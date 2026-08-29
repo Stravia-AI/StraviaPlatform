@@ -1,0 +1,32 @@
+[package]
+name = "stravia-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Stravia AI Gateway — Standalone Server Binary"
+
+[features]
+default = ["embed-webui"]
+embed-webui = ["dep:rust-embed"]
+
+[dependencies]
+stravia-core = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
+tower-http = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing = { workspace = true }
+clap = { workspace = true }
+dotenvy = { workspace = true }
+shellexpand = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+rust-embed = { workspace = true, optional = true }
+
+[dev-dependencies]
+reqwest = { workspace = true }
+tower = { workspace = true }
+tempfile = { workspace = true }

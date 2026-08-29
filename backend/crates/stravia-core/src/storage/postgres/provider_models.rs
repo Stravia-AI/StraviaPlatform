@@ -1,0 +1,494 @@
+use std::collections::BTreeMap;
+use std::str::FromStr;
+
+use anyhow::Context;
+use async_trait::async_trait;
+use rust_decimal::Decimal;
+use sqlx::{Pool, Postgres, Transaction};
+
+use super::PostgresStorage;
+use crate::provider_models::{
+    NewProviderModelRecord, PriceComponents, ProviderModelCostRule, ProviderModelCostRuleKind,
+    ProviderModelMetadata, ProviderModelMutation, ProviderModelPresence,
+    ProviderModelReconciliation, ProviderModelRecord, ProviderModelSelectionPolicy,
+    ProviderModelSourceKind,
+};
+use crate::storage::traits::ProviderModelStore;
+
+#[derive(sqlx::FromRow)]
+struct ProviderModelRow {
+    provider_id: String,
+    model_id: String,
+    source_kind: String,
+    metadata_source_provider_id: Option<String>,
+    presence: String,
+    selection_policy: String,
+    metadata_json: String,
+    revision: i64,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct CostRuleRow {
+    provider_id: String,
+    model_id: String,
+    rule_index: i32,
+    rule_kind: String,
+    threshold_tokens: i64,
+    cost_input: Option<Decimal>,
+    cost_output: Option<Decimal>,
+    cost_reasoning: Option<Decimal>,
+    cost_cache_read: Option<Decimal>,
+    cost_cache_write: Option<Decimal>,
+    cost_input_audio: Option<Decimal>,
+    cost_output_audio: Option<Decimal>,
+}
+
+#[async_trait]
+impl ProviderModelStore for PostgresStorage {
+    async fn list_for_provider(
+        &self,
+        provider_id: &str,
+    ) -> anyhow::Result<Vec<ProviderModelRecord>> {
+        let rows = sqlx::query_as::<_, ProviderModelRow>(
+            r#"SELECT provider_id, model_id, source_kind, metadata_source_provider_id,
+                      presence, selection_policy, metadata_json::text AS metadata_json,
+                      revision, created_at::text AS created_at, updated_at::text AS updated_at
+               FROM provider_models
+               WHERE provider_id = $1
+               ORDER BY LOWER(COALESCE(name, model_id)), model_id"#,
+        )
+        .bind(provider_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let rules = load_rules_for_provider(&self.pool, provider_id).await?;
+        rows.into_iter()
+            .map(|row| {
+                let cost_rules = rules.get(&row.model_id).cloned().unwrap_or_default();
+                decode_record(row, cost_rules)
+            })
+            .collect()
+    }
+
+    async fn get(
+        &self,
+        provider_id: &str,
+        model_id: &str,
+    ) -> anyhow::Result<Option<ProviderModelRecord>> {
+        get_record(&self.pool, provider_id, model_id).await
+    }
+
+    async fn apply_reconciliation(
+        &self,
+        provider_id: &str,
+        reconciliation: ProviderModelReconciliation,
+    ) -> anyhow::Result<()> {
+        let mut tx = self.pool.begin().await?;
+        for update in reconciliation.updates {
+            let metadata_json = sqlx::query_scalar::<_, String>(
+                "SELECT metadata_json::text FROM provider_models WHERE provider_id = $1 AND model_id = $2 AND source_kind = 'discovered'",
+            )
+            .bind(provider_id)
+            .bind(&update.model_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            let Some(metadata_json) = metadata_json else {
+                continue;
+            };
+            let mut metadata: ProviderModelMetadata = serde_json::from_str(&metadata_json)
+                .context("decode Provider Model metadata during reconciliation")?;
+            metadata.status = update.lifecycle_status.clone();
+            sqlx::query(
+                r#"UPDATE provider_models
+                   SET presence = $1, lifecycle_status = $2, metadata_json = $3::jsonb,
+                       revision = revision + 1, updated_at = NOW()
+                   WHERE provider_id = $4 AND model_id = $5 AND source_kind = 'discovered'"#,
+            )
+            .bind(update.presence.as_str())
+            .bind(update.lifecycle_status)
+            .bind(serde_json::to_string(&metadata)?)
+            .bind(provider_id)
+            .bind(update.model_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        for input in reconciliation.inserts {
+            insert_record(&mut tx, input).await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn create(&self, input: NewProviderModelRecord) -> anyhow::Result<ProviderModelMutation> {
+        let mut tx = self.pool.begin().await?;
+        let exists = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM provider_models WHERE provider_id = $1 AND model_id = $2",
+        )
+        .bind(&input.provider_id)
+        .bind(&input.model_id)
+        .fetch_one(&mut *tx)
+        .await?
+            > 0;
+        if exists {
+            return Ok(ProviderModelMutation::Conflict);
+        }
+        let provider_id = input.provider_id.clone();
+        let model_id = input.model_id.clone();
+        insert_record(&mut tx, input).await?;
+        tx.commit().await?;
+        Ok(ProviderModelMutation::Applied(Box::new(
+            get_record(&self.pool, &provider_id, &model_id)
+                .await?
+                .context("created Provider Model not found")?,
+        )))
+    }
+
+    async fn update_metadata(
+        &self,
+        provider_id: &str,
+        model_id: &str,
+        metadata: ProviderModelMetadata,
+        expected_revision: i64,
+    ) -> anyhow::Result<ProviderModelMutation> {
+        let mut tx = self.pool.begin().await?;
+        let updated =
+            update_record_metadata(&mut tx, provider_id, model_id, &metadata, expected_revision)
+                .await?;
+        if !updated {
+            let exists = model_exists(&mut tx, provider_id, model_id).await?;
+            return Ok(if exists {
+                ProviderModelMutation::Conflict
+            } else {
+                ProviderModelMutation::NotFound
+            });
+        }
+        replace_cost_rules(&mut tx, provider_id, model_id, &metadata.cost_rules()).await?;
+        tx.commit().await?;
+        Ok(ProviderModelMutation::Applied(Box::new(
+            get_record(&self.pool, provider_id, model_id)
+                .await?
+                .context("updated Provider Model not found")?,
+        )))
+    }
+
+    async fn update_selection_policy(
+        &self,
+        provider_id: &str,
+        model_id: &str,
+        policy: ProviderModelSelectionPolicy,
+        expected_revision: i64,
+    ) -> anyhow::Result<ProviderModelMutation> {
+        let result = sqlx::query(
+            r#"UPDATE provider_models
+               SET selection_policy = $1, revision = revision + 1, updated_at = NOW()
+               WHERE provider_id = $2 AND model_id = $3 AND revision = $4"#,
+        )
+        .bind(policy.as_str())
+        .bind(provider_id)
+        .bind(model_id)
+        .bind(expected_revision)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Ok(
+                if get_record(&self.pool, provider_id, model_id)
+                    .await?
+                    .is_some()
+                {
+                    ProviderModelMutation::Conflict
+                } else {
+                    ProviderModelMutation::NotFound
+                },
+            );
+        }
+        Ok(ProviderModelMutation::Applied(Box::new(
+            get_record(&self.pool, provider_id, model_id)
+                .await?
+                .context("updated Provider Model not found")?,
+        )))
+    }
+
+    async fn delete_manual(&self, provider_id: &str, model_id: &str) -> anyhow::Result<bool> {
+        let result = sqlx::query(
+            "DELETE FROM provider_models WHERE provider_id = $1 AND model_id = $2 AND source_kind = 'manual'",
+        )
+        .bind(provider_id)
+        .bind(model_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+}
+
+async fn get_record(
+    pool: &Pool<Postgres>,
+    provider_id: &str,
+    model_id: &str,
+) -> anyhow::Result<Option<ProviderModelRecord>> {
+    let row = sqlx::query_as::<_, ProviderModelRow>(
+        r#"SELECT provider_id, model_id, source_kind, metadata_source_provider_id,
+                  presence, selection_policy, metadata_json::text AS metadata_json,
+                  revision, created_at::text AS created_at, updated_at::text AS updated_at
+           FROM provider_models
+           WHERE provider_id = $1 AND model_id = $2"#,
+    )
+    .bind(provider_id)
+    .bind(model_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let rules = load_rules_for_model(pool, provider_id, model_id).await?;
+    decode_record(row, rules).map(Some)
+}
+
+async fn load_rules_for_provider(
+    pool: &Pool<Postgres>,
+    provider_id: &str,
+) -> anyhow::Result<BTreeMap<String, Vec<ProviderModelCostRule>>> {
+    let rows = sqlx::query_as::<_, CostRuleRow>(
+        r#"SELECT provider_id, model_id, rule_index, rule_kind, threshold_tokens,
+                  cost_input, cost_output, cost_reasoning, cost_cache_read,
+                  cost_cache_write, cost_input_audio, cost_output_audio
+           FROM provider_model_cost_rules
+           WHERE provider_id = $1
+           ORDER BY model_id, rule_index"#,
+    )
+    .bind(provider_id)
+    .fetch_all(pool)
+    .await?;
+    let mut rules = BTreeMap::<String, Vec<ProviderModelCostRule>>::new();
+    for row in rows {
+        let model_id = row.model_id.clone();
+        rules.entry(model_id).or_default().push(decode_rule(row)?);
+    }
+    Ok(rules)
+}
+
+async fn load_rules_for_model(
+    pool: &Pool<Postgres>,
+    provider_id: &str,
+    model_id: &str,
+) -> anyhow::Result<Vec<ProviderModelCostRule>> {
+    sqlx::query_as::<_, CostRuleRow>(
+        r#"SELECT provider_id, model_id, rule_index, rule_kind, threshold_tokens,
+                  cost_input, cost_output, cost_reasoning, cost_cache_read,
+                  cost_cache_write, cost_input_audio, cost_output_audio
+           FROM provider_model_cost_rules
+           WHERE provider_id = $1 AND model_id = $2
+           ORDER BY rule_index"#,
+    )
+    .bind(provider_id)
+    .bind(model_id)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(decode_rule)
+    .collect()
+}
+
+fn decode_record(
+    row: ProviderModelRow,
+    cost_rules: Vec<ProviderModelCostRule>,
+) -> anyhow::Result<ProviderModelRecord> {
+    Ok(ProviderModelRecord {
+        provider_id: row.provider_id,
+        model_id: row.model_id,
+        source_kind: ProviderModelSourceKind::from_str(&row.source_kind)?,
+        metadata_source_provider_id: row.metadata_source_provider_id,
+        presence: ProviderModelPresence::from_str(&row.presence)?,
+        selection_policy: ProviderModelSelectionPolicy::from_str(&row.selection_policy)?,
+        metadata: serde_json::from_str(&row.metadata_json)
+            .context("decode Provider Model metadata")?,
+        revision: row.revision,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        cost_rules,
+    })
+}
+
+fn decode_rule(row: CostRuleRow) -> anyhow::Result<ProviderModelCostRule> {
+    let _ = row.provider_id;
+    Ok(ProviderModelCostRule {
+        rule_index: i64::from(row.rule_index),
+        kind: ProviderModelCostRuleKind::from_str(&row.rule_kind)?,
+        threshold_tokens: u64::try_from(row.threshold_tokens)
+            .context("negative Provider Model cost threshold")?,
+        prices: PriceComponents {
+            input: row.cost_input,
+            output: row.cost_output,
+            reasoning: row.cost_reasoning,
+            cache_read: row.cost_cache_read,
+            cache_write: row.cost_cache_write,
+            input_audio: row.cost_input_audio,
+            output_audio: row.cost_output_audio,
+        },
+    })
+}
+
+async fn insert_record(
+    tx: &mut Transaction<'_, Postgres>,
+    input: NewProviderModelRecord,
+) -> anyhow::Result<()> {
+    let metadata_json = serde_json::to_string(&input.metadata)?;
+    let limit = input.metadata.limit.as_ref();
+    let prices = input.metadata.cost.as_ref().map(|cost| &cost.prices);
+    sqlx::query(
+        r#"INSERT INTO provider_models (
+               provider_id, model_id, source_kind, metadata_source_provider_id,
+               presence, lifecycle_status, selection_policy, name, family,
+               attachment, reasoning, tool_call, open_weights, structured_output, temperature,
+               limit_context, limit_input, limit_output,
+               cost_input, cost_output, cost_reasoning, cost_cache_read, cost_cache_write,
+               cost_input_audio, cost_output_audio, metadata_json
+           ) VALUES (
+               $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+               $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26::jsonb
+           )"#,
+    )
+    .bind(&input.provider_id)
+    .bind(&input.model_id)
+    .bind(input.source_kind.as_str())
+    .bind(&input.metadata_source_provider_id)
+    .bind(input.presence.as_str())
+    .bind(&input.metadata.status)
+    .bind(input.selection_policy.as_str())
+    .bind(&input.metadata.name)
+    .bind(&input.metadata.family)
+    .bind(input.metadata.attachment)
+    .bind(input.metadata.reasoning)
+    .bind(input.metadata.tool_call)
+    .bind(input.metadata.open_weights)
+    .bind(input.metadata.structured_output)
+    .bind(input.metadata.temperature)
+    .bind(limit.and_then(|limit| to_i64(limit.context)).transpose()?)
+    .bind(limit.and_then(|limit| to_i64(limit.input)).transpose()?)
+    .bind(limit.and_then(|limit| to_i64(limit.output)).transpose()?)
+    .bind(prices.and_then(|prices| prices.input))
+    .bind(prices.and_then(|prices| prices.output))
+    .bind(prices.and_then(|prices| prices.reasoning))
+    .bind(prices.and_then(|prices| prices.cache_read))
+    .bind(prices.and_then(|prices| prices.cache_write))
+    .bind(prices.and_then(|prices| prices.input_audio))
+    .bind(prices.and_then(|prices| prices.output_audio))
+    .bind(metadata_json)
+    .execute(&mut **tx)
+    .await?;
+    replace_cost_rules(
+        tx,
+        &input.provider_id,
+        &input.model_id,
+        &input.metadata.cost_rules(),
+    )
+    .await
+}
+
+async fn update_record_metadata(
+    tx: &mut Transaction<'_, Postgres>,
+    provider_id: &str,
+    model_id: &str,
+    metadata: &ProviderModelMetadata,
+    expected_revision: i64,
+) -> anyhow::Result<bool> {
+    let limit = metadata.limit.as_ref();
+    let prices = metadata.cost.as_ref().map(|cost| &cost.prices);
+    let result = sqlx::query(
+        r#"UPDATE provider_models SET
+               lifecycle_status = $1, name = $2, family = $3, attachment = $4, reasoning = $5,
+               tool_call = $6, open_weights = $7, structured_output = $8, temperature = $9,
+               limit_context = $10, limit_input = $11, limit_output = $12,
+               cost_input = $13, cost_output = $14, cost_reasoning = $15, cost_cache_read = $16,
+               cost_cache_write = $17, cost_input_audio = $18, cost_output_audio = $19,
+               metadata_json = $20::jsonb, revision = revision + 1, updated_at = NOW()
+           WHERE provider_id = $21 AND model_id = $22 AND revision = $23"#,
+    )
+    .bind(&metadata.status)
+    .bind(&metadata.name)
+    .bind(&metadata.family)
+    .bind(metadata.attachment)
+    .bind(metadata.reasoning)
+    .bind(metadata.tool_call)
+    .bind(metadata.open_weights)
+    .bind(metadata.structured_output)
+    .bind(metadata.temperature)
+    .bind(limit.and_then(|limit| to_i64(limit.context)).transpose()?)
+    .bind(limit.and_then(|limit| to_i64(limit.input)).transpose()?)
+    .bind(limit.and_then(|limit| to_i64(limit.output)).transpose()?)
+    .bind(prices.and_then(|prices| prices.input))
+    .bind(prices.and_then(|prices| prices.output))
+    .bind(prices.and_then(|prices| prices.reasoning))
+    .bind(prices.and_then(|prices| prices.cache_read))
+    .bind(prices.and_then(|prices| prices.cache_write))
+    .bind(prices.and_then(|prices| prices.input_audio))
+    .bind(prices.and_then(|prices| prices.output_audio))
+    .bind(serde_json::to_string(metadata)?)
+    .bind(provider_id)
+    .bind(model_id)
+    .bind(expected_revision)
+    .execute(&mut **tx)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+async fn replace_cost_rules(
+    tx: &mut Transaction<'_, Postgres>,
+    provider_id: &str,
+    model_id: &str,
+    rules: &[ProviderModelCostRule],
+) -> anyhow::Result<()> {
+    sqlx::query("DELETE FROM provider_model_cost_rules WHERE provider_id = $1 AND model_id = $2")
+        .bind(provider_id)
+        .bind(model_id)
+        .execute(&mut **tx)
+        .await?;
+    for rule in rules {
+        sqlx::query(
+            r#"INSERT INTO provider_model_cost_rules (
+                   provider_id, model_id, rule_index, rule_kind, threshold_tokens,
+                   cost_input, cost_output, cost_reasoning, cost_cache_read, cost_cache_write,
+                   cost_input_audio, cost_output_audio
+               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"#,
+        )
+        .bind(provider_id)
+        .bind(model_id)
+        .bind(i32::try_from(rule.rule_index).context("cost rule index exceeds database range")?)
+        .bind(rule.kind.as_str())
+        .bind(
+            i64::try_from(rule.threshold_tokens)
+                .context("cost threshold exceeds database range")?,
+        )
+        .bind(rule.prices.input)
+        .bind(rule.prices.output)
+        .bind(rule.prices.reasoning)
+        .bind(rule.prices.cache_read)
+        .bind(rule.prices.cache_write)
+        .bind(rule.prices.input_audio)
+        .bind(rule.prices.output_audio)
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
+}
+
+async fn model_exists(
+    tx: &mut Transaction<'_, Postgres>,
+    provider_id: &str,
+    model_id: &str,
+) -> anyhow::Result<bool> {
+    Ok(sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM provider_models WHERE provider_id = $1 AND model_id = $2",
+    )
+    .bind(provider_id)
+    .bind(model_id)
+    .fetch_one(&mut **tx)
+    .await?
+        > 0)
+}
+
+fn to_i64(value: Option<u64>) -> Option<anyhow::Result<i64>> {
+    value.map(|value| {
+        i64::try_from(value).context("Provider Model token limit exceeds database range")
+    })
+}

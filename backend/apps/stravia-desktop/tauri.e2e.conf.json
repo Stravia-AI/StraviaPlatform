@@ -1,0 +1,26 @@
+{
+  "identifier": "com.stravia.ai-gateway.desktop-e2e",
+  "build": {
+    "beforeBuildCommand": {
+      "script": "bun run build:web:desktop-e2e",
+      "cwd": "../../../"
+    },
+    "features": ["desktop-e2e"]
+  },
+  "app": {
+    "security": {
+      "capabilities": [
+        "main-capability",
+        {
+          "identifier": "desktop-e2e",
+          "description": "WebDriver permissions for the desktop smoke test binary.",
+          "windows": ["main"],
+          "permissions": ["wdio:default", "wdio-webdriver:default"]
+        }
+      ]
+    }
+  },
+  "bundle": {
+    "active": false
+  }
+}

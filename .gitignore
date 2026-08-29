@@ -1,0 +1,67 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# WebUI (SvelteKit / Vite)
+/node_modules/
+/frontend/stravia-webui/node_modules/
+/frontend/stravia-webui/.svelte-kit/
+/frontend/stravia-webui/.vite/
+/frontend/stravia-webui/dist/
+/frontend/stravia-webui/dist-ssr/
+/package-lock.json
+/frontend/stravia-webui/*.local
+/.bun/
+/frontend/stravia-webui/playwright-report/
+/frontend/stravia-webui/test-results/
+# Tauri generated artifacts
+/backend/apps/stravia-desktop/target/
+/backend/apps/stravia-desktop/gen/
+/backend/apps/stravia-desktop/icons/android/
+/backend/apps/stravia-desktop/icons/ios/
+
+# Local runtime state
+*.db
+*.db-wal
+*.db-shm
+*.patch
+/.stravia-dev/
+
+# Environment files (keep safe-to-commit examples)
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Logs
+*.log
+/logs/
+
+# Python test and tooling caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.venv/
+venv/
+
+# Editors and local AI tooling
+.idea/
+.vscode/
+*.sw?
+.agents/
+.antigravitycli/
+.claude/
+/.scratch/
+.cursor/
+/opencode.json
+
+# Operating systems
+.DS_Store
+Thumbs.db
+Desktop.ini

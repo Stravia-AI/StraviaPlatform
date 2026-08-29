@@ -1,0 +1,7 @@
+{
+  "source": "https://www.openresponses.org/openapi/2026-04-24/openapi.json",
+  "upstream_commit": "92c12d96d7b61d6d15e2214daa5e9c6000ab6e1c",
+  "sha256": "d598753c3a86fd8a2434828fe39dcc8786a7a694bbe46080a0d24c9fa40e72df",
+  "license": "Apache-2.0",
+  "retrieved_at": "2026-08-14"
+}

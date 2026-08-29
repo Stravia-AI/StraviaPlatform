@@ -1,0 +1,147 @@
+version: "3"
+
+vars:
+  DESKTOP_DIR: backend/apps/stravia-desktop
+  TAURI_CLI_VERSION: 2.11.1
+  WIRE_CAPTURE_DIR: "{{.ROOT_DIR}}/.scratch/wire-captures"
+
+tasks:
+  install:web:
+    desc: Install the locked Bun workspace dependencies.
+    cmds:
+      - bun ci
+
+  dev:web:
+    desc: Start the Stravia WebUI development server.
+    deps: [install:web]
+    cmds:
+      - bun run dev:web
+
+  dev:server:
+    desc: Start the Vite WebUI and standalone server in debug mode.
+    deps: [dev:web, dev:server:backend]
+
+  dev:server:backend:
+    internal: true
+    cmds:
+      - cargo run -p stravia-server -- --wire-capture-dir "{{.WIRE_CAPTURE_DIR}}"
+
+  dev:desktop:
+    desc: Start the Stravia desktop application in Tauri development mode.
+    deps: [install:web]
+    dir: "{{.DESKTOP_DIR}}"
+    env:
+      STRAVIA_WIRE_CAPTURE_DIR: "{{.WIRE_CAPTURE_DIR}}"
+    cmds:
+      - bunx @tauri-apps/cli@{{.TAURI_CLI_VERSION}} dev
+
+  build:web:
+    desc: Build the Stravia WebUI distribution assets.
+    deps: [install:web]
+    cmds:
+      - bun run build:web
+
+  build:server:
+    desc: Build the standalone Stravia server for production.
+    deps: [build:web]
+    cmds:
+      - cargo build --locked -p stravia-server --release {{if .TARGET}}--target {{.TARGET}}{{end}}
+
+  build:devtools:
+    desc: Build Stravia development tools for production.
+    cmds:
+      - cargo build -p stravia-devtools --release
+
+  build:server:debug:
+    desc: Build the standalone Stravia server in debug mode without embedded WebUI assets.
+    cmds:
+      - cargo build -p stravia-server
+
+  build:devtools:debug:
+    desc: Build Stravia development tools in debug mode.
+    cmds:
+      - cargo build -p stravia-devtools
+
+  build:desktop:
+    desc: Build Stravia desktop bundles for production.
+    deps: [install:web]
+    dir: "{{.DESKTOP_DIR}}"
+    cmds:
+      - bunx @tauri-apps/cli@{{.TAURI_CLI_VERSION}} build {{if .BUNDLES}}--bundles {{.BUNDLES}}{{end}} {{if .RUST_TARGET}}--target {{.RUST_TARGET}}{{end}} -- --locked
+
+  build:desktop:e2e:
+    desc: Build the Windows desktop WebDriver smoke-test binary.
+    deps: [install:web]
+    dir: "{{.DESKTOP_DIR}}"
+    cmds:
+      - bunx @tauri-apps/cli@{{.TAURI_CLI_VERSION}} build --ci --debug --no-bundle --config tauri.e2e.conf.json
+
+  test:e2e:desktop:
+    desc: Run the Windows Tauri desktop smoke test.
+    deps: [build:desktop:e2e]
+    cmds:
+      - bun run test:e2e:desktop
+
+  check:web:
+    internal: true
+    desc: Run WebUI static checks through Bun.
+    deps: [install:web]
+    cmds:
+      - bun run check:web
+      - bun run lint:web
+
+  check:
+    desc: Run fast static checks without building embedded WebUI assets.
+    deps: [check:web]
+    cmds:
+      - cargo fmt --all -- --check
+      - cargo check --locked --workspace
+
+  test:
+    desc: Run WebUI and supported Rust unit tests without building embedded WebUI assets.
+    deps: [install:web]
+    cmds:
+      - bun run --filter stravia-webui test:unit
+      - cargo test --locked --workspace --exclude stravia-desktop
+
+  test:e2e:proxy:
+    desc: Run the proxy protocol matrix E2E tests.
+    deps: [build:server:debug, build:devtools:debug]
+    cmds:
+      - uv run --locked --group test python -m pytest tests/e2e/proxy -q -m proxy
+
+  test:e2e:admin:
+    desc: Run the Admin service E2E tests.
+    deps: [build:server:debug]
+    cmds:
+      - uv run --locked --group test python -m pytest tests/e2e/admin -q -m admin
+
+  test:e2e:storage:sqlite:
+    desc: Run the SQLite storage E2E tests.
+    deps: [build:server:debug]
+    cmds:
+      - uv run --locked --group test python -m pytest tests/e2e/storage/test_storage.py -q -m storage -k sqlite
+
+  test:e2e:storage:postgres:
+    desc: Run the PostgreSQL storage E2E tests.
+    requires:
+      vars: [DB_URL]
+    deps: [build:server:debug]
+    cmds:
+      - uv run --locked --group test python -m pytest tests/e2e/storage/test_storage.py -q -m storage -k postgres
+
+  test:e2e:web:
+    desc: Run Chromium WebUI E2E tests.
+    deps: [install:web]
+    cmds:
+      - bun run test:e2e:web
+
+  test:e2e:
+    desc: Run proxy, Admin service, SQLite, and PostgreSQL E2E tests.
+    requires:
+      vars: [DB_URL]
+    cmds:
+      - task: test:e2e:proxy
+      - task: test:e2e:admin
+      - task: test:e2e:storage:sqlite
+      - task: test:e2e:storage:postgres

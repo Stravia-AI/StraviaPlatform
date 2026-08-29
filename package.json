@@ -1,0 +1,26 @@
+{
+  "name": "stravia",
+  "private": true,
+  "version": "0.1.0",
+  "license": "AGPL-3.0-only",
+  "packageManager": "bun@1.4.0",
+  "engines": {
+    "bun": "1.4.0"
+  },
+  "workspaces": [
+    "frontend/stravia-webui"
+  ],
+  "scripts": {
+    "dev:web": "bun run --filter stravia-webui dev",
+    "build:web": "bun run --filter stravia-webui build",
+    "build:web:desktop-e2e": "bun run --filter stravia-webui build:desktop-e2e",
+    "check:web": "bun run --filter stravia-webui check",
+    "lint:web": "bun run --filter stravia-webui lint",
+    "test:e2e:web": "bun run --filter stravia-webui test:e2e",
+    "test:e2e:desktop": "bun run --filter stravia-webui test:e2e:desktop",
+    "playwright:install:web": "bun run --filter stravia-webui playwright:install",
+    "format:web": "bun run --filter stravia-webui format",
+    "format:check:web": "bun run --filter stravia-webui format:check",
+    "preview:web": "bun run --filter stravia-webui preview"
+  }
+}

@@ -1,0 +1,598 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RUST_VERSION: "1.97.1"
+  BUN_VERSION: "1.4.0"
+  TASK_VERSION: "3.52.0"
+  IMAGE_NAME: ghcr.io/stravia-ai/straviaplatform
+
+jobs:
+  checks:
+    name: Release checks
+    uses: ./.github/workflows/ci.yml
+
+  prepare:
+    name: Validate release inputs
+    needs: checks
+    runs-on: ubuntu-24.04
+    outputs:
+      publish: ${{ steps.release.outputs.publish }}
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+      major: ${{ steps.release.outputs.major }}
+      minor: ${{ steps.release.outputs.minor }}
+      prerelease: ${{ steps.release.outputs.prerelease }}
+    steps:
+      - name: Checkout complete history
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Fetch master branch
+        if: github.event_name == 'push'
+        run: git fetch --no-tags origin master:refs/remotes/origin/master
+
+      - name: Validate tag, source commit, and repository versions
+        id: release
+        shell: bash
+        run: |
+          python3 <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          import tomllib
+          from pathlib import Path
+
+          cargo_version = tomllib.loads(Path("Cargo.toml").read_text(encoding="utf-8"))["workspace"]["package"]["version"]
+          package_version = json.loads(Path("package.json").read_text(encoding="utf-8"))["version"]
+          desktop_version = json.loads(Path("backend/apps/stravia-desktop/tauri.conf.json").read_text(encoding="utf-8"))["version"]
+
+          publish = os.environ["GITHUB_EVENT_NAME"] == "push"
+          tag = os.environ["GITHUB_REF_NAME"] if publish else f"v{cargo_version}"
+          if publish and os.environ["GITHUB_REF_TYPE"] != "tag":
+              raise SystemExit("Release publication must be triggered by a tag push")
+          if not tag.startswith("v"):
+              raise SystemExit(f"Release tag must start with v: {tag}")
+
+          version = tag[1:]
+          identifier = r"(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
+          match = re.fullmatch(
+              rf"(?P<major>0|[1-9][0-9]*)\."
+              rf"(?P<minor>0|[1-9][0-9]*)\."
+              rf"(?P<patch>0|[1-9][0-9]*)"
+              rf"(?:-(?P<prerelease>{identifier}(?:\.{identifier})*))?",
+              version,
+          )
+          if match is None:
+              raise SystemExit(
+                  f"Release tag must be SemVer without build metadata, for example v1.2.3 or v1.2.3-rc.1: {tag}"
+              )
+
+          versions = {
+              "Cargo.toml": cargo_version,
+              "package.json": package_version,
+              "tauri.conf.json": desktop_version,
+          }
+          mismatches = {path: value for path, value in versions.items() if value != version}
+          if mismatches:
+              details = ", ".join(f"{path}={value}" for path, value in mismatches.items())
+              raise SystemExit(f"Tag {tag} does not match repository versions: {details}")
+
+          if publish:
+              tag_commit = subprocess.check_output(
+                  ["git", "rev-parse", f"{tag}^{{commit}}"], text=True
+              ).strip()
+              ancestry = subprocess.run(
+                  ["git", "merge-base", "--is-ancestor", tag_commit, "origin/master"],
+                  check=False,
+              )
+              if ancestry.returncode != 0:
+                  raise SystemExit(f"Tag {tag} does not point to a commit in origin/master")
+
+          outputs = {
+              "publish": str(publish).lower(),
+              "tag": tag,
+              "version": version,
+              "major": match.group("major"),
+              "minor": match.group("minor"),
+              "prerelease": str(match.group("prerelease") is not None).lower(),
+          }
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+              for key, value in outputs.items():
+                  output.write(f"{key}={value}\n")
+          PY
+
+  build-server:
+    name: Server (${{ matrix.suffix }})
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            suffix: linux-x86_64-gnu
+            target: ""
+            libc: gnu
+            binary: target/release/stravia-server
+          - runner: ubuntu-24.04
+            suffix: linux-x86_64-musl
+            target: x86_64-unknown-linux-musl
+            libc: musl
+            binary: target/x86_64-unknown-linux-musl/release/stravia-server
+          - runner: ubuntu-24.04-arm
+            suffix: linux-aarch64-gnu
+            target: ""
+            libc: gnu
+            binary: target/release/stravia-server
+          - runner: ubuntu-24.04-arm
+            suffix: linux-aarch64-musl
+            target: aarch64-unknown-linux-musl
+            libc: musl
+            binary: target/aarch64-unknown-linux-musl/release/stravia-server
+          - runner: windows-latest
+            suffix: windows-x86_64
+            target: ""
+            libc: windows
+            binary: target/release/stravia-server.exe
+          - runner: windows-11-arm
+            suffix: windows-aarch64
+            target: ""
+            libc: windows
+            binary: target/release/stravia-server.exe
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Add musl target
+        if: matrix.target != ''
+        shell: bash
+        run: rustup target add "${{ matrix.target }}" --toolchain "${RUST_VERSION}"
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Setup Task
+        uses: go-task/setup-task@v2
+        with:
+          version: ${{ env.TASK_VERSION }}
+
+      - name: Install musl toolchain
+        if: matrix.libc == 'musl'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends musl-tools
+
+      - name: Build server
+        run: task build:server TARGET="${{ matrix.target }}"
+
+      - name: Package Unix server
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          ASSET_BASENAME: stravia-server-v${{ needs.prepare.outputs.version }}-${{ matrix.suffix }}
+          BINARY_PATH: ${{ matrix.binary }}
+        run: |
+          mkdir -p "package/${ASSET_BASENAME}" dist
+          install -m 0755 "${BINARY_PATH}" "package/${ASSET_BASENAME}/stravia-server"
+          install -m 0644 LICENSE "package/${ASSET_BASENAME}/LICENSE"
+          tar -C package -czf "dist/${ASSET_BASENAME}.tar.gz" "${ASSET_BASENAME}"
+
+      - name: Package Windows server
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          ASSET_BASENAME: stravia-server-v${{ needs.prepare.outputs.version }}-${{ matrix.suffix }}
+          BINARY_PATH: ${{ matrix.binary }}
+        run: |
+          $packageDirectory = Join-Path package $env:ASSET_BASENAME
+          New-Item -ItemType Directory -Path $packageDirectory -Force | Out-Null
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          Copy-Item $env:BINARY_PATH (Join-Path $packageDirectory 'stravia-server.exe')
+          Copy-Item LICENSE (Join-Path $packageDirectory 'LICENSE')
+          Compress-Archive -Path $packageDirectory -DestinationPath "dist/$($env:ASSET_BASENAME).zip"
+
+      - name: Upload server asset
+        uses: actions/upload-artifact@v7
+        with:
+          name: server-${{ matrix.suffix }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  build-desktop:
+    name: Desktop (${{ matrix.suffix }})
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            suffix: linux-x86_64
+            bundle: appimage
+            bundle_directory: appimage
+          - runner: ubuntu-24.04-arm
+            suffix: linux-aarch64
+            bundle: appimage
+            bundle_directory: appimage
+          - runner: windows-latest
+            suffix: windows-x86_64
+            bundle: nsis
+            bundle_directory: nsis
+          - runner: windows-11-arm
+            suffix: windows-aarch64
+            bundle: nsis
+            bundle_directory: nsis
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Setup Task
+        uses: go-task/setup-task@v2
+        with:
+          version: ${{ env.TASK_VERSION }}
+
+      - name: Install Linux desktop dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            xdg-utils \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: Build desktop bundle
+        run: task build:desktop BUNDLES="${{ matrix.bundle }}"
+
+      - name: Collect Linux desktop bundle
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          ASSET_NAME: stravia-desktop-v${{ needs.prepare.outputs.version }}-${{ matrix.suffix }}.AppImage
+        run: |
+          shopt -s nullglob
+          bundles=(target/release/bundle/${{ matrix.bundle_directory }}/*.AppImage)
+          if [[ ${#bundles[@]} -ne 1 ]]; then
+            printf 'Expected exactly one AppImage, found %s\n' "${#bundles[@]}" >&2
+            exit 1
+          fi
+          mkdir -p dist
+          cp "${bundles[0]}" "dist/${ASSET_NAME}"
+
+      - name: Collect Windows desktop bundle
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          ASSET_NAME: stravia-desktop-v${{ needs.prepare.outputs.version }}-${{ matrix.suffix }}-setup.exe
+        run: |
+          $bundles = @(Get-ChildItem 'target/release/bundle/${{ matrix.bundle_directory }}/*-setup.exe' -File)
+          if ($bundles.Count -ne 1) {
+            throw "Expected exactly one NSIS installer, found $($bundles.Count)"
+          }
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          Copy-Item $bundles[0].FullName (Join-Path dist $env:ASSET_NAME)
+
+      - name: Upload desktop asset
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-${{ matrix.suffix }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  docker-build:
+    name: Docker validation (${{ matrix.platform }})
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux/amd64
+            cache_scope: docker-amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            cache_scope: docker-arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build image without publishing
+        uses: docker/build-push-action@v7
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: "false"
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          push: false
+          provenance: false
+          sbom: false
+          labels: |
+            org.opencontainers.image.source=https://github.com/Stravia-AI/StraviaPlatform
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.prepare.outputs.version }}
+            org.opencontainers.image.licenses=AGPL-3.0-only
+          cache-from: type=gha,scope=${{ matrix.cache_scope }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.cache_scope }}
+
+  collect-assets:
+    name: Collect release assets
+    needs:
+      - prepare
+      - build-server
+      - build-desktop
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download server assets
+        uses: actions/download-artifact@v8
+        with:
+          pattern: server-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Download desktop assets
+        uses: actions/download-artifact@v8
+        with:
+          pattern: desktop-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        shell: bash
+        run: |
+          cd release-assets
+          LC_ALL=C sha256sum -- * > SHA256SUMS
+
+      - name: Upload consolidated release assets
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-assets
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 7
+
+  prepare-draft:
+    name: Prepare draft release
+    if: needs.prepare.outputs.publish == 'true'
+    needs:
+      - prepare
+      - collect-assets
+      - docker-build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v8
+        with:
+          name: release-assets
+          path: release-assets
+
+      - name: Create or refresh draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ needs.prepare.outputs.tag }}
+          IS_PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+          WINDOWS_NOTICE: "> [!WARNING]\n> Windows desktop installers are currently unsigned and may trigger Microsoft Defender SmartScreen. Verify the downloaded file against `SHA256SUMS` before running it."
+        run: |
+          if gh release view "${TAG_NAME}" >/dev/null 2>&1; then
+            if [[ "${IS_PRERELEASE}" == "true" ]]; then
+              gh release edit "${TAG_NAME}" --draft --prerelease --latest=false
+            else
+              gh release edit "${TAG_NAME}" --draft --prerelease=false --latest=false
+            fi
+          else
+            args=(
+              "${TAG_NAME}"
+              --verify-tag
+              --draft
+              --title "Stravia ${TAG_NAME}"
+              --generate-notes
+              --notes "${WINDOWS_NOTICE}"
+              --latest=false
+            )
+            if [[ "${IS_PRERELEASE}" == "true" ]]; then
+              args+=(--prerelease)
+            fi
+            gh release create "${args[@]}"
+          fi
+          gh release upload "${TAG_NAME}" release-assets/* --clobber
+
+  publish-image:
+    name: Publish image digest (${{ matrix.platform }})
+    if: needs.prepare.outputs.publish == 'true'
+    needs:
+      - prepare
+      - prepare-draft
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux/amd64
+            cache_scope: docker-amd64
+            artifact: docker-digest-amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            cache_scope: docker-arm64
+            artifact: docker-digest-arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Login to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build and push image by digest
+        id: build
+        uses: docker/build-push-action@v7
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: "false"
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          provenance: false
+          sbom: false
+          labels: |
+            org.opencontainers.image.source=https://github.com/Stravia-AI/StraviaPlatform
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.prepare.outputs.version }}
+            org.opencontainers.image.licenses=AGPL-3.0-only
+          cache-from: type=gha,scope=${{ matrix.cache_scope }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.cache_scope }}
+          outputs: type=image,name=${{ env.IMAGE_NAME }},push=true,push-by-digest=true,name-canonical=true
+
+      - name: Export digest
+        shell: bash
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          test -n "${IMAGE_DIGEST}"
+          mkdir -p "${RUNNER_TEMP}/digests"
+          touch "${RUNNER_TEMP}/digests/${IMAGE_DIGEST#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-image-manifest:
+    name: Publish multi-architecture image
+    needs:
+      - prepare
+      - publish-image
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Download image digests
+        uses: actions/download-artifact@v8
+        with:
+          pattern: docker-digest-*
+          path: ${{ runner.temp }}/digests
+          merge-multiple: true
+
+      - name: Login to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Generate image tags
+        id: metadata
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          flavor: latest=false
+          tags: |
+            type=raw,value=${{ needs.prepare.outputs.version }}
+            type=raw,value=${{ needs.prepare.outputs.major }}.${{ needs.prepare.outputs.minor }},enable=${{ needs.prepare.outputs.prerelease == 'false' }}
+            type=raw,value=${{ needs.prepare.outputs.major }},enable=${{ needs.prepare.outputs.prerelease == 'false' }}
+            type=raw,value=latest,enable=${{ needs.prepare.outputs.prerelease == 'false' }}
+
+      - name: Create and inspect multi-architecture manifest
+        shell: bash
+        env:
+          TAGS_JSON: ${{ steps.metadata.outputs.json }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          mapfile -t tags < <(jq -r '.tags[]' <<< "${TAGS_JSON}")
+          tag_args=()
+          for tag in "${tags[@]}"; do
+            tag_args+=(--tag "${tag}")
+          done
+
+          shopt -s nullglob
+          digest_files=("${RUNNER_TEMP}"/digests/*)
+          if [[ ${#digest_files[@]} -ne 2 ]]; then
+            printf 'Expected two image digests, found %s\n' "${#digest_files[@]}" >&2
+            exit 1
+          fi
+          sources=()
+          for digest_file in "${digest_files[@]}"; do
+            sources+=("${IMAGE_NAME}@sha256:$(basename "${digest_file}")")
+          done
+
+          docker buildx imagetools create "${tag_args[@]}" "${sources[@]}"
+          docker buildx imagetools inspect "${IMAGE_NAME}:${VERSION}"
+
+  publish-release:
+    name: Publish GitHub Release
+    needs:
+      - prepare
+      - publish-image-manifest
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Publish completed draft
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ needs.prepare.outputs.tag }}
+          IS_PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+        run: |
+          if [[ "${IS_PRERELEASE}" == "true" ]]; then
+            gh release edit "${TAG_NAME}" --draft=false --prerelease --latest=false
+          else
+            gh release edit "${TAG_NAME}" --draft=false --prerelease=false --latest
+          fi

@@ -1,0 +1,2 @@
+# SQLx 会按原始字节计算 migration checksum，必须跨平台保持 LF。
+backend/crates/stravia-core/migrations/**/*.sql text eol=lf

@@ -1,0 +1,129 @@
+use crate::protocol::ir::{AiItem, AiResponse};
+
+pub fn normalize_response_reasoning(resp: &mut AiResponse) {
+    if resp.reasoning_items().next().is_some() {
+        return;
+    }
+
+    let first_text_index = resp
+        .items
+        .iter()
+        .position(|item| item.output_text_ref().is_some());
+    let (reasoning, text) = split_think_tags(&resp.output_text());
+    if let Some(reasoning) = reasoning {
+        resp.replace_output_text(text);
+        resp.items.insert(
+            first_text_index.unwrap_or(resp.items.len()),
+            AiItem::thinking(reasoning, None),
+        );
+    }
+}
+
+pub(crate) fn split_think_tags(content: &str) -> (Option<String>, String) {
+    let mut remaining = content;
+    let mut reasoning_parts: Vec<String> = Vec::new();
+    let mut text_parts: Vec<String> = Vec::new();
+
+    loop {
+        let Some(start_idx) = remaining.find("<think>") else {
+            if !remaining.is_empty() {
+                text_parts.push(remaining.to_string());
+            }
+            break;
+        };
+
+        let before = &remaining[..start_idx];
+        if !before.is_empty() {
+            text_parts.push(before.to_string());
+        }
+
+        let after_start = &remaining[start_idx + "<think>".len()..];
+        let Some(end_rel_idx) = after_start.find("</think>") else {
+            text_parts.push(remaining[start_idx..].to_string());
+            break;
+        };
+
+        let thought = after_start[..end_rel_idx].trim();
+        if !thought.is_empty() {
+            reasoning_parts.push(thought.to_string());
+        }
+        remaining = &after_start[end_rel_idx + "</think>".len()..];
+    }
+
+    let reasoning = if reasoning_parts.is_empty() {
+        None
+    } else {
+        Some(reasoning_parts.join("\n"))
+    };
+    (reasoning, text_parts.join("").trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_resp(content: &str) -> AiResponse {
+        let mut r = AiResponse::new("", "");
+        r.push_output_text(content.to_string());
+        r
+    }
+
+    #[test]
+    fn test_split_think_tags_basic() {
+        let (reasoning, text) = split_think_tags("<think>let me think</think>the answer");
+        assert_eq!(reasoning.as_deref(), Some("let me think"));
+        assert_eq!(text, "the answer");
+    }
+
+    #[test]
+    fn test_split_think_tags_no_tags() {
+        let (reasoning, text) = split_think_tags("just text");
+        assert!(reasoning.is_none());
+        assert_eq!(text, "just text");
+    }
+
+    #[test]
+    fn test_split_think_tags_multiple() {
+        let (reasoning, text) =
+            split_think_tags("<think>step1</think>middle<think>step2</think>end");
+        let r = reasoning.unwrap();
+        assert!(r.contains("step1"), "expected step1 in reasoning: {r}");
+        assert!(r.contains("step2"), "expected step2 in reasoning: {r}");
+        assert_eq!(text, "middleend");
+    }
+
+    #[test]
+    fn test_split_think_tags_unclosed() {
+        let (reasoning, text) = split_think_tags("<think>incomplete");
+        assert!(
+            reasoning.is_none(),
+            "unclosed think should produce no reasoning"
+        );
+        assert!(
+            text.contains("<think>"),
+            "unclosed think tag should remain in text"
+        );
+    }
+
+    #[test]
+    fn test_normalize_response_reasoning_no_op_when_already_set() {
+        let mut resp = make_resp("<think>should be ignored</think>answer");
+        resp.push_reasoning("existing reasoning", None);
+        normalize_response_reasoning(&mut resp);
+        assert_eq!(
+            resp.reasoning_items().next().map(|(text, _)| text),
+            Some("existing reasoning")
+        );
+    }
+
+    #[test]
+    fn test_normalize_response_reasoning_extracts_think_tags() {
+        let mut resp = make_resp("<think>my reasoning</think>final answer");
+        normalize_response_reasoning(&mut resp);
+        assert_eq!(
+            resp.reasoning_items().next().map(|(text, _)| text),
+            Some("my reasoning")
+        );
+        assert_eq!(resp.output_text(), "final answer");
+    }
+}

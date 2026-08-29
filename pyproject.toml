@@ -1,0 +1,24 @@
+[project]
+name = "stravia-e2e"
+version = "0.0.0"
+requires-python = ">=3.11"
+dependencies = []
+
+[dependency-groups]
+test = [
+  "pytest==8.4.1",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests/e2e"]
+python_files = ["test_*.py"]
+addopts = "-ra"
+markers = [
+  "e2e: end-to-end tests",
+  "proxy: proxy protocol matrix tests",
+  "admin: Admin API tests",
+  "storage: storage backend tests",
+]

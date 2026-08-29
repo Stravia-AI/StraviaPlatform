@@ -1,0 +1,57 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "stravia-responses": {
+      "name": "Stravia · OpenAI Responses",
+      "npm": "@ai-sdk/openai",
+      "options": {
+        "baseURL": "http://127.0.0.1:23471/v1",
+        "apiKey": "stravia-local-test"
+      },
+      "models": {
+        "gateway-test": {
+          "name": "gateway-test · Responses"
+        }
+      }
+    },
+    "stravia-openai-compatible": {
+      "name": "Stravia · OpenAI Compatible",
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "http://127.0.0.1:23471/v1",
+        "apiKey": "stravia-local-test"
+      },
+      "models": {
+        "gateway-test": {
+          "name": "gateway-test · Chat Completions"
+        }
+      }
+    },
+    "stravia-anthropic": {
+      "name": "Stravia · Anthropic Messages",
+      "npm": "@ai-sdk/anthropic",
+      "options": {
+        "baseURL": "http://127.0.0.1:23471/v1",
+        "apiKey": "stravia-local-test"
+      },
+      "models": {
+        "gateway-test": {
+          "name": "gateway-test · Anthropic"
+        }
+      }
+    },
+    "stravia-google": {
+      "name": "Stravia · Google Gemini",
+      "npm": "@ai-sdk/google",
+      "options": {
+        "baseURL": "http://127.0.0.1:23471/v1beta",
+        "apiKey": "stravia-local-test"
+      },
+      "models": {
+        "gateway-test": {
+          "name": "gateway-test · Gemini"
+        }
+      }
+    }
+  }
+}

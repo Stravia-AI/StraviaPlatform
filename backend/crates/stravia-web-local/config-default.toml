@@ -1,0 +1,20 @@
+# See src/search/config.rs for all of the possible options.
+# The commented-out lines are examples of values you could set, not the defaults.
+
+[engines]
+# "360" = true
+# sogou_weixin = true
+# numbat = false
+# fend = true
+
+[urls.replace]
+# "www.reddit.com" = "old.reddit.com"
+# "medium.com" = "scribe.rip"
+# ".medium.com" = "scribe.rip"
+
+[urls.weight]
+# These are checked after applying replacements. Setting the weight to 0 (or any
+# negative number) completely hides the result. Longer matches have a higher
+# priority.
+# "quora.com" = 0.1
+# ".quora.com" = 0.1
