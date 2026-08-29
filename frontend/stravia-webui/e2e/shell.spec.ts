@@ -37,16 +37,18 @@ test('sidebar stays usable in expanded and compact modes', async ({ page }) => {
     .not.toBe(idleBackground)
 })
 
-test('settings uses one compact section control instead of nesting another sidebar', async ({ page }) => {
+test('settings lists sections in the main content instead of nesting another sidebar', async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 800 })
   await page.goto('/settings')
 
-  const sectionSelect = page.getByRole('button', { name: 'Select Settings section' })
-  await expect(sectionSelect).toBeVisible()
   await expect(page.getByRole('navigation', { name: 'Settings sections' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Select Settings section' })).toHaveCount(0)
+  await expect(page.getByRole('region', { name: 'Appearance' })).toHaveCount(1)
+  await expect(page.getByRole('region', { name: 'Proxy' })).toHaveCount(1)
+  await expect(page.getByRole('region', { name: 'Request history' })).toHaveCount(1)
 
   await page.setViewportSize({ width: 1500, height: 800 })
-  await expect(sectionSelect).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Appearance' })).toBeVisible()
 })
 
 test('desktop port controls stay hidden outside the Tauri shell', async ({ page }) => {
@@ -73,14 +75,13 @@ test('system theme follows browser color-scheme changes', async ({ page }) => {
   await expect.poll(() => page.evaluate(() => localStorage.getItem('stravia-theme'))).toBe('light')
 })
 
-test('settings section selection only scrolls the main content', async ({ page }) => {
+test('settings sections only scroll the main content', async ({ page }) => {
   await page.setViewportSize({ width: 900, height: 800 })
   await page.goto('/settings')
 
-  const sectionSelect = page.getByRole('button', { name: 'Select Settings section' })
-  await sectionSelect.click()
-  await page.getByRole('option', { name: 'Request history' }).click()
-  await expect(sectionSelect).toHaveText('Request history')
+  const requestHistory = page.getByRole('region', { name: 'Request history' })
+  await requestHistory.scrollIntoViewIfNeeded()
+  await expect(requestHistory).toBeVisible()
 
   await expect
     .poll(() =>
@@ -89,17 +90,13 @@ test('settings section selection only scrolls the main content', async ({ page }
         const header = document.querySelector<HTMLElement>('header')
         const sidebar = document.querySelector<HTMLElement>('aside')
         const main = document.querySelector<HTMLElement>('main')
-        const logs = document.getElementById('logs')
-        const mainRect = main?.getBoundingClientRect()
-        const logsRect = logs?.getBoundingClientRect()
         return {
           shellScrollTop: shell?.scrollTop,
           headerTop: header?.getBoundingClientRect().top,
           sidebarTop: sidebar?.getBoundingClientRect().top,
           mainScrolled: (main?.scrollTop ?? 0) > 0,
-          logsVisible: Boolean(mainRect && logsRect && logsRect.top >= mainRect.top && logsRect.top < mainRect.bottom),
         }
       }),
     )
-    .toEqual({ shellScrollTop: 0, headerTop: 0, sidebarTop: 40, mainScrolled: true, logsVisible: true })
+    .toEqual({ shellScrollTop: 0, headerTop: 0, sidebarTop: 40, mainScrolled: true })
 })

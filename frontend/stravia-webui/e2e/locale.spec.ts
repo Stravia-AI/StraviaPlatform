@@ -113,7 +113,7 @@ test('localized Logs keep one local timestamp across list and detail surfaces', 
   await page.goto('/logs')
 
   const localTimestamp = '2026/1/2 08:04:05'
-  await expect(page.getByRole('columnheader', { name: 'Token' })).toBeVisible()
+  await expect(page.getByRole('columnheader', { name: 'Token', exact: true })).toBeVisible()
   await expect(page.getByRole('cell', { name: localTimestamp })).toBeVisible()
   await page.getByRole('button', { name: '查看详情' }).click()
 

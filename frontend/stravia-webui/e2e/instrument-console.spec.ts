@@ -55,7 +55,9 @@ test('empty Model services, Models, API Keys, and logs speak the missing depende
   await page.goto('/logs')
   await expect(page.getByRole('button', { name: 'Clear history' })).toBeDisabled()
   await expect(page.getByLabel('Model service')).toHaveCount(0)
-  await expect(page.getByRole('region', { name: 'Recent requests' }).getByRole('link', { name: 'Connect apps' })).toBeVisible()
+  await expect(
+    page.getByRole('region', { name: 'Recent requests' }).getByRole('link', { name: 'Connect agents' }),
+  ).toBeVisible()
 })
 
 test('Connect an app lists missing Model and API Key instead of empty dropdowns', async ({ page }) => {
@@ -67,7 +69,7 @@ test('Connect an app lists missing Model and API Key instead of empty dropdowns'
   await expect(page.getByRole('button', { name: 'API Key' })).toHaveCount(0)
 })
 
-test('API Key editor stacks compact controls and moves help into the label tooltip', async ({ page }) => {
+test('API Key editor keeps compact controls and help inside the editor', async ({ page }) => {
   await page.goto('/api-keys')
   await page.getByRole('button', { name: 'Create first API Key' }).click()
 
@@ -79,18 +81,23 @@ test('API Key editor stacks compact controls and moves help into the label toolt
   expect(nameBox?.width ?? 0).toBeGreaterThan(8)
   expect(nameBox?.width ?? 0).toBeGreaterThan((overlayBox?.width ?? 0) * 0.8)
 
-  await expect(page.getByLabel('Maximum concurrent executions')).toHaveCount(0)
-  await page.getByRole('button', { name: 'Advanced', exact: true }).click()
-  await expect(page.getByLabel('Maximum concurrent executions')).toBeVisible()
-
   const concurrency = page.locator('#api-key-concurrency-limit')
+  const expiresAt = page.getByLabel('Expires at')
+  await expect(concurrency).toBeVisible()
+  await expect(expiresAt).toBeVisible()
   const concurrencyBox = await concurrency.boundingBox()
-  expect(Math.abs((concurrencyBox?.width ?? 0) - (nameBox?.width ?? 0))).toBeLessThan(1)
+  const expiresAtBox = await expiresAt.boundingBox()
+  expect(concurrencyBox?.width ?? 0).toBeLessThan(nameBox?.width ?? 0)
+  expect(Math.abs((concurrencyBox?.width ?? 0) - (expiresAtBox?.width ?? 0))).toBeLessThan(1)
+  expect(Math.abs((concurrencyBox?.y ?? 0) - (expiresAtBox?.y ?? 0))).toBeLessThan(1)
 
   await expect(
     page.getByText('Leave empty for unlimited. Each Proxy request and MCP tools/call uses one slot; nested work reuses it.'),
   ).toBeHidden()
-  const help = overlay.getByRole('button', { name: 'More about this field' }).nth(1)
+  const help = overlay
+    .getByRole('group')
+    .filter({ has: concurrency })
+    .getByRole('button', { name: 'More about this field' })
   await help.hover()
   await expect(page.locator('[data-slot="tooltip-content"]')).toBeVisible()
 

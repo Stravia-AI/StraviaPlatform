@@ -37,7 +37,7 @@ describe('Stravia desktop smoke', () => {
     expect(portState.currentPort).toEqual(serverPort)
     expect((await fetch(`http://127.0.0.1:${serverPort}/api/v1/status`)).ok).toBe(true)
 
-    const brand = await $('[aria-label="Stravia"]')
+    const brand = await $('[aria-label="Stravia 观策行"]')
     await expect(brand).toBeDisplayed()
 
     const navigationTrigger = await $('header button[aria-expanded]')
@@ -55,7 +55,6 @@ describe('Stravia desktop smoke', () => {
 
     await expect($('//h2[normalize-space()="Local access"]')).toBeDisplayed()
     await expect($('#desktop-fixed-port')).toHaveValue(String(portState.fixedPort ?? portState.currentPort))
-    await expect($('button[aria-label="Select Settings section"]')).toBeDisplayed()
     expect((await $('#desktop').getAttribute('class')).split(/\s+/)).toContain('route-section')
 
     let activePort = portState.currentPort
@@ -77,7 +76,7 @@ describe('Stravia desktop smoke', () => {
         { timeout: 10_000, timeoutMsg: 'desktop listener did not hot-switch to the saved port' },
       )
       activePort = nextPort
-      await expect($('[aria-label="Stravia"]')).toBeDisplayed()
+      await expect($('[aria-label="Stravia 观策行"]')).toBeDisplayed()
       expect((await fetch(`http://127.0.0.1:${nextPort}/api/v1/status`)).ok).toBe(true)
     }
 

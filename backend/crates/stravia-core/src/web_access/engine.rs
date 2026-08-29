@@ -505,7 +505,11 @@ pub(super) async fn validate_fetch_request(
             )));
         }
 
-        if let Ok(address) = hostname.parse::<std::net::IpAddr>() {
+        let ip_literal = hostname
+            .strip_prefix('[')
+            .and_then(|hostname| hostname.strip_suffix(']'))
+            .unwrap_or(&hostname);
+        if let Ok(address) = ip_literal.parse::<std::net::IpAddr>() {
             if !is_public_ip(address) {
                 return Err(WebAccessError::invalid(format!(
                     "URL must be public HTTP(S): {value}"

@@ -11,7 +11,7 @@
     "build:desktop-e2e": "bun run i18n:compile && vite build --mode desktop-e2e",
     "check": "bun run i18n:check && bun run i18n:compile && svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "lint": "eslint .",
-    "test:unit": "bun run i18n:compile && bun test test/**/*.test.ts",
+    "test:unit": "bun run i18n:compile && bun test ./test",
     "test:e2e": "playwright test",
     "test:e2e:desktop": "wdio run ./wdio.desktop.conf.ts",
     "playwright:install": "playwright install",

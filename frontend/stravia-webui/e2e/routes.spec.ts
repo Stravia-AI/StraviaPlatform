@@ -256,7 +256,12 @@ test('Model Route editor omits API Key and payload toggles', async ({ page }) =>
 
   await page.goto('/models')
   await expect(page.getByRole('link', { name: 'Edit' })).toHaveCount(0)
-  await page.getByRole('row').filter({ hasText: 'gpt-5.4' }).getByRole('cell').nth(1).click()
+  await page
+    .locator('main')
+    .getByRole('link')
+    .filter({ hasText: 'gpt-5.4' })
+    .getByText('gpt-5.4', { exact: true })
+    .click()
   await expect(page.getByRole('heading', { name: 'Edit model' })).toBeVisible()
   const editRouteBreadcrumb = page.getByRole('navigation', { name: 'Breadcrumb' })
   await expect(editRouteBreadcrumb.getByRole('link', { name: 'Models' })).toHaveAttribute('href', '/models')
@@ -382,7 +387,12 @@ test('Model Route editor derives thinking levels and identifies blocking destina
   })
 
   await page.goto('/models')
-  await page.getByRole('row').filter({ hasText: 'thinking-route' }).getByRole('cell').nth(1).click()
+  await page
+    .locator('main')
+    .getByRole('link')
+    .filter({ hasText: 'thinking-route' })
+    .getByText('thinking-route', { exact: true })
+    .click()
   await expect(page.getByRole('button', { name: 'Advanced', exact: true })).toHaveCount(0)
   const enabledSwitch = page.getByRole('switch', { name: 'Enable' })
   await expect(enabledSwitch).toBeChecked()

@@ -29,12 +29,24 @@ async fn protected_responses_router() -> (Router, String) {
 }
 
 async fn protected_responses_router_with_key_state(enabled: bool) -> (Router, String) {
+    protected_responses_router_with_hook(enabled, None).await
+}
+
+async fn protected_responses_router_with_hook(
+    enabled: bool,
+    hook: Option<std::sync::Arc<dyn crate::hook::Hook>>,
+) -> (Router, String) {
     let data_dir = tempfile::tempdir().expect("temp data dir").keep();
     let config = GatewayConfig {
         data_dir,
         ..Default::default()
     };
-    let (gateway, _logs) = Gateway::new(config).await.expect("gateway");
+    let builder = Gateway::builder(config);
+    let (gateway, _logs) = match hook {
+        Some(hook) => builder.hook(hook).build().await,
+        None => builder.build().await,
+    }
+    .expect("gateway");
     let admin = gateway.admin();
     let provider = admin
         .create_provider(CreateProvider {
@@ -114,6 +126,49 @@ async fn protected_responses_router_with_key_state(enabled: bool) -> (Router, St
             .expect("disable API key");
     }
     (create_router(gateway), api_key.token)
+}
+
+struct BlockingRequestHook {
+    entered: std::sync::Arc<tokio::sync::Notify>,
+    release: std::sync::Arc<tokio::sync::Notify>,
+}
+
+struct BlockingRequestSession {
+    entered: std::sync::Arc<tokio::sync::Notify>,
+    release: std::sync::Arc<tokio::sync::Notify>,
+}
+
+impl crate::hook::Hook for BlockingRequestHook {
+    fn descriptor(&self) -> crate::hook::HookDescriptor {
+        crate::hook::HookDescriptor {
+            event_kinds: vec![crate::hook::EventKind::Request],
+            ..crate::hook::HookDescriptor::all("block-websocket-request")
+        }
+    }
+
+    fn create_session(
+        &self,
+        _context: &crate::hook::SessionContext,
+    ) -> Box<dyn crate::hook::HookSession> {
+        Box::new(BlockingRequestSession {
+            entered: std::sync::Arc::clone(&self.entered),
+            release: std::sync::Arc::clone(&self.release),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::hook::HookSession for BlockingRequestSession {
+    async fn handle(
+        &mut self,
+        event: crate::hook::HookEvent<'_>,
+    ) -> Result<crate::hook::ActionBatch, String> {
+        if matches!(event, crate::hook::HookEvent::Request { .. }) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        Ok(crate::hook::ActionBatch::default())
+    }
 }
 
 #[tokio::test]
@@ -466,7 +521,16 @@ async fn responses_websocket_rejects_unknown_event_types() {
     use futures::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
-    let (router, token) = protected_responses_router().await;
+    let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+    let release = std::sync::Arc::new(tokio::sync::Notify::new());
+    let (router, token) = protected_responses_router_with_hook(
+        true,
+        Some(std::sync::Arc::new(BlockingRequestHook {
+            entered: std::sync::Arc::clone(&entered),
+            release: std::sync::Arc::clone(&release),
+        })),
+    )
+    .await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind WebSocket test listener");
@@ -511,6 +575,9 @@ async fn responses_websocket_rejects_unknown_event_types() {
         ))
         .await
         .expect("send first response.create");
+    tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+        .await
+        .expect("request Hook timeout");
     socket
         .send(tokio_tungstenite::tungstenite::Message::Text(
             r#"{"type":"response.create","model":"auth-model","input":"second"}"#.into(),
@@ -539,6 +606,7 @@ async fn responses_websocket_rejects_unknown_event_types() {
     .expect("response_in_progress timeout");
     assert!(response_in_progress);
 
+    release.notify_one();
     socket.close(None).await.expect("close WebSocket");
     server.abort();
 }
