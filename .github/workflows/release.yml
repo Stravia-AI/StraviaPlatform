@@ -41,9 +41,9 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Fetch master branch
+      - name: Fetch main branch
         if: github.event_name == 'push'
-        run: git fetch --no-tags origin master:refs/remotes/origin/master
+        run: git fetch --no-tags origin main:refs/remotes/origin/main
 
       - name: Validate tag, source commit, and repository versions
         id: release
@@ -97,11 +97,11 @@ jobs:
                   ["git", "rev-parse", f"{tag}^{{commit}}"], text=True
               ).strip()
               ancestry = subprocess.run(
-                  ["git", "merge-base", "--is-ancestor", tag_commit, "origin/master"],
+                  ["git", "merge-base", "--is-ancestor", tag_commit, "origin/main"],
                   check=False,
               )
               if ancestry.returncode != 0:
-                  raise SystemExit(f"Tag {tag} does not point to a commit in origin/master")
+                  raise SystemExit(f"Tag {tag} does not point to a commit in origin/main")
 
           outputs = {
               "publish": str(publish).lower(),
