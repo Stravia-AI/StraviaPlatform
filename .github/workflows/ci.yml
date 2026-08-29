@@ -134,7 +134,7 @@ jobs:
           version: ${{ env.TASK_VERSION }}
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@v10
+        uses: astral-sh/setup-uv@v10.0.1
         with:
           version: ${{ env.UV_VERSION }}
 
@@ -185,7 +185,7 @@ jobs:
           version: ${{ env.TASK_VERSION }}
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@v10
+        uses: astral-sh/setup-uv@v10.0.1
         with:
           version: ${{ env.UV_VERSION }}
 
