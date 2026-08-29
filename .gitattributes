@@ -1,2 +1,3 @@
-# SQLx 会按原始字节计算 migration checksum，必须跨平台保持 LF。
+# SQLx migration checksum 与生成 schema 一致性测试都比较原始字节，必须跨平台保持 LF。
 backend/crates/stravia-core/migrations/**/*.sql text eol=lf
+deploy/schema/postgres.sql text eol=lf

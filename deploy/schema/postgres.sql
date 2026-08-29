@@ -195,7 +195,6 @@ CREATE INDEX idx_provider_models_provider_name
     ON provider_models(provider_id, name);
 
 CREATE TABLE provider_model_cost_rules (
-
     provider_id TEXT NOT NULL,
     model_id TEXT NOT NULL,
     rule_index INTEGER NOT NULL CHECK (rule_index >= 0),
@@ -396,7 +395,6 @@ DROP CONSTRAINT web_providers_credentials_check;
 ALTER TABLE web_providers
 DROP COLUMN provider_id,
 ALTER COLUMN api_key SET NOT NULL,
-
 ADD CONSTRAINT web_providers_kind_check
     CHECK (kind IN ('exa', 'brave', 'tavily', 'zhipu'));
 
@@ -598,7 +596,6 @@ WHERE name = 'web_research_config';
 DELETE FROM turn_chain_nodes
 WHERE kind = 'web_research';
 
-
 ALTER TABLE turn_chain_nodes
 DROP CONSTRAINT turn_chain_nodes_kind_check,
 ADD CONSTRAINT turn_chain_nodes_kind_check
@@ -798,7 +795,6 @@ SET vendor = CASE
             'llmgateway',
             'llmtr',
             'lmstudio',
-
             'longcat',
             'lucidquery',
             'lynkr',
@@ -999,7 +995,6 @@ WHERE vendor IN (
         'kosmik',
         'kuae-cloud-coding-plan',
         'lilac',
-
         'llama',
         'llmgateway',
         'llmtr',
