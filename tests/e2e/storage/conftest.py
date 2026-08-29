@@ -127,6 +127,7 @@ def build_harness(work_dir: Path) -> None:
             CreateApiKey, CreateModel, CreateProvider, LogQuery, ProviderCredentialInput,
             ProviderSourceInput,
         };
+        use stravia_core::provider_models::CreateManualProviderModel;
         use stravia_core::{logging, Gateway};
         use stravia_server::{HttpAppConfig, build_http_app, start_http_server, standalone_local_origins};
         use reqwest::StatusCode;
@@ -220,6 +221,16 @@ def build_harness(work_dir: Path) -> None:
                 },
                 use_proxy: false,
             }).await?;
+            admin.create_manual_provider_model(
+                &provider.id,
+                "gpt-4o-mini",
+                CreateManualProviderModel {
+                    metadata: serde_json::json!({
+                        "id": "gpt-4o-mini",
+                        "name": "GPT-4o mini",
+                    }),
+                },
+            ).await?;
 
             let route = admin.create_model(CreateModel {
                 name: format!("{backend}-model"),
@@ -230,14 +241,15 @@ def build_harness(work_dir: Path) -> None:
             }).await?;
 
             let api_key = admin.create_api_key(CreateApiKey {
+                key: None,
                 name: format!("{backend}-e2e-key"),
                 concurrency_limit: Some(10),
                 mcp_access_enabled: false,
-                web_search_injection_enabled: false,
+                transparent_injection_enabled: false,
+                inject_media_understanding: false,
+                inject_web_search: false,
                 expires_at: None,
                 model_ids: vec![route.id.clone()],
-                allow_web_research: false,
-                allow_media_understanding: false,
             }).await?;
 
             ensure!(admin.list_providers().await?.len() == 1, "provider count");

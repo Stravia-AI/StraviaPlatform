@@ -102,7 +102,18 @@ def _create_provider(env: dict[str, str], name: str) -> str:
         headers=env["auth"],
     )
     assert status == 200, f"create provider failed: {status} {resp}"
-    return resp["data"]["id"]
+    provider_id = resp["data"]["id"]
+    status, resp = http_request(
+        "POST",
+        f"{env['admin']}/api/v1/providers/{provider_id}/models",
+        payload={
+            "model_id": "gpt-4o-mini",
+            "metadata": {"id": "gpt-4o-mini", "name": "GPT-4o mini"},
+        },
+        headers=env["auth"],
+    )
+    assert status == 201, f"create provider model failed: {status} {resp}"
+    return provider_id
 
 
 def _create_model(env: dict[str, str], provider_id: str, name: str) -> str:
@@ -113,7 +124,6 @@ def _create_model(env: dict[str, str], provider_id: str, name: str) -> str:
             "name": name,
             "target_provider": provider_id,
             "target_model": "gpt-4o-mini",
-            "access_control": True,
         },
         headers=env["auth"],
     )

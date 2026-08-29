@@ -112,7 +112,9 @@ tasks:
 
   test:e2e:admin:
     desc: Run the Admin service E2E tests.
-    deps: [build:server:debug]
+    deps: [build:server]
+    env:
+      STRAVIA_BINARY: '{{.ROOT_DIR}}/target/release/stravia-server{{if eq OS "windows"}}.exe{{end}}'
     cmds:
       - uv run --locked --group test python -m pytest tests/e2e/admin -q -m admin
 
