@@ -4,7 +4,7 @@ use std::str::FromStr;
 use anyhow::Context;
 use async_trait::async_trait;
 use rust_decimal::Decimal;
-use sqlx::{Sqlite, SqlitePool, Transaction};
+use sqlx::{Connection, Sqlite, SqlitePool, Transaction};
 
 use super::SqliteStorage;
 use crate::provider_models::{
@@ -84,7 +84,8 @@ impl ProviderModelStore for SqliteStorage {
         provider_id: &str,
         reconciliation: ProviderModelReconciliation,
     ) -> anyhow::Result<()> {
-        let mut tx = self.pool.begin().await?;
+        let mut connection = self.pool.acquire().await?;
+        let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
         for update in reconciliation.updates {
             let metadata_json = sqlx::query_scalar::<_, String>(
                 "SELECT metadata_json FROM provider_models WHERE provider_id = ? AND model_id = ? AND source_kind = 'discovered'",
@@ -121,7 +122,8 @@ impl ProviderModelStore for SqliteStorage {
     }
 
     async fn create(&self, input: NewProviderModelRecord) -> anyhow::Result<ProviderModelMutation> {
-        let mut tx = self.pool.begin().await?;
+        let mut connection = self.pool.acquire().await?;
+        let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
         let exists = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM provider_models WHERE provider_id = ? AND model_id = ?",
         )
@@ -498,4 +500,70 @@ fn to_i64(value: Option<u64>) -> Option<anyhow::Result<i64>> {
     value.map(|value| {
         i64::try_from(value).context("Provider Model token limit exceeds database range")
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn create_waits_for_a_concurrent_sqlite_writer() {
+        let data_dir = tempfile::tempdir().expect("temporary data directory");
+        let pool = crate::db::init_pool(data_dir.path())
+            .await
+            .expect("SQLite pool");
+        crate::migrations::migrate_sqlite(&pool)
+            .await
+            .expect("SQLite migrations");
+        sqlx::query(
+            "INSERT INTO providers (id, name, protocol, base_url, api_key)
+             VALUES ('provider', 'Provider', 'openai', 'https://example.com', 'key')",
+        )
+        .execute(&pool)
+        .await
+        .expect("test Provider");
+        let storage = SqliteStorage::from_pool(pool.clone());
+
+        let mut writer = pool.acquire().await.expect("writer connection");
+        let writer_tx = writer
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .expect("writer transaction");
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let create_task = tokio::spawn(async move {
+            started_tx.send(()).expect("signal create start");
+            storage
+                .create(NewProviderModelRecord {
+                    provider_id: "provider".into(),
+                    model_id: "model".into(),
+                    source_kind: ProviderModelSourceKind::Manual,
+                    metadata_source_provider_id: None,
+                    presence: ProviderModelPresence::Present,
+                    selection_policy: ProviderModelSelectionPolicy::Auto,
+                    metadata: ProviderModelMetadata::bare("model"),
+                })
+                .await
+        });
+        started_rx.await.expect("create start");
+
+        let mut create_task = create_task;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), &mut create_task)
+                .await
+                .is_err(),
+            "create must wait while another write transaction owns the database"
+        );
+        writer_tx
+            .commit()
+            .await
+            .expect("release writer transaction");
+
+        let mutation = create_task
+            .await
+            .expect("create task")
+            .expect("create Provider Model");
+        assert!(matches!(mutation, ProviderModelMutation::Applied(_)));
+    }
 }
