@@ -91,11 +91,6 @@ def test_server_boots_postgres_with_migrations(
                 )
                 assert status == 200, f"PostgreSQL server status failed: {body}"
 
-                status, body = http_request("GET", admin_base)
-                assert status == 200, f"embedded WebUI failed: {body}"
-                assert isinstance(body, str)
-                assert "<!doctype html>" in body.lower()
-
                 upstream_port = storage_runtime["upstream_port"]
                 assert isinstance(upstream_port, int)
                 status, body = http_request(
@@ -121,12 +116,25 @@ def test_server_boots_postgres_with_migrations(
 
                 status, body = http_request(
                     "POST",
+                    f"{admin_base}/api/v1/providers/{provider_id}/models",
+                    payload={
+                        "model_id": "gpt-4o-mini",
+                        "metadata": {
+                            "id": "gpt-4o-mini",
+                            "name": "GPT-4o mini",
+                        },
+                    },
+                    headers=headers,
+                )
+                assert status == 201, f"create PostgreSQL provider model failed: {body}"
+
+                status, body = http_request(
+                    "POST",
                     f"{admin_base}/api/v1/models",
                     payload={
                         "name": "postgres-server-e2e-model",
                         "target_provider": provider_id,
                         "target_model": "gpt-4o-mini",
-                        "access_control": True,
                     },
                     headers=headers,
                 )

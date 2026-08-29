@@ -945,7 +945,7 @@ impl ResponsesWebSocketStream {
     async fn next_raw(
         &mut self,
         adapter: &ProviderAdapter,
-        status: u16,
+        _status: u16,
     ) -> Result<Option<bytes::Bytes>, ProviderStreamError> {
         if let Some(stream) = &mut self.http_fallback {
             return match stream.next().await {
@@ -984,7 +984,7 @@ impl ResponsesWebSocketStream {
                     adapter.capture_upstream_response(
                         crate::wire_capture::CaptureTransport::WebSocket,
                         crate::wire_capture::CaptureRepresentation::Wire,
-                        status,
+                        _status,
                         None,
                         text.as_bytes(),
                     );

@@ -336,6 +336,7 @@ impl GenerationChainState {
 
 #[derive(Clone, Debug, Default)]
 struct ActiveGenerationChain {
+    #[cfg(debug_assertions)]
     pub root_id: Option<String>,
     pub parent_id: Option<String>,
     pub parent_upstream_response_id: Option<String>,
