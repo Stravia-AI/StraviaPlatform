@@ -606,7 +606,10 @@ pub struct StatsOverview {
     pub total_requests: i64,
     pub total_input_tokens: i64,
     pub total_output_tokens: i64,
+    pub total_cache_read_tokens: i64,
+    pub total_cache_write_tokens: i64,
     pub avg_duration_ms: f64,
+    pub avg_first_token_ms: Option<f64>,
     pub error_count: i64,
 }
 
@@ -617,7 +620,10 @@ pub struct StatsHourly {
     pub error_count: i64,
     pub total_input_tokens: i64,
     pub total_output_tokens: i64,
+    pub total_cache_read_tokens: i64,
+    pub total_cache_write_tokens: i64,
     pub avg_duration_ms: f64,
+    pub avg_first_token_ms: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -645,6 +651,7 @@ pub struct ApiKeyStats {
     pub total_input_tokens: i64,
     pub total_output_tokens: i64,
     pub cache_read_tokens: i64,
+    pub cache_write_tokens: i64,
     pub last_used_at: i64,
 }
 

@@ -36,6 +36,31 @@ test('Overview with traffic shows charts and a neutral error rate when there are
   await expect(errorRate.locator('.text-destructive')).toHaveCount(0)
 })
 
+test('Usage analytics separates cache tokens and shows first-token and total latency in seconds', async ({ page }) => {
+  await stubTraffic(page, { requests: 12, errors: 0 })
+  await page.goto('/stats')
+
+  for (const [label, value] of [
+    ['Input Tokens', '100'],
+    ['Output Tokens', '40'],
+    ['Cache input tokens', '20'],
+    ['Cache output tokens', '10'],
+  ]) {
+    await expect(
+      page.locator('.route-metric-strip__item').filter({ has: page.getByText(label, { exact: true }) }),
+    ).toContainText(value)
+  }
+  await expect(page.getByLabel('Token usage chart').locator('.lc-bar')).toHaveCount(4)
+
+  const latency = page.locator('section').filter({ has: page.getByRole('heading', { name: 'Latency', exact: true }) })
+  await expect(latency.getByText('First', { exact: true })).toBeVisible()
+  await expect(latency.getByText('0.04 s', { exact: true })).toBeVisible()
+  await expect(latency.getByText('Duration', { exact: true })).toBeVisible()
+  await expect(latency.getByText('0.12 s', { exact: true })).toBeVisible()
+  await expect(latency.getByLabel('Latency chart')).toBeVisible()
+  await expect(latency.locator('.lc-path')).toHaveCount(2)
+})
+
 test('empty Model services, Models, API Keys, and logs speak the missing dependency', async ({ page }) => {
   await page.goto('/providers')
   await expect(page.getByText('A Model has nowhere to go until you connect a Provider.')).toBeVisible()
@@ -184,7 +209,10 @@ async function stubTraffic(page: Page, counts: { requests: number; errors: numbe
           total_requests: counts.requests,
           total_input_tokens: 100,
           total_output_tokens: 40,
+          total_cache_read_tokens: 20,
+          total_cache_write_tokens: 10,
           avg_duration_ms: 120,
+          avg_first_token_ms: 40,
           error_count: counts.errors,
         },
       },
@@ -200,7 +228,10 @@ async function stubTraffic(page: Page, counts: { requests: number; errors: numbe
             error_count: counts.errors,
             total_input_tokens: 100,
             total_output_tokens: 40,
+            total_cache_read_tokens: 20,
+            total_cache_write_tokens: 10,
             avg_duration_ms: 120,
+            avg_first_token_ms: 40,
           },
         ],
       },

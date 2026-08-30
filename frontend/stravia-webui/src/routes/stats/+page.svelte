@@ -6,7 +6,15 @@ import { BarChart, LineChart } from 'layerchart'
 import { admin } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
 import { getDataTableLabels } from '$lib/data-table-labels'
-import { formatCompactCount, formatDuration, formatList, formatLogTime, formatPercent, formatTime } from '$lib/format'
+import {
+  formatCompactCount,
+  formatDuration,
+  formatDurationSeconds,
+  formatList,
+  formatLogTime,
+  formatPercent,
+  formatTime,
+} from '$lib/format'
 import type { ApiKeyStats, ProviderStats } from '$lib/types'
 import MetricStrip from '$lib/components/metric-strip.svelte'
 import PageHeader from '$lib/components/page-header.svelte'
@@ -106,9 +114,14 @@ const apiKeyStatsColumns = apiKeyStatsColumnHelper.columns([
     meta: { label: () => m.stats_output_tokens(), align: 'end', cellClass: 'font-technical tabular-nums' },
   }),
   apiKeyStatsColumnHelper.accessor('cache_read_tokens', {
-    header: () => m.stats_cache_reads(),
+    header: () => m.logs_cache_input_tokens(),
     cell: (context) => formatCompactCount(context.getValue()),
-    meta: { label: () => m.stats_cache_reads(), align: 'end', cellClass: 'font-technical tabular-nums' },
+    meta: { label: () => m.logs_cache_input_tokens(), align: 'end', cellClass: 'font-technical tabular-nums' },
+  }),
+  apiKeyStatsColumnHelper.accessor('cache_write_tokens', {
+    header: () => m.logs_cache_output_tokens(),
+    cell: (context) => formatCompactCount(context.getValue()),
+    meta: { label: () => m.logs_cache_output_tokens(), align: 'end', cellClass: 'font-technical tabular-nums' },
   }),
   apiKeyStatsColumnHelper.accessor('last_used_at', {
     header: () => m.stats_last_used(),
@@ -123,10 +136,16 @@ const tokenChart = $derived(
     bucket: formatBucket(item.hour),
     input: item.total_input_tokens,
     output: item.total_output_tokens,
+    cacheInput: item.total_cache_read_tokens,
+    cacheOutput: item.total_cache_write_tokens,
   })),
 )
 const latencyChart = $derived(
-  hourlyStats.map((item) => ({ bucket: formatBucket(item.hour), latency: item.avg_duration_ms })),
+  hourlyStats.map((item) => ({
+    bucket: formatBucket(item.hour),
+    firstToken: item.avg_first_token_ms == null ? null : item.avg_first_token_ms / 1000,
+    duration: item.avg_duration_ms / 1000,
+  })),
 )
 const errorChart = $derived(hourlyStats.map((item) => ({ bucket: formatBucket(item.hour), errors: item.error_count })))
 const modelTotal = $derived(modelStats.slice(0, 6).reduce((total, item) => total + item.request_count, 0))
@@ -134,8 +153,9 @@ const metrics = $derived([
   { label: m.common_total_requests(), value: formatCompactCount(overview?.total_requests ?? 0) },
   { label: m.stats_input_tokens(), value: formatCompactCount(overview?.total_input_tokens ?? 0) },
   { label: m.stats_output_tokens(), value: formatCompactCount(overview?.total_output_tokens ?? 0) },
+  { label: m.logs_cache_input_tokens(), value: formatCompactCount(overview?.total_cache_read_tokens ?? 0) },
+  { label: m.logs_cache_output_tokens(), value: formatCompactCount(overview?.total_cache_write_tokens ?? 0) },
   { label: m.common_avg_latency(), value: formatDuration(overview?.avg_duration_ms ?? 0) },
-  { label: m.common_errors_label(), value: formatCompactCount(overview?.error_count ?? 0), tone: 'error' as const },
 ])
 const anyError = $derived(
   overviewQuery.error ?? hourlyQuery.error ?? providersQuery.error ?? apiKeysQuery.error ?? modelsQuery.error,
@@ -244,7 +264,7 @@ function retryAll(): void {
 
   {#if analyticsPending}
     <div class="route-metric-strip" aria-label={m.stats_loading_analytics_metrics()}>
-      {#each Array(5) as _, index (index)}<div class="route-metric-strip__item">
+      {#each Array(6) as _, index (index)}<div class="route-metric-strip__item">
           <Skeleton class="h-4 w-24" /><Skeleton class="mt-2 h-7 w-20" />
         </div>{/each}
     </div>
@@ -304,6 +324,8 @@ function retryAll(): void {
               series={[
                 { key: 'input', label: m.stats_input(), color: 'var(--chart-1)' },
                 { key: 'output', label: m.stats_output(), color: 'var(--chart-3)' },
+                { key: 'cacheInput', label: m.logs_cache_input_tokens(), color: 'var(--chart-2)' },
+                { key: 'cacheOutput', label: m.logs_cache_output_tokens(), color: 'var(--chart-4)' },
               ]}
               seriesLayout="stack"
               props={{ xAxis: { ticks: 4 } }} />
@@ -319,15 +341,25 @@ function retryAll(): void {
               <h2 id="latency-trend-title" class="route-section-title">{m.common_latency()}</h2>
               <p class="route-section-description">{m.stats_average_end_end_duration()}</p>
             </div>
-            <span class="font-technical text-xs tabular-nums">{formatDuration(overview?.avg_duration_ms ?? 0)}</span>
+            <div class="font-technical grid grid-cols-[auto_auto] gap-x-2 text-xs tabular-nums">
+              <span class="text-muted-foreground">{m.logs_first_token_short()}</span>
+              <span>{formatDurationSeconds(overview?.avg_first_token_ms)}</span>
+              <span class="text-muted-foreground">{m.logs_duration_short()}</span>
+              <span>{formatDurationSeconds(overview?.avg_duration_ms)}</span>
+            </div>
           </div>
           {#if hourlyQuery.error && hourlyQuery.data === undefined}
             {@render queryFailure(hourlyQuery.error, hourlyQuery.refetch)}
-          {:else if hasTraffic && latencyChart.length > 0}<div class="h-36 min-w-0">
+          {:else if hasTraffic && latencyChart.length > 0}<div
+              class="h-36 min-w-0"
+              aria-label={m.overview_latency_chart()}>
               <LineChart
                 data={latencyChart}
                 x={(item) => item.bucket}
-                series={[{ key: 'latency', label: m.common_avg_latency_label(), color: 'var(--chart-1)' }]}
+                series={[
+                  { key: 'firstToken', label: m.stats_first_token_seconds(), color: 'var(--chart-2)' },
+                  { key: 'duration', label: m.stats_duration_seconds(), color: 'var(--chart-1)' },
+                ]}
                 props={{ xAxis: { ticks: 4 } }} />
             </div>{:else}<div class="grid h-36 place-items-center border-y text-sm text-muted-foreground">
               {hasTraffic ? m.stats_no_latency_data() : m.stats_send_first_request()}

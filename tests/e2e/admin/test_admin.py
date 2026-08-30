@@ -413,6 +413,35 @@ def test_proxy_request_creates_log(admin_env: dict[str, str]) -> None:
         time.sleep(0.3)
     assert total >= 1
 
+    attributed_usage: dict[str, Any] | None = None
+    deadline = time.time() + 10.0
+    while time.time() < deadline:
+        status, stats_resp = http_request(
+            "GET",
+            f"{admin_env['admin']}/api/v1/stats/api-keys",
+            headers=admin_env["auth"],
+        )
+        if status == 200:
+            attributed_usage = next(
+                (
+                    item
+                    for item in stats_resp.get("data", [])
+                    if item.get("api_key_id") == api_key["id"]
+                ),
+                None,
+            )
+            if attributed_usage is not None:
+                break
+        time.sleep(0.3)
+
+    assert attributed_usage is not None
+    assert attributed_usage["api_key_name"] == "test-key-log"
+    assert attributed_usage["request_count"] >= 1
+    assert attributed_usage["total_input_tokens"] >= 3
+    assert attributed_usage["total_output_tokens"] >= 2
+    assert attributed_usage["cache_read_tokens"] == 0
+    assert attributed_usage["cache_write_tokens"] == 0
+
 
 @pytest.mark.e2e
 @pytest.mark.admin
@@ -440,3 +469,22 @@ def test_stats_overview_incremented(admin_env: dict[str, str]) -> None:
     assert status == 200
     data = resp.get("data", {})
     assert data.get("total_requests", 0) >= 1
+    assert data.get("total_input_tokens", 0) >= 3
+    assert data.get("total_output_tokens", 0) >= 2
+    assert data["total_cache_read_tokens"] == 0
+    assert data["total_cache_write_tokens"] == 0
+    assert data["avg_duration_ms"] >= 0
+    assert data["avg_first_token_ms"] is None
+
+    status, resp = http_request(
+        "GET",
+        f"{admin_env['admin']}/api/v1/stats/hourly",
+        headers=admin_env["auth"],
+    )
+    assert status == 200
+    hourly = resp.get("data", [])
+    assert hourly
+    assert hourly[-1]["total_cache_read_tokens"] == 0
+    assert hourly[-1]["total_cache_write_tokens"] == 0
+    assert hourly[-1]["avg_duration_ms"] >= 0
+    assert hourly[-1]["avg_first_token_ms"] is None

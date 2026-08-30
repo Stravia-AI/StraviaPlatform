@@ -38,7 +38,7 @@ impl LogBuilder {
         ingress: &str,
         request_model: &str,
         thinking_level: Option<crate::thinking::ThinkingLevel>,
-        api_key_id: Option<&str>,
+        auth_subject: Option<&crate::proxy::context::AuthSubject>,
         start: Instant,
     ) -> Self {
         Self {
@@ -47,8 +47,8 @@ impl LogBuilder {
             upstream_protocol: ingress.to_string(),
             client_model: request_model.to_string(),
             upstream_model: String::new(),
-            api_key_id: api_key_id.map(ToString::to_string),
-            api_key_name: None,
+            api_key_id: auth_subject.and_then(|subject| subject.api_key_id.clone()),
+            api_key_name: auth_subject.and_then(|subject| subject.label.clone()),
             provider_id: String::new(),
             provider_name: String::new(),
             model_id: None,

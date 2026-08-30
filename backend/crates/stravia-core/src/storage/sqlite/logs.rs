@@ -171,14 +171,14 @@ impl LogStore for SqliteLogStore {
     async fn stats_overview(&self, hours: Option<i64>) -> anyhow::Result<StatsOverview> {
         if let Some(hours) = hours {
             Ok(sqlx::query_as::<_, StatsOverview>(
-                "SELECT COUNT(*) AS total_requests, COALESCE(SUM(input_tokens), 0) AS total_input_tokens, COALESCE(SUM(output_tokens), 0) AS total_output_tokens, COALESCE(AVG(latency_total_ms), 0.0) AS avg_duration_ms, COALESCE(SUM(CASE WHEN client_status_code >= 400 THEN 1 ELSE 0 END), 0) AS error_count FROM request_logs WHERE created_at >= CAST(strftime('%s', 'now', ?) AS INTEGER) * 1000",
+                "SELECT COUNT(*) AS total_requests, COALESCE(SUM(input_tokens), 0) AS total_input_tokens, COALESCE(SUM(output_tokens), 0) AS total_output_tokens, COALESCE(SUM(cache_read_tokens), 0) AS total_cache_read_tokens, COALESCE(SUM(cache_write_tokens), 0) AS total_cache_write_tokens, COALESCE(AVG(latency_total_ms), 0.0) AS avg_duration_ms, AVG(stream_first_chunk_ms) AS avg_first_token_ms, COALESCE(SUM(CASE WHEN client_status_code >= 400 THEN 1 ELSE 0 END), 0) AS error_count FROM request_logs WHERE created_at >= CAST(strftime('%s', 'now', ?) AS INTEGER) * 1000",
             )
             .bind(format!("-{hours} hours"))
             .fetch_one(&self.pool)
             .await?)
         } else {
             Ok(sqlx::query_as::<_, StatsOverview>(
-                "SELECT COUNT(*) AS total_requests, COALESCE(SUM(input_tokens), 0) AS total_input_tokens, COALESCE(SUM(output_tokens), 0) AS total_output_tokens, COALESCE(AVG(latency_total_ms), 0.0) AS avg_duration_ms, COALESCE(SUM(CASE WHEN client_status_code >= 400 THEN 1 ELSE 0 END), 0) AS error_count FROM request_logs",
+                "SELECT COUNT(*) AS total_requests, COALESCE(SUM(input_tokens), 0) AS total_input_tokens, COALESCE(SUM(output_tokens), 0) AS total_output_tokens, COALESCE(SUM(cache_read_tokens), 0) AS total_cache_read_tokens, COALESCE(SUM(cache_write_tokens), 0) AS total_cache_write_tokens, COALESCE(AVG(latency_total_ms), 0.0) AS avg_duration_ms, AVG(stream_first_chunk_ms) AS avg_first_token_ms, COALESCE(SUM(CASE WHEN client_status_code >= 400 THEN 1 ELSE 0 END), 0) AS error_count FROM request_logs",
             )
             .fetch_one(&self.pool)
             .await?)
@@ -187,7 +187,7 @@ impl LogStore for SqliteLogStore {
 
     async fn stats_hourly(&self, hours: i64) -> anyhow::Result<Vec<StatsHourly>> {
         Ok(sqlx::query_as::<_, StatsHourly>(
-            "SELECT strftime('%Y-%m-%d %H:00:00', datetime(created_at/1000, 'unixepoch')) AS hour, COUNT(*) AS request_count, COALESCE(SUM(CASE WHEN client_status_code >= 400 THEN 1 ELSE 0 END), 0) AS error_count, COALESCE(SUM(input_tokens), 0) AS total_input_tokens, COALESCE(SUM(output_tokens), 0) AS total_output_tokens, COALESCE(AVG(latency_total_ms), 0.0) AS avg_duration_ms FROM request_logs WHERE created_at >= CAST(strftime('%s', 'now', ?) AS INTEGER) * 1000 GROUP BY hour ORDER BY hour ASC",
+            "SELECT strftime('%Y-%m-%d %H:00:00', datetime(created_at/1000, 'unixepoch')) AS hour, COUNT(*) AS request_count, COALESCE(SUM(CASE WHEN client_status_code >= 400 THEN 1 ELSE 0 END), 0) AS error_count, COALESCE(SUM(input_tokens), 0) AS total_input_tokens, COALESCE(SUM(output_tokens), 0) AS total_output_tokens, COALESCE(SUM(cache_read_tokens), 0) AS total_cache_read_tokens, COALESCE(SUM(cache_write_tokens), 0) AS total_cache_write_tokens, COALESCE(AVG(latency_total_ms), 0.0) AS avg_duration_ms, AVG(stream_first_chunk_ms) AS avg_first_token_ms FROM request_logs WHERE created_at >= CAST(strftime('%s', 'now', ?) AS INTEGER) * 1000 GROUP BY hour ORDER BY hour ASC",
         )
         .bind(format!("-{hours} hours"))
         .fetch_all(&self.pool)
@@ -231,14 +231,14 @@ impl LogStore for SqliteLogStore {
     async fn stats_by_api_key(&self, hours: Option<i64>) -> anyhow::Result<Vec<ApiKeyStats>> {
         if let Some(hours) = hours {
             Ok(sqlx::query_as::<_, ApiKeyStats>(
-                "SELECT COALESCE(api_key_id, '') AS api_key_id, COALESCE(api_key_name, api_key_id, '') AS api_key_name, COUNT(*) AS request_count, COALESCE(SUM(input_tokens), 0) AS total_input_tokens, COALESCE(SUM(output_tokens), 0) AS total_output_tokens, COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens, MAX(created_at) AS last_used_at FROM request_logs WHERE api_key_id IS NOT NULL AND api_key_id <> '' AND created_at >= CAST(strftime('%s', 'now', ?) AS INTEGER) * 1000 GROUP BY api_key_id, api_key_name ORDER BY request_count DESC",
+                "SELECT COALESCE(api_key_id, '') AS api_key_id, COALESCE(MAX(api_key_name), api_key_id, '') AS api_key_name, COUNT(*) AS request_count, COALESCE(SUM(input_tokens), 0) AS total_input_tokens, COALESCE(SUM(output_tokens), 0) AS total_output_tokens, COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens, COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens, MAX(created_at) AS last_used_at FROM request_logs WHERE api_key_id IS NOT NULL AND api_key_id <> '' AND created_at >= CAST(strftime('%s', 'now', ?) AS INTEGER) * 1000 GROUP BY api_key_id ORDER BY request_count DESC",
             )
             .bind(format!("-{hours} hours"))
             .fetch_all(&self.pool)
             .await?)
         } else {
             Ok(sqlx::query_as::<_, ApiKeyStats>(
-                "SELECT COALESCE(api_key_id, '') AS api_key_id, COALESCE(api_key_name, api_key_id, '') AS api_key_name, COUNT(*) AS request_count, COALESCE(SUM(input_tokens), 0) AS total_input_tokens, COALESCE(SUM(output_tokens), 0) AS total_output_tokens, COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens, MAX(created_at) AS last_used_at FROM request_logs WHERE api_key_id IS NOT NULL AND api_key_id <> '' GROUP BY api_key_id, api_key_name ORDER BY request_count DESC",
+                "SELECT COALESCE(api_key_id, '') AS api_key_id, COALESCE(MAX(api_key_name), api_key_id, '') AS api_key_name, COUNT(*) AS request_count, COALESCE(SUM(input_tokens), 0) AS total_input_tokens, COALESCE(SUM(output_tokens), 0) AS total_output_tokens, COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens, COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens, MAX(created_at) AS last_used_at FROM request_logs WHERE api_key_id IS NOT NULL AND api_key_id <> '' GROUP BY api_key_id ORDER BY request_count DESC",
             )
             .fetch_all(&self.pool)
             .await?)

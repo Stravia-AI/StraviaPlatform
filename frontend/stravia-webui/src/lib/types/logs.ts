@@ -57,7 +57,10 @@ export interface StatsOverview {
   total_requests: number
   total_input_tokens: number
   total_output_tokens: number
+  total_cache_read_tokens: number
+  total_cache_write_tokens: number
   avg_duration_ms: number
+  avg_first_token_ms: number | null
   error_count: number
 }
 
@@ -67,7 +70,10 @@ export interface StatsHourly {
   error_count: number
   total_input_tokens: number
   total_output_tokens: number
+  total_cache_read_tokens: number
+  total_cache_write_tokens: number
   avg_duration_ms: number
+  avg_first_token_ms: number | null
 }
 
 export interface ModelStats {
@@ -92,6 +98,7 @@ export interface ApiKeyStats {
   total_input_tokens: number
   total_output_tokens: number
   cache_read_tokens: number
+  cache_write_tokens: number
   last_used_at: number
 }
 

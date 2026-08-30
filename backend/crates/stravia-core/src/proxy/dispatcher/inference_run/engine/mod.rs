@@ -300,10 +300,11 @@ pub(super) async fn orchestrate(
         Err(error) => return inference_access_error_response(error),
     };
     let concurrency_limit = authenticated_principal.concurrency_limit;
+    let api_key_name = authenticated_principal.api_key_name;
     let principal = authenticated_principal.principal;
     ctx.auth_subject = Some(crate::proxy::context::AuthSubject {
         api_key_id: Some(principal.api_key_id().to_owned()),
-        label: None,
+        label: Some(api_key_name),
     });
     let generation_chain_write = if matches!(request_kind, crate::hook::RequestKind::Generation) {
         match gw.generation_chains.begin(principal.clone(), request).await {
@@ -581,7 +582,7 @@ async fn dispatch_round(
                         &ingress.to_string(),
                         &request.model,
                         request.reasoning.level,
-                        None,
+                        ctx.auth_subject.as_ref(),
                         start,
                     )
                     .stream_flag(request.stream.enabled)
@@ -717,6 +718,7 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
                     ingress,
                     start,
                     request_extras,
+                    request_context.auth_subject.as_ref(),
                     error,
                 );
             }
@@ -732,6 +734,7 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
                         ingress,
                         start,
                         request_extras,
+                        request_context.auth_subject.as_ref(),
                         error,
                     );
                 }
@@ -744,6 +747,7 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
                 ingress,
                 start,
                 request_extras,
+                request_context.auth_subject.as_ref(),
                 error,
             );
         }
@@ -763,7 +767,7 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
             &ingress.to_string(),
             &request.model,
             request.reasoning.level,
-            None,
+            request_context.auth_subject.as_ref(),
             start,
         )
         .stream_flag(true)
@@ -978,7 +982,7 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
         &ingress.to_string(),
         &request.model,
         request.reasoning.level,
-        None,
+        request_context.auth_subject.as_ref(),
         start,
     )
     .stream_flag(request.stream.enabled)
@@ -1052,6 +1056,7 @@ pub(super) async fn acquire_followup_model_turn(
                     ingress,
                     start,
                     request_extras,
+                    request_context.auth_subject.as_ref(),
                     error,
                 ));
             }
@@ -1065,6 +1070,7 @@ pub(super) async fn acquire_followup_model_turn(
                         ingress,
                         start,
                         request_extras,
+                        request_context.auth_subject.as_ref(),
                         error,
                     )
                 })?
@@ -1076,6 +1082,7 @@ pub(super) async fn acquire_followup_model_turn(
                 ingress,
                 start,
                 request_extras,
+                request_context.auth_subject.as_ref(),
                 error,
             ));
         }
@@ -1136,6 +1143,7 @@ fn model_turn_execute_failure(
     ingress: ProtocolId,
     start: Instant,
     request_extras: &RequestExtras,
+    auth_subject: Option<&crate::proxy::context::AuthSubject>,
     error: crate::agent::ModelTurnError,
 ) -> RoundOutcome {
     let outcome = model_turn_error_outcome(error);
@@ -1148,7 +1156,7 @@ fn model_turn_execute_failure(
         &ingress.to_string(),
         &request.model,
         request.reasoning.level,
-        None,
+        auth_subject,
         start,
     )
     .stream_flag(request.stream.enabled)

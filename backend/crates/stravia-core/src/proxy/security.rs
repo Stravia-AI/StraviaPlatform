@@ -53,6 +53,7 @@ pub(crate) struct ModelAccessGrant {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AuthenticatedPrincipal {
     pub(crate) principal: crate::hook::Principal,
+    pub(crate) api_key_name: String,
     pub(crate) concurrency_limit: Option<i32>,
 }
 
@@ -97,6 +98,7 @@ impl<'a> Security<'a> {
         validate_key_state(&key)?;
         Ok(AuthenticatedPrincipal {
             principal: crate::hook::Principal::new(key.id),
+            api_key_name: key.name,
             concurrency_limit: key.concurrency_limit,
         })
     }
