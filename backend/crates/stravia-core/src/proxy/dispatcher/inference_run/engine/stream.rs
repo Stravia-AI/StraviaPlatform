@@ -882,8 +882,12 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                 };
                 delivery.fail_before_commit(outcome)
             } else if cancelled {
-                delivery
-                    .fail_before_commit(buffered_response(error_response(499, "request cancelled")))
+                let response = if request_context.deadline.is_exceeded() {
+                    error_response(504, "request deadline exceeded")
+                } else {
+                    error_response(499, "request cancelled")
+                };
+                delivery.fail_before_commit(buffered_response(response))
             } else {
                 false
             };

@@ -1,4 +1,5 @@
 use super::*;
+use sqlx::Connection;
 
 #[derive(Clone)]
 pub enum SqlTurnChainStore {
@@ -175,8 +176,12 @@ impl TurnChainStore for SqlTurnChainStore {
 
         match self {
             Self::Sqlite(pool) => {
-                let mut transaction = pool
-                    .begin()
+                let mut connection = pool
+                    .acquire()
+                    .await
+                    .map_err(|error| TurnCommitError::Storage(error.to_string()))?;
+                let mut transaction = connection
+                    .begin_with("BEGIN IMMEDIATE")
                     .await
                     .map_err(|error| TurnCommitError::Storage(error.to_string()))?;
                 let duplicate: Option<(i64,)> =
