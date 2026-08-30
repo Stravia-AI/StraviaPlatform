@@ -3,7 +3,18 @@ import type { Model, ThinkingLevel } from '$lib/types'
 
 export type CodeLanguage = 'python' | 'typescript' | 'curl'
 export type GatewayProtocol = 'openai-compatible' | 'open-responses' | 'anthropic-messages' | 'google-gemini'
-export type CliToolId = 'claude-code' | 'codex-cli' | 'opencode' | 'omp' | 'pi'
+export type CliToolId =
+  | 'codex-cli'
+  | 'claude-code'
+  | 'opencode'
+  | 'openclaw'
+  | 'hermes-agent'
+  | 'trae'
+  | 'workbuddy'
+  | 'zcode'
+  | 'deepseek-harness'
+  | 'pi'
+  | 'omp'
 
 export interface ClaudeModelMappings {
   defaultModel: string
@@ -41,16 +52,37 @@ export const CLI_TOOLS: ReadonlyArray<{
   protocol: GatewayProtocol
   description: () => string
 }> = [
+  { id: 'codex-cli', name: 'Codex', protocol: 'open-responses', description: m.connect_tool_codex_description },
   {
     id: 'claude-code',
     name: 'Claude Code',
     protocol: 'anthropic-messages',
     description: m.connect_tool_claude_description,
   },
-  { id: 'codex-cli', name: 'Codex', protocol: 'openai-compatible', description: m.connect_tool_codex_description },
   { id: 'opencode', name: 'OpenCode', protocol: 'open-responses', description: m.connect_tool_opencode_description },
-  { id: 'omp', name: 'OMP', protocol: 'open-responses', description: m.connect_tool_omp_description },
+  { id: 'openclaw', name: 'OpenClaw', protocol: 'openai-compatible', description: m.connect_tool_openclaw_description },
+  {
+    id: 'hermes-agent',
+    name: 'Hermes Agent',
+    protocol: 'openai-compatible',
+    description: m.connect_tool_hermes_description,
+  },
+  { id: 'trae', name: 'TRAE', protocol: 'openai-compatible', description: m.connect_tool_trae_description },
+  {
+    id: 'workbuddy',
+    name: 'WorkBuddy',
+    protocol: 'openai-compatible',
+    description: m.connect_tool_workbuddy_description,
+  },
+  { id: 'zcode', name: 'ZCode', protocol: 'openai-compatible', description: m.connect_tool_zcode_description },
+  {
+    id: 'deepseek-harness',
+    name: 'DeepSeek Harness',
+    protocol: 'openai-compatible',
+    description: m.connect_tool_deepseek_harness_description,
+  },
   { id: 'pi', name: 'Pi', protocol: 'open-responses', description: m.connect_tool_pi_description },
+  { id: 'omp', name: 'OMP', protocol: 'open-responses', description: m.connect_tool_omp_description },
 ]
 
 const thinkingLevelDescriptions: Record<ThinkingLevel, string> = {
@@ -361,6 +393,143 @@ ${JSON.stringify(
 
 # Merge into ~/.pi/agent/settings.json
 ${JSON.stringify({ defaultProvider: 'stravia', defaultModel: params.defaultModel }, null, 2)}`
+  }
+
+  if (params.tool === 'openclaw') {
+    return `# ~/.openclaw/openclaw.json
+${JSON.stringify(
+  {
+    models: {
+      providers: {
+        stravia: {
+          baseUrl: `${params.host}/v1`,
+          apiKey: params.apiKey,
+          api: 'openai-completions',
+          models: models.map((model) => ({
+            id: model.name,
+            name: model.name,
+            ...(model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow }),
+            ...(model.outputMaxTokens === undefined ? {} : { maxTokens: model.outputMaxTokens }),
+          })),
+        },
+      },
+    },
+    agents: { defaults: { model: { primary: `stravia/${params.defaultModel}` } } },
+  },
+  null,
+  2,
+)}`
+  }
+
+  if (params.tool === 'hermes-agent') {
+    const modelEntries = models.flatMap((model) => [
+      `      ${JSON.stringify(model.name)}:`,
+      ...(model.contextWindow === undefined ? [] : [`        context_length: ${model.contextWindow}`]),
+    ])
+    return `# ~/.hermes/.env
+STRAVIA_API_KEY=${params.apiKey}
+
+# ~/.hermes/config.yaml
+providers:
+  stravia:
+    api: ${JSON.stringify(`${params.host}/v1`)}
+    key_env: STRAVIA_API_KEY
+    transport: chat_completions
+    default_model: ${JSON.stringify(params.defaultModel)}
+    discover_models: false
+    models:
+${modelEntries.join('\n')}
+model:
+  provider: stravia
+  default: ${JSON.stringify(params.defaultModel)}`
+  }
+
+  if (params.tool === 'trae') {
+    return `# trae_config.yaml
+agents:
+  trae_agent:
+    enable_lakeview: false
+    model: stravia_default
+    max_steps: 200
+    tools:
+      - bash
+      - str_replace_based_edit_tool
+      - sequentialthinking
+      - task_done
+model_providers:
+  stravia:
+    provider: openai
+    api_key: ${JSON.stringify(params.apiKey)}
+    base_url: ${JSON.stringify(`${params.host}/v1`)}
+models:
+  stravia_default:
+    model_provider: stravia
+    model: ${JSON.stringify(params.defaultModel)}
+    max_tokens: ${models.find((model) => model.name === params.defaultModel)?.outputMaxTokens ?? 4096}
+    temperature: 0.5
+    top_p: 1
+    top_k: 0
+    max_retries: 10
+    parallel_tool_calls: true`
+  }
+
+  if (params.tool === 'workbuddy') {
+    return `# ~/.workbuddy/models.json
+${JSON.stringify(
+  models.map((model) => ({
+    id: model.name,
+    name: model.name,
+    vendor: 'Custom',
+    url: `${params.host}/v1/chat/completions`,
+    apiKey: params.apiKey,
+    ...(model.contextWindow === undefined ? {} : { maxInputTokens: model.contextWindow }),
+    ...(model.outputMaxTokens === undefined ? {} : { maxOutputTokens: model.outputMaxTokens }),
+    supportsToolCall: true,
+    supportsImages: false,
+    supportsReasoning: supportsReasoning(model),
+    useCustomProtocol: false,
+  })),
+  null,
+  2,
+)}`
+  }
+
+  if (params.tool === 'zcode') {
+    return `# ZCode: Manage Models > Settings > Model Settings > Add Provider
+Provider Name: Stravia
+Protocol: OpenAI
+Base URL: ${params.host}/v1
+API Key: ${params.apiKey}
+
+# Add Model, then enable each model authorized by this API Key:
+${modelNames.join('\n')}
+
+# Select this default model:
+${params.defaultModel}`
+  }
+
+  if (params.tool === 'deepseek-harness') {
+    const modelEntries = models.flatMap((model) => [
+      `        - id: ${JSON.stringify(model.name)}`,
+      ...(model.contextWindow === undefined ? [] : [`          contextWindow: ${model.contextWindow}`]),
+      ...(model.outputMaxTokens === undefined ? [] : [`          maxTokens: ${model.outputMaxTokens}`]),
+    ])
+    return `# Set STRAVIA_API_KEY before starting dsh.
+# Value: ${params.apiKey}
+
+# $DSH_HOME/settings.yaml
+llm-pi-ai:
+  providers:
+    stravia:
+      displayName: Stravia Gateway
+      apiKeyEnv: STRAVIA_API_KEY
+      api: openai-completions
+      baseURL: ${JSON.stringify(`${params.host}/v1`)}
+      models:
+${modelEntries.join('\n')}
+
+# In Settings > Models, select stravia/${params.defaultModel}.
+# DeepSeek Harness persists that selection as the default for new sessions.`
   }
 
   const opencodeModels = Object.fromEntries(

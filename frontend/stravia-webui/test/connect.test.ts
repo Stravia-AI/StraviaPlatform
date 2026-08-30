@@ -1,6 +1,12 @@
 import { describe, expect, test } from 'bun:test'
 
-import { buildCliConfig, buildCode, defineClientModel, type ClientModelDefinition } from '../src/lib/connect'
+import {
+  buildCliConfig,
+  buildCode,
+  CLI_TOOLS,
+  defineClientModel,
+  type ClientModelDefinition,
+} from '../src/lib/connect'
 import type { Model } from '../src/lib/types'
 
 const models: ClientModelDefinition[] = [
@@ -192,6 +198,129 @@ describe('client configuration generation', () => {
       max: 'max',
     })
     expect(settings).toEqual({ defaultProvider: 'stravia', defaultModel: 'gpt-5.6-luna' })
+  })
+
+  test('lists the requested clients in product order', () => {
+    expect(CLI_TOOLS.slice(0, 10).map((tool) => tool.name)).toEqual([
+      'Codex',
+      'Claude Code',
+      'OpenCode',
+      'OpenClaw',
+      'Hermes Agent',
+      'TRAE',
+      'WorkBuddy',
+      'ZCode',
+      'DeepSeek Harness',
+      'Pi',
+    ])
+  })
+
+  test('writes an OpenClaw provider and primary model', () => {
+    const config = buildCliConfig({
+      tool: 'openclaw',
+      host: 'http://localhost:5174',
+      apiKey: 'sk-client',
+      models,
+      defaultModel: 'gpt-5.6-sol',
+    })
+    const json = JSON.parse(config.split('\n').slice(1).join('\n'))
+
+    expect(json.models.providers.stravia).toMatchObject({
+      baseUrl: 'http://localhost:5174/v1',
+      apiKey: 'sk-client',
+      api: 'openai-completions',
+    })
+    expect(json.models.providers.stravia.models.map((model: { id: string }) => model.id)).toEqual(modelNames)
+    expect(json.agents.defaults.model.primary).toBe('stravia/gpt-5.6-sol')
+  })
+
+  test('writes modern Hermes named-provider configuration', () => {
+    const config = buildCliConfig({
+      tool: 'hermes-agent',
+      host: 'http://localhost:5174',
+      apiKey: 'sk-client',
+      models,
+      defaultModel: 'gpt-5.6-luna',
+    })
+
+    expect(config).toContain('STRAVIA_API_KEY=sk-client')
+    expect(config).toContain('key_env: STRAVIA_API_KEY')
+    expect(config).toContain('transport: chat_completions')
+    expect(config).toContain('default: "gpt-5.6-luna"')
+    for (const model of modelNames) expect(config).toContain(`"${model}":`)
+  })
+
+  test('writes a TRAE OpenAI-compatible model binding', () => {
+    const config = buildCliConfig({
+      tool: 'trae',
+      host: 'http://localhost:5174',
+      apiKey: 'sk-client',
+      models,
+      defaultModel: 'gpt-5.6-sol',
+    })
+
+    expect(config).toContain('provider: openai')
+    expect(config).toContain('enable_lakeview: false')
+    expect(config).toContain('base_url: "http://localhost:5174/v1"')
+    expect(config).toContain('model_provider: stravia')
+    expect(config).toContain('model: "gpt-5.6-sol"')
+    expect(config).toContain('max_tokens: 128000')
+    expect(config).toContain('temperature: 0.5')
+    expect(config).toContain('top_p: 1')
+    expect(config).toContain('top_k: 0')
+    expect(config).toContain('max_retries: 10')
+    expect(config).toContain('parallel_tool_calls: true')
+  })
+
+  test('writes WorkBuddy models.json and exact ZCode UI fields', () => {
+    const common = {
+      host: 'http://localhost:5174',
+      apiKey: 'sk-client',
+      models,
+      defaultModel: 'gpt-5.6-sol',
+    }
+    const workbuddy = buildCliConfig({ tool: 'workbuddy', ...common })
+    const zcode = buildCliConfig({ tool: 'zcode', ...common })
+
+    const workbuddyModels = JSON.parse(workbuddy.split('\n').slice(1).join('\n'))
+    expect(workbuddy).toStartWith('# ~/.workbuddy/models.json')
+    expect(workbuddyModels.map((model: { id: string }) => model.id)).toEqual(modelNames)
+    expect(workbuddyModels[1]).toEqual({
+      id: 'gpt-5.6-sol',
+      name: 'gpt-5.6-sol',
+      vendor: 'Custom',
+      url: 'http://localhost:5174/v1/chat/completions',
+      apiKey: 'sk-client',
+      maxInputTokens: 272000,
+      maxOutputTokens: 128000,
+      supportsToolCall: true,
+      supportsImages: false,
+      supportsReasoning: true,
+      useCustomProtocol: false,
+    })
+    expect(zcode).toContain('Protocol: OpenAI')
+    expect(zcode).toContain('Base URL: http://localhost:5174/v1')
+    for (const model of modelNames) {
+      expect(workbuddy).toContain(model)
+      expect(zcode).toContain(model)
+    }
+  })
+
+  test('writes a DeepSeek Harness custom provider', () => {
+    const config = buildCliConfig({
+      tool: 'deepseek-harness',
+      host: 'http://localhost:5174',
+      apiKey: 'sk-client',
+      models,
+      defaultModel: 'gpt-5.6-sol',
+    })
+
+    expect(config).toContain('apiKeyEnv: STRAVIA_API_KEY')
+    expect(config).toContain('api: openai-completions')
+    expect(config).toContain('baseURL: "http://localhost:5174/v1"')
+    expect(config).toContain('- id: "gpt-5.6-sol"')
+    expect(config).toContain('contextWindow: 272000')
+    expect(config).toContain('maxTokens: 128000')
   })
 
   test('rejects defaults and mappings outside the API Key scope', () => {
