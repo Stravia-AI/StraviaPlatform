@@ -28,12 +28,13 @@ pub async fn models_list(State(gw): State<Gateway>, headers: HeaderMap) -> Respo
         Ok(model_ids) => model_ids.into_iter().collect::<HashSet<_>>(),
         Err(error) => return error.render(None),
     };
+    let unrestricted_model_access = accessible_route_ids.is_empty();
 
     let cache = gw.model_cache.read().await;
     let models = cache
         .models
         .iter()
-        .filter(|model| accessible_route_ids.contains(&model.id))
+        .filter(|model| unrestricted_model_access || accessible_route_ids.contains(&model.id))
         .filter(|model| !model.name.trim().is_empty())
         .map(|model| {
             (
@@ -152,7 +153,7 @@ mod tests {
                 thinking_level_map: Vec::new(),
             }],
         };
-        let _unbound = gateway
+        let unbound = gateway
             .admin()
             .create_model(create_model("unbound-model"))
             .await
@@ -194,6 +195,20 @@ mod tests {
             header::AUTHORIZATION,
             HeaderValue::from_str(&format!("Bearer {}", key.token)).expect("auth header"),
         );
+        let security = Security::new(gateway.storage.auth());
+        let principal = crate::hook::Principal::new(key.id.clone());
+        security
+            .authorize_principal_model(&principal, &bound)
+            .await
+            .expect("bound model authorization");
+        assert!(matches!(
+            security
+                .authorize_principal_model(&principal, &unbound)
+                .await,
+            Err(crate::error::GatewayError::Forbidden {
+                reason: crate::error::AccessDenial::ModelNotAllowed
+            })
+        ));
         assert_eq!(
             listed_model_ids(models_list(State(gateway.clone()), valid_headers.clone()).await)
                 .await,
@@ -205,6 +220,35 @@ mod tests {
             listed[0]["stravia:thinking_levels"],
             serde_json::json!(["off", "minimal", "low", "medium", "high"])
         );
+        gateway
+            .admin()
+            .update_api_key(
+                &key.id,
+                crate::db::models::UpdateApiKey {
+                    key: None,
+                    name: None,
+                    concurrency_limit: None,
+                    is_enabled: None,
+                    mcp_access_enabled: None,
+                    transparent_injection_enabled: None,
+                    inject_web_search: None,
+                    expires_at: None,
+                    model_ids: Some(Vec::new()),
+                    inject_media_understanding: None,
+                },
+            )
+            .await
+            .expect("allow every model");
+        security
+            .authorize_principal_model(&principal, &unbound)
+            .await
+            .expect("unrestricted key authorizes a model");
+        assert_eq!(
+            listed_model_ids(models_list(State(gateway.clone()), valid_headers.clone()).await)
+                .await,
+            ["bound-model", "unbound-model"]
+        );
+
         let targets = bound
             .targets
             .iter()

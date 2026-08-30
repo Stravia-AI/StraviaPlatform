@@ -15,6 +15,7 @@ import { toast } from 'svelte-sonner'
 import { admin, proxyBase } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
 import {
+  apiKeyAllowsModel,
   buildCliConfig,
   buildCode,
   CLI_TOOLS,
@@ -68,10 +69,12 @@ const blockingResourceError = $derived(
     (proxyQuery.data === undefined ? proxyQuery.error : null),
 )
 const codeModel = $derived(models.find((model) => model.id === codeModelId))
-const codeKeys = $derived(codeModel ? apiKeys.filter((key) => key.model_ids.includes(codeModel.id)) : [])
+const codeKeys = $derived(codeModel ? apiKeys.filter((key) => apiKeyAllowsModel(key.model_ids, codeModel.id)) : [])
 const selectedCodeKey = $derived(codeKeys.find((key) => key.id === codeKeyId))
 const selectedCliKey = $derived(apiKeys.find((key) => key.id === cliKeyId))
-const cliModels = $derived(selectedCliKey ? models.filter((model) => selectedCliKey.model_ids.includes(model.id)) : [])
+const cliModels = $derived(
+  selectedCliKey ? models.filter((model) => apiKeyAllowsModel(selectedCliKey.model_ids, model.id)) : [],
+)
 const selectedCliDefaultModel = $derived(cliModels.find((model) => model.id === cliDefaultModelId))
 const selectedTool = $derived(CLI_TOOLS.find((tool) => tool.id === cliToolId) ?? CLI_TOOLS[0])
 const codeApiKey = $derived(selectedCodeKey?.key ?? emptyKey)

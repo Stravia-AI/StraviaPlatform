@@ -456,10 +456,11 @@ async fn set_concurrency_limit(gateway: &Gateway, limit: i32) {
 struct AccessMutationFixture {
     gateway: Arc<std::sync::Mutex<Option<Gateway>>>,
     key_id: Arc<std::sync::Mutex<Option<String>>>,
+    replacement_model_id: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl AccessMutationFixture {
-    fn set(&self, gateway: Gateway, key_id: String) {
+    fn set(&self, gateway: Gateway, key_id: String, replacement_model_id: String) {
         *self
             .gateway
             .lock()
@@ -468,6 +469,10 @@ impl AccessMutationFixture {
             .key_id
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(key_id);
+        *self
+            .replacement_model_id
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(replacement_model_id);
     }
 
     fn gateway(&self) -> Option<Gateway> {
@@ -479,6 +484,13 @@ impl AccessMutationFixture {
 
     fn key_id(&self) -> Option<String> {
         self.key_id
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn replacement_model_id(&self) -> Option<String> {
+        self.replacement_model_id
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
@@ -1093,7 +1105,12 @@ impl crate::hook::PlatformTool for AccessMutationTool {
             .ok_or_else(|| crate::hook::PlatformToolError::new("missing test key"))?;
         let (is_enabled, model_ids) = match self.mutation {
             TestAccessMutation::DisableKey => (Some(false), None),
-            TestAccessMutation::RevokeBinding => (None, Some(Vec::new())),
+            TestAccessMutation::RevokeBinding => (
+                None,
+                Some(vec![self.access.replacement_model_id().ok_or_else(
+                    || crate::hook::PlatformToolError::new("missing replacement model"),
+                )?]),
+            ),
         };
         gateway
             .admin()
@@ -1252,6 +1269,12 @@ async fn assert_hidden_round_rechecks_access(
         .await
         .expect("gateway init");
     let model = format!("hidden-round-protected-{}", mutation.tool_id());
+    let replacement_model_id = configure_route_with_id(
+        &gateway,
+        &format!("hidden-round-replacement-{}", mutation.tool_id()),
+        &[base_url.clone()],
+    )
+    .await;
     let model_id = configure_route_with_id(&gateway, &model, &[base_url]).await;
     let key = gateway
         .admin()
@@ -1268,7 +1291,7 @@ async fn assert_hidden_round_rechecks_access(
         })
         .await
         .expect("API key");
-    access.set(gateway.clone(), key.id);
+    access.set(gateway.clone(), key.id, replacement_model_id);
     let mut headers = HeaderMap::new();
     headers.insert(
         header::AUTHORIZATION,

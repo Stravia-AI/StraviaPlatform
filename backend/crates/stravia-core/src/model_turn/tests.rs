@@ -191,12 +191,27 @@ async fn gateway_with_captured_model(
         .create_model(CreateModel {
             name: model_name.into(),
             balance: None,
-            target_provider: provider.id,
+            target_provider: provider.id.clone(),
             target_model: "upstream-model".into(),
             targets: Vec::new(),
         })
         .await
         .expect("Model");
+    let model_ids = if bind_key {
+        vec![model.id]
+    } else {
+        let other_model = admin
+            .create_model(CreateModel {
+                name: format!("{model_name}-other"),
+                balance: None,
+                target_provider: provider.id,
+                target_model: "upstream-model".into(),
+                targets: Vec::new(),
+            })
+            .await
+            .expect("other Model");
+        vec![other_model.id]
+    };
     let key = admin
         .create_api_key(crate::db::models::CreateApiKey {
             key: None,
@@ -206,7 +221,7 @@ async fn gateway_with_captured_model(
             mcp_access_enabled: true,
             transparent_injection_enabled: false,
             inject_web_search: false,
-            model_ids: if bind_key { vec![model.id] } else { Vec::new() },
+            model_ids,
             inject_media_understanding: false,
         })
         .await

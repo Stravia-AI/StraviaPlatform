@@ -127,6 +127,10 @@ export function defineClientModel(model: Model): ClientModelDefinition {
   }
 }
 
+export function apiKeyAllowsModel(modelIds: readonly string[], modelId: string): boolean {
+  return modelIds.length === 0 || modelIds.includes(modelId)
+}
+
 export function maskApiKey(key: string): string {
   return key.length <= 14 ? key : `${key.slice(0, 12)}••`
 }

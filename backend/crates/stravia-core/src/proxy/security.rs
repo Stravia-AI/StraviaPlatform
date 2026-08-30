@@ -198,7 +198,7 @@ impl<'a> Security<'a> {
             });
         };
         if !auth
-            .model_binding_exists(&key.id, &model.id)
+            .model_access_allowed(&key.id, &model.id)
             .await
             .map_err(auth_storage_error)?
         {
@@ -451,12 +451,12 @@ mod tests {
             Ok(self.key.clone().filter(|key| key.id == id))
         }
 
-        async fn model_binding_exists(
+        async fn model_access_allowed(
             &self,
             _api_key_id: &str,
             _model_id: &str,
         ) -> anyhow::Result<bool> {
-            Ok(self.binding)
+            Ok(self.visible_model_ids.is_empty() || self.binding)
         }
 
         async fn list_bound_model_ids(&self, _api_key_id: &str) -> anyhow::Result<Vec<String>> {
@@ -612,6 +612,21 @@ mod tests {
             .authorize_principal_model(&principal, &protected_model())
             .await
             .expect("bound credential is authorized");
+        assert_eq!(grant.api_key_id.as_deref(), Some("key-id"));
+        assert_eq!(grant.api_key_name.as_deref(), Some("Test key"));
+    }
+
+    #[tokio::test]
+    async fn principal_model_authorization_allows_every_model_when_unrestricted() {
+        let mut unrestricted = TestStore::valid();
+        unrestricted.binding = false;
+        unrestricted.visible_model_ids.clear();
+
+        let grant = Security::new(Some(&unrestricted))
+            .authorize_principal_model(&Principal::new("key-id"), &protected_model())
+            .await
+            .expect("an empty model scope authorizes every model");
+
         assert_eq!(grant.api_key_id.as_deref(), Some("key-id"));
         assert_eq!(grant.api_key_name.as_deref(), Some("Test key"));
     }

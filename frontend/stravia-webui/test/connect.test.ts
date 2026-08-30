@@ -1,10 +1,12 @@
 import { describe, expect, test } from 'bun:test'
 
 import {
+  apiKeyAllowsModel,
   buildCliConfig,
   buildCode,
   CLI_TOOLS,
   defineClientModel,
+  maskApiKey,
   type ClientModelDefinition,
 } from '../src/lib/connect'
 import type { Model } from '../src/lib/types'
@@ -32,6 +34,15 @@ const models: ClientModelDefinition[] = [
 const modelNames = models.map((model) => model.name)
 
 describe('client configuration generation', () => {
+  test('treats an empty API Key model scope as unrestricted', () => {
+    expect(apiKeyAllowsModel([], 'model-id')).toBe(true)
+    expect(apiKeyAllowsModel(['other-model-id'], 'model-id')).toBe(false)
+  })
+
+  test('masks API Keys consistently without exposing most of the prefix', () => {
+    expect(maskApiKey('sk-d787f8575abcdef4482')).toBe('sk-d78••••••••4482')
+  })
+
   test('generates Open Responses examples for every code language', () => {
     const base = {
       protocol: 'open-responses' as const,

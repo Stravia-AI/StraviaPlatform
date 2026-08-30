@@ -239,15 +239,22 @@ impl AuthAccessStore for PostgresAuthAccessStore {
         ))
     }
 
-    async fn model_binding_exists(&self, api_key_id: &str, model_id: &str) -> anyhow::Result<bool> {
-        let count = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM api_key_models WHERE api_key_id = $1 AND model_id = $2",
+    async fn model_access_allowed(&self, api_key_id: &str, model_id: &str) -> anyhow::Result<bool> {
+        sqlx::query_scalar::<_, bool>(
+            "SELECT
+                EXISTS (SELECT 1 FROM api_keys WHERE id = $1)
+                AND (
+                    NOT EXISTS (SELECT 1 FROM api_key_models WHERE api_key_id = $1)
+                    OR EXISTS (
+                        SELECT 1 FROM api_key_models WHERE api_key_id = $1 AND model_id = $2
+                    )
+                )",
         )
         .bind(api_key_id)
         .bind(model_id)
         .fetch_one(&self.pool)
-        .await?;
-        Ok(count > 0)
+        .await
+        .map_err(Into::into)
     }
 
     async fn list_bound_model_ids(&self, api_key_id: &str) -> anyhow::Result<Vec<String>> {

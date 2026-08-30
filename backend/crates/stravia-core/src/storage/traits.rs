@@ -211,7 +211,9 @@ pub trait ApiKeyStore: Send + Sync {
 pub trait AuthAccessStore: Send + Sync {
     async fn find_api_key(&self, raw_key: &str) -> anyhow::Result<Option<ApiKeyAccessRecord>>;
     async fn find_api_key_by_id(&self, id: &str) -> anyhow::Result<Option<ApiKeyAccessRecord>>;
-    async fn model_binding_exists(&self, api_key_id: &str, model_id: &str) -> anyhow::Result<bool>;
+    /// An existing API key without model bindings has unrestricted model access.
+    async fn model_access_allowed(&self, api_key_id: &str, model_id: &str) -> anyhow::Result<bool>;
+    /// An empty list represents unrestricted access, not an empty allowlist.
     async fn list_bound_model_ids(&self, api_key_id: &str) -> anyhow::Result<Vec<String>>;
 }
 
