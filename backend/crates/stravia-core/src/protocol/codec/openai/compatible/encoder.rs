@@ -48,7 +48,7 @@ impl OpenAIEncoder {
             Some(crate::thinking::TargetThinkingControl::Effort { value }) => {
                 obj.insert("reasoning_effort".into(), Value::String(value.clone()));
             }
-            Some(crate::thinking::TargetThinkingControl::Disabled) | None => {}
+            None => {}
             Some(control) => {
                 anyhow::bail!(
                     "OpenAI Chat Completions cannot represent Target Thinking Control {control:?}"
@@ -771,6 +771,38 @@ mod tests {
 
         assert_eq!(body["reasoning_effort"], "xhigh");
         assert!(body.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn generic_toggle_without_provider_adapter_is_rejected() {
+        let mut request = AiRequest::new(
+            "custom-model",
+            vec![AiItem {
+                role: Role::User,
+                content: MessageContent::Text("hello".into()),
+                tool_calls: None,
+                tool_call_id: None,
+                meta: None,
+            }],
+        );
+        request.reasoning.target_control = Some(crate::thinking::TargetThinkingControl::Enabled);
+        request.meta.source_protocol =
+            Some(crate::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1);
+
+        let error = crate::protocol::transform::ProtocolTransform::global()
+            .bind(
+                crate::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+                crate::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            )
+            .unwrap()
+            .encode_request(&request)
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("cannot preserve: reasoning.target_control")
+        );
     }
 
     #[test]

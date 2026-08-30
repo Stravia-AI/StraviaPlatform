@@ -10,4 +10,5 @@
 //!   `shared.rs` helper inside the vendor's own directory.
 
 pub mod openai_compat;
+pub(crate) mod openai_compatible_thinking;
 pub mod pipeline;

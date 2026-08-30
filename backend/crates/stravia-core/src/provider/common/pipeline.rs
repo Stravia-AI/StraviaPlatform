@@ -1,4 +1,4 @@
-//! Standard 7-step request/response pipeline shared by every
+//! Standard request/response pipeline shared by every
 //! OpenAI-compatible vendor.
 //!
 //! # Usage
@@ -43,8 +43,9 @@ where
 }
 
 /// Standard `build_request` pipeline:
-/// `pre_request → normalize_tool_results → pre_encode → codec_encode →
-///  post_encode → auth_headers → build_url`.
+/// `pre_request → normalize_tool_results → pre_encode →
+///  openai_compatible_thinking → codec_encode → post_encode → auth_headers →
+///  build_url`.
 pub async fn build_request<V>(
     vendor: &V,
     req: &mut crate::protocol::ir::AiRequest,
@@ -73,7 +74,10 @@ where
         .await
         .map_err(GatewayError::internal)?;
 
-    // 4. canonical pair-bound encode and representability gate
+    // 4. Provider-specific OpenAI-compatible thinking controls
+    super::openai_compatible_thinking::apply(ctx, req);
+
+    // 5. canonical pair-bound encode and representability gate
     let ingress = req.meta.source_protocol.unwrap_or(ctx.protocol);
     let pair = crate::protocol::transform::ProtocolTransform::global()
         .bind(ingress, ctx.protocol)
@@ -84,13 +88,13 @@ where
         path: egress_path,
     } = pair.encode_request(req).map_err(transform_gateway_error)?;
 
-    // 5. post_encode hook
+    // 6. post_encode hook
     extension
         .post_encode(&vendor_ctx, &mut body, &mut extra_headers)
         .await
         .map_err(GatewayError::internal)?;
 
-    // 6. auth headers
+    // 7. auth headers
     //
     // OAuth drivers (codex, claude-code) stash their Bearer + provider-
     // specific headers in `RuntimeBinding.extra_headers` and ask the
@@ -125,7 +129,7 @@ where
     }
     headers.extend(extra_headers);
 
-    // 7. build URL
+    // 8. build URL
     let url = extension.build_url(&vendor_ctx, ctx.egress_base_url, &egress_path);
 
     Ok(crate::provider::outbound::OutboundRequest { url, headers, body })

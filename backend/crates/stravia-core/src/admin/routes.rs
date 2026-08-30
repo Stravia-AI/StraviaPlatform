@@ -332,10 +332,21 @@ impl<'a> RouteModule<'a> {
                         ) || row.source == ThinkingMappingSource::Overridden
                     }
                     "gemini" | "google-gemini" | "google-genai" => true,
+                    "openai-compatible" | "openai-compat" | "openai" => match row.control {
+                        crate::thinking::TargetThinkingControl::Effort { .. }
+                        | crate::thinking::TargetThinkingControl::Hidden => true,
+                        crate::thinking::TargetThinkingControl::Enabled
+                        | crate::thinking::TargetThinkingControl::Disabled => {
+                            crate::provider::common::openai_compatible_thinking::supports_toggle(
+                                &provider,
+                                &target.model,
+                            )
+                        }
+                        _ => false,
+                    },
                     _ => matches!(
                         row.control,
                         crate::thinking::TargetThinkingControl::Effort { .. }
-                            | crate::thinking::TargetThinkingControl::Disabled
                             | crate::thinking::TargetThinkingControl::Hidden
                     ),
                 };
@@ -1206,6 +1217,80 @@ mod tests {
             })
         );
         Ok(())
+    }
+
+    async fn create_openai_compatible_toggle_route(
+        vendor: &str,
+        model: &str,
+    ) -> anyhow::Result<Model> {
+        let data_dir = tempfile::tempdir()?;
+        let (gateway, _logs) = Gateway::new(GatewayConfig {
+            data_dir: data_dir.path().to_path_buf(),
+            ..GatewayConfig::default()
+        })
+        .await?;
+        let admin = gateway.admin();
+        let provider = admin
+            .create_provider(CreateProvider {
+                name: Some(format!("{vendor} Route Test Provider")),
+                source: ProviderSourceInput::Custom {
+                    vendor: Some(vendor.into()),
+                    protocol: "openai-compatible".into(),
+                    base_url: "http://127.0.0.1:9".into(),
+                    models_source: None,
+                    static_models: None,
+                },
+                credential: ProviderCredentialInput::None,
+                use_proxy: false,
+            })
+            .await?;
+        admin
+            .create_manual_provider_model(
+                &provider.id,
+                model,
+                CreateManualProviderModel {
+                    metadata: json!({
+                        "id": model,
+                        "reasoning_options": [{"type": "toggle"}]
+                    }),
+                },
+            )
+            .await?;
+
+        admin
+            .create_model(CreateModel {
+                name: model.into(),
+                balance: None,
+                target_provider: provider.id,
+                target_model: model.into(),
+                targets: Vec::new(),
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn xiaomi_toggle_model_can_be_bound_over_openai_compatible() -> anyhow::Result<()> {
+        let route = create_openai_compatible_toggle_route("xiaomi", "mimo-v2.5").await?;
+
+        assert_eq!(
+            route.supported_thinking_levels.0,
+            vec![ThinkingLevel::Off, ThinkingLevel::Medium]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unknown_compatible_provider_does_not_guess_toggle_wire_shape() {
+        let error =
+            create_openai_compatible_toggle_route("openai-compatible", "custom-toggle-model")
+                .await
+                .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("THINKING_CONTROL_UNREPRESENTABLE")
+        );
     }
 
     #[tokio::test]

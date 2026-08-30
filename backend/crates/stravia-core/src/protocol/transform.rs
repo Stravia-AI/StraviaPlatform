@@ -706,10 +706,7 @@ fn thinking_control_representable(
 ) -> bool {
     use crate::thinking::TargetThinkingControl;
     match protocol {
-        Protocol::OpenAICompatible => matches!(
-            control,
-            TargetThinkingControl::Effort { .. } | TargetThinkingControl::Disabled
-        ),
+        Protocol::OpenAICompatible => matches!(control, TargetThinkingControl::Effort { .. }),
         Protocol::OpenResponses => match control {
             TargetThinkingControl::Effort { .. } => true,
             TargetThinkingControl::Disabled => true,
