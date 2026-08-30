@@ -944,6 +944,8 @@
   "connect_tool_claude_description": "Anthropic 官方命令行编程助手",
   "connect_tool_codex_description": "OpenAI 命令行编程工具",
   "connect_tool_opencode_description": "开源 AI 编程命令行工具",
+  "connect_tool_omp_description": "Oh My Pi 可扩展 AI 编程工具",
+  "connect_tool_pi_description": "极简可扩展终端编程工具",
   "common_sse": "SSE",
   "common_json": "JSON",
   "common_input_abbreviation": "IN",

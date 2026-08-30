@@ -947,6 +947,8 @@
   "connect_tool_claude_description": "Anthropic official coding CLI assistant",
   "connect_tool_codex_description": "OpenAI coding CLI tool",
   "connect_tool_opencode_description": "Open-source AI coding CLI tool",
+  "connect_tool_omp_description": "Extensible AI coding harness by Oh My Pi",
+  "connect_tool_pi_description": "Minimal extensible terminal coding harness",
   "common_sse": "SSE",
   "common_json": "JSON",
   "common_input_abbreviation": "IN",

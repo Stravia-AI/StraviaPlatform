@@ -20,6 +20,13 @@ export default defineConfig(({ mode }) => {
       // Styled Svelte libraries must stay eligible for prebundling or cold starts can expose component source as virtual CSS.
       exclude: ['@lucide/svelte', '@tanstack/svelte-query', 'mode-watcher'],
     },
-    server: { port: 5173, proxy: { '/api/v1': { target: `http://127.0.0.1:${backendPort}`, changeOrigin: true } } },
+    server: {
+      port: 5173,
+      proxy: {
+        '/api/v1': { target: `http://127.0.0.1:${backendPort}`, changeOrigin: true },
+        '/v1': { target: `http://127.0.0.1:${backendPort}`, changeOrigin: true },
+        '/v1beta': { target: `http://127.0.0.1:${backendPort}`, changeOrigin: true },
+      },
+    },
   }
 })

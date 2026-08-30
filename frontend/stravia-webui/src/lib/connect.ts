@@ -3,7 +3,7 @@ import type { Model, ThinkingLevel } from '$lib/types'
 
 export type CodeLanguage = 'python' | 'typescript' | 'curl'
 export type GatewayProtocol = 'openai-compatible' | 'open-responses' | 'anthropic-messages' | 'google-gemini'
-export type CliToolId = 'claude-code' | 'codex-cli' | 'opencode'
+export type CliToolId = 'claude-code' | 'codex-cli' | 'opencode' | 'omp' | 'pi'
 
 export interface ClaudeModelMappings {
   defaultModel: string
@@ -49,6 +49,8 @@ export const CLI_TOOLS: ReadonlyArray<{
   },
   { id: 'codex-cli', name: 'Codex', protocol: 'openai-compatible', description: m.connect_tool_codex_description },
   { id: 'opencode', name: 'OpenCode', protocol: 'open-responses', description: m.connect_tool_opencode_description },
+  { id: 'omp', name: 'OMP', protocol: 'open-responses', description: m.connect_tool_omp_description },
+  { id: 'pi', name: 'Pi', protocol: 'open-responses', description: m.connect_tool_pi_description },
 ]
 
 const thinkingLevelDescriptions: Record<ThinkingLevel, string> = {
@@ -63,6 +65,14 @@ const thinkingLevelDescriptions: Record<ThinkingLevel, string> = {
 
 function reasoningEffort(level: ThinkingLevel): string {
   return level === 'off' ? 'none' : level
+}
+
+function reasoningLevels(model: ClientModelDefinition): ThinkingLevel[] {
+  return model.supportedThinkingLevels.filter((level) => level !== 'off')
+}
+
+function supportsReasoning(model: ClientModelDefinition): boolean {
+  return reasoningLevels(model).length > 0
 }
 
 function claudeEffortLevel(model: ClientModelDefinition): 'low' | 'medium' | 'high' | 'xhigh' | undefined {
@@ -275,6 +285,84 @@ env_key = "STRAVIA_API_KEY"
 ${JSON.stringify(modelCatalog, null, 2)}`
   }
 
+  if (params.tool === 'omp') {
+    const modelEntries = models.flatMap((model) => {
+      const levels = reasoningLevels(model)
+      return [
+        `      - id: ${JSON.stringify(model.name)}`,
+        `        name: ${JSON.stringify(model.name)}`,
+        `        reasoning: ${supportsReasoning(model)}`,
+        ...(levels.length === 0
+          ? []
+          : [
+              '        thinking:',
+              '          mode: effort',
+              `          efforts: ${JSON.stringify(levels)}`,
+              ...(levels.includes('medium') ? ['          defaultLevel: medium'] : []),
+            ]),
+        ...(model.contextWindow === undefined ? [] : [`        contextWindow: ${model.contextWindow}`]),
+        ...(model.outputMaxTokens === undefined ? [] : [`        maxTokens: ${model.outputMaxTokens}`]),
+      ]
+    })
+
+    return `# ~/.omp/agent/models.yml
+providers:
+  stravia:
+    baseUrl: ${JSON.stringify(`${params.host}/v1`)}
+    apiKey: ${JSON.stringify(params.apiKey)}
+    api: openai-responses
+    authHeader: true
+    models:
+${modelEntries.join('\n')}
+
+# Merge into ~/.omp/agent/config.yml
+modelRoles:
+  default: ${JSON.stringify(`stravia/${params.defaultModel}`)}`
+  }
+
+  if (params.tool === 'pi') {
+    const piModels = models.map((model) => {
+      const levels = reasoningLevels(model)
+      const thinkingLevelMap =
+        levels.length === 0
+          ? undefined
+          : Object.fromEntries(
+              (['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const).map((level) => [
+                level,
+                model.supportedThinkingLevels.includes(level) ? reasoningEffort(level) : null,
+              ]),
+            )
+      return {
+        id: model.name,
+        name: model.name,
+        reasoning: supportsReasoning(model),
+        ...(thinkingLevelMap === undefined ? {} : { thinkingLevelMap }),
+        ...(model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow }),
+        ...(model.outputMaxTokens === undefined ? {} : { maxTokens: model.outputMaxTokens }),
+      }
+    })
+
+    return `# ~/.pi/agent/models.json
+${JSON.stringify(
+  {
+    providers: {
+      stravia: {
+        baseUrl: `${params.host}/v1`,
+        apiKey: params.apiKey,
+        api: 'openai-responses',
+        authHeader: true,
+        models: piModels,
+      },
+    },
+  },
+  null,
+  2,
+)}
+
+# Merge into ~/.pi/agent/settings.json
+${JSON.stringify({ defaultProvider: 'stravia', defaultModel: params.defaultModel }, null, 2)}`
+  }
+
   const opencodeModels = Object.fromEntries(
     models.map((model) => {
       const variants = Object.fromEntries(
@@ -290,7 +378,7 @@ ${JSON.stringify(modelCatalog, null, 2)}`
       return [
         model.name,
         {
-          reasoning: model.supportedThinkingLevels.some((level) => level !== 'off'),
+          reasoning: supportsReasoning(model),
           variants,
           limit,
         },

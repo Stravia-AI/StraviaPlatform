@@ -147,6 +147,53 @@ describe('client configuration generation', () => {
     })
   })
 
+  test('writes every authorized model to the OMP Responses provider', () => {
+    const config = buildCliConfig({
+      tool: 'omp',
+      host: 'http://localhost:5174',
+      apiKey: 'sk-client',
+      models,
+      defaultModel: 'gpt-5.6-sol',
+    })
+
+    expect(config).toStartWith('# ~/.omp/agent/models.yml')
+    expect(config).toContain('baseUrl: "http://localhost:5174/v1"')
+    expect(config).toContain('api: openai-responses')
+    expect(config).toContain('authHeader: true')
+    expect(config).toContain('efforts: ["minimal","low","medium","high","xhigh","max"]')
+    expect(config).toContain('default: "stravia/gpt-5.6-sol"')
+    for (const model of modelNames) expect(config).toContain(`- id: "${model}"`)
+  })
+
+  test('writes every authorized model to the Pi Responses provider', () => {
+    const config = buildCliConfig({
+      tool: 'pi',
+      host: 'http://localhost:5174',
+      apiKey: 'sk-client',
+      models,
+      defaultModel: 'gpt-5.6-luna',
+    })
+    const [modelsJson, settingsJson] = config.split('\n\n# Merge into ~/.pi/agent/settings.json\n')
+    const providerConfig = JSON.parse(modelsJson.split('\n').slice(1).join('\n'))
+    const settings = JSON.parse(settingsJson)
+
+    expect(providerConfig.providers.stravia).toMatchObject({
+      baseUrl: 'http://localhost:5174/v1',
+      apiKey: 'sk-client',
+      api: 'openai-responses',
+      authHeader: true,
+    })
+    expect(providerConfig.providers.stravia.models.map((model: { id: string }) => model.id)).toEqual(modelNames)
+    expect(providerConfig.providers.stravia.models[1].thinkingLevelMap).toMatchObject({
+      off: 'none',
+      minimal: 'minimal',
+      medium: 'medium',
+      xhigh: 'xhigh',
+      max: 'max',
+    })
+    expect(settings).toEqual({ defaultProvider: 'stravia', defaultModel: 'gpt-5.6-luna' })
+  })
+
   test('rejects defaults and mappings outside the API Key scope', () => {
     expect(() =>
       buildCliConfig({
