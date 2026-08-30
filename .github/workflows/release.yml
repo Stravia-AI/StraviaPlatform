@@ -414,7 +414,6 @@ jobs:
           GH_REPO: ${{ github.repository }}
           TAG_NAME: ${{ needs.prepare.outputs.tag }}
           IS_PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
-          WINDOWS_NOTICE: "> [!WARNING]\n> Windows desktop installers are currently unsigned and may trigger Microsoft Defender SmartScreen. Verify the downloaded file against `SHA256SUMS` before running it."
         run: |
           if gh release view "${TAG_NAME}" >/dev/null 2>&1; then
             if [[ "${IS_PRERELEASE}" == "true" ]]; then
@@ -429,7 +428,6 @@ jobs:
               --draft
               --title "Stravia ${TAG_NAME}"
               --generate-notes
-              --notes "${WINDOWS_NOTICE}"
               --latest=false
             )
             if [[ "${IS_PRERELEASE}" == "true" ]]; then
