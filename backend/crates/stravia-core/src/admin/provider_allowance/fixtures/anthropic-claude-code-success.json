@@ -1,0 +1,38 @@
+{
+  "limits": [
+    {
+      "kind": "session",
+      "percent": 42.5,
+      "resets_at": "2026-08-30T15:00:00Z"
+    },
+    {
+      "kind": "weekly_all",
+      "percent": 61,
+      "resets_at": "2026-09-05T00:00:00Z"
+    },
+    {
+      "kind": "weekly_scoped",
+      "percent": 75,
+      "resets_at": "2026-09-05T00:00:00Z",
+      "scope": {
+        "model": {
+          "display_name": "Claude Sonnet"
+        }
+      }
+    }
+  ],
+  "spend": {
+    "enabled": true,
+    "percent": 25,
+    "used": {
+      "amount_minor": 1250,
+      "exponent": 2,
+      "currency": "USD"
+    },
+    "limit": {
+      "amount_minor": 5000,
+      "exponent": 2,
+      "currency": "USD"
+    }
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "quota_reset_date": "2026-09-01T00:00:00Z",
+  "quota_snapshots": {
+    "premium_interactions": {
+      "entitlement": 50,
+      "remaining": 12,
+      "percent_remaining": 24,
+      "unlimited": false
+    },
+    "chat": {
+      "entitlement": 2000,
+      "remaining": 1999,
+      "percent_remaining": 99.95,
+      "unlimited": false
+    }
+  }
+}

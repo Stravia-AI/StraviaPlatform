@@ -278,6 +278,16 @@ _避免使用_：Egress Wire Value、Native Reasoning Option、Mapped Effort
 Provider 是管理员保存的一条上游连接，包含 Catalog 身份、Vendor、Protocol、base URL 与 Adapter Credentials；base URL 是保存时由 Vendor 从 Adapter Credentials 派生的快照，管理员显式覆盖时保存覆盖值，推理期间不重新派生。它不是 Provider Catalog Entry，也不是客户端 Route。
 _避免使用_：Vendor（当指这条保存记录）
 
+## Provider Allowance
+
+Provider Allowance 是上游 Provider 对当前账户报告的可消费额度快照，包括订阅配额窗口、请求额度与账户余额；它不等于 Stravia 从请求日志汇总的 token、请求数或成本统计，也不改变 Provider 的路由资格或健康状态。
+_避免使用_：Provider Plan Usage、Token Usage、Request Usage、Stats Usage
+
+## Provider Allowance Monitor
+
+Provider Allowance Monitor 是 Stravia Core 按 Provider 的 Catalog 身份选择、读取并规范化上游额度的受信实现；只有启用且命中本地 Monitor registry 的 Provider 才具有 Provider Allowance。Monitor 只使用该 Provider 已保存的 Adapter Credentials 或 OAuth Credential。
+_避免使用_：Catalog Allowance Capability、Quota Endpoint、远端解析规则
+
 ## Vendor
 
 Vendor 是按 npm 包标识的上游运行时适配器；同一 npm 的多个 Provider Catalog Entry 共用它。它拥有 Adapter Credentials 校验、base URL 组装、鉴权与供应商 headers，不拥有 wire codec，也不执行 npm 包。

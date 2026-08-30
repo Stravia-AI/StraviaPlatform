@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use stravia_core::Gateway;
+use stravia_core::admin::provider_allowance::ProviderAllowanceSnapshot;
 use tauri::State;
 
 use crate::desktop_gateway_runtime::{DesktopGatewayRuntime, DesktopPortState, PortOperationError};
@@ -31,6 +33,59 @@ pub async fn recheck_desktop_fixed_port(
     runtime.recheck_fixed_port().await
 }
 
+#[tauri::command]
+pub async fn list_provider_allowances(
+    gateway: State<'_, Gateway>,
+) -> Result<Vec<ProviderAllowanceSnapshot>, String> {
+    list_provider_allowances_for_gateway(&gateway).await
+}
+
+#[tauri::command]
+pub async fn refresh_provider_allowances(
+    gateway: State<'_, Gateway>,
+) -> Result<Vec<ProviderAllowanceSnapshot>, String> {
+    refresh_provider_allowances_for_gateway(&gateway).await
+}
+
+#[tauri::command]
+pub async fn refresh_provider_allowance(
+    provider_id: String,
+    gateway: State<'_, Gateway>,
+) -> Result<Option<ProviderAllowanceSnapshot>, String> {
+    refresh_provider_allowance_for_gateway(&gateway, &provider_id).await
+}
+
+async fn list_provider_allowances_for_gateway(
+    gateway: &Gateway,
+) -> Result<Vec<ProviderAllowanceSnapshot>, String> {
+    gateway
+        .admin()
+        .list_provider_allowances()
+        .await
+        .map_err(|_| "failed to load provider allowances".to_string())
+}
+
+async fn refresh_provider_allowances_for_gateway(
+    gateway: &Gateway,
+) -> Result<Vec<ProviderAllowanceSnapshot>, String> {
+    gateway
+        .admin()
+        .refresh_provider_allowances()
+        .await
+        .map_err(|_| "failed to refresh provider allowances".to_string())
+}
+
+async fn refresh_provider_allowance_for_gateway(
+    gateway: &Gateway,
+    provider_id: &str,
+) -> Result<Option<ProviderAllowanceSnapshot>, String> {
+    gateway
+        .admin()
+        .refresh_provider_allowance(provider_id)
+        .await
+        .map_err(|_| "failed to refresh provider allowance".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -42,6 +97,10 @@ mod tests {
     };
     use stravia_server::{HttpAppConfig, build_http_app, desktop_origins};
 
+    use super::{
+        list_provider_allowances_for_gateway, refresh_provider_allowance_for_gateway,
+        refresh_provider_allowances_for_gateway,
+    };
     use crate::desktop_gateway_runtime::{
         DesktopGatewayRuntime, PortOwner, PortOwnerResolver, PortPreferenceLoad,
         PortPreferenceStore,
@@ -86,6 +145,41 @@ mod tests {
         DesktopGatewayRuntime::start(app, Arc::new(MissingStore), Arc::new(NoOwners))
             .await
             .expect("desktop runtime should bind an OS-assigned port")
+    }
+
+    #[tokio::test]
+    async fn allowance_commands_preserve_the_core_result_shape() {
+        let storage: DynStorage = Arc::new(MemoryStorage::new(vec![], vec![], vec![]));
+        let (gateway, _log_rx) = Gateway::from_storage(GatewayConfig::default(), storage)
+            .await
+            .expect("desktop gateway should initialize from memory storage");
+
+        assert_eq!(
+            list_provider_allowances_for_gateway(&gateway)
+                .await
+                .expect("list allowances"),
+            gateway
+                .admin()
+                .list_provider_allowances()
+                .await
+                .expect("core list allowances")
+        );
+        assert_eq!(
+            refresh_provider_allowances_for_gateway(&gateway)
+                .await
+                .expect("refresh allowances"),
+            gateway
+                .admin()
+                .refresh_provider_allowances()
+                .await
+                .expect("core refresh allowances")
+        );
+        assert_eq!(
+            refresh_provider_allowance_for_gateway(&gateway, "missing")
+                .await
+                .expect("refresh missing provider"),
+            None
+        );
     }
 
     #[tokio::test]

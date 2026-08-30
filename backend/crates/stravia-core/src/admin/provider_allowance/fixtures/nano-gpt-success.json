@@ -1,0 +1,16 @@
+{
+  "state": "active",
+  "period": {
+    "currentPeriodEnd": "2026-09-30T00:00:00Z"
+  },
+  "daily": {
+    "percentUsed": 0.25,
+    "used": 25,
+    "limit": 100,
+    "resetAt": "2026-08-31T00:00:00Z"
+  },
+  "monthly": {
+    "used": 3,
+    "limit": 10
+  }
+}

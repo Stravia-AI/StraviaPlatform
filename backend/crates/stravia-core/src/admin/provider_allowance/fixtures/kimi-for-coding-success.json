@@ -1,0 +1,21 @@
+{
+  "usage": {
+    "limit": 1000,
+    "used": 250,
+    "remaining": 750,
+    "resetTime": "2026-09-05T00:00:00Z"
+  },
+  "limits": [
+    {
+      "window": {
+        "duration": 5,
+        "timeUnit": "HOUR"
+      },
+      "detail": {
+        "limit": 100,
+        "remaining": 80,
+        "resetTime": "2026-08-30T15:00:00Z"
+      }
+    }
+  ]
+}

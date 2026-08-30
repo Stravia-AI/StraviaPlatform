@@ -27,6 +27,7 @@ mod model_catalog;
 mod model_data;
 mod oauth;
 mod observability;
+pub mod provider_allowance;
 mod provider_connection;
 mod routes;
 pub mod settings;

@@ -97,6 +97,7 @@ SvelteKit WebUI 可管理：
 - 虚拟模型及其上游后端
 - 可自动生成或自定义并编辑完整密钥的 API Key、模型绑定、有效期、Principal Concurrency Limit 和执行权限
 - 请求日志、延迟和 Token 用量统计
+- 在独立的**额度**页面查看 Provider 上报的配额、请求额度和余额；支持三分钟缓存、单个 Provider 刷新，并在刷新失败时保留上次成功结果
 - 运行时设置
 - SDK 与 AI 编码工具的可复制集成示例
 

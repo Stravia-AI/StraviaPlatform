@@ -49,6 +49,7 @@ import type {
   MediaUnderstandingConfigView,
   UpdateMediaUnderstandingConfig,
   ThinkingLevel,
+  ProviderAllowanceSnapshot,
 } from '$lib/types'
 
 export const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
@@ -246,10 +247,7 @@ function mapRequest(command: string, args?: Record<string, unknown>): RequestMap
         body: { level: args?.level },
       }
     case 'regenerateTargetThinkingMap':
-      return {
-        method: 'POST',
-        path: `/models/${args?.routeId}/targets/${args?.targetId}/thinking-map/regenerate`,
-      }
+      return { method: 'POST', path: `/models/${args?.routeId}/targets/${args?.targetId}/thinking-map/regenerate` }
     case 'listApiKeys':
       return { method: 'GET', path: '/api-keys' }
     case 'createApiKey':
@@ -281,6 +279,12 @@ function mapRequest(command: string, args?: Record<string, unknown>): RequestMap
       return { method: 'GET', path: statsPath('/stats/providers', args?.hours) }
     case 'getStatsByApiKey':
       return { method: 'GET', path: statsPath('/stats/api-keys', args?.hours) }
+    case 'listProviderAllowances':
+      return { method: 'GET', path: '/provider-allowances' }
+    case 'refreshProviderAllowances':
+      return { method: 'POST', path: '/provider-allowances/refresh' }
+    case 'refreshProviderAllowance':
+      return { method: 'POST', path: `/provider-allowances/${encodeURIComponent(String(args?.providerId))}/refresh` }
     case 'getSetting':
       return { method: 'GET', path: `/settings/${args?.key}` }
     case 'setSetting':
@@ -446,6 +450,11 @@ export const admin = {
     models: (hours?: number) => request<ModelStats[]>('getStatsByModel', { hours }),
     providers: (hours?: number) => request<ProviderStats[]>('getStatsByProvider', { hours }),
     apiKeys: (hours?: number) => request<ApiKeyStats[]>('getStatsByApiKey', { hours }),
+  },
+  allowances: {
+    list: () => request<ProviderAllowanceSnapshot[]>('listProviderAllowances'),
+    refreshAll: () => request<ProviderAllowanceSnapshot[]>('refreshProviderAllowances'),
+    refresh: (providerId: string) => request<ProviderAllowanceSnapshot>('refreshProviderAllowance', { providerId }),
   },
   settings: {
     get: (key: string) => request<string | null>('getSetting', { key }),
