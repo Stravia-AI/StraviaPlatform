@@ -5,6 +5,7 @@ import { page } from '$app/state'
 import { createQuery } from '@tanstack/svelte-query'
 import ChartNoAxesCombinedIcon from '@lucide/svelte/icons/chart-no-axes-combined'
 import CogIcon from '@lucide/svelte/icons/cog'
+import GaugeIcon from '@lucide/svelte/icons/gauge'
 import KeyRoundIcon from '@lucide/svelte/icons/key-round'
 import ImagesIcon from '@lucide/svelte/icons/images'
 import LayoutDashboardIcon from '@lucide/svelte/icons/layout-dashboard'
@@ -98,6 +99,7 @@ const navigationGroups = [
     items: [
       { href: '/logs', label: m.app_shell_nav_request_history, icon: ScrollTextIcon },
       { href: '/stats', label: m.app_shell_nav_usage, icon: ChartNoAxesCombinedIcon },
+      { href: '/allowances', label: m.app_shell_nav_allowances, icon: GaugeIcon },
     ],
   },
   { label: m.app_shell_nav_system, items: [{ href: '/settings', label: m.app_shell_nav_settings, icon: CogIcon }] },

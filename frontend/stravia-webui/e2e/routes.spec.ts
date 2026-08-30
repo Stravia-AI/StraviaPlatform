@@ -68,7 +68,19 @@ test('Connect an app configures clients from API Key models', async ({ page }) =
   await expect(page.getByRole('tab', { name: 'Clients' })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Client setup' })).toBeVisible()
   await page.getByRole('button', { name: 'Client' }).click()
-  await expect(page.getByRole('listbox').getByRole('option')).toHaveText(['Claude Code', 'Codex', 'OpenCode'])
+  await expect(page.getByRole('listbox').getByRole('option')).toHaveText([
+    'Codex',
+    'Claude Code',
+    'OpenCode',
+    'OpenClaw',
+    'Hermes Agent',
+    'TRAE',
+    'WorkBuddy',
+    'ZCode',
+    'DeepSeek Harness',
+    'Pi',
+    'OMP',
+  ])
   await page.getByRole('option', { name: 'Claude Code' }).click()
 
   await page.getByRole('button', { name: 'API Key' }).click()

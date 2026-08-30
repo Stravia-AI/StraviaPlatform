@@ -1,0 +1,22 @@
+{
+  "subscription": {
+    "plan": "Developer",
+    "kwh_included": 100,
+    "kwh_used": 35,
+    "in_overage": false,
+    "kwh_reset_date": "2026-09-01T00:00:00Z"
+  },
+  "key": {
+    "name": "Primary",
+    "allowance": {
+      "period": "daily",
+      "spent_usd": 2,
+      "limit_usd": 10,
+      "blocked": false,
+      "reset_at": "2026-08-31T00:00:00Z"
+    }
+  },
+  "balance": {
+    "credits_remaining_usd": 20
+  }
+}

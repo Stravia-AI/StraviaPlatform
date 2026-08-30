@@ -1,0 +1,9 @@
+{
+  "remaining_included_requests": 0,
+  "included_request_limit": 1000,
+  "overage_request_count": 200,
+  "current_period_used_percent": 120,
+  "window_start": "2026-08-30T10:00:00Z",
+  "window_end": "2026-08-30T15:00:00Z",
+  "plan_tier": "Pro"
+}

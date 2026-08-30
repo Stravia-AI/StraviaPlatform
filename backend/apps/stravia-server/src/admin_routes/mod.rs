@@ -19,6 +19,11 @@ use stravia_core::web_search::WebSearchConfig;
 use crate::oauth_callback::OAuthCallbackManager;
 use stravia_core::db::models::*;
 
+mod provider_allowances;
+use provider_allowances::{
+    list_provider_allowances, refresh_provider_allowance, refresh_provider_allowances,
+};
+
 #[derive(Clone)]
 struct AdminToken(String);
 
@@ -224,6 +229,15 @@ pub fn create_router(gateway: Gateway, admin_token: Option<String>) -> Router {
         .route("/stats/models", get(stats_by_model))
         .route("/stats/providers", get(stats_by_provider))
         .route("/stats/api-keys", get(stats_by_api_key))
+        .route("/provider-allowances", get(list_provider_allowances))
+        .route(
+            "/provider-allowances/refresh",
+            post(refresh_provider_allowances),
+        )
+        .route(
+            "/provider-allowances/{provider_id}/refresh",
+            post(refresh_provider_allowance),
+        )
         .route("/settings/{key}", get(get_setting).put(set_setting))
         .route("/status", get(get_status))
         .layer(Extension(oauth_callbacks))

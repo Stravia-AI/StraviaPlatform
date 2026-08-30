@@ -113,6 +113,12 @@ export function localizeBackendErrorMessage(error: unknown, locale: Locale = get
       return m.backend_error_catalog_refresh_failed({}, options)
     case 'CATALOG_SCOPE_REFRESH_FAILED':
       return m.backend_error_catalog_scope_refresh_failed({}, options)
+    case 'PROVIDER_ALLOWANCE_LOAD_FAILED':
+      return m.backend_error_provider_allowance_load_failed({}, options)
+    case 'PROVIDER_ALLOWANCE_REFRESH_FAILED':
+      return m.backend_error_provider_allowance_refresh_failed({}, options)
+    case 'PROVIDER_ALLOWANCE_UNAVAILABLE':
+      return m.backend_error_provider_allowance_unavailable({}, options)
     case 'CATALOG_MODEL_NOT_FOUND':
       return m.backend_error_catalog_model_not_found({}, options)
     case 'CATALOG_ENTRY_NOT_FOUND':

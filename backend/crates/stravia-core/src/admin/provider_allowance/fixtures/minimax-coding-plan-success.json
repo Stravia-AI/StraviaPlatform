@@ -1,0 +1,21 @@
+{
+  "base_resp": {
+    "status_code": 0
+  },
+  "model_remains": [
+    {
+      "model_name": "MiniMax-M2",
+      "current_interval_total_count": 1000,
+      "current_interval_usage_count": 700,
+      "current_interval_remaining_percent": 70,
+      "start_time": 1789982000000,
+      "end_time": 1790000000000,
+      "current_weekly_total_count": 5000,
+      "current_weekly_usage_count": 4000,
+      "current_weekly_remaining_percent": 80,
+      "weekly_start_time": 1789395200000,
+      "weekly_end_time": 1790000000000,
+      "current_weekly_status": 1
+    }
+  ]
+}

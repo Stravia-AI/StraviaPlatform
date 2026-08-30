@@ -21,12 +21,14 @@ describe('Vite development proxy', () => {
     }
 
     const resolved = await config({ command: 'serve', mode: 'development', isSsrBuild: false, isPreview: false })
-    const proxy = resolved.server?.proxy?.['/api/v1']
+    const proxies = ['/api/v1', '/v1', '/v1beta'].map((path) => resolved.server?.proxy?.[path])
 
-    expect(proxy).toBeObject()
-    if (!proxy || typeof proxy === 'string') {
-      throw new Error('expected an object proxy configuration')
+    for (const proxy of proxies) {
+      expect(proxy).toBeObject()
+      if (!proxy || typeof proxy === 'string') {
+        throw new Error('expected an object proxy configuration')
+      }
+      expect(proxy.target).toBe('http://127.0.0.1:45678')
     }
-    expect(proxy.target).toBe('http://127.0.0.1:45678')
   })
 })

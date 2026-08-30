@@ -115,6 +115,7 @@ pub fn run() {
                 logging::run_collector(log_rx, storage_for_logs).await;
             });
 
+            app.manage(gateway);
             app.manage(runtime.clone());
             app.manage(setup_tray(app, server_port)?);
             runtime.set_switch_publisher(Arc::new(TauriPortSwitchPublisher {
@@ -127,6 +128,9 @@ pub fn run() {
             commands::get_desktop_port_state,
             commands::set_desktop_fixed_port,
             commands::recheck_desktop_fixed_port,
+            commands::list_provider_allowances,
+            commands::refresh_provider_allowances,
+            commands::refresh_provider_allowance,
         ])
         .build(tauri::generate_context!())
         .expect("error while running Stravia application")

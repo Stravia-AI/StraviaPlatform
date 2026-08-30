@@ -1,0 +1,22 @@
+{
+  "data": {
+    "level": "Pro",
+    "limits": [
+      {
+        "type": "CREDIT_LIMIT",
+        "unit": 3,
+        "number": 5,
+        "percentage": 32.5,
+        "currentValue": 325,
+        "usage": 1000,
+        "remaining": 675,
+        "nextResetTime": 1790000000
+      },
+      {
+        "type": "TIME_LIMIT",
+        "percentage": 10,
+        "nextResetTime": 1790500000
+      }
+    ]
+  }
+}

@@ -4,6 +4,38 @@ use axum::http::{Request, StatusCode};
 use stravia_core::config::GatewayConfig;
 use tower::ServiceExt;
 
+#[tokio::test]
+async fn provider_allowance_routes_share_the_core_contract() -> anyhow::Result<()> {
+    let data_dir = tempfile::tempdir()?;
+    let (gateway, _logs) = Gateway::new(GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await?;
+    let app = create_router(gateway, None);
+
+    for request in [
+        Request::get("/api/v1/provider-allowances").body(Body::empty())?,
+        Request::post("/api/v1/provider-allowances/refresh").body(Body::empty())?,
+    ] {
+        let response = app.clone().oneshot(request).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await?;
+        let json: serde_json::Value = serde_json::from_slice(&body)?;
+        assert_eq!(json, serde_json::json!({ "data": [] }));
+    }
+
+    let missing = app
+        .oneshot(Request::post("/api/v1/provider-allowances/missing/refresh").body(Body::empty())?)
+        .await?;
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    let body = to_bytes(missing.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+    assert_eq!(json["error"], "provider allowance is unavailable");
+    assert_eq!(json["code"], "PROVIDER_ALLOWANCE_UNAVAILABLE");
+    Ok(())
+}
+
 async fn automatic_callback_failure_body(locale: &str) -> anyhow::Result<String> {
     let data_dir = tempfile::tempdir()?;
     let (gateway, _logs) = Gateway::new(GatewayConfig {
