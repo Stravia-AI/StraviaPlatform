@@ -25,12 +25,18 @@ test('empty Overview hides charts, keeps error rate neutral, and shows the next 
   await expect(page.getByRole('link', { name: 'Connect a model service' })).toBeVisible()
 })
 
-test('Overview with traffic shows charts and a neutral error rate when there are no errors', async ({ page }) => {
+test('Overview with traffic shows request and second-based latency charts', async ({ page }) => {
   await stubTraffic(page, { requests: 12, errors: 0 })
   await page.goto('/')
 
   await expect(page.getByLabel('Request volume chart')).toBeVisible()
-  await expect(page.getByLabel('Latency chart')).toBeVisible()
+  const latency = page.locator('section').filter({ has: page.getByRole('heading', { name: 'Latency', exact: true }) })
+  await expect(latency.getByText('First', { exact: true })).toBeVisible()
+  await expect(latency.getByText('0.04 s', { exact: true })).toBeVisible()
+  await expect(latency.getByText('Duration', { exact: true })).toBeVisible()
+  await expect(latency.getByText('0.12 s', { exact: true })).toBeVisible()
+  await expect(latency.getByLabel('Latency chart')).toBeVisible()
+  await expect(latency.locator('.lc-path')).toHaveCount(2)
   const errorRate = page.locator('.route-metric-strip__item').filter({ hasText: 'Error rate' })
   await expect(errorRate).toContainText('0%')
   await expect(errorRate.locator('.text-destructive')).toHaveCount(0)

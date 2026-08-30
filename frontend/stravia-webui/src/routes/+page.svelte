@@ -6,7 +6,14 @@ import { BarChart, LineChart } from 'layerchart'
 import { admin, isTauri } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
 import { getDataTableLabels } from '$lib/data-table-labels'
-import { formatCompactCount, formatDuration, formatNumber, formatPercent, formatTime } from '$lib/format'
+import {
+  formatCompactCount,
+  formatDuration,
+  formatDurationSeconds,
+  formatNumber,
+  formatPercent,
+  formatTime,
+} from '$lib/format'
 import type { ModelStats, ProviderStats } from '$lib/types'
 import DesktopPortNotice from '$lib/components/desktop-port-notice.svelte'
 import MetricStrip from '$lib/components/metric-strip.svelte'
@@ -104,7 +111,11 @@ const requestChart = $derived(
   })),
 )
 const latencyChart = $derived(
-  (hourlyQuery.data ?? []).map((item) => ({ hour: formatTime(item.hour), latency: item.avg_duration_ms })),
+  (hourlyQuery.data ?? []).map((item) => ({
+    hour: formatTime(item.hour),
+    firstToken: item.avg_first_token_ms == null ? null : item.avg_first_token_ms / 1000,
+    duration: item.avg_duration_ms / 1000,
+  })),
 )
 const errorRate = $derived(hasTraffic && overview ? (overview.error_count / overview.total_requests) * 100 : 0)
 const dash = '–'
@@ -224,22 +235,33 @@ function getProviderStatsRowId(provider: ProviderStats): string {
             <div>
               <h2 id="latency-title" class="route-section-title">{m.common_latency()}</h2>
               <p class="route-section-description">
-                {m.overview_average_end_end_latency_over_same_period()}
+                {m.overview_average_first_token_end_end_latency_over_same_period()}
               </p>
             </div>
-            <StatusIndicator
-              compact
-              label={statusQuery.data?.status === 'running'
-                ? m.common_stravia_running()
-                : m.overview_status_unavailable()}
-              tone={statusQuery.data?.status === 'running' ? 'healthy' : 'neutral'} />
+            <div class="flex shrink-0 flex-col items-end gap-2">
+              <StatusIndicator
+                compact
+                label={statusQuery.data?.status === 'running'
+                  ? m.common_stravia_running()
+                  : m.overview_status_unavailable()}
+                tone={statusQuery.data?.status === 'running' ? 'healthy' : 'neutral'} />
+              <div class="font-technical grid grid-cols-[auto_auto] gap-x-2 text-xs tabular-nums">
+                <span class="text-muted-foreground">{m.logs_first_token_short()}</span>
+                <span>{formatDurationSeconds(overview?.avg_first_token_ms)}</span>
+                <span class="text-muted-foreground">{m.logs_duration_short()}</span>
+                <span>{formatDurationSeconds(overview?.avg_duration_ms)}</span>
+              </div>
+            </div>
           </div>
           {#if latencyChart.length > 0}
             <div class="h-72 min-w-0" aria-label={m.overview_latency_chart()}>
               <LineChart
                 data={latencyChart}
                 x={(item) => item.hour}
-                series={[{ key: 'latency', label: m.common_avg_latency_label(), color: 'var(--chart-1)' }]}
+                series={[
+                  { key: 'firstToken', label: m.stats_first_token_seconds(), color: 'var(--chart-2)' },
+                  { key: 'duration', label: m.stats_duration_seconds(), color: 'var(--chart-1)' },
+                ]}
                 props={{ xAxis: { ticks: 4 } }} />
             </div>
           {:else}

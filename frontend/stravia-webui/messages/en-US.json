@@ -424,7 +424,7 @@
   "models_web_search_no_longer_has_model": "Web search will no longer have a model to use.",
   "not_found_page_not_found": "Page not found",
   "not_found_page_value_does_not_exist_have_moved": "The page {requestedPath} does not exist or may have moved.",
-  "overview_average_end_end_latency_over_same_period": "Average end-to-end latency over the same period.",
+  "overview_average_first_token_end_end_latency_over_same_period": "Average time to first token and end-to-end latency over the same period.",
   "overview_client_model_names_most_requests": "Client model names with the most requests.",
   "overview_latency_appears_first_request": "Latency appears after the first request.",
   "overview_latency_chart": "Latency chart",

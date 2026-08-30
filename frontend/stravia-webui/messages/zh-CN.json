@@ -424,7 +424,7 @@
   "models_web_search_no_longer_has_model": "联网搜索将没有可用模型。",
   "not_found_page_not_found": "页面未找到",
   "not_found_page_value_does_not_exist_have_moved": "页面 {requestedPath} 不存在或可能已移动。",
-  "overview_average_end_end_latency_over_same_period": "同一时段的端到端平均延迟。",
+  "overview_average_first_token_end_end_latency_over_same_period": "同一时段的平均首字延迟与端到端耗时。",
   "overview_client_model_names_most_requests": "客户端请求最多的模型名称。",
   "overview_latency_appears_first_request": "首次请求后将显示延迟。",
   "overview_latency_chart": "延迟图表",
