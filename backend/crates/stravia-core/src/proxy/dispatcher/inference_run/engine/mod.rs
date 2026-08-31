@@ -264,10 +264,7 @@ pub(super) async fn orchestrate(
     } = input;
     let mut request = request;
     if let Some(session_id) = client_session_id(&headers, &request) {
-        request.meta.vendor.ingress.insert(
-            "__stravia_generation_session_id".into(),
-            serde_json::Value::String(session_id),
-        );
+        crate::generation_chain::set_generation_session_id(&mut request, session_id);
     }
     let client_request = request.clone();
     let ingress_capabilities = crate::protocol::registry::ProtocolRegistry::global()

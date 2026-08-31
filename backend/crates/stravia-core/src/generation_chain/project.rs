@@ -506,6 +506,13 @@ pub(crate) fn generation_session_fingerprint(request: &AiRequest) -> Option<Stri
     ))
 }
 
+pub(crate) fn set_generation_session_id(request: &mut AiRequest, session_id: impl Into<String>) {
+    request.meta.vendor.ingress.insert(
+        GENERATION_SESSION_ID_META.into(),
+        serde_json::Value::String(session_id.into()),
+    );
+}
+
 pub(super) fn append_history_context_fingerprint(previous: &str, message: &AiItem) -> String {
     let hash = context_hash_from_hex(previous)
         .unwrap_or_else(|| crate::protocol::ir::canonical::history_context_hash(&[]));

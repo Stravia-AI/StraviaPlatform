@@ -26,6 +26,19 @@ struct ToolExecutionRequest<'a> {
     events: &'a mpsc::Sender<AgentEvent>,
 }
 
+#[derive(Default)]
+struct ParentAgentContext {
+    transcript: Vec<AiItem>,
+    snapshot: Option<ParentAgentSnapshot>,
+    root_turn_id: Option<AgentTurnId>,
+}
+
+struct ParentAgentSnapshot {
+    definition_id: AgentDefinitionId,
+    definition_revision: u32,
+    model_id: String,
+}
+
 impl AgentRunner {
     pub fn new(
         definitions: AgentDefinitionRegistry,
@@ -105,14 +118,14 @@ impl AgentRunner {
         parent: &AgentTurnId,
         expected_definition: &AgentDefinitionId,
     ) -> Result<Vec<ArtifactId>, AgentRunError> {
-        let (transcript, snapshot) = self.load_parent_context(principal, Some(parent)).await?;
-        let Some((definition_id, _, _)) = snapshot else {
+        let context = self.load_parent_context(principal, Some(parent)).await?;
+        let Some(snapshot) = context.snapshot else {
             return Err(AgentRunError::new(
                 "parent_turn_unavailable",
                 "Parent Turn is unavailable",
             ));
         };
-        if &definition_id != expected_definition {
+        if &snapshot.definition_id != expected_definition {
             return Err(AgentRunError::new(
                 "parent_turn_unavailable",
                 "Parent Turn is unavailable",
@@ -120,7 +133,7 @@ impl AgentRunner {
         }
         let mut seen = HashSet::new();
         let mut artifacts = Vec::new();
-        for message in transcript {
+        for message in context.transcript {
             let MessageContent::Blocks(blocks) = message.content else {
                 continue;
             };
@@ -215,7 +228,11 @@ impl AgentRunner {
         events: &mpsc::Sender<AgentEvent>,
     ) -> Result<AgentResult, AgentRunError> {
         let cancellation = input.cancellation.clone();
-        let (mut transcript, parent_snapshot) = tokio::select! {
+        let ParentAgentContext {
+            mut transcript,
+            snapshot: parent_snapshot,
+            root_turn_id,
+        } = tokio::select! {
             _ = events.closed() => {
                 cancellation.cancel();
                 return Err(AgentRunError::new(
@@ -260,8 +277,8 @@ impl AgentRunner {
                 },
                 resolved.model_id,
             )
-        } else if let Some((definition_id, revision, model_id)) = parent_snapshot {
-            if definition_id != input.definition_id {
+        } else if let Some(snapshot) = parent_snapshot {
+            if snapshot.definition_id != input.definition_id {
                 return Err(AgentRunError::new(
                     "parent_turn_definition_mismatch",
                     "Parent Turn belongs to a different Agent Definition",
@@ -269,7 +286,7 @@ impl AgentRunner {
             }
             if self
                 .definitions
-                .get_current(&definition_id)
+                .get_current(&snapshot.definition_id)
                 .await
                 .is_ok_and(|current| !current.config.enabled)
             {
@@ -280,7 +297,7 @@ impl AgentRunner {
             }
             let spec = self
                 .definitions
-                .load_revision(&definition_id, revision)
+                .load_revision(&snapshot.definition_id, snapshot.definition_revision)
                 .await
                 .map_err(|error| {
                     AgentRunError::new("definition_revision_unavailable", error.to_string())
@@ -291,7 +308,7 @@ impl AgentRunner {
                     spec_hash: String::new(),
                     config: crate::agent::AgentDefinitionConfig::default(),
                 },
-                model_id,
+                snapshot.model_id,
             )
         } else {
             let record = self
@@ -353,6 +370,9 @@ impl AgentRunner {
             .model_specs(&record.spec.tools)
             .map_err(|error| AgentRunError::new(error.code, error.message))?;
         let turn_id = AgentTurnId::agent();
+        // Child turns append to the same prompt prefix; keep provider cache routing on the root
+        // identity while independent Agent chains remain isolated.
+        let generation_session_id = root_turn_id.as_ref().unwrap_or(&turn_id);
         let mut _run_guards = Vec::with_capacity(self.run_lifecycles.len());
         for lifecycle in self.run_lifecycles.iter() {
             _run_guards.push(lifecycle.start(&input.principal, &turn_id).await?);
@@ -412,6 +432,10 @@ impl AgentRunner {
         let mut initial_request = AiRequest::new(&model_id, model_transcript.clone());
         initial_request.instructions = Some(model_instructions.clone());
         initial_request.tools = (!allowed_tools.is_empty()).then_some(allowed_tools.clone());
+        crate::generation_chain::set_generation_session_id(
+            &mut initial_request,
+            generation_session_id.as_str(),
+        );
         let hooks = self
             .hooks
             .as_ref()
@@ -487,6 +511,10 @@ impl AgentRunner {
 
             let mut request = AiRequest::new(&model_id, model_transcript.clone());
             request.instructions = Some(model_instructions.clone());
+            crate::generation_chain::set_generation_session_id(
+                &mut request,
+                generation_session_id.as_str(),
+            );
             request.parallel_tool_calls = Some(
                 record
                     .spec
@@ -1153,15 +1181,19 @@ impl AgentRunner {
         &self,
         principal: &Principal,
         parent: Option<&AgentTurnId>,
-    ) -> Result<(Vec<AiItem>, Option<(AgentDefinitionId, u32, String)>), AgentRunError> {
+    ) -> Result<ParentAgentContext, AgentRunError> {
         let Some(parent) = parent else {
-            return Ok((Vec::new(), None));
+            return Ok(ParentAgentContext::default());
         };
         let chain = self
             .turns
             .materialize(principal, TurnNodeKind::Agent, parent)
             .await
             .map_err(|error| AgentRunError::new("parent_turn_unavailable", error.to_string()))?;
+        let root_turn_id = chain
+            .first()
+            .map(|node| node.id.clone())
+            .ok_or_else(|| AgentRunError::new("parent_turn_unavailable", "Parent Turn is empty"))?;
         let payload = chain
             .last()
             .ok_or_else(|| AgentRunError::new("parent_turn_unavailable", "Parent Turn is empty"))?;
@@ -1201,7 +1233,15 @@ impl AgentRunner {
             .ok_or_else(|| {
                 AgentRunError::new("parent_turn_invalid", "Parent Turn has no Model snapshot")
             })?;
-        Ok((transcript, Some((definition_id, revision, model_id))))
+        Ok(ParentAgentContext {
+            transcript,
+            snapshot: Some(ParentAgentSnapshot {
+                definition_id,
+                definition_revision: revision,
+                model_id,
+            }),
+            root_turn_id: Some(root_turn_id),
+        })
     }
 
     async fn commit_turn(

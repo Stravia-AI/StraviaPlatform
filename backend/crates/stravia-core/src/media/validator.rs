@@ -39,9 +39,7 @@ pub(crate) fn validate_media_report(
     let mut marker_set = HashSet::with_capacity(marker_ids.len());
     for marker in marker_ids {
         let id = ArtifactId::new(marker);
-        if !marker_set.insert(id) {
-            return Err("Media Report contains a duplicate Artifact marker".into());
-        }
+        marker_set.insert(id);
     }
     let mut listed = HashSet::with_capacity(report.artifacts.len());
     for artifact in &report.artifacts {
@@ -230,7 +228,7 @@ mod tests {
     }
 
     #[test]
-    fn report_requires_marker_list_and_evidence_bijection() {
+    fn report_allows_repeated_citations_and_requires_marker_list_evidence_bijection() {
         let evidence = HashSet::from([id("artifact_a"), id("artifact_b")]);
         let valid = report(
             "Compare [artifact:artifact_a] with [artifact:artifact_b].".into(),
@@ -238,16 +236,17 @@ mod tests {
             &[],
         );
         assert!(validate_media_report(valid, &evidence, AgentCompletion::Completed).is_ok());
+        let repeated = report(
+            "First [artifact:artifact_a], then again [artifact:artifact_a].".into(),
+            &["artifact_a"],
+            &[],
+        );
+        assert!(validate_media_report(repeated, &evidence, AgentCompletion::Completed).is_ok());
 
         for invalid in [
             report(
                 "Only [artifact:artifact_a].".into(),
                 &["artifact_a", "artifact_b"],
-                &[],
-            ),
-            report(
-                "Twice [artifact:artifact_a] and [artifact:artifact_a].".into(),
-                &["artifact_a"],
                 &[],
             ),
             report(

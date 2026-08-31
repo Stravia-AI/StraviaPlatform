@@ -228,6 +228,11 @@ async fn enabled_registry() -> AgentDefinitionRegistry {
     registry
 }
 
+fn request_session_fingerprint(request: &AiRequest) -> String {
+    crate::generation_chain::generation_session_fingerprint(request)
+        .expect("Agent Model Turn must carry a generation session")
+}
+
 #[tokio::test]
 async fn runner_executes_tool_loop_commits_turn_and_emits_one_terminal_event() {
     let mut tool_response = AiResponse::new("response-1", "model-1");
@@ -294,6 +299,11 @@ async fn runner_executes_tool_loop_commits_turn_and_emits_one_terminal_event() {
     assert_eq!(chain.len(), 1);
     let requests = model.requests();
     assert_eq!(requests.len(), 2);
+    assert_eq!(
+        request_session_fingerprint(&requests[0]),
+        request_session_fingerprint(&requests[1]),
+        "every Model Turn in one Agent Turn must share its cache identity"
+    );
     assert!(
         requests.iter().all(|request| {
             request
@@ -464,6 +474,11 @@ async fn transcript_aware_output_validation_runs_before_commit_and_can_repair_on
     assert_eq!(result.output, serde_json::json!({"answer": "verified"}));
     assert_eq!(validator.calls.load(Ordering::SeqCst), 2);
     let requests = model.requests();
+    assert_eq!(
+        request_session_fingerprint(&requests[0]),
+        request_session_fingerprint(&requests[1]),
+        "schema repair must preserve the Agent Turn cache identity"
+    );
     let replay = &requests[1].items;
     assert!(
         replay.iter().any(|item| {
@@ -641,8 +656,12 @@ async fn child_turn_reuses_parent_transcript_without_mutating_parent() {
     first.push_output_text(r#"{"answer":"first"}"#);
     let mut second = AiResponse::new("response-2", "model-1");
     second.push_output_text(r#"{"answer":"second"}"#);
+    let mut independent = AiResponse::new("response-3", "model-1");
+    independent.push_output_text(r#"{"answer":"independent"}"#);
     let model = Arc::new(crate::agent::InMemoryModelTurnExecutor::scripted([
-        first, second,
+        first,
+        independent,
+        second,
     ]));
     let turns: Arc<dyn TurnChainStore> = Arc::new(crate::turn_chain::test_store().await);
     let registry = enabled_registry().await;
@@ -669,6 +688,21 @@ async fn child_turn_reuses_parent_transcript_without_mutating_parent() {
         AgentEvent::Completed(result) => result.turn_id.clone(),
         other => panic!("unexpected terminal: {other:?}"),
     };
+    let independent_events = runner
+        .run(AgentInput {
+            principal: principal.clone(),
+            definition_id: AgentDefinitionId::new("research"),
+            parent_turn_id: None,
+            prompt: "independent question".into(),
+            artifacts: Vec::new(),
+            cancellation: CancellationToken::new(),
+        })
+        .collect::<Vec<_>>()
+        .await;
+    assert!(matches!(
+        independent_events.last(),
+        Some(AgentEvent::Completed(_))
+    ));
     let mut revised = definition();
     revised.revision = 2;
     revised.instructions = "New instructions.".into();
@@ -708,9 +742,19 @@ async fn child_turn_reuses_parent_transcript_without_mutating_parent() {
     assert_eq!(child_chain.len(), 2);
     let requests = model.requests();
     let expected_system = model_instructions(&definition());
-    assert_eq!(requests[1].items.len(), 3);
+    assert_eq!(requests[2].items.len(), 3);
     assert_eq!(
-        requests[1].instructions.as_deref(),
+        request_session_fingerprint(&requests[0]),
+        request_session_fingerprint(&requests[2]),
+        "a child Agent Turn must preserve the root cache identity"
+    );
+    assert_ne!(
+        request_session_fingerprint(&requests[0]),
+        request_session_fingerprint(&requests[1]),
+        "independent Agent roots must not share cache identity"
+    );
+    assert_eq!(
+        requests[2].instructions.as_deref(),
         Some(expected_system.as_str())
     );
 }

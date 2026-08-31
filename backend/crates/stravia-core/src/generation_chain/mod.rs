@@ -32,6 +32,7 @@ use store::*;
 
 pub(crate) use project::{
     generation_node_is_completed, generation_session_fingerprint, mark_generation_target,
+    set_generation_session_id,
 };
 pub(crate) use store::{
     hydrate_response_artifact_references, request_has_item_references,
