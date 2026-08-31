@@ -11,18 +11,17 @@ use axum::http::HeaderMap;
 use futures::StreamExt;
 
 use crate::agent::{CanonicalEvent, ModelTurn, ModelTurnExecutor};
-use crate::protocol::ir::{
-    AiItem, AiRequest, AiResponse, AiStreamDelta, ContentBlock, MessageContent,
-};
+use crate::protocol::ir::{AiItem, AiRequest, AiResponse, AiStreamDelta, MessageContent};
 use crate::proxy::context::RequestContext;
 
 use super::delivery::LiveStreamRequest;
 use super::{
-    ClientOutputCommit, CompletionContext, CompletionFailure, CompletionInput, CompletionOutcome,
-    DeliveryAdapter, DeliveryProgress, EarlyPlatformExecution, EarlyThinkingMarkers,
-    FollowupModelTurn, LogBuilder, PhaseTracker, PublishedPlatformExecutions, RequestExtras,
-    RoundOutcome, StreamResponseAccumulator, acquire_followup_model_turn, ai_response_to_deltas,
-    buffered_response, complete_canonical_response, error_response, hook_failure_response,
+    ClientOutputCommit, ClientProjector, CompletionContext, CompletionFailure, CompletionInput,
+    CompletionOutcome, DeliveryAdapter, DeliveryProgress, EarlyPlatformExecution,
+    EarlyThinkingMarkers, FollowupModelTurn, LogBuilder, PhaseTracker,
+    PublishedPlatformExecutions, RequestExtras, RoundOutcome, StreamResponseAccumulator,
+    acquire_followup_model_turn, ai_response_to_deltas, buffered_response,
+    complete_canonical_response, error_response, hook_failure_response, is_protected_thinking,
     live_response, prepare_platform_markers, prepare_thinking_markers, publish_markers,
     render_completion_failure,
 };
@@ -84,32 +83,6 @@ enum UnindexedItemKind {
     Tool,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ProjectionSpanCarrier {
-    Unindexed,
-    Indexed {
-        output_index: Option<usize>,
-        content_index: Option<usize>,
-    },
-}
-
-impl ProjectionSpanCarrier {
-    fn delta(self, text: String, obfuscation: Option<String>) -> AiStreamDelta {
-        match self {
-            Self::Unindexed => AiStreamDelta::ThinkingDelta(text),
-            Self::Indexed {
-                output_index,
-                content_index,
-            } => AiStreamDelta::ThinkingDeltaWithMetadata {
-                text,
-                obfuscation,
-                output_index,
-                content_index,
-            },
-        }
-    }
-}
-
 #[derive(Default)]
 struct LiveDeltaGate {
     pending_prefix: Vec<AiStreamDelta>,
@@ -126,11 +99,7 @@ struct LiveDeltaGate {
     next_unindexed_output_index: usize,
     current_unindexed_item_kind: Option<UnindexedItemKind>,
     ambiguous_suffix: bool,
-    contains_platform: bool,
-    projection_reference: Option<String>,
-    projection_span_ordinal: usize,
-    projection_span_carrier: Option<ProjectionSpanCarrier>,
-    projected_text_output_indices: HashSet<usize>,
+    projector: ClientProjector,
     client_output_started: bool,
     response_started: bool,
 }
@@ -141,10 +110,7 @@ impl LiveDeltaGate {
             self.pending_suffix.is_empty(),
             "a completed Model Leg must resolve its ambiguous suffix"
         );
-        debug_assert!(
-            self.projection_span_carrier.is_none(),
-            "a completed Model Leg must close its projected Text span"
-        );
+        self.projector.begin_model_leg();
         self.pending_tool_deltas.clear();
         self.pending_tool_names.clear();
         self.platform_tool_indices.clear();
@@ -162,11 +128,6 @@ impl LiveDeltaGate {
         self.next_unindexed_output_index = 0;
         self.current_unindexed_item_kind = None;
         self.ambiguous_suffix = false;
-        self.contains_platform = false;
-        self.projection_reference = None;
-        self.projection_span_ordinal = 0;
-        self.projection_span_carrier = None;
-        self.projected_text_output_indices.clear();
     }
 
     fn observe_unindexed_item(&mut self, kind: UnindexedItemKind) -> usize {
@@ -318,65 +279,14 @@ impl LiveDeltaGate {
         let mut marker_index = 0;
         if let MessageContent::Blocks(blocks) = &item.content {
             for block in blocks {
-                let is_protected = matches!(
-                    block,
-                    ContentBlock::Thinking {
-                        signature: Some(_),
-                        ..
-                    } | ContentBlock::Reasoning {
-                        encrypted_content: Some(_),
-                        ..
-                    } | ContentBlock::RedactedThinking { .. }
-                );
-                if !is_protected {
+                if !is_protected_thinking(block) {
                     continue;
                 }
                 let marker = markers
                     .get(marker_index)
                     .expect("protected Thinking block has a History Marker");
                 marker_index += 1;
-                match block {
-                    ContentBlock::Thinking { thinking, .. } if !thinking.is_empty() => {
-                        preview.push(AiStreamDelta::ThinkingDelta(
-                            crate::history_marker::render_preview_projection_span(
-                                &marker.reference,
-                                0,
-                                thinking,
-                            ),
-                        ));
-                    }
-                    ContentBlock::Reasoning {
-                        summary, content, ..
-                    } => {
-                        for (ordinal, text) in summary.iter().chain(content).enumerate() {
-                            preview.push(if ordinal < summary.len() {
-                                AiStreamDelta::ReasoningSummaryDelta {
-                                    text: crate::history_marker::render_preview_projection_span(
-                                        &marker.reference,
-                                        ordinal,
-                                        text,
-                                    ),
-                                    obfuscation: None,
-                                    output_index: Some(index),
-                                    content_index: Some(ordinal),
-                                }
-                            } else {
-                                AiStreamDelta::ThinkingDeltaWithMetadata {
-                                    text: crate::history_marker::render_preview_projection_span(
-                                        &marker.reference,
-                                        ordinal,
-                                        text,
-                                    ),
-                                    obfuscation: None,
-                                    output_index: Some(index),
-                                    content_index: Some(ordinal - summary.len()),
-                                }
-                            });
-                        }
-                    }
-                    ContentBlock::RedactedThinking { .. } => {}
-                    _ => unreachable!("protected Thinking preview remains a reasoning block"),
-                }
+                preview.extend(self.projector.preview_deltas(index, block, marker));
             }
         }
         preview
@@ -396,110 +306,15 @@ impl LiveDeltaGate {
         }
     }
 
-    fn project_text_delta(
-        &mut self,
-        carrier: ProjectionSpanCarrier,
-        mut text: String,
-        obfuscation: Option<String>,
-    ) -> Vec<AiStreamDelta> {
-        if let ProjectionSpanCarrier::Indexed {
-            output_index: Some(index),
-            ..
-        } = carrier
-        {
-            self.projected_text_output_indices.insert(index);
-        }
-        let mut projected = Vec::new();
-        if self.projection_span_carrier != Some(carrier) {
-            projected.extend(self.close_projected_span());
-            let reference = self
-                .projection_reference
-                .as_deref()
-                .expect("Platform projection requires a History Marker");
-            text = format!(
-                "{}{text}",
-                crate::history_marker::render_text_projection_start(
-                    reference,
-                    self.projection_span_ordinal,
-                )
-            );
-            self.projection_span_carrier = Some(carrier);
-        }
-        projected.push(carrier.delta(text, obfuscation));
-        projected
-    }
-
-    fn project_delta(&mut self, delta: AiStreamDelta) -> Vec<AiStreamDelta> {
-        match delta {
-            AiStreamDelta::TextDelta(text) => {
-                self.project_text_delta(ProjectionSpanCarrier::Unindexed, text, None)
-            }
-            AiStreamDelta::TextDeltaWithMetadata {
-                text,
-                obfuscation,
-                output_index,
-                content_index,
-                ..
-            } => self.project_text_delta(
-                ProjectionSpanCarrier::Indexed {
-                    output_index,
-                    content_index,
-                },
-                text,
-                obfuscation,
-            ),
-            AiStreamDelta::ItemDone { index, item } => {
-                let unindexed_text_item = self.projection_span_carrier
-                    == Some(ProjectionSpanCarrier::Unindexed)
-                    && item.role == crate::protocol::ir::Role::Assistant
-                    && item.tool_calls.is_none()
-                    && item.reasoning_ref().is_none()
-                    && item.thinking_ref().is_none()
-                    && item.unknown_ref().is_none();
-                let projected_text_item =
-                    self.projected_text_output_indices.remove(&index) || unindexed_text_item;
-                let mut projected = self.close_projected_span();
-                if !projected_text_item {
-                    projected.push(AiStreamDelta::ItemDone { index, item });
-                }
-                projected
-            }
-            other => {
-                let mut projected = self.close_projected_span();
-                projected.push(other);
-                projected
-            }
-        }
-    }
-
-    fn close_projected_span(&mut self) -> Vec<AiStreamDelta> {
-        let Some(carrier) = self.projection_span_carrier.take() else {
-            return Vec::new();
-        };
-        let reference = self
-            .projection_reference
-            .as_deref()
-            .expect("Platform projection requires a History Marker");
-        let ordinal = self.projection_span_ordinal;
-        self.projection_span_ordinal += 1;
-        vec![carrier.delta(
-            crate::history_marker::render_text_projection_end(reference, ordinal),
-            None,
-        )]
-    }
-
     fn project_platform_marker(&mut self, reference: &str, rendered: String) -> Vec<AiStreamDelta> {
-        self.contains_platform = true;
-        if self.projection_reference.is_none() {
-            self.projection_reference = Some(reference.to_owned());
-        }
+        self.projector.note_platform_reference(reference);
         self.ambiguous_suffix = false;
         let pending = std::mem::take(&mut self.pending_suffix);
         let mut projected = pending
             .into_iter()
-            .flat_map(|delta| self.project_delta(delta))
+            .flat_map(|delta| self.projector.project_delta(delta))
             .collect::<Vec<_>>();
-        projected.extend(self.close_projected_span());
+        projected.extend(self.projector.close_span());
         projected.push(AiStreamDelta::ThinkingDelta(rendered));
         self.commit_visible(projected)
     }
@@ -509,13 +324,13 @@ impl LiveDeltaGate {
         let mut suffix = std::mem::take(&mut self.pending_suffix);
         suffix.extend(pending_thinking);
         self.ambiguous_suffix = false;
-        if self.contains_platform {
+        if self.projector.contains_platform() {
             suffix = suffix
                 .into_iter()
-                .flat_map(|delta| self.project_delta(delta))
+                .flat_map(|delta| self.projector.project_delta(delta))
                 .collect();
         }
-        suffix.extend(self.close_projected_span());
+        suffix.extend(self.projector.close_span());
         self.commit_visible(suffix)
     }
 
@@ -572,8 +387,8 @@ impl LiveDeltaGate {
     ) -> Vec<AiStreamDelta> {
         let mut visible = Vec::new();
         for delta in deltas {
-            if self.contains_platform {
-                visible.extend(self.project_delta(delta));
+            if self.projector.contains_platform() {
+                visible.extend(self.projector.project_delta(delta));
                 continue;
             }
             if has_exposed_tools {
@@ -1856,56 +1671,6 @@ mod terminal_tests {
     }
 
     #[test]
-    fn indexed_projection_closes_on_the_same_reasoning_item_and_consumes_text_item_done() {
-        let mut gate = LiveDeltaGate {
-            projection_reference: Some("hm_0123456789abcdefghij".into()),
-            ..Default::default()
-        };
-        let mut visible = gate.project_delta(AiStreamDelta::TextDeltaWithMetadata {
-            text: "projected".into(),
-            logprobs: Vec::new(),
-            obfuscation: None,
-            output_index: Some(3),
-            content_index: Some(1),
-        });
-        visible.extend(gate.project_delta(AiStreamDelta::ItemDone {
-            index: 3,
-            item: AiItem {
-                role: crate::protocol::ir::Role::Assistant,
-                content: MessageContent::Blocks(vec![
-                    ContentBlock::Text {
-                        text: "first".into(),
-                        cache_control: None,
-                    },
-                    ContentBlock::Text {
-                        text: "second".into(),
-                        cache_control: None,
-                    },
-                ]),
-                tool_calls: None,
-                tool_call_id: None,
-                meta: None,
-            },
-        }));
-
-        assert_eq!(visible.len(), 2);
-        let texts = visible
-            .iter()
-            .map(|delta| match delta {
-                AiStreamDelta::ThinkingDeltaWithMetadata {
-                    text,
-                    output_index: Some(3),
-                    content_index: Some(1),
-                    ..
-                } => text.as_str(),
-                other => panic!("unexpected projected delta: {other:?}"),
-            })
-            .collect::<String>();
-        assert!(texts.contains(":text:0:start -->projected"), "{texts}");
-        assert!(texts.contains(":text:0:end -->"), "{texts}");
-    }
-
-    #[test]
     fn signature_fragments_remain_buffered_until_the_thinking_item_completes() {
         let mut gate = LiveDeltaGate {
             pending_unindexed_thinking: Some((
@@ -1930,7 +1695,7 @@ mod terminal_tests {
             MessageContent::Blocks(ref blocks)
                 if matches!(
                     blocks.as_slice(),
-                    [ContentBlock::Thinking { thinking, signature: Some(signature) }]
+                    [crate::protocol::ir::ContentBlock::Thinking { thinking, signature: Some(signature) }]
                         if thinking == "reasoning" && signature == "opaque-signature"
                 )
         ));

@@ -77,19 +77,24 @@ Artifact Store 是保存并读取 Artifact 内容的深模块。它向调用方�
 
 Platform Tool 是由平台拥有、注册和执行的模型工具。平台向模型暴露它、拦截其调用并将结果仅送回模型；客户端看不到调用参数或工具结果，但协议可以暴露不含敏感内容的执行生命周期。
 
+## Client Projection
+
+Client Projection 是把一次 Model Leg 的 canonical response 变成客户端可见视图：Platform Tool call/result 与受保护 Thinking 替换为 History Marker；含 Platform ToolCall 的 Model Leg 中，canonical Text 仅在该视图里改用带 Projection Delimiter 的 Thinking 承载。它不是 Protocol Conversion，也不拥有 ingress 协议形态改写；Generation Chain 保存的是投影完成之后、按 ingress 协议落盘的结果。
+_避免使用_：History Marker Projection；把 Generation Chain 的协议形态改写称为 Client Projection
+
 ## History Marker
 
-History Marker 是客户端投影中、归属于 Principal 的 opaque 历史引用，用于在原位置等待并恢复一个 Hidden History Segment。一个 Marker 只能引用一个 Platform Tool Execution（其 call 与 terminal result）或一个受保护 Thinking block，禁止聚合多个工具执行或多个 block。新 Marker 以无签名 Thinking block 中仅供机器读取的 HTML comment 呈现；各生成协议使用原生 reasoning、thinking 或 thought 载体，旧 Text 载体只在保留期内兼容读取。周边客户端历史可以独立修改，同一 Marker 在保留期内可以被重试和并发分支重复使用。
+History Marker 是 Client Projection 中、归属于 Principal 的 opaque 历史引用，用于在原位置等待并恢复一个 Hidden History Segment。一个 Marker 只能引用一个 Platform Tool Execution（其 call 与 terminal result）或一个受保护 Thinking block，禁止聚合多个工具执行或多个 block。新 Marker 以无签名 Thinking block 中仅供机器读取的 HTML comment 呈现；各生成协议使用原生 reasoning、thinking 或 thought 载体，旧 Text 载体只在保留期内兼容读取。周边客户端历史可以独立修改，同一 Marker 在保留期内可以被重试和并发分支重复使用。
 _避免使用_：占位文本、Platform Tool Call、Client History Token
 
 ## Projection Delimiter
 
-Projection Delimiter 是 client projection 中围绕一段可见字节的成对、无状态机器语法，表示该段 canonical Text 仅为客户端展示而使用 Thinking 载体。它绑定一个既有 Principal-scoped History Marker reference 和 span ordinal，不拥有 hidden payload、不创建 Store 记录；客户端回放时只有 Marker 仍存在、Delimiter 正确配对且 Marker 可解析，范围内字节才恢复为 canonical Text。删除或破坏任一边界属于显式历史编辑。
+Projection Delimiter 是 Client Projection 中围绕一段可见字节的成对、无状态机器语法，表示该段 canonical Text 仅为客户端展示而使用 Thinking 载体。它绑定一个既有 Principal-scoped History Marker reference 和 span ordinal，不拥有 hidden payload、不创建 Store 记录；客户端回放时只有 Marker 仍存在、Delimiter 正确配对且 Marker 可解析，范围内字节才恢复为 canonical Text。删除或破坏任一边界属于显式历史编辑。
 _避免使用_：History Marker、Hidden History Segment、Projection Record
 
 ## Hidden History Segment
 
-Hidden History Segment 是客户端可见投影省略、但属于模型有效上下文的单个受保护单元；它是一个 Thinking block，或一个 Platform Tool Execution 的 call/result 对。恢复只替换对应 History Marker，不覆盖 Marker 之外的客户端历史，也不拥有同一模型轮次中客户端可见的工具调用。
+Hidden History Segment 是 Client Projection 省略、但属于模型有效上下文的单个受保护单元；它是一个 Thinking block，或一个 Platform Tool Execution 的 call/result 对。恢复只替换对应 History Marker，不覆盖 Marker 之外的客户端历史，也不拥有同一模型轮次中客户端可见的工具调用。
 _避免使用_：Hidden Client History、完整历史快照
 
 ## Opaque Context Requirement
@@ -109,12 +114,12 @@ _避免使用_：Tool Retry Job、Inference Run
 
 ## Generation Chain
 
-Generation Chain 是归属于 Principal、由已完整交付且终态为 `completed` 或 `incomplete` 的生成请求与最终响应组成的不可变历史有向无环图，独立于 ingress 协议。每个节点保存的是该次交付在 ingress 协议下的客户端可见投影，不等于 Effective Model Request 的 items；该投影由 Generation Chain 拥有，不属于 Protocol Conversion。Stravia 始终记录每个这类生成请求；每个请求形成一个可分支的节点。`failed`、取消、客户端断线与 delivery failure 不形成节点。它不拥有可变 Session head 或 Inference Run 生命周期状态。
-_避免使用_：Client History（当作独立事实源）；把客户端可见投影当作 Protocol Conversion
+Generation Chain 是归属于 Principal、由已完整交付且终态为 `completed` 或 `incomplete` 的生成请求与最终响应组成的不可变历史有向无环图，独立于 ingress 协议。每个节点保存的是该次交付在 ingress 协议下的形态，其内容来自已完成的 Client Projection，不等于 Effective Model Request 的 items；ingress 形态改写由 Generation Chain 拥有，Marker 与 Projection Delimiter 规则不属于它。Stravia 始终记录每个这类生成请求；每个请求形成一个可分支的节点。`failed`、取消、客户端断线与 delivery failure 不形成节点。它不拥有可变 Session head 或 Inference Run 生命周期状态。
+_避免使用_：Client History（当作独立事实源）；把客户端可见投影当作 Protocol Conversion；把 Client Projection 当作 Generation Chain 的阶段
 
 ## Generation Chain Write
 
-Generation Chain Write 是一次尚未落盘的 Generation Chain 节点写入尝试，由进行中的 Inference Run 持有；完整交付后才成为节点，失败或中止则丢弃。Write 拥有节点合法性（仅 `completed` 或 `incomplete` 可落盘，并在 stage 时写入客户端可见投影）；Inference Run 只在完整交付后提交，不解释投影或终态合法性。它不是 Model Turn、Agent Turn、Search Turn、Media Understanding Turn，也不是已持久化的 Generation Chain 节点。
+Generation Chain Write 是一次尚未落盘的 Generation Chain 节点写入尝试，由进行中的 Inference Run 持有；完整交付后才成为节点，失败或中止则丢弃。Write 拥有节点合法性（仅 `completed` 或 `incomplete` 可落盘，并在 stage 时写入 ingress 协议形态）；Inference Run 只在完整交付后提交，不解释投影或终态合法性。它不是 Model Turn、Agent Turn、Search Turn、Media Understanding Turn，也不是已持久化的 Generation Chain 节点。
 _避免使用_：GenerationChainTurn、GenerationChainDraft、Session
 
 ## Generation Materialization Cache

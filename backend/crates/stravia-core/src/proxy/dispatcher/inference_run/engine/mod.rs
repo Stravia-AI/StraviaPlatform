@@ -15,6 +15,7 @@ mod completion;
 mod delivery;
 mod errors;
 mod log;
+mod projection;
 mod stream;
 mod util;
 use self::claim::*;
@@ -25,6 +26,7 @@ use self::delivery::{
 pub(super) use self::errors::hook_failure_response;
 use self::errors::*;
 use self::log::*;
+use self::projection::*;
 use self::util::{client_session_id, forwarded_client_headers};
 use super::{Phase, PhaseTracker, RunInput};
 use std::sync::Arc;

@@ -12,7 +12,7 @@ use crate::protocol::ir::{
 };
 use crate::proxy::context::RequestContext;
 
-use super::{Phase, PhaseTracker};
+use super::{ClientProjector, Phase, PhaseTracker, is_protected_thinking};
 
 #[derive(Clone)]
 struct GenerationChainCompletion {
@@ -277,6 +277,10 @@ impl PreparedPlatformMarker {
         &self.marker.reference
     }
 
+    pub(super) fn marker(&self) -> &HistoryMarker {
+        &self.marker
+    }
+
     pub(super) fn render(&self) -> String {
         render_history_marker(&self.marker)
     }
@@ -375,112 +379,6 @@ pub(super) async fn prepare_platform_markers(
     Ok((prepared, jobs))
 }
 
-fn project_platform_markers(response: &mut AiResponse, markers: &[PreparedPlatformMarker]) {
-    let by_call_id = markers
-        .iter()
-        .map(|prepared| (prepared.call_id.as_str(), &prepared.marker))
-        .collect::<std::collections::HashMap<_, _>>();
-    let Some(projection_reference) = markers.first().map(PreparedPlatformMarker::reference) else {
-        return;
-    };
-    let mut span_ordinal = 0;
-    let mut projected = Vec::with_capacity(response.items.len() + markers.len());
-    for mut item in std::mem::take(&mut response.items) {
-        if item
-            .function_call_output_ref()
-            .is_some_and(|(call_id, _)| by_call_id.contains_key(call_id))
-        {
-            continue;
-        }
-        if item.role != crate::protocol::ir::Role::Assistant {
-            projected.push(item);
-            continue;
-        }
-
-        let calls = item.tool_calls.take().unwrap_or_default();
-        let had_calls = !calls.is_empty();
-        let content = std::mem::replace(&mut item.content, MessageContent::Text(String::new()));
-        let mut meta = item.meta.take();
-        let mut emitted_content = false;
-        match content {
-            MessageContent::Text(text) if !text.is_empty() => {
-                push_projected_content(
-                    &mut projected,
-                    MessageContent::Blocks(vec![ContentBlock::Thinking {
-                        thinking: crate::history_marker::render_text_projection_span(
-                            projection_reference,
-                            span_ordinal,
-                            &text,
-                        ),
-                        signature: None,
-                    }]),
-                    &mut meta,
-                );
-                emitted_content = true;
-                span_ordinal += 1;
-            }
-            MessageContent::Blocks(blocks) => {
-                for block in blocks {
-                    let projected_block = match block {
-                        ContentBlock::Text { text, .. } => {
-                            let thinking = crate::history_marker::render_text_projection_span(
-                                projection_reference,
-                                span_ordinal,
-                                &text,
-                            );
-                            span_ordinal += 1;
-                            ContentBlock::Thinking {
-                                thinking,
-                                signature: None,
-                            }
-                        }
-                        other => other,
-                    };
-                    push_projected_content(
-                        &mut projected,
-                        MessageContent::Blocks(vec![projected_block]),
-                        &mut meta,
-                    );
-                    emitted_content = true;
-                }
-            }
-            MessageContent::Text(_) => {}
-        }
-        for call in calls {
-            if let Some(marker) = by_call_id.get(call.id.as_str()) {
-                projected.push(AiItem::thinking(render_history_marker(marker), None));
-            } else {
-                projected.push(AiItem {
-                    role: crate::protocol::ir::Role::Assistant,
-                    content: MessageContent::Text(String::new()),
-                    tool_calls: Some(vec![call]),
-                    tool_call_id: None,
-                    meta: meta.take(),
-                });
-            }
-        }
-        if !emitted_content && !had_calls && meta.is_some() {
-            item.meta = meta;
-            projected.push(item);
-        }
-    }
-    response.items = projected;
-}
-
-fn push_projected_content(
-    projected: &mut Vec<AiItem>,
-    content: MessageContent,
-    meta: &mut Option<serde_json::Value>,
-) {
-    projected.push(AiItem {
-        role: crate::protocol::ir::Role::Assistant,
-        content,
-        tool_calls: None,
-        tool_call_id: None,
-        meta: meta.take(),
-    });
-}
-
 async fn wait_platform_markers(
     context: &CompletionContext,
     markers: &[PreparedPlatformMarker],
@@ -543,19 +441,6 @@ fn append_restored_platform_round(
 const THINKING_MARKER_PENDING_RETENTION: std::time::Duration =
     std::time::Duration::from_secs(60 * 60);
 
-fn is_protected_thinking(block: &ContentBlock) -> bool {
-    matches!(
-        block,
-        ContentBlock::Thinking {
-            signature: Some(_),
-            ..
-        } | ContentBlock::Reasoning {
-            encrypted_content: Some(_),
-            ..
-        } | ContentBlock::RedactedThinking { .. }
-    )
-}
-
 async fn create_thinking_marker(
     context: &CompletionContext,
     block: ContentBlock,
@@ -592,6 +477,7 @@ pub(super) async fn prepare_thinking_markers(
 }
 
 async fn project_protected_thinking(
+    projector: &ClientProjector,
     context: &CompletionContext,
     response: &mut AiResponse,
     early_thinking_markers: Vec<EarlyThinkingMarkers>,
@@ -624,58 +510,18 @@ async fn project_protected_thinking(
         if let MessageContent::Blocks(blocks) = &mut item.content {
             let mut visible_blocks = Vec::with_capacity(blocks.len());
             for block in std::mem::take(blocks) {
-                let visible = match &block {
-                    ContentBlock::Thinking {
-                        thinking,
-                        signature: Some(_),
-                    } => Some(ContentBlock::Thinking {
-                        thinking: thinking.clone(),
-                        signature: None,
-                    }),
-                    ContentBlock::Reasoning {
-                        summary,
-                        content,
-                        encrypted_content: Some(_),
-                    } => Some(ContentBlock::Reasoning {
-                        summary: summary.clone(),
-                        content: content.clone(),
-                        encrypted_content: None,
-                    }),
-                    ContentBlock::RedactedThinking { .. } => None,
-                    _ => {
-                        visible_blocks.push(block);
-                        continue;
-                    }
-                };
+                if !is_protected_thinking(&block) {
+                    visible_blocks.push(block);
+                    continue;
+                }
                 let marker = if let Some(marker) = prepared.pop_front() {
                     marker
                 } else {
-                    let marker = create_thinking_marker(context, block).await?;
+                    let marker = create_thinking_marker(context, block.clone()).await?;
                     new_references.push(marker.reference.clone());
                     marker
                 };
-                if let Some(mut visible_block) = visible {
-                    match &mut visible_block {
-                        ContentBlock::Thinking { thinking, .. } => {
-                            *thinking = crate::history_marker::render_preview_projection_span(
-                                &marker.reference,
-                                0,
-                                thinking,
-                            );
-                        }
-                        ContentBlock::Reasoning {
-                            summary, content, ..
-                        } => {
-                            for (ordinal, text) in summary.iter_mut().chain(content).enumerate() {
-                                *text = crate::history_marker::render_preview_projection_span(
-                                    &marker.reference,
-                                    ordinal,
-                                    text,
-                                );
-                            }
-                        }
-                        _ => unreachable!("protected Thinking preview remains a reasoning block"),
-                    }
+                if let Some(visible_block) = projector.visible_protected_block(&block, &marker) {
                     visible_blocks.push(visible_block);
                 }
                 item_markers.push(marker);
@@ -690,11 +536,7 @@ async fn project_protected_thinking(
         if !item_is_empty {
             projected.push(item);
         }
-        projected.extend(
-            item_markers
-                .iter()
-                .map(|marker| AiItem::thinking(render_history_marker(marker), None)),
-        );
+        projected.extend(item_markers.iter().map(ClientProjector::marker_item));
     }
     if !early_by_output_index.is_empty() {
         return Err(HistoryMarkerError::InvalidPayload);
@@ -767,11 +609,18 @@ pub(super) async fn complete_canonical_response(
     let has_platform_calls = !classified.platform.is_empty();
     let has_client_calls = !classified.client.is_empty();
     let canonical_response = response.clone();
-    let mut publish_references =
-        match project_protected_thinking(context, &mut response, early_thinking_markers).await {
-            Ok(references) => references,
-            Err(error) => return CompletionOutcome::Failed(CompletionFailure::hook(error, commit)),
-        };
+    let mut projector = ClientProjector::new();
+    let mut publish_references = match project_protected_thinking(
+        &projector,
+        context,
+        &mut response,
+        early_thinking_markers,
+    )
+    .await
+    {
+        Ok(references) => references,
+        Err(error) => return CompletionOutcome::Failed(CompletionFailure::hook(error, commit)),
+    };
     let mut background_executions = Vec::new();
     let mut started_executions = Vec::new();
     if has_platform_calls {
@@ -822,7 +671,11 @@ pub(super) async fn complete_canonical_response(
                 .map(|prepared| prepared.marker.reference.clone()),
         );
         request_context.extensions.insert(published);
-        project_platform_markers(&mut response, &prepared);
+        let platform = prepared
+            .iter()
+            .map(|marker| (marker.call_id(), marker.marker()))
+            .collect::<Vec<_>>();
+        response.items = projector.project_items(std::mem::take(&mut response.items), &platform);
         if !has_client_calls {
             return CompletionOutcome::PlatformOnly(Box::new(PlatformOnlyContinuation {
                 projected_response: response,
