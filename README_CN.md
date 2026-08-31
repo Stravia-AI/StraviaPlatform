@@ -51,7 +51,7 @@ Stravia 支持 JSON、SSE 与 Open Responses WebSocket 交付、跨协议工具�
 
 隐藏的 Platform Tool 续跑会通过各协议原生的 reasoning、thinking 或 thought 表示投影到客户端历史，而不会写入普通 content。重新提交完整历史的客户端必须原样保留这些 item，包括 HTML comment 形式的 History Marker 和 Projection Delimiter；Stravia 依靠它们恢复原始 Text、ToolCall 与 ToolResult 顺序。这些 comment 是不应渲染的机器语法。删除 Marker 或 Delimiter 会被视为有意编辑历史。
 
-one-shot buffered 请求无法安全地自动续跑只包含隐藏 Platform Tool 的 Model Leg，因为副作用开始前无法确认 Marker 已交付。Stravia 会在不启动工具的情况下返回 `409 history_marker_delivery_required`；请启用客户端流式传输后重试。
+客户端关闭流式传输时，Stravia 会先执行仅含 Platform Tool 的隐藏续轮，再一次性返回包含 reasoning-carried Marker 历史与最终答案的 buffered 响应。live stream 则在启动对应 Platform Tool 前交付并发布每个 Marker。
 
 OpenAI direct 与 Codex OAuth 的生成 Target 会为 Chat Completions、Open Responses、Anthropic Messages 和 Gemini 请求使用上游 Responses WebSocket，不受客户端是否流式影响；Embeddings 仍只使用 HTTP。Hook 与协议可表示性检查完成后，Stravia 可从最长且严格等价的 canonical item 前缀续接；Principal、精确 Target、Provider 账号与配置、resolved model、instructions、tools、reasoning、response format 和请求控制必须全部一致。任一条件不匹配都会发送完整有效历史，不会削弱请求语义。
 

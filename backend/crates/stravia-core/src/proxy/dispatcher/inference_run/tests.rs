@@ -1093,24 +1093,6 @@ async fn execute_non_stream(gateway: Gateway, model: &str) -> Response {
     execute_non_stream_request(gateway, AiRequest::new(model, Vec::new())).await
 }
 
-fn openai_chat_stream_history(body: &str) -> (String, String) {
-    let mut reasoning = String::new();
-    let mut content = String::new();
-    for chunk in body
-        .lines()
-        .filter_map(|line| line.strip_prefix("data: "))
-        .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
-    {
-        if let Some(text) = chunk["choices"][0]["delta"]["reasoning_content"].as_str() {
-            reasoning.push_str(text);
-        }
-        if let Some(text) = chunk["choices"][0]["delta"]["content"].as_str() {
-            content.push_str(text);
-        }
-    }
-    (reasoning, content)
-}
-
 struct ExposeOrderedToolHook {
     request_rounds: Arc<std::sync::Mutex<Vec<u32>>>,
 }
@@ -1535,9 +1517,9 @@ impl crate::hook::StreamTransformer for CountingStreamTransformer {
 
 async fn assert_hidden_round_rechecks_access(
     mutation: TestAccessMutation,
-    _expected_status: StatusCode,
-    _expected_type: &str,
-    _expected_message: &str,
+    expected_status: StatusCode,
+    expected_type: &str,
+    expected_message: &str,
 ) {
     let tool_round = serde_json::json!({
         "id": format!("chatcmpl-{}", mutation.tool_id()),
@@ -1616,20 +1598,26 @@ async fn assert_hidden_round_rechecks_access(
         HeaderValue::from_str(&format!("Bearer {}", key.token)).expect("auth header"),
     );
 
-    let mut request = AiRequest::new(model, Vec::new());
-    request.stream.enabled = true;
-    let response = execute_non_stream_request_with_headers(gateway.clone(), headers, request).await;
+    let response = execute_non_stream_request_with_headers(
+        gateway.clone(),
+        headers,
+        AiRequest::new(model, Vec::new()),
+    )
+    .await;
 
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), expected_status);
     assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
     let body = to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("authorization response");
-    let body = String::from_utf8_lossy(&body);
-    assert!(body.contains("stream_mid_error"), "{body}");
+    let body: serde_json::Value =
+        serde_json::from_slice(&body).expect("authorization response JSON");
+    assert_eq!(body["error"]["type"], expected_type);
+    assert_eq!(body["error"]["message"], expected_message);
+    assert!(body["error"].get("request_id").is_none());
 }
 
-async fn buffered_platform_only_requires_delivery_impl() {
+async fn buffered_platform_only_executes_hidden_round_impl() {
     let platform_round = serde_json::json!({
         "id": "chatcmpl-buffered-platform-only",
         "object": "chat.completion",
@@ -1657,7 +1645,8 @@ async fn buffered_platform_only_requires_delivery_impl() {
             "total_tokens": 2
         }
     });
-    let (base_url, provider_calls) = serve_openai_sequence(vec![platform_round]).await;
+    let (base_url, provider_calls) =
+        serve_openai_sequence(vec![platform_round, openai_response("final answer")]).await;
     let data_dir = tempfile::tempdir().expect("temporary data directory");
     let tool_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
     let (expose_tool_hook, _request_hook_rounds) = ExposeOrderedToolHook::counting();
@@ -1675,28 +1664,31 @@ async fn buffered_platform_only_requires_delivery_impl() {
     configure_route(&gateway, "buffered-platform-only", &[base_url]).await;
 
     let response = execute_non_stream(gateway.clone(), "buffered-platform-only").await;
-    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX)
         .await
-        .expect("buffered Platform-only rejection body");
+        .expect("buffered Platform-only response body");
     let body = String::from_utf8_lossy(&body);
-    assert!(body.contains("history_marker_delivery_required"), "{body}");
     assert!(
-        body.contains("Buffered Platform Tool execution requires a client delivery confirmation."),
+        body.contains(crate::history_marker::HISTORY_MARKER_PREFIX),
         "{body}"
     );
-    assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
-    assert!(
-        tool_calls
+    assert!(body.contains("final answer"), "{body}");
+    assert_eq!(provider_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        *tool_calls
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .is_empty()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        vec![1]
     );
-    let marker_count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM history_markers")
-        .fetch_one(gateway._sqlite_pool.as_ref().expect("Gateway SQLite pool"))
-        .await
-        .expect("History Marker count");
-    assert_eq!(marker_count, 0);
+    let completed_marker_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM history_markers \
+         WHERE published_at IS NOT NULL AND execution_state = 'completed'",
+    )
+    .fetch_one(gateway._sqlite_pool.as_ref().expect("Gateway SQLite pool"))
+    .await
+    .expect("completed History Marker count");
+    assert_eq!(completed_marker_count, 1);
 }
 
 async fn hidden_round_request_hook_response_is_delivered_impl() {
@@ -2111,7 +2103,7 @@ async fn platform_leg_text_projects_to_reasoning_and_hidden_followup_stays_canon
     configure_route(&gateway, "projected-platform", &[base_url]).await;
     let headers = authorized_headers(&gateway).await;
 
-    let mut initial_request = AiRequest::new(
+    let initial_request = AiRequest::new(
         "projected-platform",
         vec![crate::protocol::ir::AiItem {
             role: crate::protocol::ir::Role::User,
@@ -2121,7 +2113,6 @@ async fn platform_leg_text_projects_to_reasoning_and_hidden_followup_stays_canon
             meta: None,
         }],
     );
-    initial_request.stream.enabled = true;
     let response =
         execute_non_stream_request_with_headers(gateway.clone(), headers.clone(), initial_request)
             .await;
@@ -2129,8 +2120,13 @@ async fn platform_leg_text_projects_to_reasoning_and_hidden_followup_stays_canon
     let body = to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("projected response body");
-    let body = String::from_utf8_lossy(&body);
-    let (reasoning, content) = openai_chat_stream_history(&body);
+    let body: serde_json::Value = serde_json::from_slice(&body).expect("projected response JSON");
+    let reasoning = body["choices"][0]["message"]["reasoning_content"]
+        .as_str()
+        .expect("reasoning_content");
+    let content = body["choices"][0]["message"]["content"]
+        .as_str()
+        .expect("content");
     let r1 = reasoning.find("R1").expect("first reasoning");
     let c1 = reasoning.find("C1").expect("projected text");
     let marker = reasoning
@@ -2349,13 +2345,15 @@ async fn failed_platform_call_and_successful_retry_preserve_marker_and_result_or
     .expect("Gateway");
     configure_route(&gateway, "platform-retry-order", &[base_url]).await;
 
-    let response = execute_stream(gateway, "platform-retry-order").await;
+    let response = execute_non_stream(gateway, "platform-retry-order").await;
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("retry response body");
-    let body = String::from_utf8_lossy(&body);
-    let (reasoning, content) = openai_chat_stream_history(&body);
+    let body: serde_json::Value = serde_json::from_slice(&body).expect("retry response JSON");
+    let reasoning = body["choices"][0]["message"]["reasoning_content"]
+        .as_str()
+        .expect("retry reasoning_content");
     let marker_positions = reasoning
         .match_indices(crate::history_marker::HISTORY_MARKER_PREFIX)
         .map(|(position, _)| position)
@@ -2373,7 +2371,7 @@ async fn failed_platform_call_and_successful_retry_preserve_marker_and_result_or
             && marker_positions[1] < final_reasoning,
         "{reasoning}"
     );
-    assert_eq!(content, "final answer");
+    assert_eq!(body["choices"][0]["message"]["content"], "final answer");
     assert_eq!(provider_calls.load(Ordering::SeqCst), 3);
     assert_eq!(
         *tool_calls
@@ -2922,24 +2920,14 @@ async fn platform_markers_are_ingress_neutral_impl() {
             "message": {
                 "role": "assistant",
                 "content": null,
-                "tool_calls": [
-                    {
-                        "id": "platform-call",
-                        "type": "function",
-                        "function": {
-                            "name": "stravia__ordered_tool",
-                            "arguments": "{\"index\":1}"
-                        }
-                    },
-                    {
-                        "id": "client-call",
-                        "type": "function",
-                        "function": {
-                            "name": "client_tool",
-                            "arguments": "{}"
-                        }
+                "tool_calls": [{
+                    "id": "platform-call",
+                    "type": "function",
+                    "function": {
+                        "name": "stravia__ordered_tool",
+                        "arguments": "{\"index\":1}"
                     }
-                ]
+                }]
             },
             "finish_reason": "tool_calls"
         }],
@@ -2968,6 +2956,7 @@ async fn platform_markers_are_ingress_neutral_impl() {
     let mut provider_responses = Vec::new();
     for _ in &protocols {
         provider_responses.push(platform_round.clone());
+        provider_responses.push(openai_response("final answer"));
     }
     let (base_url, provider_calls) = serve_openai_sequence(provider_responses).await;
     let data_dir = tempfile::tempdir().expect("temporary data directory");
@@ -3000,7 +2989,7 @@ async fn platform_markers_are_ingress_neutral_impl() {
             body.contains(crate::history_marker::HISTORY_MARKER_PREFIX),
             "{ingress}: {body}"
         );
-        assert!(body.contains("client-call"), "{ingress}: {body}");
+        assert!(body.contains("final answer"), "{ingress}: {body}");
         assert!(!body.contains("platform-call"), "{ingress}: {body}");
         assert!(!body.contains("stravia__ordered_tool"), "{ingress}: {body}");
         let body_json: serde_json::Value =
@@ -3087,7 +3076,7 @@ async fn platform_markers_are_ingress_neutral_impl() {
         };
         assert!(marker_is_reasoning, "{ingress}: {body}");
     }
-    assert_eq!(provider_calls.load(Ordering::SeqCst), 8);
+    assert_eq!(provider_calls.load(Ordering::SeqCst), 16);
     assert_eq!(
         tool_calls
             .lock()

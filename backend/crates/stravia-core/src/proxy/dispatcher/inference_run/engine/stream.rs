@@ -1351,7 +1351,6 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                         upstream_response_id,
                         early_platform_executions,
                         early_thinking_markers,
-                        allow_platform_only: true,
                     },
                 )
                 .await
@@ -1515,9 +1514,6 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                                 }
                             }
                         }
-                    }
-                    CompletionOutcome::PlatformOnlyRejected => {
-                        unreachable!("live delivery permits Platform-only continuation")
                     }
                     CompletionOutcome::Ready(lease) => match (*lease).prepare(&mut phase) {
                         Ok(prepared) => {

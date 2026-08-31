@@ -183,7 +183,7 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
                 meta: None,
             }],
         );
-    request.stream.enabled = true;
+    request.stream.enabled = false;
     let mut headers = HeaderMap::new();
     headers.insert(
         header::AUTHORIZATION,
@@ -198,9 +198,21 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
     let body = to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("bridge response body");
-    let body = String::from_utf8_lossy(&body);
-    assert!(body.contains("parent used Media Report"), "{body}");
-    let (first_assistant_reasoning, first_assistant) = openai_chat_stream_history(&body);
+    assert!(
+        String::from_utf8_lossy(&body).contains("parent used Media Report"),
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    let first_response: serde_json::Value =
+        serde_json::from_slice(&body).expect("bridge response JSON");
+    let first_assistant = first_response["choices"][0]["message"]["content"]
+        .as_str()
+        .expect("first assistant content")
+        .to_owned();
+    let first_assistant_reasoning = first_response["choices"][0]["message"]["reasoning_content"]
+        .as_str()
+        .expect("first assistant reasoning")
+        .to_owned();
     let trusted_media_turns = sqlx::query_scalar::<_, i64>(
         "SELECT json_array_length(json_extract(payload, '$.trusted_media_turn_ids')) \
          FROM turn_chain_nodes WHERE kind = 'response' ORDER BY created_at DESC LIMIT 1",
@@ -212,7 +224,7 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
 
     let mut second_user = crate::protocol::ir::AiItem::output_text("What is its subject?");
     second_user.role = crate::protocol::ir::Role::User;
-    let mut second_request = AiRequest::new(
+    let second_request = AiRequest::new(
         "text-parent",
         vec![
             request.items[0].clone(),
@@ -221,7 +233,6 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
             second_user,
         ],
     );
-    second_request.stream.enabled = true;
     let second_response =
         execute_non_stream_request_with_headers(gateway, headers, second_request).await;
     let second_status = second_response.status();

@@ -934,22 +934,45 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
             upstream_response_id,
             early_platform_executions: Vec::new(),
             early_thinking_markers: Vec::new(),
-            allow_platform_only: false,
         },
     )
     .await
     {
-        CompletionOutcome::PlatformOnly(_) | CompletionOutcome::PlatformOnlyRejected => {
+        CompletionOutcome::PlatformOnly(continuation) => {
             model_turn_log
                 .take()
                 .expect("current Model Turn log")
                 .without_client_exchange()
                 .emit();
-            return buffered_response(coded_error_response(
-                StatusCode::CONFLICT,
-                BUFFERED_PLATFORM_ONLY_REJECTION_CODE,
-                BUFFERED_PLATFORM_ONLY_REJECTION_MESSAGE,
-            ));
+            if let Err(failure) = continuation.publish(&completion_context).await {
+                return buffered_response(render_completion_failure(
+                    failure,
+                    ingress,
+                    request.stream.enabled,
+                ));
+            }
+            if let Err(failure) = continuation
+                .finish(
+                    &completion_context,
+                    request_context,
+                    request,
+                    inference_run
+                        .as_mut()
+                        .expect("buffered Inference Run continuation"),
+                    phase,
+                )
+                .await
+            {
+                return buffered_response(render_completion_failure(
+                    failure,
+                    ingress,
+                    request.stream.enabled,
+                ));
+            }
+            return RoundOutcome::NextRound {
+                run: None,
+                phase: None,
+            };
         }
         CompletionOutcome::Ready(lease) => match (*lease).prepare(phase) {
             Ok(delivery) => delivery,

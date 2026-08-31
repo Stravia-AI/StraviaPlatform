@@ -22,13 +22,13 @@ status: accepted
 - Protected Thinking preview 使用独立 preview delimiter。恢复时删除 preview，并在 Marker 原位置插入 Store 中的 signed、encrypted 或 redacted authoritative block。
 - 当 Inference Run 暴露 Platform Tools 时，首个 Text 之前的 genuine reasoning 立即发送；从首个 Text 开始只缓冲该 Model Leg 的可见后缀。确认 Platform ToolCall 后，将其中 Text 投影为 delimited Thinking；Model Leg 无 Platform ToolCall 时按原顺序回放。禁止用超时、阈值或文本分类提前决定。
 - live stream 与 terminal staged projection 使用相同 Marker reference、span ordinal、Delimiter 顺序和可见字节。Generation Chain 保存实际交付的 client projection；canonical accumulator 始终接收原始 delta。
-- Marker 的安全顺序保持为：create/claim，交付 Marker projection，确认 delivery progress，publish，启动 Platform Tool Execution。提交前不可表示 Thinking 时返回 typed error；提交后失败使用 ingress 协议 terminal error。
+- live stream 的安全顺序保持为：create/claim，交付 Marker projection，确认 delivery progress，publish，启动 Platform Tool Execution。one-shot buffered 请求按 create/claim、publish、执行隐藏续轮、一次性返回 Marker history 与最终答案的顺序工作；其中 Marker 是响应历史记录，不是副作用执行前的客户端确认凭证。提交前不可表示 Thinking 时返回 typed error；提交后失败使用 ingress 协议 terminal error。
 
 ## Consequences
 
 - 正确性要求缓冲含 Platform Tools 的 Model Leg 中从首个 Text 开始的后缀。无 Platform ToolCall 时，最终 Text 的首字节延迟到 Model Leg 结束；这是结构性延迟，不提供配置开关或启发式旁路。
 - Genuine reasoning 仍可实时显示；不缓冲整个 Model Turn。
-- one-shot buffered 请求无法同时保持自动隐藏续跑和“Marker 交付后才执行”不变量。只包含隐藏 Platform Tool 的 Model Leg 返回 typed `409 history_marker_delivery_required` 且不创建 Marker、不启动工具；调用方需改用 live stream。
+- one-shot buffered 请求会在内部完成 Platform-only 工具执行与后续 Model Turn，再一次性返回 reasoning-carried Marker history 和最终 content；它不提供副作用执行前的客户端 Marker 交付确认。
 - Protocol codecs 只机械地转换 canonical Thinking。平台工具分类、Marker 放置和 Text 投影集中在 Inference Run；有序恢复集中在 History Marker 模块。
 - Projection Delimiter 的耐久性依赖客户端保留协议 reasoning history。客户端删除 Marker 或 Delimiter 即表示显式历史编辑，Stravia 不从周边文本猜测或恢复被删除的内容。
 - 数据库 schema 与 SQLite/PostgreSQL Store 契约不变。

@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn buffered_platform_only_requires_client_delivery_confirmation() {
+fn buffered_platform_only_executes_hidden_round_before_returning() {
     std::thread::Builder::new()
         .name("buffered-platform-only-rejection".into())
         .stack_size(16 * 1024 * 1024)
@@ -10,7 +10,7 @@ fn buffered_platform_only_requires_client_delivery_confirmation() {
                 .enable_all()
                 .build()
                 .expect("test runtime")
-                .block_on(buffered_platform_only_requires_delivery_impl())
+                .block_on(buffered_platform_only_executes_hidden_round_impl())
         })
         .expect("test thread")
         .join()

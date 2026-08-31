@@ -107,13 +107,8 @@ pub(super) enum ClientOutputCommit {
     Committed,
 }
 
-pub(super) const BUFFERED_PLATFORM_ONLY_REJECTION_CODE: &str = "history_marker_delivery_required";
-pub(super) const BUFFERED_PLATFORM_ONLY_REJECTION_MESSAGE: &str =
-    "Buffered Platform Tool execution requires a client delivery confirmation.";
-
 pub(super) enum CompletionOutcome {
     PlatformOnly(Box<PlatformOnlyContinuation>),
-    PlatformOnlyRejected,
     Ready(Box<CompletionLease>),
     Failed(CompletionFailure),
 }
@@ -266,7 +261,6 @@ pub(super) struct CompletionInput<'a> {
     pub(super) upstream_response_id: Option<String>,
     pub(super) early_platform_executions: Vec<EarlyPlatformExecution>,
     pub(super) early_thinking_markers: Vec<EarlyThinkingMarkers>,
-    pub(super) allow_platform_only: bool,
 }
 
 pub(super) struct PreparedPlatformMarker {
@@ -735,7 +729,6 @@ pub(super) async fn complete_canonical_response(
         upstream_response_id,
         early_platform_executions,
         early_thinking_markers,
-        allow_platform_only,
     } = input;
     let commit = context.client_output_commit;
     fill_canonical_defaults(context, &mut response);
@@ -773,9 +766,6 @@ pub(super) async fn complete_canonical_response(
     let classified = run.classify_tool_calls(&response);
     let has_platform_calls = !classified.platform.is_empty();
     let has_client_calls = !classified.client.is_empty();
-    if has_platform_calls && !has_client_calls && !allow_platform_only {
-        return CompletionOutcome::PlatformOnlyRejected;
-    }
     let canonical_response = response.clone();
     let mut publish_references =
         match project_protected_thinking(context, &mut response, early_thinking_markers).await {

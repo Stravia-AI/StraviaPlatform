@@ -831,7 +831,7 @@ async fn hidden_rounds_are_iterative_and_platform_tools_keep_response_order() {
         .expect("gateway init");
     configure_route(&gateway, "hidden-round-route", &[base_url]).await;
 
-    let response = execute_stream(gateway, "hidden-round-route").await;
+    let response = execute_non_stream(gateway, "hidden-round-route").await;
 
     let status = response.status();
     let body = to_bytes(response.into_body(), usize::MAX)
