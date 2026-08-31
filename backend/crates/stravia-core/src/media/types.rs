@@ -12,6 +12,7 @@ pub struct MediaArtifactInput {
 #[serde(deny_unknown_fields)]
 pub struct MediaUnderstandingInput {
     pub prompt: String,
+    #[serde(default)]
     pub artifacts: Vec<MediaArtifactInput>,
     #[serde(default)]
     pub previous_turn_id: Option<AgentTurnId>,

@@ -86,6 +86,12 @@ struct LiveDeltaGate {
 }
 
 impl LiveDeltaGate {
+    fn begin_model_leg(&mut self) {
+        self.pending_tool_deltas.clear();
+        self.pending_tool_names.clear();
+        self.platform_tool_indices.clear();
+    }
+
     fn commit_visible(&mut self, mut deltas: Vec<AiStreamDelta>) -> Vec<AiStreamDelta> {
         if !self.client_output_started {
             self.client_output_started = true;
@@ -294,6 +300,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
         let mut live_delta_gate = LiveDeltaGate::default();
         let mut emitted_marker_texts = HashSet::new();
         'model_legs: loop {
+            live_delta_gate.begin_model_leg();
             let attempt_trace = turn.transport.clone();
             let mut completion_context = CompletionContext::from_model_turn(
                 gateway.clone(),

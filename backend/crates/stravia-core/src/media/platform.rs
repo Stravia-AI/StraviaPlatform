@@ -93,7 +93,8 @@ pub(crate) fn input_schema() -> Value {
             "artifacts": {
                 "type": "array",
                 "maxItems": 8,
-                "description": "New static JPEG, PNG, or WebP source Artifacts in stable order.",
+                "default": [],
+                "description": "New static JPEG, PNG, or WebP source Artifacts in stable order. Use [] when continuing previous_turn_id without new media. Never repeat Artifact IDs from previous turns.",
                 "items": {
                     "type": "object",
                     "properties": {
@@ -110,7 +111,20 @@ pub(crate) fn input_schema() -> Value {
                 "description": "An explicit prior Media Understanding Turn to continue or branch from."
             }
         },
-        "required": ["prompt", "artifacts"],
+        "required": ["prompt"],
+        "anyOf": [
+            {
+                "required": ["previous_turn_id"]
+            },
+            {
+                "properties": {
+                    "artifacts": {
+                        "minItems": 1
+                    }
+                },
+                "required": ["artifacts"]
+            }
+        ],
         "additionalProperties": false
     })
 }
@@ -228,7 +242,7 @@ async fn execute_platform(
         return Err(serde_json::json!({
             "error": {
                 "code": "media_artifact_unavailable",
-                "message": "Media Artifact is unavailable to this Inference Run"
+                "message": "Media Artifact is unavailable to this Inference Run; continue a previous Media Turn with artifacts: [] when no new media was attached"
             }
         }));
     }
@@ -340,9 +354,25 @@ mod tests {
         assert_eq!(schema["additionalProperties"], false);
         assert_eq!(schema["properties"]["artifacts"]["maxItems"], 8);
         assert_eq!(
+            schema["properties"]["artifacts"]["default"],
+            serde_json::json!([])
+        );
+        assert_eq!(
             schema["properties"]["artifacts"]["items"]["additionalProperties"],
             false
         );
+        assert_eq!(schema["required"], serde_json::json!(["prompt"]));
+        assert_eq!(
+            schema["anyOf"][0]["required"],
+            serde_json::json!(["previous_turn_id"])
+        );
+        assert_eq!(schema["anyOf"][1]["properties"]["artifacts"]["minItems"], 1);
+        let continuation: MediaUnderstandingInput = serde_json::from_value(serde_json::json!({
+            "prompt": "Continue the prior analysis",
+            "previous_turn_id": "aturn_parent"
+        }))
+        .expect("continuation input may omit new Artifacts");
+        assert!(continuation.artifacts.is_empty());
         assert!(MEDIA_TOOL_DESCRIPTION.contains("JPEG"));
     }
 

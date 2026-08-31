@@ -35,6 +35,23 @@ fn platform_only_stream_emits_marker_and_continues_on_the_same_response() {
 }
 
 #[test]
+fn platform_only_stream_preserves_followup_client_tool_arguments() {
+    std::thread::Builder::new()
+        .name("platform-client-tool-stream".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime")
+                .block_on(platform_only_stream_preserves_client_tool_arguments_impl())
+        })
+        .expect("test thread")
+        .join()
+        .expect("test thread result");
+}
+
+#[test]
 fn platform_markers_are_projected_for_all_generation_ingresses() {
     std::thread::Builder::new()
         .name("platform-marker-ingresses".into())

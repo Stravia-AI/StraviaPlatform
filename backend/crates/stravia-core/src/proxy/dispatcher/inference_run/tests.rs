@@ -1691,6 +1691,69 @@ async fn platform_only_stream_continues_with_marker_impl() {
     assert!(entries[2].path.is_some());
 }
 
+async fn platform_only_stream_preserves_client_tool_arguments_impl() {
+    let (base_url, provider_calls) = serve_sse_sequence(vec![
+        openai_sse_platform_tool_call(),
+        openai_sse_client_tool_call(),
+    ])
+    .await;
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let tool_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (expose_tool_hook, _request_hook_rounds) = ExposeOrderedToolHook::counting();
+    let (gateway, _logs) = crate::Gateway::builder(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .hook(Arc::new(expose_tool_hook))
+    .platform_tool(Arc::new(OrderedTool {
+        calls: Arc::clone(&tool_calls),
+    }))
+    .build()
+    .await
+    .expect("Gateway");
+    configure_route(&gateway, "platform-client-tool-stream", &[base_url]).await;
+
+    let response = execute_stream(gateway, "platform-client-tool-stream").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("Platform continuation client Tool body");
+    let body = String::from_utf8_lossy(&body);
+    let mut tool_name = String::new();
+    let mut tool_arguments = String::new();
+    for event in body
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter(|data| *data != "[DONE]")
+        .map(|data| serde_json::from_str::<serde_json::Value>(data).expect("client SSE event"))
+    {
+        for call in event["choices"][0]["delta"]["tool_calls"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            if let Some(name) = call["function"]["name"].as_str() {
+                tool_name.push_str(name);
+            }
+            if let Some(arguments) = call["function"]["arguments"].as_str() {
+                tool_arguments.push_str(arguments);
+            }
+        }
+    }
+
+    assert_eq!(tool_name, "Read", "{body}");
+    assert_eq!(tool_arguments, r#"{"value":"preserved"}"#, "{body}");
+    assert!(!body.contains("platform-call"), "{body}");
+    assert!(!body.contains("stravia__ordered_tool"), "{body}");
+    assert_eq!(provider_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        *tool_calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        vec![1]
+    );
+}
+
 async fn platform_markers_are_ingress_neutral_impl() {
     let platform_round = serde_json::json!({
         "id": "chatcmpl-platform-only",
@@ -1821,6 +1884,67 @@ fn openai_sse_platform_tool_call() -> String {
                 "prompt_tokens": 11,
                 "completion_tokens": 1,
                 "total_tokens": 12
+            }
+        })
+    )
+}
+
+fn openai_sse_client_tool_call() -> String {
+    format!(
+        "data: {}\n\ndata: {}\n\ndata: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+        serde_json::json!({
+            "id": "upstream-client-tool",
+            "model": "provider-model",
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "client-call",
+                        "type": "function",
+                        "function": {
+                            "name": "Read",
+                            "arguments": "{\"value\":"
+                        }
+                    }]
+                },
+                "finish_reason": null
+            }]
+        }),
+        serde_json::json!({
+            "id": "upstream-client-tool",
+            "model": "provider-model",
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": {
+                            "arguments": "\"preserved\"}"
+                        }
+                    }]
+                },
+                "finish_reason": null
+            }]
+        }),
+        serde_json::json!({
+            "id": "upstream-client-tool",
+            "model": "provider-model",
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "tool_calls"
+            }]
+        }),
+        serde_json::json!({
+            "id": "upstream-client-tool",
+            "model": "provider-model",
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 22,
+                "completion_tokens": 2,
+                "total_tokens": 24
             }
         })
     )
