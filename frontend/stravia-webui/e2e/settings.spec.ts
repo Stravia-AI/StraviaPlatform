@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test'
 
+import type { MediaUnderstandingConfigView } from '../src/lib/types'
 import { prepareApp } from './prepare-app'
 
 test.beforeEach(async ({ page }) => {
@@ -87,6 +88,19 @@ test('advanced features keep separate media and web search surfaces', async ({ p
     updated_at: '2026-08-17T00:00:00Z',
     limits: { min_turns: 1, max_turns: 20, min_total_time_seconds: 30, max_total_time_seconds: 900 },
   }
+  const mediaConfig = {
+    enabled: true,
+    model_id: 'model-media',
+    thinking_level: 'high',
+    state: 'available',
+    eligible_models: [
+      {
+        id: 'model-media',
+        name: 'Multimodal model',
+        supported_thinking_levels: ['off', 'medium', 'high'],
+      },
+    ],
+  } satisfies MediaUnderstandingConfigView
 
   await page.route('**/api/v1/web-search/config', async (route) => {
     await route.fulfill({ json: { data: searchConfig } })
@@ -100,16 +114,7 @@ test('advanced features keep separate media and web search surfaces', async ({ p
     })
   })
   await page.route('**/api/v1/media-understanding', async (route) => {
-    await route.fulfill({
-      json: {
-        data: {
-          enabled: true,
-          model_id: 'model-media',
-          state: 'available',
-          eligible_models: [{ id: 'model-media', name: 'Multimodal model' }],
-        },
-      },
-    })
+    await route.fulfill({ json: { data: mediaConfig } })
   })
   await page.route('**/api/v1/web-access/settings', async (route) => {
     await route.fulfill({ json: { data: { enabled: true, search_provider_ids: [], fetch_provider_ids: [] } } })
@@ -126,6 +131,7 @@ test('advanced features keep separate media and web search surfaces', async ({ p
   await expect(page.getByRole('heading', { name: 'Media understanding', exact: true })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Understanding model' })).toBeVisible()
   await expect(page.getByText('Available', { exact: true })).toBeVisible()
+  await expect(page.locator('#media-thinking-level')).toHaveText('high')
   await expect(page.getByRole('heading', { name: 'Supported images and limits' })).toHaveCount(0)
   await expect(page.getByRole('heading', { name: 'Image processing' })).toHaveCount(0)
 
