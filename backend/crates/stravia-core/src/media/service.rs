@@ -51,8 +51,9 @@ impl MediaUnderstandingService {
 
     pub(crate) async fn model_id(&self) -> Option<String> {
         self.runner
-            .definition_model(&AgentDefinitionId::new(MEDIA_DEFINITION_ID))
+            .definition_model_with_thinking_level(&AgentDefinitionId::new(MEDIA_DEFINITION_ID))
             .await
+            .map(|(model_id, _)| model_id)
     }
     pub(crate) async fn prepare_sources(
         &self,

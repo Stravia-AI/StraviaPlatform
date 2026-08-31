@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent::{AgentDefinitionConfig, AgentDefinitionId};
 use crate::media::MEDIA_DEFINITION_ID;
+use crate::thinking::ThinkingLevel;
 
 use super::AdminService;
 
@@ -9,6 +10,7 @@ use super::AdminService;
 pub struct MediaUnderstandingConfigUpdate {
     pub enabled: bool,
     pub model_id: Option<String>,
+    pub thinking_level: Option<ThinkingLevel>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -23,12 +25,14 @@ pub enum MediaUnderstandingState {
 pub struct EligibleMediaModel {
     pub id: String,
     pub name: String,
+    pub supported_thinking_levels: Vec<ThinkingLevel>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MediaUnderstandingConfigView {
     pub enabled: bool,
     pub model_id: Option<String>,
+    pub thinking_level: Option<ThinkingLevel>,
     pub state: MediaUnderstandingState,
     pub eligible_models: Vec<EligibleMediaModel>,
 }
@@ -59,12 +63,15 @@ impl AdminService {
             MediaUnderstandingState::Disabled
         } else if self.gw.media_derivatives.is_none() {
             MediaUnderstandingState::Unavailable
-        } else if record
-            .config
-            .model_id
-            .as_ref()
-            .is_some_and(|id| eligible_models.iter().any(|model| &model.id == id))
-        {
+        } else if record.config.model_id.as_ref().is_some_and(|id| {
+            eligible_models.iter().any(|model| {
+                &model.id == id
+                    && record
+                        .config
+                        .thinking_level
+                        .is_some_and(|level| model.supported_thinking_levels.contains(&level))
+            })
+        }) {
             MediaUnderstandingState::Available
         } else {
             MediaUnderstandingState::Unavailable
@@ -72,6 +79,7 @@ impl AdminService {
         Ok(MediaUnderstandingConfigView {
             enabled: record.config.enabled,
             model_id: record.config.model_id,
+            thinking_level: record.config.thinking_level,
             state,
             eligible_models,
         })
@@ -94,15 +102,26 @@ impl AdminService {
                     "Media Understanding requires a logical Model",
                 )
             })?;
-            if !self
-                .list_eligible_media_models()
-                .await?
+            let eligible_models = self.list_eligible_media_models().await?;
+            let model = eligible_models
                 .iter()
-                .any(|model| model.id == model_id)
-            {
+                .find(|model| model.id == model_id)
+                .ok_or_else(|| {
+                    MediaUnderstandingConfigError::new(
+                        "MEDIA_UNDERSTANDING_MODEL_UNAVAILABLE",
+                        "The selected Model is unavailable for Media Understanding",
+                    )
+                })?;
+            let thinking_level = update.thinking_level.ok_or_else(|| {
+                MediaUnderstandingConfigError::new(
+                    "MEDIA_UNDERSTANDING_THINKING_LEVEL_REQUIRED",
+                    "Media Understanding requires a Thinking Level",
+                )
+            })?;
+            if !model.supported_thinking_levels.contains(&thinking_level) {
                 return Err(MediaUnderstandingConfigError::new(
-                    "MEDIA_UNDERSTANDING_MODEL_UNAVAILABLE",
-                    "The selected Model is unavailable for Media Understanding",
+                    "MEDIA_UNDERSTANDING_THINKING_LEVEL_UNAVAILABLE",
+                    "The selected Thinking Level is unavailable on the selected Model",
                 ));
             }
         }
@@ -113,6 +132,7 @@ impl AdminService {
                 AgentDefinitionConfig {
                     enabled: update.enabled,
                     model_id: update.model_id,
+                    thinking_level: update.thinking_level,
                 },
             )
             .await
@@ -136,6 +156,7 @@ impl AdminService {
             eligible.push(EligibleMediaModel {
                 id: model.id,
                 name: model.name,
+                supported_thinking_levels: model.supported_thinking_levels.0,
             });
         }
         eligible.sort_by(|left, right| left.name.cmp(&right.name).then(left.id.cmp(&right.id)));
@@ -184,6 +205,7 @@ mod tests {
         assert_eq!(config.state, MediaUnderstandingState::Disabled);
         assert!(!config.enabled);
         assert!(config.model_id.is_none());
+        assert!(config.thinking_level.is_none());
         assert!(config.eligible_models.is_empty());
     }
     #[tokio::test]
@@ -203,6 +225,7 @@ mod tests {
             .update_media_understanding_config(MediaUnderstandingConfigUpdate {
                 enabled: true,
                 model_id: None,
+                thinking_level: None,
             })
             .await
             .expect_err("Media runtime storage should be required");
@@ -254,35 +277,109 @@ mod tests {
             )
             .await
             .expect("Provider Model");
+        admin
+            .create_manual_provider_model(
+                &provider.id,
+                "text",
+                crate::provider_models::CreateManualProviderModel {
+                    metadata: serde_json::json!({
+                        "id": "text",
+                        "modalities": { "input": ["text"], "output": ["text"] }
+                    }),
+                },
+            )
+            .await
+            .expect("text-only Provider Model");
         let model = admin
             .create_model(crate::db::models::CreateModel {
                 name: "Visual Route".into(),
                 balance: Some("weighted".into()),
-                target_provider: provider.id,
+                target_provider: provider.id.clone(),
                 target_model: "vision".into(),
                 targets: vec![],
             })
             .await
             .expect("Model");
+        let mixed_model = admin
+            .create_model(crate::db::models::CreateModel {
+                name: "Mixed Route".into(),
+                balance: Some("weighted".into()),
+                target_provider: String::new(),
+                target_model: String::new(),
+                targets: vec![
+                    crate::db::models::CreateModelBackend {
+                        provider_id: provider.id.clone(),
+                        model: "vision".into(),
+                        weight: Some(50),
+                        priority: Some(1),
+                        thinking_level_map: Vec::new(),
+                    },
+                    crate::db::models::CreateModelBackend {
+                        provider_id: provider.id.clone(),
+                        model: "text".into(),
+                        weight: Some(50),
+                        priority: Some(2),
+                        thinking_level_map: Vec::new(),
+                    },
+                ],
+            })
+            .await
+            .expect("mixed Model");
+
+        let before_update = admin
+            .get_media_understanding_config()
+            .await
+            .expect("Media config");
+        let eligible = before_update
+            .eligible_models
+            .iter()
+            .find(|candidate| candidate.id == model.id)
+            .expect("all-image Model should be eligible");
+        assert!(
+            eligible
+                .supported_thinking_levels
+                .contains(&ThinkingLevel::Medium)
+        );
+        assert!(
+            !before_update
+                .eligible_models
+                .iter()
+                .any(|candidate| candidate.id == mixed_model.id)
+        );
+
+        let unsupported_error = admin
+            .update_media_understanding_config(MediaUnderstandingConfigUpdate {
+                enabled: true,
+                model_id: Some(model.id.clone()),
+                thinking_level: Some(ThinkingLevel::Max),
+            })
+            .await
+            .expect_err("hidden Thinking Level should be rejected");
+        assert_eq!(
+            unsupported_error.code,
+            "MEDIA_UNDERSTANDING_THINKING_LEVEL_UNAVAILABLE"
+        );
 
         let updated = admin
             .update_media_understanding_config(MediaUnderstandingConfigUpdate {
                 enabled: true,
                 model_id: Some(model.id.clone()),
+                thinking_level: Some(ThinkingLevel::Medium),
             })
             .await
             .expect("eligible Media config");
 
         assert_eq!(updated.state, MediaUnderstandingState::Available);
         assert_eq!(updated.model_id.as_deref(), Some(model.id.as_str()));
+        assert_eq!(updated.thinking_level, Some(ThinkingLevel::Medium));
+        let persisted = admin
+            .media_definition()
+            .await
+            .expect("Media Definition")
+            .config;
         assert_eq!(
-            admin
-                .media_definition()
-                .await
-                .expect("Media Definition")
-                .config
-                .model_id,
-            Some(model.id)
+            (persisted.model_id, persisted.thinking_level),
+            (Some(model.id), Some(ThinkingLevel::Medium))
         );
     }
 }

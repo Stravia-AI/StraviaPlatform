@@ -358,6 +358,7 @@ History Marker Store 的持久化事实源。每行只保存一个受保护 Thin
 | `definition_id` | TEXT PK | — | Definition ID |
 | `enabled` | BOOLEAN/INTEGER NOT NULL | false | 是否向内部调用面公开 |
 | `model_id` | TEXT | NULL | 绑定逻辑模型（FK → models.id, ON DELETE SET NULL） |
+| `thinking_level` | TEXT | NULL | 内部 Model Turn 使用的思考等级：`off`、`minimal`、`low`、`medium`、`high`、`xhigh` 或 `max` |
 | `updated_at` | BIGINT/INTEGER NOT NULL | — | 更新时间（Unix 毫秒） |
 
 ---

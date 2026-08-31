@@ -91,6 +91,7 @@ pub struct AgentDefinitionSpec {
 pub struct AgentDefinitionConfig {
     pub enabled: bool,
     pub model_id: Option<String>,
+    pub thinking_level: Option<crate::thinking::ThinkingLevel>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -566,6 +567,7 @@ mod tests {
                 AgentDefinitionConfig {
                     enabled: true,
                     model_id: Some("model-1".into()),
+                    thinking_level: Some(crate::thinking::ThinkingLevel::High),
                 },
             )
             .await
@@ -583,6 +585,10 @@ mod tests {
             .expect("current Definition");
         assert!(record.config.enabled);
         assert_eq!(record.config.model_id.as_deref(), Some("model-1"));
+        assert_eq!(
+            record.config.thinking_level,
+            Some(crate::thinking::ThinkingLevel::High)
+        );
 
         let mut rewritten = definition(1);
         rewritten.instructions = "Changed without a revision bump.".into();

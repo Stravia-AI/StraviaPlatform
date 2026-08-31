@@ -61,7 +61,9 @@ const POSTGRES_SCHEMA_SQL: &str = concat!(
     "\n",
     include_str!("../../stravia-core/migrations/postgres/0024_derive_route_thinking_levels.sql"),
     "\n",
-    include_str!("../../stravia-core/migrations/postgres/0025_request_log_usage_details.sql")
+    include_str!("../../stravia-core/migrations/postgres/0025_request_log_usage_details.sql"),
+    "\n",
+    include_str!("../../stravia-core/migrations/postgres/0026_agent_definition_thinking_level.sql")
 );
 const POSTGRES_SCHEMA_HEADER: &str = "\
 -- Stravia AI Gateway - PostgreSQL Final Schema

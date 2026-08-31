@@ -418,6 +418,7 @@ async fn media_test_app() -> (TestApp, crate::agent::ArtifactId, Arc<AtomicUsize
         .update_media_understanding_config(crate::admin::MediaUnderstandingConfigUpdate {
             enabled: true,
             model_id: Some(model.id),
+            thinking_level: Some(crate::thinking::ThinkingLevel::Medium),
         })
         .await
         .expect("enable Media Understanding");
@@ -752,6 +753,7 @@ async fn media_platform_gate_removes_the_tool_from_mcp_discovery() {
         .update_media_understanding_config(crate::admin::MediaUnderstandingConfigUpdate {
             enabled: false,
             model_id: current.model_id,
+            thinking_level: current.thinking_level,
         })
         .await
         .expect("disable Media Understanding");

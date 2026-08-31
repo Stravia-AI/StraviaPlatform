@@ -611,7 +611,7 @@ generic `agent_<slug>` 本身不增加 per-key capability allowlist；产品 cap
 | 实体 | 关键字段 | 说明 |
 |---|---|---|
 | Agent Definition Revision | definition_id、slug、version、spec_hash、spec_json、created_at | 程序注册的 immutable spec |
-| Agent Definition Config | definition_id、enabled、model_id、updated_at | Admin 唯一可改字段 |
+| Agent Definition Config | definition_id、enabled、model_id、thinking_level、updated_at | Admin 唯一可改字段 |
 | Turn Chain Node | node_id、kind、parent_id、principal、payload_version、payload、expires_at | kind 至少 response/agent |
 | Artifact | artifact_id、principal、mime、size、backend_key、state、expires_at | opaque public ID；当前 backend 为 LocalFS |
 | Artifact Upload | upload_id、artifact_id、principal、token_hash、declared/received size、expires_at | authenticated multipart staging |

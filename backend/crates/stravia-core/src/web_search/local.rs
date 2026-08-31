@@ -580,6 +580,7 @@ mod tests {
                 AgentDefinitionConfig {
                     enabled: true,
                     model_id: Some("model-1".into()),
+                    thinking_level: None,
                 },
             )
             .await

@@ -98,6 +98,7 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
         .update_media_understanding_config(crate::admin::MediaUnderstandingConfigUpdate {
             enabled: true,
             model_id: Some(media_model.id),
+            thinking_level: Some(crate::thinking::ThinkingLevel::Medium),
         })
         .await
         .expect("enable Media Understanding");

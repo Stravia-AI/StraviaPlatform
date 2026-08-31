@@ -41,6 +41,7 @@ describe('client configuration generation', () => {
 
   test('masks API Keys consistently without exposing most of the prefix', () => {
     expect(maskApiKey('sk-d787f8575abcdef4482')).toBe('sk-d78••••••••4482')
+    expect(maskApiKey('sk-short-key')).toBe('••••••••••••')
   })
 
   test('generates Open Responses examples for every code language', () => {

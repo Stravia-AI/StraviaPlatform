@@ -169,18 +169,24 @@ impl AgentDefinitionStore for SqlAgentDefinitionStore {
                 .execute(&mut *transaction)
                 .await
                 .map_err(|error| AgentDefinitionError::Storage(error.to_string()))?;
-                let (enabled, model_id): (bool, Option<String>) = sqlx::query_as(
-                    "SELECT enabled, model_id FROM agent_definition_configs WHERE definition_id = ?",
-                )
-                .bind(spec.id.as_str())
-                .fetch_one(&mut *transaction)
-                .await
-                .map_err(|error| AgentDefinitionError::Storage(error.to_string()))?;
+                let (enabled, model_id, thinking_level): (bool, Option<String>, Option<String>) =
+                    sqlx::query_as(
+                        "SELECT enabled, model_id, thinking_level FROM agent_definition_configs \
+                         WHERE definition_id = ?",
+                    )
+                    .bind(spec.id.as_str())
+                    .fetch_one(&mut *transaction)
+                    .await
+                    .map_err(|error| AgentDefinitionError::Storage(error.to_string()))?;
                 transaction
                     .commit()
                     .await
                     .map_err(|error| AgentDefinitionError::Storage(error.to_string()))?;
-                Ok(AgentDefinitionConfig { enabled, model_id })
+                Ok(AgentDefinitionConfig {
+                    enabled,
+                    model_id,
+                    thinking_level: decode_thinking_level(thinking_level)?,
+                })
             }
             Self::Postgres(pool) => {
                 let mut transaction = pool
@@ -224,18 +230,24 @@ impl AgentDefinitionStore for SqlAgentDefinitionStore {
                 .execute(&mut *transaction)
                 .await
                 .map_err(|error| AgentDefinitionError::Storage(error.to_string()))?;
-                let (enabled, model_id): (bool, Option<String>) = sqlx::query_as(
-                    "SELECT enabled, model_id FROM agent_definition_configs WHERE definition_id = $1",
-                )
-                .bind(spec.id.as_str())
-                .fetch_one(&mut *transaction)
-                .await
-                .map_err(|error| AgentDefinitionError::Storage(error.to_string()))?;
+                let (enabled, model_id, thinking_level): (bool, Option<String>, Option<String>) =
+                    sqlx::query_as(
+                        "SELECT enabled, model_id, thinking_level FROM agent_definition_configs \
+                         WHERE definition_id = $1",
+                    )
+                    .bind(spec.id.as_str())
+                    .fetch_one(&mut *transaction)
+                    .await
+                    .map_err(|error| AgentDefinitionError::Storage(error.to_string()))?;
                 transaction
                     .commit()
                     .await
                     .map_err(|error| AgentDefinitionError::Storage(error.to_string()))?;
-                Ok(AgentDefinitionConfig { enabled, model_id })
+                Ok(AgentDefinitionConfig {
+                    enabled,
+                    model_id,
+                    thinking_level: decode_thinking_level(thinking_level)?,
+                })
             }
         }
     }
@@ -280,22 +292,26 @@ impl AgentDefinitionStore for SqlAgentDefinitionStore {
         let now = chrono::Utc::now().timestamp_millis();
         let rows = match self {
             Self::Sqlite(pool) => sqlx::query(
-                "UPDATE agent_definition_configs SET enabled = ?, model_id = ?, updated_at = ? \
+                "UPDATE agent_definition_configs \
+                 SET enabled = ?, model_id = ?, thinking_level = ?, updated_at = ? \
                  WHERE definition_id = ?",
             )
             .bind(config.enabled)
             .bind(&config.model_id)
+            .bind(config.thinking_level.map(|level| level.as_str()))
             .bind(now)
             .bind(id.as_str())
             .execute(pool)
             .await
             .map(|result| result.rows_affected()),
             Self::Postgres(pool) => sqlx::query(
-                "UPDATE agent_definition_configs SET enabled = $1, model_id = $2, updated_at = $3 \
-                 WHERE definition_id = $4",
+                "UPDATE agent_definition_configs \
+                 SET enabled = $1, model_id = $2, thinking_level = $3, updated_at = $4 \
+                 WHERE definition_id = $5",
             )
             .bind(config.enabled)
             .bind(&config.model_id)
+            .bind(config.thinking_level.map(|level| level.as_str()))
             .bind(now)
             .bind(id.as_str())
             .execute(pool)
@@ -308,6 +324,17 @@ impl AgentDefinitionStore for SqlAgentDefinitionStore {
         }
         Ok(config)
     }
+}
+
+fn decode_thinking_level(
+    value: Option<String>,
+) -> Result<Option<crate::thinking::ThinkingLevel>, AgentDefinitionError> {
+    value
+        .map(|value| {
+            crate::thinking::ThinkingLevel::from_wire(&value)
+                .map_err(|error| AgentDefinitionError::Storage(error.to_string()))
+        })
+        .transpose()
 }
 
 fn revision_mismatch(spec: &AgentDefinitionSpec) -> AgentDefinitionError {

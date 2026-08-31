@@ -1161,3 +1161,7 @@ DROP COLUMN supported_thinking_levels;
 
 ALTER TABLE request_logs ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE request_logs ADD COLUMN thinking_level TEXT;
+
+ALTER TABLE agent_definition_configs
+ADD COLUMN thinking_level TEXT
+CHECK (thinking_level IN ('off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'));

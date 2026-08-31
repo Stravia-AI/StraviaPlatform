@@ -132,7 +132,7 @@ export function apiKeyAllowsModel(modelIds: readonly string[], modelId: string):
 }
 
 export function maskApiKey(key: string): string {
-  return key.length <= 14 ? key : `${key.slice(0, 12)}••`
+  return key.length <= 14 ? '••••••••••••' : `${key.slice(0, 6)}••••••••${key.slice(-4)}`
 }
 
 export function protocolLabel(protocol: GatewayProtocol): string {

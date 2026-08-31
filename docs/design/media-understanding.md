@@ -1,7 +1,7 @@
 # Media Understanding 设计
 
 > 状态：已实施
-> 更新：2026-08-17
+> 更新：2026-08-31
 > 相关决策：[ADR-0009](../adr/0009-add-media-understanding-as-capability-tool.md)、[ADR-0016](../adr/0016-gate-advanced-capabilities-and-separate-transparent-injection.md)
 
 ## 1. 结论
@@ -93,7 +93,7 @@ Media Understanding 使用 `id = "media-understanding"` 的 internal Agent Defin
 - `MediaOutputValidator` 的 Artifact provenance；
 - `TurnChainStore` 的 continuation 和 branch。
 
-管理员配置的逻辑 Model 必须启用，且其可用 Target 支持图片输入。隐藏 Media Model 不需要出现在 API Key 的普通 `model_ids` 中；平台 Gate 开启后，有效 Key 通过 capability-owned authorization 间接执行它，但不能把该隐藏 Model 当普通客户端 Model 直接调用。
+管理员配置的逻辑 Model 必须启用，且每个 Target 都必须支持图片输入。管理员还必须从该逻辑 Model 的 `supported_thinking_levels` 中选择思考等级；每次内部 Model Turn 都携带该等级。隐藏 Media Model 不需要出现在 API Key 的普通 `model_ids` 中；平台 Gate 开启后，有效 Key 通过 capability-owned authorization 间接执行它，但不能把该隐藏 Model 当普通客户端 Model 直接调用。
 
 ## 6. 当前图片处理边界
 
@@ -138,6 +138,7 @@ WebUI route：
 
 - enabled；
 - logical Model；
+- Thinking Level；
 - effective state：`disabled` / `unavailable` / `available`；
 - Save。
 
@@ -145,7 +146,7 @@ WebUI route：
 
 ## 9. Persistence 与升级
 
-Media Definition、Agent Turn、Artifact 与 `media_derivatives` 继续使用既有 schema。migration 18 把 API Key 权限改为：
+Media Definition、Agent Turn、Artifact 与 `media_derivatives` 继续使用既有 schema。migration 26 为 `agent_definition_configs` 增加 nullable `thinking_level`；启用 Media Understanding 时，专用 Admin API 要求该值属于所选逻辑 Model 的支持等级。migration 18 把 API Key 权限改为：
 
 - `mcp_access_enabled`；
 - `transparent_injection_enabled`；
@@ -162,6 +163,8 @@ Media Definition、Agent Turn、Artifact 与 `media_derivatives` 继续使用既
 - Transparent Injection 关闭时显式 MCP 仍可用；
 - Gate 关闭时保存的注入选择保留但不生效；
 - native vision Target 优先于 bridge；
+- 只有每个 Target 都支持图片输入的已启用逻辑 Model 才会出现在配置列表；
+- 配置的思考等级必须由逻辑 Model 的每个 Target 支持，并应用到每次内部 Model Turn；
 - 无 native Target 时 bridge 仍可执行完整 Media Report；
 - JPEG/PNG/WebP 成功，不支持的未来格式返回明确错误；
 - WebUI 只显示核心配置和 effective state。

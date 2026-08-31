@@ -221,6 +221,7 @@ async fn enabled_registry() -> AgentDefinitionRegistry {
             AgentDefinitionConfig {
                 enabled: true,
                 model_id: Some("model-1".into()),
+                thinking_level: Some(crate::thinking::ThinkingLevel::Medium),
             },
         )
         .await
@@ -299,6 +300,9 @@ async fn runner_executes_tool_loop_commits_turn_and_emits_one_terminal_event() {
     assert_eq!(chain.len(), 1);
     let requests = model.requests();
     assert_eq!(requests.len(), 2);
+    assert!(requests.iter().all(|request| {
+        request.reasoning.level == Some(crate::thinking::ThinkingLevel::Medium)
+    }));
     assert_eq!(
         request_session_fingerprint(&requests[0]),
         request_session_fingerprint(&requests[1]),
@@ -347,6 +351,7 @@ async fn model_turn_budget_reserves_a_no_tool_finalization_turn() {
             AgentDefinitionConfig {
                 enabled: true,
                 model_id: Some("model-1".into()),
+                thinking_level: None,
             },
         )
         .await

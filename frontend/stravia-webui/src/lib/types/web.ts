@@ -1,3 +1,5 @@
+import type { ThinkingLevel } from './route'
+
 export type WebProviderKind = 'exa' | 'brave' | 'tavily' | 'zhipu'
 
 export interface WebProvider {
@@ -61,6 +63,7 @@ export interface EligibleSearchModel {
 export interface EligibleMediaModel {
   id: string
   name: string
+  supported_thinking_levels: ThinkingLevel[]
 }
 
 export interface CompatibleCodexProvider {
@@ -74,6 +77,7 @@ export type MediaUnderstandingState = 'disabled' | 'unavailable' | 'available'
 export interface MediaUnderstandingConfigView {
   enabled: boolean
   model_id?: string | null
+  thinking_level?: ThinkingLevel | null
   state: MediaUnderstandingState
   eligible_models: EligibleMediaModel[]
 }
@@ -81,4 +85,5 @@ export interface MediaUnderstandingConfigView {
 export interface UpdateMediaUnderstandingConfig {
   enabled: boolean
   model_id?: string | null
+  thinking_level?: ThinkingLevel | null
 }

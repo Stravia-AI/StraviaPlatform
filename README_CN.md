@@ -87,7 +87,7 @@ Route Builder 使用独立页面。选择 Provider 后会自动加载其可用 P
 
 Media Understanding 公开一个用于静态 JPEG、PNG 与 WebP 图片的 `understand_media` 能力。若父 Route 存在支持图片的 Target，Stravia 会原样发送图片；否则，支持工具的父 Model 可调用已配置的隐藏视觉 Model，并获得包含 source ArtifactId 与可分支 `turn_id` 的强校验 Media Report。原生视觉 Route 失败后不会 fallback 到隐藏 Model。
 
-在**多模态理解**页面启用平台能力并选择一个逻辑视觉 Model；该 Model 的每个 Target 都必须明确声明图片输入能力。启用后，所有有效 API Key 都能显式调用 `understand_media`；MCP 访问和透明注入仍由每个 Key 独立控制。隐藏调用计入调用方配额，但不会授予视觉 Model 的直接访问权。外部图片 URL 仅允许公网 HTTPS 目标，并会在使用前创建 snapshot。预处理始终生成有界的有损 JPEG derivative，忽略 ICC profile，因此精确颜色或细小文本 OCR 可能不准确。
+在**多模态理解**页面启用平台能力、选择逻辑 Model 并设置思考等级。选择器只列出所有 Target 都明确声明图片输入能力的已启用 Model；思考等级选择器只列出每个 Target 都支持的等级。启用后，所有有效 API Key 都能显式调用 `understand_media`；MCP 访问和透明注入仍由每个 Key 独立控制。隐藏调用计入调用方配额，但不会授予所选 Model 的直接访问权。外部图片 URL 仅允许公网 HTTPS 目标，并会在使用前创建 snapshot。预处理始终生成有界的有损 JPEG derivative，忽略 ICC profile，因此精确颜色或细小文本 OCR 可能不准确。
 
 ### 本地管理
 

@@ -37,6 +37,7 @@ struct ParentAgentSnapshot {
     definition_id: AgentDefinitionId,
     definition_revision: u32,
     model_id: String,
+    thinking_level: Option<crate::thinking::ThinkingLevel>,
 }
 
 impl AgentRunner {
@@ -112,6 +113,19 @@ impl AgentRunner {
             .filter(|record| record.config.enabled)
             .and_then(|record| record.config.model_id)
     }
+
+    pub(crate) async fn definition_model_with_thinking_level(
+        &self,
+        id: &AgentDefinitionId,
+    ) -> Option<(String, crate::thinking::ThinkingLevel)> {
+        self.definitions
+            .get_current(id)
+            .await
+            .ok()
+            .filter(|record| record.config.enabled)
+            .and_then(|record| record.config.model_id.zip(record.config.thinking_level))
+    }
+
     pub(crate) async fn parent_artifact_ids(
         &self,
         principal: &Principal,
@@ -248,7 +262,7 @@ impl AgentRunner {
                 input.parent_turn_id.as_ref(),
             ) => result?,
         };
-        let (record, model_id) = if let Some(resolved) = resolved {
+        let (record, model_id, thinking_level) = if let Some(resolved) = resolved {
             if input.parent_turn_id.is_some() {
                 return Err(AgentRunError::new(
                     "ephemeral_parent_not_allowed",
@@ -276,6 +290,7 @@ impl AgentRunner {
                     config: crate::agent::AgentDefinitionConfig::default(),
                 },
                 resolved.model_id,
+                None,
             )
         } else if let Some(snapshot) = parent_snapshot {
             if snapshot.definition_id != input.definition_id {
@@ -309,6 +324,7 @@ impl AgentRunner {
                     config: crate::agent::AgentDefinitionConfig::default(),
                 },
                 snapshot.model_id,
+                snapshot.thinking_level,
             )
         } else {
             let record = self
@@ -325,7 +341,8 @@ impl AgentRunner {
             let model_id = record.config.model_id.clone().ok_or_else(|| {
                 AgentRunError::new("model_unavailable", "Agent Definition has no bound Model")
             })?;
-            (record, model_id)
+            let thinking_level = record.config.thinking_level;
+            (record, model_id, thinking_level)
         };
         let started_at = Instant::now();
         let deadline = started_at + record.spec.budgets.total_wall_time;
@@ -431,6 +448,7 @@ impl AgentRunner {
         let model_instructions = model_instructions(&record.spec);
         let mut initial_request = AiRequest::new(&model_id, model_transcript.clone());
         initial_request.instructions = Some(model_instructions.clone());
+        initial_request.reasoning.level = thinking_level;
         initial_request.tools = (!allowed_tools.is_empty()).then_some(allowed_tools.clone());
         crate::generation_chain::set_generation_session_id(
             &mut initial_request,
@@ -511,6 +529,7 @@ impl AgentRunner {
 
             let mut request = AiRequest::new(&model_id, model_transcript.clone());
             request.instructions = Some(model_instructions.clone());
+            request.reasoning.level = thinking_level;
             crate::generation_chain::set_generation_session_id(
                 &mut request,
                 generation_session_id.as_str(),
@@ -769,6 +788,7 @@ impl AgentRunner {
                             &input,
                             &record,
                             &model_id,
+                            thinking_level,
                             &turn_id,
                             &transcript,
                             &result,
@@ -1233,12 +1253,22 @@ impl AgentRunner {
             .ok_or_else(|| {
                 AgentRunError::new("parent_turn_invalid", "Parent Turn has no Model snapshot")
             })?;
+        let thinking_level = payload
+            .payload
+            .get("thinking_level")
+            .map(|value| {
+                serde_json::from_value::<Option<crate::thinking::ThinkingLevel>>(value.clone())
+                    .map_err(|error| AgentRunError::new("parent_turn_invalid", error.to_string()))
+            })
+            .transpose()?
+            .flatten();
         Ok(ParentAgentContext {
             transcript,
             snapshot: Some(ParentAgentSnapshot {
                 definition_id,
                 definition_revision: revision,
                 model_id,
+                thinking_level,
             }),
             root_turn_id: Some(root_turn_id),
         })
@@ -1249,6 +1279,7 @@ impl AgentRunner {
         input: &AgentInput,
         record: &crate::agent::AgentDefinitionRecord,
         model_id: &str,
+        thinking_level: Option<crate::thinking::ThinkingLevel>,
         turn_id: &AgentTurnId,
         transcript: &[AiItem],
         result: &AgentResult,
@@ -1264,6 +1295,7 @@ impl AgentRunner {
                     "definition_id": record.spec.id.as_str(),
                     "definition_revision": record.spec.revision,
                     "model_id": model_id,
+                    "thinking_level": thinking_level,
                     "transcript": transcript,
                     "completion": result.completion,
                     "output": result.output,
