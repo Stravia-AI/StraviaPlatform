@@ -9,7 +9,7 @@ import {
   maskApiKey,
   type ClientModelDefinition,
 } from '../src/lib/connect'
-import type { Model } from '../src/lib/types'
+import type { Route } from '../src/lib/types'
 
 const models: ClientModelDefinition[] = [
   {
@@ -375,7 +375,7 @@ describe('client configuration generation', () => {
       context_window: 128_000,
       output_max_tokens: 32_000,
       targets: [],
-    } satisfies Model
+    } satisfies Route
 
     expect(defineClientModel(model)).toEqual({
       name: 'shared-model',

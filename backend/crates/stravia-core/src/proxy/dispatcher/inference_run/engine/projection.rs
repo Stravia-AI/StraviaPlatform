@@ -119,7 +119,8 @@ impl ClientProjector {
                 obfuscation,
             ),
             AiStreamDelta::ItemDone { index, item } => {
-                let unindexed_text_item = self.span_carrier == Some(ProjectionSpanCarrier::Unindexed)
+                let unindexed_text_item = self.span_carrier
+                    == Some(ProjectionSpanCarrier::Unindexed)
                     && item.role == Role::Assistant
                     && item.tool_calls.is_none()
                     && item.reasoning_ref().is_none()
@@ -174,10 +175,7 @@ impl ClientProjector {
         };
         let ordinal = self.span_ordinal;
         self.span_ordinal += 1;
-        vec![carrier.delta(
-            render_text_projection_end(self.reference(), ordinal),
-            None,
-        )]
+        vec![carrier.delta(render_text_projection_end(self.reference(), ordinal), None)]
     }
 
     /// Visible preview deltas for a completed protected Thinking block. The
@@ -198,7 +196,9 @@ impl ClientProjector {
             ContentBlock::Thinking { thinking, .. } => {
                 vec![AiStreamDelta::ThinkingDelta(thinking.clone())]
             }
-            ContentBlock::Reasoning { summary, content, .. } => summary
+            ContentBlock::Reasoning {
+                summary, content, ..
+            } => summary
                 .iter()
                 .enumerate()
                 .map(|(ordinal, text)| AiStreamDelta::ReasoningSummaryDelta {
@@ -216,7 +216,9 @@ impl ClientProjector {
                     }
                 }))
                 .collect(),
-            other => unreachable!("protected Thinking preview remains a reasoning block: {other:?}"),
+            other => {
+                unreachable!("protected Thinking preview remains a reasoning block: {other:?}")
+            }
         }
     }
 
@@ -359,7 +361,9 @@ impl ClientProjector {
             ContentBlock::Thinking { thinking, .. } => {
                 *thinking = render_preview_projection_span(&marker.reference, 0, thinking);
             }
-            ContentBlock::Reasoning { summary, content, .. } => {
+            ContentBlock::Reasoning {
+                summary, content, ..
+            } => {
                 for (ordinal, text) in summary.iter_mut().chain(content).enumerate() {
                     *text = render_preview_projection_span(&marker.reference, ordinal, text);
                 }
@@ -468,13 +472,17 @@ mod tests {
         }));
         deltas.extend(live.close_span());
         assert!(
-            !deltas.iter().any(|delta| matches!(delta, AiStreamDelta::ItemDone { .. })),
+            !deltas
+                .iter()
+                .any(|delta| matches!(delta, AiStreamDelta::ItemDone { .. })),
             "the projected Text item's completion must be consumed"
         );
 
         let mut staged = ClientProjector::new();
-        let staged_items =
-            staged.project_items(vec![item], &[("call-1", &platform_marker("hm_0123456789abcdefghij"))]);
+        let staged_items = staged.project_items(
+            vec![item],
+            &[("call-1", &platform_marker("hm_0123456789abcdefghij"))],
+        );
 
         // Staged projection frames each Text block as its own Thinking item;
         // the identity both paths share is the delivered byte sequence.
@@ -493,7 +501,10 @@ mod tests {
         // per block: start, visible, end — with identical span ordinals.
         let live_text = delta_texts(&deltas);
         assert_eq!(live_text, staged_text);
-        assert!(staged_text.contains(":text:0:start -->first"), "{staged_text}");
+        assert!(
+            staged_text.contains(":text:0:start -->first"),
+            "{staged_text}"
+        );
         assert!(staged_text.contains(":text:1:end -->"), "{staged_text}");
     }
 
@@ -574,7 +585,10 @@ mod tests {
             .expect("empty signed Thinking keeps a visible preview");
 
         match staged {
-            ContentBlock::Thinking { thinking, signature } => {
+            ContentBlock::Thinking {
+                thinking,
+                signature,
+            } => {
                 assert_eq!(signature, None);
                 assert_eq!(live_text, thinking);
             }
@@ -601,9 +615,14 @@ mod tests {
             .expect("signed Thinking keeps a visible preview");
 
         match visible {
-            ContentBlock::Thinking { thinking, signature } => {
+            ContentBlock::Thinking {
+                thinking,
+                signature,
+            } => {
                 assert_eq!(signature, None);
-                assert!(thinking.contains(&format!("{PROJECTION_DELIMITER_PREFIX}hm_0123456789abcdefghij:preview:0:start")));
+                assert!(thinking.contains(&format!(
+                    "{PROJECTION_DELIMITER_PREFIX}hm_0123456789abcdefghij:preview:0:start"
+                )));
                 assert!(thinking.contains("hidden"));
             }
             other => panic!("unexpected visible block: {other:?}"),

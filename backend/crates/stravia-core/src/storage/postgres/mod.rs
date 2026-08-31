@@ -6,18 +6,17 @@ use sqlx::{Pool, Postgres, postgres::PgPoolOptions};
 use std::time::Duration;
 
 use crate::db::models::{
-    ApiKey, ApiKeyStats, ApiKeyWithBindings, CreateApiKey, CreateModel, CreateModelBackend,
-    CreateProviderRecord, LogPage, LogQuery, Model, ModelBackend, ModelStats, OAuthCredential,
-    Provider, ProviderStats, RequestLog, StatsHourly, StatsOverview, UpdateApiKey, UpdateModel,
-    UpdateProvider, UpsertOAuthCredential, is_valid_provider_auth_mode,
+    ApiKey, ApiKeyStats, ApiKeyWithBindings, CreateApiKey, CreateProviderRecord, LogPage, LogQuery,
+    ModelStats, OAuthCredential, Provider, ProviderStats, PutRoute, RequestLog, Route, StatsHourly,
+    StatsOverview, Target, UpdateApiKey, UpdateProvider, UpsertOAuthCredential,
+    is_valid_provider_auth_mode,
 };
 use crate::logging::LogEntry;
 use crate::storage::sql::config::SqlBackendConfig;
 use crate::storage::traits::{
-    ApiKeyAccessRecord, ApiKeyStore, AuthAccessStore, LogStore, ModelBackendStore,
-    ModelSnapshotStore, ModelStore, OAuthCredentialStore, ProviderModelStore, ProviderStore,
-    ProviderTestResult, SettingsStore, Storage, StorageBackend, StorageBootstrap, StorageHealth,
-    WebProviderStore,
+    ApiKeyAccessRecord, ApiKeyStore, AuthAccessStore, LogStore, OAuthCredentialStore,
+    ProviderModelStore, ProviderStore, ProviderTestResult, RouteStore, SettingsStore, Storage,
+    StorageBackend, StorageBootstrap, StorageHealth, WebProviderStore,
 };
 mod provider_models;
 mod web_providers;
@@ -78,8 +77,7 @@ pub struct PostgresStorage {
     pool: Pool<Postgres>,
     provider_store: Arc<PostgresProviderStore>,
     web_provider_store: Arc<PostgresWebProviderStore>,
-    model_store: Arc<PostgresModelStore>,
-    model_backend_store: Arc<PostgresModelBackendStore>,
+    model_store: Arc<PostgresRouteStore>,
     settings_store: Arc<PostgresSettingsStore>,
     api_key_store: Arc<PostgresApiKeyStore>,
     auth_store: Arc<PostgresAuthAccessStore>,
@@ -94,8 +92,7 @@ impl PostgresStorage {
         let pool = adapter.pool().clone();
         let provider_store = Arc::new(PostgresProviderStore { pool: pool.clone() });
         let web_provider_store = Arc::new(PostgresWebProviderStore { pool: pool.clone() });
-        let model_store = Arc::new(PostgresModelStore { pool: pool.clone() });
-        let model_backend_store = Arc::new(PostgresModelBackendStore { pool: pool.clone() });
+        let model_store = Arc::new(PostgresRouteStore { pool: pool.clone() });
         let settings_store = Arc::new(PostgresSettingsStore { pool: pool.clone() });
         let api_key_store = Arc::new(PostgresApiKeyStore { pool: pool.clone() });
         let auth_store = Arc::new(PostgresAuthAccessStore { pool: pool.clone() });
@@ -107,7 +104,6 @@ impl PostgresStorage {
             provider_store,
             web_provider_store,
             model_store,
-            model_backend_store,
             settings_store,
             api_key_store,
             auth_store,
@@ -131,20 +127,12 @@ impl Storage for PostgresStorage {
         Some(self.web_provider_store.as_ref())
     }
 
-    fn models(&self) -> &dyn ModelStore {
-        self.model_store.as_ref()
-    }
-
-    fn snapshots(&self) -> &dyn ModelSnapshotStore {
+    fn routes(&self) -> &dyn RouteStore {
         self.model_store.as_ref()
     }
 
     fn settings(&self) -> &dyn SettingsStore {
         self.settings_store.as_ref()
-    }
-
-    fn model_backends(&self) -> Option<&dyn ModelBackendStore> {
-        Some(self.model_backend_store.as_ref())
     }
 
     fn provider_models(&self) -> &dyn ProviderModelStore {
@@ -175,15 +163,15 @@ impl Storage for PostgresStorage {
 mod api_keys;
 mod bootstrap;
 mod logs;
-mod models;
 mod oauth;
 mod providers;
+mod routes;
 mod settings;
 
 use api_keys::*;
 use bootstrap::*;
 use logs::*;
-use models::*;
 use oauth::*;
 use providers::*;
+use routes::*;
 use settings::*;

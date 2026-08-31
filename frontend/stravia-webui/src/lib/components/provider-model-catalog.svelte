@@ -21,7 +21,7 @@ import { getDataTableLabels } from '$lib/data-table-labels'
 import { formatNumber, formatTime } from '$lib/format'
 import { localeState } from '$lib/localization.svelte'
 import type {
-  Model,
+  Route,
   PreparedProviderModel,
   ProviderModelDetail,
   ProviderModelSelectionPolicy,
@@ -50,7 +50,7 @@ import { Spinner } from '$lib/components/ui/spinner'
 
 interface Props {
   providerId: string
-  routes: Model[]
+  routes: Route[]
   routeReferencesReady: boolean
   syncedAt?: Date
   syncedSummary?: ProviderModelSyncSummary
@@ -216,7 +216,7 @@ $effect(() => {
   }
 })
 
-function modelReferences(modelId: string): Array<{ route: Model; target: Model['targets'][number] }> {
+function modelReferences(modelId: string): Array<{ route: Route; target: Route['targets'][number] }> {
   return routes.flatMap((route) =>
     route.targets
       .filter((target) => target.provider_id === providerId && target.model === modelId)
@@ -224,7 +224,7 @@ function modelReferences(modelId: string): Array<{ route: Model; target: Model['
   )
 }
 
-function routeForModel(modelId: string): Model | undefined {
+function routeForModel(modelId: string): Route | undefined {
   return routes.find((route) => route.name === modelId)
 }
 
@@ -1053,7 +1053,7 @@ async function deleteManualModel(): Promise<void> {
         {#each selectedReferences as reference (reference.target.id)}
           <a
             class="flex min-h-10 items-center rounded-md px-2 font-medium hover:bg-muted"
-            href={resolve('/models/[id]', { id: reference.route.id })}
+            href={resolve('/models/[id]', { id: reference.route.name })}
             >{reference.route.name} · {reference.target.model}</a>
         {/each}
       </div>

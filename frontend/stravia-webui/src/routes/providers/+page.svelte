@@ -12,7 +12,7 @@ import { admin } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
 import { getDataTableLabels } from '$lib/data-table-labels'
 import { formatDuration } from '$lib/format'
-import type { ImageCapabilityDrift, Model, Provider } from '$lib/types'
+import type { ImageCapabilityDrift, Provider, Route } from '$lib/types'
 import PageHeader from '$lib/components/page-header.svelte'
 import ProviderEditor from '$lib/components/provider-editor.svelte'
 import ProviderMark from '$lib/components/provider-mark.svelte'
@@ -134,7 +134,7 @@ function handleProviderTableRowClick({ event, original }: DataTableRowPointerEve
   openProvider(original, event)
 }
 
-function providerReferences(provider: Provider): Array<{ route: Model; target: Model['targets'][number] }> {
+function providerReferences(provider: Provider): Array<{ route: Route; target: Route['targets'][number] }> {
   return models.flatMap((route) =>
     route.targets.filter((target) => target.provider_id === provider.id).map((target) => ({ route, target })),
   )
@@ -457,7 +457,7 @@ async function copyProvider(): Promise<void> {
         {#each references as reference (reference.target.id)}
           <a
             class="flex min-h-10 items-center justify-between gap-3 rounded-md px-2 hover:bg-muted"
-            href={resolve('/models/[id]', { id: reference.route.id })}>
+            href={resolve('/models/[id]', { id: reference.route.name })}>
             <span class="font-medium">{reference.route.name} · {reference.target.model}</span>
             <span class="text-xs text-muted-foreground">{m.providers_change_service()}</span>
           </a>

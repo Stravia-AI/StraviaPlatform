@@ -6,9 +6,15 @@ use crate::provider_models::{
 };
 use crate::thinking::{ThinkingLevel, ThinkingMappingSource, generate_thinking_level_map};
 
+mod model_discovery;
 mod model_records;
 mod provider_model_records;
+use model_discovery::{
+    HttpProviderModelDiscovery, ProviderModelDiscovery, RouteModelDiscoveryError,
+};
 use provider_model_records::PreparedProviderModel;
+
+static HTTP_PROVIDER_MODEL_DISCOVERY: HttpProviderModelDiscovery = HttpProviderModelDiscovery;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct BindRouteInput {
@@ -50,11 +56,22 @@ pub(crate) struct RouteUnbind {
 
 pub(crate) struct RouteModule<'a> {
     admin: &'a AdminService,
+    model_discovery: &'a dyn ProviderModelDiscovery,
 }
 
 impl<'a> RouteModule<'a> {
     pub(crate) fn new(admin: &'a AdminService) -> Self {
-        Self { admin }
+        Self::with_model_discovery(admin, &HTTP_PROVIDER_MODEL_DISCOVERY)
+    }
+
+    fn with_model_discovery(
+        admin: &'a AdminService,
+        model_discovery: &'a dyn ProviderModelDiscovery,
+    ) -> Self {
+        Self {
+            admin,
+            model_discovery,
+        }
     }
 
     pub(crate) async fn add_provider_model(
@@ -86,110 +103,27 @@ impl<'a> RouteModule<'a> {
     pub(crate) async fn discover_provider_model_ids(
         &self,
         provider_id: &str,
-    ) -> anyhow::Result<Vec<String>> {
-        let provider = self.admin.get_provider(provider_id).await?;
-        if uses_catalog_inventory(&provider) {
-            return self
-                .admin
-                .preset_catalog_models_for_provider(&provider)
-                .await?
-                .map(|catalog| catalog.models.into_iter().map(|model| model.id).collect())
-                .ok_or_else(|| anyhow::anyhow!("Catalog Provider identity is missing"));
-        }
-        let runtime = self.admin.resolve_provider_runtime(&provider).await?;
-        let credential = runtime.access_token.clone();
-        if let Some(static_list) = runtime.binding.static_models_override.as_deref() {
-            let models = static_list
-                .iter()
-                .map(|model| model.trim().to_string())
-                .filter(|model| !model.is_empty())
-                .collect::<Vec<_>>();
-            if !models.is_empty() {
-                return Ok(models);
-            }
-        }
-        let preset_static_models = preset_static_models(&provider);
-        if !preset_static_models.is_empty() {
-            return Ok(preset_static_models);
-        }
-        let endpoint = runtime
-            .binding
-            .models_source_override
-            .clone()
-            .or_else(|| resolve_models_endpoint(&provider))
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("Model Discovery URL is empty"))?;
-
-        let mut headers = if runtime.binding.disable_default_auth {
-            HeaderMap::new()
-        } else {
-            build_model_headers(&provider.protocol, provider.vendor.as_deref(), &credential)?
-        };
-        headers.extend(runtime_binding_headers(&runtime.binding)?);
-        let mut request = self
-            .admin
-            .gw
-            .http_client
-            .get(&endpoint)
-            .headers(headers)
-            .timeout(Duration::from_secs(10));
-        if provider.protocol == "gemini" && !runtime.binding.disable_default_auth {
-            let separator = if endpoint.contains('?') { '&' } else { '?' };
-            let mut headers =
-                build_model_headers(&provider.protocol, provider.vendor.as_deref(), &credential)?;
-            headers.extend(runtime_binding_headers(&runtime.binding)?);
-            request = self
-                .admin
-                .gw
-                .http_client
-                .get(format!("{endpoint}{separator}key={credential}"))
-                .headers(headers)
-                .timeout(Duration::from_secs(10));
-        }
-
-        let response = request
-            .send()
-            .await
-            .map_err(|error| anyhow::anyhow!(format_connectivity_error(&error)))?;
-        if !response.status().is_success() {
-            let status = response.status().as_u16();
-            let body = response.text().await.unwrap_or_default();
-            let preview = body.chars().take(200).collect::<String>();
-            anyhow::bail!("HTTP {status}: {preview}");
-        }
-        let json: Value = response.json().await.unwrap_or_default();
-        let models =
-            extract_models_from_response(&provider.protocol, provider.vendor.as_deref(), &json);
-        if models.is_empty() {
-            anyhow::bail!("Model list format is invalid or empty");
-        }
-        Ok(models)
+    ) -> Result<Vec<String>, RouteModelDiscoveryError> {
+        self.model_discovery.discover(self.admin, provider_id).await
     }
 
-    pub(crate) async fn create(&self, mut input: CreateModel) -> anyhow::Result<Model> {
-        let mut targets = normalize_create_model_backends(&input)?;
+    pub(crate) async fn create(&self, mut input: CreateRoute) -> anyhow::Result<Route> {
+        let mut targets = normalize_create_route_targets(&input)?;
         self.ensure_new_targets_available(&[], &targets).await?;
         self.prepare_thinking_maps(&[], &mut targets).await?;
         self.ensure_thinking_controls_representable(&targets)
             .await?;
         input.targets = targets;
-        self.admin.create_model_record(input).await
+        self.create_record(input).await
     }
 
     pub(crate) async fn change(
         &self,
-        route_storage_id: &str,
-        mut input: UpdateModel,
-    ) -> anyhow::Result<Model> {
-        let current = self
-            .admin
-            .list_models()
-            .await?
-            .into_iter()
-            .find(|route| route.id == route_storage_id)
-            .ok_or_else(|| anyhow::anyhow!("Route not found: {route_storage_id}"))?;
-        let mut targets = normalize_update_model_backends(&current, &input)?;
+        route_id: &str,
+        mut input: UpdateRoute,
+    ) -> anyhow::Result<Route> {
+        let current = self.get(route_id).await?;
+        let mut targets = normalize_update_route_targets(&current, &input)?;
         self.ensure_new_targets_available(&current.targets, &targets)
             .await?;
         self.prepare_thinking_maps(&current.targets, &mut targets)
@@ -199,7 +133,7 @@ impl<'a> RouteModule<'a> {
         input.targets = Some(
             targets
                 .iter()
-                .map(|target| UpsertModelBackend {
+                .map(|target| UpsertTarget {
                     id: None,
                     provider_id: target.provider_id.clone(),
                     model: target.model.clone(),
@@ -209,15 +143,13 @@ impl<'a> RouteModule<'a> {
                 })
                 .collect(),
         );
-        self.admin
-            .update_model_record(route_storage_id, input)
-            .await
+        self.change_record(route_id, input).await
     }
 
     async fn prepare_thinking_maps(
         &self,
-        existing: &[ModelBackend],
-        proposed: &mut [CreateModelBackend],
+        existing: &[Target],
+        proposed: &mut [CreateTarget],
     ) -> anyhow::Result<()> {
         for target in proposed {
             let current = existing.iter().find(|current| {
@@ -313,43 +245,28 @@ impl<'a> RouteModule<'a> {
 
     async fn ensure_thinking_controls_representable(
         &self,
-        targets: &[CreateModelBackend],
+        targets: &[CreateTarget],
     ) -> anyhow::Result<()> {
         for target in targets {
             let provider = self.admin.get_provider(target.provider_id.trim()).await?;
             for row in &target.thinking_level_map {
-                let representable = match provider.protocol.as_str() {
-                    "open-responses" => match &row.control {
-                        crate::thinking::TargetThinkingControl::Effort { .. } => true,
-                        crate::thinking::TargetThinkingControl::Disabled
-                        | crate::thinking::TargetThinkingControl::Hidden => true,
-                        _ => false,
-                    },
-                    "anthropic" | "anthropic-messages" | "anthropic-msgs" => {
-                        !matches!(
-                            row.control,
-                            crate::thinking::TargetThinkingControl::Effort { .. }
-                        ) || row.source == ThinkingMappingSource::Overridden
-                    }
-                    "gemini" | "google-gemini" | "google-genai" => true,
-                    "openai-compatible" | "openai-compat" | "openai" => match row.control {
-                        crate::thinking::TargetThinkingControl::Effort { .. }
-                        | crate::thinking::TargetThinkingControl::Hidden => true,
-                        crate::thinking::TargetThinkingControl::Enabled
-                        | crate::thinking::TargetThinkingControl::Disabled => {
-                            crate::provider::common::openai_compatible_thinking::supports_toggle(
+                let registry = crate::protocol::registry::ProtocolRegistry::global();
+                let representable = registry
+                    .protocol_represents_target_thinking_control(&provider.protocol, &row.control)
+                    || registry
+                        .parse_protocol(&provider.protocol)
+                        .is_some_and(|protocol| {
+                            protocol == crate::protocol::ids::Protocol::OpenAICompatible
+                            && matches!(
+                                row.control,
+                                crate::thinking::TargetThinkingControl::Enabled
+                                    | crate::thinking::TargetThinkingControl::Disabled
+                            )
+                            && crate::provider::common::openai_compatible_thinking::supports_toggle(
                                 &provider,
                                 &target.model,
                             )
-                        }
-                        _ => false,
-                    },
-                    _ => matches!(
-                        row.control,
-                        crate::thinking::TargetThinkingControl::Effort { .. }
-                            | crate::thinking::TargetThinkingControl::Hidden
-                    ),
-                };
+                        });
                 if !representable {
                     return Err(coded_error(
                         "THINKING_CONTROL_UNREPRESENTABLE",
@@ -369,36 +286,30 @@ impl<'a> RouteModule<'a> {
 
     pub(crate) async fn reset_thinking_mapping(
         &self,
-        route_storage_id: &str,
+        route_id: &str,
         target_id: &str,
         level: ThinkingLevel,
-    ) -> anyhow::Result<Model> {
-        self.replace_generated_thinking_rows(route_storage_id, target_id, Some(level))
+    ) -> anyhow::Result<Route> {
+        self.replace_generated_thinking_rows(route_id, target_id, Some(level))
             .await
     }
 
     pub(crate) async fn regenerate_thinking_map(
         &self,
-        route_storage_id: &str,
+        route_id: &str,
         target_id: &str,
-    ) -> anyhow::Result<Model> {
-        self.replace_generated_thinking_rows(route_storage_id, target_id, None)
+    ) -> anyhow::Result<Route> {
+        self.replace_generated_thinking_rows(route_id, target_id, None)
             .await
     }
 
     async fn replace_generated_thinking_rows(
         &self,
-        route_storage_id: &str,
+        route_id: &str,
         target_id: &str,
         only_level: Option<ThinkingLevel>,
-    ) -> anyhow::Result<Model> {
-        let route = self
-            .admin
-            .list_models()
-            .await?
-            .into_iter()
-            .find(|route| route.id == route_storage_id)
-            .ok_or_else(|| anyhow::anyhow!("Route not found: {route_storage_id}"))?;
+    ) -> anyhow::Result<Route> {
+        let route = self.get(route_id).await?;
         let target = route
             .targets
             .iter()
@@ -433,15 +344,14 @@ impl<'a> RouteModule<'a> {
             .collect::<Vec<_>>();
         self.ensure_thinking_controls_representable(&prepared)
             .await?;
-        self.admin
-            .update_model_record(
-                route_storage_id,
-                UpdateModel {
-                    targets: Some(targets),
-                    ..UpdateModel::default()
-                },
-            )
-            .await
+        self.change_record(
+            route_id,
+            UpdateRoute {
+                targets: Some(targets),
+                ..UpdateRoute::default()
+            },
+        )
+        .await
     }
 
     pub(crate) async fn refresh_generated_thinking_maps(
@@ -479,19 +389,18 @@ impl<'a> RouteModule<'a> {
                 .collect::<Vec<_>>();
             self.ensure_thinking_controls_representable(&prepared)
                 .await?;
-            changes.push((route.id, targets));
+            changes.push((route.name, targets));
         }
         if apply {
             for (route_id, targets) in changes {
-                self.admin
-                    .update_model_record(
-                        &route_id,
-                        UpdateModel {
-                            targets: Some(targets),
-                            ..UpdateModel::default()
-                        },
-                    )
-                    .await?;
+                self.change_record(
+                    &route_id,
+                    UpdateRoute {
+                        targets: Some(targets),
+                        ..UpdateRoute::default()
+                    },
+                )
+                .await?;
             }
         }
         Ok(())
@@ -499,8 +408,8 @@ impl<'a> RouteModule<'a> {
 
     async fn ensure_new_targets_available(
         &self,
-        existing: &[ModelBackend],
-        proposed: &[CreateModelBackend],
+        existing: &[Target],
+        proposed: &[CreateTarget],
     ) -> anyhow::Result<()> {
         for target in proposed {
             let provider_id = target.provider_id.trim();
@@ -568,7 +477,7 @@ impl<'a> RouteModule<'a> {
             let mut targets = route
                 .targets
                 .iter()
-                .map(|target| UpsertModelBackend {
+                .map(|target| UpsertTarget {
                     id: Some(target.id.clone()),
                     provider_id: target.provider_id.clone(),
                     model: target.model.clone(),
@@ -577,7 +486,7 @@ impl<'a> RouteModule<'a> {
                     thinking_level_map: target.thinking_level_map.0.clone(),
                 })
                 .collect::<Vec<_>>();
-            targets.extend(copied_targets.into_iter().map(|target| UpsertModelBackend {
+            targets.extend(copied_targets.into_iter().map(|target| UpsertTarget {
                 id: None,
                 provider_id: copied_provider_id.to_string(),
                 model: target.model,
@@ -587,10 +496,10 @@ impl<'a> RouteModule<'a> {
             }));
 
             self.change(
-                &route.id,
-                UpdateModel {
+                &route.name,
+                UpdateRoute {
                     targets: Some(targets),
-                    ..UpdateModel::default()
+                    ..UpdateRoute::default()
                 },
             )
             .await?;
@@ -645,11 +554,11 @@ impl<'a> RouteModule<'a> {
         }
     }
 
-    pub(crate) async fn delete(&self, route_storage_id: &str) -> anyhow::Result<()> {
-        self.admin.delete_model_record(route_storage_id).await
+    pub(crate) async fn delete(&self, route_id: &str) -> anyhow::Result<()> {
+        self.delete_record(route_id).await
     }
 
-    pub(crate) async fn bind(&self, input: RouteBind) -> anyhow::Result<Model> {
+    pub(crate) async fn bind(&self, input: RouteBind) -> anyhow::Result<Route> {
         let (route_id, provider_id, provider_model_id, weight, priority) = match input {
             RouteBind::OneClick {
                 provider_id,
@@ -674,12 +583,11 @@ impl<'a> RouteModule<'a> {
         };
         let route_id = normalize_name(&route_id, "model ID sent by clients")?;
         let provider_model_id = normalize_model_id(&provider_model_id)?;
-        let existing = self
-            .admin
-            .list_models()
-            .await?
-            .into_iter()
-            .find(|route| route.name.eq_ignore_ascii_case(&route_id));
+        let mut existing = self.admin.gw.storage.routes().get(&route_id).await?;
+        if let Some(route) = existing.as_mut() {
+            self.refresh_route_token_limits(std::slice::from_mut(route))
+                .await?;
+        }
         if let Some(existing) = existing.as_ref()
             && existing.targets.iter().any(|target| {
                 target.provider_id == provider_id && target.model == provider_model_id
@@ -719,12 +627,12 @@ impl<'a> RouteModule<'a> {
 
         let Some(existing) = existing else {
             return self
-                .create(CreateModel {
+                .create(CreateRoute {
                     name: route_id,
                     balance: Some("weighted".into()),
                     target_provider: provider_id.clone(),
                     target_model: provider_model_id.clone(),
-                    targets: vec![CreateModelBackend {
+                    targets: vec![CreateTarget {
                         provider_id,
                         model: provider_model_id,
                         weight: Some(weight),
@@ -745,7 +653,7 @@ impl<'a> RouteModule<'a> {
         let mut targets = existing
             .targets
             .iter()
-            .map(|target| UpsertModelBackend {
+            .map(|target| UpsertTarget {
                 id: Some(target.id.clone()),
                 provider_id: target.provider_id.clone(),
                 model: target.model.clone(),
@@ -754,7 +662,7 @@ impl<'a> RouteModule<'a> {
                 thinking_level_map: target.thinking_level_map.0.clone(),
             })
             .collect::<Vec<_>>();
-        targets.push(UpsertModelBackend {
+        targets.push(UpsertTarget {
             id: None,
             provider_id,
             model: provider_model_id,
@@ -763,24 +671,25 @@ impl<'a> RouteModule<'a> {
             thinking_level_map: Vec::new(),
         });
         self.change(
-            &existing.id,
-            UpdateModel {
+            &existing.name,
+            UpdateRoute {
                 targets: Some(targets),
-                ..UpdateModel::default()
+                ..UpdateRoute::default()
             },
         )
         .await
     }
 
-    pub(crate) async fn unbind(&self, input: RouteUnbind) -> anyhow::Result<Option<Model>> {
+    pub(crate) async fn unbind(&self, input: RouteUnbind) -> anyhow::Result<Option<Route>> {
         let route_id = normalize_name(&input.route_id, "model ID sent by clients")?;
         let provider_model_id = normalize_model_id(&input.provider_model_id)?;
         let route = self
             .admin
-            .list_models()
+            .gw
+            .storage
+            .routes()
+            .get(&route_id)
             .await?
-            .into_iter()
-            .find(|route| route.name.eq_ignore_ascii_case(&route_id))
             .ok_or_else(|| anyhow::anyhow!("Route not found: {route_id}"))?;
         let targets = route
             .targets
@@ -788,7 +697,7 @@ impl<'a> RouteModule<'a> {
             .filter(|target| {
                 target.provider_id != input.provider_id || target.model != provider_model_id
             })
-            .map(|target| UpsertModelBackend {
+            .map(|target| UpsertTarget {
                 id: Some(target.id.clone()),
                 provider_id: target.provider_id.clone(),
                 model: target.model.clone(),
@@ -801,14 +710,14 @@ impl<'a> RouteModule<'a> {
             return Ok(Some(route));
         }
         if targets.is_empty() {
-            self.delete(&route.id).await?;
+            self.delete(&route.name).await?;
             return Ok(None);
         }
         self.change(
-            &route.id,
-            UpdateModel {
+            &route.name,
+            UpdateRoute {
                 targets: Some(targets),
-                ..UpdateModel::default()
+                ..UpdateRoute::default()
             },
         )
         .await
@@ -817,7 +726,7 @@ impl<'a> RouteModule<'a> {
 }
 
 impl AdminService {
-    pub async fn bind_route(&self, input: BindRouteInput) -> anyhow::Result<Model> {
+    pub async fn bind_route(&self, input: BindRouteInput) -> anyhow::Result<Route> {
         let bind = match input.route_id {
             Some(route_id) => RouteBind::At {
                 route_id,
@@ -834,7 +743,7 @@ impl AdminService {
         RouteModule::new(self).bind(bind).await
     }
 
-    pub async fn unbind_route(&self, input: UnbindRouteInput) -> anyhow::Result<Option<Model>> {
+    pub async fn unbind_route(&self, input: UnbindRouteInput) -> anyhow::Result<Option<Route>> {
         RouteModule::new(self)
             .unbind(RouteUnbind {
                 route_id: input.route_id,
@@ -849,7 +758,7 @@ impl AdminService {
         route_id: &str,
         target_id: &str,
         level: ThinkingLevel,
-    ) -> anyhow::Result<Model> {
+    ) -> anyhow::Result<Route> {
         RouteModule::new(self)
             .reset_thinking_mapping(route_id, target_id, level)
             .await
@@ -859,18 +768,18 @@ impl AdminService {
         &self,
         route_id: &str,
         target_id: &str,
-    ) -> anyhow::Result<Model> {
+    ) -> anyhow::Result<Route> {
         RouteModule::new(self)
             .regenerate_thinking_map(route_id, target_id)
             .await
     }
 }
 
-fn route_targets_for_update(route: &Model) -> Vec<UpsertModelBackend> {
+fn route_targets_for_update(route: &Route) -> Vec<UpsertTarget> {
     route
         .targets
         .iter()
-        .map(|target| UpsertModelBackend {
+        .map(|target| UpsertTarget {
             id: Some(target.id.clone()),
             provider_id: target.provider_id.clone(),
             model: target.model.clone(),
@@ -881,8 +790,8 @@ fn route_targets_for_update(route: &Model) -> Vec<UpsertModelBackend> {
         .collect()
 }
 
-fn create_backend_from_upsert(target: &UpsertModelBackend) -> CreateModelBackend {
-    CreateModelBackend {
+fn create_backend_from_upsert(target: &UpsertTarget) -> CreateTarget {
+    CreateTarget {
         provider_id: target.provider_id.clone(),
         model: target.model.clone(),
         weight: target.weight,
@@ -893,6 +802,8 @@ fn create_backend_from_upsert(target: &UpsertModelBackend) -> CreateModelBackend
 
 #[cfg(test)]
 mod tests {
+    use async_trait::async_trait;
+    use axum::{Router, http::StatusCode, routing::get};
     use serde_json::json;
 
     use super::*;
@@ -902,6 +813,94 @@ mod tests {
         CreateManualProviderModel, ProviderModelSelectionPolicy, UpdateProviderModelSelection,
     };
     use crate::thinking::mapping_control;
+
+    struct StubModelDiscovery;
+
+    #[async_trait]
+    impl ProviderModelDiscovery for StubModelDiscovery {
+        async fn discover(
+            &self,
+            _admin: &AdminService,
+            provider_id: &str,
+        ) -> Result<Vec<String>, RouteModelDiscoveryError> {
+            Ok(vec![format!("{provider_id}-model")])
+        }
+    }
+
+    #[tokio::test]
+    async fn route_model_discovery_uses_the_injected_adapter() -> anyhow::Result<()> {
+        let data_dir = tempfile::tempdir()?;
+        let (gateway, _logs) = Gateway::new(GatewayConfig {
+            data_dir: data_dir.path().to_path_buf(),
+            ..GatewayConfig::default()
+        })
+        .await?;
+        let discovery = StubModelDiscovery;
+        let admin = gateway.admin();
+        let models = RouteModule::with_model_discovery(&admin, &discovery)
+            .discover_provider_model_ids("provider")
+            .await?;
+        assert_eq!(models, ["provider-model"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn discovery_http_failure_is_typed_and_hides_the_response_body() -> anyhow::Result<()> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route(
+                    "/models",
+                    get(|| async { (StatusCode::BAD_GATEWAY, "secret upstream diagnostic") }),
+                ),
+            )
+            .await
+            .expect("serve discovery fixture");
+        });
+
+        let data_dir = tempfile::tempdir()?;
+        let (gateway, _logs) = Gateway::new(GatewayConfig {
+            data_dir: data_dir.path().to_path_buf(),
+            ..GatewayConfig::default()
+        })
+        .await?;
+        let admin = gateway.admin();
+        let provider = admin
+            .create_provider(CreateProvider {
+                name: Some("Discovery Error Provider".into()),
+                source: ProviderSourceInput::Custom {
+                    vendor: None,
+                    protocol: "openai-compatible".into(),
+                    base_url: format!("http://{address}"),
+                    models_source: Some(format!("http://{address}/models")),
+                    static_models: None,
+                },
+                credential: ProviderCredentialInput::ApiKey {
+                    value: "discovery-test-key".into(),
+                },
+                use_proxy: false,
+            })
+            .await?;
+
+        let error = RouteModule::new(&admin)
+            .discover_provider_model_ids(&provider.id)
+            .await
+            .expect_err("discovery should reject the upstream status");
+        assert!(
+            matches!(
+                &error,
+                RouteModelDiscoveryError::DiscoveryHttpStatus {
+                    provider_id,
+                    status: 502,
+                } if provider_id == &provider.id
+            ),
+            "unexpected Route error: {error:?}"
+        );
+        assert!(!error.to_string().contains("secret upstream diagnostic"));
+        Ok(())
+    }
 
     async fn route_fixture_with_protocol(
         protocol: &str,
@@ -988,6 +987,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn route_ids_are_compared_exactly_when_binding() -> anyhow::Result<()> {
+        let (_data_dir, gateway, provider) = route_fixture().await?;
+        let admin = gateway.admin();
+        let routes = RouteModule::new(&admin);
+
+        for route_id in ["CaseRoute", "caseroute"] {
+            routes
+                .bind(RouteBind::At {
+                    route_id: route_id.into(),
+                    provider_id: provider.id.clone(),
+                    provider_model_id: "upstream-model".into(),
+                    weight: 100,
+                    priority: 1,
+                })
+                .await?;
+        }
+
+        let route_ids = routes
+            .list()
+            .await?
+            .into_iter()
+            .map(|route| route.name)
+            .collect::<Vec<_>>();
+        assert_eq!(route_ids.len(), 2);
+        assert!(route_ids.iter().any(|route_id| route_id == "CaseRoute"));
+        assert!(route_ids.iter().any(|route_id| route_id == "caseroute"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn route_get_uses_exact_route_id_and_never_storage_id() -> anyhow::Result<()> {
+        let (_data_dir, gateway, provider) = route_fixture().await?;
+        let admin = gateway.admin();
+        let routes = RouteModule::new(&admin);
+        let route = routes
+            .bind(RouteBind::At {
+                route_id: "ExactRoute".into(),
+                provider_id: provider.id,
+                provider_model_id: "upstream-model".into(),
+                weight: 100,
+                priority: 1,
+            })
+            .await?;
+
+        assert_eq!(routes.get("ExactRoute").await?.id, route.id);
+        assert!(routes.get("exactroute").await.is_err());
+        assert!(routes.get(&route.id).await.is_err());
+        let cache = gateway.model_cache.read().await;
+        assert!(cache.match_model("ExactRoute").is_some());
+        assert!(cache.match_model("exactroute").is_none());
+        assert!(cache.match_model(&route.id).is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn unavailable_provider_model_cannot_be_bound_as_a_new_target() -> anyhow::Result<()> {
         let (_data_dir, gateway, provider) = route_fixture().await?;
         let admin = gateway.admin();
@@ -1015,12 +1069,12 @@ mod tests {
 
         assert!(error.to_string().contains("not available"));
         let change_error = admin
-            .create_model(CreateModel {
+            .create_model(CreateRoute {
                 name: "manual-route".into(),
                 balance: None,
                 target_provider: provider.id.clone(),
                 target_model: "upstream-model".into(),
-                targets: vec![CreateModelBackend {
+                targets: vec![CreateTarget {
                     provider_id: provider.id,
                     model: "upstream-model".into(),
                     weight: Some(100),
@@ -1041,7 +1095,7 @@ mod tests {
         let admin = gateway.admin();
 
         let error = admin
-            .create_model(CreateModel {
+            .create_model(CreateRoute {
                 name: "missing-model-route".into(),
                 balance: None,
                 target_provider: provider.id,
@@ -1102,7 +1156,7 @@ mod tests {
             )
             .await?;
         let route = admin
-            .create_model(CreateModel {
+            .create_model(CreateRoute {
                 name: "thinking-route".into(),
                 balance: None,
                 target_provider: provider.id.clone(),
@@ -1135,10 +1189,10 @@ mod tests {
         low.control = crate::thinking::TargetThinkingControl::Hidden;
         let updated = admin
             .update_model(
-                &route.id,
-                UpdateModel {
+                &route.name,
+                UpdateRoute {
                     targets: Some(targets),
-                    ..UpdateModel::default()
+                    ..UpdateRoute::default()
                 },
             )
             .await?;
@@ -1154,7 +1208,7 @@ mod tests {
         assert_eq!(low.source, ThinkingMappingSource::Overridden);
 
         let reset = admin
-            .reset_target_thinking_mapping(&route.id, &updated.targets[0].id, ThinkingLevel::Low)
+            .reset_target_thinking_mapping(&route.name, &updated.targets[0].id, ThinkingLevel::Low)
             .await?;
         let low = reset.targets[0]
             .thinking_level_map
@@ -1201,7 +1255,7 @@ mod tests {
             .await?;
 
         let route = admin
-            .create_model(CreateModel {
+            .create_model(CreateRoute {
                 name: "max-effort-route".into(),
                 balance: None,
                 target_provider: provider.id,
@@ -1222,7 +1276,7 @@ mod tests {
     async fn create_openai_compatible_toggle_route(
         vendor: &str,
         model: &str,
-    ) -> anyhow::Result<Model> {
+    ) -> anyhow::Result<Route> {
         let data_dir = tempfile::tempdir()?;
         let (gateway, _logs) = Gateway::new(GatewayConfig {
             data_dir: data_dir.path().to_path_buf(),
@@ -1258,7 +1312,7 @@ mod tests {
             .await?;
 
         admin
-            .create_model(CreateModel {
+            .create_model(CreateRoute {
                 name: model.into(),
                 balance: None,
                 target_provider: provider.id,
@@ -1333,7 +1387,7 @@ mod tests {
             .await?;
 
         let route = admin
-            .create_model(CreateModel {
+            .create_model(CreateRoute {
                 name: "gemini-thinking-route".into(),
                 balance: None,
                 target_provider: provider.id,
@@ -1384,20 +1438,20 @@ mod tests {
         }
 
         let route = admin
-            .create_model(CreateModel {
+            .create_model(CreateRoute {
                 name: "intersection-route".into(),
                 balance: None,
                 target_provider: provider.id.clone(),
                 target_model: "wide-effort-model".into(),
                 targets: vec![
-                    CreateModelBackend {
+                    CreateTarget {
                         provider_id: provider.id.clone(),
                         model: "wide-effort-model".into(),
                         weight: Some(100),
                         priority: Some(1),
                         thinking_level_map: Vec::new(),
                     },
-                    CreateModelBackend {
+                    CreateTarget {
                         provider_id: provider.id,
                         model: "narrow-effort-model".into(),
                         weight: Some(100),
@@ -1448,7 +1502,7 @@ mod tests {
             )
             .await?;
         let route = admin
-            .create_model(CreateModel {
+            .create_model(CreateRoute {
                 name: "toggle-route".into(),
                 balance: None,
                 target_provider: provider.id,
@@ -1467,10 +1521,10 @@ mod tests {
         };
         let updated = admin
             .update_model(
-                &route.id,
-                UpdateModel {
+                &route.name,
+                UpdateRoute {
                     targets: Some(targets),
-                    ..UpdateModel::default()
+                    ..UpdateRoute::default()
                 },
             )
             .await?;
@@ -1484,7 +1538,7 @@ mod tests {
         );
 
         let regenerated = admin
-            .regenerate_target_thinking_map(&route.id, &updated.targets[0].id)
+            .regenerate_target_thinking_map(&route.name, &updated.targets[0].id)
             .await?;
         assert_eq!(
             regenerated.supported_thinking_levels.0,
@@ -1498,7 +1552,7 @@ mod tests {
         let (_data_dir, gateway, provider) = route_fixture().await?;
         let admin = gateway.admin();
         let route = admin
-            .create_model(CreateModel {
+            .create_model(CreateRoute {
                 name: "refresh-route".into(),
                 balance: None,
                 target_provider: provider.id.clone(),
@@ -1517,10 +1571,10 @@ mod tests {
         };
         let route = admin
             .update_model(
-                &route.id,
-                UpdateModel {
+                &route.name,
+                UpdateRoute {
                     targets: Some(targets),
-                    ..UpdateModel::default()
+                    ..UpdateRoute::default()
                 },
             )
             .await?;

@@ -15,13 +15,13 @@ import type {
   ApiKeyStats,
   CreateApiKey,
   BindRouteInput,
-  CreateModel,
+  CreateRoute,
   CreateProvider,
   CreateWebProvider,
   GatewayStatus,
   LogPage,
   LogQuery,
-  Model,
+  Route,
   ImageCapabilityDrift,
   ModelCapabilities,
   ModelStats,
@@ -36,7 +36,7 @@ import type {
   TestResult,
   UpdateApiKey,
   UnbindRouteInput,
-  UpdateModel,
+  UpdateRoute,
   UpdateProvider,
   UpdateWebProvider,
   VendorMetadata,
@@ -230,6 +230,8 @@ function mapRequest(command: string, args?: Record<string, unknown>): RequestMap
       return { method: 'POST', path: '/providers/oauth', body: { session_id: args?.sessionId, input: args?.input } }
     case 'listModels':
       return { method: 'GET', path: '/models' }
+    case 'getModel':
+      return { method: 'GET', path: `/models/${encodeURIComponent(String(args?.routeId ?? ''))}` }
     case 'createModel':
       return { method: 'POST', path: '/models', body: args?.input as Record<string, unknown> }
     case 'bindRoute':
@@ -237,17 +239,24 @@ function mapRequest(command: string, args?: Record<string, unknown>): RequestMap
     case 'unbindRoute':
       return { method: 'POST', path: '/models/unbind', body: args?.input as Record<string, unknown> }
     case 'updateModel':
-      return { method: 'PUT', path: `/models/${args?.id}`, body: args?.input as Record<string, unknown> }
+      return {
+        method: 'PUT',
+        path: `/models/${encodeURIComponent(String(args?.routeId ?? ''))}`,
+        body: args?.input as Record<string, unknown>,
+      }
     case 'deleteModel':
-      return { method: 'DELETE', path: `/models/${args?.id}` }
+      return { method: 'DELETE', path: `/models/${encodeURIComponent(String(args?.routeId ?? ''))}` }
     case 'resetTargetThinkingMapping':
       return {
         method: 'POST',
-        path: `/models/${args?.routeId}/targets/${args?.targetId}/thinking-map/reset`,
+        path: `/models/${encodeURIComponent(String(args?.routeId ?? ''))}/targets/${args?.targetId}/thinking-map/reset`,
         body: { level: args?.level },
       }
     case 'regenerateTargetThinkingMap':
-      return { method: 'POST', path: `/models/${args?.routeId}/targets/${args?.targetId}/thinking-map/regenerate` }
+      return {
+        method: 'POST',
+        path: `/models/${encodeURIComponent(String(args?.routeId ?? ''))}/targets/${args?.targetId}/thinking-map/regenerate`,
+      }
     case 'listApiKeys':
       return { method: 'GET', path: '/api-keys' }
     case 'createApiKey':
@@ -422,16 +431,17 @@ export const admin = {
       request<void>('completeOAuthSession', { sessionId, callbackUrl, metadata }),
   },
   models: {
-    list: () => request<Model[]>('listModels'),
-    create: (input: CreateModel) => request<Model>('createModel', { input }),
-    bind: (input: BindRouteInput) => request<Model>('bindRoute', { input }),
-    unbind: (input: UnbindRouteInput) => request<Model | null>('unbindRoute', { input }),
-    update: (id: string, input: UpdateModel) => request<Model>('updateModel', { id, input }),
-    delete: (id: string) => request<void>('deleteModel', { id }),
+    list: () => request<Route[]>('listModels'),
+    get: (routeId: string) => request<Route>('getModel', { routeId }),
+    create: (input: CreateRoute) => request<Route>('createModel', { input }),
+    bind: (input: BindRouteInput) => request<Route>('bindRoute', { input }),
+    unbind: (input: UnbindRouteInput) => request<Route | null>('unbindRoute', { input }),
+    update: (routeId: string, input: UpdateRoute) => request<Route>('updateModel', { routeId, input }),
+    delete: (routeId: string) => request<void>('deleteModel', { routeId }),
     resetThinkingMapping: (routeId: string, targetId: string, level: ThinkingLevel) =>
-      request<Model>('resetTargetThinkingMapping', { routeId, targetId, level }),
+      request<Route>('resetTargetThinkingMapping', { routeId, targetId, level }),
     regenerateThinkingMap: (routeId: string, targetId: string) =>
-      request<Model>('regenerateTargetThinkingMap', { routeId, targetId }),
+      request<Route>('regenerateTargetThinkingMap', { routeId, targetId }),
   },
   apiKeys: {
     list: () => request<ApiKey[]>('listApiKeys'),

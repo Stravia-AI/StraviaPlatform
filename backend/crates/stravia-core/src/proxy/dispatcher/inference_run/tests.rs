@@ -18,7 +18,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::*;
 use crate::db::models::{
-    CreateModel, CreateModelBackend, CreateProvider, ProviderCredentialInput, ProviderSourceInput,
+    CreateProvider, CreateRoute, CreateTarget, ProviderCredentialInput, ProviderSourceInput,
 };
 use crate::protocol::ids::{
     ANTHROPIC_MESSAGES_2023_06_01, BEDROCK_CONVERSE_V1, COHERE_CHAT_V2, GATEWAY_LANGUAGE_MODEL_V4,
@@ -993,7 +993,7 @@ async fn configure_route_with_protocol(
             )
             .await
             .expect("create provider model");
-        targets.push(CreateModelBackend {
+        targets.push(CreateTarget {
             provider_id: provider.id,
             model: "provider-model".into(),
             weight: Some(100),
@@ -1003,7 +1003,7 @@ async fn configure_route_with_protocol(
     }
     gateway
         .admin()
-        .create_model(CreateModel {
+        .create_model(CreateRoute {
             name: model.into(),
             balance: Some("priority".into()),
             target_provider: String::new(),

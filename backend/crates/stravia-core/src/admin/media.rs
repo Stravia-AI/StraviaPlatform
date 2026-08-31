@@ -291,7 +291,7 @@ mod tests {
             .await
             .expect("text-only Provider Model");
         let model = admin
-            .create_model(crate::db::models::CreateModel {
+            .create_model(crate::db::models::CreateRoute {
                 name: "Visual Route".into(),
                 balance: Some("weighted".into()),
                 target_provider: provider.id.clone(),
@@ -301,20 +301,20 @@ mod tests {
             .await
             .expect("Model");
         let mixed_model = admin
-            .create_model(crate::db::models::CreateModel {
+            .create_model(crate::db::models::CreateRoute {
                 name: "Mixed Route".into(),
                 balance: Some("weighted".into()),
                 target_provider: String::new(),
                 target_model: String::new(),
                 targets: vec![
-                    crate::db::models::CreateModelBackend {
+                    crate::db::models::CreateTarget {
                         provider_id: provider.id.clone(),
                         model: "vision".into(),
                         weight: Some(50),
                         priority: Some(1),
                         thinking_level_map: Vec::new(),
                     },
-                    crate::db::models::CreateModelBackend {
+                    crate::db::models::CreateTarget {
                         provider_id: provider.id.clone(),
                         model: "text".into(),
                         weight: Some(50),

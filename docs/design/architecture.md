@@ -666,33 +666,31 @@ inventory::submit! { ExtensionRegistration { make: || Box::new(XxxChannel) } }
 
 ---
 
-## 8. 模型（路由）与访问控制
+## 8. Route 与访问控制
 
-### 8.1 Model 模型（原 Route）
+### 8.1 Route 聚合
 
-模型唯一键为 `name`，客户端请求中的 `model` 值与之精确匹配即命中：
+Route ID 存于 `name`，客户端请求中的 `model` 值以大小写敏感的精确匹配命中：
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | `id` | TEXT PK | UUID |
-| `name` | TEXT | 显示名称，同时作为模型匹配键 |
-| `balance` | TEXT | 负载策略：`weighted` / `priority` / `cooldown` / `latency` |
-| `target_provider` | TEXT FK | 默认目标 Provider（兜底）|
-| `target_model` | TEXT | 默认上游模型名 |
-| `is_enabled` | BOOL | 模型启用状态，默认 true |
+| `name` | TEXT | Route ID，同时是客户端模型 ID |
+| `balance` | TEXT | Target 选择策略：`weighted` / `priority` / `cooldown` / `latency` |
+| `is_enabled` | BOOL | Route 启用状态，默认 true |
 
 > `ingress_protocol` 不在数据库中。协议在运行时由 `RequestContext` 携带，日志写入 `request_logs.client_protocol`。
 
-**后端列表（model_backends）**：一个 Model 可绑定多个 backend，每个 backend 指向 `provider_id` + `model`，带 `weight`（weighted balance）、`priority`（priority balance）和七行 `thinking_level_map`；后端健康状态在内存 `HealthRegistry` 管理，不入库。
+**Target 列表（model_backends）**：一个 Route 可绑定多个 Target，每个 Target 指向 `provider_id` + `model`，带 `weight`（weighted）、`priority`（priority）和七行 `thinking_level_map`；Target 健康状态在内存 `HealthRegistry` 管理，不入库。Route 记录和完整 Target 列表由一个聚合持久化接口在同一事务内写入。
 
 客户端继续使用 Chat Completions、Open Responses、Anthropic Messages 或 Gemini 的原生 thinking 字段。codec 先解码为规范 Thinking Level，Request Hook 可修改该等级；Route 以所有 Target 非 Hidden Thinking Level Map 的交集派生支持等级并据此钳制，每次 Target 尝试再用该 Target 的 Thinking Level Map 生成 protocol-native control。`GET /v1/models` 仅在派生交集非空时返回可选的 `stravia:thinking_levels`，不暴露 Target control。
 
 ### 8.2 API Token 模型
 
-Model 与 API Token 是**独立管理、多对多绑定**的关系（经 `api_key_models` 表）：
+Route 与 API Token 是**独立管理、多对多绑定**的关系（经 `api_key_models` 表）：
 
 ```
-API Token ──── (授权绑定) ──── Model
+API Token ──── (授权绑定) ──── Route
   │                             │
   ├── 并发上限: concurrency_limit ├── 匹配键 (name)
   ├── 过期时间                  ├── 后端列表 (model_backends)
@@ -785,18 +783,16 @@ CREATE TABLE providers (
     updated_at      TEXT NOT NULL
 );
 
--- 模型（路由规则）
+-- Route
 CREATE TABLE models (
     id              TEXT PRIMARY KEY,
-    name            TEXT NOT NULL UNIQUE,  -- 匹配键 + 显示名
+    name            TEXT NOT NULL UNIQUE,  -- 大小写敏感的 Route ID
     balance         TEXT NOT NULL DEFAULT 'weighted',
-    target_provider TEXT NOT NULL REFERENCES providers(id),
-    target_model    TEXT NOT NULL,
     is_enabled      INTEGER NOT NULL DEFAULT 1,
     created_at      TEXT NOT NULL
 );
 
--- 模型后端列表
+-- Target 列表
 CREATE TABLE model_backends (
     id          TEXT PRIMARY KEY,
     model_id    TEXT NOT NULL REFERENCES models(id) ON DELETE CASCADE,

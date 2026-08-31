@@ -133,30 +133,10 @@ impl ProviderStore for PostgresProviderStore {
 
         sqlx::query(
             "DELETE FROM models
-             WHERE target_provider = $1
-               AND NOT EXISTS (
+             WHERE NOT EXISTS (
                    SELECT 1 FROM model_backends WHERE model_id = models.id
                )",
         )
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
-
-        sqlx::query(
-            "WITH first_backends AS (
-                 SELECT DISTINCT ON (model_id)
-                        model_id, provider_id, model
-                   FROM model_backends
-                  ORDER BY model_id, priority ASC, created_at ASC
-        )
-             UPDATE models
-                SET target_provider = first_backends.provider_id,
-                    target_model = first_backends.model
-               FROM first_backends
-              WHERE models.id = first_backends.model_id
-                AND models.target_provider = $1",
-        )
-        .bind(id)
         .execute(&mut *tx)
         .await?;
 

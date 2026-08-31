@@ -127,37 +127,10 @@ impl ProviderStore for SqliteProviderStore {
 
         sqlx::query(
             "DELETE FROM models
-             WHERE target_provider = ?
-               AND NOT EXISTS (
+             WHERE NOT EXISTS (
                    SELECT 1 FROM model_backends WHERE model_id = models.id
                )",
         )
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
-
-        sqlx::query(
-            "UPDATE models
-                SET target_provider = (
-                        SELECT provider_id
-                          FROM model_backends
-                         WHERE model_id = models.id
-                         ORDER BY priority ASC, created_at ASC
-                         LIMIT 1
-                    ),
-                    target_model = (
-                        SELECT model
-                          FROM model_backends
-                         WHERE model_id = models.id
-                         ORDER BY priority ASC, created_at ASC
-                         LIMIT 1
-        )
-              WHERE target_provider = ?
-                AND EXISTS (
-                    SELECT 1 FROM model_backends WHERE model_id = models.id
-                )",
-        )
-        .bind(id)
         .execute(&mut *tx)
         .await?;
 

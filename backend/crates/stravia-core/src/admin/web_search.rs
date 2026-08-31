@@ -247,7 +247,7 @@ impl AdminService {
 
     async fn validate_local_targets(
         &self,
-        model: &crate::db::models::Model,
+        model: &crate::db::models::Route,
     ) -> Result<(), WebSearchConfigError> {
         for target in &model.targets {
             let Some(provider) = self
@@ -570,7 +570,7 @@ mod tests {
             .await
             .expect("Provider Model");
         let model = admin
-            .create_model(crate::db::models::CreateModel {
+            .create_model(crate::db::models::CreateRoute {
                 name: "Search Model".into(),
                 balance: Some("weighted".into()),
                 target_provider: provider.id.clone(),

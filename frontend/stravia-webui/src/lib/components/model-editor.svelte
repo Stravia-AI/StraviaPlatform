@@ -16,15 +16,16 @@ import { modelIdFromCatalogId } from '$lib/catalog-model-id'
 import { formatNumber } from '$lib/format'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
 import type {
-  CreateModelBackend,
-  Model,
+  CreateTarget,
   ModelCapabilities,
   Provider,
   ProviderModelSummary,
+  Route,
+  RouteSelectionStrategy,
   TargetThinkingControl,
   ThinkingLevel,
   ThinkingLevelMapping,
-  UpsertModelBackend,
+  UpsertTarget,
 } from '$lib/types'
 import ModelCombobox from '$lib/components/model-combobox.svelte'
 import ModelDetailsDialog from '$lib/components/model-details-dialog.svelte'
@@ -40,7 +41,7 @@ import { Switch } from '$lib/components/ui/switch'
 import * as Tooltip from '$lib/components/ui/tooltip'
 
 interface Props {
-  model?: Model
+  model?: Route
   providers: Provider[]
   initialProviderId?: string
   initialModelId?: string
@@ -64,17 +65,6 @@ type TargetForm = {
 
 const thinkingLevels: ThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 
-function defaultThinkingLevelMap(): ThinkingLevelMapping[] {
-  return thinkingLevels.map((level) => ({
-    level,
-    control:
-      level === 'xhigh' || level === 'max'
-        ? { type: 'hidden' }
-        : { type: 'effort', value: level === 'off' ? 'none' : level },
-    source: 'generated',
-  }))
-}
-
 let { model, providers, initialProviderId = '', initialModelId = '', onSaved }: Props = $props()
 const initialModel = untrack(() => model)
 const queryClient = useQueryClient()
@@ -97,6 +87,36 @@ const canonicalModelsQuery = createQuery(() => ({
 }))
 const canonicalModels = $derived(canonicalModelsQuery.data?.models ?? [])
 
+function strategyLabel(strategy: RouteSelectionStrategy): string {
+  switch (strategy) {
+    case 'weighted':
+      return m.model_editor_split_traffic()
+    case 'priority':
+      return m.common_try_order()
+    case 'cooldown':
+      return m.model_editor_rotate_destinations()
+    case 'latency':
+      return m.model_editor_prefer_low_latency()
+  }
+}
+
+function strategyHelp(strategy: RouteSelectionStrategy): string {
+  switch (strategy) {
+    case 'weighted':
+      return m.model_editor_traffic_share_help()
+    case 'priority':
+      return m.model_editor_failover_help()
+    case 'cooldown':
+      return m.model_editor_cooldown_help()
+    case 'latency':
+      return m.model_editor_latency_help()
+  }
+}
+
+function strategySummary(strategy: RouteSelectionStrategy): string {
+  return strategy === 'weighted' ? m.model_editor_traffic_split_share() : strategyLabel(strategy)
+}
+
 $effect(() => {
   if (!initialized && providers.length > 0) {
     initialized = true
@@ -118,7 +138,7 @@ function newTarget(values: Partial<TargetForm> = {}): TargetForm {
     persisted: false,
     loading: false,
     validationError: '',
-    thinkingLevelMap: defaultThinkingLevelMap(),
+    thinkingLevelMap: [],
     ...values,
   }
 }
@@ -138,7 +158,7 @@ function targetForms(): TargetForm[] {
           thinkingLevelMap: target.thinking_level_map?.map((row) => ({
             ...row,
             control: { ...row.control },
-          })) ?? defaultThinkingLevelMap(),
+          })) ?? [],
         }),
       )
   }
@@ -189,7 +209,7 @@ async function changeProvider(target: TargetForm, providerId: string): Promise<v
   target.custom = false
   target.persisted = false
   target.validationError = ''
-  target.thinkingLevelMap = defaultThinkingLevelMap()
+  target.thinkingLevelMap = []
   await loadInventory(target)
 }
 
@@ -198,7 +218,7 @@ async function selectModel(target: TargetForm, modelId: string): Promise<void> {
   target.custom = false
   target.validationError = ''
   target.capabilities = undefined
-  target.thinkingLevelMap = defaultThinkingLevelMap()
+  target.thinkingLevelMap = []
   await loadCapabilities(target, true)
 }
 
@@ -216,7 +236,7 @@ async function loadCapabilities(target: TargetForm, refreshThinkingMap = false):
         detail.thinking_level_map?.map((row) => ({
           ...row,
           control: { ...row.control },
-        })) ?? defaultThinkingLevelMap()
+        })) ?? []
     }
   } catch (error) {
     target.capabilities = undefined
@@ -295,7 +315,7 @@ async function resetThinkingRow(target: TargetForm, level: ThinkingLevel): Promi
   if (!initialModel || !target.id) return
   target.validationError = ''
   try {
-    const updated = await admin.models.resetThinkingMapping(initialModel.id, target.id, level)
+    const updated = await admin.models.resetThinkingMapping(initialModel.name, target.id, level)
     target.thinkingLevelMap =
       updated.targets.find((candidate) => candidate.id === target.id)?.thinking_level_map ?? target.thinkingLevelMap
   } catch (error) {
@@ -315,7 +335,7 @@ async function regenerateThinkingMap(): Promise<void> {
   regenerateOpen = false
   target.validationError = ''
   try {
-    const updated = await admin.models.regenerateThinkingMap(initialModel.id, target.id)
+    const updated = await admin.models.regenerateThinkingMap(initialModel.name, target.id)
     target.thinkingLevelMap =
       updated.targets.find((candidate) => candidate.id === target.id)?.thinking_level_map ?? target.thinkingLevelMap
   } catch (error) {
@@ -332,7 +352,7 @@ async function saveModel(): Promise<void> {
   }
   const cleanTargets = targets
     .filter((target) => target.providerId && target.model.trim())
-    .map((target, index): CreateModelBackend & UpsertModelBackend => ({
+    .map((target, index): CreateTarget & UpsertTarget => ({
       id: target.id,
       provider_id: target.providerId,
       model: target.model.trim(),
@@ -373,16 +393,16 @@ async function saveModel(): Promise<void> {
       targets: cleanTargets,
     }
     if (initialModel) {
-      await admin.models.update(initialModel.id, { ...input, is_enabled: form.enabled })
+      await admin.models.update(initialModel.name, { ...input, is_enabled: form.enabled })
     } else {
       const created = await admin.models.create(input)
       if (!form.enabled) {
         try {
-          await admin.models.update(created.id, { is_enabled: false })
+          await admin.models.update(created.name, { is_enabled: false })
         } catch {
           await queryClient.invalidateQueries({ queryKey: ['models'] })
           toast.error(m.model_editor_model_was_added_but_not_disabled_review_status())
-          await goto(resolve('/models/[id]', { id: created.id }))
+          await goto(resolve('/models/[id]', { id: created.name }))
           return
         }
       }
@@ -460,11 +480,13 @@ async function saveModel(): Promise<void> {
           <Field.Label for="route-balance">{m.model_editor_how_requests_sent()}</Field.Label>
           <Select.Root type="single" bind:value={form.balance}>
             <Select.Trigger id="route-balance" class="w-full" aria-label={m.model_editor_how_requests_sent()}>
-              {form.balance === 'priority' ? m.common_try_order() : m.model_editor_split_traffic()}
+              {strategyLabel(form.balance)}
             </Select.Trigger>
             <Select.Content>
               <Select.Item value="weighted">{m.model_editor_split_traffic()}</Select.Item>
               <Select.Item value="priority">{m.common_try_order()}</Select.Item>
+              <Select.Item value="cooldown">{m.model_editor_rotate_destinations()}</Select.Item>
+              <Select.Item value="latency">{m.model_editor_prefer_low_latency()}</Select.Item>
             </Select.Content>
           </Select.Root>
         </Field.Field>
@@ -475,9 +497,7 @@ async function saveModel(): Promise<void> {
       <div class="route-section-header">
         <div>
           <h2 id="route-targets-title" class="route-section-title">{m.model_editor_request_destinations()}</h2>
-          <p class="route-section-description">
-            {form.balance === 'weighted' ? m.model_editor_traffic_share_help() : m.model_editor_failover_help()}
-          </p>
+          <p class="route-section-description">{strategyHelp(form.balance)}</p>
         </div>
         <Button type="button" variant="outline" onclick={addTarget}
           ><CirclePlusIcon data-icon="inline-start" />{m.model_editor_add_destination()}</Button>
@@ -755,9 +775,7 @@ async function saveModel(): Promise<void> {
       <p class="text-sm text-muted-foreground">
         {targets.length === 1
           ? m.common_1_destination()
-          : m.model_editor_value_destinations({ target_count: targets.length })} · {form.balance === 'priority'
-          ? m.model_editor_tried_order()
-          : m.model_editor_traffic_split_share()}
+          : m.model_editor_value_destinations({ target_count: targets.length })} · {strategySummary(form.balance)}
       </p>
       <div class="flex gap-2">
         <Button href="/models" variant="outline">{m.common_cancel()}</Button>

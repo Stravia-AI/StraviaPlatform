@@ -404,7 +404,7 @@ async fn media_test_app() -> (TestApp, crate::agent::ArtifactId, Arc<AtomicUsize
         .expect("Media Provider Model");
     let model = gateway
         .admin()
-        .create_model(crate::db::models::CreateModel {
+        .create_model(crate::db::models::CreateRoute {
             name: "mcp-vision".into(),
             balance: None,
             target_provider: provider.id,

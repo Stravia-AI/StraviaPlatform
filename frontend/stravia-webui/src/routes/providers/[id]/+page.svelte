@@ -211,7 +211,7 @@ async function syncModels(): Promise<ProviderModelSyncSummary | undefined> {
               <div class="grid gap-3 py-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] sm:items-center">
                 <a
                   class="min-h-10 content-center font-medium hover:underline"
-                  href={resolve('/models/[id]', { id: reference.route.id })}>{reference.route.name}</a>
+                  href={resolve('/models/[id]', { id: reference.route.name })}>{reference.route.name}</a>
                 <TechnicalValue value={reference.target.model} copyable />
                 <Badge variant="outline">{m.providers_order()} {reference.target.priority}</Badge>
               </div>

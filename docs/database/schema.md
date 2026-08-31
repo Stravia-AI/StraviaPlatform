@@ -53,29 +53,29 @@ AI 模型供应商配置（API endpoint、密钥、认证方式等）。
 
 ## models
 
-虚拟模型配置，定义客户端请求的模型名如何映射到后端。
+Route 记录。`name` 保存客户端请求使用的 Route ID；Targets 只存于 `model_backends`。
 
 | Column | Type | Default | Description |
 |---|---|---|---|
 | `id` | TEXT PK | — | 主键，UUID |
-| `name` | TEXT NOT NULL | — | 显示名称，同时作为客户端请求的模型匹配键（路由唯一键的一部分） |
-| `balance` | TEXT | `'weighted'` | 多后端负载均衡策略：`weighted`、`priority`、`cooldown`、`latency` |
-| `target_provider` | TEXT NOT NULL | — | 默认后端 provider ID（FK → providers.id） |
-| `target_model` | TEXT NOT NULL | — | 默认后端使用的上游模型名 |
+| `name` | TEXT NOT NULL | — | Route ID；客户端模型 ID，精确且大小写敏感匹配 |
+| `balance` | TEXT | `'weighted'` | Target 选择策略：`weighted`、`priority`、`cooldown`、`latency` |
 | `is_enabled` | INTEGER | `1` | 是否启用 |
 | `priority` | INTEGER | `0` | 优先级（预留） |
 | `created_at` | TEXT | `datetime('now')` | 创建时间 |
+
+**唯一索引**：`idx_models_route_id` on `name`
 
 ---
 
 ## model_backends
 
-模型后端列表，一个 model 可对应多个 provider + 上游模型的组合。
+Target 列表；一条 Route 对应一个或多个 Provider + Provider Model 组合。
 
 | Column | Type | Default | Description |
 |---|---|---|---|
 | `id` | TEXT PK | — | 主键，UUID |
-| `model_id` | TEXT NOT NULL | — | 所属模型 ID（FK → models.id, ON DELETE CASCADE） |
+| `model_id` | TEXT NOT NULL | — | 所属 Route 的存储主键（FK → models.id, ON DELETE CASCADE） |
 | `provider_id` | TEXT NOT NULL | — | 供应商 ID（FK → providers.id） |
 | `model` | TEXT NOT NULL | — | 上游模型名（发送给 provider 的模型标识） |
 | `weight` | INTEGER | `100` | 权重（`weighted` 策略下生效） |
@@ -456,6 +456,8 @@ Advanced Capabilities / Web Search migration 18 是 destructive clean cutover：
 Revisioned Provider Catalog migration 20 不改变表 shape。它仅把可由既有 `preset_key` 或旧 source identity 确定的 Provider `models_source` 转换为 `catalog`，并补齐缺失的 Catalog Provider ID；无法安全确定 identity 的行保持原值，以便管理员诊断和修复。Provider 凭据、channel、路由与既有 Provider Model metadata 均不修改。
 
 History Marker migration 22 新增 Principal-scoped `history_markers` 表及 Platform Tool Execution 的 durable claim、lease、deadline、terminal、publication 与 retention 字段。隐藏 payload 沿用现有 SQLite/PostgreSQL 部署安全边界，不引入独立加密密钥。
+
+Route Target Aggregate migration 27 先把仅存在于旧 `models.target_provider` / `models.target_model` 的主 Target 补入 `model_backends`，再删除这两个重复列，并为大小写敏感的 Route ID `models.name` 建立唯一索引。升级后 Route 与全部 Targets 由同一聚合写入事务维护。
 
 SQLite 与 PostgreSQL 必须保持 API Key 字段默认值、Turn kind、settings identity、唯一约束和 Artifact 外键等价。
 

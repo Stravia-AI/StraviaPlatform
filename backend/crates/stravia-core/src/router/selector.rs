@@ -29,7 +29,7 @@ use std::str::FromStr;
 use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
-use crate::db::models::{ModelBackend, ModelBalance};
+use crate::db::models::{RouteSelectionStrategy, Target};
 
 // ── SelectedTarget ────────────────────────────────────────────────────────────
 
@@ -54,7 +54,7 @@ pub struct RouteAttemptPolicy {
 }
 
 impl RouteAttemptPolicy {
-    pub fn new(balance: &str, targets: &[ModelBackend]) -> Self {
+    pub fn new(balance: &str, targets: &[Target]) -> Self {
         Self {
             balance: balance.to_owned(),
             ordered: TargetSelector::select_ordered(balance, targets).into_iter(),
@@ -142,7 +142,7 @@ pub fn selected_target_key(target: &SelectedTarget) -> String {
 
 /// Produces an ordered list of targets to try, from most to least preferred.
 pub trait RoutingStrategy: Send + Sync {
-    fn select_ordered(&self, targets: &[ModelBackend]) -> Vec<SelectedTarget>;
+    fn select_ordered(&self, targets: &[Target]) -> Vec<SelectedTarget>;
 }
 
 // ── Weighted ──────────────────────────────────────────────────────────────────
@@ -150,8 +150,8 @@ pub trait RoutingStrategy: Send + Sync {
 pub struct WeightedStrategy;
 
 impl RoutingStrategy for WeightedStrategy {
-    fn select_ordered(&self, targets: &[ModelBackend]) -> Vec<SelectedTarget> {
-        let refs: Vec<&ModelBackend> = targets.iter().filter(|t| t.weight > 0).collect();
+    fn select_ordered(&self, targets: &[Target]) -> Vec<SelectedTarget> {
+        let refs: Vec<&Target> = targets.iter().filter(|t| t.weight > 0).collect();
         weighted_shuffle(&refs)
             .into_iter()
             .map(to_selected)
@@ -164,8 +164,8 @@ impl RoutingStrategy for WeightedStrategy {
 pub struct PriorityStrategy;
 
 impl RoutingStrategy for PriorityStrategy {
-    fn select_ordered(&self, targets: &[ModelBackend]) -> Vec<SelectedTarget> {
-        let mut groups: BTreeMap<i32, Vec<&ModelBackend>> = BTreeMap::new();
+    fn select_ordered(&self, targets: &[Target]) -> Vec<SelectedTarget> {
+        let mut groups: BTreeMap<i32, Vec<&Target>> = BTreeMap::new();
         for t in targets {
             groups.entry(t.priority).or_default().push(t);
         }
@@ -203,9 +203,9 @@ impl CooldownStrategy {
 }
 
 impl RoutingStrategy for CooldownStrategy {
-    fn select_ordered(&self, targets: &[ModelBackend]) -> Vec<SelectedTarget> {
+    fn select_ordered(&self, targets: &[Target]) -> Vec<SelectedTarget> {
         let map = self.last_selected.read().unwrap_or_else(|p| p.into_inner());
-        let mut scored: Vec<(&ModelBackend, Duration)> = targets
+        let mut scored: Vec<(&Target, Duration)> = targets
             .iter()
             .map(|t| {
                 let key = target_key(t);
@@ -252,9 +252,9 @@ impl LatencyStrategy {
 }
 
 impl RoutingStrategy for LatencyStrategy {
-    fn select_ordered(&self, targets: &[ModelBackend]) -> Vec<SelectedTarget> {
+    fn select_ordered(&self, targets: &[Target]) -> Vec<SelectedTarget> {
         let map = self.ema.read().unwrap_or_else(|p| p.into_inner());
-        let mut scored: Vec<(&ModelBackend, f64)> = targets
+        let mut scored: Vec<(&Target, f64)> = targets
             .iter()
             .map(|t| {
                 let key = target_key(t);
@@ -276,19 +276,21 @@ pub struct TargetSelector;
 impl TargetSelector {
     /// Return targets ordered by the named balance. Unrecognised balance
     /// strings fall back to `weighted`.
-    pub fn select_ordered(balance: &str, targets: &[ModelBackend]) -> Vec<SelectedTarget> {
-        match ModelBalance::from_str(balance).unwrap_or_default() {
-            ModelBalance::Weighted => WeightedStrategy.select_ordered(targets),
-            ModelBalance::Priority => PriorityStrategy.select_ordered(targets),
-            ModelBalance::Cooldown => CooldownStrategy::global().select_ordered(targets),
-            ModelBalance::Latency => LatencyStrategy::global().select_ordered(targets),
+    pub fn select_ordered(balance: &str, targets: &[Target]) -> Vec<SelectedTarget> {
+        match RouteSelectionStrategy::from_str(balance).unwrap_or_default() {
+            RouteSelectionStrategy::Weighted => WeightedStrategy.select_ordered(targets),
+            RouteSelectionStrategy::Priority => PriorityStrategy.select_ordered(targets),
+            RouteSelectionStrategy::Cooldown => CooldownStrategy::global().select_ordered(targets),
+            RouteSelectionStrategy::Latency => LatencyStrategy::global().select_ordered(targets),
         }
     }
 
     /// Record that `target_key` was successfully selected.
     /// Only meaningful for the `cooldown` balance; a no-op for others.
     pub fn record_selected(balance: &str, target_key: &str) {
-        if ModelBalance::from_str(balance).unwrap_or_default() == ModelBalance::Cooldown {
+        if RouteSelectionStrategy::from_str(balance).unwrap_or_default()
+            == RouteSelectionStrategy::Cooldown
+        {
             CooldownStrategy::global().record_selected(target_key);
         }
     }
@@ -296,7 +298,9 @@ impl TargetSelector {
     /// Record observed response latency for `target_key`.
     /// Only meaningful for the `latency` balance; a no-op for others.
     pub fn record_latency(balance: &str, target_key: &str, latency_ms: f64) {
-        if ModelBalance::from_str(balance).unwrap_or_default() == ModelBalance::Latency {
+        if RouteSelectionStrategy::from_str(balance).unwrap_or_default()
+            == RouteSelectionStrategy::Latency
+        {
             LatencyStrategy::global().record_latency(target_key, latency_ms);
         }
     }
@@ -305,12 +309,12 @@ impl TargetSelector {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 #[inline]
-fn target_key(t: &ModelBackend) -> String {
+fn target_key(t: &Target) -> String {
     format!("{}:{}", t.provider_id, t.model)
 }
 
 #[inline]
-fn to_selected(t: &ModelBackend) -> SelectedTarget {
+fn to_selected(t: &Target) -> SelectedTarget {
     SelectedTarget {
         provider_id: t.provider_id.clone(),
         model: t.model.clone(),
@@ -318,11 +322,11 @@ fn to_selected(t: &ModelBackend) -> SelectedTarget {
     }
 }
 
-fn weighted_shuffle<'a>(targets: &[&'a ModelBackend]) -> Vec<&'a ModelBackend> {
+fn weighted_shuffle<'a>(targets: &[&'a Target]) -> Vec<&'a Target> {
     if targets.is_empty() {
         return vec![];
     }
-    let mut items: Vec<(&ModelBackend, f64)> = targets
+    let mut items: Vec<(&Target, f64)> = targets
         .iter()
         .map(|t| {
             let weight = t.weight.max(1) as f64;
@@ -339,8 +343,8 @@ mod tests {
     use super::*;
     use crate::router::health::HealthRegistry;
 
-    fn target(provider_id: &str, priority: i32) -> ModelBackend {
-        ModelBackend {
+    fn target(provider_id: &str, priority: i32) -> Target {
+        Target {
             id: format!("target-{provider_id}"),
             model_id: "route".into(),
             provider_id: provider_id.into(),

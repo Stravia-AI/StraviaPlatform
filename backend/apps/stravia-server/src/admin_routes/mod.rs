@@ -64,7 +64,9 @@ pub fn create_router(gateway: Gateway, admin_token: Option<String>) -> Router {
         .put(update_web_provider_handler)
         .delete(delete_web_provider_handler);
 
-    let models_item = put(update_model_handler).delete(delete_model_handler);
+    let models_item = get(get_model_handler)
+        .put(update_model_handler)
+        .delete(delete_model_handler);
     let api_keys_item = get(get_api_key_handler)
         .put(update_api_key_handler)
         .delete(delete_api_key_handler);
@@ -210,13 +212,13 @@ pub fn create_router(gateway: Gateway, admin_token: Option<String>) -> Router {
             "/models/{route_id}/targets/{target_id}/thinking-map/regenerate",
             post(regenerate_target_thinking_map_handler),
         )
-        .route("/models/{id}", models_item.clone())
+        .route("/models/{route_id}", models_item.clone())
         // Deprecated: use /models instead
         .route(
             "/routes",
             get(list_models_handler).post(create_model_handler),
         )
-        .route("/routes/{id}", models_item)
+        .route("/routes/{route_id}", models_item)
         .route(
             "/api-keys",
             get(list_api_keys_handler).post(create_api_key_handler),

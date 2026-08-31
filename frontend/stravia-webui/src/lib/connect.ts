@@ -1,5 +1,5 @@
 import * as m from '$lib/paraglide/messages.js'
-import type { Model, ThinkingLevel } from '$lib/types'
+import type { Route, ThinkingLevel } from '$lib/types'
 
 export type CodeLanguage = 'python' | 'typescript' | 'curl'
 export type GatewayProtocol = 'openai-compatible' | 'open-responses' | 'anthropic-messages' | 'google-gemini'
@@ -118,7 +118,7 @@ function claudeAutoCompactWindow(model: ClientModelDefinition): number | undefin
   return Math.min(model.contextWindow, 1_000_000)
 }
 
-export function defineClientModel(model: Model): ClientModelDefinition {
+export function defineClientModel(model: Route): ClientModelDefinition {
   return {
     name: model.name,
     supportedThinkingLevels: [...new Set(model.supported_thinking_levels ?? [])],

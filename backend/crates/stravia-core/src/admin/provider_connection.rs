@@ -16,44 +16,23 @@ impl AdminService {
         credentials: std::collections::BTreeMap<String, String>,
         configured_base_url: Option<&str>,
     ) -> anyhow::Result<String> {
-        validate_provider_base_url(&assemble_vendor_base_url(
-            vendor_id,
-            &credentials,
-            configured_base_url,
-        )?)
+        ProviderConnection::new(self).preview_base_url(vendor_id, credentials, configured_base_url)
     }
 
     pub async fn list_providers(&self) -> anyhow::Result<Vec<Provider>> {
-        self.gw.storage.providers().list().await
+        ProviderConnection::new(self).list().await
     }
 
     pub async fn get_provider(&self, id: &str) -> anyhow::Result<Provider> {
-        self.gw
-            .storage
-            .providers()
-            .get(id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("provider not found: {id}"))
+        ProviderConnection::new(self).get(id).await
     }
     pub async fn provider_requires_oauth_session(
         &self,
         input: &CreateProvider,
     ) -> anyhow::Result<bool> {
-        let ProviderSourceInput::Catalog {
-            provider_id,
-            channel_id,
-            fingerprint,
-            ..
-        } = &input.source
-        else {
-            return Ok(false);
-        };
-        let (_, channel) = self
-            .gw
-            .provider_catalog
-            .resolve_channel(provider_id, channel_id, fingerprint)
-            .await?;
-        Ok(channel.auth_mode == crate::provider_catalog::CatalogAuthMode::OAuth)
+        ProviderConnection::new(self)
+            .requires_oauth_session(input)
+            .await
     }
 
     pub async fn create_provider(&self, input: CreateProvider) -> anyhow::Result<Provider> {
@@ -224,27 +203,44 @@ impl AdminService {
         id: &str,
         options: CopyProviderOptions,
     ) -> anyhow::Result<Provider> {
+        ProviderConnection::new(self).copy(id, options).await
+    }
+
+    pub(super) async fn copy_provider_record(
+        &self,
+        id: &str,
+        options: CopyProviderOptions,
+    ) -> anyhow::Result<Provider> {
         let original = self.get_provider(id).await?;
         let name = self.next_provider_copy_name(&original.name).await?;
-        self.ensure_provider_name_unique(None, &name).await?;
-        let copied = self
-            .gw
-            .storage
-            .providers()
-            .create(CreateProviderRecord {
-                name,
-                vendor: original.vendor.clone(),
-                protocol: original.protocol.clone(),
-                base_url: original.base_url.clone(),
-                preset_key: original.preset_key.clone(),
-                channel: original.channel.clone(),
-                models_source: original.models_source.clone(),
-                static_models: original.static_models.clone(),
-                api_key: original.api_key.clone(),
-                adapter_credentials: original.adapter_credentials.clone(),
-                auth_mode: original.auth_mode.clone(),
+        let credential = if original.effective_auth_mode() == "oauth" {
+            ProviderCredentialInput::None
+        } else {
+            let values: std::collections::BTreeMap<String, String> =
+                serde_json::from_str(&original.adapter_credentials).unwrap_or_default();
+            if !values.is_empty() {
+                ProviderCredentialInput::Fields { values }
+            } else if !original.api_key.is_empty() {
+                ProviderCredentialInput::ApiKey {
+                    value: original.api_key.clone(),
+                }
+            } else {
+                ProviderCredentialInput::None
+            }
+        };
+        let copied = ProviderConnection::new(self)
+            .save(ProviderSave::Custom(CreateProvider {
+                name: Some(name),
+                source: ProviderSourceInput::Custom {
+                    vendor: original.vendor.clone(),
+                    protocol: original.protocol.clone(),
+                    base_url: original.base_url.clone(),
+                    models_source: original.models_source.clone(),
+                    static_models: original.static_models.clone(),
+                },
+                credential,
                 use_proxy: original.use_proxy,
-            })
+            }))
             .await?;
         let copied = self
             .update_provider(
@@ -312,8 +308,11 @@ impl AdminService {
         id: &str,
         input: UpdateProvider,
     ) -> anyhow::Result<Provider> {
-        crate::admin::provider_connection::ProviderConnection::new(self)
-            .update(id, input)
+        ProviderConnection::new(self)
+            .save(ProviderSave::Update {
+                provider_id: id.to_string(),
+                input,
+            })
             .await
     }
 
@@ -473,7 +472,7 @@ impl AdminService {
         // ProviderStore owns the backend transaction that removes this
         // Provider, prunes its Targets, and deletes Routes left empty.
         self.gw.storage.providers().delete(id).await?;
-        self.reload_model_cache().await?;
+        super::routes::RouteModule::new(self).reload_cache().await?;
         self.bump_config_epoch().await?;
         self.gw.clear_ollama_capability_cache_for_provider(id).await;
         Ok(())
@@ -691,9 +690,9 @@ impl AdminService {
     }
 
     pub async fn test_provider_models(&self, id: &str) -> anyhow::Result<Vec<String>> {
-        super::routes::RouteModule::new(self)
+        Ok(super::routes::RouteModule::new(self)
             .discover_provider_model_ids(id)
-            .await
+            .await?)
     }
     pub async fn get_provider_models(&self, id: &str) -> anyhow::Result<Vec<String>> {
         let provider = self.get_provider(id).await?;

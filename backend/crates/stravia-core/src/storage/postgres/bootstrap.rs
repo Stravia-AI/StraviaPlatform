@@ -48,17 +48,6 @@ pub(super) fn provider_select(suffix: Option<&str>) -> String {
     sql
 }
 
-pub(super) fn model_select(suffix: Option<&str>) -> String {
-    let mut sql = String::from(
-        "SELECT id, name, COALESCE(balance, 'weighted') AS balance, target_provider, target_model, COALESCE(is_enabled, TRUE) AS is_enabled, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS created_at FROM models",
-    );
-    if let Some(suffix) = suffix {
-        sql.push(' ');
-        sql.push_str(suffix);
-    }
-    sql
-}
-
 pub(super) fn api_key_select(suffix: Option<&str>) -> String {
     let mut sql = String::from(
         "SELECT id, token, name, concurrency_limit, COALESCE(is_enabled, TRUE) AS is_enabled, COALESCE(mcp_access_enabled, FALSE) AS mcp_access_enabled, COALESCE(transparent_injection_enabled, FALSE) AS transparent_injection_enabled, COALESCE(inject_media_understanding, FALSE) AS inject_media_understanding, COALESCE(inject_web_search, FALSE) AS inject_web_search, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS expires_at, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS created_at, to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS updated_at FROM api_keys",

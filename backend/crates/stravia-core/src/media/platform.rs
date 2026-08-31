@@ -18,30 +18,12 @@ pub(crate) const MEDIA_TOOL_NAME: &str = "understand_media";
 
 pub(crate) async fn model_is_image_capable(
     gateway: &crate::Gateway,
-    model: &crate::db::models::Model,
+    model: &crate::db::models::Route,
 ) -> bool {
     if !model.is_enabled {
         return false;
     }
-    let targets = if let Some(store) = gateway.storage.model_backends()
-        && let Ok(targets) = store.list_backends_by_model(&model.id).await
-        && !targets.is_empty()
-    {
-        targets
-    } else if model.target_provider.trim().is_empty() {
-        Vec::new()
-    } else {
-        vec![crate::db::models::ModelBackend {
-            id: String::new(),
-            model_id: model.id.clone(),
-            provider_id: model.target_provider.clone(),
-            model: model.target_model.clone(),
-            weight: 100,
-            priority: 1,
-            created_at: String::new(),
-            thinking_level_map: sqlx::types::Json(Vec::new()),
-        }]
-    };
+    let targets = model.targets.clone();
     if targets.is_empty() {
         return false;
     }
@@ -150,7 +132,13 @@ pub(crate) async fn is_available(gateway: &crate::Gateway, principal: &Principal
     let Some(model_id) = service.model_id().await else {
         return false;
     };
-    let model = gateway.storage.models().get(&model_id).await.ok().flatten();
+    let model = gateway
+        .storage
+        .routes()
+        .list_active()
+        .await
+        .ok()
+        .and_then(|routes| routes.into_iter().find(|route| route.id == model_id));
     let Some(model) = model else {
         return false;
     };

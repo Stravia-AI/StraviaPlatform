@@ -11,7 +11,7 @@ use super::*;
 use crate::Gateway;
 use crate::config::GatewayConfig;
 use crate::db::models::{
-    CreateModel, CreateModelBackend, CreateProvider, ProviderCredentialInput, ProviderSourceInput,
+    CreateProvider, CreateRoute, CreateTarget, ProviderCredentialInput, ProviderSourceInput,
 };
 use crate::hook::Principal;
 use crate::protocol::ir::{AiResponse, AiStreamDelta};
@@ -252,7 +252,7 @@ async fn gateway_with_captured_model(
         .expect("Provider");
     add_test_provider_model(&gateway, &provider.id).await;
     let model = admin
-        .create_model(CreateModel {
+        .create_model(CreateRoute {
             name: model_name.into(),
             balance: None,
             target_provider: provider.id.clone(),
@@ -265,7 +265,7 @@ async fn gateway_with_captured_model(
         vec![model.id]
     } else {
         let other_model = admin
-            .create_model(CreateModel {
+            .create_model(CreateRoute {
                 name: format!("{model_name}-other"),
                 balance: None,
                 target_provider: provider.id,
@@ -413,7 +413,7 @@ async fn execute_fails_over_before_canonical_output_and_returns_the_locked_targe
         add_test_provider_model(&gateway, &provider.id).await;
     }
     let model = admin
-        .create_model(CreateModel {
+        .create_model(CreateRoute {
             name: "failover-model".into(),
             balance: Some("priority".into()),
             target_provider: String::new(),
@@ -421,7 +421,7 @@ async fn execute_fails_over_before_canonical_output_and_returns_the_locked_targe
             targets: providers
                 .iter()
                 .enumerate()
-                .map(|(index, provider)| CreateModelBackend {
+                .map(|(index, provider)| CreateTarget {
                     provider_id: provider.id.clone(),
                     model: "upstream-model".into(),
                     weight: Some(100),
@@ -514,7 +514,7 @@ async fn execute_rejects_tools_when_no_target_declares_function_tool_support() {
         .expect("Provider");
     add_test_provider_model(&gateway, &provider.id).await;
     let model = admin
-        .create_model(CreateModel {
+        .create_model(CreateRoute {
             name: "no-tools-model".into(),
             balance: None,
             target_provider: provider.id,
@@ -609,7 +609,7 @@ async fn execute_does_not_fail_over_after_the_first_canonical_delta() {
         add_test_provider_model(&gateway, &provider.id).await;
     }
     let model = admin
-        .create_model(CreateModel {
+        .create_model(CreateRoute {
             name: "stream-lock-model".into(),
             balance: Some("priority".into()),
             target_provider: String::new(),
@@ -617,7 +617,7 @@ async fn execute_does_not_fail_over_after_the_first_canonical_delta() {
             targets: providers
                 .iter()
                 .enumerate()
-                .map(|(index, provider)| CreateModelBackend {
+                .map(|(index, provider)| CreateTarget {
                     provider_id: provider.id.clone(),
                     model: "upstream-model".into(),
                     weight: Some(100),
@@ -801,7 +801,7 @@ async fn internal_stream_log_uses_terminal_usage_and_transport_metrics() {
         .expect("Provider");
     add_test_provider_model(&gateway, &provider.id).await;
     let _model = admin
-        .create_model(CreateModel {
+        .create_model(CreateRoute {
             name: "stream-grant-model".into(),
             balance: None,
             target_provider: provider.id.clone(),
@@ -811,7 +811,7 @@ async fn internal_stream_log_uses_terminal_usage_and_transport_metrics() {
         .await
         .expect("Model");
     let other_model = admin
-        .create_model(CreateModel {
+        .create_model(CreateRoute {
             name: "bound-model".into(),
             balance: None,
             target_provider: provider.id,

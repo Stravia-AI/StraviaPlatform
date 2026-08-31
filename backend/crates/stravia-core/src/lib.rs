@@ -150,7 +150,7 @@ pub struct Gateway {
     proxy_client_cache: Arc<tokio::sync::RwLock<Option<ProxyClientCache>>>,
     responses_websockets: proxy::client::ResponsesWebSocketRegistry,
     pub(crate) principal_admission: Arc<admission::PrincipalAdmission>,
-    pub model_cache: Arc<tokio::sync::RwLock<router::ModelCache>>,
+    pub model_cache: Arc<tokio::sync::RwLock<router::RouteCache>>,
     pub health_registry: Arc<HealthRegistry>,
     pub(crate) cache_affinity: router::cache_affinity::CacheAffinity,
     pub ollama_capability_cache: Arc<tokio::sync::RwLock<HashMap<String, CapabilityCacheEntry>>>,
@@ -704,11 +704,12 @@ impl web_search::SearchRunAuthorizer for GatewayWebSearchAuthorizer {
         match binding {
             web_search::ResolvedWebSearchBackend::Local { model_id } => {
                 self.storage
-                    .models()
-                    .get(model_id)
+                    .routes()
+                    .list_active()
                     .await
                     .map_err(|_| web_search_authorization_error())?
-                    .filter(|model| model.is_enabled)
+                    .into_iter()
+                    .find(|route| route.id == *model_id)
                     .ok_or_else(web_search_authorization_error)?;
                 proxy::security::Security::new(self.storage.auth())
                     .authorize_principal_capability(principal)
@@ -773,14 +774,13 @@ impl agent::AgentToolAuthorizer for GatewayAgentToolAuthorizer {
     ) -> Result<(), agent::AgentRunError> {
         let model = self
             .storage
-            .models()
-            .get(model_id)
+            .routes()
+            .list_active()
             .await
             .map_err(|_| agent_tool_authorization_error())?
+            .into_iter()
+            .find(|route| route.id == model_id)
             .ok_or_else(agent_tool_authorization_error)?;
-        if !model.is_enabled {
-            return Err(agent_tool_authorization_error());
-        }
         let security = crate::proxy::security::Security::new(self.storage.auth());
         let capability_owned = definition_id.as_str() == web_search::LOCAL_SEARCH_DEFINITION_ID
             || definition_id.as_str() == media::MEDIA_DEFINITION_ID;
@@ -944,7 +944,7 @@ impl Gateway {
             .build()?;
 
         let model_cache = Arc::new(tokio::sync::RwLock::new(
-            router::ModelCache::load(storage.snapshots(), storage.model_backends()).await?,
+            router::RouteCache::load(storage.routes()).await?,
         ));
         let health_registry = Arc::new(HealthRegistry::new());
         let ollama_capability_cache = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
@@ -1190,10 +1190,7 @@ impl Gateway {
                                     .model_cache
                                     .write()
                                     .await
-                                    .reload(
-                                        gw_poll.storage.snapshots(),
-                                        gw_poll.storage.model_backends(),
-                                    )
+                                    .reload(gw_poll.storage.routes())
                                     .await
                             } => result,
                         };

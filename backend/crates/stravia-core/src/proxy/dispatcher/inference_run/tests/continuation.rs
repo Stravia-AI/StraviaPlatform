@@ -671,11 +671,14 @@ async fn cache_affinity_prefers_the_target_that_processed_a_long_exact_prefix() 
     .await;
     let backends = gateway
         .storage
-        .model_backends()
-        .expect("model backend store")
-        .list_backends_by_model(&route_id)
+        .routes()
+        .list()
         .await
-        .expect("route backends");
+        .expect("Routes")
+        .into_iter()
+        .find(|route| route.id == route_id)
+        .expect("cache-affinity Route")
+        .targets;
     let first_target = crate::router::selected_target_key(&crate::router::SelectedTarget {
         provider_id: backends[0].provider_id.clone(),
         model: backends[0].model.clone(),

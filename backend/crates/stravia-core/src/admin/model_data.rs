@@ -1,21 +1,20 @@
 use super::*;
 
 pub(super) fn normalize_model_balance(balance: Option<&str>) -> anyhow::Result<String> {
-    let normalized = balance.unwrap_or("weighted").trim().to_ascii_lowercase();
-    match normalized.as_str() {
-        "weighted" | "priority" => Ok(normalized),
-        _ => anyhow::bail!("unsupported model balance: {normalized}"),
-    }
+    balance
+        .unwrap_or("weighted")
+        .parse::<RouteSelectionStrategy>()
+        .map(|strategy| strategy.as_str().to_string())
 }
 
-pub(super) fn normalize_create_model_backends(
-    input: &CreateModel,
-) -> anyhow::Result<Vec<CreateModelBackend>> {
+pub(super) fn normalize_create_route_targets(
+    input: &CreateRoute,
+) -> anyhow::Result<Vec<CreateTarget>> {
     if !input.targets.is_empty() {
         return Ok(input.targets.clone());
     }
     if !input.target_provider.trim().is_empty() && !input.target_model.trim().is_empty() {
-        return Ok(vec![CreateModelBackend {
+        return Ok(vec![CreateTarget {
             provider_id: input.target_provider.clone(),
             model: input.target_model.clone(),
             weight: Some(100),
@@ -26,14 +25,14 @@ pub(super) fn normalize_create_model_backends(
     anyhow::bail!("at least one model backend is required")
 }
 
-pub(super) fn normalize_update_model_backends(
-    current: &Model,
-    input: &UpdateModel,
-) -> anyhow::Result<Vec<CreateModelBackend>> {
+pub(super) fn normalize_update_route_targets(
+    current: &Route,
+    input: &UpdateRoute,
+) -> anyhow::Result<Vec<CreateTarget>> {
     if let Some(targets) = &input.targets {
         let mapped = targets
             .iter()
-            .map(|target| CreateModelBackend {
+            .map(|target| CreateTarget {
                 provider_id: target.provider_id.clone(),
                 model: target.model.clone(),
                 weight: target.weight,
@@ -55,7 +54,7 @@ pub(super) fn normalize_update_model_backends(
     if provider.trim().is_empty() || model.trim().is_empty() {
         anyhow::bail!("model backend cannot be empty");
     }
-    Ok(vec![CreateModelBackend {
+    Ok(vec![CreateTarget {
         provider_id: provider,
         model,
         weight: Some(100),
@@ -64,7 +63,7 @@ pub(super) fn normalize_update_model_backends(
     }])
 }
 
-pub(super) fn ensure_model_backends_valid(backends: &[CreateModelBackend]) -> anyhow::Result<()> {
+pub(super) fn ensure_route_targets_valid(backends: &[CreateTarget]) -> anyhow::Result<()> {
     if backends.is_empty() {
         anyhow::bail!("at least one model backend is required");
     }

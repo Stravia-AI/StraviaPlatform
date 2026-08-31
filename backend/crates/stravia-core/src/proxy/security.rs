@@ -8,7 +8,7 @@
 use axum::http::{HeaderMap, header};
 use chrono::{NaiveDateTime, Utc};
 
-use crate::db::models::Model;
+use crate::db::models::Route;
 use crate::error::{AccessDenial, AuthFailure, GatewayError};
 use crate::storage::traits::{ApiKeyAccessRecord, AuthAccessStore};
 
@@ -129,7 +129,7 @@ impl<'a> Security<'a> {
     pub(crate) async fn authorize_principal_model(
         &self,
         principal: &crate::hook::Principal,
-        model: &Model,
+        model: &Route,
     ) -> Result<ModelAccessGrant, GatewayError> {
         let key = self.principal_key(principal).await?;
         self.authorize_key_model(&key, model).await
@@ -189,7 +189,7 @@ impl<'a> Security<'a> {
     async fn authorize_key_model(
         &self,
         key: &ApiKeyAccessRecord,
-        model: &Model,
+        model: &Route,
     ) -> Result<ModelAccessGrant, GatewayError> {
         validate_key_state(key)?;
         let Some(auth) = self.auth else {
@@ -284,7 +284,7 @@ mod tests {
     use axum::http::{HeaderMap, HeaderValue, header};
 
     use super::{ClientCredential, Security, validate_key_state};
-    use crate::db::models::Model;
+    use crate::db::models::Route;
     use crate::error::{AccessDenial, AuthFailure, GatewayError};
     use crate::hook::Principal;
     use crate::storage::traits::{ApiKeyAccessRecord, AuthAccessStore};
@@ -467,8 +467,8 @@ mod tests {
         }
     }
 
-    fn protected_model() -> Model {
-        Model {
+    fn protected_model() -> Route {
+        Route {
             id: "protected-model-id".into(),
             name: "protected-model".into(),
             balance: "priority".into(),

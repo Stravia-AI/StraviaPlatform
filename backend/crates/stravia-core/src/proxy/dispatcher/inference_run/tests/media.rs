@@ -89,7 +89,7 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
         .await
         .expect("parent Provider Model");
     let parent_model = admin
-        .create_model(CreateModel {
+        .create_model(CreateRoute {
             name: "text-parent".into(),
             balance: None,
             target_provider: parent_provider.id,
@@ -129,7 +129,7 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
         .await
         .expect("Media Provider Model");
     let media_model = admin
-        .create_model(CreateModel {
+        .create_model(CreateRoute {
             name: "media-vision".into(),
             balance: None,
             target_provider: media_provider.id,
@@ -338,20 +338,20 @@ async fn mixed_media_route_prefers_native_targets_and_rejects_targets_without_to
     .await;
     let mixed_model = gateway
         .admin()
-        .create_model(CreateModel {
+        .create_model(CreateRoute {
             name: "mixed-media".into(),
             balance: Some("priority".into()),
             target_provider: String::new(),
             target_model: String::new(),
             targets: vec![
-                CreateModelBackend {
+                CreateTarget {
                     provider_id: bridge.id,
                     model: "bridge".into(),
                     weight: Some(100),
                     priority: Some(1),
                     thinking_level_map: Vec::new(),
                 },
-                CreateModelBackend {
+                CreateTarget {
                     provider_id: native.id,
                     model: "native".into(),
                     weight: Some(100),
@@ -364,7 +364,7 @@ async fn mixed_media_route_prefers_native_targets_and_rejects_targets_without_to
         .expect("mixed Media Model");
     let unsupported_model = gateway
         .admin()
-        .create_model(CreateModel {
+        .create_model(CreateRoute {
             name: "unsupported-media".into(),
             balance: None,
             target_provider: no_tools.id,

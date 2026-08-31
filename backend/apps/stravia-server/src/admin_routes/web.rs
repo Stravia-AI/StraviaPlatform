@@ -41,7 +41,10 @@ pub(super) fn media_understanding_config_error(
 
 pub(super) async fn list_web_providers_handler(State(gw): State<Gateway>) -> impl IntoResponse {
     match gw.admin().list_web_providers().await {
-        Ok(value) => Json(serde_json::json!({ "data": value })).into_response(),
+        Ok(value) => Json(serde_json::json!({
+            "data": value.into_iter().map(web_provider_value).collect::<Vec<_>>()
+        }))
+        .into_response(),
         Err(error) => err(error),
     }
 }
@@ -51,7 +54,7 @@ pub(super) async fn get_web_provider_handler(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match gw.admin().get_web_provider(&id).await {
-        Ok(value) => Json(serde_json::json!({ "data": value })).into_response(),
+        Ok(value) => Json(serde_json::json!({ "data": web_provider_value(value) })).into_response(),
         Err(error) => err(error),
     }
 }
@@ -63,7 +66,7 @@ pub(super) async fn create_web_provider_handler(
     match gw.admin().create_web_provider(input).await {
         Ok(value) => (
             StatusCode::CREATED,
-            Json(serde_json::json!({ "data": value })),
+            Json(serde_json::json!({ "data": web_provider_value(value) })),
         )
             .into_response(),
         Err(error) => err(error),
@@ -76,9 +79,22 @@ pub(super) async fn update_web_provider_handler(
     Json(input): Json<UpdateWebProvider>,
 ) -> impl IntoResponse {
     match gw.admin().update_web_provider(&id, input).await {
-        Ok(value) => Json(serde_json::json!({ "data": value })).into_response(),
+        Ok(value) => Json(serde_json::json!({ "data": web_provider_value(value) })).into_response(),
         Err(error) => err(error),
     }
+}
+
+fn web_provider_value(provider: WebProvider) -> serde_json::Value {
+    let capabilities = provider.capabilities();
+    let mut value = serde_json::to_value(provider).expect("Web Provider serializes");
+    value
+        .as_object_mut()
+        .expect("Web Provider serializes as object")
+        .insert(
+            "capabilities".into(),
+            serde_json::to_value(capabilities).expect("Web Provider capabilities serialize"),
+        );
+    value
 }
 
 pub(super) async fn delete_web_provider_handler(

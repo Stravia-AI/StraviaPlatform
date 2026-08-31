@@ -11,7 +11,7 @@ import { toast } from 'svelte-sonner'
 import { admin } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
 import { getDataTableLabels } from '$lib/data-table-labels'
-import type { Model } from '$lib/types'
+import type { Route, RouteSelectionStrategy } from '$lib/types'
 import PageHeader from '$lib/components/page-header.svelte'
 import StatusIndicator from '$lib/components/status-indicator.svelte'
 import TechnicalValue from '$lib/components/technical-value.svelte'
@@ -37,7 +37,7 @@ const mediaUnderstandingQuery = createQuery(() => ({
   queryKey: ['media-understanding-config'],
   queryFn: admin.mediaUnderstanding.get,
 }))
-let deleteTarget = $state<Model>()
+let deleteTarget = $state<Route>()
 let deleteOpen = $state(false)
 let actingModelId = $state<string>()
 
@@ -45,7 +45,21 @@ const models = $derived(modelsQuery.data ?? [])
 const providers = $derived(providersQuery.data ?? [])
 const apiKeys = $derived(apiKeysQuery.data ?? [])
 const tableLabels = $derived(getDataTableLabels())
-const modelColumnHelper = createDataTableColumnHelper<Model>()
+const modelColumnHelper = createDataTableColumnHelper<Route>()
+
+function strategyLabel(strategy: RouteSelectionStrategy): string {
+  switch (strategy) {
+    case 'weighted':
+      return m.models_split_share()
+    case 'priority':
+      return m.common_try_order()
+    case 'cooldown':
+      return m.model_editor_rotate_destinations()
+    case 'latency':
+      return m.model_editor_prefer_low_latency()
+  }
+}
+
 const modelColumns = modelColumnHelper.columns([
   modelColumnHelper.accessor('name', {
     header: () => m.common_model(),
@@ -82,7 +96,7 @@ const modelColumns = modelColumnHelper.columns([
   }),
 ])
 
-function getModelRowId(model: Model): string {
+function getModelRowId(model: Route): string {
   return model.id
 }
 const routeDependenciesUnavailable = $derived(
@@ -107,7 +121,7 @@ const deletesMediaUnderstandingRoute = $derived(
   Boolean(deleteTarget && mediaUnderstandingQuery.data?.model_id === deleteTarget.id),
 )
 
-function targetsLabel(model: Model): string {
+function targetsLabel(model: Route): string {
   return model.targets
     .map(
       (target) =>
@@ -116,30 +130,30 @@ function targetsLabel(model: Model): string {
     .join(', ')
 }
 
-function openModel(model: Model, event: MouseEvent): void {
+function openModel(model: Route, event: MouseEvent): void {
   if (event.target instanceof Element && event.target.closest('a, button, [role="button"]')) return
-  void goto(resolve(`/models/${encodeURIComponent(model.id)}`))
+  void goto(resolve(`/models/${encodeURIComponent(model.name)}`))
 }
 
-function handleModelTableRowClick({ event, original }: DataTableRowPointerEvent<Model>): void {
+function handleModelTableRowClick({ event, original }: DataTableRowPointerEvent<Route>): void {
   openModel(original, event)
 }
 
-function handleModelRowKeydown(event: KeyboardEvent, model: Model): void {
+function handleModelRowKeydown(event: KeyboardEvent, model: Route): void {
   if (event.key !== 'Enter' || event.target !== event.currentTarget) return
   event.preventDefault()
-  void goto(resolve(`/models/${encodeURIComponent(model.id)}`))
+  void goto(resolve(`/models/${encodeURIComponent(model.name)}`))
 }
 
-function askDelete(model: Model): void {
+function askDelete(model: Route): void {
   deleteTarget = model
   deleteOpen = true
 }
 
-async function toggleModel(model: Model): Promise<void> {
+async function toggleModel(model: Route): Promise<void> {
   actingModelId = model.id
   try {
-    await admin.models.update(model.id, { is_enabled: !model.is_enabled })
+    await admin.models.update(model.name, { is_enabled: !model.is_enabled })
     await queryClient.invalidateQueries({ queryKey: ['models'] })
   } catch (error) {
     toast.error(localizeBackendErrorMessage(error))
@@ -152,7 +166,7 @@ async function deleteModel(): Promise<void> {
   if (!deleteTarget) return
   actingModelId = deleteTarget.id
   try {
-    await admin.models.delete(deleteTarget.id)
+    await admin.models.delete(deleteTarget.name)
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ['models'] }),
       queryClient.invalidateQueries({ queryKey: ['api-keys'] }),
@@ -178,7 +192,7 @@ async function deleteModel(): Promise<void> {
   </Button>
 {/snippet}
 
-{#snippet modelActions(model: Model)}
+{#snippet modelActions(model: Route)}
   <DropdownMenu.Root>
     <DropdownMenu.Trigger>
       {#snippet child({ props })}
@@ -207,17 +221,17 @@ async function deleteModel(): Promise<void> {
   </DropdownMenu.Root>
 {/snippet}
 
-{#snippet modelBalanceCell(context: DataTableCellContext<Model>)}
+{#snippet modelBalanceCell(context: DataTableCellContext<Route>)}
   <Badge variant="outline">
-    {context.row.original.balance === 'priority' ? m.common_try_order() : m.models_split_share()}
+    {strategyLabel(context.row.original.balance)}
   </Badge>
 {/snippet}
 
-{#snippet modelTargetsCell(context: DataTableCellContext<Model>)}
+{#snippet modelTargetsCell(context: DataTableCellContext<Route>)}
   <TechnicalValue value={targetsLabel(context.row.original)} copyable />
 {/snippet}
 
-{#snippet modelStatusCell(context: DataTableCellContext<Model>)}
+{#snippet modelStatusCell(context: DataTableCellContext<Route>)}
   {@const model = context.row.original}
   <StatusIndicator
     compact
@@ -225,7 +239,7 @@ async function deleteModel(): Promise<void> {
     tone={model.is_enabled ? 'healthy' : 'neutral'} />
 {/snippet}
 
-{#snippet modelActionsCell(context: DataTableCellContext<Model>)}
+{#snippet modelActionsCell(context: DataTableCellContext<Route>)}
   <div class="flex justify-end gap-1">{@render modelActions(context.row.original)}</div>
 {/snippet}
 
@@ -308,8 +322,7 @@ async function deleteModel(): Promise<void> {
             <div class="min-w-0">
               <p class="font-technical truncate font-medium">{model.name}</p>
               <p class="mt-1 text-xs text-muted-foreground">
-                {model.balance === 'priority' ? m.common_try_order() : m.models_split_share()} · {model.targets
-                  .length === 1
+                {strategyLabel(model.balance)} · {model.targets.length === 1
                   ? m.common_1_destination()
                   : m.models_value_destinations({ target_count: model.targets.length })}
               </p>

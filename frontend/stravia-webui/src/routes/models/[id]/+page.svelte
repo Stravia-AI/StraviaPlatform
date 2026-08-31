@@ -11,17 +11,21 @@ import { Spinner } from '$lib/components/ui/spinner'
 
 const routeId = $derived(page.params.id ?? '')
 const providersQuery = createQuery(() => ({ queryKey: ['providers'], queryFn: admin.providers.list }))
-const modelsQuery = createQuery(() => ({ queryKey: ['models'], queryFn: admin.models.list }))
-const model = $derived(modelsQuery.data?.find((item) => item.id === routeId))
+const routeQuery = createQuery(() => ({
+  queryKey: ['models', routeId],
+  queryFn: () => admin.models.get(routeId),
+  enabled: Boolean(routeId),
+}))
+const model = $derived(routeQuery.data)
 </script>
 
 <svelte:head><title>{model?.name ?? m.common_model()} · Stravia</title></svelte:head>
 
-{#if providersQuery.isPending || modelsQuery.isPending}
+{#if providersQuery.isPending || routeQuery.isPending}
   <div class="grid min-h-72 place-items-center"><Spinner /></div>
-{:else if providersQuery.isError || modelsQuery.isError}
+{:else if providersQuery.isError || routeQuery.isError}
   <p class="text-sm text-destructive">
-    {localizeBackendErrorMessage(providersQuery.error ?? modelsQuery.error)}
+    {localizeBackendErrorMessage(providersQuery.error ?? routeQuery.error)}
   </p>
 {:else if !model}
   <div class="route-page">

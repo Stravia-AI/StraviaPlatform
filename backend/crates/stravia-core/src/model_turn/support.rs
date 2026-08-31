@@ -3,32 +3,14 @@ use std::sync::Arc;
 use reqwest::header::{HeaderMap as ReqwestHeaderMap, HeaderValue as ReqwestHeaderValue};
 
 use crate::Gateway;
-use crate::db::models::{Model, ModelBackend, Provider};
+use crate::db::models::{Provider, Route, Target};
 use crate::protocol::ids::Protocol;
 use crate::protocol::ir::AiResponse;
 use crate::provider::VendorRegistry;
 use crate::provider::vendor::Vendor;
 
-pub(super) async fn load_model_backends(gw: &Gateway, model: &Model) -> Vec<ModelBackend> {
-    if let Some(store) = gw.storage.model_backends()
-        && let Ok(backends) = store.list_backends_by_model(&model.id).await
-        && !backends.is_empty()
-    {
-        return backends;
-    }
-    if model.target_provider.trim().is_empty() {
-        return Vec::new();
-    }
-    vec![ModelBackend {
-        id: String::new(),
-        model_id: model.id.clone(),
-        provider_id: model.target_provider.clone(),
-        model: model.target_model.clone(),
-        weight: 100,
-        priority: 1,
-        created_at: String::new(),
-        thinking_level_map: sqlx::types::Json(Vec::new()),
-    }]
+pub(super) async fn load_route_targets(_gw: &Gateway, model: &Route) -> Vec<Target> {
+    model.targets.clone()
 }
 
 pub(super) fn is_retryable(status: u16) -> bool {

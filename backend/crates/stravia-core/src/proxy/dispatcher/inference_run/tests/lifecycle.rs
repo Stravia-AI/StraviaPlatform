@@ -754,7 +754,7 @@ async fn catalog_provider_without_dedicated_vendor_adapter_reaches_upstream() {
         .expect("create test Provider Model");
     gateway
         .admin()
-        .create_model(CreateModel {
+        .create_model(CreateRoute {
             name: "gpt-5.4".into(),
             balance: None,
             target_provider: provider.id,
@@ -967,20 +967,29 @@ async fn unrepresentable_thinking_control_is_a_typed_422_before_upstream() {
         .control = crate::thinking::TargetThinkingControl::Budget { value: 8192 };
     gateway
         .storage
-        .model_backends()
-        .expect("Target store")
-        .set_backends(
-            &route.id,
-            &[CreateModelBackend {
+        .routes()
+        .put(crate::db::models::PutRoute {
+            id: Some(route.id.clone()),
+            route_id: route.name.clone(),
+            selection_strategy: route.balance.clone(),
+            is_enabled: route.is_enabled,
+            targets: vec![CreateTarget {
                 provider_id: route.targets[0].provider_id.clone(),
                 model: route.targets[0].model.clone(),
                 weight: Some(route.targets[0].weight),
                 priority: Some(route.targets[0].priority),
                 thinking_level_map: map,
             }],
-        )
+        })
         .await
         .expect("inject legacy unrepresentable map");
+    gateway
+        .model_cache
+        .write()
+        .await
+        .reload(gateway.storage.routes())
+        .await
+        .expect("reload injected Route");
 
     let mut user = crate::protocol::ir::AiItem::output_text("hello");
     user.role = crate::protocol::ir::Role::User;
@@ -1037,7 +1046,7 @@ async fn explicit_thinking_is_rejected_when_the_route_opens_no_levels() {
             for row in &mut map {
                 row.control = crate::thinking::TargetThinkingControl::Hidden;
             }
-            crate::db::models::UpsertModelBackend {
+            crate::db::models::UpsertTarget {
                 id: Some(target.id.clone()),
                 provider_id: target.provider_id.clone(),
                 model: target.model.clone(),
@@ -1050,8 +1059,8 @@ async fn explicit_thinking_is_rejected_when_the_route_opens_no_levels() {
     gateway
         .admin()
         .update_model(
-            &route.id,
-            crate::db::models::UpdateModel {
+            &route.name,
+            crate::db::models::UpdateRoute {
                 targets: Some(targets),
                 ..Default::default()
             },
@@ -1117,7 +1126,7 @@ async fn failover_remaps_the_same_clamped_level_for_the_next_target() {
                 .control = crate::thinking::TargetThinkingControl::Effort {
                 value: if index == 0 { "low" } else { "high" }.into(),
             };
-            crate::db::models::UpsertModelBackend {
+            crate::db::models::UpsertTarget {
                 id: Some(target.id.clone()),
                 provider_id: target.provider_id.clone(),
                 model: target.model.clone(),
@@ -1130,8 +1139,8 @@ async fn failover_remaps_the_same_clamped_level_for_the_next_target() {
     gateway
         .admin()
         .update_model(
-            &route.id,
-            crate::db::models::UpdateModel {
+            &route.name,
+            crate::db::models::UpdateRoute {
                 targets: Some(targets),
                 ..Default::default()
             },

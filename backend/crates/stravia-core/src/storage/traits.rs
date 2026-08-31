@@ -5,11 +5,10 @@ use anyhow::Context;
 use async_trait::async_trait;
 
 use crate::db::models::{
-    ApiKeyStats, ApiKeyWithBindings, CreateApiKey, CreateModel, CreateModelBackend,
-    CreateProviderRecord, CreateWebProvider, LogPage, LogQuery, Model, ModelBackend, ModelStats,
-    OAuthCredential, Provider, ProviderStats, RequestLog, StatsHourly, StatsOverview, UpdateApiKey,
-    UpdateModel, UpdateProvider, UpdateWebProvider, UpsertOAuthCredential, WebAccessSettings,
-    WebProvider,
+    ApiKeyStats, ApiKeyWithBindings, CreateApiKey, CreateProviderRecord, CreateWebProvider,
+    LogPage, LogQuery, ModelStats, OAuthCredential, Provider, ProviderStats, PutRoute, RequestLog,
+    Route, StatsHourly, StatsOverview, UpdateApiKey, UpdateProvider, UpdateWebProvider,
+    UpsertOAuthCredential, WebAccessSettings, WebProvider,
 };
 use crate::logging::LogEntry;
 use crate::provider_models::{
@@ -131,29 +130,12 @@ fn validate_web_access_priority_list(
 }
 
 #[async_trait]
-pub trait ModelStore: Send + Sync {
-    async fn list(&self) -> anyhow::Result<Vec<Model>>;
-    async fn get(&self, id: &str) -> anyhow::Result<Option<Model>>;
-    async fn create(&self, input: CreateModel) -> anyhow::Result<Model>;
-    async fn update(&self, id: &str, input: UpdateModel) -> anyhow::Result<Model>;
-    async fn delete(&self, id: &str) -> anyhow::Result<()>;
-    async fn exists_by_name(&self, name: &str, exclude_id: Option<&str>) -> anyhow::Result<bool>;
-}
-
-#[async_trait]
-pub trait ModelSnapshotStore: Send + Sync {
-    async fn load_active_snapshot(&self) -> anyhow::Result<Vec<Model>>;
-}
-
-#[async_trait]
-pub trait ModelBackendStore: Send + Sync {
-    async fn list_backends_by_model(&self, model_id: &str) -> anyhow::Result<Vec<ModelBackend>>;
-    async fn set_backends(
-        &self,
-        model_id: &str,
-        backends: &[CreateModelBackend],
-    ) -> anyhow::Result<Vec<ModelBackend>>;
-    async fn delete_backends_by_model(&self, model_id: &str) -> anyhow::Result<()>;
+pub trait RouteStore: Send + Sync {
+    async fn list(&self) -> anyhow::Result<Vec<Route>>;
+    async fn list_active(&self) -> anyhow::Result<Vec<Route>>;
+    async fn get(&self, route_id: &str) -> anyhow::Result<Option<Route>>;
+    async fn put(&self, route: PutRoute) -> anyhow::Result<Route>;
+    async fn delete(&self, route_id: &str) -> anyhow::Result<()>;
 }
 
 #[async_trait]
@@ -276,11 +258,7 @@ pub trait Storage: Send + Sync {
     fn web_providers(&self) -> Option<&dyn WebProviderStore> {
         None
     }
-    fn models(&self) -> &dyn ModelStore;
-    fn snapshots(&self) -> &dyn ModelSnapshotStore;
-    fn model_backends(&self) -> Option<&dyn ModelBackendStore> {
-        None
-    }
+    fn routes(&self) -> &dyn RouteStore;
     fn provider_models(&self) -> &dyn ProviderModelStore;
     fn settings(&self) -> &dyn SettingsStore;
     fn api_keys(&self) -> Option<&dyn ApiKeyStore> {

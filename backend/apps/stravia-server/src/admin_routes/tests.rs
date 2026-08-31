@@ -742,6 +742,10 @@ async fn web_access_admin_routes_persist_masked_providers_and_atomic_priority() 
     let created_body = to_bytes(created.into_body(), usize::MAX).await?;
     let created_json: serde_json::Value = serde_json::from_slice(&created_body)?;
     assert!(created_json["data"].get("api_key").is_none());
+    assert_eq!(
+        created_json["data"]["capabilities"],
+        serde_json::json!({ "search": true, "fetch": true })
+    );
     let id = created_json["data"]["id"]
         .as_str()
         .expect("Web Provider ID");

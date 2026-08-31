@@ -660,4 +660,53 @@ ADD COLUMN allow_media_understanding BOOLEAN NOT NULL DEFAULT FALSE;\n";
         .expect("unchanged Provider Model snapshot");
         assert_eq!(metadata, r#"{"id":"claude","name":"Claude"}"#);
     }
+
+    #[tokio::test]
+    async fn route_target_migration_preserves_a_legacy_primary_target() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("SQLite pool");
+        migrate_sqlite_range(&pool, 1, 26).await;
+        sqlx::query(
+            "INSERT INTO providers (
+                id, name, protocol, base_url, api_key, auth_mode
+             ) VALUES (
+                'provider-1', 'Provider 1', 'openai-compatible',
+                'https://example.com', '', 'apikey'
+             )",
+        )
+        .execute(&pool)
+        .await
+        .expect("legacy Provider");
+        sqlx::query(
+            "INSERT INTO models (
+                id, name, balance, target_provider, target_model
+             ) VALUES (
+                'route-storage-id', 'ClientRoute', 'weighted', 'provider-1', 'upstream-model'
+             )",
+        )
+        .execute(&pool)
+        .await
+        .expect("legacy Route");
+
+        migrate_sqlite_range(&pool, 27, 27).await;
+
+        let target = sqlx::query_as::<_, (String, String)>(
+            "SELECT provider_id, model FROM model_backends WHERE model_id = 'route-storage-id'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("migrated Target");
+        assert_eq!(target, ("provider-1".into(), "upstream-model".into()));
+        let columns = sqlx::query_scalar::<_, String>(
+            "SELECT name FROM pragma_table_info('models') ORDER BY cid",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("Route columns");
+        assert!(!columns.iter().any(|column| column == "target_provider"));
+        assert!(!columns.iter().any(|column| column == "target_model"));
+    }
 }

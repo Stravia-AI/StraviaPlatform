@@ -47,7 +47,7 @@ function kindLabel(kind: WebProviderKind): string {
 }
 
 function supportsFetch(provider: WebProvider): boolean {
-  return provider.kind === 'exa' || provider.kind === 'tavily' || provider.kind === 'zhipu'
+  return provider.capabilities.fetch
 }
 
 function openCreate(): void {

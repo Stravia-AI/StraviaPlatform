@@ -18,12 +18,11 @@ use super::delivery::LiveStreamRequest;
 use super::{
     ClientOutputCommit, ClientProjector, CompletionContext, CompletionFailure, CompletionInput,
     CompletionOutcome, DeliveryAdapter, DeliveryProgress, EarlyPlatformExecution,
-    EarlyThinkingMarkers, FollowupModelTurn, LogBuilder, PhaseTracker,
-    PublishedPlatformExecutions, RequestExtras, RoundOutcome, StreamResponseAccumulator,
-    acquire_followup_model_turn, ai_response_to_deltas, buffered_response,
-    complete_canonical_response, error_response, hook_failure_response, is_protected_thinking,
-    live_response, prepare_platform_markers, prepare_thinking_markers, publish_markers,
-    render_completion_failure,
+    EarlyThinkingMarkers, FollowupModelTurn, LogBuilder, PhaseTracker, PublishedPlatformExecutions,
+    RequestExtras, RoundOutcome, StreamResponseAccumulator, acquire_followup_model_turn,
+    ai_response_to_deltas, buffered_response, complete_canonical_response, error_response,
+    hook_failure_response, is_protected_thinking, live_response, prepare_platform_markers,
+    prepare_thinking_markers, publish_markers, render_completion_failure,
 };
 
 pub(super) struct HookLegGuard<'a> {

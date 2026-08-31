@@ -16,10 +16,20 @@ pub(super) async fn list_models_handler(State(gw): State<Gateway>) -> impl IntoR
 
 pub(super) async fn create_model_handler(
     State(gw): State<Gateway>,
-    Json(input): Json<CreateModel>,
+    Json(input): Json<CreateRoute>,
 ) -> impl IntoResponse {
     match gw.admin().create_model(input).await {
         Ok(model) => Json(serde_json::json!({ "data": model })).into_response(),
+        Err(error) => err(error),
+    }
+}
+
+pub(super) async fn get_model_handler(
+    State(gw): State<Gateway>,
+    Path(route_id): Path<String>,
+) -> impl IntoResponse {
+    match gw.admin().get_model(&route_id).await {
+        Ok(route) => Json(serde_json::json!({ "data": route })).into_response(),
         Err(error) => err(error),
     }
 }
@@ -46,10 +56,10 @@ pub(super) async fn unbind_route_handler(
 
 pub(super) async fn update_model_handler(
     State(gw): State<Gateway>,
-    Path(id): Path<String>,
-    Json(input): Json<UpdateModel>,
+    Path(route_id): Path<String>,
+    Json(input): Json<UpdateRoute>,
 ) -> impl IntoResponse {
-    match gw.admin().update_model(&id, input).await {
+    match gw.admin().update_model(&route_id, input).await {
         Ok(model) => Json(serde_json::json!({ "data": model })).into_response(),
         Err(error) => err(error),
     }
@@ -57,9 +67,9 @@ pub(super) async fn update_model_handler(
 
 pub(super) async fn delete_model_handler(
     State(gw): State<Gateway>,
-    Path(id): Path<String>,
+    Path(route_id): Path<String>,
 ) -> impl IntoResponse {
-    match gw.admin().delete_model(&id).await {
+    match gw.admin().delete_model(&route_id).await {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => err(e),
     }

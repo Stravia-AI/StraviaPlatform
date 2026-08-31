@@ -10,7 +10,7 @@ import { toast } from 'svelte-sonner'
 
 import { admin } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
-import type { ApiKey, Model } from '$lib/types'
+import type { ApiKey, Route } from '$lib/types'
 import PageHeader from '$lib/components/page-header.svelte'
 import * as Field from '$lib/components/ui/field'
 import { Button, buttonVariants } from '$lib/components/ui/button'
@@ -38,7 +38,7 @@ interface KeyForm {
 interface Props {
   open?: boolean
   apiKey?: ApiKey
-  models: Model[]
+  models: Route[]
   webSearchEnabled: boolean
   mediaUnderstandingEnabled: boolean
   presentation?: 'sheet' | 'page'

@@ -547,13 +547,17 @@ mod tests {
         .execute(&pool)
         .await
         .expect("insert Provider");
+        sqlx::query("INSERT INTO models (id, name) VALUES ('model-1', 'Model')")
+            .execute(&pool)
+            .await
+            .expect("insert Model");
         sqlx::query(
-            "INSERT INTO models (id, name, target_provider, target_model) \
-             VALUES ('model-1', 'Model', 'provider-1', 'upstream')",
+            "INSERT INTO model_backends (id, model_id, provider_id, model) \
+             VALUES ('target-1', 'model-1', 'provider-1', 'upstream')",
         )
         .execute(&pool)
         .await
-        .expect("insert Model");
+        .expect("insert Target");
         let registry = AgentDefinitionRegistry::with_store(Arc::new(
             SqlAgentDefinitionStore::sqlite(pool.clone()),
         ));

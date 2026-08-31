@@ -10,7 +10,7 @@ use super::provider::{
     ResponsesWebSocketBinding,
 };
 use super::support::{
-    ai_response_to_deltas, is_openai_generation_target, is_retryable, load_model_backends,
+    ai_response_to_deltas, is_openai_generation_target, is_retryable, load_route_targets,
     merge_provider_headers, resolve_vendor_adapter, runtime_binding_headers,
 };
 use super::{
@@ -134,7 +134,7 @@ async fn execute_inner(
     }
     .map_err(model_turn_gateway_error)?;
 
-    let targets = load_model_backends(gateway, &route).await;
+    let targets = load_route_targets(gateway, &route).await;
     let mut attempts = RouteAttemptPolicy::new(&route.balance, &targets);
     if let Some(plan) = input.request.meta.media_routing.as_ref() {
         attempts.retain(|target| plan.target_keys.contains(&selected_target_key(target)));
@@ -262,7 +262,7 @@ impl AttemptFailure {
 
 async fn prepare_attempt(
     executor: &LiveModelTurnExecutor,
-    route: &crate::db::models::Model,
+    route: &crate::db::models::Route,
     target: &SelectedTarget,
     input: &TurnInput,
 ) -> Result<PreparedAttempt, AttemptFailure> {
@@ -704,7 +704,7 @@ mod tests {
 
 async fn begin_attempt(
     gateway: &Gateway,
-    route: &crate::db::models::Model,
+    route: &crate::db::models::Route,
     target: &SelectedTarget,
     input: &TurnInput,
     mut prepared: PreparedAttempt,
@@ -1133,7 +1133,7 @@ fn model_turn_gateway_error(error: GatewayError) -> ModelTurnError {
 
 fn emit_internal_model_log(
     gateway: &Gateway,
-    route: &crate::db::models::Model,
+    route: &crate::db::models::Route,
     prepared: &PreparedAttempt,
     access: &crate::proxy::security::ModelAccessGrant,
     input: &TurnInput,
@@ -1148,7 +1148,7 @@ fn emit_internal_model_log(
 }
 
 fn internal_model_log_entry(
-    route: &crate::db::models::Model,
+    route: &crate::db::models::Route,
     prepared: &PreparedAttempt,
     access: &crate::proxy::security::ModelAccessGrant,
     input: &TurnInput,
@@ -1214,7 +1214,7 @@ struct PendingInternalModelLog {
 impl PendingInternalModelLog {
     fn new(
         gateway: &Gateway,
-        route: &crate::db::models::Model,
+        route: &crate::db::models::Route,
         prepared: &PreparedAttempt,
         access: &crate::proxy::security::ModelAccessGrant,
         input: &TurnInput,

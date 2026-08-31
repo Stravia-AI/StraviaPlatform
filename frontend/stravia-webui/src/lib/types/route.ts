@@ -1,7 +1,7 @@
-export interface Model {
+export interface Route {
   id: string
   name: string
-  balance: ModelBalance
+  balance: RouteSelectionStrategy
   target_provider: string
   target_model: string
   is_enabled: boolean
@@ -9,12 +9,12 @@ export interface Model {
   supported_thinking_levels: ThinkingLevel[]
   context_window?: number | null
   output_max_tokens?: number | null
-  targets: ModelBackend[]
+  targets: Target[]
 }
 
-export type ModelBalance = 'weighted' | 'priority'
+export type RouteSelectionStrategy = 'weighted' | 'priority' | 'cooldown' | 'latency'
 
-export interface ModelBackend {
+export interface Target {
   id: string
   model_id: string
   provider_id: string
@@ -40,12 +40,12 @@ export interface ThinkingLevelMapping {
   source: 'generated' | 'overridden'
 }
 
-export interface CreateModel {
+export interface CreateRoute {
   name: string
-  balance?: ModelBalance
+  balance?: RouteSelectionStrategy
   target_provider: string
   target_model: string
-  targets?: CreateModelBackend[]
+  targets?: CreateTarget[]
 }
 
 export interface BindRouteInput {
@@ -62,16 +62,16 @@ export interface UnbindRouteInput {
   provider_model_id: string
 }
 
-export interface UpdateModel {
+export interface UpdateRoute {
   name?: string
-  balance?: ModelBalance
+  balance?: RouteSelectionStrategy
   target_provider?: string
   target_model?: string
-  targets?: UpsertModelBackend[]
+  targets?: UpsertTarget[]
   is_enabled?: boolean
 }
 
-export interface CreateModelBackend {
+export interface CreateTarget {
   provider_id: string
   model: string
   weight?: number
@@ -79,7 +79,7 @@ export interface CreateModelBackend {
   thinking_level_map?: ThinkingLevelMapping[]
 }
 
-export interface UpsertModelBackend {
+export interface UpsertTarget {
   id?: string
   provider_id: string
   model: string

@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::db::models::{Model, ModelBackend};
+use crate::db::models::{Route, Target};
 use crate::hook::{
     ActionBatch, EventKind, Hook, HookAction, HookDescriptor, HookEvent, HookId, HookRejection,
     HookSession, Principal, RequestKind, RequestPatch, ResponsePatch, SessionContext, ToolId,
@@ -368,7 +368,7 @@ fn project_media_results(
 
 async fn classify_targets(
     gateway: &crate::Gateway,
-    model: &Model,
+    model: &Route,
 ) -> (Vec<String>, Vec<String>, Vec<String>) {
     let targets = load_targets(gateway, model).await;
     let mut native_targets = Vec::new();
@@ -412,26 +412,8 @@ async fn classify_targets(
     (native_targets, bridge_targets, tool_targets)
 }
 
-async fn load_targets(gateway: &crate::Gateway, model: &Model) -> Vec<ModelBackend> {
-    if let Some(store) = gateway.storage.model_backends()
-        && let Ok(backends) = store.list_backends_by_model(&model.id).await
-        && !backends.is_empty()
-    {
-        return backends;
-    }
-    if model.target_provider.trim().is_empty() {
-        return Vec::new();
-    }
-    vec![ModelBackend {
-        id: String::new(),
-        model_id: model.id.clone(),
-        provider_id: model.target_provider.clone(),
-        model: model.target_model.clone(),
-        weight: 100,
-        priority: 1,
-        created_at: String::new(),
-        thinking_level_map: sqlx::types::Json(Vec::new()),
-    }]
+async fn load_targets(_gateway: &crate::Gateway, model: &Route) -> Vec<Target> {
+    model.targets.clone()
 }
 
 fn reject_gateway_error(error: crate::error::GatewayError) -> ActionBatch {

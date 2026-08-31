@@ -1,35 +1,25 @@
-use crate::db::models::Model;
-use crate::storage::{ModelBackendStore, ModelSnapshotStore};
+use crate::db::models::Route;
+use crate::storage::RouteStore;
 
-pub struct ModelCache {
-    pub models: Vec<Model>,
+pub struct RouteCache {
+    pub models: Vec<Route>,
 }
 
-impl ModelCache {
-    pub async fn load(
-        store: &dyn ModelSnapshotStore,
-        backend_store: Option<&dyn ModelBackendStore>,
-    ) -> anyhow::Result<Self> {
-        let mut models = store.load_active_snapshot().await?;
+impl RouteCache {
+    pub async fn load(store: &dyn RouteStore) -> anyhow::Result<Self> {
+        let mut models = store.list_active().await?;
         for model in &mut models {
-            if let Some(backend_store) = backend_store {
-                model.targets = backend_store.list_backends_by_model(&model.id).await?;
-            }
             model.refresh_supported_thinking_levels();
         }
         Ok(Self { models })
     }
 
-    pub async fn reload(
-        &mut self,
-        store: &dyn ModelSnapshotStore,
-        backend_store: Option<&dyn ModelBackendStore>,
-    ) -> anyhow::Result<()> {
-        *self = Self::load(store, backend_store).await?;
+    pub async fn reload(&mut self, store: &dyn RouteStore) -> anyhow::Result<()> {
+        *self = Self::load(store).await?;
         Ok(())
     }
 }
 
-pub fn match_model<'a>(models: &'a [Model], model: &str) -> Option<&'a Model> {
+pub fn match_model<'a>(models: &'a [Route], model: &str) -> Option<&'a Route> {
     models.iter().find(|m| m.name == model)
 }

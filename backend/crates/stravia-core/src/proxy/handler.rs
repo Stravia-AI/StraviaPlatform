@@ -74,8 +74,8 @@ mod tests {
 
     use super::*;
     use crate::db::models::{
-        CreateModel, CreateModelBackend, CreateProvider, Model, ProviderCredentialInput,
-        ProviderSourceInput,
+        CreateProvider, CreateRoute, CreateTarget, ProviderCredentialInput, ProviderSourceInput,
+        Route,
     };
     use crate::provider_models::CreateManualProviderModel;
 
@@ -140,12 +140,12 @@ mod tests {
             )
             .await
             .expect("Provider Model");
-        let create_model = |name: &str| CreateModel {
+        let create_model = |name: &str| CreateRoute {
             name: name.into(),
             balance: Some("priority".into()),
             target_provider: String::new(),
             target_model: String::new(),
-            targets: vec![CreateModelBackend {
+            targets: vec![CreateTarget {
                 provider_id: provider.id.clone(),
                 model: "provider-model".into(),
                 weight: Some(100),
@@ -257,7 +257,7 @@ mod tests {
                 for row in &mut map {
                     row.control = crate::thinking::TargetThinkingControl::Hidden;
                 }
-                crate::db::models::UpsertModelBackend {
+                crate::db::models::UpsertTarget {
                     id: Some(target.id.clone()),
                     provider_id: target.provider_id.clone(),
                     model: target.model.clone(),
@@ -270,8 +270,8 @@ mod tests {
         gateway
             .admin()
             .update_model(
-                &bound.id,
-                crate::db::models::UpdateModel {
+                &bound.name,
+                crate::db::models::UpdateRoute {
                     targets: Some(targets),
                     ..Default::default()
                 },
@@ -331,7 +331,7 @@ mod tests {
     async fn models_list_rejects_when_authentication_is_unavailable() {
         let storage = std::sync::Arc::new(crate::storage::MemoryStorage::new(
             Vec::new(),
-            vec![Model {
+            vec![Route {
                 id: "model-id".into(),
                 name: "model".into(),
                 balance: "priority".into(),

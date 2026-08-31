@@ -118,7 +118,7 @@ pub struct UpsertOAuthCredential {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
-pub struct Model {
+pub struct Route {
     pub id: String,
     pub name: String,
     pub balance: String,
@@ -137,10 +137,10 @@ pub struct Model {
     pub output_max_tokens: Option<u64>,
     #[serde(default)]
     #[sqlx(skip)]
-    pub targets: Vec<ModelBackend>,
+    pub targets: Vec<Target>,
 }
 
-impl Model {
+impl Route {
     pub fn refresh_supported_thinking_levels(&mut self) {
         self.supported_thinking_levels = sqlx::types::Json(
             ThinkingLevel::ALL
@@ -158,7 +158,7 @@ impl Model {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
-pub struct ModelBackend {
+pub struct Target {
     pub id: String,
     pub model_id: String,
     pub provider_id: String,
@@ -173,7 +173,7 @@ pub struct ModelBackend {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
-pub enum ModelBalance {
+pub enum RouteSelectionStrategy {
     /// Weighted reservoir sampling — targets with higher weight are preferred.
     #[default]
     Weighted,
@@ -185,7 +185,7 @@ pub enum ModelBalance {
     Latency,
 }
 
-impl ModelBalance {
+impl RouteSelectionStrategy {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Weighted => "weighted",
@@ -196,7 +196,7 @@ impl ModelBalance {
     }
 }
 
-impl std::str::FromStr for ModelBalance {
+impl std::str::FromStr for RouteSelectionStrategy {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -396,7 +396,7 @@ pub struct UpdateProvider {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct UpdateModel {
+pub struct UpdateRoute {
     #[serde(alias = "virtual_model", alias = "vmodel")]
     pub name: Option<String>,
     #[serde(rename = "balance", alias = "strategy")]
@@ -404,12 +404,12 @@ pub struct UpdateModel {
     pub target_provider: Option<String>,
     pub target_model: Option<String>,
     #[serde(default)]
-    pub targets: Option<Vec<UpsertModelBackend>>,
+    pub targets: Option<Vec<UpsertTarget>>,
     pub is_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreateModel {
+pub struct CreateRoute {
     #[serde(alias = "virtual_model", alias = "vmodel")]
     pub name: String,
     #[serde(rename = "balance", alias = "strategy")]
@@ -417,11 +417,11 @@ pub struct CreateModel {
     pub target_provider: String,
     pub target_model: String,
     #[serde(default)]
-    pub targets: Vec<CreateModelBackend>,
+    pub targets: Vec<CreateTarget>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreateModelBackend {
+pub struct CreateTarget {
     pub provider_id: String,
     pub model: String,
     pub weight: Option<i32>,
@@ -431,7 +431,7 @@ pub struct CreateModelBackend {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UpsertModelBackend {
+pub struct UpsertTarget {
     pub id: Option<String>,
     pub provider_id: String,
     pub model: String,
@@ -439,6 +439,15 @@ pub struct UpsertModelBackend {
     pub priority: Option<i32>,
     #[serde(default)]
     pub thinking_level_map: Vec<ThinkingLevelMapping>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PutRoute {
+    pub id: Option<String>,
+    pub route_id: String,
+    pub selection_strategy: String,
+    pub is_enabled: bool,
+    pub targets: Vec<CreateTarget>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

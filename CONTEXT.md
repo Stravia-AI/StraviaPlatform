@@ -173,7 +173,7 @@ _避免使用_：Provider、Vendor
 
 ## Canonical Model
 
-Canonical Model 是归属于一个 Lab、独立于具体 Provider 的模型身份与共享规格；其 ID 固定为 `{lab_id}/{model_id}`，多个 Provider Catalog Entry 可以关联同一个 Canonical Model。它不同于负责客户端路由的 Model。
+Canonical Model 是归属于一个 Lab、独立于具体 Provider 的模型身份与共享规格；其 ID 固定为 `{lab_id}/{model_id}`，多个 Provider Catalog Entry 可以关联同一个 Canonical Model。它不同于负责客户端路由的 Route。
 _避免使用_：Base Model、模型数据元、Catalog Model
 
 ## Provider Catalog Entry
@@ -183,7 +183,7 @@ _避免使用_：Provider Offering、Catalog Model
 
 ## Provider Model
 
-Provider Model 是属于一个已保存 Provider 实例、以 upstream model ID 标识的持久化模型快照；它不同于共享 Provider Catalog 条目，也不同于负责客户端路由的 Model 和 Model Backend。
+Provider Model 是属于一个已保存 Provider 实例、以 upstream model ID 标识的持久化模型快照；它不同于共享 Provider Catalog 条目，也不同于负责客户端路由的 Route 和 Target。
 _避免使用_：Provider Model Override、Catalog Model
 
 ## Selection Policy
@@ -193,7 +193,7 @@ _避免使用_：Enabled、Availability Override
 
 ## Effective Availability
 
-Effective Availability 是 Selection Policy、Provider discovery presence 与上游生命周期共同计算出的“可用/禁用”结果；它只约束新的路由候选，不改写已有 Model Backend。
+Effective Availability 是 Selection Policy、Provider discovery presence 与上游生命周期共同计算出的“可用/禁用”结果；它只约束新的路由候选，不改写已有 Target。
 _避免使用_：Provider Status、Model Status
 
 ## Route
@@ -202,8 +202,8 @@ Route 将 Route ID 映射到一组 Target，并规定这些 Target 的选择策�
 
 ## Route ID
 
-Route ID 是客户端请求里填写的模型 ID。它是调用身份，不是展示标签，也不是存储主键。一键接入时默认等于 Provider Model 的 upstream ID；同一 Route ID 即同一 Route。
-_避免使用_：Route 名、展示名、昵称
+Route ID 是客户端请求里填写的模型 ID。它是调用身份，不是展示标签，也不是存储主键。查找与绑定都按精确、大小写敏感比较；存储主键不是客户端查找键。一键接入时默认等于 Provider Model 的 upstream ID；同一 Route ID 即同一 Route。
+_避免使用_：Route 名、展示名、昵称、大小写折叠、用存储主键兜底查找
 
 ## Cache Affinity
 

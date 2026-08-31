@@ -6,6 +6,7 @@ export interface WebProvider {
   id: string
   name: string
   kind: WebProviderKind
+  capabilities: { search: boolean; fetch: boolean }
   last_test_success?: boolean | null
   last_test_at?: string | null
   created_at: string

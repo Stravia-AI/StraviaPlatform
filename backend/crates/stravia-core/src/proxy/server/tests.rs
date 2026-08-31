@@ -1,6 +1,6 @@
 use crate::config::GatewayConfig;
 use crate::db::models::{
-    CreateModel, CreateProvider, CreateWebProvider, ProviderCredentialInput, ProviderSourceInput,
+    CreateProvider, CreateRoute, CreateWebProvider, ProviderCredentialInput, ProviderSourceInput,
     WebAccessSettings,
 };
 use crate::provider_models::CreateManualProviderModel;
@@ -82,7 +82,7 @@ async fn protected_responses_router_with_hook(
         .await
         .expect("Provider Model");
     let model = admin
-        .create_model(CreateModel {
+        .create_model(CreateRoute {
             name: "auth-model".into(),
             balance: None,
             target_provider: provider.id,
@@ -649,7 +649,7 @@ async fn responses_native_web_search_is_concealed_when_search_is_unavailable() {
         .await
         .expect("Provider Model");
     let model = admin
-        .create_model(CreateModel {
+        .create_model(CreateRoute {
             name: "web-search-test".into(),
             balance: None,
             target_provider: provider.id.clone(),

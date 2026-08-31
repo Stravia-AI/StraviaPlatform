@@ -124,8 +124,8 @@ def build_harness(work_dir: Path) -> None:
         use anyhow::{Context, ensure};
         use stravia_core::config::{GatewayConfig, SqlStorageConfig, StorageBackendKind};
         use stravia_core::db::models::{
-            CreateApiKey, CreateModel, CreateProvider, LogQuery, ProviderCredentialInput,
-            ProviderSourceInput,
+            CreateApiKey, CreateProvider, CreateRoute, CreateTarget, LogQuery, ProviderCredentialInput,
+            ProviderSourceInput, PutRoute,
         };
         use stravia_core::provider_models::CreateManualProviderModel;
         use stravia_core::{logging, Gateway};
@@ -232,7 +232,7 @@ def build_harness(work_dir: Path) -> None:
                 },
             ).await?;
 
-            let route = admin.create_model(CreateModel {
+            let route = admin.create_model(CreateRoute {
                 name: format!("{backend}-model"),
                 balance: None,
                 target_provider: provider.id.clone(),
@@ -253,7 +253,29 @@ def build_harness(work_dir: Path) -> None:
             }).await?;
 
             ensure!(admin.list_providers().await?.len() == 1, "provider count");
-            ensure!(admin.list_models().await?.len() == 1, "model count");
+            let routes = admin.list_models().await?;
+            ensure!(routes.len() == 1, "Route count");
+            ensure!(routes[0].targets.len() == 1, "Route aggregate Target count");
+            ensure!(routes[0].targets[0].provider_id == provider.id, "Route aggregate Provider");
+            let failed_put = gw.storage.routes().put(PutRoute {
+                id: Some(route.id.clone()),
+                route_id: route.name.clone(),
+                selection_strategy: "latency".to_string(),
+                is_enabled: false,
+                targets: vec![CreateTarget {
+                    provider_id: "missing-provider".to_string(),
+                    model: "missing-model".to_string(),
+                    weight: Some(1),
+                    priority: Some(1),
+                    thinking_level_map: vec![],
+                }],
+            }).await;
+            ensure!(failed_put.is_err(), "invalid Route aggregate put must fail");
+            let preserved = gw.storage.routes().get(&route.name).await?.context("preserved Route")?;
+            ensure!(preserved.balance == route.balance, "failed put preserves Route strategy");
+            ensure!(preserved.is_enabled == route.is_enabled, "failed put preserves Route state");
+            ensure!(preserved.targets.len() == 1, "failed put preserves Target count");
+            ensure!(preserved.targets[0].provider_id == provider.id, "failed put preserves Target");
             ensure!(admin.list_api_keys().await?.len() == 1, "api key count");
 
             let cors_origins = standalone_local_origins(server_port);
@@ -290,6 +312,8 @@ def build_harness(work_dir: Path) -> None:
                     println!("stats_total_requests={stats_requests}");
                     println!("proxy_status_ok=200");
                     println!("proxy_status_no_key=401");
+                    admin.delete_provider(&provider.id).await?;
+                    ensure!(admin.list_models().await?.is_empty(), "Provider delete removes empty Route");
                     server.shutdown().await?;
                     return Ok(());
                 }

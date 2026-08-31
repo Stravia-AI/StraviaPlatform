@@ -152,6 +152,30 @@ impl ProtocolRegistry {
         })
     }
 
+    pub(crate) fn protocol_represents_target_thinking_control(
+        &self,
+        raw: &str,
+        control: &crate::thinking::TargetThinkingControl,
+    ) -> bool {
+        use crate::protocol::ids::Protocol;
+        use crate::thinking::TargetThinkingControl;
+
+        if matches!(control, TargetThinkingControl::Hidden) {
+            return true;
+        }
+        match self.parse_protocol(raw) {
+            Some(Protocol::OpenResponses) => matches!(
+                control,
+                TargetThinkingControl::Effort { .. } | TargetThinkingControl::Disabled
+            ),
+            Some(Protocol::AnthropicMessages) | Some(Protocol::GoogleGemini) => true,
+            Some(Protocol::OpenAICompatible) => {
+                matches!(control, TargetThinkingControl::Effort { .. })
+            }
+            _ => false,
+        }
+    }
+
     /// Registered endpoint identities for one protocol, sorted canonically.
     pub fn endpoints_for_protocol(&self, protocol: Protocol) -> Vec<ProtocolEndpoint> {
         let mut endpoints: Vec<_> = self
