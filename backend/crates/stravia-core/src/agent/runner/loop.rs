@@ -604,9 +604,8 @@ impl AgentRunner {
                 },
             )
             .await?;
-            let response_message = response_message(&response);
-            transcript.push(response_message.clone());
-            model_transcript.push(response_message);
+            transcript.extend(response.items.iter().cloned());
+            model_transcript.extend(response.items.iter().cloned());
 
             let response_tool_calls = response.tool_calls().cloned().collect::<Vec<_>>();
             if !response_tool_calls.is_empty() {
@@ -1268,10 +1267,6 @@ async fn send_event(
         .send(event)
         .await
         .map_err(|_| AgentRunError::new("cancelled", "Agent Run consumer disconnected"))
-}
-
-fn response_message(response: &AiResponse) -> AiItem {
-    response.to_assistant_item()
 }
 
 fn user_instruction(text: impl Into<String>) -> AiItem {

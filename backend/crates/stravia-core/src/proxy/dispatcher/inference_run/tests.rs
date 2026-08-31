@@ -671,6 +671,18 @@ fn marker_artifact_id(request: &str) -> Option<String> {
     visit(&value)
 }
 
+fn media_turn_id(request: &str) -> Option<String> {
+    let suffix = request
+        .split_once("[stravia_media_turn turn_id=\\\"aturn_")
+        .map(|(_, suffix)| suffix)
+        .or_else(|| {
+            request
+                .split_once("\\\"turn_id\\\":\\\"aturn_")
+                .map(|(_, suffix)| suffix)
+        })?;
+    Some(format!("aturn_{}", suffix.split_once("\\\"")?.0))
+}
+
 async fn serve_media_parent(
     source_id: Arc<std::sync::Mutex<Option<String>>>,
 ) -> (String, Arc<AtomicUsize>) {
@@ -681,47 +693,93 @@ async fn serve_media_parent(
     let calls = Arc::new(AtomicUsize::new(0));
     let observed = calls.clone();
     tokio::spawn(async move {
-        for ordinal in 0..2 {
+        for ordinal in 0..4 {
             let (mut socket, _) = listener.accept().await.expect("accept parent request");
             let request = read_test_http_request(&mut socket).await;
             observed.fetch_add(1, Ordering::SeqCst);
-            let body = if ordinal == 0 {
-                let id = marker_artifact_id(&request).expect("bridge Artifact marker");
-                *source_id
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(id.clone());
-                serde_json::json!({
-                    "id": "chatcmpl-media-tool",
-                    "object": "chat.completion",
-                    "created": 1,
-                    "model": "parent",
-                    "choices": [{
-                        "index": 0,
-                        "message": {
-                            "role": "assistant",
-                            "content": null,
-                            "tool_calls": [{
-                                "id": "media-call",
-                                "type": "function",
-                                "function": {
-                                    "name": "stravia__understand_media",
-                                    "arguments": serde_json::json!({
-                                        "prompt": "Describe the image",
-                                        "artifacts": [{"artifact_id": id}]
-                                    }).to_string()
-                                }
-                            }]
-                        },
-                        "finish_reason": "tool_calls"
-                    }],
-                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
-                })
-            } else {
-                assert!(
-                    request.contains("The image is understood"),
-                    "parent must receive the Media Report: {request}"
-                );
-                openai_response("parent used Media Report")
+            let body = match ordinal {
+                0 => {
+                    let id = marker_artifact_id(&request).expect("bridge Artifact marker");
+                    *source_id
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(id.clone());
+                    serde_json::json!({
+                        "id": "chatcmpl-media-tool",
+                        "object": "chat.completion",
+                        "created": 1,
+                        "model": "parent",
+                        "choices": [{
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": null,
+                                "tool_calls": [{
+                                    "id": "media-call",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "stravia__understand_media",
+                                        "arguments": serde_json::json!({
+                                            "prompt": "Describe the image",
+                                            "artifacts": [{"artifact_id": id}]
+                                        }).to_string()
+                                    }
+                                }]
+                            },
+                            "finish_reason": "tool_calls"
+                        }],
+                        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                    })
+                }
+                1 => {
+                    assert!(
+                        request.contains("The image is understood"),
+                        "parent must receive the Media Report: {request}"
+                    );
+                    openai_response("parent used Media Report")
+                }
+                2 => {
+                    let turn_id = media_turn_id(&request)
+                        .unwrap_or_else(|| panic!("inherited Media Turn marker: {request}"));
+                    assert!(
+                        request.contains(r#""name":"stravia__understand_media""#),
+                        "continued request must expose understand_media: {request}"
+                    );
+                    serde_json::json!({
+                        "id": "chatcmpl-media-continuation",
+                        "object": "chat.completion",
+                        "created": 1,
+                        "model": "parent",
+                        "choices": [{
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": null,
+                                "tool_calls": [{
+                                    "id": "media-continuation-call",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "stravia__understand_media",
+                                        "arguments": serde_json::json!({
+                                            "prompt": "Identify the subject",
+                                            "artifacts": [],
+                                            "previous_turn_id": turn_id
+                                        }).to_string()
+                                    }
+                                }]
+                            },
+                            "finish_reason": "tool_calls"
+                        }],
+                        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                    })
+                }
+                3 => {
+                    assert!(
+                        request.contains("The same image is understood"),
+                        "parent must receive the continued Media Report: {request}"
+                    );
+                    openai_response("parent used continued Media Report")
+                }
+                _ => unreachable!("fixed request sequence"),
             };
             write_test_json_response(&mut socket, body).await;
         }
@@ -739,21 +797,38 @@ async fn serve_media_model(
     let calls = Arc::new(AtomicUsize::new(0));
     let observed = calls.clone();
     tokio::spawn(async move {
-        let (mut socket, _) = listener.accept().await.expect("accept Media request");
-        let _request = read_test_http_request(&mut socket).await;
-        observed.fetch_add(1, Ordering::SeqCst);
-        let id = source_id
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
-            .expect("source Artifact from parent request");
-        let report = serde_json::json!({
-            "answer": format!("The image is understood [artifact:{id}]"),
-            "artifacts": [{"artifact_id": id}],
-            "limitations": []
-        })
-        .to_string();
-        write_test_json_response(&mut socket, openai_response(&report)).await;
+        for ordinal in 0..2 {
+            let (mut socket, _) = listener.accept().await.expect("accept Media request");
+            let request = read_test_http_request(&mut socket).await;
+            observed.fetch_add(1, Ordering::SeqCst);
+            let id = source_id
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+                .expect("source Artifact from parent request");
+            assert!(
+                request.contains("data:image/jpeg;base64"),
+                "every Media Turn must hydrate the inherited image: {request}"
+            );
+            if ordinal == 1 {
+                assert!(
+                    request.contains("Identify the subject"),
+                    "continued Media request must append the new task: {request}"
+                );
+            }
+            let answer = if ordinal == 0 {
+                format!("The image is understood [artifact:{id}]")
+            } else {
+                format!("The same image is understood [artifact:{id}]")
+            };
+            let report = serde_json::json!({
+                "answer": answer,
+                "artifacts": [{"artifact_id": id}],
+                "limitations": []
+            })
+            .to_string();
+            write_test_json_response(&mut socket, openai_response(&report)).await;
+        }
     });
     (format!("http://{address}/v1"), calls)
 }
@@ -1489,13 +1564,14 @@ async fn mixed_tool_continuation_replays_impl() {
 async fn platform_only_stream_continues_with_marker_impl() {
     let (base_url, provider_calls) = serve_sse_sequence(vec![
         openai_sse_platform_tool_call(),
-        openai_sse("final answer"),
+        openai_sse_with_usage("final answer", 22, 2),
+        openai_sse_with_usage("continued answer", 33, 3),
     ])
     .await;
     let data_dir = tempfile::tempdir().expect("temporary data directory");
     let tool_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
     let (expose_tool_hook, _request_hook_rounds) = ExposeOrderedToolHook::counting();
-    let (gateway, _logs) = crate::Gateway::builder(crate::config::GatewayConfig {
+    let (gateway, mut logs) = crate::Gateway::builder(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -1508,7 +1584,7 @@ async fn platform_only_stream_continues_with_marker_impl() {
     .expect("Gateway");
     configure_route(&gateway, "platform-only-stream", &[base_url]).await;
 
-    let response = execute_stream(gateway, "platform-only-stream").await;
+    let response = execute_stream(gateway.clone(), "platform-only-stream").await;
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX)
         .await
@@ -1517,6 +1593,10 @@ async fn platform_only_stream_continues_with_marker_impl() {
     assert!(
         body.contains(crate::history_marker::HISTORY_MARKER_PREFIX),
         "{body}"
+    );
+    assert!(
+        !body.contains(r#""content":"\n\n<!-- stravia-history-marker:"#),
+        "streamed history markers must match the canonical assistant output exactly: {body}"
     );
     assert_eq!(
         body.matches(crate::history_marker::HISTORY_MARKER_PREFIX)
@@ -1528,13 +1608,87 @@ async fn platform_only_stream_continues_with_marker_impl() {
     assert!(!body.contains("platform-call"), "{body}");
     assert!(!body.contains("stravia__ordered_tool"), "{body}");
     assert!(!body.contains(r#"{\"index\":1}"#), "{body}");
-    assert_eq!(provider_calls.load(Ordering::SeqCst), 2);
+    let assistant_text = body
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+        .filter_map(|event| {
+            event["choices"][0]["delta"]["content"]
+                .as_str()
+                .map(str::to_owned)
+        })
+        .collect::<String>();
+    assert!(
+        assistant_text.starts_with(crate::history_marker::HISTORY_MARKER_PREFIX),
+        "{assistant_text}"
+    );
+
+    let mut first_user = crate::protocol::ir::AiItem::output_text("test");
+    first_user.role = crate::protocol::ir::Role::User;
+    let mut second_user = crate::protocol::ir::AiItem::output_text("follow up");
+    second_user.role = crate::protocol::ir::Role::User;
+    let mut second_request = AiRequest::new(
+        "platform-only-stream",
+        vec![
+            first_user,
+            crate::protocol::ir::AiItem::output_text(assistant_text),
+            second_user,
+        ],
+    );
+    second_request.stream.enabled = true;
+    let second_response = execute_non_stream_request(gateway.clone(), second_request).await;
+    let second_status = second_response.status();
+    let second_body = to_bytes(second_response.into_body(), usize::MAX)
+        .await
+        .expect("continued response body");
+    assert_eq!(
+        second_status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&second_body)
+    );
+    assert!(
+        String::from_utf8_lossy(&second_body).contains("continued answer"),
+        "{}",
+        String::from_utf8_lossy(&second_body)
+    );
+
+    let child_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM turn_chain_nodes WHERE kind = 'response' AND parent_id IS NOT NULL",
+    )
+    .fetch_one(gateway._sqlite_pool.as_ref().expect("Gateway SQLite pool"))
+    .await
+    .expect("count Generation Chain children");
+    assert_eq!(
+        child_count, 1,
+        "the streamed assistant output must discover the first response as its exact parent"
+    );
+    assert_eq!(provider_calls.load(Ordering::SeqCst), 3);
     assert_eq!(
         *tool_calls
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()),
         vec![1]
     );
+    let mut entries = Vec::new();
+    for _ in 0..3 {
+        entries.push(
+            tokio::time::timeout(std::time::Duration::from_secs(1), logs.recv())
+                .await
+                .expect("one log per streamed Model Turn")
+                .expect("request log channel remains open"),
+        );
+    }
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry.usage.prompt_tokens)
+            .collect::<Vec<_>>(),
+        vec![11, 22, 33]
+    );
+    assert!(entries[0].path.is_none());
+    assert!(entries[1].path.is_some());
+    assert!(entries[2].path.is_some());
 }
 
 async fn platform_markers_are_ingress_neutral_impl() {
@@ -1629,7 +1783,7 @@ async fn platform_markers_are_ingress_neutral_impl() {
 
 fn openai_sse_platform_tool_call() -> String {
     format!(
-        "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+        "data: {}\n\ndata: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
         serde_json::json!({
             "id": "upstream-tool",
             "model": "provider-model",
@@ -1658,13 +1812,27 @@ fn openai_sse_platform_tool_call() -> String {
                 "delta": {},
                 "finish_reason": "tool_calls"
             }]
+        }),
+        serde_json::json!({
+            "id": "upstream-tool",
+            "model": "provider-model",
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 11,
+                "completion_tokens": 1,
+                "total_tokens": 12
+            }
         })
     )
 }
 
 fn openai_sse(content: &str) -> String {
+    openai_sse_with_usage(content, 1, 1)
+}
+
+fn openai_sse_with_usage(content: &str, prompt_tokens: u32, completion_tokens: u32) -> String {
     format!(
-        "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+        "data: {}\n\ndata: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
         serde_json::json!({
             "id": "upstream-1",
             "model": "provider-model",
@@ -1682,6 +1850,16 @@ fn openai_sse(content: &str) -> String {
                 "delta": {},
                 "finish_reason": "stop"
             }]
+        }),
+        serde_json::json!({
+            "id": "upstream-1",
+            "model": "provider-model",
+            "choices": [],
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens.saturating_add(completion_tokens)
+            }
         })
     )
 }

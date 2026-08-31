@@ -298,6 +298,49 @@ fn materialize_media_turns(
             };
         }
     }
+    for item in &request.items {
+        if item.role != crate::protocol::ir::Role::Tool
+            || item
+                .meta
+                .as_ref()
+                .and_then(serde_json::Value::as_object)
+                .and_then(|meta| meta.get("__stravia_history_marker_restored"))
+                .and_then(serde_json::Value::as_bool)
+                != Some(true)
+        {
+            continue;
+        }
+        let crate::protocol::ir::MessageContent::Blocks(blocks) = &item.content else {
+            continue;
+        };
+        for block in blocks {
+            let crate::protocol::ir::ContentBlock::ToolResult {
+                content,
+                is_error: Some(false) | None,
+                ..
+            } = block
+            else {
+                continue;
+            };
+            let Some(turn_id) = content
+                .get("turn_id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|turn_id| {
+                    inherited_media_turns
+                        .iter()
+                        .any(|(_, allowed)| allowed.iter().any(|allowed| allowed == turn_id))
+                })
+            else {
+                continue;
+            };
+            if !turn_ids
+                .iter()
+                .any(|existing: &crate::agent::AgentTurnId| existing.as_str() == turn_id)
+            {
+                turn_ids.push(crate::agent::AgentTurnId::new(turn_id));
+            }
+        }
+    }
     turn_ids
 }
 
@@ -522,5 +565,51 @@ mod tests {
                         if raw["turn_id"] == "aturn_injected"
                 )
         ));
+    }
+
+    #[test]
+    fn media_turn_materialization_recovers_trusted_restored_tool_results() {
+        let mut result = crate::protocol::ir::AiItem {
+            role: crate::protocol::ir::Role::Tool,
+            content: crate::protocol::ir::MessageContent::Blocks(vec![
+                crate::protocol::ir::ContentBlock::ToolResult {
+                    tool_use_id: "media-call".into(),
+                    content: serde_json::json!({
+                        "turn_id": "aturn_parent",
+                        "completion": "complete",
+                        "report": {
+                            "answer": "understood",
+                            "artifacts": [],
+                            "limitations": []
+                        }
+                    }),
+                    is_error: Some(false),
+                    cache_control: None,
+                },
+            ]),
+            tool_calls: None,
+            tool_call_id: Some("media-call".into()),
+            meta: None,
+        };
+        result.set_graph_metadata(
+            None,
+            None,
+            crate::protocol::ir::AiItemProvenance::Platform,
+            crate::protocol::ir::AiItemAudience::Internal,
+        );
+        result
+            .meta
+            .as_mut()
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("graph metadata")
+            .insert(
+                "__stravia_history_marker_restored".into(),
+                serde_json::Value::Bool(true),
+            );
+        let mut request = crate::protocol::ir::AiRequest::new("model", vec![result]);
+
+        let turns = materialize_media_turns(&mut request, &[(0, vec!["aturn_parent".into()])]);
+
+        assert_eq!(turns, vec![crate::agent::AgentTurnId::new("aturn_parent")]);
     }
 }

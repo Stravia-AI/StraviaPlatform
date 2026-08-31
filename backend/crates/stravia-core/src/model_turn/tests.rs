@@ -103,6 +103,70 @@ async fn serve_incomplete_openai_stream() -> (String, Arc<AtomicUsize>) {
     (format!("http://{address}/v1"), calls)
 }
 
+async fn serve_complete_openai_stream() -> (String, Arc<AtomicUsize>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind streaming provider");
+    let address = listener.local_addr().expect("provider address");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&calls);
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept provider request");
+        let mut request = vec![0_u8; 16 * 1024];
+        let _ = socket.read(&mut request).await.expect("read request");
+        observed.fetch_add(1, Ordering::SeqCst);
+        let frames = [
+            serde_json::json!({
+                "id": "chatcmpl-stream",
+                "object": "chat.completion.chunk",
+                "created": 1,
+                "model": "upstream-model",
+                "choices": [{
+                    "index": 0,
+                    "delta": {"role": "assistant", "content": "ok"},
+                    "finish_reason": null
+                }]
+            }),
+            serde_json::json!({
+                "id": "chatcmpl-stream",
+                "object": "chat.completion.chunk",
+                "created": 1,
+                "model": "upstream-model",
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "stop"
+                }]
+            }),
+            serde_json::json!({
+                "id": "chatcmpl-stream",
+                "object": "chat.completion.chunk",
+                "created": 1,
+                "model": "upstream-model",
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 11,
+                    "completion_tokens": 7,
+                    "total_tokens": 18
+                }
+            }),
+        ]
+        .into_iter()
+        .map(|frame| format!("data: {frame}\n\n"))
+        .collect::<String>()
+            + "data: [DONE]\n\n";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{frames}",
+            frames.len()
+        );
+        socket
+            .write_all(response.as_bytes())
+            .await
+            .expect("write streaming response");
+    });
+    (format!("http://{address}/v1"), calls)
+}
+
 async fn serve_openai_capture() -> (String, Arc<Mutex<Vec<u8>>>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -705,4 +769,92 @@ async fn execute_capability_grant_does_not_require_route_binding() {
     let _ = turn.output.collect::<Vec<_>>().await;
 
     assert!(!captured.lock().expect("captured grant").is_empty());
+}
+
+#[tokio::test]
+async fn internal_stream_log_uses_terminal_usage_and_transport_metrics() {
+    let (base_url, calls) = serve_complete_openai_stream().await;
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let (gateway, mut logs) = Gateway::new(GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .expect("Gateway");
+    let admin = gateway.admin();
+    let provider = admin
+        .create_provider(CreateProvider {
+            name: Some("Streaming".into()),
+            source: ProviderSourceInput::Custom {
+                vendor: Some("test-http".into()),
+                protocol: "openai-compatible".into(),
+                base_url,
+                models_source: None,
+                static_models: None,
+            },
+            credential: ProviderCredentialInput::ApiKey {
+                value: "test-provider-key".into(),
+            },
+            use_proxy: false,
+        })
+        .await
+        .expect("Provider");
+    add_test_provider_model(&gateway, &provider.id).await;
+    let _model = admin
+        .create_model(CreateModel {
+            name: "stream-grant-model".into(),
+            balance: None,
+            target_provider: provider.id.clone(),
+            target_model: "upstream-model".into(),
+            targets: Vec::new(),
+        })
+        .await
+        .expect("Model");
+    let other_model = admin
+        .create_model(CreateModel {
+            name: "bound-model".into(),
+            balance: None,
+            target_provider: provider.id,
+            target_model: "upstream-model".into(),
+            targets: Vec::new(),
+        })
+        .await
+        .expect("other Model");
+    let key = admin
+        .create_api_key(crate::db::models::CreateApiKey {
+            key: None,
+            name: "Streaming key".into(),
+            concurrency_limit: None,
+            expires_at: None,
+            mcp_access_enabled: true,
+            transparent_injection_enabled: false,
+            inject_web_search: false,
+            model_ids: vec![other_model.id],
+            inject_media_understanding: false,
+        })
+        .await
+        .expect("API key");
+    let mut request = AiRequest::new("stream-grant-model", Vec::new());
+    request.stream.enabled = true;
+
+    let turn = gateway
+        .model_turn
+        .execute(
+            TurnInput::new(Principal::new(key.id), request)
+                .with_authorization(ModelTurnAuthorization::CapabilityGrant),
+        )
+        .await
+        .expect("streaming CapabilityGrant Model Turn");
+    let _ = turn.output.collect::<Vec<_>>().await;
+    let entry = tokio::time::timeout(Duration::from_secs(1), logs.recv())
+        .await
+        .expect("internal Model Turn log")
+        .expect("log channel remains open");
+
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(entry.usage.prompt_tokens, 11);
+    assert_eq!(entry.usage.completion_tokens, 7);
+    assert_eq!(entry.usage.total_tokens, 18);
+    assert!(entry.stream_chunks_count > 0);
+    assert!(entry.stream_first_chunk_ms.is_some());
 }

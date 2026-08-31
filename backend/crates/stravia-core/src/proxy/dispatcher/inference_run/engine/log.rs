@@ -23,6 +23,7 @@ pub(super) struct LogBuilder {
     is_stream: bool,
     redact_payloads: bool,
     start: Instant,
+    completed_at: Option<(i64, i64)>,
     client_status_code: i32,
     usage: Usage,
     thinking_level: Option<crate::thinking::ThinkingLevel>,
@@ -56,6 +57,7 @@ impl LogBuilder {
             is_stream: false,
             redact_payloads: false,
             start,
+            completed_at: None,
             client_status_code: 200,
             usage: Usage::default(),
             thinking_level,
@@ -154,6 +156,24 @@ impl LogBuilder {
         self
     }
 
+    pub(super) fn model_turn_completed(mut self, started_at: Instant) -> Self {
+        self.completed_at = Some((
+            chrono::Utc::now().timestamp_millis(),
+            started_at.elapsed().as_millis() as i64,
+        ));
+        self
+    }
+
+    pub(super) fn without_client_exchange(mut self) -> Self {
+        self.extras.method = None;
+        self.extras.path = None;
+        self.extras.client_request_headers = None;
+        self.extras.client_request_body = None;
+        self.extras.client_response_headers = None;
+        self.extras.client_response_body = None;
+        self
+    }
+
     // ── Legacy shim ────────────────────────────────────────────────────────
 
     /// Maps `response_body` → `client_response_body`.
@@ -170,11 +190,16 @@ impl LogBuilder {
             self.extras.upstream_response_body = None;
         }
         use crate::logging::LogEntry;
-        let latency_total_ms = self.start.elapsed().as_millis() as i64;
+        let (created_at, latency_total_ms) = self.completed_at.unwrap_or_else(|| {
+            (
+                chrono::Utc::now().timestamp_millis(),
+                self.start.elapsed().as_millis() as i64,
+            )
+        });
         let entry = LogEntry {
             api_key_id: self.api_key_id,
             api_key_name: self.api_key_name,
-            created_at: chrono::Utc::now().timestamp_millis(),
+            created_at,
             client_protocol: self.client_protocol,
             upstream_protocol: self.upstream_protocol,
             provider_id: self.provider_id,

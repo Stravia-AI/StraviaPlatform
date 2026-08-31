@@ -199,8 +199,11 @@ fn stabilize_media_generation_chain(
     if plan.mode != MediaRoutingMode::Bridge {
         return true;
     }
-    let image_count = generation
-        .client_request
+    let client_delta = generation
+        .write
+        .as_ref()
+        .map_or(&generation.client_request, |write| write.request_delta());
+    let image_count = client_delta
         .items
         .iter()
         .filter_map(|message| match &message.content {
@@ -697,6 +700,7 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
     };
 
     let mut effective_request = request.clone();
+    let turn_started = Instant::now();
     let turn = match executor
         .execute(make_input(effective_request.clone()))
         .await
@@ -785,6 +789,7 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
             inference_run: inference_run.take().expect("live Inference Run"),
             phase: std::mem::replace(phase, PhaseTracker::at(Phase::Finished)),
             start,
+            turn_started,
             request_extras: request_extras.clone(),
             log,
         })
@@ -876,6 +881,43 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
         response.stop_reason = completed_response.stop_reason;
     }
     let upstream_response_id = (!response.id.is_empty()).then(|| response.id.clone());
+    let stream_metrics = attempt_trace.stream_metrics();
+    let mut model_turn_log = Some(
+        LogBuilder::from_dispatch(
+            gateway,
+            &ingress.to_string(),
+            &request.model,
+            request.reasoning.level,
+            request_context.auth_subject.as_ref(),
+            turn_started,
+        )
+        .stream_flag(request.stream.enabled)
+        .model_turn(&route, &turn.target)
+        .status(200)
+        .usage(response.usage.clone())
+        .with_req_extras(request_extras)
+        .upstream_protocol(&route.egress.to_string())
+        .upstream_url(&attempt_trace.upstream_url)
+        .with_upstream_request(
+            attempt_trace.request_headers.clone(),
+            attempt_trace.request_body.clone(),
+        )
+        .with_upstream_response(
+            200,
+            attempt_trace
+                .response_headers
+                .lock()
+                .expect("response headers")
+                .clone(),
+            request.meta.media_routing.is_none().then(|| {
+                String::from_utf8_lossy(&attempt_trace.response_body.lock().expect("response body"))
+                    .into_owned()
+            }),
+            None,
+        )
+        .stream_metrics(stream_metrics.chunks_count, stream_metrics.first_chunk_ms)
+        .model_turn_completed(turn_started),
+    );
     let completed = match complete_canonical_response(
         &completion_context,
         CompletionInput {
@@ -894,6 +936,11 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
     .await
     {
         CompletionOutcome::PlatformOnly(continuation) => {
+            model_turn_log
+                .take()
+                .expect("current Model Turn log")
+                .without_client_exchange()
+                .emit();
             if let Err(failure) = continuation.publish(&completion_context).await {
                 return buffered_response(render_completion_failure(
                     failure,
@@ -977,40 +1024,11 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
         delivered.response =
             DeliveryAdapter::commit_response_after_delivery(delivered.response, pending);
     }
-    LogBuilder::from_dispatch(
-        gateway,
-        &ingress.to_string(),
-        &request.model,
-        request.reasoning.level,
-        request_context.auth_subject.as_ref(),
-        start,
-    )
-    .stream_flag(request.stream.enabled)
-    .model_turn(&route, &turn.target)
-    .status(200)
-    .usage(completed.response.usage.clone())
-    .with_req_extras(request_extras)
-    .upstream_protocol(&route.egress.to_string())
-    .upstream_url(&attempt_trace.upstream_url)
-    .with_upstream_request(
-        attempt_trace.request_headers.clone(),
-        attempt_trace.request_body.clone(),
-    )
-    .with_upstream_response(
-        200,
-        attempt_trace
-            .response_headers
-            .lock()
-            .expect("response headers")
-            .clone(),
-        request.meta.media_routing.is_none().then(|| {
-            String::from_utf8_lossy(&attempt_trace.response_body.lock().expect("response body"))
-                .into_owned()
-        }),
-        None,
-    )
-    .with_client_response(None, client_response_body)
-    .emit();
+    model_turn_log
+        .take()
+        .expect("current Model Turn log")
+        .with_client_response(None, client_response_body)
+        .emit();
     buffered_completion(delivered.response)
 }
 
@@ -1026,7 +1044,7 @@ pub(super) async fn acquire_followup_model_turn(
     principal: &crate::hook::Principal,
     start: Instant,
     request_extras: &RequestExtras,
-) -> Result<crate::agent::ModelTurn, RoundOutcome> {
+) -> Result<(crate::agent::ModelTurn, Instant), RoundOutcome> {
     enter_phase(phase, Phase::Selecting).map_err(|response| buffered_response(*response))?;
     let make_input = |effective_request: AiRequest| {
         let input = TurnInput::new(principal.clone(), effective_request).with_execution(
@@ -1038,6 +1056,7 @@ pub(super) async fn acquire_followup_model_turn(
         input.with_extra_headers(forwarded_client_headers(headers))
     };
     let mut effective_request = request.clone();
+    let turn_started = Instant::now();
     let turn = match executor
         .execute(make_input(effective_request.clone()))
         .await
@@ -1090,7 +1109,7 @@ pub(super) async fn acquire_followup_model_turn(
     *request = effective_request;
     inference_run.set_route(turn.route.clone());
     enter_phase(phase, Phase::Calling).map_err(|response| buffered_response(*response))?;
-    Ok(turn)
+    Ok((turn, turn_started))
 }
 
 fn model_turn_error_outcome(error: crate::agent::ModelTurnError) -> RoundOutcome {

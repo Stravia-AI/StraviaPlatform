@@ -70,6 +70,7 @@ pub(super) struct ModelTurnStreamInput {
     pub(super) inference_run: crate::hook::InferenceRun,
     pub(super) phase: PhaseTracker,
     pub(super) start: Instant,
+    pub(super) turn_started: Instant,
     pub(super) request_extras: RequestExtras,
     pub(super) log: LogBuilder,
 }
@@ -264,6 +265,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
         mut inference_run,
         mut phase,
         start,
+        mut turn_started,
         request_extras,
         log,
     } = input;
@@ -428,7 +430,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                                                     marker,
                                                 );
                                             emitted_marker_texts.insert(rendered.clone());
-                                            AiStreamDelta::TextDelta(format!("\n\n{rendered}"))
+                                            AiStreamDelta::TextDelta(rendered)
                                         })
                                         .collect(),
                                 );
@@ -536,7 +538,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                                         .map(|marker| {
                                             let rendered = marker.render();
                                             emitted_marker_texts.insert(rendered.clone());
-                                            AiStreamDelta::TextDelta(format!("\n\n{rendered}"))
+                                            AiStreamDelta::TextDelta(rendered)
                                         })
                                         .collect(),
                                 );
@@ -651,6 +653,37 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                     "Model Turn ended without a completion",
                 )));
             }
+            let leg_egress = turn.route.egress;
+            let stream_metrics = attempt_trace.stream_metrics();
+            let mut model_turn_log = Some(
+                log.clone()
+                    .model_turn(&turn.route, &turn.target)
+                    .status(200)
+                    .usage(response.usage.clone())
+                    .upstream_protocol(&leg_egress.to_string())
+                    .upstream_url(&attempt_trace.upstream_url)
+                    .with_upstream_request(
+                        attempt_trace.request_headers.clone(),
+                        attempt_trace.request_body.clone(),
+                    )
+                    .with_upstream_response(
+                        200,
+                        attempt_trace
+                            .response_headers
+                            .lock()
+                            .expect("response headers")
+                            .clone(),
+                        (!redact_payloads).then(|| {
+                            String::from_utf8_lossy(
+                                &attempt_trace.response_body.lock().expect("response body"),
+                            )
+                            .into_owned()
+                        }),
+                        None,
+                    )
+                    .stream_metrics(stream_metrics.chunks_count, stream_metrics.first_chunk_ms)
+                    .model_turn_completed(turn_started),
+            );
 
             let mut pending_generation_chain = None;
             let mut background_executions = Vec::new();
@@ -677,6 +710,11 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                 .await
                 {
                     CompletionOutcome::PlatformOnly(continuation) => {
+                        model_turn_log
+                            .take()
+                            .expect("current Model Turn log")
+                            .without_client_exchange()
+                            .emit();
                         let marker_deltas = continuation
                             .projected_response()
                             .items
@@ -686,7 +724,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                                 text.contains(crate::history_marker::HISTORY_MARKER_PREFIX)
                             })
                             .filter(|text| emitted_marker_texts.insert((*text).to_owned()))
-                            .map(|text| AiStreamDelta::TextDelta(format!("\n\n{text}")))
+                            .map(|text| AiStreamDelta::TextDelta(text.to_owned()))
                             .collect::<Vec<_>>();
                         let marker_deltas = live_delta_gate.commit_visible(marker_deltas);
                         match delivery.send_deltas(&marker_deltas).await {
@@ -740,8 +778,9 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                             )
                             .await
                             {
-                                Ok(next_turn) => {
+                                Ok((next_turn, next_turn_started)) => {
                                     turn = next_turn;
+                                    turn_started = next_turn_started;
                                     continue 'model_legs;
                                 }
                                 Err(outcome) => {
@@ -798,7 +837,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                     .filter_map(|item| item.output_text_ref())
                     .filter(|text| text.contains(crate::history_marker::HISTORY_MARKER_PREFIX))
                     .filter(|text| emitted_marker_texts.insert((*text).to_owned()))
-                    .map(|text| AiStreamDelta::TextDelta(format!("\n\n{text}")))
+                    .map(|text| AiStreamDelta::TextDelta(text.to_owned()))
                     .collect::<Vec<_>>();
                 let markers = live_delta_gate.commit_visible(markers);
                 if !markers.is_empty() {
@@ -949,32 +988,11 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
             } else {
                 delivery.captured_body()
             };
-            let stream_metrics = attempt_trace.stream_metrics();
-            log.status(if aborted { 500 } else { 200 })
-                .usage(response.usage.clone())
-                .upstream_protocol(&egress.to_string())
-                .upstream_url(&attempt_trace.upstream_url)
-                .with_upstream_request(
-                    attempt_trace.request_headers.clone(),
-                    attempt_trace.request_body.clone(),
-                )
-                .with_upstream_response(
-                    200,
-                    attempt_trace
-                        .response_headers
-                        .lock()
-                        .expect("response headers")
-                        .clone(),
-                    (!redact_payloads).then(|| {
-                        String::from_utf8_lossy(
-                            &attempt_trace.response_body.lock().expect("response body"),
-                        )
-                        .into_owned()
-                    }),
-                    None,
-                )
+            model_turn_log
+                .take()
+                .expect("current Model Turn log")
+                .status(if aborted { 500 } else { 200 })
                 .with_client_response(None, client_response_body)
-                .stream_metrics(stream_metrics.chunks_count, stream_metrics.first_chunk_ms)
                 .emit();
             break 'model_legs;
         }

@@ -9,6 +9,10 @@ impl GenerationChainWrite {
         &mut self.request
     }
 
+    pub(crate) fn request_delta(&self) -> &AiRequest {
+        &self.request_delta
+    }
+
     pub(crate) fn id(&self) -> &str {
         &self.id
     }
@@ -110,7 +114,7 @@ impl GenerationChainWrite {
     }
 
     pub(crate) async fn persist(&mut self) -> Result<(), PersistError> {
-        let staged = self.staged.clone().ok_or(PersistError::NotStaged)?;
+        let mut staged = self.staged.clone().ok_or(PersistError::NotStaged)?;
         if let Some(store) = &self.chain.history_markers {
             let mut references =
                 crate::history_marker::history_marker_references(&self.parent.parent_client_items);
@@ -120,13 +124,27 @@ impl GenerationChainWrite {
                 &staged.response.items,
             ));
             for reference in untrusted {
-                if store
+                let resolved = store
                     .resolve(&self.principal, &reference)
                     .await
-                    .map_err(PersistError::HistoryMarker)?
-                    .is_some_and(|marker| marker.published)
-                {
+                    .map_err(PersistError::HistoryMarker)?;
+                if resolved.as_ref().is_some_and(|marker| marker.published) {
                     references.push(reference);
+                }
+                if let Some(turn_id) = resolved
+                    .as_ref()
+                    .and_then(|marker| marker.segment.as_ref())
+                    .and_then(media_turn_id)
+                    && !staged
+                        .response
+                        .trusted_media_turn_ids
+                        .iter()
+                        .any(|existing| existing == turn_id)
+                {
+                    staged
+                        .response
+                        .trusted_media_turn_ids
+                        .push(turn_id.to_owned());
                 }
             }
             references.sort();
@@ -151,6 +169,27 @@ impl GenerationChainWrite {
             .await
             .map_err(PersistError::Store)
     }
+}
+
+fn media_turn_id(segment: &crate::history_marker::HiddenHistorySegment) -> Option<&str> {
+    let crate::history_marker::HiddenHistorySegment::Platform {
+        result:
+            ContentBlock::ToolResult {
+                content,
+                is_error: Some(false) | None,
+                ..
+            },
+        ..
+    } = segment
+    else {
+        return None;
+    };
+    content.get("report").filter(|report| report.is_object())?;
+    content.get("completion")?.as_str()?;
+    content
+        .get("turn_id")?
+        .as_str()
+        .filter(|turn_id| turn_id.starts_with("aturn_"))
 }
 
 struct StagedTarget {

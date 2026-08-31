@@ -424,15 +424,21 @@ async fn ephemeral_run_returns_validated_output_without_committing_an_agent_turn
 #[tokio::test]
 async fn transcript_aware_output_validation_runs_before_commit_and_can_repair_once() {
     let mut first = AiResponse::new("response-1", "model-1");
+    first.items.push(AiItem::reasoning(
+        vec!["summary".into()],
+        Vec::new(),
+        Some("opaque-reasoning".into()),
+    ));
     first.push_output_text(r#"{"answer":"unverified"}"#);
     let mut repaired = AiResponse::new("response-2", "model-1");
     repaired.push_output_text(r#"{"answer":"verified"}"#);
     let validator = Arc::new(RejectFirstOutput::default());
+    let model = Arc::new(crate::agent::InMemoryModelTurnExecutor::scripted([
+        first, repaired,
+    ]));
     let runner = AgentRunner::new(
         enabled_registry().await,
-        Arc::new(crate::agent::InMemoryModelTurnExecutor::scripted([
-            first, repaired,
-        ])),
+        model.clone(),
         vec![Arc::new(EchoTool)],
         Arc::new(crate::turn_chain::test_store().await),
     )
@@ -457,6 +463,18 @@ async fn transcript_aware_output_validation_runs_before_commit_and_can_repair_on
     };
     assert_eq!(result.output, serde_json::json!({"answer": "verified"}));
     assert_eq!(validator.calls.load(Ordering::SeqCst), 2);
+    let requests = model.requests();
+    let replay = &requests[1].items;
+    assert!(
+        replay.iter().any(|item| {
+            matches!(
+                &item.content,
+                MessageContent::Blocks(blocks)
+                    if matches!(blocks.as_slice(), [ContentBlock::Reasoning { .. }])
+            )
+        }),
+        "reasoning output must remain a standalone canonical item: {replay:?}"
+    );
 }
 
 #[tokio::test]

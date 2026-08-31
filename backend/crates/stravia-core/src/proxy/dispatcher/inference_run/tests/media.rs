@@ -145,7 +145,9 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
         HeaderValue::from_str(&format!("Bearer {}", api_key.token)).expect("Bearer header"),
     );
 
-    let response = execute_non_stream_request_with_headers(gateway, headers, request).await;
+    let response =
+        execute_non_stream_request_with_headers(gateway.clone(), headers.clone(), request.clone())
+            .await;
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX)
@@ -156,9 +158,56 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
         "{}",
         String::from_utf8_lossy(&body)
     );
-    assert_eq!(parent_calls.load(Ordering::SeqCst), 2);
-    assert_eq!(media_calls.load(Ordering::SeqCst), 1);
-    for _ in 0..2 {
+    let first_response: serde_json::Value =
+        serde_json::from_slice(&body).expect("bridge response JSON");
+    let first_assistant = first_response["choices"][0]["message"]["content"]
+        .as_str()
+        .expect("first assistant content")
+        .to_owned();
+    let trusted_media_turns = sqlx::query_scalar::<_, i64>(
+        "SELECT json_array_length(json_extract(payload, '$.trusted_media_turn_ids')) \
+         FROM turn_chain_nodes WHERE kind = 'response' ORDER BY created_at DESC LIMIT 1",
+    )
+    .fetch_one(gateway._sqlite_pool.as_ref().expect("Gateway SQLite pool"))
+    .await
+    .expect("persisted trusted Media Turns");
+    assert_eq!(trusted_media_turns, 1);
+
+    let mut second_user = crate::protocol::ir::AiItem::output_text("What is its subject?");
+    second_user.role = crate::protocol::ir::Role::User;
+    let second_response = execute_non_stream_request_with_headers(
+        gateway,
+        headers,
+        AiRequest::new(
+            "text-parent",
+            vec![
+                request.items[0].clone(),
+                crate::protocol::ir::AiItem::output_text(first_assistant),
+                second_user,
+            ],
+        ),
+    )
+    .await;
+    let second_status = second_response.status();
+    let second_body = to_bytes(second_response.into_body(), usize::MAX)
+        .await
+        .expect("continued bridge response body");
+    assert_eq!(
+        second_status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&second_body)
+    );
+    assert!(
+        String::from_utf8_lossy(&second_body).contains("parent used continued Media Report"),
+        "{}",
+        String::from_utf8_lossy(&second_body)
+    );
+
+    assert_eq!(parent_calls.load(Ordering::SeqCst), 4);
+    assert_eq!(media_calls.load(Ordering::SeqCst), 2);
+    let mut entries = Vec::new();
+    for _ in 0..6 {
         let entry = tokio::time::timeout(std::time::Duration::from_secs(1), logs.recv())
             .await
             .expect("Media request log should be emitted")
@@ -170,7 +219,23 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
                 && entry.upstream_response_body.is_none(),
             "Media request payloads must remain redacted: {entry:?}"
         );
+        entries.push(entry);
     }
+    let parent_entries = entries
+        .iter()
+        .filter(|entry| entry.client_model == "text-parent")
+        .collect::<Vec<_>>();
+    let media_entries = entries
+        .iter()
+        .filter(|entry| entry.client_model == "media-vision")
+        .collect::<Vec<_>>();
+    assert_eq!(parent_entries.len(), 4, "{entries:#?}");
+    assert_eq!(media_entries.len(), 2, "{entries:#?}");
+    assert!(entries.iter().all(|entry| {
+        entry.usage.prompt_tokens == 1
+            && entry.usage.completion_tokens == 1
+            && entry.usage.total_tokens == 2
+    }));
 }
 
 #[tokio::test]

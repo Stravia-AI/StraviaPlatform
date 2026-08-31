@@ -865,15 +865,8 @@ async fn begin_attempt(
     };
 
     let (tx, rx) = tokio::sync::mpsc::channel(32);
-    emit_internal_model_log(
-        gateway,
-        route,
-        &prepared,
-        access,
-        input,
-        Usage::default(),
-        attempt_started,
-    );
+    let internal_log =
+        PendingInternalModelLog::new(gateway, route, &prepared, access, input, attempt_started);
     let principal = input.principal.clone();
     let request = input.request.clone();
     let route_id = route.id.clone();
@@ -886,6 +879,7 @@ async fn begin_attempt(
     let deadline = input.deadline;
     let trace = prepared.trace.clone();
     tokio::spawn(async move {
+        let mut internal_log = internal_log;
         let mut accumulator = StreamResponseAccumulator::default();
         let terminal_error = handle_terminal_stream_error(
             &gateway.health_registry,
@@ -962,6 +956,9 @@ async fn begin_attempt(
             }
         }
         let response = accumulator.into_ai_response();
+        if let Some(log) = internal_log.as_mut() {
+            log.set_usage(response.usage.clone());
+        }
         gateway.cache_affinity.record_success(
             &principal,
             &route_id,
@@ -1143,8 +1140,23 @@ fn emit_internal_model_log(
     usage: Usage,
     started_at: Instant,
 ) {
-    if input.authorization == ModelTurnAuthorization::RouteBinding {
+    let Some(entry) = internal_model_log_entry(route, prepared, access, input, usage, started_at)
+    else {
         return;
+    };
+    send_log(gateway, entry);
+}
+
+fn internal_model_log_entry(
+    route: &crate::db::models::Model,
+    prepared: &PreparedAttempt,
+    access: &crate::proxy::security::ModelAccessGrant,
+    input: &TurnInput,
+    usage: Usage,
+    started_at: Instant,
+) -> Option<LogEntry> {
+    if input.authorization == ModelTurnAuthorization::RouteBinding {
+        return None;
     }
     let protocol = input
         .request
@@ -1152,47 +1164,106 @@ fn emit_internal_model_log(
         .source_protocol
         .unwrap_or(OPEN_RESPONSES_2026_04_24)
         .to_string();
-    send_log(
-        gateway,
-        LogEntry {
-            api_key_id: access.api_key_id.clone(),
-            api_key_name: access.api_key_name.clone(),
-            created_at: chrono::Utc::now().timestamp_millis(),
-            client_protocol: protocol.clone(),
-            upstream_protocol: prepared.route.egress.to_string(),
-            provider_id: prepared.provider.id.clone(),
-            provider_name: prepared.provider.name.clone(),
-            model_id: Some(route.id.clone()),
-            model_name: Some(route.name.clone()),
-            upstream_url: Some(prepared.trace.upstream_url.clone()),
-            client_model: route.name.clone(),
-            upstream_model: prepared.actual_model.clone(),
-            method: None,
-            path: None,
-            client_request_headers: None,
-            client_request_body: None,
-            client_response_headers: None,
-            client_response_body: None,
-            upstream_request_headers: prepared.trace.request_headers.clone(),
-            upstream_request_body: None,
-            upstream_response_headers: prepared
-                .trace
-                .response_headers
-                .lock()
-                .expect("response headers")
-                .clone(),
-            upstream_response_body: None,
-            upstream_status_code: Some(200),
-            client_status_code: 200,
-            latency_total_ms: started_at.elapsed().as_millis() as i64,
-            latency_upstream_ms: None,
-            usage,
-            thinking_level: input.request.reasoning.level,
-            is_stream: prepared.force_stream,
-            stream_chunks_count: 0,
-            stream_first_chunk_ms: None,
-        },
-    );
+    Some(LogEntry {
+        api_key_id: access.api_key_id.clone(),
+        api_key_name: access.api_key_name.clone(),
+        created_at: chrono::Utc::now().timestamp_millis(),
+        client_protocol: protocol.clone(),
+        upstream_protocol: prepared.route.egress.to_string(),
+        provider_id: prepared.provider.id.clone(),
+        provider_name: prepared.provider.name.clone(),
+        model_id: Some(route.id.clone()),
+        model_name: Some(route.name.clone()),
+        upstream_url: Some(prepared.trace.upstream_url.clone()),
+        client_model: route.name.clone(),
+        upstream_model: prepared.actual_model.clone(),
+        method: None,
+        path: None,
+        client_request_headers: None,
+        client_request_body: None,
+        client_response_headers: None,
+        client_response_body: None,
+        upstream_request_headers: prepared.trace.request_headers.clone(),
+        upstream_request_body: None,
+        upstream_response_headers: prepared
+            .trace
+            .response_headers
+            .lock()
+            .expect("response headers")
+            .clone(),
+        upstream_response_body: None,
+        upstream_status_code: Some(200),
+        client_status_code: 200,
+        latency_total_ms: started_at.elapsed().as_millis() as i64,
+        latency_upstream_ms: None,
+        usage,
+        thinking_level: input.request.reasoning.level,
+        is_stream: prepared.force_stream,
+        stream_chunks_count: 0,
+        stream_first_chunk_ms: None,
+    })
+}
+
+struct PendingInternalModelLog {
+    gateway: Gateway,
+    entry: Option<LogEntry>,
+    trace: crate::model_turn::TurnTransport,
+    started_at: Instant,
+}
+
+impl PendingInternalModelLog {
+    fn new(
+        gateway: &Gateway,
+        route: &crate::db::models::Model,
+        prepared: &PreparedAttempt,
+        access: &crate::proxy::security::ModelAccessGrant,
+        input: &TurnInput,
+        started_at: Instant,
+    ) -> Option<Self> {
+        Some(Self {
+            gateway: gateway.clone(),
+            entry: Some(internal_model_log_entry(
+                route,
+                prepared,
+                access,
+                input,
+                Usage::default(),
+                started_at,
+            )?),
+            trace: prepared.trace.clone(),
+            started_at,
+        })
+    }
+
+    fn set_usage(&mut self, usage: Usage) {
+        if let Some(entry) = self.entry.as_mut() {
+            entry.usage = usage;
+        }
+    }
+
+    fn emit(&mut self) {
+        let Some(mut entry) = self.entry.take() else {
+            return;
+        };
+        let metrics = self.trace.stream_metrics();
+        entry.created_at = chrono::Utc::now().timestamp_millis();
+        entry.latency_total_ms = self.started_at.elapsed().as_millis() as i64;
+        entry.upstream_response_headers = self
+            .trace
+            .response_headers
+            .lock()
+            .expect("response headers")
+            .clone();
+        entry.stream_chunks_count = metrics.chunks_count;
+        entry.stream_first_chunk_ms = metrics.first_chunk_ms;
+        send_log(&self.gateway, entry);
+    }
+}
+
+impl Drop for PendingInternalModelLog {
+    fn drop(&mut self) {
+        self.emit();
+    }
 }
 
 fn normalize_provider_effective_request(
