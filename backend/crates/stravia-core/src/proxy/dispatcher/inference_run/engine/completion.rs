@@ -107,8 +107,13 @@ pub(super) enum ClientOutputCommit {
     Committed,
 }
 
+pub(super) const BUFFERED_PLATFORM_ONLY_REJECTION_CODE: &str = "history_marker_delivery_required";
+pub(super) const BUFFERED_PLATFORM_ONLY_REJECTION_MESSAGE: &str =
+    "Buffered Platform Tool execution requires a client delivery confirmation.";
+
 pub(super) enum CompletionOutcome {
     PlatformOnly(Box<PlatformOnlyContinuation>),
+    PlatformOnlyRejected,
     Ready(Box<CompletionLease>),
     Failed(CompletionFailure),
 }
@@ -179,17 +184,6 @@ pub(super) struct PreparedDelivery {
     pub(super) background_executions: Vec<crate::HistoryMarkerExecutionJob>,
     pub(super) started_executions: Vec<crate::StartedHistoryMarkerExecution>,
     pub(super) publish_references: Vec<String>,
-}
-
-impl PreparedDelivery {
-    pub(super) async fn publish(
-        &self,
-        context: &CompletionContext,
-    ) -> Result<(), CompletionFailure> {
-        publish_markers(context, &self.publish_references)
-            .await
-            .map_err(|error| CompletionFailure::hook(error, context.client_output_commit))
-    }
 }
 
 impl CompletionLease {
@@ -272,6 +266,7 @@ pub(super) struct CompletionInput<'a> {
     pub(super) upstream_response_id: Option<String>,
     pub(super) early_platform_executions: Vec<EarlyPlatformExecution>,
     pub(super) early_thinking_markers: Vec<EarlyThinkingMarkers>,
+    pub(super) allow_platform_only: bool,
 }
 
 pub(super) struct PreparedPlatformMarker {
@@ -391,23 +386,105 @@ fn project_platform_markers(response: &mut AiResponse, markers: &[PreparedPlatfo
         .iter()
         .map(|prepared| (prepared.call_id.as_str(), &prepared.marker))
         .collect::<std::collections::HashMap<_, _>>();
+    let Some(projection_reference) = markers.first().map(PreparedPlatformMarker::reference) else {
+        return;
+    };
+    let mut span_ordinal = 0;
     let mut projected = Vec::with_capacity(response.items.len() + markers.len());
-    for item in std::mem::take(&mut response.items) {
-        if let Some(call) = item.function_call_ref()
-            && let Some(marker) = by_call_id.get(call.id.as_str())
-        {
-            projected.push(AiItem::output_text(render_history_marker(marker)));
-            continue;
-        }
+    for mut item in std::mem::take(&mut response.items) {
         if item
             .function_call_output_ref()
             .is_some_and(|(call_id, _)| by_call_id.contains_key(call_id))
         {
             continue;
         }
-        projected.push(item);
+        if item.role != crate::protocol::ir::Role::Assistant {
+            projected.push(item);
+            continue;
+        }
+
+        let calls = item.tool_calls.take().unwrap_or_default();
+        let had_calls = !calls.is_empty();
+        let content = std::mem::replace(&mut item.content, MessageContent::Text(String::new()));
+        let mut meta = item.meta.take();
+        let mut emitted_content = false;
+        match content {
+            MessageContent::Text(text) if !text.is_empty() => {
+                push_projected_content(
+                    &mut projected,
+                    MessageContent::Blocks(vec![ContentBlock::Thinking {
+                        thinking: crate::history_marker::render_text_projection_span(
+                            projection_reference,
+                            span_ordinal,
+                            &text,
+                        ),
+                        signature: None,
+                    }]),
+                    &mut meta,
+                );
+                emitted_content = true;
+                span_ordinal += 1;
+            }
+            MessageContent::Blocks(blocks) => {
+                for block in blocks {
+                    let projected_block = match block {
+                        ContentBlock::Text { text, .. } => {
+                            let thinking = crate::history_marker::render_text_projection_span(
+                                projection_reference,
+                                span_ordinal,
+                                &text,
+                            );
+                            span_ordinal += 1;
+                            ContentBlock::Thinking {
+                                thinking,
+                                signature: None,
+                            }
+                        }
+                        other => other,
+                    };
+                    push_projected_content(
+                        &mut projected,
+                        MessageContent::Blocks(vec![projected_block]),
+                        &mut meta,
+                    );
+                    emitted_content = true;
+                }
+            }
+            MessageContent::Text(_) => {}
+        }
+        for call in calls {
+            if let Some(marker) = by_call_id.get(call.id.as_str()) {
+                projected.push(AiItem::thinking(render_history_marker(marker), None));
+            } else {
+                projected.push(AiItem {
+                    role: crate::protocol::ir::Role::Assistant,
+                    content: MessageContent::Text(String::new()),
+                    tool_calls: Some(vec![call]),
+                    tool_call_id: None,
+                    meta: meta.take(),
+                });
+            }
+        }
+        if !emitted_content && !had_calls && meta.is_some() {
+            item.meta = meta;
+            projected.push(item);
+        }
     }
     response.items = projected;
+}
+
+fn push_projected_content(
+    projected: &mut Vec<AiItem>,
+    content: MessageContent,
+    meta: &mut Option<serde_json::Value>,
+) {
+    projected.push(AiItem {
+        role: crate::protocol::ir::Role::Assistant,
+        content,
+        tool_calls: None,
+        tool_call_id: None,
+        meta: meta.take(),
+    });
 }
 
 async fn wait_platform_markers(
@@ -583,7 +660,28 @@ async fn project_protected_thinking(
                     new_references.push(marker.reference.clone());
                     marker
                 };
-                if let Some(visible_block) = visible {
+                if let Some(mut visible_block) = visible {
+                    match &mut visible_block {
+                        ContentBlock::Thinking { thinking, .. } => {
+                            *thinking = crate::history_marker::render_preview_projection_span(
+                                &marker.reference,
+                                0,
+                                thinking,
+                            );
+                        }
+                        ContentBlock::Reasoning {
+                            summary, content, ..
+                        } => {
+                            for (ordinal, text) in summary.iter_mut().chain(content).enumerate() {
+                                *text = crate::history_marker::render_preview_projection_span(
+                                    &marker.reference,
+                                    ordinal,
+                                    text,
+                                );
+                            }
+                        }
+                        _ => unreachable!("protected Thinking preview remains a reasoning block"),
+                    }
                     visible_blocks.push(visible_block);
                 }
                 item_markers.push(marker);
@@ -601,7 +699,7 @@ async fn project_protected_thinking(
         projected.extend(
             item_markers
                 .iter()
-                .map(|marker| AiItem::output_text(render_history_marker(marker))),
+                .map(|marker| AiItem::thinking(render_history_marker(marker), None)),
         );
     }
     if !early_by_output_index.is_empty() {
@@ -637,6 +735,7 @@ pub(super) async fn complete_canonical_response(
         upstream_response_id,
         early_platform_executions,
         early_thinking_markers,
+        allow_platform_only,
     } = input;
     let commit = context.client_output_commit;
     fill_canonical_defaults(context, &mut response);
@@ -671,15 +770,18 @@ pub(super) async fn complete_canonical_response(
             return CompletionOutcome::Failed(CompletionFailure::hook(error, commit));
         }
     }
+    let classified = run.classify_tool_calls(&response);
+    let has_platform_calls = !classified.platform.is_empty();
+    let has_client_calls = !classified.client.is_empty();
+    if has_platform_calls && !has_client_calls && !allow_platform_only {
+        return CompletionOutcome::PlatformOnlyRejected;
+    }
     let canonical_response = response.clone();
     let mut publish_references =
         match project_protected_thinking(context, &mut response, early_thinking_markers).await {
             Ok(references) => references,
             Err(error) => return CompletionOutcome::Failed(CompletionFailure::hook(error, commit)),
         };
-    let classified = run.classify_tool_calls(&response);
-    let has_platform_calls = !classified.platform.is_empty();
-    let has_client_calls = !classified.client.is_empty();
     let mut background_executions = Vec::new();
     let mut started_executions = Vec::new();
     if has_platform_calls {
@@ -903,7 +1005,7 @@ fn retain_hidden_round_item(item: &crate::protocol::ir::AiItem) -> bool {
         || item.reasoning_ref().is_some()
 }
 
-fn apply_hidden_rounds(context: &RequestContext, response: &mut AiResponse) {
+pub(super) fn apply_hidden_rounds(context: &RequestContext, response: &mut AiResponse) {
     let Some(state) = context.extensions.get::<HiddenRoundState>() else {
         return;
     };

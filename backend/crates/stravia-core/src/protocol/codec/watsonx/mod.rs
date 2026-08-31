@@ -35,8 +35,16 @@ impl ProtocolAdapter for WatsonxTextChatV1 {
         &CAPS
     }
 
-    fn decode_request(&self, _body: Value) -> anyhow::Result<AiRequest> {
-        anyhow::bail!("watsonx-text-chat is egress-only")
+    fn decode_request(&self, mut body: Value) -> anyhow::Result<AiRequest> {
+        let object = body
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("watsonx request body must be an object"))?;
+        if let Some(model) = object.remove("model_id") {
+            object.insert("model".into(), model);
+        }
+        let mut request = OpenAIChatCompletionsV1.decode_request(body)?;
+        request.meta.source_protocol = Some(WATSONX_TEXT_CHAT_V1);
+        Ok(request)
     }
 
     fn encode_request(&self, request: &AiRequest) -> anyhow::Result<(Value, HeaderMap)> {

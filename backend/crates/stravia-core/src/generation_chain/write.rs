@@ -27,49 +27,66 @@ impl GenerationChainWrite {
     }
 
     pub(crate) fn observe_effective(&mut self, request: AiRequest) {
-        let marker_items = self
+        let marker_references = self
             .request
             .items
             .iter()
             .enumerate()
-            .filter_map(|(index, item)| {
-                let references =
-                    crate::history_marker::history_marker_references(std::slice::from_ref(item));
-                if references.is_empty() {
-                    return None;
-                }
-                let content = references
+            .flat_map(|(source_index, item)| {
+                crate::history_marker::history_marker_references(std::slice::from_ref(item))
+                    .into_iter()
+                    .map(move |reference| (source_index, reference))
+            })
+            .fold(
+                Vec::<(usize, String)>::new(),
+                |mut references, occurrence| {
+                    if !references
+                        .iter()
+                        .any(|(_, existing)| existing == &occurrence.1)
+                    {
+                        references.push(occurrence);
+                    }
+                    references
+                },
+            );
+        // resolve_request_markers has already expanded each marker in atom order;
+        // its restored-item sentinels carry the exact reference to anchor here.
+        let marker_anchors = history_marker_anchor_indices(&request.items);
+        let mut marker_insertions = marker_references
+            .into_iter()
+            .enumerate()
+            .map(|(ordinal, (source_index, reference))| {
+                let index = marker_anchors
                     .iter()
-                    .map(|reference| {
-                        crate::history_marker::render_history_marker_reference(reference)
+                    .find(|(_, anchor_reference)| anchor_reference == &reference)
+                    .map(|(anchor, _)| {
+                        request.items[..*anchor]
+                            .iter()
+                            .filter(|item| !history_marker_restored(item))
+                            .count()
                     })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                Some((
+                    .unwrap_or(source_index);
+                (
                     index,
-                    AiItem {
-                        role: item.role,
-                        content: MessageContent::Text(content),
-                        tool_calls: None,
-                        tool_call_id: None,
-                        meta: None,
-                    },
-                ))
+                    ordinal,
+                    AiItem::thinking(
+                        crate::history_marker::render_history_marker_reference(&reference),
+                        None,
+                    ),
+                )
             })
             .collect::<Vec<_>>();
+
         self.request = request;
-        self.request.items.retain(|item| {
-            item.meta
-                .as_ref()
-                .and_then(serde_json::Value::as_object)
-                .and_then(|meta| meta.get("__stravia_history_marker_restored"))
-                .and_then(serde_json::Value::as_bool)
-                != Some(true)
-        });
-        for (index, marker) in marker_items {
-            self.request
-                .items
-                .insert(index.min(self.request.items.len()), marker);
+        self.request
+            .items
+            .retain(|item| !history_marker_restored(item));
+        marker_insertions.sort_by_key(|(index, ordinal, _)| (*index, *ordinal));
+        for (offset, (index, _, marker)) in marker_insertions.into_iter().enumerate() {
+            self.request.items.insert(
+                index.saturating_add(offset).min(self.request.items.len()),
+                marker,
+            );
         }
     }
 
@@ -169,6 +186,37 @@ impl GenerationChainWrite {
             .await
             .map_err(PersistError::Store)
     }
+}
+
+fn history_marker_restored(item: &AiItem) -> bool {
+    item.meta
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .and_then(|meta| meta.get("__stravia_history_marker_restored"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+}
+
+fn history_marker_anchor_indices(items: &[AiItem]) -> Vec<(usize, String)> {
+    let mut anchors = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        if !history_marker_restored(item) {
+            continue;
+        }
+        let Some(reference) = item
+            .meta
+            .as_ref()
+            .and_then(serde_json::Value::as_object)
+            .and_then(|meta| meta.get("__stravia_history_marker_reference"))
+            .and_then(serde_json::Value::as_str)
+        else {
+            continue;
+        };
+        if !anchors.iter().any(|(_, existing)| existing == reference) {
+            anchors.push((index, reference.to_owned()));
+        }
+    }
+    anchors
 }
 
 fn media_turn_id(segment: &crate::history_marker::HiddenHistorySegment) -> Option<&str> {

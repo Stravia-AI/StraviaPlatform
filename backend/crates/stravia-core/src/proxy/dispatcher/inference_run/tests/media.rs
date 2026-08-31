@@ -1,15 +1,59 @@
 use super::*;
 
+struct ClearHiddenMediaPlanHook;
+
+struct ClearHiddenMediaPlanSession;
+
+impl crate::hook::Hook for ClearHiddenMediaPlanHook {
+    fn descriptor(&self) -> crate::hook::HookDescriptor {
+        crate::hook::HookDescriptor {
+            event_kinds: vec![crate::hook::EventKind::Request],
+            ..crate::hook::HookDescriptor::all("clear-hidden-media-plan")
+        }
+    }
+
+    fn create_session(
+        &self,
+        _context: &crate::hook::SessionContext,
+    ) -> Box<dyn crate::hook::HookSession> {
+        Box::new(ClearHiddenMediaPlanSession)
+    }
+}
+
+#[async_trait]
+impl crate::hook::HookSession for ClearHiddenMediaPlanSession {
+    async fn handle(
+        &mut self,
+        event: crate::hook::HookEvent<'_>,
+    ) -> Result<crate::hook::ActionBatch, String> {
+        let crate::hook::HookEvent::Request { current, round, .. } = event else {
+            return Ok(crate::hook::ActionBatch::default());
+        };
+        if round == 0 {
+            return Ok(crate::hook::ActionBatch::default());
+        }
+        let mut replacement = current.clone();
+        replacement.meta.media_routing = None;
+        Ok(crate::hook::ActionBatch::one(
+            crate::hook::HookAction::PatchRequest(Box::new(
+                crate::hook::RequestPatch::ReplaceCanonical(Box::new(replacement)),
+            )),
+        ))
+    }
+}
+
 #[tokio::test]
 async fn non_vision_parent_uses_capability_owned_media_model() {
     let source_id = Arc::new(std::sync::Mutex::new(None));
     let (parent_url, parent_calls) = serve_media_parent(source_id.clone()).await;
     let (media_url, media_calls) = serve_media_model(source_id).await;
     let data_dir = tempfile::tempdir().expect("temporary data directory");
-    let (gateway, mut logs) = crate::Gateway::new(crate::config::GatewayConfig {
+    let (gateway, mut logs) = crate::Gateway::builder(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
+    .hook(Arc::new(ClearHiddenMediaPlanHook))
+    .build()
     .await
     .expect("Gateway");
     let admin = gateway.admin();
@@ -139,7 +183,7 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
                 meta: None,
             }],
         );
-    request.stream.enabled = false;
+    request.stream.enabled = true;
     let mut headers = HeaderMap::new();
     headers.insert(
         header::AUTHORIZATION,
@@ -154,17 +198,9 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
     let body = to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("bridge response body");
-    assert!(
-        String::from_utf8_lossy(&body).contains("parent used Media Report"),
-        "{}",
-        String::from_utf8_lossy(&body)
-    );
-    let first_response: serde_json::Value =
-        serde_json::from_slice(&body).expect("bridge response JSON");
-    let first_assistant = first_response["choices"][0]["message"]["content"]
-        .as_str()
-        .expect("first assistant content")
-        .to_owned();
+    let body = String::from_utf8_lossy(&body);
+    assert!(body.contains("parent used Media Report"), "{body}");
+    let (first_assistant_reasoning, first_assistant) = openai_chat_stream_history(&body);
     let trusted_media_turns = sqlx::query_scalar::<_, i64>(
         "SELECT json_array_length(json_extract(payload, '$.trusted_media_turn_ids')) \
          FROM turn_chain_nodes WHERE kind = 'response' ORDER BY created_at DESC LIMIT 1",
@@ -176,19 +212,18 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
 
     let mut second_user = crate::protocol::ir::AiItem::output_text("What is its subject?");
     second_user.role = crate::protocol::ir::Role::User;
-    let second_response = execute_non_stream_request_with_headers(
-        gateway,
-        headers,
-        AiRequest::new(
-            "text-parent",
-            vec![
-                request.items[0].clone(),
-                crate::protocol::ir::AiItem::output_text(first_assistant),
-                second_user,
-            ],
-        ),
-    )
-    .await;
+    let mut second_request = AiRequest::new(
+        "text-parent",
+        vec![
+            request.items[0].clone(),
+            crate::protocol::ir::AiItem::thinking(first_assistant_reasoning, None),
+            crate::protocol::ir::AiItem::output_text(first_assistant),
+            second_user,
+        ],
+    );
+    second_request.stream.enabled = true;
+    let second_response =
+        execute_non_stream_request_with_headers(gateway, headers, second_request).await;
     let second_status = second_response.status();
     let second_body = to_bytes(second_response.into_body(), usize::MAX)
         .await

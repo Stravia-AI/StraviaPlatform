@@ -79,8 +79,13 @@ Platform Tool 是由平台拥有、注册和执行的模型工具。平台向模
 
 ## History Marker
 
-History Marker 是客户端投影中、归属于 Principal 的 opaque 历史引用，用于在原位置等待并恢复一个 Hidden History Segment。一个 Marker 只能引用一个 Platform Tool Execution（其 call 与 terminal result）或一个受保护 Thinking block，禁止聚合多个工具执行或多个 block。它以仅供机器读取的 HTML comment 呈现，不产生用户可见文案；周边客户端历史可以独立修改，同一 Marker 在保留期内可以被重试和并发分支重复使用。
+History Marker 是客户端投影中、归属于 Principal 的 opaque 历史引用，用于在原位置等待并恢复一个 Hidden History Segment。一个 Marker 只能引用一个 Platform Tool Execution（其 call 与 terminal result）或一个受保护 Thinking block，禁止聚合多个工具执行或多个 block。新 Marker 以无签名 Thinking block 中仅供机器读取的 HTML comment 呈现；各生成协议使用原生 reasoning、thinking 或 thought 载体，旧 Text 载体只在保留期内兼容读取。周边客户端历史可以独立修改，同一 Marker 在保留期内可以被重试和并发分支重复使用。
 _避免使用_：占位文本、Platform Tool Call、Client History Token
+
+## Projection Delimiter
+
+Projection Delimiter 是 client projection 中围绕一段可见字节的成对、无状态机器语法，表示该段 canonical Text 仅为客户端展示而使用 Thinking 载体。它绑定一个既有 Principal-scoped History Marker reference 和 span ordinal，不拥有 hidden payload、不创建 Store 记录；客户端回放时只有 Marker 仍存在、Delimiter 正确配对且 Marker 可解析，范围内字节才恢复为 canonical Text。删除或破坏任一边界属于显式历史编辑。
+_避免使用_：History Marker、Hidden History Segment、Projection Record
 
 ## Hidden History Segment
 

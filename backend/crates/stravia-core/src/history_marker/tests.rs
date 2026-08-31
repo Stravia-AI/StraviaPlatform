@@ -438,7 +438,7 @@ async fn sqlite_thinking_markers_are_immutable_and_publish_extends_retention() {
 }
 
 #[tokio::test]
-async fn resolver_restores_trailing_marker_before_its_public_item_and_preserves_edits() {
+async fn resolver_restores_trailing_marker_at_its_exact_position_and_preserves_edits() {
     let store = sqlite_store().await;
     let owner = principal("owner");
     let marker = store
@@ -479,8 +479,9 @@ async fn resolver_restores_trailing_marker_before_its_public_item_and_preserves_
 
     assert_eq!(summary.restored_thinking_segments, 1);
     assert_eq!(request.items.len(), 3);
+    assert_eq!(request.items[0].output_text_ref(), Some("client edit\n"));
     assert!(matches!(
-        &request.items[0].content,
+        &request.items[1].content,
         MessageContent::Blocks(blocks)
             if matches!(
                 blocks.as_slice(),
@@ -490,7 +491,6 @@ async fn resolver_restores_trailing_marker_before_its_public_item_and_preserves_
                 }] if thinking == "authoritative" && signature == "opaque-signature"
             )
     ));
-    assert_eq!(request.items[1].output_text_ref(), Some("client edit"));
     assert_eq!(
         request.items[2]
             .function_call_ref()
@@ -606,5 +606,436 @@ async fn resolver_removes_unknown_and_unauthorized_private_markers() {
         .unwrap();
 
     assert_eq!(summary, MarkerResolution::default());
-    assert!(request.items.is_empty());
+    assert_eq!(request.items.len(), 1);
+    assert_eq!(request.items[0].output_text_ref(), Some("\n"));
+}
+
+#[tokio::test]
+async fn resolver_restores_projected_text_and_platform_segment_at_exact_marker_position() {
+    let store = sqlite_store().await;
+    let owner = principal("owner");
+    let marker = store
+        .create_platform(
+            &owner,
+            PlatformMarkerInput {
+                tool_id: "web-search".into(),
+                call: call("call-ordered"),
+                activity: "Searching the web".into(),
+                execution_limit: Duration::from_secs(30),
+                pending_retention: Duration::from_secs(60),
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .claim_execution(&owner, &marker.reference, "worker", Duration::from_secs(30))
+        .await
+        .unwrap();
+    store
+        .finish_execution(
+            &owner,
+            &marker.reference,
+            "worker",
+            PlatformExecutionState::Completed,
+            HiddenHistorySegment::Platform {
+                call: call("call-ordered"),
+                result: ContentBlock::ToolResult {
+                    tool_use_id: "call-ordered".into(),
+                    content: serde_json::json!({"answer": "stable"}),
+                    is_error: Some(false),
+                    cache_control: None,
+                },
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .publish(
+            &owner,
+            std::slice::from_ref(&marker.reference),
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+
+    let projected = format!(
+        "R1{}{}R2",
+        render_text_projection_span(&marker.reference, 0, "C1"),
+        render_history_marker(&marker)
+    );
+    let mut request = AiRequest::new(
+        "model",
+        vec![AiItem::thinking(projected, None), AiItem::output_text("C2")],
+    );
+
+    let summary = resolve_request_markers(store.as_ref(), &owner, &mut request)
+        .await
+        .unwrap();
+
+    assert_eq!(summary.restored_platform_segments, 1);
+    assert_eq!(request.items.len(), 6);
+    assert!(matches!(
+        request.items[0].thinking_ref(),
+        Some(("R1", None))
+    ));
+    assert_eq!(request.items[1].output_text_ref(), Some("C1"));
+    assert_eq!(
+        request.items[2]
+            .function_call_ref()
+            .map(|call| call.id.as_str()),
+        Some("call-ordered")
+    );
+    assert_eq!(
+        request.items[3].tool_call_id.as_deref(),
+        Some("call-ordered")
+    );
+    assert!(matches!(
+        request.items[4].thinking_ref(),
+        Some(("R2", None))
+    ));
+    assert_eq!(request.items[5].output_text_ref(), Some("C2"));
+}
+
+#[tokio::test]
+async fn resolver_replaces_protected_preview_with_authoritative_thinking() {
+    let store = sqlite_store().await;
+    let owner = principal("owner");
+    let marker = store
+        .create_thinking(
+            &owner,
+            ThinkingMarkerInput {
+                block: ContentBlock::Thinking {
+                    thinking: "authoritative".into(),
+                    signature: Some("opaque-signature".into()),
+                },
+                activity: "Preserving protected reasoning".into(),
+                pending_retention: Duration::from_secs(60),
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .publish(
+            &owner,
+            std::slice::from_ref(&marker.reference),
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+    let projected = format!(
+        "{}{}",
+        render_preview_projection_span(&marker.reference, 0, "visible preview"),
+        render_history_marker(&marker)
+    );
+    let mut request = AiRequest::new("model", vec![AiItem::thinking(projected, None)]);
+
+    let summary = resolve_request_markers(store.as_ref(), &owner, &mut request)
+        .await
+        .unwrap();
+
+    assert_eq!(summary.restored_thinking_segments, 1);
+    assert_eq!(request.items.len(), 1);
+    assert!(matches!(
+        request.items[0].thinking_ref(),
+        Some(("authoritative", Some("opaque-signature")))
+    ));
+}
+
+#[tokio::test]
+async fn resolver_replaces_reasoning_previews_and_restores_redacted_blocks() {
+    let store = sqlite_store().await;
+    let owner = principal("owner");
+    let encrypted = store
+        .create_thinking(
+            &owner,
+            ThinkingMarkerInput {
+                block: ContentBlock::Reasoning {
+                    summary: vec!["authoritative summary".into()],
+                    content: vec!["authoritative content".into()],
+                    encrypted_content: Some("opaque-encrypted-content".into()),
+                },
+                activity: "Preserving encrypted reasoning".into(),
+                pending_retention: Duration::from_secs(60),
+            },
+        )
+        .await
+        .unwrap();
+    let redacted = store
+        .create_thinking(
+            &owner,
+            ThinkingMarkerInput {
+                block: ContentBlock::RedactedThinking {
+                    data: "opaque-redacted-content".into(),
+                },
+                activity: "Preserving redacted reasoning".into(),
+                pending_retention: Duration::from_secs(60),
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .publish(
+            &owner,
+            &[encrypted.reference.clone(), redacted.reference.clone()],
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+    let preview = AiItem::reasoning(
+        vec![render_preview_projection_span(
+            &encrypted.reference,
+            0,
+            "visible summary",
+        )],
+        vec![render_preview_projection_span(
+            &encrypted.reference,
+            1,
+            "visible content",
+        )],
+        None,
+    );
+    let markers = AiItem::thinking(
+        format!(
+            "{}{}",
+            render_history_marker(&encrypted),
+            render_history_marker(&redacted)
+        ),
+        None,
+    );
+    let mut request = AiRequest::new("model", vec![preview, markers]);
+
+    let summary = resolve_request_markers(store.as_ref(), &owner, &mut request)
+        .await
+        .unwrap();
+
+    assert_eq!(summary.restored_thinking_segments, 2);
+    assert_eq!(request.items.len(), 2);
+    assert!(matches!(
+        request.items[0].reasoning_ref(),
+        Some((summary, content, Some("opaque-encrypted-content")))
+            if summary == ["authoritative summary"] && content == ["authoritative content"]
+    ));
+    assert!(matches!(
+        &request.items[1].content,
+        MessageContent::Blocks(blocks)
+            if matches!(
+                blocks.as_slice(),
+                [ContentBlock::RedactedThinking { data }]
+                    if data == "opaque-redacted-content"
+            )
+    ));
+}
+
+#[tokio::test]
+async fn resolver_strips_mismatched_delimiters_without_retyping_visible_bytes() {
+    let store = sqlite_store().await;
+    let owner = principal("owner");
+    let marker = store
+        .create_thinking(
+            &owner,
+            ThinkingMarkerInput {
+                block: ContentBlock::Thinking {
+                    thinking: "authoritative".into(),
+                    signature: Some("opaque-signature".into()),
+                },
+                activity: "Preserving protected reasoning".into(),
+                pending_retention: Duration::from_secs(60),
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .publish(
+            &owner,
+            std::slice::from_ref(&marker.reference),
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+    let projected = format!(
+        "{prefix}{reference}:text:0:start -->edited{prefix}{reference}:text:1:end -->{}",
+        render_history_marker(&marker),
+        prefix = PROJECTION_DELIMITER_PREFIX,
+        reference = marker.reference,
+    );
+    let mut request = AiRequest::new("model", vec![AiItem::thinking(projected, None)]);
+
+    resolve_request_markers(store.as_ref(), &owner, &mut request)
+        .await
+        .unwrap();
+
+    assert_eq!(request.items.len(), 2);
+    assert!(matches!(
+        request.items[0].thinking_ref(),
+        Some(("edited", None))
+    ));
+    assert!(matches!(
+        request.items[1].thinking_ref(),
+        Some(("authoritative", Some("opaque-signature")))
+    ));
+}
+
+#[tokio::test]
+async fn resolver_treats_marker_removal_as_an_explicit_projection_edit() {
+    let store = sqlite_store().await;
+    let owner = principal("owner");
+    let marker = store
+        .create_thinking(
+            &owner,
+            ThinkingMarkerInput {
+                block: ContentBlock::Thinking {
+                    thinking: "authoritative".into(),
+                    signature: Some("opaque-signature".into()),
+                },
+                activity: "Preserving protected reasoning".into(),
+                pending_retention: Duration::from_secs(60),
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .publish(
+            &owner,
+            std::slice::from_ref(&marker.reference),
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+    let mut request = AiRequest::new(
+        "model",
+        vec![AiItem::thinking(
+            render_text_projection_span(&marker.reference, 0, "client edit"),
+            None,
+        )],
+    );
+
+    let summary = resolve_request_markers(store.as_ref(), &owner, &mut request)
+        .await
+        .unwrap();
+
+    assert_eq!(summary, MarkerResolution::default());
+    assert_eq!(request.items.len(), 1);
+    assert!(matches!(
+        request.items[0].thinking_ref(),
+        Some(("client edit", None))
+    ));
+}
+
+#[tokio::test]
+async fn resolver_restores_multiple_markers_at_block_boundaries_once_in_order() {
+    let store = sqlite_store().await;
+    let owner = principal("owner");
+    let first = store
+        .create_thinking(
+            &owner,
+            ThinkingMarkerInput {
+                block: ContentBlock::Thinking {
+                    thinking: "first authoritative".into(),
+                    signature: Some("first-signature".into()),
+                },
+                activity: "Preserving first reasoning".into(),
+                pending_retention: Duration::from_secs(60),
+            },
+        )
+        .await
+        .unwrap();
+    let second = store
+        .create_thinking(
+            &owner,
+            ThinkingMarkerInput {
+                block: ContentBlock::Thinking {
+                    thinking: "second authoritative".into(),
+                    signature: Some("second-signature".into()),
+                },
+                activity: "Preserving second reasoning".into(),
+                pending_retention: Duration::from_secs(60),
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .publish(
+            &owner,
+            &[first.reference.clone(), second.reference.clone()],
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+    let projected = format!(
+        "{}middle{}{}",
+        render_history_marker(&first),
+        render_history_marker(&second),
+        render_history_marker(&first)
+    );
+    let mut request = AiRequest::new("model", vec![AiItem::thinking(projected, None)]);
+
+    let summary = resolve_request_markers(store.as_ref(), &owner, &mut request)
+        .await
+        .unwrap();
+
+    assert_eq!(summary.restored_thinking_segments, 2);
+    assert_eq!(request.items.len(), 3);
+    assert!(matches!(
+        request.items[0].thinking_ref(),
+        Some(("first authoritative", Some("first-signature")))
+    ));
+    assert!(matches!(
+        request.items[1].thinking_ref(),
+        Some(("middle", None))
+    ));
+    assert!(matches!(
+        request.items[2].thinking_ref(),
+        Some(("second authoritative", Some("second-signature")))
+    ));
+}
+
+#[tokio::test]
+async fn resolver_strips_unpublished_and_expired_markers_without_losing_visible_text() {
+    let store = sqlite_store().await;
+    let owner = principal("owner");
+    let unpublished = store
+        .create_thinking(
+            &owner,
+            ThinkingMarkerInput {
+                block: ContentBlock::Thinking {
+                    thinking: "unpublished".into(),
+                    signature: Some("opaque".into()),
+                },
+                activity: "Unpublished reasoning".into(),
+                pending_retention: Duration::from_secs(60),
+            },
+        )
+        .await
+        .unwrap();
+    let expired = store
+        .create_thinking(
+            &owner,
+            ThinkingMarkerInput {
+                block: ContentBlock::Thinking {
+                    thinking: "expired".into(),
+                    signature: Some("opaque".into()),
+                },
+                activity: "Expired reasoning".into(),
+                pending_retention: Duration::ZERO,
+            },
+        )
+        .await
+        .unwrap();
+    let projected = format!(
+        "{}visible{}",
+        render_history_marker(&unpublished),
+        render_history_marker(&expired)
+    );
+    let mut request = AiRequest::new("model", vec![AiItem::thinking(projected, None)]);
+
+    let summary = resolve_request_markers(store.as_ref(), &owner, &mut request)
+        .await
+        .unwrap();
+
+    assert_eq!(summary, MarkerResolution::default());
+    assert_eq!(request.items.len(), 1);
+    assert!(matches!(
+        request.items[0].thinking_ref(),
+        Some(("visible", None))
+    ));
 }

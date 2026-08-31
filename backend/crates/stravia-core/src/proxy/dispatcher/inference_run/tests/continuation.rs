@@ -1,6 +1,57 @@
 use super::*;
 
 #[test]
+fn buffered_platform_only_requires_client_delivery_confirmation() {
+    std::thread::Builder::new()
+        .name("buffered-platform-only-rejection".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime")
+                .block_on(buffered_platform_only_requires_delivery_impl())
+        })
+        .expect("test thread")
+        .join()
+        .expect("test thread panicked");
+}
+
+#[test]
+fn hidden_round_request_hook_response_continues_the_committed_stream() {
+    std::thread::Builder::new()
+        .name("hidden-round-hook-response".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime")
+                .block_on(hidden_round_request_hook_response_is_delivered_impl())
+        })
+        .expect("test thread")
+        .join()
+        .expect("test thread panicked");
+}
+
+#[test]
+fn hidden_round_request_hook_rejection_terminates_the_committed_stream() {
+    std::thread::Builder::new()
+        .name("hidden-round-hook-rejection".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime")
+                .block_on(hidden_round_request_hook_rejection_is_delivered_impl())
+        })
+        .expect("test thread")
+        .join()
+        .expect("test thread panicked");
+}
+
+#[test]
 fn mixed_tool_continuation_replays_after_drop_and_is_consumed_after_delivery() {
     std::thread::Builder::new()
         .name("mixed-tool-continuation".into())

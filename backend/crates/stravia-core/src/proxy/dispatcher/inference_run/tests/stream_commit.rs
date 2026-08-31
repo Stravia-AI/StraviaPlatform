@@ -1,5 +1,72 @@
 use super::*;
 
+struct ExposeToolAndSignalUsageHook {
+    usage_processed: Arc<tokio::sync::Notify>,
+}
+
+struct ExposeToolAndSignalUsageSession {
+    transformer: SignalUsageTransformer,
+}
+
+struct SignalUsageTransformer {
+    usage_processed: Arc<tokio::sync::Notify>,
+}
+
+impl crate::hook::Hook for ExposeToolAndSignalUsageHook {
+    fn descriptor(&self) -> crate::hook::HookDescriptor {
+        crate::hook::HookDescriptor {
+            event_kinds: vec![
+                crate::hook::EventKind::Request,
+                crate::hook::EventKind::Stream,
+            ],
+            ..crate::hook::HookDescriptor::all("signal-ambiguous-text-processed")
+        }
+    }
+
+    fn create_session(
+        &self,
+        _context: &crate::hook::SessionContext,
+    ) -> Box<dyn crate::hook::HookSession> {
+        Box::new(ExposeToolAndSignalUsageSession {
+            transformer: SignalUsageTransformer {
+                usage_processed: Arc::clone(&self.usage_processed),
+            },
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::hook::HookSession for ExposeToolAndSignalUsageSession {
+    async fn handle(
+        &mut self,
+        event: crate::hook::HookEvent<'_>,
+    ) -> Result<crate::hook::ActionBatch, String> {
+        if matches!(event, crate::hook::HookEvent::Request { .. }) {
+            Ok(crate::hook::ActionBatch::one(
+                crate::hook::HookAction::ExposeTool(crate::hook::ToolId::new("ordered-tool")),
+            ))
+        } else {
+            Ok(crate::hook::ActionBatch::default())
+        }
+    }
+
+    fn stream_transformer(&mut self) -> Option<&mut dyn crate::hook::StreamTransformer> {
+        Some(&mut self.transformer)
+    }
+}
+
+impl crate::hook::StreamTransformer for SignalUsageTransformer {
+    fn transform(
+        &mut self,
+        delta: &crate::protocol::ir::AiStreamDelta,
+    ) -> Result<crate::hook::StreamDirective, String> {
+        if matches!(delta, crate::protocol::ir::AiStreamDelta::Usage(_)) {
+            self.usage_processed.notify_one();
+        }
+        Ok(crate::hook::StreamDirective::Pass)
+    }
+}
+
 #[tokio::test]
 async fn protected_reasoning_marker_is_emitted_at_item_done_before_answer() {
     let (reasoning_events, answer_events) =
@@ -146,9 +213,9 @@ async fn platform_execution_starts_at_tool_call_complete_before_model_turn_ends(
 }
 
 #[tokio::test]
-async fn exposed_platform_tool_does_not_buffer_normal_stream_text() {
+async fn exposed_platform_tool_buffers_ambiguous_text_until_model_leg_completes() {
     let first_event = format!(
-        "data: {}\n\n",
+        "data: {}\n\ndata: {}\n\n",
         serde_json::json!({
             "id": "upstream-live",
             "model": "provider-model",
@@ -157,12 +224,116 @@ async fn exposed_platform_tool_does_not_buffer_normal_stream_text() {
                 "delta": {"role": "assistant", "content": "live"},
                 "finish_reason": null
             }]
+        }),
+        serde_json::json!({
+            "id": "upstream-live",
+            "model": "provider-model",
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 1,
+                "completion_tokens": 1,
+                "total_tokens": 2
+            }
         })
     );
     let remaining_events = format!(
         "data: {}\n\ndata: [DONE]\n\n",
         serde_json::json!({
             "id": "upstream-live",
+            "model": "provider-model",
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "stop"
+            }]
+        })
+    );
+    let (upstream_url, _calls, release_upstream) =
+        serve_gated_sse(first_event, remaining_events).await;
+    let data_dir = tempfile::tempdir().expect("temp data dir");
+    let tool_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let usage_processed = Arc::new(tokio::sync::Notify::new());
+    let (gateway, _logs) = Gateway::builder(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .hook(Arc::new(ExposeToolAndSignalUsageHook {
+        usage_processed: Arc::clone(&usage_processed),
+    }))
+    .platform_tool(Arc::new(OrderedTool { calls: tool_calls }))
+    .build()
+    .await
+    .expect("gateway init");
+    configure_route_with_vendor(
+        &gateway,
+        "platform-tool-live-text",
+        &[upstream_url],
+        "normalizing-test",
+    )
+    .await;
+
+    let mut execution = Box::pin(execute_protocol_request(
+        gateway,
+        "platform-tool-live-text",
+        ANTHROPIC_MESSAGES_2023_06_01,
+        "/v1/messages",
+        true,
+    ));
+    let completed_before_usage = tokio::select! {
+        biased;
+        response = execution.as_mut() => Some(response),
+        _ = usage_processed.notified() => None,
+    };
+    assert!(
+        completed_before_usage.is_none(),
+        "the first Text delta was processed before Usage and must remain buffered"
+    );
+
+    release_upstream
+        .send(())
+        .expect("release upstream completion");
+    let response = tokio::time::timeout(std::time::Duration::from_secs(2), execution)
+        .await
+        .expect("response after Model Leg completion");
+    let chunks = response.into_body().into_data_stream();
+    let body = to_bytes(axum::body::Body::from_stream(chunks), usize::MAX)
+        .await
+        .expect("completed stream body");
+    let body = std::str::from_utf8(&body).expect("UTF-8 stream body");
+    assert!(body.contains(r#""text":"normalized:live""#), "{body}");
+    assert!(body.contains("message_stop"), "{body}");
+}
+
+#[tokio::test]
+async fn exposed_platform_tool_streams_reasoning_before_first_text_immediately() {
+    let first_event = format!(
+        "data: {}\n\n",
+        serde_json::json!({
+            "id": "upstream-live-reasoning",
+            "model": "provider-model",
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "role": "assistant",
+                    "reasoning_content": "live reasoning"
+                },
+                "finish_reason": null
+            }]
+        })
+    );
+    let remaining_events = format!(
+        "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+        serde_json::json!({
+            "id": "upstream-live-reasoning",
+            "model": "provider-model",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "final answer"},
+                "finish_reason": null
+            }]
+        }),
+        serde_json::json!({
+            "id": "upstream-live-reasoning",
             "model": "provider-model",
             "choices": [{
                 "index": 0,
@@ -185,26 +356,14 @@ async fn exposed_platform_tool_does_not_buffer_normal_stream_text() {
     .build()
     .await
     .expect("gateway init");
-    configure_route_with_vendor(
-        &gateway,
-        "platform-tool-live-text",
-        &[upstream_url],
-        "normalizing-test",
-    )
-    .await;
+    configure_route(&gateway, "platform-tool-live-reasoning", &[upstream_url]).await;
 
     let response = tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        execute_protocol_request(
-            gateway,
-            "platform-tool-live-text",
-            ANTHROPIC_MESSAGES_2023_06_01,
-            "/v1/messages",
-            true,
-        ),
+        execute_stream(gateway, "platform-tool-live-reasoning"),
     )
     .await
-    .expect("response headers before upstream completion");
+    .expect("reasoning must commit the response before Model Leg completion");
     let mut chunks = response.into_body().into_data_stream();
     let prefix = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         let mut prefix = String::new();
@@ -212,17 +371,17 @@ async fn exposed_platform_tool_does_not_buffer_normal_stream_text() {
             let chunk = chunks
                 .next()
                 .await
-                .expect("stream ended before live content")
-                .expect("live stream chunk");
+                .expect("stream ended before reasoning")
+                .expect("reasoning stream chunk");
             prefix.push_str(std::str::from_utf8(&chunk).expect("UTF-8 stream chunk"));
-            if prefix.contains(r#""text":"normalized:live""#) {
+            if prefix.contains("live reasoning") {
                 break prefix;
             }
         }
     })
     .await
-    .expect("Anthropic content delta before upstream completion");
-    assert!(!prefix.contains("message_stop"), "{prefix}");
+    .expect("reasoning delta before upstream completion");
+    assert!(!prefix.contains("final answer"), "{prefix}");
 
     release_upstream
         .send(())
@@ -233,7 +392,7 @@ async fn exposed_platform_tool_does_not_buffer_normal_stream_text() {
     assert!(
         std::str::from_utf8(&suffix)
             .expect("UTF-8 stream suffix")
-            .contains("message_stop")
+            .contains("final answer")
     );
 }
 

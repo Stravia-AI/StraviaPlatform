@@ -104,14 +104,19 @@ async fn edited_visible_reasoning_restores_the_authoritative_protected_block() {
             .expect("first response body"),
     )
     .expect("first response JSON");
-    let projected = first_body["choices"][0]["message"]["content"]
+    let projected = first_body["choices"][0]["message"]["reasoning_content"]
         .as_str()
-        .expect("projected assistant content");
+        .expect("projected assistant reasoning");
+    assert_eq!(
+        first_body["choices"][0]["message"]["content"],
+        "first answer"
+    );
     assert!(projected.contains("stravia-history-marker:"), "{projected}");
     assert_eq!(projected.matches("stravia-history-marker:").count(), 2);
-    let references = crate::history_marker::history_marker_references(&[
-        crate::protocol::ir::AiItem::output_text(projected),
-    ]);
+    let references =
+        crate::history_marker::history_marker_references(&[crate::protocol::ir::AiItem::thinking(
+            projected, None,
+        )]);
     assert_eq!(references.len(), 2, "{projected}");
     assert_ne!(references[0], references[1], "{projected}");
     assert!(!projected.contains("opaque-signature"), "{projected}");
@@ -125,7 +130,7 @@ async fn edited_visible_reasoning_restores_the_authoritative_protected_block() {
         headers.clone(),
         AiRequest::new(
             "opaque-incompatible",
-            vec![crate::protocol::ir::AiItem::output_text(edited.clone())],
+            vec![crate::protocol::ir::AiItem::thinking(edited.clone(), None)],
         ),
     )
     .await;
@@ -152,7 +157,7 @@ async fn edited_visible_reasoning_restores_the_authoritative_protected_block() {
         ),
         request: AiRequest::new(
             "in-memory-model",
-            vec![crate::protocol::ir::AiItem::output_text(edited)],
+            vec![crate::protocol::ir::AiItem::thinking(edited, None)],
         ),
         ingress: OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
         context: RequestContext::new(
@@ -191,9 +196,191 @@ async fn edited_visible_reasoning_restores_the_authoritative_protected_block() {
         !requests[1]
             .items
             .iter()
-            .any(|item| item.output_text_ref() == Some("client-edited reasoning")),
+            .any(|item| item.thinking_ref() == Some(("client-edited reasoning", None))),
         "client edits must not replace the authoritative protected block"
     );
+}
+
+#[tokio::test]
+async fn signed_reasoning_stream_replay_uses_one_preview_and_authoritative_marker() {
+    let anthropic_stream = |response_id: &str, reasoning: &str, signature: &str, answer: &str| {
+        format!(
+            "event: message_start\ndata: {}\n\n\
+             event: content_block_start\ndata: {}\n\n\
+             event: content_block_delta\ndata: {}\n\n\
+             event: content_block_delta\ndata: {}\n\n\
+             event: content_block_stop\ndata: {}\n\n\
+             event: content_block_start\ndata: {}\n\n\
+             event: content_block_delta\ndata: {}\n\n\
+             event: content_block_stop\ndata: {}\n\n\
+             event: message_delta\ndata: {}\n\n\
+             event: message_stop\ndata: {}\n\n",
+            serde_json::json!({
+                "type": "message_start",
+                "message": {
+                    "id": response_id,
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "provider-model",
+                    "content": [],
+                    "stop_reason": null,
+                    "stop_sequence": null,
+                    "usage": {"input_tokens": 1, "output_tokens": 0}
+                }
+            }),
+            serde_json::json!({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "thinking", "thinking": ""}
+            }),
+            serde_json::json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "thinking_delta", "thinking": reasoning}
+            }),
+            serde_json::json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "signature_delta", "signature": signature}
+            }),
+            serde_json::json!({"type": "content_block_stop", "index": 0}),
+            serde_json::json!({
+                "type": "content_block_start",
+                "index": 1,
+                "content_block": {"type": "text", "text": ""}
+            }),
+            serde_json::json!({
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": {"type": "text_delta", "text": answer}
+            }),
+            serde_json::json!({"type": "content_block_stop", "index": 1}),
+            serde_json::json!({
+                "type": "message_delta",
+                "delta": {
+                    "stop_reason": "end_turn",
+                    "stop_sequence": null
+                },
+                "usage": {"output_tokens": 2}
+            }),
+            serde_json::json!({"type": "message_stop"})
+        )
+    };
+    let (upstream_url, calls) = serve_sse_sequence(vec![
+        anthropic_stream(
+            "signed-first",
+            "signed preview",
+            "signed-opaque",
+            "first answer",
+        ),
+        anthropic_stream(
+            "signed-second",
+            "continued reasoning",
+            "signed-second-opaque",
+            "second answer",
+        ),
+    ])
+    .await;
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let (gateway, _logs) = Gateway::new(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .expect("gateway init");
+    configure_route_with_protocol(
+        &gateway,
+        "signed-chat-replay",
+        &[upstream_url],
+        "test-http",
+        "anthropic-messages",
+    )
+    .await;
+    let headers = authorized_headers(&gateway).await;
+    let mut first_request = AiRequest::new(
+        "signed-chat-replay",
+        vec![crate::protocol::ir::AiItem::output_text("hello")],
+    );
+    first_request.stream.enabled = true;
+    let first = execute_request_with_headers(
+        gateway.clone(),
+        headers.clone(),
+        first_request,
+        OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+        "/v1/chat/completions",
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let first_body = String::from_utf8(
+        to_bytes(first.into_body(), usize::MAX)
+            .await
+            .expect("first response body")
+            .to_vec(),
+    )
+    .expect("UTF-8 first response");
+    let projected = first_body
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+        .filter_map(|chunk| {
+            chunk["choices"][0]["delta"]["reasoning_content"]
+                .as_str()
+                .map(str::to_owned)
+        })
+        .collect::<String>();
+    assert_eq!(
+        projected.matches("signed preview").count(),
+        1,
+        "{projected}"
+    );
+    assert_eq!(
+        projected
+            .matches(crate::history_marker::PROJECTION_DELIMITER_PREFIX)
+            .count(),
+        2,
+        "signed preview must have one preview start/end pair: {projected}"
+    );
+    assert_eq!(
+        projected
+            .matches(crate::history_marker::HISTORY_MARKER_PREFIX)
+            .count(),
+        1,
+        "{projected}"
+    );
+    let preview_end = projected
+        .find(":preview:0:end -->")
+        .expect("preview delimiter end");
+    let marker_start = projected
+        .find(crate::history_marker::HISTORY_MARKER_PREFIX)
+        .expect("History Marker carrier");
+    assert!(preview_end < marker_start, "{projected}");
+
+    let mut second_request = AiRequest::new(
+        "signed-chat-replay",
+        vec![
+            crate::protocol::ir::AiItem::output_text("hello"),
+            crate::protocol::ir::AiItem::thinking(projected, None),
+        ],
+    );
+    second_request.stream.enabled = true;
+    let second = execute_request_with_headers(
+        gateway,
+        headers,
+        second_request,
+        OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+        "/v1/chat/completions",
+    )
+    .await;
+    assert_eq!(second.status(), StatusCode::OK);
+    let second_body = String::from_utf8(
+        to_bytes(second.into_body(), usize::MAX)
+            .await
+            .expect("second response body")
+            .to_vec(),
+    )
+    .expect("UTF-8 second response");
+    assert!(second_body.contains("second answer"), "{second_body}");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
@@ -644,13 +831,14 @@ async fn hidden_rounds_are_iterative_and_platform_tools_keep_response_order() {
         .expect("gateway init");
     configure_route(&gateway, "hidden-round-route", &[base_url]).await;
 
-    let response = execute_non_stream(gateway, "hidden-round-route").await;
+    let response = execute_stream(gateway, "hidden-round-route").await;
 
-    assert_eq!(response.status(), StatusCode::OK);
+    let status = response.status();
     let body = to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("hidden-round response body");
     let body = String::from_utf8_lossy(&body);
+    assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body.contains("final response"), "{body}");
     assert_eq!(
         body.matches("stravia-history-marker:").count(),

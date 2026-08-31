@@ -19,7 +19,9 @@ mod stream;
 mod util;
 use self::claim::*;
 use self::completion::*;
-use self::delivery::{DeliveryAdapter, DeliveryProgress};
+use self::delivery::{
+    BufferedDeliveryProgress, DeliveryAdapter, DeliveryProgress, after_body_delivery,
+};
 pub(super) use self::errors::hook_failure_response;
 use self::errors::*;
 use self::log::*;
@@ -763,6 +765,10 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
     }
 
     if request.stream.enabled {
+        let mut stream_request_extras = request_extras.clone();
+        if request.meta.media_routing.is_some() {
+            stream_request_extras.body = None;
+        }
         let log = LogBuilder::from_dispatch(
             gateway,
             &ingress.to_string(),
@@ -773,7 +779,7 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
         )
         .stream_flag(true)
         .model_turn(&turn.route, &turn.target)
-        .with_req_extras(request_extras);
+        .with_req_extras(&stream_request_extras);
         return stream::handle_model_turn_stream(stream::ModelTurnStreamInput {
             turn,
             executor: Arc::clone(&executor),
@@ -787,7 +793,7 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
             phase: std::mem::replace(phase, PhaseTracker::at(Phase::Finished)),
             start,
             turn_started,
-            request_extras: request_extras.clone(),
+            request_extras: stream_request_extras,
             log,
         })
         .await;
@@ -928,42 +934,22 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
             upstream_response_id,
             early_platform_executions: Vec::new(),
             early_thinking_markers: Vec::new(),
+            allow_platform_only: false,
         },
     )
     .await
     {
-        CompletionOutcome::PlatformOnly(continuation) => {
+        CompletionOutcome::PlatformOnly(_) | CompletionOutcome::PlatformOnlyRejected => {
             model_turn_log
                 .take()
                 .expect("current Model Turn log")
                 .without_client_exchange()
                 .emit();
-            if let Err(failure) = continuation.publish(&completion_context).await {
-                return buffered_response(render_completion_failure(
-                    failure,
-                    ingress,
-                    request.stream.enabled,
-                ));
-            }
-            if let Err(failure) = continuation
-                .finish(
-                    &completion_context,
-                    request_context,
-                    request,
-                    inference_run
-                        .as_mut()
-                        .expect("Platform continuation Inference Run"),
-                    phase,
-                )
-                .await
-            {
-                return buffered_response(render_completion_failure(
-                    failure,
-                    ingress,
-                    request.stream.enabled,
-                ));
-            }
-            return dispatch_next_round();
+            return buffered_response(coded_error_response(
+                StatusCode::CONFLICT,
+                BUFFERED_PLATFORM_ONLY_REJECTION_CODE,
+                BUFFERED_PLATFORM_ONLY_REJECTION_MESSAGE,
+            ));
         }
         CompletionOutcome::Ready(lease) => match (*lease).prepare(phase) {
             Ok(delivery) => delivery,
@@ -983,43 +969,72 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
             ));
         }
     };
-    if let Err(failure) = completed.publish(&completion_context).await {
-        return buffered_response(render_completion_failure(
-            failure,
-            ingress,
-            request.stream.enabled,
-        ));
-    }
-    let mut started_executions = completed.started_executions;
-    if !completed.background_executions.is_empty() {
-        started_executions.extend(gateway.start_history_marker_executions(
-            completion_context.principal().clone(),
-            completed.background_executions,
-        ));
-    }
-    if !started_executions.is_empty() {
-        gateway.spawn_started_history_marker_executions(
-            started_executions,
-            inference_run
-                .take()
-                .expect("background Platform execution requires its Inference Run"),
-        );
-    }
 
+    let PreparedDelivery {
+        response: prepared_response,
+        pending_generation_chain,
+        background_executions,
+        started_executions,
+        publish_references,
+    } = completed;
     let mut delivery = if request.stream.enabled {
         DeliveryAdapter::buffered_stream(ingress, route.egress)
     } else {
         DeliveryAdapter::non_stream(ingress, route.egress)
     };
-    let mut delivered = delivery.deliver_canonical(&completed.response, StatusCode::OK);
+    let mut delivered = delivery.deliver_canonical(&prepared_response, StatusCode::OK);
+    if delivered.progress != BufferedDeliveryProgress::Prepared {
+        return buffered_response(delivered.response);
+    }
     let client_response_body = request
         .meta
         .media_routing
         .is_none()
         .then(|| delivered.body.clone());
-    if let Some(pending) = completed.pending_generation_chain {
-        delivered.response =
-            DeliveryAdapter::commit_response_after_delivery(delivered.response, pending);
+
+    if !publish_references.is_empty()
+        || !background_executions.is_empty()
+        || !started_executions.is_empty()
+        || pending_generation_chain.is_some()
+    {
+        let mut marker_context = completion_context.clone();
+        let gateway = gateway.clone();
+        let mut pending_generation_chain = pending_generation_chain;
+        let run = if !background_executions.is_empty() || !started_executions.is_empty() {
+            inference_run.take()
+        } else {
+            None
+        };
+        delivered.response = after_body_delivery(delivered.response, async move {
+            marker_context.mark_client_output_committed();
+            if !publish_references.is_empty()
+                && let Err(error) = publish_markers(&marker_context, &publish_references).await
+            {
+                tracing::error!("failed to publish delivered history markers: {error}");
+                return;
+            }
+            let mut started_executions = started_executions;
+            if !background_executions.is_empty() {
+                started_executions.extend(gateway.start_history_marker_executions(
+                    marker_context.principal().clone(),
+                    background_executions,
+                ));
+            }
+            if !started_executions.is_empty() {
+                if let Some(run) = run {
+                    gateway.spawn_started_history_marker_executions(started_executions, run);
+                } else {
+                    tracing::error!(
+                        "delivered history markers have Platform executions but no Inference Run"
+                    );
+                }
+            }
+            if let Some(write) = pending_generation_chain.as_mut()
+                && let Err(error) = write.persist().await
+            {
+                tracing::error!("failed to commit delivered Generation Chain node: {error}");
+            }
+        });
     }
     model_turn_log
         .take()
@@ -1027,6 +1042,39 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
         .with_client_response(None, client_response_body)
         .emit();
     buffered_completion(delivered.response)
+}
+
+pub(super) enum FollowupModelTurn {
+    Turn(crate::agent::ModelTurn, Instant),
+    HookResponse {
+        response: AiResponse,
+        pending_generation_chain: Option<crate::generation_chain::GenerationChainWrite>,
+    },
+    StreamError(crate::protocol::ir::AiError),
+}
+
+fn hook_stream_error(control: crate::hook::HookControl) -> crate::protocol::ir::AiError {
+    use crate::protocol::ir::{AiError, AiErrorKind};
+
+    match control {
+        crate::hook::HookControl::Reject(rejection) => {
+            let kind = match rejection.status {
+                401 => AiErrorKind::AuthenticationError,
+                403 => AiErrorKind::AuthorizationError,
+                400..=499 => AiErrorKind::InvalidRequest,
+                _ => AiErrorKind::ServerError,
+            };
+            AiError::new(kind, rejection.message)
+                .with_status(rejection.status)
+                .with_raw(serde_json::json!({"code": rejection.code}))
+        }
+        crate::hook::HookControl::StreamAbort { message } => {
+            AiError::new(AiErrorKind::StreamMidError, message)
+        }
+        crate::hook::HookControl::Continue | crate::hook::HookControl::Respond(_) => {
+            AiError::new(AiErrorKind::Unknown, "invalid hidden-round Hook control")
+        }
+    }
 }
 
 pub(super) async fn acquire_followup_model_turn(
@@ -1039,9 +1087,103 @@ pub(super) async fn acquire_followup_model_turn(
     inference_run: &mut crate::hook::InferenceRun,
     phase: &mut PhaseTracker,
     principal: &crate::hook::Principal,
+    generation: &GenerationChainRun,
+    fixed_media_plan: Option<&crate::protocol::ir::request::MediaRoutingPlan>,
     start: Instant,
     request_extras: &RequestExtras,
-) -> Result<(crate::agent::ModelTurn, Instant), RoundOutcome> {
+) -> Result<FollowupModelTurn, RoundOutcome> {
+    if request_context.cancellation.is_cancelled() {
+        return Err(buffered_response(error_response(499, "request cancelled")));
+    }
+    match inference_run.on_request(request).await {
+        Ok(crate::hook::HookControl::Continue) => {}
+        Ok(crate::hook::HookControl::Respond(response)) => {
+            let mut response = *response;
+            inference_run.set_route(crate::hook::RouteContext {
+                model_id: request.model.clone(),
+                provider_id: "hook".into(),
+                target_id: "hook".into(),
+                egress: ingress,
+            });
+            match inference_run.on_client_output(&mut response).await {
+                Ok(crate::hook::HookControl::Continue) => {}
+                Ok(crate::hook::HookControl::Respond(replacement)) => {
+                    response = *replacement;
+                }
+                Ok(control) => {
+                    return Ok(FollowupModelTurn::StreamError(hook_stream_error(control)));
+                }
+                Err(error) => {
+                    return Ok(FollowupModelTurn::StreamError(
+                        crate::protocol::ir::AiError::new(
+                            crate::protocol::ir::AiErrorKind::StreamMidError,
+                            error.to_string(),
+                        ),
+                    ));
+                }
+            }
+            if ingress == crate::protocol::ids::OPEN_RESPONSES_2026_04_24
+                && let Some(write) = generation.write.as_ref()
+            {
+                response.id = write.id().to_owned();
+            }
+            let pending_generation_chain = generation.write.clone().and_then(|mut write| {
+                write.observe_effective(request.clone());
+                crate::generation_chain::mark_generation_target(
+                    &mut response,
+                    "hook",
+                    ingress,
+                    &request.model,
+                );
+                let mut staged_response = response.clone();
+                apply_hidden_rounds(request_context, &mut staged_response);
+                response.usage = staged_response.usage.clone();
+                let staged = write.stage(&mut staged_response, None);
+                response.vendor = staged_response.vendor;
+                staged.then_some(write)
+            });
+            if let Err(error) = phase.transition(Phase::SemanticComplete) {
+                return Ok(FollowupModelTurn::StreamError(
+                    crate::protocol::ir::AiError::new(
+                        crate::protocol::ir::AiErrorKind::StreamMidError,
+                        error,
+                    ),
+                ));
+            }
+            if let Err(error) = phase.transition(Phase::AwaitingDelivery) {
+                return Ok(FollowupModelTurn::StreamError(
+                    crate::protocol::ir::AiError::new(
+                        crate::protocol::ir::AiErrorKind::StreamMidError,
+                        error,
+                    ),
+                ));
+            }
+            return Ok(FollowupModelTurn::HookResponse {
+                response,
+                pending_generation_chain,
+            });
+        }
+        Ok(control) => return Ok(FollowupModelTurn::StreamError(hook_stream_error(control))),
+        Err(error) => {
+            return Ok(FollowupModelTurn::StreamError(
+                crate::protocol::ir::AiError::new(
+                    crate::protocol::ir::AiErrorKind::StreamMidError,
+                    error.to_string(),
+                ),
+            ));
+        }
+    }
+    if let Some(plan) = fixed_media_plan {
+        request.meta.media_routing = Some(plan.clone());
+    }
+    if !stabilize_media_generation_chain(generation, request) {
+        return Ok(FollowupModelTurn::StreamError(
+            crate::protocol::ir::AiError::new(
+                crate::protocol::ir::AiErrorKind::StreamMidError,
+                "Media bridge could not prepare the hidden request",
+            ),
+        ));
+    }
     enter_phase(phase, Phase::Selecting).map_err(|response| buffered_response(*response))?;
     let make_input = |effective_request: AiRequest| {
         let input = TurnInput::new(principal.clone(), effective_request).with_execution(
@@ -1106,7 +1248,7 @@ pub(super) async fn acquire_followup_model_turn(
     *request = effective_request;
     inference_run.set_route(turn.route.clone());
     enter_phase(phase, Phase::Calling).map_err(|response| buffered_response(*response))?;
-    Ok((turn, turn_started))
+    Ok(FollowupModelTurn::Turn(turn, turn_started))
 }
 
 fn model_turn_error_outcome(error: crate::agent::ModelTurnError) -> RoundOutcome {
@@ -1180,13 +1322,6 @@ fn model_turn_execute_failure(
     .with_req_extras(request_extras)
     .emit();
     outcome
-}
-
-pub(super) fn dispatch_next_round() -> RoundOutcome {
-    RoundOutcome::NextRound {
-        run: None,
-        phase: None,
-    }
 }
 
 /// Owned request HTTP metadata kept for log entries. Used by the non-stream

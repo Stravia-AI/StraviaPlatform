@@ -798,10 +798,7 @@ fn request_block_representable(
                     source: crate::protocol::ir::MediaSource::Base64 { .. },
                     ..
                 }
-                | ContentBlock::Thinking {
-                    signature: Some(_),
-                    ..
-                }
+                | ContentBlock::Thinking { .. }
                 | ContentBlock::ToolUse { .. }
                 | ContentBlock::ToolResult { .. }
         ),

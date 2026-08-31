@@ -49,6 +49,10 @@ The same Rust core powers two deployment modes:
 
 Stravia supports JSON, SSE, and Open Responses WebSocket delivery, cross-protocol tool calls, reasoning content, usage data, and same-protocol pass-through when an upstream requires no mutation.
 
+Hidden Platform Tool continuations are projected into client history through each protocol's native reasoning, thinking, or thought representation rather than ordinary content. Clients that resubmit full history must preserve those items verbatim, including the HTML-comment History Markers and Projection Delimiters; Stravia uses them to restore the original Text, ToolCall, and ToolResult order. These comments are machine syntax and should not be rendered. Removing a Marker or Delimiter is treated as an intentional history edit.
+
+A one-shot buffered request cannot safely auto-continue a Model Leg that contains only a hidden Platform Tool because no Marker can be confirmed delivered before the side effect starts. Stravia returns `409 history_marker_delivery_required` without starting the tool; retry with client streaming enabled.
+
 OpenAI direct and Codex OAuth generation Targets use the upstream Responses WebSocket transport for Chat Completions, Open Responses, Anthropic Messages, and Gemini requests, regardless of client streaming mode. Embeddings remain HTTP-only. After Hooks and protocol representability checks, Stravia may continue from the longest exact reusable canonical item prefix; Principal, exact Target, Provider account/configuration, resolved model, instructions, tools, reasoning, response format, and request controls must all match. A mismatch sends the full effective history instead of weakening request semantics.
 
 `POST /v1/responses` uses Open Responses 2026-04-24 as its canonical baseline while accepting structurally safe rolling additive fields and hosted-tool declarations. Same-protocol Targets preserve that compatibility envelope; cross-protocol Targets may omit advisory fields and optional hosted tools, but never content or hard constraints. `POST /v1/responses/compact` is recognized but returns `unsupported_feature`, and background execution remains unsupported.

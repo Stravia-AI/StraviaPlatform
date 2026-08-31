@@ -27,7 +27,7 @@ pub struct BedrockConverseV1;
 const CAPS: EndpointCapabilities = EndpointCapabilities {
     streaming: true,
     tools: true,
-    reasoning: false,
+    reasoning: true,
     embeddings: false,
     override_model_in_body: false,
     ingress_routes: &[],
@@ -35,7 +35,7 @@ const CAPS: EndpointCapabilities = EndpointCapabilities {
     structured_output: false,
     function_calling: true,
     parallel_tool_calls: false,
-    extended_reasoning: false,
+    extended_reasoning: true,
     deterministic_seed: false,
     stream: StreamCaps {
         server_sent_events: false,
@@ -165,17 +165,54 @@ impl ProtocolAdapter for BedrockConverseV1 {
     }
 
     fn encode_response(&self, response: &AiResponse) -> Value {
-        let mut content: Vec<Value> = response
-            .output_texts()
-            .map(|text| json!({"text": text}))
-            .collect();
-        content.extend(response.tool_calls().map(|call| json!({
-            "toolUse": {
-                "toolUseId": call.id,
-                "name": call.name,
-                "input": serde_json::from_str::<Value>(&call.arguments).unwrap_or_else(|_| Value::String(call.arguments.clone())),
+        let mut content = Vec::new();
+        for item in &response.items {
+            match &item.content {
+                MessageContent::Text(text) if item.role == Role::Assistant && !text.is_empty() => {
+                    content.push(json!({"text": text}));
+                }
+                MessageContent::Blocks(blocks) if item.role == Role::Assistant => {
+                    for block in blocks {
+                        match block {
+                            ContentBlock::Text { text, .. } if !text.is_empty() => {
+                                content.push(json!({"text": text}));
+                            }
+                            ContentBlock::Thinking {
+                                thinking,
+                                signature,
+                            } => {
+                                let mut reasoning = Map::from_iter([(
+                                    "text".into(),
+                                    Value::String(thinking.clone()),
+                                )]);
+                                if let Some(signature) = signature {
+                                    reasoning.insert(
+                                        "signature".into(),
+                                        Value::String(signature.clone()),
+                                    );
+                                }
+                                content.push(json!({
+                                    "reasoningContent": {
+                                        "reasoningText": Value::Object(reasoning)
+                                    }
+                                }));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
             }
-        })));
+            for call in item.tool_calls.as_deref().unwrap_or_default() {
+                content.push(json!({
+                    "toolUse": {
+                        "toolUseId": call.id,
+                        "name": call.name,
+                        "input": serde_json::from_str::<Value>(&call.arguments).unwrap_or_else(|_| Value::String(call.arguments.clone())),
+                    }
+                }));
+            }
+        }
         json!({
             "output": {"message": {"role": "assistant", "content": content}},
             "stopReason": response.stop_reason.as_deref().unwrap_or("end_turn"),
@@ -410,12 +447,30 @@ fn encode_user_content(content: &MessageContent) -> anyhow::Result<Vec<Value>> {
 fn encode_assistant_content(item: &AiItem) -> anyhow::Result<Vec<Value>> {
     let mut content = match &item.content {
         MessageContent::Text(text) => vec![json!({"text": text})],
-        MessageContent::Blocks(blocks) => blocks.iter().map(|block| match block {
-            ContentBlock::Text { text, .. } => Ok(json!({"text": text})),
-            ContentBlock::Thinking { thinking, signature: Some(signature) } => Ok(json!({"reasoningContent": {"reasoningText": {"text": thinking, "signature": signature}}})),
-            ContentBlock::ToolUse { id, name, input, .. } => Ok(json!({"toolUse": {"toolUseId": id, "name": name, "input": input}})),
-            other => bail!("Bedrock cannot represent assistant content block `{}`", content_block_name(other)),
-        }).collect::<anyhow::Result<Vec<_>>>()?,
+        MessageContent::Blocks(blocks) => blocks
+            .iter()
+            .map(|block| match block {
+                ContentBlock::Text { text, .. } => Ok(json!({"text": text})),
+                ContentBlock::Thinking {
+                    thinking,
+                    signature,
+                } => {
+                    let mut reasoning =
+                        Map::from_iter([("text".into(), Value::String(thinking.clone()))]);
+                    if let Some(signature) = signature {
+                        reasoning.insert("signature".into(), Value::String(signature.clone()));
+                    }
+                    Ok(json!({"reasoningContent": {"reasoningText": Value::Object(reasoning)}}))
+                }
+                ContentBlock::ToolUse {
+                    id, name, input, ..
+                } => Ok(json!({"toolUse": {"toolUseId": id, "name": name, "input": input}})),
+                other => bail!(
+                    "Bedrock cannot represent assistant content block `{}`",
+                    content_block_name(other)
+                ),
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?,
     };
     content.extend(item.tool_calls.as_deref().unwrap_or(&[]).iter().map(|call| json!({"toolUse": {
         "toolUseId": call.id,

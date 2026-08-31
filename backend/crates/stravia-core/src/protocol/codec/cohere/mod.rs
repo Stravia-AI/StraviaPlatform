@@ -192,11 +192,33 @@ impl ProtocolAdapter for CohereChatV2 {
     }
 
     fn encode_response(&self, response: &AiResponse) -> Value {
+        let mut content = Vec::new();
+        for item in &response.items {
+            match &item.content {
+                MessageContent::Text(text) if item.role == Role::Assistant && !text.is_empty() => {
+                    content.push(json!({"type": "text", "text": text}));
+                }
+                MessageContent::Blocks(blocks) if item.role == Role::Assistant => {
+                    for block in blocks {
+                        match block {
+                            ContentBlock::Text { text, .. } if !text.is_empty() => {
+                                content.push(json!({"type": "text", "text": text}));
+                            }
+                            ContentBlock::Thinking { thinking, .. } => {
+                                content.push(json!({"type": "thinking", "thinking": thinking}));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
         json!({
             "generation_id": response.id,
             "message": {
                 "role": "assistant",
-                "content": response.output_texts().map(|text| json!({"type": "text", "text": text})).collect::<Vec<_>>(),
+                "content": content,
                 "tool_calls": response.tool_calls().map(|call| json!({
                     "id": call.id,
                     "type": "function",
@@ -407,9 +429,8 @@ fn encode_message(item: &AiItem) -> anyhow::Result<Value> {
         Role::Assistant => {
             let calls = encode_tool_calls(item);
             if calls.is_empty() {
-                let content = encode_text_content(&item.content)?;
-                if !content.is_empty() {
-                    message.insert("content".into(), Value::String(content));
+                if let Some(content) = encode_assistant_content(&item.content)? {
+                    message.insert("content".into(), content);
                 }
             } else {
                 message.insert("tool_calls".into(), Value::Array(calls));
@@ -437,6 +458,39 @@ fn encode_message(item: &AiItem) -> anyhow::Result<Value> {
         }
     };
     Ok(Value::Object(message))
+}
+
+fn encode_assistant_content(content: &MessageContent) -> anyhow::Result<Option<Value>> {
+    match content {
+        MessageContent::Text(text) => Ok((!text.is_empty()).then(|| Value::String(text.clone()))),
+        MessageContent::Blocks(blocks) => {
+            let has_thinking = blocks
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Thinking { .. }));
+            if !has_thinking {
+                let text = encode_text_content(content)?;
+                return Ok((!text.is_empty()).then(|| Value::String(text)));
+            }
+
+            let mut parts = Vec::new();
+            for block in blocks {
+                match block {
+                    ContentBlock::Text { text, .. } if !text.is_empty() => {
+                        parts.push(json!({"type": "text", "text": text}));
+                    }
+                    ContentBlock::Thinking { thinking, .. } => {
+                        parts.push(json!({"type": "thinking", "thinking": thinking}));
+                    }
+                    ContentBlock::ToolUse { .. } | ContentBlock::ToolResult { .. } => {}
+                    other => bail!(
+                        "Cohere cannot represent assistant content block `{}`",
+                        content_block_name(other)
+                    ),
+                }
+            }
+            Ok((!parts.is_empty()).then(|| Value::Array(parts)))
+        }
+    }
 }
 
 fn encode_user_content(content: &MessageContent) -> anyhow::Result<Value> {
@@ -488,7 +542,6 @@ fn encode_text_content(content: &MessageContent) -> anyhow::Result<String> {
             for block in blocks {
                 match block {
                     ContentBlock::Text { text, .. } => out.push_str(text),
-                    ContentBlock::Thinking { thinking, .. } => out.push_str(thinking),
                     ContentBlock::ToolUse { .. } | ContentBlock::ToolResult { .. } => {}
                     other => bail!(
                         "Cohere cannot represent content block `{}`",
@@ -578,6 +631,12 @@ fn decode_messages(body: &Value) -> anyhow::Result<Vec<AiItem>> {
                                 text: required_string(part, "text")?,
                                 cache_control: None,
                             }),
+                            Some("thinking") if role == Role::Assistant => {
+                                Ok(ContentBlock::Thinking {
+                                    thinking: required_string(part, "thinking")?,
+                                    signature: None,
+                                })
+                            }
                             Some("image_url") => Ok(ContentBlock::Image {
                                 source: MediaSource::Url(required_string(
                                     part.pointer("/image_url")

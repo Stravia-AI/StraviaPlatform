@@ -21,9 +21,9 @@ use crate::db::models::{
     CreateModel, CreateModelBackend, CreateProvider, ProviderCredentialInput, ProviderSourceInput,
 };
 use crate::protocol::ids::{
-    ANTHROPIC_MESSAGES_2023_06_01, GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
-    OPEN_RESPONSES_2026_04_24, OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
-    OPENAI_COMPATIBLE_EMBEDDINGS_V1,
+    ANTHROPIC_MESSAGES_2023_06_01, BEDROCK_CONVERSE_V1, COHERE_CHAT_V2, GATEWAY_LANGUAGE_MODEL_V4,
+    GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA, OPEN_RESPONSES_2026_04_24,
+    OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1, OPENAI_COMPATIBLE_EMBEDDINGS_V1, WATSONX_TEXT_CHAT_V1,
 };
 use crate::protocol::ir::AiResponse;
 
@@ -535,6 +535,63 @@ async fn serve_openai_sequence(bodies: Vec<serde_json::Value>) -> (String, Arc<A
     (base_url, calls)
 }
 
+fn openai_chat_response_as_sse(body: serde_json::Value) -> String {
+    let event = |choices: serde_json::Value| {
+        serde_json::json!({
+            "id": body["id"].clone(),
+            "object": "chat.completion.chunk",
+            "created": body["created"].clone(),
+            "model": body["model"].clone(),
+            "choices": choices,
+        })
+    };
+    let mut events = Vec::new();
+    for choice in body["choices"].as_array().into_iter().flatten() {
+        let index = choice["index"].clone();
+        let mut message = choice["message"].clone();
+        let tool_calls = message
+            .as_object_mut()
+            .and_then(|message| message.remove("tool_calls"))
+            .and_then(|calls| calls.as_array().cloned())
+            .unwrap_or_default();
+        if let Some(message) = message.as_object_mut() {
+            message.retain(|_, value| !value.is_null());
+        }
+        if message
+            .as_object()
+            .is_some_and(|message| !message.is_empty())
+        {
+            events.push(event(serde_json::json!([{
+                "index": index.clone(),
+                "delta": message,
+                "finish_reason": null,
+            }])));
+        }
+        for (tool_index, mut tool_call) in tool_calls.into_iter().enumerate() {
+            tool_call["index"] = serde_json::json!(tool_index);
+            events.push(event(serde_json::json!([{
+                "index": index.clone(),
+                "delta": {"tool_calls": [tool_call]},
+                "finish_reason": null,
+            }])));
+        }
+        events.push(event(serde_json::json!([{
+            "index": index,
+            "delta": {},
+            "finish_reason": choice["finish_reason"].clone(),
+        }])));
+    }
+    let mut usage_event = event(serde_json::json!([]));
+    usage_event["usage"] = body["usage"].clone();
+    events.push(usage_event);
+    let mut sse = events
+        .into_iter()
+        .map(|event| format!("data: {event}\n\n"))
+        .collect::<String>();
+    sse.push_str("data: [DONE]\n\n");
+    sse
+}
+
 async fn create_test_provider_with_model(
     gateway: &Gateway,
     name: &str,
@@ -594,14 +651,27 @@ async fn serve_openai_sequence_with_requests(
                 .read(&mut request)
                 .await
                 .expect("read provider sequence request");
+            let request = String::from_utf8_lossy(&request[..read]).into_owned();
             observed_requests
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push(String::from_utf8_lossy(&request[..read]).into_owned());
+                .push(request.clone());
             observed.fetch_add(1, Ordering::SeqCst);
-            let body = body.to_string();
+            let is_stream = request
+                .split_once("\r\n\r\n")
+                .and_then(|(_, body)| serde_json::from_str::<serde_json::Value>(body).ok())
+                .and_then(|body| body["stream"].as_bool())
+                .unwrap_or(false);
+            let (content_type, body) = if is_stream {
+                (
+                    "text/event-stream",
+                    openai_chat_response_as_sse(body.clone()),
+                )
+            } else {
+                ("application/json", body.to_string())
+            };
             let response = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                 body.len()
             );
             socket
@@ -652,6 +722,31 @@ async fn write_test_json_response(socket: &mut tokio::net::TcpStream, body: serd
         .write_all(response.as_bytes())
         .await
         .expect("write test response");
+}
+
+async fn write_test_openai_response(
+    socket: &mut tokio::net::TcpStream,
+    request: &str,
+    body: serde_json::Value,
+) {
+    let is_stream = request
+        .split_once("\r\n\r\n")
+        .and_then(|(_, body)| serde_json::from_str::<serde_json::Value>(body).ok())
+        .and_then(|body| body["stream"].as_bool())
+        .unwrap_or(false);
+    if !is_stream {
+        write_test_json_response(socket, body).await;
+        return;
+    }
+    let body = openai_chat_response_as_sse(body);
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    socket
+        .write_all(response.as_bytes())
+        .await
+        .expect("write test OpenAI stream response");
 }
 
 fn marker_artifact_id(request: &str) -> Option<String> {
@@ -781,7 +876,7 @@ async fn serve_media_parent(
                 }
                 _ => unreachable!("fixed request sequence"),
             };
-            write_test_json_response(&mut socket, body).await;
+            write_test_openai_response(&mut socket, &request, body).await;
         }
     });
     (format!("http://{address}/v1"), calls)
@@ -856,12 +951,14 @@ async fn configure_route_with_protocol(
     protocol: &str,
 ) -> String {
     let mut targets = Vec::with_capacity(base_urls.len());
-    let reasoning_options = (protocol == "open-responses").then(|| {
-        serde_json::json!([{
+    let reasoning_options = match protocol {
+        "open-responses" => Some(serde_json::json!([{
             "type": "effort",
             "values": ["none", "low", "medium", "high", "xhigh"]
-        }])
-    });
+        }])),
+        "anthropic-messages" => Some(serde_json::json!([{"type": "toggle"}])),
+        _ => None,
+    };
     for (priority, base_url) in base_urls.iter().enumerate() {
         let provider = gateway
             .admin()
@@ -956,7 +1053,10 @@ async fn execute_request_with_headers(
     ingress: ProtocolId,
     path: &str,
 ) -> Response {
-    let envelope_body = serde_json::json!({ "model": request.model.clone() });
+    let envelope_body = serde_json::json!({
+        "model": request.model.clone(),
+        "stream": request.stream.enabled,
+    });
     execute(RunInput {
         gateway: gateway.clone(),
         executor: std::sync::Arc::clone(&gateway.model_turn),
@@ -993,6 +1093,24 @@ async fn execute_non_stream(gateway: Gateway, model: &str) -> Response {
     execute_non_stream_request(gateway, AiRequest::new(model, Vec::new())).await
 }
 
+fn openai_chat_stream_history(body: &str) -> (String, String) {
+    let mut reasoning = String::new();
+    let mut content = String::new();
+    for chunk in body
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+    {
+        if let Some(text) = chunk["choices"][0]["delta"]["reasoning_content"].as_str() {
+            reasoning.push_str(text);
+        }
+        if let Some(text) = chunk["choices"][0]["delta"]["content"].as_str() {
+            content.push_str(text);
+        }
+    }
+    (reasoning, content)
+}
+
 struct ExposeOrderedToolHook {
     request_rounds: Arc<std::sync::Mutex<Vec<u32>>>,
 }
@@ -1000,6 +1118,14 @@ struct ExposeOrderedToolHook {
 struct ExposeOrderedToolSession {
     request_rounds: Arc<std::sync::Mutex<Vec<u32>>>,
 }
+
+struct HiddenRoundRespondHook;
+
+struct HiddenRoundRespondSession;
+
+struct HiddenRoundRejectHook;
+
+struct HiddenRoundRejectSession;
 
 impl ExposeOrderedToolHook {
     fn counting() -> (Self, Arc<std::sync::Mutex<Vec<u32>>>) {
@@ -1031,6 +1157,82 @@ impl crate::hook::Hook for ExposeOrderedToolHook {
     }
 }
 
+impl crate::hook::Hook for HiddenRoundRespondHook {
+    fn descriptor(&self) -> crate::hook::HookDescriptor {
+        crate::hook::HookDescriptor {
+            event_kinds: vec![crate::hook::EventKind::Request],
+            ..crate::hook::HookDescriptor::all("hidden-round-respond")
+        }
+    }
+
+    fn create_session(
+        &self,
+        _context: &crate::hook::SessionContext,
+    ) -> Box<dyn crate::hook::HookSession> {
+        Box::new(HiddenRoundRespondSession)
+    }
+}
+
+impl crate::hook::Hook for HiddenRoundRejectHook {
+    fn descriptor(&self) -> crate::hook::HookDescriptor {
+        crate::hook::HookDescriptor {
+            event_kinds: vec![crate::hook::EventKind::Request],
+            ..crate::hook::HookDescriptor::all("hidden-round-reject")
+        }
+    }
+
+    fn create_session(
+        &self,
+        _context: &crate::hook::SessionContext,
+    ) -> Box<dyn crate::hook::HookSession> {
+        Box::new(HiddenRoundRejectSession)
+    }
+}
+
+#[async_trait]
+impl crate::hook::HookSession for HiddenRoundRespondSession {
+    async fn handle(
+        &mut self,
+        event: crate::hook::HookEvent<'_>,
+    ) -> Result<crate::hook::ActionBatch, String> {
+        let crate::hook::HookEvent::Request { round, .. } = event else {
+            return Ok(crate::hook::ActionBatch::default());
+        };
+        if round == 0 {
+            return Ok(crate::hook::ActionBatch::one(
+                crate::hook::HookAction::ExposeTool(crate::hook::ToolId::new("ordered-tool")),
+            ));
+        }
+        let mut response = AiResponse::new("hook-followup", "hook-model");
+        response.push_output_text("hook completed hidden round");
+        Ok(crate::hook::ActionBatch::one(
+            crate::hook::HookAction::Respond(Box::new(response)),
+        ))
+    }
+}
+
+#[async_trait]
+impl crate::hook::HookSession for HiddenRoundRejectSession {
+    async fn handle(
+        &mut self,
+        event: crate::hook::HookEvent<'_>,
+    ) -> Result<crate::hook::ActionBatch, String> {
+        let crate::hook::HookEvent::Request { round, .. } = event else {
+            return Ok(crate::hook::ActionBatch::default());
+        };
+        let action = if round == 0 {
+            crate::hook::HookAction::ExposeTool(crate::hook::ToolId::new("ordered-tool"))
+        } else {
+            crate::hook::HookAction::Reject(crate::hook::HookRejection {
+                status: 403,
+                code: "hidden_round_denied".into(),
+                message: "hidden round rejected".into(),
+            })
+        };
+        Ok(crate::hook::ActionBatch::one(action))
+    }
+}
+
 #[async_trait]
 impl crate::hook::HookSession for ExposeOrderedToolSession {
     async fn handle(
@@ -1052,6 +1254,10 @@ impl crate::hook::HookSession for ExposeOrderedToolSession {
 }
 
 struct OrderedTool {
+    calls: Arc<std::sync::Mutex<Vec<u64>>>,
+}
+
+struct RetryingOrderedTool {
     calls: Arc<std::sync::Mutex<Vec<u64>>>,
 }
 
@@ -1085,6 +1291,43 @@ impl crate::hook::PlatformTool for OrderedTool {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(index);
+        Ok(serde_json::json!({ "index": index }))
+    }
+}
+
+#[async_trait]
+impl crate::hook::PlatformTool for RetryingOrderedTool {
+    fn id(&self) -> crate::hook::ToolId {
+        crate::hook::ToolId::new("ordered-tool")
+    }
+
+    fn external_name(&self) -> &str {
+        "ordered_tool"
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": { "index": { "type": "integer" } },
+            "required": ["index"]
+        })
+    }
+
+    async fn execute(
+        &self,
+        arguments: serde_json::Value,
+        _context: crate::hook::ToolExecutionContext,
+    ) -> Result<serde_json::Value, crate::hook::PlatformToolError> {
+        let index = arguments["index"]
+            .as_u64()
+            .ok_or_else(|| crate::hook::PlatformToolError::new("missing index"))?;
+        self.calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(index);
+        if index == 1 {
+            return Err(crate::hook::PlatformToolError::new("first attempt failed"));
+        }
         Ok(serde_json::json!({ "index": index }))
     }
 }
@@ -1292,9 +1535,9 @@ impl crate::hook::StreamTransformer for CountingStreamTransformer {
 
 async fn assert_hidden_round_rechecks_access(
     mutation: TestAccessMutation,
-    expected_status: StatusCode,
-    expected_type: &str,
-    expected_message: &str,
+    _expected_status: StatusCode,
+    _expected_type: &str,
+    _expected_message: &str,
 ) {
     let tool_round = serde_json::json!({
         "id": format!("chatcmpl-{}", mutation.tool_id()),
@@ -1373,23 +1616,250 @@ async fn assert_hidden_round_rechecks_access(
         HeaderValue::from_str(&format!("Bearer {}", key.token)).expect("auth header"),
     );
 
-    let response = execute_non_stream_request_with_headers(
-        gateway,
-        headers,
-        AiRequest::new(model, Vec::new()),
-    )
-    .await;
+    let mut request = AiRequest::new(model, Vec::new());
+    request.stream.enabled = true;
+    let response = execute_non_stream_request_with_headers(gateway.clone(), headers, request).await;
 
-    assert_eq!(response.status(), expected_status);
+    assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
     let body = to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("authorization response");
-    let body: serde_json::Value =
-        serde_json::from_slice(&body).expect("authorization response JSON");
-    assert_eq!(body["error"]["type"], expected_type);
-    assert_eq!(body["error"]["message"], expected_message);
-    assert!(body["error"].get("request_id").is_none());
+    let body = String::from_utf8_lossy(&body);
+    assert!(body.contains("stream_mid_error"), "{body}");
+}
+
+async fn buffered_platform_only_requires_delivery_impl() {
+    let platform_round = serde_json::json!({
+        "id": "chatcmpl-buffered-platform-only",
+        "object": "chat.completion",
+        "created": 1,
+        "model": "provider-model",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "platform-call",
+                    "type": "function",
+                    "function": {
+                        "name": "stravia__ordered_tool",
+                        "arguments": "{\"index\":1}"
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }],
+        "usage": {
+            "prompt_tokens": 1,
+            "completion_tokens": 1,
+            "total_tokens": 2
+        }
+    });
+    let (base_url, provider_calls) = serve_openai_sequence(vec![platform_round]).await;
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let tool_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (expose_tool_hook, _request_hook_rounds) = ExposeOrderedToolHook::counting();
+    let (gateway, _logs) = crate::Gateway::builder(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .hook(Arc::new(expose_tool_hook))
+    .platform_tool(Arc::new(OrderedTool {
+        calls: Arc::clone(&tool_calls),
+    }))
+    .build()
+    .await
+    .expect("Gateway");
+    configure_route(&gateway, "buffered-platform-only", &[base_url]).await;
+
+    let response = execute_non_stream(gateway.clone(), "buffered-platform-only").await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("buffered Platform-only rejection body");
+    let body = String::from_utf8_lossy(&body);
+    assert!(body.contains("history_marker_delivery_required"), "{body}");
+    assert!(
+        body.contains("Buffered Platform Tool execution requires a client delivery confirmation."),
+        "{body}"
+    );
+    assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
+    assert!(
+        tool_calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty()
+    );
+    let marker_count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM history_markers")
+        .fetch_one(gateway._sqlite_pool.as_ref().expect("Gateway SQLite pool"))
+        .await
+        .expect("History Marker count");
+    assert_eq!(marker_count, 0);
+}
+
+async fn hidden_round_request_hook_response_is_delivered_impl() {
+    let platform_round = serde_json::json!({
+        "id": "chatcmpl-hook-followup",
+        "object": "chat.completion",
+        "created": 1,
+        "model": "provider-model",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "platform-call",
+                    "type": "function",
+                    "function": {
+                        "name": "stravia__ordered_tool",
+                        "arguments": "{\"index\":1}"
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }],
+        "usage": {
+            "prompt_tokens": 1,
+            "completion_tokens": 1,
+            "total_tokens": 2
+        }
+    });
+    let (base_url, provider_calls) = serve_openai_sequence(vec![platform_round]).await;
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let tool_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (gateway, mut logs) = crate::Gateway::builder(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .hook(Arc::new(HiddenRoundRespondHook))
+    .platform_tool(Arc::new(OrderedTool {
+        calls: Arc::clone(&tool_calls),
+    }))
+    .build()
+    .await
+    .expect("Gateway");
+    configure_route(&gateway, "hook-followup", &[base_url]).await;
+
+    let response = execute_stream(gateway.clone(), "hook-followup").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("hidden-round Hook response body");
+    let body = String::from_utf8_lossy(&body);
+    assert!(
+        body.contains(crate::history_marker::HISTORY_MARKER_PREFIX),
+        "{body}"
+    );
+    assert!(body.contains("hook completed hidden round"), "{body}");
+    assert!(!body.contains("stream_mid_error"), "{body}");
+    assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        *tool_calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        vec![1]
+    );
+    let generation_payload = sqlx::query_scalar::<_, String>(
+        "SELECT payload FROM turn_chain_nodes WHERE kind = 'response' \
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .fetch_one(gateway._sqlite_pool.as_ref().expect("Gateway SQLite pool"))
+    .await
+    .expect("hidden-round Hook Generation Chain payload");
+    assert!(
+        generation_payload.contains(crate::history_marker::HISTORY_MARKER_PREFIX),
+        "{generation_payload}"
+    );
+    assert!(
+        generation_payload.contains("hook completed hidden round"),
+        "{generation_payload}"
+    );
+    let mut entries = Vec::new();
+    for _ in 0..2 {
+        entries.push(
+            tokio::time::timeout(std::time::Duration::from_secs(1), logs.recv())
+                .await
+                .expect("hidden-round Hook log should be emitted")
+                .expect("hidden-round Hook log channel should remain open"),
+        );
+    }
+    assert!(
+        entries.iter().any(|entry| {
+            entry
+                .client_response_body
+                .as_deref()
+                .is_some_and(|body| body.contains("hook completed hidden round"))
+        }),
+        "{entries:#?}"
+    );
+}
+
+async fn hidden_round_request_hook_rejection_is_delivered_impl() {
+    let platform_round = serde_json::json!({
+        "id": "chatcmpl-hook-reject",
+        "object": "chat.completion",
+        "created": 1,
+        "model": "provider-model",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "platform-call",
+                    "type": "function",
+                    "function": {
+                        "name": "stravia__ordered_tool",
+                        "arguments": "{\"index\":1}"
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }],
+        "usage": {
+            "prompt_tokens": 1,
+            "completion_tokens": 1,
+            "total_tokens": 2
+        }
+    });
+    let (base_url, provider_calls) = serve_openai_sequence(vec![platform_round]).await;
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let tool_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (gateway, _logs) = crate::Gateway::builder(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .hook(Arc::new(HiddenRoundRejectHook))
+    .platform_tool(Arc::new(OrderedTool {
+        calls: Arc::clone(&tool_calls),
+    }))
+    .build()
+    .await
+    .expect("Gateway");
+    configure_route(&gateway, "hook-reject", &[base_url]).await;
+
+    let response = execute_stream(gateway, "hook-reject").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("hidden-round Hook rejection body");
+    let body = String::from_utf8_lossy(&body);
+    assert!(
+        body.contains(crate::history_marker::HISTORY_MARKER_PREFIX),
+        "{body}"
+    );
+    assert!(body.contains("hidden round rejected"), "{body}");
+    assert!(!body.contains("stream aborted"), "{body}");
+    assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        *tool_calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        vec![1]
+    );
 }
 
 async fn mixed_tool_continuation_replays_impl() {
@@ -1483,6 +1953,13 @@ async fn mixed_tool_continuation_replays_impl() {
         execute_non_stream_request_with_headers(gateway.clone(), headers.clone(), initial.clone())
             .await;
     assert_eq!(first.status(), StatusCode::OK);
+    assert!(
+        tool_calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty(),
+        "Platform Tool execution must wait for response-body delivery"
+    );
     let first_body = to_bytes(first.into_body(), usize::MAX)
         .await
         .expect("mixed continuation first body");
@@ -1561,6 +2038,674 @@ async fn mixed_tool_continuation_replays_impl() {
     assert_eq!(provider_calls.load(Ordering::SeqCst), 3);
 }
 
+#[tokio::test]
+async fn platform_leg_text_projects_to_reasoning_and_hidden_followup_stays_canonical() {
+    let platform_round = serde_json::json!({
+        "id": "chatcmpl-projected-platform",
+        "object": "chat.completion",
+        "created": 1,
+        "model": "provider-model",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "reasoning_content": "R1",
+                "content": "C1",
+                "tool_calls": [{
+                    "id": "platform-call",
+                    "type": "function",
+                    "function": {
+                        "name": "stravia__ordered_tool",
+                        "arguments": "{\"index\":1}"
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }],
+        "usage": {
+            "prompt_tokens": 1,
+            "completion_tokens": 1,
+            "total_tokens": 2
+        }
+    });
+    let final_round = serde_json::json!({
+        "id": "chatcmpl-projected-final",
+        "object": "chat.completion",
+        "created": 1,
+        "model": "provider-model",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "reasoning_content": "R2",
+                "content": "C2"
+            },
+            "finish_reason": "stop"
+        }],
+        "usage": {
+            "prompt_tokens": 2,
+            "completion_tokens": 2,
+            "total_tokens": 4
+        }
+    });
+    let (base_url, provider_calls, requests) = serve_openai_sequence_with_requests(vec![
+        platform_round,
+        final_round,
+        openai_response("after replay"),
+    ])
+    .await;
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let tool_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (expose_tool_hook, _request_hook_rounds) = ExposeOrderedToolHook::counting();
+    let (gateway, _logs) = crate::Gateway::builder(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .hook(Arc::new(expose_tool_hook))
+    .platform_tool(Arc::new(OrderedTool {
+        calls: Arc::clone(&tool_calls),
+    }))
+    .build()
+    .await
+    .expect("Gateway");
+    configure_route(&gateway, "projected-platform", &[base_url]).await;
+    let headers = authorized_headers(&gateway).await;
+
+    let mut initial_request = AiRequest::new(
+        "projected-platform",
+        vec![crate::protocol::ir::AiItem {
+            role: crate::protocol::ir::Role::User,
+            content: crate::protocol::ir::MessageContent::Text("test".into()),
+            tool_calls: None,
+            tool_call_id: None,
+            meta: None,
+        }],
+    );
+    initial_request.stream.enabled = true;
+    let response =
+        execute_non_stream_request_with_headers(gateway.clone(), headers.clone(), initial_request)
+            .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("projected response body");
+    let body = String::from_utf8_lossy(&body);
+    let (reasoning, content) = openai_chat_stream_history(&body);
+    let r1 = reasoning.find("R1").expect("first reasoning");
+    let c1 = reasoning.find("C1").expect("projected text");
+    let marker = reasoning
+        .find(crate::history_marker::HISTORY_MARKER_PREFIX)
+        .expect("Thinking-carried Marker");
+    let r2 = reasoning.find("R2").expect("second reasoning");
+    assert!(r1 < c1 && c1 < marker && marker < r2, "{reasoning}");
+    assert!(
+        reasoning.contains(crate::history_marker::PROJECTION_DELIMITER_PREFIX),
+        "{reasoning}"
+    );
+    assert_eq!(content, "C2");
+    assert!(!content.contains(crate::history_marker::HISTORY_MARKER_PREFIX));
+
+    assert_eq!(provider_calls.load(Ordering::SeqCst), 2);
+    let captured = requests
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let second_body = captured[1]
+        .split_once("\r\n\r\n")
+        .expect("provider request body")
+        .1;
+    let second_body: serde_json::Value =
+        serde_json::from_str(second_body).expect("provider request JSON");
+    let messages = second_body["messages"]
+        .as_array()
+        .expect("provider messages");
+    let reasoning_index = messages
+        .iter()
+        .position(|message| message["reasoning_content"] == "R1")
+        .unwrap_or_else(|| panic!("canonical first reasoning message: {messages:?}"));
+    let text_index = messages
+        .iter()
+        .position(|message| message["content"] == "C1")
+        .expect("canonical platform prelude message");
+    let call_index = messages
+        .iter()
+        .position(|message| {
+            message["tool_calls"][0]["id"]
+                .as_str()
+                .is_some_and(|id| id == "platform-call")
+        })
+        .expect("canonical platform assistant message");
+    let result_index = messages
+        .iter()
+        .position(|message| message["tool_call_id"] == "platform-call")
+        .expect("canonical platform result message");
+    assert!(
+        reasoning_index < text_index && text_index < call_index && call_index < result_index,
+        "{messages:?}"
+    );
+    assert!(
+        !second_body
+            .to_string()
+            .contains(crate::history_marker::HISTORY_MARKER_PREFIX)
+    );
+    assert!(
+        !second_body
+            .to_string()
+            .contains(crate::history_marker::PROJECTION_DELIMITER_PREFIX)
+    );
+    drop(captured);
+
+    let replay_request = crate::protocol::registry::ProtocolRegistry::global()
+        .adapter(&OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1)
+        .expect("OpenAI Chat adapter")
+        .decode_request(serde_json::json!({
+            "model": "projected-platform",
+            "messages": [
+                {"role": "user", "content": "test"},
+                {
+                    "role": "assistant",
+                    "reasoning_content": reasoning,
+                    "content": content
+                },
+                {"role": "user", "content": "continue"}
+            ]
+        }))
+        .expect("client replay request");
+    let replay_response =
+        execute_non_stream_request_with_headers(gateway, headers, replay_request).await;
+    assert_eq!(replay_response.status(), StatusCode::OK);
+    assert_eq!(provider_calls.load(Ordering::SeqCst), 3);
+
+    let captured = requests
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let replay_body = captured[2]
+        .split_once("\r\n\r\n")
+        .expect("replay provider request body")
+        .1;
+    let replay_body: serde_json::Value =
+        serde_json::from_str(replay_body).expect("replay provider request JSON");
+    let replay_messages = replay_body["messages"]
+        .as_array()
+        .expect("replay provider messages");
+    let message_text = |message: &serde_json::Value| {
+        message["content"]
+            .as_str()
+            .map(str::to_string)
+            .or_else(|| {
+                message["content"].as_array().map(|parts| {
+                    parts
+                        .iter()
+                        .filter_map(|part| part["text"].as_str())
+                        .collect::<String>()
+                })
+            })
+            .unwrap_or_default()
+    };
+    let r1 = replay_messages
+        .iter()
+        .position(|message| message["reasoning_content"] == "R1")
+        .expect("replayed R1");
+    let c1 = replay_messages
+        .iter()
+        .position(|message| message_text(message) == "C1")
+        .unwrap_or_else(|| panic!("replayed C1: {replay_messages:?}"));
+    let call = replay_messages
+        .iter()
+        .position(|message| message["tool_calls"][0]["id"] == "platform-call")
+        .expect("replayed Platform ToolCall");
+    let result = replay_messages
+        .iter()
+        .position(|message| message["tool_call_id"] == "platform-call")
+        .expect("replayed Platform ToolResult");
+    let r2 = replay_messages
+        .iter()
+        .position(|message| message["reasoning_content"] == "R2")
+        .expect("replayed R2");
+    let c2 = replay_messages
+        .iter()
+        .position(|message| message_text(message) == "C2")
+        .expect("replayed C2");
+    assert!(
+        r1 < c1 && c1 < call && call < result && result < r2 && r2 <= c2,
+        "{replay_messages:?}"
+    );
+    let replay_wire = replay_body.to_string();
+    assert!(
+        !replay_wire.contains(crate::history_marker::HISTORY_MARKER_PREFIX),
+        "{replay_wire}"
+    );
+    assert!(
+        !replay_wire.contains(crate::history_marker::PROJECTION_DELIMITER_PREFIX),
+        "{replay_wire}"
+    );
+}
+
+#[tokio::test]
+async fn failed_platform_call_and_successful_retry_preserve_marker_and_result_order() {
+    let platform_round = |id: &str, reasoning: &str, text: &str, call_id: &str, index: u64| {
+        serde_json::json!({
+            "id": id,
+            "model": "provider-model",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "reasoning_content": reasoning,
+                    "content": text,
+                    "tool_calls": [{
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": "stravia__ordered_tool",
+                            "arguments": serde_json::json!({"index": index}).to_string()
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {
+                "prompt_tokens": 1,
+                "completion_tokens": 1,
+                "total_tokens": 2
+            }
+        })
+    };
+    let (base_url, provider_calls, requests) = serve_openai_sequence_with_requests(vec![
+        platform_round("retry-1", "R1", "attempt one", "platform-call-1", 1),
+        platform_round("retry-2", "R2", "attempt two", "platform-call-2", 2),
+        serde_json::json!({
+            "id": "retry-final",
+            "model": "provider-model",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "reasoning_content": "R3",
+                    "content": "final answer"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 1,
+                "completion_tokens": 1,
+                "total_tokens": 2
+            }
+        }),
+    ])
+    .await;
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let tool_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (expose_tool_hook, _request_hook_rounds) = ExposeOrderedToolHook::counting();
+    let (gateway, _logs) = crate::Gateway::builder(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .hook(Arc::new(expose_tool_hook))
+    .platform_tool(Arc::new(RetryingOrderedTool {
+        calls: Arc::clone(&tool_calls),
+    }))
+    .build()
+    .await
+    .expect("Gateway");
+    configure_route(&gateway, "platform-retry-order", &[base_url]).await;
+
+    let response = execute_stream(gateway, "platform-retry-order").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("retry response body");
+    let body = String::from_utf8_lossy(&body);
+    let (reasoning, content) = openai_chat_stream_history(&body);
+    let marker_positions = reasoning
+        .match_indices(crate::history_marker::HISTORY_MARKER_PREFIX)
+        .map(|(position, _)| position)
+        .collect::<Vec<_>>();
+    assert_eq!(marker_positions.len(), 2, "{reasoning}");
+    let first_attempt = reasoning
+        .find("attempt one")
+        .expect("first attempt narration");
+    let second_attempt = reasoning.find("attempt two").expect("retry narration");
+    let final_reasoning = reasoning.find("R3").expect("final reasoning");
+    assert!(
+        first_attempt < marker_positions[0]
+            && marker_positions[0] < second_attempt
+            && second_attempt < marker_positions[1]
+            && marker_positions[1] < final_reasoning,
+        "{reasoning}"
+    );
+    assert_eq!(content, "final answer");
+    assert_eq!(provider_calls.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        *tool_calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        vec![1, 2]
+    );
+
+    let captured = requests
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let third_body = captured[2]
+        .split_once("\r\n\r\n")
+        .expect("third provider request body")
+        .1;
+    let third_body: serde_json::Value =
+        serde_json::from_str(third_body).expect("third provider request JSON");
+    let messages = third_body["messages"]
+        .as_array()
+        .expect("third provider messages");
+    let call_1 = messages
+        .iter()
+        .position(|message| message["tool_calls"][0]["id"] == "platform-call-1")
+        .expect("first Platform ToolCall");
+    let result_1 = messages
+        .iter()
+        .position(|message| message["tool_call_id"] == "platform-call-1")
+        .expect("failed Platform ToolResult");
+    let call_2 = messages
+        .iter()
+        .position(|message| message["tool_calls"][0]["id"] == "platform-call-2")
+        .expect("retry Platform ToolCall");
+    let result_2 = messages
+        .iter()
+        .position(|message| message["tool_call_id"] == "platform-call-2")
+        .expect("successful Platform ToolResult");
+    assert!(
+        call_1 < result_1 && result_1 < call_2 && call_2 < result_2,
+        "{messages:?}"
+    );
+}
+
+#[tokio::test]
+async fn platform_stream_buffers_ambiguous_suffix_and_never_returns_to_reasoning_after_content() {
+    let (base_url, provider_calls) = serve_sse_sequence(vec![
+        openai_sse_projected_platform_leg(),
+        openai_sse_reasoning_and_text("R2", "C2", 22, 2),
+    ])
+    .await;
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let tool_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (expose_tool_hook, _request_hook_rounds) = ExposeOrderedToolHook::counting();
+    let (gateway, _logs) = crate::Gateway::builder(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .hook(Arc::new(expose_tool_hook))
+    .platform_tool(Arc::new(OrderedTool {
+        calls: Arc::clone(&tool_calls),
+    }))
+    .build()
+    .await
+    .expect("Gateway");
+    configure_route(&gateway, "projected-platform-stream", &[base_url]).await;
+
+    let response = execute_stream(gateway, "projected-platform-stream").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("projected stream body");
+    let body = String::from_utf8(body.to_vec()).expect("UTF-8 stream");
+    let mut runs = Vec::<(&str, String)>::new();
+    for event in body
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter(|data| *data != "[DONE]")
+        .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+    {
+        let delta = &event["choices"][0]["delta"];
+        let next = delta["reasoning_content"]
+            .as_str()
+            .filter(|text| !text.is_empty())
+            .map(|text| ("reasoning", text))
+            .or_else(|| {
+                delta["content"]
+                    .as_str()
+                    .filter(|text| !text.is_empty())
+                    .map(|text| ("content", text))
+            });
+        let Some((kind, text)) = next else {
+            continue;
+        };
+        if let Some((last_kind, bytes)) = runs.last_mut()
+            && *last_kind == kind
+        {
+            bytes.push_str(text);
+        } else {
+            runs.push((kind, text.to_owned()));
+        }
+    }
+
+    assert_eq!(
+        runs.iter().map(|(kind, _)| *kind).collect::<Vec<_>>(),
+        vec!["reasoning", "content"],
+        "{body}"
+    );
+    assert!(runs[0].1.contains("R1"), "{body}");
+    assert!(runs[0].1.contains("C1"), "{body}");
+    assert!(
+        runs[0]
+            .1
+            .contains(crate::history_marker::HISTORY_MARKER_PREFIX),
+        "{body}"
+    );
+    assert_eq!(
+        runs[0]
+            .1
+            .matches(crate::history_marker::PROJECTION_DELIMITER_PREFIX)
+            .count(),
+        2,
+        "one contiguous Text run must use one start/end delimiter pair: {body}"
+    );
+    assert!(runs[0].1.contains("R2"), "{body}");
+    assert_eq!(runs[1].1, "C2");
+    assert_eq!(provider_calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn platform_stream_projection_matrix_for_registered_generation_ingresses() {
+    let protocols = [
+        (
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            "/v1/chat/completions",
+        ),
+        (OPEN_RESPONSES_2026_04_24, "/v1/responses"),
+        (ANTHROPIC_MESSAGES_2023_06_01, "/v1/messages"),
+        (
+            GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+            "/v1beta/models/test:streamGenerateContent",
+        ),
+    ];
+    let responses = protocols
+        .iter()
+        .flat_map(|_| {
+            [
+                openai_sse_projected_platform_leg(),
+                openai_sse_reasoning_and_text("R2", "C2", 22, 2),
+            ]
+        })
+        .collect::<Vec<_>>();
+    let (base_url, provider_calls) = serve_sse_sequence(responses).await;
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let tool_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (expose_tool_hook, _request_hook_rounds) = ExposeOrderedToolHook::counting();
+    let (gateway, _logs) = crate::Gateway::builder(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .hook(Arc::new(expose_tool_hook))
+    .platform_tool(Arc::new(OrderedTool {
+        calls: Arc::clone(&tool_calls),
+    }))
+    .build()
+    .await
+    .expect("Gateway");
+    configure_route(&gateway, "platform-stream-matrix", &[base_url]).await;
+
+    for (ingress, path) in protocols {
+        let response = execute_protocol_request(
+            gateway.clone(),
+            "platform-stream-matrix",
+            ingress,
+            path,
+            true,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK, "{ingress}");
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("protocol stream body");
+        let body = String::from_utf8(body.to_vec()).expect("UTF-8 stream");
+        let mut runs = Vec::<(&str, String)>::new();
+        for event in body
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter(|data| *data != "[DONE]")
+            .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+        {
+            let next = if ingress == OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1 {
+                let delta = &event["choices"][0]["delta"];
+                delta["reasoning_content"]
+                    .as_str()
+                    .map(|text| ("reasoning", text))
+                    .or_else(|| delta["content"].as_str().map(|text| ("content", text)))
+            } else if ingress == OPEN_RESPONSES_2026_04_24 {
+                match event["type"].as_str() {
+                    Some("response.reasoning.delta")
+                    | Some("response.reasoning_summary_text.delta") => {
+                        event["delta"].as_str().map(|text| ("reasoning", text))
+                    }
+                    Some("response.output_text.delta") => {
+                        event["delta"].as_str().map(|text| ("content", text))
+                    }
+                    _ => None,
+                }
+            } else if ingress == ANTHROPIC_MESSAGES_2023_06_01 {
+                match event
+                    .pointer("/delta/type")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    Some("thinking_delta") => event
+                        .pointer("/delta/thinking")
+                        .and_then(serde_json::Value::as_str)
+                        .map(|text| ("reasoning", text)),
+                    Some("text_delta") => event
+                        .pointer("/delta/text")
+                        .and_then(serde_json::Value::as_str)
+                        .map(|text| ("content", text)),
+                    _ => None,
+                }
+            } else {
+                let part = event.pointer("/candidates/0/content/parts/0");
+                part.and_then(|part| {
+                    part["text"].as_str().map(|text| {
+                        if part["thought"].as_bool() == Some(true) {
+                            ("reasoning", text)
+                        } else {
+                            ("content", text)
+                        }
+                    })
+                })
+            };
+            let Some((kind, text)) = next.filter(|(_, text)| !text.is_empty()) else {
+                continue;
+            };
+            if let Some((last_kind, bytes)) = runs.last_mut()
+                && *last_kind == kind
+            {
+                bytes.push_str(text);
+            } else {
+                runs.push((kind, text.to_owned()));
+            }
+        }
+
+        assert_eq!(
+            runs.iter().map(|(kind, _)| *kind).collect::<Vec<_>>(),
+            vec!["reasoning", "content"],
+            "{ingress}: {body}"
+        );
+        assert!(
+            runs[0].1.contains("R1")
+                && runs[0].1.contains("C1")
+                && runs[0]
+                    .1
+                    .contains(crate::history_marker::HISTORY_MARKER_PREFIX)
+                && runs[0].1.contains("R2"),
+            "{ingress}: {body}"
+        );
+        assert_eq!(runs[1].1, "C2", "{ingress}: {body}");
+    }
+    assert_eq!(provider_calls.load(Ordering::SeqCst), 8);
+    assert_eq!(
+        tool_calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len(),
+        4
+    );
+}
+
+#[tokio::test]
+async fn exposed_platform_tools_preserve_non_platform_stream_order_and_bytes() {
+    let (base_url, provider_calls) =
+        serve_sse_sequence(vec![openai_sse_reasoning_and_text("R1", "C1", 11, 2)]).await;
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let tool_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (expose_tool_hook, _request_hook_rounds) = ExposeOrderedToolHook::counting();
+    let (gateway, _logs) = crate::Gateway::builder(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .hook(Arc::new(expose_tool_hook))
+    .platform_tool(Arc::new(OrderedTool {
+        calls: Arc::clone(&tool_calls),
+    }))
+    .build()
+    .await
+    .expect("Gateway");
+    configure_route(&gateway, "non-platform-stream", &[base_url]).await;
+
+    let response = execute_stream(gateway, "non-platform-stream").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("non-Platform stream body");
+    let body = String::from_utf8(body.to_vec()).expect("UTF-8 stream");
+    let visible = body
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter(|data| *data != "[DONE]")
+        .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+        .filter_map(|event| {
+            let delta = &event["choices"][0]["delta"];
+            delta["reasoning_content"]
+                .as_str()
+                .map(|text| ("reasoning", text.to_owned()))
+                .or_else(|| {
+                    delta["content"]
+                        .as_str()
+                        .map(|text| ("content", text.to_owned()))
+                })
+        })
+        .filter(|(_, text)| !text.is_empty())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        visible,
+        vec![
+            ("reasoning", "R1".to_string()),
+            ("content", "C1".to_string())
+        ],
+        "{body}"
+    );
+    assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
+    assert!(
+        tool_calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty()
+    );
+}
+
 async fn platform_only_stream_continues_with_marker_impl() {
     let (base_url, provider_calls) = serve_sse_sequence(vec![
         openai_sse_platform_tool_call(),
@@ -1608,6 +2753,20 @@ async fn platform_only_stream_continues_with_marker_impl() {
     assert!(!body.contains("platform-call"), "{body}");
     assert!(!body.contains("stravia__ordered_tool"), "{body}");
     assert!(!body.contains(r#"{\"index\":1}"#), "{body}");
+    let assistant_reasoning = body
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+        .filter_map(|event| {
+            event["choices"][0]["delta"]["reasoning_content"]
+                .as_str()
+                .map(str::to_owned)
+        })
+        .collect::<String>();
+    assert!(
+        assistant_reasoning.starts_with(crate::history_marker::HISTORY_MARKER_PREFIX),
+        "{assistant_reasoning}"
+    );
     let assistant_text = body
         .lines()
         .filter_map(|line| line.strip_prefix("data: "))
@@ -1618,10 +2777,7 @@ async fn platform_only_stream_continues_with_marker_impl() {
                 .map(str::to_owned)
         })
         .collect::<String>();
-    assert!(
-        assistant_text.starts_with(crate::history_marker::HISTORY_MARKER_PREFIX),
-        "{assistant_text}"
-    );
+    assert_eq!(assistant_text, "final answer");
 
     let mut first_user = crate::protocol::ir::AiItem::output_text("test");
     first_user.role = crate::protocol::ir::Role::User;
@@ -1631,6 +2787,7 @@ async fn platform_only_stream_continues_with_marker_impl() {
         "platform-only-stream",
         vec![
             first_user,
+            crate::protocol::ir::AiItem::thinking(assistant_reasoning, None),
             crate::protocol::ir::AiItem::output_text(assistant_text),
             second_user,
         ],
@@ -1765,14 +2922,24 @@ async fn platform_markers_are_ingress_neutral_impl() {
             "message": {
                 "role": "assistant",
                 "content": null,
-                "tool_calls": [{
-                    "id": "platform-call",
-                    "type": "function",
-                    "function": {
-                        "name": "stravia__ordered_tool",
-                        "arguments": "{\"index\":1}"
+                "tool_calls": [
+                    {
+                        "id": "platform-call",
+                        "type": "function",
+                        "function": {
+                            "name": "stravia__ordered_tool",
+                            "arguments": "{\"index\":1}"
+                        }
+                    },
+                    {
+                        "id": "client-call",
+                        "type": "function",
+                        "function": {
+                            "name": "client_tool",
+                            "arguments": "{}"
+                        }
                     }
-                }]
+                ]
             },
             "finish_reason": "tool_calls"
         }],
@@ -1793,11 +2960,14 @@ async fn platform_markers_are_ingress_neutral_impl() {
             GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
             "/v1beta/models/ingress-neutral:generateContent",
         ),
+        (BEDROCK_CONVERSE_V1, "/model/ingress-neutral/converse"),
+        (COHERE_CHAT_V2, "/v2/chat"),
+        (WATSONX_TEXT_CHAT_V1, "/ml/v1/text/chat"),
+        (GATEWAY_LANGUAGE_MODEL_V4, "/language-model"),
     ];
     let mut provider_responses = Vec::new();
     for _ in &protocols {
         provider_responses.push(platform_round.clone());
-        provider_responses.push(openai_response("final answer"));
     }
     let (base_url, provider_calls) = serve_openai_sequence(provider_responses).await;
     let data_dir = tempfile::tempdir().expect("temporary data directory");
@@ -1830,9 +3000,92 @@ async fn platform_markers_are_ingress_neutral_impl() {
             body.contains(crate::history_marker::HISTORY_MARKER_PREFIX),
             "{ingress}: {body}"
         );
-        assert!(body.contains("final answer"), "{ingress}: {body}");
+        assert!(body.contains("client-call"), "{ingress}: {body}");
         assert!(!body.contains("platform-call"), "{ingress}: {body}");
         assert!(!body.contains("stravia__ordered_tool"), "{ingress}: {body}");
+        let body_json: serde_json::Value =
+            serde_json::from_str(&body).expect("protocol response JSON");
+        let marker_is_reasoning = if ingress == OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1
+            || ingress == WATSONX_TEXT_CHAT_V1
+        {
+            body_json["choices"][0]["message"]["reasoning_content"]
+                .as_str()
+                .is_some_and(|text| text.contains(crate::history_marker::HISTORY_MARKER_PREFIX))
+                && !body_json["choices"][0]["message"]["content"]
+                    .as_str()
+                    .is_some_and(|text| text.contains(crate::history_marker::HISTORY_MARKER_PREFIX))
+        } else if ingress == OPEN_RESPONSES_2026_04_24 {
+            body_json["output"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|item| {
+                    item["type"] == "reasoning"
+                        && item
+                            .to_string()
+                            .contains(crate::history_marker::HISTORY_MARKER_PREFIX)
+                })
+        } else if ingress == ANTHROPIC_MESSAGES_2023_06_01 {
+            body_json["content"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|block| {
+                    block["type"] == "thinking"
+                        && block["thinking"].as_str().is_some_and(|text| {
+                            text.contains(crate::history_marker::HISTORY_MARKER_PREFIX)
+                        })
+                })
+        } else if ingress == GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA {
+            body_json["candidates"][0]["content"]["parts"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|part| {
+                    part["thought"] == true
+                        && part["text"].as_str().is_some_and(|text| {
+                            text.contains(crate::history_marker::HISTORY_MARKER_PREFIX)
+                        })
+                })
+        } else if ingress == BEDROCK_CONVERSE_V1 {
+            body_json["output"]["message"]["content"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|block| {
+                    block
+                        .pointer("/reasoningContent/reasoningText/text")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|text| {
+                            text.contains(crate::history_marker::HISTORY_MARKER_PREFIX)
+                        })
+                })
+        } else if ingress == COHERE_CHAT_V2 {
+            body_json["message"]["content"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|block| {
+                    block["type"] == "thinking"
+                        && block["thinking"].as_str().is_some_and(|text| {
+                            text.contains(crate::history_marker::HISTORY_MARKER_PREFIX)
+                        })
+                })
+        } else if ingress == GATEWAY_LANGUAGE_MODEL_V4 {
+            body_json["content"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|block| {
+                    block["type"] == "reasoning"
+                        && block["text"].as_str().is_some_and(|text| {
+                            text.contains(crate::history_marker::HISTORY_MARKER_PREFIX)
+                        })
+                })
+        } else {
+            false
+        };
+        assert!(marker_is_reasoning, "{ingress}: {body}");
     }
     assert_eq!(provider_calls.load(Ordering::SeqCst), 8);
     assert_eq!(
@@ -1840,7 +3093,7 @@ async fn platform_markers_are_ingress_neutral_impl() {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .len(),
-        4
+        8
     );
 }
 
@@ -1887,6 +3140,131 @@ fn openai_sse_platform_tool_call() -> String {
             }
         })
     )
+}
+
+fn openai_sse_projected_platform_leg() -> String {
+    [
+        serde_json::json!({
+            "id": "upstream-projected-tool",
+            "model": "provider-model",
+            "choices": [{
+                "index": 0,
+                "delta": {"role": "assistant", "reasoning_content": "R1"},
+                "finish_reason": null
+            }]
+        }),
+        serde_json::json!({
+            "id": "upstream-projected-tool",
+            "model": "provider-model",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "C"},
+                "finish_reason": null
+            }]
+        }),
+        serde_json::json!({
+            "id": "upstream-projected-tool",
+            "model": "provider-model",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "1"},
+                "finish_reason": null
+            }]
+        }),
+        serde_json::json!({
+            "id": "upstream-projected-tool",
+            "model": "provider-model",
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "platform-call",
+                        "type": "function",
+                        "function": {
+                            "name": "stravia__ordered_tool",
+                            "arguments": "{\"index\":1}"
+                        }
+                    }]
+                },
+                "finish_reason": null
+            }]
+        }),
+        serde_json::json!({
+            "id": "upstream-projected-tool",
+            "model": "provider-model",
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "tool_calls"
+            }]
+        }),
+        serde_json::json!({
+            "id": "upstream-projected-tool",
+            "model": "provider-model",
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 11,
+                "completion_tokens": 1,
+                "total_tokens": 12
+            }
+        }),
+    ]
+    .into_iter()
+    .map(|event| format!("data: {event}\n\n"))
+    .chain(std::iter::once("data: [DONE]\n\n".into()))
+    .collect()
+}
+
+fn openai_sse_reasoning_and_text(
+    reasoning: &str,
+    text: &str,
+    prompt_tokens: u32,
+    completion_tokens: u32,
+) -> String {
+    [
+        serde_json::json!({
+            "id": "upstream-projected-final",
+            "model": "provider-model",
+            "choices": [{
+                "index": 0,
+                "delta": {"role": "assistant", "reasoning_content": reasoning},
+                "finish_reason": null
+            }]
+        }),
+        serde_json::json!({
+            "id": "upstream-projected-final",
+            "model": "provider-model",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": text},
+                "finish_reason": null
+            }]
+        }),
+        serde_json::json!({
+            "id": "upstream-projected-final",
+            "model": "provider-model",
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "stop"
+            }]
+        }),
+        serde_json::json!({
+            "id": "upstream-projected-final",
+            "model": "provider-model",
+            "choices": [],
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens
+            }
+        }),
+    ]
+    .into_iter()
+    .map(|event| format!("data: {event}\n\n"))
+    .chain(std::iter::once("data: [DONE]\n\n".into()))
+    .collect()
 }
 
 fn openai_sse_client_tool_call() -> String {

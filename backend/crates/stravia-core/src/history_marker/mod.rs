@@ -10,10 +10,13 @@ use crate::hook::Principal;
 use crate::protocol::ir::{ContentBlock, ToolCall};
 
 pub use sql::SqlHistoryMarkerStore;
-pub(crate) use syntax::render_history_marker_reference;
 pub use syntax::{
-    HISTORY_MARKER_PREFIX, MarkerResolution, history_marker_references, render_history_marker,
-    resolve_request_markers,
+    HISTORY_MARKER_PREFIX, MarkerResolution, PROJECTION_DELIMITER_PREFIX,
+    history_marker_references, render_history_marker, resolve_request_markers,
+};
+pub(crate) use syntax::{
+    render_history_marker_reference, render_preview_projection_span, render_text_projection_end,
+    render_text_projection_span, render_text_projection_start,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

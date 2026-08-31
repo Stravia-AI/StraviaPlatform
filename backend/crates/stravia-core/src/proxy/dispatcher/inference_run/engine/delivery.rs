@@ -1,4 +1,5 @@
 use std::convert::Infallible;
+use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -26,9 +27,16 @@ pub(super) enum DeliveryProgress {
     ProtocolFailed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BufferedDeliveryProgress {
+    Prepared,
+    ProtocolFailed,
+}
+
 pub(super) struct BufferedDelivery {
     pub(super) response: Response,
     pub(super) body: String,
+    pub(super) progress: BufferedDeliveryProgress,
 }
 
 /// Static transport choice for one Inference Run.
@@ -140,6 +148,7 @@ impl DeliveryAdapter {
                         BufferedDelivery {
                             response: (status, Json(output)).into_response(),
                             body,
+                            progress: BufferedDeliveryProgress::Prepared,
                         }
                     }
                     Err(error) => {
@@ -149,6 +158,7 @@ impl DeliveryAdapter {
                             response: (StatusCode::UNPROCESSABLE_ENTITY, Json(output))
                                 .into_response(),
                             body,
+                            progress: BufferedDeliveryProgress::ProtocolFailed,
                         }
                     }
                 }
@@ -171,21 +181,24 @@ impl DeliveryAdapter {
                         events.extend(encoder.finish()?);
                         Ok(events)
                     });
-                match result {
+                let progress = match result {
                     Ok(events) => {
                         for event in events {
                             parts.push(event.to_sse_string());
                         }
+                        BufferedDeliveryProgress::Prepared
                     }
                     Err(error) => {
                         *failed = true;
                         parts.push(protocol_error_event(*ingress, &error).to_sse_string());
+                        BufferedDeliveryProgress::ProtocolFailed
                     }
-                }
+                };
                 let body = parts.join("");
                 BufferedDelivery {
                     response: streaming_response(Body::from(body.clone())),
                     body,
+                    progress,
                 }
             }
         }
@@ -426,8 +439,9 @@ impl Stream for CommitOnPollStream {
 
 struct DeliveryConfirmedBody {
     inner: axum::body::BodyDataStream,
-    task: Option<Pin<Box<dyn std::future::Future<Output = ()> + Send>>>,
+    task: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
     inner_complete: bool,
+    inner_failed: bool,
 }
 
 impl Stream for DeliveryConfirmedBody {
@@ -437,8 +451,16 @@ impl Stream for DeliveryConfirmedBody {
         if !self.inner_complete {
             match Pin::new(&mut self.inner).poll_next(context) {
                 Poll::Ready(None) => self.inner_complete = true,
+                Poll::Ready(Some(Err(error))) => {
+                    self.inner_failed = true;
+                    self.inner_complete = true;
+                    return Poll::Ready(Some(Err(error)));
+                }
                 poll => return poll,
             }
+        }
+        if self.inner_failed {
+            return Poll::Ready(None);
         }
         let Some(task) = self.task.as_mut() else {
             return Poll::Ready(None);
@@ -453,15 +475,16 @@ impl Stream for DeliveryConfirmedBody {
     }
 }
 
-fn after_body_delivery<F>(response: Response, task: F) -> Response
+pub(super) fn after_body_delivery<F>(response: Response, task: F) -> Response
 where
-    F: std::future::Future<Output = ()> + Send + 'static,
+    F: Future<Output = ()> + Send + 'static,
 {
     let (parts, body) = response.into_parts();
     let body = Body::from_stream(DeliveryConfirmedBody {
         inner: body.into_data_stream(),
         task: Some(Box::pin(task)),
         inner_complete: false,
+        inner_failed: false,
     });
     Response::from_parts(parts, body)
 }

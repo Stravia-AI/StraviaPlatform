@@ -209,30 +209,23 @@ fn normalize_messages_for_openai(
             final_id = format!("call_enc_{generated_seq}");
         }
 
-        let extracted_call = take_matching_tool_call_from_history(&mut out, &final_id);
-        if let Some((tc, source_idx)) = extracted_call {
-            trim_trailing_assistant_text_after_index(&mut out, source_idx);
-            let source_meta = out[source_idx].meta.clone();
-            out.push(AiItem {
-                role: Role::Assistant,
-                content: MessageContent::Text(String::new()),
-                tool_calls: Some(vec![tc]),
-                tool_call_id: None,
-                meta: source_meta,
-            });
-            seen_tool_call_ids.insert(final_id.clone());
-        } else {
-            let has_adjacent_matching_call = out
-                .last()
-                .is_some_and(|prev| assistant_has_tool_call_id(prev, &final_id));
-
-            let has_adjacent_matching_call = if has_adjacent_matching_call {
-                true
-            } else {
-                make_matching_call_adjacent(&mut out, &final_id)
-            };
-
-            if !has_adjacent_matching_call {
+        let has_adjacent_matching_call = out
+            .last()
+            .is_some_and(|prev| assistant_has_tool_call_id(prev, &final_id));
+        if !has_adjacent_matching_call {
+            let extracted_call = take_matching_tool_call_from_history(&mut out, &final_id);
+            if let Some((tc, source_idx)) = extracted_call {
+                trim_trailing_assistant_text_after_index(&mut out, source_idx);
+                let source_meta = out[source_idx].meta.clone();
+                out.push(AiItem {
+                    role: Role::Assistant,
+                    content: MessageContent::Text(String::new()),
+                    tool_calls: Some(vec![tc]),
+                    tool_call_id: None,
+                    meta: source_meta,
+                });
+                seen_tool_call_ids.insert(final_id.clone());
+            } else if !make_matching_call_adjacent(&mut out, &final_id) {
                 if seen_tool_call_ids.contains(&final_id) {
                     generated_seq += 1;
                     final_id = format!("call_enc_{generated_seq}");
@@ -272,7 +265,17 @@ fn normalize_messages_for_openai(
         if has_calls {
             return true;
         }
-        !msg.content.to_text().trim().is_empty()
+        let has_reasoning = matches!(
+            &msg.content,
+            MessageContent::Blocks(blocks)
+                if blocks.iter().any(|block| matches!(
+                    block,
+                    ContentBlock::Thinking { .. }
+                        | ContentBlock::Reasoning { .. }
+                        | ContentBlock::RedactedThinking { .. }
+                ))
+        );
+        has_reasoning || !msg.content.to_text().trim().is_empty()
     });
 
     out
@@ -457,14 +460,6 @@ fn trim_trailing_assistant_text_after_index(out: &mut Vec<AiItem>, source_idx: u
 }
 
 fn promote_reasoning_meta(message: &mut AiItem) {
-    if message
-        .meta
-        .as_ref()
-        .and_then(Value::as_object)
-        .is_some_and(|meta| meta.contains_key("reasoning_content"))
-    {
-        return;
-    }
     let MessageContent::Blocks(blocks) = &message.content else {
         return;
     };

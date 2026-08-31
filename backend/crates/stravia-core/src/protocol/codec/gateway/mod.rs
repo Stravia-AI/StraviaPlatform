@@ -17,7 +17,7 @@ use crate::protocol::ids::{
 };
 use crate::protocol::ir::{
     AiItem, AiRequest, AiResponse, AiStreamDelta, ContentBlock, MediaSource, MessageContent, Role,
-    ToolCall, ToolChoice, Usage,
+    ToolCall, ToolChoice, ToolSpec, Usage,
 };
 use crate::protocol::registry::EndpointRegistration;
 use crate::protocol::transform::{
@@ -56,8 +56,44 @@ impl ProtocolAdapter for GatewayLanguageModelV4 {
         &CAPS
     }
 
-    fn decode_request(&self, _body: Value) -> anyhow::Result<AiRequest> {
-        bail!("Vercel AI Gateway v4 is egress-only")
+    fn decode_request(&self, body: Value) -> anyhow::Result<AiRequest> {
+        let model = body
+            .get("model")
+            .or_else(|| body.get("modelId"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let mut request = AiRequest::new(model, decode_prompt(&body)?);
+        request.generation.max_tokens = body
+            .get("maxOutputTokens")
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok());
+        request.generation.temperature = body.get("temperature").and_then(Value::as_f64);
+        request.generation.top_p = body.get("topP").and_then(Value::as_f64);
+        request.generation.presence_penalty = body.get("presencePenalty").and_then(Value::as_f64);
+        request.generation.frequency_penalty = body.get("frequencyPenalty").and_then(Value::as_f64);
+        request.generation.seed = body.get("seed").and_then(Value::as_i64);
+        request.generation.stop = body.get("stopSequences").and_then(|value| {
+            value.as_array().map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+        });
+        request.tools = body.get("tools").map(decode_gateway_tools).transpose()?;
+        request.tool_choice = body
+            .get("toolChoice")
+            .map(decode_gateway_tool_choice)
+            .transpose()?;
+        request.reasoning.enabled = body.get("reasoning").is_some();
+        request.response_format = body
+            .get("responseFormat")
+            .map(decode_gateway_response_format)
+            .transpose()?;
+        request.meta.source_protocol = Some(GATEWAY_LANGUAGE_MODEL_V4);
+        Ok(request)
     }
 
     fn encode_request(&self, request: &AiRequest) -> anyhow::Result<(Value, HeaderMap)> {
@@ -211,8 +247,49 @@ impl ProtocolAdapter for GatewayLanguageModelV4 {
         Ok(response)
     }
 
-    fn encode_response(&self, _response: &AiResponse) -> Value {
-        json!({"content": [], "finishReason": {"unified": "stop"}, "usage": gateway_usage_value(&Usage::default())})
+    fn encode_response(&self, response: &AiResponse) -> Value {
+        let mut content = Vec::new();
+        for item in &response.items {
+            match &item.content {
+                MessageContent::Text(text) if item.role == Role::Assistant && !text.is_empty() => {
+                    content.push(json!({"type": "text", "text": text}));
+                }
+                MessageContent::Blocks(blocks) if item.role == Role::Assistant => {
+                    for block in blocks {
+                        match block {
+                            ContentBlock::Text { text, .. } if !text.is_empty() => {
+                                content.push(json!({"type": "text", "text": text}));
+                            }
+                            ContentBlock::Thinking { thinking, .. } => {
+                                content.push(json!({"type": "reasoning", "text": thinking}));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+            for call in item.tool_calls.as_deref().unwrap_or_default() {
+                content.push(json!({
+                    "type": "tool-call",
+                    "toolCallId": call.id,
+                    "toolName": call.name,
+                    "input": serde_json::from_str::<Value>(&call.arguments)
+                        .unwrap_or_else(|_| Value::String(call.arguments.clone())),
+                }));
+            }
+        }
+        json!({
+            "content": content,
+            "finishReason": {
+                "unified": response.stop_reason.as_deref().unwrap_or("stop")
+            },
+            "usage": gateway_usage_value(&response.usage),
+            "response": {
+                "id": response.id,
+                "modelId": response.model,
+            }
+        })
     }
 
     fn stream_decoder(&self) -> Result<WireStreamDecoder, TransformError> {
@@ -229,6 +306,189 @@ impl ProtocolAdapter for GatewayLanguageModelV4 {
 
 inventory::submit! {
     EndpointRegistration { make: || Box::new(GatewayLanguageModelV4) }
+}
+
+fn decode_prompt(body: &Value) -> anyhow::Result<Vec<AiItem>> {
+    body.get("prompt")
+        .and_then(Value::as_array)
+        .context("Gateway request is missing prompt")?
+        .iter()
+        .map(decode_message)
+        .collect()
+}
+
+fn decode_message(message: &Value) -> anyhow::Result<AiItem> {
+    let role = match required_string(message, "role")?.as_str() {
+        "system" => Role::System,
+        "user" => Role::User,
+        "assistant" => Role::Assistant,
+        "tool" => Role::Tool,
+        other => bail!("unsupported Gateway prompt role `{other}`"),
+    };
+    if matches!(role, Role::System) {
+        return Ok(AiItem {
+            role,
+            content: MessageContent::Text(required_string(message, "content")?),
+            tool_calls: None,
+            tool_call_id: None,
+            meta: None,
+        });
+    }
+
+    let parts = message
+        .get("content")
+        .and_then(Value::as_array)
+        .context("Gateway prompt content must be an array")?;
+    let mut blocks = Vec::new();
+    let mut tool_calls = Vec::new();
+    let mut tool_call_id = None;
+    for part in parts {
+        match part.get("type").and_then(Value::as_str) {
+            Some("text") => blocks.push(ContentBlock::Text {
+                text: required_string(part, "text")?,
+                cache_control: None,
+            }),
+            Some("reasoning") if role == Role::Assistant => {
+                blocks.push(ContentBlock::Thinking {
+                    thinking: required_string(part, "text")?,
+                    signature: None,
+                });
+            }
+            Some("tool-call") if role == Role::Assistant => {
+                tool_calls.push(ToolCall {
+                    id: required_string(part, "toolCallId")?,
+                    name: required_string(part, "toolName")?,
+                    arguments: serde_json::to_string(
+                        part.get("input")
+                            .context("Gateway tool call is missing input")?,
+                    )?,
+                });
+            }
+            Some("tool-result") if role == Role::Tool => {
+                let id = required_string(part, "toolCallId")?;
+                if tool_call_id.replace(id).is_some() {
+                    bail!("Gateway tool prompt must contain exactly one tool result");
+                }
+                let output = part
+                    .get("output")
+                    .context("Gateway tool result is missing output")?;
+                let text = output
+                    .get("value")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| output.to_string());
+                blocks.push(ContentBlock::ToolResult {
+                    tool_use_id: tool_call_id.clone().unwrap_or_default(),
+                    content: Value::String(text),
+                    is_error: None,
+                    cache_control: None,
+                });
+            }
+            Some("file") if role == Role::User => {
+                let media_type = required_string(part, "mediaType")?;
+                blocks.push(ContentBlock::File {
+                    source: decode_gateway_file_source(
+                        part.get("data").context("Gateway file is missing data")?,
+                        &media_type,
+                    )?,
+                    media_type: Some(media_type),
+                });
+            }
+            Some(other) => {
+                bail!("unsupported Gateway prompt content type `{other}` for role `{role:?}`")
+            }
+            None => bail!("Gateway prompt content is missing type"),
+        }
+    }
+    Ok(AiItem {
+        role,
+        content: MessageContent::Blocks(blocks),
+        tool_calls: (!tool_calls.is_empty()).then_some(tool_calls),
+        tool_call_id,
+        meta: None,
+    })
+}
+
+fn decode_gateway_file_source(value: &Value, media_type: &str) -> anyhow::Result<MediaSource> {
+    match value.get("type").and_then(Value::as_str) {
+        Some("url") => Ok(MediaSource::Url(required_string(value, "url")?)),
+        Some("data") => Ok(MediaSource::Base64 {
+            media_type: media_type.to_string(),
+            data: required_string(value, "data")?,
+        }),
+        Some("reference") => Ok(MediaSource::FileId {
+            file_id: value
+                .pointer("/reference/stravia")
+                .and_then(Value::as_str)
+                .context("Gateway file reference is missing stravia ID")?
+                .to_string(),
+            detail: None,
+        }),
+        Some(other) => bail!("unsupported Gateway file data type `{other}`"),
+        None => bail!("Gateway file data is missing type"),
+    }
+}
+
+fn decode_gateway_tools(value: &Value) -> anyhow::Result<Vec<ToolSpec>> {
+    value
+        .as_array()
+        .context("Gateway tools must be an array")?
+        .iter()
+        .map(|tool| {
+            if tool.get("type").and_then(Value::as_str) != Some("function") {
+                bail!("Gateway only supports function tools");
+            }
+            Ok(ToolSpec {
+                name: required_string(tool, "name")?,
+                description: tool
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                parameters: tool
+                    .get("inputSchema")
+                    .cloned()
+                    .unwrap_or_else(|| json!({"type": "object"})),
+                strict: tool.get("strict").and_then(Value::as_bool),
+                cache_control: None,
+                meta: None,
+            })
+        })
+        .collect()
+}
+
+fn decode_gateway_tool_choice(value: &Value) -> anyhow::Result<ToolChoice> {
+    match value.get("type").and_then(Value::as_str) {
+        Some("auto") => Ok(ToolChoice::Auto),
+        Some("none") => Ok(ToolChoice::None),
+        Some("required") => Ok(ToolChoice::Required),
+        Some("tool") => Ok(ToolChoice::Named {
+            name: required_string(value, "toolName")?,
+        }),
+        Some(other) => bail!("unsupported Gateway tool choice `{other}`"),
+        None => bail!("Gateway tool choice is missing type"),
+    }
+}
+
+fn decode_gateway_response_format(
+    value: &Value,
+) -> anyhow::Result<crate::protocol::ir::ResponseFormat> {
+    match value.get("type").and_then(Value::as_str) {
+        Some("text") => Ok(crate::protocol::ir::ResponseFormat::Text),
+        Some("json") if value.get("schema").is_some() => {
+            Ok(crate::protocol::ir::ResponseFormat::JsonSchema {
+                schema: value.get("schema").cloned().unwrap_or(Value::Null),
+                name: value
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("response")
+                    .to_string(),
+                strict: None,
+            })
+        }
+        Some("json") => Ok(crate::protocol::ir::ResponseFormat::JsonObject),
+        Some(other) => bail!("unsupported Gateway response format `{other}`"),
+        None => bail!("Gateway response format is missing type"),
+    }
 }
 
 fn encode_message(item: &AiItem, tool_names: &BTreeMap<String, String>) -> anyhow::Result<Value> {
