@@ -39,7 +39,15 @@ type CliConfigParams =
       mappings: ClaudeModelMappings
     }
   | {
-      tool: Exclude<CliToolId, 'claude-code'>
+      tool: 'workbuddy' | 'zcode'
+      host: string
+      apiKey: string
+      models: readonly ClientModelDefinition[]
+      defaultModel: string
+      imageInputEnabled: boolean
+    }
+  | {
+      tool: Exclude<CliToolId, 'claude-code' | 'workbuddy' | 'zcode'>
       host: string
       apiKey: string
       models: readonly ClientModelDefinition[]
@@ -94,6 +102,8 @@ const thinkingLevelDescriptions: Record<ThinkingLevel, string> = {
   xhigh: 'Extra high reasoning effort',
   max: 'Maximum reasoning effort',
 }
+
+const zcodeStraviaProviderId = 'custom:stravia'
 
 function reasoningEffort(level: ThinkingLevel): string {
   return level === 'off' ? 'none' : level
@@ -480,36 +490,91 @@ models:
   if (params.tool === 'workbuddy') {
     return `# ~/.workbuddy/models.json
 ${JSON.stringify(
-  models.map((model) => ({
-    id: model.name,
-    name: model.name,
-    vendor: 'Custom',
-    url: `${params.host}/v1/chat/completions`,
-    apiKey: params.apiKey,
-    ...(model.contextWindow === undefined ? {} : { maxInputTokens: model.contextWindow }),
-    ...(model.outputMaxTokens === undefined ? {} : { maxOutputTokens: model.outputMaxTokens }),
-    supportsToolCall: true,
-    supportsImages: false,
-    supportsReasoning: supportsReasoning(model),
-    useCustomProtocol: false,
-  })),
+  models.map((model) => {
+    const supportedEfforts = reasoningLevels(model)
+    return {
+      id: model.name,
+      name: model.name,
+      vendor: 'Custom',
+      url: `${params.host}/v1/chat/completions`,
+      apiKey: params.apiKey,
+      ...(model.contextWindow === undefined ? {} : { maxInputTokens: model.contextWindow }),
+      ...(model.outputMaxTokens === undefined ? {} : { maxOutputTokens: model.outputMaxTokens }),
+      supportsToolCall: true,
+      supportsImages: params.imageInputEnabled,
+      supportsReasoning: supportedEfforts.length > 0,
+      useCustomProtocol: false,
+      ...(supportedEfforts.length === 0 ? {} : { reasoning: { supportedEfforts } }),
+    }
+  }),
   null,
   2,
 )}`
   }
 
   if (params.tool === 'zcode') {
-    return `# ZCode: Manage Models > Settings > Model Settings > Add Provider
-Provider Name: Stravia
-Protocol: OpenAI
-Base URL: ${params.host}/v1
-API Key: ${params.apiKey}
+    const zcodeModels = Object.fromEntries(
+      models.map((model) => {
+        const variants = [...new Set(model.supportedThinkingLevels)]
+        const defaultVariant = variants.includes('medium')
+          ? 'medium'
+          : variants.find((variant) => variant !== 'off')
+        const limit = {
+          ...(model.contextWindow === undefined ? {} : { context: model.contextWindow }),
+          ...(model.outputMaxTokens === undefined ? {} : { output: model.outputMaxTokens }),
+        }
 
-# Add Model, then enable each model authorized by this API Key:
-${modelNames.join('\n')}
+        return [
+          model.name,
+          {
+            ...(defaultVariant === undefined
+              ? {}
+              : {
+                  reasoning: {
+                    enabled: true,
+                    variants,
+                    defaultVariant,
+                  },
+                }),
+            ...(Object.keys(limit).length === 0 ? {} : { limit }),
+            modalities: {
+              input: params.imageInputEnabled ? ['text', 'image'] : ['text'],
+              output: ['text'],
+            },
+            zcode: {
+              modalitiesConfigured: true,
+              modified: true,
+            },
+          },
+        ]
+      }),
+    )
 
-# Select this default model:
-${params.defaultModel}`
+    return `# Exit ZCode before editing its configuration file.
+# Windows: %USERPROFILE%\\.zcode\\v2\\config.json
+# macOS/Linux: ~/.zcode/v2/config.json
+# Merge the provider entry below into the top-level "provider" object; keep every existing provider.
+${JSON.stringify(
+  {
+    provider: {
+      [zcodeStraviaProviderId]: {
+        name: 'Stravia',
+        kind: 'openai-compatible',
+        options: {
+          apiKey: params.apiKey,
+          baseURL: `${params.host}/v1`,
+          apiKeyRequired: true,
+        },
+        source: 'custom',
+        models: zcodeModels,
+      },
+    },
+  },
+  null,
+  2,
+)}
+
+# Restart ZCode, then select ${params.defaultModel} as the default model.`
   }
 
   if (params.tool === 'deepseek-harness') {

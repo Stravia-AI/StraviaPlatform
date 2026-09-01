@@ -58,6 +58,8 @@ test('Connect an app configures clients from API Key models', async ({ page }) =
             key: 'sk-test-secret',
             name: 'Client key',
             model_ids: ['model-claude-opus', 'model-gpt-5.6-sol', 'model-gpt-5.6-luna'],
+            transparent_injection_enabled: true,
+            inject_media_understanding: true,
           },
         ],
       },
@@ -126,6 +128,23 @@ test('Connect an app configures clients from API Key models', async ({ page }) =
   await expect(generatedConfig).toContainText('"output": 128000')
   await expect(generatedConfig).toContainText('"xhigh":')
   await expect(generatedConfig).toContainText('"reasoningEffort": "xhigh"')
+
+  await page.getByRole('button', { name: 'Client' }).click()
+  await page.getByRole('option', { name: 'ZCode' }).click()
+  await expect(generatedConfig).toContainText('%USERPROFILE%\\.zcode\\v2\\config.json')
+  await expect(generatedConfig).toContainText('"kind": "openai-compatible"')
+  await expect(generatedConfig).toContainText('"context": 272000')
+  await expect(generatedConfig).toContainText('"output": 128000')
+  await expect(generatedConfig).toContainText('"defaultVariant": "medium"')
+  await expect(generatedConfig).toContainText('"image"')
+  await expect(generatedConfig).toContainText('Restart ZCode, then select gpt-5.6-sol as the default model.')
+
+  await page.getByRole('button', { name: 'Client' }).click()
+  await page.getByRole('option', { name: 'WorkBuddy' }).click()
+  await expect(generatedConfig).toContainText('"supportsImages": true')
+  await expect(generatedConfig).toContainText('"supportedEfforts"')
+  await expect(generatedConfig).toContainText('"minimal"')
+  await expect(generatedConfig).toContainText('"xhigh"')
 })
 
 test('Models table fits the desktop content width without horizontal scrolling', async ({ page }) => {

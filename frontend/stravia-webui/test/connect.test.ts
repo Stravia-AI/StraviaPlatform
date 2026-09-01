@@ -284,15 +284,15 @@ describe('client configuration generation', () => {
     expect(config).toContain('parallel_tool_calls: true')
   })
 
-  test('writes WorkBuddy models.json and exact ZCode UI fields', () => {
+  test('writes WorkBuddy models.json and a complete ZCode provider entry', () => {
     const common = {
       host: 'http://localhost:5174',
       apiKey: 'sk-client',
       models,
       defaultModel: 'gpt-5.6-sol',
     }
-    const workbuddy = buildCliConfig({ tool: 'workbuddy', ...common })
-    const zcode = buildCliConfig({ tool: 'zcode', ...common })
+    const workbuddy = buildCliConfig({ tool: 'workbuddy', ...common, imageInputEnabled: true })
+    const zcode = buildCliConfig({ tool: 'zcode', ...common, imageInputEnabled: true })
 
     const workbuddyModels = JSON.parse(workbuddy.split('\n').slice(1).join('\n'))
     expect(workbuddy).toStartWith('# ~/.workbuddy/models.json')
@@ -306,16 +306,103 @@ describe('client configuration generation', () => {
       maxInputTokens: 272000,
       maxOutputTokens: 128000,
       supportsToolCall: true,
-      supportsImages: false,
+      supportsImages: true,
       supportsReasoning: true,
       useCustomProtocol: false,
+      reasoning: {
+        supportedEfforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+      },
     })
-    expect(zcode).toContain('Protocol: OpenAI')
-    expect(zcode).toContain('Base URL: http://localhost:5174/v1')
-    for (const model of modelNames) {
-      expect(workbuddy).toContain(model)
-      expect(zcode).toContain(model)
+
+    const zcodeJson = zcode.slice(zcode.indexOf('{'), zcode.lastIndexOf('}') + 1)
+    const zcodeDocument = JSON.parse(zcodeJson) as {
+      provider: Record<
+        string,
+        {
+          name: string
+          kind: string
+          options: { apiKey: string; baseURL: string; apiKeyRequired: boolean }
+          source: string
+          models: Record<
+            string,
+            {
+              reasoning?: { enabled: boolean; variants: string[]; defaultVariant: string }
+              limit: { context: number; output: number }
+              modalities: { input: string[]; output: string[] }
+              zcode: { modalitiesConfigured: boolean; modified: boolean }
+            }
+          >
+        }
+      >
     }
+    const [zcodeProvider] = Object.values(zcodeDocument.provider)
+    expect(zcode).toStartWith('# Exit ZCode before editing its configuration file.')
+    expect(Object.keys(zcodeDocument.provider)).toEqual(['custom:stravia'])
+    expect(zcodeProvider).toBeDefined()
+    expect(zcodeProvider?.name).toBe('Stravia')
+    expect(zcodeProvider?.kind).toBe('openai-compatible')
+    expect(zcodeProvider?.options).toEqual({
+      apiKey: 'sk-client',
+      baseURL: 'http://localhost:5174/v1',
+      apiKeyRequired: true,
+    })
+    expect(zcodeProvider?.source).toBe('custom')
+    expect(Object.keys(zcodeProvider?.models ?? {})).toEqual(modelNames)
+    expect(zcodeProvider?.models['gpt-5.6-sol']).toEqual({
+      reasoning: {
+        enabled: true,
+        variants: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+        defaultVariant: 'medium',
+      },
+      limit: {
+        context: 272000,
+        output: 128000,
+      },
+      modalities: {
+        input: ['text', 'image'],
+        output: ['text'],
+      },
+      zcode: {
+        modalitiesConfigured: true,
+        modified: true,
+      },
+    })
+    expect(zcode).toContain('# Restart ZCode, then select gpt-5.6-sol as the default model.')
+  })
+
+  test('only enables WorkBuddy image input for transparent media understanding API Keys', () => {
+    const workbuddy = buildCliConfig({
+      tool: 'workbuddy',
+      host: 'http://localhost:5174',
+      apiKey: 'sk-client',
+      models,
+      defaultModel: 'gpt-5.6-sol',
+      imageInputEnabled: false,
+    })
+    const workbuddyModels = JSON.parse(workbuddy.split('\n').slice(1).join('\n')) as Array<{
+      supportsImages: boolean
+    }>
+
+    expect(workbuddyModels.map((model) => model.supportsImages)).toEqual(modelNames.map(() => false))
+  })
+
+  test('only enables ZCode image input for transparent media understanding API Keys', () => {
+    const zcode = buildCliConfig({
+      tool: 'zcode',
+      host: 'http://localhost:5174',
+      apiKey: 'sk-client',
+      models,
+      defaultModel: 'gpt-5.6-sol',
+      imageInputEnabled: false,
+    })
+    const zcodeDocument = JSON.parse(zcode.slice(zcode.indexOf('{'), zcode.lastIndexOf('}') + 1)) as {
+      provider: Record<string, { models: Record<string, { modalities: { input: string[] } }> }>
+    }
+    const [zcodeProvider] = Object.values(zcodeDocument.provider)
+
+    expect(Object.values(zcodeProvider?.models ?? {}).map((model) => model.modalities.input)).toEqual(
+      modelNames.map(() => ['text']),
+    )
   })
 
   test('writes a DeepSeek Harness custom provider', () => {
