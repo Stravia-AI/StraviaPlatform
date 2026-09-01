@@ -137,6 +137,9 @@ pub struct Route {
     pub output_max_tokens: Option<u64>,
     #[serde(default)]
     #[sqlx(skip)]
+    pub supports_image_input: bool,
+    #[serde(default)]
+    #[sqlx(skip)]
     pub targets: Vec<Target>,
 }
 

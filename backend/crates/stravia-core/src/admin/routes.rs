@@ -326,7 +326,7 @@ impl<'a> RouteModule<'a> {
         let provider_model_id = normalize_model_id(&provider_model_id)?;
         let mut existing = self.admin.gw.storage.routes().get(&route_id).await?;
         if let Some(route) = existing.as_mut() {
-            self.refresh_route_token_limits(std::slice::from_mut(route))
+            self.refresh_route_client_capabilities(std::slice::from_mut(route))
                 .await?;
         }
         if let Some(existing) = existing.as_ref()

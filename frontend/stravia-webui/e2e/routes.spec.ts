@@ -43,6 +43,7 @@ test('Connect an app configures clients from API Key models', async ({ page }) =
           id: `model-${model.name}`,
           balance: 'priority',
           is_enabled: true,
+          supports_image_input: model.name === 'gpt-5.6-sol',
           targets: [],
           ...model,
         })),
@@ -58,7 +59,7 @@ test('Connect an app configures clients from API Key models', async ({ page }) =
             key: 'sk-test-secret',
             name: 'Client key',
             model_ids: ['model-claude-opus', 'model-gpt-5.6-sol', 'model-gpt-5.6-luna'],
-            transparent_injection_enabled: true,
+            transparent_injection_enabled: false,
             inject_media_understanding: true,
           },
         ],
@@ -114,6 +115,7 @@ test('Connect an app configures clients from API Key models', async ({ page }) =
   await expect(generatedConfig).toContainText('env_key = "STRAVIA_API_KEY"')
   await expect(generatedConfig).not.toContainText('requires_openai_auth')
   await expect(generatedConfig).toContainText('"context_window": 272000')
+  await expect(generatedConfig).toContainText('"input_modalities"')
   await expect(generatedConfig).toContainText('"effort": "xhigh"')
   await expect(generatedConfig).toContainText('"slug": "claude-opus"')
   await expect(generatedConfig).toContainText('"slug": "gpt-5.6-sol"')
@@ -126,6 +128,7 @@ test('Connect an app configures clients from API Key models', async ({ page }) =
   await expect(generatedConfig).toContainText('"url": "http://127.0.0.1:4173/v1/responses"')
   await expect(generatedConfig).toContainText('"context": 272000')
   await expect(generatedConfig).toContainText('"output": 128000')
+  await expect(generatedConfig).toContainText('"modalities"')
   await expect(generatedConfig).toContainText('"xhigh":')
   await expect(generatedConfig).toContainText('"reasoningEffort": "xhigh"')
 
@@ -142,6 +145,7 @@ test('Connect an app configures clients from API Key models', async ({ page }) =
   await page.getByRole('button', { name: 'Client' }).click()
   await page.getByRole('option', { name: 'WorkBuddy' }).click()
   await expect(generatedConfig).toContainText('"supportsImages": true')
+  await expect(generatedConfig).toContainText('"supportsImages": false')
   await expect(generatedConfig).toContainText('"supportedEfforts"')
   await expect(generatedConfig).toContainText('"minimal"')
   await expect(generatedConfig).toContainText('"xhigh"')

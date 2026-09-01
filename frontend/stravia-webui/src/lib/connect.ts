@@ -26,6 +26,7 @@ export interface ClaudeModelMappings {
 export interface ClientModelDefinition {
   name: string
   supportedThinkingLevels: readonly ThinkingLevel[]
+  supportsImageInput: boolean
   contextWindow?: number
   outputMaxTokens?: number
 }
@@ -39,19 +40,12 @@ type CliConfigParams =
       mappings: ClaudeModelMappings
     }
   | {
-      tool: 'workbuddy' | 'zcode'
+      tool: Exclude<CliToolId, 'claude-code'>
       host: string
       apiKey: string
       models: readonly ClientModelDefinition[]
       defaultModel: string
-      imageInputEnabled: boolean
-    }
-  | {
-      tool: Exclude<CliToolId, 'claude-code' | 'workbuddy' | 'zcode'>
-      host: string
-      apiKey: string
-      models: readonly ClientModelDefinition[]
-      defaultModel: string
+      transparentImageInputEnabled: boolean
     }
 
 export const CLI_TOOLS: ReadonlyArray<{
@@ -117,6 +111,13 @@ function supportsReasoning(model: ClientModelDefinition): boolean {
   return reasoningLevels(model).length > 0
 }
 
+function inputModalities(
+  model: ClientModelDefinition,
+  transparentImageInputEnabled: boolean,
+): Array<'text' | 'image'> {
+  return transparentImageInputEnabled || model.supportsImageInput ? ['text', 'image'] : ['text']
+}
+
 function claudeEffortLevel(model: ClientModelDefinition): 'low' | 'medium' | 'high' | 'xhigh' | undefined {
   return (['medium', 'high', 'low', 'xhigh'] as const).find((level) =>
     model.supportedThinkingLevels.includes(level),
@@ -132,6 +133,7 @@ export function defineClientModel(model: Route): ClientModelDefinition {
   return {
     name: model.name,
     supportedThinkingLevels: [...new Set(model.supported_thinking_levels ?? [])],
+    supportsImageInput: model.supports_image_input ?? false,
     ...(model.context_window ? { contextWindow: model.context_window } : {}),
     ...(model.output_max_tokens ? { outputMaxTokens: model.output_max_tokens } : {}),
   }
@@ -309,6 +311,7 @@ ${JSON.stringify(
         truncation_policy: { mode: 'bytes', limit: 10_000 },
         supports_parallel_tool_calls: false,
         experimental_supported_tools: [],
+        input_modalities: inputModalities(model, params.transparentImageInputEnabled),
         context_window: model.contextWindow,
       })),
     }
@@ -348,6 +351,7 @@ ${JSON.stringify(modelCatalog, null, 2)}`
             ]),
         ...(model.contextWindow === undefined ? [] : [`        contextWindow: ${model.contextWindow}`]),
         ...(model.outputMaxTokens === undefined ? [] : [`        maxTokens: ${model.outputMaxTokens}`]),
+        `        input: ${JSON.stringify(inputModalities(model, params.transparentImageInputEnabled))}`,
       ]
     })
 
@@ -383,6 +387,7 @@ modelRoles:
         name: model.name,
         reasoning: supportsReasoning(model),
         ...(thinkingLevelMap === undefined ? {} : { thinkingLevelMap }),
+        input: inputModalities(model, params.transparentImageInputEnabled),
         ...(model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow }),
         ...(model.outputMaxTokens === undefined ? {} : { maxTokens: model.outputMaxTokens }),
       }
@@ -422,6 +427,7 @@ ${JSON.stringify(
           models: models.map((model) => ({
             id: model.name,
             name: model.name,
+            input: inputModalities(model, params.transparentImageInputEnabled),
             ...(model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow }),
             ...(model.outputMaxTokens === undefined ? {} : { maxTokens: model.outputMaxTokens }),
           })),
@@ -439,6 +445,7 @@ ${JSON.stringify(
     const modelEntries = models.flatMap((model) => [
       `      ${JSON.stringify(model.name)}:`,
       ...(model.contextWindow === undefined ? [] : [`        context_length: ${model.contextWindow}`]),
+      `        supports_vision: ${inputModalities(model, params.transparentImageInputEnabled).includes('image')}`,
     ])
     return `# ~/.hermes/.env
 STRAVIA_API_KEY=${params.apiKey}
@@ -501,7 +508,7 @@ ${JSON.stringify(
       ...(model.contextWindow === undefined ? {} : { maxInputTokens: model.contextWindow }),
       ...(model.outputMaxTokens === undefined ? {} : { maxOutputTokens: model.outputMaxTokens }),
       supportsToolCall: true,
-      supportsImages: params.imageInputEnabled,
+      supportsImages: inputModalities(model, params.transparentImageInputEnabled).includes('image'),
       supportsReasoning: supportedEfforts.length > 0,
       useCustomProtocol: false,
       ...(supportedEfforts.length === 0 ? {} : { reasoning: { supportedEfforts } }),
@@ -538,7 +545,7 @@ ${JSON.stringify(
                 }),
             ...(Object.keys(limit).length === 0 ? {} : { limit }),
             modalities: {
-              input: params.imageInputEnabled ? ['text', 'image'] : ['text'],
+              input: inputModalities(model, params.transparentImageInputEnabled),
               output: ['text'],
             },
             zcode: {
@@ -582,6 +589,7 @@ ${JSON.stringify(
       `        - id: ${JSON.stringify(model.name)}`,
       ...(model.contextWindow === undefined ? [] : [`          contextWindow: ${model.contextWindow}`]),
       ...(model.outputMaxTokens === undefined ? [] : [`          maxTokens: ${model.outputMaxTokens}`]),
+      `          input: ${JSON.stringify(inputModalities(model, params.transparentImageInputEnabled))}`,
     ])
     return `# Set STRAVIA_API_KEY before starting dsh.
 # Value: ${params.apiKey}
@@ -619,6 +627,10 @@ ${modelEntries.join('\n')}
           reasoning: supportsReasoning(model),
           variants,
           limit,
+          modalities: {
+            input: inputModalities(model, params.transparentImageInputEnabled),
+            output: ['text'],
+          },
         },
       ]
     }),

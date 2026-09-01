@@ -111,23 +111,14 @@ const generatedCliConfig = $derived.by(() => {
     })
   }
   if (!selectedCliDefaultModel) return ''
-  if (cliToolId === 'workbuddy' || cliToolId === 'zcode') {
-    return buildCliConfig({
-      tool: cliToolId,
-      host,
-      apiKey: selectedCliKey.key,
-      models: clientConfigModels,
-      defaultModel: selectedCliDefaultModel.name,
-      imageInputEnabled:
-        selectedCliKey.transparent_injection_enabled && selectedCliKey.inject_media_understanding,
-    })
-  }
   return buildCliConfig({
     tool: cliToolId,
     host,
     apiKey: selectedCliKey.key,
     models: clientConfigModels,
     defaultModel: selectedCliDefaultModel.name,
+    transparentImageInputEnabled:
+      selectedCliKey.transparent_injection_enabled && selectedCliKey.inject_media_understanding,
   })
 })
 
