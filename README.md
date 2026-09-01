@@ -118,11 +118,12 @@ This `0.1.0` cutover supports fresh SQLite and PostgreSQL databases. It does not
 
 ## Releases
 
-Version tags publish Server archives, Desktop installers, and a multi-architecture container image through [GitHub Releases](https://github.com/Stravia-AI/StraviaPlatform/releases). Release assets currently cover:
+Version tags publish Server archives and Desktop installers through [GitHub Releases](https://github.com/Stravia-AI/StraviaPlatform/releases), alongside a multi-architecture container image and Nix packages. Release outputs currently cover:
 
 - Server: Linux and Windows on x86_64 and ARM64; Linux provides both GNU and musl archives.
 - Desktop: Linux AppImage and Windows NSIS installers on x86_64 and ARM64.
 - Container: `linux/amd64` and `linux/arm64` under `ghcr.io/stravia-ai/straviaplatform`.
+- Nix: native `x86_64-linux` and `aarch64-linux` packages from the repository flake, published to the [`stravia-platform` Cachix cache](https://app.cachix.org/cache/stravia-platform).
 
 macOS artifacts are not currently provided. Linux GNU Server archives and Desktop AppImages use Ubuntu 24.04 as their compatibility baseline; use a musl Server archive on older Linux distributions. Windows Desktop installers are currently unsigned and may trigger Microsoft Defender SmartScreen.
 
@@ -163,6 +164,40 @@ task build:server
 ```
 
 The default configuration uses SQLite and listens on `127.0.0.1:23471`. Debug builds share the repository-local `.stravia-dev/` data directory with the desktop app; release builds use `~/.stravia`. Open <http://127.0.0.1:23471> to configure a provider and create a model route.
+
+### Run the server with Nix
+
+```bash
+# Current checkout
+nix run .
+
+# Tagged release; replace vX.Y.Z with the required release
+nix run github:Stravia-AI/StraviaPlatform/vX.Y.Z
+```
+
+The flake supports `x86_64-linux` and `aarch64-linux`, builds the embedded WebUI and Server as one package, and configures the public `stravia-platform` Cachix cache as a substituter.
+
+For NixOS, import the service module from the flake:
+
+```nix
+{
+  inputs.stravia.url = "github:Stravia-AI/StraviaPlatform";
+
+  outputs = { nixpkgs, stravia, ... }: {
+    nixosConfigurations.gateway = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        stravia.nixosModules.default
+        {
+          services.stravia.enable = true;
+        }
+      ];
+    };
+  };
+}
+```
+
+The service listens on `127.0.0.1:23471` by default, runs with a dynamic system user, and persists its data under `/var/lib/stravia`. Set `services.stravia.host`, `port`, and `openFirewall` when exposing it on the network. Put secrets and optional server settings in `services.stravia.environmentFile`; a non-loopback listener requires `STRAVIA_ADMIN_TOKEN`.
 
 ### Run the server with Docker
 
