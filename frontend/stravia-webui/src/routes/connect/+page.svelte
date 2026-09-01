@@ -117,6 +117,8 @@ const generatedCliConfig = $derived.by(() => {
     apiKey: selectedCliKey.key,
     models: clientConfigModels,
     defaultModel: selectedCliDefaultModel.name,
+    transparentImageInputEnabled:
+      selectedCliKey.transparent_injection_enabled && selectedCliKey.inject_media_understanding,
   })
 })
 

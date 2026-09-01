@@ -1,7 +1,11 @@
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 
-type ModelTokenLimits = (Option<u64>, Option<u64>);
+struct ClientModelCapabilities {
+    context_window: Option<u64>,
+    output_max_tokens: Option<u64>,
+    supports_image_input: bool,
+}
 
 impl AdminService {
     pub async fn list_models(&self) -> anyhow::Result<Vec<Route>> {
@@ -28,7 +32,7 @@ impl AdminService {
 impl RouteModule<'_> {
     pub(crate) async fn list(&self) -> anyhow::Result<Vec<Route>> {
         let mut routes = self.admin.gw.storage.routes().list().await?;
-        self.refresh_route_token_limits(&mut routes).await?;
+        self.refresh_route_client_capabilities(&mut routes).await?;
         Ok(routes)
     }
 
@@ -42,7 +46,7 @@ impl RouteModule<'_> {
             .get(&route_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Route not found: {route_id}"))?;
-        self.refresh_route_token_limits(std::slice::from_mut(&mut route))
+        self.refresh_route_client_capabilities(std::slice::from_mut(&mut route))
             .await?;
         Ok(route)
     }
@@ -121,7 +125,7 @@ impl RouteModule<'_> {
             .await
     }
 
-    pub(super) async fn refresh_route_token_limits(
+    pub(super) async fn refresh_route_client_capabilities(
         &self,
         routes: &mut [Route],
     ) -> anyhow::Result<()> {
@@ -134,10 +138,11 @@ impl RouteModule<'_> {
                     .map(|target| target.provider_id.clone())
             })
             .collect::<BTreeSet<_>>();
-        let mut limits_by_provider = BTreeMap::<String, BTreeMap<String, ModelTokenLimits>>::new();
+        let mut capabilities_by_provider =
+            BTreeMap::<String, BTreeMap<String, ClientModelCapabilities>>::new();
 
         for provider_id in provider_ids {
-            let provider_limits = self
+            let provider_capabilities = self
                 .admin
                 .gw
                 .storage
@@ -147,17 +152,34 @@ impl RouteModule<'_> {
                 .into_iter()
                 .map(|record| {
                     let limits = record.metadata.limit.unwrap_or_default();
-                    (record.model_id, (limits.context, limits.output))
+                    let modalities = record.metadata.modalities.unwrap_or_default();
+                    (
+                        record.model_id,
+                        ClientModelCapabilities {
+                            context_window: limits.context,
+                            output_max_tokens: limits.output,
+                            supports_image_input: modalities
+                                .input
+                                .iter()
+                                .any(|modality| modality == "image"),
+                        },
+                    )
                 })
                 .collect();
-            limits_by_provider.insert(provider_id, provider_limits);
+            capabilities_by_provider.insert(provider_id, provider_capabilities);
         }
 
         for route in routes {
             route.context_window =
-                common_target_limit(&route.targets, &limits_by_provider, |limits| limits.0);
+                common_target_limit(&route.targets, &capabilities_by_provider, |capabilities| {
+                    capabilities.context_window
+                });
             route.output_max_tokens =
-                common_target_limit(&route.targets, &limits_by_provider, |limits| limits.1);
+                common_target_limit(&route.targets, &capabilities_by_provider, |capabilities| {
+                    capabilities.output_max_tokens
+                });
+            route.supports_image_input =
+                all_targets_support_image_input(&route.targets, &capabilities_by_provider);
         }
         Ok(())
     }
@@ -165,11 +187,11 @@ impl RouteModule<'_> {
 
 fn common_target_limit(
     targets: &[Target],
-    limits_by_provider: &BTreeMap<String, BTreeMap<String, ModelTokenLimits>>,
-    select: impl Fn(&ModelTokenLimits) -> Option<u64>,
+    capabilities_by_provider: &BTreeMap<String, BTreeMap<String, ClientModelCapabilities>>,
+    select: impl Fn(&ClientModelCapabilities) -> Option<u64>,
 ) -> Option<u64> {
     let mut limits = targets.iter().map(|target| {
-        limits_by_provider
+        capabilities_by_provider
             .get(&target.provider_id)
             .and_then(|models| models.get(&target.model))
             .and_then(&select)
@@ -177,4 +199,17 @@ fn common_target_limit(
     });
     let first = limits.next()??;
     limits.try_fold(first, |common, limit| Some(common.min(limit?)))
+}
+
+fn all_targets_support_image_input(
+    targets: &[Target],
+    capabilities_by_provider: &BTreeMap<String, BTreeMap<String, ClientModelCapabilities>>,
+) -> bool {
+    !targets.is_empty()
+        && targets.iter().all(|target| {
+            capabilities_by_provider
+                .get(&target.provider_id)
+                .and_then(|models| models.get(&target.model))
+                .is_some_and(|capabilities| capabilities.supports_image_input)
+        })
 }

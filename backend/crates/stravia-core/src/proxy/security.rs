@@ -480,6 +480,7 @@ mod tests {
             supported_thinking_levels: sqlx::types::Json(Vec::new()),
             context_window: None,
             output_max_tokens: None,
+            supports_image_input: false,
         }
     }
 

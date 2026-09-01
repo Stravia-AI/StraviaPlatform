@@ -15,18 +15,21 @@ const models: ClientModelDefinition[] = [
   {
     name: 'claude-opus',
     supportedThinkingLevels: ['off', 'high', 'max'],
+    supportsImageInput: false,
     contextWindow: 200_000,
     outputMaxTokens: 32_000,
   },
   {
     name: 'gpt-5.6-sol',
     supportedThinkingLevels: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+    supportsImageInput: true,
     contextWindow: 272_000,
     outputMaxTokens: 128_000,
   },
   {
     name: 'gpt-5.6-luna',
     supportedThinkingLevels: ['off', 'low', 'medium', 'high'],
+    supportsImageInput: false,
     contextWindow: 196_000,
     outputMaxTokens: 64_000,
   },
@@ -88,6 +91,7 @@ describe('client configuration generation', () => {
         {
           name: 'small-model',
           supportedThinkingLevels: ['off', 'minimal', 'max'],
+          supportsImageInput: false,
           contextWindow: 64_000,
           outputMaxTokens: 8_000,
         },
@@ -111,6 +115,7 @@ describe('client configuration generation', () => {
       apiKey: 'sk-client',
       models,
       defaultModel: 'gpt-5.6-sol',
+      transparentImageInputEnabled: false,
     })
 
     expect(config).toContain('model = "gpt-5.6-sol"')
@@ -125,6 +130,14 @@ describe('client configuration generation', () => {
     expect(config).toContain('"context_window": 272000')
     expect(config).toContain('"effort": "none"')
     expect(config).toContain('"effort": "xhigh"')
+    const codexCatalog = JSON.parse(config.split('# ~/.codex/stravia-models.json\n')[1]) as {
+      models: Array<{ input_modalities: string[] }>
+    }
+    expect(codexCatalog.models.map((model) => model.input_modalities)).toEqual([
+      ['text'],
+      ['text', 'image'],
+      ['text'],
+    ])
     for (const model of modelNames) expect(config).toContain(`"slug": "${model}"`)
   })
 
@@ -135,6 +148,7 @@ describe('client configuration generation', () => {
       apiKey: 'sk-client',
       models,
       defaultModel: 'gpt-5.6-luna',
+      transparentImageInputEnabled: false,
     })
 
     const json = JSON.parse(config.split('\n').slice(1).join('\n'))
@@ -147,10 +161,12 @@ describe('client configuration generation', () => {
       'reasoning',
       'variants',
       'limit',
+      'modalities',
     ])
     expect(json.provider.stravia.models['gpt-5.6-sol']).toMatchObject({
       reasoning: true,
       limit: { context: 272_000, output: 128_000 },
+      modalities: { input: ['text', 'image'], output: ['text'] },
       variants: {
         none: { reasoningEffort: 'none' },
         medium: { reasoningEffort: 'medium' },
@@ -172,6 +188,7 @@ describe('client configuration generation', () => {
       apiKey: 'sk-client',
       models,
       defaultModel: 'gpt-5.6-sol',
+      transparentImageInputEnabled: false,
     })
 
     expect(config).toStartWith('# ~/.omp/agent/models.yml')
@@ -179,6 +196,8 @@ describe('client configuration generation', () => {
     expect(config).toContain('api: openai-responses')
     expect(config).toContain('authHeader: true')
     expect(config).toContain('efforts: ["minimal","low","medium","high","xhigh","max"]')
+    expect(config).toContain('input: ["text","image"]')
+    expect(config).toContain('input: ["text"]')
     expect(config).toContain('default: "stravia/gpt-5.6-sol"')
     for (const model of modelNames) expect(config).toContain(`- id: "${model}"`)
   })
@@ -190,6 +209,7 @@ describe('client configuration generation', () => {
       apiKey: 'sk-client',
       models,
       defaultModel: 'gpt-5.6-luna',
+      transparentImageInputEnabled: false,
     })
     const [modelsJson, settingsJson] = config.split('\n\n# Merge into ~/.pi/agent/settings.json\n')
     const providerConfig = JSON.parse(modelsJson.split('\n').slice(1).join('\n'))
@@ -209,6 +229,11 @@ describe('client configuration generation', () => {
       xhigh: 'xhigh',
       max: 'max',
     })
+    expect(providerConfig.providers.stravia.models.map((model: { input: string[] }) => model.input)).toEqual([
+      ['text'],
+      ['text', 'image'],
+      ['text'],
+    ])
     expect(settings).toEqual({ defaultProvider: 'stravia', defaultModel: 'gpt-5.6-luna' })
   })
 
@@ -234,6 +259,7 @@ describe('client configuration generation', () => {
       apiKey: 'sk-client',
       models,
       defaultModel: 'gpt-5.6-sol',
+      transparentImageInputEnabled: false,
     })
     const json = JSON.parse(config.split('\n').slice(1).join('\n'))
 
@@ -243,6 +269,11 @@ describe('client configuration generation', () => {
       api: 'openai-completions',
     })
     expect(json.models.providers.stravia.models.map((model: { id: string }) => model.id)).toEqual(modelNames)
+    expect(json.models.providers.stravia.models.map((model: { input: string[] }) => model.input)).toEqual([
+      ['text'],
+      ['text', 'image'],
+      ['text'],
+    ])
     expect(json.agents.defaults.model.primary).toBe('stravia/gpt-5.6-sol')
   })
 
@@ -253,12 +284,15 @@ describe('client configuration generation', () => {
       apiKey: 'sk-client',
       models,
       defaultModel: 'gpt-5.6-luna',
+      transparentImageInputEnabled: false,
     })
 
     expect(config).toContain('STRAVIA_API_KEY=sk-client')
     expect(config).toContain('key_env: STRAVIA_API_KEY')
     expect(config).toContain('transport: chat_completions')
     expect(config).toContain('default: "gpt-5.6-luna"')
+    expect(config).toContain('"gpt-5.6-sol":\n        context_length: 272000\n        supports_vision: true')
+    expect(config).toContain('"gpt-5.6-luna":\n        context_length: 196000\n        supports_vision: false')
     for (const model of modelNames) expect(config).toContain(`"${model}":`)
   })
 
@@ -269,6 +303,7 @@ describe('client configuration generation', () => {
       apiKey: 'sk-client',
       models,
       defaultModel: 'gpt-5.6-sol',
+      transparentImageInputEnabled: false,
     })
 
     expect(config).toContain('provider: openai')
@@ -284,15 +319,15 @@ describe('client configuration generation', () => {
     expect(config).toContain('parallel_tool_calls: true')
   })
 
-  test('writes WorkBuddy models.json and exact ZCode UI fields', () => {
+  test('writes WorkBuddy models.json and a complete ZCode provider entry', () => {
     const common = {
       host: 'http://localhost:5174',
       apiKey: 'sk-client',
       models,
       defaultModel: 'gpt-5.6-sol',
     }
-    const workbuddy = buildCliConfig({ tool: 'workbuddy', ...common })
-    const zcode = buildCliConfig({ tool: 'zcode', ...common })
+    const workbuddy = buildCliConfig({ tool: 'workbuddy', ...common, transparentImageInputEnabled: true })
+    const zcode = buildCliConfig({ tool: 'zcode', ...common, transparentImageInputEnabled: true })
 
     const workbuddyModels = JSON.parse(workbuddy.split('\n').slice(1).join('\n'))
     expect(workbuddy).toStartWith('# ~/.workbuddy/models.json')
@@ -306,16 +341,103 @@ describe('client configuration generation', () => {
       maxInputTokens: 272000,
       maxOutputTokens: 128000,
       supportsToolCall: true,
-      supportsImages: false,
+      supportsImages: true,
       supportsReasoning: true,
       useCustomProtocol: false,
+      reasoning: {
+        supportedEfforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+      },
     })
-    expect(zcode).toContain('Protocol: OpenAI')
-    expect(zcode).toContain('Base URL: http://localhost:5174/v1')
-    for (const model of modelNames) {
-      expect(workbuddy).toContain(model)
-      expect(zcode).toContain(model)
+
+    const zcodeJson = zcode.slice(zcode.indexOf('{'), zcode.lastIndexOf('}') + 1)
+    const zcodeDocument = JSON.parse(zcodeJson) as {
+      provider: Record<
+        string,
+        {
+          name: string
+          kind: string
+          options: { apiKey: string; baseURL: string; apiKeyRequired: boolean }
+          source: string
+          models: Record<
+            string,
+            {
+              reasoning?: { enabled: boolean; variants: string[]; defaultVariant: string }
+              limit: { context: number; output: number }
+              modalities: { input: string[]; output: string[] }
+              zcode: { modalitiesConfigured: boolean; modified: boolean }
+            }
+          >
+        }
+      >
     }
+    const [zcodeProvider] = Object.values(zcodeDocument.provider)
+    expect(zcode).toStartWith('# Exit ZCode before editing its configuration file.')
+    expect(Object.keys(zcodeDocument.provider)).toEqual(['custom:stravia'])
+    expect(zcodeProvider).toBeDefined()
+    expect(zcodeProvider?.name).toBe('Stravia')
+    expect(zcodeProvider?.kind).toBe('openai-compatible')
+    expect(zcodeProvider?.options).toEqual({
+      apiKey: 'sk-client',
+      baseURL: 'http://localhost:5174/v1',
+      apiKeyRequired: true,
+    })
+    expect(zcodeProvider?.source).toBe('custom')
+    expect(Object.keys(zcodeProvider?.models ?? {})).toEqual(modelNames)
+    expect(zcodeProvider?.models['gpt-5.6-sol']).toEqual({
+      reasoning: {
+        enabled: true,
+        variants: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+        defaultVariant: 'medium',
+      },
+      limit: {
+        context: 272000,
+        output: 128000,
+      },
+      modalities: {
+        input: ['text', 'image'],
+        output: ['text'],
+      },
+      zcode: {
+        modalitiesConfigured: true,
+        modified: true,
+      },
+    })
+    expect(zcode).toContain('# Restart ZCode, then select gpt-5.6-sol as the default model.')
+  })
+
+  test('falls back to model image capabilities when WorkBuddy transparent media understanding is disabled', () => {
+    const workbuddy = buildCliConfig({
+      tool: 'workbuddy',
+      host: 'http://localhost:5174',
+      apiKey: 'sk-client',
+      models,
+      defaultModel: 'gpt-5.6-sol',
+      transparentImageInputEnabled: false,
+    })
+    const workbuddyModels = JSON.parse(workbuddy.split('\n').slice(1).join('\n')) as Array<{
+      supportsImages: boolean
+    }>
+
+    expect(workbuddyModels.map((model) => model.supportsImages)).toEqual([false, true, false])
+  })
+
+  test('falls back to model image capabilities when ZCode transparent media understanding is disabled', () => {
+    const zcode = buildCliConfig({
+      tool: 'zcode',
+      host: 'http://localhost:5174',
+      apiKey: 'sk-client',
+      models,
+      defaultModel: 'gpt-5.6-sol',
+      transparentImageInputEnabled: false,
+    })
+    const zcodeDocument = JSON.parse(zcode.slice(zcode.indexOf('{'), zcode.lastIndexOf('}') + 1)) as {
+      provider: Record<string, { models: Record<string, { modalities: { input: string[] } }> }>
+    }
+    const [zcodeProvider] = Object.values(zcodeDocument.provider)
+
+    expect(Object.values(zcodeProvider?.models ?? {}).map((model) => model.modalities.input)).toEqual(
+      [['text'], ['text', 'image'], ['text']],
+    )
   })
 
   test('writes a DeepSeek Harness custom provider', () => {
@@ -325,6 +447,7 @@ describe('client configuration generation', () => {
       apiKey: 'sk-client',
       models,
       defaultModel: 'gpt-5.6-sol',
+      transparentImageInputEnabled: false,
     })
 
     expect(config).toContain('apiKeyEnv: STRAVIA_API_KEY')
@@ -333,6 +456,8 @@ describe('client configuration generation', () => {
     expect(config).toContain('- id: "gpt-5.6-sol"')
     expect(config).toContain('contextWindow: 272000')
     expect(config).toContain('maxTokens: 128000')
+    expect(config).toContain('input: ["text","image"]')
+    expect(config).toContain('input: ["text"]')
   })
 
   test('rejects defaults and mappings outside the API Key scope', () => {
@@ -343,6 +468,7 @@ describe('client configuration generation', () => {
         apiKey: 'sk-client',
         models,
         defaultModel: 'not-authorized',
+        transparentImageInputEnabled: false,
       }),
     ).toThrow('default model must be available to the API key')
 
@@ -374,12 +500,14 @@ describe('client configuration generation', () => {
       supported_thinking_levels: ['off', 'low', 'high'],
       context_window: 128_000,
       output_max_tokens: 32_000,
+      supports_image_input: true,
       targets: [],
     } satisfies Route
 
     expect(defineClientModel(model)).toEqual({
       name: 'shared-model',
       supportedThinkingLevels: ['off', 'low', 'high'],
+      supportsImageInput: true,
       contextWindow: 128_000,
       outputMaxTokens: 32_000,
     })

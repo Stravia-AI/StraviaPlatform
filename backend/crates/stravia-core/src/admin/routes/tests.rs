@@ -134,6 +134,10 @@ async fn route_fixture_with_protocol(
                     "limit": {
                         "context": 200000,
                         "output": 32000
+                    },
+                    "modalities": {
+                        "input": ["text", "image"],
+                        "output": ["text"]
                     }
                 }),
             },
@@ -179,6 +183,7 @@ async fn one_click_bind_is_idempotent_and_uses_upstream_id_as_route_id() -> anyh
     assert_eq!(second.targets[0].model, "upstream-model");
     assert_eq!(second.context_window, Some(200_000));
     assert_eq!(second.output_max_tokens, Some(32_000));
+    assert!(second.supports_image_input);
     Ok(())
 }
 
@@ -598,14 +603,21 @@ async fn gemini_accepts_generated_effort_maps() -> anyhow::Result<()> {
 async fn supported_levels_are_the_intersection_of_all_targets() -> anyhow::Result<()> {
     let (_data_dir, gateway, provider) = route_fixture().await?;
     let admin = gateway.admin();
-    for (model, values, context, output) in [
+    for (model, values, context, output, input_modalities) in [
         (
             "wide-effort-model",
             vec!["none", "low", "high", "max"],
             200_000,
             64_000,
+            vec!["text", "image"],
         ),
-        ("narrow-effort-model", vec!["low", "high"], 128_000, 32_000),
+        (
+            "narrow-effort-model",
+            vec!["low", "high"],
+            128_000,
+            32_000,
+            vec!["text"],
+        ),
     ] {
         admin
             .create_manual_provider_model(
@@ -621,6 +633,10 @@ async fn supported_levels_are_the_intersection_of_all_targets() -> anyhow::Resul
                         "limit": {
                             "context": context,
                             "output": output
+                        },
+                        "modalities": {
+                            "input": input_modalities,
+                            "output": ["text"]
                         }
                     }),
                 },
@@ -659,6 +675,7 @@ async fn supported_levels_are_the_intersection_of_all_targets() -> anyhow::Resul
     );
     assert_eq!(route.context_window, Some(128_000));
     assert_eq!(route.output_max_tokens, Some(32_000));
+    assert!(!route.supports_image_input);
     Ok(())
 }
 

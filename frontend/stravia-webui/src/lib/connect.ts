@@ -26,6 +26,7 @@ export interface ClaudeModelMappings {
 export interface ClientModelDefinition {
   name: string
   supportedThinkingLevels: readonly ThinkingLevel[]
+  supportsImageInput: boolean
   contextWindow?: number
   outputMaxTokens?: number
 }
@@ -44,6 +45,7 @@ type CliConfigParams =
       apiKey: string
       models: readonly ClientModelDefinition[]
       defaultModel: string
+      transparentImageInputEnabled: boolean
     }
 
 export const CLI_TOOLS: ReadonlyArray<{
@@ -95,6 +97,8 @@ const thinkingLevelDescriptions: Record<ThinkingLevel, string> = {
   max: 'Maximum reasoning effort',
 }
 
+const zcodeStraviaProviderId = 'custom:stravia'
+
 function reasoningEffort(level: ThinkingLevel): string {
   return level === 'off' ? 'none' : level
 }
@@ -105,6 +109,13 @@ function reasoningLevels(model: ClientModelDefinition): ThinkingLevel[] {
 
 function supportsReasoning(model: ClientModelDefinition): boolean {
   return reasoningLevels(model).length > 0
+}
+
+function inputModalities(
+  model: ClientModelDefinition,
+  transparentImageInputEnabled: boolean,
+): Array<'text' | 'image'> {
+  return transparentImageInputEnabled || model.supportsImageInput ? ['text', 'image'] : ['text']
 }
 
 function claudeEffortLevel(model: ClientModelDefinition): 'low' | 'medium' | 'high' | 'xhigh' | undefined {
@@ -122,6 +133,7 @@ export function defineClientModel(model: Route): ClientModelDefinition {
   return {
     name: model.name,
     supportedThinkingLevels: [...new Set(model.supported_thinking_levels ?? [])],
+    supportsImageInput: model.supports_image_input ?? false,
     ...(model.context_window ? { contextWindow: model.context_window } : {}),
     ...(model.output_max_tokens ? { outputMaxTokens: model.output_max_tokens } : {}),
   }
@@ -299,6 +311,7 @@ ${JSON.stringify(
         truncation_policy: { mode: 'bytes', limit: 10_000 },
         supports_parallel_tool_calls: false,
         experimental_supported_tools: [],
+        input_modalities: inputModalities(model, params.transparentImageInputEnabled),
         context_window: model.contextWindow,
       })),
     }
@@ -338,6 +351,7 @@ ${JSON.stringify(modelCatalog, null, 2)}`
             ]),
         ...(model.contextWindow === undefined ? [] : [`        contextWindow: ${model.contextWindow}`]),
         ...(model.outputMaxTokens === undefined ? [] : [`        maxTokens: ${model.outputMaxTokens}`]),
+        `        input: ${JSON.stringify(inputModalities(model, params.transparentImageInputEnabled))}`,
       ]
     })
 
@@ -373,6 +387,7 @@ modelRoles:
         name: model.name,
         reasoning: supportsReasoning(model),
         ...(thinkingLevelMap === undefined ? {} : { thinkingLevelMap }),
+        input: inputModalities(model, params.transparentImageInputEnabled),
         ...(model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow }),
         ...(model.outputMaxTokens === undefined ? {} : { maxTokens: model.outputMaxTokens }),
       }
@@ -412,6 +427,7 @@ ${JSON.stringify(
           models: models.map((model) => ({
             id: model.name,
             name: model.name,
+            input: inputModalities(model, params.transparentImageInputEnabled),
             ...(model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow }),
             ...(model.outputMaxTokens === undefined ? {} : { maxTokens: model.outputMaxTokens }),
           })),
@@ -429,6 +445,7 @@ ${JSON.stringify(
     const modelEntries = models.flatMap((model) => [
       `      ${JSON.stringify(model.name)}:`,
       ...(model.contextWindow === undefined ? [] : [`        context_length: ${model.contextWindow}`]),
+      `        supports_vision: ${inputModalities(model, params.transparentImageInputEnabled).includes('image')}`,
     ])
     return `# ~/.hermes/.env
 STRAVIA_API_KEY=${params.apiKey}
@@ -480,36 +497,91 @@ models:
   if (params.tool === 'workbuddy') {
     return `# ~/.workbuddy/models.json
 ${JSON.stringify(
-  models.map((model) => ({
-    id: model.name,
-    name: model.name,
-    vendor: 'Custom',
-    url: `${params.host}/v1/chat/completions`,
-    apiKey: params.apiKey,
-    ...(model.contextWindow === undefined ? {} : { maxInputTokens: model.contextWindow }),
-    ...(model.outputMaxTokens === undefined ? {} : { maxOutputTokens: model.outputMaxTokens }),
-    supportsToolCall: true,
-    supportsImages: false,
-    supportsReasoning: supportsReasoning(model),
-    useCustomProtocol: false,
-  })),
+  models.map((model) => {
+    const supportedEfforts = reasoningLevels(model)
+    return {
+      id: model.name,
+      name: model.name,
+      vendor: 'Custom',
+      url: `${params.host}/v1/chat/completions`,
+      apiKey: params.apiKey,
+      ...(model.contextWindow === undefined ? {} : { maxInputTokens: model.contextWindow }),
+      ...(model.outputMaxTokens === undefined ? {} : { maxOutputTokens: model.outputMaxTokens }),
+      supportsToolCall: true,
+      supportsImages: inputModalities(model, params.transparentImageInputEnabled).includes('image'),
+      supportsReasoning: supportedEfforts.length > 0,
+      useCustomProtocol: false,
+      ...(supportedEfforts.length === 0 ? {} : { reasoning: { supportedEfforts } }),
+    }
+  }),
   null,
   2,
 )}`
   }
 
   if (params.tool === 'zcode') {
-    return `# ZCode: Manage Models > Settings > Model Settings > Add Provider
-Provider Name: Stravia
-Protocol: OpenAI
-Base URL: ${params.host}/v1
-API Key: ${params.apiKey}
+    const zcodeModels = Object.fromEntries(
+      models.map((model) => {
+        const variants = [...new Set(model.supportedThinkingLevels)]
+        const defaultVariant = variants.includes('medium')
+          ? 'medium'
+          : variants.find((variant) => variant !== 'off')
+        const limit = {
+          ...(model.contextWindow === undefined ? {} : { context: model.contextWindow }),
+          ...(model.outputMaxTokens === undefined ? {} : { output: model.outputMaxTokens }),
+        }
 
-# Add Model, then enable each model authorized by this API Key:
-${modelNames.join('\n')}
+        return [
+          model.name,
+          {
+            ...(defaultVariant === undefined
+              ? {}
+              : {
+                  reasoning: {
+                    enabled: true,
+                    variants,
+                    defaultVariant,
+                  },
+                }),
+            ...(Object.keys(limit).length === 0 ? {} : { limit }),
+            modalities: {
+              input: inputModalities(model, params.transparentImageInputEnabled),
+              output: ['text'],
+            },
+            zcode: {
+              modalitiesConfigured: true,
+              modified: true,
+            },
+          },
+        ]
+      }),
+    )
 
-# Select this default model:
-${params.defaultModel}`
+    return `# Exit ZCode before editing its configuration file.
+# Windows: %USERPROFILE%\\.zcode\\v2\\config.json
+# macOS/Linux: ~/.zcode/v2/config.json
+# Merge the provider entry below into the top-level "provider" object; keep every existing provider.
+${JSON.stringify(
+  {
+    provider: {
+      [zcodeStraviaProviderId]: {
+        name: 'Stravia',
+        kind: 'openai-compatible',
+        options: {
+          apiKey: params.apiKey,
+          baseURL: `${params.host}/v1`,
+          apiKeyRequired: true,
+        },
+        source: 'custom',
+        models: zcodeModels,
+      },
+    },
+  },
+  null,
+  2,
+)}
+
+# Restart ZCode, then select ${params.defaultModel} as the default model.`
   }
 
   if (params.tool === 'deepseek-harness') {
@@ -517,6 +589,7 @@ ${params.defaultModel}`
       `        - id: ${JSON.stringify(model.name)}`,
       ...(model.contextWindow === undefined ? [] : [`          contextWindow: ${model.contextWindow}`]),
       ...(model.outputMaxTokens === undefined ? [] : [`          maxTokens: ${model.outputMaxTokens}`]),
+      `          input: ${JSON.stringify(inputModalities(model, params.transparentImageInputEnabled))}`,
     ])
     return `# Set STRAVIA_API_KEY before starting dsh.
 # Value: ${params.apiKey}
@@ -554,6 +627,10 @@ ${modelEntries.join('\n')}
           reasoning: supportsReasoning(model),
           variants,
           limit,
+          modalities: {
+            input: inputModalities(model, params.transparentImageInputEnabled),
+            output: ['text'],
+          },
         },
       ]
     }),
