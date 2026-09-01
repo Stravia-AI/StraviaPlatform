@@ -1,28 +1,32 @@
-use futures::{StreamExt, stream};
+use futures::{stream, StreamExt};
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use rmcp::model::{CallToolRequestParams, CallToolResult, ClientInfo, ProtocolVersion};
 use rmcp::service::RunningService;
 use rmcp::transport::{
-    StreamableHttpClientTransport, streamable_http_client::StreamableHttpClientTransportConfig,
+    streamable_http_client::StreamableHttpClientTransportConfig, StreamableHttpClientTransport,
 };
 use rmcp::{ClientLifecycleMode, ClientServiceExt, RoleClient};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
-use super::engine::{
-    AdapterSuccess, ProviderFailure, ProviderUsage, WebProviderAdapter, failed_fetch_result,
-};
-use super::{
-    FetchRequest, FetchResult, FetchStatus, SearchMode, SearchRequest, SearchResponse,
-    SearchResult, WebAccessErrorCode,
+use crate::{
+    failed_fetch_result, AdapterSuccess, FetchRequest, FetchResult, FetchStatus, ProviderFailure,
+    ProviderUsage, SearchMode, SearchRequest, SearchResponse, SearchResult, WebAccessErrorCode,
+    WebProviderAdapter,
 };
 
-pub(super) enum AdapterConfig {
-    Exa { id: String, api_key: String },
-    Brave { id: String, api_key: String },
-    Tavily { id: String, api_key: String },
-    Zhipu { id: String, api_key: String },
+pub enum RemoteAdapterConfig {
+    Exa {
+        id: String,
+        client: reqwest::Client,
+        api_key: String,
+    },
+    Zhipu {
+        id: String,
+        client: reqwest::Client,
+        api_key: String,
+    },
 }
 
 const EXA_MAX_CONTENT_CHARACTERS: usize = 10_000;
@@ -31,27 +35,22 @@ const ZHIPU_READER_MCP_ENDPOINT: &str = "https://open.bigmodel.cn/api/mcp/web_re
 const ZHIPU_SEARCH_TOOL: &str = "web_search_prime";
 const ZHIPU_READER_TOOL: &str = "webReader";
 
-pub(super) fn build_adapter(
-    client: reqwest::Client,
-    config: AdapterConfig,
-) -> Arc<dyn WebProviderAdapter> {
+pub fn build_remote_adapter(config: RemoteAdapterConfig) -> Arc<dyn WebProviderAdapter> {
     match config {
-        AdapterConfig::Exa { id, api_key } => Arc::new(ExaAdapter {
+        RemoteAdapterConfig::Exa {
+            id,
+            client,
+            api_key,
+        } => Arc::new(ExaAdapter {
             id,
             client,
             api_key,
         }),
-        AdapterConfig::Brave { id, api_key } => Arc::new(BraveAdapter {
+        RemoteAdapterConfig::Zhipu {
             id,
             client,
             api_key,
-        }),
-        AdapterConfig::Tavily { id, api_key } => Arc::new(TavilyAdapter {
-            id,
-            client,
-            api_key,
-        }),
-        AdapterConfig::Zhipu { id, api_key } => Arc::new(ZhipuAdapter {
+        } => Arc::new(ZhipuAdapter {
             id,
             client,
             api_key,
@@ -166,202 +165,6 @@ impl WebProviderAdapter for ExaAdapter {
         }
         Ok(AdapterSuccess::new(
             results,
-            ProviderUsage::from_payload(&payload),
-        ))
-    }
-}
-
-struct BraveAdapter {
-    id: String,
-    client: reqwest::Client,
-    api_key: String,
-}
-
-#[async_trait::async_trait]
-impl WebProviderAdapter for BraveAdapter {
-    fn provider_id(&self) -> &str {
-        &self.id
-    }
-
-    fn supports_search(&self) -> bool {
-        true
-    }
-
-    fn supports_fetch(&self) -> bool {
-        false
-    }
-
-    async fn search(
-        &self,
-        request: &SearchRequest,
-    ) -> Result<AdapterSuccess<SearchResponse>, ProviderFailure> {
-        let query = brave_query(request)?;
-        let mut url = reqwest::Url::parse("https://api.search.brave.com/res/v1/web/search")
-            .map_err(|_| invalid_response("invalid Brave endpoint"))?;
-        url.query_pairs_mut()
-            .append_pair("q", &query)
-            .append_pair("count", &request.max_results.to_string());
-        let payload = send_json(
-            self.client
-                .get(url)
-                .header("x-subscription-token", &self.api_key)
-                .header("accept", "application/json"),
-        )
-        .await?;
-        let values = payload
-            .pointer("/web/results")
-            .and_then(Value::as_array)
-            .ok_or_else(|| invalid_response("Brave Search response is missing web.results"))?;
-        let results = values
-            .iter()
-            .filter_map(|item| {
-                Some(SearchResult {
-                    url: http_url_field(item, "url")?.to_string(),
-                    title: optional_string(item, "title"),
-                    snippet: optional_string(item, "description"),
-                })
-            })
-            .take(request.max_results)
-            .collect::<Vec<_>>();
-        if !values.is_empty() && results.is_empty() {
-            return Err(invalid_response(
-                "Brave Search results contain no valid URLs",
-            ));
-        }
-        Ok(AdapterSuccess::new(
-            index_response(request, results),
-            ProviderUsage::from_payload(&payload),
-        ))
-    }
-
-    async fn fetch(
-        &self,
-        _request: &FetchRequest,
-    ) -> Result<AdapterSuccess<Vec<FetchResult>>, ProviderFailure> {
-        Err(ProviderFailure::new(
-            WebAccessErrorCode::Unsupported,
-            "Brave does not support Web Fetch",
-        ))
-    }
-}
-
-fn brave_query(request: &SearchRequest) -> Result<String, ProviderFailure> {
-    let mut query = request.query.clone();
-    if !request.allowed_domains.is_empty() {
-        query.push_str(" (");
-        for (index, domain) in request.allowed_domains.iter().enumerate() {
-            if index > 0 {
-                query.push_str(" OR ");
-            }
-            query.push_str("site:");
-            query.push_str(domain);
-        }
-        query.push(')');
-    }
-    for domain in &request.blocked_domains {
-        query.push_str(" -site:");
-        query.push_str(domain);
-    }
-    if query.chars().count() > 400 || query.split_whitespace().count() > 50 {
-        return Err(ProviderFailure::new(
-            WebAccessErrorCode::Unsupported,
-            "Brave query limits exceeded",
-        ));
-    }
-    Ok(query)
-}
-
-struct TavilyAdapter {
-    id: String,
-    client: reqwest::Client,
-    api_key: String,
-}
-
-#[async_trait::async_trait]
-impl WebProviderAdapter for TavilyAdapter {
-    fn provider_id(&self) -> &str {
-        &self.id
-    }
-
-    fn supports_search(&self) -> bool {
-        true
-    }
-
-    fn supports_fetch(&self) -> bool {
-        true
-    }
-
-    async fn search(
-        &self,
-        request: &SearchRequest,
-    ) -> Result<AdapterSuccess<SearchResponse>, ProviderFailure> {
-        let mut body = json!({
-            "query": request.query,
-            "max_results": request.max_results,
-            "search_depth": "basic",
-            "include_answer": false,
-            "include_raw_content": false
-        });
-        if !request.allowed_domains.is_empty() {
-            body["include_domains"] = json!(request.allowed_domains);
-        }
-        if !request.blocked_domains.is_empty() {
-            body["exclude_domains"] = json!(request.blocked_domains);
-        }
-        let payload = send_json(
-            self.client
-                .post("https://api.tavily.com/search")
-                .bearer_auth(&self.api_key)
-                .json(&body),
-        )
-        .await?;
-        let values = payload
-            .get("results")
-            .and_then(Value::as_array)
-            .ok_or_else(|| invalid_response("Tavily Search response is missing results"))?;
-        let results = values
-            .iter()
-            .filter_map(|item| {
-                Some(SearchResult {
-                    url: http_url_field(item, "url")?.to_string(),
-                    title: optional_string(item, "title"),
-                    snippet: optional_string(item, "content"),
-                })
-            })
-            .take(request.max_results)
-            .collect::<Vec<_>>();
-        if !values.is_empty() && results.is_empty() {
-            return Err(invalid_response(
-                "Tavily Search results contain no valid URLs",
-            ));
-        }
-        Ok(AdapterSuccess::new(
-            index_response(request, results),
-            ProviderUsage::from_payload(&payload),
-        ))
-    }
-
-    async fn fetch(
-        &self,
-        request: &FetchRequest,
-    ) -> Result<AdapterSuccess<Vec<FetchResult>>, ProviderFailure> {
-        let payload = send_json(
-            self.client
-                .post("https://api.tavily.com/extract")
-                .bearer_auth(&self.api_key)
-                .json(&json!({
-                    "urls": request.urls,
-                    "format": "markdown",
-                    "include_images": false
-                })),
-        )
-        .await?;
-        Ok(AdapterSuccess::new(
-            normalize_fetch_payload(
-                request,
-                payload.get("results").and_then(Value::as_array),
-                "raw_content",
-            ),
             ProviderUsage::from_payload(&payload),
         ))
     }
@@ -554,6 +357,7 @@ fn normalize_zhipu_fetch(
         format: Some("markdown".into()),
         title: optional_string(payload, "title"),
         truncated,
+        limitations: Vec::new(),
         error: None,
     })
 }
@@ -685,6 +489,7 @@ fn normalize_fetch_payload(
                 format: Some("markdown".into()),
                 title: optional_string(item, "title"),
                 truncated: false,
+                limitations: Vec::new(),
                 error: None,
             }
         })
@@ -717,25 +522,6 @@ fn optional_string(value: &Value, field: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn brave_rewrite_refuses_over_limit_filters() {
-        let request = SearchRequest {
-            query: "Rust".into(),
-            max_results: 5,
-            allowed_domains: (0..20)
-                .map(|index| format!("very-long-domain-{index}.example.com"))
-                .collect(),
-            blocked_domains: vec![],
-        };
-        assert!(matches!(
-            brave_query(&request),
-            Err(ProviderFailure {
-                code: WebAccessErrorCode::Unsupported,
-                ..
-            })
-        ));
-    }
 
     #[test]
     fn fetch_normalization_reuses_deduplicated_upstream_results() {

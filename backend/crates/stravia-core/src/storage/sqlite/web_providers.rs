@@ -5,7 +5,7 @@ use crate::storage::traits::{
 };
 use anyhow::Context;
 use async_trait::async_trait;
-use sqlx::SqlitePool;
+use sqlx::{SqlitePool, types::Json};
 
 const ENABLED_KEY: &str = "web_access_enabled";
 const SEARCH_IDS_KEY: &str = "web_access_search_provider_ids";
@@ -20,7 +20,7 @@ pub(super) struct SqliteWebProviderStore {
 impl WebProviderStore for SqliteWebProviderStore {
     async fn list(&self) -> anyhow::Result<Vec<WebProvider>> {
         Ok(sqlx::query_as::<_, WebProvider>(
-            "SELECT id, name, kind, api_key, last_test_success, last_test_at, created_at, updated_at FROM web_providers ORDER BY created_at DESC",
+            "SELECT id, name, kind, api_key, use_proxy, local_engines, last_test_success, last_test_at, created_at, updated_at FROM web_providers ORDER BY created_at DESC",
         )
         .fetch_all(&self.pool)
         .await?)
@@ -28,7 +28,7 @@ impl WebProviderStore for SqliteWebProviderStore {
 
     async fn get(&self, id: &str) -> anyhow::Result<Option<WebProvider>> {
         Ok(sqlx::query_as::<_, WebProvider>(
-            "SELECT id, name, kind, api_key, last_test_success, last_test_at, created_at, updated_at FROM web_providers WHERE id = ?",
+            "SELECT id, name, kind, api_key, use_proxy, local_engines, last_test_success, last_test_at, created_at, updated_at FROM web_providers WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -37,13 +37,18 @@ impl WebProviderStore for SqliteWebProviderStore {
 
     async fn create(&self, input: CreateWebProvider) -> anyhow::Result<WebProvider> {
         let id = uuid::Uuid::new_v4().to_string();
-        sqlx::query("INSERT INTO web_providers (id, name, kind, api_key) VALUES (?, ?, ?, ?)")
-            .bind(&id)
-            .bind(input.name.trim())
-            .bind(input.kind)
-            .bind(input.api_key)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "INSERT INTO web_providers (id, name, kind, api_key, use_proxy, local_engines)
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(input.name.trim())
+        .bind(input.kind)
+        .bind(input.api_key)
+        .bind(input.use_proxy)
+        .bind(input.local_engines.map(Json))
+        .execute(&self.pool)
+        .await?;
         self.get(&id)
             .await?
             .context("Web Provider missing after create")
@@ -59,11 +64,20 @@ impl WebProviderStore for SqliteWebProviderStore {
             Some(value) => value,
             None => current.api_key,
         };
+        let use_proxy = input.use_proxy.unwrap_or(current.use_proxy);
+        let local_engines = match input.local_engines {
+            Some(value) => value.map(Json),
+            None => current.local_engines,
+        };
         sqlx::query(
-            "UPDATE web_providers SET name = ?, api_key = ?, updated_at = datetime('now') WHERE id = ?",
+            "UPDATE web_providers
+             SET name = ?, api_key = ?, use_proxy = ?, local_engines = ?, updated_at = datetime('now')
+             WHERE id = ?",
         )
         .bind(name.trim())
         .bind(api_key)
+        .bind(use_proxy)
+        .bind(local_engines)
         .bind(id)
         .execute(&self.pool)
         .await?;
@@ -188,7 +202,7 @@ impl WebProviderStore for SqliteWebProviderStore {
         .fetch_all(&mut *tx)
         .await?;
         let web_providers = sqlx::query_as::<_, WebProvider>(
-            "SELECT id, name, kind, api_key, last_test_success, last_test_at, created_at, updated_at FROM web_providers ORDER BY created_at DESC",
+            "SELECT id, name, kind, api_key, use_proxy, local_engines, last_test_success, last_test_at, created_at, updated_at FROM web_providers ORDER BY created_at DESC",
         )
         .fetch_all(&mut *tx)
         .await?;
@@ -224,7 +238,7 @@ impl WebProviderStore for SqliteWebProviderStore {
         sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
         let result: anyhow::Result<()> = async {
             let providers = sqlx::query_as::<_, WebProvider>(
-                "SELECT id, name, kind, api_key, last_test_success, last_test_at, created_at, updated_at FROM web_providers",
+                "SELECT id, name, kind, api_key, use_proxy, local_engines, last_test_success, last_test_at, created_at, updated_at FROM web_providers",
             )
             .fetch_all(&mut *conn)
             .await?;

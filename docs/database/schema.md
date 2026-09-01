@@ -266,20 +266,22 @@ Provider Model 的有序分层价格规则。`context_over_200k` 与 Provider Ca
 
 ## web_providers
 
-Local Web Search 的内部 Search 与 Fetch 上游配置。`api_key` 用于 Exa、Brave、Tavily 与智谱 Coding Plan；Codex Search Backend 不属于此表。
+Local Web Search 的内部 Search 与 Fetch 上游配置。每个部署恰好有一条不可删除的 `local` 记录；Exa 与智谱使用 `api_key`。Codex Search Backend 不属于此表。
 
 | Column | Type | Default | Description |
 |---|---|---|---|
 | `id` | TEXT PK | — | 主键，UUID |
 | `name` | TEXT NOT NULL UNIQUE | — | 管理员可见名称 |
-| `kind` | TEXT NOT NULL | — | `exa`、`brave`、`tavily` 或 `zhipu` |
-| `api_key` | TEXT NOT NULL | — | Web Provider 凭据；Admin API 不回显 |
+| `kind` | TEXT NOT NULL | — | `local`、`exa` 或 `zhipu`；`local` 由唯一部分索引约束为单例 |
+| `api_key` | TEXT | NULL | Exa/智谱必填；Local 必须为空；Admin API 不回显 |
+| `use_proxy` | INTEGER/BOOLEAN NOT NULL | `0`/`FALSE` | 是否通过 Gateway `proxy_url` 出站 |
+| `local_engines` | TEXT/JSONB | NULL | 仅 Local 使用的 HTML 检索引擎配置；至少一个引擎启用，私有设置不由 Admin API 回显 |
 | `last_test_success` | INTEGER | NULL | 最近一次连接测试是否成功 |
 | `last_test_at` | TEXT | NULL | 最近一次连接测试时间 |
 | `created_at` | TEXT | `datetime('now')` | 创建时间 |
 | `updated_at` | TEXT | `datetime('now')` | 更新时间 |
 
-表不再保留 `provider_id` 或 Codex 行。
+表不再保留 `provider_id`、Codex、Brave 或 Tavily 行。凭据约束要求远程 Provider 具有非空 `api_key` 且没有 `local_engines`，Local 则恰好相反。
 
 ---
 
@@ -458,6 +460,8 @@ Revisioned Provider Catalog migration 20 不改变表 shape。它仅把可由既
 History Marker migration 22 新增 Principal-scoped `history_markers` 表及 Platform Tool Execution 的 durable claim、lease、deadline、terminal、publication 与 retention 字段。隐藏 payload 沿用现有 SQLite/PostgreSQL 部署安全边界，不引入独立加密密钥。
 
 Route Target Aggregate migration 27 先把仅存在于旧 `models.target_provider` / `models.target_model` 的主 Target 补入 `model_backends`，再删除这两个重复列，并为大小写敏感的 Route ID `models.name` 建立唯一索引。升级后 Route 与全部 Targets 由同一聚合写入事务维护。
+
+Web Access Adapter migration 28 是不兼容旧二进制的 clean cutover：把 kind 约束收紧为 `local|exa|zhipu`，删除 Brave/Tavily 行，加入 `use_proxy` 与 Local Search Engine 配置，并写入唯一 Local Provider。Search/Fetch 列表保留既有 Exa/智谱顺序；移除旧 kind 后为空的列表改为仅 Local。升级前必须备份数据库；回滚必须恢复 migration 28 之前的数据库，不能只回退应用文件。
 
 SQLite 与 PostgreSQL 必须保持 API Key 字段默认值、Turn kind、settings identity、唯一约束和 Artifact 外键等价。
 

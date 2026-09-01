@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["backend/crates/stravia-core", "backend/crates/stravia-devtools", "backend/apps/stravia-desktop", "backend/apps/stravia-server", "backend/crates/stravia-web-local"]
+members = ["backend/crates/stravia-core", "backend/crates/stravia-devtools", "backend/apps/stravia-desktop", "backend/apps/stravia-server", "backend/crates/stravia-web-access", "backend/crates/stravia-web-access-contract"]
 
 [workspace.package]
 version = "0.1.1"
@@ -11,7 +11,8 @@ license = "AGPL-3.0-only"
 [workspace.dependencies]
 stravia-core = { path = "backend/crates/stravia-core" }
 stravia-server = { path = "backend/apps/stravia-server", default-features = false }
-stravia-web-local = { path = "backend/crates/stravia-web-local" }
+stravia-web-access = { path = "backend/crates/stravia-web-access" }
+stravia-web-access-contract = { path = "backend/crates/stravia-web-access-contract" }
 tokio = { version = "1", features = ["full"] }
 ammonia = "4.1.4"
 axum = { version = "0.8", features = ["macros", "multipart", "ws"] }

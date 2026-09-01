@@ -4,7 +4,7 @@ status: accepted
 
 # Own Web Access adapters in stravia-web-access
 
-Stravia 将 Web Access 的全部 Web Provider 适配器从 `stravia-core` 迁到 `stravia-web-access`（由 `stravia-web-local` 改名）。crate 拥有 Local、Exa、Zhipu；删除 Brave 与 Tavily。公开 Web Search、Search Report、Local Agent 循环、Web Access 统一请求/结果与有序 failover 仍在 core；Codex Search Backend 本期不动。Local Web Provider 是恰好一条、不可删除的 `kind=local` 记录；出站跟随模型 Provider 的 `use_proxy` + Gateway `proxy_url`，不再把 Direct/System/Explicit 做成管理面。这样桌面与服务器共用同一套零 API key 的 Internal Search/Fetch，远程适配器不再寄生在 core 里，也避免为 Local 再开第二套配置根。
+Stravia 将 Web Access 的全部 Web Provider 适配器从 `stravia-core` 迁到 `stravia-web-access`（由 `stravia-web-local` 改名）。crate 拥有 Local、Exa、Zhipu；删除 Brave 与 Tavily。中立的 `stravia-web-access-contract` 定义单一适配器 trait 与统一请求/结果，core 直接依赖并回导出该契约，同时继续拥有验证、有序 failover 与运行快照；Provider 实现 crate 不接管客户端传输契约。公开 Web Search、Search Report、Local Agent 循环与 Codex Search Backend 本期不动。Local Web Provider 是恰好一条、不可删除的 `kind=local` 记录；出站跟随模型 Provider 的 `use_proxy` + Gateway `proxy_url`，不再把 Direct/System/Explicit 做成管理面。这样桌面与服务器共用同一套零 API key 的 Internal Search/Fetch，远程适配器不再寄生在 core 里，也避免为 Local 再开第二套配置根。
 
 本决策接续 [ADR-0024](0024-local-web-provider-in-process-metasearch.md) 与 [ADR-0025](0025-in-process-web-fetch-quality-gate-chromium.md) 推迟的接线，并取代 [ADR-0026](0026-local-web-outbound-proxy-mode.md) 的管理面三档；search/fetch/Chrome 必须共用同一出站快照的约束仍然有效。
 

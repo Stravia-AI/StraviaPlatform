@@ -1,4 +1,4 @@
-use stravia_web_local::{parse_cli_proxy, LocalWeb, OutboundProxyMode};
+use stravia_web_access::{parse_cli_proxy, LocalWeb, OutboundProxyMode};
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {

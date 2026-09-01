@@ -6486,6 +6486,8 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "sqlx",
+ "stravia-web-access",
+ "stravia-web-access-contract",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -6566,10 +6568,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "stravia-web-local"
+name = "stravia-web-access"
 version = "0.1.1"
 dependencies = [
  "ammonia",
+ "async-trait",
  "base64 0.23.1",
  "bytes",
  "chrono",
@@ -6586,9 +6589,12 @@ dependencies = [
  "parking_lot",
  "rand 0.10.2",
  "regex",
+ "reqwest",
+ "rmcp",
  "scraper",
  "serde",
  "serde_json",
+ "stravia-web-access-contract",
  "thiserror 2.0.20",
  "tokio",
  "tokio-stream",
@@ -6599,6 +6605,15 @@ dependencies = [
  "urlencoding",
  "wreq",
  "wreq-util",
+]
+
+[[package]]
+name = "stravia-web-access-contract"
+version = "0.1.1"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

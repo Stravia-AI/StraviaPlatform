@@ -1,5 +1,8 @@
 use super::policy::{apply_domain_filters, validate_fetch_request, validate_search_request};
 use super::*;
+#[cfg(test)]
+pub(super) use stravia_web_access_contract::ProviderUsage;
+pub(super) use stravia_web_access_contract::{AdapterSuccess, ProviderFailure, WebProviderAdapter};
 
 fn search_failure_message(code: WebAccessErrorCode) -> &'static str {
     match code {
@@ -10,113 +13,6 @@ fn search_failure_message(code: WebAccessErrorCode) -> &'static str {
         WebAccessErrorCode::RateLimited => "Web Search is rate limited",
         WebAccessErrorCode::Unavailable => "Web Search is unavailable",
     }
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct ProviderFailure {
-    pub(super) code: WebAccessErrorCode,
-    pub(super) message: String,
-}
-
-impl ProviderFailure {
-    pub(super) fn new(code: WebAccessErrorCode, message: impl Into<String>) -> Self {
-        Self {
-            code,
-            message: message.into(),
-        }
-    }
-
-    #[cfg(test)]
-    pub(super) fn unavailable(message: impl Into<String>) -> Self {
-        Self::new(WebAccessErrorCode::Unavailable, message)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub(super) struct ProviderUsage {
-    pub(super) input_tokens: Option<u64>,
-    pub(super) output_tokens: Option<u64>,
-    pub(super) total_tokens: Option<u64>,
-    pub(super) credits: Option<f64>,
-    pub(super) cost: Option<f64>,
-}
-
-impl ProviderUsage {
-    pub(super) fn from_payload(payload: &serde_json::Value) -> Option<Self> {
-        let usage = payload.get("usage")?.as_object()?;
-        let input_tokens = usage
-            .get("input_tokens")
-            .and_then(serde_json::Value::as_u64)
-            .or_else(|| {
-                usage
-                    .get("prompt_tokens")
-                    .and_then(serde_json::Value::as_u64)
-            });
-        let output_tokens = usage
-            .get("output_tokens")
-            .and_then(serde_json::Value::as_u64)
-            .or_else(|| {
-                usage
-                    .get("completion_tokens")
-                    .and_then(serde_json::Value::as_u64)
-            });
-        let total_tokens = usage
-            .get("total_tokens")
-            .and_then(serde_json::Value::as_u64);
-        let credits = usage.get("credits").and_then(serde_json::Value::as_f64);
-        let cost = usage.get("cost").and_then(serde_json::Value::as_f64);
-        if input_tokens.is_none()
-            && output_tokens.is_none()
-            && total_tokens.is_none()
-            && credits.is_none()
-            && cost.is_none()
-        {
-            return None;
-        }
-        Some(Self {
-            input_tokens,
-            output_tokens,
-            total_tokens,
-            credits,
-            cost,
-        })
-    }
-}
-
-/// Successful adapter output keeps provider-native usage private to Web Access
-/// telemetry; only `result` crosses the engine's public seam.
-pub(super) struct AdapterSuccess<T> {
-    pub(super) result: T,
-    pub(super) native_usage: Option<ProviderUsage>,
-}
-
-impl<T> AdapterSuccess<T> {
-    pub(super) fn new(result: T, native_usage: Option<ProviderUsage>) -> Self {
-        Self {
-            result,
-            native_usage,
-        }
-    }
-}
-
-#[async_trait::async_trait]
-pub(super) trait WebProviderAdapter: Send + Sync {
-    fn provider_id(&self) -> &str {
-        "anonymous"
-    }
-
-    fn supports_search(&self) -> bool;
-    fn supports_fetch(&self) -> bool;
-
-    async fn search(
-        &self,
-        request: &SearchRequest,
-    ) -> Result<AdapterSuccess<SearchResponse>, ProviderFailure>;
-
-    async fn fetch(
-        &self,
-        request: &FetchRequest,
-    ) -> Result<AdapterSuccess<Vec<FetchResult>>, ProviderFailure>;
 }
 
 #[derive(Clone)]
@@ -371,6 +267,7 @@ pub(super) fn failed_fetch_result(
         format: None,
         title: None,
         truncated: false,
+        limitations: Vec::new(),
         error: Some(WebAccessPublicError { code, message }),
     }
 }

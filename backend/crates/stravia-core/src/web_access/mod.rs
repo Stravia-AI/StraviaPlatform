@@ -5,7 +5,6 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 mod platform;
-mod providers;
 use crate::db::models::{WebAccessSettings, WebProvider};
 use crate::storage::traits::WebAccessApiKeyPermissions;
 type RuntimeConfig = (
@@ -17,6 +16,12 @@ type RuntimeConfig = (
 pub(crate) use platform::{WEB_FETCH_TOOL_ID, WEB_SEARCH_TOOL_ID, internal_platform_tools};
 
 mod types;
+pub use stravia_web_access_contract::{
+    FetchRequest, FetchResult, FetchStatus, SearchRequest, SearchResponse, WebAccessErrorCode,
+    WebAccessPublicError,
+};
+#[cfg(test)]
+use stravia_web_access_contract::{SearchMode, SearchResult};
 pub use types::*;
 
 mod engine;

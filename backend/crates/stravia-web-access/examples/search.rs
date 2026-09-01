@@ -1,4 +1,4 @@
-use stravia_web_local::{
+use stravia_web_access::{
     parse_cli_proxy, search::engines::ProgressUpdateData, LocalWeb, OutboundProxyMode,
 };
 

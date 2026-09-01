@@ -3,7 +3,7 @@
 | 项 | 值 |
 |---|---|
 | 研究日期 | 2026-08-21 |
-| 范围 | `stravia-web-local` 的零凭据 HTML 搜索 fan-out；不评估需要新增持久化配置、付费合同或授权 OAuth 的 Web Provider。 |
+| 范围 | `stravia-web-access` 的零凭据 HTML 搜索 fan-out；不评估需要新增持久化配置、付费合同或授权 OAuth 的 Web Provider。 |
 | 已有引擎 | Google、Bing、Brave 默认启用；Baidu、360 搜索和搜狗微信已实现但默认关闭。 |
 
 > 结论区分已由第一方页面直接观察到的事实和工程判断。HTML 页面可抓取不代表它是稳定或获准的 API；部署方仍须审查上游条款、robots、地域合规与访问频率。
@@ -74,4 +74,4 @@
 | S7 | [头条搜索](https://so.toutiao.com/search?keyword=rust) / [头条合作入口](https://www.toutiao.com/cooperation/) | 原始 HTML 的应用壳、内部 AJAX/Argus 令牌边界与未发现公开关键词搜索 API。 |
 | S8 | [小红书搜索](https://www.xiaohongshu.com/search_result/?keyword=rust) | 当前请求只得到应用壳，未得到可解析的自然结果。 |
 | S9 | [神马站长开放平台](https://zhanzhang.sm.cn/open/helpopen) / [Sitemap 说明](https://zhanzhang.sm.cn/open/helpsitemap) | 公开能力为结构化数据与 Sitemap 提交；不保证抓取、索引或排名，不能视为通用搜索 API。 |
-| S10 | [`stravia-web-local` 排名实现](../../backend/crates/stravia-web-local/src/search/engines/ranking.rs) | 相同 URL 合并且各引擎 score 叠加；新增通用引擎需要保守权重与重复结果观察。 |
+| S10 | [`stravia-web-access` 排名实现](../../backend/crates/stravia-web-access/src/search/engines/ranking.rs) | 相同 URL 合并且各引擎 score 叠加；新增通用引擎需要保守权重与重复结果观察。 |

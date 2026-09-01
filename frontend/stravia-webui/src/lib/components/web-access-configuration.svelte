@@ -10,7 +10,13 @@ import { toast } from 'svelte-sonner'
 import { admin } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
 import { formatDuration } from '$lib/format'
-import type { WebAccessSettings, WebProvider, WebProviderKind } from '$lib/types'
+import type {
+  LocalSearchEngineConfigs,
+  LocalSearchEngineId,
+  WebAccessSettings,
+  WebProvider,
+  WebProviderKind,
+} from '$lib/types'
 import * as AlertDialog from '$lib/components/ui/alert-dialog'
 import { Badge } from '$lib/components/ui/badge'
 import { Button, buttonVariants } from '$lib/components/ui/button'
@@ -30,6 +36,7 @@ let editingProvider = $state<WebProvider>()
 let editorName = $state('')
 let editorKind = $state<WebProviderKind>('exa')
 let editorSecret = $state('')
+let editorUseProxy = $state(false)
 let savingEditor = $state(false)
 let actingProviderId = $state<string>()
 let savingSettings = $state(false)
@@ -43,8 +50,29 @@ const settings = $derived<WebAccessSettings>(
 const settingsUnavailable = $derived(settingsQuery.isPending || settingsQuery.isError)
 
 function kindLabel(kind: WebProviderKind): string {
-  return ({ exa: 'Exa', brave: 'Brave', tavily: 'Tavily', zhipu: 'Zhipu' } as const)[kind]
+  return ({ local: 'Local', exa: 'Exa', zhipu: 'Zhipu' } as const)[kind]
 }
+
+const localEngineOptions: ReadonlyArray<{ id: LocalSearchEngineId; label: string }> = [
+  { id: 'google', label: 'Google' },
+  { id: 'bing', label: 'Bing' },
+  { id: 'brave', label: 'Brave' },
+  { id: 'baidu', label: 'Baidu' },
+  { id: '360', label: '360 Search' },
+  { id: 'sogou_weixin', label: 'Sogou Weixin' },
+  { id: 'google_scholar', label: 'Google Scholar' },
+]
+
+function defaultLocalEngines(): LocalSearchEngineConfigs {
+  return Object.fromEntries(
+    localEngineOptions.map(({ id }) => [
+      id,
+      { enabled: ['google', 'bing', 'brave', 'baidu'].includes(id) },
+    ]),
+  ) as LocalSearchEngineConfigs
+}
+
+let editorLocalEngines = $state<LocalSearchEngineConfigs>(defaultLocalEngines())
 
 function supportsFetch(provider: WebProvider): boolean {
   return provider.capabilities.fetch
@@ -55,6 +83,8 @@ function openCreate(): void {
   editorName = ''
   editorKind = 'exa'
   editorSecret = ''
+  editorUseProxy = false
+  editorLocalEngines = defaultLocalEngines()
   editorOpen = true
 }
 
@@ -63,6 +93,11 @@ function openEdit(provider: WebProvider): void {
   editorName = provider.name
   editorKind = provider.kind
   editorSecret = ''
+  editorUseProxy = provider.use_proxy
+  editorLocalEngines = {
+    ...defaultLocalEngines(),
+    ...(provider.local_engines ?? {}),
+  }
   editorOpen = true
 }
 
@@ -78,7 +113,7 @@ async function saveEditor(): Promise<void> {
     toast.error(m.web_access_configuration_service_name_required())
     return
   }
-  if (!editingProvider && !editorSecret.trim()) {
+  if (!editingProvider && editorKind !== 'local' && !editorSecret.trim()) {
     toast.error(m.web_access_configuration_api_key_required())
     return
   }
@@ -86,15 +121,26 @@ async function saveEditor(): Promise<void> {
   savingEditor = true
   try {
     if (editingProvider) {
-      await admin.webAccess.providers.update(editingProvider.id, {
-        name: editorName.trim(),
-        ...(editorSecret.trim() ? { api_key: editorSecret.trim() } : {}),
-      })
+      await admin.webAccess.providers.update(
+        editingProvider.id,
+        editorKind === 'local'
+          ? {
+              name: editorName.trim(),
+              use_proxy: editorUseProxy,
+              local_engines: editorLocalEngines,
+            }
+          : {
+              name: editorName.trim(),
+              use_proxy: editorUseProxy,
+              ...(editorSecret.trim() ? { api_key: editorSecret.trim() } : {}),
+            },
+      )
     } else {
       await admin.webAccess.providers.create({
         name: editorName.trim(),
         kind: editorKind,
-        api_key: editorSecret.trim(),
+        api_key: editorSecret.trim() || undefined,
+        use_proxy: editorUseProxy,
       })
     }
     await refreshWebAccess()
@@ -270,14 +316,16 @@ async function deleteProvider(): Promise<void> {
               {/if}
             </Button>
             <Button variant="ghost" size="sm" onclick={() => openEdit(provider)}>{m.common_edit()}</Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              class="text-destructive"
-              onclick={() => {
-                deleteTarget = provider
-                deleteOpen = true
-              }}>{m.web_access_configuration_delete()}</Button>
+            {#if provider.kind !== 'local'}
+              <Button
+                variant="ghost"
+                size="sm"
+                class="text-destructive"
+                onclick={() => {
+                  deleteTarget = provider
+                  deleteOpen = true
+                }}>{m.web_access_configuration_delete()}</Button>
+            {/if}
           </div>
         </div>
       {/each}
@@ -369,21 +417,47 @@ async function deleteProvider(): Promise<void> {
               <Select.Trigger id="web-provider-kind" class="w-full">{kindLabel(editorKind)}</Select.Trigger>
               <Select.Content>
                 <Select.Item value="exa" label="Exa">Exa</Select.Item>
-                <Select.Item value="brave" label="Brave">Brave</Select.Item>
-                <Select.Item value="tavily" label="Tavily">Tavily</Select.Item>
                 <Select.Item value="zhipu" label="Zhipu">Zhipu</Select.Item>
               </Select.Content>
             </Select.Root>
           </Field.Field>
-          <Field.Field size="fill">
-            <Field.Label for="web-provider-secret">{m.common_api_key()}</Field.Label>
-            <Input
-              id="web-provider-secret"
-              type="password"
-              autocomplete="new-password"
-              bind:value={editorSecret}
-              placeholder={editingProvider ? m.web_access_configuration_leave_blank_keep_existing() : ''} />
-          </Field.Field>
+          <div class="flex items-center justify-between gap-4 rounded-md border p-3">
+            <div>
+              <Field.Label
+                for="web-provider-use-proxy"
+                hint={m.common_send_requests_service_proxy_configured_settings()}>{m.common_use_proxy()}</Field.Label>
+            </div>
+            <Switch
+              id="web-provider-use-proxy"
+              checked={editorUseProxy}
+              onCheckedChange={(checked) => (editorUseProxy = checked)} />
+          </div>
+          {#if editorKind === 'local'}
+            <Field.Field size="fill">
+              <Field.Label>{m.web_access_configuration_local_search_engines()}</Field.Label>
+              <div class="divide-y rounded-md border">
+                {#each localEngineOptions as engine (engine.id)}
+                  <div class="flex min-h-12 items-center justify-between gap-4 px-3">
+                    <span class="text-sm font-medium">{engine.label}</span>
+                    <Switch
+                      checked={editorLocalEngines[engine.id].enabled}
+                      aria-label={engine.label}
+                      onCheckedChange={(checked) => (editorLocalEngines[engine.id].enabled = checked)} />
+                  </div>
+                {/each}
+              </div>
+            </Field.Field>
+          {:else}
+            <Field.Field size="fill">
+              <Field.Label for="web-provider-secret">{m.common_api_key()}</Field.Label>
+              <Input
+                id="web-provider-secret"
+                type="password"
+                autocomplete="new-password"
+                bind:value={editorSecret}
+                placeholder={editingProvider ? m.web_access_configuration_leave_blank_keep_existing() : ''} />
+            </Field.Field>
+          {/if}
         </Field.Group>
       </div>
       <Sheet.Footer class="route-overlay-footer">

@@ -66,6 +66,19 @@ ADD COLUMN allow_media_understanding BOOLEAN NOT NULL DEFAULT FALSE;\n";
         }
     }
 
+    async fn migrate_postgres_range(pool: &sqlx::PgPool, min_version: i64, max_version: i64) {
+        for migration in POSTGRES_MIGRATOR.iter().filter(|migration| {
+            migration.version >= min_version && migration.version <= max_version
+        }) {
+            sqlx::raw_sql(migration.sql.as_ref())
+                .execute(pool)
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("migration {} must apply: {error}", migration.version)
+                });
+        }
+    }
+
     #[tokio::test]
     async fn web_search_migration_prefills_only_one_codex_binding_and_prunes_priorities() {
         for codex_count in 0..=2 {
@@ -708,5 +721,212 @@ ADD COLUMN allow_media_understanding BOOLEAN NOT NULL DEFAULT FALSE;\n";
         .expect("Route columns");
         assert!(!columns.iter().any(|column| column == "target_provider"));
         assert!(!columns.iter().any(|column| column == "target_model"));
+    }
+
+    #[tokio::test]
+    async fn web_access_adapter_migration_seeds_local_and_prunes_removed_providers() {
+        for (legacy_ids, expected_remote_ids) in [
+            (vec!["brave-source"], Vec::<&str>::new()),
+            (vec!["exa-source"], vec!["exa-source"]),
+            (vec!["brave-source", "exa-source"], vec!["exa-source"]),
+        ] {
+            let pool = SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect("sqlite::memory:")
+                .await
+                .expect("SQLite pool");
+            migrate_sqlite_range(&pool, 1, 27).await;
+            sqlx::query(
+                "INSERT INTO web_providers (id, name, kind, api_key)
+                 VALUES
+                    ('brave-source', 'Brave source', 'brave', 'brave-key'),
+                    ('exa-source', 'Exa source', 'exa', 'exa-key')",
+            )
+            .execute(&pool)
+            .await
+            .expect("legacy Web Providers");
+            let priority = serde_json::to_string(&legacy_ids).expect("legacy priority");
+            for key in [
+                "web_access_search_provider_ids",
+                "web_access_fetch_provider_ids",
+            ] {
+                sqlx::query("INSERT INTO settings (name, value) VALUES (?, ?)")
+                    .bind(key)
+                    .bind(&priority)
+                    .execute(&pool)
+                    .await
+                    .expect("legacy Web Access priority");
+            }
+
+            migrate_sqlite_range(&pool, 28, 28).await;
+
+            let local = sqlx::query_as::<_, (String, bool, Option<String>, String)>(
+                "SELECT id, use_proxy, api_key, local_engines
+                 FROM web_providers WHERE kind = 'local'",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("seeded Local Web Provider");
+            assert!(!local.1);
+            assert!(local.2.is_none());
+            let engines: serde_json::Value =
+                serde_json::from_str(&local.3).expect("Local Search Engine config");
+            for engine in ["google", "bing", "brave", "baidu"] {
+                assert_eq!(engines[engine]["enabled"], true, "{engine}");
+            }
+            for engine in ["360", "sogou_weixin", "google_scholar"] {
+                assert_eq!(engines[engine]["enabled"], false, "{engine}");
+            }
+
+            let kinds =
+                sqlx::query_scalar::<_, String>("SELECT kind FROM web_providers ORDER BY kind")
+                    .fetch_all(&pool)
+                    .await
+                    .expect("migrated Web Provider kinds");
+            assert_eq!(kinds, ["exa", "local"]);
+
+            for key in [
+                "web_access_search_provider_ids",
+                "web_access_fetch_provider_ids",
+            ] {
+                let value =
+                    sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE name = ?")
+                        .bind(key)
+                        .fetch_one(&pool)
+                        .await
+                        .expect("migrated Web Access priority");
+                let ids = serde_json::from_str::<Vec<String>>(&value).expect("priority IDs");
+                let expected = if expected_remote_ids.is_empty() {
+                    vec![local.0.clone()]
+                } else {
+                    expected_remote_ids
+                        .iter()
+                        .map(|id| (*id).to_string())
+                        .collect()
+                };
+                assert_eq!(ids, expected);
+            }
+
+            assert!(
+                sqlx::query(
+                    "INSERT INTO web_providers (id, name, kind, api_key)
+                     VALUES ('removed', 'Removed', 'tavily', 'secret')",
+                )
+                .execute(&pool)
+                .await
+                .is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn postgres_web_access_adapter_migration_matches_sqlite_when_configured() {
+        let Some(url) = std::env::var("DB_URL")
+            .ok()
+            .or_else(|| std::env::var("DATABASE_URL").ok())
+        else {
+            return;
+        };
+        let admin = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("PostgreSQL admin pool");
+
+        for (legacy_ids, expected_ids) in [
+            (vec!["brave-source"], vec!["web-provider-local"]),
+            (vec!["exa-source"], vec!["exa-source"]),
+            (vec!["brave-source", "exa-source"], vec!["exa-source"]),
+        ] {
+            let schema = format!(
+                "stravia_web_access_migration_test_{}",
+                uuid::Uuid::new_v4().simple()
+            );
+            sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+                .execute(&admin)
+                .await
+                .expect("create isolated PostgreSQL schema");
+            let options: sqlx::postgres::PgConnectOptions =
+                url.parse().expect("PostgreSQL connection options");
+            let options = options.options([("search_path", schema.as_str())]);
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect_with(options)
+                .await
+                .expect("isolated PostgreSQL pool");
+            migrate_postgres_range(&pool, 1, 27).await;
+            sqlx::query(
+                "INSERT INTO web_providers (id, name, kind, api_key)
+                 VALUES
+                    ('brave-source', 'Brave source', 'brave', 'brave-key'),
+                    ('exa-source', 'Exa source', 'exa', 'exa-key')",
+            )
+            .execute(&pool)
+            .await
+            .expect("legacy Web Providers");
+            let priority = serde_json::to_string(&legacy_ids).expect("legacy priority");
+            for key in [
+                "web_access_search_provider_ids",
+                "web_access_fetch_provider_ids",
+            ] {
+                sqlx::query("INSERT INTO settings (name, value) VALUES ($1, $2)")
+                    .bind(key)
+                    .bind(&priority)
+                    .execute(&pool)
+                    .await
+                    .expect("legacy Web Access priority");
+            }
+
+            migrate_postgres_range(&pool, 28, 28).await;
+
+            let local = sqlx::query_as::<_, (bool, Option<String>, serde_json::Value)>(
+                "SELECT use_proxy, api_key, local_engines
+                 FROM web_providers WHERE kind = 'local'",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("seeded Local Web Provider");
+            assert!(!local.0);
+            assert!(local.1.is_none());
+            assert_eq!(local.2["google"]["enabled"], true);
+            assert_eq!(local.2["google_scholar"]["enabled"], false);
+
+            let kinds =
+                sqlx::query_scalar::<_, String>("SELECT kind FROM web_providers ORDER BY kind")
+                    .fetch_all(&pool)
+                    .await
+                    .expect("migrated Web Provider kinds");
+            assert_eq!(kinds, ["exa", "local"]);
+            for key in [
+                "web_access_search_provider_ids",
+                "web_access_fetch_provider_ids",
+            ] {
+                let value =
+                    sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE name = $1")
+                        .bind(key)
+                        .fetch_one(&pool)
+                        .await
+                        .expect("migrated Web Access priority");
+                assert_eq!(
+                    serde_json::from_str::<Vec<String>>(&value).expect("priority IDs"),
+                    expected_ids
+                );
+            }
+            assert!(
+                sqlx::query(
+                    "INSERT INTO web_providers (id, name, kind, api_key)
+                     VALUES ('removed', 'Removed', 'tavily', 'secret')",
+                )
+                .execute(&pool)
+                .await
+                .is_err()
+            );
+
+            pool.close().await;
+            sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+                .execute(&admin)
+                .await
+                .expect("drop isolated PostgreSQL schema");
+        }
     }
 }

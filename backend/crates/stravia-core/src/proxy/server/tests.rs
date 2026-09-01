@@ -674,9 +674,11 @@ async fn responses_native_web_search_is_concealed_when_search_is_unavailable() {
         .expect("API key");
     let web_provider = admin
         .create_web_provider(CreateWebProvider {
-            name: "Brave".into(),
-            kind: "brave".into(),
+            name: "Exa".into(),
+            kind: "exa".into(),
             api_key: Some("secret".into()),
+            use_proxy: false,
+            local_engines: None,
         })
         .await
         .expect("Web Provider");

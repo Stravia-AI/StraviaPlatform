@@ -45,11 +45,26 @@ impl WebAccessRunSnapshotStore {
 #[derive(Clone)]
 pub struct WebAccessService {
     gateway: crate::Gateway,
+    adapter_factory: Arc<dyn AdapterFactory>,
 }
 
 impl WebAccessService {
     pub(crate) fn new(gateway: crate::Gateway) -> Self {
-        Self { gateway }
+        Self {
+            gateway,
+            adapter_factory: Arc::new(ProductionAdapterFactory),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_adapter_factory(
+        gateway: crate::Gateway,
+        adapter_factory: Arc<dyn AdapterFactory>,
+    ) -> Self {
+        Self {
+            gateway,
+            adapter_factory,
+        }
     }
 
     pub async fn settings(&self) -> anyhow::Result<WebAccessSettings> {
@@ -166,7 +181,8 @@ impl WebAccessService {
     }
 
     async fn test_provider_inner(&self, provider: WebProvider) -> Result<(), WebAccessError> {
-        let adapter = self.adapter(&provider).await?;
+        let proxy_url = self.proxy_url_snapshot().await?;
+        let adapter = self.adapter(&provider, proxy_url.as_deref())?;
         if adapter.supports_search() {
             adapter
                 .search(&SearchRequest {
@@ -229,25 +245,25 @@ impl WebAccessService {
         settings: &WebAccessSettings,
         records: &std::collections::HashMap<String, WebProvider>,
     ) -> Result<WebAccessEngine, WebAccessError> {
-        let search = self
-            .ordered_adapters(&settings.search_provider_ids, records)
-            .await;
-        let fetch = self
-            .ordered_adapters(&settings.fetch_provider_ids, records)
-            .await;
+        let proxy_url = self.proxy_url_snapshot().await?;
+        let search =
+            self.ordered_adapters(&settings.search_provider_ids, records, proxy_url.as_deref());
+        let fetch =
+            self.ordered_adapters(&settings.fetch_provider_ids, records, proxy_url.as_deref());
         Ok(WebAccessEngine::new(search, fetch))
     }
-    async fn ordered_adapters(
+    fn ordered_adapters(
         &self,
         ids: &[String],
         records: &std::collections::HashMap<String, WebProvider>,
+        proxy_url: Option<&str>,
     ) -> Vec<Arc<dyn WebProviderAdapter>> {
         let mut adapters = Vec::with_capacity(ids.len());
         for id in ids {
             let Some(provider) = records.get(id) else {
                 continue;
             };
-            match self.adapter(provider).await {
+            match self.adapter(provider, proxy_url) {
                 Ok(adapter) => adapters.push(adapter),
                 Err(error) => adapters.push(Arc::new(UnavailableAdapter {
                     id: provider.id.clone(),
@@ -264,40 +280,141 @@ impl WebAccessService {
         adapters
     }
 
-    async fn adapter(
+    fn adapter(
         &self,
         provider: &WebProvider,
+        proxy_url: Option<&str>,
     ) -> Result<Arc<dyn WebProviderAdapter>, WebAccessError> {
-        use providers::AdapterConfig;
-        let config = match provider.kind.as_str() {
-            "exa" => AdapterConfig::Exa {
-                id: provider.id.clone(),
-                api_key: required_secret(provider)?,
-            },
-            "brave" => AdapterConfig::Brave {
-                id: provider.id.clone(),
-                api_key: required_secret(provider)?,
-            },
-            "tavily" => AdapterConfig::Tavily {
-                id: provider.id.clone(),
-                api_key: required_secret(provider)?,
-            },
-            "zhipu" => AdapterConfig::Zhipu {
-                id: provider.id.clone(),
-                api_key: required_secret(provider)?,
-            },
-            _ => {
-                return Err(WebAccessError::from_code(
-                    WebAccessErrorCode::Unsupported,
-                    "unsupported Web Provider kind",
-                ));
-            }
+        let outbound = if provider.use_proxy {
+            stravia_web_access::OutboundProxyMode::Explicit(
+                proxy_url
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(unavailable_proxy_configuration)?
+                    .to_string(),
+            )
+        } else {
+            stravia_web_access::OutboundProxyMode::Direct
         };
-        Ok(providers::build_adapter(
-            self.gateway.http_client.clone(),
-            config,
-        ))
+        self.adapter_factory.build(provider, outbound)
     }
+}
+
+pub(super) trait AdapterFactory: Send + Sync {
+    fn build(
+        &self,
+        provider: &WebProvider,
+        outbound: stravia_web_access::OutboundProxyMode,
+    ) -> Result<Arc<dyn WebProviderAdapter>, WebAccessError>;
+}
+
+struct ProductionAdapterFactory;
+
+impl AdapterFactory for ProductionAdapterFactory {
+    fn build(
+        &self,
+        provider: &WebProvider,
+        outbound: stravia_web_access::OutboundProxyMode,
+    ) -> Result<Arc<dyn WebProviderAdapter>, WebAccessError> {
+        match provider.kind.as_str() {
+            "local" => {
+                let engines = provider
+                    .local_engines
+                    .as_deref()
+                    .ok_or_else(unavailable_configuration)?
+                    .iter()
+                    .map(|(id, config)| {
+                        (
+                            id.clone(),
+                            stravia_web_access::local::LocalSearchEngineSetting {
+                                enabled: config.enabled,
+                            },
+                        )
+                    })
+                    .collect();
+                stravia_web_access::local::build_local_adapter(
+                    provider.id.clone(),
+                    outbound,
+                    engines,
+                )
+                .map_err(provider_failure)
+            }
+            "exa" => {
+                let client = remote_http_client(&outbound)?;
+                Ok(stravia_web_access::remote::build_remote_adapter(
+                    stravia_web_access::remote::RemoteAdapterConfig::Exa {
+                        id: provider.id.clone(),
+                        client,
+                        api_key: required_secret(provider)?,
+                    },
+                ))
+            }
+            "zhipu" => {
+                let client = remote_http_client(&outbound)?;
+                Ok(stravia_web_access::remote::build_remote_adapter(
+                    stravia_web_access::remote::RemoteAdapterConfig::Zhipu {
+                        id: provider.id.clone(),
+                        client,
+                        api_key: required_secret(provider)?,
+                    },
+                ))
+            }
+            _ => Err(WebAccessError::from_code(
+                WebAccessErrorCode::Unsupported,
+                "unsupported Web Provider kind",
+            )),
+        }
+    }
+}
+
+impl WebAccessService {
+    async fn proxy_url_snapshot(&self) -> Result<Option<String>, WebAccessError> {
+        self.gateway
+            .storage
+            .settings()
+            .get("proxy_url")
+            .await
+            .map(|value| value.map(|url| url.trim().to_string()))
+            .map_err(|_| {
+                WebAccessError::from_code(
+                    WebAccessErrorCode::Unavailable,
+                    "Gateway proxy configuration is unavailable",
+                )
+            })
+    }
+}
+
+fn remote_http_client(
+    outbound: &stravia_web_access::OutboundProxyMode,
+) -> Result<reqwest::Client, WebAccessError> {
+    let mut builder = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .no_proxy();
+    match outbound {
+        stravia_web_access::OutboundProxyMode::Direct => {}
+        stravia_web_access::OutboundProxyMode::Explicit(proxy_url) => {
+            builder = builder.proxy(
+                reqwest::Proxy::all(proxy_url).map_err(|_| unavailable_proxy_configuration())?,
+            );
+        }
+        stravia_web_access::OutboundProxyMode::System => {
+            return Err(unavailable_proxy_configuration());
+        }
+    }
+    builder
+        .build()
+        .map_err(|_| unavailable_proxy_configuration())
+}
+
+fn provider_failure(failure: ProviderFailure) -> WebAccessError {
+    WebAccessError::from_code(failure.code, failure.message)
+}
+
+fn unavailable_proxy_configuration() -> WebAccessError {
+    WebAccessError::from_code(
+        WebAccessErrorCode::Unavailable,
+        "Web Provider proxy is enabled but Gateway proxy_url is empty or invalid",
+    )
 }
 
 fn required_secret(provider: &WebProvider) -> Result<String, WebAccessError> {

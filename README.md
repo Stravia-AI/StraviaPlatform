@@ -81,7 +81,7 @@ The Route Builder is a full page. Selecting a Provider automatically loads its a
 
 Optional Web Search exposes one public `web_search` capability that returns a terminal sourced Search Report rather than a single search page. A successful result includes the answer, cited public HTTP(S) sources, limitations, completion state, usage, and a stable `turn_id`. Pass that ID as `previous_turn_id` to continue from the complete same-principal ancestor chain or to create an independent branch; Stravia never selects an implicit latest turn.
 
-Configure one Search Backend in the WebUI. Local Search runs a bounded Agent over internal Web Access Search and Fetch sources (Exa, Brave, Tavily, or Zhipu as supported) and applies the configured local turn/time limits. Codex Agentic Search uses one exact compatible Codex OAuth Responses Provider/model binding and ignores the Local budget. There is no fallback between Local and Codex.
+Configure one Search Backend in the WebUI. Local Search runs a bounded Agent over ordered internal Web Access Search and Fetch sources: the seeded in-process Local Provider, Exa, or Zhipu. Each Web Provider can independently use the Gateway proxy. Codex Agentic Search uses one exact compatible Codex OAuth Responses Provider/model binding and ignores the Local budget. There is no fallback between Local and Codex.
 
 The platform Web Search switch controls explicit access for every valid API key. Each key separately controls MCP access and Transparent Injection; injection only adds selected enabled capabilities to compatible requests and does not restrict explicit or MCP calls. MCP clients connect to `POST /mcp`, use `Authorization: Bearer <key>`, and discover `web_search` only when both MCP access and the platform capability are enabled. OpenAI Responses native web-search declarations and hidden tool continuations use the same Search contract.
 
@@ -323,4 +323,4 @@ Debug server builds do not embed or serve WebUI assets. `task dev:server` starts
 ## License
 
 Stravia is licensed under the [GNU Affero General Public License v3.0 only](LICENSE) (`AGPL-3.0-only`).
-Separately licensed components and assets retain the terms stated in their own license files, including the `stravia-web-local` crate under `CC0-1.0` and bundled fonts under their respective licenses.
+Separately licensed components and assets retain the terms stated in their own license files, including the `stravia-web-access` crate under `CC0-1.0` and bundled fonts under their respective licenses.

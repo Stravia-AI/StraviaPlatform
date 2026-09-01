@@ -5,12 +5,12 @@ use crate::storage::traits::{
 };
 use anyhow::Context;
 use async_trait::async_trait;
-use sqlx::{Pool, Postgres};
+use sqlx::{Pool, Postgres, types::Json};
 
 const SEARCH_IDS_KEY: &str = "web_access_search_provider_ids";
 const ENABLED_KEY: &str = "web_access_enabled";
 const FETCH_IDS_KEY: &str = "web_access_fetch_provider_ids";
-const SELECT_WEB_PROVIDER: &str = "SELECT id, name, kind, api_key, last_test_success, to_char(last_test_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS last_test_at, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS created_at, to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS updated_at FROM web_providers";
+const SELECT_WEB_PROVIDER: &str = "SELECT id, name, kind, api_key, use_proxy, local_engines, last_test_success, to_char(last_test_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS last_test_at, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS created_at, to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS updated_at FROM web_providers";
 
 #[derive(Clone)]
 pub(super) struct PostgresWebProviderStore {
@@ -42,13 +42,18 @@ impl WebProviderStore for PostgresWebProviderStore {
 
     async fn create(&self, input: CreateWebProvider) -> anyhow::Result<WebProvider> {
         let id = uuid::Uuid::new_v4().to_string();
-        sqlx::query("INSERT INTO web_providers (id, name, kind, api_key) VALUES ($1, $2, $3, $4)")
-            .bind(&id)
-            .bind(input.name.trim())
-            .bind(input.kind)
-            .bind(input.api_key)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "INSERT INTO web_providers (id, name, kind, api_key, use_proxy, local_engines)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(&id)
+        .bind(input.name.trim())
+        .bind(input.kind)
+        .bind(input.api_key)
+        .bind(input.use_proxy)
+        .bind(input.local_engines.map(Json))
+        .execute(&self.pool)
+        .await?;
         self.get(&id)
             .await?
             .context("Web Provider missing after create")
@@ -68,11 +73,21 @@ impl WebProviderStore for PostgresWebProviderStore {
             Some(value) => value,
             None => current.api_key,
         };
+        let use_proxy = input.use_proxy.unwrap_or(current.use_proxy);
+        let local_engines = match input.local_engines {
+            Some(value) => value.map(Json),
+            None => current.local_engines,
+        };
         sqlx::query(
-            "UPDATE web_providers SET name = $1, api_key = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $3",
+            "UPDATE web_providers
+             SET name = $1, api_key = $2, use_proxy = $3, local_engines = $4,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = $5",
         )
         .bind(name.trim())
         .bind(api_key)
+        .bind(use_proxy)
+        .bind(local_engines)
         .bind(id)
         .execute(&mut *tx)
         .await?;

@@ -1,0 +1,13 @@
+[package]
+name = "stravia-web-access-contract"
+version.workspace = true
+edition = "2021"
+rust-version.workspace = true
+license = "AGPL-3.0-only"
+description = "Transport-neutral Web Access adapter contract"
+publish = false
+
+[dependencies]
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

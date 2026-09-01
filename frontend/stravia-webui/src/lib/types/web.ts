@@ -1,11 +1,27 @@
 import type { ThinkingLevel } from './route'
 
-export type WebProviderKind = 'exa' | 'brave' | 'tavily' | 'zhipu'
+export type WebProviderKind = 'local' | 'exa' | 'zhipu'
+export type LocalSearchEngineId =
+  | 'google'
+  | 'bing'
+  | 'brave'
+  | 'baidu'
+  | '360'
+  | 'sogou_weixin'
+  | 'google_scholar'
+
+export interface LocalSearchEngineConfig {
+  enabled: boolean
+}
+
+export type LocalSearchEngineConfigs = Record<LocalSearchEngineId, LocalSearchEngineConfig>
 
 export interface WebProvider {
   id: string
   name: string
   kind: WebProviderKind
+  use_proxy: boolean
+  local_engines?: LocalSearchEngineConfigs | null
   capabilities: { search: boolean; fetch: boolean }
   last_test_success?: boolean | null
   last_test_at?: string | null
@@ -17,11 +33,15 @@ export interface CreateWebProvider {
   name: string
   kind: WebProviderKind
   api_key?: string | null
+  use_proxy?: boolean
+  local_engines?: LocalSearchEngineConfigs | null
 }
 
 export interface UpdateWebProvider {
   name?: string
   api_key?: string
+  use_proxy?: boolean
+  local_engines?: LocalSearchEngineConfigs
 }
 
 export interface WebAccessSettings {

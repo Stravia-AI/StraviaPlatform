@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
+use sqlx::{FromRow, types::Json};
 
 use crate::provider::AuthMode;
 use crate::provider::VendorRegistry;
@@ -536,6 +536,9 @@ pub struct WebProvider {
     pub kind: String,
     #[serde(skip_serializing)]
     pub api_key: Option<String>,
+    pub use_proxy: bool,
+    #[serde(skip_serializing)]
+    pub local_engines: Option<Json<LocalSearchEngineConfigs>>,
     pub last_test_success: Option<bool>,
     pub last_test_at: Option<String>,
     pub created_at: String,
@@ -547,6 +550,9 @@ pub struct CreateWebProvider {
     pub name: String,
     pub kind: String,
     pub api_key: Option<String>,
+    #[serde(default)]
+    pub use_proxy: bool,
+    pub local_engines: Option<LocalSearchEngineConfigs>,
 }
 
 fn deserialize_double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
@@ -562,6 +568,63 @@ pub struct UpdateWebProvider {
     pub name: Option<String>,
     #[serde(default, deserialize_with = "deserialize_double_option")]
     pub api_key: Option<Option<String>>,
+    pub use_proxy: Option<bool>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub local_engines: Option<Option<LocalSearchEngineConfigs>>,
+}
+
+pub type LocalSearchEngineConfigs = BTreeMap<String, LocalSearchEngineConfig>;
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LocalSearchEngineConfig {
+    pub enabled: bool,
+    #[serde(default)]
+    pub private_settings: Option<BTreeMap<String, String>>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct LocalSearchEngineView {
+    pub enabled: bool,
+}
+
+impl std::fmt::Debug for LocalSearchEngineConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LocalSearchEngineConfig")
+            .field("enabled", &self.enabled)
+            .field(
+                "private_settings_configured",
+                &self
+                    .private_settings
+                    .as_ref()
+                    .is_some_and(|settings| !settings.is_empty()),
+            )
+            .finish()
+    }
+}
+
+pub fn default_local_search_engines() -> LocalSearchEngineConfigs {
+    [
+        ("google", true),
+        ("bing", true),
+        ("brave", true),
+        ("baidu", true),
+        ("360", false),
+        ("sogou_weixin", false),
+        ("google_scholar", false),
+    ]
+    .into_iter()
+    .map(|(id, enabled)| {
+        (
+            id.to_string(),
+            LocalSearchEngineConfig {
+                enabled,
+                private_settings: Some(BTreeMap::new()),
+            },
+        )
+    })
+    .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -573,16 +636,28 @@ pub struct WebProviderCapabilities {
 impl WebProvider {
     pub fn capabilities(&self) -> Option<WebProviderCapabilities> {
         match self.kind.as_str() {
-            "brave" => Some(WebProviderCapabilities {
-                search: true,
-                fetch: false,
-            }),
-            "exa" | "tavily" | "zhipu" => Some(WebProviderCapabilities {
+            "local" | "exa" | "zhipu" => Some(WebProviderCapabilities {
                 search: true,
                 fetch: true,
             }),
             _ => None,
         }
+    }
+
+    pub fn local_engine_views(&self) -> Option<BTreeMap<String, LocalSearchEngineView>> {
+        self.local_engines.as_deref().map(|engines| {
+            engines
+                .iter()
+                .map(|(id, config)| {
+                    (
+                        id.clone(),
+                        LocalSearchEngineView {
+                            enabled: config.enabled,
+                        },
+                    )
+                })
+                .collect()
+        })
     }
 }
 

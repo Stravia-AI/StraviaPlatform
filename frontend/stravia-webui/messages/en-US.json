@@ -772,6 +772,7 @@
   "web_access_configuration_leave_blank_keep_existing": "Leave blank to keep existing",
   "web_access_configuration_feature_summary": "Let a Stravia model search the web and read source pages during a search task. Changes are saved immediately.",
   "web_access_configuration_loading_search_services": "Loading search services…",
+  "web_access_configuration_local_search_engines": "Local search engines",
   "web_access_configuration_move_value_down": "Move {name} down",
   "web_access_configuration_move_value_up": "Move {name} up",
   "web_access_configuration_no_compatible_services": "No compatible services.",

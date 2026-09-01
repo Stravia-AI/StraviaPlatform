@@ -81,7 +81,7 @@ Route Builder 使用独立页面。选择 Provider 后会自动加载其可用 P
 
 可选的联网搜索只公开一个 `web_search` 能力，返回终态、带来源的 Search Report，而不是单页搜索结果。成功结果包含答案、已引用的公网 HTTP(S) 来源、限制、完成状态、用量和稳定 `turn_id`。将该 ID 作为 `previous_turn_id` 传入，可从同一 Principal 的完整祖先链续接或创建独立分支；Stravia 不会隐式选择“最新”Turn。
 
-在 WebUI 中配置一个 Search Backend。Local Search 使用有界 Agent 编排内部 Web Access 的 Search/Fetch 来源（按能力支持 Exa、Brave、Tavily 或智谱），并应用已配置的本地轮次和时间限制。Codex Agentic Search 固定到一个精确且兼容的 Codex OAuth Responses Provider/model，不使用 Local budget。Local 与 Codex 之间不做 fallback。
+在 WebUI 中配置一个 Search Backend。Local Search 使用有界 Agent 编排有序的内部 Web Access Search/Fetch 来源：自动创建的进程内 Local Provider、Exa 或智谱。每个 Web Provider 都可独立选择是否使用 Gateway 代理。Codex Agentic Search 固定到一个精确且兼容的 Codex OAuth Responses Provider/model，不使用 Local budget。Local 与 Codex 之间不做 fallback。
 
 平台联网搜索总开关统一控制所有有效 API Key 的显式访问。每个 Key 分别控制 MCP 访问和透明注入；透明注入只把所选且已启用的能力加入兼容请求，不限制显式调用或 MCP。MCP 客户端连接 `POST /mcp`，通过 `Authorization: Bearer <key>` 认证，并且只在 MCP 权限与平台能力都开启时发现 `web_search`。OpenAI Responses 的原生 web-search 声明与隐藏 tool continuation 使用同一个 Search contract。
 
@@ -323,4 +323,4 @@ Debug 服务端构建不会内嵌或提供 WebUI 资源。`task dev:server` 会�
 ## 许可证
 
 Stravia 采用 [GNU Affero General Public License v3.0 only](LICENSE)（`AGPL-3.0-only`）许可。
-单独许可的组件和资源继续适用其各自许可证文件中的条款，包括采用 `CC0-1.0` 的 `stravia-web-local` crate，以及采用各自许可证的内置字体。
+单独许可的组件和资源继续适用其各自许可证文件中的条款，包括采用 `CC0-1.0` 的 `stravia-web-access` crate，以及采用各自许可证的内置字体。

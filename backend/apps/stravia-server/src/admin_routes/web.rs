@@ -86,14 +86,21 @@ pub(super) async fn update_web_provider_handler(
 
 fn web_provider_value(provider: WebProvider) -> serde_json::Value {
     let capabilities = provider.capabilities();
+    let local_engines = provider.local_engine_views();
     let mut value = serde_json::to_value(provider).expect("Web Provider serializes");
-    value
+    let object = value
         .as_object_mut()
-        .expect("Web Provider serializes as object")
-        .insert(
-            "capabilities".into(),
-            serde_json::to_value(capabilities).expect("Web Provider capabilities serialize"),
+        .expect("Web Provider serializes as object");
+    object.insert(
+        "capabilities".into(),
+        serde_json::to_value(capabilities).expect("Web Provider capabilities serialize"),
+    );
+    if let Some(local_engines) = local_engines {
+        object.insert(
+            "local_engines".into(),
+            serde_json::to_value(local_engines).expect("Local Search Engines serialize"),
         );
+    }
     value
 }
 
@@ -187,4 +194,41 @@ pub(super) fn web_search_config_error(
         })),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::web_provider_value;
+    use stravia_core::db::models::{WebProvider, default_local_search_engines};
+
+    #[test]
+    fn local_web_provider_payload_exposes_engine_state_without_secrets() {
+        let mut engines = default_local_search_engines();
+        engines
+            .get_mut("google")
+            .expect("Google config")
+            .private_settings = Some(
+            [("cookies".to_string(), "SID=private-session".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        let value = web_provider_value(WebProvider {
+            id: "web-provider-local".into(),
+            name: "Local".into(),
+            kind: "local".into(),
+            api_key: None,
+            use_proxy: false,
+            local_engines: Some(engines.into()),
+            last_test_success: None,
+            last_test_at: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+        });
+
+        assert_eq!(value["local_engines"]["google"]["enabled"], true);
+        let payload = value.to_string();
+        assert!(!payload.contains("SID=private-session"));
+        assert!(!payload.contains("private_settings"));
+        assert!(value.get("api_key").is_none());
+    }
 }

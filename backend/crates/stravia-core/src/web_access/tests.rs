@@ -1,3 +1,4 @@
+use super::service::AdapterFactory;
 use super::*;
 
 #[test]
@@ -146,6 +147,7 @@ fn fetch_result_serializes_false_truncated() {
         format: Some("text".into()),
         title: None,
         truncated: false,
+        limitations: Vec::new(),
         error: None,
     };
     let value = serde_json::to_value(result).expect("fetch result encoding");
@@ -184,6 +186,30 @@ struct FakeSearchProvider {
     calls: std::sync::atomic::AtomicUsize,
 }
 
+struct FakeAdapterFactory {
+    adapters: std::collections::HashMap<String, Arc<dyn WebProviderAdapter>>,
+    outbounds: std::sync::Mutex<Vec<(String, stravia_web_access::OutboundProxyMode)>>,
+}
+
+impl AdapterFactory for FakeAdapterFactory {
+    fn build(
+        &self,
+        provider: &WebProvider,
+        outbound: stravia_web_access::OutboundProxyMode,
+    ) -> Result<Arc<dyn WebProviderAdapter>, WebAccessError> {
+        self.outbounds
+            .lock()
+            .expect("outbounds lock")
+            .push((provider.id.clone(), outbound));
+        self.adapters.get(&provider.id).cloned().ok_or_else(|| {
+            WebAccessError::from_code(
+                WebAccessErrorCode::Unavailable,
+                "test adapter is unavailable",
+            )
+        })
+    }
+}
+
 #[async_trait::async_trait]
 impl WebProviderAdapter for FakeSearchProvider {
     fn supports_search(&self) -> bool {
@@ -210,6 +236,218 @@ impl WebProviderAdapter for FakeSearchProvider {
     ) -> Result<AdapterSuccess<Vec<FetchResult>>, ProviderFailure> {
         unreachable!("search-only fake")
     }
+}
+
+#[tokio::test]
+async fn configured_local_adapter_observes_proxy_snapshot_empty_success_and_failover() {
+    let data_dir = tempfile::tempdir().expect("temp data dir");
+    let (gateway, _logs) = crate::Gateway::new(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .expect("gateway");
+    let admin = gateway.admin();
+    let key = admin
+        .create_api_key(crate::db::models::CreateApiKey {
+            key: None,
+            name: "Web key".into(),
+            concurrency_limit: None,
+            expires_at: None,
+            mcp_access_enabled: false,
+            transparent_injection_enabled: true,
+            inject_web_search: true,
+            model_ids: vec![],
+            inject_media_understanding: false,
+        })
+        .await
+        .expect("API key");
+    let local = admin
+        .list_web_providers()
+        .await
+        .expect("Web Providers")
+        .into_iter()
+        .find(|provider| provider.kind == "local")
+        .expect("Local Web Provider");
+    admin
+        .update_web_provider(
+            &local.id,
+            crate::db::models::UpdateWebProvider {
+                use_proxy: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("proxied Local");
+    let exa = admin
+        .create_web_provider(crate::db::models::CreateWebProvider {
+            name: "Exa".into(),
+            kind: "exa".into(),
+            api_key: Some("test-exa-key".into()),
+            use_proxy: false,
+            local_engines: None,
+        })
+        .await
+        .expect("Exa Web Provider");
+    admin
+        .update_web_access_settings(WebAccessSettings {
+            enabled: true,
+            search_provider_ids: vec![local.id.clone(), exa.id.clone()],
+            fetch_provider_ids: vec![],
+        })
+        .await
+        .expect("enabled settings");
+    admin
+        .set_setting("proxy_url", "http://old-proxy.example:8080")
+        .await
+        .expect("old proxy");
+
+    let failing_local = Arc::new(FakeSearchProvider {
+        response: Err(ProviderFailure::unavailable("Local unavailable")),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let rescuing_exa = Arc::new(FakeSearchProvider {
+        response: Ok(SearchResponse {
+            mode: SearchMode::Index,
+            query: "Rust".into(),
+            results: vec![SearchResult {
+                url: "https://docs.rs/".into(),
+                title: Some("docs.rs".into()),
+                snippet: None,
+            }],
+            answer: None,
+            citations: None,
+        }),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let old_factory = Arc::new(FakeAdapterFactory {
+        adapters: [
+            (
+                local.id.clone(),
+                failing_local.clone() as Arc<dyn WebProviderAdapter>,
+            ),
+            (
+                exa.id.clone(),
+                rescuing_exa.clone() as Arc<dyn WebProviderAdapter>,
+            ),
+        ]
+        .into_iter()
+        .collect(),
+        outbounds: std::sync::Mutex::new(vec![]),
+    });
+    let old_service = WebAccessService::with_adapter_factory(gateway.clone(), old_factory.clone());
+    assert_eq!(
+        old_service
+            .capture_run_snapshot("run-old", &key.id)
+            .await
+            .expect("old snapshot"),
+        WebAccessAvailability {
+            search: true,
+            fetch: false,
+        }
+    );
+
+    admin
+        .set_setting("proxy_url", "http://new-proxy.example:8080")
+        .await
+        .expect("new proxy");
+    let rescued = old_service
+        .search_in_run(
+            "run-old",
+            &key.id,
+            SearchRequest {
+                query: "Rust".into(),
+                max_results: 5,
+                allowed_domains: vec![],
+                blocked_domains: vec![],
+            },
+        )
+        .await
+        .expect("Exa rescues Local hard failure");
+    assert_eq!(rescued.results[0].url, "https://docs.rs/");
+    assert_eq!(
+        old_factory
+            .outbounds
+            .lock()
+            .expect("outbounds lock")
+            .as_slice(),
+        [
+            (
+                local.id.clone(),
+                stravia_web_access::OutboundProxyMode::Explicit(
+                    "http://old-proxy.example:8080".into()
+                ),
+            ),
+            (
+                exa.id.clone(),
+                stravia_web_access::OutboundProxyMode::Direct,
+            ),
+        ]
+    );
+
+    let empty_local = Arc::new(FakeSearchProvider {
+        response: Ok(SearchResponse {
+            mode: SearchMode::Index,
+            query: "Rust".into(),
+            results: vec![],
+            answer: None,
+            citations: None,
+        }),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let skipped_exa = Arc::new(FakeSearchProvider {
+        response: Err(ProviderFailure::unavailable("must not run")),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let new_factory = Arc::new(FakeAdapterFactory {
+        adapters: [
+            (
+                local.id.clone(),
+                empty_local.clone() as Arc<dyn WebProviderAdapter>,
+            ),
+            (
+                exa.id.clone(),
+                skipped_exa.clone() as Arc<dyn WebProviderAdapter>,
+            ),
+        ]
+        .into_iter()
+        .collect(),
+        outbounds: std::sync::Mutex::new(vec![]),
+    });
+    let new_service = WebAccessService::with_adapter_factory(gateway, new_factory.clone());
+    new_service
+        .capture_run_snapshot("run-new", &key.id)
+        .await
+        .expect("new snapshot");
+    let empty = new_service
+        .search_in_run(
+            "run-new",
+            &key.id,
+            SearchRequest {
+                query: "Rust".into(),
+                max_results: 5,
+                allowed_domains: vec![],
+                blocked_domains: vec![],
+            },
+        )
+        .await
+        .expect("Local empty result succeeds");
+    assert!(empty.results.is_empty());
+    assert_eq!(
+        empty_local.calls.load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    assert_eq!(
+        skipped_exa.calls.load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    assert_eq!(
+        new_factory.outbounds.lock().expect("outbounds lock")[0],
+        (
+            local.id,
+            stravia_web_access::OutboundProxyMode::Explicit("http://new-proxy.example:8080".into()),
+        )
+    );
 }
 
 #[tokio::test]
@@ -346,6 +584,8 @@ async fn configuration_changes_do_not_replace_an_inference_run_snapshot() {
             name: "Exa".into(),
             kind: "exa".into(),
             api_key: Some("test-exa-key".into()),
+            use_proxy: false,
+            local_engines: None,
         })
         .await
         .expect("Web Provider");
@@ -434,6 +674,7 @@ impl WebProviderAdapter for FakeFetchProvider {
                             format: None,
                             title: None,
                             truncated: false,
+                            limitations: Vec::new(),
                             error: Some(WebAccessPublicError {
                                 code: WebAccessErrorCode::Unavailable,
                                 message: None,
@@ -447,6 +688,7 @@ impl WebProviderAdapter for FakeFetchProvider {
                             format: Some("markdown".into()),
                             title: None,
                             truncated: false,
+                            limitations: Vec::new(),
                             error: None,
                         }
                     }
@@ -489,6 +731,112 @@ async fn fetch_retries_only_failed_urls_and_preserves_input_order() {
     );
     assert_eq!(
         second.calls.lock().expect("calls lock").as_slice(),
+        &[vec!["https://8.8.8.8/b".to_string()]]
+    );
+}
+
+#[tokio::test]
+async fn configured_local_fetch_retries_only_failed_urls_on_zhipu() {
+    let data_dir = tempfile::tempdir().expect("temp data dir");
+    let (gateway, _logs) = crate::Gateway::new(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .expect("gateway");
+    let admin = gateway.admin();
+    let key = admin
+        .create_api_key(crate::db::models::CreateApiKey {
+            key: None,
+            name: "Web key".into(),
+            concurrency_limit: None,
+            expires_at: None,
+            mcp_access_enabled: false,
+            transparent_injection_enabled: true,
+            inject_web_search: true,
+            model_ids: vec![],
+            inject_media_understanding: false,
+        })
+        .await
+        .expect("API key");
+    let local = admin
+        .list_web_providers()
+        .await
+        .expect("Web Providers")
+        .into_iter()
+        .find(|provider| provider.kind == "local")
+        .expect("Local Web Provider");
+    let zhipu = admin
+        .create_web_provider(crate::db::models::CreateWebProvider {
+            name: "Zhipu".into(),
+            kind: "zhipu".into(),
+            api_key: Some("test-zhipu-key".into()),
+            use_proxy: false,
+            local_engines: None,
+        })
+        .await
+        .expect("Zhipu Web Provider");
+    admin
+        .update_web_access_settings(WebAccessSettings {
+            enabled: true,
+            search_provider_ids: vec![],
+            fetch_provider_ids: vec![local.id.clone(), zhipu.id.clone()],
+        })
+        .await
+        .expect("enabled settings");
+
+    let local_fetch = Arc::new(FakeFetchProvider {
+        fail_url: Some("https://8.8.8.8/b".into()),
+        content_characters: 7,
+        calls: std::sync::Mutex::new(vec![]),
+    });
+    let zhipu_fetch = Arc::new(FakeFetchProvider {
+        fail_url: None,
+        content_characters: 7,
+        calls: std::sync::Mutex::new(vec![]),
+    });
+    let factory = Arc::new(FakeAdapterFactory {
+        adapters: [
+            (local.id, local_fetch.clone() as Arc<dyn WebProviderAdapter>),
+            (zhipu.id, zhipu_fetch.clone() as Arc<dyn WebProviderAdapter>),
+        ]
+        .into_iter()
+        .collect(),
+        outbounds: std::sync::Mutex::new(vec![]),
+    });
+    let service = WebAccessService::with_adapter_factory(gateway, factory);
+    assert_eq!(
+        service
+            .capture_run_snapshot("run-fetch", &key.id)
+            .await
+            .expect("Fetch snapshot"),
+        WebAccessAvailability {
+            search: false,
+            fetch: true,
+        }
+    );
+    let response = service
+        .fetch_in_run(
+            "run-fetch",
+            &key.id,
+            FetchRequest {
+                urls: vec!["https://8.8.8.8/a".into(), "https://8.8.8.8/b".into()],
+                max_characters: 8_000,
+            },
+        )
+        .await
+        .expect("Zhipu recovers Local per-URL failure");
+
+    assert_eq!(
+        response
+            .results
+            .iter()
+            .map(|result| result.url.as_str())
+            .collect::<Vec<_>>(),
+        ["https://8.8.8.8/a", "https://8.8.8.8/b"]
+    );
+    assert_eq!(
+        zhipu_fetch.calls.lock().expect("calls lock").as_slice(),
         &[vec!["https://8.8.8.8/b".to_string()]]
     );
 }

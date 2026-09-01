@@ -772,6 +772,7 @@
   "web_access_configuration_leave_blank_keep_existing": "留空以保留现有凭据",
   "web_access_configuration_feature_summary": "允许 Stravia 模型在搜索任务中搜索网页并读取资料页面；更改会立即保存。",
   "web_access_configuration_loading_search_services": "正在加载搜索服务…",
+  "web_access_configuration_local_search_engines": "本地搜索引擎",
   "web_access_configuration_move_value_down": "下移 {name}",
   "web_access_configuration_move_value_up": "上移 {name}",
   "web_access_configuration_no_compatible_services": "没有兼容的服务。",
