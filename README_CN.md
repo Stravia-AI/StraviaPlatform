@@ -118,11 +118,12 @@ SvelteKit WebUI 可管理：
 
 ## 发布版本
 
-版本 tag 会通过 [GitHub Releases](https://github.com/Stravia-AI/StraviaPlatform/releases) 发布 Server 压缩包、Desktop 安装包和多架构容器镜像。当前发布范围：
+版本 tag 会通过 [GitHub Releases](https://github.com/Stravia-AI/StraviaPlatform/releases) 发布 Server 压缩包和 Desktop 安装包，同时发布多架构容器镜像和 Nix package。当前发布范围：
 
 - Server：Linux 和 Windows 的 x86_64、ARM64 架构；Linux 同时提供 GNU 与 musl 压缩包。
 - Desktop：Linux AppImage 和 Windows NSIS 安装包，均覆盖 x86_64 与 ARM64。
 - 容器：`ghcr.io/stravia-ai/straviaplatform` 下的 `linux/amd64` 与 `linux/arm64`。
+- Nix：仓库 flake 提供原生 `x86_64-linux` 和 `aarch64-linux` package，release 构建会推送到 [`stravia-platform` Cachix cache](https://app.cachix.org/cache/stravia-platform)。
 
 当前不提供 macOS 产物。Linux GNU Server 压缩包和 Desktop AppImage 以 Ubuntu 24.04 为兼容基线；旧版 Linux 发行版应使用 musl Server 压缩包。Windows Desktop 安装包暂未签名，可能触发 Microsoft Defender SmartScreen。
 
@@ -163,6 +164,40 @@ task build:server
 ```
 
 默认配置使用 SQLite，并监听 `127.0.0.1:23471`。Debug 构建与桌面端共用仓库内的 `.stravia-dev/` 数据目录；Release 构建使用 `~/.stravia`。打开 <http://127.0.0.1:23471>，配置提供商并创建模型路由。
+
+### 使用 Nix 运行服务端
+
+```bash
+# 当前 checkout
+nix run .
+
+# 已发布 tag；将 vX.Y.Z 替换为所需版本
+nix run github:Stravia-AI/StraviaPlatform/vX.Y.Z
+```
+
+flake 支持 `x86_64-linux` 和 `aarch64-linux`，会把内嵌 WebUI 与 Server 构建为一个 package，并将公开的 `stravia-platform` Cachix cache 配置为 substituter。
+
+在 NixOS 中，可以从 flake 导入 service module：
+
+```nix
+{
+  inputs.stravia.url = "github:Stravia-AI/StraviaPlatform";
+
+  outputs = { nixpkgs, stravia, ... }: {
+    nixosConfigurations.gateway = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        stravia.nixosModules.default
+        {
+          services.stravia.enable = true;
+        }
+      ];
+    };
+  };
+}
+```
+
+service 默认监听 `127.0.0.1:23471`，使用动态系统用户运行，并将数据持久化到 `/var/lib/stravia`。如需对外提供服务，请配置 `services.stravia.host`、`port` 和 `openFirewall`。密钥及其他可选服务端设置应放入 `services.stravia.environmentFile`；监听非 loopback 地址时必须设置 `STRAVIA_ADMIN_TOKEN`。
 
 ### 使用 Docker 运行服务端
 
