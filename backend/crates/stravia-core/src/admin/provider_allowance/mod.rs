@@ -1,16 +1,18 @@
 use serde::{Deserialize, Serialize};
 
 mod parsers;
+mod samples;
 mod service;
 
 use parsers::{ParsedAllowance, parse_minimax_fallback, parse_monitor_response};
-pub(crate) use service::ProviderAllowanceState;
+pub(crate) use samples::AllowanceSampleStore;
 #[cfg(test)]
 use service::{
     AllowanceHttpRequest, AllowanceHttpResponse, AllowanceTransport, TransportFailure,
     fetch_monitor, list_provider_allowances_with_transport, monitor_requests,
     refresh_provider_allowance_with_transport,
 };
+pub(crate) use service::{ProviderAllowanceState, SAMPLE_INTERVAL};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProviderAllowanceSnapshot {
@@ -54,6 +56,35 @@ pub struct Allowance {
     pub window_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reset_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub condition: Option<AllowanceCondition>,
+    pub forecast: ExhaustionForecast,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AllowanceCondition {
+    Normal,
+    Tight,
+    Exhausted,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ExhaustionForecast {
+    pub status: ExhaustionForecastStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub projected_remaining_percent: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exhausts_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ExhaustionForecastStatus {
+    NoRisk,
+    WillExhaust,
+    #[default]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

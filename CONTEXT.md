@@ -298,6 +298,26 @@ _避免使用_：Provider Plan Usage、Token Usage、Request Usage、Stats Usage
 Provider Allowance Monitor 是 Stravia Core 按 Provider 的 Catalog 身份选择、读取并规范化上游额度的受信实现；只有启用且命中本地 Monitor registry 的 Provider 才具有 Provider Allowance。Monitor 只使用该 Provider 已保存的 Adapter Credentials 或 OAuth Credential。
 _避免使用_：Catalog Allowance Capability、Quota Endpoint、远端解析规则
 
+## Allowance Item
+
+Allowance Item 是 Provider Allowance 快照里账户级的一条可消费额度，是配额窗口、请求额度或账户余额之一。它以 Monitor 给出的稳定 key 标识，归属一个 Provider。模型级额度不是 Allowance Item，不进入额度矩阵、重置时间轴或预计耗尽。
+_避免使用_：Quota、把 Model Allowance 当作账户级行
+
+## Allowance Condition
+
+Allowance Condition 是 Allowance Item 的展示态，由当前快照的剩余或已用比例派生：已用 ≥ 100% 或剩余 ≤ 0 为耗尽，剩余 < 20% 为紧张，其余可计算的为正常。它不是 Provider 健康，不落盘，也不改变路由资格。
+_避免使用_：Health、Provider Status、把 fresh/stale/error 叫作成色
+
+## Allowance Sample
+
+Allowance Sample 是一次成功 Monitor 读取后，对一个 Allowance Item 在某一时刻的 used / remaining / reset 观察记录。它只服务于趋势和预计耗尽，保留 14 天；它不是 live 快照，不是 Stats Usage，也不表示 Provider 健康或路由资格。
+_避免使用_：Provider Allowance Snapshot、用量历史、Quota History
+
+## Exhaustion Forecast
+
+Exhaustion Forecast 是对一个 Allowance Item、用当前重置窗口内 Allowance Sample 做线性外推后得到的耗尽估计：是否会在 reset_at 之前耗尽，以及窗口结束时的预计剩余。它不是 Stats Usage；跨重置的 Sample 不参与计算，样本不足时不给出估计。没有 reset_at 的余额只估计何时到 0，不使用「重置前」语义。
+_避免使用_：7 日均用量、Usage Forecast
+
 ## Vendor
 
 Vendor 是按 npm 包标识的上游运行时适配器；同一 npm 的多个 Provider Catalog Entry 共用它。它拥有 Adapter Credentials 校验、base URL 组装、鉴权与供应商 headers，不拥有 wire codec，也不执行 npm 包。

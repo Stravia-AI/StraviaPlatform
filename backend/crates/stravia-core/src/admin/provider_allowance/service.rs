@@ -21,13 +21,17 @@ use tokio::sync::{Mutex, RwLock};
 use crate::admin::AdminService;
 use crate::db::models::Provider;
 
+use super::samples::{AllowanceSample, AllowanceSampleStore, SAMPLE_RETENTION_MILLIS};
 use super::{
-    MonitorKind, ParsedAllowance, ProviderAllowanceError, ProviderAllowanceErrorCategory,
+    Allowance, AllowanceCondition, ExhaustionForecast, ExhaustionForecastStatus, MonitorKind,
+    ParsedAllowance, ProviderAllowanceError, ProviderAllowanceErrorCategory,
     ProviderAllowanceSnapshot, ProviderAllowanceStatus, monitor_for, parse_minimax_fallback,
     parse_monitor_response,
 };
 
 const SUCCESS_TTL: Duration = Duration::from_secs(180);
+pub(crate) const SAMPLE_INTERVAL: Duration = Duration::from_secs(30 * 60);
+const MIN_FORECAST_SPAN_MILLIS: i64 = 24 * 60 * 60 * 1000;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_PARALLEL_REFRESHES: usize = 4;
@@ -342,7 +346,7 @@ async fn fetch_provider_allowance(
                         return Ok(None);
                     }
 
-                    let snapshot = fetch_uncached(
+                    let mut snapshot = fetch_uncached(
                         &admin,
                         &current,
                         monitor,
@@ -358,6 +362,34 @@ async fn fetch_provider_allowance(
                         || provider_identity(&admin, &latest).await? != identity_for_future
                     {
                         return Ok(None);
+                    }
+
+                    if snapshot.status == ProviderAllowanceStatus::Fresh
+                        && let Err(error) = admin
+                            .gw
+                            .allowance_samples
+                            .record_snapshot_at(&snapshot, chrono::Utc::now().timestamp_millis())
+                            .await
+                    {
+                        tracing::warn!(
+                            provider_id = %provider_id,
+                            error = ?error,
+                            "provider allowance sample write failed"
+                        );
+                    }
+                    if snapshot.status == ProviderAllowanceStatus::Fresh
+                        && let Err(error) = apply_forecasts(
+                            &mut snapshot,
+                            &admin.gw.allowance_samples,
+                            chrono::Utc::now().timestamp_millis(),
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            provider_id = %provider_id,
+                            error = ?error,
+                            "provider allowance forecast load failed"
+                        );
                     }
 
                     let successful_at =
@@ -460,19 +492,241 @@ async fn fetch_uncached(
     .await;
 
     match result {
-        Ok(parsed) => ProviderAllowanceSnapshot {
-            provider_id: provider.id.clone(),
-            provider_name: provider.name.clone(),
-            catalog_provider_id: provider.preset_key.clone().unwrap_or_default(),
-            channel: provider.channel.clone().unwrap_or_else(|| "default".into()),
-            plan_label: parsed.plan_label,
-            status: ProviderAllowanceStatus::Fresh,
-            fetched_at: Some(chrono::Utc::now().to_rfc3339()),
-            allowances: parsed.allowances,
-            models: parsed.models,
-            error: None,
-        },
+        Ok(mut parsed) => {
+            for allowance in &mut parsed.allowances {
+                allowance.condition = allowance_condition(allowance);
+            }
+            ProviderAllowanceSnapshot {
+                provider_id: provider.id.clone(),
+                provider_name: provider.name.clone(),
+                catalog_provider_id: provider.preset_key.clone().unwrap_or_default(),
+                channel: provider.channel.clone().unwrap_or_else(|| "default".into()),
+                plan_label: parsed.plan_label,
+                status: ProviderAllowanceStatus::Fresh,
+                fetched_at: Some(chrono::Utc::now().to_rfc3339()),
+                allowances: parsed.allowances,
+                models: parsed.models,
+                error: None,
+            }
+        }
         Err(error) => stale_or_error_snapshot(provider, previous, error),
+    }
+}
+
+fn allowance_condition(allowance: &Allowance) -> Option<AllowanceCondition> {
+    if allowance
+        .used_percent
+        .is_some_and(|used| used.is_finite() && used >= 100.0)
+        || allowance
+            .remaining
+            .as_ref()
+            .is_some_and(|remaining| remaining.value.is_finite() && remaining.value <= 0.0)
+    {
+        return Some(AllowanceCondition::Exhausted);
+    }
+
+    let remaining_percent = allowance
+        .used_percent
+        .filter(|used| used.is_finite())
+        .map(|used| 100.0 - used)
+        .or_else(|| {
+            allowance
+                .remaining
+                .as_ref()
+                .zip(allowance.limit.as_ref())
+                .filter(|(remaining, limit)| {
+                    remaining.value.is_finite() && limit.value.is_finite() && limit.value > 0.0
+                })
+                .map(|(remaining, limit)| remaining.value / limit.value * 100.0)
+        })?;
+
+    Some(if remaining_percent < 20.0 {
+        AllowanceCondition::Tight
+    } else {
+        AllowanceCondition::Normal
+    })
+}
+
+async fn apply_forecasts(
+    snapshot: &mut ProviderAllowanceSnapshot,
+    store: &AllowanceSampleStore,
+    now: i64,
+) -> anyhow::Result<()> {
+    for allowance in &mut snapshot.allowances {
+        let since = allowance
+            .reset_at
+            .zip(allowance.window_seconds)
+            .map(|(reset_at, window_seconds)| {
+                reset_at.saturating_sub(
+                    i64::try_from(window_seconds)
+                        .unwrap_or(i64::MAX)
+                        .saturating_mul(1000),
+                )
+            })
+            .unwrap_or_else(|| now.saturating_sub(SAMPLE_RETENTION_MILLIS));
+        let samples = store
+            .list_for_item(&snapshot.provider_id, &allowance.key, since)
+            .await?;
+        allowance.forecast = forecast_allowance(allowance, &samples);
+    }
+    Ok(())
+}
+
+fn forecast_allowance(allowance: &Allowance, samples: &[AllowanceSample]) -> ExhaustionForecast {
+    if let Some(reset_at) = allowance.reset_at {
+        let Some(window_seconds) = allowance.window_seconds else {
+            return ExhaustionForecast::default();
+        };
+        let window_start = reset_at.saturating_sub(
+            i64::try_from(window_seconds)
+                .unwrap_or(i64::MAX)
+                .saturating_mul(1000),
+        );
+        let points = samples
+            .iter()
+            .filter(|sample| sample.sampled_at >= window_start)
+            .filter_map(|sample| {
+                sample_remaining_percent(sample).map(|remaining| (sample.sampled_at, remaining))
+            })
+            .collect::<Vec<_>>();
+        let Some(line) = LinearTrend::from_points(&points) else {
+            return ExhaustionForecast::default();
+        };
+        let projected = line.value_at(reset_at);
+        if line.slope < 0.0 && projected <= 0.0 {
+            let exhausts_at = line.zero_at().map(|value| value.round() as i64);
+            return ExhaustionForecast {
+                status: ExhaustionForecastStatus::WillExhaust,
+                projected_remaining_percent: Some(0.0),
+                exhausts_at,
+            };
+        }
+        return ExhaustionForecast {
+            status: ExhaustionForecastStatus::NoRisk,
+            projected_remaining_percent: Some(projected.clamp(0.0, 100.0)),
+            exhausts_at: None,
+        };
+    }
+
+    let Some(current_amount) = allowance.remaining.as_ref() else {
+        return ExhaustionForecast::default();
+    };
+    let points = samples
+        .iter()
+        .filter(|sample| {
+            sample.amount_unit.as_deref() == Some(current_amount.unit.as_str())
+                && sample.currency.as_deref() == current_amount.currency.as_deref()
+        })
+        .filter_map(|sample| {
+            sample
+                .remaining_value
+                .filter(|value| value.is_finite())
+                .map(|remaining| (sample.sampled_at, remaining))
+        })
+        .collect::<Vec<_>>();
+    let Some(line) = LinearTrend::from_points(&points) else {
+        return ExhaustionForecast::default();
+    };
+    if current_amount.value.is_finite() && current_amount.value <= 0.0 {
+        return ExhaustionForecast {
+            status: ExhaustionForecastStatus::WillExhaust,
+            projected_remaining_percent: None,
+            exhausts_at: line
+                .zero_at()
+                .map(|value| value.round() as i64)
+                .or_else(|| {
+                    points
+                        .iter()
+                        .filter_map(|(sampled_at, remaining)| {
+                            (*remaining <= 0.0).then_some(*sampled_at)
+                        })
+                        .min()
+                }),
+        };
+    }
+    if line.slope < 0.0
+        && let Some(exhausts_at) = line.zero_at().map(|value| value.round() as i64)
+    {
+        return ExhaustionForecast {
+            status: ExhaustionForecastStatus::WillExhaust,
+            projected_remaining_percent: None,
+            exhausts_at: Some(exhausts_at),
+        };
+    }
+    ExhaustionForecast {
+        status: ExhaustionForecastStatus::NoRisk,
+        projected_remaining_percent: None,
+        exhausts_at: None,
+    }
+}
+
+fn sample_remaining_percent(sample: &AllowanceSample) -> Option<f64> {
+    sample
+        .used_percent
+        .filter(|value| value.is_finite())
+        .map(|used| 100.0 - used)
+        .or_else(|| {
+            sample
+                .remaining_value
+                .zip(sample.limit_value)
+                .filter(|(remaining, limit)| {
+                    remaining.is_finite() && limit.is_finite() && *limit > 0.0
+                })
+                .map(|(remaining, limit)| remaining / limit * 100.0)
+        })
+}
+
+struct LinearTrend {
+    origin: f64,
+    intercept: f64,
+    slope: f64,
+}
+
+impl LinearTrend {
+    fn from_points(points: &[(i64, f64)]) -> Option<Self> {
+        if points.len() < 2 {
+            return None;
+        }
+        let first = points.iter().map(|(time, _)| *time).min()?;
+        let last = points.iter().map(|(time, _)| *time).max()?;
+        if last.saturating_sub(first) < MIN_FORECAST_SPAN_MILLIS {
+            return None;
+        }
+        let origin = first as f64;
+        let count = points.len() as f64;
+        let mean_x = points
+            .iter()
+            .map(|(time, _)| *time as f64 - origin)
+            .sum::<f64>()
+            / count;
+        let mean_y = points.iter().map(|(_, value)| *value).sum::<f64>() / count;
+        let (numerator, denominator) =
+            points
+                .iter()
+                .fold((0.0, 0.0), |(numerator, denominator), (time, value)| {
+                    let centered_x = (*time as f64 - origin) - mean_x;
+                    (
+                        numerator + centered_x * (*value - mean_y),
+                        denominator + centered_x * centered_x,
+                    )
+                });
+        if denominator <= f64::EPSILON {
+            return None;
+        }
+        let slope = numerator / denominator;
+        Some(Self {
+            origin,
+            intercept: mean_y - slope * mean_x,
+            slope,
+        })
+    }
+
+    fn value_at(&self, timestamp: i64) -> f64 {
+        self.intercept + self.slope * (timestamp as f64 - self.origin)
+    }
+
+    fn zero_at(&self) -> Option<f64> {
+        (self.slope < 0.0).then_some(self.origin - self.intercept / self.slope)
     }
 }
 

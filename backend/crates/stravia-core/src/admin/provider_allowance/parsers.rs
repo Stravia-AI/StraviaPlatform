@@ -81,6 +81,8 @@ fn allowance(key: impl Into<String>, label: impl Into<String>, kind: AllowanceKi
         used_percent: None,
         window_seconds: None,
         reset_at: None,
+        condition: None,
+        forecast: Default::default(),
     }
 }
 
