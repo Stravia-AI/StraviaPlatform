@@ -134,47 +134,6 @@ impl ProviderStore for SqliteProviderStore {
         .execute(&mut *tx)
         .await?;
 
-        for key in [
-            "web_access_search_provider_ids",
-            "web_access_fetch_provider_ids",
-        ] {
-            let current =
-                sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE name = ?")
-                    .bind(key)
-                    .fetch_optional(&mut *tx)
-                    .await?;
-            let Some(current) = current else { continue };
-            let pruned = sqlx::query_scalar::<_, String>(
-                "SELECT CASE
-                    WHEN json_valid(?) THEN COALESCE(
-                        (SELECT json_group_array(ordered.value)
-                           FROM (
-                               SELECT entry.value AS value
-                                 FROM json_each(?) AS entry
-                                WHERE entry.value NOT IN (
-                                    SELECT id FROM web_providers WHERE provider_id = ?
-                                )
-                                ORDER BY CAST(entry.key AS INTEGER)
-                           ) AS ordered),
-                        '[]'
-                    )
-                    ELSE '[]'
-                END",
-            )
-            .bind(&current)
-            .bind(&current)
-            .bind(id)
-            .fetch_one(&mut *tx)
-            .await?;
-            sqlx::query(
-                "UPDATE settings SET value = ?, updated_at = datetime('now') WHERE name = ?",
-            )
-            .bind(pruned)
-            .bind(key)
-            .execute(&mut *tx)
-            .await?;
-        }
-
         sqlx::query("DELETE FROM providers WHERE id = ?")
             .bind(id)
             .execute(&mut *tx)

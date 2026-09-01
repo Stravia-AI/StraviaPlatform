@@ -219,6 +219,26 @@ test('Model Route curl always includes the selected API Key', async ({ page }) =
 
 test('Model Route editor omits API Key and payload toggles', async ({ page }) => {
   await page.setViewportSize({ width: 1089, height: 612 })
+  const model = {
+    id: 'model-gpt',
+    name: 'gpt-5.4',
+    balance: 'priority',
+    target_provider: 'provider',
+    target_model: 'gpt-5.4',
+    is_enabled: true,
+    created_at: '2026-08-17T00:00:00Z',
+    targets: [
+      {
+        id: 'target-gpt',
+        model_id: 'model-gpt',
+        provider_id: 'provider',
+        model: 'gpt-5.4',
+        weight: 100,
+        priority: 1,
+        created_at: '2026-08-17T00:00:00Z',
+      },
+    ],
+  }
   await page.route('**/api/v1/providers', async (route) => {
     await route.fulfill({
       json: {
@@ -238,32 +258,10 @@ test('Model Route editor omits API Key and payload toggles', async ({ page }) =>
     })
   })
   await page.route('**/api/v1/models', async (route) => {
-    await route.fulfill({
-      json: {
-        data: [
-          {
-            id: 'model-gpt',
-            name: 'gpt-5.4',
-            balance: 'priority',
-            target_provider: 'provider',
-            target_model: 'gpt-5.4',
-            is_enabled: true,
-            created_at: '2026-08-17T00:00:00Z',
-            targets: [
-              {
-                id: 'target-gpt',
-                model_id: 'model-gpt',
-                provider_id: 'provider',
-                model: 'gpt-5.4',
-                weight: 100,
-                priority: 1,
-                created_at: '2026-08-17T00:00:00Z',
-              },
-            ],
-          },
-        ],
-      },
-    })
+    await route.fulfill({ json: { data: [model] } })
+  })
+  await page.route('**/api/v1/models/gpt-5.4', async (route) => {
+    await route.fulfill({ json: { data: model } })
   })
 
   await page.goto('/models')
@@ -321,6 +319,38 @@ test('Model Route editor omits API Key and payload toggles', async ({ page }) =>
 test('Model Route editor derives thinking levels and identifies blocking destinations', async ({ page }) => {
   await page.setViewportSize({ width: 820, height: 900 })
   let updateBody: Record<string, unknown> | undefined
+  const model = {
+    id: 'thinking-route',
+    name: 'thinking-route',
+    balance: 'priority',
+    target_provider: 'provider',
+    target_model: 'wide-model',
+    is_enabled: true,
+    created_at: '2026-08-17T00:00:00Z',
+    supported_thinking_levels: ['off', 'max'],
+    targets: [
+      {
+        id: 'target-wide',
+        model_id: 'thinking-route',
+        provider_id: 'provider',
+        model: 'wide-model',
+        weight: 100,
+        priority: 1,
+        created_at: '2026-08-17T00:00:00Z',
+        thinking_level_map: thinkingMap(new Set(['off', 'low', 'high'])),
+      },
+      {
+        id: 'target-narrow',
+        model_id: 'thinking-route',
+        provider_id: 'provider',
+        model: 'narrow-model',
+        weight: 100,
+        priority: 2,
+        created_at: '2026-08-17T00:00:00Z',
+        thinking_level_map: thinkingMap(new Set(['low', 'high'])),
+      },
+    ],
+  }
   await page.route('**/api/v1/providers', async (route) => {
     await route.fulfill({
       json: {
@@ -340,46 +370,13 @@ test('Model Route editor derives thinking levels and identifies blocking destina
     })
   })
   await page.route('**/api/v1/models', async (route) => {
-    await route.fulfill({
-      json: {
-        data: [
-          {
-            id: 'thinking-route',
-            name: 'thinking-route',
-            balance: 'priority',
-            target_provider: 'provider',
-            target_model: 'wide-model',
-            is_enabled: true,
-            created_at: '2026-08-17T00:00:00Z',
-            supported_thinking_levels: ['off', 'max'],
-            targets: [
-              {
-                id: 'target-wide',
-                model_id: 'thinking-route',
-                provider_id: 'provider',
-                model: 'wide-model',
-                weight: 100,
-                priority: 1,
-                created_at: '2026-08-17T00:00:00Z',
-                thinking_level_map: thinkingMap(new Set(['off', 'low', 'high'])),
-              },
-              {
-                id: 'target-narrow',
-                model_id: 'thinking-route',
-                provider_id: 'provider',
-                model: 'narrow-model',
-                weight: 100,
-                priority: 2,
-                created_at: '2026-08-17T00:00:00Z',
-                thinking_level_map: thinkingMap(new Set(['low', 'high'])),
-              },
-            ],
-          },
-        ],
-      },
-    })
+    await route.fulfill({ json: { data: [model] } })
   })
   await page.route('**/api/v1/models/thinking-route', async (route) => {
+    if (route.request().method() === 'GET') {
+      await route.fulfill({ json: { data: model } })
+      return
+    }
     updateBody = route.request().postDataJSON() as Record<string, unknown>
     await route.fulfill({
       json: {
@@ -544,7 +541,7 @@ test('Route Builder loads Provider Models and exposes only strategy-relevant Tar
       if (createAttempts === 1) {
         await route.fulfill({ status: 400, json: { error: 'Route validation failed' } })
       } else {
-        await route.fulfill({ json: { data: { id: 'route-created' } } })
+        await route.fulfill({ json: { data: { id: 'route-created', name: 'route-created' } } })
       }
       return
     }

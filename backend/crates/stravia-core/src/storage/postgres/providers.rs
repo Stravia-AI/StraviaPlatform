@@ -140,34 +140,6 @@ impl ProviderStore for PostgresProviderStore {
         .execute(&mut *tx)
         .await?;
 
-        sqlx::query_scalar::<_, String>(
-            "SELECT id FROM web_providers WHERE provider_id = $1 FOR UPDATE",
-        )
-        .bind(id)
-        .fetch_all(&mut *tx)
-        .await?;
-
-        sqlx::query(
-            "UPDATE settings
-             SET value = COALESCE(
-                 (SELECT jsonb_agg(item.value ORDER BY item.ordinality)::text
-                    FROM jsonb_array_elements_text(settings.value::jsonb)
-                         WITH ORDINALITY AS item(value, ordinality)
-                   WHERE item.value NOT IN (
-                       SELECT id FROM web_providers WHERE provider_id = $1
-                   )),
-                 '[]'
-             ),
-             updated_at = CURRENT_TIMESTAMP
-             WHERE name IN (
-                 'web_access_search_provider_ids',
-                 'web_access_fetch_provider_ids'
-             )",
-        )
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
-
         sqlx::query("DELETE FROM providers WHERE id = $1")
             .bind(id)
             .execute(&mut *tx)
