@@ -253,7 +253,10 @@ def test_status_describes_gateway_without_a_listener_port(admin_env: dict[str, s
         "GET", f"{admin_env['admin']}/api/v1/status", headers=admin_env["auth"]
     )
     assert status == 200
-    assert body == {"status": "running"}
+    assert body["status"] == "running"
+    assert isinstance(body["version"], str)
+    assert body["version"]
+    assert "listener_port" not in body
 
 
 @pytest.mark.e2e
