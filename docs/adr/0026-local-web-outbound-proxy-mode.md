@@ -1,4 +1,10 @@
+---
+status: superseded by ADR-0031
+---
+
 # Give Local Web one snapshotted outbound proxy mode
+
+> 管理面的 Direct / System / Explicit 三档已被 [ADR-0031](0031-own-web-access-adapters-in-stravia-web-access.md) 取代为 `use_proxy` + Gateway `proxy_url`。Internal Web Search、Static Extraction 与 Rendered Extraction 必须共用同一出站快照的约束仍然有效。
 
 `stravia-web-local` 用构造期快照的 **Local Web Outbound Proxy Mode**（Direct / System / Explicit）覆盖 Internal Web Search、Static Extraction 和 Rendered Extraction（含 Chrome 子资源）。System 只认进程环境变量，不认 OS GUI/PAC/WinHTTP；有可用代理时源站 DNS 交给代理，Chrome 禁止本机源站解析。这样在必须走代理才能出网的环境里，三条路径不会各走各的出口。
 

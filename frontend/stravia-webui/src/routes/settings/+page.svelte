@@ -19,6 +19,10 @@ import { Spinner } from '$lib/components/ui/spinner'
 import { Switch } from '$lib/components/ui/switch'
 
 const queryClient = useQueryClient()
+const statusQuery = createQuery(() => ({
+  queryKey: ['gateway-status'],
+  queryFn: admin.settings.status,
+}))
 const retentionQuery = createQuery(() => ({
   queryKey: ['setting', 'log_retention_days'],
   queryFn: () => admin.settings.get('log_retention_days'),
@@ -58,7 +62,7 @@ const proxyDirty = $derived(
 const settingsError = $derived(
   retentionQuery.error ?? proxyEnabledQuery.error ?? proxyUrlQuery.error ?? proxyBypassQuery.error,
 )
-const appVersion = import.meta.env.VITE_APP_VERSION ?? '–'
+const appVersion = $derived(statusQuery.data?.version ?? '–')
 const currentTheme = $derived(userPrefersMode.current ?? 'system')
 
 function scrollToSection(id: string): void {

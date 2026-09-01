@@ -51,6 +51,7 @@ export interface LogPage {
 
 export interface GatewayStatus {
   status: string
+  version: string
 }
 
 export interface StatsOverview {

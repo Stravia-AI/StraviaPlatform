@@ -384,18 +384,23 @@ _避免使用_：SSR、SPA、低质量页面
 
 ## Web Provider
 
-Web Provider 是 Local Web Search 中执行 Internal Web Search、Internal Web Fetch 之一或两者的已配置上游；它独立于模型路由的 Target，也不包含 Codex Search Backend。
+Web Provider 是 Local Web Search 中执行 Internal Web Search、Internal Web Fetch 之一或两者的已配置上游；它独立于模型路由的 Target，也不包含 Codex Search Backend。每条记录拥有与模型 Provider 同构的 `use_proxy`：开启时必须有可用的 Gateway `proxy_url`，关闭时直连。
 _避免使用_：Search Engine、Web Backend
 
 ## Local Web Provider
 
-Local Web Provider 是在进程内执行 Internal Web Search 和/或 Internal Web Fetch 的 Web Provider，不使用第三方 search/fetch API key。它仍会访问公网搜索引擎和公网 URL；它不是本地网页索引，也不是 Search Backend。
-_避免使用_：元搜索、Metasearch、Search Engine、Local Search、Local Search Backend
+Local Web Provider 是在进程内执行 Internal Web Search 和/或 Internal Web Fetch 的 Web Provider，不使用第三方 search/fetch API key。每个部署恰好一条且不可删除；不用它时从 search/fetch 有序列表移除，而不是销毁记录。它拥有是否经 Gateway 代理出站的开关，以及各 Local Search Engine 的配置。该开关与模型 Provider 的 `use_proxy` 同构：开启时必须有可用的 Gateway `proxy_url`，关闭时直连。它仍会向公网发出查询和抓取；它不是本地网页索引，也不是 Search Backend，也不是独立于 Web Provider 记录的内置运行时。
+_避免使用_：元搜索、Metasearch、Search Engine、Local Search、Local Search Backend、内置 Local 运行时
+
+## Local Search Engine
+
+Local Search Engine 是 Local Web Provider 在 Internal Web Search 中查询的一个公网 HTML 检索服务。它的配置属于那条唯一的 Local Web Provider 记录，包括启用与否以及仅由该引擎解释的私有设置；私有设置可以包含须按凭据保管的值。该记录必须至少启用一个 Local Search Engine；要停用 Local 搜索时从 search 列表移除，而不是关光引擎。它不是 Web Provider，不是 Search Backend，也不是 Search Report 引用的 Search Source。
+_避免使用_：Search Engine（当指 Web Provider）、Metasearch、引擎 Provider、全局 cookie jar、把计算器或页面后处理当作 Local Search Engine
 
 ## Local Web Outbound Proxy Mode
 
-Local Web Outbound Proxy Mode 是 Local Web Provider 运行时对全部出站流量的单一选择，取值为 Direct、System 或 Explicit。Internal Web Search、Static Extraction 与 Rendered Extraction（含页面子资源）必须使用同一模式；Direct 不使用代理，System 使用进程环境变量中的代理，Explicit 使用一个指定的代理 URL。它不是 Provider 的 `use_proxy`，也不是操作系统 GUI、PAC 或 WinHTTP 代理。
-_避免使用_：wreq proxy、browser proxy、系统代理（未限定时）
+Local Web Outbound Proxy Mode 是 Local Web Provider 对 Internal Web Search、Static Extraction 与 Rendered Extraction（含页面子资源）的单一出站结果，由该记录的 `use_proxy` 与 Gateway `proxy_url` 派生：关闭则直连，开启则全部走 `proxy_url`。它不是独立的 Direct/System/Explicit 管理面选项，也不是操作系统 GUI、PAC 或 WinHTTP 代理。
+_避免使用_：System 代理档、独立 Local 代理 URL、wreq proxy、browser proxy、系统代理（未限定时）
 
 ## Advanced Capability
 

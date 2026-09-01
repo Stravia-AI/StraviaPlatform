@@ -5,6 +5,7 @@ use super::*;
 pub(super) async fn get_status() -> impl IntoResponse {
     Json(serde_json::json!({
         "status": "running",
+        "version": env!("CARGO_PKG_VERSION"),
     }))
 }
 

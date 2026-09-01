@@ -5,6 +5,26 @@ use stravia_core::config::GatewayConfig;
 use tower::ServiceExt;
 
 #[tokio::test]
+async fn status_reports_the_running_server_version() -> anyhow::Result<()> {
+    let data_dir = tempfile::tempdir()?;
+    let (gateway, _logs) = Gateway::new(GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await?;
+    let response = create_router(gateway, None)
+        .oneshot(Request::get("/api/v1/status").body(Body::empty())?)
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+    assert_eq!(json["status"], "running");
+    assert_eq!(json["version"], env!("CARGO_PKG_VERSION"));
+    Ok(())
+}
+
+#[tokio::test]
 async fn provider_allowance_routes_share_the_core_contract() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
     let (gateway, _logs) = Gateway::new(GatewayConfig {
