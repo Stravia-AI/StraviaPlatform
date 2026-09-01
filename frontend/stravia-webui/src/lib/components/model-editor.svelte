@@ -16,8 +16,6 @@ import { modelIdFromCatalogId } from '$lib/catalog-model-id'
 import { formatNumber } from '$lib/format'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
 import type {
-  CreateTarget,
-  ModelCapabilities,
   Provider,
   ProviderModelSummary,
   Route,
@@ -25,8 +23,15 @@ import type {
   TargetThinkingControl,
   ThinkingLevel,
   ThinkingLevelMapping,
-  UpsertTarget,
 } from '$lib/types'
+import {
+  addRouteTarget,
+  buildRouteTargets,
+  createRouteTargetForms,
+  moveRouteTarget,
+  removeRouteTarget,
+  type RouteTargetForm,
+} from './route-targets-form.js'
 import ModelCombobox from '$lib/components/model-combobox.svelte'
 import ModelDetailsDialog from '$lib/components/model-details-dialog.svelte'
 import PageHeader from '$lib/components/page-header.svelte'
@@ -48,37 +53,23 @@ interface Props {
   onSaved?: () => void
 }
 
-type TargetForm = {
-  key: string
-  id?: string
-  providerId: string
-  model: string
-  weight: number
-  inventory: ProviderModelSummary[]
-  capabilities?: ModelCapabilities
-  custom: boolean
-  persisted: boolean
-  loading: boolean
-  validationError: string
-  thinkingLevelMap: ThinkingLevelMapping[]
-}
-
 const thinkingLevels: ThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 
 let { model, providers, initialProviderId = '', initialModelId = '', onSaved }: Props = $props()
 const initialModel = untrack(() => model)
 const queryClient = useQueryClient()
-let nextTargetKey = 0
 let form = $state({
   name: initialModel?.name ?? '',
   balance: initialModel?.balance ?? 'weighted',
   enabled: initialModel?.is_enabled ?? true,
 })
-let targets = $state<TargetForm[]>(targetForms())
+let targets = $state<RouteTargetForm[]>(
+  untrack(() => createRouteTargetForms(initialModel, initialProviderId, initialModelId)),
+)
 let saving = $state(false)
 let initialized = $state(false)
 let regenerateOpen = $state(false)
-let regenerateTarget = $state<TargetForm>()
+let regenerateTarget = $state<RouteTargetForm>()
 
 const availableProviders = $derived(providers)
 const canonicalModelsQuery = createQuery(() => ({
@@ -126,62 +117,18 @@ $effect(() => {
   }
 })
 
-function newTarget(values: Partial<TargetForm> = {}): TargetForm {
-  nextTargetKey += 1
-  return {
-    key: `target-${nextTargetKey}`,
-    providerId: '',
-    model: '',
-    weight: 100,
-    inventory: [],
-    custom: false,
-    persisted: false,
-    loading: false,
-    validationError: '',
-    thinkingLevelMap: [],
-    ...values,
-  }
-}
-
-function targetForms(): TargetForm[] {
-  if (initialModel?.targets.length) {
-    return initialModel.targets
-      .slice()
-      .sort((left, right) => left.priority - right.priority)
-      .map((target) =>
-        newTarget({
-          id: target.id,
-          providerId: target.provider_id,
-          model: target.model,
-          weight: target.weight,
-          persisted: true,
-          thinkingLevelMap: target.thinking_level_map?.map((row) => ({
-            ...row,
-            control: { ...row.control },
-          })) ?? [],
-        }),
-      )
-  }
-  return [newTarget({ providerId: initialProviderId, model: initialModelId })]
-}
-
-function validWeight(value: number): boolean {
-  const number = Number(value)
-  return Number.isInteger(number) && number > 0
-}
-
-function modelCandidates(target: TargetForm): ProviderModelSummary[] {
+function modelCandidates(target: RouteTargetForm): ProviderModelSummary[] {
   return target.inventory.filter((item) => {
     const keepExisting = target.persisted && item.id === target.model
     return item.available || keepExisting
   })
 }
 
-function selectedSummary(target: TargetForm): ProviderModelSummary | undefined {
+function selectedSummary(target: RouteTargetForm): ProviderModelSummary | undefined {
   return target.inventory.find((item) => item.id === target.model)
 }
 
-async function loadInventory(target: TargetForm): Promise<void> {
+async function loadInventory(target: RouteTargetForm): Promise<void> {
   if (!target.providerId) return
   target.loading = true
   target.validationError = ''
@@ -200,7 +147,7 @@ async function loadInventory(target: TargetForm): Promise<void> {
   }
 }
 
-async function changeProvider(target: TargetForm, providerId: string): Promise<void> {
+async function changeProvider(target: RouteTargetForm, providerId: string): Promise<void> {
   if (target.providerId === providerId) return
   target.providerId = providerId
   target.model = ''
@@ -213,7 +160,7 @@ async function changeProvider(target: TargetForm, providerId: string): Promise<v
   await loadInventory(target)
 }
 
-async function selectModel(target: TargetForm, modelId: string): Promise<void> {
+async function selectModel(target: RouteTargetForm, modelId: string): Promise<void> {
   target.model = modelId
   target.custom = false
   target.validationError = ''
@@ -222,7 +169,7 @@ async function selectModel(target: TargetForm, modelId: string): Promise<void> {
   await loadCapabilities(target, true)
 }
 
-async function loadCapabilities(target: TargetForm, refreshThinkingMap = false): Promise<void> {
+async function loadCapabilities(target: RouteTargetForm, refreshThinkingMap = false): Promise<void> {
   if (!target.providerId || !target.model) return
   target.loading = true
   try {
@@ -246,7 +193,7 @@ async function loadCapabilities(target: TargetForm, refreshThinkingMap = false):
   }
 }
 
-function useInventory(target: TargetForm): void {
+function useInventory(target: RouteTargetForm): void {
   target.custom = false
   target.model = ''
   target.capabilities = undefined
@@ -254,26 +201,22 @@ function useInventory(target: TargetForm): void {
 }
 
 function addTarget(): void {
-  targets.push(newTarget())
+  addRouteTarget(targets)
 }
 
 function removeTarget(index: number): void {
-  if (targets.length === 1) return
-  targets.splice(index, 1)
+  removeRouteTarget(targets, index)
 }
 
 function moveTarget(index: number, offset: -1 | 1): void {
-  const destination = index + offset
-  if (destination < 0 || destination >= targets.length) return
-  const [target] = targets.splice(index, 1)
-  targets.splice(destination, 0, target)
+  moveRouteTarget(targets, index, offset)
 }
 
-function targetSupportsThinkingLevel(target: TargetForm, level: ThinkingLevel): boolean {
+function targetSupportsThinkingLevel(target: RouteTargetForm, level: ThinkingLevel): boolean {
   return target.thinkingLevelMap.some((row) => row.level === level && row.control.type !== 'hidden')
 }
 
-function targetLabel(target: TargetForm, index: number): string {
+function targetLabel(target: RouteTargetForm, index: number): string {
   const destination = m.model_editor_destination_value({ index: index + 1 })
   const provider = providers.find((candidate) => candidate.id === target.providerId)
   return [destination, provider?.name ?? target.providerId, target.model.trim()].filter(Boolean).join(' · ')
@@ -311,7 +254,7 @@ function thinkingControlLabel(type: TargetThinkingControl['type']): string {
   }[type]
 }
 
-async function resetThinkingRow(target: TargetForm, level: ThinkingLevel): Promise<void> {
+async function resetThinkingRow(target: RouteTargetForm, level: ThinkingLevel): Promise<void> {
   if (!initialModel || !target.id) return
   target.validationError = ''
   try {
@@ -323,7 +266,7 @@ async function resetThinkingRow(target: TargetForm, level: ThinkingLevel): Promi
   }
 }
 
-function requestThinkingMapRegeneration(target: TargetForm): void {
+function requestThinkingMapRegeneration(target: RouteTargetForm): void {
   regenerateTarget = target
   regenerateOpen = true
 }
@@ -346,24 +289,14 @@ async function regenerateThinkingMap(): Promise<void> {
 }
 
 async function saveModel(): Promise<void> {
-  if (form.balance === 'weighted' && targets.some((target) => !validWeight(target.weight))) {
+  const result = buildRouteTargets(form.balance, targets)
+  if (result.error === 'invalid-weight') {
     toast.error(m.model_editor_every_traffic_share_must_positive_integer())
     return
   }
-  const cleanTargets = targets
-    .filter((target) => target.providerId && target.model.trim())
-    .map((target, index): CreateTarget & UpsertTarget => ({
-      id: target.id,
-      provider_id: target.providerId,
-      model: target.model.trim(),
-      weight: form.balance === 'weighted' ? Number(target.weight) : 100,
-      priority: index + 1,
-      thinking_level_map: target.persisted
-        ? target.thinkingLevelMap
-        : target.thinkingLevelMap.filter((row) => row.source === 'overridden'),
-    }))
+  const cleanTargets = result.targets
   const firstTarget = cleanTargets[0]
-  if (!form.name.trim() || !firstTarget || cleanTargets.length !== targets.length) {
+  if (!form.name.trim() || !firstTarget || result.error === 'incomplete-target') {
     toast.error(m.model_editor_destinations_help())
     return
   }

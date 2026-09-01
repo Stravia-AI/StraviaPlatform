@@ -28,9 +28,7 @@ import type {
   ProviderModelSummary,
   ProviderModelSyncSummary,
 } from '$lib/types'
-import ModelCombobox from '$lib/components/model-combobox.svelte'
 import ProviderModelEditor from '$lib/components/provider-model-editor.svelte'
-import * as AlertDialog from '$lib/components/ui/alert-dialog'
 import { Badge } from '$lib/components/ui/badge'
 import { Button } from '$lib/components/ui/button'
 import {
@@ -40,13 +38,13 @@ import {
   type DataTableFilterGroup,
   type DataTableRowPointerEvent,
 } from '$lib/components/ui/data-table'
-import * as Dialog from '$lib/components/ui/dialog'
 import * as DropdownMenu from '$lib/components/ui/dropdown-menu'
-import * as Field from '$lib/components/ui/field'
 import { Input } from '$lib/components/ui/input'
-import * as Select from '$lib/components/ui/select'
-import * as Sheet from '$lib/components/ui/sheet'
 import { Spinner } from '$lib/components/ui/spinner'
+import CatalogConfirmations from './provider-model-catalog/confirmations.svelte'
+import CatalogEditorDrawer from './provider-model-catalog/editor-drawer.svelte'
+import CatalogFilterSheet from './provider-model-catalog/filter-sheet.svelte'
+import ManualModelDialog from './provider-model-catalog/manual-model-dialog.svelte'
 
 interface Props {
   providerId: string
@@ -547,61 +545,6 @@ async function deleteManualModel(): Promise<void> {
 }
 </script>
 
-{#snippet availabilitySelect(id: string)}
-  <Select.Root
-    type="single"
-    bind:value={() => availabilityFilter, (value) => setCatalogFilter('availability', value ?? 'all')}>
-    <Select.Trigger {id} class="h-10 w-full font-normal" aria-label={m.provider_model_catalog_model_availability()}>
-      {availabilityFilter === 'all'
-        ? m.common_all_models()
-        : availabilityFilter === 'available'
-          ? m.common_used()
-          : m.common_unavailable()}
-    </Select.Trigger>
-    <Select.Content>
-      <Select.Item value="all">{m.common_all_models()}</Select.Item>
-      <Select.Item value="available">{m.common_used()}</Select.Item>
-      <Select.Item value="unavailable">{m.common_unavailable()}</Select.Item>
-    </Select.Content>
-  </Select.Root>
-{/snippet}
-
-{#snippet sourceSelect(id: string)}
-  <Select.Root
-    type="single"
-    bind:value={() => sourceFilter, (value) => setCatalogFilter('source_kind', value ?? 'all')}>
-    <Select.Trigger {id} class="h-10 w-full font-normal" aria-label={m.provider_model_catalog_how_models_were_added()}>
-      {sourceFilter === 'all'
-        ? m.provider_model_catalog_all_sources()
-        : sourceFilter === 'manual'
-          ? m.common_added_manually()
-          : m.common_synced()}
-    </Select.Trigger>
-    <Select.Content>
-      <Select.Item value="all">{m.provider_model_catalog_all_sources()}</Select.Item>
-      <Select.Item value="discovered">{m.common_synced()}</Select.Item>
-      <Select.Item value="manual">{m.common_added_manually()}</Select.Item>
-    </Select.Content>
-  </Select.Root>
-{/snippet}
-
-{#snippet referenceSelect(id: string)}
-  <Select.Root type="single" bind:value={() => referenceFilter, (value) => setCatalogFilter('usage', value ?? 'all')}>
-    <Select.Trigger {id} class="h-10 w-full font-normal" aria-label={m.provider_model_catalog_model_usage()}>
-      {referenceFilter === 'all'
-        ? m.provider_model_catalog_all_usage()
-        : referenceFilter === 'referenced'
-          ? m.provider_model_catalog_use()
-          : m.provider_model_catalog_not_use()}
-    </Select.Trigger>
-    <Select.Content>
-      <Select.Item value="all">{m.provider_model_catalog_all_usage()}</Select.Item>
-      <Select.Item value="referenced">{m.provider_model_catalog_use()}</Select.Item>
-      <Select.Item value="unreferenced">{m.provider_model_catalog_not_use()}</Select.Item>
-    </Select.Content>
-  </Select.Root>
-{/snippet}
-
 {#snippet providerModelIdentityCell(context: DataTableCellContext<ProviderModelSummary>)}
   {@const model = context.row.original}
   <div class="min-h-10 w-full min-w-0 text-left" aria-label={`${model.name} ${model.id}`}>
@@ -912,158 +855,45 @@ async function deleteManualModel(): Promise<void> {
   </section>
 {/if}
 
-<Sheet.Root bind:open={filtersOpen}>
-  <Sheet.Content
-    side="right"
-    class="w-full! max-w-none! gap-0 p-0 sm:max-w-sm!"
-    closeLabel={m.provider_model_catalog_close_model_filters()}>
-    <Sheet.Header class="border-b">
-      <Sheet.Title>{m.provider_model_catalog_filter_models()}</Sheet.Title>
-      <Sheet.Description>{m.provider_model_catalog_filter_models_description()}</Sheet.Description>
-    </Sheet.Header>
-    <div class="route-overlay-body">
-      <Field.FieldGroup>
-        <Field.Field>
-          <Field.FieldLabel for="provider-model-availability-mobile">
-            {m.provider_model_catalog_model_availability()}
-          </Field.FieldLabel>
-          {@render availabilitySelect('provider-model-availability-mobile')}
-        </Field.Field>
-        <Field.Field>
-          <Field.FieldLabel for="provider-model-source-mobile">
-            {m.provider_model_catalog_how_models_were_added()}
-          </Field.FieldLabel>
-          {@render sourceSelect('provider-model-source-mobile')}
-        </Field.Field>
-        <Field.Field>
-          <Field.FieldLabel for="provider-model-reference-mobile">
-            {m.provider_model_catalog_model_usage()}
-          </Field.FieldLabel>
-          {@render referenceSelect('provider-model-reference-mobile')}
-        </Field.Field>
-      </Field.FieldGroup>
-    </div>
-    <Sheet.Footer class="route-overlay-footer">
-      <Button variant="outline" onclick={clearFilters}>{m.provider_model_catalog_clear_filters()}</Button>
-      <Sheet.Close class="h-10 rounded-md bg-primary px-3 text-primary-foreground">
-        {m.provider_model_catalog_show_models()}
-      </Sheet.Close>
-    </Sheet.Footer>
-  </Sheet.Content>
-</Sheet.Root>
+<CatalogFilterSheet
+  bind:open={filtersOpen}
+  availability={availabilityFilter}
+  source={sourceFilter}
+  reference={referenceFilter}
+  onFilterChange={setCatalogFilter}
+  onClear={clearFilters} />
 
-<Dialog.Root bind:open={manualOpen}>
-  <Dialog.Content>
-    <Dialog.Header>
-      <Dialog.Title>{m.provider_model_catalog_add_model_manually_label()}</Dialog.Title>
-    </Dialog.Header>
-    <Field.Field>
-      <Field.Label>{m.provider_model_catalog_search_model()}</Field.Label>
-      <ModelCombobox
-        id="manual-provider-model-search"
-        value={manualTemplateId}
-        models={canonicalModels}
-        placeholder={m.provider_model_catalog_search_model()}
-        searchPlaceholder={m.provider_model_catalog_search_model()}
-        emptyText={m.provider_model_catalog_no_models_found()}
-        ariaLabel={m.provider_model_catalog_search_model()}
-        searchAriaLabel={m.provider_model_catalog_search_model()}
-        clearAriaLabel={m.provider_model_catalog_clear_selected_model()}
-        disabled={canonicalModelsQuery.isPending}
-        onSelect={selectManualTemplate}
-        onClear={clearManualTemplate} />
-    </Field.Field>
-    <Dialog.Footer>
-      <Button variant="outline" onclick={() => (manualOpen = false)}>{m.common_cancel()}</Button>
-      <Button onclick={() => void prepareManualModel()} disabled={preparingManual || !manualTemplateId.trim()}>
-        {#if preparingManual}<Spinner data-icon="inline-start" />{/if}{m.provider_model_catalog_continue()}
-      </Button>
-    </Dialog.Footer>
-  </Dialog.Content>
-</Dialog.Root>
+<ManualModelDialog
+  bind:open={manualOpen}
+  bind:templateId={manualTemplateId}
+  models={canonicalModels}
+  modelsPending={canonicalModelsQuery.isPending}
+  preparing={preparingManual}
+  onSelect={selectManualTemplate}
+  onClear={clearManualTemplate}
+  onContinue={() => void prepareManualModel()} />
 
-<Sheet.Root bind:open={drawerOpen} onOpenChange={handleDrawerOpen}>
-  <Sheet.Content
-    side="right"
-    class="provider-model-drawer w-full! max-w-none! gap-0 overflow-hidden p-0 sm:max-w-[960px]!"
-    closeLabel={m.provider_model_catalog_close_model_editor()}>
-    {#if selectedDetail}
-      <Sheet.Header class="border-b pr-14">
-        <Sheet.Title class="truncate">{selectedDetail.metadata.name || selectedDetail.id}</Sheet.Title>
-        <Sheet.Description class="break-all font-technical">{selectedDetail.id}</Sheet.Description>
-      </Sheet.Header>
-      <div class="route-overlay-body" data-provider-model-scroll-owner>
-        {#if loadingDetail}
-          <div class="grid min-h-72 place-items-center"><Spinner /></div>
-        {:else}
-          <ProviderModelEditor
-            bind:this={editor}
-            detail={selectedDetail}
-            {draft}
-            onSave={(metadataJson) => void saveModel(metadataJson)}
-            onSelectionChange={(policy) => void updateSelection(policy)}
-            onDirtyChange={(value) => {
-              if (!discarding) dirty = value
-            }} />
-        {/if}
-      </div>
-      <Sheet.Footer class="route-overlay-footer justify-between sm:justify-between">
-        <Button variant="outline" onclick={requestClose}>{m.common_cancel()}</Button>
-        <Button onclick={() => editor?.submit()} disabled={saving}>
-          {#if saving}<Spinner data-icon="inline-start" />{/if}
-          {m.common_add_model()}
-        </Button>
-      </Sheet.Footer>
-    {/if}
-  </Sheet.Content>
-</Sheet.Root>
+<CatalogEditorDrawer
+  bind:open={drawerOpen}
+  detail={selectedDetail}
+  {draft}
+  loading={loadingDetail}
+  {saving}
+  onOpenChange={handleDrawerOpen}
+  onClose={requestClose}
+  onSave={(metadataJson) => void saveModel(metadataJson)}
+  onSelectionChange={(policy) => void updateSelection(policy)}
+  onDirtyChange={(value) => {
+    if (!discarding) dirty = value
+  }} />
 
-<AlertDialog.Root bind:open={discardOpen}>
-  <AlertDialog.Content>
-    <AlertDialog.Header>
-      <AlertDialog.Title>{m.provider_model_catalog_discard_unsaved_model_changes()}</AlertDialog.Title>
-      <AlertDialog.Description>{m.provider_model_catalog_unsaved_changes_warning()}</AlertDialog.Description>
-    </AlertDialog.Header>
-    <AlertDialog.Footer>
-      <AlertDialog.Cancel onclick={() => (pendingAction = undefined)}
-        >{m.provider_model_catalog_keep_editing()}</AlertDialog.Cancel>
-      <AlertDialog.Action variant="destructive" onclick={() => void confirmDiscard()}
-        >{m.provider_model_catalog_discard_changes()}</AlertDialog.Action>
-    </AlertDialog.Footer>
-  </AlertDialog.Content>
-</AlertDialog.Root>
-
-<AlertDialog.Root bind:open={deleteOpen}>
-  <AlertDialog.Content>
-    <AlertDialog.Header>
-      <AlertDialog.Title
-        >{m.provider_model_catalog_delete_value({
-          id: selectedDetail?.metadata.name || selectedDetail?.id || m.common_model(),
-        })}</AlertDialog.Title>
-      <AlertDialog.Description>
-        {#if routeReferencesReady}
-          {m.provider_model_catalog_remove_manual_references({ count: selectedReferences.length })}
-        {:else}
-          {m.provider_model_catalog_usage_check_error()}
-        {/if}
-      </AlertDialog.Description>
-    </AlertDialog.Header>
-    {#if selectedReferences.length > 0}
-      <div class="flex flex-col gap-1 rounded-lg border p-3">
-        {#each selectedReferences as reference (reference.target.id)}
-          <a
-            class="flex min-h-10 items-center rounded-md px-2 font-medium hover:bg-muted"
-            href={resolve('/models/[id]', { id: reference.route.name })}
-            >{reference.route.name} · {reference.target.model}</a>
-        {/each}
-      </div>
-    {/if}
-    <AlertDialog.Footer>
-      <AlertDialog.Cancel>{m.common_cancel()}</AlertDialog.Cancel>
-      <AlertDialog.Action
-        variant="destructive"
-        disabled={saving || !routeReferencesReady}
-        onclick={() => void deleteManualModel()}>{m.provider_model_catalog_remove_list()}</AlertDialog.Action>
-    </AlertDialog.Footer>
-  </AlertDialog.Content>
-</AlertDialog.Root>
+<CatalogConfirmations
+  bind:discardOpen
+  bind:deleteOpen
+  detail={selectedDetail}
+  references={selectedReferences}
+  {routeReferencesReady}
+  {saving}
+  onKeepEditing={() => (pendingAction = undefined)}
+  onDiscard={() => void confirmDiscard()}
+  onDelete={() => void deleteManualModel()} />

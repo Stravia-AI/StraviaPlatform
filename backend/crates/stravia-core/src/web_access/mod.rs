@@ -20,14 +20,20 @@ mod types;
 pub use types::*;
 
 mod engine;
+mod policy;
+mod service;
+mod ssrf;
 
-pub use engine::WebAccessService;
 #[cfg(test)]
-use engine::{
-    AdapterSuccess, ProviderFailure, ProviderUsage, WebAccessAvailability, WebAccessEngine,
-    WebProviderAdapter, validate_fetch_request, validate_search_request,
-};
-pub(crate) use engine::{WebAccessRunSnapshotStore, is_public_ip, normalize_domains};
+use engine::{AdapterSuccess, ProviderFailure, ProviderUsage, WebAccessEngine, WebProviderAdapter};
+pub(crate) use policy::normalize_domains;
+#[cfg(test)]
+use policy::{validate_fetch_request, validate_search_request};
+#[cfg(test)]
+use service::WebAccessAvailability;
+pub(crate) use service::WebAccessRunSnapshotStore;
+pub use service::WebAccessService;
+pub(crate) use ssrf::is_public_ip;
 
 #[cfg(test)]
 mod tests;

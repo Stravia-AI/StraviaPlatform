@@ -9,10 +9,18 @@ import { providerModelSelectionPolicyLabel } from '$lib/provider-model-labels'
 import type {
   ProviderModelDetail,
   ProviderModelMetadata,
-  ProviderModelPrices,
   ProviderModelReasoningOption,
   ProviderModelSelectionPolicy,
 } from '$lib/types'
+import {
+  buildProviderModelMetadataJson,
+  emptyProviderModelCost,
+  emptyProviderModelPrices,
+  providerModelCostFromMetadata,
+  providerModelFormFingerprint,
+  type ProviderModelCostForm,
+  type ProviderModelPriceForm,
+} from './provider-model-form.js'
 import { Badge } from '$lib/components/ui/badge'
 import { Button } from '$lib/components/ui/button'
 import * as Field from '$lib/components/ui/field'
@@ -29,32 +37,9 @@ interface Props {
   onDirtyChange?: (dirty: boolean) => void
 }
 
-interface PriceForm {
-  input: string
-  output: string
-  reasoning: string
-  cache_read: string
-  cache_write: string
-  input_audio: string
-  output_audio: string
-}
-
-interface CostTierForm extends PriceForm {
-  threshold: string
-}
-
-interface CostForm {
-  base: PriceForm
-  tiers: CostTierForm[]
-}
-
-interface RawDecimal {
-  readonly rawDecimal: string
-}
-
 type StringField = 'name' | 'description'
 type BooleanField = 'attachment' | 'reasoning' | 'tool_call' | 'structured_output' | 'temperature'
-type PriceField = keyof PriceForm
+type PriceField = keyof ProviderModelPriceForm
 const reasoningOptionTypes: ProviderModelReasoningOption['type'][] = ['toggle', 'effort', 'budget_tokens']
 const knownEffortValues: Array<string | null> = [
   'none',
@@ -93,11 +78,9 @@ const priceFields: Array<{ key: PriceField; label: () => string }> = [
 const visiblePriceFields = priceFields.filter(
   ({ key }) => key !== 'reasoning' && key !== 'input_audio' && key !== 'output_audio',
 )
-const decimalPattern = /^(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/
-
 let { detail, draft = false, onSave, onSelectionChange, onDirtyChange }: Props = $props()
 let metadata = $state<ProviderModelMetadata>({})
-let cost = $state<CostForm>(emptyCost())
+let cost = $state<ProviderModelCostForm>(emptyProviderModelCost())
 let structuralErrors = $state<string[]>([])
 let advancedOpen = $state(false)
 let errorAlert = $state<HTMLDivElement>()
@@ -137,7 +120,7 @@ $effect.pre(() => {
 $effect(() => {
   const snapshot = $state.snapshot(detail.metadata)
   metadata = structuredClone(snapshot)
-  cost = costFromMetadata(snapshot)
+  cost = providerModelCostFromMetadata(snapshot)
   structuralErrors = []
   initialFingerprint = untrack(fingerprint)
 })
@@ -149,36 +132,11 @@ $effect(() => {
 })
 
 function fingerprint(): string {
-  return JSON.stringify({ metadata: $state.snapshot(metadata), cost: $state.snapshot(cost) })
+  return providerModelFormFingerprint($state.snapshot(metadata), $state.snapshot(cost))
 }
 
 function hasField(key: keyof ProviderModelMetadata): boolean {
   return Object.prototype.hasOwnProperty.call(metadata, key) && metadata[key] !== null
-}
-
-function emptyPrices(): PriceForm {
-  return { input: '', output: '', reasoning: '', cache_read: '', cache_write: '', input_audio: '', output_audio: '' }
-}
-
-function pricesFromMetadata(prices: ProviderModelPrices | null | undefined): PriceForm {
-  const result = emptyPrices()
-  for (const { key } of priceFields) {
-    const value = prices?.[key]
-    result[key] = value == null ? '' : String(value)
-  }
-  return result
-}
-
-function emptyCost(): CostForm {
-  return { base: emptyPrices(), tiers: [] }
-}
-
-function costFromMetadata(value: ProviderModelMetadata): CostForm {
-  if (!value.cost) return emptyCost()
-  return {
-    base: pricesFromMetadata(value.cost),
-    tiers: (value.cost.tiers ?? []).map((tier) => ({ ...pricesFromMetadata(tier), threshold: String(tier.tier.size) })),
-  }
 }
 
 function addStringField(key: StringField): void {
@@ -187,7 +145,7 @@ function addStringField(key: StringField): void {
 
 function removeField(key: keyof ProviderModelMetadata): void {
   delete metadata[key]
-  if (key === 'cost') cost = emptyCost()
+  if (key === 'cost') cost = emptyProviderModelCost()
 }
 
 function setStringField(key: StringField, value: string): void {
@@ -297,7 +255,7 @@ function setInterleavedMode(mode: 'unset' | 'enabled' | 'disabled' | 'field'): v
 }
 
 function addTier(): void {
-  cost.tiers.push({ ...emptyPrices(), threshold: '' })
+  cost.tiers.push({ ...emptyProviderModelPrices(), threshold: '' })
   metadata.cost ??= { tiers: [] }
 }
 
@@ -305,78 +263,10 @@ function removeTier(index: number): void {
   cost.tiers.splice(index, 1)
 }
 
-
-function rawDecimal(value: string, field: string, errors: string[]): RawDecimal | undefined {
-  const trimmed = value.trim()
-  if (!trimmed) return undefined
-  if (!decimalPattern.test(trimmed)) {
-    errors.push(m.provider_model_editor_value_must_non_negative_decimal({ field: field }))
-    return undefined
-  }
-  return { rawDecimal: trimmed }
-}
-
-function buildPrices(form: PriceForm, label: string, errors: string[]): Record<string, unknown> {
-  const result: Record<string, unknown> = {}
-  for (const field of priceFields) {
-    const value = rawDecimal(form[field.key], `${label} ${field.label()}`, errors)
-    if (value) result[field.key] = value
-  }
-  return result
-}
-
-function buildMetadataJson(): string | null {
-  const errors: string[] = []
-  const value = structuredClone($state.snapshot(metadata)) as Record<string, unknown>
-  value.id = detail.id
-
-  if (hasField('limit') && metadata.limit) {
-    for (const [key, number] of Object.entries(metadata.limit)) {
-      if (number != null && (!Number.isSafeInteger(number) || number < 0)) {
-        errors.push(m.provider_model_editor_invalid_limit({ key: key }))
-      }
-    }
-  }
-
-  if (hasField('cost')) {
-    const costValue: Record<string, unknown> = buildPrices(cost.base, m.provider_model_editor_base_cost(), errors)
-    costValue.tiers = cost.tiers.map((tier, index) => {
-      const threshold = Number(tier.threshold)
-      if (!Number.isSafeInteger(threshold) || threshold < 0) {
-        errors.push(m.provider_model_editor_invalid_tier_threshold({ index: index + 1 }))
-      }
-      return {
-        tier: { type: 'context', size: threshold },
-        ...buildPrices(tier, m.provider_model_editor_tier_value({ index: index + 1 }), errors),
-      }
-    })
-    value.cost = costValue
-  }
-
-  structuralErrors = errors
-  return errors.length === 0 ? encodeJson(value) : null
-}
-
-function encodeJson(value: unknown): string {
-  if (value === null) return 'null'
-  if (typeof value === 'string' || typeof value === 'boolean') return JSON.stringify(value)
-  if (typeof value === 'number') {
-    if (!Number.isFinite(value)) throw new Error(m.provider_model_editor_error_non_finite_number())
-    return JSON.stringify(value)
-  }
-  if (Array.isArray(value)) return `[${value.map(encodeJson).join(',')}]`
-  if (typeof value === 'object') {
-    if ('rawDecimal' in value) return (value as RawDecimal).rawDecimal
-    return `{${Object.entries(value)
-      .filter(([, item]) => item !== undefined)
-      .map(([key, item]) => `${JSON.stringify(key)}:${encodeJson(item)}`)
-      .join(',')}}`
-  }
-  throw new Error(m.provider_model_editor_error_unsupported_value())
-}
-
 export function submit(): void {
-  const json = buildMetadataJson()
+  const result = buildProviderModelMetadataJson(detail.id, $state.snapshot(metadata), $state.snapshot(cost))
+  structuralErrors = result.errors
+  const { json } = result
   if (json) onSave(json)
 }
 </script>

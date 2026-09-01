@@ -32,7 +32,7 @@
 pub(crate) mod codec;
 
 #[cfg(test)]
-mod conversion_tests;
+mod conversion;
 pub mod ids;
 pub mod ir;
 pub mod registry;

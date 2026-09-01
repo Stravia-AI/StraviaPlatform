@@ -37,12 +37,20 @@ stravia/
 ├── backend/crates/
 │   ├── stravia-core/
 │   │   └── src/
-│           ├── lib.rs            # 20 个顶层 pub mod + crate-private runtime modules + Gateway / GatewayConfig
+│           ├── lib.rs            # crate module declarations 与稳定 Gateway re-export
+│           ├── gateway/          # Gateway public facade 与构建/运行时生命周期
+│           │   ├── mod.rs            # Gateway 类型与稳定接口
+│           │   ├── builder.rs · lifecycle.rs · runtime.rs
+│           │   └── extensions.rs · history_marker_executions.rs
 │           ├── model_turn/       # Model Turn Executor deep module（crate-private）
 │           │   ├── mod.rs            # execute(TurnInput) interface / Live + InMemory adapters
 │           │   ├── live.rs           # 授权、选路、Target Continuation、transport
 │           │   ├── continuation.rs   # ContinuationLookup
-│           │   ├── provider.rs       # HTTP/SSE 与 Responses WebSocket
+│           │   ├── provider/         # Provider Turn transport deep module
+│           │   │   ├── mod.rs            # 选择 transport 与公共执行流程
+│           │   │   ├── reasoning.rs      # reasoning normalizer
+│           │   │   ├── transport_http.rs
+│           │   │   └── transport_responses_websocket.rs
 │           │   ├── accumulator.rs
 │           │   ├── support.rs
 │           │   └── tests.rs
@@ -52,7 +60,7 @@ stravia/
 │           │   ├── store.rs          # durable TurnChainStore adapter
 │           │   ├── materialize.rs    # Generation Materialization Cache
 │           │   ├── project.rs        # 客户端可见历史投影
-│           │   └── tests.rs          # Write 契约
+│           │   └── tests/            # store discovery / projection / write marker 契约
 │           ├── proxy/            # 代理面
 │           │   ├── mod.rs
 │           │   ├── auth.rs
@@ -73,9 +81,10 @@ stravia/
 │           │   │   └── inference_run/
 │           │   │       ├── engine/
 │           │   │       │   ├── mod.rs        # orchestrate：Inference Run 内部编排
-│           │   │       │   ├── claim.rs · log.rs · errors.rs
-│           │   │       │   ├── completion.rs · delivery.rs · stream.rs · util.rs
-│           │   │       └── tests/            # lifecycle 契约与单一 fixture
+│           │   │       │   ├── claim.rs · log.rs · errors.rs · projection.rs
+│           │   │       │   ├── completion.rs · delivery.rs · followup.rs · canonical_stream.rs
+│           │   │       │   └── stream/{mod,gate}.rs  # stream 编排与 LiveDeltaGate
+│           │   │       └── tests/            # lifecycle / projection / transport 契约与共享 support
 │           │   ├── planner/      # 协议协商
 │           │   │   ├── mod.rs        # ProtocolPlan / ProtocolMode 等 re-export
 │           │   │   └── negotiator.rs # negotiate() / RoutingStrategy / OrderedStrategy
@@ -111,6 +120,7 @@ stravia/
 │           │   ├── ids.rs        # ProtocolEndpoint / EndpointCapabilities
 │           │   ├── registry.rs   # endpoint identity / capability / alias / route registry
 │           │   ├── transform.rs  # crate-private ProtocolTransform / ProtocolPair / stream session
+│           │   ├── conversion/   # thinking/Open Responses/Gemini/cross-protocol 契约测试
 │           │   ├── ir/           # 统一内部表示（IR）
 │           │   │   ├── mod.rs
 │           │   │   ├── canonical.rs # semantic item/request hashes
@@ -154,8 +164,10 @@ stravia/
 │           ├── admin/            # AdminService 管理面（按职责拆分）
 │           │   ├── mod.rs
 │           │   ├── extensions.rs # list_loaded_extensions（provider/protocol 只读清单）
-│           │   ├── provider_connection.rs · provider_connection/interface.rs · oauth.rs
-│           │   ├── routes.rs · routes/{model_records,provider_model_records}.rs · api_keys.rs
+│           │   ├── provider_connection.rs
+│           │   ├── provider_connection/{interface,configuration,capabilities}.rs
+│           │   ├── oauth.rs · oauth/{runtime,session_store}.rs
+│           │   ├── routes.rs · routes/{model_records,provider_model_records,thinking_map}.rs · api_keys.rs
 │           │   ├── settings.rs · observability.rs · web_access.rs · web_search.rs
 │           │   ├── model_catalog.rs · auth_data.rs · model_data.rs
 │           │   └── session_tests.rs
@@ -163,10 +175,13 @@ stravia/
 │           ├── web_access/       # Web Access（crate-private）
 │           │   ├── mod.rs            # request / response interface
 │           │   ├── types.rs          # request / response DTO
-│           │   ├── engine.rs         # SSRF policy 与运行时
+│           │   ├── engine.rs         # provider adapter 与请求引擎
+│           │   ├── service.rs        # 编排入口
+│           │   ├── policy.rs · ssrf.rs
 │           │   └── providers.rs · platform.rs
 │           ├── agent/
-│           │   ├── runner/           # types / loop / schema / tests
+│           │   ├── runner/           # loop / context / tools / types / schema / tests
+│           │   ├── adapters/         # agent call / hook / remote MCP adapters
 │           │   └── artifact/         # ArtifactStore interface / Local store / quota / tests
 │           ├── provider_catalog/ # Catalog facade / types / source / parse / persist
 │           ├── turn_chain/       # TurnChainStore interface / memory / sql adapters
@@ -185,6 +200,11 @@ stravia/
 │   ├── stravia-desktop/
 │   └── stravia-server/
 └── frontend/stravia-webui/
+    └── src/lib/components/
+        ├── ui/data-table/             # facade、filter/column UI、CSV、virtual range、持久化
+        ├── provider-model-catalog/    # filter、manual、editor、confirmation overlays
+        ├── provider-model-form.ts     # metadata/cost form model 与精确 decimal serialization
+        └── route-targets-form.ts      # Target 列表恢复、排序、校验与提交投影
 ```
 
 
@@ -239,6 +259,8 @@ stravia-server::start_http_server() → 绑定 listener 并提供优雅关闭
 ```
 
 `AdminService` 是管理面唯一入口；`admin/` 子模块按功能职责分布，不引入新传输层抽象。
+
+`Gateway` 的公共路径仍为 crate root re-export；实现位于 `gateway/`，由 `builder`、生命周期、运行时扩展和 history marker execution 子模块共同封装。`lib.rs` 不再承载 Gateway 方法实现，外部调用方无需迁移 import。
 
 ---
 
@@ -903,6 +925,8 @@ CREATE TABLE provider_oauth_credentials (
 | 组件 | Bits UI + shadcn-svelte |
 | 样式 | Tailwind CSS 4 |
 | 图表 | LayerChart |
+
+页面级 Svelte 组件只保留查询、导航和跨领域流程编排。`ui/data-table/` 将列菜单、筛选菜单、CSV 导出、虚拟行范围和状态持久化分开；Provider Model Catalog 将移动筛选、手工模型、编辑抽屉和确认流程放入领域组件。Provider Model metadata/cost 与 Route Target 列表的恢复、校验和提交投影分别由 `provider-model-form.ts`、`route-targets-form.ts` 负责，避免在模板事件处理器中重复后端契约。
 
 ---
 

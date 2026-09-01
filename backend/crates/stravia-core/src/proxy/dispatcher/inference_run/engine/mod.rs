@@ -10,14 +10,17 @@
 //!   3. Execute one shared Model Turn after hooks stabilize the effective request.
 //!   4. Run response/tool/client-output hooks and deliver the committed result.
 
+mod canonical_stream;
 mod claim;
 mod completion;
 mod delivery;
 mod errors;
+mod followup;
 mod log;
 mod projection;
 mod stream;
 mod util;
+use self::canonical_stream::ai_response_to_deltas;
 use self::claim::*;
 use self::completion::*;
 use self::delivery::{
@@ -25,6 +28,7 @@ use self::delivery::{
 };
 pub(super) use self::errors::hook_failure_response;
 use self::errors::*;
+use self::followup::{FollowupModelTurn, acquire_followup_model_turn};
 use self::log::*;
 use self::projection::*;
 use self::util::{client_session_id, forwarded_client_headers};
@@ -37,7 +41,7 @@ use axum::response::{IntoResponse, Response};
 use futures::StreamExt;
 
 use crate::Gateway;
-use crate::agent::{CanonicalEvent, ModelTurnExecutor, TurnInput};
+use crate::agent::{CanonicalEvent, ModelTurn, ModelTurnExecutor, TurnInput};
 #[cfg(test)]
 use crate::db::models::Provider;
 use crate::error::{AccessDenial, AuthFailure, GatewayError};
@@ -676,22 +680,20 @@ async fn dispatch_round(
     }
 }
 
-async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutcome {
-    let SharedModelTurnInput {
-        executor,
-        gateway,
-        request,
-        ingress,
-        request_context,
-        inference_run,
-        phase,
-        generation,
-        start,
-        request_extras,
-        headers,
-    } = input;
+async fn acquire_turn(
+    executor: &dyn ModelTurnExecutor,
+    gateway: &Gateway,
+    headers: &HeaderMap,
+    request: &AiRequest,
+    ingress: ProtocolId,
+    request_context: &RequestContext,
+    inference_run: &mut crate::hook::InferenceRun,
+    principal: &crate::hook::Principal,
+    start: Instant,
+    request_extras: &RequestExtras,
+) -> Result<(ModelTurn, AiRequest, Instant), RoundOutcome> {
     let make_input = |effective_request: AiRequest| {
-        let input = TurnInput::new(generation.principal.clone(), effective_request).with_execution(
+        let input = TurnInput::new(principal.clone(), effective_request).with_execution(
             request_context.cancellation.clone(),
             request_context.deadline.at(),
         );
@@ -712,12 +714,9 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
                 && !crate::web_search::native_web_search_requested(&effective_request) =>
         {
             let original_tools = effective_request.tools.clone();
-            inference_run
-                .as_mut()
-                .expect("buffered Inference Run")
-                .remove_exposed_tools(&mut effective_request);
+            inference_run.remove_exposed_tools(&mut effective_request);
             if effective_request.tools == original_tools {
-                return model_turn_execute_failure(
+                return Err(model_turn_execute_failure(
                     gateway,
                     request,
                     ingress,
@@ -725,15 +724,13 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
                     request_extras,
                     request_context.auth_subject.as_ref(),
                     error,
-                );
+                ));
             }
-            match executor
+            executor
                 .execute(make_input(effective_request.clone()))
                 .await
-            {
-                Ok(turn) => turn,
-                Err(error) => {
-                    return model_turn_execute_failure(
+                .map_err(|error| {
+                    model_turn_execute_failure(
                         gateway,
                         request,
                         ingress,
@@ -741,12 +738,11 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
                         request_extras,
                         request_context.auth_subject.as_ref(),
                         error,
-                    );
-                }
-            }
+                    )
+                })?
         }
         Err(error) => {
-            return model_turn_execute_failure(
+            return Err(model_turn_execute_failure(
                 gateway,
                 request,
                 ingress,
@@ -754,8 +750,42 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
                 request_extras,
                 request_context.auth_subject.as_ref(),
                 error,
-            );
+            ));
         }
+    };
+    Ok((turn, effective_request, turn_started))
+}
+
+async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutcome {
+    let SharedModelTurnInput {
+        executor,
+        gateway,
+        request,
+        ingress,
+        request_context,
+        inference_run,
+        phase,
+        generation,
+        start,
+        request_extras,
+        headers,
+    } = input;
+    let (turn, effective_request, turn_started) = match acquire_turn(
+        executor.as_ref(),
+        gateway,
+        headers,
+        request,
+        ingress,
+        request_context,
+        inference_run.as_mut().expect("buffered Inference Run"),
+        &generation.principal,
+        start,
+        request_extras,
+    )
+    .await
+    {
+        Ok(turn) => turn,
+        Err(outcome) => return outcome,
     };
     *request = effective_request;
     inference_run
@@ -1069,286 +1099,6 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
     buffered_completion(delivered.response)
 }
 
-pub(super) enum FollowupModelTurn {
-    Turn(crate::agent::ModelTurn, Instant),
-    HookResponse {
-        response: AiResponse,
-        pending_generation_chain: Option<crate::generation_chain::GenerationChainWrite>,
-    },
-    StreamError(crate::protocol::ir::AiError),
-}
-
-fn hook_stream_error(control: crate::hook::HookControl) -> crate::protocol::ir::AiError {
-    use crate::protocol::ir::{AiError, AiErrorKind};
-
-    match control {
-        crate::hook::HookControl::Reject(rejection) => {
-            let kind = match rejection.status {
-                401 => AiErrorKind::AuthenticationError,
-                403 => AiErrorKind::AuthorizationError,
-                400..=499 => AiErrorKind::InvalidRequest,
-                _ => AiErrorKind::ServerError,
-            };
-            AiError::new(kind, rejection.message)
-                .with_status(rejection.status)
-                .with_raw(serde_json::json!({"code": rejection.code}))
-        }
-        crate::hook::HookControl::StreamAbort { message } => {
-            AiError::new(AiErrorKind::StreamMidError, message)
-        }
-        crate::hook::HookControl::Continue | crate::hook::HookControl::Respond(_) => {
-            AiError::new(AiErrorKind::Unknown, "invalid hidden-round Hook control")
-        }
-    }
-}
-
-pub(super) async fn acquire_followup_model_turn(
-    executor: &dyn ModelTurnExecutor,
-    gateway: &Gateway,
-    headers: &HeaderMap,
-    request: &mut AiRequest,
-    ingress: ProtocolId,
-    request_context: &RequestContext,
-    inference_run: &mut crate::hook::InferenceRun,
-    phase: &mut PhaseTracker,
-    principal: &crate::hook::Principal,
-    generation: &GenerationChainRun,
-    fixed_media_plan: Option<&crate::protocol::ir::request::MediaRoutingPlan>,
-    start: Instant,
-    request_extras: &RequestExtras,
-) -> Result<FollowupModelTurn, RoundOutcome> {
-    if request_context.cancellation.is_cancelled() {
-        return Err(buffered_response(error_response(499, "request cancelled")));
-    }
-    match inference_run.on_request(request).await {
-        Ok(crate::hook::HookControl::Continue) => {}
-        Ok(crate::hook::HookControl::Respond(response)) => {
-            let mut response = *response;
-            inference_run.set_route(crate::hook::RouteContext {
-                model_id: request.model.clone(),
-                provider_id: "hook".into(),
-                target_id: "hook".into(),
-                egress: ingress,
-            });
-            match inference_run.on_client_output(&mut response).await {
-                Ok(crate::hook::HookControl::Continue) => {}
-                Ok(crate::hook::HookControl::Respond(replacement)) => {
-                    response = *replacement;
-                }
-                Ok(control) => {
-                    return Ok(FollowupModelTurn::StreamError(hook_stream_error(control)));
-                }
-                Err(error) => {
-                    return Ok(FollowupModelTurn::StreamError(
-                        crate::protocol::ir::AiError::new(
-                            crate::protocol::ir::AiErrorKind::StreamMidError,
-                            error.to_string(),
-                        ),
-                    ));
-                }
-            }
-            if ingress == crate::protocol::ids::OPEN_RESPONSES_2026_04_24
-                && let Some(write) = generation.write.as_ref()
-            {
-                response.id = write.id().to_owned();
-            }
-            let pending_generation_chain = generation.write.clone().and_then(|mut write| {
-                write.observe_effective(request.clone());
-                crate::generation_chain::mark_generation_target(
-                    &mut response,
-                    "hook",
-                    ingress,
-                    &request.model,
-                );
-                let mut staged_response = response.clone();
-                apply_hidden_rounds(request_context, &mut staged_response);
-                response.usage = staged_response.usage.clone();
-                let staged = write.stage(&mut staged_response, None);
-                response.vendor = staged_response.vendor;
-                staged.then_some(write)
-            });
-            if let Err(error) = phase.transition(Phase::SemanticComplete) {
-                return Ok(FollowupModelTurn::StreamError(
-                    crate::protocol::ir::AiError::new(
-                        crate::protocol::ir::AiErrorKind::StreamMidError,
-                        error,
-                    ),
-                ));
-            }
-            if let Err(error) = phase.transition(Phase::AwaitingDelivery) {
-                return Ok(FollowupModelTurn::StreamError(
-                    crate::protocol::ir::AiError::new(
-                        crate::protocol::ir::AiErrorKind::StreamMidError,
-                        error,
-                    ),
-                ));
-            }
-            return Ok(FollowupModelTurn::HookResponse {
-                response,
-                pending_generation_chain,
-            });
-        }
-        Ok(control) => return Ok(FollowupModelTurn::StreamError(hook_stream_error(control))),
-        Err(error) => {
-            return Ok(FollowupModelTurn::StreamError(
-                crate::protocol::ir::AiError::new(
-                    crate::protocol::ir::AiErrorKind::StreamMidError,
-                    error.to_string(),
-                ),
-            ));
-        }
-    }
-    if let Some(plan) = fixed_media_plan {
-        request.meta.media_routing = Some(plan.clone());
-    }
-    if !stabilize_media_generation_chain(generation, request) {
-        return Ok(FollowupModelTurn::StreamError(
-            crate::protocol::ir::AiError::new(
-                crate::protocol::ir::AiErrorKind::StreamMidError,
-                "Media bridge could not prepare the hidden request",
-            ),
-        ));
-    }
-    enter_phase(phase, Phase::Selecting).map_err(|response| buffered_response(*response))?;
-    let make_input = |effective_request: AiRequest| {
-        let input = TurnInput::new(principal.clone(), effective_request).with_execution(
-            request_context.cancellation.clone(),
-            request_context.deadline.at(),
-        );
-        #[cfg(debug_assertions)]
-        let input = input.with_wire_capture_id(request_context.request_id.clone());
-        input.with_extra_headers(forwarded_client_headers(headers))
-    };
-    let mut effective_request = request.clone();
-    let turn_started = Instant::now();
-    let turn = match executor
-        .execute(make_input(effective_request.clone()))
-        .await
-    {
-        Ok(turn) => turn,
-        Err(error)
-            if error.code == "tools_unsupported"
-                && !crate::web_search::native_web_search_requested(&effective_request) =>
-        {
-            let original_tools = effective_request.tools.clone();
-            inference_run.remove_exposed_tools(&mut effective_request);
-            if effective_request.tools == original_tools {
-                return Err(model_turn_execute_failure(
-                    gateway,
-                    request,
-                    ingress,
-                    start,
-                    request_extras,
-                    request_context.auth_subject.as_ref(),
-                    error,
-                ));
-            }
-            executor
-                .execute(make_input(effective_request.clone()))
-                .await
-                .map_err(|error| {
-                    model_turn_execute_failure(
-                        gateway,
-                        request,
-                        ingress,
-                        start,
-                        request_extras,
-                        request_context.auth_subject.as_ref(),
-                        error,
-                    )
-                })?
-        }
-        Err(error) => {
-            return Err(model_turn_execute_failure(
-                gateway,
-                request,
-                ingress,
-                start,
-                request_extras,
-                request_context.auth_subject.as_ref(),
-                error,
-            ));
-        }
-    };
-    *request = effective_request;
-    inference_run.set_route(turn.route.clone());
-    enter_phase(phase, Phase::Calling).map_err(|response| buffered_response(*response))?;
-    Ok(FollowupModelTurn::Turn(turn, turn_started))
-}
-
-fn model_turn_error_outcome(error: crate::agent::ModelTurnError) -> RoundOutcome {
-    let status = match error.code.as_str() {
-        "cancelled" => StatusCode::from_u16(499).expect("valid cancellation status"),
-        "deadline_exceeded" => StatusCode::GATEWAY_TIMEOUT,
-        "model_not_found" | "STRAVIA_NOT_FOUND" => StatusCode::NOT_FOUND,
-        "model_unavailable" | "provider_unavailable" => StatusCode::SERVICE_UNAVAILABLE,
-        "tools_unsupported"
-        | "web_search_unsupported"
-        | "input_modality_unsupported"
-        | "thinking_level_unsupported"
-        | "protected_context_unrepresentable" => StatusCode::BAD_REQUEST,
-        "protocol_lossy_rejected" | "STRAVIA_PROTOCOL_LOSSY_REJECTED" => {
-            StatusCode::UNPROCESSABLE_ENTITY
-        }
-        "api_key_model_forbidden" | "capability_forbidden" | "STRAVIA_FORBIDDEN" => {
-            StatusCode::FORBIDDEN
-        }
-        "STRAVIA_AUTH_ERROR" => StatusCode::UNAUTHORIZED,
-        _ => StatusCode::BAD_GATEWAY,
-    };
-    let response = if error.code.starts_with("STRAVIA_") {
-        let message = match error.code.as_str() {
-            "STRAVIA_FORBIDDEN" if error.message == "access to this model is not permitted" => {
-                "api key not allowed for this model".to_owned()
-            }
-            _ => error.message,
-        };
-        (
-            status,
-            axum::Json(serde_json::json!({
-                "error": {
-                    "type": error.code,
-                    "code": status.as_u16(),
-                    "message": message,
-                }
-            })),
-        )
-            .into_response()
-    } else {
-        coded_error_response(status, &error.code, &error.message)
-    };
-    buffered_response(response)
-}
-
-fn model_turn_execute_failure(
-    gateway: &Gateway,
-    request: &AiRequest,
-    ingress: ProtocolId,
-    start: Instant,
-    request_extras: &RequestExtras,
-    auth_subject: Option<&crate::proxy::context::AuthSubject>,
-    error: crate::agent::ModelTurnError,
-) -> RoundOutcome {
-    let outcome = model_turn_error_outcome(error);
-    let status = match &outcome {
-        RoundOutcome::Deliver { response, .. } => response.status().as_u16(),
-        RoundOutcome::NextRound { .. } => 500,
-    };
-    LogBuilder::from_dispatch(
-        gateway,
-        &ingress.to_string(),
-        &request.model,
-        request.reasoning.level,
-        auth_subject,
-        start,
-    )
-    .stream_flag(request.stream.enabled)
-    .status(status)
-    .with_req_extras(request_extras)
-    .emit();
-    outcome
-}
-
 /// Owned request HTTP metadata kept for log entries. Used by the non-stream
 /// and stream handlers (not the force-stream handler which omits request
 /// details from its log path).
@@ -1363,132 +1113,6 @@ pub(super) struct RequestExtras {
 // Utility helpers (is_retryable, runtime_binding_headers, load_model_backends,
 // forwarded_client_headers) are in util.rs.
 
-pub(super) fn ai_response_to_deltas(resp: &AiResponse) -> Vec<crate::protocol::ir::AiStreamDelta> {
-    use crate::protocol::ir::AiStreamDelta;
-    let mut deltas = Vec::new();
-    let mut response_profile = serde_json::Map::new();
-    for key in [
-        "__open_responses_effective_request",
-        "__open_responses_response_profile",
-    ] {
-        if let Some(profile) = resp
-            .vendor
-            .ingress
-            .get(key)
-            .and_then(serde_json::Value::as_object)
-        {
-            response_profile.extend(profile.clone());
-        }
-    }
-    if !response_profile.is_empty() {
-        deltas.push(AiStreamDelta::ResponseMetadata {
-            metadata: serde_json::Value::Object(response_profile),
-        });
-    }
-    deltas.push(AiStreamDelta::MessageStart {
-        id: if resp.id.is_empty() {
-            format!("chatcmpl-{}", uuid::Uuid::new_v4().simple())
-        } else {
-            resp.id.clone()
-        },
-        model: resp.model.clone(),
-    });
-    for (output_index, item) in resp.items.iter().enumerate() {
-        if let Some(text) = item.output_text_ref()
-            && !text.is_empty()
-        {
-            deltas.push(AiStreamDelta::TextDeltaWithMetadata {
-                text: text.to_owned(),
-                logprobs: Vec::new(),
-                obfuscation: None,
-                output_index: Some(output_index),
-                content_index: Some(0),
-            });
-        } else if let Some(refusal) = item.refusal_ref()
-            && !refusal.is_empty()
-        {
-            deltas.push(AiStreamDelta::RefusalDeltaWithIndex {
-                text: refusal.to_owned(),
-                output_index,
-                content_index: 0,
-            });
-        } else if let Some((summary, content, _)) = item.reasoning_ref() {
-            for (content_index, text) in summary.iter().enumerate() {
-                deltas.push(AiStreamDelta::ReasoningSummaryDelta {
-                    text: text.clone(),
-                    obfuscation: None,
-                    output_index: Some(output_index),
-                    content_index: Some(content_index),
-                });
-            }
-            for (content_index, text) in content.iter().enumerate() {
-                deltas.push(AiStreamDelta::ThinkingDeltaWithMetadata {
-                    text: text.clone(),
-                    obfuscation: None,
-                    output_index: Some(output_index),
-                    content_index: Some(content_index),
-                });
-            }
-        } else if let Some((text, signature)) = item.thinking_ref()
-            && !text.is_empty()
-        {
-            deltas.push(AiStreamDelta::ThinkingDelta(text.to_owned()));
-            if let Some(signature) = signature.filter(|value| !value.is_empty()) {
-                deltas.push(AiStreamDelta::ThinkingSignature(signature.to_owned()));
-            }
-        } else if let Some(call) = item.function_call_ref() {
-            deltas.push(AiStreamDelta::ToolCallStart {
-                index: output_index,
-                id: call.id.clone(),
-                name: call.name.clone(),
-            });
-            if !call.arguments.is_empty() {
-                deltas.push(AiStreamDelta::ToolCallDelta {
-                    index: output_index,
-                    arguments: call.arguments.clone(),
-                });
-            }
-        } else if let Some(raw) = item.unknown_ref() {
-            deltas.push(AiStreamDelta::Unknown {
-                raw: raw.to_string(),
-            });
-        }
-        deltas.push(AiStreamDelta::ItemDone {
-            index: output_index,
-            item: item.clone(),
-        });
-    }
-
-    if let Some(metadata) = resp.vendor.ingress.get("__google_response_metadata") {
-        deltas.push(AiStreamDelta::Unknown {
-            raw: serde_json::json!({"__google_response_metadata": metadata}).to_string(),
-        });
-    }
-    deltas.push(AiStreamDelta::Usage(resp.usage.clone()));
-    if let Some(terminal) = resp.vendor.egress.get("__open_responses_terminal")
-        && let Some(status) = terminal.get("status").and_then(serde_json::Value::as_str)
-    {
-        deltas.push(AiStreamDelta::ResponseTerminal {
-            status: status.to_owned(),
-            incomplete_details: terminal
-                .get("incomplete_details")
-                .filter(|value| !value.is_null())
-                .cloned(),
-        });
-    }
-    deltas.push(AiStreamDelta::Done {
-        stop_reason: resp
-            .stop_reason
-            .clone()
-            .unwrap_or_else(|| "stop".to_string()),
-    });
-    deltas
-}
-
-/// Emit a `LogEntry` for a request that failed to decode at the ingress
-/// boundary (before `orchestrate` runs) and return the corresponding
-/// 400 `Response`. Ensures decode failures show up in the in-app log module
-/// rather than only in stdout tracing.
 pub(crate) fn log_decode_error(
     gw: &Gateway,
     envelope: &RawEnvelope,
@@ -1518,39 +1142,6 @@ pub(crate) fn log_decode_error(
 }
 
 // StreamResponseAccumulator and ensure_tool_index are in accumulator.rs.
-
-#[cfg(test)]
-mod canonical_stream_tests {
-    use super::*;
-
-    #[test]
-    fn canonical_reencoding_preserves_dated_incomplete_terminal() {
-        let mut response = AiResponse::new("resp_1", "logical-model");
-        response.vendor.egress.insert(
-            "__open_responses_terminal".into(),
-            serde_json::json!({
-                "status": "incomplete",
-                "incomplete_details": {"reason": "max_output_tokens"},
-            }),
-        );
-
-        let deltas = ai_response_to_deltas(&response);
-
-        assert!(matches!(
-            deltas.as_slice(),
-            [
-                crate::protocol::ir::AiStreamDelta::MessageStart { .. },
-                crate::protocol::ir::AiStreamDelta::Usage(_),
-                crate::protocol::ir::AiStreamDelta::ResponseTerminal {
-                    status,
-                    incomplete_details: Some(details),
-                },
-                crate::protocol::ir::AiStreamDelta::Done { .. },
-            ] if status == "incomplete"
-                && details["reason"] == "max_output_tokens"
-        ));
-    }
-}
 
 #[cfg(test)]
 mod openai_generation_target_tests {

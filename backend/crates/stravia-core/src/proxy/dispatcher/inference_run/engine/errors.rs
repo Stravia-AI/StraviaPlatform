@@ -121,3 +121,76 @@ pub(crate) fn hook_failure_response(error: impl std::fmt::Display) -> Response {
     tracing::error!(error = %error, "inference hook failed");
     error_response(500, "hook_failed")
 }
+
+pub(super) fn model_turn_error_outcome(error: crate::agent::ModelTurnError) -> RoundOutcome {
+    let status = match error.code.as_str() {
+        "cancelled" => StatusCode::from_u16(499).expect("valid cancellation status"),
+        "deadline_exceeded" => StatusCode::GATEWAY_TIMEOUT,
+        "model_not_found" | "STRAVIA_NOT_FOUND" => StatusCode::NOT_FOUND,
+        "model_unavailable" | "provider_unavailable" => StatusCode::SERVICE_UNAVAILABLE,
+        "tools_unsupported"
+        | "web_search_unsupported"
+        | "input_modality_unsupported"
+        | "thinking_level_unsupported"
+        | "protected_context_unrepresentable" => StatusCode::BAD_REQUEST,
+        "protocol_lossy_rejected" | "STRAVIA_PROTOCOL_LOSSY_REJECTED" => {
+            StatusCode::UNPROCESSABLE_ENTITY
+        }
+        "api_key_model_forbidden" | "capability_forbidden" | "STRAVIA_FORBIDDEN" => {
+            StatusCode::FORBIDDEN
+        }
+        "STRAVIA_AUTH_ERROR" => StatusCode::UNAUTHORIZED,
+        _ => StatusCode::BAD_GATEWAY,
+    };
+    let response = if error.code.starts_with("STRAVIA_") {
+        let message = match error.code.as_str() {
+            "STRAVIA_FORBIDDEN" if error.message == "access to this model is not permitted" => {
+                "api key not allowed for this model".to_owned()
+            }
+            _ => error.message,
+        };
+        (
+            status,
+            axum::Json(serde_json::json!({
+                "error": {
+                    "type": error.code,
+                    "code": status.as_u16(),
+                    "message": message,
+                }
+            })),
+        )
+            .into_response()
+    } else {
+        coded_error_response(status, &error.code, &error.message)
+    };
+    buffered_response(response)
+}
+
+pub(super) fn model_turn_execute_failure(
+    gateway: &Gateway,
+    request: &AiRequest,
+    ingress: ProtocolId,
+    start: Instant,
+    request_extras: &RequestExtras,
+    auth_subject: Option<&crate::proxy::context::AuthSubject>,
+    error: crate::agent::ModelTurnError,
+) -> RoundOutcome {
+    let outcome = model_turn_error_outcome(error);
+    let status = match &outcome {
+        RoundOutcome::Deliver { response, .. } => response.status().as_u16(),
+        RoundOutcome::NextRound { .. } => 500,
+    };
+    LogBuilder::from_dispatch(
+        gateway,
+        &ingress.to_string(),
+        &request.model,
+        request.reasoning.level,
+        auth_subject,
+        start,
+    )
+    .stream_flag(request.stream.enabled)
+    .status(status)
+    .with_req_extras(request_extras)
+    .emit();
+    outcome
+}

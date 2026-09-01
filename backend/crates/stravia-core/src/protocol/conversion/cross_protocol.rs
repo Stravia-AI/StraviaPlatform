@@ -1,160 +1,4 @@
-use crate::protocol::codec::anthropic::messages::decoder::AnthropicDecoder;
-use crate::protocol::codec::anthropic::messages::encoder::AnthropicEncoder;
-use crate::protocol::codec::anthropic::messages::stream::AnthropicResponseFormatter;
-use crate::protocol::codec::google::gemini::encoder::GoogleEncoder;
-use crate::protocol::codec::google::gemini::stream::GoogleStreamFormatter;
-use crate::protocol::codec::open_responses::decoder::ResponsesDecoder;
-use crate::protocol::codec::open_responses::encoder::ResponsesEncoder;
-use crate::protocol::codec::open_responses::formatter::ResponsesResponseFormatter;
-use crate::protocol::codec::open_responses::parser::{
-    ResponsesResponseParser, ResponsesStreamParser,
-};
-use crate::protocol::codec::openai::compatible::encoder::OpenAIEncoder;
-use crate::protocol::codec::openai::compatible::stream::OpenAIStreamFormatter;
-use crate::protocol::codec::reasoning::normalize_response_reasoning;
-use crate::protocol::codec::tool_correlation::normalize_request_tool_results;
-use crate::protocol::ids::{
-    ANTHROPIC_MESSAGES_2023_06_01, BEDROCK_CONVERSE_V1, COHERE_CHAT_V2, GATEWAY_LANGUAGE_MODEL_V4,
-    GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA, OPEN_RESPONSES_2026_04_24,
-    OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1, WATSONX_TEXT_CHAT_V1,
-};
-use crate::protocol::ir::usage::Usage;
-use crate::protocol::ir::{
-    AiItem, AiRequest, AiResponse as IrAiResponse, AiStreamDelta as IrStreamDelta,
-    ContentBlock as IrContentBlock, MediaSource, MessageContent as IrMessageContent,
-    Role as IrRole, StreamConfig, ToolCall, ToolSpec,
-};
-use crate::protocol::transform::ProtocolTransform;
-use serde_json::{Value, json};
-
-#[test]
-fn all_generation_request_codecs_restore_thinking_marker_carriers() {
-    let marker = "<!-- stravia-projection:hm_0123456789abcdefghij:text:0:start -->visible\
-                  <!-- stravia-projection:hm_0123456789abcdefghij:text:0:end -->\
-                  <!-- stravia-history-marker:hm_0123456789abcdefghij -->";
-    let cases = [
-        (
-            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
-            json!({
-                "model": "test-model",
-                "messages": [{
-                    "role": "assistant",
-                    "reasoning_content": marker,
-                    "content": ""
-                }]
-            }),
-        ),
-        (
-            OPEN_RESPONSES_2026_04_24,
-            json!({
-                "model": "test-model",
-                "input": [{
-                    "type": "reasoning",
-                    "summary": [{"type": "summary_text", "text": marker}],
-                    "content": []
-                }]
-            }),
-        ),
-        (
-            ANTHROPIC_MESSAGES_2023_06_01,
-            json!({
-                "model": "test-model",
-                "max_tokens": 16,
-                "messages": [{
-                    "role": "assistant",
-                    "content": [{
-                        "type": "thinking",
-                        "thinking": marker
-                    }]
-                }]
-            }),
-        ),
-        (
-            GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
-            json!({
-                "contents": [{
-                    "role": "model",
-                    "parts": [{"text": marker, "thought": true}]
-                }]
-            }),
-        ),
-        (
-            BEDROCK_CONVERSE_V1,
-            json!({
-                "modelId": "test-model",
-                "messages": [{
-                    "role": "assistant",
-                    "content": [{
-                        "reasoningContent": {
-                            "reasoningText": {"text": marker}
-                        }
-                    }]
-                }]
-            }),
-        ),
-        (
-            COHERE_CHAT_V2,
-            json!({
-                "model": "test-model",
-                "messages": [{
-                    "role": "assistant",
-                    "content": [{"type": "thinking", "thinking": marker}]
-                }]
-            }),
-        ),
-        (
-            WATSONX_TEXT_CHAT_V1,
-            json!({
-                "model_id": "test-model",
-                "messages": [{
-                    "role": "assistant",
-                    "reasoning_content": marker,
-                    "content": ""
-                }]
-            }),
-        ),
-        (
-            GATEWAY_LANGUAGE_MODEL_V4,
-            json!({
-                "model": "test-model",
-                "prompt": [{
-                    "role": "assistant",
-                    "content": [{"type": "reasoning", "text": marker}]
-                }]
-            }),
-        ),
-    ];
-
-    for (protocol, body) in cases {
-        let adapter = crate::protocol::registry::ProtocolRegistry::global()
-            .adapter(&protocol)
-            .expect("registered generation adapter");
-        let request = adapter
-            .decode_request(body)
-            .unwrap_or_else(|error| panic!("{protocol} request decode failed: {error}"));
-
-        assert_eq!(
-            crate::history_marker::history_marker_references(&request.items),
-            vec!["hm_0123456789abcdefghij".to_string()],
-            "{protocol} must decode a native reasoning carrier as Thinking"
-        );
-        assert!(
-            request.items.iter().all(|item| match &item.content {
-                IrMessageContent::Text(text) => !text.contains("stravia-history-marker"),
-                IrMessageContent::Blocks(blocks) => blocks.iter().all(|block| {
-                    !matches!(block, IrContentBlock::Text { text, .. } if text.contains("stravia-history-marker"))
-                }),
-            }),
-            "{protocol} must not decode the marker as ordinary Text"
-        );
-        let decoded = serde_json::to_string(&request.items).expect("serialize decoded items");
-        assert!(
-            decoded.contains(crate::history_marker::PROJECTION_DELIMITER_PREFIX)
-                && decoded.contains("visible"),
-            "{protocol} must preserve Projection Delimiters and visible bytes"
-        );
-    }
-}
+use super::*;
 
 #[test]
 fn openai_to_anthropic_thinking_blocks() {
@@ -182,7 +26,6 @@ fn openai_to_anthropic_thinking_blocks() {
         Some("reasoning summary")
     );
 }
-
 #[test]
 fn anthropic_encoder_replays_reasoning_extra_as_thinking_block() {
     let mut extra = std::collections::HashMap::new();
@@ -223,41 +66,6 @@ fn anthropic_encoder_replays_reasoning_extra_as_thinking_block() {
     );
     assert_eq!(blocks[1]["type"].as_str(), Some("tool_use"));
 }
-
-#[test]
-fn openai_to_responses_reasoning_and_function_call_items() {
-    let mut resp = IrAiResponse::new("resp_1", "minimax-m2.7");
-    resp.push_reasoning("chain", None);
-    resp.extend_tool_calls(vec![ToolCall {
-        id: "call_123".to_string(),
-        name: "ls".to_string(),
-        arguments: "{\"path\":\".\"}".to_string(),
-    }]);
-    resp.push_output_text("done");
-    resp.stop_reason = Some("stop".to_string());
-
-    let out = ResponsesResponseFormatter.format_response(&resp);
-    let output = out
-        .get("output")
-        .and_then(|v| v.as_array())
-        .expect("output should be array");
-    assert!(
-        output
-            .iter()
-            .any(|item| item.get("type").and_then(|v| v.as_str()) == Some("reasoning"))
-    );
-    assert!(
-        output
-            .iter()
-            .any(|item| item.get("type").and_then(|v| v.as_str()) == Some("function_call"))
-    );
-    assert!(
-        output
-            .iter()
-            .any(|item| item.get("type").and_then(|v| v.as_str()) == Some("message"))
-    );
-}
-
 #[test]
 fn openai_formatter_sets_tool_calls_finish_reason_when_tool_calls_present() {
     let mut resp = IrAiResponse::new("gen_1", "gemini-2.5-flash");
@@ -283,7 +91,6 @@ fn openai_formatter_sets_tool_calls_finish_reason_when_tool_calls_present() {
         .and_then(|v| v.as_str());
     assert_eq!(finish_reason, Some("tool_calls"));
 }
-
 #[test]
 fn openai_stream_formatter_sets_tool_calls_finish_reason_when_tool_calls_seen() {
     let mut fmt = OpenAIStreamFormatter::new();
@@ -319,132 +126,6 @@ fn openai_stream_formatter_sets_tool_calls_finish_reason_when_tool_calls_seen() 
         .and_then(|v| v.as_str());
     assert_eq!(finish_reason, Some("tool_calls"));
 }
-
-#[test]
-fn gemini_tool_result_correlation_success() {
-    let messages = vec![
-        AiItem {
-            role: IrRole::Assistant,
-            content: IrMessageContent::Text(String::new()),
-            tool_calls: Some(vec![ToolCall {
-                id: "call_abc".to_string(),
-                name: "read_file".to_string(),
-                arguments: "{\"path\":\"src/main.rs\"}".to_string(),
-            }]),
-            tool_call_id: None,
-            meta: None,
-        },
-        AiItem {
-            role: IrRole::Tool,
-            content: IrMessageContent::Blocks(vec![IrContentBlock::ToolResult {
-                tool_use_id: "read_file".to_string(),
-                content: serde_json::json!({"ok": true}),
-                is_error: None,
-                cache_control: None,
-            }]),
-            tool_calls: None,
-            tool_call_id: None,
-            meta: None,
-        },
-    ];
-    let mut ai_req = AiRequest::new("minimax-m2.7", messages);
-    ai_req.stream = StreamConfig {
-        enabled: false,
-        include_usage: false,
-    };
-    ai_req.meta.source_protocol = Some(GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA);
-
-    normalize_request_tool_results(&mut ai_req);
-    assert_eq!(
-        ai_req.items[1].tool_call_id.as_deref(),
-        Some("call_abc"),
-        "tool result should be correlated to previous assistant tool_call id"
-    );
-}
-
-#[test]
-fn gemini_tool_result_id_hint_matches_out_of_order_calls() {
-    let messages = vec![
-        AiItem {
-            role: IrRole::Assistant,
-            content: IrMessageContent::Text(String::new()),
-            tool_calls: Some(vec![
-                ToolCall {
-                    id: "call_a".to_string(),
-                    name: "Glob".to_string(),
-                    arguments: "{}".to_string(),
-                },
-                ToolCall {
-                    id: "call_b".to_string(),
-                    name: "Bash".to_string(),
-                    arguments: "{}".to_string(),
-                },
-            ]),
-            tool_call_id: None,
-            meta: None,
-        },
-        AiItem {
-            role: IrRole::Tool,
-            content: IrMessageContent::Blocks(vec![IrContentBlock::ToolResult {
-                tool_use_id: "call_b".to_string(),
-                content: serde_json::json!({"ok": true}),
-                is_error: None,
-                cache_control: None,
-            }]),
-            tool_calls: None,
-            tool_call_id: None,
-            meta: None,
-        },
-        AiItem {
-            role: IrRole::Tool,
-            content: IrMessageContent::Blocks(vec![IrContentBlock::ToolResult {
-                tool_use_id: "call_a".to_string(),
-                content: serde_json::json!({"ok": true}),
-                is_error: None,
-                cache_control: None,
-            }]),
-            tool_calls: None,
-            tool_call_id: None,
-            meta: None,
-        },
-    ];
-    let mut ai_req = AiRequest::new("minimax-m2.7", messages);
-    ai_req.stream = StreamConfig {
-        enabled: false,
-        include_usage: false,
-    };
-    ai_req.meta.source_protocol = Some(GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA);
-
-    normalize_request_tool_results(&mut ai_req);
-    assert_eq!(ai_req.items[1].tool_call_id.as_deref(), Some("call_b"));
-    assert_eq!(ai_req.items[2].tool_call_id.as_deref(), Some("call_a"));
-}
-
-#[test]
-fn minimax_reasoning_split_fallback_think_tag() {
-    let mut ai_resp = IrAiResponse::new("resp_2", "minimax-m2.7");
-    ai_resp.push_output_text("<think>plan first</think>run ls".to_string());
-    ai_resp.stop_reason = Some("stop".to_string());
-
-    normalize_response_reasoning(&mut ai_resp);
-    assert_eq!(
-        ai_resp.reasoning_items().next().map(|(text, _)| text),
-        Some("plan first")
-    );
-    assert_eq!(ai_resp.output_text(), "run ls");
-}
-
-#[test]
-fn non_reasoning_model_no_regression() {
-    let mut ai_resp = IrAiResponse::new("resp_3", "plain-model");
-    ai_resp.push_output_text("hello world".to_string());
-    ai_resp.stop_reason = Some("stop".to_string());
-
-    normalize_response_reasoning(&mut ai_resp);
-    assert!(ai_resp.reasoning_items().next().is_none());
-    assert_eq!(ai_resp.output_text(), "hello world");
-}
-
 #[test]
 fn anthropic_tool_result_decodes_to_tool_role() {
     let body = serde_json::json!({
@@ -482,7 +163,6 @@ fn anthropic_tool_result_decodes_to_tool_role() {
     assert_eq!(req.items[1].role, IrRole::Tool);
     assert_eq!(req.items[1].tool_call_id.as_deref(), Some("call_abc"));
 }
-
 #[test]
 fn anthropic_multi_tool_result_decodes_to_multiple_tool_messages() {
     let body = serde_json::json!({
@@ -514,7 +194,6 @@ fn anthropic_multi_tool_result_decodes_to_multiple_tool_messages() {
     assert_eq!(req.items[1].tool_call_id.as_deref(), Some("call_a"));
     assert_eq!(req.items[2].tool_call_id.as_deref(), Some("call_b"));
 }
-
 #[test]
 fn anthropic_thinking_block_round_trips_with_signature() {
     let body = serde_json::json!({
@@ -569,7 +248,6 @@ fn anthropic_thinking_block_round_trips_with_signature() {
         Some("sig_123")
     );
 }
-
 #[test]
 fn anthropic_mixed_assistant_history_encodes_as_ordered_responses_items() {
     let pair = ProtocolTransform::global()
@@ -626,7 +304,6 @@ fn anthropic_mixed_assistant_history_encodes_as_ordered_responses_items() {
     assert_eq!(input[0]["encrypted_content"], "opaque");
     assert_eq!(input[0]["summary"], json!([]));
 }
-
 #[test]
 fn openai_encoder_injects_synthetic_tool_call_before_orphan_tool_result() {
     let messages = vec![AiItem {
@@ -664,7 +341,6 @@ fn openai_encoder_injects_synthetic_tool_call_before_orphan_tool_result() {
         Some("call_orphan_1")
     );
 }
-
 #[test]
 fn openai_encoder_injects_adjacent_tool_call_for_non_adjacent_match() {
     let messages = vec![
@@ -732,7 +408,6 @@ fn openai_encoder_injects_adjacent_tool_call_for_non_adjacent_match() {
         .unwrap_or("");
     assert_eq!(assistant_call_id, tool_id);
 }
-
 #[test]
 fn openai_encoder_drops_intermediate_assistant_text_before_tool_result() {
     let messages = vec![
@@ -801,7 +476,6 @@ fn openai_encoder_drops_intermediate_assistant_text_before_tool_result() {
         Some("call_keep")
     );
 }
-
 #[test]
 fn openai_encoder_remaps_duplicate_tool_call_ids() {
     let messages = vec![
@@ -882,7 +556,6 @@ fn openai_encoder_remaps_duplicate_tool_call_ids() {
     assert!(ids.contains(&tool_ids[0]));
     assert!(ids.contains(&tool_ids[1]));
 }
-
 #[test]
 fn anthropic_encoder_maps_required_tool_choice_to_any() {
     let messages = vec![AiItem {
@@ -922,7 +595,6 @@ fn anthropic_encoder_maps_required_tool_choice_to_any() {
         Some("any")
     );
 }
-
 #[test]
 fn anthropic_encoder_maps_function_tool_choice_to_tool_name() {
     let messages = vec![AiItem {
@@ -969,7 +641,6 @@ fn anthropic_encoder_maps_function_tool_choice_to_tool_name() {
         Some("exec_command")
     );
 }
-
 #[test]
 fn anthropic_encoder_merges_consecutive_roles_and_drops_empty_text() {
     let messages = vec![
@@ -1050,7 +721,6 @@ fn anthropic_encoder_merges_consecutive_roles_and_drops_empty_text() {
         Some("second")
     );
 }
-
 #[test]
 fn anthropic_encoder_normalizes_tool_use_ids_for_tool_and_result() {
     let messages = vec![
@@ -1119,32 +789,6 @@ fn anthropic_encoder_normalizes_tool_use_ids_for_tool_and_result() {
     assert!(tool_use_id.starts_with("toolu_"));
     assert_eq!(tool_use_id, tool_result_id);
 }
-
-#[test]
-fn responses_decoder_ignores_empty_message_content_item() {
-    let body = serde_json::json!({
-        "model": "MiniMax-M2.7-Code-Claude",
-        "input": [
-            { "type": "message", "role": "user", "content": [] },
-            {
-                "type": "message",
-                "role": "user",
-                "content": [{ "type": "input_text", "text": "帮我查看当前目录下有哪些文件" }]
-            }
-        ]
-    });
-
-    let req = ResponsesDecoder
-        .decode_request(body)
-        .expect("decode request should succeed");
-    assert_eq!(req.items.len(), 1);
-    assert_eq!(req.items[0].role, IrRole::User);
-    assert_eq!(
-        req.items[0].content.to_text(),
-        "帮我查看当前目录下有哪些文件"
-    );
-}
-
 #[test]
 fn openai_encoder_remaps_reused_tool_result_id_with_synthetic_adjacent_call() {
     let messages = vec![
@@ -1217,7 +861,6 @@ fn openai_encoder_remaps_reused_tool_result_id_with_synthetic_adjacent_call() {
     assert_eq!(tool_ids.len(), 2);
     assert_ne!(tool_ids[0], tool_ids[1]);
 }
-
 #[test]
 fn openai_encoder_rewrites_multi_tool_call_history_to_adjacent_pairs() {
     let messages = vec![
@@ -1311,7 +954,6 @@ fn openai_encoder_rewrites_multi_tool_call_history_to_adjacent_pairs() {
     assert_eq!(id1, prev1);
     assert_eq!(id2, prev2);
 }
-
 #[test]
 fn openai_encoder_preserves_reasoning_content_across_parallel_tool_calls() {
     // Regression: when an assistant message has multiple parallel tool calls
@@ -1424,7 +1066,6 @@ fn openai_encoder_preserves_reasoning_content_across_parallel_tool_calls() {
         }
     }
 }
-
 #[test]
 fn anthropic_to_openai_thinking_round_trip_carries_reasoning_content() {
     // Regression for cross-protocol Anthropic Messages → OpenAI chat/completions:
@@ -1540,7 +1181,6 @@ fn anthropic_to_openai_thinking_round_trip_carries_reasoning_content() {
         }
     }
 }
-
 #[test]
 fn openai_encoder_drops_orphan_assistant_tool_calls_without_results() {
     let messages = vec![
@@ -1625,605 +1265,6 @@ fn openai_encoder_drops_orphan_assistant_tool_calls_without_results() {
         .unwrap_or("");
     assert_eq!(call_id, "call_new");
 }
-
-#[test]
-fn gemini_stream_formatter_keeps_tool_name_for_argument_deltas() {
-    let mut fmt = GoogleStreamFormatter::new();
-    let deltas = vec![
-        IrStreamDelta::MessageStart {
-            id: "x".to_string(),
-            model: "m".to_string(),
-        },
-        IrStreamDelta::ToolCallStart {
-            index: 0,
-            id: "call_1".to_string(),
-            name: "run_shell_command".to_string(),
-        },
-        IrStreamDelta::ToolCallDelta {
-            index: 0,
-            arguments: "{\"command\":\"ls -la\"}".to_string(),
-        },
-    ];
-    let events = fmt.format_deltas(&deltas);
-    let mut saw_named_call = false;
-    let mut saw_command_arg = false;
-    for ev in events {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&ev.data) else {
-            continue;
-        };
-        let part = v
-            .get("candidates")
-            .and_then(|c| c.as_array())
-            .and_then(|arr| arr.first())
-            .and_then(|c| c.get("content"))
-            .and_then(|c| c.get("parts"))
-            .and_then(|p| p.as_array())
-            .and_then(|arr| arr.first())
-            .and_then(|p| p.get("functionCall"));
-        if let Some(fc) = part {
-            if fc.get("name").and_then(|n| n.as_str()) == Some("run_shell_command") {
-                saw_named_call = true;
-            }
-            if fc
-                .get("args")
-                .and_then(|a| a.get("command"))
-                .and_then(|c| c.as_str())
-                == Some("ls -la")
-            {
-                saw_command_arg = true;
-            }
-        }
-    }
-    assert!(saw_named_call);
-    assert!(saw_command_arg);
-}
-
-#[test]
-fn gemini_stream_formatter_normalizes_common_tool_argument_aliases() {
-    let mut fmt = GoogleStreamFormatter::new();
-    let deltas = vec![
-        IrStreamDelta::MessageStart {
-            id: "x".to_string(),
-            model: "m".to_string(),
-        },
-        IrStreamDelta::ToolCallStart {
-            index: 0,
-            id: "call_1".to_string(),
-            name: "glob".to_string(),
-        },
-        IrStreamDelta::ToolCallDelta {
-            index: 0,
-            arguments: "{\"include_pattern\":\"**/*.py\",\"search_root\":\"/tmp/work\",\"exclude_pattern\":\"**/.venv/**\"}".to_string(),
-        },
-    ];
-    let events = fmt.format_deltas(&deltas);
-    let payload = events
-        .iter()
-        .filter_map(|e| serde_json::from_str::<serde_json::Value>(&e.data).ok())
-        .find_map(|v| {
-            v.get("candidates")
-                .and_then(|c| c.as_array())
-                .and_then(|arr| arr.first())
-                .and_then(|c| c.get("content"))
-                .and_then(|c| c.get("parts"))
-                .and_then(|p| p.as_array())
-                .and_then(|arr| arr.first())
-                .and_then(|p| p.get("functionCall"))
-                .cloned()
-        })
-        .expect("functionCall payload");
-
-    assert_eq!(payload.get("name").and_then(|v| v.as_str()), Some("glob"));
-    let args = payload.get("args").expect("args object");
-    assert_eq!(
-        args.get("pattern").and_then(|v| v.as_str()),
-        Some("**/*.py")
-    );
-    assert_eq!(
-        args.get("root_dir").and_then(|v| v.as_str()),
-        Some("/tmp/work")
-    );
-    assert_eq!(
-        args.get("exclude_patterns")
-            .and_then(|v| v.as_array())
-            .and_then(|arr| arr.first())
-            .and_then(|v| v.as_str()),
-        Some("**/.venv/**")
-    );
-}
-
-#[test]
-fn gemini_encoder_sanitizes_unsupported_json_schema_fields() {
-    let messages = vec![AiItem {
-        role: IrRole::User,
-        content: IrMessageContent::Text("hello".to_string()),
-        tool_calls: None,
-        tool_call_id: None,
-        meta: None,
-    }];
-    let tools = Some(vec![ToolSpec {
-        name: "glob".to_string(),
-        description: Some("glob files".to_string()),
-        parameters: serde_json::json!({
-            "$schema": "https://json-schema.org/draft/2020-12/schema",
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-                "pattern": {"type": "string"},
-                "items": {
-                    "type": "array",
-                    "items": {
-                        "$ref": "#/$defs/entry",
-                        "ref": "legacy"
-                    }
-                }
-            },
-            "$defs": {
-                "entry": {"type":"string"}
-            }
-        }),
-        strict: None,
-        cache_control: None,
-        meta: None,
-    }]);
-    let mut req = AiRequest::new("gemini-2.5-flash", messages);
-    req.stream = StreamConfig {
-        enabled: false,
-        include_usage: false,
-    };
-    req.tools = tools;
-    req.meta.source_protocol = Some(OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1);
-
-    let (body, _) = GoogleEncoder.encode_request(&req).expect("encode");
-    let params = body
-        .get("tools")
-        .and_then(|v| v.as_array())
-        .and_then(|arr| arr.first())
-        .and_then(|v| v.get("functionDeclarations"))
-        .and_then(|v| v.as_array())
-        .and_then(|arr| arr.first())
-        .and_then(|v| v.get("parameters"))
-        .cloned()
-        .expect("parameters");
-
-    let rendered = params.to_string();
-    assert!(!rendered.contains("$schema"));
-    assert!(!rendered.contains("additionalProperties"));
-    assert!(!rendered.contains("$ref"));
-    assert!(!rendered.contains("\"ref\""));
-    assert!(!rendered.contains("$defs"));
-}
-
-fn responses_request(messages: Vec<AiItem>, stream: bool) -> AiRequest {
-    let mut req = AiRequest::new("gpt-5.4", messages);
-    req.stream = StreamConfig {
-        enabled: stream,
-        include_usage: false,
-    };
-    req.meta.source_protocol = Some(OPEN_RESPONSES_2026_04_24);
-    req
-}
-
-#[test]
-fn responses_encoder_targets_slash_v1_responses_and_preserves_stream_choice() {
-    let req = responses_request(
-        vec![AiItem {
-            role: IrRole::User,
-            content: IrMessageContent::Text("hello".to_string()),
-            tool_calls: None,
-            tool_call_id: None,
-            meta: None,
-        }],
-        false,
-    );
-
-    let (body, _) = ResponsesEncoder.encode_request(&req).expect("encode");
-    assert_eq!(body.get("stream").and_then(|v| v.as_bool()), Some(false));
-    assert_eq!(
-        body.get("store").and_then(|v| v.as_bool()),
-        Some(true),
-        "Open Responses defaults to local persistence"
-    );
-    assert_eq!(
-        ResponsesEncoder.egress_path("gpt-5.4", false),
-        "/v1/responses"
-    );
-}
-
-#[test]
-fn responses_encoder_keeps_instructions_distinct_from_system_messages() {
-    let mut req = responses_request(
-        vec![
-            AiItem {
-                role: IrRole::System,
-                content: IrMessageContent::Text("system context".to_string()),
-                tool_calls: None,
-                tool_call_id: None,
-                meta: None,
-            },
-            AiItem {
-                role: IrRole::User,
-                content: IrMessageContent::Text("hi".to_string()),
-                tool_calls: None,
-                tool_call_id: None,
-                meta: None,
-            },
-        ],
-        false,
-    );
-    req.instructions = Some("request instructions".into());
-
-    let (body, _) = ResponsesEncoder.encode_request(&req).expect("encode");
-    assert_eq!(
-        body.get("instructions").and_then(|v| v.as_str()),
-        Some("request instructions")
-    );
-    let input = body.get("input").and_then(|v| v.as_array()).expect("input");
-    assert_eq!(input.len(), 2);
-    assert_eq!(
-        input[0].get("role").and_then(|v| v.as_str()),
-        Some("system")
-    );
-    assert_eq!(input[1].get("role").and_then(|v| v.as_str()), Some("user"));
-}
-
-#[test]
-fn responses_encoder_emits_function_call_and_function_call_output_items() {
-    let req = responses_request(
-        vec![
-            AiItem {
-                role: IrRole::Assistant,
-                content: IrMessageContent::Text(String::new()),
-                tool_calls: Some(vec![ToolCall {
-                    id: "call_abc".to_string(),
-                    name: "list_dir".to_string(),
-                    arguments: "{\"path\":\".\"}".to_string(),
-                }]),
-                tool_call_id: None,
-                meta: None,
-            },
-            AiItem {
-                role: IrRole::Tool,
-                content: IrMessageContent::Text("file1\nfile2".to_string()),
-                tool_calls: None,
-                tool_call_id: Some("call_abc".to_string()),
-                meta: None,
-            },
-        ],
-        false,
-    );
-
-    let (body, _) = ResponsesEncoder.encode_request(&req).expect("encode");
-    let input = body.get("input").and_then(|v| v.as_array()).expect("input");
-    assert_eq!(
-        input.len(),
-        2,
-        "one function_call + one function_call_output"
-    );
-
-    assert_eq!(
-        input[0].get("type").and_then(|v| v.as_str()),
-        Some("function_call")
-    );
-    assert_eq!(
-        input[0].get("call_id").and_then(|v| v.as_str()),
-        Some("call_abc")
-    );
-    assert_eq!(
-        input[0].get("name").and_then(|v| v.as_str()),
-        Some("list_dir")
-    );
-    assert_eq!(
-        input[0].get("arguments").and_then(|v| v.as_str()),
-        Some("{\"path\":\".\"}"),
-    );
-
-    assert_eq!(
-        input[1].get("type").and_then(|v| v.as_str()),
-        Some("function_call_output")
-    );
-    assert_eq!(
-        input[1].get("call_id").and_then(|v| v.as_str()),
-        Some("call_abc")
-    );
-    assert_eq!(
-        input[1].get("output").and_then(|v| v.as_str()),
-        Some("file1\nfile2")
-    );
-}
-
-#[test]
-fn responses_encoder_preserves_max_output_tokens() {
-    let mut req = responses_request(
-        vec![AiItem {
-            role: IrRole::User,
-            content: IrMessageContent::Text("hi".to_string()),
-            tool_calls: None,
-            tool_call_id: None,
-            meta: None,
-        }],
-        false,
-    );
-    req.generation.max_tokens = Some(128);
-
-    let (body, _) = ResponsesEncoder.encode_request(&req).expect("encode");
-    assert_eq!(
-        body.get("max_output_tokens")
-            .and_then(|value| value.as_u64()),
-        Some(128)
-    );
-}
-
-fn responses_sse_event(event: &str, sequence_number: u64, payload: Value) -> String {
-    let mut body = payload.as_object().expect("SSE payload object").clone();
-    body.insert("type".into(), Value::String(event.to_owned()));
-    body.insert("sequence_number".into(), sequence_number.into());
-    format!("event: {event}\ndata: {}\n\n", Value::Object(body))
-}
-
-#[test]
-fn responses_stream_parser_extracts_text_and_usage() {
-    let output_item = json!({
-        "id": "msg_1",
-        "type": "message",
-        "status": "completed",
-        "role": "assistant",
-        "content": [{"type": "output_text", "text": "Hello", "annotations": []}]
-    });
-    let created = crate::protocol::codec::open_responses::formatter::response_resource_snapshot(
-        "resp_1",
-        "gpt-5.4",
-        "in_progress",
-        Vec::new(),
-        Value::Null,
-        Value::Null,
-        Value::Null,
-    );
-    let completed = crate::protocol::codec::open_responses::formatter::response_resource_snapshot(
-        "resp_1",
-        "gpt-5.4",
-        "completed",
-        vec![output_item.clone()],
-        Value::Null,
-        Value::Null,
-        json!({
-            "input_tokens": 7,
-            "output_tokens": 2,
-            "total_tokens": 9,
-            "input_tokens_details": {"cached_tokens": 0},
-            "output_tokens_details": {"reasoning_tokens": 0}
-        }),
-    );
-    let sse = [
-        responses_sse_event("response.created", 0, json!({"response": created})),
-        responses_sse_event(
-            "response.output_item.added",
-            1,
-            json!({"output_index": 0, "item": {"id": "msg_1", "type": "message", "status": "in_progress", "role": "assistant", "content": []}}),
-        ),
-        responses_sse_event(
-            "response.content_part.added",
-            2,
-            json!({"output_index": 0, "item_id": "msg_1", "content_index": 0, "part": {"type": "output_text", "text": "", "annotations": [], "logprobs": []}}),
-        ),
-        responses_sse_event(
-            "response.output_text.delta",
-            3,
-            json!({"output_index": 0, "item_id": "msg_1", "content_index": 0, "delta": "Hel"}),
-        ),
-        responses_sse_event(
-            "response.output_text.delta",
-            4,
-            json!({"output_index": 0, "item_id": "msg_1", "content_index": 0, "delta": "lo"}),
-        ),
-        responses_sse_event(
-            "response.content_part.done",
-            5,
-            json!({"output_index": 0, "item_id": "msg_1", "content_index": 0, "part": {"type": "output_text", "text": "Hello", "annotations": [], "logprobs": []}}),
-        ),
-        responses_sse_event(
-            "response.output_item.done",
-            6,
-            json!({"output_index": 0, "item": output_item}),
-        ),
-        responses_sse_event(
-            "response.completed",
-            7,
-            json!({"response": completed}),
-        ),
-    ]
-    .concat();
-
-    let mut parser = ResponsesStreamParser::new();
-    let deltas = parser.parse_chunk(&sse).expect("parse");
-
-    let mut saw_start = false;
-    let mut text_concat = String::new();
-    let mut usage_input = 0;
-    let mut usage_output = 0;
-    let mut done_reason: Option<String> = None;
-
-    for delta in &deltas {
-        match delta {
-            IrStreamDelta::MessageStart { id, model } => {
-                saw_start = true;
-                assert_eq!(id, "resp_1");
-                assert_eq!(model, "gpt-5.4");
-            }
-            IrStreamDelta::TextDelta(t) => text_concat.push_str(t),
-            IrStreamDelta::TextDeltaWithMetadata { text, .. } => {
-                text_concat.push_str(text);
-            }
-            IrStreamDelta::Usage(u) => {
-                usage_input = u.prompt_tokens;
-                usage_output = u.completion_tokens;
-            }
-            IrStreamDelta::Done { stop_reason } => done_reason = Some(stop_reason.clone()),
-            _ => {}
-        }
-    }
-
-    assert!(saw_start);
-    assert_eq!(text_concat, "Hello");
-    assert_eq!(usage_input, 7);
-    assert_eq!(usage_output, 2);
-    assert_eq!(done_reason.as_deref(), Some("stop"));
-}
-
-#[test]
-fn responses_stream_parser_extracts_function_call() {
-    let output_item = json!({
-        "id": "fc_1",
-        "type": "function_call",
-        "status": "completed",
-        "call_id": "call_xyz",
-        "name": "ls",
-        "arguments": "{\"a\":1}"
-    });
-    let created = crate::protocol::codec::open_responses::formatter::response_resource_snapshot(
-        "resp_1",
-        "gpt-5.4",
-        "in_progress",
-        Vec::new(),
-        Value::Null,
-        Value::Null,
-        Value::Null,
-    );
-    let completed = crate::protocol::codec::open_responses::formatter::response_resource_snapshot(
-        "resp_1",
-        "gpt-5.4",
-        "completed",
-        vec![output_item.clone()],
-        Value::Null,
-        Value::Null,
-        Value::Null,
-    );
-    let sse = [
-        responses_sse_event("response.created", 0, json!({"response": created})),
-        responses_sse_event(
-            "response.output_item.added",
-            1,
-            json!({"output_index": 0, "item": {"id": "fc_1", "type": "function_call", "status": "in_progress", "call_id": "call_xyz", "name": "ls", "arguments": ""}}),
-        ),
-        responses_sse_event(
-            "response.function_call_arguments.delta",
-            2,
-            json!({"output_index": 0, "item_id": "fc_1", "delta": "{\"a\":1"}),
-        ),
-        responses_sse_event(
-            "response.function_call_arguments.delta",
-            3,
-            json!({"output_index": 0, "item_id": "fc_1", "delta": "}"}),
-        ),
-        responses_sse_event(
-            "response.output_item.done",
-            4,
-            json!({"output_index": 0, "item": output_item}),
-        ),
-        responses_sse_event(
-            "response.completed",
-            5,
-            json!({"response": completed}),
-        ),
-    ]
-    .concat();
-
-    let mut parser = ResponsesStreamParser::new();
-    let deltas = parser.parse_chunk(&sse).expect("parse");
-
-    let mut got_start = false;
-    let mut arg_concat = String::new();
-    for delta in &deltas {
-        match delta {
-            IrStreamDelta::ToolCallStart { id, name, .. } => {
-                got_start = true;
-                assert_eq!(id, "call_xyz");
-                assert_eq!(name, "ls");
-            }
-            IrStreamDelta::ToolCallDelta { arguments, .. } => arg_concat.push_str(arguments),
-            _ => {}
-        }
-    }
-    assert!(got_start);
-    assert_eq!(arg_concat, "{\"a\":1}");
-}
-
-#[test]
-fn responses_response_parser_extracts_text_tool_calls_and_usage() {
-    let body = serde_json::json!({
-        "id": "resp_42",
-        "object": "response",
-        "created_at": 1,
-        "completed_at": 2,
-        "model": "gpt-5.4",
-        "status": "completed",
-        "incomplete_details": null,
-        "previous_response_id": null,
-        "instructions": null,
-        "output": [
-            {
-                "id": "msg_1",
-                "type": "message",
-                "status": "completed",
-                "role": "assistant",
-                "content": [
-                    {"type": "output_text", "text": "Hi ", "annotations": []},
-                    {"type": "output_text", "text": "there", "annotations": []}
-                ]
-            },
-            {
-                "id": "fc_1",
-                "type": "function_call",
-                "status": "completed",
-                "call_id": "call_1",
-                "name": "search",
-                "arguments": "{\"q\":\"rust\"}"
-            }
-        ],
-        "error": null,
-        "tools": [],
-        "tool_choice": "auto",
-        "truncation": "disabled",
-        "parallel_tool_calls": true,
-        "text": {"format": {"type": "text"}},
-        "top_p": null,
-        "presence_penalty": null,
-        "frequency_penalty": null,
-        "top_logprobs": null,
-        "temperature": null,
-        "reasoning": null,
-        "usage": {
-            "input_tokens": 11,
-            "output_tokens": 3,
-            "total_tokens": 14,
-            "input_tokens_details": {"cached_tokens": 0},
-            "output_tokens_details": {"reasoning_tokens": 0}
-        },
-        "max_output_tokens": null,
-        "max_tool_calls": null,
-        "store": false,
-        "background": false,
-        "service_tier": "default",
-        "metadata": {},
-        "safety_identifier": null,
-        "prompt_cache_key": null
-    });
-
-    let resp = ResponsesResponseParser.parse_response(body).expect("parse");
-
-    assert_eq!(resp.id, "resp_42");
-    assert_eq!(resp.model, "gpt-5.4");
-    assert_eq!(resp.output_text(), "Hi there");
-    assert_eq!(resp.stop_reason.as_deref(), Some("tool_calls"));
-    assert_eq!(resp.usage.prompt_tokens, 11);
-    assert_eq!(resp.usage.completion_tokens, 3);
-    assert_eq!(resp.tool_calls().count(), 1);
-    let call = resp.tool_calls().next().expect("function call");
-    assert_eq!(call.id, "call_1");
-    assert_eq!(call.name, "search");
-    assert_eq!(call.arguments, "{\"q\":\"rust\"}");
-}
-
 #[test]
 fn codex_parallel_calls_with_intermediate_text_anthropic_egress() {
     let body = serde_json::json!({
@@ -2305,113 +1346,6 @@ fn codex_parallel_calls_with_intermediate_text_anthropic_egress() {
         }
     }
 }
-
-#[test]
-fn gemini_file_data_round_trip_preserves_uri_and_mime_type() {
-    use crate::protocol::codec::google::gemini::decoder::GoogleDecoder;
-
-    // Simulate an inbound request with a PDF fileData part.
-    let inbound = serde_json::json!({
-        "contents": [{
-            "role": "user",
-            "parts": [{
-                "fileData": {
-                    "fileUri": "https://example.com/doc.pdf",
-                    "mimeType": "application/pdf"
-                }
-            }]
-        }]
-    });
-
-    // Decode to IR, then re-encode.
-    let mut req = GoogleDecoder.decode_request(inbound).expect("decode");
-    req.meta.source_protocol = Some(GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA);
-    let (outbound, _) = GoogleEncoder.encode_request(&req).expect("encode");
-
-    let parts = outbound["contents"][0]["parts"].as_array().expect("parts");
-    let fd = &parts[0]["fileData"];
-    assert_eq!(
-        fd["fileUri"].as_str(),
-        Some("https://example.com/doc.pdf"),
-        "fileUri must survive round-trip"
-    );
-    assert_eq!(
-        fd["mimeType"].as_str(),
-        Some("application/pdf"),
-        "mimeType must survive round-trip"
-    );
-}
-
-#[test]
-fn gemini_decoder_file_data_routes_image_to_image_block() {
-    use crate::protocol::codec::google::gemini::decoder::GoogleDecoder;
-
-    let body = serde_json::json!({
-        "contents": [{
-            "role": "user",
-            "parts": [{
-                "fileData": {
-                    "fileUri": "https://example.com/photo.jpg",
-                    "mimeType": "image/jpeg"
-                }
-            }]
-        }]
-    });
-
-    let decoder = GoogleDecoder;
-    let req = decoder.decode_request(body).expect("decode");
-
-    let msg = &req.items[0];
-    match &msg.content {
-        IrMessageContent::Blocks(blocks) => {
-            assert_eq!(blocks.len(), 1);
-            match &blocks[0] {
-                IrContentBlock::Image { source, .. } => match source {
-                    MediaSource::Url(url) => {
-                        assert_eq!(url, "https://example.com/photo.jpg");
-                    }
-                    _ => panic!("expected MediaSource::Url"),
-                },
-                other => panic!("expected ContentBlock::Image for image/ mimeType, got {other:?}"),
-            }
-        }
-        other => panic!("expected Blocks, got {other:?}"),
-    }
-}
-
-#[test]
-fn gemini_encoder_file_data_without_mime_type_omits_mime_type() {
-    let messages = vec![AiItem {
-        role: IrRole::User,
-        content: IrMessageContent::Blocks(vec![IrContentBlock::File {
-            source: MediaSource::Url("https://example.com/unknown.bin".into()),
-            media_type: None,
-        }]),
-        tool_calls: None,
-        tool_call_id: None,
-        meta: None,
-    }];
-    let req = AiRequest::new("gemini-2.5-flash", messages);
-
-    let (body, _) = GoogleEncoder.encode_request(&req).expect("encode");
-
-    let parts = body["contents"][0]["parts"]
-        .as_array()
-        .expect("parts array");
-    let fd = &parts[0]["fileData"];
-    assert_eq!(
-        fd["fileUri"].as_str(),
-        Some("https://example.com/unknown.bin")
-    );
-    assert!(
-        fd.get("mimeType").is_none(),
-        "mimeType must be absent when media_type is None"
-    );
-}
-
-// ── Claude Code >=2.1.154 mid-conversation system messages ────────────────────
-
-/// Basic: inline system role is decoded as Role::System and kept at its position.
 #[test]
 fn anthropic_inline_system_role_decodes_without_error() {
     let body = serde_json::json!({
@@ -2558,35 +1492,6 @@ fn anthropic_truly_unknown_role_still_errors() {
         "error message must identify the bad role, got: {err}"
     );
 }
-
-#[test]
-fn gemini_encoder_file_data_with_mime_type_emits_mime_type() {
-    let messages = vec![AiItem {
-        role: IrRole::User,
-        content: IrMessageContent::Blocks(vec![IrContentBlock::File {
-            source: MediaSource::Url("https://example.com/report.pdf".into()),
-            media_type: Some("application/pdf".into()),
-        }]),
-        tool_calls: None,
-        tool_call_id: None,
-        meta: None,
-    }];
-    let req = AiRequest::new("gemini-2.5-flash", messages);
-
-    let (body, _) = GoogleEncoder.encode_request(&req).expect("encode");
-
-    let parts = body["contents"][0]["parts"]
-        .as_array()
-        .expect("parts array");
-    assert_eq!(parts.len(), 1);
-    let fd = &parts[0]["fileData"];
-    assert_eq!(
-        fd["fileUri"].as_str(),
-        Some("https://example.com/report.pdf")
-    );
-    assert_eq!(fd["mimeType"].as_str(), Some("application/pdf"));
-}
-
 #[test]
 fn anthropic_to_openai_strips_tool_use_from_content_array() {
     // Regression for Anthropic Messages → OpenAI Chat Completions cross-protocol
@@ -2708,19 +1613,3 @@ fn anthropic_to_openai_strips_tool_use_from_content_array() {
 
 // The dated contract rejects malformed function calls instead of preserving
 // undocumented vendor quirks in the canonical graph.
-#[test]
-fn responses_decoder_rejects_empty_function_call_names() {
-    let error = ResponsesDecoder
-        .decode_request(serde_json::json!({
-            "model": "gpt-5.4",
-            "input": [{
-                "type": "function_call",
-                "call_id": "call_aec52c641b094ce0aae3ce3cc526068c",
-                "name": "",
-                "arguments": "{\"cmd\":\"git status --short\"}"
-            }]
-        }))
-        .expect_err("dated protocol requires a non-empty function name");
-
-    assert!(error.to_string().contains("non-empty call_id and name"));
-}

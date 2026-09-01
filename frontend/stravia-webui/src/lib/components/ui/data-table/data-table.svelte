@@ -29,12 +29,9 @@ import ChevronLeftIcon from '@lucide/svelte/icons/chevron-left'
 import ChevronRightIcon from '@lucide/svelte/icons/chevron-right'
 import ChevronUpIcon from '@lucide/svelte/icons/chevron-up'
 import CheckIcon from '@lucide/svelte/icons/check'
-import Columns3Icon from '@lucide/svelte/icons/columns-3'
 import DownloadIcon from '@lucide/svelte/icons/download'
-import FunnelIcon from '@lucide/svelte/icons/funnel'
 import FunnelXIcon from '@lucide/svelte/icons/funnel-x'
 import GripVerticalIcon from '@lucide/svelte/icons/grip-vertical'
-import PlusIcon from '@lucide/svelte/icons/plus'
 import PencilIcon from '@lucide/svelte/icons/pencil'
 import SearchIcon from '@lucide/svelte/icons/search'
 import XIcon from '@lucide/svelte/icons/x'
@@ -42,15 +39,18 @@ import XIcon from '@lucide/svelte/icons/x'
 import { cn } from '$lib/utils.js'
 import { Button } from '$lib/components/ui/button'
 import { Checkbox } from '$lib/components/ui/checkbox'
-import * as DropdownMenu from '$lib/components/ui/dropdown-menu'
 import * as Empty from '$lib/components/ui/empty'
 import { Input } from '$lib/components/ui/input'
 import * as InputGroup from '$lib/components/ui/input-group'
-import * as Popover from '$lib/components/ui/popover'
 import * as Select from '$lib/components/ui/select'
 import { Skeleton } from '$lib/components/ui/skeleton'
 import { Spinner } from '$lib/components/ui/spinner'
 import * as Table from '$lib/components/ui/table'
+import ColumnMenu from './column-menu.svelte'
+import FilterMenu from './filter-menu.svelte'
+import { exportDataTableCsv } from './export.js'
+import { parseDataTableState, serializeDataTableState } from './state-persistence.js'
+import { dataTableVirtualRange } from './virtual-rows.js'
 import {
   dataTableFeatures,
   defaultDataTableLabels,
@@ -616,35 +616,19 @@ const rowRegions = $derived.by(() => {
 })
 const renderedRows = $derived([...rowRegions.top, ...rowRegions.center, ...rowRegions.bottom])
 const virtualScrollEnabled = $derived(Boolean(virtualScrollOptions && scrollHeight))
-const virtualStartIndex = $derived(
-  virtualScrollEnabled
-    ? Math.max(
-        0,
-        Math.floor(virtualScrollTop / Math.max(1, virtualScrollOptions?.itemSize ?? rowHeight)) -
-          (virtualScrollOptions?.overscan ?? 5),
-      )
-    : 0,
+const virtualRange = $derived(
+  dataTableVirtualRange({
+    enabled: virtualScrollEnabled,
+    rowCount: rowRegions.center.length,
+    scrollTop: virtualScrollTop,
+    viewportHeight: virtualViewportHeight,
+    itemSize: virtualScrollOptions?.itemSize ?? rowHeight,
+    overscan: virtualScrollOptions?.overscan ?? 5,
+  }),
 )
-const virtualEndIndex = $derived(
-  virtualScrollEnabled
-    ? Math.min(
-        rowRegions.center.length,
-        Math.ceil(
-          (virtualScrollTop + virtualViewportHeight) / Math.max(1, virtualScrollOptions?.itemSize ?? rowHeight),
-        ) +
-          (virtualScrollOptions?.overscan ?? 5),
-      )
-    : rowRegions.center.length,
-)
-const visibleCenterRows = $derived(rowRegions.center.slice(virtualStartIndex, virtualEndIndex))
-const virtualTopPadding = $derived(
-  virtualScrollEnabled ? virtualStartIndex * Math.max(1, virtualScrollOptions?.itemSize ?? rowHeight) : 0,
-)
-const virtualBottomPadding = $derived(
-  virtualScrollEnabled
-    ? (rowRegions.center.length - virtualEndIndex) * Math.max(1, virtualScrollOptions?.itemSize ?? rowHeight)
-    : 0,
-)
+const visibleCenterRows = $derived(rowRegions.center.slice(virtualRange.startIndex, virtualRange.endIndex))
+const virtualTopPadding = $derived(virtualRange.topPadding)
+const virtualBottomPadding = $derived(virtualRange.bottomPadding)
 
 function isInteractiveTarget(target: EventTarget | null): boolean {
   return (
@@ -1052,49 +1036,15 @@ function handleViewportScroll(event: Event): void {
   virtualViewportHeight = viewport.clientHeight
 }
 
-function csvCell(value: unknown): string {
-  const text = String(value ?? '')
-  return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text
-}
-
 export function exportCsv(options: DataTableExportOptions<TData> = {}): void {
-  const exportColumns = table
-    .getVisibleLeafColumns()
-    .filter((column) => Boolean(column.accessorFn) && column.columnDef.meta?.exportable !== false)
-  const model = options.selectionOnly
-    ? table.getSelectedRowModel()
-    : options.currentPageOnly
-      ? table.getRowModel()
-      : table.getPrePaginatedRowModel()
-  const rows = model.flatRows.filter((row) => !row.getIsGrouped())
-  const header = exportColumns
-    .map((column) => {
-      const exportHeader = column.columnDef.meta?.exportHeader
-      return csvCell(typeof exportHeader === 'function' ? exportHeader() : (exportHeader ?? columnLabel(column)))
-    })
-    .join(',')
-  const lines = rows.map((row) =>
-    exportColumns
-      .map((column) => {
-        const value = row.getValue(column.id)
-        return csvCell(
-          options.getValue?.(row.original, column.id, value) ??
-            getExportValue?.(row.original, column.id, value) ??
-            value,
-        )
-      })
-      .join(','),
-  )
-  const blob = new Blob([`\ufeff${[header, ...lines].join('\r\n')}`], { type: 'text/csv;charset=utf-8' })
-  const href = URL.createObjectURL(blob)
-  const anchor = document.createElement('a')
-  const requestedFilename = options.filename ?? exportFilename
-  const filename = requestedFilename.toLowerCase().endsWith('.csv') ? requestedFilename : `${requestedFilename}.csv`
-  anchor.href = href
-  anchor.download = filename
-  anchor.click()
-  URL.revokeObjectURL(href)
-  onExport?.({ filename, rowCount: rows.length })
+  exportDataTableCsv({
+    table,
+    options,
+    defaultFilename: exportFilename,
+    columnLabel,
+    getExportValue,
+    onExport,
+  })
 }
 
 export function getTable(): DataTable<TData> {
@@ -1119,11 +1069,7 @@ onMount(() => {
     try {
       const raw = storage().getItem(stateKey)
       if (raw) {
-        const saved = JSON.parse(raw) as { version?: unknown; state?: Partial<DataTableState> }
-        if (saved.version !== 1 || !saved.state || typeof saved.state !== 'object') {
-          throw new Error(`Unsupported DataTable state stored under "${stateKey}".`)
-        }
-        const state = saved.state
+        const state = parseDataTableState(raw, stateKey)
         if (Array.isArray(state.sorting)) sorting = state.sorting
         if (Array.isArray(state.columnFilters)) columnFilters = state.columnFilters
         if (typeof state.globalFilter === 'string') globalFilter = state.globalFilter
@@ -1158,7 +1104,7 @@ $effect(() => {
   const state = currentState()
   if (!persistenceReady || !stateKey) return
   try {
-    storage().setItem(stateKey, JSON.stringify({ version: 1, state }))
+    storage().setItem(stateKey, serializeDataTableState(state))
     onStateSave?.(state)
   } catch (error) {
     reportStateError(error)
@@ -1454,27 +1400,7 @@ $effect(() => {
         {/if}
         {#if toolbarEnd}{@render toolbarEnd(table)}{/if}
         {#if columnToggle}
-          <DropdownMenu.Root>
-            <DropdownMenu.Trigger>
-              {#snippet child({ props })}
-                <Button {...props} variant="outline" size="sm">
-                  <Columns3Icon data-icon="inline-start" />{resolvedLabels.columns}<ChevronDownIcon
-                    data-icon="inline-end" />
-                </Button>
-              {/snippet}
-            </DropdownMenu.Trigger>
-            <DropdownMenu.Content align="end" class="min-w-44">
-              <DropdownMenu.Group>
-                <DropdownMenu.Label>{resolvedLabels.columns}</DropdownMenu.Label>
-                {#each table.getAllLeafColumns().filter((column) => column.getCanHide()) as column (column.id)}
-                  <DropdownMenu.CheckboxItem
-                    bind:checked={() => column.getIsVisible(), (value) => column.toggleVisibility(Boolean(value))}>
-                    {columnLabel(column)}
-                  </DropdownMenu.CheckboxItem>
-                {/each}
-              </DropdownMenu.Group>
-            </DropdownMenu.Content>
-          </DropdownMenu.Root>
+          <ColumnMenu {table} label={resolvedLabels.columns} {columnLabel} />
         {/if}
         {#if exportable}
           <Button
@@ -1598,156 +1524,24 @@ $effect(() => {
                       <FlexRender {header} />
                     {/if}
                     {#if filterDisplay === 'menu' && filter && header.column.columns.length === 0}
-                      <Popover.Root
-                        bind:open={() => openFilterColumnId === header.column.id, (open) =>
-                          setFilterMenuOpen(header.column, filter, open)}>
-                        <Popover.Trigger>
-                          {#snippet child({ props })}
-                            <Button
-                              {...props}
-                              variant="ghost"
-                              size="icon"
-                              class={cn(
-                                '-me-2 size-10 shrink-0',
-                                header.column.getIsFiltered() && 'bg-muted text-primary hover:text-primary',
-                              )}
-                              aria-label={openFilterColumnId === header.column.id
-                                ? resolvedLabels.hideFilterMenu(columnLabel(header.column))
-                                : resolvedLabels.showFilterMenu(columnLabel(header.column))}
-                              aria-haspopup="dialog"
-                              aria-expanded={openFilterColumnId === header.column.id}>
-                              <FunnelIcon class="size-3.5" />
-                            </Button>
-                          {/snippet}
-                        </Popover.Trigger>
-                        <Popover.Content
-                          align={header.column.columnDef.meta?.align === 'end' ? 'end' : 'start'}
-                          class="w-72 p-0"
-                          role="dialog"
-                          aria-label={resolvedLabels.filterBy(columnLabel(header.column))}>
-                          <Popover.Header class="border-b border-border/60 px-4 py-3">
-                            <Popover.Title>{resolvedLabels.filterBy(columnLabel(header.column))}</Popover.Title>
-                          </Popover.Header>
-                          {#if filterDraft}
-                            <div class="space-y-3 p-4">
-                              {#if filter.variant === 'text'}
-                                {#if filterDraft.constraints.length > 1}
-                                  <Select.Root
-                                    type="single"
-                                    bind:value={() => filterDraft?.operator ?? 'and', (value) =>
-                                      updateFilterOperator(value as DataTableFilterOperator)}>
-                                    <Select.Trigger class="h-10 w-full" aria-label={resolvedLabels.matchMode}>
-                                      {filterDraft.operator === 'and' ? resolvedLabels.matchAll : resolvedLabels.matchAny}
-                                    </Select.Trigger>
-                                    <Select.Content>
-                                      <Select.Item value="and">{resolvedLabels.matchAll}</Select.Item>
-                                      <Select.Item value="or">{resolvedLabels.matchAny}</Select.Item>
-                                    </Select.Content>
-                                  </Select.Root>
-                                {/if}
-                                {#each filterDraft.constraints as constraint, constraintIndex (constraintIndex)}
-                                  <div class="space-y-2">
-                                    <div class="flex items-center gap-2">
-                                      <Select.Root
-                                        type="single"
-                                        bind:value={() => constraint.matchMode, (value) =>
-                                          updateFilterConstraint(constraintIndex, {
-                                            matchMode: value as DataTableFilterMatchMode,
-                                          })}>
-                                        <Select.Trigger class="h-10 min-w-0 flex-1" aria-label={resolvedLabels.matchMode}>
-                                          {resolvedLabels.filterMatchMode(constraint.matchMode)}
-                                        </Select.Trigger>
-                                        <Select.Content>
-                                          {#each textFilterMatchModes(filter) as matchMode (matchMode)}
-                                            <Select.Item value={matchMode}>
-                                              {resolvedLabels.filterMatchMode(matchMode)}
-                                            </Select.Item>
-                                          {/each}
-                                        </Select.Content>
-                                      </Select.Root>
-                                      {#if filterDraft.constraints.length > 1}
-                                        <Button
-                                          variant="ghost"
-                                          size="icon"
-                                          class="size-10 shrink-0"
-                                          aria-label={resolvedLabels.removeFilterRule(constraintIndex + 1)}
-                                          onclick={() => removeFilterConstraint(constraintIndex)}>
-                                          <XIcon class="size-4" />
-                                        </Button>
-                                      {/if}
-                                    </div>
-                                    <Input
-                                      class="h-10"
-                                      value={String(constraint.value ?? '')}
-                                      placeholder={filter.placeholder ?? columnLabel(header.column)}
-                                      aria-label={filter.placeholder ?? columnLabel(header.column)}
-                                      oninput={(event) =>
-                                        updateFilterConstraint(constraintIndex, {
-                                          value: event.currentTarget.value || undefined,
-                                        })} />
-                                  </div>
-                                {/each}
-                                {#if filterDraft.constraints.length < Math.max(1, Math.min(filter.maxConstraints ?? 3, 3))}
-                                  <Button variant="ghost" class="h-10 w-full justify-start" onclick={() => addFilterConstraint(filter)}>
-                                    <PlusIcon data-icon="inline-start" />{resolvedLabels.addFilterRule}
-                                  </Button>
-                                {/if}
-                              {:else if filter.variant === 'select'}
-                                <Select.Root
-                                  type="single"
-                                  bind:value={() =>
-                                    String(filterDraft?.constraints[0]?.value ?? allFilterValue), (value) =>
-                                    updateFilterConstraint(0, {
-                                      value: value === allFilterValue ? undefined : value,
-                                    })}>
-                                  <Select.Trigger
-                                    class="h-10 w-full"
-                                    aria-label={filter.placeholder ?? columnLabel(header.column)}>
-                                    {filter.options?.find(
-                                      (option) => option.value === filterDraft?.constraints[0]?.value,
-                                    )?.label ?? filter.allLabel ?? resolvedLabels.allValues}
-                                  </Select.Trigger>
-                                  <Select.Content>
-                                    <Select.Item value={allFilterValue}>{filter.allLabel ?? resolvedLabels.allValues}</Select.Item>
-                                    {#each selectFilterOptions(header.column) as option (option.value)}
-                                      <Select.Item value={option.value}>{option.label}</Select.Item>
-                                    {/each}
-                                  </Select.Content>
-                                </Select.Root>
-                              {:else}
-                                {@const range =
-                                  (filterDraft.constraints[0]?.value as
-                                    | [number | undefined, number | undefined]
-                                    | undefined) ?? []}
-                                <div class="grid grid-cols-2 gap-2">
-                                  <Input
-                                    class="h-10 min-w-0"
-                                    type="number"
-                                    value={range[0] ?? ''}
-                                    placeholder={filter.minPlaceholder ?? resolvedLabels.minimum}
-                                    aria-label={filter.minPlaceholder ?? resolvedLabels.minimum}
-                                    oninput={(event) => updateDraftNumberFilter(0, 0, event.currentTarget.value)} />
-                                  <Input
-                                    class="h-10 min-w-0"
-                                    type="number"
-                                    value={range[1] ?? ''}
-                                    placeholder={filter.maxPlaceholder ?? resolvedLabels.maximum}
-                                    aria-label={filter.maxPlaceholder ?? resolvedLabels.maximum}
-                                    oninput={(event) => updateDraftNumberFilter(0, 1, event.currentTarget.value)} />
-                                </div>
-                              {/if}
-                            </div>
-                            <div class="flex items-center justify-between border-t border-border/60 px-4 py-3">
-                              <Button variant="outline" class="h-10" onclick={() => clearColumnFilter(header.column)}>
-                                {resolvedLabels.clearFilter}
-                              </Button>
-                              <Button class="h-10" onclick={() => applyColumnFilter(header.column)}>
-                                {resolvedLabels.applyFilter}
-                              </Button>
-                            </div>
-                          {/if}
-                        </Popover.Content>
-                      </Popover.Root>
+                      <FilterMenu
+                        column={header.column}
+                        {filter}
+                        draft={filterDraft}
+                        labels={resolvedLabels}
+                        columnName={columnLabel(header.column)}
+                        open={openFilterColumnId === header.column.id}
+                        {allFilterValue}
+                        selectOptions={selectFilterOptions(header.column)}
+                        textMatchModes={textFilterMatchModes(filter)}
+                        onOpenChange={(open) => setFilterMenuOpen(header.column, filter, open)}
+                        onUpdateOperator={updateFilterOperator}
+                        onUpdateConstraint={updateFilterConstraint}
+                        onAddConstraint={() => addFilterConstraint(filter)}
+                        onRemoveConstraint={removeFilterConstraint}
+                        onUpdateNumber={updateDraftNumberFilter}
+                        onClear={() => clearColumnFilter(header.column)}
+                        onApply={() => applyColumnFilter(header.column)} />
                     {/if}
                   </div>
                   {#if resizableColumns && header.column.getCanResize()}
