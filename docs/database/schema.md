@@ -7,7 +7,8 @@ Stravia supports **SQLite** (default) and **PostgreSQL** only. Both use the logi
 ```
 providers ──1:N── model_backends ──N:1── models ──M:N── api_keys (via api_key_models)
     ├──1:1── provider_oauth_credentials
-    └──1:N── provider_models ──1:N── provider_model_cost_rules
+    ├──1:N── provider_models ──1:N── provider_model_cost_rules
+    └──1:N── provider_allowance_samples
 web_providers (Local Web Search / Fetch upstreams)
 request_logs (append-only)
 turn_chain_nodes (principal-scoped Response / Agent / Web Search DAG)
@@ -208,6 +209,30 @@ Provider Model 的有序分层价格规则。`context_over_200k` 与 Provider Ca
 **外键**：`(provider_id, model_id)` → `provider_models`，ON DELETE CASCADE
 
 **唯一索引**：`idx_provider_model_cost_rules_threshold` on `(provider_id, model_id, rule_kind, threshold_tokens)`
+
+---
+
+## provider_allowance_samples
+
+Provider 账户级额度的历史样本，用于估算当前重置窗口内的耗尽风险。Gateway 每 30 分钟刷新所有可监控 Provider；仅成功取得的 fresh 账户级额度会写入，模型级额度、stale 快照和失败结果不写入。Gateway 启动、每轮后台采样及写入时删除超过 14 天的样本。
+
+| Column | Type | Default | Description |
+|---|---|---|---|
+| `id` | TEXT PK | — | 样本 ID，UUID |
+| `provider_id` | TEXT NOT NULL | — | Provider ID（FK → `providers.id`, ON DELETE CASCADE） |
+| `allowance_key` | TEXT NOT NULL | — | Provider 快照内稳定的账户级额度键 |
+| `sampled_at` | BIGINT / INTEGER NOT NULL | — | 采样时间，Unix 毫秒时间戳 |
+| `used_value` | DOUBLE PRECISION / REAL | NULL | 已用原始数值 |
+| `remaining_value` | DOUBLE PRECISION / REAL | NULL | 剩余原始数值 |
+| `limit_value` | DOUBLE PRECISION / REAL | NULL | 总量原始数值 |
+| `used_percent` | DOUBLE PRECISION / REAL | NULL | 已用百分比 |
+| `amount_unit` | TEXT | NULL | 数值单位 |
+| `currency` | TEXT | NULL | 余额币种 |
+| `reset_at` | BIGINT / INTEGER | NULL | 当前额度窗口重置时间，Unix 毫秒时间戳 |
+
+**索引**：
+- `idx_provider_allowance_samples_item_time` on `(provider_id, allowance_key, sampled_at)`
+- `idx_provider_allowance_samples_sampled_at` on `sampled_at`
 
 ---
 
@@ -458,6 +483,8 @@ Revisioned Provider Catalog migration 20 不改变表 shape。它仅把可由既
 History Marker migration 22 新增 Principal-scoped `history_markers` 表及 Platform Tool Execution 的 durable claim、lease、deadline、terminal、publication 与 retention 字段。隐藏 payload 沿用现有 SQLite/PostgreSQL 部署安全边界，不引入独立加密密钥。
 
 Route Target Aggregate migration 27 先把仅存在于旧 `models.target_provider` / `models.target_model` 的主 Target 补入 `model_backends`，再删除这两个重复列，并为大小写敏感的 Route ID `models.name` 建立唯一索引。升级后 Route 与全部 Targets 由同一聚合写入事务维护。
+
+Allowance Samples migration 28 新增 `provider_allowance_samples`。样本随 Provider 删除而级联删除；应用按 14 天 TTL 清理，预报只读取当前重置窗口内且语义一致的样本。
 
 SQLite 与 PostgreSQL 必须保持 API Key 字段默认值、Turn kind、settings identity、唯一约束和 Artifact 外键等价。
 

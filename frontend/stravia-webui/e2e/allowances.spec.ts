@@ -24,6 +24,17 @@ const freshSnapshot = {
       remaining: { value: 44.375, unit: 'tokens' },
       limit: { value: 100, unit: 'tokens' },
       used_percent: 55.625,
+      reset_at: 1788883200000,
+      condition: 'normal',
+      forecast: { status: 'no_risk', projected_remaining_percent: 24.5 },
+    },
+    {
+      key: 'credits_balance',
+      label: 'Credit balance',
+      kind: 'balance',
+      remaining: { value: 0, unit: 'currency', currency: 'USD' },
+      condition: 'exhausted',
+      forecast: { status: 'unknown' },
     },
   ],
   models: [
@@ -36,6 +47,8 @@ const freshSnapshot = {
           kind: 'quota_window',
           remaining: { value: 25, unit: 'tokens' },
           reset_at: 1788282000000,
+          condition: 'tight',
+          forecast: { status: 'will_exhaust', exhausts_at: 1788200000000 },
         },
       ],
     },
@@ -57,6 +70,9 @@ const staleSnapshot = {
       used_percent: 111.25,
       used: { value: 111.25, unit: 'requests' },
       limit: { value: 100, unit: 'requests' },
+      reset_at: 1788796800000,
+      condition: 'exhausted',
+      forecast: { status: 'will_exhaust', projected_remaining_percent: 0, exhausts_at: 1788700000000 },
     },
   ],
   models: [],
@@ -92,24 +108,40 @@ async function mockAllowances(page: Page, snapshots: AllowanceFixture[]) {
   return posts
 }
 
-test('renders fresh, stale, error, typed values, model details, and both refresh actions', async ({ page }) => {
+async function selectFilter(page: Page, label: string, option: string): Promise<void> {
+  await page.getByRole('button', { name: label, exact: true }).click()
+  await page.getByRole('option', { name: option, exact: true }).click()
+}
+
+test('renders the matrix, shared summary, timeline, forecast, model details, and refresh actions', async ({ page }) => {
   const posts = await mockAllowances(page, [errorSnapshot, staleSnapshot, freshSnapshot])
   await page.goto('/allowances')
 
-  await expect(page.getByRole('heading', { name: 'Provider allowances' })).toBeVisible()
-  const cards = page.locator('[data-testid^="allowance-card-"]')
-  await expect(cards).toHaveCount(3)
-  await expect(cards.locator('[data-slot="card-title"]')).toHaveText(['Alpha account', 'Beta account', 'Gamma account'])
-  await expect(page.getByText('Fresh', { exact: true })).toBeVisible()
-  await expect(page.getByText('Stale', { exact: true })).toBeVisible()
-  await expect(page.getByText('Unavailable', { exact: true })).toBeVisible()
-  await expect(page.getByText('55.63 tokens')).toBeVisible()
-  await expect(page.getByText('111.25%').first()).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Allowance overview' })).toBeVisible()
+  const matrix = page.getByRole('table', { name: 'Allowance matrix' })
+  await expect(matrix).toBeVisible()
+  await expect(matrix.getByText('Alpha account')).toBeVisible()
+  await expect(matrix.getByText('Beta account')).toBeVisible()
+  await expect(matrix.getByText('Gamma account')).toBeVisible()
+  await expect(matrix.getByText('Weekly window')).toHaveCount(2)
+  await expect(matrix.getByText('Fresh', { exact: true })).toBeVisible()
+  await expect(matrix.getByText('Stale', { exact: true })).toBeVisible()
+  await expect(matrix.getByText('Unavailable', { exact: true })).toBeVisible()
+  await expect(matrix.getByText('Exhausted', { exact: true }).first()).toBeVisible()
+  await expect(matrix.getByText('0 USD')).toBeVisible()
   await expect(page.getByText('Showing the last successful result because this refresh failed.')).toBeVisible()
   await expect(page.getByText('Reconnect this model service or update its credential.')).toBeVisible()
-  await expect(page.locator('[role="progressbar"]')).toHaveCount(2)
-  await expect(page.getByTestId('allowance-card-error').locator('[role="progressbar"]')).toHaveCount(0)
 
+  const conditionSummary = page.getByRole('region', { name: 'Allowance condition' })
+  await expect(conditionSummary.getByText('Exhausted', { exact: true })).toBeVisible()
+  await expect(conditionSummary.getByText(/Lowest remaining/)).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Reset timeline' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Exhaustion forecast' })).toBeVisible()
+  await expect(page.getByText('Based on the current window')).toBeVisible()
+  await expect(page.getByText('Will exhaust 1')).toBeVisible()
+  await expect(page.getByText('Unknown 1')).toBeVisible()
+
+  await page.getByLabel('Show model allowances for Alpha account').click()
   await page.getByText('claude-opus-4-6').click()
   await expect(page.getByText(/Resets/)).toBeVisible()
 
@@ -117,6 +149,53 @@ test('renders fresh, stale, error, typed values, model details, and both refresh
   await expect.poll(() => posts).toContain('/api/v1/provider-allowances/refresh')
   await page.getByRole('button', { name: 'Refresh Alpha account' }).click()
   await expect.poll(() => posts).toContain('/api/v1/provider-allowances/provider-alpha/refresh')
+})
+
+test('search and all filters drive the same visible collection', async ({ page }) => {
+  await mockAllowances(page, [errorSnapshot, staleSnapshot, freshSnapshot])
+  await page.goto('/allowances')
+
+  const search = page.getByLabel('Search model services')
+  const timelinePanel = page.locator('[data-slot="card"]').filter({ has: page.getByRole('heading', { name: 'Reset timeline' }) })
+  const forecastPanel = page
+    .locator('[data-slot="card"]')
+    .filter({ has: page.getByRole('heading', { name: 'Exhaustion forecast' }) })
+  await search.fill('alpha')
+  await expect(page.getByRole('table', { name: 'Allowance matrix' }).getByText('Alpha account')).toBeVisible()
+  await expect(page.getByRole('table', { name: 'Allowance matrix' }).getByText('Beta account')).toHaveCount(0)
+  await expect(timelinePanel).not.toContainText('Beta account')
+  await expect(forecastPanel).toContainText('Unknown 1')
+
+  await search.fill('Weekly')
+  await expect(page.getByText('No allowances match these filters.')).toBeVisible()
+  await search.fill('')
+
+  await selectFilter(page, 'Filter by service type', 'openai / codex')
+  await expect(page.getByRole('table', { name: 'Allowance matrix' }).getByText('Beta account')).toBeVisible()
+  await expect(page.getByRole('table', { name: 'Allowance matrix' }).getByText('Alpha account')).toHaveCount(0)
+  await expect(timelinePanel).toContainText('Beta account')
+  await expect(timelinePanel).not.toContainText('Alpha account')
+  await expect(forecastPanel).toContainText('Will exhaust 1')
+  await expect(forecastPanel).toContainText('Unknown 0')
+
+  await selectFilter(page, 'Filter by service type', 'All')
+  await selectFilter(page, 'Filter by allowance condition', 'Exhausted')
+  await expect(page.getByRole('table', { name: 'Allowance matrix' }).getByText('Alpha account')).toBeVisible()
+  await expect(page.getByRole('table', { name: 'Allowance matrix' }).getByText('Beta account')).toBeVisible()
+  await expect(timelinePanel).toContainText('Beta account')
+  await expect(timelinePanel).not.toContainText('Alpha account')
+  await expect(forecastPanel).toContainText('Will exhaust 1')
+  await expect(forecastPanel).toContainText('Unknown 1')
+
+  await selectFilter(page, 'Filter by allowance condition', 'All')
+  await selectFilter(page, 'Filter by data freshness', 'Unavailable')
+  await expect(page.getByRole('table', { name: 'Allowance matrix' }).getByText('Gamma account')).toBeVisible()
+  await expect(page.getByRole('table', { name: 'Allowance matrix' }).getByText('Alpha account')).toHaveCount(0)
+  await expect(timelinePanel).not.toContainText('Alpha account')
+  await expect(timelinePanel).not.toContainText('Beta account')
+  await expect(forecastPanel).toContainText('No risk 0')
+  await expect(forecastPanel).toContainText('Will exhaust 0')
+  await expect(forecastPanel).toContainText('Unknown 0')
 })
 
 test('renders the empty and request-error states with recovery guidance', async ({ page }) => {
@@ -135,14 +214,17 @@ test('renders the empty and request-error states with recovery guidance', async 
   await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible()
 })
 
-test('keeps the card grid usable on a narrow Chinese viewport', async ({ page }) => {
+test('keeps the matrix and side panels usable on a narrow Chinese viewport', async ({ page }) => {
   await page.setViewportSize({ width: 375, height: 760 })
   await page.addInitScript(() => localStorage.setItem('stravia-locale', 'zh-CN'))
   await mockAllowances(page, [freshSnapshot])
   await page.goto('/allowances')
 
-  await expect(page.getByRole('heading', { name: 'Provider 额度' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '额度总览' })).toBeVisible()
   await expect(page.getByRole('button', { name: '全部刷新' })).toBeVisible()
+  await expect(page.getByRole('table', { name: '额度矩阵' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '重置时间轴' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '预计耗尽' })).toBeVisible()
   const overflow = await page.evaluate(
     () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
   )

@@ -10,8 +10,9 @@ use crate::config::GatewayConfig;
 use crate::db::models::{CreateProviderRecord, UpdateProvider};
 
 use super::{
-    AllowanceHttpRequest, AllowanceHttpResponse, AllowanceKind, AllowanceTransport, MonitorKind,
-    ProviderAllowanceErrorCategory, ProviderAllowanceStatus, TransportFailure, fetch_monitor,
+    AllowanceCondition, AllowanceHttpRequest, AllowanceHttpResponse, AllowanceKind,
+    AllowanceTransport, ExhaustionForecastStatus, MonitorKind, ProviderAllowanceErrorCategory,
+    ProviderAllowanceStatus, TransportFailure, fetch_monitor,
     list_provider_allowances_with_transport, monitor_for, monitor_requests, parse_monitor_response,
     refresh_provider_allowance_with_transport,
 };
@@ -302,6 +303,411 @@ impl AllowanceTransport for AccountFixtureTransport {
             .unwrap(),
         })
     }
+}
+
+struct ConditionFixtureTransport;
+
+#[async_trait]
+impl AllowanceTransport for ConditionFixtureTransport {
+    async fn execute(
+        &self,
+        _client: reqwest::Client,
+        _use_proxy: bool,
+        request: AllowanceHttpRequest,
+    ) -> Result<AllowanceHttpResponse, TransportFailure> {
+        let authorization = request
+            .headers
+            .get(reqwest::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .expect("authorization header");
+        let snapshot = match authorization {
+            "token token-exhausted" => serde_json::json!({
+                "entitlement": 100,
+                "remaining": 0,
+                "unlimited": false
+            }),
+            "token token-tight" => serde_json::json!({
+                "entitlement": 100,
+                "remaining": 19,
+                "unlimited": false
+            }),
+            "token token-normal" => serde_json::json!({
+                "entitlement": 100,
+                "remaining": 20,
+                "unlimited": false
+            }),
+            "token token-unknown" => serde_json::json!({ "unlimited": true }),
+            value => panic!("unexpected credential header: {value}"),
+        };
+        Ok(AllowanceHttpResponse {
+            status: StatusCode::OK,
+            headers: HeaderMap::new(),
+            body: serde_json::to_vec(&serde_json::json!({
+                "quota_reset_date": "2026-09-08T00:00:00Z",
+                "quota_snapshots": { "premium_interactions": snapshot }
+            }))
+            .expect("allowance fixture"),
+        })
+    }
+}
+
+#[tokio::test]
+async fn admin_service_derives_allowance_condition_from_the_live_snapshot() -> anyhow::Result<()> {
+    let data_dir = tempfile::tempdir()?;
+    let (gateway, _logs) = Gateway::new(GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await?;
+    let transport = Arc::new(ConditionFixtureTransport);
+
+    for (name, token, expected) in [
+        (
+            "Exhausted",
+            "token-exhausted",
+            Some(AllowanceCondition::Exhausted),
+        ),
+        ("Tight", "token-tight", Some(AllowanceCondition::Tight)),
+        (
+            "Normal boundary",
+            "token-normal",
+            Some(AllowanceCondition::Normal),
+        ),
+        ("Unknown", "token-unknown", None),
+    ] {
+        let provider = create_test_provider(&gateway, name, "github-copilot", token).await?;
+        let snapshot = refresh_provider_allowance_with_transport(
+            &gateway.admin(),
+            &provider.id,
+            transport.clone(),
+        )
+        .await?
+        .expect("eligible provider snapshot");
+        assert_eq!(snapshot.allowances[0].condition, expected);
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn fresh_monitor_reads_persist_account_samples_and_start_with_unknown_forecasts()
+-> anyhow::Result<()> {
+    let data_dir = tempfile::tempdir()?;
+    let (gateway, _logs) = Gateway::new(GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await?;
+    let provider =
+        create_test_provider(&gateway, "Sampled", "github-copilot", "token-normal").await?;
+
+    let snapshot = refresh_provider_allowance_with_transport(
+        &gateway.admin(),
+        &provider.id,
+        Arc::new(ConditionFixtureTransport),
+    )
+    .await?
+    .expect("eligible provider snapshot");
+
+    assert_eq!(
+        snapshot.allowances[0].forecast.status,
+        ExhaustionForecastStatus::Unknown
+    );
+    let samples = gateway
+        .allowance_samples
+        .list_for_item(&provider.id, "premium_interactions", i64::MIN)
+        .await?;
+    assert_eq!(samples.len(), 1);
+    assert_eq!(samples[0].remaining_value, Some(20.0));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn fresh_monitor_reads_prune_samples_older_than_fourteen_days() -> anyhow::Result<()> {
+    let data_dir = tempfile::tempdir()?;
+    let (gateway, _logs) = Gateway::new(GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await?;
+    let provider =
+        create_test_provider(&gateway, "Retained", "github-copilot", "token-normal").await?;
+    let transport = Arc::new(ConditionFixtureTransport);
+    let snapshot = refresh_provider_allowance_with_transport(
+        &gateway.admin(),
+        &provider.id,
+        transport.clone(),
+    )
+    .await?
+    .expect("initial allowance");
+    gateway
+        .allowance_samples
+        .record_snapshot_at(
+            &snapshot,
+            chrono::Utc::now().timestamp_millis() - 15 * 24 * 60 * 60 * 1000,
+        )
+        .await?;
+
+    refresh_provider_allowance_with_transport(&gateway.admin(), &provider.id, transport)
+        .await?
+        .expect("refresh allowance");
+    let samples = gateway
+        .allowance_samples
+        .list_for_item(&provider.id, "premium_interactions", i64::MIN)
+        .await?;
+    assert_eq!(samples.len(), 2);
+
+    Ok(())
+}
+
+struct ForecastFixtureTransport {
+    reset_at: i64,
+}
+
+#[async_trait]
+impl AllowanceTransport for ForecastFixtureTransport {
+    async fn execute(
+        &self,
+        _client: reqwest::Client,
+        _use_proxy: bool,
+        _request: AllowanceHttpRequest,
+    ) -> Result<AllowanceHttpResponse, TransportFailure> {
+        Ok(AllowanceHttpResponse {
+            status: StatusCode::OK,
+            headers: HeaderMap::new(),
+            body: serde_json::to_vec(&serde_json::json!({
+                "data": {
+                    "level": "Pro",
+                    "limits": [{
+                        "type": "CREDIT_LIMIT",
+                        "unit": 6,
+                        "number": 1,
+                        "percentage": 80,
+                        "currentValue": 800,
+                        "usage": 1000,
+                        "remaining": 200,
+                        "nextResetTime": self.reset_at
+                    }]
+                }
+            }))
+            .expect("forecast fixture"),
+        })
+    }
+}
+
+#[tokio::test]
+async fn current_window_samples_forecast_exhaustion_before_reset() -> anyhow::Result<()> {
+    let data_dir = tempfile::tempdir()?;
+    let (gateway, _logs) = Gateway::new(GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await?;
+    let now = chrono::Utc::now().timestamp_millis();
+    let reset_at = now + 48 * 60 * 60 * 1000;
+    let provider =
+        create_test_provider(&gateway, "Forecasted", "zai-coding-plan", "forecast-token").await?;
+    let transport = Arc::new(ForecastFixtureTransport { reset_at });
+
+    let current = refresh_provider_allowance_with_transport(
+        &gateway.admin(),
+        &provider.id,
+        transport.clone(),
+    )
+    .await?
+    .expect("current allowance");
+    let mut historical = current.clone();
+    historical.allowances[0].used_percent = Some(50.0);
+    gateway
+        .allowance_samples
+        .record_snapshot_at(&historical, now - 25 * 60 * 60 * 1000)
+        .await?;
+
+    let forecasted =
+        refresh_provider_allowance_with_transport(&gateway.admin(), &provider.id, transport)
+            .await?
+            .expect("forecasted allowance");
+    let forecast = &forecasted.allowances[0].forecast;
+    assert_eq!(forecast.status, ExhaustionForecastStatus::WillExhaust);
+    assert_eq!(forecast.projected_remaining_percent, Some(0.0));
+    assert!(
+        forecast
+            .exhausts_at
+            .is_some_and(|at| at > now && at < reset_at)
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn forecast_excludes_prior_windows_and_projects_remaining_at_reset() -> anyhow::Result<()> {
+    let data_dir = tempfile::tempdir()?;
+    let (gateway, _logs) = Gateway::new(GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await?;
+    let now = chrono::Utc::now().timestamp_millis();
+    let reset_at = now + 48 * 60 * 60 * 1000;
+    let provider =
+        create_test_provider(&gateway, "No risk", "zai-coding-plan", "forecast-token").await?;
+    let transport = Arc::new(ForecastFixtureTransport { reset_at });
+    let current = refresh_provider_allowance_with_transport(
+        &gateway.admin(),
+        &provider.id,
+        transport.clone(),
+    )
+    .await?
+    .expect("current allowance");
+
+    let mut within_window = current.clone();
+    within_window.allowances[0].used_percent = Some(70.0);
+    gateway
+        .allowance_samples
+        .record_snapshot_at(&within_window, now - 25 * 60 * 60 * 1000)
+        .await?;
+    let mut prior_window = current.clone();
+    prior_window.allowances[0].used_percent = Some(0.0);
+    gateway
+        .allowance_samples
+        .record_snapshot_at(&prior_window, now - 6 * 24 * 60 * 60 * 1000)
+        .await?;
+
+    let forecasted =
+        refresh_provider_allowance_with_transport(&gateway.admin(), &provider.id, transport)
+            .await?
+            .expect("forecasted allowance");
+    let forecast = &forecasted.allowances[0].forecast;
+    assert_eq!(forecast.status, ExhaustionForecastStatus::NoRisk);
+    assert!(
+        forecast
+            .projected_remaining_percent
+            .is_some_and(|value| value > 0.0 && value < 5.0)
+    );
+    assert!(forecast.exhausts_at.is_none());
+
+    Ok(())
+}
+
+struct BalanceFixtureTransport {
+    balance: f64,
+}
+
+#[async_trait]
+impl AllowanceTransport for BalanceFixtureTransport {
+    async fn execute(
+        &self,
+        _client: reqwest::Client,
+        _use_proxy: bool,
+        _request: AllowanceHttpRequest,
+    ) -> Result<AllowanceHttpResponse, TransportFailure> {
+        Ok(AllowanceHttpResponse {
+            status: StatusCode::OK,
+            headers: HeaderMap::new(),
+            body: serde_json::to_vec(&serde_json::json!({
+                "is_available": true,
+                "balance_infos": [{
+                    "currency": "USD",
+                    "total_balance": self.balance.to_string()
+                }]
+            }))
+            .expect("balance fixture"),
+        })
+    }
+}
+
+#[tokio::test]
+async fn balance_samples_without_reset_forecast_when_the_balance_reaches_zero() -> anyhow::Result<()>
+{
+    let data_dir = tempfile::tempdir()?;
+    let (gateway, _logs) = Gateway::new(GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await?;
+    let provider = create_test_provider(&gateway, "Balance", "deepseek", "balance-token").await?;
+    let transport = Arc::new(BalanceFixtureTransport { balance: 10.0 });
+    let now = chrono::Utc::now().timestamp_millis();
+    let current = refresh_provider_allowance_with_transport(
+        &gateway.admin(),
+        &provider.id,
+        transport.clone(),
+    )
+    .await?
+    .expect("current balance");
+    let mut historical = current.clone();
+    historical.allowances[0]
+        .remaining
+        .as_mut()
+        .expect("balance amount")
+        .value = 40.0;
+    gateway
+        .allowance_samples
+        .record_snapshot_at(&historical, now - 25 * 60 * 60 * 1000)
+        .await?;
+
+    let forecasted =
+        refresh_provider_allowance_with_transport(&gateway.admin(), &provider.id, transport)
+            .await?
+            .expect("forecasted balance");
+    let forecast = &forecasted.allowances[0].forecast;
+    assert_eq!(forecast.status, ExhaustionForecastStatus::WillExhaust);
+    assert!(forecast.exhausts_at.is_some_and(|at| at > now));
+    assert!(forecast.projected_remaining_percent.is_none());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn exhausted_balance_is_not_forecast_as_no_risk() -> anyhow::Result<()> {
+    let data_dir = tempfile::tempdir()?;
+    let (gateway, _logs) = Gateway::new(GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await?;
+    let transport = Arc::new(BalanceFixtureTransport { balance: 0.0 });
+    for (index, historical_balance) in [40.0, 0.0].into_iter().enumerate() {
+        let provider = create_test_provider(
+            &gateway,
+            &format!("Exhausted balance {index}"),
+            "deepseek",
+            "balance-token",
+        )
+        .await?;
+        let now = chrono::Utc::now().timestamp_millis();
+        let current = refresh_provider_allowance_with_transport(
+            &gateway.admin(),
+            &provider.id,
+            transport.clone(),
+        )
+        .await?
+        .expect("current balance");
+        let mut historical = current.clone();
+        historical.allowances[0]
+            .remaining
+            .as_mut()
+            .expect("balance amount")
+            .value = historical_balance;
+        gateway
+            .allowance_samples
+            .record_snapshot_at(&historical, now - 25 * 60 * 60 * 1000)
+            .await?;
+
+        let forecasted = refresh_provider_allowance_with_transport(
+            &gateway.admin(),
+            &provider.id,
+            transport.clone(),
+        )
+        .await?
+        .expect("forecasted balance");
+        let forecast = &forecasted.allowances[0].forecast;
+        assert_eq!(forecast.status, ExhaustionForecastStatus::WillExhaust);
+        let observed_at = chrono::Utc::now().timestamp_millis();
+        assert!(forecast.exhausts_at.is_some_and(|at| at <= observed_at));
+    }
+    Ok(())
 }
 
 #[tokio::test]

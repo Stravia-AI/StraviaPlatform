@@ -101,7 +101,7 @@ The SvelteKit WebUI manages:
 - Virtual models and their upstream backends
 - API keys with generated or custom editable secrets, model bindings, expiration, Principal Concurrency Limit, and execution permissions
 - Request logs, latency and token usage statistics
-- Provider-reported quotas, request allowances, and balances on the separate **Allowances** page, with three-minute caching, per-provider refresh, and last-success preservation when a refresh fails
+- Provider-reported quotas, request allowances, and balances in an **Allowance overview** matrix with filters, a reset timeline, and current-window exhaustion forecasts backed by 30-minute samples; live reads retain three-minute caching, per-provider refresh, and the last successful result when a refresh fails
 - Runtime settings
 - Ready-to-copy integration examples for SDKs and coding tools
 

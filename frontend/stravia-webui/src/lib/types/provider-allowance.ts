@@ -1,5 +1,7 @@
 export type ProviderAllowanceStatus = 'fresh' | 'stale' | 'error'
 export type AllowanceKind = 'quota_window' | 'request_allowance' | 'balance'
+export type AllowanceCondition = 'normal' | 'tight' | 'exhausted'
+export type ExhaustionForecastStatus = 'no_risk' | 'will_exhaust' | 'unknown'
 export type ProviderAllowanceErrorCategory =
   'authentication' | 'rate_limited' | 'timeout' | 'upstream_unavailable' | 'invalid_response'
 
@@ -19,6 +21,12 @@ export interface Allowance {
   used_percent?: number
   window_seconds?: number
   reset_at?: number
+  condition?: AllowanceCondition
+  forecast: {
+    status: ExhaustionForecastStatus
+    projected_remaining_percent?: number
+    exhausts_at?: number
+  }
 }
 
 export interface ModelAllowance {

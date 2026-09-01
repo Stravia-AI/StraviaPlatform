@@ -1,5 +1,30 @@
 use super::*;
 
+async fn run_provider_allowance_sampler<F, Fut>(
+    cancellation: proxy::context::CancellationToken,
+    period: Duration,
+    mut sample: F,
+) where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = anyhow::Result<()>>,
+{
+    let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            _ = cancellation.cancelled() => return,
+            _ = interval.tick() => {}
+        }
+        let result = tokio::select! {
+            _ = cancellation.cancelled() => return,
+            result = sample() => result,
+        };
+        if let Err(error) = result {
+            tracing::warn!(error = ?error, "provider allowance background sample failed");
+        }
+    }
+}
+
 impl Gateway {
     pub fn builder(config: GatewayConfig) -> GatewayBuilder {
         GatewayBuilder::new(config)
@@ -170,6 +195,26 @@ impl Gateway {
             artifact_store.clone(),
         )
         .with_history_markers(Arc::clone(&history_markers));
+        let allowance_samples = match storage_kind {
+            RuntimeStorageKind::Memory => admin::provider_allowance::AllowanceSampleStore::memory(),
+            RuntimeStorageKind::Sqlite => admin::provider_allowance::AllowanceSampleStore::sqlite(
+                sqlite_pool
+                    .as_ref()
+                    .expect("SQLite Gateway requires a SQLite pool")
+                    .clone(),
+            ),
+            RuntimeStorageKind::Postgres => {
+                admin::provider_allowance::AllowanceSampleStore::postgres(
+                    postgres_pool
+                        .as_ref()
+                        .expect("PostgreSQL Gateway requires a PostgreSQL pool")
+                        .clone(),
+                )
+            }
+        };
+        allowance_samples
+            .cleanup_at(chrono::Utc::now().timestamp_millis())
+            .await?;
         let mut gw = Self {
             config,
             storage,
@@ -178,6 +223,7 @@ impl Gateway {
             responses_websocket_client,
             provider_catalog,
             provider_allowance_state: admin::provider_allowance::ProviderAllowanceState::default(),
+            allowance_samples,
             proxy_client_cache: Arc::new(tokio::sync::RwLock::new(None)),
             responses_websockets: proxy::client::ResponsesWebSocketRegistry::default(),
             model_cache,
@@ -276,6 +322,30 @@ impl Gateway {
                         tracing::warn!("auth session cleanup skipped: {error}");
                     }
                 }
+            });
+        }
+
+        {
+            let gw_sample = gw.background_clone();
+            let cancellation = gw.lifecycle.cancellation.clone();
+            gw.lifecycle.spawn(async move {
+                run_provider_allowance_sampler(
+                    cancellation,
+                    admin::provider_allowance::SAMPLE_INTERVAL,
+                    move || {
+                        let admin = gw_sample.admin();
+                        let samples = gw_sample.allowance_samples.clone();
+                        async move {
+                            let refresh =
+                                admin.list_provider_allowances().await.map(|_snapshots| ());
+                            samples
+                                .cleanup_at(chrono::Utc::now().timestamp_millis())
+                                .await?;
+                            refresh
+                        }
+                    },
+                )
+                .await;
             });
         }
 
@@ -557,4 +627,42 @@ fn to_sql_backend_config(
         idle_timeout: config.idle_timeout,
         ..Default::default()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn provider_allowance_sampler_waits_thirty_minutes_and_stops_on_shutdown() {
+        let cancellation = proxy::context::CancellationToken::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let task_calls = Arc::clone(&calls);
+        let task_cancellation = cancellation.clone();
+        let task = tokio::spawn(run_provider_allowance_sampler(
+            task_cancellation,
+            admin::provider_allowance::SAMPLE_INTERVAL,
+            move || {
+                task_calls.fetch_add(1, Ordering::SeqCst);
+                async { Ok(()) }
+            },
+        ));
+        tokio::task::yield_now().await;
+
+        tokio::time::advance(admin::provider_allowance::SAMPLE_INTERVAL - Duration::from_millis(1))
+            .await;
+        tokio::task::yield_now().await;
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        tokio::time::advance(admin::provider_allowance::SAMPLE_INTERVAL).await;
+        tokio::task::yield_now().await;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        cancellation.cancel();
+        task.await.expect("sampler should stop after cancellation");
+    }
 }
