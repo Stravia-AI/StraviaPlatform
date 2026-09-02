@@ -464,6 +464,13 @@ async fn make_requests(
                         };
 
                     let response = match match engine {
+                        Engine::GoogleScholar
+                            if search::google_scholar::requires_browser_render(
+                                http_response.res.status(),
+                            ) =>
+                        {
+                            search::google_scholar::render_response(query).await
+                        }
                         Engine::Google
                             if search::google::requires_browser_render(&http_response.body) =>
                         {

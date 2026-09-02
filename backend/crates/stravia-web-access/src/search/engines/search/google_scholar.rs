@@ -1,18 +1,65 @@
+use std::time::Duration;
+
 use url::Url;
 
-use crate::search::{
-    engines::{EngineResponse, RequestResponse, SearchQuery},
-    parse::{parse_html_response_with_opts, ParseOpts},
+use crate::{
+    browser::RenderRequest,
+    search::{
+        engines::{EngineResponse, RequestResponse, SearchQuery},
+        parse::{parse_html_response_with_opts, ParseOpts},
+    },
 };
 
+const GOOGLE_SCHOLAR_HOME_URL: &str = "https://scholar.google.com/";
+const GOOGLE_SCHOLAR_RESULT_SELECTOR: &str = "div.gs_r";
+const BROWSER_RENDER_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub async fn request(search: &SearchQuery) -> RequestResponse {
-    let query: &str = search;
-    let url = Url::parse_with_params(
+    search.http.get(search_url(search).as_str()).into()
+}
+
+pub(crate) fn requires_browser_render(status: wreq::StatusCode) -> bool {
+    status.is_redirection()
+        || matches!(
+            status,
+            wreq::StatusCode::FORBIDDEN | wreq::StatusCode::TOO_MANY_REQUESTS
+        )
+}
+
+pub(crate) async fn render_response(search: &SearchQuery) -> eyre::Result<EngineResponse> {
+    let rendered = search
+        .browser
+        .render(RenderRequest {
+            url: search_url(search).as_str(),
+            preflight_url: Some(GOOGLE_SCHOLAR_HOME_URL),
+            ready_selector: GOOGLE_SCHOLAR_RESULT_SELECTOR,
+            timeout: BROWSER_RENDER_TIMEOUT,
+            request_guard: None,
+        })
+        .await
+        .map_err(|error| eyre::eyre!("Google Scholar browser renderer failed: {error}"))?;
+    if !rendered.ready {
+        eyre::bail!(
+            "Google Scholar search results did not render from {} within {} seconds",
+            rendered.url,
+            BROWSER_RENDER_TIMEOUT.as_secs()
+        );
+    }
+
+    parse_response(&rendered.html)
+}
+
+fn search_url(search: &SearchQuery) -> Url {
+    Url::parse_with_params(
         "https://scholar.google.com/scholar",
-        &[("hl", "en"), ("as_sdt", "0,5"), ("q", query), ("btnG", "")],
+        &[
+            ("hl", "en"),
+            ("as_sdt", "0,5"),
+            ("q", search.query.as_str()),
+            ("btnG", ""),
+        ],
     )
-    .unwrap();
-    search.http.get(url.as_str()).into()
+    .unwrap()
 }
 
 pub fn parse_response(body: &str) -> eyre::Result<EngineResponse> {
@@ -28,7 +75,15 @@ pub fn parse_response(body: &str) -> eyre::Result<EngineResponse> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_response;
+    use super::{parse_response, requires_browser_render};
+
+    #[test]
+    fn renders_google_scholar_after_http_blocking() {
+        assert!(requires_browser_render(wreq::StatusCode::FOUND));
+        assert!(requires_browser_render(wreq::StatusCode::FORBIDDEN));
+        assert!(requires_browser_render(wreq::StatusCode::TOO_MANY_REQUESTS));
+        assert!(!requires_browser_render(wreq::StatusCode::OK));
+    }
 
     #[test]
     fn parses_google_scholar_organic_results() {
