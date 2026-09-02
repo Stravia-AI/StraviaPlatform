@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use futures::stream;
+use rust_decimal::prelude::ToPrimitive;
 
 use super::continuation::{ContinuationLookup, ContinuationTarget};
 use super::provider::{
@@ -10,8 +11,8 @@ use super::provider::{
     ResponsesWebSocketBinding,
 };
 use super::support::{
-    ai_response_to_deltas, is_openai_generation_target, is_retryable, load_route_targets,
-    merge_provider_headers, resolve_vendor_adapter, runtime_binding_headers,
+    ai_response_to_deltas, is_openai_generation_target, load_route_targets, merge_provider_headers,
+    resolve_vendor_adapter, runtime_binding_headers,
 };
 use super::{
     CanonicalEvent, ModelTurn, ModelTurnAuthorization, ModelTurnError, ModelTurnExecutor,
@@ -24,7 +25,7 @@ use crate::logging::LogEntry;
 use crate::protocol::ProviderProtocols;
 use crate::protocol::ids::OPEN_RESPONSES_2026_04_24;
 use crate::protocol::ir::request::MediaRoutingMode;
-use crate::protocol::ir::{AiRequest, AiStreamDelta, Usage};
+use crate::protocol::ir::{AiError, AiRequest, AiStreamDelta, Usage};
 use crate::provider::VendorRegistry;
 use crate::proxy::client::ProxyClient;
 use crate::proxy::context::RequestContext;
@@ -32,8 +33,8 @@ use crate::proxy::observability::send_log;
 use crate::proxy::planner::{ProtocolMode, ProtocolPlan, negotiate};
 use crate::proxy::security::Security;
 use crate::router::{
-    AttemptFailureDisposition, RouteAttemptPolicy, SelectedTarget, TargetSelector,
-    selected_target_key,
+    AttemptFailureDisposition, RouteAttemptContext, RouteAttemptPolicy, RoutePolicyState,
+    RouteSchedulingSnapshot, SelectedTarget, conversation_identity, selected_target_key,
 };
 
 #[derive(Clone)]
@@ -135,7 +136,47 @@ async fn execute_inner(
     .map_err(model_turn_gateway_error)?;
 
     let targets = load_route_targets(gateway, &route).await;
-    let mut attempts = RouteAttemptPolicy::new(&route.balance, &targets);
+    let preferred_target =
+        gateway
+            .cache_affinity
+            .preferred_target(&input.principal, &route.id, &input.request);
+    let conversation = conversation_identity(&input.request);
+    let conversation_affinity_target = if matches!(
+        conversation,
+        Some(crate::router::ConversationIdentity::GenerationParent(_))
+    ) {
+        executor
+            .continuation
+            .preferred_target(&input.principal, &input.request)
+            .await
+    } else {
+        None
+    };
+    let scheduling_snapshot =
+        load_scheduling_snapshot(gateway, &targets)
+            .await
+            .map_err(|error| {
+                ModelTurnError::new(
+                    "route_scheduling_unavailable",
+                    format!("Route scheduling snapshot is unavailable: {error}"),
+                )
+            })?;
+    let attempt_context = RouteAttemptContext {
+        principal: input.principal.continuation_key(),
+        route_id: route.id.clone(),
+        conversation,
+        conversation_affinity_target,
+        cache_affinity_target: preferred_target,
+        estimated_uncached_input_tokens: estimate_uncached_input_tokens(&input.request),
+        now_ms: gateway.route_policy_state.now_ms(),
+    };
+    let mut attempts = RouteAttemptPolicy::new(
+        &route.balance,
+        &targets,
+        attempt_context.clone(),
+        &scheduling_snapshot,
+        gateway.route_policy_state.clone(),
+    );
     if let Some(plan) = input.request.meta.media_routing.as_ref() {
         attempts.retain(|target| plan.target_keys.contains(&selected_target_key(target)));
         if attempts.is_empty() {
@@ -145,11 +186,6 @@ async fn execute_inner(
             ));
         }
     }
-    let preferred_target =
-        gateway
-            .cache_affinity
-            .preferred_target(&input.principal, &route.id, &input.request);
-    attempts.prefer(preferred_target.as_deref(), &gateway.health_registry);
     if attempts.is_empty() {
         return Err(ModelTurnError::new(
             "model_unavailable",
@@ -159,63 +195,128 @@ async fn execute_inner(
 
     let mut last_error = None;
     while let Some(target) = attempts.next_healthy(&gateway.health_registry) {
-        let attempt_started = Instant::now();
-        match prepare_attempt(&executor, &route, &target, &input).await {
-            Ok(prepared) => match begin_attempt(
-                gateway,
-                &route,
-                &target,
-                &input,
-                prepared,
-                &access,
-                attempt_started,
-            )
-            .await
-            {
-                Ok(turn) => return Ok(turn),
-                Err(failure) => {
-                    if !failure.retryable {
-                        if failure.record_health {
-                            attempts.record_failure(
-                                &gateway.health_registry,
-                                &target,
-                                false,
-                                false,
-                            );
+        loop {
+            let attempt_started = Instant::now();
+            let result = match prepare_attempt(&executor, &route, &target, &input).await {
+                Ok(prepared) => {
+                    let attempt = begin_attempt(
+                        gateway,
+                        &route,
+                        &target,
+                        &input,
+                        prepared,
+                        &access,
+                        attempt_started,
+                        gateway.route_policy_state.clone(),
+                        attempt_context.clone(),
+                    );
+                    if target.first_token_timeout_ms == 0 {
+                        attempt.await
+                    } else {
+                        match tokio::time::timeout(
+                            Duration::from_millis(target.first_token_timeout_ms as u64),
+                            attempt,
+                        )
+                        .await
+                        {
+                            Ok(result) => result,
+                            Err(_) => Err(AttemptFailure::upstream(
+                                crate::protocol::ir::AiErrorKind::Timeout,
+                                "first_token_timeout",
+                                "Target did not produce a First Token before its timeout",
+                                None,
+                            )),
                         }
-                        return Err(failure.error);
                     }
-                    if attempts.record_failure(&gateway.health_registry, &target, true, false)
-                        == AttemptFailureDisposition::Stop
-                    {
-                        return Err(failure.error);
-                    }
-                    last_error = Some(failure.error);
                 }
-            },
-            Err(failure) => {
-                if !failure.retryable {
-                    if failure.record_health {
-                        attempts.record_failure(&gateway.health_registry, &target, false, false);
-                    }
-                    return Err(failure.error);
+                Err(failure) => Err(failure),
+            };
+            let failure = match result {
+                Ok(turn) => {
+                    attempts.accept_current();
+                    return Ok(turn);
                 }
-                if !failure.record_health {
-                    last_error = Some(failure.error);
-                    continue;
-                }
-                if attempts.record_failure(&gateway.health_registry, &target, true, false)
-                    == AttemptFailureDisposition::Stop
-                {
-                    return Err(failure.error);
-                }
+                Err(failure) => failure,
+            };
+            let Some(kind) = failure.kind.clone() else {
+                return Err(failure.error);
+            };
+            if !failure.record_health {
+                attempts.skip_current();
                 last_error = Some(failure.error);
+                break;
+            }
+            match attempts.record_failure(
+                &gateway.health_registry,
+                &target,
+                kind,
+                false,
+                failure.retry_after,
+                gateway.route_policy_state.now_ms(),
+                rand::random(),
+            ) {
+                AttemptFailureDisposition::RetrySame { delay } => {
+                    tokio::time::sleep(delay).await;
+                }
+                AttemptFailureDisposition::TryNextTarget => {
+                    last_error = Some(failure.error);
+                    break;
+                }
+                AttemptFailureDisposition::Stop => return Err(failure.error),
             }
         }
     }
 
     Err(last_error
         .unwrap_or_else(|| ModelTurnError::new("provider_unavailable", "all Model Targets failed")))
+}
+
+async fn load_scheduling_snapshot(
+    gateway: &Gateway,
+    targets: &[crate::db::models::Target],
+) -> anyhow::Result<RouteSchedulingSnapshot> {
+    let mut snapshot = RouteSchedulingSnapshot {
+        targets: gateway.storage.logs().route_scheduling_snapshot().await?,
+    };
+    for target in targets {
+        let key = format!("{}:{}", target.provider_id, target.model);
+        let index = snapshot
+            .targets
+            .iter()
+            .position(|item| item.target_key == key)
+            .unwrap_or_else(|| {
+                snapshot
+                    .targets
+                    .push(crate::router::TargetSchedulingSnapshot {
+                        target_key: key.clone(),
+                        ..Default::default()
+                    });
+                snapshot.targets.len() - 1
+            });
+        let Some(provider_model) = gateway
+            .storage
+            .provider_models()
+            .get(&target.provider_id, &target.model)
+            .await?
+        else {
+            continue;
+        };
+        let Some(cost) = provider_model.metadata.cost else {
+            continue;
+        };
+        let target_snapshot = &mut snapshot.targets[index];
+        target_snapshot.cost_input = cost.prices.input.and_then(|value| value.to_f64());
+        target_snapshot.cost_output = cost.prices.output.and_then(|value| value.to_f64());
+        target_snapshot.cost_cache_read = cost.prices.cache_read.and_then(|value| value.to_f64());
+        target_snapshot.cost_cache_write = cost.prices.cache_write.and_then(|value| value.to_f64());
+    }
+    Ok(snapshot)
+}
+
+fn estimate_uncached_input_tokens(request: &AiRequest) -> u64 {
+    serde_json::to_vec(&request.items)
+        .map(|bytes| bytes.len().div_ceil(4) as u64)
+        .unwrap_or_default()
 }
 
 struct PreparedAttempt {
@@ -230,32 +331,50 @@ struct PreparedAttempt {
 
 struct AttemptFailure {
     error: ModelTurnError,
-    retryable: bool,
+    kind: Option<crate::protocol::ir::AiErrorKind>,
     record_health: bool,
+    retry_after: Option<Duration>,
 }
 
 impl AttemptFailure {
     fn retryable(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             error: ModelTurnError::new(code, message),
-            retryable: true,
+            kind: Some(crate::protocol::ir::AiErrorKind::ServiceUnavailable),
             record_health: true,
+            retry_after: None,
+        }
+    }
+
+    fn upstream(
+        kind: crate::protocol::ir::AiErrorKind,
+        code: impl Into<String>,
+        message: impl Into<String>,
+        retry_after: Option<Duration>,
+    ) -> Self {
+        Self {
+            error: ModelTurnError::new(code, message),
+            kind: Some(kind),
+            record_health: true,
+            retry_after,
         }
     }
 
     fn terminal(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             error: ModelTurnError::new(code, message),
-            retryable: false,
+            kind: None,
             record_health: false,
+            retry_after: None,
         }
     }
 
     fn ineligible(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             error: ModelTurnError::new(code, message),
-            retryable: true,
+            kind: Some(crate::protocol::ir::AiErrorKind::ModelNotAvailable),
             record_health: false,
+            retry_after: None,
         }
     }
 }
@@ -710,6 +829,8 @@ async fn begin_attempt(
     mut prepared: PreparedAttempt,
     access: &crate::proxy::security::ModelAccessGrant,
     attempt_started: Instant,
+    route_policy_state: RoutePolicyState,
+    attempt_context: RouteAttemptContext,
 ) -> Result<ModelTurn, AttemptFailure> {
     let mut target_identity = TargetIdentity {
         actual_model: prepared.actual_model.clone(),
@@ -732,24 +853,30 @@ async fn begin_attempt(
                 if let Some(decode) =
                     error.downcast_ref::<crate::proxy::client::UpstreamResponseDecodeError>()
                 {
-                    AttemptFailure {
-                        error: ModelTurnError::new("upstream_error", error.to_string()),
-                        retryable: is_retryable(decode.status),
-                        record_health: true,
-                    }
+                    AttemptFailure::upstream(
+                        AiError::kind_from_status(decode.status, None),
+                        "upstream_error",
+                        error.to_string(),
+                        retry_after(&decode.headers),
+                    )
                 } else {
                     AttemptFailure::retryable("upstream_error", error.to_string())
                 }
             })?;
         if call.status >= 400 {
-            return Err(AttemptFailure {
-                error: ModelTurnError::new(
-                    "upstream_error",
-                    format!("upstream returned HTTP {}", call.status),
-                ),
-                retryable: is_retryable(call.status),
-                record_health: true,
-            });
+            let kind = call
+                .canonical
+                .as_ref()
+                .ok()
+                .and_then(|response| response.error.as_ref())
+                .map(|error| error.kind.clone())
+                .unwrap_or_else(|| AiError::kind_from_status(call.status, Some(&call.raw)));
+            return Err(AttemptFailure::upstream(
+                kind,
+                "upstream_error",
+                format!("upstream returned HTTP {}", call.status),
+                retry_after(&call.headers),
+            ));
         }
         *prepared
             .trace
@@ -769,12 +896,7 @@ async fn begin_attempt(
             &prepared.route.target_id,
             &response.usage,
         );
-        record_success(
-            gateway,
-            &route.balance,
-            target,
-            attempt_started.elapsed().as_secs_f64() * 1000.0,
-        );
+        record_success(gateway, target, &route_policy_state, &attempt_context);
         emit_internal_model_log(
             gateway,
             route,
@@ -818,17 +940,17 @@ async fn begin_attempt(
                 .lock()
                 .expect("response headers") =
                 crate::proxy::observability::headers_to_json(&headers);
+            let kind = AiError::kind_from_status(status, body.as_ref().ok());
+            let retry_after = retry_after(&headers);
             *prepared.trace.response_body.lock().expect("response body") = body
                 .map(|body| serde_json::to_vec(&body).unwrap_or_default())
                 .unwrap_or_default();
-            return Err(AttemptFailure {
-                error: ModelTurnError::new(
-                    "upstream_error",
-                    format!("upstream returned HTTP {status}"),
-                ),
-                retryable: is_retryable(status),
-                record_health: true,
-            });
+            return Err(AttemptFailure::upstream(
+                kind,
+                "upstream_error",
+                format!("upstream returned HTTP {status}"),
+                retry_after,
+            ));
         }
         ProviderStreamResponse::Uncertain { message } => {
             return Err(AttemptFailure::terminal(
@@ -847,22 +969,40 @@ async fn begin_attempt(
         .expect("response headers") =
         crate::proxy::observability::headers_to_json(&provider_stream.headers);
 
-    let first_deltas = loop {
+    let mut first_deltas = Vec::new();
+    loop {
         match provider_stream.next().await {
             Ok(Some(chunk)) => {
                 prepared
                     .trace
                     .record_stream_chunk(stream_started, &chunk.raw);
-                if !chunk.deltas.is_empty() {
-                    break chunk.deltas;
+                let ready = chunk
+                    .deltas
+                    .iter()
+                    .any(|delta| is_first_output(delta) || is_terminal_delta(delta));
+                first_deltas.extend(chunk.deltas);
+                if ready {
+                    break;
                 }
             }
             Ok(None) => {
-                break provider_stream.finish().await.map_err(stream_failure)?;
+                first_deltas.extend(provider_stream.finish().await.map_err(stream_failure)?);
+                break;
             }
             Err(error) => return Err(stream_failure(error)),
         }
-    };
+    }
+    if let Some(error) = first_deltas.iter().find_map(|delta| match delta {
+        AiStreamDelta::StreamError { error } => Some(error),
+        _ => None,
+    }) {
+        return Err(AttemptFailure::upstream(
+            error.kind.clone(),
+            "upstream_stream_error",
+            "upstream stream error",
+            None,
+        ));
+    }
 
     let (tx, rx) = tokio::sync::mpsc::channel(32);
     let internal_log =
@@ -870,9 +1010,12 @@ async fn begin_attempt(
     let principal = input.principal.clone();
     let request = input.request.clone();
     let route_id = route.id.clone();
-    let route_balance = route.balance.clone();
+    let route_policy_state = route_policy_state.clone();
+    let attempt_context = attempt_context.clone();
     let target_key = prepared.route.target_id.clone();
     let health_target_key = selected_target_key(&target);
+    let reservation =
+        route_policy_state.reservation(attempt_context.clone(), health_target_key.clone());
     let gateway = gateway.clone();
     let target = target.clone();
     let cancellation = input.cancellation.clone();
@@ -966,12 +1109,8 @@ async fn begin_attempt(
             &target_key,
             &response.usage,
         );
-        record_success(
-            &gateway,
-            &route_balance,
-            &target,
-            attempt_started.elapsed().as_secs_f64() * 1000.0,
-        );
+        record_success(&gateway, &target, &route_policy_state, &attempt_context);
+        reservation.complete();
         let _ = tx
             .send(Ok(CanonicalEvent::Completed(Box::new(response))))
             .await;
@@ -1000,6 +1139,33 @@ async fn send_deltas(
     Ok(())
 }
 
+fn is_first_output(delta: &AiStreamDelta) -> bool {
+    match delta {
+        AiStreamDelta::TextDelta(text)
+        | AiStreamDelta::RefusalDelta(text)
+        | AiStreamDelta::ThinkingDelta(text) => !text.is_empty(),
+        AiStreamDelta::TextDeltaWithMetadata { text, .. }
+        | AiStreamDelta::RefusalDeltaWithIndex { text, .. }
+        | AiStreamDelta::ThinkingDeltaWithMetadata { text, .. }
+        | AiStreamDelta::ReasoningSummaryDelta { text, .. } => !text.is_empty(),
+        AiStreamDelta::ToolCallStart { .. }
+        | AiStreamDelta::ToolCallDelta { .. }
+        | AiStreamDelta::ToolCallComplete { .. }
+        | AiStreamDelta::ItemDone { .. } => true,
+        _ => false,
+    }
+}
+
+fn is_terminal_delta(delta: &AiStreamDelta) -> bool {
+    matches!(
+        delta,
+        AiStreamDelta::StreamError { .. }
+            | AiStreamDelta::UnexpectedEof
+            | AiStreamDelta::Done { .. }
+            | AiStreamDelta::ResponseTerminal { .. }
+    )
+}
+
 fn handle_terminal_stream_error(
     health: &crate::router::health::HealthRegistry,
     target_key: &str,
@@ -1011,10 +1177,21 @@ fn handle_terminal_stream_error(
     }) else {
         return false;
     };
-    let retryable = error
-        .status_code
-        .map_or_else(|| error.is_retryable(), is_retryable);
-    if retryable {
+    let degrades_health = error.status_code.map_or_else(
+        || error.is_retryable(),
+        |status| {
+            matches!(
+                AiError::kind_from_status(status, None),
+                crate::protocol::ir::AiErrorKind::RateLimitError
+                    | crate::protocol::ir::AiErrorKind::QuotaExceeded
+                    | crate::protocol::ir::AiErrorKind::ServerError
+                    | crate::protocol::ir::AiErrorKind::ServiceUnavailable
+                    | crate::protocol::ir::AiErrorKind::Timeout
+                    | crate::protocol::ir::AiErrorKind::ModelNotAvailable
+            )
+        },
+    );
+    if degrades_health {
         health.record_failure(target_key);
     }
     true
@@ -1035,6 +1212,17 @@ fn stream_failure(error: ProviderStreamError) -> AttemptFailure {
             AttemptFailure::terminal(error.stable_code(), error.to_string())
         }
     }
+}
+
+fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let value = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
+    if let Ok(seconds) = value.trim().parse::<u64>() {
+        return Some(Duration::from_secs(seconds));
+    }
+    let deadline = chrono::DateTime::parse_from_rfc2822(value).ok()?;
+    (deadline.with_timezone(&chrono::Utc) - chrono::Utc::now())
+        .to_std()
+        .ok()
 }
 
 fn target_namespace(
@@ -1289,9 +1477,13 @@ fn normalize_provider_effective_request(
     request.ext = effective.ext;
 }
 
-fn record_success(gateway: &Gateway, balance: &str, target: &SelectedTarget, latency_ms: f64) {
+fn record_success(
+    gateway: &Gateway,
+    target: &SelectedTarget,
+    route_policy_state: &RoutePolicyState,
+    attempt_context: &RouteAttemptContext,
+) {
     let target_key = selected_target_key(target);
     gateway.health_registry.record_success(&target_key);
-    TargetSelector::record_selected(balance, &target_key);
-    TargetSelector::record_latency(balance, &target_key, latency_ms);
+    route_policy_state.record_success(attempt_context, &target_key);
 }

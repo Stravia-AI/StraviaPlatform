@@ -61,7 +61,7 @@ Route 记录。`model_id` 保存客户端请求使用的 Route ID，`display_nam
 | `id` | TEXT PK | — | 主键，UUID |
 | `model_id` | TEXT NOT NULL | — | Route ID；客户端模型 ID，精确且大小写敏感匹配 |
 | `display_name` | TEXT NULL | `NULL` | 可选展示名称；空值由应用层回退为 `model_id` |
-| `balance` | TEXT | `'weighted'` | Target 选择策略：`weighted`、`priority`、`cooldown`、`latency` |
+| `balance` | TEXT | `'traffic_equalization'` | Route Scheduling Strategy：`traffic_equalization` 或 `latency_preference`；管理接口对旧值做写入归一化，读取只返回新值 |
 | `is_enabled` | INTEGER | `1` | 是否启用 |
 | `priority` | INTEGER | `0` | 优先级（预留） |
 | `created_at` | TEXT | `datetime('now')` | 创建时间 |
@@ -80,9 +80,11 @@ Target 列表；一条 Route 对应一个或多个 Provider + Provider Model 组
 | `model_id` | TEXT NOT NULL | — | 所属 Route 的存储主键（FK → models.id, ON DELETE CASCADE） |
 | `provider_id` | TEXT NOT NULL | — | 供应商 ID（FK → providers.id） |
 | `model` | TEXT NOT NULL | — | 上游模型名（发送给 provider 的模型标识） |
-| `weight` | INTEGER | `100` | 权重（`weighted` 策略下生效） |
-| `priority` | INTEGER | `1` | 优先级，数值越小越优先（`priority` 策略下生效） |
+| `priority` | INTEGER | `0` | Target Priority，范围 0–100000，数值越大越优先；相同值组成一个调度组 |
 | `thinking_level_map` | JSON | 七行 Hidden Mapping | Target 的七行 Thinking Level Map，包含 Control 与 Generated/Overridden 来源；SQLite 使用 JSON 文本，PostgreSQL 使用 JSONB |
+| `first_token_timeout_ms` | BIGINT / INTEGER | `60000` | First Token Timeout（毫秒）；`0` 表示关闭 |
+| `target_retry_budget` | INTEGER | `5` | 同一 Target 的额外重试次数 |
+| `target_cooldown_ms` | BIGINT / INTEGER | `120000` | 放弃 Target 后阻止新请求选中它的进程内冷却时长（毫秒） |
 | `created_at` | TEXT | `datetime('now')` | 创建时间 |
 
 **索引**：`idx_model_backends_model_id` on `model_id`
@@ -488,6 +490,8 @@ History Marker migration 22 新增 Principal-scoped `history_markers` 表及 Pla
 Route Target Aggregate migration 27 先把仅存在于旧 `models.target_provider` / `models.target_model` 的主 Target 补入 `model_backends`，再删除这两个重复列，并为大小写敏感的 Route ID `models.name` 建立唯一索引。升级后 Route 与全部 Targets 由同一聚合写入事务维护。
 
 Web Access Adapter migration 28 是不兼容旧二进制的 clean cutover：把 kind 约束收紧为 `local|exa|zhipu`，删除 Brave/Tavily 行，加入 `use_proxy` 与 Local Search Engine 配置，并写入唯一 Local Provider。Search/Fetch 列表保留既有 Exa/智谱顺序；移除旧 kind 后为空的列表改为仅 Local。升级前必须备份数据库；回滚必须恢复 migration 28 之前的数据库，不能只回退应用文件。
+
+Layer Route Target Selection migration 31 删除 `model_backends.weight`，把既有 Target Priority 全部重置为 `0`，增加 First Token Timeout、Target Retry Budget 与 Target Cooldown，并把旧 `weighted|priority|cooldown|latency` Strategy 归一化为 `traffic_equalization|latency_preference`。
 
 Allowance Samples migration 29 新增 `provider_allowance_samples`。样本随 Provider 删除而级联删除；应用按 14 天 TTL 清理，预报只读取当前重置窗口内且语义一致的样本。
 

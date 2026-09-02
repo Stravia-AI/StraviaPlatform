@@ -119,7 +119,9 @@ impl GenerationChainWrite {
                 }),
         );
         if let Some(target) = target {
-            effective_state = effective_state.with_provider_model(&target.actual_model);
+            effective_state = effective_state
+                .with_provider_model(&target.actual_model)
+                .with_selected_target_key(&target.selected_target_key);
         }
         self.staged = Some(StagedGeneration {
             response: response.clone(),
@@ -243,6 +245,7 @@ struct StagedTarget {
     namespace: String,
     protocol: ProtocolId,
     actual_model: String,
+    selected_target_key: String,
 }
 
 fn staged_target(response: &AiResponse) -> Option<StagedTarget> {
@@ -256,5 +259,10 @@ fn staged_target(response: &AiResponse) -> Option<StagedTarget> {
         namespace: target.get("namespace")?.as_str()?.to_owned(),
         protocol: crate::protocol::registry::ProtocolRegistry::global().resolve_alias(protocol)?,
         actual_model: target.get("actual_model")?.as_str()?.to_owned(),
+        selected_target_key: target
+            .get("selected_target_key")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
     })
 }

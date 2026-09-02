@@ -90,6 +90,7 @@ pub(super) async fn acquire_followup_model_turn(
                     "hook",
                     ingress,
                     &request.model,
+                    "",
                 );
                 let mut staged_response = response.clone();
                 apply_hidden_rounds(request_context, &mut staged_response);

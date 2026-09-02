@@ -15,9 +15,9 @@ impl SqliteRouteStore {
             ""
         };
         let sql = format!(
-            "SELECT id, model_id, display_name, COALESCE(balance, 'weighted') AS balance, \
-             COALESCE((SELECT provider_id FROM model_backends WHERE model_id = models.id ORDER BY priority ASC, created_at ASC LIMIT 1), '') AS target_provider, \
-             COALESCE((SELECT model FROM model_backends WHERE model_id = models.id ORDER BY priority ASC, created_at ASC LIMIT 1), '') AS target_model, \
+            "SELECT id, model_id, display_name, COALESCE(balance, 'traffic_equalization') AS balance, \
+             COALESCE((SELECT provider_id FROM model_backends WHERE model_id = models.id ORDER BY priority DESC, created_at ASC LIMIT 1), '') AS target_provider, \
+             COALESCE((SELECT model FROM model_backends WHERE model_id = models.id ORDER BY priority DESC, created_at ASC LIMIT 1), '') AS target_model, \
              COALESCE(is_enabled, 1) AS is_enabled, created_at \
              FROM models{where_clause} ORDER BY created_at DESC"
         );
@@ -33,7 +33,7 @@ impl SqliteRouteStore {
 
     async fn load_targets(&self, route_storage_id: &str) -> anyhow::Result<Vec<Target>> {
         Ok(sqlx::query_as::<_, Target>(
-            "SELECT id, model_id, provider_id, model, weight, priority, created_at, thinking_level_map FROM model_backends WHERE model_id = ? ORDER BY priority ASC, created_at ASC",
+            "SELECT id, model_id, provider_id, model, priority, first_token_timeout_ms, target_retry_budget, target_cooldown_ms, created_at, thinking_level_map FROM model_backends WHERE model_id = ? ORDER BY priority DESC, created_at ASC",
         )
         .bind(route_storage_id)
         .fetch_all(&self.pool)
@@ -42,9 +42,9 @@ impl SqliteRouteStore {
 
     async fn load_route(&self, route_id: &str) -> anyhow::Result<Option<Route>> {
         let route = sqlx::query_as::<_, Route>(
-            "SELECT id, model_id, display_name, COALESCE(balance, 'weighted') AS balance, \
-             COALESCE((SELECT provider_id FROM model_backends WHERE model_id = models.id ORDER BY priority ASC, created_at ASC LIMIT 1), '') AS target_provider, \
-             COALESCE((SELECT model FROM model_backends WHERE model_id = models.id ORDER BY priority ASC, created_at ASC LIMIT 1), '') AS target_model, \
+            "SELECT id, model_id, display_name, COALESCE(balance, 'traffic_equalization') AS balance, \
+             COALESCE((SELECT provider_id FROM model_backends WHERE model_id = models.id ORDER BY priority DESC, created_at ASC LIMIT 1), '') AS target_provider, \
+             COALESCE((SELECT model FROM model_backends WHERE model_id = models.id ORDER BY priority DESC, created_at ASC LIMIT 1), '') AS target_model, \
              COALESCE(is_enabled, 1) AS is_enabled, created_at \
              FROM models WHERE model_id = ?",
         )
@@ -123,7 +123,7 @@ impl RouteStore for SqliteRouteStore {
         }
 
         let existing = sqlx::query_as::<_, Target>(
-            "SELECT id, model_id, provider_id, model, weight, priority, created_at, thinking_level_map FROM model_backends WHERE model_id = ?",
+            "SELECT id, model_id, provider_id, model, priority, first_token_timeout_ms, target_retry_budget, target_cooldown_ms, created_at, thinking_level_map FROM model_backends WHERE model_id = ?",
         )
         .bind(&route_storage_id)
         .fetch_all(&mut *tx)
@@ -142,14 +142,28 @@ impl RouteStore for SqliteRouteStore {
                 .map(|row| row.id.clone())
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
             sqlx::query(
-                "INSERT INTO model_backends (id, model_id, provider_id, model, weight, priority, thinking_level_map) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO model_backends (id, model_id, provider_id, model, priority, first_token_timeout_ms, target_retry_budget, target_cooldown_ms, thinking_level_map) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(id)
             .bind(&route_storage_id)
             .bind(target.provider_id.trim())
             .bind(target.model.trim())
-            .bind(target.weight.unwrap_or(100).max(0))
-            .bind(target.priority.unwrap_or(1).max(1))
+            .bind(target.priority.unwrap_or(DEFAULT_TARGET_PRIORITY))
+            .bind(
+                target
+                    .first_token_timeout_ms
+                    .unwrap_or(DEFAULT_FIRST_TOKEN_TIMEOUT_MS),
+            )
+            .bind(
+                target
+                    .target_retry_budget
+                    .unwrap_or(DEFAULT_TARGET_RETRY_BUDGET),
+            )
+            .bind(
+                target
+                    .target_cooldown_ms
+                    .unwrap_or(DEFAULT_TARGET_COOLDOWN_MS),
+            )
             .bind(sqlx::types::Json(&target.thinking_level_map))
             .execute(&mut *tx)
             .await?;
@@ -183,8 +197,10 @@ mod tests {
         crate::db::models::CreateTarget {
             provider_id: provider_id.into(),
             model: model.into(),
-            weight: Some(100),
-            priority: Some(1),
+            priority: Some(0),
+            first_token_timeout_ms: None,
+            target_retry_budget: None,
+            target_cooldown_ms: None,
             thinking_level_map: Vec::new(),
         }
     }
@@ -217,7 +233,7 @@ mod tests {
                 id: None,
                 model_id: "atomic-route".into(),
                 display_name: None,
-                selection_strategy: "weighted".into(),
+                selection_strategy: "traffic_equalization".into(),
                 is_enabled: true,
                 targets: vec![target("provider-1", "working-model")],
             })
@@ -229,7 +245,7 @@ mod tests {
                 id: Some(route.id),
                 model_id: "atomic-route".into(),
                 display_name: None,
-                selection_strategy: "priority".into(),
+                selection_strategy: "latency_preference".into(),
                 is_enabled: true,
                 targets: vec![target("missing-provider", "broken-model")],
             })
@@ -241,7 +257,7 @@ mod tests {
             .await
             .expect("get")
             .expect("Route");
-        assert_eq!(persisted.balance, "weighted");
+        assert_eq!(persisted.balance, "traffic_equalization");
         assert_eq!(persisted.targets.len(), 1);
         assert_eq!(persisted.targets[0].provider_id, "provider-1");
         assert_eq!(persisted.targets[0].model, "working-model");
@@ -279,7 +295,7 @@ mod tests {
                     id: None,
                     model_id: "concurrent-route".into(),
                     display_name: None,
-                    selection_strategy: "weighted".into(),
+                    selection_strategy: "traffic_equalization".into(),
                     is_enabled: true,
                     targets: vec![target("provider-1", "provider-model")],
                 })

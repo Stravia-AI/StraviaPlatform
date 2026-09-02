@@ -591,6 +591,7 @@ async fn dispatch_round(
                                 "hook",
                                 ingress,
                                 &request.model,
+                                "",
                             );
                             write.stage(&mut response, None).then_some(write)
                         });

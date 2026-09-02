@@ -3,7 +3,6 @@ import type {
   ModelCapabilities,
   ProviderModelSummary,
   Route,
-  RouteSelectionStrategy,
   ThinkingLevelMapping,
   UpsertTarget,
 } from '$lib/types'
@@ -13,7 +12,10 @@ export interface RouteTargetForm {
   id?: string
   providerId: string
   model: string
-  weight: number
+  priority: number
+  firstTokenTimeoutMs: number
+  targetRetryBudget: number
+  targetCooldownMs: number
   inventory: ProviderModelSummary[]
   capabilities?: ModelCapabilities
   custom: boolean
@@ -23,7 +25,12 @@ export interface RouteTargetForm {
   thinkingLevelMap: ThinkingLevelMapping[]
 }
 
-export type RouteTargetsValidationError = 'invalid-weight' | 'incomplete-target'
+export type RouteTargetsValidationError =
+  | 'invalid-priority'
+  | 'invalid-first-token-timeout'
+  | 'invalid-retry-budget'
+  | 'invalid-cooldown'
+  | 'incomplete-target'
 
 function nextTargetKey(targets: RouteTargetForm[]): string {
   const next = targets.reduce((maximum, target) => {
@@ -41,7 +48,10 @@ export function createRouteTarget(
     key: nextTargetKey(targets),
     providerId: '',
     model: '',
-    weight: 100,
+    priority: 0,
+    firstTokenTimeoutMs: 60_000,
+    targetRetryBudget: 5,
+    targetCooldownMs: 120_000,
     inventory: [],
     custom: false,
     persisted: false,
@@ -59,12 +69,15 @@ export function createRouteTargetForms(
 ): RouteTargetForm[] {
   const targets: RouteTargetForm[] = []
   if (route?.targets.length) {
-    for (const target of route.targets.slice().sort((left, right) => left.priority - right.priority)) {
+    for (const target of route.targets) {
       targets.push(createRouteTarget(targets, {
         id: target.id,
         providerId: target.provider_id,
         model: target.model,
-        weight: target.weight,
+        priority: target.priority,
+        firstTokenTimeoutMs: target.first_token_timeout_ms,
+        targetRetryBudget: target.target_retry_budget,
+        targetCooldownMs: target.target_cooldown_ms,
         persisted: true,
         thinkingLevelMap: target.thinking_level_map?.map((row) => ({
           ...row,
@@ -86,34 +99,33 @@ export function removeRouteTarget(targets: RouteTargetForm[], index: number): vo
   targets.splice(index, 1)
 }
 
-export function moveRouteTarget(targets: RouteTargetForm[], index: number, offset: -1 | 1): void {
-  const destination = index + offset
-  if (destination < 0 || destination >= targets.length) return
-  const [target] = targets.splice(index, 1)
-  targets.splice(destination, 0, target)
-}
-
-export function validRouteTargetWeight(value: number): boolean {
+function validInteger(value: number, maximum?: number): boolean {
   const number = Number(value)
-  return Number.isInteger(number) && number > 0
+  return Number.isInteger(number) && number >= 0 && (maximum === undefined || number <= maximum)
 }
 
 export function buildRouteTargets(
-  strategy: RouteSelectionStrategy,
   targets: RouteTargetForm[],
 ): { targets: Array<CreateTarget & UpsertTarget>; error?: RouteTargetsValidationError } {
-  if (strategy === 'weighted' && targets.some((target) => !validRouteTargetWeight(target.weight))) {
-    return { targets: [], error: 'invalid-weight' }
-  }
+  if (targets.some((target) => !validInteger(target.priority, 100_000)))
+    return { targets: [], error: 'invalid-priority' }
+  if (targets.some((target) => !validInteger(target.firstTokenTimeoutMs)))
+    return { targets: [], error: 'invalid-first-token-timeout' }
+  if (targets.some((target) => !validInteger(target.targetRetryBudget)))
+    return { targets: [], error: 'invalid-retry-budget' }
+  if (targets.some((target) => !validInteger(target.targetCooldownMs)))
+    return { targets: [], error: 'invalid-cooldown' }
 
   const cleanTargets = targets
     .filter((target) => target.providerId && target.model.trim())
-    .map((target, index): CreateTarget & UpsertTarget => ({
+    .map((target): CreateTarget & UpsertTarget => ({
       id: target.id,
       provider_id: target.providerId,
       model: target.model.trim(),
-      weight: strategy === 'weighted' ? Number(target.weight) : 100,
-      priority: index + 1,
+      priority: Number(target.priority),
+      first_token_timeout_ms: Number(target.firstTokenTimeoutMs),
+      target_retry_budget: Number(target.targetRetryBudget),
+      target_cooldown_ms: Number(target.targetCooldownMs),
       thinking_level_map: target.persisted
         ? target.thinkingLevelMap
         : target.thinkingLevelMap.filter((row) => row.source === 'overridden'),

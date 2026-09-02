@@ -146,14 +146,16 @@ mod tests {
         let create_model = |model_id: &str, display_name: Option<&str>| CreateRoute {
             model_id: model_id.into(),
             display_name: display_name.map(ToOwned::to_owned),
-            balance: Some("priority".into()),
+            balance: Some("traffic_equalization".into()),
             target_provider: String::new(),
             target_model: String::new(),
             targets: vec![CreateTarget {
                 provider_id: provider.id.clone(),
                 model: "provider-model".into(),
-                weight: Some(100),
                 priority: Some(1),
+                first_token_timeout_ms: None,
+                target_retry_budget: None,
+                target_cooldown_ms: None,
                 thinking_level_map: Vec::new(),
             }],
         };
@@ -281,8 +283,10 @@ mod tests {
                     id: Some(target.id.clone()),
                     provider_id: target.provider_id.clone(),
                     model: target.model.clone(),
-                    weight: Some(target.weight),
                     priority: Some(target.priority),
+                    first_token_timeout_ms: Some(target.first_token_timeout_ms),
+                    target_retry_budget: Some(target.target_retry_budget),
+                    target_cooldown_ms: Some(target.target_cooldown_ms),
                     thinking_level_map: map,
                 }
             })
@@ -355,7 +359,7 @@ mod tests {
                 id: "model-id".into(),
                 model_id: "model".into(),
                 display_name: None,
-                balance: "priority".into(),
+                balance: "traffic_equalization".into(),
                 target_provider: String::new(),
                 target_model: String::new(),
                 is_enabled: true,

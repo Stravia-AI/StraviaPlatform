@@ -206,6 +206,18 @@ struct GenerationChainContinuationLookup {
 
 #[async_trait]
 impl crate::model_turn::ContinuationLookup for GenerationChainContinuationLookup {
+    async fn preferred_target(&self, principal: &Principal, request: &AiRequest) -> Option<String> {
+        let parent_id = crate::model_turn::parent_id_from_request(request)?;
+        let materialized = self
+            .chain
+            .store
+            .materialize_generation(principal, &TurnNodeId::new(parent_id))
+            .await
+            .ok()?;
+        (!materialized.effective_state.selected_target_key.is_empty())
+            .then_some(materialized.effective_state.selected_target_key)
+    }
+
     async fn prepare(
         &self,
         principal: &Principal,
@@ -245,6 +257,8 @@ struct GenerationChainState {
     pub instructions_fingerprint: String,
     #[serde(default)]
     pub provider_model: String,
+    #[serde(default)]
+    pub selected_target_key: String,
     pub tools_fingerprint: String,
     pub request_settings_fingerprint: String,
     #[serde(default)]
@@ -299,6 +313,11 @@ impl GenerationChainState {
     }
     pub(crate) fn with_provider_model(mut self, provider_model: &str) -> Self {
         self.provider_model = provider_model.to_owned();
+        self
+    }
+
+    pub(crate) fn with_selected_target_key(mut self, target_key: &str) -> Self {
+        self.selected_target_key = target_key.to_owned();
         self
     }
 

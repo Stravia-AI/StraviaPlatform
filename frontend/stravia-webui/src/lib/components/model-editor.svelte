@@ -3,8 +3,6 @@ import * as m from '$lib/paraglide/messages.js'
 import { goto } from '$app/navigation'
 import { resolve } from '$app/paths'
 import { createQuery, useQueryClient } from '@tanstack/svelte-query'
-import ArrowDownIcon from '@lucide/svelte/icons/arrow-down'
-import ArrowUpIcon from '@lucide/svelte/icons/arrow-up'
 import CirclePlusIcon from '@lucide/svelte/icons/circle-plus'
 import RotateCcwIcon from '@lucide/svelte/icons/rotate-ccw'
 import Trash2Icon from '@lucide/svelte/icons/trash-2'
@@ -28,7 +26,6 @@ import {
   addRouteTarget,
   buildRouteTargets,
   createRouteTargetForms,
-  moveRouteTarget,
   removeRouteTarget,
   type RouteTargetForm,
 } from './route-targets-form.js'
@@ -62,7 +59,7 @@ const queryClient = useQueryClient()
 let form = $state({
   modelId: initialModel?.model_id ?? '',
   displayName: initialModel?.display_name ?? '',
-  balance: initialModel?.balance ?? 'weighted',
+  balance: initialModel?.balance ?? 'traffic_equalization',
   enabled: initialModel?.is_enabled ?? true,
 })
 let targets = $state<RouteTargetForm[]>(
@@ -82,32 +79,24 @@ const canonicalModels = $derived(canonicalModelsQuery.data?.models ?? [])
 
 function strategyLabel(strategy: RouteSelectionStrategy): string {
   switch (strategy) {
-    case 'weighted':
-      return m.model_editor_split_traffic()
-    case 'priority':
-      return m.common_try_order()
-    case 'cooldown':
-      return m.model_editor_rotate_destinations()
-    case 'latency':
-      return m.model_editor_prefer_low_latency()
+    case 'traffic_equalization':
+      return m.model_editor_traffic_equalization()
+    case 'latency_preference':
+      return m.model_editor_latency_preference()
   }
 }
 
 function strategyHelp(strategy: RouteSelectionStrategy): string {
   switch (strategy) {
-    case 'weighted':
-      return m.model_editor_traffic_share_help()
-    case 'priority':
-      return m.model_editor_failover_help()
-    case 'cooldown':
-      return m.model_editor_cooldown_help()
-    case 'latency':
-      return m.model_editor_latency_help()
+    case 'traffic_equalization':
+      return m.model_editor_traffic_equalization_help()
+    case 'latency_preference':
+      return m.model_editor_latency_preference_help()
   }
 }
 
 function strategySummary(strategy: RouteSelectionStrategy): string {
-  return strategy === 'weighted' ? m.model_editor_traffic_split_share() : strategyLabel(strategy)
+  return strategyLabel(strategy)
 }
 
 $effect(() => {
@@ -206,10 +195,6 @@ function removeTarget(index: number): void {
   removeRouteTarget(targets, index)
 }
 
-function moveTarget(index: number, offset: -1 | 1): void {
-  moveRouteTarget(targets, index, offset)
-}
-
 function targetSupportsThinkingLevel(target: RouteTargetForm, level: ThinkingLevel): boolean {
   return target.thinkingLevelMap.some((row) => row.level === level && row.control.type !== 'hidden')
 }
@@ -287,9 +272,9 @@ async function regenerateThinkingMap(): Promise<void> {
 }
 
 async function saveModel(): Promise<void> {
-  const result = buildRouteTargets(form.balance, targets)
-  if (result.error === 'invalid-weight') {
-    toast.error(m.model_editor_every_traffic_share_must_positive_integer())
+  const result = buildRouteTargets(targets)
+  if (result.error && result.error !== 'incomplete-target') {
+    toast.error(m.model_editor_invalid_target_controls())
     return
   }
   const cleanTargets = result.targets
@@ -418,10 +403,8 @@ async function saveModel(): Promise<void> {
               {strategyLabel(form.balance)}
             </Select.Trigger>
             <Select.Content>
-              <Select.Item value="weighted">{m.model_editor_split_traffic()}</Select.Item>
-              <Select.Item value="priority">{m.common_try_order()}</Select.Item>
-              <Select.Item value="cooldown">{m.model_editor_rotate_destinations()}</Select.Item>
-              <Select.Item value="latency">{m.model_editor_prefer_low_latency()}</Select.Item>
+              <Select.Item value="traffic_equalization">{m.model_editor_traffic_equalization()}</Select.Item>
+              <Select.Item value="latency_preference">{m.model_editor_latency_preference()}</Select.Item>
             </Select.Content>
           </Select.Root>
         </Field.Field>
@@ -452,24 +435,6 @@ async function saveModel(): Promise<void> {
                   >{/if}
               </div>
               <div class="flex items-center gap-1">
-                {#if form.balance === 'priority'}
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    class="size-10"
-                    aria-label={m.model_editor_move_destination_value_up({ index: index + 1 })}
-                    disabled={index === 0}
-                    onclick={() => moveTarget(index, -1)}><ArrowUpIcon /></Button>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    class="size-10"
-                    aria-label={m.model_editor_move_destination_value_down({ index: index + 1 })}
-                    disabled={index === targets.length - 1}
-                    onclick={() => moveTarget(index, 1)}><ArrowDownIcon /></Button>
-                {/if}
                 {#if targets.length > 1}
                   <Button
                     type="button"
@@ -482,7 +447,7 @@ async function saveModel(): Promise<void> {
               </div>
             </div>
 
-            <div class="grid gap-4 lg:grid-cols-[minmax(13rem,0.7fr)_minmax(18rem,1.3fr)_minmax(9rem,0.45fr)]">
+            <div class="grid gap-4 lg:grid-cols-[minmax(13rem,0.7fr)_minmax(18rem,1.3fr)_minmax(10rem,0.45fr)]">
               <Field.Field size="select">
                 <Field.Label for={`target-provider-${target.key}`}>{m.common_model_service()}</Field.Label>
                 <Select.Root
@@ -533,18 +498,52 @@ async function saveModel(): Promise<void> {
                 {/if}
               </Field.Field>
 
-              {#if form.balance === 'weighted'}
-                <Field.Field size="number">
-                  <Field.Label for={`target-weight-${target.key}`}>{m.model_editor_traffic_share()}</Field.Label>
-                  <Input
-                    id={`target-weight-${target.key}`}
-                    type="number"
-                    min="1"
-                    step="1"
-                    bind:value={target.weight}
-                    aria-label={m.model_editor_destination_value_traffic_share({ index: index + 1 })} />
-                </Field.Field>
-              {/if}
+              <Field.Field size="number">
+                <Field.Label for={`target-priority-${target.key}`}>{m.model_editor_target_priority()}</Field.Label>
+                <Input
+                  id={`target-priority-${target.key}`}
+                  type="number"
+                  min="0"
+                  max="100000"
+                  step="1"
+                  bind:value={target.priority} />
+                <Field.Description>{m.model_editor_target_priority_help()}</Field.Description>
+              </Field.Field>
+            </div>
+
+            <div class="mt-4 grid gap-4 border-t pt-4 md:grid-cols-3">
+              <Field.Field size="number">
+                <Field.Label for={`target-first-token-timeout-${target.key}`}
+                  >{m.model_editor_first_token_timeout()}</Field.Label>
+                <Input
+                  id={`target-first-token-timeout-${target.key}`}
+                  type="number"
+                  min="0"
+                  step="1"
+                  bind:value={target.firstTokenTimeoutMs} />
+                <Field.Description>{m.model_editor_first_token_timeout_help()}</Field.Description>
+              </Field.Field>
+              <Field.Field size="number">
+                <Field.Label for={`target-retry-budget-${target.key}`}
+                  >{m.model_editor_target_retry_budget()}</Field.Label>
+                <Input
+                  id={`target-retry-budget-${target.key}`}
+                  type="number"
+                  min="0"
+                  step="1"
+                  bind:value={target.targetRetryBudget} />
+                <Field.Description>{m.model_editor_target_retry_budget_help()}</Field.Description>
+              </Field.Field>
+              <Field.Field size="number">
+                <Field.Label for={`target-cooldown-${target.key}`}>{m.model_editor_target_cooldown()}</Field.Label>
+                <Input
+                  id={`target-cooldown-${target.key}`}
+                  type="number"
+                  min="0"
+                  step="1"
+                  bind:value={target.targetCooldownMs} />
+                <Field.Description>{m.model_editor_target_cooldown_help()}</Field.Description>
+              </Field.Field>
             </div>
 
             {#if target.loading}

@@ -18,12 +18,15 @@ use provider_model_records::PreparedProviderModel;
 static HTTP_PROVIDER_MODEL_DISCOVERY: HttpProviderModelDiscovery = HttpProviderModelDiscovery;
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BindRouteInput {
     pub route_id: Option<String>,
     pub provider_id: String,
     pub provider_model_id: String,
-    pub weight: Option<i32>,
     pub priority: Option<i32>,
+    pub first_token_timeout_ms: Option<i64>,
+    pub target_retry_budget: Option<i32>,
+    pub target_cooldown_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -43,8 +46,10 @@ pub(crate) enum RouteBind {
         route_id: String,
         provider_id: String,
         provider_model_id: String,
-        weight: i32,
         priority: i32,
+        first_token_timeout_ms: i64,
+        target_retry_budget: i32,
+        target_cooldown_ms: i64,
     },
 }
 
@@ -138,8 +143,10 @@ impl<'a> RouteModule<'a> {
                     id: None,
                     provider_id: target.provider_id.clone(),
                     model: target.model.clone(),
-                    weight: target.weight,
                     priority: target.priority,
+                    first_token_timeout_ms: target.first_token_timeout_ms,
+                    target_retry_budget: target.target_retry_budget,
+                    target_cooldown_ms: target.target_cooldown_ms,
                     thinking_level_map: target.thinking_level_map.clone(),
                 })
                 .collect(),
@@ -222,8 +229,10 @@ impl<'a> RouteModule<'a> {
                     id: Some(target.id.clone()),
                     provider_id: target.provider_id.clone(),
                     model: target.model.clone(),
-                    weight: Some(target.weight),
                     priority: Some(target.priority),
+                    first_token_timeout_ms: Some(target.first_token_timeout_ms),
+                    target_retry_budget: Some(target.target_retry_budget),
+                    target_cooldown_ms: Some(target.target_cooldown_ms),
                     thinking_level_map: target.thinking_level_map.0.clone(),
                 })
                 .collect::<Vec<_>>();
@@ -231,8 +240,10 @@ impl<'a> RouteModule<'a> {
                 id: None,
                 provider_id: copied_provider_id.to_string(),
                 model: target.model,
-                weight: Some(target.weight),
                 priority: Some(target.priority),
+                first_token_timeout_ms: Some(target.first_token_timeout_ms),
+                target_retry_budget: Some(target.target_retry_budget),
+                target_cooldown_ms: Some(target.target_cooldown_ms),
                 thinking_level_map: Vec::new(),
             }));
 
@@ -300,27 +311,59 @@ impl<'a> RouteModule<'a> {
     }
 
     pub(crate) async fn bind(&self, input: RouteBind) -> anyhow::Result<Route> {
-        let (route_id, provider_id, provider_model_id, weight, priority) = match input {
+        let (
+            route_id,
+            provider_id,
+            provider_model_id,
+            priority,
+            first_token_timeout_ms,
+            target_retry_budget,
+            target_cooldown_ms,
+        ) = match input {
             RouteBind::OneClick {
                 provider_id,
                 provider_model_id,
             } => {
                 let route_id = provider_model_id.clone();
-                (route_id, provider_id, provider_model_id, 100, 1)
+                (
+                    route_id,
+                    provider_id,
+                    provider_model_id,
+                    DEFAULT_TARGET_PRIORITY,
+                    DEFAULT_FIRST_TOKEN_TIMEOUT_MS,
+                    DEFAULT_TARGET_RETRY_BUDGET,
+                    DEFAULT_TARGET_COOLDOWN_MS,
+                )
             }
             RouteBind::At {
                 route_id,
                 provider_id,
                 provider_model_id,
-                weight,
                 priority,
-            } => (
-                route_id,
-                provider_id,
-                provider_model_id,
-                weight.max(0),
-                priority.max(1),
-            ),
+                first_token_timeout_ms,
+                target_retry_budget,
+                target_cooldown_ms,
+            } => {
+                let target = CreateTarget {
+                    provider_id: provider_id.clone(),
+                    model: provider_model_id.clone(),
+                    priority: Some(priority),
+                    first_token_timeout_ms: Some(first_token_timeout_ms),
+                    target_retry_budget: Some(target_retry_budget),
+                    target_cooldown_ms: Some(target_cooldown_ms),
+                    thinking_level_map: Vec::new(),
+                };
+                ensure_route_targets_valid(std::slice::from_ref(&target))?;
+                (
+                    route_id,
+                    provider_id,
+                    provider_model_id,
+                    priority,
+                    first_token_timeout_ms,
+                    target_retry_budget,
+                    target_cooldown_ms,
+                )
+            }
         };
         let route_id = normalize_name(&route_id, "model ID sent by clients")?;
         let provider_model_id = normalize_model_id(&provider_model_id)?;
@@ -371,14 +414,16 @@ impl<'a> RouteModule<'a> {
                 .create(CreateRoute {
                     model_id: route_id,
                     display_name: None,
-                    balance: Some("weighted".into()),
+                    balance: Some("traffic_equalization".into()),
                     target_provider: provider_id.clone(),
                     target_model: provider_model_id.clone(),
                     targets: vec![CreateTarget {
                         provider_id,
                         model: provider_model_id,
-                        weight: Some(weight),
                         priority: Some(priority),
+                        first_token_timeout_ms: Some(first_token_timeout_ms),
+                        target_retry_budget: Some(target_retry_budget),
+                        target_cooldown_ms: Some(target_cooldown_ms),
                         thinking_level_map: Vec::new(),
                     }],
                 })
@@ -399,8 +444,10 @@ impl<'a> RouteModule<'a> {
                 id: Some(target.id.clone()),
                 provider_id: target.provider_id.clone(),
                 model: target.model.clone(),
-                weight: Some(target.weight),
                 priority: Some(target.priority),
+                first_token_timeout_ms: Some(target.first_token_timeout_ms),
+                target_retry_budget: Some(target.target_retry_budget),
+                target_cooldown_ms: Some(target.target_cooldown_ms),
                 thinking_level_map: target.thinking_level_map.0.clone(),
             })
             .collect::<Vec<_>>();
@@ -408,8 +455,10 @@ impl<'a> RouteModule<'a> {
             id: None,
             provider_id,
             model: provider_model_id,
-            weight: Some(weight),
             priority: Some(priority),
+            first_token_timeout_ms: Some(first_token_timeout_ms),
+            target_retry_budget: Some(target_retry_budget),
+            target_cooldown_ms: Some(target_cooldown_ms),
             thinking_level_map: Vec::new(),
         });
         self.change(
@@ -443,8 +492,10 @@ impl<'a> RouteModule<'a> {
                 id: Some(target.id.clone()),
                 provider_id: target.provider_id.clone(),
                 model: target.model.clone(),
-                weight: Some(target.weight),
                 priority: Some(target.priority),
+                first_token_timeout_ms: Some(target.first_token_timeout_ms),
+                target_retry_budget: Some(target.target_retry_budget),
+                target_cooldown_ms: Some(target.target_cooldown_ms),
                 thinking_level_map: target.thinking_level_map.0.clone(),
             })
             .collect::<Vec<_>>();
@@ -474,8 +525,16 @@ impl AdminService {
                 route_id,
                 provider_id: input.provider_id,
                 provider_model_id: input.provider_model_id,
-                weight: input.weight.unwrap_or(100),
-                priority: input.priority.unwrap_or(1),
+                priority: input.priority.unwrap_or(DEFAULT_TARGET_PRIORITY),
+                first_token_timeout_ms: input
+                    .first_token_timeout_ms
+                    .unwrap_or(DEFAULT_FIRST_TOKEN_TIMEOUT_MS),
+                target_retry_budget: input
+                    .target_retry_budget
+                    .unwrap_or(DEFAULT_TARGET_RETRY_BUDGET),
+                target_cooldown_ms: input
+                    .target_cooldown_ms
+                    .unwrap_or(DEFAULT_TARGET_COOLDOWN_MS),
             },
             None => RouteBind::OneClick {
                 provider_id: input.provider_id,
@@ -525,8 +584,10 @@ fn route_targets_for_update(route: &Route) -> Vec<UpsertTarget> {
             id: Some(target.id.clone()),
             provider_id: target.provider_id.clone(),
             model: target.model.clone(),
-            weight: Some(target.weight),
             priority: Some(target.priority),
+            first_token_timeout_ms: Some(target.first_token_timeout_ms),
+            target_retry_budget: Some(target.target_retry_budget),
+            target_cooldown_ms: Some(target.target_cooldown_ms),
             thinking_level_map: target.thinking_level_map.0.clone(),
         })
         .collect()
@@ -536,8 +597,10 @@ fn create_backend_from_upsert(target: &UpsertTarget) -> CreateTarget {
     CreateTarget {
         provider_id: target.provider_id.clone(),
         model: target.model.clone(),
-        weight: target.weight,
         priority: target.priority,
+        first_token_timeout_ms: target.first_token_timeout_ms,
+        target_retry_budget: target.target_retry_budget,
+        target_cooldown_ms: target.target_cooldown_ms,
         thinking_level_map: target.thinking_level_map.clone(),
     }
 }

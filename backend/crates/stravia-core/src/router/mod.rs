@@ -5,9 +5,9 @@ pub mod selector;
 
 pub use matcher::RouteCache;
 pub use selector::{
-    AttemptFailureDisposition, CooldownStrategy, LatencyStrategy, PriorityStrategy,
-    RouteAttemptPolicy, RoutingStrategy, SelectedTarget, TargetSelector, WeightedStrategy,
-    selected_target_key,
+    AttemptFailureDisposition, ConversationIdentity, RouteAttemptContext, RouteAttemptPolicy,
+    RouteAttemptReservation, RoutePolicyState, RouteSchedulingSnapshot, SelectedTarget,
+    TargetSchedulingSnapshot, conversation_identity, selected_target_key,
 };
 
 use crate::db::models::Route;

@@ -535,8 +535,10 @@ mod tests {
                 route_id: None,
                 provider_id: provider.id.clone(),
                 provider_model_id: "disposable-model".into(),
-                weight: None,
                 priority: None,
+                first_token_timeout_ms: None,
+                target_retry_budget: None,
+                target_cooldown_ms: None,
             })
             .await?;
 
@@ -596,22 +598,26 @@ mod tests {
             .create_model(CreateRoute {
                 model_id: "durable-route".into(),
                 display_name: None,
-                balance: Some("priority".into()),
+                balance: Some("traffic_equalization".into()),
                 target_provider: primary.id.clone(),
                 target_model: "primary-model".into(),
                 targets: vec![
                     CreateTarget {
                         provider_id: primary.id.clone(),
                         model: "primary-model".into(),
-                        weight: Some(100),
                         priority: Some(1),
+                        first_token_timeout_ms: None,
+                        target_retry_budget: None,
+                        target_cooldown_ms: None,
                         thinking_level_map: Vec::new(),
                     },
                     CreateTarget {
                         provider_id: fallback.id.clone(),
                         model: "fallback-model".into(),
-                        weight: Some(100),
                         priority: Some(2),
+                        first_token_timeout_ms: None,
+                        target_retry_budget: None,
+                        target_cooldown_ms: None,
                         thinking_level_map: Vec::new(),
                     },
                 ],

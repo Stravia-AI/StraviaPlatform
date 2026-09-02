@@ -978,8 +978,10 @@ async fn unrepresentable_thinking_control_is_a_typed_422_before_upstream() {
             targets: vec![CreateTarget {
                 provider_id: route.targets[0].provider_id.clone(),
                 model: route.targets[0].model.clone(),
-                weight: Some(route.targets[0].weight),
                 priority: Some(route.targets[0].priority),
+                first_token_timeout_ms: Some(route.targets[0].first_token_timeout_ms),
+                target_retry_budget: Some(route.targets[0].target_retry_budget),
+                target_cooldown_ms: Some(route.targets[0].target_cooldown_ms),
                 thinking_level_map: map,
             }],
         })
@@ -1052,8 +1054,10 @@ async fn explicit_thinking_is_rejected_when_the_route_opens_no_levels() {
                 id: Some(target.id.clone()),
                 provider_id: target.provider_id.clone(),
                 model: target.model.clone(),
-                weight: Some(target.weight),
                 priority: Some(target.priority),
+                first_token_timeout_ms: Some(target.first_token_timeout_ms),
+                target_retry_budget: Some(target.target_retry_budget),
+                target_cooldown_ms: Some(target.target_cooldown_ms),
                 thinking_level_map: map,
             }
         })
@@ -1132,8 +1136,10 @@ async fn failover_remaps_the_same_clamped_level_for_the_next_target() {
                 id: Some(target.id.clone()),
                 provider_id: target.provider_id.clone(),
                 model: target.model.clone(),
-                weight: Some(target.weight),
                 priority: Some(target.priority),
+                first_token_timeout_ms: Some(target.first_token_timeout_ms),
+                target_retry_budget: Some(target.target_retry_budget),
+                target_cooldown_ms: Some(target.target_cooldown_ms),
                 thinking_level_map: map,
             }
         })

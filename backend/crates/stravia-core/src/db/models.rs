@@ -169,14 +169,21 @@ impl Route {
     }
 }
 
+pub const DEFAULT_TARGET_PRIORITY: i32 = 0;
+pub const DEFAULT_FIRST_TOKEN_TIMEOUT_MS: i64 = 60_000;
+pub const DEFAULT_TARGET_RETRY_BUDGET: i32 = 5;
+pub const DEFAULT_TARGET_COOLDOWN_MS: i64 = 120_000;
+
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct Target {
     pub id: String,
     pub model_id: String,
     pub provider_id: String,
     pub model: String,
-    pub weight: i32,
     pub priority: i32,
+    pub first_token_timeout_ms: i64,
+    pub target_retry_budget: i32,
+    pub target_cooldown_ms: i64,
     pub created_at: String,
     #[serde(default)]
     pub thinking_level_map: sqlx::types::Json<Vec<ThinkingLevelMapping>>,
@@ -186,24 +193,18 @@ pub struct Target {
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
 pub enum RouteSelectionStrategy {
-    /// Weighted reservoir sampling — targets with higher weight are preferred.
+    /// Selects the Target carrying the least weighted traffic in the last 24 hours.
     #[default]
-    Weighted,
-    /// Priority groups — lower priority number tried first; random within group.
-    Priority,
-    /// Cooldown-aware round-robin — deprioritises recently-used targets.
-    Cooldown,
-    /// Latency-ordered — targets sorted by ascending EMA response latency.
-    Latency,
+    TrafficEqualization,
+    /// Selects the fastest reliable Target when enough recent samples exist.
+    LatencyPreference,
 }
 
 impl RouteSelectionStrategy {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Weighted => "weighted",
-            Self::Priority => "priority",
-            Self::Cooldown => "cooldown",
-            Self::Latency => "latency",
+            Self::TrafficEqualization => "traffic_equalization",
+            Self::LatencyPreference => "latency_preference",
         }
     }
 }
@@ -213,11 +214,9 @@ impl std::str::FromStr for RouteSelectionStrategy {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "weighted" => Ok(Self::Weighted),
-            "priority" => Ok(Self::Priority),
-            "cooldown" => Ok(Self::Cooldown),
-            "latency" => Ok(Self::Latency),
-            other => anyhow::bail!("unsupported model balance: {other}"),
+            "traffic_equalization" => Ok(Self::TrafficEqualization),
+            "latency_preference" => Ok(Self::LatencyPreference),
+            other => anyhow::bail!("unsupported Route Scheduling Strategy: {other}"),
         }
     }
 }
@@ -436,22 +435,28 @@ pub struct CreateRoute {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateTarget {
     pub provider_id: String,
     pub model: String,
-    pub weight: Option<i32>,
     pub priority: Option<i32>,
+    pub first_token_timeout_ms: Option<i64>,
+    pub target_retry_budget: Option<i32>,
+    pub target_cooldown_ms: Option<i64>,
     #[serde(default)]
     pub thinking_level_map: Vec<ThinkingLevelMapping>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpsertTarget {
     pub id: Option<String>,
     pub provider_id: String,
     pub model: String,
-    pub weight: Option<i32>,
     pub priority: Option<i32>,
+    pub first_token_timeout_ms: Option<i64>,
+    pub target_retry_budget: Option<i32>,
+    pub target_cooldown_ms: Option<i64>,
     #[serde(default)]
     pub thinking_level_map: Vec<ThinkingLevelMapping>,
 }

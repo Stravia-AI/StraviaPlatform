@@ -50,14 +50,10 @@ const modelColumnHelper = createDataTableColumnHelper<Route>()
 
 function strategyLabel(strategy: RouteSelectionStrategy): string {
   switch (strategy) {
-    case 'weighted':
-      return m.models_split_share()
-    case 'priority':
-      return m.common_try_order()
-    case 'cooldown':
-      return m.model_editor_rotate_destinations()
-    case 'latency':
-      return m.model_editor_prefer_low_latency()
+    case 'traffic_equalization':
+      return m.model_editor_traffic_equalization()
+    case 'latency_preference':
+      return m.model_editor_latency_preference()
   }
 }
 

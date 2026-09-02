@@ -14,15 +14,17 @@ export interface Route {
   targets: Target[]
 }
 
-export type RouteSelectionStrategy = 'weighted' | 'priority' | 'cooldown' | 'latency'
+export type RouteSelectionStrategy = 'traffic_equalization' | 'latency_preference'
 
 export interface Target {
   id: string
   model_id: string
   provider_id: string
   model: string
-  weight: number
   priority: number
+  first_token_timeout_ms: number
+  target_retry_budget: number
+  target_cooldown_ms: number
   created_at: string
   thinking_level_map: ThinkingLevelMapping[]
 }
@@ -55,8 +57,10 @@ export interface BindRouteInput {
   route_id?: string
   provider_id: string
   provider_model_id: string
-  weight?: number
   priority?: number
+  first_token_timeout_ms?: number
+  target_retry_budget?: number
+  target_cooldown_ms?: number
 }
 
 export interface UnbindRouteInput {
@@ -78,8 +82,10 @@ export interface UpdateRoute {
 export interface CreateTarget {
   provider_id: string
   model: string
-  weight?: number
   priority?: number
+  first_token_timeout_ms?: number
+  target_retry_budget?: number
+  target_cooldown_ms?: number
   thinking_level_map?: ThinkingLevelMapping[]
 }
 
@@ -87,7 +93,9 @@ export interface UpsertTarget {
   id?: string
   provider_id: string
   model: string
-  weight?: number
   priority?: number
+  first_token_timeout_ms?: number
+  target_retry_budget?: number
+  target_cooldown_ms?: number
   thinking_level_map?: ThinkingLevelMapping[]
 }
