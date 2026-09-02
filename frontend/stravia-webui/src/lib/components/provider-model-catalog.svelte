@@ -177,27 +177,29 @@ const providerModelColumns = providerModelColumnHelper.columns([
     },
     size: 160,
   }),
-  providerModelColumnHelper.accessor((model) =>
-    modelReferences(model.id).length > 0 ? 'referenced' : 'unreferenced', {
-    id: 'usage',
-    header: () => m.provider_model_catalog_model_usage(),
-    cell: (context) => renderSnippet(providerModelUsageCell, context),
-    enableSorting: false,
-    enableGlobalFilter: false,
-    meta: {
-      label: () => m.provider_model_catalog_model_usage(),
-      cellClass: 'whitespace-normal',
-      filter: {
-        variant: 'select',
-        allLabel: m.provider_model_catalog_all_usage(),
-        options: [
-          { value: 'referenced', label: m.provider_model_catalog_use() },
-          { value: 'unreferenced', label: m.provider_model_catalog_not_use() },
-        ],
+  providerModelColumnHelper.accessor(
+    (model) => (modelReferences(model.id).length > 0 ? 'referenced' : 'unreferenced'),
+    {
+      id: 'usage',
+      header: () => m.provider_model_catalog_model_usage(),
+      cell: (context) => renderSnippet(providerModelUsageCell, context),
+      enableSorting: false,
+      enableGlobalFilter: false,
+      meta: {
+        label: () => m.provider_model_catalog_model_usage(),
+        cellClass: 'whitespace-normal',
+        filter: {
+          variant: 'select',
+          allLabel: m.provider_model_catalog_all_usage(),
+          options: [
+            { value: 'referenced', label: m.provider_model_catalog_use() },
+            { value: 'unreferenced', label: m.provider_model_catalog_not_use() },
+          ],
+        },
       },
+      size: 190,
     },
-    size: 190,
-  }),
+  ),
 ])
 
 function getProviderModelRowId(model: ProviderModelSummary): string {
@@ -223,7 +225,7 @@ function modelReferences(modelId: string): Array<{ route: Route; target: Route['
 }
 
 function routeForModel(modelId: string): Route | undefined {
-  return routes.find((route) => route.name === modelId)
+  return routes.find((route) => route.model_id === modelId)
 }
 
 function catalogFilterValue<TValue extends string>(columnId: string, fallback: TValue): TValue {
@@ -245,10 +247,7 @@ function setCatalogFilter(columnId: string, value: string, emptyValue = 'all'): 
           ...remaining,
           {
             id: columnId,
-            value: {
-              operator: 'and',
-              constraints: [{ value, matchMode: 'equals' }],
-            } satisfies DataTableFilterGroup,
+            value: { operator: 'and', constraints: [{ value, matchMode: 'equals' }] } satisfies DataTableFilterGroup,
           },
         ]
 }

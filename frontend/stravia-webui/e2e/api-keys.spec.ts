@@ -105,7 +105,8 @@ test('API Key editor persists concurrency and Model Route selections', async ({ 
         data: [
           {
             id: modelId,
-            name: modelName,
+            model_id: modelName,
+            display_name: 'GPT 5.6 Sol',
             balance: 'weighted',
             is_enabled: true,
             created_at: '2026-08-17T00:00:00Z',
@@ -113,7 +114,8 @@ test('API Key editor persists concurrency and Model Route selections', async ({ 
           },
           {
             id: secondModelId,
-            name: secondModelName,
+            model_id: secondModelName,
+            display_name: null,
             balance: 'priority',
             is_enabled: true,
             created_at: '2026-08-17T00:00:00Z',
@@ -145,10 +147,7 @@ test('API Key editor persists concurrency and Model Route selections', async ({ 
     if (!box) throw new Error(`${selector} is not visible`)
     return { x: box.x + box.width / 2, y: box.y + box.height / 2 }
   }
-  const [nameCenter, enabledCenter] = await Promise.all([
-    center('#api-key-name'),
-    center('#api-key-enabled'),
-  ])
+  const [nameCenter, enabledCenter] = await Promise.all([center('#api-key-name'), center('#api-key-enabled')])
   expect(Math.abs(nameCenter.y - enabledCenter.y)).toBeLessThan(1)
   await page.setViewportSize({ width: 544, height: 832 })
   const allowAllModels = page.getByRole('switch', { name: 'Allow all models' })
@@ -168,6 +167,10 @@ test('API Key editor persists concurrency and Model Route selections', async ({ 
   const modelMenu = page.locator('[data-slot="popover-content"]')
   const modelSearch = modelMenu.getByPlaceholder('Search models…')
   await expect(modelSearch).toBeVisible()
+  await expect(modelMenu.getByText('GPT 5.6 Sol', { exact: true })).toBeVisible()
+  await expect(modelMenu.getByText(modelName, { exact: true })).toBeVisible()
+  await modelSearch.fill('GPT 5.6 Sol')
+  await expect(modelMenu.getByText(modelName, { exact: true })).toBeVisible()
   await modelSearch.fill('luna')
   await expect(modelMenu.getByText(secondModelName, { exact: true })).toBeVisible()
   await expect(modelMenu.getByText(modelName, { exact: true })).toBeHidden()
@@ -178,7 +181,10 @@ test('API Key editor persists concurrency and Model Route selections', async ({ 
   const unallowedGroup = modelMenu.getByRole('group', { name: 'Not allowed' })
   await expect(allowedGroup).toBeVisible()
   await expect(unallowedGroup).toBeVisible()
-  const [allowedGroupBox, unallowedGroupBox] = await Promise.all([allowedGroup.boundingBox(), unallowedGroup.boundingBox()])
+  const [allowedGroupBox, unallowedGroupBox] = await Promise.all([
+    allowedGroup.boundingBox(),
+    unallowedGroup.boundingBox(),
+  ])
   if (!allowedGroupBox || !unallowedGroupBox) throw new Error('Model permission groups are not visible')
   expect(allowedGroupBox.y).toBeLessThan(unallowedGroupBox.y)
   await expect(modelMenu.locator('[data-slot="command-separator"]')).toHaveCount(1)

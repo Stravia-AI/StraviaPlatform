@@ -1,4 +1,5 @@
 import * as m from '$lib/paraglide/messages.js'
+import { effectiveModelDisplayName } from '$lib/logical-model'
 import type { Route, ThinkingLevel } from '$lib/types'
 
 export type CodeLanguage = 'python' | 'typescript' | 'curl'
@@ -24,7 +25,8 @@ export interface ClaudeModelMappings {
 }
 
 export interface ClientModelDefinition {
-  name: string
+  modelId: string
+  displayName: string
   supportedThinkingLevels: readonly ThinkingLevel[]
   supportsImageInput: boolean
   contextWindow?: number
@@ -111,17 +113,12 @@ function supportsReasoning(model: ClientModelDefinition): boolean {
   return reasoningLevels(model).length > 0
 }
 
-function inputModalities(
-  model: ClientModelDefinition,
-  transparentImageInputEnabled: boolean,
-): Array<'text' | 'image'> {
+function inputModalities(model: ClientModelDefinition, transparentImageInputEnabled: boolean): Array<'text' | 'image'> {
   return transparentImageInputEnabled || model.supportsImageInput ? ['text', 'image'] : ['text']
 }
 
 function claudeEffortLevel(model: ClientModelDefinition): 'low' | 'medium' | 'high' | 'xhigh' | undefined {
-  return (['medium', 'high', 'low', 'xhigh'] as const).find((level) =>
-    model.supportedThinkingLevels.includes(level),
-  )
+  return (['medium', 'high', 'low', 'xhigh'] as const).find((level) => model.supportedThinkingLevels.includes(level))
 }
 
 function claudeAutoCompactWindow(model: ClientModelDefinition): number | undefined {
@@ -131,7 +128,8 @@ function claudeAutoCompactWindow(model: ClientModelDefinition): number | undefin
 
 export function defineClientModel(model: Route): ClientModelDefinition {
   return {
-    name: model.name,
+    modelId: model.model_id,
+    displayName: effectiveModelDisplayName(model),
     supportedThinkingLevels: [...new Set(model.supported_thinking_levels ?? [])],
     supportsImageInput: model.supports_image_input ?? false,
     ...(model.context_window ? { contextWindow: model.context_window } : {}),
@@ -247,15 +245,15 @@ return response.choices[0]?.message?.content;`
 }
 
 export function buildCliConfig(params: CliConfigParams): string {
-  const models = [...new Map(params.models.map((model) => [model.name, model])).values()]
+  const models = [...new Map(params.models.map((model) => [model.modelId, model])).values()]
   if (models.length === 0) throw new Error('client configuration requires at least one model')
-  const modelNames = models.map((model) => model.name)
+  const modelNames = models.map((model) => model.modelId)
 
   if (params.tool === 'claude-code') {
     const mappedModels = Object.values(params.mappings)
     if (mappedModels.some((model) => !modelNames.includes(model)))
       throw new Error('Claude model mappings must use models available to the API key')
-    const defaultModel = models.find((model) => model.name === params.mappings.defaultModel)!
+    const defaultModel = models.find((model) => model.modelId === params.mappings.defaultModel)!
     const effortLevel = claudeEffortLevel(defaultModel)
     const autoCompactWindow = claudeAutoCompactWindow(defaultModel)
 
@@ -278,21 +276,19 @@ ${JSON.stringify(
 )}`
   }
 
-  if (!modelNames.includes(params.defaultModel))
-    throw new Error('default model must be available to the API key')
+  if (!modelNames.includes(params.defaultModel)) throw new Error('default model must be available to the API key')
 
   if (params.tool === 'codex-cli') {
     const modelCatalog = {
       models: models.map((model, index) => ({
-        slug: model.name,
-        display_name: model.name,
+        slug: model.modelId,
+        display_name: model.displayName,
         description: null,
-        default_reasoning_level:
-          model.supportedThinkingLevels.includes('medium')
-            ? 'medium'
-            : model.supportedThinkingLevels[0] === undefined
-              ? undefined
-              : reasoningEffort(model.supportedThinkingLevels[0]),
+        default_reasoning_level: model.supportedThinkingLevels.includes('medium')
+          ? 'medium'
+          : model.supportedThinkingLevels[0] === undefined
+            ? undefined
+            : reasoningEffort(model.supportedThinkingLevels[0]),
         supported_reasoning_levels: model.supportedThinkingLevels.map((level) => ({
           effort: reasoningEffort(level),
           description: thinkingLevelDescriptions[level],
@@ -338,8 +334,8 @@ ${JSON.stringify(modelCatalog, null, 2)}`
     const modelEntries = models.flatMap((model) => {
       const levels = reasoningLevels(model)
       return [
-        `      - id: ${JSON.stringify(model.name)}`,
-        `        name: ${JSON.stringify(model.name)}`,
+        `      - id: ${JSON.stringify(model.modelId)}`,
+        `        name: ${JSON.stringify(model.displayName)}`,
         `        reasoning: ${supportsReasoning(model)}`,
         ...(levels.length === 0
           ? []
@@ -383,8 +379,8 @@ modelRoles:
               ]),
             )
       return {
-        id: model.name,
-        name: model.name,
+        id: model.modelId,
+        name: model.displayName,
         reasoning: supportsReasoning(model),
         ...(thinkingLevelMap === undefined ? {} : { thinkingLevelMap }),
         input: inputModalities(model, params.transparentImageInputEnabled),
@@ -425,8 +421,8 @@ ${JSON.stringify(
           apiKey: params.apiKey,
           api: 'openai-completions',
           models: models.map((model) => ({
-            id: model.name,
-            name: model.name,
+            id: model.modelId,
+            name: model.displayName,
             input: inputModalities(model, params.transparentImageInputEnabled),
             ...(model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow }),
             ...(model.outputMaxTokens === undefined ? {} : { maxTokens: model.outputMaxTokens }),
@@ -443,7 +439,7 @@ ${JSON.stringify(
 
   if (params.tool === 'hermes-agent') {
     const modelEntries = models.flatMap((model) => [
-      `      ${JSON.stringify(model.name)}:`,
+      `      ${JSON.stringify(model.modelId)}:`,
       ...(model.contextWindow === undefined ? [] : [`        context_length: ${model.contextWindow}`]),
       `        supports_vision: ${inputModalities(model, params.transparentImageInputEnabled).includes('image')}`,
     ])
@@ -486,7 +482,7 @@ models:
   stravia_default:
     model_provider: stravia
     model: ${JSON.stringify(params.defaultModel)}
-    max_tokens: ${models.find((model) => model.name === params.defaultModel)?.outputMaxTokens ?? 4096}
+    max_tokens: ${models.find((model) => model.modelId === params.defaultModel)?.outputMaxTokens ?? 4096}
     temperature: 0.5
     top_p: 1
     top_k: 0
@@ -500,8 +496,8 @@ ${JSON.stringify(
   models.map((model) => {
     const supportedEfforts = reasoningLevels(model)
     return {
-      id: model.name,
-      name: model.name,
+      id: model.modelId,
+      name: model.displayName,
       vendor: 'Custom',
       url: `${params.host}/v1/chat/completions`,
       apiKey: params.apiKey,
@@ -523,35 +519,19 @@ ${JSON.stringify(
     const zcodeModels = Object.fromEntries(
       models.map((model) => {
         const variants = [...new Set(model.supportedThinkingLevels)]
-        const defaultVariant = variants.includes('medium')
-          ? 'medium'
-          : variants.find((variant) => variant !== 'off')
+        const defaultVariant = variants.includes('medium') ? 'medium' : variants.find((variant) => variant !== 'off')
         const limit = {
           ...(model.contextWindow === undefined ? {} : { context: model.contextWindow }),
           ...(model.outputMaxTokens === undefined ? {} : { output: model.outputMaxTokens }),
         }
 
         return [
-          model.name,
+          model.modelId,
           {
-            ...(defaultVariant === undefined
-              ? {}
-              : {
-                  reasoning: {
-                    enabled: true,
-                    variants,
-                    defaultVariant,
-                  },
-                }),
+            ...(defaultVariant === undefined ? {} : { reasoning: { enabled: true, variants, defaultVariant } }),
             ...(Object.keys(limit).length === 0 ? {} : { limit }),
-            modalities: {
-              input: inputModalities(model, params.transparentImageInputEnabled),
-              output: ['text'],
-            },
-            zcode: {
-              modalitiesConfigured: true,
-              modified: true,
-            },
+            modalities: { input: inputModalities(model, params.transparentImageInputEnabled), output: ['text'] },
+            zcode: { modalitiesConfigured: true, modified: true },
           },
         ]
       }),
@@ -567,11 +547,7 @@ ${JSON.stringify(
       [zcodeStraviaProviderId]: {
         name: 'Stravia',
         kind: 'openai-compatible',
-        options: {
-          apiKey: params.apiKey,
-          baseURL: `${params.host}/v1`,
-          apiKeyRequired: true,
-        },
+        options: { apiKey: params.apiKey, baseURL: `${params.host}/v1`, apiKeyRequired: true },
         source: 'custom',
         models: zcodeModels,
       },
@@ -586,7 +562,7 @@ ${JSON.stringify(
 
   if (params.tool === 'deepseek-harness') {
     const modelEntries = models.flatMap((model) => [
-      `        - id: ${JSON.stringify(model.name)}`,
+      `        - id: ${JSON.stringify(model.modelId)}`,
       ...(model.contextWindow === undefined ? [] : [`          contextWindow: ${model.contextWindow}`]),
       ...(model.outputMaxTokens === undefined ? [] : [`          maxTokens: ${model.outputMaxTokens}`]),
       `          input: ${JSON.stringify(inputModalities(model, params.transparentImageInputEnabled))}`,
@@ -622,15 +598,12 @@ ${modelEntries.join('\n')}
           ? { context: model.contextWindow, output: model.outputMaxTokens }
           : undefined
       return [
-        model.name,
+        model.modelId,
         {
           reasoning: supportsReasoning(model),
           variants,
           limit,
-          modalities: {
-            input: inputModalities(model, params.transparentImageInputEnabled),
-            output: ['text'],
-          },
+          modalities: { input: inputModalities(model, params.transparentImageInputEnabled), output: ['text'] },
         },
       ]
     }),
@@ -643,11 +616,7 @@ ${JSON.stringify(
       stravia: {
         npm: '@ai-sdk/open-responses',
         models: opencodeModels,
-        options: {
-          name: 'stravia',
-          url: `${params.host}/v1/responses`,
-          apiKey: params.apiKey,
-        },
+        options: { name: 'stravia', url: `${params.host}/v1/responses`, apiKey: params.apiKey },
       },
     },
   },

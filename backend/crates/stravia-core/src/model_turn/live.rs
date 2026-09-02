@@ -287,7 +287,7 @@ async fn prepare_attempt(
             )
         })?;
     let actual_model = if target.model.is_empty() || target.model == "*" {
-        route.name.clone()
+        route.model_id.clone()
     } else {
         target.model.clone()
     };
@@ -509,7 +509,7 @@ async fn prepare_attempt(
     } else {
         provider_request.reasoning.target_control = None;
     }
-    provider_request.model.clone_from(&route.name);
+    provider_request.model.clone_from(&route.model_id);
     let mut full_provider_request = provider_request.clone();
     crate::model_turn::clear_previous_response_id(&mut full_provider_request);
     let mut full_outbound = adapter
@@ -716,7 +716,7 @@ async fn begin_attempt(
         provider_id: prepared.route.provider_id.clone(),
         target_id: prepared.route.target_id.clone(),
         provider_name: prepared.provider.name.clone(),
-        route_name: route.name.clone(),
+        route_name: route.model_id.clone(),
         namespace: prepared.namespace.clone(),
         response_continuation_available: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
             false,
@@ -1173,9 +1173,9 @@ fn internal_model_log_entry(
         provider_id: prepared.provider.id.clone(),
         provider_name: prepared.provider.name.clone(),
         model_id: Some(route.id.clone()),
-        model_name: Some(route.name.clone()),
+        model_name: Some(route.effective_display_name().to_string()),
         upstream_url: Some(prepared.trace.upstream_url.clone()),
-        client_model: route.name.clone(),
+        client_model: route.model_id.clone(),
         upstream_model: prepared.actual_model.clone(),
         method: None,
         path: None,

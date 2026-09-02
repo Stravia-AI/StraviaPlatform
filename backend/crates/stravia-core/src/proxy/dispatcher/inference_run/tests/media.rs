@@ -90,7 +90,8 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
         .expect("parent Provider Model");
     let parent_model = admin
         .create_model(CreateRoute {
-            name: "text-parent".into(),
+            model_id: "text-parent".into(),
+            display_name: None,
             balance: None,
             target_provider: parent_provider.id,
             target_model: "parent".into(),
@@ -130,7 +131,8 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
         .expect("Media Provider Model");
     let media_model = admin
         .create_model(CreateRoute {
-            name: "media-vision".into(),
+            model_id: "media-vision".into(),
+            display_name: None,
             balance: None,
             target_provider: media_provider.id,
             target_model: "vision".into(),
@@ -339,7 +341,8 @@ async fn mixed_media_route_prefers_native_targets_and_rejects_targets_without_to
     let mixed_model = gateway
         .admin()
         .create_model(CreateRoute {
-            name: "mixed-media".into(),
+            model_id: "mixed-media".into(),
+            display_name: None,
             balance: Some("priority".into()),
             target_provider: String::new(),
             target_model: String::new(),
@@ -365,7 +368,8 @@ async fn mixed_media_route_prefers_native_targets_and_rejects_targets_without_to
     let unsupported_model = gateway
         .admin()
         .create_model(CreateRoute {
-            name: "unsupported-media".into(),
+            model_id: "unsupported-media".into(),
+            display_name: None,
             balance: None,
             target_provider: no_tools.id,
             target_model: "unsupported".into(),

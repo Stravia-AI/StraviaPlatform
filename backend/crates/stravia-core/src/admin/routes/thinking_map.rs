@@ -244,7 +244,7 @@ impl RouteModule<'_> {
                 .collect::<Vec<_>>();
             self.ensure_thinking_controls_representable(&prepared)
                 .await?;
-            changes.push((route.name, targets));
+            changes.push((route.model_id, targets));
         }
         if apply {
             for (route_id, targets) in changes {

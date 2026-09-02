@@ -13,7 +13,7 @@ impl SqliteRouteStore {
             ""
         };
         let sql = format!(
-            "SELECT id, name, COALESCE(balance, 'weighted') AS balance, \
+            "SELECT id, model_id, display_name, COALESCE(balance, 'weighted') AS balance, \
              COALESCE((SELECT provider_id FROM model_backends WHERE model_id = models.id ORDER BY priority ASC, created_at ASC LIMIT 1), '') AS target_provider, \
              COALESCE((SELECT model FROM model_backends WHERE model_id = models.id ORDER BY priority ASC, created_at ASC LIMIT 1), '') AS target_model, \
              COALESCE(is_enabled, 1) AS is_enabled, created_at \
@@ -40,11 +40,11 @@ impl SqliteRouteStore {
 
     async fn load_route(&self, route_id: &str) -> anyhow::Result<Option<Route>> {
         let route = sqlx::query_as::<_, Route>(
-            "SELECT id, name, COALESCE(balance, 'weighted') AS balance, \
+            "SELECT id, model_id, display_name, COALESCE(balance, 'weighted') AS balance, \
              COALESCE((SELECT provider_id FROM model_backends WHERE model_id = models.id ORDER BY priority ASC, created_at ASC LIMIT 1), '') AS target_provider, \
              COALESCE((SELECT model FROM model_backends WHERE model_id = models.id ORDER BY priority ASC, created_at ASC LIMIT 1), '') AS target_model, \
              COALESCE(is_enabled, 1) AS is_enabled, created_at \
-             FROM models WHERE name = ?",
+             FROM models WHERE model_id = ?",
         )
         .bind(route_id)
         .fetch_optional(&self.pool)
@@ -82,32 +82,37 @@ impl RouteStore for SqliteRouteStore {
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let mut tx = self.pool.begin().await?;
         let conflict = sqlx::query_scalar::<_, String>(
-            "SELECT id FROM models WHERE name = ? AND id != ? LIMIT 1",
+            "SELECT id FROM models WHERE model_id = ? AND id != ? LIMIT 1",
         )
-        .bind(route.route_id.trim())
+        .bind(route.model_id.trim())
         .bind(&route_storage_id)
         .fetch_optional(&mut *tx)
         .await?;
         if conflict.is_some() {
-            anyhow::bail!("Route ID already exists: {}", route.route_id.trim());
+            anyhow::bail!("Route ID already exists: {}", route.model_id.trim());
         }
 
         if route.id.is_some() {
-            let updated =
-                sqlx::query("UPDATE models SET name = ?, balance = ?, is_enabled = ? WHERE id = ?")
-                    .bind(route.route_id.trim())
-                    .bind(route.selection_strategy.trim())
-                    .bind(route.is_enabled)
-                    .bind(&route_storage_id)
-                    .execute(&mut *tx)
-                    .await?;
+            let updated = sqlx::query(
+                "UPDATE models SET model_id = ?, display_name = ?, balance = ?, is_enabled = ? WHERE id = ?",
+            )
+            .bind(route.model_id.trim())
+            .bind(route.display_name.as_deref())
+            .bind(route.selection_strategy.trim())
+            .bind(route.is_enabled)
+            .bind(&route_storage_id)
+            .execute(&mut *tx)
+            .await?;
             if updated.rows_affected() == 0 {
-                anyhow::bail!("Route not found: {}", route.route_id.trim());
+                anyhow::bail!("Route not found: {}", route.model_id.trim());
             }
         } else {
-            sqlx::query("INSERT INTO models (id, name, balance, is_enabled) VALUES (?, ?, ?, ?)")
+            sqlx::query(
+                "INSERT INTO models (id, model_id, display_name, balance, is_enabled) VALUES (?, ?, ?, ?, ?)",
+            )
                 .bind(&route_storage_id)
-                .bind(route.route_id.trim())
+                .bind(route.model_id.trim())
+                .bind(route.display_name.as_deref())
                 .bind(route.selection_strategy.trim())
                 .bind(route.is_enabled)
                 .execute(&mut *tx)
@@ -148,13 +153,13 @@ impl RouteStore for SqliteRouteStore {
         }
 
         tx.commit().await?;
-        self.get(route.route_id.trim())
+        self.get(route.model_id.trim())
             .await?
             .context("Route missing after put")
     }
 
     async fn delete(&self, route_id: &str) -> anyhow::Result<()> {
-        sqlx::query("DELETE FROM models WHERE name = ?")
+        sqlx::query("DELETE FROM models WHERE model_id = ?")
             .bind(route_id)
             .execute(&self.pool)
             .await?;
@@ -204,7 +209,8 @@ mod tests {
         let route = store
             .put(PutRoute {
                 id: None,
-                route_id: "atomic-route".into(),
+                model_id: "atomic-route".into(),
+                display_name: None,
                 selection_strategy: "weighted".into(),
                 is_enabled: true,
                 targets: vec![target("provider-1", "working-model")],
@@ -215,7 +221,8 @@ mod tests {
         let failed = store
             .put(PutRoute {
                 id: Some(route.id),
-                route_id: "atomic-route".into(),
+                model_id: "atomic-route".into(),
+                display_name: None,
                 selection_strategy: "priority".into(),
                 is_enabled: true,
                 targets: vec![target("missing-provider", "broken-model")],

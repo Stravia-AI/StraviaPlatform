@@ -83,7 +83,8 @@ async fn protected_responses_router_with_hook(
         .expect("Provider Model");
     let model = admin
         .create_model(CreateRoute {
-            name: "auth-model".into(),
+            model_id: "auth-model".into(),
+            display_name: None,
             balance: None,
             target_provider: provider.id,
             target_model: "auth-model".into(),
@@ -650,7 +651,8 @@ async fn responses_native_web_search_is_concealed_when_search_is_unavailable() {
         .expect("Provider Model");
     let model = admin
         .create_model(CreateRoute {
-            name: "web-search-test".into(),
+            model_id: "web-search-test".into(),
+            display_name: None,
             balance: None,
             target_provider: provider.id.clone(),
             target_model: "no-tools".into(),

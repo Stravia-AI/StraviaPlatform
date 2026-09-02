@@ -237,7 +237,7 @@ impl<'a> RouteModule<'a> {
             }));
 
             self.change(
-                &route.name,
+                &route.model_id,
                 UpdateRoute {
                     targets: Some(targets),
                     ..UpdateRoute::default()
@@ -369,7 +369,8 @@ impl<'a> RouteModule<'a> {
         let Some(existing) = existing else {
             return self
                 .create(CreateRoute {
-                    name: route_id,
+                    model_id: route_id,
+                    display_name: None,
                     balance: Some("weighted".into()),
                     target_provider: provider_id.clone(),
                     target_model: provider_model_id.clone(),
@@ -412,7 +413,7 @@ impl<'a> RouteModule<'a> {
             thinking_level_map: Vec::new(),
         });
         self.change(
-            &existing.name,
+            &existing.model_id,
             UpdateRoute {
                 targets: Some(targets),
                 ..UpdateRoute::default()
@@ -451,11 +452,11 @@ impl<'a> RouteModule<'a> {
             return Ok(Some(route));
         }
         if targets.is_empty() {
-            self.delete(&route.name).await?;
+            self.delete(&route.model_id).await?;
             return Ok(None);
         }
         self.change(
-            &route.name,
+            &route.model_id,
             UpdateRoute {
                 targets: Some(targets),
                 ..UpdateRoute::default()

@@ -205,6 +205,11 @@ Route 将 Route ID 映射到一组 Target，并规定这些 Target 的选择策�
 Route ID 是客户端请求里填写的模型 ID。它是调用身份，不是展示标签，也不是存储主键。查找与绑定都按精确、大小写敏感比较；存储主键不是客户端查找键。一键接入时默认等于 Provider Model 的 upstream ID；同一 Route ID 即同一 Route。
 _避免使用_：Route 名、展示名、昵称、大小写折叠、用存储主键兜底查找
 
+## Model Display Name
+
+Model Display Name 是 Route 可选、可重复的人类可读标签。它不参与路由、授权、绑定或 Target 选择；为空时，面向人的展示统一回退到 Route ID。
+_避免使用_：Route ID、模型身份、查找键
+
 ## Cache Affinity
 
 Cache Affinity 是 Route 在候选 Target 间为提高上游 Prompt Cache 复用率施加的软性偏好。它按 Principal 隔离；对一个由 Canonical Item Hash 顺序组成的 Cache Prefix，它优先选择曾成功处理该前缀、且报告 `prompt_tokens` 不少于 20,000 的合格 Target；没有合格命中时，回退到 Route 的选择策略。它适用于所有通过 Route 选择 Target 的调用，不形成客户端、连接或 Session 绑定，不改变 Effective Model Request，也不复用响应或 Target Continuation。

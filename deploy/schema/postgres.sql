@@ -1287,3 +1287,10 @@ CREATE INDEX idx_provider_allowance_samples_item_time
     ON provider_allowance_samples(provider_id, allowance_key, sampled_at);
 CREATE INDEX idx_provider_allowance_samples_sampled_at
     ON provider_allowance_samples(sampled_at);
+
+ALTER TABLE models RENAME COLUMN name TO model_id;
+ALTER TABLE models ADD COLUMN display_name TEXT;
+
+ALTER INDEX idx_models_route_id RENAME TO idx_models_route_id_legacy;
+CREATE UNIQUE INDEX idx_models_route_id ON models(model_id);
+DROP INDEX idx_models_route_id_legacy;

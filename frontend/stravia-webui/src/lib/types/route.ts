@@ -1,6 +1,7 @@
 export interface Route {
   id: string
-  name: string
+  model_id: string
+  display_name?: string | null
   balance: RouteSelectionStrategy
   target_provider: string
   target_model: string
@@ -42,7 +43,8 @@ export interface ThinkingLevelMapping {
 }
 
 export interface CreateRoute {
-  name: string
+  model_id: string
+  display_name?: string | null
   balance?: RouteSelectionStrategy
   target_provider: string
   target_model: string
@@ -64,7 +66,8 @@ export interface UnbindRouteInput {
 }
 
 export interface UpdateRoute {
-  name?: string
+  model_id?: string
+  display_name?: string | null
   balance?: RouteSelectionStrategy
   target_provider?: string
   target_model?: string

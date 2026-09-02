@@ -820,6 +820,206 @@ ADD COLUMN allow_media_understanding BOOLEAN NOT NULL DEFAULT FALSE;\n";
     }
 
     #[tokio::test]
+    async fn route_display_name_migration_preserves_identity_and_bindings() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("SQLite pool");
+        migrate_sqlite_range(&pool, 1, 29).await;
+        sqlx::query(
+            "INSERT INTO providers (id, name, protocol, base_url, api_key, auth_mode)
+             VALUES ('provider-1', 'Provider 1', 'openai-compatible', 'https://example.com', '', 'apikey')",
+        )
+        .execute(&pool)
+        .await
+        .expect("legacy Provider");
+        sqlx::query(
+            "INSERT INTO models (id, name, balance)
+             VALUES ('route-storage-id', 'CaseSensitive/Model', 'weighted')",
+        )
+        .execute(&pool)
+        .await
+        .expect("legacy Route");
+        sqlx::query(
+            "INSERT INTO model_backends (id, model_id, provider_id, model)
+             VALUES ('target-id', 'route-storage-id', 'provider-1', 'upstream-model')",
+        )
+        .execute(&pool)
+        .await
+        .expect("legacy Target");
+        sqlx::query(
+            "INSERT INTO api_keys (id, token, name)
+             VALUES ('key-id', 'sk-existing', 'Existing')",
+        )
+        .execute(&pool)
+        .await
+        .expect("legacy API Key");
+        sqlx::query(
+            "INSERT INTO api_key_models (api_key_id, model_id)
+             VALUES ('key-id', 'route-storage-id')",
+        )
+        .execute(&pool)
+        .await
+        .expect("legacy API Key binding");
+
+        migrate_sqlite_range(&pool, 30, 30).await;
+
+        let route = sqlx::query_as::<_, (String, Option<String>)>(
+            "SELECT model_id, display_name FROM models WHERE id = 'route-storage-id'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("migrated Route");
+        assert_eq!(route, ("CaseSensitive/Model".into(), None));
+        let columns = sqlx::query_scalar::<_, String>(
+            "SELECT name FROM pragma_table_info('models') ORDER BY cid",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("Route columns");
+        assert!(columns.iter().any(|column| column == "model_id"));
+        assert!(columns.iter().any(|column| column == "display_name"));
+        assert!(!columns.iter().any(|column| column == "name"));
+        let target_binding: String =
+            sqlx::query_scalar("SELECT model_id FROM model_backends WHERE id = 'target-id'")
+                .fetch_one(&pool)
+                .await
+                .expect("Target binding");
+        let api_key_binding: String =
+            sqlx::query_scalar("SELECT model_id FROM api_key_models WHERE api_key_id = 'key-id'")
+                .fetch_one(&pool)
+                .await
+                .expect("API Key binding");
+        assert_eq!(target_binding, "route-storage-id");
+        assert_eq!(api_key_binding, "route-storage-id");
+        assert!(
+            sqlx::query(
+                "INSERT INTO models (id, model_id, display_name)
+                 VALUES ('duplicate-id', 'CaseSensitive/Model', 'Duplicate label')",
+            )
+            .execute(&pool)
+            .await
+            .is_err(),
+            "Model ID uniqueness must survive the column rename"
+        );
+    }
+
+    #[tokio::test]
+    async fn postgres_route_display_name_migration_matches_sqlite_when_configured() {
+        let Some(url) = std::env::var("DB_URL")
+            .ok()
+            .or_else(|| std::env::var("DATABASE_URL").ok())
+        else {
+            return;
+        };
+        let admin = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("PostgreSQL admin pool");
+        let schema = format!(
+            "stravia_route_display_name_migration_test_{}",
+            uuid::Uuid::new_v4().simple()
+        );
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+            .execute(&admin)
+            .await
+            .expect("create isolated PostgreSQL schema");
+        let options: sqlx::postgres::PgConnectOptions =
+            url.parse().expect("PostgreSQL connection options");
+        let options = options.options([("search_path", schema.as_str())]);
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("isolated PostgreSQL pool");
+        migrate_postgres_range(&pool, 1, 29).await;
+        sqlx::query(
+            "INSERT INTO providers (id, name, protocol, base_url, api_key, auth_mode)
+             VALUES ('provider-1', 'Provider 1', 'openai-compatible', 'https://example.com', '', 'apikey')",
+        )
+        .execute(&pool)
+        .await
+        .expect("legacy Provider");
+        sqlx::query(
+            "INSERT INTO models (id, name, balance)
+             VALUES ('route-storage-id', 'CaseSensitive/Model', 'weighted')",
+        )
+        .execute(&pool)
+        .await
+        .expect("legacy Route");
+        sqlx::query(
+            "INSERT INTO model_backends (id, model_id, provider_id, model)
+             VALUES ('target-id', 'route-storage-id', 'provider-1', 'upstream-model')",
+        )
+        .execute(&pool)
+        .await
+        .expect("legacy Target");
+        sqlx::query(
+            "INSERT INTO api_keys (id, token, name)
+             VALUES ('key-id', 'sk-existing', 'Existing')",
+        )
+        .execute(&pool)
+        .await
+        .expect("legacy API Key");
+        sqlx::query(
+            "INSERT INTO api_key_models (api_key_id, model_id)
+             VALUES ('key-id', 'route-storage-id')",
+        )
+        .execute(&pool)
+        .await
+        .expect("legacy API Key binding");
+
+        migrate_postgres_range(&pool, 30, 30).await;
+
+        let route = sqlx::query_as::<_, (String, Option<String>)>(
+            "SELECT model_id, display_name FROM models WHERE id = 'route-storage-id'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("migrated Route");
+        assert_eq!(route, ("CaseSensitive/Model".into(), None));
+        let obsolete_column: Option<String> = sqlx::query_scalar(
+            "SELECT column_name FROM information_schema.columns
+             WHERE table_schema = current_schema()
+               AND table_name = 'models'
+               AND column_name = 'name'",
+        )
+        .fetch_optional(&pool)
+        .await
+        .expect("obsolete Route column");
+        assert!(obsolete_column.is_none());
+        let bindings = sqlx::query_as::<_, (String, String)>(
+            "SELECT
+                (SELECT model_id FROM model_backends WHERE id = 'target-id'),
+                (SELECT model_id FROM api_key_models WHERE api_key_id = 'key-id')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("preserved bindings");
+        assert_eq!(
+            bindings,
+            ("route-storage-id".into(), "route-storage-id".into())
+        );
+        assert!(
+            sqlx::query(
+                "INSERT INTO models (id, model_id, display_name)
+                 VALUES ('duplicate-id', 'CaseSensitive/Model', 'Duplicate label')",
+            )
+            .execute(&pool)
+            .await
+            .is_err()
+        );
+
+        pool.close().await;
+        sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+            .execute(&admin)
+            .await
+            .expect("drop isolated PostgreSQL schema");
+    }
+
+    #[tokio::test]
     async fn postgres_web_access_adapter_migration_matches_sqlite_when_configured() {
         let Some(url) = std::env::var("DB_URL")
             .ok()

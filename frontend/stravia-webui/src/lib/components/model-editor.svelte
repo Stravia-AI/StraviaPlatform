@@ -33,6 +33,7 @@ import {
   type RouteTargetForm,
 } from './route-targets-form.js'
 import ModelCombobox from '$lib/components/model-combobox.svelte'
+import ModelIdCombobox from '$lib/components/model-id-combobox.svelte'
 import ModelDetailsDialog from '$lib/components/model-details-dialog.svelte'
 import PageHeader from '$lib/components/page-header.svelte'
 import * as AlertDialog from '$lib/components/ui/alert-dialog'
@@ -59,7 +60,8 @@ let { model, providers, initialProviderId = '', initialModelId = '', onSaved }: 
 const initialModel = untrack(() => model)
 const queryClient = useQueryClient()
 let form = $state({
-  name: initialModel?.name ?? '',
+  modelId: initialModel?.model_id ?? '',
+  displayName: initialModel?.display_name ?? '',
   balance: initialModel?.balance ?? 'weighted',
   enabled: initialModel?.is_enabled ?? true,
 })
@@ -179,11 +181,7 @@ async function loadCapabilities(target: RouteTargetForm, refreshThinkingMap = fa
     ])
     target.capabilities = capabilities
     if (detail) {
-      target.thinkingLevelMap =
-        detail.thinking_level_map?.map((row) => ({
-          ...row,
-          control: { ...row.control },
-        })) ?? []
+      target.thinkingLevelMap = detail.thinking_level_map?.map((row) => ({ ...row, control: { ...row.control } })) ?? []
     }
   } catch (error) {
     target.capabilities = undefined
@@ -258,7 +256,7 @@ async function resetThinkingRow(target: RouteTargetForm, level: ThinkingLevel): 
   if (!initialModel || !target.id) return
   target.validationError = ''
   try {
-    const updated = await admin.models.resetThinkingMapping(initialModel.name, target.id, level)
+    const updated = await admin.models.resetThinkingMapping(initialModel.model_id, target.id, level)
     target.thinkingLevelMap =
       updated.targets.find((candidate) => candidate.id === target.id)?.thinking_level_map ?? target.thinkingLevelMap
   } catch (error) {
@@ -278,7 +276,7 @@ async function regenerateThinkingMap(): Promise<void> {
   regenerateOpen = false
   target.validationError = ''
   try {
-    const updated = await admin.models.regenerateThinkingMap(initialModel.name, target.id)
+    const updated = await admin.models.regenerateThinkingMap(initialModel.model_id, target.id)
     target.thinkingLevelMap =
       updated.targets.find((candidate) => candidate.id === target.id)?.thinking_level_map ?? target.thinkingLevelMap
   } catch (error) {
@@ -296,7 +294,7 @@ async function saveModel(): Promise<void> {
   }
   const cleanTargets = result.targets
   const firstTarget = cleanTargets[0]
-  if (!form.name.trim() || !firstTarget || result.error === 'incomplete-target') {
+  if (!form.modelId.trim() || !firstTarget || result.error === 'incomplete-target') {
     toast.error(m.model_editor_destinations_help())
     return
   }
@@ -306,9 +304,7 @@ async function saveModel(): Promise<void> {
     for (const target of targets) {
       const modelId = target.model.trim()
       const needsSnapshot =
-        target.custom &&
-        !target.persisted &&
-        !target.inventory.some((providerModel) => providerModel.id === modelId)
+        target.custom && !target.persisted && !target.inventory.some((providerModel) => providerModel.id === modelId)
       if (needsSnapshot) {
         await admin.providers.createManualModel(
           target.providerId,
@@ -319,23 +315,24 @@ async function saveModel(): Promise<void> {
     }
 
     const input = {
-      name: form.name.trim(),
+      model_id: form.modelId.trim(),
+      display_name: form.displayName.trim(),
       balance: form.balance,
       target_provider: firstTarget.provider_id,
       target_model: firstTarget.model,
       targets: cleanTargets,
     }
     if (initialModel) {
-      await admin.models.update(initialModel.name, { ...input, is_enabled: form.enabled })
+      await admin.models.update(initialModel.model_id, { ...input, is_enabled: form.enabled })
     } else {
       const created = await admin.models.create(input)
       if (!form.enabled) {
         try {
-          await admin.models.update(created.name, { is_enabled: false })
+          await admin.models.update(created.model_id, { is_enabled: false })
         } catch {
           await queryClient.invalidateQueries({ queryKey: ['models'] })
           toast.error(m.model_editor_model_was_added_but_not_disabled_review_status())
-          await goto(resolve('/models/[id]', { id: created.name }))
+          await goto(resolve('/models/[id]', { id: created.model_id }))
           return
         }
       }
@@ -381,33 +378,38 @@ async function saveModel(): Promise<void> {
           <Switch
             id="route-enabled"
             aria-label={m.common_enable_action()}
-            bind:checked={
-              () => form.enabled,
-              (checked) => (form.enabled = checked)
-            } />
+            bind:checked={() => form.enabled, (checked) => (form.enabled = checked)} />
         </div>
       </div>
-      <div class="grid gap-4 md:grid-cols-3">
+      <div class="grid gap-4 md:grid-cols-4">
         <Field.Field orientation="vertical" class="md:col-span-2">
-          {#if initialModel}
-            <Field.Label for="route-name">{m.model_editor_model_name_used_clients()}</Field.Label>
-            <Input id="route-name" class="font-technical" bind:value={form.name} placeholder="gpt-5.4" required />
-          {:else}
-            <Field.Label>{m.model_editor_search_model()}</Field.Label>
-            <ModelCombobox
-              id="route-model-search"
-              value={form.name}
-              models={canonicalModels}
-              placeholder={m.model_editor_search_model()}
-              searchPlaceholder={m.model_editor_search_model()}
-              emptyText={m.model_editor_no_models_found()}
-              ariaLabel={m.model_editor_search_model()}
-              searchAriaLabel={m.model_editor_search_model()}
-              clearAriaLabel={m.model_editor_clear_selected_model()}
-              disabled={canonicalModelsQuery.isPending}
-              onSelect={(id) => (form.name = modelIdFromCatalogId(id))}
-              onClear={() => (form.name = '')} />
-          {/if}
+          <Field.Label for="route-model-id">{m.model_editor_model_id()}</Field.Label>
+          <ModelIdCombobox
+            id="route-model-id"
+            value={form.modelId}
+            models={canonicalModels}
+            placeholder={m.model_editor_model_id_placeholder()}
+            emptyText={m.model_editor_no_models_found()}
+            ariaLabel={m.model_editor_model_id()}
+            clearAriaLabel={m.model_editor_clear_selected_model()}
+            onInput={(value) => {
+              form.modelId = value
+            }}
+            onSelect={(model) => {
+              form.modelId = modelIdFromCatalogId(model.id)
+              form.displayName = model.name
+            }}
+            onClear={() => {
+              form.modelId = ''
+              form.displayName = ''
+            }} />
+        </Field.Field>
+        <Field.Field orientation="vertical">
+          <Field.Label for="route-display-name">{m.model_editor_model_name()}</Field.Label>
+          <Input
+            id="route-display-name"
+            bind:value={form.displayName}
+            placeholder={m.model_editor_model_name_placeholder()} />
         </Field.Field>
         <Field.Field orientation="vertical">
           <Field.Label for="route-balance">{m.model_editor_how_requests_sent()}</Field.Label>
@@ -614,7 +616,8 @@ async function saveModel(): Promise<void> {
                           </Select.Trigger>
                           <Select.Content>
                             {#each ['effort', 'budget', 'enabled', 'disabled', 'hidden'] as type (type)}
-                              <Select.Item value={type}>{thinkingControlLabel(type as TargetThinkingControl['type'])}</Select.Item>
+                              <Select.Item value={type}
+                                >{thinkingControlLabel(type as TargetThinkingControl['type'])}</Select.Item>
                             {/each}
                           </Select.Content>
                         </Select.Root>

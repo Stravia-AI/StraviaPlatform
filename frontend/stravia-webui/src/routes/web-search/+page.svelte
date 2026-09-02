@@ -6,6 +6,7 @@ import { toast } from 'svelte-sonner'
 
 import { admin } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
+import { sortLogicalModels } from '$lib/logical-model'
 import type { WebSearchBackend, WebSearchConfig } from '$lib/types'
 import PageHeader from '$lib/components/page-header.svelte'
 import WebAccessConfiguration from '$lib/components/web-access-configuration.svelte'
@@ -40,6 +41,7 @@ let saving = $state(false)
 
 const codexProviders = $derived(codexProvidersQuery.data ?? [])
 const codexModels = $derived(codexProviders.find((provider) => provider.id === codexProviderId)?.models ?? [])
+const eligibleModels = $derived(sortLogicalModels(eligibleModelsQuery.data ?? []))
 const limits = $derived(configQuery.data?.limits)
 const bindingReady = $derived(
   backendKind === 'local' ? Boolean(localModelId) : Boolean(codexProviderId) && Boolean(codexModelId),
@@ -48,10 +50,10 @@ const localLimitsReady = $derived(
   backendKind !== 'local' ||
     Boolean(
       limits &&
-        Number(maxTurns) >= limits.min_turns &&
-        Number(maxTurns) <= limits.max_turns &&
-        Number(totalSeconds) >= limits.min_total_time_seconds &&
-        Number(totalSeconds) <= limits.max_total_time_seconds,
+      Number(maxTurns) >= limits.min_turns &&
+      Number(maxTurns) <= limits.max_turns &&
+      Number(totalSeconds) >= limits.min_total_time_seconds &&
+      Number(totalSeconds) <= limits.max_total_time_seconds,
     ),
 )
 const canSave = $derived(!saving && !configQuery.isPending && localLimitsReady && (!enabled || bindingReady))
@@ -170,11 +172,16 @@ async function save(): Promise<void> {
             </Field.Label>
             <Select.Root type="single" bind:value={localModelId}>
               <Select.Trigger id="search-local-model" class="w-full">
-                {eligibleModelsQuery.data?.find((model) => model.id === localModelId)?.name ?? m.common_select_model()}
+                {eligibleModels.find((model) => model.id === localModelId)?.display_name ?? m.common_select_model()}
               </Select.Trigger>
               <Select.Content>
-                {#each eligibleModelsQuery.data ?? [] as model (model.id)}
-                  <Select.Item value={model.id} label={model.name}>{model.name}</Select.Item>
+                {#each eligibleModels as model (model.id)}
+                  <Select.Item value={model.id} label={model.display_name}>
+                    <span class="min-w-0 flex-1 truncate">{model.display_name}</span>
+                    {#if model.display_name !== model.model_id}
+                      <span class="truncate font-technical text-xs text-muted-foreground">{model.model_id}</span>
+                    {/if}
+                  </Select.Item>
                 {/each}
               </Select.Content>
             </Select.Root>

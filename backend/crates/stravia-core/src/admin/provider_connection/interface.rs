@@ -594,7 +594,8 @@ mod tests {
             .await?;
         admin
             .create_model(CreateRoute {
-                name: "durable-route".into(),
+                model_id: "durable-route".into(),
+                display_name: None,
                 balance: Some("priority".into()),
                 target_provider: primary.id.clone(),
                 target_model: "primary-model".into(),

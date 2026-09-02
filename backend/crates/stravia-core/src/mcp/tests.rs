@@ -405,7 +405,8 @@ async fn media_test_app() -> (TestApp, crate::agent::ArtifactId, Arc<AtomicUsize
     let model = gateway
         .admin()
         .create_model(crate::db::models::CreateRoute {
-            name: "mcp-vision".into(),
+            model_id: "mcp-vision".into(),
+            display_name: None,
             balance: None,
             target_provider: provider.id,
             target_model: "vision".into(),

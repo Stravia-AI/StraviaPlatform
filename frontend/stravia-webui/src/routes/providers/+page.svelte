@@ -12,6 +12,7 @@ import { admin } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
 import { getDataTableLabels } from '$lib/data-table-labels'
 import { formatDuration } from '$lib/format'
+import { effectiveModelDisplayName, logicalModelSecondaryId } from '$lib/logical-model'
 import type { ImageCapabilityDrift, Provider, Route } from '$lib/types'
 import PageHeader from '$lib/components/page-header.svelte'
 import ProviderEditor from '$lib/components/provider-editor.svelte'
@@ -457,8 +458,13 @@ async function copyProvider(): Promise<void> {
         {#each references as reference (reference.target.id)}
           <a
             class="flex min-h-10 items-center justify-between gap-3 rounded-md px-2 hover:bg-muted"
-            href={resolve('/models/[id]', { id: reference.route.name })}>
-            <span class="font-medium">{reference.route.name} · {reference.target.model}</span>
+            href={resolve('/models/[id]', { id: reference.route.model_id })}>
+            <span class="font-medium">
+              {effectiveModelDisplayName(reference.route)}
+              {#if logicalModelSecondaryId(reference.route)}
+                · {reference.route.model_id}{/if}
+              · {reference.target.model}
+            </span>
             <span class="text-xs text-muted-foreground">{m.providers_change_service()}</span>
           </a>
         {/each}

@@ -30,7 +30,8 @@ impl WebSearchConfigError {
 #[derive(Debug, Clone, Serialize)]
 pub struct EligibleSearchModel {
     pub id: String,
-    pub name: String,
+    pub model_id: String,
+    pub display_name: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -114,13 +115,19 @@ impl AdminService {
         let mut eligible = Vec::new();
         for model in models.into_iter().filter(|model| model.is_enabled) {
             if self.validate_local_targets(&model).await.is_ok() {
+                let display_name = model.effective_display_name().to_string();
                 eligible.push(EligibleSearchModel {
                     id: model.id,
-                    name: model.name,
+                    model_id: model.model_id,
+                    display_name,
                 });
             }
         }
-        eligible.sort_by(|left, right| left.name.cmp(&right.name).then(left.id.cmp(&right.id)));
+        eligible.sort_by(|left, right| {
+            left.display_name
+                .cmp(&right.display_name)
+                .then(left.model_id.cmp(&right.model_id))
+        });
         Ok(eligible)
     }
 
@@ -571,7 +578,8 @@ mod tests {
             .expect("Provider Model");
         let model = admin
             .create_model(crate::db::models::CreateRoute {
-                name: "Search Model".into(),
+                model_id: "Search Model".into(),
+                display_name: None,
                 balance: Some("weighted".into()),
                 target_provider: provider.id.clone(),
                 target_model: "tool-model".into(),
@@ -587,7 +595,8 @@ mod tests {
 
         assert_eq!(eligible.len(), 1);
         assert_eq!(eligible[0].id, model.id);
-        assert_eq!(eligible[0].name, "Search Model");
+        assert_eq!(eligible[0].model_id, "Search Model");
+        assert_eq!(eligible[0].display_name, "Search Model");
     }
 
     #[tokio::test]

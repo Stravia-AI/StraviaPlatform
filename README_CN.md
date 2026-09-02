@@ -67,11 +67,11 @@ OpenAI direct 与 Codex OAuth 的生成 Target 会为 Chat Completions、Open Re
 - DeepSeek、Moonshot AI、Zhipu AI、Z.AI、MiniMax、xAI（API Key 与 Grok OAuth）和 NVIDIA
 - OpenRouter、Ollama 以及自定义 OpenAI 兼容端点
 
-客户端发送一个**虚拟模型名**。该值就是 Route ID，匹配时包含字母大小写在内完全精确。对应 Route 可以包含一个或多个 Target，并使用 weighted、priority、cooldown 或 latency 选择策略。Stravia 从 revisioned `models.stravia.cn` 索引刷新 Provider Catalog：轻量 Provider 与 Canonical Model 索引以同一 revision 原子更新，Provider-scoped inventory 仅在需要时加载。Catalog Provider 使用其 scoped inventory；账号级 discovery 仍决定可调用的模型 ID，Core 只为精确匹配补充元数据，不会加入仅存在于 Catalog 的模型。
+客户端发送一个 **Model ID**。该值就是 Route ID，匹配时包含字母大小写在内完全精确。逻辑 Model 还可以设置可选、可重复的展示名称；展示为空时回退到 Model ID，并且永不参与路由、授权或绑定。对应 Route 可以包含一个或多个 Target，并使用 weighted、priority、cooldown 或 latency 选择策略。Stravia 从 revisioned `models.stravia.cn` 索引刷新 Provider Catalog：轻量 Provider 与 Canonical Model 索引以同一 revision 原子更新，Provider-scoped inventory 仅在需要时加载。Catalog Provider 使用其 scoped inventory；账号级 discovery 仍决定可调用的模型 ID，Core 只为精确匹配补充元数据，不会加入仅存在于 Catalog 的模型。
 
 添加提供商时，先选择完整的提供商/通道选项。API Key 与 OAuth 通道是独立选项，创建后不能互相转换。Codex 与 Claude Code OAuth 在桌面端和通过回环地址访问的 WebUI 中会自动接收回调；远程 WebUI 则会在浏览器登录后要求粘贴完整 callback URL。Grok OAuth 使用 xAI device authorization flow：WebUI 打开验证页面，在需要时显示 user code，并轮询直到授权完成。
 
-WebUI 为每种资源保留唯一编辑表面。添加 Model 或手动 Provider Model 时可以搜索 Canonical Model 模板；选择不会创建 Backend，也不会保存隐藏 binding，所有值仍可编辑。新 Provider 保存后会进入详情页并开始同步 Provider Model；详情视图分别管理连接设置、持久化 Provider Model 清单和 Route 引用。Provider Model metadata 在独立抽屉中保存，Selection Policy 则立即生效，并且只控制新 Target 候选的 Effective Availability。Provider Model 变为不可用不会改写已有 Route Target。管理员可以从精确 Provider Catalog Entry 显式 re-import 已发现的 Provider Model；普通同步不会覆盖本地 metadata。
+WebUI 为每种资源保留唯一编辑表面。添加或编辑逻辑 Model 时，Model ID 组合框可以按名称或 ID 搜索 Canonical Model，并在目录不可用时继续接受自定义 ID；选择模板会复制其展示名称，两个字段都可继续编辑。手动 Provider Model 仍可搜索 Canonical Model 模板；选择不会创建 Backend，也不会保存隐藏 binding。新 Provider 保存后会进入详情页并开始同步 Provider Model；详情视图分别管理连接设置、持久化 Provider Model 清单和 Route 引用。Provider Model metadata 在独立抽屉中保存，Selection Policy 则立即生效，并且只控制新 Target 候选的 Effective Availability。Provider Model 变为不可用不会改写已有 Route Target。管理员可以从精确 Provider Catalog Entry 显式 re-import 已发现的 Provider Model；普通同步不会覆盖本地 metadata。
 
 连接页面生成基于 Open Responses 的 OpenCode provider。Claude Code 配置会在所选默认 Route 声明的能力可由 Claude Code 表达时，自动写入 `effortLevel` 和 `autoCompactWindow`。
 

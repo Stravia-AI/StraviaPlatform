@@ -768,7 +768,8 @@ test('Provider detail separates connection, inventory, references, and guarded m
   }
   const routeModel = {
     id: 'route-detail',
-    name: 'client-model',
+    model_id: 'client-model',
+    display_name: 'Client model',
     balance: 'priority',
     target_provider: provider.id,
     target_model: unavailable.id,
@@ -889,7 +890,12 @@ test('Provider detail separates connection, inventory, references, and guarded m
   await expect(modelTable.locator('input')).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Show filter menu for Model availability' })).toBeVisible()
   await expect
-    .poll(() => modelTable.getByRole('columnheader').first().evaluate((header) => Math.round(header.getBoundingClientRect().height)))
+    .poll(() =>
+      modelTable
+        .getByRole('columnheader')
+        .first()
+        .evaluate((header) => Math.round(header.getBoundingClientRect().height)),
+    )
     .toBeLessThanOrEqual(56)
   await expect(page.getByRole('row').filter({ hasText: /GPT Test.*openai\/gpt-test/ })).toBeVisible()
   await expect(page.getByRole('row').filter({ hasText: /Retired Model.*retired-model/ })).toHaveCount(0)
@@ -913,17 +919,13 @@ test('Provider detail separates connection, inventory, references, and guarded m
   await page.getByRole('button', { name: 'Cancel', exact: true }).click()
   await page.getByRole('button', { name: 'Show filter menu for Model availability' }).click()
   let availabilityFilterDialog = page.getByRole('dialog', { name: 'Filter by Model availability' })
-  await availabilityFilterDialog
-    .locator('[data-slot="select-trigger"][aria-label="Model availability"]')
-    .click()
+  await availabilityFilterDialog.locator('[data-slot="select-trigger"][aria-label="Model availability"]').click()
   await page.getByRole('option', { name: 'All models', exact: true }).click()
   await expect(page.getByRole('row').filter({ hasText: /Retired Model.*retired-model/ })).toHaveCount(0)
   await availabilityFilterDialog.getByRole('button', { name: 'Apply' }).click()
   const filterColumnStarts = await modelTable
     .getByRole('columnheader')
-    .evaluateAll((columns) =>
-      columns.slice(0, 4).map((column) => Math.round(column.getBoundingClientRect().left)),
-  )
+    .evaluateAll((columns) => columns.slice(0, 4).map((column) => Math.round(column.getBoundingClientRect().left)))
   const modelRowColumns = await Promise.all(
     [
       page.getByRole('row').filter({ hasText: /GPT Test.*openai\/gpt-test/ }),
@@ -931,9 +933,7 @@ test('Provider detail separates connection, inventory, references, and guarded m
     ].map((row) =>
       row
         .locator(':scope > td')
-        .evaluateAll((columns) =>
-          columns.slice(0, 4).map((column) => Math.round(column.getBoundingClientRect().left)),
-        ),
+        .evaluateAll((columns) => columns.slice(0, 4).map((column) => Math.round(column.getBoundingClientRect().left))),
     ),
   )
   expect(modelRowColumns).toEqual([filterColumnStarts, filterColumnStarts])
@@ -949,9 +949,7 @@ test('Provider detail separates connection, inventory, references, and guarded m
 
   await page.getByRole('button', { name: 'Show filter menu for Model availability' }).click()
   availabilityFilterDialog = page.getByRole('dialog', { name: 'Filter by Model availability' })
-  await availabilityFilterDialog
-    .locator('[data-slot="select-trigger"][aria-label="Model availability"]')
-    .click()
+  await availabilityFilterDialog.locator('[data-slot="select-trigger"][aria-label="Model availability"]').click()
   await page.getByRole('option', { name: 'Unavailable', exact: true }).click()
   await availabilityFilterDialog.getByRole('button', { name: 'Apply' }).click()
   await page.locator('#provider-model-search-desktop').fill('retired')
@@ -996,9 +994,7 @@ test('Provider detail separates connection, inventory, references, and guarded m
   await page.goto(`/providers/${provider.id}?view=models`)
   await page.getByRole('button', { name: 'Show filter menu for Model availability' }).click()
   availabilityFilterDialog = page.getByRole('dialog', { name: 'Filter by Model availability' })
-  await availabilityFilterDialog
-    .locator('[data-slot="select-trigger"][aria-label="Model availability"]')
-    .click()
+  await availabilityFilterDialog.locator('[data-slot="select-trigger"][aria-label="Model availability"]').click()
   await page.getByRole('option', { name: 'Unavailable', exact: true }).click()
   await availabilityFilterDialog.getByRole('button', { name: 'Apply' }).click()
   await page
@@ -1027,7 +1023,8 @@ test('dependency previews block referenced Provider deletion and explain Route d
   const safeProvider = { ...provider, id: 'provider-safe', name: 'Safe Provider' }
   const routeModel = {
     id: 'route-used',
-    name: 'used-route',
+    model_id: 'used-route',
+    display_name: null,
     balance: 'priority',
     target_provider: provider.id,
     target_model: 'upstream',
@@ -1093,9 +1090,9 @@ test('dependency previews block referenced Provider deletion and explain Route d
   await expect.poll(() => providerDeletes).toBe(1)
 
   await page.goto('/models')
-  await page.getByRole('button', { name: `More actions for ${routeModel.name}` }).click()
+  await page.getByRole('button', { name: `More actions for ${routeModel.model_id}` }).click()
   await page.getByRole('menuitem', { name: 'Delete model…' }).click()
-  await expect(page.getByRole('alertdialog', { name: `Delete ${routeModel.name}?` })).toBeVisible()
+  await expect(page.getByRole('alertdialog', { name: `Delete ${routeModel.model_id}?` })).toBeVisible()
   await expect(page.getByText('1 API Key permission will be removed')).toBeVisible()
   await expect(page.getByText('Production key', { exact: true })).toBeVisible()
   await page.getByRole('button', { name: 'Cancel' }).click()
@@ -1204,7 +1201,8 @@ test('unused provider models create a matching model or append a destination', a
   let routes = [
     {
       id: 'route-existing',
-      name: 'gpt-existing',
+      model_id: 'gpt-existing',
+      display_name: null,
       balance: 'weighted',
       target_provider: 'provider-secondary',
       target_model: 'gpt-existing',
@@ -1271,7 +1269,8 @@ test('unused provider models create a matching model or append a destination', a
       }
       const created = {
         id: 'route-new',
-        name: 'gpt-new',
+        model_id: 'gpt-new',
+        display_name: null,
         balance: 'weighted',
         target_provider: provider.id,
         target_model: 'gpt-new',

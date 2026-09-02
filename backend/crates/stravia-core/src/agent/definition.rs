@@ -547,7 +547,7 @@ mod tests {
         .execute(&pool)
         .await
         .expect("insert Provider");
-        sqlx::query("INSERT INTO models (id, name) VALUES ('model-1', 'Model')")
+        sqlx::query("INSERT INTO models (id, model_id) VALUES ('model-1', 'Model')")
             .execute(&pool)
             .await
             .expect("insert Model");

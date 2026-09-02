@@ -755,7 +755,8 @@ async fn catalog_provider_without_dedicated_vendor_adapter_reaches_upstream() {
     gateway
         .admin()
         .create_model(CreateRoute {
-            name: "gpt-5.4".into(),
+            model_id: "gpt-5.4".into(),
+            display_name: None,
             balance: None,
             target_provider: provider.id,
             target_model: "glm-5".into(),
@@ -970,7 +971,8 @@ async fn unrepresentable_thinking_control_is_a_typed_422_before_upstream() {
         .routes()
         .put(crate::db::models::PutRoute {
             id: Some(route.id.clone()),
-            route_id: route.name.clone(),
+            model_id: route.model_id.clone(),
+            display_name: route.display_name.clone(),
             selection_strategy: route.balance.clone(),
             is_enabled: route.is_enabled,
             targets: vec![CreateTarget {
@@ -1059,7 +1061,7 @@ async fn explicit_thinking_is_rejected_when_the_route_opens_no_levels() {
     gateway
         .admin()
         .update_model(
-            &route.name,
+            &route.model_id,
             crate::db::models::UpdateRoute {
                 targets: Some(targets),
                 ..Default::default()
@@ -1139,7 +1141,7 @@ async fn failover_remaps_the_same_clamped_level_for_the_next_target() {
     gateway
         .admin()
         .update_model(
-            &route.name,
+            &route.model_id,
             crate::db::models::UpdateRoute {
                 targets: Some(targets),
                 ..Default::default()

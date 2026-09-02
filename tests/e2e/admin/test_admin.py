@@ -116,15 +116,23 @@ def _create_provider(env: dict[str, str], name: str) -> str:
     return provider_id
 
 
-def _create_model(env: dict[str, str], provider_id: str, name: str) -> str:
+def _create_model(
+    env: dict[str, str],
+    provider_id: str,
+    model_id: str,
+    display_name: str | None = None,
+) -> str:
+    payload: dict[str, Any] = {
+        "model_id": model_id,
+        "target_provider": provider_id,
+        "target_model": "gpt-4o-mini",
+    }
+    if display_name is not None:
+        payload["display_name"] = display_name
     status, resp = http_request(
         "POST",
         f"{env['admin']}/api/v1/models",
-        payload={
-            "name": name,
-            "target_provider": provider_id,
-            "target_model": "gpt-4o-mini",
-        },
+        payload=payload,
         headers=env["auth"],
     )
     assert status == 200, f"create model failed: {status} {resp}"
@@ -352,12 +360,51 @@ def test_provider_crud(admin_env: dict[str, str]) -> None:
 @pytest.mark.admin
 def test_model_crud(admin_env: dict[str, str]) -> None:
     provider_id = _create_provider(admin_env, "test-provider-model")
-    model_id = _create_model(admin_env, provider_id, "test-model")
+    route_storage_id = _create_model(admin_env, provider_id, "test-model", "Test model")
+    unnamed_storage_id = _create_model(admin_env, provider_id, "test-model-unnamed")
 
     status, resp = http_request("GET", f"{admin_env['admin']}/api/v1/models", headers=admin_env["auth"])
     assert status == 200
-    ids = [item["id"] for item in resp.get("data", [])]
-    assert model_id in ids
+    route = next(item for item in resp.get("data", []) if item["id"] == route_storage_id)
+    assert route["model_id"] == "test-model"
+    assert route["display_name"] == "Test model"
+    assert "name" not in route
+    unnamed_route = next(item for item in resp.get("data", []) if item["id"] == unnamed_storage_id)
+    assert unnamed_route["model_id"] == "test-model-unnamed"
+    assert unnamed_route["display_name"] is None
+
+    status, resp = http_request(
+        "GET",
+        f"{admin_env['admin']}/api/v1/models/test-model",
+        headers=admin_env["auth"],
+    )
+    assert status == 200
+    assert resp["data"]["model_id"] == "test-model"
+
+    status, resp = http_request(
+        "PUT",
+        f"{admin_env['admin']}/api/v1/models/test-model",
+        payload={"model_id": "test-model", "display_name": "   "},
+        headers=admin_env["auth"],
+    )
+    assert status == 200
+    assert resp["data"]["display_name"] is None
+    assert resp["data"]["model_id"] == "test-model"
+
+    duplicate_id = _create_model(admin_env, provider_id, "test-model-duplicate", "Test model")
+    assert duplicate_id != route_storage_id
+
+    status, _ = http_request(
+        "POST",
+        f"{admin_env['admin']}/api/v1/models",
+        payload={
+            "name": "legacy-model",
+            "target_provider": provider_id,
+            "target_model": "gpt-4o-mini",
+        },
+        headers=admin_env["auth"],
+    )
+    assert status >= 400
 
 
 @pytest.mark.e2e

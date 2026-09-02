@@ -51,7 +51,8 @@ impl RouteModule<'_> {
         Ok(route)
     }
     pub(super) async fn create_record(&self, input: CreateRoute) -> anyhow::Result<Route> {
-        let route_id = normalize_name(&input.name, "model ID sent by clients")?;
+        let route_id = normalize_name(&input.model_id, "model ID sent by clients")?;
+        let display_name = normalize_display_name(input.display_name.as_deref());
         let selection_strategy = normalize_model_balance(input.balance.as_deref())?;
         let targets = normalize_create_route_targets(&input)?;
         ensure_route_targets_valid(&targets)?;
@@ -62,14 +63,15 @@ impl RouteModule<'_> {
             .routes()
             .put(PutRoute {
                 id: None,
-                route_id,
+                model_id: route_id,
+                display_name,
                 selection_strategy,
                 is_enabled: true,
                 targets,
             })
             .await?;
         self.after_write().await?;
-        self.get(&route.name).await
+        self.get(&route.model_id).await
     }
 
     pub(super) async fn change_record(
@@ -79,9 +81,14 @@ impl RouteModule<'_> {
     ) -> anyhow::Result<Route> {
         let current = self.get(route_id).await?;
         let next_route_id = normalize_name(
-            input.name.as_deref().unwrap_or(&current.name),
+            input.model_id.as_deref().unwrap_or(&current.model_id),
             "model ID sent by clients",
         )?;
+        let display_name = if input.display_name.is_some() {
+            normalize_display_name(input.display_name.as_deref())
+        } else {
+            current.display_name.clone()
+        };
         let selection_strategy =
             normalize_model_balance(input.balance.as_deref().or(Some(&current.balance)))?;
         let targets = normalize_update_route_targets(&current, &input)?;
@@ -93,14 +100,15 @@ impl RouteModule<'_> {
             .routes()
             .put(PutRoute {
                 id: Some(current.id),
-                route_id: next_route_id,
+                model_id: next_route_id,
+                display_name,
                 selection_strategy,
                 is_enabled: input.is_enabled.unwrap_or(current.is_enabled),
                 targets,
             })
             .await?;
         self.after_write().await?;
-        self.get(&route.name).await
+        self.get(&route.model_id).await
     }
 
     pub(super) async fn delete_record(&self, route_id: &str) -> anyhow::Result<()> {
@@ -183,6 +191,13 @@ impl RouteModule<'_> {
         }
         Ok(())
     }
+}
+
+fn normalize_display_name(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn common_target_limit(

@@ -7,7 +7,7 @@
 //! This file now contains only `models_list`, which is a read-only endpoint
 //! that does not go through the proxy pipeline.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 
 use axum::Json;
 use axum::extract::State;
@@ -31,24 +31,27 @@ pub async fn models_list(State(gw): State<Gateway>, headers: HeaderMap) -> Respo
     let unrestricted_model_access = accessible_route_ids.is_empty();
 
     let cache = gw.model_cache.read().await;
-    let models = cache
+    let mut models = cache
         .models
         .iter()
         .filter(|model| unrestricted_model_access || accessible_route_ids.contains(&model.id))
-        .filter(|model| !model.name.trim().is_empty())
+        .filter(|model| !model.model_id.trim().is_empty())
         .map(|model| {
             (
-                model.name.trim().to_string(),
+                model.model_id.trim().to_string(),
+                model.effective_display_name().to_string(),
                 model.supported_thinking_levels.0.clone(),
             )
         })
-        .collect::<BTreeMap<_, _>>();
+        .collect::<Vec<_>>();
+    models.sort_by(|left, right| left.1.cmp(&right.1).then(left.0.cmp(&right.0)));
 
     let data = models
         .into_iter()
-        .map(|(model, thinking_levels)| {
+        .map(|(model_id, display_name, thinking_levels)| {
             let mut value = serde_json::json!({
-                "id": model,
+                "id": model_id,
+                "display_name": display_name,
                 "object": "model",
                 "created": 0,
                 "owned_by": "Stravia"
@@ -140,8 +143,9 @@ mod tests {
             )
             .await
             .expect("Provider Model");
-        let create_model = |name: &str| CreateRoute {
-            name: name.into(),
+        let create_model = |model_id: &str, display_name: Option<&str>| CreateRoute {
+            model_id: model_id.into(),
+            display_name: display_name.map(ToOwned::to_owned),
             balance: Some("priority".into()),
             target_provider: String::new(),
             target_model: String::new(),
@@ -155,14 +159,19 @@ mod tests {
         };
         let unbound = gateway
             .admin()
-            .create_model(create_model("unbound-model"))
+            .create_model(create_model("unbound-model", Some("Shared label")))
             .await
             .expect("unbound model");
         let bound = gateway
             .admin()
-            .create_model(create_model("bound-model"))
+            .create_model(create_model("bound-model", Some("Shared label")))
             .await
             .expect("bound model");
+        gateway
+            .admin()
+            .create_model(create_model("unnamed-model", None))
+            .await
+            .expect("unnamed model");
         let key = gateway
             .admin()
             .create_api_key(crate::db::models::CreateApiKey {
@@ -216,6 +225,7 @@ mod tests {
         );
         let listed =
             listed_models(models_list(State(gateway.clone()), valid_headers.clone()).await).await;
+        assert_eq!(listed[0]["display_name"], "Shared label");
         assert_eq!(
             listed[0]["stravia:thinking_levels"],
             serde_json::json!(["off", "minimal", "low", "medium", "high"])
@@ -246,7 +256,17 @@ mod tests {
         assert_eq!(
             listed_model_ids(models_list(State(gateway.clone()), valid_headers.clone()).await)
                 .await,
-            ["bound-model", "unbound-model"]
+            ["bound-model", "unbound-model", "unnamed-model"]
+        );
+        let listed =
+            listed_models(models_list(State(gateway.clone()), valid_headers.clone()).await).await;
+        assert_eq!(
+            listed
+                .iter()
+                .map(|model| model["display_name"].as_str().expect("display name"))
+                .collect::<Vec<_>>(),
+            ["Shared label", "Shared label", "unnamed-model"],
+            "duplicate display names must not collapse distinct Model IDs"
         );
 
         let targets = bound
@@ -270,7 +290,7 @@ mod tests {
         gateway
             .admin()
             .update_model(
-                &bound.name,
+                &bound.model_id,
                 crate::db::models::UpdateRoute {
                     targets: Some(targets),
                     ..Default::default()
@@ -333,7 +353,8 @@ mod tests {
             Vec::new(),
             vec![Route {
                 id: "model-id".into(),
-                name: "model".into(),
+                model_id: "model".into(),
+                display_name: None,
                 balance: "priority".into(),
                 target_provider: String::new(),
                 target_model: String::new(),

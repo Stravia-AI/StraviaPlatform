@@ -8,6 +8,7 @@ import { toast } from 'svelte-sonner'
 import { admin } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
 import { getDataTableLabels } from '$lib/data-table-labels'
+import { effectiveModelDisplayName, logicalModelSecondaryId, sortLogicalModels } from '$lib/logical-model'
 import {
   computeTps,
   formatDuration,
@@ -76,15 +77,16 @@ const logsQuery = createQuery(() => ({
 }))
 
 const logs = $derived(logsQuery.data?.items ?? [])
+const models = $derived(sortLogicalModels(modelsQuery.data ?? []))
 const total = $derived(logsQuery.data?.total ?? 0)
 const pageCount = $derived(Math.max(1, Math.ceil(total / pageSize)))
 const tableLabels = $derived(getDataTableLabels())
+const modelDisplayName = (modelId: string | undefined) => {
+  const model = models.find((candidate) => candidate.id === modelId)
+  return model ? effectiveModelDisplayName(model) : undefined
+}
 const modelLabel = (log: RequestLog) =>
-  log.model_name ??
-  modelsQuery.data?.find((model) => model.id === log.model_id)?.name ??
-  log.model_id ??
-  log.client_model ??
-  '–'
+  log.model_name ?? modelDisplayName(log.model_id) ?? log.model_id ?? log.client_model ?? '–'
 const providerLabel = (log: RequestLog) =>
   log.provider_name ??
   providersQuery.data?.find((provider) => provider.id === log.provider_id)?.name ??
@@ -144,11 +146,7 @@ const logColumns = logColumnHelper.columns([
       header: () => m.common_latency(),
       cell: (context) => renderSnippet(latencyCell, context),
       enableSorting: false,
-      meta: {
-        label: () => m.common_latency(),
-        align: 'end',
-        cellClass: 'whitespace-nowrap',
-      },
+      meta: { label: () => m.common_latency(), align: 'end', cellClass: 'whitespace-nowrap' },
       size: 152,
     },
   ),
@@ -168,10 +166,7 @@ const logColumns = logColumnHelper.columns([
     header: () => m.common_token(),
     cell: (context) => renderSnippet(tokenUsageCell, context),
     enableSorting: false,
-    meta: {
-      label: () => m.common_token(),
-      cellClass: 'whitespace-nowrap',
-    },
+    meta: { label: () => m.common_token(), cellClass: 'whitespace-nowrap' },
     size: 156,
   }),
   logColumnHelper.display({
@@ -202,11 +197,7 @@ const activeFilters = $derived.by(() => {
     })
   }
   if (modelFilter !== 'all') {
-    filters.push({
-      key: 'model',
-      label: m.common_model(),
-      value: modelsQuery.data?.find((model) => model.id === modelFilter)?.name ?? modelFilter,
-    })
+    filters.push({ key: 'model', label: m.common_model(), value: modelDisplayName(modelFilter) ?? modelFilter })
   }
   if (apiKeyFilter !== 'all') {
     filters.push({
@@ -312,13 +303,17 @@ async function clearRequests(): Promise<void> {
 {/snippet}
 
 {#snippet tokenUsage(log: RequestLog)}
-  <span title={m.logs_input_tokens()}><span class="text-muted-foreground">{m.common_input_abbreviation()}</span>
+  <span title={m.logs_input_tokens()}
+    ><span class="text-muted-foreground">{m.common_input_abbreviation()}</span>
     {formatTokenCount(log.input_tokens)}</span>
-  <span title={m.logs_output_tokens()}><span class="text-muted-foreground">{m.common_output_abbreviation()}</span>
+  <span title={m.logs_output_tokens()}
+    ><span class="text-muted-foreground">{m.common_output_abbreviation()}</span>
     {formatTokenCount(log.output_tokens)}</span>
-  <span title={m.logs_cache_input_tokens()}><span class="text-muted-foreground">C-IN</span>
+  <span title={m.logs_cache_input_tokens()}
+    ><span class="text-muted-foreground">C-IN</span>
     {formatTokenCount(log.cache_read_tokens)}</span>
-  <span title={m.logs_cache_output_tokens()}><span class="text-muted-foreground">C-OUT</span>
+  <span title={m.logs_cache_output_tokens()}
+    ><span class="text-muted-foreground">C-OUT</span>
     {formatTokenCount(log.cache_write_tokens)}</span>
 {/snippet}
 
@@ -370,15 +365,19 @@ async function clearRequests(): Promise<void> {
     <Field.FieldLabel for="request-model-filter">{m.common_model()}</Field.FieldLabel>
     <Select.Root type="single" bind:value={modelFilter}>
       <Select.Trigger id="request-model-filter" class="w-full"
-        >{modelsQuery.data?.find((model) => model.id === modelFilter)?.name ?? m.common_all_models()}</Select.Trigger>
+        >{modelDisplayName(modelFilter) ?? m.common_all_models()}</Select.Trigger>
       <Select.Content
         ><Select.Group
           ><Select.Item value="all" onclick={resetPage}>{m.common_all_models()}</Select.Item
-          >{#each modelsQuery.data ?? [] as model (model.id)}<Select.Item
+          >{#each models as model (model.id)}<Select.Item
               value={model.id}
-              label={model.name}
-              onclick={resetPage}>{model.name}</Select.Item
-            >{/each}</Select.Group
+              label={effectiveModelDisplayName(model)}
+              onclick={resetPage}>
+              <span class="min-w-0 flex-1 truncate">{effectiveModelDisplayName(model)}</span>
+              {#if logicalModelSecondaryId(model)}
+                <span class="truncate font-technical text-xs text-muted-foreground">{model.model_id}</span>
+              {/if}
+            </Select.Item>{/each}</Select.Group
         ></Select.Content>
     </Select.Root>
   </Field.Field>

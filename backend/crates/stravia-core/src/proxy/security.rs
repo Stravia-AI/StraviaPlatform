@@ -470,7 +470,8 @@ mod tests {
     fn protected_model() -> Route {
         Route {
             id: "protected-model-id".into(),
-            name: "protected-model".into(),
+            model_id: "protected-model".into(),
+            display_name: None,
             balance: "priority".into(),
             target_provider: String::new(),
             target_model: String::new(),

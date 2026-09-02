@@ -1,16 +1,13 @@
 import { describe, expect, test } from 'bun:test'
 
-import {
-  buildRouteTargets,
-  createRouteTarget,
-  createRouteTargetForms,
-} from '../src/lib/components/route-targets-form'
+import { buildRouteTargets, createRouteTarget, createRouteTargetForms } from '../src/lib/components/route-targets-form'
 import type { Route } from '../src/lib/types'
 
 function routeWithTargets(): Route {
   return {
     id: 'route-id',
-    name: 'route',
+    model_id: 'route',
+    display_name: null,
     balance: 'priority',
     target_provider: 'provider-a',
     target_model: 'model-a',
@@ -69,9 +66,7 @@ describe('route targets form', () => {
         model: 'model-a',
         weight: 100,
         priority: 1,
-        thinking_level_map: [
-          { level: 'high', control: { type: 'effort', value: 'high' }, source: 'overridden' },
-        ],
+        thinking_level_map: [{ level: 'high', control: { type: 'effort', value: 'high' }, source: 'overridden' }],
       },
     ])
   })

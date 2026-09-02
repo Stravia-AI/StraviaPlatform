@@ -29,7 +29,7 @@ pub(crate) async fn model_is_image_capable(
     }
     for target in targets {
         let actual_model = if target.model.is_empty() || target.model == "*" {
-            model.name.as_str()
+            model.model_id.as_str()
         } else {
             target.model.as_str()
         };

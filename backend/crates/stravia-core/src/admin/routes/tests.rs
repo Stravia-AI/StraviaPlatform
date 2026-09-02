@@ -150,6 +150,24 @@ async fn route_fixture() -> anyhow::Result<(tempfile::TempDir, Gateway, Provider
     route_fixture_with_protocol("openai").await
 }
 
+#[test]
+fn route_wire_inputs_use_model_id_and_reject_legacy_name() {
+    let current = serde_json::from_value::<CreateRoute>(json!({
+        "model_id": "client-model",
+        "display_name": "Friendly model",
+        "target_provider": "provider",
+        "target_model": "upstream-model"
+    }));
+    assert!(current.is_ok(), "current Route contract must deserialize");
+
+    let legacy = serde_json::from_value::<CreateRoute>(json!({
+        "name": "client-model",
+        "target_provider": "provider",
+        "target_model": "upstream-model"
+    }));
+    assert!(legacy.is_err(), "legacy name input must be rejected");
+}
+
 #[tokio::test]
 async fn one_click_bind_is_idempotent_and_uses_upstream_id_as_route_id() -> anyhow::Result<()> {
     let (_data_dir, gateway, provider) = route_fixture().await?;
@@ -177,7 +195,7 @@ async fn one_click_bind_is_idempotent_and_uses_upstream_id_as_route_id() -> anyh
     let second = routes.bind(input).await?;
 
     assert_eq!(first.id, second.id);
-    assert_eq!(first.name, "upstream-model");
+    assert_eq!(first.model_id, "upstream-model");
     assert_eq!(second.targets.len(), 1);
     assert_eq!(second.targets[0].provider_id, provider.id);
     assert_eq!(second.targets[0].model, "upstream-model");
@@ -209,7 +227,7 @@ async fn route_ids_are_compared_exactly_when_binding() -> anyhow::Result<()> {
         .list()
         .await?
         .into_iter()
-        .map(|route| route.name)
+        .map(|route| route.model_id)
         .collect::<Vec<_>>();
     assert_eq!(route_ids.len(), 2);
     assert!(route_ids.iter().any(|route_id| route_id == "CaseRoute"));
@@ -243,6 +261,54 @@ async fn route_get_uses_exact_route_id_and_never_storage_id() -> anyhow::Result<
 }
 
 #[tokio::test]
+async fn route_display_name_is_optional_normalized_and_not_an_identity() -> anyhow::Result<()> {
+    let (_data_dir, gateway, provider) = route_fixture().await?;
+    let admin = gateway.admin();
+    let create = |model_id: &str| CreateRoute {
+        model_id: model_id.into(),
+        display_name: Some("  Shared label  ".into()),
+        balance: Some("priority".into()),
+        target_provider: provider.id.clone(),
+        target_model: "upstream-model".into(),
+        targets: Vec::new(),
+    };
+
+    let first = admin
+        .create_model(create("  CaseSensitive/Model  "))
+        .await?;
+    let second = admin.create_model(create("other-model")).await?;
+    assert_eq!(first.model_id, "CaseSensitive/Model");
+    assert_eq!(first.display_name.as_deref(), Some("Shared label"));
+    assert_eq!(second.display_name.as_deref(), Some("Shared label"));
+
+    let renamed = admin
+        .update_model(
+            &first.model_id,
+            UpdateRoute {
+                display_name: Some("   ".into()),
+                ..Default::default()
+            },
+        )
+        .await?;
+    assert_eq!(renamed.id, first.id);
+    assert_eq!(renamed.model_id, "CaseSensitive/Model");
+    assert!(renamed.display_name.is_none());
+    assert_eq!(renamed.effective_display_name(), "CaseSensitive/Model");
+    assert!(admin.get_model("casesensitive/model").await.is_err());
+    assert_eq!(
+        gateway
+            .model_cache
+            .read()
+            .await
+            .match_model("CaseSensitive/Model")
+            .expect("cached Route")
+            .id,
+        first.id
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn unavailable_provider_model_cannot_be_bound_as_a_new_target() -> anyhow::Result<()> {
     let (_data_dir, gateway, provider) = route_fixture().await?;
     let admin = gateway.admin();
@@ -271,7 +337,8 @@ async fn unavailable_provider_model_cannot_be_bound_as_a_new_target() -> anyhow:
     assert!(error.to_string().contains("not available"));
     let change_error = admin
         .create_model(CreateRoute {
-            name: "manual-route".into(),
+            model_id: "manual-route".into(),
+            display_name: None,
             balance: None,
             target_provider: provider.id.clone(),
             target_model: "upstream-model".into(),
@@ -297,7 +364,8 @@ async fn missing_provider_model_cannot_be_added_as_a_new_target() -> anyhow::Res
 
     let error = admin
         .create_model(CreateRoute {
-            name: "missing-model-route".into(),
+            model_id: "missing-model-route".into(),
+            display_name: None,
             balance: None,
             target_provider: provider.id,
             target_model: "missing-model".into(),
@@ -357,7 +425,8 @@ async fn route_generates_seven_rows_seeds_levels_and_resets_one_override() -> an
         .await?;
     let route = admin
         .create_model(CreateRoute {
-            name: "thinking-route".into(),
+            model_id: "thinking-route".into(),
+            display_name: None,
             balance: None,
             target_provider: provider.id.clone(),
             target_model: "effort-model".into(),
@@ -389,7 +458,7 @@ async fn route_generates_seven_rows_seeds_levels_and_resets_one_override() -> an
     low.control = crate::thinking::TargetThinkingControl::Hidden;
     let updated = admin
         .update_model(
-            &route.name,
+            &route.model_id,
             UpdateRoute {
                 targets: Some(targets),
                 ..UpdateRoute::default()
@@ -408,7 +477,7 @@ async fn route_generates_seven_rows_seeds_levels_and_resets_one_override() -> an
     assert_eq!(low.source, ThinkingMappingSource::Overridden);
 
     let reset = admin
-        .reset_target_thinking_mapping(&route.name, &updated.targets[0].id, ThinkingLevel::Low)
+        .reset_target_thinking_mapping(&route.model_id, &updated.targets[0].id, ThinkingLevel::Low)
         .await?;
     let low = reset.targets[0]
         .thinking_level_map
@@ -456,7 +525,8 @@ async fn open_responses_accepts_max_effort_map() -> anyhow::Result<()> {
 
     let route = admin
         .create_model(CreateRoute {
-            name: "max-effort-route".into(),
+            model_id: "max-effort-route".into(),
+            display_name: None,
             balance: None,
             target_provider: provider.id,
             target_model: "max-effort-model".into(),
@@ -510,7 +580,8 @@ async fn create_openai_compatible_toggle_route(vendor: &str, model: &str) -> any
 
     admin
         .create_model(CreateRoute {
-            name: model.into(),
+            model_id: model.into(),
+            display_name: None,
             balance: None,
             target_provider: provider.id,
             target_model: model.into(),
@@ -584,7 +655,8 @@ async fn gemini_accepts_generated_effort_maps() -> anyhow::Result<()> {
 
     let route = admin
         .create_model(CreateRoute {
-            name: "gemini-thinking-route".into(),
+            model_id: "gemini-thinking-route".into(),
+            display_name: None,
             balance: None,
             target_provider: provider.id,
             target_model: "gemini-effort-model".into(),
@@ -646,7 +718,8 @@ async fn supported_levels_are_the_intersection_of_all_targets() -> anyhow::Resul
 
     let route = admin
         .create_model(CreateRoute {
-            name: "intersection-route".into(),
+            model_id: "intersection-route".into(),
+            display_name: None,
             balance: None,
             target_provider: provider.id.clone(),
             target_model: "wide-effort-model".into(),
@@ -711,7 +784,8 @@ async fn regenerate_updates_derived_supported_levels() -> anyhow::Result<()> {
         .await?;
     let route = admin
         .create_model(CreateRoute {
-            name: "toggle-route".into(),
+            model_id: "toggle-route".into(),
+            display_name: None,
             balance: None,
             target_provider: provider.id,
             target_model: "toggle-model".into(),
@@ -729,7 +803,7 @@ async fn regenerate_updates_derived_supported_levels() -> anyhow::Result<()> {
     };
     let updated = admin
         .update_model(
-            &route.name,
+            &route.model_id,
             UpdateRoute {
                 targets: Some(targets),
                 ..UpdateRoute::default()
@@ -746,7 +820,7 @@ async fn regenerate_updates_derived_supported_levels() -> anyhow::Result<()> {
     );
 
     let regenerated = admin
-        .regenerate_target_thinking_map(&route.name, &updated.targets[0].id)
+        .regenerate_target_thinking_map(&route.model_id, &updated.targets[0].id)
         .await?;
     assert_eq!(
         regenerated.supported_thinking_levels.0,
@@ -761,7 +835,8 @@ async fn refresh_regenerates_only_generated_rows() -> anyhow::Result<()> {
     let admin = gateway.admin();
     let route = admin
         .create_model(CreateRoute {
-            name: "refresh-route".into(),
+            model_id: "refresh-route".into(),
+            display_name: None,
             balance: None,
             target_provider: provider.id.clone(),
             target_model: "upstream-model".into(),
@@ -779,7 +854,7 @@ async fn refresh_regenerates_only_generated_rows() -> anyhow::Result<()> {
     };
     let route = admin
         .update_model(
-            &route.name,
+            &route.model_id,
             UpdateRoute {
                 targets: Some(targets),
                 ..UpdateRoute::default()

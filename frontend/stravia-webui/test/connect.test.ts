@@ -13,28 +13,31 @@ import type { Route } from '../src/lib/types'
 
 const models: ClientModelDefinition[] = [
   {
-    name: 'claude-opus',
+    modelId: 'claude-opus',
+    displayName: 'Claude Opus',
     supportedThinkingLevels: ['off', 'high', 'max'],
     supportsImageInput: false,
     contextWindow: 200_000,
     outputMaxTokens: 32_000,
   },
   {
-    name: 'gpt-5.6-sol',
+    modelId: 'gpt-5.6-sol',
+    displayName: 'GPT 5.6 Sol',
     supportedThinkingLevels: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
     supportsImageInput: true,
     contextWindow: 272_000,
     outputMaxTokens: 128_000,
   },
   {
-    name: 'gpt-5.6-luna',
+    modelId: 'gpt-5.6-luna',
+    displayName: 'GPT 5.6 Luna',
     supportedThinkingLevels: ['off', 'low', 'medium', 'high'],
     supportsImageInput: false,
     contextWindow: 196_000,
     outputMaxTokens: 64_000,
   },
 ]
-const modelNames = models.map((model) => model.name)
+const modelIds = models.map((model) => model.modelId)
 
 describe('client configuration generation', () => {
   test('treats an empty API Key model scope as unrestricted', () => {
@@ -89,7 +92,8 @@ describe('client configuration generation', () => {
       apiKey: 'sk-client',
       models: [
         {
-          name: 'small-model',
+          modelId: 'small-model',
+          displayName: 'small-model',
           supportedThinkingLevels: ['off', 'minimal', 'max'],
           supportsImageInput: false,
           contextWindow: 64_000,
@@ -131,14 +135,11 @@ describe('client configuration generation', () => {
     expect(config).toContain('"effort": "none"')
     expect(config).toContain('"effort": "xhigh"')
     const codexCatalog = JSON.parse(config.split('# ~/.codex/stravia-models.json\n')[1]) as {
-      models: Array<{ input_modalities: string[] }>
+      models: Array<{ slug: string; display_name: string; input_modalities: string[] }>
     }
-    expect(codexCatalog.models.map((model) => model.input_modalities)).toEqual([
-      ['text'],
-      ['text', 'image'],
-      ['text'],
-    ])
-    for (const model of modelNames) expect(config).toContain(`"slug": "${model}"`)
+    expect(codexCatalog.models.map((model) => model.input_modalities)).toEqual([['text'], ['text', 'image'], ['text']])
+    for (const model of modelIds) expect(config).toContain(`"slug": "${model}"`)
+    expect(codexCatalog.models[1]).toMatchObject({ slug: 'gpt-5.6-sol', display_name: 'GPT 5.6 Sol' })
   })
 
   test('writes every authorized model to the OpenCode provider', () => {
@@ -156,7 +157,7 @@ describe('client configuration generation', () => {
     expect(Object.keys(json.provider.stravia)).toEqual(['npm', 'models', 'options'])
     expect(json.provider.stravia.npm).toBe('@ai-sdk/open-responses')
     expect(json.model).toBe('stravia/gpt-5.6-luna')
-    expect(Object.keys(json.provider.stravia.models)).toEqual(modelNames)
+    expect(Object.keys(json.provider.stravia.models)).toEqual(modelIds)
     expect(Object.keys(json.provider.stravia.models['gpt-5.6-sol'])).toEqual([
       'reasoning',
       'variants',
@@ -199,7 +200,8 @@ describe('client configuration generation', () => {
     expect(config).toContain('input: ["text","image"]')
     expect(config).toContain('input: ["text"]')
     expect(config).toContain('default: "stravia/gpt-5.6-sol"')
-    for (const model of modelNames) expect(config).toContain(`- id: "${model}"`)
+    for (const model of modelIds) expect(config).toContain(`- id: "${model}"`)
+    expect(config).toContain('- id: "gpt-5.6-sol"\n        name: "GPT 5.6 Sol"')
   })
 
   test('writes every authorized model to the Pi Responses provider', () => {
@@ -221,7 +223,8 @@ describe('client configuration generation', () => {
       api: 'openai-responses',
       authHeader: true,
     })
-    expect(providerConfig.providers.stravia.models.map((model: { id: string }) => model.id)).toEqual(modelNames)
+    expect(providerConfig.providers.stravia.models.map((model: { id: string }) => model.id)).toEqual(modelIds)
+    expect(providerConfig.providers.stravia.models[1].name).toBe('GPT 5.6 Sol')
     expect(providerConfig.providers.stravia.models[1].thinkingLevelMap).toMatchObject({
       off: 'none',
       minimal: 'minimal',
@@ -268,7 +271,8 @@ describe('client configuration generation', () => {
       apiKey: 'sk-client',
       api: 'openai-completions',
     })
-    expect(json.models.providers.stravia.models.map((model: { id: string }) => model.id)).toEqual(modelNames)
+    expect(json.models.providers.stravia.models.map((model: { id: string }) => model.id)).toEqual(modelIds)
+    expect(json.models.providers.stravia.models[1].name).toBe('GPT 5.6 Sol')
     expect(json.models.providers.stravia.models.map((model: { input: string[] }) => model.input)).toEqual([
       ['text'],
       ['text', 'image'],
@@ -293,7 +297,7 @@ describe('client configuration generation', () => {
     expect(config).toContain('default: "gpt-5.6-luna"')
     expect(config).toContain('"gpt-5.6-sol":\n        context_length: 272000\n        supports_vision: true')
     expect(config).toContain('"gpt-5.6-luna":\n        context_length: 196000\n        supports_vision: false')
-    for (const model of modelNames) expect(config).toContain(`"${model}":`)
+    for (const model of modelIds) expect(config).toContain(`"${model}":`)
   })
 
   test('writes a TRAE OpenAI-compatible model binding', () => {
@@ -320,21 +324,16 @@ describe('client configuration generation', () => {
   })
 
   test('writes WorkBuddy models.json and a complete ZCode provider entry', () => {
-    const common = {
-      host: 'http://localhost:5174',
-      apiKey: 'sk-client',
-      models,
-      defaultModel: 'gpt-5.6-sol',
-    }
+    const common = { host: 'http://localhost:5174', apiKey: 'sk-client', models, defaultModel: 'gpt-5.6-sol' }
     const workbuddy = buildCliConfig({ tool: 'workbuddy', ...common, transparentImageInputEnabled: true })
     const zcode = buildCliConfig({ tool: 'zcode', ...common, transparentImageInputEnabled: true })
 
     const workbuddyModels = JSON.parse(workbuddy.split('\n').slice(1).join('\n'))
     expect(workbuddy).toStartWith('# ~/.workbuddy/models.json')
-    expect(workbuddyModels.map((model: { id: string }) => model.id)).toEqual(modelNames)
+    expect(workbuddyModels.map((model: { id: string }) => model.id)).toEqual(modelIds)
     expect(workbuddyModels[1]).toEqual({
       id: 'gpt-5.6-sol',
-      name: 'gpt-5.6-sol',
+      name: 'GPT 5.6 Sol',
       vendor: 'Custom',
       url: 'http://localhost:5174/v1/chat/completions',
       apiKey: 'sk-client',
@@ -344,9 +343,7 @@ describe('client configuration generation', () => {
       supportsImages: true,
       supportsReasoning: true,
       useCustomProtocol: false,
-      reasoning: {
-        supportedEfforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
-      },
+      reasoning: { supportedEfforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] },
     })
 
     const zcodeJson = zcode.slice(zcode.indexOf('{'), zcode.lastIndexOf('}') + 1)
@@ -382,25 +379,16 @@ describe('client configuration generation', () => {
       apiKeyRequired: true,
     })
     expect(zcodeProvider?.source).toBe('custom')
-    expect(Object.keys(zcodeProvider?.models ?? {})).toEqual(modelNames)
+    expect(Object.keys(zcodeProvider?.models ?? {})).toEqual(modelIds)
     expect(zcodeProvider?.models['gpt-5.6-sol']).toEqual({
       reasoning: {
         enabled: true,
         variants: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
         defaultVariant: 'medium',
       },
-      limit: {
-        context: 272000,
-        output: 128000,
-      },
-      modalities: {
-        input: ['text', 'image'],
-        output: ['text'],
-      },
-      zcode: {
-        modalitiesConfigured: true,
-        modified: true,
-      },
+      limit: { context: 272000, output: 128000 },
+      modalities: { input: ['text', 'image'], output: ['text'] },
+      zcode: { modalitiesConfigured: true, modified: true },
     })
     expect(zcode).toContain('# Restart ZCode, then select gpt-5.6-sol as the default model.')
   })
@@ -414,9 +402,7 @@ describe('client configuration generation', () => {
       defaultModel: 'gpt-5.6-sol',
       transparentImageInputEnabled: false,
     })
-    const workbuddyModels = JSON.parse(workbuddy.split('\n').slice(1).join('\n')) as Array<{
-      supportsImages: boolean
-    }>
+    const workbuddyModels = JSON.parse(workbuddy.split('\n').slice(1).join('\n')) as Array<{ supportsImages: boolean }>
 
     expect(workbuddyModels.map((model) => model.supportsImages)).toEqual([false, true, false])
   })
@@ -435,9 +421,11 @@ describe('client configuration generation', () => {
     }
     const [zcodeProvider] = Object.values(zcodeDocument.provider)
 
-    expect(Object.values(zcodeProvider?.models ?? {}).map((model) => model.modalities.input)).toEqual(
-      [['text'], ['text', 'image'], ['text']],
-    )
+    expect(Object.values(zcodeProvider?.models ?? {}).map((model) => model.modalities.input)).toEqual([
+      ['text'],
+      ['text', 'image'],
+      ['text'],
+    ])
   })
 
   test('writes a DeepSeek Harness custom provider', () => {
@@ -491,7 +479,8 @@ describe('client configuration generation', () => {
   test('uses the route-level model capabilities returned by the backend', () => {
     const model = {
       id: 'route',
-      name: 'shared-model',
+      model_id: 'shared-model',
+      display_name: 'Shared Model',
       balance: 'weighted',
       target_provider: 'provider-a',
       target_model: 'upstream-a',
@@ -505,11 +494,39 @@ describe('client configuration generation', () => {
     } satisfies Route
 
     expect(defineClientModel(model)).toEqual({
-      name: 'shared-model',
+      modelId: 'shared-model',
+      displayName: 'Shared Model',
       supportedThinkingLevels: ['off', 'low', 'high'],
       supportsImageInput: true,
       contextWindow: 128_000,
       outputMaxTokens: 32_000,
     })
+  })
+
+  test('falls back to Model ID when a Route has no display name', () => {
+    const model = {
+      id: 'unnamed-route',
+      model_id: 'custom/unnamed-model',
+      display_name: null,
+      balance: 'weighted',
+      target_provider: 'provider-a',
+      target_model: 'upstream-a',
+      is_enabled: true,
+      created_at: '2026-08-05T00:00:00Z',
+      supported_thinking_levels: [],
+      targets: [],
+    } satisfies Route
+
+    const definition = defineClientModel(model)
+    expect(definition.displayName).toBe('custom/unnamed-model')
+    const config = buildCliConfig({
+      tool: 'omp',
+      host: 'http://localhost:5174',
+      apiKey: 'sk-client',
+      models: [definition],
+      defaultModel: definition.modelId,
+      transparentImageInputEnabled: false,
+    })
+    expect(config).toContain('- id: "custom/unnamed-model"\n        name: "custom/unnamed-model"')
   })
 })

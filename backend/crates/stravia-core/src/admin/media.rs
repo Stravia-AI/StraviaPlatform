@@ -24,7 +24,8 @@ pub enum MediaUnderstandingState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct EligibleMediaModel {
     pub id: String,
-    pub name: String,
+    pub model_id: String,
+    pub display_name: String,
     pub supported_thinking_levels: Vec<ThinkingLevel>,
 }
 
@@ -153,13 +154,19 @@ impl AdminService {
             if !crate::media::model_is_image_capable(&self.gw, &model).await {
                 continue;
             }
+            let display_name = model.effective_display_name().to_string();
             eligible.push(EligibleMediaModel {
                 id: model.id,
-                name: model.name,
+                model_id: model.model_id,
+                display_name,
                 supported_thinking_levels: model.supported_thinking_levels.0,
             });
         }
-        eligible.sort_by(|left, right| left.name.cmp(&right.name).then(left.id.cmp(&right.id)));
+        eligible.sort_by(|left, right| {
+            left.display_name
+                .cmp(&right.display_name)
+                .then(left.model_id.cmp(&right.model_id))
+        });
         Ok(eligible)
     }
 
@@ -292,7 +299,8 @@ mod tests {
             .expect("text-only Provider Model");
         let model = admin
             .create_model(crate::db::models::CreateRoute {
-                name: "Visual Route".into(),
+                model_id: "Visual Route".into(),
+                display_name: None,
                 balance: Some("weighted".into()),
                 target_provider: provider.id.clone(),
                 target_model: "vision".into(),
@@ -302,7 +310,8 @@ mod tests {
             .expect("Model");
         let mixed_model = admin
             .create_model(crate::db::models::CreateRoute {
-                name: "Mixed Route".into(),
+                model_id: "Mixed Route".into(),
+                display_name: None,
                 balance: Some("weighted".into()),
                 target_provider: String::new(),
                 target_model: String::new(),

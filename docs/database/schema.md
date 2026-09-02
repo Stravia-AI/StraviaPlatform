@@ -54,18 +54,19 @@ AI 模型供应商配置（API endpoint、密钥、认证方式等）。
 
 ## models
 
-Route 记录。`name` 保存客户端请求使用的 Route ID；Targets 只存于 `model_backends`。
+Route 记录。`model_id` 保存客户端请求使用的 Route ID，`display_name` 保存可选的人类可读名称；Targets 只存于 `model_backends`。
 
 | Column | Type | Default | Description |
 |---|---|---|---|
 | `id` | TEXT PK | — | 主键，UUID |
-| `name` | TEXT NOT NULL | — | Route ID；客户端模型 ID，精确且大小写敏感匹配 |
+| `model_id` | TEXT NOT NULL | — | Route ID；客户端模型 ID，精确且大小写敏感匹配 |
+| `display_name` | TEXT NULL | `NULL` | 可选展示名称；空值由应用层回退为 `model_id` |
 | `balance` | TEXT | `'weighted'` | Target 选择策略：`weighted`、`priority`、`cooldown`、`latency` |
 | `is_enabled` | INTEGER | `1` | 是否启用 |
 | `priority` | INTEGER | `0` | 优先级（预留） |
 | `created_at` | TEXT | `datetime('now')` | 创建时间 |
 
-**唯一索引**：`idx_models_route_id` on `name`
+**唯一索引**：`idx_models_route_id` on `model_id`
 
 ---
 
@@ -489,6 +490,8 @@ Route Target Aggregate migration 27 先把仅存在于旧 `models.target_provide
 Web Access Adapter migration 28 是不兼容旧二进制的 clean cutover：把 kind 约束收紧为 `local|exa|zhipu`，删除 Brave/Tavily 行，加入 `use_proxy` 与 Local Search Engine 配置，并写入唯一 Local Provider。Search/Fetch 列表保留既有 Exa/智谱顺序；移除旧 kind 后为空的列表改为仅 Local。升级前必须备份数据库；回滚必须恢复 migration 28 之前的数据库，不能只回退应用文件。
 
 Allowance Samples migration 29 新增 `provider_allowance_samples`。样本随 Provider 删除而级联删除；应用按 14 天 TTL 清理，预报只读取当前重置窗口内且语义一致的样本。
+
+Route Display Name migration 30 把 `models.name` 原值逐字节迁移为 `models.model_id`，新增 nullable `display_name`，并把 `idx_models_route_id` 移到 `model_id`。迁移不会从 Canonical Model 目录推断历史展示名称，也不会改写 Target 或 API Key 的内部 Route 主键绑定。
 
 SQLite 与 PostgreSQL 必须保持 API Key 字段默认值、Turn kind、settings identity、唯一约束和 Artifact 外键等价。
 

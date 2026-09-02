@@ -120,7 +120,8 @@ pub struct UpsertOAuthCredential {
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct Route {
     pub id: String,
-    pub name: String,
+    pub model_id: String,
+    pub display_name: Option<String>,
     pub balance: String,
     pub target_provider: String,
     pub target_model: String,
@@ -144,6 +145,14 @@ pub struct Route {
 }
 
 impl Route {
+    pub fn effective_display_name(&self) -> &str {
+        self.display_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(&self.model_id)
+    }
+
     pub fn refresh_supported_thinking_levels(&mut self) {
         self.supported_thinking_levels = sqlx::types::Json(
             ThinkingLevel::ALL
@@ -399,9 +408,10 @@ pub struct UpdateProvider {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateRoute {
-    #[serde(alias = "virtual_model", alias = "vmodel")]
-    pub name: Option<String>,
+    pub model_id: Option<String>,
+    pub display_name: Option<String>,
     #[serde(rename = "balance", alias = "strategy")]
     pub balance: Option<String>,
     pub target_provider: Option<String>,
@@ -412,9 +422,11 @@ pub struct UpdateRoute {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateRoute {
-    #[serde(alias = "virtual_model", alias = "vmodel")]
-    pub name: String,
+    pub model_id: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
     #[serde(rename = "balance", alias = "strategy")]
     pub balance: Option<String>,
     pub target_provider: String,
@@ -447,7 +459,8 @@ pub struct UpsertTarget {
 #[derive(Debug, Clone)]
 pub struct PutRoute {
     pub id: Option<String>,
-    pub route_id: String,
+    pub model_id: String,
+    pub display_name: Option<String>,
     pub selection_strategy: String,
     pub is_enabled: bool,
     pub targets: Vec<CreateTarget>,

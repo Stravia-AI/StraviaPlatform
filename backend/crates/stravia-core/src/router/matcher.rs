@@ -21,5 +21,5 @@ impl RouteCache {
 }
 
 pub fn match_model<'a>(models: &'a [Route], model: &str) -> Option<&'a Route> {
-    models.iter().find(|m| m.name == model)
+    models.iter().find(|m| m.model_id == model)
 }

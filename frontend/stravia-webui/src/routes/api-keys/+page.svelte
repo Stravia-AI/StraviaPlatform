@@ -10,6 +10,7 @@ import { admin } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
 import { getDataTableLabels } from '$lib/data-table-labels'
 import { formatLogTime } from '$lib/format'
+import { effectiveModelDisplayName } from '$lib/logical-model'
 import type { ApiKey } from '$lib/types'
 import ApiKeyEditor from '$lib/components/api-key-editor.svelte'
 import PageHeader from '$lib/components/page-header.svelte'
@@ -116,7 +117,12 @@ function limitsLabel(apiKey: ApiKey): string {
 function modelAccessLabel(apiKey: ApiKey): string {
   return apiKey.model_ids.length === 0
     ? m.api_keys_all_permitted_models()
-    : apiKey.model_ids.map((id) => models.find((model) => model.id === id)?.name ?? id).join(', ')
+    : apiKey.model_ids
+        .map((id) => {
+          const model = models.find((candidate) => candidate.id === id)
+          return model ? effectiveModelDisplayName(model) : id
+        })
+        .join(', ')
 }
 
 function openApiKey(apiKey: ApiKey, event: MouseEvent): void {

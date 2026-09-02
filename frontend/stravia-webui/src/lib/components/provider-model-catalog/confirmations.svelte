@@ -1,6 +1,7 @@
 <script lang="ts">
 import { resolve } from '$app/paths'
 import * as m from '$lib/paraglide/messages.js'
+import { effectiveModelDisplayName, logicalModelSecondaryId } from '$lib/logical-model'
 import type { ProviderModelDetail, Route } from '$lib/types'
 
 import * as AlertDialog from '$lib/components/ui/alert-dialog'
@@ -38,7 +39,8 @@ let {
     </AlertDialog.Header>
     <AlertDialog.Footer>
       <AlertDialog.Cancel onclick={onKeepEditing}>{m.provider_model_catalog_keep_editing()}</AlertDialog.Cancel>
-      <AlertDialog.Action variant="destructive" onclick={onDiscard}>{m.provider_model_catalog_discard_changes()}</AlertDialog.Action>
+      <AlertDialog.Action variant="destructive" onclick={onDiscard}
+        >{m.provider_model_catalog_discard_changes()}</AlertDialog.Action>
     </AlertDialog.Footer>
   </AlertDialog.Content>
 </AlertDialog.Root>
@@ -62,8 +64,11 @@ let {
         {#each references as reference (reference.target.id)}
           <a
             class="flex min-h-10 items-center rounded-md px-2 font-medium hover:bg-muted"
-            href={resolve('/models/[id]', { id: reference.route.name })}>
-            {reference.route.name} · {reference.target.model}
+            href={resolve('/models/[id]', { id: reference.route.model_id })}>
+            {effectiveModelDisplayName(reference.route)}
+            {#if logicalModelSecondaryId(reference.route)}
+              · {reference.route.model_id}{/if}
+            · {reference.target.model}
           </a>
         {/each}
       </div>

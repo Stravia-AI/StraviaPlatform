@@ -11,6 +11,7 @@ import { toast } from 'svelte-sonner'
 import { admin } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
 import { getDataTableLabels } from '$lib/data-table-labels'
+import { effectiveModelDisplayName, logicalModelSecondaryId, sortLogicalModels } from '$lib/logical-model'
 import type { Route, RouteSelectionStrategy } from '$lib/types'
 import PageHeader from '$lib/components/page-header.svelte'
 import StatusIndicator from '$lib/components/status-indicator.svelte'
@@ -41,7 +42,7 @@ let deleteTarget = $state<Route>()
 let deleteOpen = $state(false)
 let actingModelId = $state<string>()
 
-const models = $derived(modelsQuery.data ?? [])
+const models = $derived(sortLogicalModels(modelsQuery.data ?? []))
 const providers = $derived(providersQuery.data ?? [])
 const apiKeys = $derived(apiKeysQuery.data ?? [])
 const tableLabels = $derived(getDataTableLabels())
@@ -61,9 +62,11 @@ function strategyLabel(strategy: RouteSelectionStrategy): string {
 }
 
 const modelColumns = modelColumnHelper.columns([
-  modelColumnHelper.accessor('name', {
+  modelColumnHelper.accessor((model) => `${effectiveModelDisplayName(model)} ${model.model_id}`, {
+    id: 'model',
     header: () => m.common_model(),
-    meta: { label: () => m.common_model(), cellClass: 'font-technical font-medium' },
+    cell: (context) => renderSnippet(modelIdentityCell, context),
+    meta: { label: () => m.common_model() },
     size: 200,
   }),
   modelColumnHelper.accessor('balance', {
@@ -132,7 +135,7 @@ function targetsLabel(model: Route): string {
 
 function openModel(model: Route, event: MouseEvent): void {
   if (event.target instanceof Element && event.target.closest('a, button, [role="button"]')) return
-  void goto(resolve(`/models/${encodeURIComponent(model.name)}`))
+  void goto(resolve(`/models/${encodeURIComponent(model.model_id)}`))
 }
 
 function handleModelTableRowClick({ event, original }: DataTableRowPointerEvent<Route>): void {
@@ -142,7 +145,7 @@ function handleModelTableRowClick({ event, original }: DataTableRowPointerEvent<
 function handleModelRowKeydown(event: KeyboardEvent, model: Route): void {
   if (event.key !== 'Enter' || event.target !== event.currentTarget) return
   event.preventDefault()
-  void goto(resolve(`/models/${encodeURIComponent(model.name)}`))
+  void goto(resolve(`/models/${encodeURIComponent(model.model_id)}`))
 }
 
 function askDelete(model: Route): void {
@@ -153,7 +156,7 @@ function askDelete(model: Route): void {
 async function toggleModel(model: Route): Promise<void> {
   actingModelId = model.id
   try {
-    await admin.models.update(model.name, { is_enabled: !model.is_enabled })
+    await admin.models.update(model.model_id, { is_enabled: !model.is_enabled })
     await queryClient.invalidateQueries({ queryKey: ['models'] })
   } catch (error) {
     toast.error(localizeBackendErrorMessage(error))
@@ -166,7 +169,7 @@ async function deleteModel(): Promise<void> {
   if (!deleteTarget) return
   actingModelId = deleteTarget.id
   try {
-    await admin.models.delete(deleteTarget.name)
+    await admin.models.delete(deleteTarget.model_id)
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ['models'] }),
       queryClient.invalidateQueries({ queryKey: ['api-keys'] }),
@@ -201,7 +204,7 @@ async function deleteModel(): Promise<void> {
           size="icon"
           class="size-10"
           variant="ghost"
-          aria-label={m.models_more_actions_value({ name: model.name })}>
+          aria-label={m.models_more_actions_value({ name: effectiveModelDisplayName(model) })}>
           <MoreHorizontalIcon />
         </Button>
       {/snippet}
@@ -219,6 +222,16 @@ async function deleteModel(): Promise<void> {
         ></DropdownMenu.Group>
     </DropdownMenu.Content>
   </DropdownMenu.Root>
+{/snippet}
+
+{#snippet modelIdentityCell(context: DataTableCellContext<Route>)}
+  {@const model = context.row.original}
+  <div class="min-w-0">
+    <span class="block truncate font-medium">{effectiveModelDisplayName(model)}</span>
+    {#if logicalModelSecondaryId(model)}
+      <span class="block truncate font-technical text-xs text-muted-foreground">{model.model_id}</span>
+    {/if}
+  </div>
 {/snippet}
 
 {#snippet modelBalanceCell(context: DataTableCellContext<Route>)}
@@ -320,7 +333,10 @@ async function deleteModel(): Promise<void> {
             onclick={(event) => openModel(model, event)}
             onkeydown={(event) => handleModelRowKeydown(event, model)}>
             <div class="min-w-0">
-              <p class="font-technical truncate font-medium">{model.name}</p>
+              <p class="truncate font-medium">{effectiveModelDisplayName(model)}</p>
+              {#if logicalModelSecondaryId(model)}
+                <p class="truncate font-technical text-xs text-muted-foreground">{model.model_id}</p>
+              {/if}
               <p class="mt-1 text-xs text-muted-foreground">
                 {strategyLabel(model.balance)} · {model.targets.length === 1
                   ? m.common_1_destination()
@@ -344,7 +360,9 @@ async function deleteModel(): Promise<void> {
   <AlertDialog.Content>
     <AlertDialog.Header>
       <AlertDialog.Title>
-        {m.models_delete_named_model({ name: deleteTarget?.name ?? m.common_model() })}
+        {m.models_delete_named_model({
+          name: deleteTarget ? effectiveModelDisplayName(deleteTarget) : m.common_model(),
+        })}
       </AlertDialog.Title>
       <AlertDialog.Description>
         {m.models_removed_service_destinations({ count: deleteTarget?.targets.length ?? 0 })}

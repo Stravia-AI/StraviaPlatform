@@ -31,9 +31,9 @@ test('settings fields align in wide containers and stack in narrow containers', 
   expect(wideThemeLabelBox!.x + wideThemeLabelBox!.width).toBeLessThan(wideThemeControlBox!.x)
   expect(Math.abs(wideProxyUrlBox!.x - wideProxyBypassBox!.x)).toBeLessThan(1)
   expect(Math.abs(wideProxyUrlBox!.width - wideProxyBypassBox!.width)).toBeLessThan(1)
-  expect(Math.abs(wideProxyUrlBox!.x + wideProxyUrlBox!.width - (wideRetentionBox!.x + wideRetentionBox!.width))).toBeLessThan(
-    1,
-  )
+  expect(
+    Math.abs(wideProxyUrlBox!.x + wideProxyUrlBox!.width - (wideRetentionBox!.x + wideRetentionBox!.width)),
+  ).toBeLessThan(1)
   await expect(themeField.locator('[data-slot="field-hint"], [data-slot="field-hint-text"]')).toHaveCount(0)
   await expect(page.getByText('Theme and language apply immediately and persist on this device.')).toHaveCount(0)
   await expect(page.getByText('Following system uses your operating system theme preference.')).toHaveCount(0)
@@ -96,7 +96,8 @@ test('advanced features keep separate media and web search surfaces', async ({ p
     eligible_models: [
       {
         id: 'model-media',
-        name: 'Multimodal model',
+        model_id: 'multimodal-model',
+        display_name: 'Multimodal model',
         supported_thinking_levels: ['off', 'medium', 'high'],
       },
     ],
@@ -106,7 +107,9 @@ test('advanced features keep separate media and web search surfaces', async ({ p
     await route.fulfill({ json: { data: searchConfig } })
   })
   await page.route('**/api/v1/web-search/eligible-models', async (route) => {
-    await route.fulfill({ json: { data: [{ id: 'model-search', name: 'Search model' }] } })
+    await route.fulfill({
+      json: { data: [{ id: 'model-search', model_id: 'search-model', display_name: 'Search model' }] },
+    })
   })
   await page.route('**/api/v1/web-search/codex-providers', async (route) => {
     await route.fulfill({
@@ -131,6 +134,10 @@ test('advanced features keep separate media and web search surfaces', async ({ p
   await expect(page.getByRole('heading', { name: 'Media understanding', exact: true })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Understanding model' })).toBeVisible()
   await expect(page.getByText('Available', { exact: true })).toBeVisible()
+  await expect(page.locator('#media-model')).toHaveText('Multimodal model')
+  await page.locator('#media-model').click()
+  await expect(page.getByText('multimodal-model', { exact: true })).toBeVisible()
+  await page.getByRole('option', { name: 'Multimodal model' }).click()
   await expect(page.locator('#media-thinking-level')).toHaveText('high')
   await expect(page.getByRole('heading', { name: 'Supported images and limits' })).toHaveCount(0)
   await expect(page.getByRole('heading', { name: 'Image processing' })).toHaveCount(0)
@@ -154,5 +161,9 @@ test('advanced features keep separate media and web search surfaces', async ({ p
 
   await page.locator('#search-backend').click()
   await page.getByRole('option', { name: 'Use a Stravia model' }).click()
+  await expect(page.locator('#search-local-model')).toHaveText('Search model')
+  await page.locator('#search-local-model').click()
+  await expect(page.getByText('search-model', { exact: true })).toBeVisible()
+  await page.getByRole('option', { name: 'Search model' }).click()
   await expect(localTurns).toHaveValue('9')
 })

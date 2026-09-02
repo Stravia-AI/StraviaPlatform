@@ -1,14 +1,7 @@
 import type { ThinkingLevel } from './route'
 
 export type WebProviderKind = 'local' | 'exa' | 'zhipu'
-export type LocalSearchEngineId =
-  | 'google'
-  | 'bing'
-  | 'brave'
-  | 'baidu'
-  | '360'
-  | 'sogou_weixin'
-  | 'google_scholar'
+export type LocalSearchEngineId = 'google' | 'bing' | 'brave' | 'baidu' | '360' | 'sogou_weixin' | 'google_scholar'
 
 export interface LocalSearchEngineConfig {
   enabled: boolean
@@ -78,12 +71,14 @@ export interface WebSearchConfigView extends WebSearchConfig {
 
 export interface EligibleSearchModel {
   id: string
-  name: string
+  model_id: string
+  display_name: string
 }
 
 export interface EligibleMediaModel {
   id: string
-  name: string
+  model_id: string
+  display_name: string
   supported_thinking_levels: ThinkingLevel[]
 }
 

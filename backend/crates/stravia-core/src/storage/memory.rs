@@ -238,7 +238,7 @@ impl RouteStore for MemoryStorage {
             .read()
             .await
             .iter()
-            .find(|route| route.name == route_id)
+            .find(|route| route.model_id == route_id)
             .cloned())
     }
 
@@ -255,9 +255,9 @@ impl RouteStore for MemoryStorage {
         anyhow::ensure!(
             !routes
                 .iter()
-                .any(|route| route.name == input.route_id && route.id != storage_id),
+                .any(|route| route.model_id == input.model_id && route.id != storage_id),
             "Route ID already exists: {}",
-            input.route_id
+            input.model_id
         );
         let created_at = routes
             .iter()
@@ -291,7 +291,8 @@ impl RouteStore for MemoryStorage {
             .collect::<Vec<_>>();
         let mut route = Route {
             id: storage_id.clone(),
-            name: input.route_id,
+            model_id: input.model_id,
+            display_name: input.display_name,
             balance: input.selection_strategy,
             target_provider: targets[0].provider_id.clone(),
             target_model: targets[0].model.clone(),
@@ -316,7 +317,7 @@ impl RouteStore for MemoryStorage {
         self.models
             .write()
             .await
-            .retain(|route| route.name != route_id);
+            .retain(|route| route.model_id != route_id);
         Ok(())
     }
 }
@@ -763,7 +764,8 @@ mod tests {
         let route = storage
             .put(PutRoute {
                 id: None,
-                route_id: "CaseRoute".into(),
+                model_id: "CaseRoute".into(),
+                display_name: None,
                 selection_strategy: "priority".into(),
                 is_enabled: true,
                 targets: vec![target("p1", "m1"), target("p2", "m2")],
@@ -796,7 +798,8 @@ mod tests {
         let updated = storage
             .put(PutRoute {
                 id: Some(route.id),
-                route_id: "CaseRoute".into(),
+                model_id: "CaseRoute".into(),
+                display_name: None,
                 selection_strategy: "weighted".into(),
                 is_enabled: true,
                 targets: vec![target("p2", "m2")],
@@ -814,7 +817,8 @@ mod tests {
         storage
             .put(PutRoute {
                 id: None,
-                route_id: "empty-after-delete".into(),
+                model_id: "empty-after-delete".into(),
+                display_name: None,
                 selection_strategy: "weighted".into(),
                 is_enabled: true,
                 targets: vec![target("p1", "m1")],
@@ -824,7 +828,8 @@ mod tests {
         storage
             .put(PutRoute {
                 id: None,
-                route_id: "survives-delete".into(),
+                model_id: "survives-delete".into(),
+                display_name: None,
                 selection_strategy: "priority".into(),
                 is_enabled: true,
                 targets: vec![target("p1", "m1"), target("p2", "m2")],

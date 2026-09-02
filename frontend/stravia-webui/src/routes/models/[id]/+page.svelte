@@ -5,6 +5,7 @@ import { createQuery } from '@tanstack/svelte-query'
 
 import { admin } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
+import { effectiveModelDisplayName } from '$lib/logical-model'
 import ModelEditor from '$lib/components/model-editor.svelte'
 import { Button } from '$lib/components/ui/button'
 import { Spinner } from '$lib/components/ui/spinner'
@@ -19,7 +20,7 @@ const routeQuery = createQuery(() => ({
 const model = $derived(routeQuery.data)
 </script>
 
-<svelte:head><title>{model?.name ?? m.common_model()} · Stravia</title></svelte:head>
+<svelte:head><title>{model ? effectiveModelDisplayName(model) : m.common_model()} · Stravia</title></svelte:head>
 
 {#if providersQuery.isPending || routeQuery.isPending}
   <div class="grid min-h-72 place-items-center"><Spinner /></div>

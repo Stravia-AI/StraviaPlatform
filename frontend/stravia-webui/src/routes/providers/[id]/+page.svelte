@@ -10,6 +10,7 @@ import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw'
 
 import { admin } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
+import { effectiveModelDisplayName, logicalModelSecondaryId } from '$lib/logical-model'
 import type { Provider, ProviderModelSyncSummary } from '$lib/types'
 import PageHeader from '$lib/components/page-header.svelte'
 import ProviderConnectionView from '$lib/components/provider-connection-view.svelte'
@@ -211,7 +212,11 @@ async function syncModels(): Promise<ProviderModelSyncSummary | undefined> {
               <div class="grid gap-3 py-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] sm:items-center">
                 <a
                   class="min-h-10 content-center font-medium hover:underline"
-                  href={resolve('/models/[id]', { id: reference.route.name })}>{reference.route.name}</a>
+                  href={resolve('/models/[id]', { id: reference.route.model_id })}>
+                  {effectiveModelDisplayName(reference.route)}
+                  {#if logicalModelSecondaryId(reference.route)}
+                    · {reference.route.model_id}{/if}
+                </a>
                 <TechnicalValue value={reference.target.model} copyable />
                 <Badge variant="outline">{m.providers_order()} {reference.target.priority}</Badge>
               </div>

@@ -125,7 +125,7 @@ def build_harness(work_dir: Path) -> None:
         use stravia_core::config::{GatewayConfig, SqlStorageConfig, StorageBackendKind};
         use stravia_core::db::models::{
             CreateApiKey, CreateProvider, CreateRoute, CreateTarget, LogQuery, ProviderCredentialInput,
-            ProviderSourceInput, PutRoute,
+            ProviderSourceInput, PutRoute, UpdateRoute,
         };
         use stravia_core::provider_models::CreateManualProviderModel;
         use stravia_core::{logging, Gateway};
@@ -233,7 +233,8 @@ def build_harness(work_dir: Path) -> None:
             ).await?;
 
             let route = admin.create_model(CreateRoute {
-                name: format!("{backend}-model"),
+                model_id: format!("{backend}-model"),
+                display_name: Some(format!("{backend} Model")),
                 balance: None,
                 target_provider: provider.id.clone(),
                 target_model: "gpt-4o-mini".to_string(),
@@ -255,11 +256,21 @@ def build_harness(work_dir: Path) -> None:
             ensure!(admin.list_providers().await?.len() == 1, "provider count");
             let routes = admin.list_models().await?;
             ensure!(routes.len() == 1, "Route count");
+            ensure!(routes[0].model_id == format!("{backend}-model"), "Route Model ID");
+            ensure!(routes[0].display_name.as_deref() == Some(format!("{backend} Model").as_str()), "Route display name");
             ensure!(routes[0].targets.len() == 1, "Route aggregate Target count");
             ensure!(routes[0].targets[0].provider_id == provider.id, "Route aggregate Provider");
+            let updated = admin.update_model(&route.model_id, UpdateRoute {
+                display_name: Some(format!("{backend} Renamed Model")),
+                ..Default::default()
+            }).await?;
+            ensure!(updated.id == route.id, "display-name update preserves Route identity");
+            ensure!(updated.model_id == route.model_id, "display-name update preserves Model ID");
+            ensure!(updated.display_name.as_deref() == Some(format!("{backend} Renamed Model").as_str()), "updated Route display name");
             let failed_put = gw.storage.routes().put(PutRoute {
                 id: Some(route.id.clone()),
-                route_id: route.name.clone(),
+                model_id: route.model_id.clone(),
+                display_name: updated.display_name.clone(),
                 selection_strategy: "latency".to_string(),
                 is_enabled: false,
                 targets: vec![CreateTarget {
@@ -271,7 +282,7 @@ def build_harness(work_dir: Path) -> None:
                 }],
             }).await;
             ensure!(failed_put.is_err(), "invalid Route aggregate put must fail");
-            let preserved = gw.storage.routes().get(&route.name).await?.context("preserved Route")?;
+            let preserved = gw.storage.routes().get(&route.model_id).await?.context("preserved Route")?;
             ensure!(preserved.balance == route.balance, "failed put preserves Route strategy");
             ensure!(preserved.is_enabled == route.is_enabled, "failed put preserves Route state");
             ensure!(preserved.targets.len() == 1, "failed put preserves Target count");

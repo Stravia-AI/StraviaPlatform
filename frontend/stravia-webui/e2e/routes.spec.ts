@@ -22,28 +22,31 @@ test('Connect an app configures clients from API Key models', async ({ page }) =
       json: {
         data: [
           {
-            name: 'claude-opus',
+            model_id: 'claude-opus',
+            display_name: 'Claude Opus',
             supported_thinking_levels: ['off', 'high', 'max'],
             context_window: 200_000,
             output_max_tokens: 32_000,
           },
           {
-            name: 'gpt-5.6-sol',
+            model_id: 'gpt-5.6-sol',
+            display_name: 'GPT 5.6 Sol',
             supported_thinking_levels: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
             context_window: 272_000,
             output_max_tokens: 128_000,
           },
           {
-            name: 'gpt-5.6-luna',
+            model_id: 'gpt-5.6-luna',
+            display_name: 'GPT 5.6 Luna',
             supported_thinking_levels: ['off', 'low', 'medium', 'high'],
             context_window: 196_000,
             output_max_tokens: 64_000,
           },
         ].map((model) => ({
-          id: `model-${model.name}`,
+          id: `model-${model.model_id}`,
           balance: 'priority',
           is_enabled: true,
-          supports_image_input: model.name === 'gpt-5.6-sol',
+          supports_image_input: model.model_id === 'gpt-5.6-sol',
           targets: [],
           ...model,
         })),
@@ -96,7 +99,10 @@ test('Connect an app configures clients from API Key models', async ({ page }) =
     ['Opus model mapping', 'claude-opus'],
   ] as const) {
     await page.getByRole('button', { name: field }).click()
-    await page.getByRole('option', { name: model }).click()
+    const option = page.getByRole('option', { name: new RegExp(model) })
+    await expect(option).toContainText(model)
+    if (field === 'Default model') await expect(option).toContainText('Claude Opus')
+    await option.click()
   }
 
   const generatedConfig = page.locator('pre.route-code-plane')
@@ -109,7 +115,7 @@ test('Connect an app configures clients from API Key models', async ({ page }) =
   await page.getByRole('option', { name: 'Codex', exact: true }).click()
   await expect(page.getByRole('button', { name: 'Haiku model mapping' })).toHaveCount(0)
   await page.getByRole('button', { name: 'Default model' }).click()
-  await page.getByRole('option', { name: 'gpt-5.6-sol' }).click()
+  await page.getByRole('option', { name: /gpt-5\.6-sol/ }).click()
 
   await expect(generatedConfig).toContainText('model_catalog_json = "stravia-models.json"')
   await expect(generatedConfig).toContainText('env_key = "STRAVIA_API_KEY"')
@@ -120,6 +126,7 @@ test('Connect an app configures clients from API Key models', async ({ page }) =
   await expect(generatedConfig).toContainText('"slug": "claude-opus"')
   await expect(generatedConfig).toContainText('"slug": "gpt-5.6-sol"')
   await expect(generatedConfig).toContainText('"slug": "gpt-5.6-luna"')
+  await expect(generatedConfig).toContainText('"display_name": "GPT 5.6 Sol"')
 
   await page.getByRole('button', { name: 'Client' }).click()
   await page.getByRole('option', { name: 'OpenCode' }).click()
@@ -171,17 +178,18 @@ test('Models table fits the desktop content width without horizontal scrolling',
   await page.route('**/api/v1/models', async (route) => {
     await route.fulfill({
       json: {
-        data: ['grok-4.6', 'gpt-5.6-sol', 'gpt-5.6-luna'].map((name) => ({
-          id: name,
-          name,
+        data: ['grok-4.6', 'gpt-5.6-sol', 'gpt-5.6-luna'].map((modelId) => ({
+          id: modelId,
+          model_id: modelId,
+          display_name: modelId === 'gpt-5.6-sol' ? 'GPT 5.6 Sol' : null,
           balance: 'weighted',
           is_enabled: true,
           targets: [
             {
-              id: `${name}-target`,
-              model_id: name,
+              id: `${modelId}-target`,
+              model_id: modelId,
               provider_id: 'codex',
-              model: name,
+              model: modelId,
               weight: 100,
               priority: 1,
             },
@@ -191,9 +199,15 @@ test('Models table fits the desktop content width without horizontal scrolling',
     })
   })
   await page.goto('/models')
-
   const tableContainer = page.locator('[data-slot="table-container"]')
   await expect(tableContainer).toBeVisible()
+  await expect(tableContainer.getByText('GPT 5.6 Sol', { exact: true })).toBeVisible()
+  await expect(tableContainer.getByText('gpt-5.6-sol', { exact: true })).toBeVisible()
+  await expect(tableContainer.getByText('grok-4.6', { exact: true })).toHaveCount(1)
+  const rows = tableContainer.getByRole('row')
+  await expect(rows.nth(1)).toContainText('GPT 5.6 Sol')
+  await expect(rows.nth(2)).toContainText('gpt-5.6-luna')
+  await expect(rows.nth(3)).toContainText('grok-4.6')
   expect(await tableContainer.evaluate((element) => element.scrollWidth)).toBeLessThanOrEqual(
     await tableContainer.evaluate((element) => element.clientWidth),
   )
@@ -206,7 +220,8 @@ test('Model Route curl always includes the selected API Key', async ({ page }) =
         data: [
           {
             id: 'model-gpt',
-            name: 'gpt-5.4',
+            model_id: 'gpt-5.4',
+            display_name: 'GPT 5.4',
             balance: 'priority',
             target_provider: 'provider',
             target_model: 'gpt-5.4',
@@ -244,7 +259,8 @@ test('Model Route editor omits API Key and payload toggles', async ({ page }) =>
   await page.setViewportSize({ width: 1089, height: 612 })
   const model = {
     id: 'model-gpt',
-    name: 'gpt-5.4',
+    model_id: 'gpt-5.4',
+    display_name: 'Team GPT',
     balance: 'priority',
     target_provider: 'provider',
     target_model: 'gpt-5.4',
@@ -296,6 +312,14 @@ test('Model Route editor omits API Key and payload toggles', async ({ page }) =>
     .getByText('gpt-5.4', { exact: true })
     .click()
   await expect(page.getByRole('heading', { name: 'Edit model' })).toBeVisible()
+  const editModelId = page.getByRole('combobox', { name: 'Model ID', exact: true })
+  const editDisplayName = page.getByLabel('Model name', { exact: true })
+  await expect(editModelId).toHaveValue('gpt-5.4')
+  await expect(editDisplayName).toHaveValue('Team GPT')
+  await editModelId.fill('custom/edit-model')
+  await editModelId.press('Enter')
+  await expect(editModelId).toHaveValue('custom/edit-model')
+  await expect(editDisplayName).toHaveValue('Team GPT')
   const editRouteBreadcrumb = page.getByRole('navigation', { name: 'Breadcrumb' })
   await expect(editRouteBreadcrumb.getByRole('link', { name: 'Models' })).toHaveAttribute('href', '/models')
   await expect(editRouteBreadcrumb.getByText('Edit', { exact: true })).toHaveAttribute('aria-current', 'page')
@@ -344,7 +368,8 @@ test('Model Route editor derives thinking levels and identifies blocking destina
   let updateBody: Record<string, unknown> | undefined
   const model = {
     id: 'thinking-route',
-    name: 'thinking-route',
+    model_id: 'thinking-route',
+    display_name: null,
     balance: 'priority',
     target_provider: 'provider',
     target_model: 'wide-model',
@@ -405,7 +430,8 @@ test('Model Route editor derives thinking levels and identifies blocking destina
       json: {
         data: {
           id: 'thinking-route',
-          name: 'thinking-route',
+          model_id: 'thinking-route',
+          display_name: null,
           balance: 'priority',
           target_provider: 'provider',
           target_model: 'wide-model',
@@ -430,31 +456,34 @@ test('Model Route editor derives thinking levels and identifies blocking destina
   await expect(enabledSwitch).toBeChecked()
   const enabledControl = page.locator('[data-slot="model-enabled-control"]')
   const [switchBox, controlBox] = await Promise.all([enabledSwitch.boundingBox(), enabledControl.boundingBox()])
-  expect(
-    (switchBox?.x ?? 0) + (switchBox?.width ?? 0) <=
-      (controlBox?.x ?? 0) + (controlBox?.width ?? 0),
-  ).toBe(true)
+  expect((switchBox?.x ?? 0) + (switchBox?.width ?? 0) <= (controlBox?.x ?? 0) + (controlBox?.width ?? 0)).toBe(true)
   await expect
-    .poll(() =>
-      page.locator('.shell-scrollbar').evaluate((element) => element.scrollWidth - element.clientWidth),
-    )
+    .poll(() => page.locator('.shell-scrollbar').evaluate((element) => element.scrollWidth - element.clientWidth))
     .toBe(0)
   await enabledSwitch.click()
   await expect(enabledSwitch).not.toBeChecked()
 
   await page.setViewportSize({ width: 1568, height: 900 })
-  const [nameLabelBox, nameInputBox, balanceLabelBox, balanceTriggerBox] = await Promise.all([
-    page.getByText('Model ID sent by clients', { exact: true }).boundingBox(),
-    page.locator('#route-name').boundingBox(),
-    page.getByText('How requests are sent', { exact: true }).boundingBox(),
-    page.locator('#route-balance').boundingBox(),
-  ])
+  const [nameLabelBox, nameInputBox, displayLabelBox, displayInputBox, balanceLabelBox, balanceTriggerBox] =
+    await Promise.all([
+      page.getByText('Model ID', { exact: true }).boundingBox(),
+      page.locator('#route-model-id').boundingBox(),
+      page.getByText('Model name', { exact: true }).boundingBox(),
+      page.locator('#route-display-name').boundingBox(),
+      page.getByText('How requests are sent', { exact: true }).boundingBox(),
+      page.locator('#route-balance').boundingBox(),
+    ])
   expect(nameLabelBox).not.toBeNull()
   expect(nameInputBox).not.toBeNull()
+  expect(displayLabelBox).not.toBeNull()
+  expect(displayInputBox).not.toBeNull()
   expect(balanceLabelBox).not.toBeNull()
   expect(balanceTriggerBox).not.toBeNull()
   expect(Math.abs(nameLabelBox!.x - nameInputBox!.x)).toBeLessThanOrEqual(1)
+  expect(Math.abs(displayLabelBox!.x - displayInputBox!.x)).toBeLessThanOrEqual(1)
   expect(Math.abs(balanceLabelBox!.x - balanceTriggerBox!.x)).toBeLessThanOrEqual(1)
+  expect(Math.abs(displayInputBox!.width - balanceTriggerBox!.width)).toBeLessThanOrEqual(2)
+  expect(Math.abs(nameInputBox!.width - displayInputBox!.width * 2)).toBeLessThanOrEqual(24)
 
   const thinkingMaps = page.locator('[data-slot="thinking-map"]')
   await expect(thinkingMaps).toHaveCount(2)
@@ -519,6 +548,7 @@ test('Route Builder loads Provider Models and exposes only strategy-relevant Tar
   const unavailable = { ...available, id: 'gpt-unavailable', name: 'GPT Unavailable', available: false }
   const imageModel = { ...available, id: 'image-model', name: 'Image Model' }
   let createAttempts = 0
+  let createBody: Record<string, unknown> | undefined
   let disableBody: Record<string, unknown> | undefined
 
   await page.route('**/api/v1/providers**', async (route) => {
@@ -561,10 +591,11 @@ test('Route Builder loads Provider Models and exposes only strategy-relevant Tar
   await page.route('**/api/v1/models', async (route) => {
     if (route.request().method() === 'POST') {
       createAttempts += 1
+      createBody = route.request().postDataJSON() as Record<string, unknown>
       if (createAttempts === 1) {
         await route.fulfill({ status: 400, json: { error: 'Route validation failed' } })
       } else {
-        await route.fulfill({ json: { data: { id: 'route-created', name: 'route-created' } } })
+        await route.fulfill({ json: { data: { id: 'route-created', model_id: 'route-created' } } })
       }
       return
     }
@@ -576,13 +607,31 @@ test('Route Builder loads Provider Models and exposes only strategy-relevant Tar
   const createRouteBreadcrumb = page.getByRole('navigation', { name: 'Breadcrumb' })
   await expect(createRouteBreadcrumb.getByRole('link', { name: 'Models' })).toHaveAttribute('href', '/models')
   await expect(createRouteBreadcrumb.getByText('Create', { exact: true })).toHaveAttribute('aria-current', 'page')
-  await page.getByRole('combobox', { name: 'Search model', exact: true }).click()
-  const modelSearch = page.getByPlaceholder('Search model')
-  await expect(modelSearch).toHaveAttribute('aria-label', 'Search model')
-  await modelSearch.fill('openai/gpt-5.4')
+  const modelSearch = page.getByRole('combobox', { name: 'Model ID', exact: true })
+  const displayName = page.getByLabel('Model name', { exact: true })
+  await expect(modelSearch).toHaveAttribute('placeholder', 'Search or enter Model ID')
+  await expect(displayName).toHaveAttribute('placeholder', 'e.g. GPT-5.4')
+  await modelSearch.fill('GPT-5.4')
   await expect(page.getByRole('option', { name: /GPT-5\.4.*openai\/gpt-5\.4/ })).toBeVisible()
   await page.getByRole('option', { name: /GPT-5\.4.*openai\/gpt-5\.4/ }).click()
-  await expect(page.getByRole('combobox', { name: 'Search model', exact: true })).toHaveText('gpt-5.4')
+  await expect(modelSearch).toHaveValue('gpt-5.4')
+  await expect(displayName).toHaveValue('GPT-5.4')
+  await modelSearch.fill('Claude Opus')
+  await page.getByRole('option', { name: /Claude Opus 4\.6.*anthropic\/claude-opus-4\.6/ }).click()
+  await expect(modelSearch).toHaveValue('claude-opus-4.6')
+  await expect(displayName).toHaveValue('Claude Opus 4.6')
+  await displayName.fill('Team GPT')
+  await modelSearch.fill('custom/model')
+  await modelSearch.press('Enter')
+  await expect(modelSearch).toHaveValue('custom/model')
+  await expect(displayName).toHaveValue('Team GPT')
+  expect(createAttempts).toBe(0)
+  await page.getByRole('button', { name: 'Clear selected model' }).click()
+  await expect(modelSearch).toHaveValue('')
+  await expect(displayName).toHaveValue('')
+  await modelSearch.fill('openai/gpt-5.4')
+  await page.getByRole('option', { name: /GPT-5\.4.*openai\/gpt-5\.4/ }).click()
+  await displayName.fill('')
   await page.getByLabel('Destination 1 model service', { exact: true }).click()
   await page.getByRole('option', { name: 'Provider A' }).click()
   await expect(page.getByLabel('Destination 1 model', { exact: true })).toBeEnabled()
@@ -622,11 +671,46 @@ test('Route Builder loads Provider Models and exposes only strategy-relevant Tar
   await expect.poll(() => createAttempts).toBe(1)
   const validationError = page.locator('[data-sonner-toast]')
   await expect(validationError).toBeVisible()
-  await expect(page.getByRole('combobox', { name: 'Search model', exact: true })).toHaveText('gpt-5.4')
+  await expect(modelSearch).toHaveValue('gpt-5.4')
   await expect(page.getByLabel('Destination 1 model', { exact: true })).toHaveText(/GPT Available/)
   await expect(page.getByRole('switch', { name: 'Enabled' })).not.toBeChecked()
   await expect(validationError).toBeHidden({ timeout: 10_000 })
   await page.getByRole('button', { name: 'Save model' }).click()
   await expect.poll(() => createAttempts).toBe(2)
+  expect(createBody?.model_id).toBe('gpt-5.4')
+  expect(createBody?.display_name).toBe('')
   await expect.poll(() => disableBody?.is_enabled).toBe(false)
+})
+
+test('Model ID remains editable while the Canonical Model catalog fails to load', async ({ page }) => {
+  let releaseCatalog!: () => void
+  const catalogGate = new Promise<void>((resolve) => {
+    releaseCatalog = resolve
+  })
+  let createAttempts = 0
+
+  await page.route('**/api/v1/catalog/models', async (route) => {
+    await catalogGate
+    await route.fulfill({ status: 503, json: { error: 'Catalog unavailable' } })
+  })
+  await page.route('**/api/v1/providers', async (route) => {
+    await route.fulfill({ json: { data: [] } })
+  })
+  await page.route('**/api/v1/models', async (route) => {
+    if (route.request().method() === 'POST') createAttempts += 1
+    await route.fulfill({ json: { data: [] } })
+  })
+
+  await page.goto('/models/new')
+  const modelId = page.getByRole('combobox', { name: 'Model ID', exact: true })
+  await expect(modelId).toBeEnabled()
+  await modelId.fill('custom/offline-model')
+  await modelId.press('Enter')
+  await expect(modelId).toHaveValue('custom/offline-model')
+  expect(createAttempts).toBe(0)
+
+  releaseCatalog()
+  await expect(modelId).toBeEnabled()
+  await modelId.fill('custom/after-failure')
+  await expect(modelId).toHaveValue('custom/after-failure')
 })

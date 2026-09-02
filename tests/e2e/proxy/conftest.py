@@ -159,7 +159,7 @@ def _configure_proxy_routes(
                 "POST",
                 f"{admin_base}/api/v1/models",
                 payload={
-                    "name": replay_model,
+                    "model_id": replay_model,
                     "target_provider": provider_ids[protocol],
                     "target_model": replay_model,
                 },

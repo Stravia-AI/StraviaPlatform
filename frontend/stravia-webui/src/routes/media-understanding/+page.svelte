@@ -6,6 +6,7 @@ import { toast } from 'svelte-sonner'
 
 import { admin } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
+import { sortLogicalModels } from '$lib/logical-model'
 import PageHeader from '$lib/components/page-header.svelte'
 import { Badge } from '$lib/components/ui/badge'
 import { Button } from '$lib/components/ui/button'
@@ -27,6 +28,7 @@ let modelId = $state('')
 let thinkingLevel = $state<ThinkingLevel | ''>('')
 let saving = $state(false)
 
+const eligibleModels = $derived(sortLogicalModels(configQuery.data?.eligible_models ?? []))
 const selectedModel = $derived(configQuery.data?.eligible_models.find((model) => model.id === modelId))
 const canSave = $derived(
   Boolean(configQuery.data) && !saving && (!enabled || (Boolean(modelId) && Boolean(thinkingLevel))),
@@ -159,11 +161,16 @@ function selectThinkingLevel(value?: string): void {
             <Field.Label for="media-model">{m.media_understanding_model_label()}</Field.Label>
             <Select.Root type="single" value={modelId} onValueChange={selectModel}>
               <Select.Trigger id="media-model" class="w-full">
-                {selectedModel?.name ?? m.media_understanding_select_model()}
+                {selectedModel?.display_name ?? m.media_understanding_select_model()}
               </Select.Trigger>
               <Select.Content>
-                {#each configQuery.data?.eligible_models ?? [] as model (model.id)}
-                  <Select.Item value={model.id} label={model.name}>{model.name}</Select.Item>
+                {#each eligibleModels as model (model.id)}
+                  <Select.Item value={model.id} label={model.display_name}>
+                    <span class="min-w-0 flex-1 truncate">{model.display_name}</span>
+                    {#if model.display_name !== model.model_id}
+                      <span class="truncate font-technical text-xs text-muted-foreground">{model.model_id}</span>
+                    {/if}
+                  </Select.Item>
                 {/each}
               </Select.Content>
             </Select.Root>

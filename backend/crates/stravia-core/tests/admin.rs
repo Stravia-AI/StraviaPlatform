@@ -492,7 +492,8 @@ async fn manual_provider_models_are_partial_and_do_not_mutate_routes() -> anyhow
     let route = gw
         .admin()
         .create_model(CreateRoute {
-            name: "private-route".to_string(),
+            model_id: "private-route".to_string(),
+            display_name: None,
             balance: Some("weighted".to_string()),
             target_provider: provider.id.clone(),
             target_model: "private/model".to_string(),
@@ -683,7 +684,8 @@ async fn copy_provider_can_copy_matching_route_targets_to_copied_provider() -> a
     let source_route = gw
         .admin()
         .create_model(CreateRoute {
-            name: "source-model".to_string(),
+            model_id: "source-model".to_string(),
+            display_name: None,
             balance: Some("priority".to_string()),
             target_provider: String::new(),
             target_model: String::new(),
@@ -728,13 +730,17 @@ async fn copy_provider_can_copy_matching_route_targets_to_copied_provider() -> a
         1,
         "copying route targets must not create new routes"
     );
-    assert!(models.iter().all(|model| model.name != "source-model_Copy"));
+    assert!(
+        models
+            .iter()
+            .all(|model| model.model_id != "source-model_Copy")
+    );
 
     let updated_model = models
         .iter()
         .find(|model| model.id == source_route.id)
         .expect("source route should remain");
-    assert_eq!(updated_model.name, "source-model");
+    assert_eq!(updated_model.model_id, "source-model");
     assert_eq!(updated_model.balance, "priority");
     assert_eq!(updated_model.target_provider, original.id);
     assert_eq!(updated_model.target_model, "source-upstream-model");
@@ -772,7 +778,8 @@ async fn copy_provider_does_not_append_targets_by_default() -> anyhow::Result<()
 
     gw.admin()
         .create_model(CreateRoute {
-            name: "no-route-copy-model".to_string(),
+            model_id: "no-route-copy-model".to_string(),
+            display_name: None,
             balance: None,
             target_provider: original.id.clone(),
             target_model: "source-upstream-model".to_string(),
@@ -982,7 +989,8 @@ async fn config_epoch_starts_at_zero_and_increments_on_model_create() -> anyhow:
     add_manual_provider_model(&gw, &provider.id, "gpt-4").await?;
     gw.admin()
         .create_model(CreateRoute {
-            name: "epoch-test-model".to_string(),
+            model_id: "epoch-test-model".to_string(),
+            display_name: None,
             balance: Some("weighted".to_string()),
             target_provider: provider.id.clone(),
             target_model: "gpt-4".to_string(),
@@ -1017,7 +1025,8 @@ async fn config_epoch_increments_on_model_update_and_delete() -> anyhow::Result<
     let model = gw
         .admin()
         .create_model(CreateRoute {
-            name: "epoch-update-model".to_string(),
+            model_id: "epoch-update-model".to_string(),
+            display_name: None,
             balance: Some("weighted".to_string()),
             target_provider: provider.id.clone(),
             target_model: "gpt-4".to_string(),
@@ -1036,7 +1045,7 @@ async fn config_epoch_increments_on_model_update_and_delete() -> anyhow::Result<
 
     gw.admin()
         .update_model(
-            &model.name,
+            &model.model_id,
             UpdateRoute {
                 is_enabled: Some(false),
                 ..Default::default()
@@ -1057,7 +1066,7 @@ async fn config_epoch_increments_on_model_update_and_delete() -> anyhow::Result<
         "epoch should increment on update"
     );
 
-    gw.admin().delete_model(&model.name).await?;
+    gw.admin().delete_model(&model.model_id).await?;
 
     let epoch_after_delete: i64 = gw
         .storage

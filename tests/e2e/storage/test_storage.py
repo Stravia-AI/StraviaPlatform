@@ -132,7 +132,8 @@ def test_server_boots_postgres_with_migrations(
                     "POST",
                     f"{admin_base}/api/v1/models",
                     payload={
-                        "name": "postgres-server-e2e-model",
+                        "model_id": "postgres-server-e2e-model",
+                        "display_name": "PostgreSQL server E2E model",
                         "target_provider": provider_id,
                         "target_model": "gpt-4o-mini",
                     },

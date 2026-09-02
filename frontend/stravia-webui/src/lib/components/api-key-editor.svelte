@@ -10,6 +10,7 @@ import { toast } from 'svelte-sonner'
 
 import { admin } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
+import { effectiveModelDisplayName, logicalModelSecondaryId, sortLogicalModels } from '$lib/logical-model'
 import type { ApiKey, Route } from '$lib/types'
 import PageHeader from '$lib/components/page-header.svelte'
 import * as Field from '$lib/components/ui/field'
@@ -61,8 +62,9 @@ let createdSecret = $state<string>()
 let secretVisible = $state(false)
 let modelPickerOpen = $state(false)
 const allowAllModels = $derived(form.modelIds.length === 0)
-const allowedModels = $derived(models.filter((model) => form.modelIds.includes(model.id)))
-const unallowedModels = $derived(models.filter((model) => !form.modelIds.includes(model.id)))
+const sortedModels = $derived(sortLogicalModels(models))
+const allowedModels = $derived(sortedModels.filter((model) => form.modelIds.includes(model.id)))
+const unallowedModels = $derived(sortedModels.filter((model) => !form.modelIds.includes(model.id)))
 
 function keyForm(source: ApiKey | undefined = apiKey): KeyForm {
   return {
@@ -252,11 +254,14 @@ async function saveKey(): Promise<void> {
                     {#each allowedModels as model (model.id)}
                       <Command.Item
                         value={model.id}
-                        keywords={[model.name]}
+                        keywords={[effectiveModelDisplayName(model), model.model_id]}
                         data-checked
                         disabled={allowedModels.length === 1}
                         onSelect={() => setModelChecked(model.id, false)}>
-                        <span class="truncate">{model.name}</span>
+                        <span class="min-w-0 flex-1 truncate">{effectiveModelDisplayName(model)}</span>
+                        {#if logicalModelSecondaryId(model)}
+                          <span class="truncate font-technical text-xs text-muted-foreground">{model.model_id}</span>
+                        {/if}
                       </Command.Item>
                     {/each}
                   </Command.Group>
@@ -267,9 +272,12 @@ async function saveKey(): Promise<void> {
                     {#each unallowedModels as model (model.id)}
                       <Command.Item
                         value={model.id}
-                        keywords={[model.name]}
+                        keywords={[effectiveModelDisplayName(model), model.model_id]}
                         onSelect={() => setModelChecked(model.id, true)}>
-                        <span class="truncate">{model.name}</span>
+                        <span class="min-w-0 flex-1 truncate">{effectiveModelDisplayName(model)}</span>
+                        {#if logicalModelSecondaryId(model)}
+                          <span class="truncate font-technical text-xs text-muted-foreground">{model.model_id}</span>
+                        {/if}
                       </Command.Item>
                     {/each}
                   </Command.Group>
@@ -314,10 +322,7 @@ async function saveKey(): Promise<void> {
         </Field.Content>
       </Field.Field>
       <Field.Field orientation="horizontal">
-        <Switch
-          id="api-key-transparent-injection"
-          class="-mt-2"
-          bind:checked={form.transparentInjectionEnabled} />
+        <Switch id="api-key-transparent-injection" class="-mt-2" bind:checked={form.transparentInjectionEnabled} />
         <Field.Content>
           <Field.Label for="api-key-transparent-injection" hint={m.api_key_editor_transparent_injection_help()}>
             {m.api_key_editor_transparent_injection()}

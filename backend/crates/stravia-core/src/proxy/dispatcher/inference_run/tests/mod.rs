@@ -1004,7 +1004,8 @@ async fn configure_route_with_protocol(
     gateway
         .admin()
         .create_model(CreateRoute {
-            name: model.into(),
+            model_id: model.into(),
+            display_name: None,
             balance: Some("priority".into()),
             target_provider: String::new(),
             target_model: String::new(),

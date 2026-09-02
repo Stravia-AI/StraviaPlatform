@@ -14,6 +14,8 @@ import { toast } from 'svelte-sonner'
 
 import { admin, proxyBase } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
+import { effectiveModelDisplayName, logicalModelSecondaryId, sortLogicalModels } from '$lib/logical-model'
+import type { Route } from '$lib/types'
 import {
   apiKeyAllowsModel,
   buildCliConfig,
@@ -58,7 +60,7 @@ let claudeModelIds = $state<Record<keyof ClaudeModelMappings, string>>({
   opusModel: '',
 })
 
-const models = $derived(modelsQuery.data ?? [])
+const models = $derived(sortLogicalModels(modelsQuery.data ?? []))
 const apiKeys = $derived(keysQuery.data ?? [])
 const host = $derived(proxyQuery.data ?? window.location.origin)
 const resourcesPending = $derived(modelsQuery.isPending || keysQuery.isPending || proxyQuery.isPending)
@@ -81,10 +83,10 @@ const codeApiKey = $derived(selectedCodeKey?.key ?? emptyKey)
 const clientConfigModels = $derived(cliModels.map(defineClientModel))
 const claudeMappings = $derived.by((): ClaudeModelMappings | undefined => {
   const mappings = {
-    defaultModel: cliModels.find((model) => model.id === claudeModelIds.defaultModel)?.name,
-    haikuModel: cliModels.find((model) => model.id === claudeModelIds.haikuModel)?.name,
-    sonnetModel: cliModels.find((model) => model.id === claudeModelIds.sonnetModel)?.name,
-    opusModel: cliModels.find((model) => model.id === claudeModelIds.opusModel)?.name,
+    defaultModel: cliModels.find((model) => model.id === claudeModelIds.defaultModel)?.model_id,
+    haikuModel: cliModels.find((model) => model.id === claudeModelIds.haikuModel)?.model_id,
+    sonnetModel: cliModels.find((model) => model.id === claudeModelIds.sonnetModel)?.model_id,
+    opusModel: cliModels.find((model) => model.id === claudeModelIds.opusModel)?.model_id,
   }
   if (!mappings.defaultModel || !mappings.haikuModel || !mappings.sonnetModel || !mappings.opusModel) return undefined
   return mappings as ClaudeModelMappings
@@ -92,7 +94,7 @@ const claudeMappings = $derived.by((): ClaudeModelMappings | undefined => {
 const generatedCode = $derived(
   buildCode({
     protocol: codeProtocol,
-    model: codeModel?.name ?? 'gpt-4o',
+    model: codeModel?.model_id ?? 'gpt-4o',
     apiKey: codeApiKey,
     host,
     language: codeLanguage,
@@ -116,7 +118,7 @@ const generatedCliConfig = $derived.by(() => {
     host,
     apiKey: selectedCliKey.key,
     models: clientConfigModels,
-    defaultModel: selectedCliDefaultModel.name,
+    defaultModel: selectedCliDefaultModel.model_id,
     transparentImageInputEnabled:
       selectedCliKey.transparent_injection_enabled && selectedCliKey.inject_media_understanding,
   })
@@ -143,11 +145,27 @@ function retryResources(): void {
 }
 
 function cliModelName(modelId: string): string | undefined {
-  return cliModels.find((model) => model.id === modelId)?.name
+  const model = cliModels.find((candidate) => candidate.id === modelId)
+  return model ? effectiveModelDisplayName(model) : undefined
 }
 </script>
 
 <svelte:head><title>{m.connect_connect_apps()} · Stravia</title></svelte:head>
+
+{#snippet logicalModelOption(model: Route)}
+  <span class="min-w-0 flex-1 truncate">{effectiveModelDisplayName(model)}</span>
+  {#if logicalModelSecondaryId(model)}
+    <span class="truncate font-technical text-xs text-muted-foreground">{model.model_id}</span>
+  {/if}
+{/snippet}
+
+{#snippet logicalModelItems(options: Route[])}
+  {#each options as model (model.id)}
+    <Select.Item value={model.id} label={effectiveModelDisplayName(model)}>
+      {@render logicalModelOption(model)}
+    </Select.Item>
+  {/each}
+{/snippet}
 
 <div class="route-page">
   <PageHeader
@@ -307,11 +325,7 @@ function cliModelName(modelId: string): string | undefined {
                         <Select.Trigger id="cli-default-model" class="w-full"
                           >{cliModelName(claudeModelIds.defaultModel) ?? m.common_select_model()}</Select.Trigger>
                         <Select.Content
-                          ><Select.Group
-                            >{#each cliModels as model (model.id)}<Select.Item value={model.id} label={model.name}
-                                >{model.name}</Select.Item
-                              >{/each}</Select.Group
-                          ></Select.Content>
+                          ><Select.Group>{@render logicalModelItems(cliModels)}</Select.Group></Select.Content>
                       </Select.Root>
                     </Field.Field>
                     <Field.Field size="select">
@@ -320,11 +334,7 @@ function cliModelName(modelId: string): string | undefined {
                         <Select.Trigger id="cli-haiku-model" class="w-full"
                           >{cliModelName(claudeModelIds.haikuModel) ?? m.common_select_model()}</Select.Trigger>
                         <Select.Content
-                          ><Select.Group
-                            >{#each cliModels as model (model.id)}<Select.Item value={model.id} label={model.name}
-                                >{model.name}</Select.Item
-                              >{/each}</Select.Group
-                          ></Select.Content>
+                          ><Select.Group>{@render logicalModelItems(cliModels)}</Select.Group></Select.Content>
                       </Select.Root>
                     </Field.Field>
                     <Field.Field size="select">
@@ -333,11 +343,7 @@ function cliModelName(modelId: string): string | undefined {
                         <Select.Trigger id="cli-sonnet-model" class="w-full"
                           >{cliModelName(claudeModelIds.sonnetModel) ?? m.common_select_model()}</Select.Trigger>
                         <Select.Content
-                          ><Select.Group
-                            >{#each cliModels as model (model.id)}<Select.Item value={model.id} label={model.name}
-                                >{model.name}</Select.Item
-                              >{/each}</Select.Group
-                          ></Select.Content>
+                          ><Select.Group>{@render logicalModelItems(cliModels)}</Select.Group></Select.Content>
                       </Select.Root>
                     </Field.Field>
                     <Field.Field size="select">
@@ -346,11 +352,7 @@ function cliModelName(modelId: string): string | undefined {
                         <Select.Trigger id="cli-opus-model" class="w-full"
                           >{cliModelName(claudeModelIds.opusModel) ?? m.common_select_model()}</Select.Trigger>
                         <Select.Content
-                          ><Select.Group
-                            >{#each cliModels as model (model.id)}<Select.Item value={model.id} label={model.name}
-                                >{model.name}</Select.Item
-                              >{/each}</Select.Group
-                          ></Select.Content>
+                          ><Select.Group>{@render logicalModelItems(cliModels)}</Select.Group></Select.Content>
                       </Select.Root>
                     </Field.Field>
                   {:else}
@@ -358,13 +360,11 @@ function cliModelName(modelId: string): string | undefined {
                       <Field.FieldLabel for="cli-default-model">{m.connect_default_model()}</Field.FieldLabel>
                       <Select.Root type="single" bind:value={cliDefaultModelId}>
                         <Select.Trigger id="cli-default-model" class="w-full"
-                          >{selectedCliDefaultModel?.name ?? m.connect_select_default_model()}</Select.Trigger>
+                          >{selectedCliDefaultModel
+                            ? effectiveModelDisplayName(selectedCliDefaultModel)
+                            : m.connect_select_default_model()}</Select.Trigger>
                         <Select.Content
-                          ><Select.Group
-                            >{#each cliModels as model (model.id)}<Select.Item value={model.id} label={model.name}
-                                >{model.name}</Select.Item
-                              >{/each}</Select.Group
-                          ></Select.Content>
+                          ><Select.Group>{@render logicalModelItems(cliModels)}</Select.Group></Select.Content>
                       </Select.Root>
                     </Field.Field>
                   {/if}
@@ -446,14 +446,9 @@ function cliModelName(modelId: string): string | undefined {
                   <Field.FieldLabel for="code-model">{m.common_model()}</Field.FieldLabel>
                   <Select.Root type="single" bind:value={codeModelId} disabled={models.length === 0}>
                     <Select.Trigger id="code-model" class="w-full"
-                      >{codeModel?.name ??
+                      >{(codeModel ? effectiveModelDisplayName(codeModel) : undefined) ??
                         (models.length ? m.common_select_model() : m.connect_add_model_first())}</Select.Trigger>
-                    <Select.Content
-                      ><Select.Group
-                        >{#each models as model (model.id)}<Select.Item value={model.id} label={model.name}
-                            >{model.name}</Select.Item
-                          >{/each}</Select.Group
-                      ></Select.Content>
+                    <Select.Content><Select.Group>{@render logicalModelItems(models)}</Select.Group></Select.Content>
                   </Select.Root>
                 </Field.Field>
                 <Field.Field size="select">
