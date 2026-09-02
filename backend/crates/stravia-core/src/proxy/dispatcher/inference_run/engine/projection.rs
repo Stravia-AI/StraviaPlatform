@@ -5,14 +5,21 @@
 //! quoted `content` previews bound to authoritative Thinking History Markers.
 //! Other protocols retain their native carriers.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::sync::Arc;
+use std::time::Duration;
 
 use crate::history_marker::{
-    HISTORY_MARKER_PREFIX, HistoryMarker, PROJECTION_DELIMITER_PREFIX, render_history_marker,
+    HISTORY_MARKER_PREFIX, HistoryMarker, HistoryMarkerError, HistoryMarkerStore,
+    PROJECTION_DELIMITER_PREFIX, ThinkingMarkerInput, render_history_marker,
     render_preview_projection_end, render_preview_projection_span, render_preview_projection_start,
 };
+use crate::hook::Principal;
 use crate::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
-use crate::protocol::ir::{AiItem, AiStreamDelta, ContentBlock, MessageContent, Role};
+use crate::protocol::ir::{AiItem, AiResponse, AiStreamDelta, ContentBlock, MessageContent, Role};
+
+const THINKING_MARKER_PENDING_RETENTION: Duration = Duration::from_secs(60 * 60);
+const PUBLISHED_MARKER_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 #[derive(Clone, Copy)]
 enum PreviewCarrier {
@@ -184,16 +191,389 @@ struct LiveProtectedPreview {
     carrier: Option<ProtectedPreviewCarrier>,
 }
 
+#[derive(Clone)]
+struct ProjectedThinkingMarker {
+    marker: HistoryMarker,
+    post_text: bool,
+}
+
+pub(super) struct ClosedThinking {
+    pub(super) finish_deltas: Vec<AiStreamDelta>,
+    pub(super) preview_deltas: Vec<AiStreamDelta>,
+    pub(super) marker_deltas: Vec<AiStreamDelta>,
+    pub(super) markers: Vec<HistoryMarker>,
+    pub(super) had_live_projection: bool,
+}
+
+/// Stateful Client Projection for exactly one Inference Run.
+///
+/// The session owns run-wide Post-Text state and Thinking Marker persistence.
+/// Model Leg boundaries only reset the staged cursor; they never reset the
+/// run-wide state.
+pub(super) struct ClientProjectionSession {
+    state: ProjectionState,
+    marker_store: Arc<dyn HistoryMarkerStore>,
+    principal: Principal,
+    leg_started_post_text: bool,
+    early_thinking: BTreeMap<usize, VecDeque<ProjectedThinkingMarker>>,
+    live_platform_carriers: HashMap<String, bool>,
+}
+
+impl ClientProjectionSession {
+    pub(super) fn new(
+        marker_store: Arc<dyn HistoryMarkerStore>,
+        principal: Principal,
+        ingress: crate::protocol::ids::ProtocolId,
+    ) -> Self {
+        Self {
+            state: ProjectionState::for_ingress(ingress),
+            marker_store,
+            principal,
+            leg_started_post_text: false,
+            early_thinking: BTreeMap::new(),
+            live_platform_carriers: HashMap::new(),
+        }
+    }
+
+    pub(super) fn begin_model_leg(&mut self) {
+        self.state.begin_model_leg();
+        debug_assert!(
+            self.early_thinking.is_empty() && self.live_platform_carriers.is_empty(),
+            "the previous Model Leg must consume its live Client Projection"
+        );
+        self.leg_started_post_text = self.state.post_text_started();
+    }
+
+    pub(super) fn post_text_started(&self) -> bool {
+        self.state.post_text_started()
+    }
+
+    pub(super) fn project_live_delta(
+        &mut self,
+        output_index: usize,
+        delta: AiStreamDelta,
+    ) -> Vec<AiStreamDelta> {
+        self.state.project_delta(output_index, delta)
+    }
+
+    pub(super) fn begin_protected_thinking(&mut self, output_index: usize) {
+        self.state.begin_protected_thinking(output_index);
+    }
+
+    pub(super) fn project_protected_delta(
+        &mut self,
+        output_index: usize,
+        delta: AiStreamDelta,
+    ) -> Vec<AiStreamDelta> {
+        self.state.project_protected_delta(output_index, delta)
+    }
+
+    pub(super) fn reserved_thinking_marker(&self, output_index: usize) -> Option<&HistoryMarker> {
+        self.state.reserved_thinking_marker(output_index)
+    }
+
+    pub(super) fn synthetic_thinking_item(&self, output_index: usize) -> Option<AiItem> {
+        self.state.synthetic_thinking_item(output_index)
+    }
+
+    pub(super) async fn close_thinking(
+        &mut self,
+        output_index: usize,
+        item: &AiItem,
+    ) -> Result<ClosedThinking, HistoryMarkerError> {
+        if self.early_thinking.contains_key(&output_index) {
+            return Err(HistoryMarkerError::InvalidPayload);
+        }
+        let post_text = self.state.post_text_started();
+        let reserved = self.reserved_thinking_marker(output_index).cloned();
+        let had_live_projection = reserved.is_some();
+        let preview_started = self.state.thinking_preview_started(output_index);
+        let markers = self
+            .persist_thinking_blocks(item, reserved.as_ref(), post_text)
+            .await?;
+        let finish_deltas = self.state.close_thinking_preview(output_index);
+        let mut preview_deltas = Vec::new();
+        let mut marker_deltas = Vec::with_capacity(markers.len());
+        if let MessageContent::Blocks(blocks) = &item.content {
+            let mut markers_for_blocks = markers.iter();
+            for block in blocks {
+                if !is_thinking(block) || (!post_text && !is_protected_thinking(block)) {
+                    continue;
+                }
+                let marker = markers_for_blocks
+                    .next()
+                    .ok_or(HistoryMarkerError::InvalidPayload)?;
+                if is_protected_thinking(block) {
+                    preview_deltas.extend(self.state.preview_deltas(output_index, block, marker));
+                }
+            }
+            if markers_for_blocks.next().is_some() {
+                return Err(HistoryMarkerError::InvalidPayload);
+            }
+        }
+        for marker in &markers {
+            marker_deltas.push(self.state.marker_delta(render_history_marker(marker)));
+        }
+        if !markers.is_empty() {
+            self.early_thinking.insert(
+                output_index,
+                markers
+                    .iter()
+                    .cloned()
+                    .map(|marker| ProjectedThinkingMarker { marker, post_text })
+                    .collect(),
+            );
+        }
+        Ok(ClosedThinking {
+            finish_deltas,
+            preview_deltas,
+            marker_deltas,
+            markers,
+            had_live_projection: had_live_projection || preview_started,
+        })
+    }
+
+    async fn persist_thinking_blocks(
+        &self,
+        item: &AiItem,
+        reserved: Option<&HistoryMarker>,
+        post_text: bool,
+    ) -> Result<Vec<HistoryMarker>, HistoryMarkerError> {
+        if !self.state.openai_compatible {
+            return reserved
+                .is_none()
+                .then(Vec::new)
+                .ok_or(HistoryMarkerError::InvalidPayload);
+        }
+        let MessageContent::Blocks(blocks) = &item.content else {
+            return reserved
+                .is_none()
+                .then(Vec::new)
+                .ok_or(HistoryMarkerError::InvalidPayload);
+        };
+        let mut markers = Vec::new();
+        let mut reserved = reserved;
+        for block in blocks
+            .iter()
+            .filter(|block| is_thinking(block) && (post_text || is_protected_thinking(block)))
+        {
+            let marker = self
+                .persist_thinking_block(block.clone(), reserved.take())
+                .await?;
+            markers.push(marker);
+        }
+        if reserved.is_some() {
+            return Err(HistoryMarkerError::InvalidPayload);
+        }
+        Ok(markers)
+    }
+
+    pub(super) fn project_platform_marker_delta(
+        &mut self,
+        reference: &str,
+        rendered: String,
+    ) -> AiStreamDelta {
+        let post_text = self.state.post_text_started();
+        self.live_platform_carriers
+            .insert(reference.to_owned(), post_text);
+        self.state.marker_delta(rendered)
+    }
+
+    pub(super) async fn publish(&self, references: &[String]) -> Result<(), HistoryMarkerError> {
+        self.marker_store
+            .publish(&self.principal, references, PUBLISHED_MARKER_RETENTION)
+            .await
+    }
+
+    pub(super) async fn project_staged(
+        &mut self,
+        response: &mut AiResponse,
+        platform: &[(&str, &HistoryMarker)],
+    ) -> Result<Vec<String>, HistoryMarkerError> {
+        let by_call_id = platform
+            .iter()
+            .copied()
+            .collect::<HashMap<&str, &HistoryMarker>>();
+        let mut post_text = self.leg_started_post_text;
+        let mut projected = Vec::with_capacity(response.items.len() + platform.len());
+        let mut new_references = Vec::new();
+
+        for (output_index, mut item) in std::mem::take(&mut response.items).into_iter().enumerate()
+        {
+            if item
+                .function_call_output_ref()
+                .is_some_and(|(call_id, _)| by_call_id.contains_key(call_id))
+            {
+                continue;
+            }
+            if item.role != Role::Assistant {
+                projected.push(item);
+                continue;
+            }
+
+            let projected_start = projected.len();
+            let mut prepared = self
+                .early_thinking
+                .remove(&output_index)
+                .unwrap_or_default();
+            let mut meta = item.meta.take();
+            match std::mem::replace(&mut item.content, MessageContent::Text(String::new())) {
+                MessageContent::Text(text) => {
+                    if !text.is_empty() {
+                        projected.push(AiItem {
+                            role: Role::Assistant,
+                            content: MessageContent::Text(text),
+                            tool_calls: None,
+                            tool_call_id: None,
+                            meta: meta.take(),
+                        });
+                        post_text = true;
+                    }
+                }
+                MessageContent::Blocks(blocks) => {
+                    for block in blocks {
+                        if !is_thinking(&block) {
+                            if matches!(&block, ContentBlock::Text { text, .. } if !text.is_empty())
+                            {
+                                post_text = true;
+                            }
+                            push_projection_block(&mut projected, block, &mut meta);
+                            continue;
+                        }
+
+                        let recorded = prepared.front().cloned();
+                        let block_post_text =
+                            recorded.as_ref().map_or(post_text, |entry| entry.post_text);
+                        let needs_marker = self.state.openai_compatible
+                            && (block_post_text || is_protected_thinking(&block));
+                        if !needs_marker {
+                            push_projection_block(&mut projected, block, &mut meta);
+                            continue;
+                        }
+                        if recorded
+                            .as_ref()
+                            .is_some_and(|entry| entry.post_text != post_text)
+                        {
+                            return Err(HistoryMarkerError::InvalidPayload);
+                        }
+                        let marker = if let Some(entry) = prepared.pop_front() {
+                            entry.marker
+                        } else {
+                            let marker = self.persist_thinking_block(block.clone(), None).await?;
+                            new_references.push(marker.reference.clone());
+                            marker
+                        };
+                        if block_post_text {
+                            if let Some(mut preview) = self.state.post_text_preview(&block, &marker)
+                            {
+                                preview.meta = meta.take();
+                                projected.push(preview);
+                            }
+                        } else if let Some(visible) =
+                            self.state.visible_protected_block(&block, &marker)
+                        {
+                            push_projection_block(&mut projected, visible, &mut meta);
+                        }
+                        let mut marker_item =
+                            marker_item_for(self.state.openai_compatible, block_post_text, &marker);
+                        marker_item.meta = meta.take();
+                        projected.push(marker_item);
+                    }
+                }
+            }
+
+            if let Some(calls) = item.tool_calls.take() {
+                for call in calls {
+                    let mut call_item = if let Some(marker) = by_call_id.get(call.id.as_str()) {
+                        let marker_post_text = self
+                            .live_platform_carriers
+                            .remove(&marker.reference)
+                            .unwrap_or(post_text);
+                        if marker_post_text != post_text {
+                            return Err(HistoryMarkerError::InvalidPayload);
+                        }
+                        marker_item_for(self.state.openai_compatible, marker_post_text, marker)
+                    } else {
+                        AiItem::function_call(call)
+                    };
+                    call_item.meta = meta.take();
+                    projected.push(call_item);
+                }
+            }
+            if !prepared.is_empty() {
+                return Err(HistoryMarkerError::InvalidPayload);
+            }
+            if projected.len() == projected_start && meta.is_some() {
+                item.meta = meta;
+                projected.push(item);
+            }
+        }
+
+        if !self.early_thinking.is_empty() || !self.live_platform_carriers.is_empty() {
+            return Err(HistoryMarkerError::InvalidPayload);
+        }
+        if post_text {
+            self.state.post_text_started = true;
+        }
+        response.items = projected;
+        Ok(new_references)
+    }
+
+    async fn persist_thinking_block(
+        &self,
+        block: ContentBlock,
+        reserved: Option<&HistoryMarker>,
+    ) -> Result<HistoryMarker, HistoryMarkerError> {
+        let input = ThinkingMarkerInput {
+            block,
+            activity: "Preserving protected reasoning".into(),
+            pending_retention: THINKING_MARKER_PENDING_RETENTION,
+        };
+        if let Some(reserved) = reserved {
+            self.marker_store
+                .create_reserved_thinking(&self.principal, reserved, input)
+                .await
+        } else {
+            self.marker_store
+                .create_thinking(&self.principal, input)
+                .await
+        }
+    }
+}
+
+fn marker_item_for(openai_compatible: bool, post_text: bool, marker: &HistoryMarker) -> AiItem {
+    let rendered = render_history_marker(marker);
+    if openai_compatible && post_text {
+        AiItem::output_text(rendered)
+    } else {
+        AiItem::thinking(rendered, None)
+    }
+}
+
+fn push_projection_block(
+    projected: &mut Vec<AiItem>,
+    block: ContentBlock,
+    meta: &mut Option<serde_json::Value>,
+) {
+    projected.push(AiItem {
+        role: Role::Assistant,
+        content: MessageContent::Blocks(vec![block]),
+        tool_calls: None,
+        tool_call_id: None,
+        meta: meta.take(),
+    });
+}
+
 /// Run-wide Client Projection state. `begin_model_leg` deliberately does not
 /// reset `post_text_started`.
-pub(super) struct ClientProjector {
+struct ProjectionState {
     openai_compatible: bool,
     post_text_started: bool,
     live_previews: HashMap<usize, LiveThinkingPreview>,
     pre_text_protected_previews: HashMap<usize, LiveProtectedPreview>,
 }
 
-impl Default for ClientProjector {
+impl Default for ProjectionState {
     fn default() -> Self {
         Self {
             openai_compatible: true,
@@ -204,20 +584,11 @@ impl Default for ClientProjector {
     }
 }
 
-impl ClientProjector {
-    pub(super) fn for_ingress(ingress: crate::protocol::ids::ProtocolId) -> Self {
+impl ProjectionState {
+    fn for_ingress(ingress: crate::protocol::ids::ProtocolId) -> Self {
         Self {
             openai_compatible: ingress == OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
             ..Self::default()
-        }
-    }
-
-    pub(super) fn staged(openai_compatible: bool, post_text_started: bool) -> Self {
-        Self {
-            openai_compatible,
-            post_text_started,
-            live_previews: HashMap::new(),
-            pre_text_protected_previews: HashMap::new(),
         }
     }
 
@@ -233,7 +604,7 @@ impl ClientProjector {
     }
 
     pub(super) fn observe_text(&mut self, text: &str) {
-        if self.openai_compatible && !text.is_empty() {
+        if !text.is_empty() {
             self.post_text_started = true;
         }
     }
@@ -489,73 +860,6 @@ impl ClientProjector {
         }
     }
 
-    pub(super) fn marker_item(&self, marker: &HistoryMarker) -> AiItem {
-        let rendered = render_history_marker(marker);
-        if self.openai_compatible && self.post_text_started {
-            AiItem::output_text(rendered)
-        } else {
-            AiItem::thinking(rendered, None)
-        }
-    }
-
-    /// Replace Platform calls with markers without retyping canonical Text.
-    pub(super) fn project_items(
-        &mut self,
-        items: Vec<AiItem>,
-        platform: &[(&str, &HistoryMarker)],
-    ) -> Vec<AiItem> {
-        if platform.is_empty() {
-            for item in &items {
-                self.observe_item_text(item);
-            }
-            return items;
-        }
-        let by_call_id = platform
-            .iter()
-            .copied()
-            .collect::<HashMap<&str, &HistoryMarker>>();
-        let mut projected = Vec::with_capacity(items.len() + platform.len());
-        for mut item in items {
-            if item
-                .function_call_output_ref()
-                .is_some_and(|(call_id, _)| by_call_id.contains_key(call_id))
-            {
-                continue;
-            }
-            if item.role == Role::Assistant {
-                self.observe_item_text(&item);
-            }
-            let calls = item.tool_calls.take().unwrap_or_default();
-            let keep_item = !message_content_is_empty(&item.content)
-                || item.meta.is_some()
-                || (calls.is_empty() && item.tool_call_id.is_some());
-            if keep_item {
-                projected.push(item);
-            }
-            for call in calls {
-                if let Some(marker) = by_call_id.get(call.id.as_str()) {
-                    projected.push(self.marker_item(marker));
-                } else {
-                    projected.push(AiItem::function_call(call));
-                }
-            }
-        }
-        projected
-    }
-
-    fn observe_item_text(&mut self, item: &AiItem) {
-        match &item.content {
-            MessageContent::Text(text) => self.observe_text(text),
-            MessageContent::Blocks(blocks) => {
-                for block in blocks {
-                    if let ContentBlock::Text { text, .. } = block {
-                        self.observe_text(text);
-                    }
-                }
-            }
-        }
-    }
-
     pub(super) fn visible_protected_block(
         &self,
         block: &ContentBlock,
@@ -595,7 +899,7 @@ impl ClientProjector {
     }
 }
 
-pub(super) fn is_thinking(block: &ContentBlock) -> bool {
+fn is_thinking(block: &ContentBlock) -> bool {
     matches!(
         block,
         ContentBlock::Thinking { .. }
@@ -605,7 +909,7 @@ pub(super) fn is_thinking(block: &ContentBlock) -> bool {
 }
 
 /// Protected reasoning the client must not receive in its authoritative form.
-pub(super) fn is_protected_thinking(block: &ContentBlock) -> bool {
+fn is_protected_thinking(block: &ContentBlock) -> bool {
     matches!(
         block,
         ContentBlock::Thinking {
@@ -665,16 +969,44 @@ fn private_prefix_lookbehind(text: &str) -> usize {
         .unwrap_or(0)
 }
 
-fn message_content_is_empty(content: &MessageContent) -> bool {
-    match content {
-        MessageContent::Text(text) => text.is_empty(),
-        MessageContent::Blocks(blocks) => blocks.is_empty(),
-    }
-}
-
 fn escape_private_syntax(text: &str) -> String {
     text.replace(HISTORY_MARKER_PREFIX, "&lt;!-- stravia-history-marker:")
         .replace(PROJECTION_DELIMITER_PREFIX, "&lt;!-- stravia-projection:")
+}
+
+#[cfg(test)]
+async fn projection_session_fixture(
+    principal_id: &str,
+) -> (
+    ClientProjectionSession,
+    Arc<dyn HistoryMarkerStore>,
+    Principal,
+) {
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("SQLite pool");
+    crate::migrations::migrate_sqlite(&pool)
+        .await
+        .expect("SQLite migrations");
+    let store: Arc<dyn HistoryMarkerStore> =
+        Arc::new(crate::history_marker::SqlHistoryMarkerStore::sqlite(pool));
+    let principal = Principal::new(principal_id);
+    (
+        ClientProjectionSession::new(
+            Arc::clone(&store),
+            principal.clone(),
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+        ),
+        store,
+        principal,
+    )
+}
+
+#[cfg(test)]
+pub(super) async fn test_projection_session() -> ClientProjectionSession {
+    projection_session_fixture("projection-gate-owner").await.0
 }
 
 #[cfg(test)]
@@ -704,9 +1036,209 @@ mod tests {
             .collect()
     }
 
+    #[tokio::test]
+    async fn one_session_projects_live_and_staged_with_the_same_marker() {
+        let (mut session, store, principal) = projection_session_fixture("projection-owner").await;
+        session.begin_model_leg();
+        let mut live = session.project_live_delta(0, AiStreamDelta::TextDelta("answer".into()));
+        live.extend(session.project_live_delta(1, AiStreamDelta::ThinkingDelta("reason".into())));
+        let reserved = session
+            .reserved_thinking_marker(1)
+            .expect("reserved Thinking Marker")
+            .reference
+            .clone();
+        assert!(
+            store
+                .resolve(&principal, &reserved)
+                .await
+                .expect("resolve reserved marker")
+                .is_none()
+        );
+
+        let closed = session
+            .close_thinking(1, &AiItem::thinking("reason", None))
+            .await
+            .expect("close Thinking");
+        live.extend(closed.finish_deltas.clone());
+        live.extend(closed.marker_deltas.clone());
+        let references = closed
+            .markers
+            .iter()
+            .map(|marker| marker.reference.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(references, vec![reserved.clone()]);
+        let persisted = store
+            .resolve(&principal, &reserved)
+            .await
+            .expect("resolve persisted marker")
+            .expect("persisted marker");
+        assert!(!persisted.published);
+        session.publish(&references).await.expect("publish marker");
+
+        let mut staged = AiResponse::new("response", "model");
+        staged.items = vec![
+            AiItem::output_text("answer"),
+            AiItem::thinking("reason", None),
+        ];
+        assert!(
+            session
+                .project_staged(&mut staged, &[])
+                .await
+                .expect("project staged response")
+                .is_empty(),
+            "staged projection must consume the live Marker"
+        );
+        let staged_text = staged
+            .items
+            .iter()
+            .filter_map(AiItem::output_text_ref)
+            .collect::<String>();
+
+        assert_eq!(text_of(&live), staged_text);
+        assert_eq!(
+            crate::history_marker::history_marker_references(&staged.items),
+            vec![reserved.clone()]
+        );
+        assert!(
+            store
+                .resolve(&principal, &reserved)
+                .await
+                .expect("resolve published marker")
+                .is_some_and(|marker| marker.published)
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnect_during_preview_abandons_the_reserved_marker() {
+        let (mut session, store, principal) = projection_session_fixture("disconnect-owner").await;
+        session.begin_model_leg();
+        session.project_live_delta(0, AiStreamDelta::TextDelta("answer".into()));
+        let preview = session.project_live_delta(1, AiStreamDelta::ThinkingDelta("reason".into()));
+        let reference = session
+            .reserved_thinking_marker(1)
+            .expect("reserved Thinking Marker")
+            .reference
+            .clone();
+
+        assert!(
+            matches!(preview.as_slice(), [AiStreamDelta::TextDelta(text)] if
+            text.contains(PROJECTION_DELIMITER_PREFIX) && text.contains("> reason"))
+        );
+        drop(session);
+        assert!(
+            store
+                .resolve(&principal, &reference)
+                .await
+                .expect("resolve abandoned marker")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn persist_failure_abandons_preview_without_retyping_it_as_canonical_text() {
+        let (mut session, store, principal) =
+            projection_session_fixture("persist-failure-owner").await;
+        session.begin_model_leg();
+        session.project_live_delta(0, AiStreamDelta::TextDelta("answer".into()));
+        let preview = session.project_live_delta(1, AiStreamDelta::ThinkingDelta("reason".into()));
+        let reference = session
+            .reserved_thinking_marker(1)
+            .expect("reserved Thinking Marker")
+            .reference
+            .clone();
+
+        assert!(matches!(
+            session
+                .close_thinking(1, &AiItem::thinking(String::new(), None))
+                .await,
+            Err(HistoryMarkerError::InvalidPayload)
+        ));
+        assert!(
+            matches!(preview.as_slice(), [AiStreamDelta::TextDelta(text)] if
+            text.contains(PROJECTION_DELIMITER_PREFIX) && text != "reason")
+        );
+        assert!(
+            store
+                .resolve(&principal, &reference)
+                .await
+                .expect("resolve failed marker")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_failure_leaves_the_persisted_marker_unpublished() {
+        let (mut session, store, principal) =
+            projection_session_fixture("publish-failure-owner").await;
+        session.begin_model_leg();
+        session.project_live_delta(0, AiStreamDelta::TextDelta("answer".into()));
+        session.project_live_delta(1, AiStreamDelta::ThinkingDelta("reason".into()));
+        let closed = session
+            .close_thinking(1, &AiItem::thinking("reason", None))
+            .await
+            .expect("persist Thinking Marker");
+        let reference = closed.markers[0].reference.clone();
+
+        let error = session
+            .publish(&[reference.clone(), "hm_0123456789missingref".to_owned()])
+            .await
+            .expect_err("missing sibling reference must roll publication back");
+        assert!(matches!(error, HistoryMarkerError::Storage(_)));
+        assert!(
+            closed.finish_deltas.iter().all(|delta| {
+                !matches!(delta, AiStreamDelta::TextDelta(text) if text == "reason")
+            })
+        );
+        assert!(
+            store
+                .resolve(&principal, &reference)
+                .await
+                .expect("resolve unpublished marker")
+                .is_some_and(|marker| !marker.published)
+        );
+    }
+
+    #[tokio::test]
+    async fn post_text_survives_a_hidden_model_leg_boundary() {
+        let (mut session, _, _) = projection_session_fixture("hidden-leg-owner").await;
+        session.begin_model_leg();
+        let mut first_leg = AiResponse::new("first", "model");
+        first_leg.items = vec![AiItem::output_text("visible answer")];
+        assert!(
+            session
+                .project_staged(&mut first_leg, &[])
+                .await
+                .expect("project first leg")
+                .is_empty()
+        );
+
+        session.begin_model_leg();
+        let mut hidden_leg = AiResponse::new("hidden", "model");
+        hidden_leg.items = vec![AiItem::thinking("later reasoning", None)];
+        let references = session
+            .project_staged(&mut hidden_leg, &[])
+            .await
+            .expect("project hidden leg");
+
+        assert_eq!(references.len(), 1);
+        assert!(
+            hidden_leg
+                .items
+                .iter()
+                .all(|item| item.thinking_ref().is_none())
+        );
+        let visible = hidden_leg
+            .items
+            .iter()
+            .filter_map(AiItem::output_text_ref)
+            .collect::<String>();
+        assert!(visible.contains("> later reasoning"), "{visible}");
+        assert!(visible.contains(HISTORY_MARKER_PREFIX), "{visible}");
+    }
+
     #[test]
     fn post_text_thinking_streams_as_quoted_content_with_stable_marker() {
-        let mut projector = ClientProjector::default();
+        let mut projector = ProjectionState::default();
         projector.project_delta(0, AiStreamDelta::TextDelta("C1".into()));
         let first = projector.project_delta(1, AiStreamDelta::ThinkingDelta("R1\n".into()));
         let second = projector.project_delta(1, AiStreamDelta::ThinkingDelta("\nR2".into()));
@@ -795,116 +1327,134 @@ mod tests {
         assert!(body.contains("> ```rust"), "{expected}");
     }
 
-    #[test]
-    fn platform_markers_follow_run_wide_post_text_carrier() {
-        let mut projector = ClientProjector::default();
+    #[tokio::test]
+    async fn platform_markers_follow_run_wide_post_text_carrier() {
+        let (mut session, _, _) = projection_session_fixture("platform-owner").await;
+        session.begin_model_leg();
         let platform = marker("hm_0123456789abcdefghij", HistoryMarkerKind::Platform);
         assert!(matches!(
-            projector.marker_delta(render_history_marker(&platform)),
+            session.project_platform_marker_delta(
+                &platform.reference,
+                render_history_marker(&platform)
+            ),
             AiStreamDelta::ThinkingDelta(_)
         ));
-        projector.observe_text("C1");
+        session.project_live_delta(0, AiStreamDelta::TextDelta("C1".into()));
+        let second = marker("hm_0123456789abcdefghi2", HistoryMarkerKind::Platform);
         assert!(matches!(
-            projector.marker_delta(render_history_marker(&platform)),
+            session
+                .project_platform_marker_delta(&second.reference, render_history_marker(&second)),
             AiStreamDelta::TextDelta(_)
         ));
-        projector.begin_model_leg();
-        assert!(matches!(
-            projector.marker_delta(render_history_marker(&platform)),
-            AiStreamDelta::TextDelta(_)
-        ));
-    }
-
-    #[test]
-    fn only_non_empty_text_starts_post_text_state() {
-        let marker = marker("hm_0123456789abcdefghij", HistoryMarkerKind::Thinking);
-        let mut projector = ClientProjector::default();
-        projector.project_delta(0, AiStreamDelta::TextDelta(String::new()));
-        assert!(matches!(
-            projector.marker_delta(render_history_marker(&marker)),
-            AiStreamDelta::ThinkingDelta(_)
-        ));
-
-        projector.project_delta(0, AiStreamDelta::TextDelta(" ".into()));
-        assert!(matches!(
-            projector.marker_delta(render_history_marker(&marker)),
-            AiStreamDelta::TextDelta(_)
-        ));
-    }
-
-    #[test]
-    fn protected_post_text_blocks_expose_only_public_preview_bytes() {
-        let marker = marker("hm_0123456789abcdefghij", HistoryMarkerKind::Thinking);
-        let projector = ClientProjector::staged(true, true);
-        let preview = projector
-            .post_text_preview(
-                &ContentBlock::Reasoning {
-                    summary: vec!["public summary".into()],
-                    content: Vec::new(),
-                    encrypted_content: Some("opaque-encrypted-payload".into()),
-                },
-                &marker,
+        let mut staged = AiResponse::new("response", "model");
+        staged.items = vec![
+            AiItem::function_call(crate::protocol::ir::ToolCall {
+                id: "call-before".into(),
+                name: "web_search".into(),
+                arguments: "{}".into(),
+            }),
+            AiItem::output_text("C1"),
+            AiItem::function_call(crate::protocol::ir::ToolCall {
+                id: "call-after".into(),
+                name: "web_search".into(),
+                arguments: "{}".into(),
+            }),
+        ];
+        session
+            .project_staged(
+                &mut staged,
+                &[("call-before", &platform), ("call-after", &second)],
             )
-            .expect("public summary Preview");
-        let text = preview.output_text_ref().expect("content Preview");
-        assert!(text.contains("> public summary"), "{text}");
-        assert!(!text.contains("opaque-encrypted-payload"), "{text}");
+            .await
+            .expect("consume live Platform Marker carriers");
+        session.begin_model_leg();
+        let third = marker("hm_0123456789abcdefghi3", HistoryMarkerKind::Platform);
+        assert!(matches!(
+            session.project_platform_marker_delta(&third.reference, render_history_marker(&third)),
+            AiStreamDelta::TextDelta(_)
+        ));
+    }
 
-        assert!(
-            projector
-                .post_text_preview(
-                    &ContentBlock::Thinking {
-                        thinking: String::new(),
-                        signature: Some("opaque-signature".into()),
-                    },
-                    &marker,
-                )
-                .is_none()
-        );
-        assert!(
-            projector
-                .post_text_preview(
-                    &ContentBlock::Reasoning {
-                        summary: Vec::new(),
-                        content: Vec::new(),
-                        encrypted_content: Some("opaque-encrypted-payload".into()),
-                    },
-                    &marker,
-                )
-                .is_none()
-        );
-        assert!(
-            projector
-                .post_text_preview(
-                    &ContentBlock::RedactedThinking {
-                        data: "opaque-redacted-payload".into(),
-                    },
-                    &marker,
-                )
-                .is_none()
-        );
-        assert!(
-            projector
-                .marker_item(&marker)
-                .output_text_ref()
-                .is_some_and(|text| text.contains(HISTORY_MARKER_PREFIX))
+    #[tokio::test]
+    async fn only_non_empty_text_starts_post_text_state() {
+        let (mut session, _, _) = projection_session_fixture("text-state-owner").await;
+        session.begin_model_leg();
+        session.project_live_delta(0, AiStreamDelta::TextDelta(String::new()));
+        assert!(!session.post_text_started());
+
+        session.project_live_delta(0, AiStreamDelta::TextDelta(" ".into()));
+        assert!(session.post_text_started());
+    }
+
+    #[tokio::test]
+    async fn protected_post_text_blocks_expose_only_public_preview_bytes() {
+        let (mut session, _, _) = projection_session_fixture("protected-owner").await;
+        session.begin_model_leg();
+        let mut response = AiResponse::new("response", "model");
+        response.items = vec![
+            AiItem::output_text("answer"),
+            AiItem::reasoning(
+                vec!["public summary".into()],
+                Vec::new(),
+                Some("opaque-encrypted-payload".into()),
+            ),
+            AiItem::thinking(String::new(), Some("opaque-signature".into())),
+            AiItem {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![ContentBlock::RedactedThinking {
+                    data: "opaque-redacted-payload".into(),
+                }]),
+                tool_calls: None,
+                tool_call_id: None,
+                meta: None,
+            },
+        ];
+
+        let references = session
+            .project_staged(&mut response, &[])
+            .await
+            .expect("project protected Thinking");
+        let visible = response
+            .items
+            .iter()
+            .filter_map(AiItem::output_text_ref)
+            .collect::<String>();
+
+        assert!(visible.contains("> public summary"), "{visible}");
+        assert!(!visible.contains("opaque-encrypted-payload"), "{visible}");
+        assert!(!visible.contains("opaque-signature"), "{visible}");
+        assert!(!visible.contains("opaque-redacted-payload"), "{visible}");
+        assert_eq!(references.len(), 3);
+        assert_eq!(
+            crate::history_marker::history_marker_references(&response.items).len(),
+            3
         );
     }
 
-    #[test]
-    fn each_post_text_thinking_block_reserves_a_distinct_marker() {
-        let mut projector = ClientProjector::default();
-        projector.observe_text("C1");
-        projector.project_delta(1, AiStreamDelta::ThinkingDelta("R1".into()));
-        let first = projector
+    #[tokio::test]
+    async fn each_post_text_thinking_block_reserves_a_distinct_marker() {
+        let (mut session, _, _) = projection_session_fixture("block-owner").await;
+        session.begin_model_leg();
+        session.project_live_delta(0, AiStreamDelta::TextDelta("C1".into()));
+        session.project_live_delta(1, AiStreamDelta::ThinkingDelta("R1".into()));
+        let first = session
             .reserved_thinking_marker(1)
             .expect("first marker")
             .reference
             .clone();
-        projector.close_thinking_preview(1);
+        session
+            .close_thinking(1, &AiItem::thinking("R1", None))
+            .await
+            .expect("close first block");
+        let mut first_response = AiResponse::new("first", "model");
+        first_response.items = vec![AiItem::output_text("C1"), AiItem::thinking("R1", None)];
+        session
+            .project_staged(&mut first_response, &[])
+            .await
+            .expect("consume first live projection");
 
-        projector.project_delta(2, AiStreamDelta::ThinkingDelta("R2".into()));
-        let second = projector
+        session.project_live_delta(2, AiStreamDelta::ThinkingDelta("R2".into()));
+        let second = session
             .reserved_thinking_marker(2)
             .expect("second marker")
             .reference
@@ -913,26 +1463,29 @@ mod tests {
         assert_ne!(first, second);
     }
 
-    #[test]
-    fn platform_projection_never_retypes_text() {
+    #[tokio::test]
+    async fn platform_projection_never_retypes_text() {
         let platform = marker("hm_0123456789abcdefghij", HistoryMarkerKind::Platform);
-        let mut projector = ClientProjector::default();
-        let projected = projector.project_items(
-            vec![
-                AiItem::output_text("C1"),
-                AiItem::function_call(crate::protocol::ir::ToolCall {
-                    id: "call-1".into(),
-                    name: "web_search".into(),
-                    arguments: "{}".into(),
-                }),
-            ],
-            &[("call-1", &platform)],
-        );
+        let (mut session, _, _) = projection_session_fixture("platform-staged-owner").await;
+        session.begin_model_leg();
+        let mut response = AiResponse::new("response", "model");
+        response.items = vec![
+            AiItem::output_text("C1"),
+            AiItem::function_call(crate::protocol::ir::ToolCall {
+                id: "call-1".into(),
+                name: "web_search".into(),
+                arguments: "{}".into(),
+            }),
+        ];
+        session
+            .project_staged(&mut response, &[("call-1", &platform)])
+            .await
+            .expect("project Platform Marker");
 
-        assert_eq!(projected[0].output_text_ref(), Some("C1"));
-        assert!(projected[0].thinking_ref().is_none());
+        assert_eq!(response.items[0].output_text_ref(), Some("C1"));
+        assert!(response.items[0].thinking_ref().is_none());
         assert!(
-            projected[1]
+            response.items[1]
                 .output_text_ref()
                 .is_some_and(|text| text.contains(HISTORY_MARKER_PREFIX))
         );

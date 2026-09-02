@@ -181,6 +181,7 @@ struct DispatchContext<'a> {
     inference_run: &'a mut Option<crate::hook::InferenceRun>,
     phase: &'a mut PhaseTracker,
     generation: &'a mut GenerationChainRun,
+    projection: &'a mut Option<ClientProjectionSession>,
 }
 
 struct SharedModelTurnInput<'a> {
@@ -195,6 +196,7 @@ struct SharedModelTurnInput<'a> {
     start: Instant,
     request_extras: &'a RequestExtras,
     headers: &'a HeaderMap,
+    projection: &'a mut Option<ClientProjectionSession>,
 }
 
 fn stabilize_media_generation_chain(
@@ -412,6 +414,11 @@ pub(super) async fn orchestrate(
             Err(error) => return hook_failure_response(error),
         },
     );
+    let mut projection = Some(ClientProjectionSession::new(
+        Arc::clone(&gw.history_markers),
+        generation.principal.clone(),
+        ingress,
+    ));
     let response = dispatch_pipeline_inner(DispatchContext {
         gw: gw.clone(),
         executor,
@@ -423,6 +430,7 @@ pub(super) async fn orchestrate(
         inference_run: &mut *inference_run,
         phase: &mut *phase,
         generation: &mut generation,
+        projection: &mut projection,
     })
     .await;
     phase.finish();
@@ -463,6 +471,7 @@ async fn dispatch_pipeline_inner(context: DispatchContext<'_>) -> Response {
         inference_run,
         phase,
         generation,
+        projection,
     } = context;
     let start = Instant::now();
     let mut delivery = DeliveryState::Buffered;
@@ -478,6 +487,7 @@ async fn dispatch_pipeline_inner(context: DispatchContext<'_>) -> Response {
             inference_run: &mut *inference_run,
             phase: &mut *phase,
             generation: &mut *generation,
+            projection: &mut *projection,
         },
         start,
         &mut delivery,
@@ -507,6 +517,7 @@ async fn dispatch_round(
         inference_run,
         phase,
         generation: generation_chain,
+        projection,
     } = context;
     let mut fixed_media_plan = request.meta.media_routing.clone();
     'round: loop {
@@ -582,6 +593,18 @@ async fn dispatch_round(
                         && let Some(write) = generation_chain.write.as_ref()
                     {
                         response.id = write.id().to_owned();
+                    }
+                    let projection = projection
+                        .as_mut()
+                        .expect("buffered Client Projection session");
+                    projection.begin_model_leg();
+                    let thinking_references =
+                        match projection.project_staged(&mut response, &[]).await {
+                            Ok(references) => references,
+                            Err(error) => return hook_failure_response(error),
+                        };
+                    if let Err(error) = projection.publish(&thinking_references).await {
+                        return hook_failure_response(error);
                     }
                     let pending_generation_chain =
                         generation_chain.write.take().and_then(|mut write| {
@@ -666,6 +689,7 @@ async fn dispatch_round(
             start,
             request_extras: &req_extras,
             headers: &headers,
+            projection,
         })
         .await;
         match outcome {
@@ -778,6 +802,7 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
         start,
         request_extras,
         headers,
+        projection,
     } = input;
     let (turn, effective_request, turn_started) = match acquire_turn(
         executor.as_ref(),
@@ -836,9 +861,15 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
             turn_started,
             request_extras: stream_request_extras,
             log,
+            projection: projection.take().expect("live Client Projection session"),
         })
         .await;
     }
+
+    let projection = projection
+        .as_mut()
+        .expect("buffered Client Projection session");
+    projection.begin_model_leg();
 
     let route = turn.route.clone();
     let streamed = turn.streamed;
@@ -974,7 +1005,7 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
             response,
             upstream_response_id,
             early_platform_executions: Vec::new(),
-            early_thinking_markers: Vec::new(),
+            projection,
         },
     )
     .await

@@ -13,18 +13,17 @@ use axum::http::HeaderMap;
 use futures::StreamExt;
 
 use crate::agent::{CanonicalEvent, ModelTurn, ModelTurnExecutor};
-use crate::protocol::ir::{AiItem, AiRequest, AiResponse, AiStreamDelta, MessageContent};
+use crate::protocol::ir::{AiItem, AiRequest, AiResponse, AiStreamDelta};
 use crate::proxy::context::RequestContext;
 
 use super::delivery::LiveStreamRequest;
 use super::{
-    ClientOutputCommit, ClientProjector, CompletionContext, CompletionFailure, CompletionInput,
-    CompletionOutcome, DeliveryAdapter, DeliveryProgress, EarlyPlatformExecution,
-    EarlyThinkingMarkers, FollowupModelTurn, LogBuilder, PhaseTracker, PublishedPlatformExecutions,
-    RequestExtras, RoundOutcome, StreamResponseAccumulator, acquire_followup_model_turn,
-    ai_response_to_deltas, buffered_response, complete_canonical_response, error_response,
-    hook_failure_response, is_protected_thinking, live_response, prepare_platform_markers,
-    prepare_thinking_markers, publish_markers, render_completion_failure,
+    ClientOutputCommit, ClientProjectionSession, CompletionContext, CompletionFailure,
+    CompletionInput, CompletionOutcome, DeliveryAdapter, DeliveryProgress, EarlyPlatformExecution,
+    FollowupModelTurn, LogBuilder, PhaseTracker, PublishedPlatformExecutions, RequestExtras,
+    RoundOutcome, StreamResponseAccumulator, acquire_followup_model_turn, ai_response_to_deltas,
+    buffered_response, complete_canonical_response, error_response, hook_failure_response,
+    live_response, prepare_platform_markers, publish_markers, render_completion_failure,
 };
 use gate::LiveDeltaGate;
 
@@ -76,11 +75,13 @@ pub(super) struct ModelTurnStreamInput {
     pub(super) turn_started: Instant,
     pub(super) request_extras: RequestExtras,
     pub(super) log: LogBuilder,
+    pub(super) projection: ClientProjectionSession,
 }
 
-fn projected_marker_carriers(response: &AiResponse) -> Vec<(String, String)> {
+fn projected_marker_carriers(response: &AiResponse) -> Vec<(String, String, bool)> {
     let mut carriers = Vec::new();
     for item in &response.items {
+        let text_carrier = item.output_text_ref().is_some();
         let text = item
             .thinking_ref()
             .map(|(text, _)| text)
@@ -93,7 +94,7 @@ fn projected_marker_carriers(response: &AiResponse) -> Vec<(String, String)> {
         for reference in
             crate::history_marker::history_marker_references(std::slice::from_ref(item))
         {
-            carriers.push((reference, text.to_owned()));
+            carriers.push((reference, text.to_owned(), text_carrier));
         }
     }
     carriers
@@ -101,21 +102,20 @@ fn projected_marker_carriers(response: &AiResponse) -> Vec<(String, String)> {
 
 fn marker_deltas(
     response: &AiResponse,
-    platform_references: &HashSet<String>,
     emitted: &mut HashSet<String>,
     gate: &mut LiveDeltaGate,
 ) -> Vec<AiStreamDelta> {
     let mut deltas = Vec::new();
-    for (reference, rendered) in projected_marker_carriers(response) {
+    for (_, rendered, text_carrier) in projected_marker_carriers(response) {
         if !emitted.insert(rendered.clone()) {
             continue;
         }
-        if platform_references.contains(&reference) {
-            deltas.extend(gate.project_platform_marker(rendered));
+        let marker = if text_carrier {
+            AiStreamDelta::TextDelta(rendered)
         } else {
-            let marker = gate.history_marker_delta(rendered);
-            deltas.extend(gate.commit_visible(vec![marker]));
-        }
+            AiStreamDelta::ThinkingDelta(rendered)
+        };
+        deltas.extend(gate.commit_visible(vec![marker]));
     }
     deltas
 }
@@ -136,6 +136,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
         mut turn_started,
         request_extras,
         log,
+        projection,
     } = input;
     let egress = turn.route.egress;
     let previous_response_id = generation.previous_response_id.clone();
@@ -160,10 +161,12 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
             capture_payload: true,
         });
         delivery.set_response_profile(&request, previous_response_id.as_deref());
-        let mut live_delta_gate = LiveDeltaGate::for_ingress(ingress);
+        let mut projection = projection;
+        let mut live_delta_gate = LiveDeltaGate::default();
         let mut emitted_marker_texts = HashSet::new();
         'model_legs: loop {
             live_delta_gate.begin_model_leg(
+                &mut projection,
                 turn.route.egress.protocol,
                 turn.reasoning_encrypted_content_requested,
             );
@@ -191,7 +194,6 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
             let mut preflight_failure = None;
             let mut leg_client_output_committed = false;
             let mut early_platform_executions = Vec::new();
-            let mut early_thinking_markers = Vec::new();
             let mut deferred_thinking_publish_references = Vec::new();
 
             while !aborted && !cancelled && !receiver_closed && !protocol_failed {
@@ -252,7 +254,8 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                             completion_context.generation_chain_identity(),
                         );
                         if !buffer_terminal_hooks {
-                            live_delta_gate.capture_protected_candidates(&transformed);
+                            live_delta_gate
+                                .capture_protected_candidates(&mut projection, &transformed);
                         }
                         if !buffer_terminal_hooks {
                             live_delta_gate.capture_unindexed_signatures(&mut transformed);
@@ -263,7 +266,10 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                             if thinking_completed
                                 && let Some((index, item)) = live_delta_gate
                                     .synthetic_signed_thinking_item()
-                                    .or_else(|| live_delta_gate.synthetic_post_text_thinking_item())
+                                    .or_else(|| {
+                                        live_delta_gate
+                                            .synthetic_post_text_thinking_item(&projection)
+                                    })
                             {
                                 transformed.insert(0, AiStreamDelta::ItemDone { index, item });
                             }
@@ -275,12 +281,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                                 .iter()
                                 .filter_map(|delta| match delta {
                                     AiStreamDelta::ItemDone { index, item }
-                                        if completed_thinking_indices.insert(*index)
-                                            && !early_thinking_markers.iter().any(
-                                                |early: &EarlyThinkingMarkers| {
-                                                    early.output_index == *index
-                                                },
-                                            ) =>
+                                        if completed_thinking_indices.insert(*index) =>
                                     {
                                         Some((*index, item))
                                     }
@@ -288,19 +289,11 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                                 })
                                 .collect::<Vec<_>>();
                             for (output_index, item) in completed_thinking_items {
-                                let reserved = live_delta_gate
-                                    .reserved_thinking_marker(output_index)
-                                    .cloned();
-                                let post_text = live_delta_gate.post_text_started();
-                                let markers = match prepare_thinking_markers(
-                                    &completion_context,
-                                    &item,
-                                    reserved.as_ref(),
-                                    post_text,
-                                )
-                                .await
+                                let (marker_deltas, markers) = match live_delta_gate
+                                    .close_thinking(&mut projection, output_index, &item)
+                                    .await
                                 {
-                                    Ok(markers) => markers,
+                                    Ok(projected) => projected,
                                     Err(error) => {
                                         aborted = true;
                                         preflight_failure =
@@ -315,58 +308,20 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                                         break;
                                     }
                                 };
-                                let mut marker_deltas = live_delta_gate.resolve_completed_item(
-                                    output_index,
-                                    &item,
-                                    &markers,
-                                );
-                                if markers.is_empty() {
-                                    if marker_deltas.is_empty() {
-                                        continue;
-                                    }
-                                    let marker_deltas =
-                                        live_delta_gate.route_visible_deltas(marker_deltas);
-                                    if marker_deltas.is_empty() {
-                                        continue;
-                                    }
-                                    match delivery.send_deltas(&marker_deltas).await {
-                                        DeliveryProgress::Sent => {
-                                            leg_client_output_committed = true;
-                                        }
-                                        DeliveryProgress::Cancelled => {
-                                            cancelled = true;
-                                            break;
-                                        }
-                                        DeliveryProgress::ReceiverClosed => {
-                                            receiver_closed = true;
-                                            break;
-                                        }
-                                        DeliveryProgress::ProtocolFailed => {
-                                            protocol_failed = true;
-                                            break;
-                                        }
-                                    }
-                                    continue;
-                                }
                                 let references = markers
                                     .iter()
                                     .map(|marker| marker.reference.clone())
                                     .collect::<Vec<_>>();
-                                marker_deltas.extend(markers.iter().map(|marker| {
-                                    let rendered =
-                                        crate::history_marker::render_history_marker(marker);
-                                    emitted_marker_texts.insert(rendered.clone());
-                                    live_delta_gate.history_marker_delta(rendered)
-                                }));
-                                let marker_deltas =
-                                    live_delta_gate.route_visible_deltas(marker_deltas);
+                                emitted_marker_texts.extend(
+                                    markers
+                                        .iter()
+                                        .map(crate::history_marker::render_history_marker),
+                                );
+                                let marker_deltas = live_delta_gate
+                                    .route_visible_deltas(&mut projection, marker_deltas);
                                 if marker_deltas.is_empty() {
                                     deferred_thinking_publish_references
                                         .extend(references.iter().cloned());
-                                    early_thinking_markers.push(EarlyThinkingMarkers {
-                                        output_index,
-                                        markers,
-                                    });
                                     continue;
                                 }
                                 match delivery.send_deltas(&marker_deltas).await {
@@ -386,19 +341,13 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                                         break;
                                     }
                                 }
-                                if let Err(error) =
-                                    publish_markers(&completion_context, &references).await
-                                {
+                                if let Err(error) = projection.publish(&references).await {
                                     tracing::error!(
                                         "failed to publish streamed thinking marker: {error}"
                                     );
                                     aborted = true;
                                     break;
                                 }
-                                early_thinking_markers.push(EarlyThinkingMarkers {
-                                    output_index,
-                                    markers,
-                                });
                             }
                             if aborted || cancelled || receiver_closed || protocol_failed {
                                 break;
@@ -472,7 +421,11 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                                     .flat_map(|marker| {
                                         let rendered = marker.render();
                                         emitted_marker_texts.insert(rendered.clone());
-                                        live_delta_gate.project_platform_marker(rendered)
+                                        live_delta_gate.project_platform_marker(
+                                            &mut projection,
+                                            marker.reference(),
+                                            rendered,
+                                        )
                                     })
                                     .collect::<Vec<_>>();
                                 match delivery.send_deltas(&marker_deltas).await {
@@ -523,7 +476,11 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                             }
                         }
                         if !buffer_terminal_hooks {
-                            let visible = live_delta_gate.filter(hook_leg.run_mut(), transformed);
+                            let visible = live_delta_gate.filter(
+                                &mut projection,
+                                hook_leg.run_mut(),
+                                transformed,
+                            );
                             let has_visible = !visible.is_empty();
                             match delivery.send_deltas(&visible).await {
                                 DeliveryProgress::Sent => {
@@ -554,7 +511,8 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                     accumulator.apply_all(&flushed);
                     if !buffer_terminal_hooks && !cancelled && !receiver_closed && !protocol_failed
                     {
-                        let visible = live_delta_gate.filter(hook_leg.run_mut(), flushed);
+                        let visible =
+                            live_delta_gate.filter(&mut projection, hook_leg.run_mut(), flushed);
                         let has_visible = !visible.is_empty();
                         match delivery.send_deltas(&visible).await {
                             DeliveryProgress::Sent => {
@@ -641,7 +599,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                         response,
                         upstream_response_id,
                         early_platform_executions,
-                        early_thinking_markers,
+                        projection: &mut projection,
                     },
                 )
                 .await
@@ -652,14 +610,8 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                             .expect("current Model Turn log")
                             .without_client_exchange()
                             .emit();
-                        let platform_references =
-                            projected_marker_carriers(continuation.projected_response())
-                                .into_iter()
-                                .map(|(reference, _)| reference)
-                                .collect::<HashSet<_>>();
                         let marker_deltas = marker_deltas(
                             continuation.projected_response(),
-                            &platform_references,
                             &mut emitted_marker_texts,
                             &mut live_delta_gate,
                         );
@@ -707,6 +659,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                                 ingress,
                                 &request_context,
                                 hook_leg.run_mut(),
+                                &mut projection,
                                 &mut phase,
                                 completion_context.principal(),
                                 &generation,
@@ -741,7 +694,11 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                                     response = hook_response;
                                     pending_generation_chain = hook_generation_chain;
                                     if !buffer_terminal_hooks {
-                                        live_delta_gate.begin_model_leg(ingress.protocol, true);
+                                        live_delta_gate.begin_model_leg(
+                                            &mut projection,
+                                            ingress.protocol,
+                                            true,
+                                        );
                                         let mut deltas = ai_response_to_deltas(&response);
                                         terminal_deltas = deltas
                                             .iter()
@@ -761,7 +718,8 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                                                     | AiStreamDelta::Done { .. }
                                             )
                                         });
-                                        let deltas = live_delta_gate.route_visible_deltas(deltas);
+                                        let deltas = live_delta_gate
+                                            .route_visible_deltas(&mut projection, deltas);
                                         match delivery.send_deltas(&deltas).await {
                                             DeliveryProgress::Sent => {}
                                             DeliveryProgress::Cancelled => cancelled = true,
@@ -847,19 +805,8 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                 && !receiver_closed
                 && !protocol_failed
             {
-                let platform_references = request_context
-                    .extensions
-                    .get::<PublishedPlatformExecutions>()
-                    .unwrap_or_default()
-                    .references
-                    .into_iter()
-                    .collect::<HashSet<_>>();
-                let markers = marker_deltas(
-                    &response,
-                    &platform_references,
-                    &mut emitted_marker_texts,
-                    &mut live_delta_gate,
-                );
+                let markers =
+                    marker_deltas(&response, &mut emitted_marker_texts, &mut live_delta_gate);
                 if !markers.is_empty() {
                     match delivery.send_deltas(&markers).await {
                         DeliveryProgress::Sent => {}
@@ -869,7 +816,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                     }
                 }
                 if !cancelled && !receiver_closed && !protocol_failed {
-                    let suffix = live_delta_gate.complete_model_leg();
+                    let suffix = live_delta_gate.complete_model_leg(&mut projection);
                     if !suffix.is_empty() {
                         match delivery.send_deltas(&suffix).await {
                             DeliveryProgress::Sent => {}
