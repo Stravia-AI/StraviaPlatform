@@ -401,7 +401,6 @@ impl GenerationChainStore {
             })
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| not_found.to_string())?;
-        #[cfg(debug_assertions)]
         let root_id = persisted.first().map(|(id, _)| id.to_string());
         resolve_item_references(
             &mut new_messages,
@@ -425,7 +424,6 @@ impl GenerationChainStore {
             request.meta.vendor.ingress.remove("previous_response_id");
         }
         Ok(ActiveGenerationChain {
-            #[cfg(debug_assertions)]
             root_id,
             parent_id: Some(parent_id.to_owned()),
             parent_upstream_response_id: materialized.upstream_response_id,
