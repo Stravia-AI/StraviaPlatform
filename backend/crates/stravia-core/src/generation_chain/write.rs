@@ -17,7 +17,6 @@ impl GenerationChainWrite {
         &self.id
     }
 
-    #[cfg(debug_assertions)]
     pub(crate) fn root_id(&self) -> &str {
         self.parent.root_id.as_deref().unwrap_or(&self.id)
     }

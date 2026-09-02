@@ -240,6 +240,81 @@ async fn chat_full_history_uses_upstream_websocket_and_longest_reusable_prefix()
 }
 
 #[tokio::test]
+async fn store_false_chat_chain_generates_a_stable_prompt_cache_key() {
+    let (base_url, connections, requests) =
+        serve_responses_websocket_sequence(vec!["first answer", "second answer"]).await;
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let (gateway, _logs) = Gateway::new(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .expect("Gateway");
+    configure_route_with_protocol(
+        &gateway,
+        "store-false-cache-key",
+        &[base_url],
+        "openai",
+        "openai-compatible",
+    )
+    .await;
+    let headers = authorized_headers(&gateway).await;
+
+    let mut first_user = crate::protocol::ir::AiItem::output_text("first");
+    first_user.role = crate::protocol::ir::Role::User;
+    let mut first_request = AiRequest::new("store-false-cache-key", vec![first_user.clone()]);
+    first_request.ext = Some(crate::protocol::ir::ProtocolExt::OpenResponses(
+        crate::protocol::ir::OpenResponsesExt {
+            store: Some(false),
+            ..Default::default()
+        },
+    ));
+    let first_response =
+        execute_non_stream_request_with_headers(gateway.clone(), headers.clone(), first_request)
+            .await;
+    assert_eq!(first_response.status(), StatusCode::OK);
+    to_bytes(first_response.into_body(), usize::MAX)
+        .await
+        .expect("first response body");
+
+    let mut second_user = crate::protocol::ir::AiItem::output_text("second");
+    second_user.role = crate::protocol::ir::Role::User;
+    let mut second_request = AiRequest::new(
+        "store-false-cache-key",
+        vec![
+            first_user,
+            crate::protocol::ir::AiItem::output_text("first answer"),
+            second_user,
+        ],
+    );
+    second_request.ext = Some(crate::protocol::ir::ProtocolExt::OpenResponses(
+        crate::protocol::ir::OpenResponsesExt {
+            store: Some(false),
+            ..Default::default()
+        },
+    ));
+    let second_response =
+        execute_non_stream_request_with_headers(gateway, headers, second_request).await;
+    assert_eq!(second_response.status(), StatusCode::OK);
+    to_bytes(second_response.into_body(), usize::MAX)
+        .await
+        .expect("second response body");
+
+    let requests = requests
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert_eq!(requests.len(), 2);
+    let prompt_cache_key = requests[0]["prompt_cache_key"]
+        .as_str()
+        .expect("first request prompt cache key");
+    assert_eq!(
+        requests[1]["prompt_cache_key"].as_str(),
+        Some(prompt_cache_key)
+    );
+    assert_eq!(connections.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn anthropic_cache_breakpoint_on_reusable_history_keeps_target_continuation() {
     let (base_url, connections, requests) =
         serve_responses_websocket_sequence(vec!["first answer", "second answer"]).await;

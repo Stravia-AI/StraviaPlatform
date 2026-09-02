@@ -316,7 +316,16 @@ pub(super) async fn orchestrate(
     });
     let generation_chain_write = if matches!(request_kind, crate::hook::RequestKind::Generation) {
         match gw.generation_chains.begin(principal.clone(), request).await {
-            Ok(write) => {
+            Ok(mut write) => {
+                if crate::generation_chain::generation_session_fingerprint(write.request())
+                    .is_none()
+                {
+                    let root_id = write.root_id().to_owned();
+                    crate::generation_chain::set_generation_session_id(
+                        write.request_mut(),
+                        root_id,
+                    );
+                }
                 #[cfg(debug_assertions)]
                 if let Some(capture) = &gw.wire_capture {
                     capture.bind_chain(&ctx.request_id, write.root_id());
