@@ -2993,19 +2993,18 @@ fn openai_responses_protected_reasoning_sse_parts(content: &str) -> (String, Str
     (before_answer, answer)
 }
 
-fn openai_responses_live_protected_summary_sse_parts() -> (String, String) {
+fn openai_responses_live_summary_sse_parts(encrypted_content: Option<&str>) -> (String, String) {
     let summary = "live protected summary";
     let summary_prefix = "live protected ";
     let summary_suffix = "summary";
-    let reasoning_in_progress = serde_json::json!({
+    let mut reasoning_in_progress = serde_json::json!({
         "id": "rs-live-protected",
         "type": "reasoning",
         "status": "in_progress",
         "summary": [],
-        "content": [],
-        "encrypted_content": "opaque-reasoning"
+        "content": []
     });
-    let reasoning_completed = serde_json::json!({
+    let mut reasoning_completed = serde_json::json!({
         "id": "rs-live-protected",
         "type": "reasoning",
         "status": "completed",
@@ -3013,9 +3012,14 @@ fn openai_responses_live_protected_summary_sse_parts() -> (String, String) {
             "type": "summary_text",
             "text": summary
         }],
-        "content": [],
-        "encrypted_content": "opaque-reasoning"
+        "content": []
     });
+    if let Some(encrypted_content) = encrypted_content {
+        reasoning_in_progress["encrypted_content"] =
+            serde_json::Value::String(encrypted_content.to_owned());
+        reasoning_completed["encrypted_content"] =
+            serde_json::Value::String(encrypted_content.to_owned());
+    }
     let in_progress_response =
         crate::protocol::codec::open_responses::formatter::response_resource_snapshot(
             "resp-live-protected",
@@ -3118,6 +3122,14 @@ fn openai_responses_live_protected_summary_sse_parts() -> (String, String) {
         }),
     );
     (before_completion, completion)
+}
+
+fn openai_responses_live_protected_summary_sse_parts() -> (String, String) {
+    openai_responses_live_summary_sse_parts(Some("opaque-reasoning"))
+}
+
+fn openai_responses_live_public_summary_sse_parts() -> (String, String) {
+    openai_responses_live_summary_sse_parts(None)
 }
 
 fn openai_responses_tool_sse(content: &str, call_id: &str) -> String {

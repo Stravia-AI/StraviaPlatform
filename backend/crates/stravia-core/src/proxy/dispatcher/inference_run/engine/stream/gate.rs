@@ -21,6 +21,7 @@ pub(super) struct LiveDeltaGate {
     pending_unindexed_thinking: Option<(usize, Vec<AiStreamDelta>)>,
     pending_unindexed_signature: Option<String>,
     buffer_indexed_protected: bool,
+    stream_unprotected_reasoning_summaries: bool,
     buffer_unindexed_protected: bool,
     next_unindexed_output_index: usize,
     current_unindexed_item_kind: Option<UnindexedItemKind>,
@@ -48,7 +49,11 @@ impl LiveDeltaGate {
         self.projector.reserved_thinking_marker(output_index)
     }
 
-    pub(super) fn begin_model_leg(&mut self, egress: crate::protocol::ids::Protocol) {
+    pub(super) fn begin_model_leg(
+        &mut self,
+        egress: crate::protocol::ids::Protocol,
+        reasoning_encrypted_content_requested: bool,
+    ) {
         self.projector.begin_model_leg();
         self.pending_tool_deltas.clear();
         self.pending_tool_names.clear();
@@ -62,6 +67,8 @@ impl LiveDeltaGate {
         self.pending_unindexed_signature = None;
         self.buffer_indexed_protected =
             matches!(egress, crate::protocol::ids::Protocol::OpenResponses);
+        self.stream_unprotected_reasoning_summaries =
+            self.buffer_indexed_protected && !reasoning_encrypted_content_requested;
         self.buffer_unindexed_protected = matches!(
             egress,
             crate::protocol::ids::Protocol::AnthropicMessages
@@ -166,6 +173,12 @@ impl LiveDeltaGate {
         }
     }
 
+    fn streams_unprotected_reasoning_summary(&self, index: usize, delta: &AiStreamDelta) -> bool {
+        self.stream_unprotected_reasoning_summaries
+            && !self.known_protected_thinking_indices.contains(&index)
+            && matches!(delta, AiStreamDelta::ReasoningSummaryDelta { .. })
+    }
+
     pub(super) fn capture_protected_candidates(&mut self, deltas: &[AiStreamDelta]) {
         for delta in deltas {
             if let AiStreamDelta::ProtectedThinkingStart { index } = delta {
@@ -176,6 +189,9 @@ impl LiveDeltaGate {
             let Some(index) = self.protected_candidate_index(delta) else {
                 continue;
             };
+            if self.streams_unprotected_reasoning_summary(index, delta) {
+                continue;
+            }
             if matches!(
                 delta,
                 AiStreamDelta::ThinkingDeltaWithMetadata {
@@ -398,6 +414,10 @@ impl LiveDeltaGate {
                 continue;
             }
             if let Some(index) = self.protected_candidate_index(&delta) {
+                if self.streams_unprotected_reasoning_summary(index, &delta) {
+                    visible.extend(self.route_visible_deltas(vec![delta]));
+                    continue;
+                }
                 let prebuffered =
                     if let Some(count) = self.prebuffered_protected_counts.get(&index).copied() {
                         if count <= 1 {

@@ -36,6 +36,14 @@ async fn add_test_provider_model(gateway: &Gateway, provider_id: &str) {
 }
 
 async fn serve_openai_status(status: u16, body: serde_json::Value) -> (String, Arc<AtomicUsize>) {
+    serve_openai_status_repeated(status, body, 1).await
+}
+
+async fn serve_openai_status_repeated(
+    status: u16,
+    body: serde_json::Value,
+    request_count: usize,
+) -> (String, Arc<AtomicUsize>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind provider");
@@ -43,20 +51,22 @@ async fn serve_openai_status(status: u16, body: serde_json::Value) -> (String, A
     let calls = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&calls);
     tokio::spawn(async move {
-        let (mut socket, _) = listener.accept().await.expect("accept provider request");
-        let mut request = vec![0_u8; 16 * 1024];
-        let bytes_read = socket.read(&mut request).await.expect("read request");
-        request.truncate(bytes_read);
-        observed.fetch_add(1, Ordering::SeqCst);
         let body = body.to_string();
-        let response = format!(
-            "HTTP/1.1 {status} Test\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-            body.len()
-        );
-        socket
-            .write_all(response.as_bytes())
-            .await
-            .expect("write response");
+        for _ in 0..request_count {
+            let (mut socket, _) = listener.accept().await.expect("accept provider request");
+            let mut request = vec![0_u8; 16 * 1024];
+            let bytes_read = socket.read(&mut request).await.expect("read request");
+            request.truncate(bytes_read);
+            observed.fetch_add(1, Ordering::SeqCst);
+            let response = format!(
+                "HTTP/1.1 {status} Test\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+        }
     });
     (format!("http://{address}/v1"), calls)
 }
@@ -167,6 +177,85 @@ async fn serve_complete_openai_stream(request_count: usize) -> (String, Arc<Atom
         }
     });
     (format!("http://{address}/v1"), calls)
+}
+
+async fn serve_zdr_then_responses_stream() -> (String, Arc<Mutex<Vec<serde_json::Value>>>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ZDR provider");
+    let address = listener.local_addr().expect("ZDR provider address");
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&captured);
+    tokio::spawn(async move {
+        for attempt in 0..2 {
+            let (mut socket, _) = listener.accept().await.expect("accept ZDR request");
+            let mut request = vec![0_u8; 16 * 1024];
+            let bytes_read = socket.read(&mut request).await.expect("read ZDR request");
+            request.truncate(bytes_read);
+            let (_, body) = captured_http(&request);
+            observed.lock().expect("captured ZDR requests").push(body);
+
+            let (status, content_type, body) = if attempt == 0 {
+                (
+                    "404 Not Found",
+                    "application/json",
+                    serde_json::json!({
+                        "code": "not-found",
+                        "error": "Previous response cannot be used for this organization due to Zero Data Retention"
+                    })
+                    .to_string(),
+                )
+            } else {
+                let created =
+                    crate::protocol::codec::open_responses::formatter::response_resource_snapshot(
+                        "resp-replayed",
+                        "upstream-model",
+                        "in_progress",
+                        Vec::new(),
+                        serde_json::Value::Null,
+                        serde_json::Value::Null,
+                        serde_json::Value::Null,
+                    );
+                let completed =
+                    crate::protocol::codec::open_responses::formatter::response_resource_snapshot(
+                        "resp-replayed",
+                        "upstream-model",
+                        "completed",
+                        Vec::new(),
+                        serde_json::Value::Null,
+                        serde_json::Value::Null,
+                        serde_json::Value::Null,
+                    );
+                (
+                    "200 OK",
+                    "text/event-stream",
+                    format!(
+                        "event: response.created\ndata: {}\n\n\
+                         event: response.completed\ndata: {}\n\ndata: [DONE]\n\n",
+                        serde_json::json!({
+                            "type": "response.created",
+                            "sequence_number": 0,
+                            "response": created,
+                        }),
+                        serde_json::json!({
+                            "type": "response.completed",
+                            "sequence_number": 1,
+                            "response": completed,
+                        }),
+                    ),
+                )
+            };
+            let response = format!(
+                "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write ZDR response");
+        }
+    });
+    (format!("http://{address}/v1"), captured)
 }
 
 async fn serve_openai_capture() -> (String, Arc<Mutex<Vec<u8>>>) {
@@ -476,6 +565,173 @@ async fn execute_fails_over_before_canonical_output_and_returns_the_locked_targe
         Some(Ok(CanonicalEvent::Completed(response)))
             if response.output_text() == "fallback"
     ));
+}
+
+#[tokio::test]
+async fn http_continuation_not_retained_by_zdr_replays_full_request_once() {
+    let (base_url, captured) = serve_zdr_then_responses_stream().await;
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let (gateway, _logs) = Gateway::new(GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .expect("Gateway");
+    let admin = gateway.admin();
+    let provider = admin
+        .create_provider(CreateProvider {
+            name: Some("ZDR".into()),
+            source: ProviderSourceInput::Custom {
+                vendor: Some("xai".into()),
+                protocol: "open-responses".into(),
+                base_url,
+                models_source: None,
+                static_models: None,
+            },
+            credential: ProviderCredentialInput::ApiKey {
+                value: "test-provider-key".into(),
+            },
+            use_proxy: false,
+        })
+        .await
+        .expect("Provider");
+    add_test_provider_model(&gateway, &provider.id).await;
+    let model = admin
+        .create_model(CreateRoute {
+            model_id: "zdr-model".into(),
+            display_name: None,
+            balance: None,
+            target_provider: provider.id,
+            target_model: "upstream-model".into(),
+            targets: Vec::new(),
+        })
+        .await
+        .expect("Model");
+    let key = admin
+        .create_api_key(crate::db::models::CreateApiKey {
+            key: None,
+            name: "ZDR key".into(),
+            concurrency_limit: None,
+            expires_at: None,
+            mcp_access_enabled: true,
+            transparent_injection_enabled: false,
+            inject_web_search: false,
+            model_ids: vec![model.id],
+            inject_media_understanding: false,
+        })
+        .await
+        .expect("API key");
+    let executor = LiveModelTurnExecutor::new(
+        gateway,
+        super::continuation::ScriptedContinuation::hit("resp-zdr"),
+    );
+    let mut request = AiRequest::new(
+        "zdr-model",
+        vec![crate::protocol::ir::AiItem {
+            role: crate::protocol::ir::Role::User,
+            content: crate::protocol::ir::MessageContent::Text("follow-up".into()),
+            tool_calls: None,
+            tool_call_id: None,
+            meta: None,
+        }],
+    );
+    request.stream.enabled = true;
+    request.meta.source_protocol = Some(crate::protocol::ids::OPEN_RESPONSES_2026_04_24);
+    request.ext = Some(crate::protocol::ir::ProtocolExt::OpenResponses(
+        crate::protocol::ir::OpenResponsesExt::default(),
+    ));
+
+    let turn = executor
+        .execute(TurnInput::new(Principal::new(key.id), request))
+        .await
+        .expect("ZDR continuation falls back to full replay");
+    let events = turn.output.collect::<Vec<_>>().await;
+    assert!(matches!(
+        events.last(),
+        Some(Ok(CanonicalEvent::Completed(response)))
+            if response.id == "resp-replayed"
+    ));
+
+    let captured = captured.lock().expect("captured ZDR requests");
+    assert_eq!(captured.len(), 2);
+    assert_eq!(captured[0]["previous_response_id"], "resp-zdr");
+    assert!(captured[1].get("previous_response_id").is_none());
+}
+
+#[tokio::test]
+async fn request_scoped_http_errors_do_not_quarantine_the_target() {
+    let (base_url, calls) = serve_openai_status_repeated(
+        404,
+        serde_json::json!({"error": {"message": "request-specific resource is missing"}}),
+        4,
+    )
+    .await;
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let (gateway, _logs) = Gateway::new(GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .expect("Gateway");
+    let admin = gateway.admin();
+    let provider = admin
+        .create_provider(CreateProvider {
+            name: Some("Request scoped failure".into()),
+            source: ProviderSourceInput::Custom {
+                vendor: Some("test-http".into()),
+                protocol: "openai-compatible".into(),
+                base_url,
+                models_source: None,
+                static_models: None,
+            },
+            credential: ProviderCredentialInput::ApiKey {
+                value: "test-provider-key".into(),
+            },
+            use_proxy: false,
+        })
+        .await
+        .expect("Provider");
+    add_test_provider_model(&gateway, &provider.id).await;
+    let model = admin
+        .create_model(CreateRoute {
+            model_id: "request-error-model".into(),
+            display_name: None,
+            balance: None,
+            target_provider: provider.id,
+            target_model: "upstream-model".into(),
+            targets: Vec::new(),
+        })
+        .await
+        .expect("Model");
+    let key = admin
+        .create_api_key(crate::db::models::CreateApiKey {
+            key: None,
+            name: "Request error key".into(),
+            concurrency_limit: None,
+            expires_at: None,
+            mcp_access_enabled: true,
+            transparent_injection_enabled: false,
+            inject_web_search: false,
+            model_ids: vec![model.id],
+            inject_media_understanding: false,
+        })
+        .await
+        .expect("API key");
+
+    for _ in 0..4 {
+        let result = gateway
+            .model_turn
+            .execute(TurnInput::new(
+                Principal::new(key.id.clone()),
+                AiRequest::new("request-error-model", Vec::new()),
+            ))
+            .await;
+        let Err(error) = result else {
+            panic!("request-scoped 404 must fail the request");
+        };
+        assert_eq!(error.code, "upstream_error");
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 4);
 }
 
 #[tokio::test]

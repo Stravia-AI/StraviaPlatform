@@ -247,6 +247,17 @@ pub trait Vendor: Send + Sync + 'static {
         Ok(false)
     }
 
+    /// Returns true only when the upstream proves that a continuation reference
+    /// is unavailable before starting the requested execution.
+    fn is_continuation_not_found(&self, status: u16, body: &Value) -> bool {
+        matches!(status, 400 | 404)
+            && body
+                .pointer("/error/code")
+                .or_else(|| body.get("code"))
+                .and_then(Value::as_str)
+                == Some("previous_response_not_found")
+    }
+
     // ── Orchestration (required) ──────────────────────────────────────────────
 
     /// Vendor identifier (matches `Provider.vendor` DB column).

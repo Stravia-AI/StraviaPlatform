@@ -145,7 +145,14 @@ test('Connect an app configures clients from API Key models', async ({ page }) =
   await expect(generatedConfig).toContainText('"kind": "openai-compatible"')
   await expect(generatedConfig).toContainText('"context": 272000')
   await expect(generatedConfig).toContainText('"output": 128000')
-  await expect(generatedConfig).toContainText('"defaultVariant": "medium"')
+  await expect(generatedConfig).not.toContainText('"providerOptionsByLevel"')
+  await expect(generatedConfig).not.toContainText('"reasoningEffort"')
+  await expect(generatedConfig).toContainText(
+    'ZCode rewrites this file at startup and does not preserve custom per-level request mappings.',
+  )
+  await expect(generatedConfig).toContainText(
+    'Reasoning controls are available only when ZCode recognizes the model itself.',
+  )
   await expect(generatedConfig).toContainText('"image"')
   await expect(generatedConfig).toContainText('Restart ZCode, then select gpt-5.6-sol as the default model.')
 

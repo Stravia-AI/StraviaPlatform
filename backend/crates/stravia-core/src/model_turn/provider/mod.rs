@@ -33,6 +33,7 @@ pub(crate) struct ProviderCall {
     adapter: ProviderAdapter,
     client: ProxyClient,
     outbound: OutboundRequest,
+    continuation_fallback: Option<OutboundRequest>,
     websocket: Option<ResponsesWebSocketCall>,
 }
 
@@ -201,6 +202,22 @@ impl ProviderAdapter {
             adapter: self,
             client,
             outbound,
+            continuation_fallback: None,
+            websocket: None,
+        }
+    }
+
+    pub(crate) fn bind_with_continuation_fallback(
+        self,
+        client: ProxyClient,
+        outbound: OutboundRequest,
+        full_outbound: OutboundRequest,
+    ) -> ProviderCall {
+        ProviderCall {
+            adapter: self,
+            client,
+            outbound,
+            continuation_fallback: Some(full_outbound),
             websocket: None,
         }
     }
@@ -221,6 +238,10 @@ impl ProviderAdapter {
         self.vendor
             .refresh_auth_on_unauthorized(&self.provider_context(), outbound)
             .await
+    }
+
+    fn is_continuation_not_found(&self, status: u16, body: &Value) -> bool {
+        self.vendor.is_continuation_not_found(status, body)
     }
 
     pub(crate) async fn parse_response(

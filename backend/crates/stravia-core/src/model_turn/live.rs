@@ -221,6 +221,7 @@ async fn execute_inner(
 struct PreparedAttempt {
     route: RouteContext,
     provider_call: ProviderCall,
+    reasoning_encrypted_content_requested: bool,
     force_stream: bool,
     actual_model: String,
     provider: crate::db::models::Provider,
@@ -595,6 +596,8 @@ async fn prepare_attempt(
         insert_default_prompt_cache_key(&mut outbound.body, prompt_cache_key);
         insert_default_prompt_cache_key(&mut full_outbound.body, prompt_cache_key);
     }
+    let reasoning_encrypted_content_requested =
+        requests_reasoning_encrypted_content(&outbound.body);
     let provider_call = if websocket_enabled {
         adapter.bind_responses_websocket(ResponsesWebSocketBinding {
             client,
@@ -608,6 +611,8 @@ async fn prepare_attempt(
             require_affinity,
             session_affinity,
         })
+    } else if continued_id.is_some() {
+        adapter.bind_with_continuation_fallback(client, outbound, full_outbound)
     } else {
         adapter.bind(client, outbound)
     };
@@ -632,6 +637,7 @@ async fn prepare_attempt(
             egress,
         },
         provider_call,
+        reasoning_encrypted_content_requested,
         force_stream: input.request.stream.enabled
             || websocket_enabled
             || target_capabilities.stream_only,
@@ -640,6 +646,18 @@ async fn prepare_attempt(
         namespace: target_namespace,
         trace,
     })
+}
+
+fn requests_reasoning_encrypted_content(body: &serde_json::Value) -> bool {
+    body.get("include")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|include| {
+            include.iter().any(|value| {
+                value
+                    .as_str()
+                    .is_some_and(|value| value == "reasoning.encrypted_content")
+            })
+        })
 }
 
 fn insert_default_prompt_cache_key(body: &mut serde_json::Value, prompt_cache_key: &str) {
@@ -651,7 +669,10 @@ fn insert_default_prompt_cache_key(body: &mut serde_json::Value, prompt_cache_ke
 
 #[cfg(test)]
 mod tests {
-    use super::{handle_terminal_stream_error, insert_default_prompt_cache_key};
+    use super::{
+        handle_terminal_stream_error, insert_default_prompt_cache_key,
+        requests_reasoning_encrypted_content,
+    };
     use crate::protocol::ir::{AiError, AiErrorKind, AiStreamDelta};
 
     #[test]
@@ -663,6 +684,22 @@ mod tests {
         let mut explicit = serde_json::json!({"prompt_cache_key": "client-cache"});
         insert_default_prompt_cache_key(&mut explicit, "session-cache");
         assert_eq!(explicit["prompt_cache_key"], "client-cache");
+    }
+
+    #[test]
+    fn encrypted_reasoning_detection_uses_the_outbound_include_contract() {
+        assert!(requests_reasoning_encrypted_content(&serde_json::json!({
+            "include": [
+                "web_search_call.action.sources",
+                "reasoning.encrypted_content"
+            ]
+        })));
+        assert!(!requests_reasoning_encrypted_content(
+            &serde_json::json!({"include": ["web_search_call.action.sources"]})
+        ));
+        assert!(!requests_reasoning_encrypted_content(
+            &serde_json::json!({})
+        ));
     }
 
     #[test]
@@ -735,20 +772,21 @@ async fn begin_attempt(
                     AttemptFailure {
                         error: ModelTurnError::new("upstream_error", error.to_string()),
                         retryable: is_retryable(decode.status),
-                        record_health: true,
+                        record_health: is_retryable(decode.status),
                     }
                 } else {
                     AttemptFailure::retryable("upstream_error", error.to_string())
                 }
             })?;
         if call.status >= 400 {
+            let retryable = is_retryable(call.status);
             return Err(AttemptFailure {
                 error: ModelTurnError::new(
                     "upstream_error",
                     format!("upstream returned HTTP {}", call.status),
                 ),
-                retryable: is_retryable(call.status),
-                record_health: true,
+                retryable,
+                record_health: retryable,
             });
         }
         *prepared
@@ -794,6 +832,7 @@ async fn begin_attempt(
             route: prepared.route,
             target: target_identity,
             output: Box::pin(stream::iter(events)),
+            reasoning_encrypted_content_requested: prepared.reasoning_encrypted_content_requested,
             streamed: false,
             transport: prepared.trace,
         });
@@ -821,13 +860,14 @@ async fn begin_attempt(
             *prepared.trace.response_body.lock().expect("response body") = body
                 .map(|body| serde_json::to_vec(&body).unwrap_or_default())
                 .unwrap_or_default();
+            let retryable = is_retryable(status);
             return Err(AttemptFailure {
                 error: ModelTurnError::new(
                     "upstream_error",
                     format!("upstream returned HTTP {status}"),
                 ),
-                retryable: is_retryable(status),
-                record_health: true,
+                retryable,
+                record_health: retryable,
             });
         }
         ProviderStreamResponse::Uncertain { message } => {
@@ -981,6 +1021,7 @@ async fn begin_attempt(
         route: prepared.route,
         target: target_identity,
         output: Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)),
+        reasoning_encrypted_content_requested: prepared.reasoning_encrypted_content_requested,
         streamed: true,
         transport: prepared.trace,
     })

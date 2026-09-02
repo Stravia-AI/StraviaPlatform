@@ -358,7 +358,6 @@ describe('client configuration generation', () => {
           models: Record<
             string,
             {
-              reasoning?: { enabled: boolean; variants: string[]; defaultVariant: string }
               limit: { context: number; output: number }
               modalities: { input: string[]; output: string[] }
               zcode: { modalitiesConfigured: boolean; modified: boolean }
@@ -381,16 +380,40 @@ describe('client configuration generation', () => {
     expect(zcodeProvider?.source).toBe('custom')
     expect(Object.keys(zcodeProvider?.models ?? {})).toEqual(modelIds)
     expect(zcodeProvider?.models['gpt-5.6-sol']).toEqual({
-      reasoning: {
-        enabled: true,
-        variants: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
-        defaultVariant: 'medium',
-      },
       limit: { context: 272000, output: 128000 },
       modalities: { input: ['text', 'image'], output: ['text'] },
       zcode: { modalitiesConfigured: true, modified: true },
     })
+    expect(zcode).toContain('ZCode rewrites this file at startup and does not preserve custom per-level request mappings.')
+    expect(zcode).toContain('Reasoning controls are available only when ZCode recognizes the model itself.')
     expect(zcode).toContain('# Restart ZCode, then select gpt-5.6-sol as the default model.')
+  })
+
+  test('does not emit custom ZCode reasoning mappings that startup removes', () => {
+    const zcode = buildCliConfig({
+      tool: 'zcode',
+      host: 'http://localhost:5174',
+      apiKey: 'sk-client',
+      models: [
+        {
+          modelId: 'grok-4.6',
+          displayName: 'Grok 4.6',
+          supportedThinkingLevels: ['low', 'medium', 'high', 'xhigh'],
+          supportsImageInput: true,
+        },
+      ],
+      defaultModel: 'grok-4.6',
+      transparentImageInputEnabled: false,
+    })
+    const document = JSON.parse(zcode.slice(zcode.indexOf('{'), zcode.lastIndexOf('}') + 1)) as {
+      provider: Record<string, { models: Record<string, Record<string, unknown>> }>
+    }
+    const [provider] = Object.values(document.provider)
+
+    expect(provider?.models['grok-4.6']?.reasoning).toBeUndefined()
+    expect(provider?.models['grok-4.6']?.variants).toBeUndefined()
+    expect(zcode).not.toContain('providerOptionsByLevel')
+    expect(zcode).not.toContain('reasoningEffort')
   })
 
   test('falls back to model image capabilities when WorkBuddy transparent media understanding is disabled', () => {

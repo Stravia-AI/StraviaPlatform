@@ -163,7 +163,10 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
         let mut live_delta_gate = LiveDeltaGate::for_ingress(ingress);
         let mut emitted_marker_texts = HashSet::new();
         'model_legs: loop {
-            live_delta_gate.begin_model_leg(turn.route.egress.protocol);
+            live_delta_gate.begin_model_leg(
+                turn.route.egress.protocol,
+                turn.reasoning_encrypted_content_requested,
+            );
             let attempt_trace = turn.transport.clone();
             let mut completion_context = CompletionContext::from_model_turn(
                 gateway.clone(),
@@ -738,7 +741,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                                     response = hook_response;
                                     pending_generation_chain = hook_generation_chain;
                                     if !buffer_terminal_hooks {
-                                        live_delta_gate.begin_model_leg(ingress.protocol);
+                                        live_delta_gate.begin_model_leg(ingress.protocol, true);
                                         let mut deltas = ai_response_to_deltas(&response);
                                         terminal_deltas = deltas
                                             .iter()

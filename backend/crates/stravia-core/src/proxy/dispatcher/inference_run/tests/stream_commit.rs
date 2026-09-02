@@ -345,6 +345,83 @@ async fn protected_reasoning_summary_streams_before_item_done() {
 }
 
 #[tokio::test]
+async fn public_reasoning_summary_streams_before_item_done() {
+    let (summary_events, completion_events) = openai_responses_live_public_summary_sse_parts();
+    let (upstream_url, _calls, release_completion) =
+        serve_gated_sse(summary_events, completion_events).await;
+    let data_dir = tempfile::tempdir().expect("temp data dir");
+    let (gateway, _logs) = Gateway::new(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .expect("gateway init");
+    configure_route_with_protocol(
+        &gateway,
+        "live-public-reasoning",
+        &[upstream_url],
+        "test-http",
+        "open-responses",
+    )
+    .await;
+
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        execute_stream(gateway, "live-public-reasoning"),
+    )
+    .await
+    .expect("public summary must commit the response before ItemDone");
+    let mut chunks = response.into_body().into_data_stream();
+    let prefix = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let mut prefix = String::new();
+        loop {
+            let chunk = chunks
+                .next()
+                .await
+                .expect("stream ended before public summary")
+                .expect("stream chunk");
+            prefix.push_str(std::str::from_utf8(&chunk).expect("UTF-8 stream chunk"));
+            if prefix.contains("live protected ")
+                && prefix.contains(r#""reasoning_content":"summary"#)
+            {
+                break prefix;
+            }
+        }
+    })
+    .await
+    .expect("public summary must stream before ItemDone");
+    assert!(prefix.contains(r#""role":"assistant""#), "{prefix}");
+    assert!(prefix.contains("resp-live-protected"), "{prefix}");
+    assert!(
+        !prefix.contains(crate::history_marker::PROJECTION_DELIMITER_PREFIX),
+        "{prefix}"
+    );
+    assert!(
+        !prefix.contains(crate::history_marker::HISTORY_MARKER_PREFIX),
+        "{prefix}"
+    );
+
+    release_completion
+        .send(())
+        .expect("release reasoning completion");
+    let suffix = to_bytes(axum::body::Body::from_stream(chunks), usize::MAX)
+        .await
+        .expect("remaining stream body");
+    let body = format!("{prefix}{}", String::from_utf8_lossy(&suffix));
+    assert_eq!(
+        body.matches(r#""reasoning_content":"live protected ""#)
+            .count(),
+        1,
+        "{body}"
+    );
+    assert_eq!(
+        body.matches(r#""reasoning_content":"summary""#).count(),
+        1,
+        "{body}"
+    );
+}
+
+#[tokio::test]
 async fn protected_reasoning_marker_failures_abort_after_live_summary() {
     let responses = (0..2)
         .map(|_| {

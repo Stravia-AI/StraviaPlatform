@@ -58,10 +58,28 @@ fn chat_reasoning_content_preserves_tool_call_before_its_output() {
         .expect("encode Responses reasoning tool history");
 
     assert_eq!(body["input"][0]["type"], "reasoning");
+    assert_eq!(body["input"][0]["content"], serde_json::json!([]));
     assert_eq!(body["input"][1]["type"], "function_call");
     assert_eq!(body["input"][1]["call_id"], "call_glob");
     assert_eq!(body["input"][2]["type"], "function_call_output");
     assert_eq!(body["input"][2]["call_id"], "call_glob");
+}
+
+#[test]
+fn empty_reasoning_content_is_always_encoded_as_an_array() {
+    for item in [
+        AiItem::reasoning(vec!["summary".into()], Vec::new(), None),
+        AiItem::thinking("summary", None),
+    ] {
+        let request = AiRequest::new("gpt", vec![item]);
+
+        let (body, _) = ResponsesEncoder
+            .encode_request(&request)
+            .expect("encode empty reasoning content");
+
+        assert_eq!(body["input"][0]["type"], "reasoning");
+        assert_eq!(body["input"][0]["content"], serde_json::json!([]));
+    }
 }
 
 #[test]
