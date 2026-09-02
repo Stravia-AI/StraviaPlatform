@@ -6,7 +6,7 @@ import { toast } from 'svelte-sonner'
 
 import { admin } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
-import { sortLogicalModels } from '$lib/logical-model'
+import { logicalModelSecondaryId, sortLogicalModels } from '$lib/logical-model'
 import PageHeader from '$lib/components/page-header.svelte'
 import { Badge } from '$lib/components/ui/badge'
 import { Button } from '$lib/components/ui/button'
@@ -167,8 +167,8 @@ function selectThinkingLevel(value?: string): void {
                 {#each eligibleModels as model (model.id)}
                   <Select.Item value={model.id} label={model.display_name}>
                     <span class="min-w-0 flex-1 truncate">{model.display_name}</span>
-                    {#if model.display_name !== model.model_id}
-                      <span class="truncate font-technical text-xs text-muted-foreground">{model.model_id}</span>
+                    {#if logicalModelSecondaryId(model) as secondaryId}
+                      <span class="truncate font-technical text-xs text-muted-foreground">{secondaryId}</span>
                     {/if}
                   </Select.Item>
                 {/each}
