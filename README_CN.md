@@ -49,9 +49,9 @@ Claude Code · Codex CLI · Gemini CLI · OpenCode · 各类 SDK
 
 Stravia 支持 JSON、SSE 与 Open Responses WebSocket 交付、跨协议工具调用、推理内容、用量数据，以及上游无需修改时的同协议透传。
 
-隐藏的 Platform Tool 续跑会通过各协议原生的 reasoning、thinking 或 thought 表示投影到客户端历史，而不会写入普通 content。重新提交完整历史的客户端必须原样保留这些 item，包括 HTML comment 形式的 History Marker 和 Projection Delimiter；Stravia 依靠它们恢复原始 Text、ToolCall 与 ToolResult 顺序。这些 comment 是不应渲染的机器语法。删除 Marker 或 Delimiter 会被视为有意编辑历史。
+隐藏的 Platform Tool 续跑通过 HTML comment 形式的 History Marker 投影到客户端历史。OpenAI-compatible Chat Completions 在首个非空 `content` delta 前继续通过 `reasoning_content` 交付 Thinking；之后的 Thinking 通过 `content` 以 Markdown 引用 Preview 流式交付，后续 Thinking Marker 与 Platform Marker 也使用 `content`，从而在客户端按字段聚合时保持顺序。纯文本客户端可能直接显示这些 Marker comment。Open Responses、Anthropic Messages 与 Gemini 保留原生有序 reasoning/thinking carrier；若所选协议无法表示已观察到的顺序，Stravia 会显式失败，而不会延迟普通 Text。
 
-客户端关闭流式传输时，Stravia 会先执行仅含 Platform Tool 的隐藏续轮，再一次性返回包含 reasoning-carried Marker 历史与最终答案的 buffered 响应。live stream 则在启动对应 Platform Tool 前交付并发布每个 Marker。
+重新提交完整历史的客户端必须原样保留 History Marker 与 Projection Delimiter。Stravia 会删除仅用于展示的 Preview 字节，并在原位置恢复权威 Thinking、ToolCall 与 ToolResult；删除 Marker 或 Delimiter 会被视为有意编辑历史。客户端关闭流式传输时，Stravia 会先执行仅含 Platform Tool 的隐藏续轮，再一次性返回语义等价的 buffered projection。live stream 则在启动对应 Platform Tool 前交付并发布每个 Marker。
 
 OpenAI direct 与 Codex OAuth 的生成 Target 会为 Chat Completions、Open Responses、Anthropic Messages 和 Gemini 请求使用上游 Responses WebSocket，不受客户端是否流式影响；Embeddings 仍只使用 HTTP。Hook 与协议可表示性检查完成后，Stravia 可从最长且严格等价的 canonical item 前缀续接；Principal、精确 Target、Provider 账号与配置、resolved model、instructions、tools、reasoning、response format 和请求控制必须全部一致。任一条件不匹配都会发送完整有效历史，不会削弱请求语义。
 

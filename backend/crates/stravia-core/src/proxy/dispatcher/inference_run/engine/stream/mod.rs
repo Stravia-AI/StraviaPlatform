@@ -111,9 +111,10 @@ fn marker_deltas(
             continue;
         }
         if platform_references.contains(&reference) {
-            deltas.extend(gate.project_platform_marker(&reference, rendered));
+            deltas.extend(gate.project_platform_marker(rendered));
         } else {
-            deltas.extend(gate.commit_visible(vec![AiStreamDelta::ThinkingDelta(rendered)]));
+            let marker = gate.history_marker_delta(rendered);
+            deltas.extend(gate.commit_visible(vec![marker]));
         }
     }
     deltas
@@ -159,7 +160,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
             capture_payload: true,
         });
         delivery.set_response_profile(&request, previous_response_id.as_deref());
-        let mut live_delta_gate = LiveDeltaGate::default();
+        let mut live_delta_gate = LiveDeltaGate::for_ingress(ingress);
         let mut emitted_marker_texts = HashSet::new();
         'model_legs: loop {
             live_delta_gate.begin_model_leg(turn.route.egress.protocol);
@@ -250,30 +251,33 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                         if !buffer_terminal_hooks {
                             live_delta_gate.capture_protected_candidates(&transformed);
                         }
-                        if !buffer_terminal_hooks && live_delta_gate.buffers_unindexed_protected() {
+                        if !buffer_terminal_hooks {
                             live_delta_gate.capture_unindexed_signatures(&mut transformed);
                             let thinking_completed = !terminal_deltas.is_empty()
                                 || transformed
                                     .iter()
                                     .any(LiveDeltaGate::ends_unindexed_thinking);
                             if thinking_completed
-                                && let Some((index, item)) =
-                                    live_delta_gate.synthetic_signed_thinking_item()
+                                && let Some((index, item)) = live_delta_gate
+                                    .synthetic_signed_thinking_item()
+                                    .or_else(|| live_delta_gate.synthetic_post_text_thinking_item())
                             {
                                 transformed.insert(0, AiStreamDelta::ItemDone { index, item });
                             }
                         }
                         accumulator.apply_all(&transformed);
                         if !buffer_terminal_hooks {
+                            let mut completed_thinking_indices = HashSet::new();
                             let completed_thinking_items = transformed
                                 .iter()
                                 .filter_map(|delta| match delta {
                                     AiStreamDelta::ItemDone { index, item }
-                                        if !early_thinking_markers.iter().any(
-                                            |early: &EarlyThinkingMarkers| {
-                                                early.output_index == *index
-                                            },
-                                        ) =>
+                                        if completed_thinking_indices.insert(*index)
+                                            && !early_thinking_markers.iter().any(
+                                                |early: &EarlyThinkingMarkers| {
+                                                    early.output_index == *index
+                                                },
+                                            ) =>
                                     {
                                         Some((*index, item))
                                     }
@@ -281,9 +285,15 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                                 })
                                 .collect::<Vec<_>>();
                             for (output_index, item) in completed_thinking_items {
+                                let reserved = live_delta_gate
+                                    .reserved_thinking_marker(output_index)
+                                    .cloned();
+                                let post_text = live_delta_gate.post_text_started();
                                 let markers = match prepare_thinking_markers(
                                     &completion_context,
                                     &item,
+                                    reserved.as_ref(),
+                                    post_text,
                                 )
                                 .await
                                 {
@@ -311,10 +321,8 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                                     if marker_deltas.is_empty() {
                                         continue;
                                     }
-                                    let marker_deltas = live_delta_gate.route_visible_deltas(
-                                        hook_leg.run_mut().has_exposed_tools(),
-                                        marker_deltas,
-                                    );
+                                    let marker_deltas =
+                                        live_delta_gate.route_visible_deltas(marker_deltas);
                                     if marker_deltas.is_empty() {
                                         continue;
                                     }
@@ -345,12 +353,10 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                                     let rendered =
                                         crate::history_marker::render_history_marker(marker);
                                     emitted_marker_texts.insert(rendered.clone());
-                                    AiStreamDelta::ThinkingDelta(rendered)
+                                    live_delta_gate.history_marker_delta(rendered)
                                 }));
-                                let marker_deltas = live_delta_gate.route_visible_deltas(
-                                    hook_leg.run_mut().has_exposed_tools(),
-                                    marker_deltas,
-                                );
+                                let marker_deltas =
+                                    live_delta_gate.route_visible_deltas(marker_deltas);
                                 if marker_deltas.is_empty() {
                                     deferred_thinking_publish_references
                                         .extend(references.iter().cloned());
@@ -463,8 +469,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                                     .flat_map(|marker| {
                                         let rendered = marker.render();
                                         emitted_marker_texts.insert(rendered.clone());
-                                        live_delta_gate
-                                            .project_platform_marker(marker.reference(), rendered)
+                                        live_delta_gate.project_platform_marker(rendered)
                                     })
                                     .collect::<Vec<_>>();
                                 match delivery.send_deltas(&marker_deltas).await {
@@ -753,8 +758,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                                                     | AiStreamDelta::Done { .. }
                                             )
                                         });
-                                        let deltas =
-                                            live_delta_gate.route_visible_deltas(false, deltas);
+                                        let deltas = live_delta_gate.route_visible_deltas(deltas);
                                         match delivery.send_deltas(&deltas).await {
                                             DeliveryProgress::Sent => {}
                                             DeliveryProgress::Cancelled => cancelled = true,

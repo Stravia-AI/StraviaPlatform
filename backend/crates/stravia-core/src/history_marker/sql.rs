@@ -40,9 +40,63 @@ impl SqlHistoryMarkerStore {
         now.saturating_add(i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
     }
 
-    fn reference() -> String {
-        let random = uuid::Uuid::new_v4().simple().to_string();
-        format!("hm_{}", &random[..20])
+    async fn insert_thinking(
+        &self,
+        principal: &Principal,
+        reference: String,
+        input: ThinkingMarkerInput,
+    ) -> Result<HistoryMarker, HistoryMarkerError> {
+        if !validate_activity(&input.activity)
+            || !validate_thinking(&input.block)
+            || !valid_reference(&reference)
+        {
+            return Err(HistoryMarkerError::InvalidPayload);
+        }
+        let principal = principal.continuation_key();
+        let segment = serde_json::to_string(&HiddenHistorySegment::Thinking { block: input.block })
+            .map_err(|error| HistoryMarkerError::Storage(error.to_string()))?;
+        let now = Self::now();
+        let expires_at = Self::after(now, input.pending_retention);
+        match self {
+            Self::Sqlite(pool) => {
+                sqlx::query(
+                    "INSERT INTO history_markers \
+                     (reference, principal, kind, activity, segment_payload, created_at, updated_at, expires_at) \
+                     VALUES (?, ?, 'thinking', ?, ?, ?, ?, ?)",
+                )
+                .bind(&reference)
+                .bind(principal)
+                .bind(&input.activity)
+                .bind(segment)
+                .bind(now)
+                .bind(now)
+                .bind(expires_at)
+                .execute(pool)
+                .await
+                .map_err(storage)?;
+            }
+            Self::Postgres(pool) => {
+                sqlx::query(
+                    "INSERT INTO history_markers \
+                     (reference, principal, kind, activity, segment_payload, created_at, updated_at, expires_at) \
+                     VALUES ($1, $2, 'thinking', $3, $4, $5, $5, $6)",
+                )
+                .bind(&reference)
+                .bind(principal)
+                .bind(&input.activity)
+                .bind(segment)
+                .bind(now)
+                .bind(expires_at)
+                .execute(pool)
+                .await
+                .map_err(storage)?;
+            }
+        }
+        Ok(HistoryMarker {
+            reference,
+            kind: HistoryMarkerKind::Thinking,
+            activity: input.activity,
+        })
     }
 
     async fn row(
@@ -216,11 +270,20 @@ fn validate_thinking(block: &ContentBlock) -> bool {
         ContentBlock::Thinking {
             signature: Some(signature),
             ..
-        }
-        | ContentBlock::Reasoning {
+        } => !signature.is_empty(),
+        ContentBlock::Thinking {
+            thinking,
+            signature: None,
+        } => !thinking.is_empty(),
+        ContentBlock::Reasoning {
             encrypted_content: Some(signature),
             ..
         } => !signature.is_empty(),
+        ContentBlock::Reasoning {
+            summary,
+            content,
+            encrypted_content: None,
+        } => summary.iter().chain(content).any(|text| !text.is_empty()),
         ContentBlock::RedactedThinking { data } => !data.is_empty(),
         _ => false,
     }
@@ -263,7 +326,7 @@ impl HistoryMarkerStore for SqlHistoryMarkerStore {
         {
             return Err(HistoryMarkerError::InvalidPayload);
         }
-        let reference = Self::reference();
+        let reference = new_reference();
         let principal = principal.continuation_key();
         let call_payload = serde_json::to_string(&input.call)
             .map_err(|error| HistoryMarkerError::Storage(error.to_string()))?;
@@ -323,55 +386,21 @@ impl HistoryMarkerStore for SqlHistoryMarkerStore {
         principal: &Principal,
         input: ThinkingMarkerInput,
     ) -> Result<HistoryMarker, HistoryMarkerError> {
-        if !validate_activity(&input.activity) || !validate_thinking(&input.block) {
+        self.insert_thinking(principal, new_reference(), input)
+            .await
+    }
+
+    async fn create_reserved_thinking(
+        &self,
+        principal: &Principal,
+        reserved: &HistoryMarker,
+        input: ThinkingMarkerInput,
+    ) -> Result<HistoryMarker, HistoryMarkerError> {
+        if reserved.kind != HistoryMarkerKind::Thinking || reserved.activity != input.activity {
             return Err(HistoryMarkerError::InvalidPayload);
         }
-        let reference = Self::reference();
-        let principal = principal.continuation_key();
-        let segment = serde_json::to_string(&HiddenHistorySegment::Thinking { block: input.block })
-            .map_err(|error| HistoryMarkerError::Storage(error.to_string()))?;
-        let now = Self::now();
-        let expires_at = Self::after(now, input.pending_retention);
-        match self {
-            Self::Sqlite(pool) => {
-                sqlx::query(
-                    "INSERT INTO history_markers \
-                     (reference, principal, kind, activity, segment_payload, created_at, updated_at, expires_at) \
-                     VALUES (?, ?, 'thinking', ?, ?, ?, ?, ?)",
-                )
-                .bind(&reference)
-                .bind(principal)
-                .bind(&input.activity)
-                .bind(segment)
-                .bind(now)
-                .bind(now)
-                .bind(expires_at)
-                .execute(pool)
-                .await
-                .map_err(storage)?;
-            }
-            Self::Postgres(pool) => {
-                sqlx::query(
-                    "INSERT INTO history_markers \
-                     (reference, principal, kind, activity, segment_payload, created_at, updated_at, expires_at) \
-                     VALUES ($1, $2, 'thinking', $3, $4, $5, $5, $6)",
-                )
-                .bind(&reference)
-                .bind(principal)
-                .bind(&input.activity)
-                .bind(segment)
-                .bind(now)
-                .bind(expires_at)
-                .execute(pool)
-                .await
-                .map_err(storage)?;
-            }
-        }
-        Ok(HistoryMarker {
-            reference,
-            kind: HistoryMarkerKind::Thinking,
-            activity: input.activity,
-        })
+        self.insert_thinking(principal, reserved.reference.clone(), input)
+            .await
     }
 
     async fn resolve(

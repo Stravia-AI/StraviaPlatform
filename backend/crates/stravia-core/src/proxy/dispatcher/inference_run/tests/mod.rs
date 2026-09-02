@@ -2583,6 +2583,61 @@ fn openai_sse_reasoning_and_text(
     .collect()
 }
 
+fn openai_sse_text_thinking_text() -> String {
+    [
+        serde_json::json!({
+            "id": "upstream-post-text-thinking",
+            "model": "provider-model",
+            "choices": [{
+                "index": 0,
+                "delta": {"role": "assistant", "content": "C1"},
+                "finish_reason": null
+            }]
+        }),
+        serde_json::json!({
+            "id": "upstream-post-text-thinking",
+            "model": "provider-model",
+            "choices": [{
+                "index": 0,
+                "delta": {"reasoning_content": "R2"},
+                "finish_reason": null
+            }]
+        }),
+        serde_json::json!({
+            "id": "upstream-post-text-thinking",
+            "model": "provider-model",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "C2"},
+                "finish_reason": null
+            }]
+        }),
+        serde_json::json!({
+            "id": "upstream-post-text-thinking",
+            "model": "provider-model",
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "stop"
+            }]
+        }),
+        serde_json::json!({
+            "id": "upstream-post-text-thinking",
+            "model": "provider-model",
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 1,
+                "completion_tokens": 3,
+                "total_tokens": 4
+            }
+        }),
+    ]
+    .into_iter()
+    .map(|event| format!("data: {event}\n\n"))
+    .chain(std::iter::once("data: [DONE]\n\n".into()))
+    .collect()
+}
+
 fn openai_sse_client_tool_call() -> String {
     format!(
         "data: {}\n\ndata: {}\n\ndata: {}\n\ndata: {}\n\ndata: [DONE]\n\n",

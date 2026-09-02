@@ -358,7 +358,7 @@ pub(super) async fn orchestrate(
             );
         }
     };
-    if marker_resolution.restored_thinking_segments > 0 {
+    if marker_resolution.restored_protected_thinking_segments > 0 {
         request.meta.vendor.ingress.insert(
             "__stravia_opaque_context_required".into(),
             serde_json::Value::Bool(true),
@@ -1039,8 +1039,18 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
         pending_generation_chain,
         background_executions,
         started_executions,
-        publish_references,
+        mut publish_references,
     } = completed;
+    if !request.stream.enabled && !publish_references.is_empty() {
+        if let Err(error) = publish_markers(&completion_context, &publish_references).await {
+            return buffered_response(render_completion_failure(
+                CompletionFailure::hook(error, ClientOutputCommit::Pending),
+                ingress,
+                false,
+            ));
+        }
+        publish_references.clear();
+    }
     let mut delivery = if request.stream.enabled {
         DeliveryAdapter::buffered_stream(ingress, route.egress)
     } else {

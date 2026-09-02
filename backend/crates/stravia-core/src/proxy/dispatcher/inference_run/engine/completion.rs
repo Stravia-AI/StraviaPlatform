@@ -12,7 +12,7 @@ use crate::protocol::ir::{
 };
 use crate::proxy::context::RequestContext;
 
-use super::{ClientProjector, Phase, PhaseTracker, is_protected_thinking};
+use super::{ClientProjector, Phase, PhaseTracker, is_protected_thinking, is_thinking};
 
 #[derive(Clone)]
 struct GenerationChainCompletion {
@@ -444,24 +444,33 @@ const THINKING_MARKER_PENDING_RETENTION: std::time::Duration =
 async fn create_thinking_marker(
     context: &CompletionContext,
     block: ContentBlock,
+    reserved: Option<&HistoryMarker>,
 ) -> Result<HistoryMarker, HistoryMarkerError> {
-    context
-        .gateway
-        .history_markers
-        .create_thinking(
-            &context.principal,
-            ThinkingMarkerInput {
-                block,
-                activity: "Preserving protected reasoning".into(),
-                pending_retention: THINKING_MARKER_PENDING_RETENTION,
-            },
-        )
-        .await
+    let input = ThinkingMarkerInput {
+        block,
+        activity: "Preserving protected reasoning".into(),
+        pending_retention: THINKING_MARKER_PENDING_RETENTION,
+    };
+    if let Some(reserved) = reserved {
+        context
+            .gateway
+            .history_markers
+            .create_reserved_thinking(&context.principal, reserved, input)
+            .await
+    } else {
+        context
+            .gateway
+            .history_markers
+            .create_thinking(&context.principal, input)
+            .await
+    }
 }
 
 pub(super) async fn prepare_thinking_markers(
     context: &CompletionContext,
     item: &AiItem,
+    reserved: Option<&HistoryMarker>,
+    post_text: bool,
 ) -> Result<Vec<HistoryMarker>, HistoryMarkerError> {
     if context.ingress != crate::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1 {
         return Ok(Vec::new());
@@ -470,14 +479,21 @@ pub(super) async fn prepare_thinking_markers(
         return Ok(Vec::new());
     };
     let mut markers = Vec::new();
-    for block in blocks.iter().filter(|block| is_protected_thinking(block)) {
-        markers.push(create_thinking_marker(context, block.clone()).await?);
+    let mut reserved = reserved;
+    for block in blocks
+        .iter()
+        .filter(|block| is_thinking(block) && (post_text || is_protected_thinking(block)))
+    {
+        markers.push(create_thinking_marker(context, block.clone(), reserved.take()).await?);
+    }
+    if reserved.is_some() {
+        return Err(HistoryMarkerError::InvalidPayload);
     }
     Ok(markers)
 }
 
-async fn project_protected_thinking(
-    projector: &ClientProjector,
+async fn project_thinking(
+    projector: &mut ClientProjector,
     context: &CompletionContext,
     response: &mut AiResponse,
     early_thinking_markers: Vec<EarlyThinkingMarkers>,
@@ -503,46 +519,105 @@ async fn project_protected_thinking(
     let mut projected = Vec::with_capacity(response.items.len());
     let mut new_references = Vec::new();
     for (output_index, mut item) in std::mem::take(&mut response.items).into_iter().enumerate() {
+        let projected_start = projected.len();
         let mut prepared = early_by_output_index
             .remove(&output_index)
             .unwrap_or_default();
-        let mut item_markers = Vec::new();
-        if let MessageContent::Blocks(blocks) = &mut item.content {
-            let mut visible_blocks = Vec::with_capacity(blocks.len());
-            for block in std::mem::take(blocks) {
-                if !is_protected_thinking(&block) {
-                    visible_blocks.push(block);
-                    continue;
+        if item.role != crate::protocol::ir::Role::Assistant {
+            projected.push(item);
+            continue;
+        }
+        let mut meta = item.meta.take();
+        match std::mem::replace(&mut item.content, MessageContent::Text(String::new())) {
+            MessageContent::Text(text) => {
+                if !text.is_empty() {
+                    projected.push(AiItem {
+                        role: crate::protocol::ir::Role::Assistant,
+                        content: MessageContent::Text(text.clone()),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        meta: meta.take(),
+                    });
+                    projector.observe_text(&text);
                 }
-                let marker = if let Some(marker) = prepared.pop_front() {
-                    marker
-                } else {
-                    let marker = create_thinking_marker(context, block.clone()).await?;
-                    new_references.push(marker.reference.clone());
-                    marker
-                };
-                if let Some(visible_block) = projector.visible_protected_block(&block, &marker) {
-                    visible_blocks.push(visible_block);
-                }
-                item_markers.push(marker);
             }
-            *blocks = visible_blocks;
+            MessageContent::Blocks(blocks) => {
+                for block in blocks {
+                    if !is_thinking(&block) {
+                        let is_text =
+                            matches!(&block, ContentBlock::Text { text, .. } if !text.is_empty());
+                        push_projection_block(&mut projected, block, &mut meta);
+                        if is_text
+                            && let Some(text) = projected.last().and_then(AiItem::output_text_ref)
+                        {
+                            projector.observe_text(text);
+                        }
+                        continue;
+                    }
+                    let post_text = projector.post_text_started();
+                    let needs_marker = post_text || is_protected_thinking(&block);
+                    if !needs_marker {
+                        push_projection_block(&mut projected, block, &mut meta);
+                        continue;
+                    }
+                    let marker = if let Some(marker) = prepared.pop_front() {
+                        marker
+                    } else {
+                        let marker = create_thinking_marker(context, block.clone(), None).await?;
+                        new_references.push(marker.reference.clone());
+                        marker
+                    };
+                    if post_text {
+                        if let Some(mut preview) = projector.post_text_preview(&block, &marker) {
+                            preview.meta = meta.take();
+                            projected.push(preview);
+                        }
+                    } else if let Some(visible) = projector.visible_protected_block(&block, &marker)
+                    {
+                        push_projection_block(&mut projected, visible, &mut meta);
+                    }
+                    let mut marker_item = projector.marker_item(&marker);
+                    if marker_item.meta.is_none() {
+                        marker_item.meta = meta.take();
+                    }
+                    projected.push(marker_item);
+                }
+            }
+        }
+        if let Some(calls) = item.tool_calls.take() {
+            for call in calls {
+                let mut call_item = AiItem::function_call(call);
+                call_item.meta = meta.take();
+                projected.push(call_item);
+            }
         }
         if !prepared.is_empty() {
             return Err(HistoryMarkerError::InvalidPayload);
         }
-        let item_is_empty = matches!(&item.content, MessageContent::Blocks(blocks) if blocks.is_empty())
-            && item.tool_calls.is_none();
-        if !item_is_empty {
+        if projected.len() == projected_start && meta.is_some() {
+            item.meta = meta;
             projected.push(item);
         }
-        projected.extend(item_markers.iter().map(ClientProjector::marker_item));
     }
     if !early_by_output_index.is_empty() {
         return Err(HistoryMarkerError::InvalidPayload);
     }
     response.items = projected;
     Ok(new_references)
+}
+
+fn push_projection_block(
+    projected: &mut Vec<AiItem>,
+    block: ContentBlock,
+    meta: &mut Option<serde_json::Value>,
+) {
+    projected.push(AiItem {
+        role: crate::protocol::ir::Role::Assistant,
+        content: MessageContent::Blocks(vec![block]),
+        tool_calls: None,
+        tool_call_id: None,
+        meta: meta.take(),
+    });
 }
 
 pub(super) async fn publish_markers(
@@ -609,9 +684,20 @@ pub(super) async fn complete_canonical_response(
     let has_platform_calls = !classified.platform.is_empty();
     let has_client_calls = !classified.client.is_empty();
     let canonical_response = response.clone();
-    let mut projector = ClientProjector::new();
-    let mut publish_references = match project_protected_thinking(
-        &projector,
+    let post_text_started = request_context
+        .extensions
+        .get::<HiddenRoundState>()
+        .is_some_and(|state| {
+            state
+                .items
+                .iter()
+                .any(|item| item.output_text_ref().is_some_and(|text| !text.is_empty()))
+        });
+    let openai_compatible =
+        context.ingress == crate::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
+    let mut projector = ClientProjector::staged(openai_compatible, post_text_started);
+    let mut publish_references = match project_thinking(
+        &mut projector,
         context,
         &mut response,
         early_thinking_markers,
@@ -675,7 +761,12 @@ pub(super) async fn complete_canonical_response(
             .iter()
             .map(|marker| (marker.call_id(), marker.marker()))
             .collect::<Vec<_>>();
-        response.items = projector.project_items(std::mem::take(&mut response.items), &platform);
+        // Thinking projection has already scanned the whole response. Replay
+        // from the run-entry state so each Platform Marker keeps its original
+        // pre-/post-Text carrier while this second pass walks item order.
+        let mut platform_projector = ClientProjector::staged(openai_compatible, post_text_started);
+        response.items =
+            platform_projector.project_items(std::mem::take(&mut response.items), &platform);
         if !has_client_calls {
             return CompletionOutcome::PlatformOnly(Box::new(PlatformOnlyContinuation {
                 projected_response: response,
