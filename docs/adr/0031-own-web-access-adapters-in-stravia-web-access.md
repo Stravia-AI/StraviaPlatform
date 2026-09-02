@@ -6,7 +6,7 @@ status: accepted
 
 Stravia 将 Web Access 的全部 Web Provider 适配器从 `stravia-core` 迁到 `stravia-web-access`（由 `stravia-web-local` 改名）。crate 拥有 Local、Exa、Zhipu；删除 Brave 与 Tavily。中立的 `stravia-web-access-contract` 定义单一适配器 trait 与统一请求/结果，core 直接依赖并回导出该契约，同时继续拥有验证、有序 failover 与运行快照；Provider 实现 crate 不接管客户端传输契约。公开 Web Search、Search Report、Local Agent 循环与 Codex Search Backend 本期不动。Local Web Provider 是恰好一条、不可删除的 `kind=local` 记录；出站跟随模型 Provider 的 `use_proxy` + Gateway `proxy_url`，不再把 Direct/System/Explicit 做成管理面。这样桌面与服务器共用同一套零 API key 的 Internal Search/Fetch，远程适配器不再寄生在 core 里，也避免为 Local 再开第二套配置根。
 
-本决策接续 [ADR-0024](0024-local-web-provider-in-process-metasearch.md) 与 [ADR-0025](0025-in-process-web-fetch-quality-gate-chromium.md) 推迟的接线，并取代 [ADR-0026](0026-local-web-outbound-proxy-mode.md) 的管理面三档；search/fetch/Chrome 必须共用同一出站快照的约束仍然有效。
+本决策接续 [ADR-0024](0024-local-web-provider-in-process-metasearch.md) 与 [ADR-0025](0025-in-process-web-fetch-quality-gate-chromium.md) 推迟的接线，并取代 [ADR-0026](0026-local-web-outbound-proxy-mode.md) 的管理面三档；search、fetch 与运行壳注入的 renderer adapter 必须共用同一出站快照。独立服务端保留 headless Chrome adapter，桌面端使用系统 WebView adapter，不把 Tauri 依赖带入 core。
 
 ## Considered options
 

@@ -6504,13 +6504,18 @@ name = "stravia-desktop"
 version = "0.1.1"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
+ "eyre",
+ "httparse",
  "listeners",
  "reqwest",
+ "rustls-native-certs",
  "serde",
  "serde_json",
  "stravia-core",
  "stravia-server",
+ "stravia-web-access",
  "tauri",
  "tauri-build",
  "tauri-plugin-autostart",
@@ -6520,8 +6525,10 @@ dependencies = [
  "tauri-plugin-wdio",
  "tauri-plugin-wdio-webdriver",
  "tokio",
+ "tokio-rustls",
  "tracing",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]

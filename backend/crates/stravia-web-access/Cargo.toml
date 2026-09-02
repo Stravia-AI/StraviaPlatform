@@ -7,6 +7,10 @@ license = "CC0-1.0"
 description = "Web Access adapter implementations for Local, Exa, and Zhipu providers"
 publish = false
 
+[features]
+default = ["chrome-renderer"]
+chrome-renderer = ["dep:headless_chrome"]
+
 [dependencies]
 stravia-web-access-contract = { workspace = true }
 ammonia = { workspace = true }
@@ -20,7 +24,7 @@ eyre = { workspace = true }
 fend-core = { workspace = true }
 futures = { workspace = true }
 http-body-util = { workspace = true }
-headless_chrome = { workspace = true }
+headless_chrome = { workspace = true, optional = true }
 htmd = { workspace = true }
 maud = { workspace = true }
 numbat = { workspace = true }

@@ -3,7 +3,9 @@ use std::{net::IpAddr, str::FromStr, sync::Arc, time::Duration};
 use url::Url;
 use wreq_util::Emulation;
 
-use crate::browser::BrowserRuntime;
+use crate::renderer::{
+    default_page_renderer_factory, PageRenderer, PageRendererConfig, PageRendererFactory,
+};
 
 const SEARCH_TIMEOUT: Duration = Duration::from_secs(10);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
@@ -35,7 +37,7 @@ struct LocalWebInner {
     snapshot: ResolvedProxy,
     http: wreq::Client,
     fetch_proxied: wreq::Client,
-    browser: BrowserRuntime,
+    renderer: Arc<dyn PageRenderer>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,37 +68,22 @@ impl ResolvedProxy {
             .is_some_and(|host| self.no_proxy.contains(host))
     }
 
+    fn renderer_config(&self) -> PageRendererConfig {
+        PageRendererConfig::new(
+            self.http.clone(),
+            self.https.clone(),
+            self.no_proxy.entries.clone(),
+        )
+    }
+
+    #[cfg(test)]
     fn chrome_proxy_server(&self) -> Option<String> {
-        match (&self.http, &self.https) {
-            (None, None) => None,
-            (Some(http), Some(https)) if http == https => Some(chrome_proxy_uri(http)),
-            (Some(http), Some(https)) => Some(format!(
-                "http={};https={}",
-                chrome_proxy_uri(http),
-                chrome_proxy_uri(https)
-            )),
-            (Some(http), None) => Some(chrome_proxy_uri(http)),
-            (None, Some(https)) => Some(chrome_proxy_uri(https)),
-        }
+        self.renderer_config().chromium_proxy_server()
     }
 
+    #[cfg(test)]
     fn chrome_exclude_hosts(&self) -> Vec<String> {
-        let mut hosts = Vec::new();
-        for proxy in [&self.http, &self.https].into_iter().flatten() {
-            if let Some(host) = proxy.host_str() {
-                push_unique(&mut hosts, host.to_string());
-                if matches!(host, "localhost" | "127.0.0.1" | "::1") {
-                    push_unique(&mut hosts, "127.0.0.1".into());
-                    push_unique(&mut hosts, "localhost".into());
-                    push_unique(&mut hosts, "::1".into());
-                }
-            }
-        }
-        hosts
-    }
-
-    fn chrome_bypass_list(&self) -> Option<String> {
-        self.no_proxy.chrome_bypass_list()
+        self.renderer_config().proxy_hosts()
     }
 }
 
@@ -127,26 +114,6 @@ impl NoProxyList {
         })
     }
 
-    fn chrome_bypass_list(&self) -> Option<String> {
-        if self.entries.is_empty() {
-            return None;
-        }
-        let mut items = Vec::new();
-        for entry in &self.entries {
-            if entry == "*" {
-                items.push("*".to_string());
-                continue;
-            }
-            if let Some(rest) = entry.strip_prefix('.') {
-                items.push(format!("*.{rest}"));
-                continue;
-            }
-            items.push(entry.clone());
-            items.push(format!("*.{entry}"));
-        }
-        Some(items.join(";"))
-    }
-
     fn as_wreq(&self) -> Option<wreq::NoProxy> {
         if self.entries.is_empty() {
             return None;
@@ -157,23 +124,33 @@ impl NoProxyList {
 
 impl LocalWeb {
     pub fn new(mode: OutboundProxyMode) -> Result<Self, LocalWebError> {
-        Self::from_env(mode, |key| std::env::var(key).ok())
+        Self::new_with_renderer_factory(mode, default_page_renderer_factory())
+    }
+
+    pub fn new_with_renderer_factory(
+        mode: OutboundProxyMode,
+        renderer_factory: Arc<dyn PageRendererFactory>,
+    ) -> Result<Self, LocalWebError> {
+        Self::from_env(mode, |key| std::env::var(key).ok(), renderer_factory)
     }
 
     fn from_env(
         mode: OutboundProxyMode,
         env: impl Fn(&str) -> Option<String>,
+        renderer_factory: Arc<dyn PageRendererFactory>,
     ) -> Result<Self, LocalWebError> {
         let snapshot = resolve_mode(mode, env)?;
         let http = build_http_client(&snapshot, SEARCH_TIMEOUT, false, true)?;
         let fetch_proxied = build_http_client(&snapshot, FETCH_TIMEOUT, true, false)?;
-        let browser = BrowserRuntime::new(chrome_launch_config(&snapshot));
+        let renderer = renderer_factory
+            .build(snapshot.renderer_config())
+            .map_err(LocalWebError)?;
         Ok(Self {
             inner: Arc::new(LocalWebInner {
                 snapshot,
                 http,
                 fetch_proxied,
-                browser,
+                renderer,
             }),
         })
     }
@@ -190,12 +167,12 @@ impl LocalWeb {
             ip: String::new(),
             config: std::sync::Arc::new(crate::search::config::Config::default()),
             http: self.http_client(),
-            browser: self.browser(),
+            renderer: self.renderer(),
         }
     }
 
-    pub(crate) fn browser(&self) -> BrowserRuntime {
-        self.inner.browser.clone()
+    pub(crate) fn renderer(&self) -> Arc<dyn PageRenderer> {
+        Arc::clone(&self.inner.renderer)
     }
 
     pub(crate) fn snapshot(&self) -> &ResolvedProxy {
@@ -219,7 +196,7 @@ impl LocalWeb {
         progress_tx: tokio::sync::mpsc::UnboundedSender<crate::search::engines::ProgressUpdate>,
     ) -> eyre::Result<()> {
         query.http = self.http_client();
-        query.browser = self.browser();
+        query.renderer = self.renderer();
         crate::search::engines::search(&query, progress_tx).await
     }
 
@@ -316,29 +293,6 @@ fn normalize_socks(mut url: Url) -> Url {
     url
 }
 
-fn chrome_proxy_uri(url: &Url) -> String {
-    url.as_str().trim_end_matches('/').to_string()
-}
-
-fn chrome_launch_config(snapshot: &ResolvedProxy) -> crate::browser::ChromeLaunchConfig {
-    let mut args = Vec::new();
-    let proxy_server = snapshot.chrome_proxy_server();
-    if proxy_server.is_some() {
-        let mut rules = String::from("MAP * ~NOTFOUND");
-        for host in snapshot.chrome_exclude_hosts() {
-            rules.push_str(", EXCLUDE ");
-            rules.push_str(&host);
-        }
-        args.push(format!("--host-resolver-rules={rules}"));
-        if let Some(bypass) = snapshot.chrome_bypass_list() {
-            args.push(format!("--proxy-bypass-list={bypass}"));
-        }
-    } else {
-        args.push("--no-proxy-server".to_string());
-    }
-    crate::browser::ChromeLaunchConfig { proxy_server, args }
-}
-
 fn build_http_client(
     snapshot: &ResolvedProxy,
     timeout: Duration,
@@ -403,12 +357,6 @@ fn proxy_build_error(error: wreq::Error) -> LocalWebError {
     LocalWebError::invalid_proxy(format!("proxy configuration failed: {error}"))
 }
 
-fn push_unique(items: &mut Vec<String>, value: String) {
-    if !items.iter().any(|item| item == &value) {
-        items.push(value);
-    }
-}
-
 /// Shared by tests that only need a Direct HTTP client.
 #[cfg(test)]
 pub(crate) fn direct_http_client() -> wreq::Client {
@@ -420,8 +368,10 @@ pub(crate) fn direct_http_client() -> wreq::Client {
 }
 
 #[cfg(test)]
-pub(crate) fn direct_browser() -> BrowserRuntime {
-    BrowserRuntime::new(chrome_launch_config(&ResolvedProxy::direct()))
+pub(crate) fn direct_renderer() -> Arc<dyn PageRenderer> {
+    default_page_renderer_factory()
+        .build(ResolvedProxy::direct().renderer_config())
+        .expect("direct page renderer")
 }
 
 pub fn parse_cli_proxy(value: &str) -> Result<OutboundProxyMode, LocalWebError> {
@@ -434,9 +384,34 @@ pub fn parse_cli_proxy(value: &str) -> Result<OutboundProxyMode, LocalWebError> 
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::{
+        collections::HashMap,
+        sync::atomic::{AtomicBool, Ordering},
+    };
 
     use super::*;
+    use crate::renderer::{RenderRequest, RenderedPage};
+
+    struct RecordingRendererFactory {
+        built: AtomicBool,
+    }
+
+    impl PageRendererFactory for RecordingRendererFactory {
+        fn build(&self, config: PageRendererConfig) -> Result<Arc<dyn PageRenderer>, String> {
+            assert!(config.is_direct());
+            self.built.store(true, Ordering::Relaxed);
+            Ok(Arc::new(FakeRenderer))
+        }
+    }
+
+    struct FakeRenderer;
+
+    #[async_trait::async_trait]
+    impl PageRenderer for FakeRenderer {
+        async fn render(&self, _request: RenderRequest<'_>) -> eyre::Result<RenderedPage> {
+            unreachable!("renderer construction test does not render")
+        }
+    }
 
     fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
         let map: HashMap<String, String> = pairs
@@ -444,6 +419,19 @@ mod tests {
             .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
             .collect();
         move |key| map.get(key).cloned()
+    }
+
+    #[test]
+    fn local_web_uses_injected_renderer_factory() {
+        let factory = Arc::new(RecordingRendererFactory {
+            built: AtomicBool::new(false),
+        });
+        let _web = LocalWeb::new_with_renderer_factory(
+            OutboundProxyMode::Direct,
+            Arc::clone(&factory) as Arc<dyn PageRendererFactory>,
+        )
+        .expect("Local Web");
+        assert!(factory.built.load(Ordering::Relaxed));
     }
 
     #[test]

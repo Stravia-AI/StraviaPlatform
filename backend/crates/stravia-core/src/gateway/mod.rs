@@ -92,6 +92,7 @@ pub struct Gateway {
     pub(crate) generation_chains: generation_chain::GenerationChain,
     pub(crate) model_turn: Arc<dyn model_turn::ModelTurnExecutor>,
     pub(crate) web_access_run_snapshots: web_access::WebAccessRunSnapshotStore,
+    pub(crate) page_renderer_factory: Arc<dyn stravia_web_access::renderer::PageRendererFactory>,
     pub(crate) web_search_runner_state:
         Arc<tokio::sync::RwLock<Option<web_search::WebSearchRunner>>>,
     pub(crate) web_search_config_lock: Arc<tokio::sync::Mutex<()>>,
@@ -139,6 +140,7 @@ impl Gateway {
             generation_chains: self.generation_chains.clone(),
             model_turn: Arc::clone(&self.model_turn),
             web_access_run_snapshots: self.web_access_run_snapshots.clone(),
+            page_renderer_factory: Arc::clone(&self.page_renderer_factory),
             web_search_runner_state: Arc::clone(&self.web_search_runner_state),
             web_search_config_lock: Arc::clone(&self.web_search_config_lock),
             _sqlite_pool: self._sqlite_pool.clone(),

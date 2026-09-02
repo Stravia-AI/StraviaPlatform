@@ -11,10 +11,15 @@ desktop-e2e = ["dep:tauri-plugin-wdio", "dep:tauri-plugin-wdio-webdriver"]
 
 [dependencies]
 anyhow = { workspace = true }
+async-trait = { workspace = true }
 axum = { workspace = true }
+eyre = { workspace = true }
+httparse = { workspace = true }
 listeners = { workspace = true }
+rustls-native-certs = { workspace = true }
 stravia-core = { workspace = true }
 stravia-server = { workspace = true }
+stravia-web-access = { workspace = true }
 tauri = { workspace = true }
 tauri-plugin-autostart = { workspace = true }
 tauri-plugin-single-instance = { workspace = true }
@@ -24,7 +29,9 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tauri-plugin-store = { workspace = true }
 tokio = { workspace = true }
+tokio-rustls = { workspace = true }
 tauri-plugin-opener = { workspace = true }
+url = { workspace = true }
 tauri-plugin-wdio = { version = "1", optional = true }
 tauri-plugin-wdio-webdriver = { version = "1", optional = true }
 

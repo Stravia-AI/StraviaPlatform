@@ -1,14 +1,14 @@
 mod extract;
 mod http;
-mod policy;
+pub(crate) mod policy;
 
 use std::{future::Future, net::IpAddr, pin::Pin, time::Duration};
 
 use serde::Serialize;
 use url::Url;
 
-use crate::browser::{BrowserRuntime, RenderRequest};
 use crate::outbound::LocalWeb;
+use crate::renderer::{PageRenderer, RenderRequest, RenderRequestPolicy};
 use extract::{ContentKind, HtmlExtract};
 use http::NetworkBackend;
 
@@ -85,8 +85,8 @@ pub(crate) async fn fetch_with_runtime(
     fetch_with(
         value,
         &NetworkBackend::from_local_web(web),
-        &ChromeBackend {
-            browser: web.browser(),
+        &RendererBackend {
+            renderer: web.renderer(),
         },
     )
     .await
@@ -127,24 +127,24 @@ struct RenderedResponse {
     html: String,
 }
 
-struct ChromeBackend {
-    browser: BrowserRuntime,
+struct RendererBackend {
+    renderer: std::sync::Arc<dyn PageRenderer>,
 }
 
-impl RenderBackend for ChromeBackend {
+impl RenderBackend for RendererBackend {
     fn render<'a>(
         &'a self,
         url: &'a Url,
     ) -> BackendFuture<'a, Result<RenderedResponse, FetchError>> {
         Box::pin(async move {
             let rendered = self
-                .browser
+                .renderer
                 .render(RenderRequest {
                     url: url.as_str(),
                     preflight_url: None,
                     ready_selector: "body",
                     timeout: RENDER_TIMEOUT,
-                    request_guard: Some(policy::is_public_browser_request),
+                    request_policy: RenderRequestPolicy::PublicWeb,
                 })
                 .await
                 .map_err(|error| {

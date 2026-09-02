@@ -6,6 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 description = "Core library for Stravia AI Gateway — protocol conversion, proxy, admin API"
 
+[features]
+default = ["chrome-renderer"]
+chrome-renderer = ["stravia-web-access/chrome-renderer"]
+
 [dependencies]
 stravia-web-access = { workspace = true }
 stravia-web-access-contract = { workspace = true }

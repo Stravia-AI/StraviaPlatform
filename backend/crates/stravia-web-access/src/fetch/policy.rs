@@ -43,7 +43,7 @@ pub(super) fn is_public_ip(address: IpAddr) -> bool {
     }
 }
 
-pub(super) fn is_public_browser_request(value: &str) -> bool {
+pub(crate) fn is_public_browser_request(value: &str) -> bool {
     let Ok(parsed) = Url::parse(value) else {
         return false;
     };

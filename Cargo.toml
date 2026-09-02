@@ -9,9 +9,9 @@ rust-version = "1.97.1"
 license = "AGPL-3.0-only"
 
 [workspace.dependencies]
-stravia-core = { path = "backend/crates/stravia-core" }
+stravia-core = { path = "backend/crates/stravia-core", default-features = false }
 stravia-server = { path = "backend/apps/stravia-server", default-features = false }
-stravia-web-access = { path = "backend/crates/stravia-web-access" }
+stravia-web-access = { path = "backend/crates/stravia-web-access", default-features = false }
 stravia-web-access-contract = { path = "backend/crates/stravia-web-access-contract" }
 tokio = { version = "1", features = ["full"] }
 ammonia = "4.1.4"
@@ -38,8 +38,10 @@ eyre = "0.6.14"
 fend-core = "1.5.8"
 thiserror = "2"
 tokio-stream = "0.1"
+tokio-rustls = "0.26.4"
 futures = "0.3"
 http-body-util = "0.1"
+httparse = "1.10.1"
 headless_chrome = "1.0.22"
 htmd = "0.5"
 bytes = "1"
@@ -59,6 +61,7 @@ numbat = "1.24.0"
 parking_lot = "0.12.5"
 tempfile = "3"
 regex = "1.13.1"
+rustls-native-certs = "0.8.4"
 scraper = "0.27.0"
 tower = { version = "0.5", features = ["util"] }
 clap = { version = "4", features = ["derive", "env"] }

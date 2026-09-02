@@ -1,7 +1,6 @@
 use std::{
     ffi::{OsStr, OsString},
     sync::{Arc, OnceLock},
-    time::Duration,
 };
 
 use headless_chrome::{
@@ -18,26 +17,23 @@ use headless_chrome::{
     Browser, LaunchOptionsBuilder, Tab,
 };
 
-const STEALTH_SCRIPT: &str = include_str!("browser_stealth.js");
-
-#[derive(Debug, Clone)]
-pub(crate) struct ChromeLaunchConfig {
-    pub proxy_server: Option<String>,
-    pub args: Vec<String>,
-}
+use crate::renderer::{
+    is_public_web_request, PageRenderer, PageRendererConfig, PageRendererFactory, RenderRequest,
+    RenderRequestPolicy, RenderedPage, BROWSER_STEALTH_SCRIPT,
+};
 
 #[derive(Clone)]
-pub(crate) struct BrowserRuntime {
+struct ChromeRenderer {
     inner: Arc<BrowserInner>,
 }
 
 struct BrowserInner {
-    config: ChromeLaunchConfig,
+    config: PageRendererConfig,
     browser: OnceLock<Result<Browser, String>>,
 }
 
-impl BrowserRuntime {
-    pub(crate) fn new(config: ChromeLaunchConfig) -> Self {
+impl ChromeRenderer {
+    fn new(config: PageRendererConfig) -> Self {
         Self {
             inner: Arc::new(BrowserInner {
                 config,
@@ -46,13 +42,13 @@ impl BrowserRuntime {
         }
     }
 
-    pub(crate) async fn render(&self, request: RenderRequest<'_>) -> eyre::Result<RenderedPage> {
+    async fn render_page(&self, request: RenderRequest<'_>) -> eyre::Result<RenderedPage> {
         let runtime = self.clone();
         let url = request.url.to_string();
         let preflight_url = request.preflight_url.map(str::to_string);
         let ready_selector = request.ready_selector.to_string();
-        let request_guard = request.request_guard;
         let timeout = request.timeout;
+        let request_policy = request.request_policy;
 
         tokio::task::spawn_blocking(move || {
             runtime.render_blocking(
@@ -60,7 +56,7 @@ impl BrowserRuntime {
                 preflight_url.as_deref(),
                 &ready_selector,
                 timeout,
-                request_guard,
+                request_policy,
             )
         })
         .await
@@ -72,8 +68,8 @@ impl BrowserRuntime {
         url: &str,
         preflight_url: Option<&str>,
         ready_selector: &str,
-        timeout: Duration,
-        request_guard: Option<fn(&str) -> bool>,
+        timeout: std::time::Duration,
+        request_policy: RenderRequestPolicy,
     ) -> eyre::Result<RenderedPage> {
         let browser = match self
             .inner
@@ -92,32 +88,33 @@ impl BrowserRuntime {
             preflight_url,
             ready_selector,
             timeout,
-            request_guard,
+            request_policy,
         );
         let _ = tab.close(true);
         rendered
     }
 }
 
-pub(crate) struct RenderRequest<'a> {
-    pub url: &'a str,
-    pub preflight_url: Option<&'a str>,
-    pub ready_selector: &'a str,
-    pub timeout: Duration,
-    pub request_guard: Option<fn(&str) -> bool>,
+#[async_trait::async_trait]
+impl PageRenderer for ChromeRenderer {
+    async fn render(&self, request: RenderRequest<'_>) -> eyre::Result<RenderedPage> {
+        self.render_page(request).await
+    }
 }
 
-pub(crate) struct RenderedPage {
-    pub html: String,
-    pub url: String,
-    pub ready: bool,
+pub(crate) struct ChromeRendererFactory;
+
+impl PageRendererFactory for ChromeRendererFactory {
+    fn build(&self, config: PageRendererConfig) -> Result<Arc<dyn PageRenderer>, String> {
+        Ok(Arc::new(ChromeRenderer::new(config)))
+    }
 }
 
-fn launch_browser(config: &ChromeLaunchConfig) -> Result<Browser, String> {
+fn launch_browser(config: &PageRendererConfig) -> Result<Browser, String> {
     let mut args: Vec<OsString> = vec![OsString::from(
         "--disable-blink-features=AutomationControlled",
     )];
-    args.extend(config.args.iter().map(OsString::from));
+    args.extend(config.chromium_args().iter().map(OsString::from));
     let arg_refs: Vec<&OsStr> = args.iter().map(|arg| arg.as_os_str()).collect();
     let mut launch_options = LaunchOptionsBuilder::default();
     launch_options
@@ -125,7 +122,8 @@ fn launch_browser(config: &ChromeLaunchConfig) -> Result<Browser, String> {
         .window_size(Some((1365, 768)))
         .args(arg_refs)
         .ignore_default_args(vec![OsStr::new("--enable-automation")]);
-    if let Some(proxy_server) = &config.proxy_server {
+    let proxy_server = config.chromium_proxy_server();
+    if let Some(proxy_server) = &proxy_server {
         launch_options.proxy_server(Some(proxy_server.as_str()));
     }
     let launch_options = launch_options
@@ -140,11 +138,11 @@ fn render_tab(
     url: &str,
     preflight_url: Option<&str>,
     ready_selector: &str,
-    timeout: Duration,
-    request_guard: Option<fn(&str) -> bool>,
+    timeout: std::time::Duration,
+    request_policy: RenderRequestPolicy,
 ) -> eyre::Result<RenderedPage> {
     apply_omp_stealth(tab)?;
-    if let Some(request_guard) = request_guard {
+    if request_policy == RenderRequestPolicy::PublicWeb {
         tab.enable_fetch(
             Some(&[RequestPattern {
                 url_pattern: None,
@@ -155,7 +153,7 @@ fn render_tab(
         )
         .map_err(|error| eyre::eyre!("request guard setup failed: {error}"))?;
         tab.enable_request_interception(Arc::new(move |_, _, intercepted: RequestPausedEvent| {
-            if request_guard(&intercepted.params.request.url) {
+            if is_public_web_request(&intercepted.params.request.url) {
                 RequestPausedDecision::Continue(None)
             } else {
                 RequestPausedDecision::Fail(FailRequest {
@@ -277,7 +275,7 @@ fn apply_omp_stealth(tab: &Tab) -> eyre::Result<()> {
     })
     .map_err(|error| eyre::eyre!("user-agent emulation failed: {error}"))?;
     tab.call_method(Page::AddScriptToEvaluateOnNewDocument {
-        source: STEALTH_SCRIPT.to_string(),
+        source: BROWSER_STEALTH_SCRIPT.to_string(),
         world_name: None,
         include_command_line_api: None,
         run_immediately: None,

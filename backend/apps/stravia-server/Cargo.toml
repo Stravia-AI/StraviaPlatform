@@ -7,8 +7,9 @@ license.workspace = true
 description = "Stravia AI Gateway — Standalone Server Binary"
 
 [features]
-default = ["embed-webui"]
+default = ["embed-webui", "chrome-renderer"]
 embed-webui = ["dep:rust-embed"]
+chrome-renderer = ["stravia-core/chrome-renderer"]
 
 [dependencies]
 stravia-core = { workspace = true }

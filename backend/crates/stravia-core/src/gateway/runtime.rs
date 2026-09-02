@@ -246,6 +246,7 @@ impl Gateway {
             generation_chains,
             model_turn: model_turn::unreachable_executor(),
             web_access_run_snapshots: web_access::WebAccessRunSnapshotStore::default(),
+            page_renderer_factory: stravia_web_access::renderer::default_page_renderer_factory(),
             web_search_runner_state: Arc::new(tokio::sync::RwLock::new(None)),
             web_search_config_lock: Arc::new(tokio::sync::Mutex::new(())),
             _sqlite_pool: sqlite_pool,
