@@ -176,9 +176,10 @@ async function save(): Promise<void> {
               </Select.Trigger>
               <Select.Content>
                 {#each eligibleModels as model (model.id)}
+                  {@const secondaryId = logicalModelSecondaryId(model)}
                   <Select.Item value={model.id} label={model.display_name}>
                     <span class="min-w-0 flex-1 truncate">{model.display_name}</span>
-                    {#if logicalModelSecondaryId(model) as secondaryId}
+                    {#if secondaryId}
                       <span class="truncate font-technical text-xs text-muted-foreground">{secondaryId}</span>
                     {/if}
                   </Select.Item>
