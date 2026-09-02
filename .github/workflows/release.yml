@@ -192,6 +192,13 @@ jobs:
         with:
           tool: cargo-zigbuild@${{ env.CARGO_ZIGBUILD_VERSION }}
 
+      - name: Configure BoringSSL for native Windows ARM64
+        if: matrix.suffix == 'windows-aarch64'
+        shell: pwsh
+        run: |
+          $toolchain = Join-Path $env:GITHUB_WORKSPACE '.github/cmake/windows-arm64.cmake'
+          "CMAKE_TOOLCHAIN_FILE=$toolchain" >> $env:GITHUB_ENV
+
       - name: Build server with the native toolchain
         if: matrix.libc != 'musl'
         run: task build:server TARGET="${{ matrix.target }}"
@@ -291,6 +298,13 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev \
             patchelf
+
+      - name: Configure BoringSSL for native Windows ARM64
+        if: matrix.suffix == 'windows-aarch64'
+        shell: pwsh
+        run: |
+          $toolchain = Join-Path $env:GITHUB_WORKSPACE '.github/cmake/windows-arm64.cmake'
+          "CMAKE_TOOLCHAIN_FILE=$toolchain" >> $env:GITHUB_ENV
 
       - name: Build desktop bundle
         run: task build:desktop BUNDLES="${{ matrix.bundle }}"

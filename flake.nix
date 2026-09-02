@@ -153,7 +153,9 @@
             nativeBuildInputs = [
               pkgs.cmake
               pkgs.git
+              pkgs.llvmPackages.libclang
             ];
+            LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
 
             preBuild = ''
               mkdir -p frontend/stravia-webui/dist

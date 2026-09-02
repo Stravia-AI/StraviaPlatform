@@ -19,7 +19,7 @@ FROM rust:${RUST_VERSION}-bookworm AS rust-builder
 WORKDIR /src
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends cmake \
+    && apt-get install -y --no-install-recommends cmake libclang-dev \
     && rm -rf /var/lib/apt/lists/*
 
 COPY Cargo.toml Cargo.lock ./
