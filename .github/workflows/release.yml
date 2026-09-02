@@ -446,11 +446,60 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout release metadata
+        uses: actions/checkout@v7
+
       - name: Download release assets
         uses: actions/download-artifact@v8
         with:
           name: release-assets
           path: release-assets
+
+      - name: Compose release notes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG_NAME: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          python3 <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          version = re.escape(os.environ["VERSION"])
+          changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
+          match = re.search(
+              rf"^## \[{version}\](?: - [^\n]+)?\n(?P<body>.*?)(?=^## |\Z)",
+              changelog,
+              flags=re.MULTILINE | re.DOTALL,
+          )
+          if match is None:
+              raise SystemExit(f"CHANGELOG.md has no section for {os.environ['VERSION']}")
+
+          notes = match.group("body").strip()
+          if not notes:
+              raise SystemExit(f"CHANGELOG.md section for {os.environ['VERSION']} is empty")
+
+          Path(os.environ["RUNNER_TEMP"], "curated-release-notes.md").write_text(
+              notes + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+          gh api \
+            --method POST \
+            "repos/${GH_REPO}/releases/generate-notes" \
+            -f "tag_name=${TAG_NAME}" \
+            --jq '.body' \
+            > "${RUNNER_TEMP}/generated-release-notes.md"
+
+          {
+            cat "${RUNNER_TEMP}/curated-release-notes.md"
+            printf '\n---\n\n'
+            cat "${RUNNER_TEMP}/generated-release-notes.md"
+          } > "${RUNNER_TEMP}/release-notes.md"
 
       - name: Create or refresh draft release
         shell: bash
@@ -459,12 +508,13 @@ jobs:
           GH_REPO: ${{ github.repository }}
           TAG_NAME: ${{ needs.prepare.outputs.tag }}
           IS_PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+          RELEASE_NOTES_FILE: ${{ runner.temp }}/release-notes.md
         run: |
           if gh release view "${TAG_NAME}" >/dev/null 2>&1; then
             if [[ "${IS_PRERELEASE}" == "true" ]]; then
-              gh release edit "${TAG_NAME}" --draft --prerelease --latest=false
+              gh release edit "${TAG_NAME}" --draft --prerelease --latest=false --notes-file "${RELEASE_NOTES_FILE}"
             else
-              gh release edit "${TAG_NAME}" --draft --prerelease=false --latest=false
+              gh release edit "${TAG_NAME}" --draft --prerelease=false --latest=false --notes-file "${RELEASE_NOTES_FILE}"
             fi
           else
             args=(
@@ -472,7 +522,7 @@ jobs:
               --verify-tag
               --draft
               --title "Stravia ${TAG_NAME}"
-              --generate-notes
+              --notes-file "${RELEASE_NOTES_FILE}"
               --latest=false
             )
             if [[ "${IS_PRERELEASE}" == "true" ]]; then
