@@ -109,9 +109,12 @@ def build_harness(work_dir: Path) -> None:
         anyhow = "1"
         stravia-core = {{ path = "{core_path}" }}
         stravia-server = {{ path = "{server_path}", default-features = false }}
-        reqwest = {{ version = "0.12", features = ["json"] }}
+        # 依赖版本与特性必须与根 workspace 对齐(reqwest/sqlx 主版本一致、禁用默认
+        # 特性),否则 harness 独立解析出的 native-tls/openssl 会与 CI 的 rust-lld
+        # 链接冲突,且会重复编译另一套主版本依赖。
+        reqwest = {{ version = "0.13", default-features = false, features = ["json"] }}
         serde_json = "1"
-        sqlx = {{ version = "0.8", default-features = false, features = ["runtime-tokio", "postgres"] }}
+        sqlx = {{ version = "0.9", default-features = false, features = ["runtime-tokio", "postgres"] }}
         tokio = {{ version = "1", features = ["macros", "rt-multi-thread", "time"] }}
         """
     ).strip() + "\n"
@@ -145,14 +148,16 @@ def build_harness(work_dir: Path) -> None:
                 let pool = PgPoolOptions::new().max_connections(1).connect(&pg_url).await?;
                 match action.as_str() {
                     "create" => {
-                        sqlx::query(&format!("CREATE SCHEMA {schema}"))
+                        sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
                             .execute(&pool)
                             .await?;
                     }
                     "drop" => {
-                        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
-                            .execute(&pool)
-                            .await?;
+                        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+                            "DROP SCHEMA {schema} CASCADE"
+                        )))
+                        .execute(&pool)
+                        .await?;
                     }
                     other => anyhow::bail!("unknown schema action: {other}"),
                 }
@@ -185,7 +190,7 @@ def build_harness(work_dir: Path) -> None:
                         "invalid schema: {schema}"
                     );
                     let pool = PgPoolOptions::new().max_connections(1).connect(&pg_url).await?;
-                    sqlx::query(&format!("CREATE SCHEMA IF NOT EXISTS {schema}")).execute(&pool).await?;
+                    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE SCHEMA IF NOT EXISTS {schema}"))).execute(&pool).await?;
                     pool.close().await;
 
                     let url_with_schema = if pg_url.contains('?') {
