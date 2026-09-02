@@ -110,6 +110,8 @@ interface Props {
   metaKeySelection?: boolean
   selectOnRowClick?: boolean
   contextMenu?: boolean
+  /** Replaces each TanStack grouped row with one full-width cell. */
+  groupRow?: Snippet<[DataTableRow<TData>]>
   expandedContent?: Snippet<[DataTableRow<TData>]>
   editMode?: DataTableEditMode
   cellEditor?: Snippet<[DataTableCell<TData>, () => void, () => void]>
@@ -224,6 +226,7 @@ let {
   metaKeySelection = true,
   selectOnRowClick = true,
   contextMenu = false,
+  groupRow,
   expandedContent,
   editMode = 'none',
   cellEditor,
@@ -1112,7 +1115,7 @@ $effect(() => {
 })
 </script>
 
-{#snippet dataRow(item: RenderedRow, rowIndex: number)}
+{#snippet standardDataRow(item: RenderedRow, rowIndex: number)}
   <Table.Row
     class={cn(
       'border-border/50',
@@ -1288,6 +1291,34 @@ $effect(() => {
         {@render expandedContent(item.row)}
       </Table.Cell>
     </Table.Row>
+  {/if}
+{/snippet}
+
+{#snippet dataRow(item: RenderedRow, rowIndex: number)}
+  {#if groupRow && item.row.getIsGrouped()}
+    <Table.Row
+      class={cn(
+        'border-border/50',
+        contextMenuSelection === item.row.id && 'bg-muted',
+        (selectionMode !== 'none' || onRowClick) && 'cursor-pointer',
+        rowClass?.(item.row),
+      )}
+      style={renderedRowStyle(item)}
+      data-state={item.row.getIsSelected() ? 'selected' : undefined}
+      data-context-menu-selected={contextMenuSelection === item.row.id ? '' : undefined}
+      data-data-table-row-index={rowIndex}
+      aria-selected={selectionMode === 'none' ? undefined : item.row.getIsSelected()}
+      tabindex={selectionMode === 'none' ? undefined : 0}
+      onclick={(event) => handleRowClick(event, item.row)}
+      ondblclick={(event) => onRowDoubleClick?.({ event, row: item.row, original: item.row.original })}
+      oncontextmenu={(event) => handleRowContextMenu(event, item.row)}
+      onkeydown={(event) => handleRowKeydown(event, item.row, rowIndex)}>
+      <Table.Cell colspan={renderedColumnCount} class="whitespace-normal p-0">
+        {@render groupRow(item.row)}
+      </Table.Cell>
+    </Table.Row>
+  {:else}
+    {@render standardDataRow(item, rowIndex)}
   {/if}
 {/snippet}
 

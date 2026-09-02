@@ -860,7 +860,6 @@
   "allowances_forecast_lowest": "Lowest projected remaining {value}",
   "allowances_forecast_no_projection": "No projected percentage available",
   "allowances_forecast_exhausts_at": "{provider} · {item} may exhaust {time}",
-  "allowances_forecast_reaches_zero_at": "{provider} · {item} may reach zero {time}",
   "allowances_filter_empty": "No allowances match these filters.",
   "allowances_show_model_allowances": "Show model allowances for {provider}",
   "allowances_refresh_all": "Refresh all",

@@ -860,7 +860,6 @@
   "allowances_forecast_lowest": "最低预计剩余 {value}",
   "allowances_forecast_no_projection": "暂无预计剩余百分比",
   "allowances_forecast_exhausts_at": "{provider} · {item} 预计于 {time} 耗尽",
-  "allowances_forecast_reaches_zero_at": "{provider} · {item} 预计于 {time} 到 0",
   "allowances_filter_empty": "没有符合当前筛选的额度。",
   "allowances_show_model_allowances": "展开 {provider} 的模型额度",
   "allowances_refresh_all": "全部刷新",

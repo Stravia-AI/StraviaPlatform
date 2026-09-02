@@ -129,8 +129,8 @@ test('renders the matrix, shared summary, timeline, forecast, model details, and
   await expect(matrix.getByText('Unavailable', { exact: true })).toBeVisible()
   await expect(matrix.getByText('Exhausted', { exact: true }).first()).toBeVisible()
   await expect(matrix.getByText('0 USD')).toBeVisible()
-  await expect(page.getByText('Showing the last successful result because this refresh failed.')).toBeVisible()
-  await expect(page.getByText('Reconnect this model service or update its credential.')).toBeVisible()
+  await expect(matrix.getByText('Showing the last successful result because this refresh failed.')).toBeVisible()
+  await expect(matrix.getByText('Reconnect this model service or update its credential.')).toBeVisible()
 
   const conditionSummary = page.getByRole('region', { name: 'Allowance condition' })
   await expect(conditionSummary.getByText('Exhausted', { exact: true })).toBeVisible()
@@ -139,16 +139,36 @@ test('renders the matrix, shared summary, timeline, forecast, model details, and
   await expect(page.getByRole('heading', { name: 'Exhaustion forecast' })).toBeVisible()
   await expect(page.getByText('Based on the current window')).toBeVisible()
   await expect(page.getByText('Will exhaust 1')).toBeVisible()
-  await expect(page.getByText('Unknown 1')).toBeVisible()
+  await expect(page.getByText('Unknown 0')).toBeVisible()
 
-  await page.getByLabel('Show model allowances for Alpha account').click()
-  await page.getByText('claude-opus-4-6').click()
-  await expect(page.getByText(/Resets/)).toBeVisible()
+  await matrix.getByLabel('Show model allowances for Alpha account').click()
+  await matrix.getByText('claude-opus-4-6').click()
+  await expect(matrix.getByText(/Resets/)).toBeVisible()
 
   await page.getByRole('button', { name: 'Refresh all' }).click()
   await expect.poll(() => posts).toContain('/api/v1/provider-allowances/refresh')
-  await page.getByRole('button', { name: 'Refresh Alpha account' }).click()
+  await matrix.getByRole('button', { name: 'Refresh Alpha account' }).click()
   await expect.poll(() => posts).toContain('/api/v1/provider-allowances/provider-alpha/refresh')
+})
+
+test('does not treat an exhausted allowance without a reset date as exhausted', async ({ page }) => {
+  await mockAllowances(page, [freshSnapshot])
+  await page.goto('/allowances')
+
+  const matrix = page.getByRole('table', { name: 'Allowance matrix' })
+  const provider = matrix.getByTestId('allowance-provider-provider-alpha')
+  const providerGroupCell = provider.locator('xpath=ancestor::td')
+  const forecastPanel = page
+    .locator('[data-slot="card"]')
+    .filter({ has: page.getByRole('heading', { name: 'Exhaustion forecast' }) })
+  await expect(providerGroupCell).toHaveAttribute('colspan', '4')
+  await expect(matrix.getByText('0 USD')).toBeVisible()
+  await expect(provider.getByText('Exhausted', { exact: true })).toHaveCount(0)
+  await expect(page.getByRole('region', { name: 'Allowance condition' }).getByText('Normal', { exact: true })).toBeVisible()
+  await expect(forecastPanel).toContainText('Unknown 0')
+
+  await selectFilter(page, 'Filter by allowance condition', 'Exhausted')
+  await expect(page.getByText('No allowances match these filters.')).toBeVisible()
 })
 
 test('search and all filters drive the same visible collection', async ({ page }) => {
@@ -164,7 +184,7 @@ test('search and all filters drive the same visible collection', async ({ page }
   await expect(page.getByRole('table', { name: 'Allowance matrix' }).getByText('Alpha account')).toBeVisible()
   await expect(page.getByRole('table', { name: 'Allowance matrix' }).getByText('Beta account')).toHaveCount(0)
   await expect(timelinePanel).not.toContainText('Beta account')
-  await expect(forecastPanel).toContainText('Unknown 1')
+  await expect(forecastPanel).toContainText('Unknown 0')
 
   await search.fill('Weekly')
   await expect(page.getByText('No allowances match these filters.')).toBeVisible()
@@ -180,12 +200,12 @@ test('search and all filters drive the same visible collection', async ({ page }
 
   await selectFilter(page, 'Filter by service type', 'All')
   await selectFilter(page, 'Filter by allowance condition', 'Exhausted')
-  await expect(page.getByRole('table', { name: 'Allowance matrix' }).getByText('Alpha account')).toBeVisible()
+  await expect(page.getByRole('table', { name: 'Allowance matrix' }).getByText('Alpha account')).toHaveCount(0)
   await expect(page.getByRole('table', { name: 'Allowance matrix' }).getByText('Beta account')).toBeVisible()
   await expect(timelinePanel).toContainText('Beta account')
   await expect(timelinePanel).not.toContainText('Alpha account')
   await expect(forecastPanel).toContainText('Will exhaust 1')
-  await expect(forecastPanel).toContainText('Unknown 1')
+  await expect(forecastPanel).toContainText('Unknown 0')
 
   await selectFilter(page, 'Filter by allowance condition', 'All')
   await selectFilter(page, 'Filter by data freshness', 'Unavailable')
@@ -222,7 +242,16 @@ test('keeps the matrix and side panels usable on a narrow Chinese viewport', asy
 
   await expect(page.getByRole('heading', { name: '额度总览' })).toBeVisible()
   await expect(page.getByRole('button', { name: '全部刷新' })).toBeVisible()
-  await expect(page.getByRole('table', { name: '额度矩阵' })).toBeVisible()
+  const matrixCard = page
+    .locator('[data-slot="card"]')
+    .filter({ has: page.getByRole('heading', { name: '额度矩阵' }) })
+  const desktopMatrix = matrixCard.locator('.route-desktop-table')
+  const mobileMatrix = matrixCard.locator('.route-mobile-list')
+  await expect(desktopMatrix).toHaveCount(1)
+  await expect(desktopMatrix).toBeHidden()
+  await expect(mobileMatrix).toHaveCount(1)
+  await expect(mobileMatrix).toBeVisible()
+  await expect(mobileMatrix.getByText('Alpha account')).toBeVisible()
   await expect(page.getByRole('heading', { name: '重置时间轴' })).toBeVisible()
   await expect(page.getByRole('heading', { name: '预计耗尽' })).toBeVisible()
   const overflow = await page.evaluate(
