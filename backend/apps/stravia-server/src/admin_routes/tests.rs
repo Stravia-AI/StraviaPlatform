@@ -729,7 +729,7 @@ async fn route_bind_endpoint_owns_one_click_target_creation() -> anyhow::Result<
     let response_body = to_bytes(response.into_body(), usize::MAX).await?;
     let routes: serde_json::Value = serde_json::from_slice(&response_body)?;
     assert_eq!(routes["data"].as_array().map(Vec::len), Some(1));
-    assert_eq!(routes["data"][0]["name"], "route-model");
+    assert_eq!(routes["data"][0]["model_id"], "route-model");
     assert_eq!(
         routes["data"][0]["targets"].as_array().map(Vec::len),
         Some(1)

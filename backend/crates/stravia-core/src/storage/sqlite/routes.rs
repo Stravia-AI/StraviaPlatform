@@ -1,3 +1,5 @@
+use sqlx::Connection;
+
 use super::*;
 
 #[derive(Clone)]
@@ -80,7 +82,8 @@ impl RouteStore for SqliteRouteStore {
             .id
             .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let mut tx = self.pool.begin().await?;
+        let mut connection = self.pool.acquire().await?;
+        let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
         let conflict = sqlx::query_scalar::<_, String>(
             "SELECT id FROM models WHERE model_id = ? AND id != ? LIMIT 1",
         )
@@ -153,6 +156,7 @@ impl RouteStore for SqliteRouteStore {
         }
 
         tx.commit().await?;
+        drop(connection);
         self.get(route.model_id.trim())
             .await?
             .context("Route missing after put")
@@ -169,6 +173,8 @@ impl RouteStore for SqliteRouteStore {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use sqlx::sqlite::SqlitePoolOptions;
 
     use super::*;
@@ -239,5 +245,64 @@ mod tests {
         assert_eq!(persisted.targets.len(), 1);
         assert_eq!(persisted.targets[0].provider_id, "provider-1");
         assert_eq!(persisted.targets[0].model, "working-model");
+    }
+
+    #[tokio::test]
+    async fn route_put_waits_for_a_concurrent_sqlite_writer() {
+        let data_dir = tempfile::tempdir().expect("temporary data directory");
+        let pool = crate::db::init_pool(data_dir.path())
+            .await
+            .expect("SQLite pool");
+        crate::migrations::migrate_sqlite(&pool)
+            .await
+            .expect("migrations");
+        sqlx::query(
+            "INSERT INTO providers (
+                id, name, protocol, base_url, api_key, auth_mode
+             ) VALUES ('provider-1', 'Provider 1', 'openai-compatible', 'https://example.com', '', 'apikey')",
+        )
+        .execute(&pool)
+        .await
+        .expect("Provider");
+        let store = SqliteRouteStore { pool: pool.clone() };
+
+        let mut writer = pool.acquire().await.expect("writer connection");
+        let writer_tx = writer
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .expect("writer transaction");
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let put_task = tokio::spawn(async move {
+            started_tx.send(()).expect("signal Route put start");
+            store
+                .put(PutRoute {
+                    id: None,
+                    model_id: "concurrent-route".into(),
+                    display_name: None,
+                    selection_strategy: "weighted".into(),
+                    is_enabled: true,
+                    targets: vec![target("provider-1", "provider-model")],
+                })
+                .await
+        });
+        started_rx.await.expect("Route put start");
+
+        let mut put_task = put_task;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), &mut put_task)
+                .await
+                .is_err(),
+            "Route put must wait while another write transaction owns the database"
+        );
+        writer_tx
+            .commit()
+            .await
+            .expect("release writer transaction");
+
+        let route = put_task
+            .await
+            .expect("Route put task")
+            .expect("create Route");
+        assert_eq!(route.model_id, "concurrent-route");
     }
 }
