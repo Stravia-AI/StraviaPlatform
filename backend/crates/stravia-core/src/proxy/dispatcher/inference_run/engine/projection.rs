@@ -131,12 +131,66 @@ struct LiveThinkingPreview {
     canonical_text: String,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProtectedPreviewCarrier {
+    Unindexed,
+    Thinking {
+        output_index: Option<usize>,
+        content_index: Option<usize>,
+    },
+    Summary {
+        output_index: Option<usize>,
+        content_index: Option<usize>,
+    },
+}
+
+impl ProtectedPreviewCarrier {
+    fn ordinal(self) -> usize {
+        match self {
+            Self::Unindexed => 0,
+            Self::Thinking { content_index, .. } | Self::Summary { content_index, .. } => {
+                content_index.unwrap_or(0)
+            }
+        }
+    }
+
+    fn delta(self, text: String, obfuscation: Option<String>) -> AiStreamDelta {
+        match self {
+            Self::Unindexed => AiStreamDelta::ThinkingDelta(text),
+            Self::Thinking {
+                output_index,
+                content_index,
+            } => AiStreamDelta::ThinkingDeltaWithMetadata {
+                text,
+                obfuscation,
+                output_index,
+                content_index,
+            },
+            Self::Summary {
+                output_index,
+                content_index,
+            } => AiStreamDelta::ReasoningSummaryDelta {
+                text,
+                obfuscation,
+                output_index,
+                content_index,
+            },
+        }
+    }
+}
+
+struct LiveProtectedPreview {
+    marker: HistoryMarker,
+    carrier: Option<ProtectedPreviewCarrier>,
+}
+
 /// Run-wide Client Projection state. `begin_model_leg` deliberately does not
 /// reset `post_text_started`.
 pub(super) struct ClientProjector {
     openai_compatible: bool,
     post_text_started: bool,
     live_previews: HashMap<usize, LiveThinkingPreview>,
+    pre_text_protected_previews: HashMap<usize, LiveProtectedPreview>,
 }
 
 impl Default for ClientProjector {
@@ -145,6 +199,7 @@ impl Default for ClientProjector {
             openai_compatible: true,
             post_text_started: false,
             live_previews: HashMap::new(),
+            pre_text_protected_previews: HashMap::new(),
         }
     }
 }
@@ -162,12 +217,13 @@ impl ClientProjector {
             openai_compatible,
             post_text_started,
             live_previews: HashMap::new(),
+            pre_text_protected_previews: HashMap::new(),
         }
     }
 
     pub(super) fn begin_model_leg(&mut self) {
         debug_assert!(
-            self.live_previews.is_empty(),
+            self.live_previews.is_empty() && self.pre_text_protected_previews.is_empty(),
             "a completed Model Leg must finalize every Thinking Marker"
         );
     }
@@ -236,6 +292,84 @@ impl ClientProjector {
         }
     }
 
+    pub(super) fn begin_protected_thinking(&mut self, output_index: usize) {
+        if self.openai_compatible && !self.post_text_started {
+            self.pre_text_protected_previews
+                .entry(output_index)
+                .or_insert_with(|| LiveProtectedPreview {
+                    marker: crate::history_marker::reserve_thinking_marker(),
+                    carrier: None,
+                });
+        }
+    }
+
+    pub(super) fn project_protected_delta(
+        &mut self,
+        output_index: usize,
+        delta: AiStreamDelta,
+    ) -> Vec<AiStreamDelta> {
+        if !self.openai_compatible {
+            return vec![delta];
+        }
+        if self.post_text_started {
+            return self.project_delta(output_index, delta);
+        }
+        let preview = self
+            .pre_text_protected_previews
+            .get_mut(&output_index)
+            .expect("protected Thinking start precedes its public deltas");
+        let (carrier, text, obfuscation) = match delta {
+            AiStreamDelta::ThinkingDelta(text) => (ProtectedPreviewCarrier::Unindexed, text, None),
+            AiStreamDelta::ThinkingDeltaWithMetadata {
+                text,
+                obfuscation,
+                output_index,
+                content_index,
+            } => (
+                ProtectedPreviewCarrier::Thinking {
+                    output_index,
+                    content_index,
+                },
+                text,
+                obfuscation,
+            ),
+            AiStreamDelta::ReasoningSummaryDelta {
+                text,
+                obfuscation,
+                output_index,
+                content_index,
+            } => (
+                ProtectedPreviewCarrier::Summary {
+                    output_index,
+                    content_index,
+                },
+                text,
+                obfuscation,
+            ),
+            other => return vec![other],
+        };
+        let mut projected = Vec::with_capacity(2);
+        if let Some(previous) = preview.carrier
+            && previous != carrier
+        {
+            projected.push(previous.delta(
+                render_preview_projection_end(&preview.marker.reference, previous.ordinal()),
+                None,
+            ));
+        }
+        let text = if preview.carrier == Some(carrier) {
+            text
+        } else {
+            format!(
+                "{}{text}",
+                render_preview_projection_start(&preview.marker.reference, carrier.ordinal())
+            )
+        };
+        preview.carrier = Some(carrier);
+        projected.push(carrier.delta(text, obfuscation));
+        projected
+    }
+
     fn project_thinking_delta(
         &mut self,
         output_index: usize,
@@ -264,6 +398,19 @@ impl ClientProjector {
         self.live_previews
             .get(&output_index)
             .map(|preview| &preview.marker)
+            .or_else(|| {
+                self.pre_text_protected_previews
+                    .get(&output_index)
+                    .map(|preview| &preview.marker)
+            })
+    }
+
+    pub(super) fn thinking_preview_started(&self, output_index: usize) -> bool {
+        self.live_previews.contains_key(&output_index)
+            || self
+                .pre_text_protected_previews
+                .get(&output_index)
+                .is_some_and(|preview| preview.carrier.is_some())
     }
 
     pub(super) fn synthetic_thinking_item(&self, output_index: usize) -> Option<AiItem> {
@@ -273,10 +420,21 @@ impl ClientProjector {
     }
 
     pub(super) fn close_thinking_preview(&mut self, output_index: usize) -> Vec<AiStreamDelta> {
-        let Some(preview) = self.live_previews.remove(&output_index) else {
-            return Vec::new();
-        };
-        vec![preview.carrier.text_delta(preview.encoder.finish())]
+        if let Some(preview) = self.live_previews.remove(&output_index) {
+            return vec![preview.carrier.text_delta(preview.encoder.finish())];
+        }
+        self.pre_text_protected_previews
+            .remove(&output_index)
+            .and_then(|preview| {
+                preview.carrier.map(|carrier| {
+                    carrier.delta(
+                        render_preview_projection_end(&preview.marker.reference, carrier.ordinal()),
+                        None,
+                    )
+                })
+            })
+            .into_iter()
+            .collect()
     }
 
     pub(super) fn preview_deltas(

@@ -295,6 +295,11 @@ fn stream_preserves_encrypted_reasoning_from_completed_item() {
             .iter()
             .any(|delta| matches!(delta, AiStreamDelta::ThinkingSignature(_)))
     );
+    assert!(
+        deltas
+            .iter()
+            .any(|delta| matches!(delta, AiStreamDelta::ProtectedThinkingStart { index: 0 }))
+    );
     assert!(deltas.iter().any(|delta| matches!(
         delta,
         AiStreamDelta::ItemDone { index: 0, item }

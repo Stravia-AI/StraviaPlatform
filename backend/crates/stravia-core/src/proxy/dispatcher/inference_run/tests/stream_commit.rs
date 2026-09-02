@@ -259,6 +259,148 @@ async fn protected_reasoning_marker_is_emitted_at_item_done_before_answer() {
 }
 
 #[tokio::test]
+async fn protected_reasoning_summary_streams_before_item_done() {
+    let (summary_events, completion_events) = openai_responses_live_protected_summary_sse_parts();
+    let (upstream_url, _calls, release_completion) =
+        serve_gated_sse(summary_events, completion_events).await;
+    let data_dir = tempfile::tempdir().expect("temp data dir");
+    let (gateway, _logs) = Gateway::new(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .expect("gateway init");
+    configure_route_with_protocol(
+        &gateway,
+        "live-protected-reasoning",
+        &[upstream_url],
+        "test-http",
+        "open-responses",
+    )
+    .await;
+
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        execute_stream(gateway, "live-protected-reasoning"),
+    )
+    .await
+    .expect("protected summary must commit the response before ItemDone");
+    let mut chunks = response.into_body().into_data_stream();
+    let prefix = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let mut prefix = String::new();
+        loop {
+            let chunk = chunks
+                .next()
+                .await
+                .expect("stream ended before protected summary")
+                .expect("stream chunk");
+            prefix.push_str(std::str::from_utf8(&chunk).expect("UTF-8 stream chunk"));
+            if prefix.contains("live protected ")
+                && prefix.contains(r#""reasoning_content":"summary"#)
+            {
+                break prefix;
+            }
+        }
+    })
+    .await
+    .expect("protected summary must stream before ItemDone");
+    assert!(prefix.contains(r#""role":"assistant""#), "{prefix}");
+    assert!(prefix.contains("resp-live-protected"), "{prefix}");
+    assert!(
+        prefix.contains(crate::history_marker::PROJECTION_DELIMITER_PREFIX),
+        "{prefix}"
+    );
+    assert_eq!(
+        prefix
+            .matches(crate::history_marker::PROJECTION_DELIMITER_PREFIX)
+            .count(),
+        1,
+        "{prefix}"
+    );
+    assert!(
+        !prefix.contains(crate::history_marker::HISTORY_MARKER_PREFIX),
+        "{prefix}"
+    );
+    assert!(!prefix.contains("opaque-reasoning"), "{prefix}");
+
+    release_completion
+        .send(())
+        .expect("release reasoning completion");
+    let suffix = to_bytes(axum::body::Body::from_stream(chunks), usize::MAX)
+        .await
+        .expect("remaining stream body");
+    let body = format!("{prefix}{}", String::from_utf8_lossy(&suffix));
+    assert_eq!(
+        body.matches(crate::history_marker::HISTORY_MARKER_PREFIX)
+            .count(),
+        1,
+        "{body}"
+    );
+    assert_eq!(
+        body.matches(crate::history_marker::PROJECTION_DELIMITER_PREFIX)
+            .count(),
+        2,
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn protected_reasoning_marker_failures_abort_after_live_summary() {
+    let responses = (0..2)
+        .map(|_| {
+            let (summary, completion) = openai_responses_live_protected_summary_sse_parts();
+            format!("{summary}{completion}")
+        })
+        .collect();
+    let (upstream_url, provider_calls) = serve_sse_sequence(responses).await;
+    let data_dir = tempfile::tempdir().expect("temp data dir");
+    let (mut gateway, _logs) = Gateway::new(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .expect("gateway init");
+    configure_route_with_protocol(
+        &gateway,
+        "failing-live-protected-reasoning",
+        &[upstream_url],
+        "test-http",
+        "open-responses",
+    )
+    .await;
+    let marker_store = Arc::clone(&gateway.history_markers);
+
+    for failure in [
+        ThinkingMarkerFailure::Persist,
+        ThinkingMarkerFailure::Publish,
+    ] {
+        gateway.history_markers = Arc::new(FailingThinkingMarkerStore {
+            inner: Arc::clone(&marker_store),
+            failure,
+        });
+        let response = execute_stream(gateway.clone(), "failing-live-protected-reasoning").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("failed stream body");
+        let body = String::from_utf8_lossy(&body);
+        assert!(body.contains("live protected "), "{body}");
+        assert!(body.contains(r#""reasoning_content":"summary"#), "{body}");
+        assert!(body.contains("stream_mid_error"), "{body}");
+        assert!(!body.contains("opaque-reasoning"), "{body}");
+
+        let generation_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM turn_chain_nodes WHERE kind = 'response'",
+        )
+        .fetch_one(gateway._sqlite_pool.as_ref().expect("Gateway SQLite pool"))
+        .await
+        .expect("count Generation Chain nodes");
+        assert_eq!(generation_count, 0);
+    }
+    assert_eq!(provider_calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
 async fn platform_execution_starts_at_tool_call_complete_before_model_turn_ends() {
     let tool_event = format!(
         "data: {}\n\n",

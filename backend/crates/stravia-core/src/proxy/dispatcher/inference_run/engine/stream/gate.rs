@@ -14,6 +14,8 @@ pub(super) struct LiveDeltaGate {
     pending_tool_names: HashMap<usize, String>,
     platform_tool_indices: HashSet<usize>,
     projected_thinking_items: HashSet<usize>,
+    known_protected_thinking_indices: HashSet<usize>,
+    streamed_protected_thinking_indices: HashSet<usize>,
     pending_protected_deltas: HashMap<usize, Vec<AiStreamDelta>>,
     prebuffered_protected_counts: HashMap<usize, usize>,
     pending_unindexed_thinking: Option<(usize, Vec<AiStreamDelta>)>,
@@ -52,6 +54,8 @@ impl LiveDeltaGate {
         self.pending_tool_names.clear();
         self.platform_tool_indices.clear();
         self.projected_thinking_items.clear();
+        self.known_protected_thinking_indices.clear();
+        self.streamed_protected_thinking_indices.clear();
         self.pending_protected_deltas.clear();
         self.prebuffered_protected_counts.clear();
         self.pending_unindexed_thinking = None;
@@ -164,6 +168,11 @@ impl LiveDeltaGate {
 
     pub(super) fn capture_protected_candidates(&mut self, deltas: &[AiStreamDelta]) {
         for delta in deltas {
+            if let AiStreamDelta::ProtectedThinkingStart { index } = delta {
+                self.known_protected_thinking_indices.insert(*index);
+                self.projector.begin_protected_thinking(*index);
+                continue;
+            }
             let Some(index) = self.protected_candidate_index(delta) else {
                 continue;
             };
@@ -201,6 +210,8 @@ impl LiveDeltaGate {
         item: &AiItem,
         markers: &[crate::history_marker::HistoryMarker],
     ) -> Vec<AiStreamDelta> {
+        self.known_protected_thinking_indices.remove(&index);
+        let streamed_protected = self.streamed_protected_thinking_indices.remove(&index);
         let pending = if let Some(pending) = self.pending_protected_deltas.remove(&index) {
             Some(pending)
         } else if self
@@ -216,15 +227,22 @@ impl LiveDeltaGate {
         } else {
             None
         };
+        if self.projector.reserved_thinking_marker(index).is_some() {
+            self.projected_thinking_items.insert(index);
+            if self.projector.thinking_preview_started(index) {
+                return self.projector.close_thinking_preview(index);
+            }
+            debug_assert!(self.projector.close_thinking_preview(index).is_empty());
+        }
         let Some(pending) = pending else {
             return self.projector.close_thinking_preview(index);
         };
         if markers.is_empty() {
-            return pending;
-        }
-        if self.projector.reserved_thinking_marker(index).is_some() {
-            self.projected_thinking_items.insert(index);
-            return self.projector.close_thinking_preview(index);
+            return if streamed_protected {
+                Vec::new()
+            } else {
+                pending
+            };
         }
         let mut preview = Vec::new();
         let mut marker_index = 0;
@@ -373,44 +391,57 @@ impl LiveDeltaGate {
     ) -> Vec<AiStreamDelta> {
         let mut visible = Vec::new();
         for delta in deltas {
+            if matches!(delta, AiStreamDelta::ProtectedThinkingStart { .. }) {
+                continue;
+            }
             if matches!(delta, AiStreamDelta::Usage(_)) {
                 continue;
             }
             if let Some(index) = self.protected_candidate_index(&delta) {
-                if let Some(count) = self.prebuffered_protected_counts.get(&index).copied() {
-                    if count <= 1 {
-                        self.prebuffered_protected_counts.remove(&index);
+                let prebuffered =
+                    if let Some(count) = self.prebuffered_protected_counts.get(&index).copied() {
+                        if count <= 1 {
+                            self.prebuffered_protected_counts.remove(&index);
+                        } else {
+                            self.prebuffered_protected_counts.insert(index, count - 1);
+                        }
+                        true
                     } else {
-                        self.prebuffered_protected_counts.insert(index, count - 1);
+                        false
+                    };
+                if !prebuffered {
+                    if matches!(
+                        delta,
+                        AiStreamDelta::ThinkingDeltaWithMetadata {
+                            output_index: Some(_),
+                            ..
+                        } | AiStreamDelta::ReasoningSummaryDelta {
+                            output_index: Some(_),
+                            ..
+                        }
+                    ) {
+                        self.pending_protected_deltas
+                            .entry(index)
+                            .or_default()
+                            .push(delta.clone());
+                    } else {
+                        match self.pending_unindexed_thinking.as_mut() {
+                            Some((pending_index, pending)) if *pending_index == index => {
+                                pending.push(delta.clone());
+                            }
+                            _ => {
+                                self.pending_unindexed_thinking =
+                                    Some((index, vec![delta.clone()]));
+                            }
+                        }
                     }
-                    if self.projector.post_text_started() {
-                        visible.extend(self.projector.project_delta(index, delta));
-                    }
-                    continue;
                 }
-                if matches!(
-                    delta,
-                    AiStreamDelta::ThinkingDeltaWithMetadata {
-                        output_index: Some(_),
-                        ..
-                    } | AiStreamDelta::ReasoningSummaryDelta {
-                        output_index: Some(_),
-                        ..
-                    }
-                ) {
-                    self.pending_protected_deltas
-                        .entry(index)
-                        .or_default()
-                        .push(delta);
-                } else {
-                    match self.pending_unindexed_thinking.as_mut() {
-                        Some((pending_index, pending)) if *pending_index == index => {
-                            pending.push(delta);
-                        }
-                        _ => {
-                            self.pending_unindexed_thinking = Some((index, vec![delta]));
-                        }
-                    }
+                if self.projector.post_text_started() {
+                    visible.extend(self.projector.project_delta(index, delta));
+                } else if self.known_protected_thinking_indices.contains(&index) {
+                    self.streamed_protected_thinking_indices.insert(index);
+                    let projected = self.projector.project_protected_delta(index, delta);
+                    visible.extend(self.commit_visible(projected));
                 }
                 continue;
             }

@@ -2993,6 +2993,133 @@ fn openai_responses_protected_reasoning_sse_parts(content: &str) -> (String, Str
     (before_answer, answer)
 }
 
+fn openai_responses_live_protected_summary_sse_parts() -> (String, String) {
+    let summary = "live protected summary";
+    let summary_prefix = "live protected ";
+    let summary_suffix = "summary";
+    let reasoning_in_progress = serde_json::json!({
+        "id": "rs-live-protected",
+        "type": "reasoning",
+        "status": "in_progress",
+        "summary": [],
+        "content": [],
+        "encrypted_content": "opaque-reasoning"
+    });
+    let reasoning_completed = serde_json::json!({
+        "id": "rs-live-protected",
+        "type": "reasoning",
+        "status": "completed",
+        "summary": [{
+            "type": "summary_text",
+            "text": summary
+        }],
+        "content": [],
+        "encrypted_content": "opaque-reasoning"
+    });
+    let in_progress_response =
+        crate::protocol::codec::open_responses::formatter::response_resource_snapshot(
+            "resp-live-protected",
+            "provider-model",
+            "in_progress",
+            Vec::new(),
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+        );
+    let completed_response =
+        crate::protocol::codec::open_responses::formatter::response_resource_snapshot(
+            "resp-live-protected",
+            "provider-model",
+            "completed",
+            vec![reasoning_completed.clone()],
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            serde_json::json!({
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "total_tokens": 2,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens_details": {"reasoning_tokens": 1}
+            }),
+        );
+    let before_completion = format!(
+        "event: response.created\ndata: {}\n\n\
+         event: response.output_item.added\ndata: {}\n\n\
+         event: response.reasoning_summary_part.added\ndata: {}\n\n\
+         event: response.reasoning_summary_text.delta\ndata: {}\n\n\
+         event: response.reasoning_summary_text.delta\ndata: {}\n\n",
+        serde_json::json!({
+            "type": "response.created",
+            "sequence_number": 0,
+            "response": in_progress_response
+        }),
+        serde_json::json!({
+            "type": "response.output_item.added",
+            "sequence_number": 1,
+            "output_index": 0,
+            "item": reasoning_in_progress
+        }),
+        serde_json::json!({
+            "type": "response.reasoning_summary_part.added",
+            "sequence_number": 2,
+            "item_id": "rs-live-protected",
+            "output_index": 0,
+            "summary_index": 0,
+            "part": {"type": "summary_text", "text": ""}
+        }),
+        serde_json::json!({
+            "type": "response.reasoning_summary_text.delta",
+            "sequence_number": 3,
+            "item_id": "rs-live-protected",
+            "output_index": 0,
+            "summary_index": 0,
+            "delta": summary_prefix
+        }),
+        serde_json::json!({
+            "type": "response.reasoning_summary_text.delta",
+            "sequence_number": 4,
+            "item_id": "rs-live-protected",
+            "output_index": 0,
+            "summary_index": 0,
+            "delta": summary_suffix
+        }),
+    );
+    let completion = format!(
+        "event: response.reasoning_summary_text.done\ndata: {}\n\n\
+         event: response.reasoning_summary_part.done\ndata: {}\n\n\
+         event: response.output_item.done\ndata: {}\n\n\
+         event: response.completed\ndata: {}\n\ndata: [DONE]\n\n",
+        serde_json::json!({
+            "type": "response.reasoning_summary_text.done",
+            "sequence_number": 5,
+            "item_id": "rs-live-protected",
+            "output_index": 0,
+            "summary_index": 0,
+            "text": summary
+        }),
+        serde_json::json!({
+            "type": "response.reasoning_summary_part.done",
+            "sequence_number": 6,
+            "item_id": "rs-live-protected",
+            "output_index": 0,
+            "summary_index": 0,
+            "part": {"type": "summary_text", "text": summary}
+        }),
+        serde_json::json!({
+            "type": "response.output_item.done",
+            "sequence_number": 7,
+            "output_index": 0,
+            "item": reasoning_completed
+        }),
+        serde_json::json!({
+            "type": "response.completed",
+            "sequence_number": 8,
+            "response": completed_response
+        }),
+    );
+    (before_completion, completion)
+}
+
 fn openai_responses_tool_sse(content: &str, call_id: &str) -> String {
     let message_in_progress = serde_json::json!({
         "id": "msg-tool",

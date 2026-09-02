@@ -16,6 +16,11 @@ pub enum StreamDelta {
     MessageStart { id: String, model: String },
     /// Effective response controls and echoed request state.
     ResponseMetadata { metadata: serde_json::Value },
+    /// An indexed reasoning item is known to carry opaque protected state.
+    ///
+    /// This lifecycle signal contains no protected bytes. It lets delivery
+    /// reserve a History Marker before public summary deltas arrive.
+    ProtectedThinkingStart { index: usize },
     /// Incremental text output.
     TextDelta(String),
     /// Incremental text output with dated token metadata retained.
