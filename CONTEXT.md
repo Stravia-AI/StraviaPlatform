@@ -79,17 +79,32 @@ Platform Tool 是由平台拥有、注册和执行的模型工具。平台向模
 
 ## Client Projection
 
-Client Projection 是把一次 Model Leg 的 canonical response 变成客户端可见视图：Platform Tool call/result 与受保护 Thinking 替换为 History Marker；含 Platform ToolCall 的 Model Leg 中，canonical Text 仅在该视图里改用带 Projection Delimiter 的 Thinking 承载。它不是 Protocol Conversion，也不拥有 ingress 协议形态改写；Generation Chain 保存的是投影完成之后、按 ingress 协议落盘的结果。
+Client Projection 是把 canonical response 变成客户端可见视图：Platform Tool call/result 与 authoritative Thinking 可替换为 History Marker，普通可见 Text 不因潜在或实际 Platform ToolCall 而延迟交付；OpenAI-compatible 的 Post-Text Thinking 以 Markdown 引用 Preview、Projection Delimiter 与一对一 History Marker 经 Text carrier 交付，其他协议保持原生 carrier，不能表示该顺序时显式失败而不回退缓冲。它不是 Protocol Conversion，也不拥有 ingress 协议形态改写；Generation Chain 保存的是投影完成之后、按 ingress 协议落盘的结果。
 _避免使用_：History Marker Projection；把 Generation Chain 的协议形态改写称为 Client Projection
+
+## Post-Text Thinking
+
+Post-Text Thinking 是同一 Inference Run 的 Client Projection 顺序中首个非空 Text 后出现的 canonical Thinking，不因 Model Leg 切换而重置；live projection 在该 Text delta 成功交付时切换，staged projection 按相同 canonical 顺序判定，空 delta 不触发，非空空白属于 Text。OpenAI-compatible Client Projection 仅将其中原本可公开的字节作为 Markdown 引用 Preview，权威内容由一对一 Thinking History Marker 恢复；protected payload 没有公开 Preview 时只交付 Marker。
+_避免使用_：Late Reasoning、Quoted Text
+
+## Quoted Thinking Preview
+
+Quoted Thinking Preview 是 Post-Text Thinking 中可公开字节的 Markdown blockquote 展示，每个物理行及空行都属于同一外层引用块；它只保证内容不逃逸该引用块，不保证内部 Markdown 采用统一样式。其布局字节属于 Projection Delimiter span，authoritative Thinking 仍由 Marker 恢复；仅编辑 Preview 而保留 Marker 不改变 authoritative Thinking，删除 Marker 后引用按普通客户端 Text 保留。编码器可以保留不超过最长私有语法前缀的固定 lookbehind，以跨 delta 转义 Marker 与 Delimiter 伪造，这不构成 Model Leg Text 缓冲。
+_避免使用_：Thinking Text、Authoritative Thinking
 
 ## History Marker
 
-History Marker 是 Client Projection 中、归属于 Principal 的 opaque 历史引用，用于在原位置等待并恢复一个 Hidden History Segment。一个 Marker 只能引用一个 Platform Tool Execution（其 call 与 terminal result）或一个受保护 Thinking block，禁止聚合多个工具执行或多个 block。新 Marker 以无签名 Thinking block 中仅供机器读取的 HTML comment 呈现；各生成协议使用原生 reasoning、thinking 或 thought 载体，旧 Text 载体只在保留期内兼容读取。周边客户端历史可以独立修改，同一 Marker 在保留期内可以被重试和并发分支重复使用。
+History Marker 是 Client Projection 中、归属于 Principal 的 opaque 历史引用，用于在原位置等待并恢复一个 Hidden History Segment。一个 Marker 只能引用一个 Platform Tool Execution（其 call 与 terminal result）或一个 authoritative Thinking block，禁止聚合多个工具执行或多个 block。新 Marker 默认以无签名 Thinking block 中仅供机器读取的 HTML comment 呈现；OpenAI-compatible 客户端收到首个 Text 后，所有 Thinking 与 Platform Marker 均改用 Text carrier，以保留它们与后续内容的顺序。Markdown renderer 通常隐藏该 comment，纯文本客户端可能直接显示它，这是 Text carrier 的显式协议行为；周边客户端历史可以独立修改，同一 Marker 在保留期内可以被重试和并发分支重复使用。
 _避免使用_：占位文本、Platform Tool Call、Client History Token
+
+## Reserved Thinking Marker
+
+Reserved Thinking Marker 是每个 canonical Post-Text Thinking block 的首个 delta 到达时仅在当前 Inference Run 中分配、尚未落盘且未发布的 History Marker reference；它允许 Preview 立即流式交付，只有完整 block 以同一 reference 原子落盘、Marker 按顺序交付并发布后才能恢复，后续 Text 必须等待该过程完成。落盘或发布失败必须显式终止交付且不得提交 Generation Chain，不得把 Preview 降级为 canonical Text；失败或未完整交付的 reference 必须废弃。无原生 block identity 时，一个连续 Thinking delta run 构成一个 block。
+_避免使用_：Published Marker、Partial Thinking
 
 ## Projection Delimiter
 
-Projection Delimiter 是 Client Projection 中围绕一段可见字节的成对、无状态机器语法，表示该段 canonical Text 仅为客户端展示而使用 Thinking 载体。它绑定一个既有 Principal-scoped History Marker reference 和 span ordinal，不拥有 hidden payload、不创建 Store 记录；客户端回放时只有 Marker 仍存在、Delimiter 正确配对且 Marker 可解析，范围内字节才恢复为 canonical Text。删除或破坏任一边界属于显式历史编辑。
+Projection Delimiter 是 Client Projection 中围绕一段可见字节的成对、无状态机器语法，表示该段 canonical content 为客户端展示临时使用了不同 carrier；Text mode 将 Thinking carrier 中的可见字节恢复为 canonical Text，Preview mode 在绑定 Marker 可恢复时删除仅供展示的字节，由 Marker 提供 authoritative content。Delimiter span 拥有为展示插入的换行、Markdown 引用前缀与转义字节，它们不属于 canonical content；客户端回放时只有绑定的 Principal-scoped History Marker 仍存在、Delimiter 正确配对且 Marker 可解析，范围内字节才按 mode 恢复。删除或破坏任一边界属于显式历史编辑。
 _避免使用_：History Marker、Hidden History Segment、Projection Record
 
 ## Hidden History Segment
