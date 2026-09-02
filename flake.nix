@@ -150,6 +150,10 @@
               "stravia-server"
             ];
             doCheck = false;
+            nativeBuildInputs = [
+              pkgs.cmake
+              pkgs.git
+            ];
 
             preBuild = ''
               mkdir -p frontend/stravia-webui/dist
