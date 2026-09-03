@@ -337,7 +337,7 @@ impl ResponsesStreamFormatter {
         self.ensure_reasoning_started(events);
         self.accumulated_reasoning_content.push_str(text);
         let mut event = serde_json::json!({
-            "type": "response.reasoning.delta",
+            "type": "response.reasoning_text.delta",
             "item_id": self.reasoning_item_id,
             "output_index": self.reasoning_output_index,
             "content_index": 0,
@@ -347,7 +347,7 @@ impl ResponsesStreamFormatter {
             event["obfuscation"] = serde_json::Value::String(obfuscation.to_owned());
         }
         events.push(SseEvent::new(
-            Some("response.reasoning.delta"),
+            Some("response.reasoning_text.delta"),
             event.to_string(),
         ));
     }
@@ -551,7 +551,7 @@ impl ResponsesStreamFormatter {
             .or_default()
             .push_str(text);
         let mut event = serde_json::json!({
-            "type": "response.reasoning.delta",
+            "type": "response.reasoning_text.delta",
             "item_id": reasoning.item_id,
             "output_index": output_index,
             "content_index": content_index,
@@ -561,7 +561,7 @@ impl ResponsesStreamFormatter {
             event["obfuscation"] = serde_json::Value::String(obfuscation.to_owned());
         }
         events.push(SseEvent::new(
-            Some("response.reasoning.delta"),
+            Some("response.reasoning_text.delta"),
             event.to_string(),
         ));
     }
@@ -807,9 +807,9 @@ impl ResponsesStreamFormatter {
             }
             if !self.accumulated_reasoning_content.is_empty() {
                 events.push(SseEvent::new(
-                    Some("response.reasoning.done"),
+                    Some("response.reasoning_text.done"),
                     serde_json::json!({
-                        "type": "response.reasoning.done",
+                        "type": "response.reasoning_text.done",
                         "item_id": item_id,
                         "output_index": output_index,
                         "content_index": 0,
@@ -861,9 +861,9 @@ impl ResponsesStreamFormatter {
             let mut content = Vec::new();
             for (content_index, text) in &reasoning.content {
                 events.push(SseEvent::new(
-                    Some("response.reasoning.done"),
+                    Some("response.reasoning_text.done"),
                     serde_json::json!({
-                        "type": "response.reasoning.done",
+                        "type": "response.reasoning_text.done",
                         "item_id": reasoning.item_id,
                         "output_index": output_index,
                         "content_index": content_index,

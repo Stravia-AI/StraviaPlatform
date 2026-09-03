@@ -464,9 +464,14 @@ fn reasoning_summary_and_content_stream_as_distinct_events() {
     assert_eq!(summary_delta["obfuscation"], "summary-pad");
     let content_delta = bodies
         .iter()
-        .find(|event| event["type"] == "response.reasoning.delta")
+        .find(|event| event["type"] == "response.reasoning_text.delta")
         .expect("reasoning content delta");
     assert_eq!(content_delta["obfuscation"], "content-pad");
+    let content_done = bodies
+        .iter()
+        .find(|event| event["type"] == "response.reasoning_text.done")
+        .expect("reasoning content done");
+    assert_eq!(content_done["text"], "full reasoning");
     let terminal = bodies
         .iter()
         .find(|event| event["type"] == "response.completed")

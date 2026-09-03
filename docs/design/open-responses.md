@@ -179,6 +179,8 @@ Open Responses `developer` message 在目标协议有等价角色时原样映射
 
 Wire-only state留在目标 stream session：`output_index`、`content_index`、`sequence_number`、SSE event name、WebSocket framing 和 `[DONE]`。
 
+Reasoning content 保持 dated reasoning item 结构，但 wire delta/done 使用 rolling `response.reasoning_text.delta` 与 `response.reasoning_text.done` 名称，以兼容当前 OpenAI Responses 客户端。Decoder 同时接受 dated `response.reasoning.delta` / `response.reasoning.done` 与 rolling 名称；reasoning summary lifecycle 不变。
+
 ---
 
 ## 6. HTTP 与 response object

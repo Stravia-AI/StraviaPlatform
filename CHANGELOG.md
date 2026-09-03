@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Open Responses reasoning streams now use the rolling reasoning-text event names expected by current clients, restoring thinking display in Oh My Pi.
+
 ## [0.1.3] - 2026-09-02
 
 ### Added
