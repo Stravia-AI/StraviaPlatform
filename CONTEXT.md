@@ -213,7 +213,7 @@ _避免使用_：Provider Status、Model Status
 
 ## Route
 
-Route 将 Route ID 映射到一组 Target，并规定这些 Target 的选择策略。
+Route 将 Route ID 映射到一组 Target，并规定这些 Target 的选择策略。一条 Route 必须至少有一个已启用 Target。
 
 ## Route Scheduling Strategy
 
@@ -278,11 +278,22 @@ Cache Prefix Token Count 是 Target 在成功处理 Cache Prefix 后报告的 `p
 
 ## Target
 
-Target 是 Route 中一个可尝试的上游目的地。只有当前 Target 的上游失败被明确判定为可重试时，当前 Run 才会按 Route 的选择策略尝试下一个 Target；Hook、Platform Tool、状态不变量错误与取消不会触发 Target 切换。
+Target 是 Route 上一个已配置的上游目的地。只有已启用 Target 会被尝试；只有当前 Target 的上游失败被明确判定为可重试时，当前 Run 才会按 Route 的选择策略尝试下一个已启用 Target；Hook、Platform Tool、状态不变量错误与取消不会触发 Target 切换。
+_避免使用_：调度泳池
+
+## Enabled Target
+
+已启用 Target 是参与该 Route 上 Target 选择、亲和与冷却的 Target。缺省为已启用。它必须已配置 Provider 与上游 model。
+_避免使用_：调度泳池、可调度 Target、在线 Target
+
+## Disabled Target
+
+已禁用 Target 是仍属于该 Route、但不参与选择、亲和或冷却的 Target。它不是已删除的 Target。
+_避免使用_：删除的 Target、暂存 Target、断开的 Target
 
 ## Target Priority
 
-Target Priority 是 Target 上的分组整数，取值 0–100000，缺省为 0；数值越高越优先。相同数值的 Target 属于同一优先级组。它不是列表顺序，也不是 Weight。
+Target Priority 是 Target 上的分组整数，取值 -2147483648–2147483647，缺省为 0；数值越高越优先。用于选择时，仅已启用且数值相同的 Target 构成同一优先级组。它不是列表顺序，也不是 Weight。
 _避免使用_：列表序号、唯一排名、Weight（当指优先级）
 
 

@@ -25,3 +25,5 @@ Target Priority 是 0–100000 的分组整数，越大越优先，缺省 0；�
 - 管理面必须能显式设置 Target Priority 与失败旋钮，不能再用列表 `index+1` 当优先级。
 - 选路要读 24h/1h 的 request_logs 聚合与进行中占位；冷却保持进程内。
 - 529 / QuotaExceeded 与 HTTP `is_retryable(status)` 必须对齐到三档处置，不能再两套判定。
+- Target Priority 的合法范围由 ADR-0036 改为有符号 32 位全区间；本 ADR 的分层选择顺序不变。
+- 管理面用优先级泳道表达这些组，见 ADR-0037；已禁用 Target 见 ADR-0035。
