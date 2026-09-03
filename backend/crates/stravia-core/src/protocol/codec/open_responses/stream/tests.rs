@@ -482,6 +482,70 @@ fn reasoning_summary_and_content_stream_as_distinct_events() {
 }
 
 #[test]
+fn closes_each_reasoning_summary_part_before_starting_the_next() {
+    let mut formatter = ResponsesStreamFormatter::new();
+    let events = formatter.format_deltas(&[
+        AiStreamDelta::MessageStart {
+            id: "resp_summary_parts".into(),
+            model: "model".into(),
+        },
+        AiStreamDelta::ReasoningSummaryDelta {
+            text: "first".into(),
+            obfuscation: None,
+            output_index: Some(0),
+            content_index: Some(0),
+        },
+        AiStreamDelta::ReasoningSummaryDelta {
+            text: "second".into(),
+            obfuscation: None,
+            output_index: Some(0),
+            content_index: Some(1),
+        },
+        AiStreamDelta::Done {
+            stop_reason: "stop".into(),
+        },
+    ]);
+    let bodies = events
+        .iter()
+        .filter_map(|event| serde_json::from_str::<serde_json::Value>(&event.data).ok())
+        .collect::<Vec<_>>();
+    let lifecycle = bodies
+        .iter()
+        .filter_map(|event| {
+            let event_type = event["type"].as_str()?;
+            event_type
+                .starts_with("response.reasoning_summary_")
+                .then(|| format!("{event_type}:{}", event["summary_index"]))
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        lifecycle,
+        [
+            "response.reasoning_summary_part.added:0",
+            "response.reasoning_summary_text.delta:0",
+            "response.reasoning_summary_text.done:0",
+            "response.reasoning_summary_part.done:0",
+            "response.reasoning_summary_part.added:1",
+            "response.reasoning_summary_text.delta:1",
+            "response.reasoning_summary_text.done:1",
+            "response.reasoning_summary_part.done:1",
+        ]
+    );
+    let terminal = bodies
+        .iter()
+        .find(|event| event["type"] == "response.completed")
+        .expect("response completed");
+    assert_eq!(
+        terminal["response"]["output"][0]["summary"],
+        serde_json::json!([
+            {"type": "summary_text", "text": "first"},
+            {"type": "summary_text", "text": "second"}
+        ])
+    );
+}
+
+#[test]
 fn completed_item_forwards_encrypted_only_reasoning() {
     let mut formatter = ResponsesStreamFormatter::new();
     let events = formatter.format_deltas(&[
