@@ -26,6 +26,8 @@ tower-http = { version = "0.7", features = ["cors", "trace"] }
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "postgres", "tls-rustls", "migrate", "macros", "rust_decimal", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["arbitrary_precision"] }
+serde-saphyr = "1"
+json5 = "1"
 async-trait = "0.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -66,7 +68,7 @@ dotenvy = "0.15"
 walkdir = "2"
 url = "2"
 urlencoding = "2.1.3"
-toml = { version = "1.1.4", default-features = false, features = ["std", "parse", "serde"] }
+toml = { version = "1.1.4", default-features = false, features = ["std", "parse", "display", "serde"] }
 shellexpand = "3"
 rust-embed = { version = "8", features = ["compression"] }
 listeners = "0.6.1"

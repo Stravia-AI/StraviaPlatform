@@ -1,10 +1,26 @@
-use std::sync::Arc;
+use std::{
+    collections::BTreeMap,
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use stravia_core::Gateway;
 use stravia_core::admin::provider_allowance::ProviderAllowanceSnapshot;
+use stravia_core::connect_client_apply::{
+    ConnectClientApplyError, ConnectClientApplyInput, ConnectClientApplyPlan,
+    PlannedConnectClientFile, plan_connect_client_apply,
+};
 use tauri::State;
 
 use crate::desktop_gateway_runtime::{DesktopGatewayRuntime, DesktopPortState, PortOperationError};
+
+struct StagedConnectClientFile {
+    target: PathBuf,
+    temporary: Option<tempfile::TempPath>,
+    backup: Option<PathBuf>,
+}
 
 #[tauri::command]
 pub fn get_server_port(runtime: State<'_, Arc<DesktopGatewayRuntime>>) -> u16 {
@@ -31,6 +47,235 @@ pub async fn recheck_desktop_fixed_port(
     runtime: State<'_, Arc<DesktopGatewayRuntime>>,
 ) -> Result<DesktopPortState, PortOperationError> {
     runtime.recheck_fixed_port().await
+}
+
+#[tauri::command]
+pub fn plan_connect_client(
+    input: ConnectClientApplyInput,
+) -> Result<ConnectClientApplyPlan, ConnectClientApplyError> {
+    load_connect_client_plan(&input)
+}
+
+#[tauri::command]
+pub fn apply_connect_client(
+    input: ConnectClientApplyInput,
+) -> Result<ConnectClientApplyPlan, ConnectClientApplyError> {
+    let plan = load_connect_client_plan(&input)?;
+    apply_planned_files(&plan.files)?;
+    Ok(plan)
+}
+
+fn load_connect_client_plan(
+    input: &ConnectClientApplyInput,
+) -> Result<ConnectClientApplyPlan, ConnectClientApplyError> {
+    let environment = std::env::vars().collect::<BTreeMap<_, _>>();
+    let unresolved = plan_connect_client_apply(input, &environment, &BTreeMap::new())?;
+    let mut existing_files = BTreeMap::new();
+    for file in &unresolved.files {
+        validate_global_target(file)?;
+        let path = PathBuf::from(&file.path);
+        match fs::read(&path) {
+            Ok(bytes) => {
+                existing_files.insert(path, bytes);
+            }
+            Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {}
+            Err(cause) => {
+                return Err(io_error(
+                    "read_error",
+                    format!("Failed to read Connect Client Global Config: {cause}"),
+                    &path,
+                ));
+            }
+        }
+    }
+    plan_connect_client_apply(input, &environment, &existing_files)
+}
+
+fn validate_global_target(file: &PlannedConnectClientFile) -> Result<(), ConnectClientApplyError> {
+    let root = PathBuf::from(&file.root);
+    let target = PathBuf::from(&file.path);
+    if !root.is_absolute() || !target.is_absolute() || !target.starts_with(&root) {
+        return Err(io_error(
+            "path_escape",
+            "Connect Client Apply target escapes the resolved global directory",
+            &target,
+        ));
+    }
+
+    if root.exists() {
+        let canonical_root = fs::canonicalize(&root).map_err(|cause| {
+            io_error(
+                "path_error",
+                format!("Failed to resolve Connect Client global directory: {cause}"),
+                &root,
+            )
+        })?;
+        let existing = if target.exists() {
+            Some(target.as_path())
+        } else {
+            target.parent().filter(|parent| parent.exists())
+        };
+        if let Some(existing) = existing {
+            let canonical_target = fs::canonicalize(existing).map_err(|cause| {
+                io_error(
+                    "path_error",
+                    format!("Failed to resolve Connect Client target: {cause}"),
+                    existing,
+                )
+            })?;
+            if !canonical_target.starts_with(&canonical_root) {
+                return Err(io_error(
+                    "path_escape",
+                    "Connect Client Apply target escapes the resolved global directory",
+                    &target,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn apply_planned_files(files: &[PlannedConnectClientFile]) -> Result<(), ConnectClientApplyError> {
+    let mut staged = Vec::with_capacity(files.len());
+    for file in files {
+        validate_global_target(file)?;
+        let target = PathBuf::from(&file.path);
+        let parent = target.parent().ok_or_else(|| {
+            io_error(
+                "path_error",
+                "Connect Client Global Config has no parent directory",
+                &target,
+            )
+        })?;
+        fs::create_dir_all(parent).map_err(|cause| {
+            io_error(
+                "write_error",
+                format!("Failed to create Connect Client global directory: {cause}"),
+                parent,
+            )
+        })?;
+        validate_global_target(file)?;
+        let mut temporary = tempfile::Builder::new()
+            .prefix(".stravia-stage-")
+            .tempfile_in(parent)
+            .map_err(|cause| {
+                io_error(
+                    "write_error",
+                    format!("Failed to stage Connect Client Global Config: {cause}"),
+                    &target,
+                )
+            })?;
+        temporary.write_all(&file.bytes).map_err(|cause| {
+            io_error(
+                "write_error",
+                format!("Failed to stage Connect Client Global Config: {cause}"),
+                &target,
+            )
+        })?;
+        temporary.flush().map_err(|cause| {
+            io_error(
+                "write_error",
+                format!("Failed to flush Connect Client Global Config: {cause}"),
+                &target,
+            )
+        })?;
+        staged.push(StagedConnectClientFile {
+            target,
+            temporary: Some(temporary.into_temp_path()),
+            backup: None,
+        });
+    }
+
+    for index in 0..staged.len() {
+        if !staged[index].target.exists() {
+            continue;
+        }
+        let parent = staged[index]
+            .target
+            .parent()
+            .expect("validated target has a parent");
+        let backup_file = match tempfile::Builder::new()
+            .prefix(".stravia-backup-")
+            .tempfile_in(parent)
+        {
+            Ok(file) => file,
+            Err(cause) => {
+                rollback_backups(&staged[..index]);
+                return Err(io_error(
+                    "write_error",
+                    format!("Failed to reserve Connect Client config backup: {cause}"),
+                    &staged[index].target,
+                ));
+            }
+        };
+        let backup = backup_file.into_temp_path();
+        let backup_path = backup.to_path_buf();
+        if let Err(cause) = backup.close() {
+            rollback_backups(&staged[..index]);
+            return Err(io_error(
+                "write_error",
+                format!("Failed to prepare Connect Client config backup: {cause}"),
+                &staged[index].target,
+            ));
+        }
+        if let Err(cause) = fs::rename(&staged[index].target, &backup_path) {
+            rollback_backups(&staged[..index]);
+            return Err(io_error(
+                "write_error",
+                format!("Failed to back up Connect Client Global Config: {cause}"),
+                &staged[index].target,
+            ));
+        }
+        staged[index].backup = Some(backup_path);
+    }
+
+    for index in 0..staged.len() {
+        let temporary = staged[index]
+            .temporary
+            .take()
+            .expect("each staged file is persisted once");
+        if let Err(cause) = temporary.persist_noclobber(&staged[index].target) {
+            for committed in &staged[..index] {
+                let _ = fs::remove_file(&committed.target);
+            }
+            rollback_backups(&staged);
+            return Err(io_error(
+                "write_error",
+                format!(
+                    "Failed to replace Connect Client Global Config: {}",
+                    cause.error
+                ),
+                &staged[index].target,
+            ));
+        }
+    }
+
+    for file in staged {
+        if let Some(backup) = file.backup {
+            let _ = fs::remove_file(backup);
+        }
+    }
+    Ok(())
+}
+
+fn rollback_backups(files: &[StagedConnectClientFile]) {
+    for file in files.iter().rev() {
+        if let Some(backup) = &file.backup {
+            let _ = fs::rename(backup, &file.target);
+        }
+    }
+}
+
+fn io_error(
+    code: &'static str,
+    message: impl Into<String>,
+    path: &Path,
+) -> ConnectClientApplyError {
+    ConnectClientApplyError {
+        code,
+        message: message.into(),
+        path: Some(path.display().to_string()),
+    }
 }
 
 #[tauri::command]

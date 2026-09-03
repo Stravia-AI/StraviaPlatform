@@ -128,6 +128,8 @@ pub fn run() {
             commands::get_desktop_port_state,
             commands::set_desktop_fixed_port,
             commands::recheck_desktop_fixed_port,
+            commands::plan_connect_client,
+            commands::apply_connect_client,
             commands::list_provider_allowances,
             commands::refresh_provider_allowances,
             commands::refresh_provider_allowance,

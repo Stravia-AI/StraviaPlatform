@@ -3,6 +3,7 @@ mod admission;
 pub mod agent;
 pub mod auth;
 pub mod config;
+pub mod connect_client_apply;
 pub mod db;
 pub mod error;
 mod gateway;

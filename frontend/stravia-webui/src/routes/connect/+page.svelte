@@ -3,6 +3,7 @@ import * as m from '$lib/paraglide/messages.js'
 import { resolve } from '$app/paths'
 import { createQuery } from '@tanstack/svelte-query'
 import ClipboardCopyIcon from '@lucide/svelte/icons/clipboard-copy'
+import CheckIcon from '@lucide/svelte/icons/check'
 import Code2Icon from '@lucide/svelte/icons/code-2'
 import ArrowRightIcon from '@lucide/svelte/icons/arrow-right'
 import BoxIcon from '@lucide/svelte/icons/box'
@@ -12,13 +13,13 @@ import PlugZapIcon from '@lucide/svelte/icons/plug-zap'
 import TerminalSquareIcon from '@lucide/svelte/icons/terminal-square'
 import { toast } from 'svelte-sonner'
 
-import { admin, proxyBase } from '$lib/admin-client'
+import { admin, isTauri, proxyBase } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
+import { applyConnectClient, asConnectClientApplyError, planConnectClient } from '$lib/connect-client-apply'
 import { effectiveModelDisplayName, logicalModelSecondaryId, sortLogicalModels } from '$lib/logical-model'
 import type { Route } from '$lib/types'
 import {
   apiKeyAllowsModel,
-  buildCliConfig,
   buildCode,
   CLI_TOOLS,
   defineClientModel,
@@ -27,6 +28,7 @@ import {
   type ClaudeModelMappings,
   type CliToolId,
   type CodeLanguage,
+  type ConnectClientApplyRequest,
   type GatewayProtocol,
 } from '$lib/connect'
 import PageHeader from '$lib/components/page-header.svelte'
@@ -52,7 +54,7 @@ let codeModelId = $state('')
 let codeKeyId = $state('')
 let cliToolId = $state<CliToolId>('codex-cli')
 let cliKeyId = $state('')
-let cliDefaultModelId = $state('')
+let applyingClient = $state(false)
 let claudeModelIds = $state<Record<keyof ClaudeModelMappings, string>>({
   defaultModel: '',
   haikuModel: '',
@@ -77,7 +79,6 @@ const selectedCliKey = $derived(apiKeys.find((key) => key.id === cliKeyId))
 const cliModels = $derived(
   selectedCliKey ? models.filter((model) => apiKeyAllowsModel(selectedCliKey.model_ids, model.id)) : [],
 )
-const selectedCliDefaultModel = $derived(cliModels.find((model) => model.id === cliDefaultModelId))
 const selectedTool = $derived(CLI_TOOLS.find((tool) => tool.id === cliToolId) ?? CLI_TOOLS[0])
 const codeApiKey = $derived(selectedCodeKey?.key ?? emptyKey)
 const clientConfigModels = $derived(cliModels.map(defineClientModel))
@@ -91,6 +92,35 @@ const claudeMappings = $derived.by((): ClaudeModelMappings | undefined => {
   if (!mappings.defaultModel || !mappings.haikuModel || !mappings.sonnetModel || !mappings.opusModel) return undefined
   return mappings as ClaudeModelMappings
 })
+const connectClientInput = $derived.by((): ConnectClientApplyRequest | undefined => {
+  if (!selectedCliKey || clientConfigModels.length === 0) return undefined
+  if (cliToolId === 'claude-code') {
+    if (!claudeMappings) return undefined
+    return { tool: cliToolId, host, apiKey: selectedCliKey.key, models: clientConfigModels, mappings: claudeMappings }
+  }
+  return {
+    tool: cliToolId,
+    host,
+    apiKey: selectedCliKey.key,
+    models: clientConfigModels,
+    transparentImageInputEnabled:
+      selectedCliKey.transparent_injection_enabled && selectedCliKey.inject_media_understanding,
+  }
+})
+const connectPlanQuery = createQuery(() => ({
+  queryKey: [
+    'connect-client-plan',
+    cliToolId,
+    cliKeyId,
+    host,
+    clientConfigModels,
+    claudeMappings,
+    selectedCliKey?.transparent_injection_enabled,
+    selectedCliKey?.inject_media_understanding,
+  ],
+  queryFn: () => planConnectClient(connectClientInput!),
+  enabled: connectClientInput !== undefined,
+}))
 const generatedCode = $derived(
   buildCode({
     protocol: codeProtocol,
@@ -101,27 +131,8 @@ const generatedCode = $derived(
   }),
 )
 const generatedCliConfig = $derived.by(() => {
-  if (!selectedCliKey || cliModels.length === 0) return ''
-  if (cliToolId === 'claude-code') {
-    if (!claudeMappings) return ''
-    return buildCliConfig({
-      tool: cliToolId,
-      host,
-      apiKey: selectedCliKey.key,
-      models: clientConfigModels,
-      mappings: claudeMappings,
-    })
-  }
-  if (!selectedCliDefaultModel) return ''
-  return buildCliConfig({
-    tool: cliToolId,
-    host,
-    apiKey: selectedCliKey.key,
-    models: clientConfigModels,
-    defaultModel: selectedCliDefaultModel.model_id,
-    transparentImageInputEnabled:
-      selectedCliKey.transparent_injection_enabled && selectedCliKey.inject_media_understanding,
-  })
+  if (!connectClientInput) return ''
+  return connectPlanQuery.data?.preview ?? ''
 })
 
 const codeProtocols = [
@@ -137,6 +148,21 @@ async function copyText(value: string): Promise<void> {
     toast.success(m.common_copied_clipboard())
   } catch {
     toast.error(m.common_not_copy_clipboard())
+  }
+}
+
+async function applySelectedClient(): Promise<void> {
+  if (!connectClientInput || !connectPlanQuery.data) return
+  applyingClient = true
+  try {
+    await applyConnectClient(connectClientInput)
+    toast.success(m.connect_apply_success_restart({ client: selectedTool.name }))
+    await connectPlanQuery.refetch()
+  } catch (error) {
+    const applyError = asConnectClientApplyError(error)
+    toast.error(m.connect_apply_failed({ message: applyError.message }))
+  } finally {
+    applyingClient = false
   }
 }
 
@@ -355,18 +381,6 @@ function cliModelName(modelId: string): string | undefined {
                           ><Select.Group>{@render logicalModelItems(cliModels)}</Select.Group></Select.Content>
                       </Select.Root>
                     </Field.Field>
-                  {:else}
-                    <Field.Field size="select">
-                      <Field.FieldLabel for="cli-default-model">{m.connect_default_model()}</Field.FieldLabel>
-                      <Select.Root type="single" bind:value={cliDefaultModelId}>
-                        <Select.Trigger id="cli-default-model" class="w-full"
-                          >{selectedCliDefaultModel
-                            ? effectiveModelDisplayName(selectedCliDefaultModel)
-                            : m.connect_select_default_model()}</Select.Trigger>
-                        <Select.Content
-                          ><Select.Group>{@render logicalModelItems(cliModels)}</Select.Group></Select.Content>
-                      </Select.Root>
-                    </Field.Field>
                   {/if}
                 {/if}
               </Field.FieldGroup>
@@ -379,13 +393,41 @@ function cliModelName(modelId: string): string | undefined {
                   <p class="route-section-description">
                     {protocolLabel(selectedTool.protocol)} · <span class="font-technical">{host}</span>
                   </p>
+                  {#if isTauri && connectPlanQuery.data}
+                    <div class="mt-2 space-y-1">
+                      <p class="text-xs font-medium text-foreground">{m.connect_global_config_paths()}</p>
+                      {#each connectPlanQuery.data.paths as path (path)}
+                        <p class="font-technical break-all text-xs text-muted-foreground">{path}</p>
+                      {/each}
+                    </div>
+                  {/if}
                 </div>
-                <Button
-                  variant="outline"
-                  onclick={() => void copyText(generatedCliConfig)}
-                  disabled={!generatedCliConfig}
-                  ><ClipboardCopyIcon data-icon="inline-start" />{m.common_copy()}</Button>
+                <div class="flex flex-wrap gap-2">
+                  {#if isTauri}
+                    <Button
+                      onclick={() => void applySelectedClient()}
+                      disabled={!connectClientInput || !connectPlanQuery.data || applyingClient}
+                      ><CheckIcon data-icon="inline-start" />{applyingClient
+                        ? m.connect_applying()
+                        : m.connect_apply()}</Button>
+                  {/if}
+                  <Button
+                    variant="outline"
+                    onclick={() => void copyText(generatedCliConfig)}
+                    disabled={!generatedCliConfig}
+                    ><ClipboardCopyIcon data-icon="inline-start" />{m.common_copy()}</Button>
+                </div>
               </div>
+              {#if connectPlanQuery.isError}
+                {@const planError = asConnectClientApplyError(connectPlanQuery.error)}
+                <div class="mb-3 border-l-2 border-destructive bg-destructive/5 px-3 py-2" role="alert">
+                  <p class="text-sm font-medium text-destructive">{m.connect_apply_plan_failed()}</p>
+                  {#if planError.path}
+                    <p class="font-technical mt-1 break-all text-xs text-muted-foreground">{planError.path}</p>
+                  {/if}
+                  <p class="mt-1 text-sm text-muted-foreground">{planError.message}</p>
+                </div>
+              {/if}
               {#if generatedCliConfig}
                 <pre class="route-code-plane">{generatedCliConfig}</pre>
               {:else}
@@ -400,9 +442,12 @@ function cliModelName(modelId: string): string | undefined {
                     {:else if cliToolId === 'claude-code'}
                       <Empty.Title>{m.connect_complete_model_mappings()}</Empty.Title>
                       <Empty.Description>{m.connect_complete_model_mappings_description()}</Empty.Description>
+                    {:else if connectPlanQuery.isPending}
+                      <Empty.Title>{m.connect_loading_global_config()}</Empty.Title>
+                      <Empty.Description>{m.connect_loading_global_config_description()}</Empty.Description>
                     {:else}
-                      <Empty.Title>{m.connect_select_default_model()}</Empty.Title>
-                      <Empty.Description>{m.connect_select_default_model_description()}</Empty.Description>
+                      <Empty.Title>{m.connect_apply_plan_failed()}</Empty.Title>
+                      <Empty.Description>{m.connect_fix_global_config_retry()}</Empty.Description>
                     {/if}</Empty.Header
                   >{#if selectedCliKey && cliModels.length === 0}<Empty.Content
                       ><Button href="/api-keys">{m.connect_go_api_keys()}</Button></Empty.Content

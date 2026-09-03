@@ -16,7 +16,7 @@ test.beforeEach(async ({ page }) => {
   await prepareApp(page)
 })
 
-test('Connect an app configures clients from API Key models', async ({ page }) => {
+test('Connect clients previews incremental global configuration patches', async ({ page }) => {
   await page.route('**/api/v1/models', async (route) => {
     await route.fulfill({
       json: {
@@ -69,10 +69,82 @@ test('Connect an app configures clients from API Key models', async ({ page }) =
       },
     })
   })
+  await page.route('**/api/v1/connect-clients/preview', async (route) => {
+    const input = route.request().postDataJSON() as { tool: string; apiKey: string; mappings?: Record<string, string> }
+    const previews: Record<string, string> = {
+      'claude-code': JSON.stringify(
+        {
+          env: {
+            ANTHROPIC_AUTH_TOKEN: input.apiKey,
+            ANTHROPIC_BASE_URL: 'http://127.0.0.1:4173',
+            ANTHROPIC_MODEL: input.mappings?.defaultModel,
+            ANTHROPIC_DEFAULT_HAIKU_MODEL: input.mappings?.haikuModel,
+            ANTHROPIC_DEFAULT_SONNET_MODEL: input.mappings?.sonnetModel,
+            ANTHROPIC_DEFAULT_OPUS_MODEL: input.mappings?.opusModel,
+          },
+        },
+        null,
+        2,
+      ),
+      'codex-cli': `model_provider = "stravia"
+model_catalog_json = "~/.codex/stravia-models.json"
+[model_providers.stravia]
+experimental_bearer_token = "${input.apiKey}"
+{"slug": "claude-opus", "slug": "gpt-5.6-sol", "slug": "gpt-5.6-luna", "display_name": "GPT 5.6 Sol", "context_window": 272000, "input_modalities": ["text", "image"], "effort": "xhigh"}`,
+      opencode: JSON.stringify(
+        {
+          provider: {
+            stravia: {
+              npm: '@ai-sdk/open-responses',
+              options: { url: 'http://127.0.0.1:4173/v1/responses' },
+              models: {
+                'gpt-5.6-sol': {
+                  limit: { context: 272000, output: 128000 },
+                  modalities: {},
+                  variants: { xhigh: { reasoningEffort: 'xhigh' } },
+                },
+              },
+            },
+          },
+        },
+        null,
+        2,
+      ),
+      zcode: `%USERPROFILE%\\.zcode\\v2\\config.json
+${JSON.stringify(
+  {
+    provider: {
+      'custom:stravia': {
+        kind: 'openai-compatible',
+        models: { 'gpt-5.6-sol': { limit: { context: 272000, output: 128000 }, modalities: { input: ['image'] } } },
+      },
+    },
+  },
+  null,
+  2,
+)}
+ZCode rewrites this file at startup and does not preserve custom per-level request mappings.
+Reasoning controls are available only when ZCode recognizes the model itself.`,
+      workbuddy: JSON.stringify(
+        [
+          { id: 'gpt-5.6-sol', supportsImages: true, supportedEfforts: ['minimal', 'xhigh'] },
+          { id: 'gpt-5.6-luna', supportsImages: false },
+        ],
+        null,
+        2,
+      ),
+    }
+    await route.fulfill({
+      json: { data: { paths: ['~/.config'], preview: previews[input.tool] ?? '{"provider":{"stravia":{}}}' } },
+    })
+  })
 
   await page.goto('/connect')
+  await expect(page.getByRole('heading', { name: 'Connect clients' })).toBeVisible()
   await expect(page.getByRole('tab', { name: 'Clients' })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Client setup' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Apply' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Copy' })).toBeVisible()
   await page.getByRole('button', { name: 'Client' }).click()
   await expect(page.getByRole('listbox').getByRole('option')).toHaveText([
     'Codex',
@@ -108,17 +180,19 @@ test('Connect an app configures clients from API Key models', async ({ page }) =
   const generatedConfig = page.locator('pre.route-code-plane')
   await expect(generatedConfig).toContainText('"ANTHROPIC_DEFAULT_HAIKU_MODEL": "gpt-5.6-luna"')
   await expect(generatedConfig).toContainText('"ANTHROPIC_DEFAULT_SONNET_MODEL": "gpt-5.6-sol"')
-  await expect(generatedConfig).toContainText('"effortLevel": "high"')
-  await expect(generatedConfig).toContainText('"autoCompactWindow": 200000')
+  await expect(generatedConfig).not.toContainText('"effortLevel"')
+  await expect(generatedConfig).not.toContainText('"autoCompactWindow"')
 
   await page.getByRole('button', { name: 'Client' }).click()
   await page.getByRole('option', { name: 'Codex', exact: true }).click()
   await expect(page.getByRole('button', { name: 'Haiku model mapping' })).toHaveCount(0)
-  await page.getByRole('button', { name: 'Default model' }).click()
-  await page.getByRole('option', { name: /gpt-5\.6-sol/ }).click()
+  await expect(page.getByRole('button', { name: 'Default model' })).toHaveCount(0)
 
-  await expect(generatedConfig).toContainText('model_catalog_json = "stravia-models.json"')
-  await expect(generatedConfig).toContainText('env_key = "STRAVIA_API_KEY"')
+  await expect(generatedConfig).toContainText('model_provider = "stravia"')
+  await expect(generatedConfig).toContainText('model_catalog_json = "~/.codex/stravia-models.json"')
+  await expect(generatedConfig).toContainText('experimental_bearer_token = "sk-test-secret"')
+  await expect(generatedConfig).not.toContainText('env_key')
+  await expect(generatedConfig).not.toContainText('model =')
   await expect(generatedConfig).not.toContainText('requires_openai_auth')
   await expect(generatedConfig).toContainText('"context_window": 272000')
   await expect(generatedConfig).toContainText('"input_modalities"')
@@ -154,7 +228,7 @@ test('Connect an app configures clients from API Key models', async ({ page }) =
     'Reasoning controls are available only when ZCode recognizes the model itself.',
   )
   await expect(generatedConfig).toContainText('"image"')
-  await expect(generatedConfig).toContainText('Restart ZCode, then select gpt-5.6-sol as the default model.')
+  await expect(generatedConfig).not.toContainText('default model')
 
   await page.getByRole('button', { name: 'Client' }).click()
   await page.getByRole('option', { name: 'WorkBuddy' }).click()

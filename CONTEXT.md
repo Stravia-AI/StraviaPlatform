@@ -4,6 +4,26 @@
 
 Stravia 是本产品的唯一品牌名称。用户可见文本、技术标识、配置键、持久化目录、错误代码和发布元数据均使用 Stravia 派生名称；不保留旧品牌兼容名称或别名。
 
+## Stravia Desktop
+
+Stravia Desktop 是运行在本机的 Stravia 管理壳，与独立 HTTP server 相对。只有它能直接改写本机 Connect Client 的配置文件。
+_避免使用_：客户端（单独使用、未区分 Desktop 与 Connect Client）
+
+## Connect Client
+
+Connect Client 是用户本机上的第三方编程工具，可被配置为以 Stravia 为模型服务；管理面「客户端」下拉里的 Codex、Claude Code 等即此类。它不是 Principal，也不是 Agent Definition。
+_避免使用_：Agent（当指这些工具）、接入 Agent、把 Desktop 和 Connect Client 都叫客户端
+
+## Connect Client Apply
+
+Connect Client Apply 是 Stravia Desktop 把 Stravia provider 增量写入某个 Connect Client Global Config 的操作。它只 upsert Stravia 拥有的 provider 段及配套 catalog；可写与当前模型分离的激活 provider 键；不写当前/默认模型，也不写把 provider 和模型焊在一起的键。Claude Code 例外：只 merge Anthropic 的 base URL、token 与四套模型映射。它不是 admin HTTP API。
+_避免使用_：一键覆盖配置、在 Gateway 进程里写用户 home、把完整可粘贴示例整文件写盘
+
+## Connect Client Global Config
+
+Connect Client Global Config 是该 Connect Client 的用户级配置文件，路径由该工具的官方目录环境变量与默认目录解析；Connect Client Apply 只改这份文件，不改仓库内的项目配置。
+_避免使用_：项目级 `.codex/config.toml`、项目级 `.claude/settings.json`、把任意 OPENCODE_CONFIG 文件都当成全局配置
+
 ## Principal
 
 Principal 是由有效 Stravia API Key 建立、用于归属 Turn Chain、Artifact、配额、并发限制与执行状态的认证客户端身份。Stravia 不存在 Anonymous Principal，也不以连接或 Session 代替认证身份。
