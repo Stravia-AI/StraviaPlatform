@@ -152,6 +152,7 @@ mod tests {
             targets: vec![CreateTarget {
                 provider_id: provider.id.clone(),
                 model: "provider-model".into(),
+                enabled: true,
                 priority: Some(1),
                 first_token_timeout_ms: None,
                 target_retry_budget: None,
@@ -283,6 +284,7 @@ mod tests {
                     id: Some(target.id.clone()),
                     provider_id: target.provider_id.clone(),
                     model: target.model.clone(),
+                    enabled: target.enabled,
                     priority: Some(target.priority),
                     first_token_timeout_ms: Some(target.first_token_timeout_ms),
                     target_retry_budget: Some(target.target_retry_budget),

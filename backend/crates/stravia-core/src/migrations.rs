@@ -906,7 +906,7 @@ ADD COLUMN allow_media_understanding BOOLEAN NOT NULL DEFAULT FALSE;\n";
     }
 
     #[tokio::test]
-    async fn route_target_selection_migration_resets_legacy_order_and_adds_failure_controls() {
+    async fn route_target_migrations_preserve_enabled_defaults_and_add_selection_controls() {
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
@@ -954,7 +954,7 @@ ADD COLUMN allow_media_understanding BOOLEAN NOT NULL DEFAULT FALSE;\n";
             .expect("legacy Target");
         }
 
-        migrate_sqlite_range(&pool, 31, 31).await;
+        migrate_sqlite_range(&pool, 31, 32).await;
 
         let routes =
             sqlx::query_as::<_, (String, String)>("SELECT id, balance FROM models ORDER BY id")
@@ -970,14 +970,14 @@ ADD COLUMN allow_media_understanding BOOLEAN NOT NULL DEFAULT FALSE;\n";
                 ("weighted-route".into(), "traffic_equalization".into()),
             ]
         );
-        let targets = sqlx::query_as::<_, (i64, i64, i64, i64)>(
-            "SELECT priority, first_token_timeout_ms, target_retry_budget, target_cooldown_ms
+        let targets = sqlx::query_as::<_, (i64, i64, i64, i64, bool)>(
+            "SELECT priority, first_token_timeout_ms, target_retry_budget, target_cooldown_ms, enabled
              FROM model_backends ORDER BY id",
         )
         .fetch_all(&pool)
         .await
         .expect("migrated Targets");
-        assert_eq!(targets, vec![(0, 60_000, 5, 120_000); 4]);
+        assert_eq!(targets, vec![(0, 60_000, 5, 120_000, true); 4]);
         let columns = sqlx::query_scalar::<_, String>(
             "SELECT name FROM pragma_table_info('model_backends') ORDER BY cid",
         )

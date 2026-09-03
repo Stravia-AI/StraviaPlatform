@@ -25,6 +25,7 @@ pub(super) fn normalize_create_route_targets(
         return Ok(vec![CreateTarget {
             provider_id: input.target_provider.clone(),
             model: input.target_model.clone(),
+            enabled: true,
             priority: None,
             first_token_timeout_ms: None,
             target_retry_budget: None,
@@ -45,6 +46,7 @@ pub(super) fn normalize_update_route_targets(
             .map(|target| CreateTarget {
                 provider_id: target.provider_id.clone(),
                 model: target.model.clone(),
+                enabled: target.enabled,
                 priority: target.priority,
                 first_token_timeout_ms: target.first_token_timeout_ms,
                 target_retry_budget: target.target_retry_budget,
@@ -69,6 +71,7 @@ pub(super) fn normalize_update_route_targets(
     Ok(vec![CreateTarget {
         provider_id: provider,
         model,
+        enabled: true,
         priority: None,
         first_token_timeout_ms: None,
         target_retry_budget: None,
@@ -79,7 +82,10 @@ pub(super) fn normalize_update_route_targets(
 
 pub(super) fn ensure_route_targets_valid(backends: &[CreateTarget]) -> anyhow::Result<()> {
     if backends.is_empty() {
-        anyhow::bail!("at least one model backend is required");
+        anyhow::bail!("at least one enabled Target is required");
+    }
+    if !backends.iter().any(|backend| backend.enabled) {
+        anyhow::bail!("at least one enabled Target is required");
     }
     let mut targets = std::collections::BTreeSet::new();
     for backend in backends {
@@ -95,10 +101,6 @@ pub(super) fn ensure_route_targets_valid(backends: &[CreateTarget]) -> anyhow::R
             anyhow::bail!(
                 "a Route cannot contain the same Provider and Provider Model more than once"
             );
-        }
-        let priority = backend.priority.unwrap_or(DEFAULT_TARGET_PRIORITY);
-        if !(0..=100_000).contains(&priority) {
-            anyhow::bail!("Target Priority must be between 0 and 100000");
         }
         if backend
             .first_token_timeout_ms

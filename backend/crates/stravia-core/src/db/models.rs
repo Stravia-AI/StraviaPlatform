@@ -158,11 +158,15 @@ impl Route {
             ThinkingLevel::ALL
                 .into_iter()
                 .filter(|level| {
-                    !self.targets.is_empty()
-                        && self.targets.iter().all(|target| {
-                            mapping_control(&target.thinking_level_map, *level)
-                                .is_some_and(|control| !control.is_hidden())
-                        })
+                    self.targets.iter().any(|target| target.enabled)
+                        && self
+                            .targets
+                            .iter()
+                            .filter(|target| target.enabled)
+                            .all(|target| {
+                                mapping_control(&target.thinking_level_map, *level)
+                                    .is_some_and(|control| !control.is_hidden())
+                            })
                 })
                 .collect(),
         );
@@ -174,12 +178,18 @@ pub const DEFAULT_FIRST_TOKEN_TIMEOUT_MS: i64 = 60_000;
 pub const DEFAULT_TARGET_RETRY_BUDGET: i32 = 5;
 pub const DEFAULT_TARGET_COOLDOWN_MS: i64 = 120_000;
 
+const fn default_target_enabled() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct Target {
     pub id: String,
     pub model_id: String,
     pub provider_id: String,
     pub model: String,
+    #[serde(default = "default_target_enabled")]
+    pub enabled: bool,
     pub priority: i32,
     pub first_token_timeout_ms: i64,
     pub target_retry_budget: i32,
@@ -439,6 +449,8 @@ pub struct CreateRoute {
 pub struct CreateTarget {
     pub provider_id: String,
     pub model: String,
+    #[serde(default = "default_target_enabled")]
+    pub enabled: bool,
     pub priority: Option<i32>,
     pub first_token_timeout_ms: Option<i64>,
     pub target_retry_budget: Option<i32>,
@@ -453,6 +465,8 @@ pub struct UpsertTarget {
     pub id: Option<String>,
     pub provider_id: String,
     pub model: String,
+    #[serde(default = "default_target_enabled")]
+    pub enabled: bool,
     pub priority: Option<i32>,
     pub first_token_timeout_ms: Option<i64>,
     pub target_retry_budget: Option<i32>,

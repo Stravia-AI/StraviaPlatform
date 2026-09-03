@@ -605,6 +605,7 @@ mod tests {
                     CreateTarget {
                         provider_id: primary.id.clone(),
                         model: "primary-model".into(),
+                        enabled: true,
                         priority: Some(1),
                         first_token_timeout_ms: None,
                         target_retry_budget: None,
@@ -614,6 +615,7 @@ mod tests {
                     CreateTarget {
                         provider_id: fallback.id.clone(),
                         model: "fallback-model".into(),
+                        enabled: true,
                         priority: Some(2),
                         first_token_timeout_ms: None,
                         target_retry_budget: None,

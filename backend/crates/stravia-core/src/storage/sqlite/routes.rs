@@ -16,8 +16,8 @@ impl SqliteRouteStore {
         };
         let sql = format!(
             "SELECT id, model_id, display_name, COALESCE(balance, 'traffic_equalization') AS balance, \
-             COALESCE((SELECT provider_id FROM model_backends WHERE model_id = models.id ORDER BY priority DESC, created_at ASC LIMIT 1), '') AS target_provider, \
-             COALESCE((SELECT model FROM model_backends WHERE model_id = models.id ORDER BY priority DESC, created_at ASC LIMIT 1), '') AS target_model, \
+             COALESCE((SELECT provider_id FROM model_backends WHERE model_id = models.id AND enabled = 1 ORDER BY priority DESC, created_at ASC LIMIT 1), '') AS target_provider, \
+             COALESCE((SELECT model FROM model_backends WHERE model_id = models.id AND enabled = 1 ORDER BY priority DESC, created_at ASC LIMIT 1), '') AS target_model, \
              COALESCE(is_enabled, 1) AS is_enabled, created_at \
              FROM models{where_clause} ORDER BY created_at DESC"
         );
@@ -33,7 +33,7 @@ impl SqliteRouteStore {
 
     async fn load_targets(&self, route_storage_id: &str) -> anyhow::Result<Vec<Target>> {
         Ok(sqlx::query_as::<_, Target>(
-            "SELECT id, model_id, provider_id, model, priority, first_token_timeout_ms, target_retry_budget, target_cooldown_ms, created_at, thinking_level_map FROM model_backends WHERE model_id = ? ORDER BY priority DESC, created_at ASC",
+            "SELECT id, model_id, provider_id, model, enabled, priority, first_token_timeout_ms, target_retry_budget, target_cooldown_ms, created_at, thinking_level_map FROM model_backends WHERE model_id = ? ORDER BY priority DESC, created_at ASC",
         )
         .bind(route_storage_id)
         .fetch_all(&self.pool)
@@ -43,8 +43,8 @@ impl SqliteRouteStore {
     async fn load_route(&self, route_id: &str) -> anyhow::Result<Option<Route>> {
         let route = sqlx::query_as::<_, Route>(
             "SELECT id, model_id, display_name, COALESCE(balance, 'traffic_equalization') AS balance, \
-             COALESCE((SELECT provider_id FROM model_backends WHERE model_id = models.id ORDER BY priority DESC, created_at ASC LIMIT 1), '') AS target_provider, \
-             COALESCE((SELECT model FROM model_backends WHERE model_id = models.id ORDER BY priority DESC, created_at ASC LIMIT 1), '') AS target_model, \
+             COALESCE((SELECT provider_id FROM model_backends WHERE model_id = models.id AND enabled = 1 ORDER BY priority DESC, created_at ASC LIMIT 1), '') AS target_provider, \
+             COALESCE((SELECT model FROM model_backends WHERE model_id = models.id AND enabled = 1 ORDER BY priority DESC, created_at ASC LIMIT 1), '') AS target_model, \
              COALESCE(is_enabled, 1) AS is_enabled, created_at \
              FROM models WHERE model_id = ?",
         )
@@ -75,8 +75,8 @@ impl RouteStore for SqliteRouteStore {
     }
 
     async fn put(&self, route: PutRoute) -> anyhow::Result<Route> {
-        if route.targets.is_empty() {
-            anyhow::bail!("a Route requires at least one Target");
+        if !route.targets.iter().any(|target| target.enabled) {
+            anyhow::bail!("a Route requires at least one enabled Target");
         }
         let route_storage_id = route
             .id
@@ -123,7 +123,7 @@ impl RouteStore for SqliteRouteStore {
         }
 
         let existing = sqlx::query_as::<_, Target>(
-            "SELECT id, model_id, provider_id, model, priority, first_token_timeout_ms, target_retry_budget, target_cooldown_ms, created_at, thinking_level_map FROM model_backends WHERE model_id = ?",
+            "SELECT id, model_id, provider_id, model, enabled, priority, first_token_timeout_ms, target_retry_budget, target_cooldown_ms, created_at, thinking_level_map FROM model_backends WHERE model_id = ?",
         )
         .bind(&route_storage_id)
         .fetch_all(&mut *tx)
@@ -142,12 +142,13 @@ impl RouteStore for SqliteRouteStore {
                 .map(|row| row.id.clone())
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
             sqlx::query(
-                "INSERT INTO model_backends (id, model_id, provider_id, model, priority, first_token_timeout_ms, target_retry_budget, target_cooldown_ms, thinking_level_map) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO model_backends (id, model_id, provider_id, model, enabled, priority, first_token_timeout_ms, target_retry_budget, target_cooldown_ms, thinking_level_map) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(id)
             .bind(&route_storage_id)
             .bind(target.provider_id.trim())
             .bind(target.model.trim())
+            .bind(target.enabled)
             .bind(target.priority.unwrap_or(DEFAULT_TARGET_PRIORITY))
             .bind(
                 target
@@ -195,6 +196,7 @@ mod tests {
 
     fn target(provider_id: &str, model: &str) -> crate::db::models::CreateTarget {
         crate::db::models::CreateTarget {
+            enabled: true,
             provider_id: provider_id.into(),
             model: model.into(),
             priority: Some(0),

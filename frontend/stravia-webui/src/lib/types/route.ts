@@ -21,6 +21,7 @@ export interface Target {
   model_id: string
   provider_id: string
   model: string
+  enabled: boolean
   priority: number
   first_token_timeout_ms: number
   target_retry_budget: number
@@ -82,6 +83,7 @@ export interface UpdateRoute {
 export interface CreateTarget {
   provider_id: string
   model: string
+  enabled?: boolean
   priority?: number
   first_token_timeout_ms?: number
   target_retry_budget?: number
@@ -93,6 +95,7 @@ export interface UpsertTarget {
   id?: string
   provider_id: string
   model: string
+  enabled?: boolean
   priority?: number
   first_token_timeout_ms?: number
   target_retry_budget?: number

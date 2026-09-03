@@ -319,6 +319,7 @@ mod tests {
                     crate::db::models::CreateTarget {
                         provider_id: provider.id.clone(),
                         model: "vision".into(),
+                        enabled: true,
                         priority: Some(1),
                         first_token_timeout_ms: None,
                         target_retry_budget: None,
@@ -328,6 +329,7 @@ mod tests {
                     crate::db::models::CreateTarget {
                         provider_id: provider.id.clone(),
                         model: "text".into(),
+                        enabled: true,
                         priority: Some(2),
                         first_token_timeout_ms: None,
                         target_retry_budget: None,

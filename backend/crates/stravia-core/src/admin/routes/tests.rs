@@ -181,6 +181,24 @@ fn route_target_wire_input_rejects_removed_weight() {
     );
 }
 
+#[test]
+fn route_target_wire_input_defaults_enabled_and_accepts_disabled() {
+    let enabled = serde_json::from_value::<CreateTarget>(json!({
+        "provider_id": "provider",
+        "model": "upstream-model"
+    }))
+    .expect("Target without enabled");
+    let disabled = serde_json::from_value::<CreateTarget>(json!({
+        "provider_id": "provider",
+        "model": "standby-model",
+        "enabled": false
+    }))
+    .expect("disabled Target");
+
+    assert!(enabled.enabled);
+    assert!(!disabled.enabled);
+}
+
 #[tokio::test]
 async fn route_configuration_supports_three_targets_priorities_and_failure_defaults()
 -> anyhow::Result<()> {
@@ -198,6 +216,7 @@ async fn route_configuration_supports_three_targets_priorities_and_failure_defau
             .await?;
     }
     let create_target = |model: &str, priority: i32| CreateTarget {
+        enabled: true,
         provider_id: provider.id.clone(),
         model: model.into(),
         priority: Some(priority),
@@ -230,19 +249,18 @@ async fn route_configuration_supports_three_targets_priorities_and_failure_defau
             && target.target_cooldown_ms == DEFAULT_TARGET_COOLDOWN_MS
     }));
 
-    for invalid in [-1, 100_001] {
-        let error = admin
+    for valid in [-1, 100_001, i32::MIN, i32::MAX] {
+        let route = admin
             .create_model(CreateRoute {
-                model_id: format!("invalid-priority-{invalid}"),
+                model_id: format!("signed-priority-{valid}"),
                 display_name: None,
                 balance: Some("traffic_equalization".into()),
                 target_provider: String::new(),
                 target_model: String::new(),
-                targets: vec![create_target("upstream-model", invalid)],
+                targets: vec![create_target("upstream-model", valid)],
             })
-            .await
-            .expect_err("out-of-range Target Priority must be rejected");
-        assert!(error.to_string().contains("Target Priority"));
+            .await?;
+        assert_eq!(route.targets[0].priority, valid);
     }
     let invalid_strategy = admin
         .create_model(CreateRoute {
@@ -260,6 +278,76 @@ async fn route_configuration_supports_three_targets_priorities_and_failure_defau
             .to_string()
             .contains("Route Scheduling Strategy")
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn route_configuration_round_trips_disabled_targets_and_requires_one_enabled()
+-> anyhow::Result<()> {
+    let (_data_dir, gateway, provider) = route_fixture().await?;
+    let admin = gateway.admin();
+    admin
+        .create_manual_provider_model(
+            &provider.id,
+            "standby-model",
+            CreateManualProviderModel {
+                metadata: json!({"id": "standby-model", "name": "Standby"}),
+            },
+        )
+        .await?;
+    let target = |model: &str, enabled: bool| CreateTarget {
+        provider_id: provider.id.clone(),
+        model: model.into(),
+        enabled,
+        priority: Some(if enabled { -1 } else { i32::MAX }),
+        first_token_timeout_ms: None,
+        target_retry_budget: None,
+        target_cooldown_ms: None,
+        thinking_level_map: Vec::new(),
+    };
+
+    let route = admin
+        .create_model(CreateRoute {
+            model_id: "enabled-and-standby".into(),
+            display_name: None,
+            balance: None,
+            target_provider: String::new(),
+            target_model: String::new(),
+            targets: vec![
+                target("upstream-model", true),
+                target("standby-model", false),
+            ],
+        })
+        .await?;
+    assert_eq!(route.targets.len(), 2);
+    assert!(
+        route
+            .targets
+            .iter()
+            .find(|target| target.model == "upstream-model")
+            .is_some_and(|target| target.enabled)
+    );
+    assert!(
+        route
+            .targets
+            .iter()
+            .find(|target| target.model == "standby-model")
+            .is_some_and(|target| !target.enabled)
+    );
+    assert_eq!(route.target_model, "upstream-model");
+
+    let error = admin
+        .create_model(CreateRoute {
+            model_id: "all-disabled".into(),
+            display_name: None,
+            balance: None,
+            target_provider: String::new(),
+            target_model: String::new(),
+            targets: vec![target("upstream-model", false)],
+        })
+        .await
+        .expect_err("Route without an enabled Target must be rejected");
+    assert!(error.to_string().contains("enabled Target"));
     Ok(())
 }
 
@@ -294,6 +382,7 @@ async fn one_click_bind_is_idempotent_and_uses_upstream_id_as_route_id() -> anyh
     assert_eq!(second.targets.len(), 1);
     assert_eq!(second.targets[0].provider_id, provider.id);
     assert_eq!(second.targets[0].model, "upstream-model");
+    assert!(second.targets[0].enabled);
     assert_eq!(second.context_window, Some(200_000));
     assert_eq!(second.output_max_tokens, Some(32_000));
     assert!(second.supports_image_input);
@@ -445,6 +534,7 @@ async fn unavailable_provider_model_cannot_be_bound_as_a_new_target() -> anyhow:
             targets: vec![CreateTarget {
                 provider_id: provider.id,
                 model: "upstream-model".into(),
+                enabled: true,
                 priority: Some(1),
                 first_token_timeout_ms: None,
                 target_retry_budget: None,
@@ -829,6 +919,7 @@ async fn supported_levels_are_the_intersection_of_all_targets() -> anyhow::Resul
                 CreateTarget {
                     provider_id: provider.id.clone(),
                     model: "wide-effort-model".into(),
+                    enabled: true,
                     priority: Some(1),
                     first_token_timeout_ms: None,
                     target_retry_budget: None,
@@ -838,6 +929,7 @@ async fn supported_levels_are_the_intersection_of_all_targets() -> anyhow::Resul
                 CreateTarget {
                     provider_id: provider.id,
                     model: "narrow-effort-model".into(),
+                    enabled: true,
                     priority: Some(1),
                     first_token_timeout_ms: None,
                     target_retry_budget: None,

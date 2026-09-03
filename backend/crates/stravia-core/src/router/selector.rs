@@ -226,6 +226,9 @@ impl RouteAttemptPolicy {
             .collect::<HashMap<_, _>>();
         let mut priority_groups = BTreeMap::<Reverse<i32>, Vec<&Target>>::new();
         for target in targets {
+            if !target.enabled {
+                continue;
+            }
             let key = target_key(target);
             if cooldowns
                 .get(&key)
@@ -605,6 +608,7 @@ mod tests {
             model_id: "route".into(),
             provider_id: provider_id.into(),
             model: "model".into(),
+            enabled: true,
             priority,
             first_token_timeout_ms: DEFAULT_FIRST_TOKEN_TIMEOUT_MS,
             target_retry_budget: DEFAULT_TARGET_RETRY_BUDGET,
@@ -656,6 +660,62 @@ mod tests {
             Some("high-b")
         );
         assert_eq!(next_provider(&mut policy, &health).as_deref(), Some("low"));
+    }
+
+    #[test]
+    fn disabled_targets_never_enter_attempt_or_affinity_order() {
+        let state = RoutePolicyState::default();
+        let health = HealthRegistry::new();
+        let mut disabled = target("disabled", i32::MAX);
+        disabled.enabled = false;
+        let targets = vec![target("enabled", -1), disabled];
+        let mut attempt_context = context(0);
+        attempt_context.conversation_affinity_target = Some("disabled:model".into());
+        attempt_context.cache_affinity_target = Some("disabled:model".into());
+        let mut policy = RouteAttemptPolicy::new(
+            "traffic_equalization",
+            &targets,
+            attempt_context,
+            &RouteSchedulingSnapshot::default(),
+            state,
+        );
+
+        assert_eq!(
+            next_provider(&mut policy, &health).as_deref(),
+            Some("enabled")
+        );
+        assert_eq!(next_provider(&mut policy, &health), None);
+    }
+
+    #[test]
+    fn signed_priority_groups_remain_descending() {
+        let state = RoutePolicyState::default();
+        let health = HealthRegistry::new();
+        let targets = vec![
+            target("minimum", i32::MIN),
+            target("negative", -1),
+            target("maximum", i32::MAX),
+        ];
+        let mut policy = RouteAttemptPolicy::new(
+            "traffic_equalization",
+            &targets,
+            context(0),
+            &RouteSchedulingSnapshot::default(),
+            state,
+        );
+
+        assert_eq!(
+            [
+                next_provider(&mut policy, &health),
+                next_provider(&mut policy, &health),
+                next_provider(&mut policy, &health),
+            ],
+            [
+                Some("maximum".into()),
+                Some("negative".into()),
+                Some("minimum".into()),
+            ]
+        );
     }
 
     #[test]

@@ -1315,3 +1315,6 @@ END;
 ALTER TABLE models ALTER COLUMN balance SET DEFAULT 'traffic_equalization';
 ALTER TABLE model_backends ALTER COLUMN priority SET DEFAULT 0;
 ALTER TABLE model_backends DROP COLUMN weight;
+
+ALTER TABLE model_backends
+ADD COLUMN enabled BOOLEAN NOT NULL DEFAULT TRUE;

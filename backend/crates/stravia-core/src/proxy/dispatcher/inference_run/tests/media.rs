@@ -350,6 +350,7 @@ async fn mixed_media_route_prefers_native_targets_and_rejects_targets_without_to
                 CreateTarget {
                     provider_id: bridge.id,
                     model: "bridge".into(),
+                    enabled: true,
                     priority: Some(1),
                     first_token_timeout_ms: None,
                     target_retry_budget: None,
@@ -359,6 +360,7 @@ async fn mixed_media_route_prefers_native_targets_and_rejects_targets_without_to
                 CreateTarget {
                     provider_id: native.id,
                     model: "native".into(),
+                    enabled: true,
                     priority: Some(2),
                     first_token_timeout_ms: None,
                     target_retry_budget: None,

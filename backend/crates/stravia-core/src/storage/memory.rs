@@ -245,8 +245,8 @@ impl RouteStore for MemoryStorage {
 
     async fn put(&self, input: PutRoute) -> anyhow::Result<Route> {
         anyhow::ensure!(
-            !input.targets.is_empty(),
-            "a Route requires at least one Target"
+            input.targets.iter().any(|target| target.enabled),
+            "a Route requires at least one enabled Target"
         );
         let mut routes = self.models.write().await;
         let storage_id = input
@@ -284,6 +284,7 @@ impl RouteStore for MemoryStorage {
                 model_id: storage_id.clone(),
                 provider_id: target.provider_id,
                 model: target.model,
+                enabled: target.enabled,
                 priority: target.priority.unwrap_or(DEFAULT_TARGET_PRIORITY),
                 first_token_timeout_ms: target
                     .first_token_timeout_ms
@@ -303,8 +304,18 @@ impl RouteStore for MemoryStorage {
             model_id: input.model_id,
             display_name: input.display_name,
             balance: input.selection_strategy,
-            target_provider: targets[0].provider_id.clone(),
-            target_model: targets[0].model.clone(),
+            target_provider: targets
+                .iter()
+                .find(|target| target.enabled)
+                .expect("validated enabled Target")
+                .provider_id
+                .clone(),
+            target_model: targets
+                .iter()
+                .find(|target| target.enabled)
+                .expect("validated enabled Target")
+                .model
+                .clone(),
             is_enabled: input.is_enabled,
             created_at,
             supported_thinking_levels: sqlx::types::Json(Vec::new()),
@@ -765,6 +776,7 @@ mod tests {
 
     fn target(provider_id: &str, model: &str) -> crate::db::models::CreateTarget {
         crate::db::models::CreateTarget {
+            enabled: true,
             provider_id: provider_id.into(),
             model: model.into(),
             priority: Some(1),

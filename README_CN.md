@@ -67,7 +67,7 @@ OpenAI direct 与 Codex OAuth 的生成 Target 会为 Chat Completions、Open Re
 - DeepSeek、Moonshot AI、Zhipu AI、Z.AI、MiniMax、xAI（API Key 与 Grok OAuth）和 NVIDIA
 - OpenRouter、Ollama 以及自定义 OpenAI 兼容端点
 
-客户端发送一个 **Model ID**。该值就是 Route ID，匹配时包含字母大小写在内完全精确。逻辑 Model 还可以设置可选、可重复的展示名称；展示为空时回退到 Model ID，并且永不参与路由、授权或绑定。对应 Route 可以包含一个或多个 Target。Stravia 先选择可用的最高 Target Priority 组，再在组内使用 Traffic Equalization 或 Latency Preference；适用时，Conversation Affinity 与 Cache Affinity 可继续偏好此前成功的 Target。Stravia 从 revisioned `models.stravia.cn` 索引刷新 Provider Catalog：轻量 Provider 与 Canonical Model 索引以同一 revision 原子更新，Provider-scoped inventory 仅在需要时加载。Catalog Provider 使用其 scoped inventory；账号级 discovery 仍决定可调用的模型 ID，Core 只为精确匹配补充元数据，不会加入仅存在于 Catalog 的模型。
+客户端发送一个 **Model ID**。该值就是 Route ID，匹配时包含字母大小写在内完全精确。逻辑 Model 还可以设置可选、可重复的展示名称；展示为空时回退到 Model ID，并且永不参与路由、授权或绑定。对应 Route 可以同时保留已启用和已禁用 Target；已禁用 Target 保留配置但不会接收流量。Stravia 先选择可用的最高 Target Priority 组，再在组内使用 Traffic Equalization 或 Latency Preference；适用时，Conversation Affinity 与 Cache Affinity 可继续偏好此前成功的已启用 Target。Stravia 从 revisioned `models.stravia.cn` 索引刷新 Provider Catalog：轻量 Provider 与 Canonical Model 索引以同一 revision 原子更新，Provider-scoped inventory 仅在需要时加载。Catalog Provider 使用其 scoped inventory；账号级 discovery 仍决定可调用的模型 ID，Core 只为精确匹配补充元数据，不会加入仅存在于 Catalog 的模型。
 
 添加提供商时，先选择完整的提供商/通道选项。API Key 与 OAuth 通道是独立选项，创建后不能互相转换。Codex 与 Claude Code OAuth 在桌面端和通过回环地址访问的 WebUI 中会自动接收回调；远程 WebUI 则会在浏览器登录后要求粘贴完整 callback URL。Grok OAuth 使用 xAI device authorization flow：WebUI 打开验证页面，在需要时显示 user code，并轮询直到授权完成。
 
@@ -75,7 +75,7 @@ WebUI 为每种资源保留唯一编辑表面。添加或编辑逻辑 Model 时�
 
 连接页面生成基于 Open Responses 的 OpenCode provider。Claude Code 配置会在所选默认 Route 声明的能力可由 Claude Code 表达时，自动写入 `effortLevel` 和 `autoCompactWindow`。
 
-Route Builder 使用独立页面。选择 Provider 后会自动加载其可用 Provider Model；如需绑定清单外的 upstream model ID，必须显式进入未经验证的自定义分支。每个 Target 都可显式设置 Priority、First Token Timeout、Target Retry Budget 与 Target Cooldown；Route 可选择同优先级组内的 Traffic Equalization 或 Latency Preference。删除 Provider 时会在同一事务内移除其 Target、删除由此变空的 Route，并保留仍有其他 Target 的 Route。
+Route Builder 使用独立页面。选择 Provider 后会自动加载其可用 Provider Model；如需绑定清单外的 upstream model ID，必须显式进入未经验证的自定义分支。已启用 Target 按优先级从上到下分层，已禁用的备用 Target 保留在右侧坞中；详情弹窗用秒编辑 First Token Timeout 与 Target Cooldown，并编辑 Target Retry Budget 和 Thinking Level Map，不暴露 Priority 整数。Route 可选择同层 Target 使用 Traffic Equalization 或 Latency Preference。删除 Provider 时会在同一事务内移除其 Target、删除由此变空的 Route，并保留仍有其他 Target 的 Route。
 
 ### 联网搜索与 MCP
 

@@ -80,7 +80,8 @@ Target 列表；一条 Route 对应一个或多个 Provider + Provider Model 组
 | `model_id` | TEXT NOT NULL | — | 所属 Route 的存储主键（FK → models.id, ON DELETE CASCADE） |
 | `provider_id` | TEXT NOT NULL | — | 供应商 ID（FK → providers.id） |
 | `model` | TEXT NOT NULL | — | 上游模型名（发送给 provider 的模型标识） |
-| `priority` | INTEGER | `0` | Target Priority，范围 0–100000，数值越大越优先；相同值组成一个调度组 |
+| `enabled` | BOOLEAN / INTEGER | `true` / `1` | Target 是否启用；已禁用 Target 仍属于 Route，但不参与选择、亲和或冷却 |
+| `priority` | INTEGER | `0` | Target Priority，范围 -2147483648–2147483647，数值越大越优先；仅已启用且相同值的 Target 组成一个调度组 |
 | `thinking_level_map` | JSON | 七行 Hidden Mapping | Target 的七行 Thinking Level Map，包含 Control 与 Generated/Overridden 来源；SQLite 使用 JSON 文本，PostgreSQL 使用 JSONB |
 | `first_token_timeout_ms` | BIGINT / INTEGER | `60000` | First Token Timeout（毫秒）；`0` 表示关闭 |
 | `target_retry_budget` | INTEGER | `5` | 同一 Target 的额外重试次数 |
@@ -492,6 +493,8 @@ Route Target Aggregate migration 27 先把仅存在于旧 `models.target_provide
 Web Access Adapter migration 28 是不兼容旧二进制的 clean cutover：把 kind 约束收紧为 `local|exa|zhipu`，删除 Brave/Tavily 行，加入 `use_proxy` 与 Local Search Engine 配置，并写入唯一 Local Provider。Search/Fetch 列表保留既有 Exa/智谱顺序；移除旧 kind 后为空的列表改为仅 Local。升级前必须备份数据库；回滚必须恢复 migration 28 之前的数据库，不能只回退应用文件。
 
 Layer Route Target Selection migration 31 删除 `model_backends.weight`，把既有 Target Priority 全部重置为 `0`，增加 First Token Timeout、Target Retry Budget 与 Target Cooldown，并把旧 `weighted|priority|cooldown|latency` Strategy 归一化为 `traffic_equalization|latency_preference`。
+
+Route Target Enabled migration 32 为 `model_backends` 增加缺省为已启用的 `enabled`；既有 Target 全部保持参与选择，写入省略该字段时也按已启用处理。
 
 Allowance Samples migration 29 新增 `provider_allowance_samples`。样本随 Provider 删除而级联删除；应用按 14 天 TTL 清理，预报只读取当前重置窗口内且语义一致的样本。
 

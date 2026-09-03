@@ -516,6 +516,7 @@ async fn execute_fails_over_before_canonical_output_and_returns_the_locked_targe
                 .iter()
                 .enumerate()
                 .map(|(index, provider)| CreateTarget {
+                    enabled: true,
                     provider_id: provider.id.clone(),
                     model: "upstream-model".into(),
                     priority: Some((providers.len() - index) as i32),
@@ -883,6 +884,7 @@ async fn execute_does_not_fail_over_after_the_first_canonical_delta() {
                 .iter()
                 .enumerate()
                 .map(|(index, provider)| CreateTarget {
+                    enabled: true,
                     provider_id: provider.id.clone(),
                     model: "upstream-model".into(),
                     priority: Some((providers.len() - index) as i32),

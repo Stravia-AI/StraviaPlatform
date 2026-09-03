@@ -693,6 +693,7 @@ async fn copy_provider_can_copy_matching_route_targets_to_copied_provider() -> a
                 CreateTarget {
                     provider_id: original.id.clone(),
                     model: "source-upstream-model".to_string(),
+                    enabled: true,
                     priority: Some(100_000),
                     first_token_timeout_ms: None,
                     target_retry_budget: None,
@@ -702,6 +703,7 @@ async fn copy_provider_can_copy_matching_route_targets_to_copied_provider() -> a
                 CreateTarget {
                     provider_id: fallback.id.clone(),
                     model: "fallback-upstream-model".to_string(),
+                    enabled: true,
                     priority: Some(0),
                     first_token_timeout_ms: None,
                     target_retry_budget: None,

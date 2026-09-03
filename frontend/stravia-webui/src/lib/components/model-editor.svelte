@@ -4,6 +4,7 @@ import { goto } from '$app/navigation'
 import { resolve } from '$app/paths'
 import { createQuery, useQueryClient } from '@tanstack/svelte-query'
 import CirclePlusIcon from '@lucide/svelte/icons/circle-plus'
+import GripVerticalIcon from '@lucide/svelte/icons/grip-vertical'
 import RotateCcwIcon from '@lucide/svelte/icons/rotate-ccw'
 import Trash2Icon from '@lucide/svelte/icons/trash-2'
 import { untrack } from 'svelte'
@@ -26,8 +27,14 @@ import {
   addRouteTarget,
   buildRouteTargets,
   createRouteTargetForms,
+  moveRouteTargetToDock,
+  moveRouteTargetToEdge,
+  moveRouteTargetToLane,
+  priorityLanes,
   removeRouteTarget,
+  reorderRouteTargetBefore,
   type RouteTargetForm,
+  type RouteTargetEdge,
 } from './route-targets-form.js'
 import ModelCombobox from '$lib/components/model-combobox.svelte'
 import ModelIdCombobox from '$lib/components/model-id-combobox.svelte'
@@ -36,6 +43,7 @@ import PageHeader from '$lib/components/page-header.svelte'
 import * as AlertDialog from '$lib/components/ui/alert-dialog'
 import { Badge } from '$lib/components/ui/badge'
 import { Button } from '$lib/components/ui/button'
+import * as Dialog from '$lib/components/ui/dialog'
 import * as Field from '$lib/components/ui/field'
 import { Input } from '$lib/components/ui/input'
 import * as Select from '$lib/components/ui/select'
@@ -69,8 +77,15 @@ let saving = $state(false)
 let initialized = $state(false)
 let regenerateOpen = $state(false)
 let regenerateTarget = $state<RouteTargetForm>()
+let targetEditorOpen = $state(false)
+let targetEditorTarget = $state<RouteTargetForm>()
+let targetEditorIsNew = $state(false)
+let targetEditorClosing = false
+let draggedTargetKey = $state('')
 
 const availableProviders = $derived(providers)
+const targetLanes = $derived(priorityLanes(targets))
+const disabledTargets = $derived(targets.filter((target) => !target.enabled))
 const canonicalModelsQuery = createQuery(() => ({
   queryKey: ['catalog', 'canonical-models'],
   queryFn: () => admin.catalog.canonicalModels(),
@@ -188,11 +203,107 @@ function useInventory(target: RouteTargetForm): void {
 }
 
 function addTarget(): void {
-  addRouteTarget(targets)
+  const target = addRouteTarget(targets)
+  editTarget(target, true)
 }
 
-function removeTarget(index: number): void {
-  removeRouteTarget(targets, index)
+function cloneTarget(target: RouteTargetForm): RouteTargetForm {
+  return {
+    ...target,
+    inventory: [...target.inventory],
+    capabilities: target.capabilities ? { ...target.capabilities } : undefined,
+    thinkingLevelMap: target.thinkingLevelMap.map((row) => ({ ...row, control: { ...row.control } })),
+  }
+}
+
+function editTarget(target: RouteTargetForm, isNew = false): void {
+  targetEditorClosing = false
+  targetEditorTarget = cloneTarget(target)
+  targetEditorIsNew = isNew
+  targetEditorOpen = true
+  if (targetEditorTarget.providerId && targetEditorTarget.inventory.length === 0) void loadInventory(targetEditorTarget)
+}
+
+function closeTargetEditor(save: boolean): void {
+  targetEditorClosing = true
+  const target = targetEditorTarget
+  if (target) {
+    const index = targets.findIndex((candidate) => candidate.key === target.key)
+    if (save && index >= 0) {
+      Object.assign(targets[index], cloneTarget(target))
+    } else if (!save && targetEditorIsNew && index >= 0) {
+      removeRouteTarget(targets, index)
+    }
+  }
+  targetEditorTarget = undefined
+  targetEditorIsNew = false
+  targetEditorOpen = false
+}
+
+function deleteEditedTarget(): void {
+  const target = targetEditorTarget
+  if (!target || target.enabled) return
+  targetEditorClosing = true
+  const index = targets.findIndex((candidate) => candidate.key === target.key)
+  if (index >= 0) removeRouteTarget(targets, index)
+  targetEditorTarget = undefined
+  targetEditorIsNew = false
+  targetEditorOpen = false
+}
+
+function removeDisabledTarget(target: RouteTargetForm): void {
+  if (target.enabled) return
+  const index = targets.findIndex((candidate) => candidate.key === target.key)
+  if (index >= 0) removeRouteTarget(targets, index)
+}
+
+function targetIndex(target: RouteTargetForm): number {
+  return targets.findIndex((candidate) => candidate.key === target.key)
+}
+
+function targetConfigured(target: RouteTargetForm): boolean {
+  return Boolean(target.providerId && target.model.trim())
+}
+
+function startTargetDrag(event: DragEvent, target: RouteTargetForm): void {
+  draggedTargetKey = target.key
+  event.dataTransfer?.setData('text/plain', target.key)
+  if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move'
+}
+
+function draggedKey(event: DragEvent): string {
+  return draggedTargetKey || event.dataTransfer?.getData('text/plain') || ''
+}
+
+function dropOnLane(event: DragEvent, priority: number, beforeKey?: string): void {
+  event.preventDefault()
+  event.stopPropagation()
+  const key = draggedKey(event)
+  const target = targets.find((candidate) => candidate.key === key)
+  if (!target) return
+  if (beforeKey && target.enabled && target.priority === priority) {
+    reorderRouteTargetBefore(targets, key, beforeKey)
+    return
+  }
+  if (!moveRouteTargetToLane(targets, key, priority)) toast.error(m.model_editor_complete_target_before_enabling())
+}
+
+function dropOnEdge(event: DragEvent, edge: RouteTargetEdge): void {
+  event.preventDefault()
+  const key = draggedKey(event)
+  const target = targets.find((candidate) => candidate.key === key)
+  if (!target) return
+  if (!targetConfigured(target)) {
+    toast.error(m.model_editor_complete_target_before_enabling())
+    return
+  }
+  if (!moveRouteTargetToEdge(targets, key, edge)) toast.error(m.model_editor_cannot_create_priority_layer())
+}
+
+function dropInDock(event: DragEvent): void {
+  event.preventDefault()
+  const key = draggedKey(event)
+  if (!moveRouteTargetToDock(targets, key)) toast.error(m.model_editor_last_enabled_target_required())
 }
 
 function targetSupportsThinkingLevel(target: RouteTargetForm, level: ThinkingLevel): boolean {
@@ -207,7 +318,7 @@ function targetLabel(target: RouteTargetForm, index: number): string {
 
 function thinkingLevelBlockers(level: ThinkingLevel): string[] {
   return targets.flatMap((target, index) =>
-    targetSupportsThinkingLevel(target, level) ? [] : [targetLabel(target, index)],
+    !target.enabled ? [] : targetSupportsThinkingLevel(target, level) ? [] : [targetLabel(target, index)],
   )
 }
 
@@ -273,14 +384,19 @@ async function regenerateThinkingMap(): Promise<void> {
 
 async function saveModel(): Promise<void> {
   const result = buildRouteTargets(targets)
-  if (result.error && result.error !== 'incomplete-target') {
+  if (result.error && result.error !== 'incomplete-target' && result.error !== 'no-enabled-target') {
     toast.error(m.model_editor_invalid_target_controls())
     return
   }
   const cleanTargets = result.targets
-  const firstTarget = cleanTargets[0]
-  if (!form.modelId.trim() || !firstTarget || result.error === 'incomplete-target') {
-    toast.error(m.model_editor_destinations_help())
+  const firstTarget = cleanTargets.find((target) => target.enabled)
+  if (
+    !form.modelId.trim() ||
+    !firstTarget ||
+    result.error === 'incomplete-target' ||
+    result.error === 'no-enabled-target'
+  ) {
+    toast.error(m.model_editor_enabled_destination_required())
     return
   }
 
@@ -337,6 +453,21 @@ async function saveModel(): Promise<void> {
   }
 }
 </script>
+
+{#snippet targetCapabilityBadges(target: RouteTargetForm, summary: ProviderModelSummary | undefined)}
+  {#if target.capabilities}
+    <Badge variant="outline">
+      {formatNumber(target.capabilities.context_window)}
+      {m.common_context()}
+    </Badge>
+  {/if}
+  {#if target.capabilities?.reasoning}<Badge variant="outline">{m.common_reasoning()}</Badge>{/if}
+  {#if target.capabilities?.tool_call}<Badge variant="outline">{m.common_tool_calls()}</Badge>{/if}
+  {#each target.capabilities?.input_modalities ?? [] as modality (modality)}
+    <Badge variant="outline">{m.model_editor_modality_input({ modality })}</Badge>
+  {/each}
+  {#if summary?.capabilities.attachment}<Badge variant="outline">{m.common_attachments()}</Badge>{/if}
+{/snippet}
 
 <div class="route-page mx-auto min-h-[calc(100svh-5rem)] w-full max-w-[90rem]">
   <PageHeader
@@ -421,245 +552,404 @@ async function saveModel(): Promise<void> {
           ><CirclePlusIcon data-icon="inline-start" />{m.model_editor_add_destination()}</Button>
       </div>
 
-      <div class="flex flex-col gap-4">
-        {#each targets as target, index (target.key)}
-          {@const summary = selectedSummary(target)}
-          <article class="rounded-xl border p-4" aria-labelledby={`target-title-${target.key}`}>
-            <div class="mb-4 flex items-center justify-between gap-3">
-              <div class="flex items-center gap-2">
-                <h3 id={`target-title-${target.key}`} class="font-medium">
-                  {m.model_editor_destination_value({ index: index + 1 })}
-                </h3>
-                {#if target.persisted && summary && !summary.available}<Badge variant="destructive"
-                    >{m.model_editor_model_no_longer_available()}</Badge
-                  >{/if}
-              </div>
-              <div class="flex items-center gap-1">
-                {#if targets.length > 1}
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    class="size-10"
-                    aria-label={m.model_editor_remove_destination_value({ index: index + 1 })}
-                    onclick={() => removeTarget(index)}><Trash2Icon /></Button>
-                {/if}
-              </div>
+      <div class="grid gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(16rem,1fr)]">
+        <div
+          data-slot="target-lane-stack"
+          class="min-w-0 rounded-2xl border bg-muted/20 p-3"
+          aria-label={m.model_editor_enabled_targets()}>
+          <div class="mb-3 flex items-center justify-between gap-3 px-1">
+            <div>
+              <h3 class="font-medium">{m.model_editor_enabled_targets()}</h3>
+              <p class="text-sm text-muted-foreground">{m.model_editor_priority_lanes_help()}</p>
             </div>
+            <Badge variant="outline">{targets.filter((target) => target.enabled).length}</Badge>
+          </div>
 
-            <div class="grid gap-4 lg:grid-cols-3">
-              <Field.Field size="select">
-                <Field.Label for={`target-provider-${target.key}`}>{m.common_model_service()}</Field.Label>
-                <Select.Root
-                  type="single"
-                  value={target.providerId}
-                  onValueChange={(value) => value && void changeProvider(target, value)}>
-                  <Select.Trigger
-                    id={`target-provider-${target.key}`}
-                    class="w-full"
-                    aria-label={m.model_editor_destination_value_model_service({ index: index + 1 })}>
-                    {providers.find((provider) => provider.id === target.providerId)?.name ??
-                      m.model_editor_choose_model_service()}
-                  </Select.Trigger>
-                  <Select.Content>
-                    {#each availableProviders as provider (provider.id)}<Select.Item
-                        value={provider.id}
-                        label={provider.name}>{provider.name}</Select.Item
-                      >{/each}
-                  </Select.Content>
-                </Select.Root>
-              </Field.Field>
+          <div
+            class="flex min-h-12 items-center justify-center rounded-xl border border-dashed px-3 text-sm text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground"
+            role="button"
+            tabindex="0"
+            ondragover={(event) => event.preventDefault()}
+            ondrop={(event) => dropOnEdge(event, 'top')}>
+            {m.model_editor_add_higher_layer()}
+          </div>
 
-              <Field.Field size="fill">
-                <Field.Label for={`target-model-${target.key}`}>{m.common_model()}</Field.Label>
-                {#if target.custom}
-                  <Input
-                    id={`target-model-${target.key}`}
-                    class="font-technical"
-                    bind:value={target.model}
-                    aria-label={m.model_editor_destination_value_custom_model_id({ index: index + 1 })}
-                    placeholder="private-model" />
-                  <Field.Description class="text-warning"
-                    >{m.model_editor_model_not_synced_list_requests_fail_if_id()}</Field.Description>
-                  <Button class="mt-2" type="button" variant="ghost" size="sm" onclick={() => useInventory(target)}
-                    >{m.model_editor_choose_synced_model()}</Button>
-                {:else}
-                  <ModelCombobox
-                    id={`target-model-${target.key}`}
-                    value={target.model}
-                    models={modelCandidates(target)}
-                    placeholder={m.model_editor_choose_model()}
-                    searchPlaceholder={m.model_editor_search_model_id()}
-                    emptyText={m.model_editor_no_models_found()}
-                    ariaLabel={m.model_editor_destination_value_model({ index: index + 1 })}
-                    searchAriaLabel={m.model_editor_search_models_destination_value({ index: index + 1 })}
-                    disabled={!target.providerId || target.loading}
-                    onSelect={(value) => void selectModel(target, value)} />
-                {/if}
-              </Field.Field>
-
-              <Field.Field size="number">
-                <Field.Label for={`target-priority-${target.key}`}>{m.model_editor_target_priority()}</Field.Label>
-                <Input
-                  id={`target-priority-${target.key}`}
-                  type="number"
-                  min="0"
-                  max="100000"
-                  step="1"
-                  bind:value={target.priority} />
-                <Field.Description>{m.model_editor_target_priority_help()}</Field.Description>
-              </Field.Field>
-            </div>
-
-            <div class="mt-4 grid gap-4 border-t pt-4 md:grid-cols-3">
-              <Field.Field size="number">
-                <Field.Label for={`target-first-token-timeout-${target.key}`}
-                  >{m.model_editor_first_token_timeout()}</Field.Label>
-                <Input
-                  id={`target-first-token-timeout-${target.key}`}
-                  type="number"
-                  min="0"
-                  step="1"
-                  bind:value={target.firstTokenTimeoutMs} />
-                <Field.Description>{m.model_editor_first_token_timeout_help()}</Field.Description>
-              </Field.Field>
-              <Field.Field size="number">
-                <Field.Label for={`target-retry-budget-${target.key}`}
-                  >{m.model_editor_target_retry_budget()}</Field.Label>
-                <Input
-                  id={`target-retry-budget-${target.key}`}
-                  type="number"
-                  min="0"
-                  step="1"
-                  bind:value={target.targetRetryBudget} />
-                <Field.Description>{m.model_editor_target_retry_budget_help()}</Field.Description>
-              </Field.Field>
-              <Field.Field size="number">
-                <Field.Label for={`target-cooldown-${target.key}`}>{m.model_editor_target_cooldown()}</Field.Label>
-                <Input
-                  id={`target-cooldown-${target.key}`}
-                  type="number"
-                  min="0"
-                  step="1"
-                  bind:value={target.targetCooldownMs} />
-                <Field.Description>{m.model_editor_target_cooldown_help()}</Field.Description>
-              </Field.Field>
-            </div>
-
-            {#if target.loading}
-              <div class="mt-3 flex items-center gap-2 text-sm text-muted-foreground">
-                <Spinner />{m.model_editor_loading_models_supported_features()}
-              </div>
-            {:else if target.capabilities || summary}
-              <div
-                class="mt-4 flex flex-wrap items-center gap-2 border-t pt-3"
-                aria-label={m.model_editor_destination_value_supported_features({ index: index + 1 })}>
-                {#if target.capabilities}
-                  <Badge variant="outline"
-                    >{formatNumber(target.capabilities.context_window)} {m.common_context()}</Badge>
-                  {#if target.capabilities.reasoning}<Badge variant="outline">{m.common_reasoning()}</Badge>{/if}
-                  {#if target.capabilities.tool_call}<Badge variant="outline">{m.common_tool_calls()}</Badge>{/if}
-                  {#each target.capabilities.input_modalities as modality (modality)}<Badge variant="outline"
-                      >{m.model_editor_modality_input({ modality })}</Badge
-                    >{/each}
-                {/if}
-                {#if summary?.capabilities.attachment}<Badge variant="outline">{m.common_attachments()}</Badge>{/if}
-                {#if summary}
-                  <ModelDetailsDialog
-                    providerId={target.providerId}
-                    modelId={target.model}
-                    triggerLabel={m.model_editor_view_model_details()} />
-                {/if}
-              </div>
-            {/if}
-            {#if target.providerId && target.model.trim() && target.thinkingLevelMap.length > 0}
-              <div class="mt-4 border-t pt-4">
-                <div class="mb-3 flex flex-wrap items-start justify-between gap-3">
-                  <div>
-                    <h4 class="font-medium">{m.model_editor_thinking_map()}</h4>
-                    <p class="text-sm text-muted-foreground">{m.model_editor_thinking_map_help()}</p>
-                  </div>
-                  {#if target.id}
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onclick={() => requestThinkingMapRegeneration(target)}>
-                      {m.model_editor_thinking_regenerate()}
-                    </Button>
-                  {/if}
+          <div class="my-2 flex flex-col gap-2">
+            {#each targetLanes as lane, laneIndex (lane.priority)}
+              <section
+                class="grid min-h-28 grid-cols-[4.5rem_minmax(0,1fr)] overflow-hidden rounded-xl border bg-background shadow-xs"
+                aria-label={m.model_editor_layer_value({ index: laneIndex + 1 })}
+                ondragover={(event) => event.preventDefault()}
+                ondrop={(event) => dropOnLane(event, lane.priority)}>
+                <div class="flex flex-col items-center justify-center border-r bg-muted/50 px-2 text-center">
+                  <span class="font-technical text-xs uppercase tracking-[0.16em] text-muted-foreground">
+                    {m.model_editor_layer()}
+                  </span>
+                  <strong class="font-technical text-xl">{laneIndex + 1}</strong>
                 </div>
-                <div data-slot="thinking-map" class="divide-y border-y">
-                  {#each target.thinkingLevelMap as row (row.level)}
-                    <div
-                      data-slot="thinking-map-row"
-                      class="grid grid-cols-[minmax(0,1fr)_2.5rem] items-center gap-x-3 gap-y-2 py-2 sm:grid-cols-[minmax(8rem,0.8fr)_minmax(0,2.2fr)_2.5rem]">
-                      <div class="flex min-w-0 items-center gap-2">
-                        <span class="font-technical text-sm">{row.level}</span>
-                        {#if row.source === 'overridden'}
-                          <span class="text-xs text-muted-foreground">
-                            {m.model_editor_thinking_overridden()}
-                          </span>
+                <div class="flex min-w-0 flex-wrap content-start gap-2 p-2">
+                  {#each lane.targets as target (target.key)}
+                    {@const summary = selectedSummary(target)}
+                    <button
+                      type="button"
+                      draggable="true"
+                      class="group flex min-h-24 min-w-48 flex-1 cursor-grab flex-col items-start rounded-lg border bg-card p-3 text-left shadow-xs transition-[border-color,box-shadow,transform] hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-sm focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 active:cursor-grabbing"
+                      aria-label={m.model_editor_edit_destination_value({ index: targetIndex(target) + 1 })}
+                      ondragstart={(event) => startTargetDrag(event, target)}
+                      ondragend={() => (draggedTargetKey = '')}
+                      ondragover={(event) => event.preventDefault()}
+                      ondrop={(event) => dropOnLane(event, lane.priority, target.key)}
+                      onclick={() => editTarget(target)}>
+                      <span class="flex w-full min-w-0 items-center gap-2">
+                        <GripVerticalIcon class="size-4 shrink-0 text-muted-foreground" />
+                        <span class="truncate font-medium">
+                          {providers.find((provider) => provider.id === target.providerId)?.name ?? target.providerId}
+                        </span>
+                      </span>
+                      <span class="mt-1 w-full truncate pl-6 font-technical text-sm text-muted-foreground">
+                        {target.model}
+                      </span>
+                      <span class="mt-auto flex flex-wrap gap-1.5 pl-6 pt-2">
+                        {#if target.persisted && summary && !summary.available}
+                          <Badge variant="destructive">{m.model_editor_model_no_longer_available()}</Badge>
                         {/if}
-                      </div>
-                      <div class="col-span-2 flex min-w-0 gap-2 sm:col-span-1">
-                        <Select.Root
-                          type="single"
-                          value={row.control.type}
-                          onValueChange={(value) =>
-                            value && changeThinkingControlKind(row, value as TargetThinkingControl['type'])}>
-                          <Select.Trigger
-                            class="w-28 shrink-0 sm:w-32"
-                            aria-label={`${row.level} ${m.model_editor_thinking_control()}`}>
-                            {thinkingControlLabel(row.control.type)}
-                          </Select.Trigger>
-                          <Select.Content>
-                            {#each ['effort', 'budget', 'enabled', 'disabled', 'hidden'] as type (type)}
-                              <Select.Item value={type}
-                                >{thinkingControlLabel(type as TargetThinkingControl['type'])}</Select.Item>
-                            {/each}
-                          </Select.Content>
-                        </Select.Root>
-                        {#if row.control.type === 'effort'}
-                          <Input
-                            class="min-w-0 flex-1"
-                            value={row.control.value}
-                            aria-label={`${row.level} ${m.model_editor_thinking_effort()}`}
-                            oninput={(event) => changeThinkingControlValue(row, event.currentTarget.value)} />
-                        {:else if row.control.type === 'budget'}
-                          <Input
-                            class="min-w-0 flex-1"
-                            type="number"
-                            min="0"
-                            step="1"
-                            value={row.control.value}
-                            aria-label={`${row.level} ${m.model_editor_thinking_budget()}`}
-                            oninput={(event) => changeThinkingControlValue(row, event.currentTarget.value)} />
-                        {/if}
-                      </div>
-                      {#if target.id}
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon"
-                          class="col-start-2 row-start-1 size-10 justify-self-end sm:col-auto sm:row-auto"
-                          aria-label={`${m.model_editor_thinking_reset_row()}: ${row.level}`}
-                          title={m.model_editor_thinking_reset_row()}
-                          onclick={() => void resetThinkingRow(target, row.level)}>
-                          <RotateCcwIcon />
-                        </Button>
-                      {/if}
-                    </div>
+                        {@render targetCapabilityBadges(target, summary)}
+                      </span>
+                    </button>
                   {/each}
                 </div>
+              </section>
+            {:else}
+              <div
+                data-slot="target-lane-empty"
+                class="flex min-h-28 items-center justify-center rounded-xl border border-dashed px-4 text-center text-sm text-muted-foreground"
+                role="group"
+                aria-label={m.model_editor_no_enabled_targets()}
+                ondragover={(event) => event.preventDefault()}
+                ondrop={(event) => dropOnEdge(event, 'top')}>
+                {m.model_editor_no_enabled_targets()}
               </div>
-            {/if}
-            {#if target.validationError}<p class="mt-3 text-sm text-warning" role="status">
-                {target.validationError}
-              </p>{/if}
-          </article>
-        {/each}
+            {/each}
+          </div>
+
+          <div
+            class="flex min-h-12 items-center justify-center rounded-xl border border-dashed px-3 text-sm text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground"
+            role="button"
+            tabindex="0"
+            ondragover={(event) => event.preventDefault()}
+            ondrop={(event) => dropOnEdge(event, 'bottom')}>
+            {m.model_editor_add_lower_layer()}
+          </div>
+        </div>
+
+        <aside
+          data-slot="target-dock"
+          class="min-w-0 rounded-2xl border border-dashed bg-muted/30 p-3"
+          aria-label={m.model_editor_disabled_targets()}
+          ondragover={(event) => event.preventDefault()}
+          ondrop={dropInDock}>
+          <div class="mb-3 flex items-center justify-between gap-3 px-1">
+            <div>
+              <h3 class="font-medium">{m.model_editor_disabled_targets()}</h3>
+              <p class="text-sm text-muted-foreground">{m.model_editor_disabled_targets_help()}</p>
+            </div>
+            <Badge variant="secondary">{disabledTargets.length}</Badge>
+          </div>
+          <div class="flex flex-col gap-2">
+            {#each disabledTargets as target (target.key)}
+              {@const summary = selectedSummary(target)}
+              <div class="relative">
+                <button
+                  type="button"
+                  draggable="true"
+                  class="group flex min-h-20 w-full cursor-grab flex-col items-start rounded-lg border bg-background p-3 pr-12 text-left shadow-xs transition-[border-color,box-shadow,transform] hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-sm focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 active:cursor-grabbing"
+                  aria-label={m.model_editor_edit_destination_value({ index: targetIndex(target) + 1 })}
+                  ondragstart={(event) => startTargetDrag(event, target)}
+                  ondragend={() => (draggedTargetKey = '')}
+                  onclick={() => editTarget(target)}>
+                  <span class="flex w-full min-w-0 items-center gap-2">
+                    <GripVerticalIcon class="size-4 shrink-0 text-muted-foreground" />
+                    <span class="truncate font-medium">
+                      {providers.find((provider) => provider.id === target.providerId)?.name ||
+                        target.providerId ||
+                        m.model_editor_unconfigured_target()}
+                    </span>
+                  </span>
+                  <span class="mt-1 w-full truncate pl-6 font-technical text-sm text-muted-foreground">
+                    {target.model || m.model_editor_choose_model()}
+                  </span>
+                  <span class="mt-auto flex flex-wrap gap-1.5 pl-6 pt-2">
+                    {#if target.persisted && summary && !summary.available}
+                      <Badge variant="destructive">{m.model_editor_model_no_longer_available()}</Badge>
+                    {/if}
+                    {@render targetCapabilityBadges(target, summary)}
+                  </span>
+                </button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  class="absolute right-1.5 top-1.5 size-9"
+                  aria-label={m.model_editor_remove_destination_value({ index: targetIndex(target) + 1 })}
+                  onclick={() => removeDisabledTarget(target)}>
+                  <Trash2Icon />
+                </Button>
+              </div>
+            {:else}
+              <div
+                class="flex min-h-28 items-center justify-center rounded-xl border border-dashed bg-background/50 px-4 text-center text-sm text-muted-foreground">
+                {m.model_editor_no_disabled_targets()}
+              </div>
+            {/each}
+          </div>
+        </aside>
       </div>
+
+      <Dialog.Root
+        bind:open={targetEditorOpen}
+        onOpenChange={(open) => {
+          if (open) {
+            targetEditorClosing = false
+          } else if (!targetEditorClosing && targetEditorTarget) {
+            closeTargetEditor(false)
+          }
+        }}>
+        <Dialog.Content class="max-h-[90svh] overflow-y-auto sm:max-w-4xl">
+          {#if targetEditorTarget}
+            {@const target = targetEditorTarget}
+            {@const index = targetIndex(target)}
+            {@const summary = selectedSummary(target)}
+            <div aria-labelledby={`target-title-${target.key}`}>
+              <Dialog.Header class="mb-4">
+                <Dialog.Title id={`target-title-${target.key}`}>
+                  {m.model_editor_edit_destination_value({ index: index + 1 })}
+                </Dialog.Title>
+                <Dialog.Description>{m.model_editor_target_dialog_help()}</Dialog.Description>
+              </Dialog.Header>
+              <div class="mb-4 flex items-center justify-between gap-3 border-b pb-4">
+                <div class="flex items-center gap-2">
+                  <Badge variant={target.enabled ? 'default' : 'secondary'}>
+                    {target.enabled ? m.model_editor_enabled() : m.model_editor_disabled()}
+                  </Badge>
+                  {#if target.persisted && summary && !summary.available}<Badge variant="destructive"
+                      >{m.model_editor_model_no_longer_available()}</Badge
+                    >{/if}
+                </div>
+                <div class="flex items-center gap-1">
+                  {#if !target.enabled}
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      class="size-10"
+                      aria-label={m.model_editor_remove_destination_value({ index: index + 1 })}
+                      onclick={deleteEditedTarget}><Trash2Icon /></Button>
+                  {/if}
+                </div>
+              </div>
+
+              <div class="grid gap-4 lg:grid-cols-2">
+                <Field.Field size="select">
+                  <Field.Label for={`target-provider-${target.key}`}>{m.common_model_service()}</Field.Label>
+                  <Select.Root
+                    type="single"
+                    value={target.providerId}
+                    onValueChange={(value) => value && void changeProvider(target, value)}>
+                    <Select.Trigger
+                      id={`target-provider-${target.key}`}
+                      class="w-full"
+                      aria-label={m.model_editor_destination_value_model_service({ index: index + 1 })}>
+                      {providers.find((provider) => provider.id === target.providerId)?.name ??
+                        m.model_editor_choose_model_service()}
+                    </Select.Trigger>
+                    <Select.Content>
+                      {#each availableProviders as provider (provider.id)}<Select.Item
+                          value={provider.id}
+                          label={provider.name}>{provider.name}</Select.Item
+                        >{/each}
+                    </Select.Content>
+                  </Select.Root>
+                </Field.Field>
+
+                <Field.Field size="fill">
+                  <Field.Label for={`target-model-${target.key}`}>{m.common_model()}</Field.Label>
+                  {#if target.custom}
+                    <Input
+                      id={`target-model-${target.key}`}
+                      class="font-technical"
+                      bind:value={target.model}
+                      aria-label={m.model_editor_destination_value_custom_model_id({ index: index + 1 })}
+                      placeholder="private-model" />
+                    <Field.Description class="text-warning"
+                      >{m.model_editor_model_not_synced_list_requests_fail_if_id()}</Field.Description>
+                    <Button class="mt-2" type="button" variant="ghost" size="sm" onclick={() => useInventory(target)}
+                      >{m.model_editor_choose_synced_model()}</Button>
+                  {:else}
+                    <ModelCombobox
+                      id={`target-model-${target.key}`}
+                      value={target.model}
+                      models={modelCandidates(target)}
+                      placeholder={m.model_editor_choose_model()}
+                      searchPlaceholder={m.model_editor_search_model_id()}
+                      emptyText={m.model_editor_no_models_found()}
+                      ariaLabel={m.model_editor_destination_value_model({ index: index + 1 })}
+                      searchAriaLabel={m.model_editor_search_models_destination_value({ index: index + 1 })}
+                      disabled={!target.providerId || target.loading}
+                      onSelect={(value) => void selectModel(target, value)} />
+                  {/if}
+                </Field.Field>
+              </div>
+
+              <div class="mt-4 grid gap-4 border-t pt-4 md:grid-cols-3">
+                <Field.Field size="number">
+                  <Field.Label for={`target-first-token-timeout-${target.key}`}
+                    >{m.model_editor_first_token_timeout()}</Field.Label>
+                  <Input
+                    id={`target-first-token-timeout-${target.key}`}
+                    type="number"
+                    min="0"
+                    step="0.001"
+                    bind:value={target.firstTokenTimeoutSeconds} />
+                  <Field.Description>{m.model_editor_first_token_timeout_help()}</Field.Description>
+                </Field.Field>
+                <Field.Field size="number">
+                  <Field.Label for={`target-retry-budget-${target.key}`}
+                    >{m.model_editor_target_retry_budget()}</Field.Label>
+                  <Input
+                    id={`target-retry-budget-${target.key}`}
+                    type="number"
+                    min="0"
+                    step="1"
+                    bind:value={target.targetRetryBudget} />
+                  <Field.Description>{m.model_editor_target_retry_budget_help()}</Field.Description>
+                </Field.Field>
+                <Field.Field size="number">
+                  <Field.Label for={`target-cooldown-${target.key}`}>{m.model_editor_target_cooldown()}</Field.Label>
+                  <Input
+                    id={`target-cooldown-${target.key}`}
+                    type="number"
+                    min="0"
+                    step="0.001"
+                    bind:value={target.targetCooldownSeconds} />
+                  <Field.Description>{m.model_editor_target_cooldown_help()}</Field.Description>
+                </Field.Field>
+              </div>
+
+              {#if target.loading}
+                <div class="mt-3 flex items-center gap-2 text-sm text-muted-foreground">
+                  <Spinner />{m.model_editor_loading_models_supported_features()}
+                </div>
+              {:else if target.capabilities || summary}
+                <div
+                  class="mt-4 flex flex-wrap items-center gap-2 border-t pt-3"
+                  aria-label={m.model_editor_destination_value_supported_features({ index: index + 1 })}>
+                  {@render targetCapabilityBadges(target, summary)}
+                  {#if summary}
+                    <ModelDetailsDialog
+                      providerId={target.providerId}
+                      modelId={target.model}
+                      triggerLabel={m.model_editor_view_model_details()} />
+                  {/if}
+                </div>
+              {/if}
+              {#if target.providerId && target.model.trim() && target.thinkingLevelMap.length > 0}
+                <div class="mt-4 border-t pt-4">
+                  <div class="mb-3 flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <h4 class="font-medium">{m.model_editor_thinking_map()}</h4>
+                      <p class="text-sm text-muted-foreground">{m.model_editor_thinking_map_help()}</p>
+                    </div>
+                    {#if target.id}
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onclick={() => requestThinkingMapRegeneration(target)}>
+                        {m.model_editor_thinking_regenerate()}
+                      </Button>
+                    {/if}
+                  </div>
+                  <div data-slot="thinking-map" class="divide-y border-y">
+                    {#each target.thinkingLevelMap as row (row.level)}
+                      <div
+                        data-slot="thinking-map-row"
+                        class="grid grid-cols-[minmax(0,1fr)_2.5rem] items-center gap-x-3 gap-y-2 py-2 sm:grid-cols-[minmax(8rem,0.8fr)_minmax(0,2.2fr)_2.5rem]">
+                        <div class="flex min-w-0 items-center gap-2">
+                          <span class="font-technical text-sm">{row.level}</span>
+                          {#if row.source === 'overridden'}
+                            <span class="text-xs text-muted-foreground">
+                              {m.model_editor_thinking_overridden()}
+                            </span>
+                          {/if}
+                        </div>
+                        <div class="col-span-2 flex min-w-0 gap-2 sm:col-span-1">
+                          <Select.Root
+                            type="single"
+                            value={row.control.type}
+                            onValueChange={(value) =>
+                              value && changeThinkingControlKind(row, value as TargetThinkingControl['type'])}>
+                            <Select.Trigger
+                              class="w-28 shrink-0 sm:w-32"
+                              aria-label={`${row.level} ${m.model_editor_thinking_control()}`}>
+                              {thinkingControlLabel(row.control.type)}
+                            </Select.Trigger>
+                            <Select.Content>
+                              {#each ['effort', 'budget', 'enabled', 'disabled', 'hidden'] as type (type)}
+                                <Select.Item value={type}
+                                  >{thinkingControlLabel(type as TargetThinkingControl['type'])}</Select.Item>
+                              {/each}
+                            </Select.Content>
+                          </Select.Root>
+                          {#if row.control.type === 'effort'}
+                            <Input
+                              class="min-w-0 flex-1"
+                              value={row.control.value}
+                              aria-label={`${row.level} ${m.model_editor_thinking_effort()}`}
+                              oninput={(event) => changeThinkingControlValue(row, event.currentTarget.value)} />
+                          {:else if row.control.type === 'budget'}
+                            <Input
+                              class="min-w-0 flex-1"
+                              type="number"
+                              min="0"
+                              step="1"
+                              value={row.control.value}
+                              aria-label={`${row.level} ${m.model_editor_thinking_budget()}`}
+                              oninput={(event) => changeThinkingControlValue(row, event.currentTarget.value)} />
+                          {/if}
+                        </div>
+                        {#if target.id}
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            class="col-start-2 row-start-1 size-10 justify-self-end sm:col-auto sm:row-auto"
+                            aria-label={`${m.model_editor_thinking_reset_row()}: ${row.level}`}
+                            title={m.model_editor_thinking_reset_row()}
+                            onclick={() => void resetThinkingRow(target, row.level)}>
+                            <RotateCcwIcon />
+                          </Button>
+                        {/if}
+                      </div>
+                    {/each}
+                  </div>
+                </div>
+              {/if}
+              {#if target.validationError}<p class="mt-3 text-sm text-warning" role="status">
+                  {target.validationError}
+                </p>{/if}
+              <Dialog.Footer class="mt-5 border-t pt-4">
+                <Button type="button" variant="outline" onclick={() => closeTargetEditor(false)}>
+                  {m.common_cancel()}
+                </Button>
+                <Button
+                  type="button"
+                  disabled={target.enabled && !targetConfigured(target)}
+                  onclick={() => closeTargetEditor(true)}>{m.common_confirm()}</Button>
+              </Dialog.Footer>
+            </div>
+          {/if}
+        </Dialog.Content>
+      </Dialog.Root>
     </section>
 
     <section class="route-section" aria-labelledby="route-thinking-title">

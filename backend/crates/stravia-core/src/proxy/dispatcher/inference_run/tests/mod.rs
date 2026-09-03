@@ -994,6 +994,7 @@ async fn configure_route_with_protocol(
             .await
             .expect("create provider model");
         targets.push(CreateTarget {
+            enabled: true,
             provider_id: provider.id,
             model: "provider-model".into(),
             priority: Some(100_000 - priority as i32),
