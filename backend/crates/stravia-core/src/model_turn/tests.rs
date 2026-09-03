@@ -509,17 +509,20 @@ async fn execute_fails_over_before_canonical_output_and_returns_the_locked_targe
         .create_model(CreateRoute {
             model_id: "failover-model".into(),
             display_name: None,
-            balance: Some("priority".into()),
+            balance: Some("traffic_equalization".into()),
             target_provider: String::new(),
             target_model: String::new(),
             targets: providers
                 .iter()
                 .enumerate()
                 .map(|(index, provider)| CreateTarget {
+                    enabled: true,
                     provider_id: provider.id.clone(),
                     model: "upstream-model".into(),
-                    weight: Some(100),
-                    priority: Some(index as i32 + 1),
+                    priority: Some((providers.len() - index) as i32),
+                    first_token_timeout_ms: None,
+                    target_retry_budget: Some(0),
+                    target_cooldown_ms: None,
                     thinking_level_map: Vec::new(),
                 })
                 .collect(),
@@ -874,17 +877,20 @@ async fn execute_does_not_fail_over_after_the_first_canonical_delta() {
         .create_model(CreateRoute {
             model_id: "stream-lock-model".into(),
             display_name: None,
-            balance: Some("priority".into()),
+            balance: Some("traffic_equalization".into()),
             target_provider: String::new(),
             target_model: String::new(),
             targets: providers
                 .iter()
                 .enumerate()
                 .map(|(index, provider)| CreateTarget {
+                    enabled: true,
                     provider_id: provider.id.clone(),
                     model: "upstream-model".into(),
-                    weight: Some(100),
-                    priority: Some(index as i32 + 1),
+                    priority: Some((providers.len() - index) as i32),
+                    first_token_timeout_ms: None,
+                    target_retry_budget: Some(0),
+                    target_cooldown_ms: None,
                     thinking_level_map: Vec::new(),
                 })
                 .collect(),

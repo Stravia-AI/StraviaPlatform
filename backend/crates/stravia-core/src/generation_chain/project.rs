@@ -279,6 +279,7 @@ pub(crate) fn mark_generation_target(
     namespace: &str,
     protocol: ProtocolId,
     actual_model: &str,
+    selected_target_key: &str,
 ) {
     response.vendor.egress.insert(
         "__stravia_generation_chain_target".into(),
@@ -286,6 +287,7 @@ pub(crate) fn mark_generation_target(
             "namespace": namespace,
             "protocol": protocol.to_string(),
             "actual_model": actual_model,
+            "selected_target_key": selected_target_key,
         }),
     );
 }

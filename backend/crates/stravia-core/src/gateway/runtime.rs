@@ -229,6 +229,7 @@ impl Gateway {
             model_cache,
             health_registry,
             cache_affinity: router::cache_affinity::CacheAffinity::default(),
+            route_policy_state: router::RoutePolicyState::default(),
             ollama_capability_cache,
             log_tx,
             #[cfg(debug_assertions)]

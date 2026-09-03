@@ -757,6 +757,10 @@ async fn cache_affinity_prefers_the_target_that_processed_a_long_exact_prefix() 
     let first_target = crate::router::selected_target_key(&crate::router::SelectedTarget {
         provider_id: backends[0].provider_id.clone(),
         model: backends[0].model.clone(),
+        priority: backends[0].priority,
+        first_token_timeout_ms: backends[0].first_token_timeout_ms,
+        target_retry_budget: backends[0].target_retry_budget,
+        target_cooldown_ms: backends[0].target_cooldown_ms,
         thinking_level_map: backends[0].thinking_level_map.0.clone(),
     });
     for _ in 0..3 {

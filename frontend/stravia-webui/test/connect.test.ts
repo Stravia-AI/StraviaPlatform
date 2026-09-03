@@ -48,7 +48,7 @@ describe('Connect clients', () => {
       id: 'route',
       model_id: 'shared-model',
       display_name: 'Shared Model',
-      balance: 'weighted',
+      balance: 'traffic_equalization',
       target_provider: 'provider-a',
       target_model: 'upstream-a',
       is_enabled: true,

@@ -13,9 +13,9 @@ impl PostgresRouteStore {
             ""
         };
         let sql = format!(
-            "SELECT id, model_id, display_name, COALESCE(balance, 'weighted') AS balance, \
-             COALESCE((SELECT provider_id FROM model_backends WHERE model_id = models.id ORDER BY priority ASC, created_at ASC LIMIT 1), '') AS target_provider, \
-             COALESCE((SELECT model FROM model_backends WHERE model_id = models.id ORDER BY priority ASC, created_at ASC LIMIT 1), '') AS target_model, \
+            "SELECT id, model_id, display_name, COALESCE(balance, 'traffic_equalization') AS balance, \
+             COALESCE((SELECT provider_id FROM model_backends WHERE model_id = models.id AND enabled = TRUE ORDER BY priority DESC, created_at ASC LIMIT 1), '') AS target_provider, \
+             COALESCE((SELECT model FROM model_backends WHERE model_id = models.id AND enabled = TRUE ORDER BY priority DESC, created_at ASC LIMIT 1), '') AS target_model, \
              COALESCE(is_enabled, TRUE) AS is_enabled, \
              to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS created_at \
              FROM models{where_clause} ORDER BY created_at DESC"
@@ -32,7 +32,7 @@ impl PostgresRouteStore {
 
     async fn load_targets(&self, route_storage_id: &str) -> anyhow::Result<Vec<Target>> {
         Ok(sqlx::query_as::<_, Target>(
-            "SELECT id, model_id, provider_id, model, weight, priority, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS created_at, thinking_level_map FROM model_backends WHERE model_id = $1 ORDER BY priority ASC, created_at ASC",
+            "SELECT id, model_id, provider_id, model, enabled, priority, first_token_timeout_ms, target_retry_budget, target_cooldown_ms, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS created_at, thinking_level_map FROM model_backends WHERE model_id = $1 ORDER BY priority DESC, created_at ASC",
         )
         .bind(route_storage_id)
         .fetch_all(&self.pool)
@@ -41,9 +41,9 @@ impl PostgresRouteStore {
 
     async fn load_route(&self, route_id: &str) -> anyhow::Result<Option<Route>> {
         let route = sqlx::query_as::<_, Route>(
-            "SELECT id, model_id, display_name, COALESCE(balance, 'weighted') AS balance, \
-             COALESCE((SELECT provider_id FROM model_backends WHERE model_id = models.id ORDER BY priority ASC, created_at ASC LIMIT 1), '') AS target_provider, \
-             COALESCE((SELECT model FROM model_backends WHERE model_id = models.id ORDER BY priority ASC, created_at ASC LIMIT 1), '') AS target_model, \
+            "SELECT id, model_id, display_name, COALESCE(balance, 'traffic_equalization') AS balance, \
+             COALESCE((SELECT provider_id FROM model_backends WHERE model_id = models.id AND enabled = TRUE ORDER BY priority DESC, created_at ASC LIMIT 1), '') AS target_provider, \
+             COALESCE((SELECT model FROM model_backends WHERE model_id = models.id AND enabled = TRUE ORDER BY priority DESC, created_at ASC LIMIT 1), '') AS target_model, \
              COALESCE(is_enabled, TRUE) AS is_enabled, \
              to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS created_at \
              FROM models WHERE model_id = $1",
@@ -75,8 +75,8 @@ impl RouteStore for PostgresRouteStore {
     }
 
     async fn put(&self, route: PutRoute) -> anyhow::Result<Route> {
-        if route.targets.is_empty() {
-            anyhow::bail!("a Route requires at least one Target");
+        if !route.targets.iter().any(|target| target.enabled) {
+            anyhow::bail!("a Route requires at least one enabled Target");
         }
         let route_storage_id = route
             .id
@@ -122,7 +122,7 @@ impl RouteStore for PostgresRouteStore {
         }
 
         let existing = sqlx::query_as::<_, Target>(
-            "SELECT id, model_id, provider_id, model, weight, priority, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS created_at, thinking_level_map FROM model_backends WHERE model_id = $1",
+            "SELECT id, model_id, provider_id, model, enabled, priority, first_token_timeout_ms, target_retry_budget, target_cooldown_ms, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS created_at, thinking_level_map FROM model_backends WHERE model_id = $1",
         )
         .bind(&route_storage_id)
         .fetch_all(&mut *tx)
@@ -141,14 +141,29 @@ impl RouteStore for PostgresRouteStore {
                 .map(|row| row.id.clone())
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
             sqlx::query(
-                "INSERT INTO model_backends (id, model_id, provider_id, model, weight, priority, thinking_level_map) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                "INSERT INTO model_backends (id, model_id, provider_id, model, enabled, priority, first_token_timeout_ms, target_retry_budget, target_cooldown_ms, thinking_level_map) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
             )
             .bind(id)
             .bind(&route_storage_id)
             .bind(target.provider_id.trim())
             .bind(target.model.trim())
-            .bind(target.weight.unwrap_or(100).max(0))
-            .bind(target.priority.unwrap_or(1).max(1))
+            .bind(target.enabled)
+            .bind(target.priority.unwrap_or(DEFAULT_TARGET_PRIORITY))
+            .bind(
+                target
+                    .first_token_timeout_ms
+                    .unwrap_or(DEFAULT_FIRST_TOKEN_TIMEOUT_MS),
+            )
+            .bind(
+                target
+                    .target_retry_budget
+                    .unwrap_or(DEFAULT_TARGET_RETRY_BUDGET),
+            )
+            .bind(
+                target
+                    .target_cooldown_ms
+                    .unwrap_or(DEFAULT_TARGET_COOLDOWN_MS),
+            )
             .bind(sqlx::types::Json(&target.thinking_level_map))
             .execute(&mut *tx)
             .await?;

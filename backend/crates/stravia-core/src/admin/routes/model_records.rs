@@ -143,6 +143,7 @@ impl RouteModule<'_> {
                 route
                     .targets
                     .iter()
+                    .filter(|target| target.enabled)
                     .map(|target| target.provider_id.clone())
             })
             .collect::<BTreeSet<_>>();
@@ -205,13 +206,16 @@ fn common_target_limit(
     capabilities_by_provider: &BTreeMap<String, BTreeMap<String, ClientModelCapabilities>>,
     select: impl Fn(&ClientModelCapabilities) -> Option<u64>,
 ) -> Option<u64> {
-    let mut limits = targets.iter().map(|target| {
-        capabilities_by_provider
-            .get(&target.provider_id)
-            .and_then(|models| models.get(&target.model))
-            .and_then(&select)
-            .filter(|limit| *limit > 0)
-    });
+    let mut limits = targets
+        .iter()
+        .filter(|target| target.enabled)
+        .map(|target| {
+            capabilities_by_provider
+                .get(&target.provider_id)
+                .and_then(|models| models.get(&target.model))
+                .and_then(&select)
+                .filter(|limit| *limit > 0)
+        });
     let first = limits.next()??;
     limits.try_fold(first, |common, limit| Some(common.min(limit?)))
 }
@@ -220,11 +224,14 @@ fn all_targets_support_image_input(
     targets: &[Target],
     capabilities_by_provider: &BTreeMap<String, BTreeMap<String, ClientModelCapabilities>>,
 ) -> bool {
-    !targets.is_empty()
-        && targets.iter().all(|target| {
-            capabilities_by_provider
-                .get(&target.provider_id)
-                .and_then(|models| models.get(&target.model))
-                .is_some_and(|capabilities| capabilities.supports_image_input)
-        })
+    targets.iter().any(|target| target.enabled)
+        && targets
+            .iter()
+            .filter(|target| target.enabled)
+            .all(|target| {
+                capabilities_by_provider
+                    .get(&target.provider_id)
+                    .and_then(|models| models.get(&target.model))
+                    .is_some_and(|capabilities| capabilities.supports_image_input)
+            })
 }

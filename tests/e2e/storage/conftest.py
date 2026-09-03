@@ -276,13 +276,15 @@ def build_harness(work_dir: Path) -> None:
                 id: Some(route.id.clone()),
                 model_id: route.model_id.clone(),
                 display_name: updated.display_name.clone(),
-                selection_strategy: "latency".to_string(),
+                selection_strategy: "latency_preference".to_string(),
                 is_enabled: false,
                 targets: vec![CreateTarget {
                     provider_id: "missing-provider".to_string(),
                     model: "missing-model".to_string(),
-                    weight: Some(1),
                     priority: Some(1),
+                    first_token_timeout_ms: Some(60_000),
+                    target_retry_budget: Some(5),
+                    target_cooldown_ms: Some(120_000),
                     thinking_level_map: vec![],
                 }],
             }).await;

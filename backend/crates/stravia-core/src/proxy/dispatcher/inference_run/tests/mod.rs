@@ -994,10 +994,13 @@ async fn configure_route_with_protocol(
             .await
             .expect("create provider model");
         targets.push(CreateTarget {
+            enabled: true,
             provider_id: provider.id,
             model: "provider-model".into(),
-            weight: Some(100),
-            priority: Some(priority as i32 + 1),
+            priority: Some(100_000 - priority as i32),
+            first_token_timeout_ms: None,
+            target_retry_budget: Some(0),
+            target_cooldown_ms: None,
             thinking_level_map: Vec::new(),
         });
     }
@@ -1006,7 +1009,7 @@ async fn configure_route_with_protocol(
         .create_model(CreateRoute {
             model_id: model.into(),
             display_name: None,
-            balance: Some("priority".into()),
+            balance: Some("traffic_equalization".into()),
             target_provider: String::new(),
             target_model: String::new(),
             targets,

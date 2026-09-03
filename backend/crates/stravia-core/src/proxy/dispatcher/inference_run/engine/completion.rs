@@ -20,6 +20,7 @@ struct GenerationChainCompletion {
     target_namespace: String,
     target_protocol: crate::protocol::ids::ProtocolId,
     actual_model: String,
+    selected_target_key: String,
     owns_response_identity: bool,
     response_continuation_available: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
@@ -52,6 +53,7 @@ impl CompletionContext {
             target_namespace: target.namespace.clone(),
             target_protocol: egress,
             actual_model: target.actual_model.clone(),
+            selected_target_key: target.target_id.clone(),
             owns_response_identity,
             response_continuation_available: target.response_continuation_available.clone(),
         });
@@ -596,6 +598,7 @@ pub(super) async fn complete_canonical_response(
             &chain.target_namespace,
             chain.target_protocol,
             &chain.actual_model,
+            &chain.selected_target_key,
         );
         chain
             .write

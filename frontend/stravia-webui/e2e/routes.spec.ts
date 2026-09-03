@@ -271,9 +271,21 @@ test('Models table fits the desktop content width without horizontal scrolling',
               model_id: modelId,
               provider_id: 'codex',
               model: modelId,
-              weight: 100,
+              enabled: true,
               priority: 1,
             },
+            ...(modelId === 'gpt-5.6-sol'
+              ? [
+                  {
+                    id: `${modelId}-disabled-target`,
+                    model_id: modelId,
+                    provider_id: 'codex',
+                    model: 'disabled-shadow-model',
+                    enabled: false,
+                    priority: 0,
+                  },
+                ]
+              : []),
           ],
         })),
       },
@@ -285,8 +297,10 @@ test('Models table fits the desktop content width without horizontal scrolling',
   await expect(tableContainer.getByText('GPT 5.6 Sol', { exact: true })).toBeVisible()
   await expect(tableContainer.getByText('gpt-5.6-sol', { exact: true })).toBeVisible()
   await expect(tableContainer.getByText('grok-4.6', { exact: true })).toHaveCount(1)
+  await expect(tableContainer.getByText('disabled-shadow-model', { exact: true })).toHaveCount(0)
   const rows = tableContainer.getByRole('row')
   await expect(rows.nth(1)).toContainText('GPT 5.6 Sol')
+  await expect(rows.nth(1)).not.toContainText('disabled-shadow-model')
   await expect(rows.nth(2)).toContainText('gpt-5.6-luna')
   await expect(rows.nth(3)).toContainText('grok-4.6')
   expect(await tableContainer.evaluate((element) => element.scrollWidth)).toBeLessThanOrEqual(
@@ -463,8 +477,11 @@ test('Model Route editor derives thinking levels and identifies blocking destina
         model_id: 'thinking-route',
         provider_id: 'provider',
         model: 'wide-model',
-        weight: 100,
+        enabled: true,
         priority: 1,
+        first_token_timeout_ms: 60_000,
+        target_retry_budget: 5,
+        target_cooldown_ms: 120_000,
         created_at: '2026-08-17T00:00:00Z',
         thinking_level_map: thinkingMap(new Set(['off', 'low', 'high'])),
       },
@@ -473,8 +490,11 @@ test('Model Route editor derives thinking levels and identifies blocking destina
         model_id: 'thinking-route',
         provider_id: 'provider',
         model: 'narrow-model',
-        weight: 100,
+        enabled: true,
         priority: 2,
+        first_token_timeout_ms: 60_000,
+        target_retry_budget: 5,
+        target_cooldown_ms: 120_000,
         created_at: '2026-08-17T00:00:00Z',
         thinking_level_map: thinkingMap(new Set(['low', 'high'])),
       },
@@ -567,9 +587,13 @@ test('Model Route editor derives thinking levels and identifies blocking destina
   expect(Math.abs(nameInputBox!.width - displayInputBox!.width * 2)).toBeLessThanOrEqual(24)
 
   const thinkingMaps = page.locator('[data-slot="thinking-map"]')
-  await expect(thinkingMaps).toHaveCount(2)
-  await expect(page.locator('[data-slot="thinking-map-row"]')).toHaveCount(14)
-  await expect(page.getByText('Generated', { exact: true })).toHaveCount(0)
+  for (const index of [1, 2]) {
+    await page.getByRole('button', { name: `Edit destination ${index}` }).click()
+    await expect(thinkingMaps).toHaveCount(1)
+    await expect(page.locator('[data-slot="thinking-map-row"]')).toHaveCount(7)
+    await expect(page.getByText('Generated', { exact: true })).toHaveCount(0)
+    await page.getByRole('button', { name: 'Confirm' }).click()
+  }
 
   const levelCards = page.locator('[data-slot="route-thinking-level"]')
   await expect(levelCards).toHaveCount(7)
@@ -594,7 +618,7 @@ test('Model Route editor derives thinking levels and identifies blocking destina
   await expect.poll(() => updateBody?.is_enabled).toBe(false)
 })
 
-test('Route Builder loads Provider Models and exposes only strategy-relevant Target controls', async ({ page }) => {
+test('Route Builder loads Provider Models and edits priority-lane destinations in dialogs', async ({ page }) => {
   const providers = [
     {
       id: 'provider-a',
@@ -713,6 +737,7 @@ test('Route Builder loads Provider Models and exposes only strategy-relevant Tar
   await modelSearch.fill('openai/gpt-5.4')
   await page.getByRole('option', { name: /GPT-5\.4.*openai\/gpt-5\.4/ }).click()
   await displayName.fill('')
+  await page.getByRole('button', { name: 'Add destination' }).click()
   await page.getByLabel('Destination 1 model service', { exact: true }).click()
   await page.getByRole('option', { name: 'Provider A' }).click()
   await expect(page.getByLabel('Destination 1 model', { exact: true })).toBeEnabled()
@@ -720,32 +745,39 @@ test('Route Builder loads Provider Models and exposes only strategy-relevant Tar
   await expect(page.getByRole('option', { name: /GPT Available.*gpt-available/ })).toBeVisible()
   await expect(page.getByRole('option', { name: /GPT Unavailable/ })).toHaveCount(0)
   await page.getByRole('option', { name: /GPT Available.*gpt-available/ }).click()
-  await expect(page.getByText('128,000 context', { exact: true })).toBeVisible()
-  await expect(page.getByText('Reasoning', { exact: true })).toBeVisible()
+  await expect(page.getByTitle('128,000 context')).toBeVisible()
+  await expect(page.getByTitle('Reasoning')).toBeVisible()
+  await page.getByRole('button', { name: 'Confirm' }).click()
+  await expect(page.getByRole('button', { name: 'Edit destination 1' })).toContainText('Provider A')
+  await expect(page.getByRole('button', { name: 'Edit destination 1' })).toContainText('gpt-available')
 
   await page.getByRole('button', { name: 'Add destination' }).click()
   await page.getByLabel('Destination 2 model service', { exact: true }).click()
   await page.getByRole('option', { name: 'Provider A' }).click()
   await page.getByLabel('Destination 2 model', { exact: true }).click()
   await page.getByRole('option', { name: /GPT Available.*gpt-available/ }).click()
-  await page.getByLabel('Destination 1 traffic share').fill('1')
-  await page.getByLabel('Destination 2 traffic share').fill('3')
-  await expect(page.getByLabel('Destination 1 traffic share')).toHaveValue('1')
-  await expect(page.getByLabel('Destination 2 traffic share')).toHaveValue('3')
+  await page.getByRole('button', { name: 'Confirm' }).click()
+  await expect(page.getByRole('button', { name: 'Edit destination 2' })).toContainText('gpt-available')
+
+  await page
+    .getByRole('button', { name: 'Edit destination 1' })
+    .dragTo(page.locator('[data-slot="target-priority-connector"][data-position="empty"]'))
+  await expect(page.getByLabel('Layer 1')).toBeVisible()
   await expect(page.getByLabel('Destination 1 priority')).toHaveCount(0)
 
   await page.getByLabel('How requests are sent').click()
-  await page.getByRole('option', { name: 'Try in order' }).click()
+  await page.getByRole('option', { name: 'Latency preference' }).click()
   await expect(page.getByLabel('Destination 1 traffic share')).toHaveCount(0)
-  await expect(page.getByRole('button', { name: 'Move destination 2 up' })).toBeVisible()
-  await page.getByRole('button', { name: 'Move destination 2 up' }).click()
+  await expect(page.getByLabel('Layer 1')).toBeVisible()
 
+  await page.getByRole('button', { name: 'Edit destination 1' }).click()
   await page.getByLabel('Destination 1 model service', { exact: true }).click()
   await page.getByRole('option', { name: 'Provider B' }).click()
   await expect(page.getByLabel('Destination 1 model', { exact: true })).toHaveText(/Choose a model/)
-  await expect(page.getByText('128,000 context', { exact: true })).toHaveCount(1)
+  await expect(page.getByRole('dialog').getByTitle('128,000 context')).toHaveCount(0)
   await page.getByLabel('Destination 1 model', { exact: true }).click()
   await page.getByRole('option', { name: /GPT Available.*gpt-available/ }).click()
+  await page.getByRole('button', { name: 'Confirm' }).click()
 
   await page.getByRole('switch', { name: 'Enabled' }).click()
   await page.getByRole('button', { name: 'Save model' }).click()
@@ -753,7 +785,9 @@ test('Route Builder loads Provider Models and exposes only strategy-relevant Tar
   const validationError = page.locator('[data-sonner-toast]')
   await expect(validationError).toBeVisible()
   await expect(modelSearch).toHaveValue('gpt-5.4')
+  await page.getByRole('button', { name: 'Edit destination 1' }).click()
   await expect(page.getByLabel('Destination 1 model', { exact: true })).toHaveText(/GPT Available/)
+  await page.getByRole('button', { name: 'Confirm' }).click()
   await expect(page.getByRole('switch', { name: 'Enabled' })).not.toBeChecked()
   await expect(validationError).toBeHidden({ timeout: 10_000 })
   await page.getByRole('button', { name: 'Save model' }).click()

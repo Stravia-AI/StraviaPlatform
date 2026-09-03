@@ -50,14 +50,10 @@ const modelColumnHelper = createDataTableColumnHelper<Route>()
 
 function strategyLabel(strategy: RouteSelectionStrategy): string {
   switch (strategy) {
-    case 'weighted':
-      return m.models_split_share()
-    case 'priority':
-      return m.common_try_order()
-    case 'cooldown':
-      return m.model_editor_rotate_destinations()
-    case 'latency':
-      return m.model_editor_prefer_low_latency()
+    case 'traffic_equalization':
+      return m.model_editor_traffic_equalization()
+    case 'latency_preference':
+      return m.model_editor_latency_preference()
   }
 }
 
@@ -126,11 +122,16 @@ const deletesMediaUnderstandingRoute = $derived(
 
 function targetsLabel(model: Route): string {
   return model.targets
+    .filter((target) => target.enabled)
     .map(
       (target) =>
         `${providers.find((provider) => provider.id === target.provider_id)?.name ?? target.provider_id}: ${target.model}`,
     )
     .join(', ')
+}
+
+function enabledTargetCount(model: Route): number {
+  return model.targets.reduce((count, target) => count + (target.enabled ? 1 : 0), 0)
 }
 
 function openModel(model: Route, event: MouseEvent): void {
@@ -326,6 +327,7 @@ async function deleteModel(): Promise<void> {
       </div>
       <div class="route-mobile-list">
         {#each models as model (model.id)}
+          {@const targetCount = enabledTargetCount(model)}
           <div
             class="route-mobile-row cursor-pointer"
             role="link"
@@ -338,9 +340,9 @@ async function deleteModel(): Promise<void> {
                 <p class="truncate font-technical text-xs text-muted-foreground">{model.model_id}</p>
               {/if}
               <p class="mt-1 text-xs text-muted-foreground">
-                {strategyLabel(model.balance)} · {model.targets.length === 1
+                {strategyLabel(model.balance)} · {targetCount === 1
                   ? m.common_1_destination()
-                  : m.models_value_destinations({ target_count: model.targets.length })}
+                  : m.models_value_destinations({ target_count: targetCount })}
               </p>
               <TechnicalValue class="mt-1 text-muted-foreground" value={targetsLabel(model)} /><StatusIndicator
                 class="mt-1"

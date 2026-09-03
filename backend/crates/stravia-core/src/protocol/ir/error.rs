@@ -132,20 +132,36 @@ impl AiError {
 
     /// Construct an `AiError` from an HTTP status code.
     ///
-    /// The caller should override the `kind` if the response body provides more
-    /// specific information (e.g. OpenAI `error.type = "context_length_exceeded"`).
     pub fn from_status(status: u16, message: impl Into<String>) -> Self {
+        Self::new(Self::kind_from_status(status, None), message).with_status(status)
+    }
+
+    pub(crate) fn kind_from_status(status: u16, raw: Option<&Value>) -> AiErrorKind {
+        if status == 429 {
+            let body = raw
+                .map(Value::to_string)
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if ["insufficient_quota", "quota_exceeded", "billing_hard_limit"]
+                .iter()
+                .any(|marker| body.contains(marker))
+            {
+                return AiErrorKind::QuotaExceeded;
+            }
+            return AiErrorKind::RateLimitError;
+        }
         let kind = match status {
+            400 => AiErrorKind::InvalidRequest,
             401 => AiErrorKind::AuthenticationError,
             403 => AiErrorKind::AuthorizationError,
-            404 => AiErrorKind::NotFoundError,
+            404 => AiErrorKind::ModelNotAvailable,
             408 | 504 => AiErrorKind::Timeout,
-            429 => AiErrorKind::RateLimitError,
             500 => AiErrorKind::ServerError,
-            503 | 529 => AiErrorKind::ServiceUnavailable,
+            501..=528 => AiErrorKind::ServiceUnavailable,
+            529 => AiErrorKind::QuotaExceeded,
             _ => AiErrorKind::Unknown,
         };
-        Self::new(kind, message).with_status(status)
+        kind
     }
 }
 
@@ -156,3 +172,31 @@ impl fmt::Display for AiError {
 }
 
 impl std::error::Error for AiError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn http_529_is_quota_exhaustion_not_a_transient_service_failure() {
+        assert_eq!(
+            AiError::from_status(529, "overloaded").kind,
+            AiErrorKind::QuotaExceeded
+        );
+    }
+
+    #[test]
+    fn http_429_quota_marker_is_quota_exhaustion() {
+        assert_eq!(
+            AiError::kind_from_status(
+                429,
+                Some(&serde_json::json!({"error": {"type": "insufficient_quota"}})),
+            ),
+            AiErrorKind::QuotaExceeded
+        );
+        assert_eq!(
+            AiError::kind_from_status(429, None),
+            AiErrorKind::RateLimitError
+        );
+    }
+}

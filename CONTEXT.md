@@ -233,7 +233,24 @@ _避免使用_：Provider Status、Model Status
 
 ## Route
 
-Route 将 Route ID 映射到一组 Target，并规定这些 Target 的选择策略。
+Route 将 Route ID 映射到一组 Target，并规定这些 Target 的选择策略。一条 Route 必须至少有一个已启用 Target。
+
+## Route Scheduling Strategy
+
+Route Scheduling Strategy 是同一 Target Priority 组内选择 Target 的策略，取值为 Traffic Equalization 或 Latency Preference；缺省为 Traffic Equalization。它不替代 Target Continuation、Conversation Affinity、Cache Affinity 或 Target Priority。
+_避免使用_：balance、weighted、priority（当指 Route 旧四档）、cooldown（当指 Route 旧四档）、平均调度、Cost Equalization
+
+## Traffic Equalization
+
+Traffic Equalization 是把下一个请求分给同组内近期加权 token 流量最低的 Target 的调度策略。它均衡的是流量，不是美元成本。
+_避免使用_：平均调度、Cost Equalization、weighted、round-robin、计费
+
+
+## Latency Preference
+
+Latency Preference 是按上游近期 Token 速度与成功率选择同组 Target 的调度策略。
+_避免使用_：latency（当指 Route 旧四档）、EMA 延迟
+
 
 ## Route ID
 
@@ -245,9 +262,14 @@ _避免使用_：Route 名、展示名、昵称、大小写折叠、用存储主
 Model Display Name 是 Route 可选、可重复的人类可读标签。它不参与路由、授权、绑定或 Target 选择；为空时，面向人的展示统一回退到 Route ID。
 _避免使用_：Route ID、模型身份、查找键
 
+## Conversation Affinity
+
+Conversation Affinity 是客户端给出 Generation Chain 父节点或 Prompt Cache Directive 路由键时，对同一身份优先选择该身份上次成功 Target 的软性偏好。不同身份不共享该偏好；两种身份都没有时不生效。它按 Principal 与 Route 隔离，可压过 Target Priority，不形成 Session，也不替代 Target Continuation。
+_避免使用_：Session、Session Affinity、Client Session
+
 ## Cache Affinity
 
-Cache Affinity 是 Route 在候选 Target 间为提高上游 Prompt Cache 复用率施加的软性偏好。它按 Principal 隔离；对一个由 Canonical Item Hash 顺序组成的 Cache Prefix，它优先选择曾成功处理该前缀、且报告 `prompt_tokens` 不少于 20,000 的合格 Target；没有合格命中时，回退到 Route 的选择策略。它适用于所有通过 Route 选择 Target 的调用，不形成客户端、连接或 Session 绑定，不改变 Effective Model Request，也不复用响应或 Target Continuation。
+Cache Affinity 是在 Conversation Affinity 不生效时，为提高上游 Prompt Cache 复用率施加的软性偏好。它按 Principal 隔离；对一个由 Canonical Item Hash 顺序组成的 Cache Prefix，它优先选择曾成功处理该前缀、且报告 `prompt_tokens` 不少于 20,000 的合格 Target；没有合格命中时，回退到 Target Priority 与 Route Scheduling Strategy。它可压过 Target Priority，不形成客户端、连接或 Session 绑定，不改变 Effective Model Request，也不复用响应或 Target Continuation。
 
 ## Canonical Item Hash
 
@@ -276,12 +298,51 @@ Cache Prefix Token Count 是 Target 在成功处理 Cache Prefix 后报告的 `p
 
 ## Target
 
-Target 是 Route 中一个可尝试的上游目的地。只有当前 Target 的上游失败被明确判定为可重试时，当前 Run 才会按 Route 的选择策略尝试下一个 Target；Hook、Platform Tool、状态不变量错误与取消不会触发 Target 切换。
+Target 是 Route 上一个已配置的上游目的地。只有已启用 Target 会被尝试；只有当前 Target 的上游失败被明确判定为可重试时，当前 Run 才会按 Route 的选择策略尝试下一个已启用 Target；Hook、Platform Tool、状态不变量错误与取消不会触发 Target 切换。
+_避免使用_：调度泳池
+
+## Enabled Target
+
+已启用 Target 是参与该 Route 上 Target 选择、亲和与冷却的 Target。缺省为已启用。它必须已配置 Provider 与上游 model。
+_避免使用_：调度泳池、可调度 Target、在线 Target
+
+## Disabled Target
+
+已禁用 Target 是仍属于该 Route、但不参与选择、亲和或冷却的 Target。它不是已删除的 Target。
+_避免使用_：删除的 Target、暂存 Target、断开的 Target
+
+## Target Priority
+
+Target Priority 是 Target 上的分组整数，取值 -2147483648–2147483647，缺省为 0；数值越高越优先。用于选择时，仅已启用且数值相同的 Target 构成同一优先级组。它不是列表顺序，也不是 Weight。
+_避免使用_：列表序号、唯一排名、Weight（当指优先级）
+
+
+## First Token
+
+First Token 是当前 Target 本次尝试从上游收到的第一个 canonical 输出，包含 Thinking。它不是 Client Output Commit，也不要求该输出已经对客户端可见。
+_避免使用_：首个可见 Text、Client Output Commit
+
+## First Token Timeout
+
+First Token Timeout 是 Target 在发出上游请求后等待 First Token 的最长时限；缺省 60 秒，0 表示关闭。超时按瞬时失败处置。
+_避免使用_：总超时、Connect Timeout
+
+## Target Cooldown
+
+Target Cooldown 是 Target 在被本次请求放弃后，一段时间内不再承接新请求的状态；缺省 120 秒。它不阻止当前请求的同 Target 重试。
+_避免使用_：HealthRegistry、熔断（当指这个冷却）
+
+## Target Retry Budget
+
+Target Retry Budget 是瞬时失败时在更换 Target 前对同一 Target 的额外尝试次数；缺省 5 次（含首次共 6 次），间隔指数退避并 full jitter。
+_避免使用_：Route 重试、循环重试
+
 
 ## Client Output Commit
 
 Client Output Commit 是一次 Run 的输出首次不可逆地对客户端可见的时点。此前，当前 Target 的明确可重试上游失败可以触发 Target 切换；此后禁止切换 Target。它不表示响应正文已完整交付，完整交付只在正文成功结束时成立。
 _避免使用_：Output Started、Response Committed、Delivery Commit
+
 
 ## Protocol Conversion
 
