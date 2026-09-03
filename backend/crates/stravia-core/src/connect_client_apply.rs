@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use serde::ser::{SerializeMap as _, SerializeSeq as _};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue, json};
 use toml::{Table as TomlTable, Value as TomlValue};
@@ -923,9 +924,55 @@ fn parse_yaml(
 }
 
 fn serialize_yaml(path: &Path, document: &JsonValue) -> Result<Vec<u8>, ConnectClientApplyError> {
-    serde_saphyr::to_string(document)
+    serde_saphyr::to_string(&YamlJsonValue(document))
         .map(String::into_bytes)
         .map_err(|cause| error("serialize_error", cause.to_string(), Some(path)))
+}
+
+struct YamlJsonValue<'a>(&'a JsonValue);
+
+impl Serialize for YamlJsonValue<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self.0 {
+            JsonValue::Null => serializer.serialize_unit(),
+            JsonValue::Bool(value) => serializer.serialize_bool(*value),
+            JsonValue::Number(value) => {
+                if let Some(value) = value.as_i64() {
+                    serializer.serialize_i64(value)
+                } else if let Some(value) = value.as_u64() {
+                    serializer.serialize_u64(value)
+                } else if let Some(value) = value.as_i128() {
+                    serializer.serialize_i128(value)
+                } else if let Some(value) = value.as_u128() {
+                    serializer.serialize_u128(value)
+                } else if let Some(value) = value.as_f64() {
+                    serializer.serialize_f64(value)
+                } else {
+                    Err(serde::ser::Error::custom(format!(
+                        "JSON number cannot be represented as a YAML scalar: {value}"
+                    )))
+                }
+            }
+            JsonValue::String(value) => serializer.serialize_str(value),
+            JsonValue::Array(values) => {
+                let mut sequence = serializer.serialize_seq(Some(values.len()))?;
+                for value in values {
+                    sequence.serialize_element(&YamlJsonValue(value))?;
+                }
+                sequence.end()
+            }
+            JsonValue::Object(values) => {
+                let mut map = serializer.serialize_map(Some(values.len()))?;
+                for (key, value) in values {
+                    map.serialize_entry(key, &YamlJsonValue(value))?;
+                }
+                map.end()
+            }
+        }
+    }
 }
 
 fn yaml_plan(
@@ -1478,6 +1525,41 @@ name = "Other"
             .find(|file| file.path.ends_with(suffix))
             .unwrap_or_else(|| panic!("planned file ending with {suffix}"));
         String::from_utf8(file.bytes.clone()).expect("UTF-8 config")
+    }
+
+    #[test]
+    fn omp_plan_serializes_model_limits_as_yaml_numbers() {
+        #[derive(serde::Deserialize)]
+        struct Config {
+            providers: BTreeMap<String, Provider>,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct Provider {
+            models: Vec<Model>,
+        }
+
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Model {
+            context_window: u64,
+            max_tokens: u64,
+        }
+
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let input = standard_input(ConnectClientId::Omp);
+
+        let plan =
+            plan_connect_client_apply(&input, &environment(temporary.path()), &BTreeMap::new())
+                .expect("OMP plan");
+        let text = planned_text(&plan, "models.yml");
+        let document =
+            serde_saphyr::from_str::<Config>(&text).expect("generated OMP config matches schema");
+        let model = &document.providers["stravia"].models[0];
+
+        assert_eq!(model.context_window, 200_000);
+        assert_eq!(model.max_tokens, 32_000);
+        assert!(!text.contains("$serde_json::private::Number"));
     }
 
     #[test]
