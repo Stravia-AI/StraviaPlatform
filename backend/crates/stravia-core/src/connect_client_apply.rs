@@ -929,6 +929,8 @@ fn serialize_yaml(path: &Path, document: &JsonValue) -> Result<Vec<u8>, ConnectC
         .map_err(|cause| error("serialize_error", cause.to_string(), Some(path)))
 }
 
+// `serde_json/arbitrary_precision` exposes numbers to non-JSON serializers as a
+// private tagged struct. Adapt them explicitly so YAML receives scalar values.
 struct YamlJsonValue<'a>(&'a JsonValue);
 
 impl Serialize for YamlJsonValue<'_> {
