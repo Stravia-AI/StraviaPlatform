@@ -87,7 +87,7 @@ test('empty Model services, Models, API Keys, and logs speak the missing depende
   await expect(page.getByRole('button', { name: 'Clear history' })).toBeDisabled()
   await expect(page.getByLabel('Model service')).toHaveCount(0)
   await expect(
-    page.getByRole('region', { name: 'Recent requests' }).getByRole('link', { name: 'Connect agents' }),
+    page.getByRole('region', { name: 'Recent requests' }).getByRole('link', { name: 'Connect clients' }),
   ).toBeVisible()
 })
 
