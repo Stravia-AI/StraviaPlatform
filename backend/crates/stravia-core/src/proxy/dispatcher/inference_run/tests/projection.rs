@@ -645,6 +645,7 @@ async fn platform_stream_projection_matrix_for_registered_generation_ingresses()
             } else if ingress == OPEN_RESPONSES_2026_04_24 {
                 match event["type"].as_str() {
                     Some("response.reasoning.delta")
+                    | Some("response.reasoning_text.delta")
                     | Some("response.reasoning_summary_text.delta") => {
                         event["delta"].as_str().map(|text| ("reasoning", text))
                     }
