@@ -622,3 +622,28 @@ async fn write_stage_rejects_failed_terminals() {
         Err(PersistError::NotStaged)
     ));
 }
+
+#[tokio::test]
+async fn write_stage_rejects_unprojected_post_text_thinking() {
+    let chain = generation_chain().await;
+    let mut write = chain
+        .begin(
+            principal("owner"),
+            chat_request(serde_json::json!([
+                {"role": "user", "content": "question"}
+            ])),
+        )
+        .await
+        .expect("begin");
+    let mut response = AiResponse::new("upstream", "model");
+    response.items = vec![
+        AiItem::output_text("answer"),
+        AiItem::thinking("authoritative reasoning", None),
+    ];
+
+    assert!(!write.stage(&mut response, None));
+    assert!(matches!(
+        write.persist().await,
+        Err(PersistError::NotStaged)
+    ));
+}

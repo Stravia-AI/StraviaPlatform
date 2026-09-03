@@ -10,13 +10,15 @@ use crate::hook::Principal;
 use crate::protocol::ir::{ContentBlock, ToolCall};
 
 pub use sql::SqlHistoryMarkerStore;
+#[cfg(test)]
+pub(crate) use syntax::render_text_projection_span;
 pub use syntax::{
     HISTORY_MARKER_PREFIX, MarkerResolution, PROJECTION_DELIMITER_PREFIX,
     history_marker_references, render_history_marker, resolve_request_markers,
 };
 pub(crate) use syntax::{
-    render_history_marker_reference, render_preview_projection_span, render_text_projection_end,
-    render_text_projection_span, render_text_projection_start,
+    new_reference, render_history_marker_reference, render_preview_projection_end,
+    render_preview_projection_span, render_preview_projection_start, valid_reference,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +54,14 @@ pub struct HistoryMarker {
     pub reference: String,
     pub kind: HistoryMarkerKind,
     pub activity: String,
+}
+
+pub(crate) fn reserve_thinking_marker() -> HistoryMarker {
+    HistoryMarker {
+        reference: new_reference(),
+        kind: HistoryMarkerKind::Thinking,
+        activity: "Preserving protected reasoning".into(),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -117,6 +127,13 @@ pub trait HistoryMarkerStore: Send + Sync {
     async fn create_thinking(
         &self,
         principal: &Principal,
+        input: ThinkingMarkerInput,
+    ) -> Result<HistoryMarker, HistoryMarkerError>;
+
+    async fn create_reserved_thinking(
+        &self,
+        principal: &Principal,
+        reserved: &HistoryMarker,
         input: ThinkingMarkerInput,
     ) -> Result<HistoryMarker, HistoryMarkerError>;
 

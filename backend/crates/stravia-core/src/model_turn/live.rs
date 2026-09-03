@@ -222,6 +222,7 @@ async fn execute_inner(
                             Ok(result) => result,
                             Err(_) => Err(AttemptFailure::upstream(
                                 crate::protocol::ir::AiErrorKind::Timeout,
+                                None,
                                 "first_token_timeout",
                                 "Target did not produce a First Token before its timeout",
                                 None,
@@ -322,6 +323,7 @@ fn estimate_uncached_input_tokens(request: &AiRequest) -> u64 {
 struct PreparedAttempt {
     route: RouteContext,
     provider_call: ProviderCall,
+    reasoning_encrypted_content_requested: bool,
     force_stream: bool,
     actual_model: String,
     provider: crate::db::models::Provider,
@@ -348,14 +350,19 @@ impl AttemptFailure {
 
     fn upstream(
         kind: crate::protocol::ir::AiErrorKind,
+        status: Option<u16>,
         code: impl Into<String>,
         message: impl Into<String>,
         retry_after: Option<Duration>,
     ) -> Self {
+        let record_health = status.map_or_else(
+            || kind.is_retryable(),
+            |status| matches!(status, 408 | 429 | 500 | 502 | 503 | 529),
+        );
         Self {
             error: ModelTurnError::new(code, message),
             kind: Some(kind),
-            record_health: true,
+            record_health,
             retry_after,
         }
     }
@@ -714,6 +721,8 @@ async fn prepare_attempt(
         insert_default_prompt_cache_key(&mut outbound.body, prompt_cache_key);
         insert_default_prompt_cache_key(&mut full_outbound.body, prompt_cache_key);
     }
+    let reasoning_encrypted_content_requested =
+        requests_reasoning_encrypted_content(&outbound.body);
     let provider_call = if websocket_enabled {
         adapter.bind_responses_websocket(ResponsesWebSocketBinding {
             client,
@@ -727,6 +736,8 @@ async fn prepare_attempt(
             require_affinity,
             session_affinity,
         })
+    } else if continued_id.is_some() {
+        adapter.bind_with_continuation_fallback(client, outbound, full_outbound)
     } else {
         adapter.bind(client, outbound)
     };
@@ -751,6 +762,7 @@ async fn prepare_attempt(
             egress,
         },
         provider_call,
+        reasoning_encrypted_content_requested,
         force_stream: input.request.stream.enabled
             || websocket_enabled
             || target_capabilities.stream_only,
@@ -759,6 +771,18 @@ async fn prepare_attempt(
         namespace: target_namespace,
         trace,
     })
+}
+
+fn requests_reasoning_encrypted_content(body: &serde_json::Value) -> bool {
+    body.get("include")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|include| {
+            include.iter().any(|value| {
+                value
+                    .as_str()
+                    .is_some_and(|value| value == "reasoning.encrypted_content")
+            })
+        })
 }
 
 fn insert_default_prompt_cache_key(body: &mut serde_json::Value, prompt_cache_key: &str) {
@@ -770,7 +794,10 @@ fn insert_default_prompt_cache_key(body: &mut serde_json::Value, prompt_cache_ke
 
 #[cfg(test)]
 mod tests {
-    use super::{handle_terminal_stream_error, insert_default_prompt_cache_key};
+    use super::{
+        handle_terminal_stream_error, insert_default_prompt_cache_key,
+        requests_reasoning_encrypted_content,
+    };
     use crate::protocol::ir::{AiError, AiErrorKind, AiStreamDelta};
 
     #[test]
@@ -782,6 +809,22 @@ mod tests {
         let mut explicit = serde_json::json!({"prompt_cache_key": "client-cache"});
         insert_default_prompt_cache_key(&mut explicit, "session-cache");
         assert_eq!(explicit["prompt_cache_key"], "client-cache");
+    }
+
+    #[test]
+    fn encrypted_reasoning_detection_uses_the_outbound_include_contract() {
+        assert!(requests_reasoning_encrypted_content(&serde_json::json!({
+            "include": [
+                "web_search_call.action.sources",
+                "reasoning.encrypted_content"
+            ]
+        })));
+        assert!(!requests_reasoning_encrypted_content(
+            &serde_json::json!({"include": ["web_search_call.action.sources"]})
+        ));
+        assert!(!requests_reasoning_encrypted_content(
+            &serde_json::json!({})
+        ));
     }
 
     #[test]
@@ -855,6 +898,7 @@ async fn begin_attempt(
                 {
                     AttemptFailure::upstream(
                         AiError::kind_from_status(decode.status, None),
+                        Some(decode.status),
                         "upstream_error",
                         error.to_string(),
                         retry_after(&decode.headers),
@@ -873,6 +917,7 @@ async fn begin_attempt(
                 .unwrap_or_else(|| AiError::kind_from_status(call.status, Some(&call.raw)));
             return Err(AttemptFailure::upstream(
                 kind,
+                Some(call.status),
                 "upstream_error",
                 format!("upstream returned HTTP {}", call.status),
                 retry_after(&call.headers),
@@ -916,6 +961,7 @@ async fn begin_attempt(
             route: prepared.route,
             target: target_identity,
             output: Box::pin(stream::iter(events)),
+            reasoning_encrypted_content_requested: prepared.reasoning_encrypted_content_requested,
             streamed: false,
             transport: prepared.trace,
         });
@@ -947,6 +993,7 @@ async fn begin_attempt(
                 .unwrap_or_default();
             return Err(AttemptFailure::upstream(
                 kind,
+                Some(status),
                 "upstream_error",
                 format!("upstream returned HTTP {status}"),
                 retry_after,
@@ -998,6 +1045,7 @@ async fn begin_attempt(
     }) {
         return Err(AttemptFailure::upstream(
             error.kind.clone(),
+            error.status_code,
             "upstream_stream_error",
             "upstream stream error",
             None,
@@ -1120,6 +1168,7 @@ async fn begin_attempt(
         route: prepared.route,
         target: target_identity,
         output: Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)),
+        reasoning_encrypted_content_requested: prepared.reasoning_encrypted_content_requested,
         streamed: true,
         transport: prepared.trace,
     })

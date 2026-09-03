@@ -1,7 +1,7 @@
 use crate::Gateway;
 use crate::history_marker::{
     ClaimOutcome, HiddenHistorySegment, HistoryMarker, HistoryMarkerError, PlatformMarkerInput,
-    ThinkingMarkerInput, render_history_marker,
+    render_history_marker,
 };
 use crate::hook::{DetachedPlatformExecution, Principal};
 use crate::model_turn::TargetIdentity;
@@ -12,7 +12,7 @@ use crate::protocol::ir::{
 };
 use crate::proxy::context::RequestContext;
 
-use super::{ClientProjector, Phase, PhaseTracker, is_protected_thinking};
+use super::{ClientProjectionSession, Phase, PhaseTracker};
 
 #[derive(Clone)]
 struct GenerationChainCompletion {
@@ -31,7 +31,6 @@ pub(super) struct CompletionContext {
     actual_model: String,
     logical_model: String,
     principal: Principal,
-    ingress: crate::protocol::ids::ProtocolId,
     generation_chain: Option<GenerationChainCompletion>,
     client_output_commit: ClientOutputCommit,
 }
@@ -63,7 +62,6 @@ impl CompletionContext {
             actual_model: target.actual_model.clone(),
             logical_model,
             principal: generation.principal,
-            ingress,
             generation_chain,
             client_output_commit: ClientOutputCommit::Pending,
         }
@@ -262,7 +260,7 @@ pub(super) struct CompletionInput<'a> {
     pub(super) response: AiResponse,
     pub(super) upstream_response_id: Option<String>,
     pub(super) early_platform_executions: Vec<EarlyPlatformExecution>,
-    pub(super) early_thinking_markers: Vec<EarlyThinkingMarkers>,
+    pub(super) projection: &'a mut ClientProjectionSession,
 }
 
 pub(super) struct PreparedPlatformMarker {
@@ -291,11 +289,6 @@ impl PreparedPlatformMarker {
 pub(super) struct EarlyPlatformExecution {
     pub(super) marker: PreparedPlatformMarker,
     pub(super) execution: crate::StartedHistoryMarkerExecution,
-}
-
-pub(super) struct EarlyThinkingMarkers {
-    pub(super) output_index: usize,
-    pub(super) markers: Vec<HistoryMarker>,
 }
 
 pub(super) async fn prepare_platform_markers(
@@ -440,113 +433,6 @@ fn append_restored_platform_round(
     }));
 }
 
-const THINKING_MARKER_PENDING_RETENTION: std::time::Duration =
-    std::time::Duration::from_secs(60 * 60);
-
-async fn create_thinking_marker(
-    context: &CompletionContext,
-    block: ContentBlock,
-) -> Result<HistoryMarker, HistoryMarkerError> {
-    context
-        .gateway
-        .history_markers
-        .create_thinking(
-            &context.principal,
-            ThinkingMarkerInput {
-                block,
-                activity: "Preserving protected reasoning".into(),
-                pending_retention: THINKING_MARKER_PENDING_RETENTION,
-            },
-        )
-        .await
-}
-
-pub(super) async fn prepare_thinking_markers(
-    context: &CompletionContext,
-    item: &AiItem,
-) -> Result<Vec<HistoryMarker>, HistoryMarkerError> {
-    if context.ingress != crate::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1 {
-        return Ok(Vec::new());
-    }
-    let MessageContent::Blocks(blocks) = &item.content else {
-        return Ok(Vec::new());
-    };
-    let mut markers = Vec::new();
-    for block in blocks.iter().filter(|block| is_protected_thinking(block)) {
-        markers.push(create_thinking_marker(context, block.clone()).await?);
-    }
-    Ok(markers)
-}
-
-async fn project_protected_thinking(
-    projector: &ClientProjector,
-    context: &CompletionContext,
-    response: &mut AiResponse,
-    early_thinking_markers: Vec<EarlyThinkingMarkers>,
-) -> Result<Vec<String>, HistoryMarkerError> {
-    if context.ingress != crate::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1 {
-        if !early_thinking_markers.is_empty() {
-            return Err(HistoryMarkerError::InvalidPayload);
-        }
-        return Ok(Vec::new());
-    }
-    let mut early_by_output_index = std::collections::BTreeMap::new();
-    for early in early_thinking_markers {
-        if early_by_output_index
-            .insert(
-                early.output_index,
-                std::collections::VecDeque::from(early.markers),
-            )
-            .is_some()
-        {
-            return Err(HistoryMarkerError::InvalidPayload);
-        }
-    }
-    let mut projected = Vec::with_capacity(response.items.len());
-    let mut new_references = Vec::new();
-    for (output_index, mut item) in std::mem::take(&mut response.items).into_iter().enumerate() {
-        let mut prepared = early_by_output_index
-            .remove(&output_index)
-            .unwrap_or_default();
-        let mut item_markers = Vec::new();
-        if let MessageContent::Blocks(blocks) = &mut item.content {
-            let mut visible_blocks = Vec::with_capacity(blocks.len());
-            for block in std::mem::take(blocks) {
-                if !is_protected_thinking(&block) {
-                    visible_blocks.push(block);
-                    continue;
-                }
-                let marker = if let Some(marker) = prepared.pop_front() {
-                    marker
-                } else {
-                    let marker = create_thinking_marker(context, block.clone()).await?;
-                    new_references.push(marker.reference.clone());
-                    marker
-                };
-                if let Some(visible_block) = projector.visible_protected_block(&block, &marker) {
-                    visible_blocks.push(visible_block);
-                }
-                item_markers.push(marker);
-            }
-            *blocks = visible_blocks;
-        }
-        if !prepared.is_empty() {
-            return Err(HistoryMarkerError::InvalidPayload);
-        }
-        let item_is_empty = matches!(&item.content, MessageContent::Blocks(blocks) if blocks.is_empty())
-            && item.tool_calls.is_none();
-        if !item_is_empty {
-            projected.push(item);
-        }
-        projected.extend(item_markers.iter().map(ClientProjector::marker_item));
-    }
-    if !early_by_output_index.is_empty() {
-        return Err(HistoryMarkerError::InvalidPayload);
-    }
-    response.items = projected;
-    Ok(new_references)
-}
-
 pub(super) async fn publish_markers(
     context: &CompletionContext,
     references: &[String],
@@ -572,7 +458,7 @@ pub(super) async fn complete_canonical_response(
         mut response,
         upstream_response_id,
         early_platform_executions,
-        early_thinking_markers,
+        projection,
     } = input;
     let commit = context.client_output_commit;
     fill_canonical_defaults(context, &mut response);
@@ -611,20 +497,9 @@ pub(super) async fn complete_canonical_response(
     let has_platform_calls = !classified.platform.is_empty();
     let has_client_calls = !classified.client.is_empty();
     let canonical_response = response.clone();
-    let mut projector = ClientProjector::new();
-    let mut publish_references = match project_protected_thinking(
-        &projector,
-        context,
-        &mut response,
-        early_thinking_markers,
-    )
-    .await
-    {
-        Ok(references) => references,
-        Err(error) => return CompletionOutcome::Failed(CompletionFailure::hook(error, commit)),
-    };
-    let mut background_executions = Vec::new();
     let mut started_executions = Vec::new();
+    let mut prepared_platform = Vec::new();
+    let mut platform_jobs = Vec::new();
     if has_platform_calls {
         let early_call_ids = early_platform_executions
             .iter()
@@ -647,7 +522,7 @@ pub(super) async fn complete_canonical_response(
                 return CompletionOutcome::Failed(CompletionFailure::hook(error, commit));
             }
         };
-        let prepared = early_platform_executions
+        prepared_platform = early_platform_executions
             .into_iter()
             .map(|early| {
                 started_executions.push(early.execution);
@@ -655,11 +530,12 @@ pub(super) async fn complete_canonical_response(
             })
             .chain(prepared)
             .collect::<Vec<_>>();
+        platform_jobs = jobs;
         let mut published = request_context
             .extensions
             .get::<PublishedPlatformExecutions>()
             .unwrap_or_default();
-        for reference in prepared
+        for reference in prepared_platform
             .iter()
             .map(|prepared| prepared.marker.reference.clone())
         {
@@ -667,29 +543,32 @@ pub(super) async fn complete_canonical_response(
                 published.references.push(reference);
             }
         }
-        publish_references.extend(
-            prepared
-                .iter()
-                .map(|prepared| prepared.marker.reference.clone()),
-        );
         request_context.extensions.insert(published);
-        let platform = prepared
-            .iter()
-            .map(|marker| (marker.call_id(), marker.marker()))
-            .collect::<Vec<_>>();
-        response.items = projector.project_items(std::mem::take(&mut response.items), &platform);
-        if !has_client_calls {
-            return CompletionOutcome::PlatformOnly(Box::new(PlatformOnlyContinuation {
-                projected_response: response,
-                canonical_response,
-                markers: prepared,
-                jobs,
-                started_executions,
-                publish_references,
-            }));
-        }
-        background_executions = jobs;
     }
+    let platform = prepared_platform
+        .iter()
+        .map(|marker| (marker.call_id(), marker.marker()))
+        .collect::<Vec<_>>();
+    let mut publish_references = match projection.project_staged(&mut response, &platform).await {
+        Ok(references) => references,
+        Err(error) => return CompletionOutcome::Failed(CompletionFailure::hook(error, commit)),
+    };
+    publish_references.extend(
+        prepared_platform
+            .iter()
+            .map(|prepared| prepared.marker.reference.clone()),
+    );
+    if has_platform_calls && !has_client_calls {
+        return CompletionOutcome::PlatformOnly(Box::new(PlatformOnlyContinuation {
+            projected_response: response,
+            canonical_response,
+            markers: prepared_platform,
+            jobs: platform_jobs,
+            started_executions,
+            publish_references,
+        }));
+    }
+    let background_executions = platform_jobs;
     apply_hidden_rounds(request_context, &mut response);
     if let Err(error) = phase.transition(Phase::SemanticComplete) {
         return CompletionOutcome::Failed(CompletionFailure::hook(error, commit));

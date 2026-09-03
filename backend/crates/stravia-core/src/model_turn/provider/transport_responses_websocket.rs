@@ -54,10 +54,16 @@ impl ProviderAdapter {
             require_affinity,
             session_affinity,
         } = request;
+        let continuation_fallback = outbound
+            .body
+            .get("previous_response_id")
+            .is_some()
+            .then(|| full_outbound.clone());
         ProviderCall {
             adapter: self,
             client,
             outbound,
+            continuation_fallback,
             websocket: Some(ResponsesWebSocketCall {
                 registry,
                 namespace,

@@ -518,8 +518,6 @@ ${JSON.stringify(
   if (params.tool === 'zcode') {
     const zcodeModels = Object.fromEntries(
       models.map((model) => {
-        const variants = [...new Set(model.supportedThinkingLevels)]
-        const defaultVariant = variants.includes('medium') ? 'medium' : variants.find((variant) => variant !== 'off')
         const limit = {
           ...(model.contextWindow === undefined ? {} : { context: model.contextWindow }),
           ...(model.outputMaxTokens === undefined ? {} : { output: model.outputMaxTokens }),
@@ -528,7 +526,6 @@ ${JSON.stringify(
         return [
           model.modelId,
           {
-            ...(defaultVariant === undefined ? {} : { reasoning: { enabled: true, variants, defaultVariant } }),
             ...(Object.keys(limit).length === 0 ? {} : { limit }),
             modalities: { input: inputModalities(model, params.transparentImageInputEnabled), output: ['text'] },
             zcode: { modalitiesConfigured: true, modified: true },
@@ -557,6 +554,8 @@ ${JSON.stringify(
   2,
 )}
 
+# ZCode rewrites this file at startup and does not preserve custom per-level request mappings.
+# Reasoning controls are available only when ZCode recognizes the model itself.
 # Restart ZCode, then select ${params.defaultModel} as the default model.`
   }
 

@@ -94,7 +94,14 @@ impl GenerationChainWrite {
         response: &mut AiResponse,
         upstream_response_id: Option<String>,
     ) -> bool {
-        if !generation_node_is_legal(response) {
+        if !generation_node_is_legal(response)
+            || !client_projection_is_valid(
+                crate::protocol::transform::ProtocolTransform::inferred_ingress(
+                    &self.request_delta,
+                ),
+                response,
+            )
+        {
             return false;
         }
         attach_persisted_profile(

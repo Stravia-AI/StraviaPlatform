@@ -100,7 +100,7 @@
             installPhase = "true";
             outputHashMode = "recursive";
             outputHashAlgo = "sha256";
-            outputHash = "sha256-/9JnpaZ7gFcrfzfc7uNSBOqKbrwMyS2CUTyAiekb8dY=";
+            outputHash = "sha256-ABbbeswuVdhqdhcnLghQZ0KkWRAsicd//1Iea49JedQ=";
           };
 
           webui = pkgs.stdenvNoCC.mkDerivation {
@@ -150,6 +150,11 @@
               "stravia-server"
             ];
             doCheck = false;
+            nativeBuildInputs = [
+              pkgs.cmake
+              pkgs.git
+              pkgs.rustPlatform.bindgenHook
+            ];
 
             preBuild = ''
               mkdir -p frontend/stravia-webui/dist

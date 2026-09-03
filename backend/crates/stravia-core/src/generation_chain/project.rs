@@ -28,7 +28,7 @@ pub(super) fn project_client_history(
     }
     if ingress == OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1 {
         let _ = prefix;
-        return Ok(project_chat_history(response));
+        return project_chat_history(response);
     }
     if ingress == ANTHROPIC_MESSAGES_2023_06_01 {
         let _ = prefix;
@@ -41,8 +41,53 @@ pub(super) fn project_client_history(
     Ok(generic_client_history_output(response))
 }
 
-fn project_chat_history(response: &AiResponse) -> Vec<AiItem> {
-    vec![crate::protocol::codec::openai::compatible::stream::client_history_output_item(response)]
+pub(super) fn client_projection_is_valid(
+    ingress: Option<ProtocolId>,
+    response: &AiResponse,
+) -> bool {
+    ingress != Some(crate::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1)
+        || chat_history_is_projected(response)
+}
+
+fn chat_history_is_projected(response: &AiResponse) -> bool {
+    let mut post_text = false;
+    for item in &response.items {
+        if item.role != Role::Assistant {
+            continue;
+        }
+        match &item.content {
+            MessageContent::Text(text) => {
+                post_text |= !text.is_empty();
+            }
+            MessageContent::Blocks(blocks) => {
+                for block in blocks {
+                    match block {
+                        ContentBlock::Text { text, .. } => post_text |= !text.is_empty(),
+                        ContentBlock::Thinking { .. }
+                        | ContentBlock::Reasoning { .. }
+                        | ContentBlock::RedactedThinking { .. }
+                            if post_text =>
+                        {
+                            return false;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    true
+}
+
+fn project_chat_history(response: &AiResponse) -> Result<Vec<AiItem>, String> {
+    if !chat_history_is_projected(response) {
+        return Err(
+            "unprojected post-Text Thinking cannot be staged as Chat client history".into(),
+        );
+    }
+    Ok(vec![
+        crate::protocol::codec::openai::compatible::stream::client_history_output_item(response),
+    ])
 }
 
 fn project_anthropic_history(response: &AiResponse) -> Vec<AiItem> {

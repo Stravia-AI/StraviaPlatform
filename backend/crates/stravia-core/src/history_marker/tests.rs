@@ -742,6 +742,125 @@ async fn resolver_replaces_protected_preview_with_authoritative_thinking() {
 }
 
 #[tokio::test]
+async fn resolver_treats_content_preview_as_display_only_while_marker_remains() {
+    let store = sqlite_store().await;
+    let owner = principal("owner");
+    let marker = store
+        .create_thinking(
+            &owner,
+            ThinkingMarkerInput {
+                block: ContentBlock::Thinking {
+                    thinking: "authoritative R2".into(),
+                    signature: None,
+                },
+                activity: "Preserving protected reasoning".into(),
+                pending_retention: Duration::from_secs(60),
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .publish(
+            &owner,
+            std::slice::from_ref(&marker.reference),
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+    let edited_preview =
+        render_preview_projection_span(&marker.reference, 0, "\n> client-edited preview\n");
+    let mut request = AiRequest::new(
+        "model",
+        vec![
+            AiItem::output_text("C1"),
+            AiItem::output_text(format!(
+                "{edited_preview}{}",
+                render_history_marker(&marker)
+            )),
+            AiItem::output_text("C2"),
+        ],
+    );
+
+    let summary = resolve_request_markers(store.as_ref(), &owner, &mut request)
+        .await
+        .unwrap();
+
+    assert_eq!(summary.restored_thinking_segments, 1);
+    assert_eq!(request.items.len(), 3);
+    assert_eq!(request.items[0].output_text_ref(), Some("C1"));
+    assert!(matches!(
+        request.items[1].thinking_ref(),
+        Some(("authoritative R2", None))
+    ));
+    assert_eq!(request.items[2].output_text_ref(), Some("C2"));
+}
+
+#[tokio::test]
+async fn reserved_thinking_reference_is_in_memory_until_atomic_creation() {
+    let store = sqlite_store().await;
+    let owner = principal("owner");
+    let reserved = reserve_thinking_marker();
+
+    assert!(
+        store
+            .resolve(&owner, &reserved.reference)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let marker = store
+        .create_reserved_thinking(
+            &owner,
+            &reserved,
+            ThinkingMarkerInput {
+                block: ContentBlock::Thinking {
+                    thinking: "authoritative".into(),
+                    signature: None,
+                },
+                activity: reserved.activity.clone(),
+                pending_retention: Duration::from_secs(60),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(marker.reference, reserved.reference);
+    let stored = store
+        .resolve(&owner, &marker.reference)
+        .await
+        .unwrap()
+        .expect("complete reserved Thinking Marker");
+    assert!(matches!(
+        stored.segment,
+        Some(HiddenHistorySegment::Thinking {
+            block: ContentBlock::Thinking {
+                thinking,
+                signature: None,
+            }
+        }) if thinking == "authoritative"
+    ));
+}
+
+#[tokio::test]
+async fn resolver_keeps_content_preview_as_text_after_marker_deletion() {
+    let store = sqlite_store().await;
+    let owner = principal("owner");
+    let reference = "hm_0123456789abcdefghij";
+    let edited_preview = render_preview_projection_span(reference, 0, "\n> retained client text\n");
+    let mut request = AiRequest::new("model", vec![AiItem::output_text(edited_preview)]);
+
+    let summary = resolve_request_markers(store.as_ref(), &owner, &mut request)
+        .await
+        .unwrap();
+
+    assert_eq!(summary, MarkerResolution::default());
+    assert_eq!(
+        request.items[0].output_text_ref(),
+        Some("\n> retained client text\n")
+    );
+}
+
+#[tokio::test]
 async fn resolver_replaces_reasoning_previews_and_restores_redacted_blocks() {
     let store = sqlite_store().await;
     let owner = principal("owner");

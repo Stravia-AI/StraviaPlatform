@@ -1,5 +1,136 @@
 use super::*;
 
+#[derive(Clone, Copy)]
+enum ThinkingMarkerFailure {
+    Persist,
+    Publish,
+}
+
+struct FailingThinkingMarkerStore {
+    inner: Arc<dyn crate::history_marker::HistoryMarkerStore>,
+    failure: ThinkingMarkerFailure,
+}
+
+#[async_trait::async_trait]
+impl crate::history_marker::HistoryMarkerStore for FailingThinkingMarkerStore {
+    async fn create_platform(
+        &self,
+        principal: &crate::hook::Principal,
+        input: crate::history_marker::PlatformMarkerInput,
+    ) -> Result<crate::history_marker::HistoryMarker, crate::history_marker::HistoryMarkerError>
+    {
+        self.inner.create_platform(principal, input).await
+    }
+
+    async fn create_thinking(
+        &self,
+        principal: &crate::hook::Principal,
+        input: crate::history_marker::ThinkingMarkerInput,
+    ) -> Result<crate::history_marker::HistoryMarker, crate::history_marker::HistoryMarkerError>
+    {
+        if matches!(self.failure, ThinkingMarkerFailure::Persist) {
+            return Err(crate::history_marker::HistoryMarkerError::Storage(
+                "injected Thinking persistence failure".into(),
+            ));
+        }
+        self.inner.create_thinking(principal, input).await
+    }
+
+    async fn create_reserved_thinking(
+        &self,
+        principal: &crate::hook::Principal,
+        reserved: &crate::history_marker::HistoryMarker,
+        input: crate::history_marker::ThinkingMarkerInput,
+    ) -> Result<crate::history_marker::HistoryMarker, crate::history_marker::HistoryMarkerError>
+    {
+        if matches!(self.failure, ThinkingMarkerFailure::Persist) {
+            return Err(crate::history_marker::HistoryMarkerError::Storage(
+                "injected Thinking persistence failure".into(),
+            ));
+        }
+        self.inner
+            .create_reserved_thinking(principal, reserved, input)
+            .await
+    }
+
+    async fn resolve(
+        &self,
+        principal: &crate::hook::Principal,
+        reference: &str,
+    ) -> Result<
+        Option<crate::history_marker::ResolvedHistoryMarker>,
+        crate::history_marker::HistoryMarkerError,
+    > {
+        self.inner.resolve(principal, reference).await
+    }
+
+    async fn claim_execution(
+        &self,
+        principal: &crate::hook::Principal,
+        reference: &str,
+        owner_id: &str,
+        lease: std::time::Duration,
+    ) -> Result<crate::history_marker::ClaimOutcome, crate::history_marker::HistoryMarkerError>
+    {
+        self.inner
+            .claim_execution(principal, reference, owner_id, lease)
+            .await
+    }
+
+    async fn finish_execution(
+        &self,
+        principal: &crate::hook::Principal,
+        reference: &str,
+        owner_id: &str,
+        state: crate::history_marker::PlatformExecutionState,
+        segment: crate::history_marker::HiddenHistorySegment,
+    ) -> Result<(), crate::history_marker::HistoryMarkerError> {
+        self.inner
+            .finish_execution(principal, reference, owner_id, state, segment)
+            .await
+    }
+
+    async fn wait_terminal(
+        &self,
+        principal: &crate::hook::Principal,
+        reference: &str,
+    ) -> Result<
+        Option<crate::history_marker::ResolvedHistoryMarker>,
+        crate::history_marker::HistoryMarkerError,
+    > {
+        self.inner.wait_terminal(principal, reference).await
+    }
+
+    async fn publish(
+        &self,
+        principal: &crate::hook::Principal,
+        references: &[String],
+        retention: std::time::Duration,
+    ) -> Result<(), crate::history_marker::HistoryMarkerError> {
+        if matches!(self.failure, ThinkingMarkerFailure::Publish) {
+            return Err(crate::history_marker::HistoryMarkerError::Storage(
+                "injected Thinking publish failure".into(),
+            ));
+        }
+        self.inner.publish(principal, references, retention).await
+    }
+
+    async fn extend_retention(
+        &self,
+        principal: &crate::hook::Principal,
+        references: &[String],
+        retention: std::time::Duration,
+    ) -> Result<(), crate::history_marker::HistoryMarkerError> {
+        self.inner
+            .extend_retention(principal, references, retention)
+            .await
+    }
+
+    async fn cleanup_expired(&self) -> Result<u64, crate::history_marker::HistoryMarkerError> {
+        self.inner.cleanup_expired().await
+    }
+}
+
 struct ExposeToolAndSignalUsageHook {
     usage_processed: Arc<tokio::sync::Notify>,
 }
@@ -128,6 +259,225 @@ async fn protected_reasoning_marker_is_emitted_at_item_done_before_answer() {
 }
 
 #[tokio::test]
+async fn protected_reasoning_summary_streams_before_item_done() {
+    let (summary_events, completion_events) = openai_responses_live_protected_summary_sse_parts();
+    let (upstream_url, _calls, release_completion) =
+        serve_gated_sse(summary_events, completion_events).await;
+    let data_dir = tempfile::tempdir().expect("temp data dir");
+    let (gateway, _logs) = Gateway::new(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .expect("gateway init");
+    configure_route_with_protocol(
+        &gateway,
+        "live-protected-reasoning",
+        &[upstream_url],
+        "test-http",
+        "open-responses",
+    )
+    .await;
+
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        execute_stream(gateway, "live-protected-reasoning"),
+    )
+    .await
+    .expect("protected summary must commit the response before ItemDone");
+    let mut chunks = response.into_body().into_data_stream();
+    let prefix = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let mut prefix = String::new();
+        loop {
+            let chunk = chunks
+                .next()
+                .await
+                .expect("stream ended before protected summary")
+                .expect("stream chunk");
+            prefix.push_str(std::str::from_utf8(&chunk).expect("UTF-8 stream chunk"));
+            if prefix.contains("live protected ")
+                && prefix.contains(r#""reasoning_content":"summary"#)
+            {
+                break prefix;
+            }
+        }
+    })
+    .await
+    .expect("protected summary must stream before ItemDone");
+    assert!(prefix.contains(r#""role":"assistant""#), "{prefix}");
+    assert!(prefix.contains("resp-live-protected"), "{prefix}");
+    assert!(
+        prefix.contains(crate::history_marker::PROJECTION_DELIMITER_PREFIX),
+        "{prefix}"
+    );
+    assert_eq!(
+        prefix
+            .matches(crate::history_marker::PROJECTION_DELIMITER_PREFIX)
+            .count(),
+        1,
+        "{prefix}"
+    );
+    assert!(
+        !prefix.contains(crate::history_marker::HISTORY_MARKER_PREFIX),
+        "{prefix}"
+    );
+    assert!(!prefix.contains("opaque-reasoning"), "{prefix}");
+
+    release_completion
+        .send(())
+        .expect("release reasoning completion");
+    let suffix = to_bytes(axum::body::Body::from_stream(chunks), usize::MAX)
+        .await
+        .expect("remaining stream body");
+    let body = format!("{prefix}{}", String::from_utf8_lossy(&suffix));
+    assert_eq!(
+        body.matches(crate::history_marker::HISTORY_MARKER_PREFIX)
+            .count(),
+        1,
+        "{body}"
+    );
+    assert_eq!(
+        body.matches(crate::history_marker::PROJECTION_DELIMITER_PREFIX)
+            .count(),
+        2,
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn public_reasoning_summary_streams_before_item_done() {
+    let (summary_events, completion_events) = openai_responses_live_public_summary_sse_parts();
+    let (upstream_url, _calls, release_completion) =
+        serve_gated_sse(summary_events, completion_events).await;
+    let data_dir = tempfile::tempdir().expect("temp data dir");
+    let (gateway, _logs) = Gateway::new(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .expect("gateway init");
+    configure_route_with_protocol(
+        &gateway,
+        "live-public-reasoning",
+        &[upstream_url],
+        "test-http",
+        "open-responses",
+    )
+    .await;
+
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        execute_stream(gateway, "live-public-reasoning"),
+    )
+    .await
+    .expect("public summary must commit the response before ItemDone");
+    let mut chunks = response.into_body().into_data_stream();
+    let prefix = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let mut prefix = String::new();
+        loop {
+            let chunk = chunks
+                .next()
+                .await
+                .expect("stream ended before public summary")
+                .expect("stream chunk");
+            prefix.push_str(std::str::from_utf8(&chunk).expect("UTF-8 stream chunk"));
+            if prefix.contains("live protected ")
+                && prefix.contains(r#""reasoning_content":"summary"#)
+            {
+                break prefix;
+            }
+        }
+    })
+    .await
+    .expect("public summary must stream before ItemDone");
+    assert!(prefix.contains(r#""role":"assistant""#), "{prefix}");
+    assert!(prefix.contains("resp-live-protected"), "{prefix}");
+    assert!(
+        !prefix.contains(crate::history_marker::PROJECTION_DELIMITER_PREFIX),
+        "{prefix}"
+    );
+    assert!(
+        !prefix.contains(crate::history_marker::HISTORY_MARKER_PREFIX),
+        "{prefix}"
+    );
+
+    release_completion
+        .send(())
+        .expect("release reasoning completion");
+    let suffix = to_bytes(axum::body::Body::from_stream(chunks), usize::MAX)
+        .await
+        .expect("remaining stream body");
+    let body = format!("{prefix}{}", String::from_utf8_lossy(&suffix));
+    assert_eq!(
+        body.matches(r#""reasoning_content":"live protected ""#)
+            .count(),
+        1,
+        "{body}"
+    );
+    assert_eq!(
+        body.matches(r#""reasoning_content":"summary""#).count(),
+        1,
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn protected_reasoning_marker_failures_abort_after_live_summary() {
+    let responses = (0..2)
+        .map(|_| {
+            let (summary, completion) = openai_responses_live_protected_summary_sse_parts();
+            format!("{summary}{completion}")
+        })
+        .collect();
+    let (upstream_url, provider_calls) = serve_sse_sequence(responses).await;
+    let data_dir = tempfile::tempdir().expect("temp data dir");
+    let (mut gateway, _logs) = Gateway::new(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .expect("gateway init");
+    configure_route_with_protocol(
+        &gateway,
+        "failing-live-protected-reasoning",
+        &[upstream_url],
+        "test-http",
+        "open-responses",
+    )
+    .await;
+    let marker_store = Arc::clone(&gateway.history_markers);
+
+    for failure in [
+        ThinkingMarkerFailure::Persist,
+        ThinkingMarkerFailure::Publish,
+    ] {
+        gateway.history_markers = Arc::new(FailingThinkingMarkerStore {
+            inner: Arc::clone(&marker_store),
+            failure,
+        });
+        let response = execute_stream(gateway.clone(), "failing-live-protected-reasoning").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("failed stream body");
+        let body = String::from_utf8_lossy(&body);
+        assert!(body.contains("live protected "), "{body}");
+        assert!(body.contains(r#""reasoning_content":"summary"#), "{body}");
+        assert!(body.contains("stream_mid_error"), "{body}");
+        assert!(!body.contains("opaque-reasoning"), "{body}");
+
+        let generation_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM turn_chain_nodes WHERE kind = 'response'",
+        )
+        .fetch_one(gateway._sqlite_pool.as_ref().expect("Gateway SQLite pool"))
+        .await
+        .expect("count Generation Chain nodes");
+        assert_eq!(generation_count, 0);
+    }
+    assert_eq!(provider_calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
 async fn platform_execution_starts_at_tool_call_complete_before_model_turn_ends() {
     let tool_event = format!(
         "data: {}\n\n",
@@ -213,7 +563,7 @@ async fn platform_execution_starts_at_tool_call_complete_before_model_turn_ends(
 }
 
 #[tokio::test]
-async fn exposed_platform_tool_buffers_ambiguous_text_until_model_leg_completes() {
+async fn exposed_platform_tool_streams_text_before_model_leg_completes() {
     let first_event = format!(
         "data: {}\n\ndata: {}\n\n",
         serde_json::json!({
@@ -272,36 +622,254 @@ async fn exposed_platform_tool_buffers_ambiguous_text_until_model_leg_completes(
     )
     .await;
 
-    let mut execution = Box::pin(execute_protocol_request(
+    let execution = execute_protocol_request(
         gateway,
         "platform-tool-live-text",
         ANTHROPIC_MESSAGES_2023_06_01,
         "/v1/messages",
         true,
-    ));
-    let completed_before_usage = tokio::select! {
-        biased;
-        response = execution.as_mut() => Some(response),
-        _ = usage_processed.notified() => None,
-    };
-    assert!(
-        completed_before_usage.is_none(),
-        "the first Text delta was processed before Usage and must remain buffered"
     );
+    let response = tokio::time::timeout(std::time::Duration::from_secs(2), execution)
+        .await
+        .expect("first Text must commit the client response before Model Leg completion");
+    let mut chunks = response.into_body().into_data_stream();
+    let prefix = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let mut prefix = String::new();
+        while !prefix.contains(r#""text":"normalized:live""#) {
+            let chunk = chunks
+                .next()
+                .await
+                .expect("stream ended before first Text")
+                .expect("stream chunk");
+            prefix.push_str(std::str::from_utf8(&chunk).expect("UTF-8 stream chunk"));
+        }
+        prefix
+    })
+    .await
+    .expect("first Text must arrive while upstream completion remains gated");
+    assert!(!prefix.contains("message_stop"), "{prefix}");
 
     release_upstream
         .send(())
         .expect("release upstream completion");
-    let response = tokio::time::timeout(std::time::Duration::from_secs(2), execution)
-        .await
-        .expect("response after Model Leg completion");
-    let chunks = response.into_body().into_data_stream();
     let body = to_bytes(axum::body::Body::from_stream(chunks), usize::MAX)
         .await
         .expect("completed stream body");
     let body = std::str::from_utf8(&body).expect("UTF-8 stream body");
-    assert!(body.contains(r#""text":"normalized:live""#), "{body}");
     assert!(body.contains("message_stop"), "{body}");
+}
+
+#[tokio::test]
+async fn disconnect_during_post_text_preview_persists_no_marker_or_generation_node() {
+    let first_events = [
+        serde_json::json!({
+            "id": "upstream-cancel-preview",
+            "model": "provider-model",
+            "choices": [{
+                "index": 0,
+                "delta": {"role": "assistant", "content": "C1"},
+                "finish_reason": null
+            }]
+        }),
+        serde_json::json!({
+            "id": "upstream-cancel-preview",
+            "model": "provider-model",
+            "choices": [{
+                "index": 0,
+                "delta": {"reasoning_content": "R2"},
+                "finish_reason": null
+            }]
+        }),
+    ]
+    .into_iter()
+    .map(|event| format!("data: {event}\n\n"))
+    .collect();
+    let remaining_events = format!(
+        "data: {}\n\ndata: [DONE]\n\n",
+        serde_json::json!({
+            "id": "upstream-cancel-preview",
+            "model": "provider-model",
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "stop"
+            }]
+        })
+    );
+    let (upstream_url, _calls, release_upstream) =
+        serve_gated_sse(first_events, remaining_events).await;
+    let data_dir = tempfile::tempdir().expect("temp data dir");
+    let (gateway, _logs) = Gateway::new(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .expect("gateway init");
+    configure_route(&gateway, "cancel-post-text-preview", &[upstream_url]).await;
+
+    let response = execute_stream(gateway.clone(), "cancel-post-text-preview").await;
+    let mut chunks = response.into_body().into_data_stream();
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let mut prefix = String::new();
+        while !prefix.contains(crate::history_marker::PROJECTION_DELIMITER_PREFIX) {
+            let chunk = chunks
+                .next()
+                .await
+                .expect("stream ended before Preview")
+                .expect("stream chunk");
+            prefix.push_str(std::str::from_utf8(&chunk).expect("UTF-8 stream chunk"));
+        }
+    })
+    .await
+    .expect("Post-Text Preview should stream before terminal");
+    drop(chunks);
+    release_upstream
+        .send(())
+        .expect("release upstream completion after disconnect");
+    tokio::task::yield_now().await;
+
+    let pool = gateway._sqlite_pool.as_ref().expect("Gateway SQLite pool");
+    let marker_count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM history_markers")
+        .fetch_one(pool)
+        .await
+        .expect("count History Markers");
+    let generation_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM turn_chain_nodes WHERE kind = 'response'",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("count Generation Chain nodes");
+    assert_eq!(marker_count, 0);
+    assert_eq!(generation_count, 0);
+}
+
+#[tokio::test]
+async fn post_text_marker_failures_abort_stream_and_skip_generation_commit() {
+    let (upstream_url, provider_calls) = serve_sse_sequence(vec![
+        openai_sse_text_thinking_text(),
+        openai_sse_text_thinking_text(),
+    ])
+    .await;
+    let data_dir = tempfile::tempdir().expect("temp data dir");
+    let (mut gateway, _logs) = Gateway::new(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .expect("gateway init");
+    configure_route(&gateway, "failing-post-text-marker", &[upstream_url]).await;
+    let marker_store = Arc::clone(&gateway.history_markers);
+
+    for failure in [
+        ThinkingMarkerFailure::Persist,
+        ThinkingMarkerFailure::Publish,
+    ] {
+        gateway.history_markers = Arc::new(FailingThinkingMarkerStore {
+            inner: Arc::clone(&marker_store),
+            failure,
+        });
+        let response = execute_stream(gateway.clone(), "failing-post-text-marker").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("failed stream body");
+        let body = String::from_utf8_lossy(&body);
+        assert!(body.contains("> R2"), "{body}");
+        assert!(body.contains("stream_mid_error"), "{body}");
+        assert!(!body.contains(r#""content":"C2""#), "{body}");
+
+        let generation_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM turn_chain_nodes WHERE kind = 'response'",
+        )
+        .fetch_one(gateway._sqlite_pool.as_ref().expect("Gateway SQLite pool"))
+        .await
+        .expect("count Generation Chain nodes");
+        assert_eq!(generation_count, 0);
+    }
+    assert_eq!(provider_calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn non_stream_post_text_marker_persistence_failure_is_typed_error() {
+    let platform_round = serde_json::json!({
+        "id": "buffered-marker-platform",
+        "model": "provider-model",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "reasoning_content": "R1",
+                "content": "C1",
+                "tool_calls": [{
+                    "id": "platform-marker-failure",
+                    "type": "function",
+                    "function": {
+                        "name": "stravia__ordered_tool",
+                        "arguments": "{\"index\":1}"
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    });
+    let final_round = serde_json::json!({
+        "id": "buffered-marker-final",
+        "model": "provider-model",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "reasoning_content": "R2",
+                "content": "C2"
+            },
+            "finish_reason": "stop"
+        }]
+    });
+    let (upstream_url, provider_calls) = serve_openai_sequence(vec![
+        platform_round.clone(),
+        final_round.clone(),
+        platform_round,
+        final_round,
+    ])
+    .await;
+    let data_dir = tempfile::tempdir().expect("temp data dir");
+    let (expose_tool_hook, _request_hook_rounds) = ExposeOrderedToolHook::counting();
+    let (mut gateway, _logs) = Gateway::builder(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .hook(Arc::new(expose_tool_hook))
+    .platform_tool(Arc::new(OrderedTool {
+        calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+    }))
+    .build()
+    .await
+    .expect("gateway init");
+    configure_route(
+        &gateway,
+        "failing-buffered-post-text-marker",
+        &[upstream_url],
+    )
+    .await;
+    let marker_store = Arc::clone(&gateway.history_markers);
+    for failure in [
+        ThinkingMarkerFailure::Persist,
+        ThinkingMarkerFailure::Publish,
+    ] {
+        gateway.history_markers = Arc::new(FailingThinkingMarkerStore {
+            inner: Arc::clone(&marker_store),
+            failure,
+        });
+        let response =
+            execute_non_stream(gateway.clone(), "failing-buffered-post-text-marker").await;
+        assert!(response.status().is_server_error(), "{}", response.status());
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("typed marker failure body");
+        let body = String::from_utf8_lossy(&body);
+        assert!(body.contains("hook_failed"), "{body}");
+    }
+    assert_eq!(provider_calls.load(Ordering::SeqCst), 3);
 }
 
 #[tokio::test]

@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn platform_leg_text_projects_to_reasoning_and_hidden_followup_stays_canonical() {
+async fn non_stream_projection_matches_ordered_content_and_replays_canonical_history() {
     let platform_round = serde_json::json!({
         "id": "chatcmpl-projected-platform",
         "object": "chat.completion",
@@ -97,19 +97,40 @@ async fn platform_leg_text_projects_to_reasoning_and_hidden_followup_stays_canon
     let content = body["choices"][0]["message"]["content"]
         .as_str()
         .expect("content");
-    let r1 = reasoning.find("R1").expect("first reasoning");
-    let c1 = reasoning.find("C1").expect("projected text");
-    let marker = reasoning
+    assert_eq!(reasoning, "R1");
+    let c1 = content.find("C1").expect("first Text");
+    let platform_marker = content
         .find(crate::history_marker::HISTORY_MARKER_PREFIX)
-        .expect("Thinking-carried Marker");
-    let r2 = reasoning.find("R2").expect("second reasoning");
-    assert!(r1 < c1 && c1 < marker && marker < r2, "{reasoning}");
+        .expect("content-carried Platform Marker");
+    let r2 = content.find("> R2").expect("quoted Post-Text Thinking");
+    let thinking_marker = content
+        [platform_marker + crate::history_marker::HISTORY_MARKER_PREFIX.len()..]
+        .find(crate::history_marker::HISTORY_MARKER_PREFIX)
+        .map(|offset| platform_marker + crate::history_marker::HISTORY_MARKER_PREFIX.len() + offset)
+        .expect("content-carried Thinking Marker");
+    let c2 = content.rfind("C2").expect("second Text");
     assert!(
-        reasoning.contains(crate::history_marker::PROJECTION_DELIMITER_PREFIX),
-        "{reasoning}"
+        c1 < platform_marker
+            && platform_marker < r2
+            && r2 < thinking_marker
+            && thinking_marker < c2,
+        "{content}"
     );
-    assert_eq!(content, "C2");
-    assert!(!content.contains(crate::history_marker::HISTORY_MARKER_PREFIX));
+    assert_eq!(
+        content
+            .matches(crate::history_marker::PROJECTION_DELIMITER_PREFIX)
+            .count(),
+        2,
+        "{content}"
+    );
+    assert!(!content.contains(":text:"), "{content}");
+    assert_eq!(
+        content
+            .matches(crate::history_marker::HISTORY_MARKER_PREFIX)
+            .count(),
+        2,
+        "{content}"
+    );
 
     assert_eq!(provider_calls.load(Ordering::SeqCst), 2);
     let captured = requests
@@ -178,7 +199,13 @@ async fn platform_leg_text_projects_to_reasoning_and_hidden_followup_stays_canon
         .expect("client replay request");
     let replay_response =
         execute_non_stream_request_with_headers(gateway, headers, replay_request).await;
-    assert_eq!(replay_response.status(), StatusCode::OK);
+    if replay_response.status() != StatusCode::OK {
+        let status = replay_response.status();
+        let error = to_bytes(replay_response.into_body(), usize::MAX)
+            .await
+            .expect("replay error body");
+        panic!("{status}: {}", String::from_utf8_lossy(&error));
+    }
     assert_eq!(provider_calls.load(Ordering::SeqCst), 3);
 
     let captured = requests
@@ -324,24 +351,33 @@ async fn failed_platform_call_and_successful_retry_preserve_marker_and_result_or
     let reasoning = body["choices"][0]["message"]["reasoning_content"]
         .as_str()
         .expect("retry reasoning_content");
-    let marker_positions = reasoning
+    let content = body["choices"][0]["message"]["content"]
+        .as_str()
+        .expect("retry content");
+    assert_eq!(reasoning, "R1");
+    let marker_positions = content
         .match_indices(crate::history_marker::HISTORY_MARKER_PREFIX)
         .map(|(position, _)| position)
         .collect::<Vec<_>>();
-    assert_eq!(marker_positions.len(), 2, "{reasoning}");
-    let first_attempt = reasoning
+    assert_eq!(marker_positions.len(), 4, "{content}");
+    let first_attempt = content
         .find("attempt one")
         .expect("first attempt narration");
-    let second_attempt = reasoning.find("attempt two").expect("retry narration");
-    let final_reasoning = reasoning.find("R3").expect("final reasoning");
+    let second_reasoning = content.find("> R2").expect("retry reasoning");
+    let second_attempt = content.find("attempt two").expect("retry narration");
+    let final_reasoning = content.find("> R3").expect("final reasoning");
+    let final_answer = content.find("final answer").expect("final answer");
     assert!(
         first_attempt < marker_positions[0]
-            && marker_positions[0] < second_attempt
-            && second_attempt < marker_positions[1]
-            && marker_positions[1] < final_reasoning,
-        "{reasoning}"
+            && marker_positions[0] < second_reasoning
+            && second_reasoning < marker_positions[1]
+            && marker_positions[1] < second_attempt
+            && second_attempt < marker_positions[2]
+            && marker_positions[2] < final_reasoning
+            && final_reasoning < marker_positions[3]
+            && marker_positions[3] < final_answer,
+        "{content}"
     );
-    assert_eq!(body["choices"][0]["message"]["content"], "final answer");
     assert_eq!(provider_calls.load(Ordering::SeqCst), 3);
     assert_eq!(
         *tool_calls
@@ -385,7 +421,7 @@ async fn failed_platform_call_and_successful_retry_preserve_marker_and_result_or
 }
 
 #[tokio::test]
-async fn platform_stream_buffers_ambiguous_suffix_and_never_returns_to_reasoning_after_content() {
+async fn platform_stream_projects_post_text_thinking_into_ordered_content() {
     let (base_url, provider_calls) = serve_sse_sequence(vec![
         openai_sse_projected_platform_leg(),
         openai_sse_reasoning_and_text("R2", "C2", 22, 2),
@@ -448,25 +484,95 @@ async fn platform_stream_buffers_ambiguous_suffix_and_never_returns_to_reasoning
         vec!["reasoning", "content"],
         "{body}"
     );
-    assert!(runs[0].1.contains("R1"), "{body}");
-    assert!(runs[0].1.contains("C1"), "{body}");
+    assert_eq!(runs[0].1, "R1", "{body}");
     assert!(
-        runs[0]
+        runs[1]
             .1
             .contains(crate::history_marker::HISTORY_MARKER_PREFIX),
         "{body}"
     );
     assert_eq!(
-        runs[0]
+        runs[1]
             .1
             .matches(crate::history_marker::PROJECTION_DELIMITER_PREFIX)
             .count(),
         2,
-        "one contiguous Text run must use one start/end delimiter pair: {body}"
+        "one Post-Text Thinking block must use one Preview delimiter pair: {body}"
     );
-    assert!(runs[0].1.contains("R2"), "{body}");
-    assert_eq!(runs[1].1, "C2");
+    let content = &runs[1].1;
+    let c1 = content.find("C1").expect("first Text");
+    let platform_marker = content
+        .find(crate::history_marker::HISTORY_MARKER_PREFIX)
+        .expect("Platform Marker");
+    let preview = content.find("> R2").expect("quoted Thinking preview");
+    let thinking_marker = content
+        [platform_marker + crate::history_marker::HISTORY_MARKER_PREFIX.len()..]
+        .find(crate::history_marker::HISTORY_MARKER_PREFIX)
+        .map(|offset| platform_marker + crate::history_marker::HISTORY_MARKER_PREFIX.len() + offset)
+        .expect("Thinking Marker");
+    let c2 = content.rfind("C2").expect("second Text");
+    assert!(
+        c1 < platform_marker
+            && platform_marker < preview
+            && preview < thinking_marker
+            && thinking_marker < c2,
+        "{body}"
+    );
     assert_eq!(provider_calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn post_text_thinking_without_tool_call_gets_its_own_ordered_marker() {
+    let (base_url, provider_calls) =
+        serve_sse_sequence(vec![openai_sse_text_thinking_text()]).await;
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let (expose_tool_hook, _request_hook_rounds) = ExposeOrderedToolHook::counting();
+    let (gateway, _logs) = crate::Gateway::builder(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .hook(Arc::new(expose_tool_hook))
+    .platform_tool(Arc::new(OrderedTool {
+        calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+    }))
+    .build()
+    .await
+    .expect("Gateway");
+    configure_route(&gateway, "post-text-thinking", &[base_url]).await;
+
+    let response = execute_stream(gateway, "post-text-thinking").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("Post-Text Thinking stream body");
+    let body = String::from_utf8(body.to_vec()).expect("UTF-8 stream");
+    let content = body
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter(|data| *data != "[DONE]")
+        .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+        .filter_map(|event| {
+            event["choices"][0]["delta"]["content"]
+                .as_str()
+                .map(str::to_owned)
+        })
+        .collect::<String>();
+
+    let c1 = content.find("C1").expect("first Text");
+    let preview = content.find("> R2").expect("quoted Thinking preview");
+    let marker = content
+        .find(crate::history_marker::HISTORY_MARKER_PREFIX)
+        .expect("Thinking Marker");
+    let c2 = content.rfind("C2").expect("second Text");
+    assert!(c1 < preview && preview < marker && marker < c2, "{body}");
+    assert_eq!(
+        content
+            .matches(crate::history_marker::HISTORY_MARKER_PREFIX)
+            .count(),
+        1,
+        "{body}"
+    );
+    assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -586,21 +692,39 @@ async fn platform_stream_projection_matrix_for_registered_generation_ingresses()
             }
         }
 
-        assert_eq!(
-            runs.iter().map(|(kind, _)| *kind).collect::<Vec<_>>(),
-            vec!["reasoning", "content"],
-            "{ingress}: {body}"
-        );
-        assert!(
-            runs[0].1.contains("R1")
-                && runs[0].1.contains("C1")
-                && runs[0]
+        if ingress == OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1 {
+            assert_eq!(
+                runs.iter().map(|(kind, _)| *kind).collect::<Vec<_>>(),
+                vec!["reasoning", "content"],
+                "{ingress}: {body}"
+            );
+            assert_eq!(runs[0].1, "R1", "{ingress}: {body}");
+            assert!(
+                runs[1].1.contains("C1")
+                    && runs[1]
+                        .1
+                        .contains(crate::history_marker::HISTORY_MARKER_PREFIX)
+                    && runs[1].1.contains("> R2")
+                    && runs[1].1.ends_with("C2"),
+                "{ingress}: {body}"
+            );
+        } else {
+            assert_eq!(
+                runs.iter().map(|(kind, _)| *kind).collect::<Vec<_>>(),
+                vec!["reasoning", "content", "reasoning", "content"],
+                "{ingress}: {body}"
+            );
+            assert_eq!(runs[0].1, "R1", "{ingress}: {body}");
+            assert_eq!(runs[1].1, "C1", "{ingress}: {body}");
+            assert!(
+                runs[2]
                     .1
                     .contains(crate::history_marker::HISTORY_MARKER_PREFIX)
-                && runs[0].1.contains("R2"),
-            "{ingress}: {body}"
-        );
-        assert_eq!(runs[1].1, "C2", "{ingress}: {body}");
+                    && runs[2].1.contains("R2"),
+                "{ingress}: {body}"
+            );
+            assert_eq!(runs[3].1, "C2", "{ingress}: {body}");
+        }
     }
     assert_eq!(provider_calls.load(Ordering::SeqCst), 8);
     assert_eq!(

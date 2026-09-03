@@ -79,12 +79,12 @@ Platform Tool 是由平台拥有、注册和执行的模型工具。平台向模
 
 ## Client Projection
 
-Client Projection 是把 canonical response 变成客户端可见视图：Platform Tool call/result 与 authoritative Thinking 可替换为 History Marker，普通可见 Text 不因潜在或实际 Platform ToolCall 而延迟交付；OpenAI-compatible 的 Post-Text Thinking 以 Markdown 引用 Preview、Projection Delimiter 与一对一 History Marker 经 Text carrier 交付，其他协议保持原生 carrier，不能表示该顺序时显式失败而不回退缓冲。它不是 Protocol Conversion，也不拥有 ingress 协议形态改写；Generation Chain 保存的是投影完成之后、按 ingress 协议落盘的结果。
-_避免使用_：History Marker Projection；把 Generation Chain 的协议形态改写称为 Client Projection
+Client Projection 是把 canonical response 变成客户端可见视图：Platform Tool call/result 与 authoritative Thinking 可替换为 History Marker，普通可见 Text 不因潜在或实际 Platform ToolCall 而延迟交付；OpenAI-compatible 的 Post-Text Thinking 以 Markdown 引用 Preview、Projection Delimiter 与一对一 History Marker 经 Text carrier 交付，其他协议保持原生 carrier，不能表示该顺序时显式失败而不回退缓冲。它拥有 Thinking History Marker 的 reserve → 落盘 → 交付 → publish 顺序；不拥有 Platform Tool Execution，也不拥有 Marker 的持久化事实源。它不是 Protocol Conversion，也不拥有 ingress 协议形态改写；Generation Chain 保存的是投影完成之后、按 ingress 协议落盘的结果。
+_避免使用_：History Marker Projection；把 Generation Chain 的协议形态改写称为 Client Projection；把 Platform Tool Execution 生命周期称为 Client Projection
 
 ## Post-Text Thinking
 
-Post-Text Thinking 是同一 Inference Run 的 Client Projection 顺序中首个非空 Text 后出现的 canonical Thinking，不因 Model Leg 切换而重置；live projection 在该 Text delta 成功交付时切换，staged projection 按相同 canonical 顺序判定，空 delta 不触发，非空空白属于 Text。OpenAI-compatible Client Projection 仅将其中原本可公开的字节作为 Markdown 引用 Preview，权威内容由一对一 Thinking History Marker 恢复；protected payload 没有公开 Preview 时只交付 Marker。
+Post-Text Thinking 是同一 Inference Run 的 Client Projection 顺序中首个非空 Text 后出现的 canonical Thinking，不因 Model Leg 切换而重置；live 与 staged 都在 Client Projection 产出该非空 Text 时进入 Post-Text，不因 Delivery 的 Sent 或 Client Output Commit 翻转；空 delta 不触发，非空空白属于 Text。OpenAI-compatible Client Projection 仅将其中原本可公开的字节作为 Markdown 引用 Preview，权威内容由一对一 Thinking History Marker 恢复；protected payload 没有公开 Preview 时只交付 Marker。
 _避免使用_：Late Reasoning、Quoted Text
 
 ## Quoted Thinking Preview
@@ -99,7 +99,7 @@ _避免使用_：占位文本、Platform Tool Call、Client History Token
 
 ## Reserved Thinking Marker
 
-Reserved Thinking Marker 是每个 canonical Post-Text Thinking block 的首个 delta 到达时仅在当前 Inference Run 中分配、尚未落盘且未发布的 History Marker reference；它允许 Preview 立即流式交付，只有完整 block 以同一 reference 原子落盘、Marker 按顺序交付并发布后才能恢复，后续 Text 必须等待该过程完成。落盘或发布失败必须显式终止交付且不得提交 Generation Chain，不得把 Preview 降级为 canonical Text；失败或未完整交付的 reference 必须废弃。无原生 block identity 时，一个连续 Thinking delta run 构成一个 block。
+Reserved Thinking Marker 是每个 canonical Post-Text Thinking block 的首个 delta 到达时由 Client Projection 在当前 Inference Run 中分配、尚未落盘且未发布的 History Marker reference；它允许 Preview 立即流式交付，只有完整 block 以同一 reference 原子落盘、Marker 按顺序交付并发布后才能恢复，后续 Text 必须等待该过程完成。落盘或发布失败必须显式终止交付且不得提交 Generation Chain，不得把 Preview 降级为 canonical Text；失败或未完整交付的 reference 必须废弃。无原生 block identity 时，一个连续 Thinking delta run 构成一个 block。
 _避免使用_：Published Marker、Partial Thinking
 
 ## Projection Delimiter
@@ -109,7 +109,7 @@ _避免使用_：History Marker、Hidden History Segment、Projection Record
 
 ## Hidden History Segment
 
-Hidden History Segment 是 Client Projection 省略、但属于模型有效上下文的单个受保护单元；它是一个 Thinking block，或一个 Platform Tool Execution 的 call/result 对。恢复只替换对应 History Marker，不覆盖 Marker 之外的客户端历史，也不拥有同一模型轮次中客户端可见的工具调用。
+Hidden History Segment 是 Client Projection 省略、但属于模型有效上下文的单个受保护单元；它是一个 Thinking block，或一个 Platform Tool Execution 的 call/result 对。恢复只替换对应 History Marker，不覆盖 Marker 之外的客户端历史，也不拥有同一模型轮次中客户端可见的工具调用。一次恢复同时给出模型可见历史，以及仍带 Marker 的 client-shaped 对照；Generation Chain 落盘 effective request 时使用该对照，不自己回锚 Marker。
 _避免使用_：Hidden Client History、完整历史快照
 
 ## Opaque Context Requirement
@@ -134,7 +134,7 @@ _避免使用_：Client History（当作独立事实源）；把客户端可见�
 
 ## Generation Chain Write
 
-Generation Chain Write 是一次尚未落盘的 Generation Chain 节点写入尝试，由进行中的 Inference Run 持有；完整交付后才成为节点，失败或中止则丢弃。Write 拥有节点合法性（仅 `completed` 或 `incomplete` 可落盘，并在 stage 时写入 ingress 协议形态）；Inference Run 只在完整交付后提交，不解释投影或终态合法性。它不是 Model Turn、Agent Turn、Search Turn、Media Understanding Turn，也不是已持久化的 Generation Chain 节点。
+Generation Chain Write 是一次尚未落盘的 Generation Chain 节点写入尝试，由进行中的 Inference Run 持有；完整交付后才成为节点，失败或中止则丢弃。Write 拥有节点合法性（仅 `completed` 或 `incomplete` 可落盘，并在 stage 时写入 ingress 协议形态与 Target 身份）；effective request 在观察时必须已是恢复给出的 client-shaped 对照，Write 不回锚 History Marker。Inference Run 只在完整交付后提交，不解释投影或终态合法性。它不是 Model Turn、Agent Turn、Search Turn、Media Understanding Turn，也不是已持久化的 Generation Chain 节点。
 _避免使用_：GenerationChainTurn、GenerationChainDraft、Session
 
 ## Generation Materialization Cache

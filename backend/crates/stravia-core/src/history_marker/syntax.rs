@@ -86,6 +86,7 @@ enum ParsedItem {
 pub struct MarkerResolution {
     pub restored_platform_segments: usize,
     pub restored_thinking_segments: usize,
+    pub restored_protected_thinking_segments: usize,
 }
 
 pub fn render_history_marker(marker: &HistoryMarker) -> String {
@@ -122,30 +123,13 @@ fn render_projection_span(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn render_text_projection_span(
     reference: &str,
     ordinal: usize,
     visible: &str,
 ) -> String {
     render_projection_span(reference, ordinal, ProjectionMode::Text, visible)
-}
-
-pub(crate) fn render_text_projection_start(reference: &str, ordinal: usize) -> String {
-    render_projection_delimiter(
-        reference,
-        ordinal,
-        ProjectionMode::Text,
-        ProjectionBoundary::Start,
-    )
-}
-
-pub(crate) fn render_text_projection_end(reference: &str, ordinal: usize) -> String {
-    render_projection_delimiter(
-        reference,
-        ordinal,
-        ProjectionMode::Text,
-        ProjectionBoundary::End,
-    )
 }
 
 pub(crate) fn render_preview_projection_span(
@@ -156,7 +140,30 @@ pub(crate) fn render_preview_projection_span(
     render_projection_span(reference, ordinal, ProjectionMode::Preview, visible)
 }
 
-fn valid_reference(reference: &str) -> bool {
+pub(crate) fn render_preview_projection_start(reference: &str, ordinal: usize) -> String {
+    render_projection_delimiter(
+        reference,
+        ordinal,
+        ProjectionMode::Preview,
+        ProjectionBoundary::Start,
+    )
+}
+
+pub(crate) fn render_preview_projection_end(reference: &str, ordinal: usize) -> String {
+    render_projection_delimiter(
+        reference,
+        ordinal,
+        ProjectionMode::Preview,
+        ProjectionBoundary::End,
+    )
+}
+
+pub(crate) fn new_reference() -> String {
+    let random = uuid::Uuid::new_v4().simple().to_string();
+    format!("hm_{}", &random[..20])
+}
+
+pub(crate) fn valid_reference(reference: &str) -> bool {
     reference.strip_prefix("hm_").is_some_and(|opaque| {
         opaque.len() == 20
             && opaque
@@ -468,10 +475,21 @@ fn segment_items(
                 MarkerResolution {
                     restored_platform_segments: 1,
                     restored_thinking_segments: 0,
+                    restored_protected_thinking_segments: 0,
                 },
             )
         }
         HiddenHistorySegment::Thinking { block } => {
+            let protected = matches!(
+                &block,
+                ContentBlock::Thinking {
+                    signature: Some(_),
+                    ..
+                } | ContentBlock::Reasoning {
+                    encrypted_content: Some(_),
+                    ..
+                } | ContentBlock::RedactedThinking { .. }
+            );
             let item = AiItem {
                 role: Role::Assistant,
                 content: MessageContent::Blocks(vec![block]),
@@ -489,6 +507,7 @@ fn segment_items(
                 MarkerResolution {
                     restored_platform_segments: 0,
                     restored_thinking_segments: 1,
+                    restored_protected_thinking_segments: usize::from(protected),
                 },
             )
         }
@@ -718,6 +737,8 @@ async fn materialize_parsed_item(
                 let (mut restored, restored_summary) = segment_items(segment, &reference);
                 summary.restored_platform_segments += restored_summary.restored_platform_segments;
                 summary.restored_thinking_segments += restored_summary.restored_thinking_segments;
+                summary.restored_protected_thinking_segments +=
+                    restored_summary.restored_protected_thinking_segments;
                 resolved_items.append(&mut restored);
             }
         }

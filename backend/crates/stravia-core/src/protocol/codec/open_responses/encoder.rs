@@ -48,7 +48,7 @@ impl ResponsesEncoder {
                         "text": text
                     })).collect::<Vec<_>>(),
                     "content": if content.is_empty() {
-                        Value::Null
+                        Value::Array(Vec::new())
                     } else {
                         Value::Array(content.iter().map(|text| serde_json::json!({
                             "type": "reasoning_text",
@@ -81,7 +81,7 @@ impl ResponsesEncoder {
                         "type": "summary_text",
                         "text": text,
                     }],
-                    "content": null,
+                    "content": [],
                 });
                 insert_reasoning_metadata(&mut reasoning, item, signature.is_some());
                 if let Some(signature) = signature {
@@ -478,7 +478,7 @@ fn encode_mixed_assistant_items(item: &crate::protocol::ir::AiItem) -> Result<Op
                 let mut reasoning = serde_json::json!({
                     "type": "reasoning",
                     "summary": summary,
-                    "content": null,
+                    "content": [],
                 });
                 insert_reasoning_metadata(&mut reasoning, item, signature.is_some());
                 if let Some(signature) = signature {

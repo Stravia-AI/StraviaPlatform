@@ -156,6 +156,8 @@ pub struct ModelTurn {
     pub route: RouteContext,
     pub target: TargetIdentity,
     pub output: CanonicalEventStream,
+    /// The actual upstream request asked the Target to return opaque reasoning state.
+    pub(crate) reasoning_encrypted_content_requested: bool,
     pub(crate) streamed: bool,
     pub(crate) transport: TurnTransport,
 }
@@ -180,6 +182,7 @@ impl ModelTurn {
             },
             route,
             output: Box::pin(futures::stream::iter(events)),
+            reasoning_encrypted_content_requested: false,
             streamed: false,
             transport: TurnTransport::default(),
         }
