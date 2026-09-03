@@ -447,7 +447,7 @@ async function saveModel(): Promise<void> {
               </div>
             </div>
 
-            <div class="grid gap-4 lg:grid-cols-[minmax(13rem,0.7fr)_minmax(18rem,1.3fr)_minmax(10rem,0.45fr)]">
+            <div class="grid gap-4 lg:grid-cols-3">
               <Field.Field size="select">
                 <Field.Label for={`target-provider-${target.key}`}>{m.common_model_service()}</Field.Label>
                 <Select.Root
