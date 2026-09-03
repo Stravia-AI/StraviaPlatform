@@ -294,7 +294,9 @@ impl ClientProjectionSession {
         let finish_deltas = self.state.close_thinking_preview(output_index);
         let mut preview_deltas = Vec::new();
         let mut marker_deltas = Vec::with_capacity(markers.len());
-        if let MessageContent::Blocks(blocks) = &item.content {
+        if self.state.openai_compatible
+            && let MessageContent::Blocks(blocks) = &item.content
+        {
             let mut markers_for_blocks = markers.iter();
             for block in blocks {
                 if !is_thinking(block) || (!post_text && !is_protected_thinking(block)) {

@@ -345,6 +345,47 @@ async fn protected_reasoning_summary_streams_before_item_done() {
 }
 
 #[tokio::test]
+async fn native_responses_protected_summary_completes_without_marker_projection() {
+    let (summary, completion) = openai_responses_live_protected_summary_sse_parts();
+    let (upstream_url, _) = serve_sse_sequence(vec![format!("{summary}{completion}")]).await;
+    let data_dir = tempfile::tempdir().expect("temp data dir");
+    let (gateway, _logs) = Gateway::new(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .expect("gateway init");
+    configure_route_with_protocol(
+        &gateway,
+        "diagnostic-native-protected-reasoning",
+        &[upstream_url],
+        "test-http",
+        "open-responses",
+    )
+    .await;
+
+    let response = execute_protocol_request(
+        gateway,
+        "diagnostic-native-protected-reasoning",
+        OPEN_RESPONSES_2026_04_24,
+        "/v1/responses",
+        true,
+    )
+    .await;
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("native Responses stream body");
+    let body = String::from_utf8_lossy(&body);
+    assert!(body.contains("response.completed"), "{body}");
+    assert!(!body.contains("response_stream_failed"), "{body}");
+    assert!(body.contains("opaque-reasoning"), "{body}");
+    assert!(
+        !body.contains(crate::history_marker::HISTORY_MARKER_PREFIX),
+        "{body}"
+    );
+}
+
+#[tokio::test]
 async fn public_reasoning_summary_streams_before_item_done() {
     let (summary_events, completion_events) = openai_responses_live_public_summary_sse_parts();
     let (upstream_url, _calls, release_completion) =
