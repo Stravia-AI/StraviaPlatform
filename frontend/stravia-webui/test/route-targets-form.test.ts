@@ -6,8 +6,9 @@ import {
   createRouteTargetForms,
   millisecondsToSeconds,
   moveRouteTargetToDock,
-  moveRouteTargetToEdge,
+  moveRouteTargetToInsertion,
   moveRouteTargetToLane,
+  planRouteTargetInsertion,
   priorityLanes,
   reorderRouteTargetBefore,
   secondsToMilliseconds,
@@ -134,19 +135,50 @@ describe('route targets form', () => {
     expect(buildRouteTargets(targets).targets.map((target) => target.id)).toEqual(['target-b', 'target-a'])
   })
 
-  test('moves targets into lanes and creates only edge priorities', () => {
+  test('moves targets into lanes and creates top and bottom priorities', () => {
     const targets = createRouteTargetForms(routeWithTargets(), '', '')
     expect(moveRouteTargetToLane(targets, 'target-2', 100_000)).toBe(true)
     expect(targets[1]).toMatchObject({ enabled: true, priority: 100_000 })
 
     targets[1].enabled = false
-    expect(moveRouteTargetToEdge(targets, 'target-2', 'top')).toBe(true)
+    expect(planRouteTargetInsertion(targets, 'target-2', { position: 'top' })?.priority).toBe(100_001)
+    expect(moveRouteTargetToInsertion(targets, 'target-2', { position: 'top' })).toBe(true)
     expect(targets[1]).toMatchObject({ enabled: true, priority: 100_001 })
     expect(targets[0].priority).toBe(100_000)
 
-    expect(moveRouteTargetToEdge(targets, 'target-2', 'bottom')).toBe(true)
+    expect(moveRouteTargetToInsertion(targets, 'target-2', { position: 'bottom' })).toBe(true)
     expect(targets[1].priority).toBe(99_999)
     expect(targets[0].priority).toBe(100_000)
+  })
+
+  test('inserts a target between lanes using an available priority', () => {
+    const targets = [createRouteTarget([], { providerId: 'provider-a', model: 'model-a', enabled: true, priority: 10 })]
+    targets.push(createRouteTarget(targets, { providerId: 'provider-b', model: 'model-b', enabled: true, priority: 0 }))
+    targets.push(
+      createRouteTarget(targets, { providerId: 'provider-c', model: 'model-c', enabled: false, priority: -20 }),
+    )
+    const insertion = { position: 'between' as const, upperPriority: 10, lowerPriority: 0 }
+
+    expect(planRouteTargetInsertion(targets, 'target-3', insertion)?.priority).toBe(5)
+    expect(moveRouteTargetToInsertion(targets, 'target-3', insertion)).toBe(true)
+    expect(targets.map((target) => target.priority)).toEqual([10, 0, 5])
+  })
+
+  test('opens space between adjacent lanes without changing their order', () => {
+    const targets = [createRouteTarget([], { providerId: 'provider-a', model: 'model-a', enabled: true, priority: 1 })]
+    targets.push(createRouteTarget(targets, { providerId: 'provider-b', model: 'model-b', enabled: true, priority: 0 }))
+    targets.push(
+      createRouteTarget(targets, { providerId: 'provider-c', model: 'model-c', enabled: true, priority: -4 }),
+    )
+    targets.push(
+      createRouteTarget(targets, { providerId: 'provider-d', model: 'model-d', enabled: false, priority: 12 }),
+    )
+    const insertion = { position: 'between' as const, upperPriority: 1, lowerPriority: 0 }
+
+    expect(planRouteTargetInsertion(targets, 'target-4', insertion)?.priority).toBe(0)
+    expect(moveRouteTargetToInsertion(targets, 'target-4', insertion)).toBe(true)
+    expect(targets.map((target) => target.priority)).toEqual([1, -1, -5, 0])
+    expect(priorityLanes(targets).map((lane) => lane.priority)).toEqual([1, 0, -1, -5])
   })
 
   test('uses saved priority for the first lane and protects the last enabled target', () => {
@@ -154,7 +186,7 @@ describe('route targets form', () => {
     targets[0].enabled = false
     targets[1].priority = -7
 
-    expect(moveRouteTargetToEdge(targets, 'target-2', 'top')).toBe(true)
+    expect(moveRouteTargetToInsertion(targets, 'target-2', { position: 'top' })).toBe(true)
     expect(targets[1]).toMatchObject({ enabled: true, priority: -7 })
     expect(moveRouteTargetToDock(targets, 'target-2')).toBe(false)
     expect(targets[1].enabled).toBe(true)
@@ -168,7 +200,7 @@ describe('route targets form', () => {
     expect(moveRouteTargetToLane(targets, 'target-2', 0)).toBe(false)
     targets[1].providerId = 'provider-b'
     targets[1].model = 'model-b'
-    expect(moveRouteTargetToEdge(targets, 'target-2', 'top')).toBe(false)
+    expect(moveRouteTargetToInsertion(targets, 'target-2', { position: 'top' })).toBe(false)
   })
 
   test('converts seconds and milliseconds with millisecond precision', () => {

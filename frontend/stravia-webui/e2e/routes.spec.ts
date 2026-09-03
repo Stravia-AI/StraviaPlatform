@@ -197,9 +197,21 @@ test('Models table fits the desktop content width without horizontal scrolling',
               model_id: modelId,
               provider_id: 'codex',
               model: modelId,
-              weight: 100,
+              enabled: true,
               priority: 1,
             },
+            ...(modelId === 'gpt-5.6-sol'
+              ? [
+                  {
+                    id: `${modelId}-disabled-target`,
+                    model_id: modelId,
+                    provider_id: 'codex',
+                    model: 'disabled-shadow-model',
+                    enabled: false,
+                    priority: 0,
+                  },
+                ]
+              : []),
           ],
         })),
       },
@@ -211,8 +223,10 @@ test('Models table fits the desktop content width without horizontal scrolling',
   await expect(tableContainer.getByText('GPT 5.6 Sol', { exact: true })).toBeVisible()
   await expect(tableContainer.getByText('gpt-5.6-sol', { exact: true })).toBeVisible()
   await expect(tableContainer.getByText('grok-4.6', { exact: true })).toHaveCount(1)
+  await expect(tableContainer.getByText('disabled-shadow-model', { exact: true })).toHaveCount(0)
   const rows = tableContainer.getByRole('row')
   await expect(rows.nth(1)).toContainText('GPT 5.6 Sol')
+  await expect(rows.nth(1)).not.toContainText('disabled-shadow-model')
   await expect(rows.nth(2)).toContainText('gpt-5.6-luna')
   await expect(rows.nth(3)).toContainText('grok-4.6')
   expect(await tableContainer.evaluate((element) => element.scrollWidth)).toBeLessThanOrEqual(
@@ -657,8 +671,8 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
   await expect(page.getByRole('option', { name: /GPT Available.*gpt-available/ })).toBeVisible()
   await expect(page.getByRole('option', { name: /GPT Unavailable/ })).toHaveCount(0)
   await page.getByRole('option', { name: /GPT Available.*gpt-available/ }).click()
-  await expect(page.getByText('128,000 context', { exact: true })).toBeVisible()
-  await expect(page.getByText('Reasoning', { exact: true })).toBeVisible()
+  await expect(page.getByTitle('128,000 context')).toBeVisible()
+  await expect(page.getByTitle('Reasoning')).toBeVisible()
   await page.getByRole('button', { name: 'Confirm' }).click()
   await expect(page.getByRole('button', { name: 'Edit destination 1' })).toContainText('Provider A')
   await expect(page.getByRole('button', { name: 'Edit destination 1' })).toContainText('gpt-available')
@@ -671,11 +685,10 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
   await page.getByRole('button', { name: 'Confirm' }).click()
   await expect(page.getByRole('button', { name: 'Edit destination 2' })).toContainText('gpt-available')
 
-  await page.getByRole('button', { name: 'Edit destination 1' }).dragTo(page.locator('[data-slot="target-lane-empty"]'))
+  await page
+    .getByRole('button', { name: 'Edit destination 1' })
+    .dragTo(page.locator('[data-slot="target-priority-connector"][data-position="empty"]'))
   await expect(page.getByLabel('Layer 1')).toBeVisible()
-  await expect(
-    page.getByText('No enabled destinations. Drag a configured destination from the dock into this stack.'),
-  ).toHaveCount(0)
   await expect(page.getByLabel('Destination 1 priority')).toHaveCount(0)
 
   await page.getByLabel('How requests are sent').click()
@@ -687,7 +700,7 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
   await page.getByLabel('Destination 1 model service', { exact: true }).click()
   await page.getByRole('option', { name: 'Provider B' }).click()
   await expect(page.getByLabel('Destination 1 model', { exact: true })).toHaveText(/Choose a model/)
-  await expect(page.getByRole('dialog').getByText('128,000 context', { exact: true })).toHaveCount(0)
+  await expect(page.getByRole('dialog').getByTitle('128,000 context')).toHaveCount(0)
   await page.getByLabel('Destination 1 model', { exact: true }).click()
   await page.getByRole('option', { name: /GPT Available.*gpt-available/ }).click()
   await page.getByRole('button', { name: 'Confirm' }).click()

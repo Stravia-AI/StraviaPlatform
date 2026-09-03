@@ -39,7 +39,13 @@ export interface RouteTargetLane {
   targets: RouteTargetForm[]
 }
 
-export type RouteTargetEdge = 'top' | 'bottom'
+export type RouteTargetInsertion =
+  { position: 'top' } | { position: 'bottom' } | { position: 'between'; upperPriority: number; lowerPriority: number }
+
+export interface RouteTargetInsertionPlan {
+  priority: number
+  shift?: { direction: 'up' | 'down'; boundary: number }
+}
 
 const i32Minimum = -2_147_483_648
 const i32Maximum = 2_147_483_647
@@ -170,19 +176,69 @@ export function moveRouteTargetToLane(targets: RouteTargetForm[], key: string, p
   return true
 }
 
-export function moveRouteTargetToEdge(targets: RouteTargetForm[], key: string, edge: RouteTargetEdge): boolean {
+export function planRouteTargetInsertion(
+  targets: RouteTargetForm[],
+  key: string,
+  insertion: RouteTargetInsertion,
+): RouteTargetInsertionPlan | undefined {
   const target = targets.find((candidate) => candidate.key === key)
-  if (!target || !completeTarget(target)) return false
-  const enabledPriorities = targets.filter((candidate) => candidate.enabled).map((candidate) => candidate.priority)
+  if (!target || !completeTarget(target)) return undefined
+  const enabledPriorities = targets
+    .filter((candidate) => candidate.enabled && candidate.key !== key)
+    .map((candidate) => candidate.priority)
   if (enabledPriorities.length === 0) {
-    target.enabled = true
-    return true
+    return { priority: target.priority }
   }
-  const edgePriority = edge === 'top' ? Math.max(...enabledPriorities) : Math.min(...enabledPriorities)
-  if ((edge === 'top' && edgePriority === i32Maximum) || (edge === 'bottom' && edgePriority === i32Minimum))
-    return false
+
+  if (insertion.position === 'top') {
+    const maximum = Math.max(...enabledPriorities)
+    return maximum === i32Maximum ? undefined : { priority: maximum + 1 }
+  }
+  if (insertion.position === 'bottom') {
+    const minimum = Math.min(...enabledPriorities)
+    return minimum === i32Minimum ? undefined : { priority: minimum - 1 }
+  }
+
+  const { upperPriority, lowerPriority } = insertion
+  if (
+    !validInteger(upperPriority, i32Minimum, i32Maximum) ||
+    !validInteger(lowerPriority, i32Minimum, i32Maximum) ||
+    upperPriority <= lowerPriority
+  ) {
+    return undefined
+  }
+  if (upperPriority - lowerPriority > 1) {
+    return { priority: lowerPriority + Math.floor((upperPriority - lowerPriority) / 2) }
+  }
+
+  const minimum = Math.min(...enabledPriorities)
+  if (minimum > i32Minimum) {
+    return { priority: lowerPriority, shift: { direction: 'down', boundary: lowerPriority } }
+  }
+  const maximum = Math.max(...enabledPriorities)
+  if (maximum < i32Maximum) {
+    return { priority: upperPriority, shift: { direction: 'up', boundary: upperPriority } }
+  }
+  return undefined
+}
+
+export function moveRouteTargetToInsertion(
+  targets: RouteTargetForm[],
+  key: string,
+  insertion: RouteTargetInsertion,
+): boolean {
+  const target = targets.find((candidate) => candidate.key === key)
+  const plan = planRouteTargetInsertion(targets, key, insertion)
+  if (!target || !plan) return false
+  if (plan.shift) {
+    for (const candidate of targets) {
+      if (!candidate.enabled || candidate.key === key) continue
+      if (plan.shift.direction === 'down' && candidate.priority <= plan.shift.boundary) candidate.priority -= 1
+      if (plan.shift.direction === 'up' && candidate.priority >= plan.shift.boundary) candidate.priority += 1
+    }
+  }
   target.enabled = true
-  target.priority = edge === 'top' ? edgePriority + 1 : edgePriority - 1
+  target.priority = plan.priority
   return true
 }
 

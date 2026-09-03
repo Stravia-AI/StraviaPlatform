@@ -3,10 +3,21 @@ import * as m from '$lib/paraglide/messages.js'
 import { goto } from '$app/navigation'
 import { resolve } from '$app/paths'
 import { createQuery, useQueryClient } from '@tanstack/svelte-query'
+import AudioLinesIcon from '@lucide/svelte/icons/audio-lines'
+import BrainCircuitIcon from '@lucide/svelte/icons/brain-circuit'
 import CirclePlusIcon from '@lucide/svelte/icons/circle-plus'
+import FileTextIcon from '@lucide/svelte/icons/file-text'
+import GaugeIcon from '@lucide/svelte/icons/gauge'
 import GripVerticalIcon from '@lucide/svelte/icons/grip-vertical'
+import ImageIcon from '@lucide/svelte/icons/image'
+import PaperclipIcon from '@lucide/svelte/icons/paperclip'
+import PlusIcon from '@lucide/svelte/icons/plus'
 import RotateCcwIcon from '@lucide/svelte/icons/rotate-ccw'
 import Trash2Icon from '@lucide/svelte/icons/trash-2'
+import TypeIcon from '@lucide/svelte/icons/type'
+import VideoIcon from '@lucide/svelte/icons/video'
+import WaypointsIcon from '@lucide/svelte/icons/waypoints'
+import WrenchIcon from '@lucide/svelte/icons/wrench'
 import { untrack } from 'svelte'
 import { toast } from 'svelte-sonner'
 
@@ -28,13 +39,14 @@ import {
   buildRouteTargets,
   createRouteTargetForms,
   moveRouteTargetToDock,
-  moveRouteTargetToEdge,
+  moveRouteTargetToInsertion,
   moveRouteTargetToLane,
+  planRouteTargetInsertion,
   priorityLanes,
   removeRouteTarget,
   reorderRouteTargetBefore,
   type RouteTargetForm,
-  type RouteTargetEdge,
+  type RouteTargetInsertion,
 } from './route-targets-form.js'
 import ModelCombobox from '$lib/components/model-combobox.svelte'
 import ModelIdCombobox from '$lib/components/model-id-combobox.svelte'
@@ -86,6 +98,7 @@ let draggedTargetKey = $state('')
 const availableProviders = $derived(providers)
 const targetLanes = $derived(priorityLanes(targets))
 const disabledTargets = $derived(targets.filter((target) => !target.enabled))
+const isDraggingTarget = $derived(Boolean(draggedTargetKey))
 const canonicalModelsQuery = createQuery(() => ({
   queryKey: ['catalog', 'canonical-models'],
   queryFn: () => admin.catalog.canonicalModels(),
@@ -283,13 +296,19 @@ function dropOnLane(event: DragEvent, priority: number, beforeKey?: string): voi
   if (!target) return
   if (beforeKey && target.enabled && target.priority === priority) {
     reorderRouteTargetBefore(targets, key, beforeKey)
+    draggedTargetKey = ''
     return
   }
-  if (!moveRouteTargetToLane(targets, key, priority)) toast.error(m.model_editor_complete_target_before_enabling())
+  if (!moveRouteTargetToLane(targets, key, priority)) {
+    toast.error(m.model_editor_complete_target_before_enabling())
+    return
+  }
+  draggedTargetKey = ''
 }
 
-function dropOnEdge(event: DragEvent, edge: RouteTargetEdge): void {
+function dropOnInsertion(event: DragEvent, insertion: RouteTargetInsertion): void {
   event.preventDefault()
+  event.stopPropagation()
   const key = draggedKey(event)
   const target = targets.find((candidate) => candidate.key === key)
   if (!target) return
@@ -297,13 +316,30 @@ function dropOnEdge(event: DragEvent, edge: RouteTargetEdge): void {
     toast.error(m.model_editor_complete_target_before_enabling())
     return
   }
-  if (!moveRouteTargetToEdge(targets, key, edge)) toast.error(m.model_editor_cannot_create_priority_layer())
+  if (!moveRouteTargetToInsertion(targets, key, insertion)) {
+    toast.error(m.model_editor_cannot_create_priority_layer())
+    return
+  }
+  draggedTargetKey = ''
+}
+
+function insertionLabel(insertion: RouteTargetInsertion): string {
+  if (insertion.position === 'top') return m.model_editor_insert_higher_priority()
+  if (insertion.position === 'bottom') return m.model_editor_insert_lower_priority()
+  const priority = planRouteTargetInsertion(targets, draggedTargetKey, insertion)?.priority
+  return priority === undefined
+    ? m.model_editor_insert_new_priority()
+    : m.model_editor_insert_priority_value({ priority })
 }
 
 function dropInDock(event: DragEvent): void {
   event.preventDefault()
   const key = draggedKey(event)
-  if (!moveRouteTargetToDock(targets, key)) toast.error(m.model_editor_last_enabled_target_required())
+  if (!moveRouteTargetToDock(targets, key)) {
+    toast.error(m.model_editor_last_enabled_target_required())
+    return
+  }
+  draggedTargetKey = ''
 }
 
 function targetSupportsThinkingLevel(target: RouteTargetForm, level: ThinkingLevel): boolean {
@@ -456,17 +492,81 @@ async function saveModel(): Promise<void> {
 
 {#snippet targetCapabilityBadges(target: RouteTargetForm, summary: ProviderModelSummary | undefined)}
   {#if target.capabilities}
-    <Badge variant="outline">
+    <span
+      class="inline-flex h-7 items-center gap-1.5 rounded-md bg-muted px-2 font-technical text-xs tabular-nums text-muted-foreground"
+      title={`${formatNumber(target.capabilities.context_window)} ${m.common_context()}`}>
+      <GaugeIcon class="size-3.5" aria-hidden="true" />
       {formatNumber(target.capabilities.context_window)}
-      {m.common_context()}
-    </Badge>
+    </span>
   {/if}
-  {#if target.capabilities?.reasoning}<Badge variant="outline">{m.common_reasoning()}</Badge>{/if}
-  {#if target.capabilities?.tool_call}<Badge variant="outline">{m.common_tool_calls()}</Badge>{/if}
+  {#if target.capabilities?.reasoning}
+    <span
+      class="inline-flex size-7 items-center justify-center rounded-md bg-muted text-muted-foreground"
+      title={m.common_reasoning()}>
+      <BrainCircuitIcon class="size-3.5" aria-hidden="true" />
+      <span class="sr-only">{m.common_reasoning()}</span>
+    </span>
+  {/if}
+  {#if target.capabilities?.tool_call}
+    <span
+      class="inline-flex size-7 items-center justify-center rounded-md bg-muted text-muted-foreground"
+      title={m.common_tool_calls()}>
+      <WrenchIcon class="size-3.5" aria-hidden="true" />
+      <span class="sr-only">{m.common_tool_calls()}</span>
+    </span>
+  {/if}
   {#each target.capabilities?.input_modalities ?? [] as modality (modality)}
-    <Badge variant="outline">{m.model_editor_modality_input({ modality })}</Badge>
+    <span
+      class="inline-flex size-7 items-center justify-center rounded-md bg-muted text-muted-foreground"
+      title={m.model_editor_modality_input({ modality })}>
+      {#if modality === 'image'}
+        <ImageIcon class="size-3.5" aria-hidden="true" />
+      {:else if modality === 'audio'}
+        <AudioLinesIcon class="size-3.5" aria-hidden="true" />
+      {:else if modality === 'video'}
+        <VideoIcon class="size-3.5" aria-hidden="true" />
+      {:else if modality === 'pdf'}
+        <FileTextIcon class="size-3.5" aria-hidden="true" />
+      {:else}
+        <TypeIcon class="size-3.5" aria-hidden="true" />
+      {/if}
+      <span class="sr-only">{m.model_editor_modality_input({ modality })}</span>
+    </span>
   {/each}
-  {#if summary?.capabilities.attachment}<Badge variant="outline">{m.common_attachments()}</Badge>{/if}
+  {#if summary?.capabilities.attachment}
+    <span
+      class="inline-flex size-7 items-center justify-center rounded-md bg-muted text-muted-foreground"
+      title={m.common_attachments()}>
+      <PaperclipIcon class="size-3.5" aria-hidden="true" />
+      <span class="sr-only">{m.common_attachments()}</span>
+    </span>
+  {/if}
+{/snippet}
+
+{#snippet priorityConnector(insertion: RouteTargetInsertion, position: string)}
+  <div
+    data-slot="target-priority-connector"
+    data-position={position}
+    class={[
+      'relative mx-auto flex w-full items-center justify-center overflow-hidden transition-[height,border-color,background-color,color] duration-150 motion-reduce:transition-none',
+      isDraggingTarget
+        ? 'h-10 rounded-lg border border-dashed border-primary/60 bg-primary/5 text-primary'
+        : 'h-5 border border-transparent text-transparent',
+    ]}
+    role="group"
+    aria-label={insertionLabel(insertion)}
+    ondragover={(event) => event.preventDefault()}
+    ondrop={(event) => dropOnInsertion(event, insertion)}>
+    <span
+      class={['absolute left-1/2 top-0 h-full w-px -translate-x-1/2', isDraggingTarget ? 'bg-primary/50' : 'bg-border']}
+      aria-hidden="true"></span>
+    {#if isDraggingTarget}
+      <span class="relative inline-flex items-center gap-2 rounded-md bg-background/90 px-3 py-1 text-sm shadow-xs">
+        <PlusIcon class="size-4" aria-hidden="true" />
+        {insertionLabel(insertion)}
+      </span>
+    {/if}
+  </div>
 {/snippet}
 
 <div class="route-page mx-auto min-h-[calc(100svh-5rem)] w-full max-w-[90rem]">
@@ -555,90 +655,100 @@ async function saveModel(): Promise<void> {
       <div class="grid gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(16rem,1fr)]">
         <div
           data-slot="target-lane-stack"
-          class="min-w-0 rounded-2xl border bg-muted/20 p-3"
+          class="relative min-w-0 px-1 sm:px-4"
           aria-label={m.model_editor_enabled_targets()}>
-          <div class="mb-3 flex items-center justify-between gap-3 px-1">
-            <div>
-              <h3 class="font-medium">{m.model_editor_enabled_targets()}</h3>
-              <p class="text-sm text-muted-foreground">{m.model_editor_priority_lanes_help()}</p>
-            </div>
-            <Badge variant="outline">{targets.filter((target) => target.enabled).length}</Badge>
-          </div>
-
           <div
-            class="flex min-h-12 items-center justify-center rounded-xl border border-dashed px-3 text-sm text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground"
-            role="button"
-            tabindex="0"
-            ondragover={(event) => event.preventDefault()}
-            ondrop={(event) => dropOnEdge(event, 'top')}>
-            {m.model_editor_add_higher_layer()}
+            data-slot="target-entry-model"
+            class="mx-auto flex min-h-16 w-fit min-w-64 max-w-full items-center gap-3 rounded-xl bg-background px-4 py-3 shadow-sm ring-1 ring-border">
+            <span class="flex size-9 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
+              <WaypointsIcon class="size-4" aria-hidden="true" />
+            </span>
+            <span class="min-w-0">
+              <span class="block text-xs text-muted-foreground">{m.model_editor_entry_model()}</span>
+              <span class="block truncate font-technical text-sm">
+                {form.modelId.trim() || m.model_editor_model_id_placeholder()}
+              </span>
+            </span>
           </div>
 
-          <div class="my-2 flex flex-col gap-2">
-            {#each targetLanes as lane, laneIndex (lane.priority)}
-              <section
-                class="grid min-h-28 grid-cols-[4.5rem_minmax(0,1fr)] overflow-hidden rounded-xl border bg-background shadow-xs"
-                aria-label={m.model_editor_layer_value({ index: laneIndex + 1 })}
-                ondragover={(event) => event.preventDefault()}
-                ondrop={(event) => dropOnLane(event, lane.priority)}>
-                <div class="flex flex-col items-center justify-center border-r bg-muted/50 px-2 text-center">
-                  <span class="font-technical text-xs uppercase tracking-[0.16em] text-muted-foreground">
-                    {m.model_editor_layer()}
-                  </span>
-                  <strong class="font-technical text-xl">{laneIndex + 1}</strong>
-                </div>
-                <div class="flex min-w-0 flex-wrap content-start gap-2 p-2">
-                  {#each lane.targets as target (target.key)}
-                    {@const summary = selectedSummary(target)}
-                    <button
-                      type="button"
-                      draggable="true"
-                      class="group flex min-h-24 min-w-48 flex-1 cursor-grab flex-col items-start rounded-lg border bg-card p-3 text-left shadow-xs transition-[border-color,box-shadow,transform] hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-sm focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 active:cursor-grabbing"
-                      aria-label={m.model_editor_edit_destination_value({ index: targetIndex(target) + 1 })}
-                      ondragstart={(event) => startTargetDrag(event, target)}
-                      ondragend={() => (draggedTargetKey = '')}
-                      ondragover={(event) => event.preventDefault()}
-                      ondrop={(event) => dropOnLane(event, lane.priority, target.key)}
-                      onclick={() => editTarget(target)}>
-                      <span class="flex w-full min-w-0 items-center gap-2">
-                        <GripVerticalIcon class="size-4 shrink-0 text-muted-foreground" />
-                        <span class="truncate font-medium">
-                          {providers.find((provider) => provider.id === target.providerId)?.name ?? target.providerId}
+          {#if targetLanes.length === 0}
+            {@render priorityConnector({ position: 'top' }, 'empty')}
+          {:else}
+            {@render priorityConnector({ position: 'top' }, 'top')}
+            <div class="flex flex-col">
+              {#each targetLanes as lane, laneIndex (lane.priority)}
+                <section
+                  class={[
+                    'grid min-h-24 grid-cols-[3.5rem_minmax(0,1fr)] overflow-hidden rounded-xl border bg-background shadow-sm transition-[border-color,box-shadow,background-color] duration-150 motion-reduce:transition-none',
+                    isDraggingTarget
+                      ? 'border-dashed border-primary/60 bg-primary/[0.025]'
+                      : 'border-transparent ring-1 ring-border',
+                  ]}
+                  aria-label={m.model_editor_layer_value({ index: laneIndex + 1 })}
+                  ondragover={(event) => event.preventDefault()}
+                  ondrop={(event) => dropOnLane(event, lane.priority)}>
+                  <div class="flex flex-col items-center justify-center bg-muted/55 px-2 text-center">
+                    <span class="font-technical text-[0.65rem] uppercase tracking-[0.14em] text-muted-foreground">
+                      {m.model_editor_layer()}
+                    </span>
+                    <strong class="font-technical text-lg tabular-nums">{laneIndex + 1}</strong>
+                  </div>
+                  <div class="flex min-w-0 flex-wrap content-start items-stretch gap-2 p-2">
+                    {#each lane.targets as target (target.key)}
+                      {@const summary = selectedSummary(target)}
+                      <button
+                        type="button"
+                        draggable="true"
+                        data-slot="target-card"
+                        data-enabled="true"
+                        class="group flex min-h-20 min-w-60 flex-1 cursor-grab flex-col items-start rounded-lg bg-card p-3 text-left shadow-xs ring-1 ring-border transition-[box-shadow,transform] hover:-translate-y-0.5 hover:shadow-sm focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 active:scale-[0.96] active:cursor-grabbing motion-reduce:transform-none motion-reduce:transition-none"
+                        aria-label={m.model_editor_edit_destination_value({ index: targetIndex(target) + 1 })}
+                        ondragstart={(event) => startTargetDrag(event, target)}
+                        ondragend={() => (draggedTargetKey = '')}
+                        ondragover={(event) => event.preventDefault()}
+                        ondrop={(event) => dropOnLane(event, lane.priority, target.key)}
+                        onclick={() => editTarget(target)}>
+                        <span class="flex w-full min-w-0 items-center gap-2">
+                          <GripVerticalIcon class="size-4 shrink-0 text-muted-foreground" />
+                          <span class="truncate font-medium">
+                            {providers.find((provider) => provider.id === target.providerId)?.name ?? target.providerId}
+                          </span>
+                          <span class="min-w-0 flex-1 truncate font-technical text-sm text-muted-foreground">
+                            {target.model}
+                          </span>
+                          <span class="size-2 shrink-0 rounded-full bg-emerald-500" aria-hidden="true"></span>
                         </span>
+                        <span class="mt-auto flex flex-wrap gap-1.5 pl-6 pt-2">
+                          {#if target.persisted && summary && !summary.available}
+                            <Badge variant="destructive">{m.model_editor_model_no_longer_available()}</Badge>
+                          {/if}
+                          {@render targetCapabilityBadges(target, summary)}
+                        </span>
+                      </button>
+                    {/each}
+                    {#if isDraggingTarget}
+                      <span class="ml-auto flex min-h-10 items-center px-3 text-sm text-primary">
+                        {m.model_editor_drop_same_priority()}
                       </span>
-                      <span class="mt-1 w-full truncate pl-6 font-technical text-sm text-muted-foreground">
-                        {target.model}
-                      </span>
-                      <span class="mt-auto flex flex-wrap gap-1.5 pl-6 pt-2">
-                        {#if target.persisted && summary && !summary.available}
-                          <Badge variant="destructive">{m.model_editor_model_no_longer_available()}</Badge>
-                        {/if}
-                        {@render targetCapabilityBadges(target, summary)}
-                      </span>
-                    </button>
-                  {/each}
-                </div>
-              </section>
-            {:else}
-              <div
-                data-slot="target-lane-empty"
-                class="flex min-h-28 items-center justify-center rounded-xl border border-dashed px-4 text-center text-sm text-muted-foreground"
-                role="group"
-                aria-label={m.model_editor_no_enabled_targets()}
-                ondragover={(event) => event.preventDefault()}
-                ondrop={(event) => dropOnEdge(event, 'top')}>
-                {m.model_editor_no_enabled_targets()}
-              </div>
-            {/each}
-          </div>
+                    {/if}
+                  </div>
+                </section>
 
-          <div
-            class="flex min-h-12 items-center justify-center rounded-xl border border-dashed px-3 text-sm text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground"
-            role="button"
-            tabindex="0"
-            ondragover={(event) => event.preventDefault()}
-            ondrop={(event) => dropOnEdge(event, 'bottom')}>
-            {m.model_editor_add_lower_layer()}
+                {#if laneIndex < targetLanes.length - 1}
+                  {@const lowerLane = targetLanes[laneIndex + 1]}
+                  {@render priorityConnector(
+                    { position: 'between', upperPriority: lane.priority, lowerPriority: lowerLane.priority },
+                    `between-${lane.priority}-${lowerLane.priority}`,
+                  )}
+                {/if}
+              {/each}
+            </div>
+            {@render priorityConnector({ position: 'bottom' }, 'bottom')}
+          {/if}
+
+          <div class="flex flex-col items-center">
+            <span class="size-2.5 rounded-full bg-primary ring-4 ring-primary/10"></span>
+            <span class="mt-1.5 text-xs text-muted-foreground">{m.model_editor_end()}</span>
           </div>
         </div>
 
