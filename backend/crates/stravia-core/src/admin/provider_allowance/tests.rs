@@ -91,6 +91,49 @@ fn copilot_uses_only_premium_interactions() {
 }
 
 #[test]
+fn zhipu_preserves_each_reported_token_window() {
+    let parsed = parse_monitor_response(
+        MonitorKind::ZhipuAiCodingPlan,
+        br#"{
+            "data": {
+                "limits": [
+                    {
+                        "type": "TOKENS_LIMIT",
+                        "unit": 3,
+                        "number": 5,
+                        "percentage": 48,
+                        "nextResetTime": 1790000000
+                    },
+                    {
+                        "type": "TOKENS_LIMIT",
+                        "unit": 6,
+                        "number": 1,
+                        "percentage": 12,
+                        "nextResetTime": 1790500000
+                    },
+                    {
+                        "type": "TIME_LIMIT",
+                        "percentage": 5,
+                        "nextResetTime": 1790600000
+                    }
+                ]
+            }
+        }"#,
+    )
+    .expect("Zhipu multi-window response should parse");
+
+    assert_eq!(parsed.allowances.len(), 3);
+    assert_eq!(parsed.allowances[0].key, "5h");
+    assert_eq!(parsed.allowances[0].window_seconds, Some(18_000));
+    assert_eq!(parsed.allowances[0].used_percent, Some(48.0));
+    assert_eq!(parsed.allowances[1].key, "weekly");
+    assert_eq!(parsed.allowances[1].window_seconds, Some(604_800));
+    assert_eq!(parsed.allowances[1].used_percent, Some(12.0));
+    assert_eq!(parsed.allowances[1].reset_at, Some(1_790_500_000_000));
+    assert_eq!(parsed.allowances[2].key, "mcp_tools");
+}
+
+#[test]
 fn every_monitor_normalizes_its_response_fixture_and_rejects_schema_drift() {
     let xai = decode_hex(include_str!("fixtures/xai-grok-success.hex"));
     let fixtures: [(MonitorKind, &[u8], &[u8], &str); 15] = [
@@ -134,7 +177,7 @@ fn every_monitor_normalizes_its_response_fixture_and_rejects_schema_drift() {
             MonitorKind::ZhipuAiCodingPlan,
             include_bytes!("fixtures/zhipuai-coding-plan-success.json"),
             br#"{"data":{"limits":[]}}"#,
-            "tokens",
+            "5h",
         ),
         (
             MonitorKind::MiniMaxCodingPlan,

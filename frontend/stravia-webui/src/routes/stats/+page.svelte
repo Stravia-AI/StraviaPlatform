@@ -15,6 +15,7 @@ import {
   formatPercent,
   formatTime,
 } from '$lib/format'
+import { buildLatencyChart } from '$lib/stats-chart'
 import type { ApiKeyStats, ProviderStats } from '$lib/types'
 import MetricStrip from '$lib/components/metric-strip.svelte'
 import PageHeader from '$lib/components/page-header.svelte'
@@ -140,13 +141,7 @@ const tokenChart = $derived(
     cacheOutput: item.total_cache_write_tokens,
   })),
 )
-const latencyChart = $derived(
-  hourlyStats.map((item) => ({
-    bucket: formatBucket(item.hour),
-    firstToken: item.avg_first_token_ms == null ? null : item.avg_first_token_ms / 1000,
-    duration: item.avg_duration_ms / 1000,
-  })),
-)
+const latencyChart = $derived(buildLatencyChart(hourlyStats, formatBucket))
 const errorChart = $derived(hourlyStats.map((item) => ({ bucket: formatBucket(item.hour), errors: item.error_count })))
 const modelTotal = $derived(modelStats.slice(0, 6).reduce((total, item) => total + item.request_count, 0))
 const metrics = $derived([

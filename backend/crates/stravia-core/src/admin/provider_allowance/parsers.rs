@@ -538,29 +538,33 @@ fn parse_zhipu(payload: &Value) -> Result<ParsedAllowance, InvalidResponse> {
         .and_then(Value::as_array)
         .ok_or(InvalidResponse)?;
     let mut allowances = Vec::new();
-    if let Some(limit) = limits.iter().find_map(|value| {
-        let object = value.as_object()?;
-        (object.get("type").and_then(non_empty) == Some("TOKENS_LIMIT")).then_some(object)
-    }) {
-        let mut item = allowance("tokens", window_label("tokens"), AllowanceKind::QuotaWindow);
-        item.used_percent = field_number(limit, "percentage");
-        item.window_seconds = zai_window_seconds(limit);
-        item.reset_at = field_timestamp(limit, "nextResetTime");
-        allowances.push(item);
-    }
-    if let Some(limit) = limits.iter().find_map(|value| {
-        let object = value.as_object()?;
-        (object.get("type").and_then(non_empty) == Some("TIME_LIMIT")).then_some(object)
-    }) {
-        let mut item = allowance(
-            "mcp_tools",
-            window_label("mcp_tools"),
-            AllowanceKind::RequestAllowance,
-        );
-        item.used_percent = field_number(limit, "percentage");
-        item.window_seconds = Some(30 * 86_400);
-        item.reset_at = field_timestamp(limit, "nextResetTime");
-        allowances.push(item);
+    for value in limits {
+        let Some(limit) = value.as_object() else {
+            continue;
+        };
+        match limit.get("type").and_then(non_empty) {
+            Some("TOKENS_LIMIT") => {
+                let seconds = zai_window_seconds(limit);
+                let key = window_key(seconds);
+                let mut item = allowance(&key, window_label(&key), AllowanceKind::QuotaWindow);
+                item.used_percent = field_number(limit, "percentage");
+                item.window_seconds = seconds;
+                item.reset_at = field_timestamp(limit, "nextResetTime");
+                allowances.push(item);
+            }
+            Some("TIME_LIMIT") => {
+                let mut item = allowance(
+                    "mcp_tools",
+                    window_label("mcp_tools"),
+                    AllowanceKind::RequestAllowance,
+                );
+                item.used_percent = field_number(limit, "percentage");
+                item.window_seconds = Some(30 * 86_400);
+                item.reset_at = field_timestamp(limit, "nextResetTime");
+                allowances.push(item);
+            }
+            _ => {}
+        }
     }
     Ok(parsed(allowances))
 }
