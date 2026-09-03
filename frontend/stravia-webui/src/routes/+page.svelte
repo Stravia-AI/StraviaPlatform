@@ -14,6 +14,7 @@ import {
   formatPercent,
   formatTime,
 } from '$lib/format'
+import { buildLatencyChart } from '$lib/stats-chart'
 import type { ModelStats, ProviderStats } from '$lib/types'
 import DesktopPortNotice from '$lib/components/desktop-port-notice.svelte'
 import MetricStrip from '$lib/components/metric-strip.svelte'
@@ -110,13 +111,7 @@ const requestChart = $derived(
     errors: item.error_count,
   })),
 )
-const latencyChart = $derived(
-  (hourlyQuery.data ?? []).map((item) => ({
-    hour: formatTime(item.hour),
-    firstToken: item.avg_first_token_ms == null ? null : item.avg_first_token_ms / 1000,
-    duration: item.avg_duration_ms / 1000,
-  })),
-)
+const latencyChart = $derived(buildLatencyChart(hourlyQuery.data ?? [], formatTime))
 const errorRate = $derived(hasTraffic && overview ? (overview.error_count / overview.total_requests) * 100 : 0)
 const dash = '–'
 const metrics = $derived([
@@ -257,7 +252,7 @@ function getProviderStatsRowId(provider: ProviderStats): string {
             <div class="h-72 min-w-0" aria-label={m.overview_latency_chart()}>
               <LineChart
                 data={latencyChart}
-                x={(item) => item.hour}
+                x={(item) => item.bucket}
                 series={[
                   { key: 'firstToken', label: m.stats_first_token_seconds(), color: 'var(--chart-2)' },
                   { key: 'duration', label: m.stats_duration_seconds(), color: 'var(--chart-1)' },
