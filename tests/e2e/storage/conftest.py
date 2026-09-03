@@ -281,6 +281,7 @@ def build_harness(work_dir: Path) -> None:
                 targets: vec![CreateTarget {
                     provider_id: "missing-provider".to_string(),
                     model: "missing-model".to_string(),
+                    enabled: true,
                     priority: Some(1),
                     first_token_timeout_ms: Some(60_000),
                     target_retry_budget: Some(5),
