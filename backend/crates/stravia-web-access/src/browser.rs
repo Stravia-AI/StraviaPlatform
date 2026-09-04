@@ -1,286 +1,350 @@
 use std::{
-    ffi::{OsStr, OsString},
-    sync::{Arc, OnceLock},
-};
-
-use headless_chrome::{
-    browser::tab::RequestPausedDecision,
-    protocol::cdp::{
-        Emulation::{
-            SetUserAgentOverride as SetEmulationUserAgentOverride, UserAgentBrandVersion,
-            UserAgentMetadata,
-        },
-        Fetch::{events::RequestPausedEvent, FailRequest, RequestPattern, RequestStage},
-        Network::{ErrorReason, SetUserAgentOverride},
-        Page,
+    env, fs,
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex, OnceLock,
     },
-    Browser, LaunchOptionsBuilder, Tab,
+    thread::{self, JoinHandle},
+    time::{Duration, Instant},
 };
 
-use crate::renderer::{
-    is_public_web_request, PageRenderer, PageRendererConfig, PageRendererFactory, RenderRequest,
-    RenderRequestPolicy, RenderedPage, BROWSER_STEALTH_SCRIPT,
-};
+use moli_core::runtime::{Browser, BrowserConfig, RenderedDomWaitUntil};
+use tokio::sync::{mpsc, oneshot};
+
+static NEXT_PROFILE_ID: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone)]
+pub(crate) struct MoliLaunchConfig {
+    pub proxy_server: Option<String>,
+    pub no_proxy: Option<String>,
+}
 
 #[derive(Clone)]
-struct ChromeRenderer {
-    inner: Arc<BrowserInner>,
+pub(crate) struct BrowserRuntime {
+    inner: Arc<BrowserRuntimeInner>,
 }
 
-struct BrowserInner {
-    config: PageRendererConfig,
-    browser: OnceLock<Result<Browser, String>>,
+struct BrowserRuntimeInner {
+    config: MoliLaunchConfig,
+    profile_dir: PathBuf,
+    worker: OnceLock<Result<BrowserWorker, String>>,
 }
 
-impl ChromeRenderer {
-    fn new(config: PageRendererConfig) -> Self {
+struct BrowserWorker {
+    commands: mpsc::UnboundedSender<BrowserCommand>,
+    thread: Mutex<Option<JoinHandle<()>>>,
+}
+
+enum BrowserCommand {
+    Render {
+        request: OwnedRenderRequest,
+        response: oneshot::Sender<Result<RenderedPage, String>>,
+    },
+    Shutdown,
+}
+
+struct OwnedRenderRequest {
+    url: String,
+    preflight_url: Option<String>,
+    ready_selector: String,
+    timeout: Duration,
+}
+
+impl BrowserRuntime {
+    pub(crate) fn new(config: MoliLaunchConfig) -> Self {
+        let profile_id = NEXT_PROFILE_ID.fetch_add(1, Ordering::Relaxed);
+        let profile_dir =
+            env::temp_dir().join(format!("stravia-moli-{}-{profile_id}", std::process::id()));
         Self {
-            inner: Arc::new(BrowserInner {
+            inner: Arc::new(BrowserRuntimeInner {
                 config,
-                browser: OnceLock::new(),
+                profile_dir,
+                worker: OnceLock::new(),
             }),
         }
     }
 
-    async fn render_page(&self, request: RenderRequest<'_>) -> eyre::Result<RenderedPage> {
-        let runtime = self.clone();
-        let url = request.url.to_string();
-        let preflight_url = request.preflight_url.map(str::to_string);
-        let ready_selector = request.ready_selector.to_string();
-        let timeout = request.timeout;
-        let request_policy = request.request_policy;
-
-        tokio::task::spawn_blocking(move || {
-            runtime.render_blocking(
-                &url,
-                preflight_url.as_deref(),
-                &ready_selector,
-                timeout,
-                request_policy,
-            )
-        })
-        .await
-        .map_err(|error| eyre::eyre!("browser renderer task failed: {error}"))?
+    fn worker(&self) -> eyre::Result<&BrowserWorker> {
+        self.inner
+            .worker
+            .get_or_init(|| {
+                start_browser_worker(self.inner.config.clone(), &self.inner.profile_dir)
+            })
+            .as_ref()
+            .map_err(|error| eyre::eyre!(error.clone()))
     }
 
-    fn render_blocking(
-        &self,
-        url: &str,
-        preflight_url: Option<&str>,
-        ready_selector: &str,
-        timeout: std::time::Duration,
-        request_policy: RenderRequestPolicy,
-    ) -> eyre::Result<RenderedPage> {
-        let browser = match self
-            .inner
-            .browser
-            .get_or_init(|| launch_browser(&self.inner.config))
-        {
-            Ok(browser) => browser,
-            Err(error) => eyre::bail!("browser renderer is unavailable: {error}"),
-        };
-        let tab = browser
-            .new_tab()
-            .map_err(|error| eyre::eyre!("tab creation failed: {error}"))?;
-        let rendered = render_tab(
-            &tab,
-            url,
-            preflight_url,
-            ready_selector,
-            timeout,
-            request_policy,
-        );
-        let _ = tab.close(true);
-        rendered
-    }
-}
-
-#[async_trait::async_trait]
-impl PageRenderer for ChromeRenderer {
-    async fn render(&self, request: RenderRequest<'_>) -> eyre::Result<RenderedPage> {
-        self.render_page(request).await
-    }
-}
-
-pub(crate) struct ChromeRendererFactory;
-
-impl PageRendererFactory for ChromeRendererFactory {
-    fn build(&self, config: PageRendererConfig) -> Result<Arc<dyn PageRenderer>, String> {
-        Ok(Arc::new(ChromeRenderer::new(config)))
-    }
-}
-
-fn launch_browser(config: &PageRendererConfig) -> Result<Browser, String> {
-    let mut args: Vec<OsString> = vec![OsString::from(
-        "--disable-blink-features=AutomationControlled",
-    )];
-    args.extend(config.chromium_args().iter().map(OsString::from));
-    let arg_refs: Vec<&OsStr> = args.iter().map(|arg| arg.as_os_str()).collect();
-    let mut launch_options = LaunchOptionsBuilder::default();
-    launch_options
-        .headless(true)
-        .window_size(Some((1365, 768)))
-        .args(arg_refs)
-        .ignore_default_args(vec![OsStr::new("--enable-automation")]);
-    let proxy_server = config.chromium_proxy_server();
-    if let Some(proxy_server) = &proxy_server {
-        launch_options.proxy_server(Some(proxy_server.as_str()));
-    }
-    let launch_options = launch_options
-        .build()
-        .map_err(|error| format!("launch configuration failed: {error}"))?;
-
-    Browser::new(launch_options).map_err(|error| format!("launch failed: {error}"))
-}
-
-fn render_tab(
-    tab: &Tab,
-    url: &str,
-    preflight_url: Option<&str>,
-    ready_selector: &str,
-    timeout: std::time::Duration,
-    request_policy: RenderRequestPolicy,
-) -> eyre::Result<RenderedPage> {
-    apply_omp_stealth(tab)?;
-    if request_policy == RenderRequestPolicy::PublicWeb {
-        tab.enable_fetch(
-            Some(&[RequestPattern {
-                url_pattern: None,
-                resource_Type: None,
-                request_stage: Some(RequestStage::Request),
-            }]),
-            None,
-        )
-        .map_err(|error| eyre::eyre!("request guard setup failed: {error}"))?;
-        tab.enable_request_interception(Arc::new(move |_, _, intercepted: RequestPausedEvent| {
-            if is_public_web_request(&intercepted.params.request.url) {
-                RequestPausedDecision::Continue(None)
-            } else {
-                RequestPausedDecision::Fail(FailRequest {
-                    request_id: intercepted.params.request_id,
-                    error_reason: ErrorReason::BlockedByClient,
-                })
+    pub(crate) async fn render(&self, request: RenderRequest<'_>) -> eyre::Result<RenderedPage> {
+        if let Some(guard) = request.request_guard {
+            if !guard(request.url) {
+                eyre::bail!("Moli renderer rejected non-public URL `{}`", request.url);
             }
-        }))
-        .map_err(|error| eyre::eyre!("request guard setup failed: {error}"))?;
-    }
-    if let Some(preflight_url) = preflight_url {
-        tab.navigate_to(preflight_url)
-            .map_err(|error| eyre::eyre!("preflight navigation failed: {error}"))?;
-        tab.wait_for_element_with_custom_timeout("body", timeout)
-            .map_err(|error| eyre::eyre!("preflight page did not load: {error}"))?;
+        }
+
+        let worker = self.worker()?;
+        let request = OwnedRenderRequest {
+            url: request.url.to_owned(),
+            preflight_url: request.preflight_url.map(str::to_owned),
+            ready_selector: request.ready_selector.to_owned(),
+            timeout: request.timeout,
+        };
+        let (response_tx, response_rx) = oneshot::channel();
+        worker
+            .commands
+            .send(BrowserCommand::Render {
+                request,
+                response: response_tx,
+            })
+            .map_err(|_| eyre::eyre!("Moli renderer thread is unavailable"))?;
+
+        response_rx
+            .await
+            .map_err(|_| eyre::eyre!("Moli renderer thread exited before returning a result"))?
+            .map_err(eyre::Report::msg)
     }
 
-    tab.navigate_to(url)
-        .map_err(|error| eyre::eyre!("navigation failed: {error}"))?;
-    let ready = tab
-        .wait_for_element_with_custom_timeout(ready_selector, timeout)
-        .is_ok();
-    let html = tab
-        .get_content()
-        .map_err(|error| eyre::eyre!("rendered HTML extraction failed: {error}"))?;
-
-    Ok(RenderedPage {
-        html,
-        url: tab.get_url(),
-        ready,
-    })
+    #[cfg(test)]
+    fn profile_dir(&self) -> &Path {
+        &self.inner.profile_dir
+    }
 }
 
-fn apply_omp_stealth(tab: &Tab) -> eyre::Result<()> {
-    let user_agent = tab
-        .evaluate("navigator.userAgent", true)
-        .map_err(|error| eyre::eyre!("user-agent read failed: {error}"))?
-        .value
-        .and_then(|value| value.as_str().map(ToOwned::to_owned))
-        .ok_or_else(|| eyre::eyre!("browser did not provide a user agent"))?
-        .replace("HeadlessChrome/", "Chrome/");
-    let full_version = user_agent
-        .split("Chrome/")
-        .nth(1)
-        .and_then(|version| version.split_whitespace().next())
-        .unwrap_or("0")
-        .to_string();
-    let major_version = full_version
-        .split('.')
-        .next()
-        .and_then(|version| version.parse::<usize>().ok())
-        .unwrap_or_default();
-    let order = [
-        [0, 1, 2],
-        [0, 2, 1],
-        [1, 0, 2],
-        [1, 2, 0],
-        [2, 0, 1],
-        [2, 1, 0],
-    ][major_version % 6];
-    let escaped_chars = [" ", " ", ";"];
-    let greasey_brand = format!(
-        "{}Not{}A{}Brand",
-        escaped_chars[order[0]], escaped_chars[order[1]], escaped_chars[order[2]]
-    );
-    let mut brands = vec![None; 3];
-    brands[order[0]] = Some(UserAgentBrandVersion {
-        brand: greasey_brand.clone(),
-        version: "99".to_string(),
-    });
-    brands[order[1]] = Some(UserAgentBrandVersion {
-        brand: "Chromium".to_string(),
-        version: major_version.to_string(),
-    });
-    brands[order[2]] = Some(UserAgentBrandVersion {
-        brand: "Google Chrome".to_string(),
-        version: major_version.to_string(),
-    });
-    let brands: Vec<_> = brands.into_iter().flatten().collect();
-    let full_version_list = brands
-        .iter()
-        .map(|brand| UserAgentBrandVersion {
-            brand: brand.brand.clone(),
-            version: if brand.brand == greasey_brand {
-                "99.0.0.0".to_string()
-            } else {
-                full_version.clone()
-            },
+fn start_browser_worker(
+    config: MoliLaunchConfig,
+    profile_dir: &Path,
+) -> Result<BrowserWorker, String> {
+    fs::create_dir_all(&profile_dir)
+        .map_err(|error| format!("Moli profile creation failed: {error}"))?;
+
+    let (commands, receiver) = mpsc::unbounded_channel();
+    let (initialized_tx, initialized_rx) = std::sync::mpsc::sync_channel(1);
+    let worker_profile_dir = profile_dir.to_owned();
+    let worker_thread = thread::Builder::new()
+        .name("stravia-moli-renderer".to_owned())
+        .spawn(move || {
+            run_browser_worker(config, &worker_profile_dir, receiver, initialized_tx);
         })
-        .collect();
+        .map_err(|error| format!("failed to start Moli renderer thread: {error}"))?;
 
-    let user_agent_metadata = UserAgentMetadata {
-        brands: Some(brands),
-        full_version_list: Some(full_version_list),
-        full_version: Some(full_version),
-        platform: "Windows".to_string(),
-        platform_version: "10.0.0".to_string(),
-        architecture: "x86".to_string(),
-        model: String::new(),
-        mobile: false,
-        bitness: Some("64".to_string()),
-        wow_64: None,
-        form_factors: None,
+    match initialized_rx.recv() {
+        Ok(Ok(())) => Ok(BrowserWorker {
+            commands,
+            thread: Mutex::new(Some(worker_thread)),
+        }),
+        Ok(Err(error)) => {
+            let _ = worker_thread.join();
+            Err(error)
+        }
+        Err(_) => {
+            let panic = worker_thread.join().is_err();
+            Err(if panic {
+                "Moli renderer thread panicked during initialization".to_owned()
+            } else {
+                "Moli renderer thread exited during initialization".to_owned()
+            })
+        }
+    }
+}
+
+impl Drop for BrowserWorker {
+    fn drop(&mut self) {
+        let _ = self.commands.send(BrowserCommand::Shutdown);
+        if let Ok(thread) = self.thread.get_mut() {
+            if let Some(thread) = thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+}
+
+impl Drop for BrowserRuntimeInner {
+    fn drop(&mut self) {
+        if let Some(worker) = self.worker.take() {
+            drop(worker);
+        }
+        let _ = fs::remove_dir_all(&self.profile_dir);
+    }
+}
+
+fn run_browser_worker(
+    config: MoliLaunchConfig,
+    profile_dir: &Path,
+    mut receiver: mpsc::UnboundedReceiver<BrowserCommand>,
+    initialized: std::sync::mpsc::SyncSender<Result<(), String>>,
+) {
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            let _ = initialized.send(Err(format!("failed to create Moli runtime: {error}")));
+            return;
+        }
     };
-    let accept_language = Some("en-US,en".to_string());
-    let platform = Some("Win32".to_string());
-    tab.call_method(SetUserAgentOverride {
-        user_agent: user_agent.clone(),
-        accept_language: accept_language.clone(),
-        platform: platform.clone(),
-        user_agent_metadata: Some(user_agent_metadata.clone()),
-    })
-    .map_err(|error| eyre::eyre!("user-agent override failed: {error}"))?;
-    tab.call_method(SetEmulationUserAgentOverride {
-        user_agent,
-        accept_language,
-        platform,
-        user_agent_metadata: Some(user_agent_metadata),
-    })
-    .map_err(|error| eyre::eyre!("user-agent emulation failed: {error}"))?;
-    tab.call_method(Page::AddScriptToEvaluateOnNewDocument {
-        source: BROWSER_STEALTH_SCRIPT.to_string(),
-        world_name: None,
-        include_command_line_api: None,
-        run_immediately: None,
-    })
-    .map_err(|error| eyre::eyre!("script injection failed: {error}"))?;
 
-    Ok(())
+    runtime.block_on(async move {
+        let browser = match Browser::new(browser_config(&config, profile_dir)) {
+            Ok(browser) => browser,
+            Err(error) => {
+                let _ =
+                    initialized.send(Err(format!("failed to initialize Moli browser: {error}")));
+                return;
+            }
+        };
+        if initialized.send(Ok(())).is_err() {
+            return;
+        }
+
+        while let Some(command) = receiver.recv().await {
+            match command {
+                BrowserCommand::Render { request, response } => {
+                    let result = render_request(&browser, request).await;
+                    let _ = response.send(result);
+                }
+                BrowserCommand::Shutdown => break,
+            }
+        }
+        drop(browser);
+    });
+}
+
+fn browser_config(config: &MoliLaunchConfig, profile_dir: &Path) -> BrowserConfig {
+    let mut browser_config = BrowserConfig::default();
+    browser_config.set_profile_dir(Some(profile_dir.to_owned()));
+    let fetch = browser_config.fetch_mut();
+    fetch.set_http_proxy(config.proxy_server.clone());
+    fetch.set_http_no_proxy(config.no_proxy.clone());
+    // Browser navigation can follow redirects and create subresource requests.
+    // Enforce the egress policy inside Moli instead of validating only the URL
+    // initially supplied by Stravia.
+    fetch.set_network_blocking(true, Vec::new());
+    browser_config
+}
+
+async fn render_request(
+    browser: &Browser,
+    request: OwnedRenderRequest,
+) -> Result<RenderedPage, String> {
+    if let Some(preflight_url) = request.preflight_url.as_deref() {
+        render_page(browser, preflight_url, "body", request.timeout)
+            .await
+            .map_err(|error| format!("preflight navigation failed: {error}"))?;
+    }
+    render_page(
+        browser,
+        &request.url,
+        &request.ready_selector,
+        request.timeout,
+    )
+    .await
+}
+
+async fn render_page(
+    browser: &Browser,
+    url: &str,
+    ready_selector: &str,
+    timeout: Duration,
+) -> Result<RenderedPage, String> {
+    let started = Instant::now();
+    let mut page = browser
+        .fetch_allow_http_error_with_wait_until(url, RenderedDomWaitUntil::Done, timeout)
+        .await
+        .map_err(|error| format!("Moli fetch failed: {error}"))?;
+
+    let remaining = timeout.saturating_sub(started.elapsed());
+    let rendered = async {
+        browser
+            .wait_for_selector(&mut page, ready_selector, remaining)
+            .await
+            .map_err(|error| {
+                format!("failed while waiting for selector `{ready_selector}`: {error}")
+            })?;
+        let final_url = page.final_url().to_string();
+        let html = page
+            .serialize_html_async()
+            .await
+            .map_err(|error| format!("failed to serialize rendered HTML: {error}"))?;
+        Ok(RenderedPage {
+            html,
+            url: final_url,
+            ready: true,
+        })
+    }
+    .await;
+
+    let close_result = page.close_async().await;
+    if rendered.is_ok() {
+        if let Err(error) = close_result {
+            return Err(format!("failed to close rendered page: {error}"));
+        }
+    }
+    rendered
+}
+
+pub(crate) struct RenderRequest<'a> {
+    pub url: &'a str,
+    pub preflight_url: Option<&'a str>,
+    pub ready_selector: &'a str,
+    pub timeout: Duration,
+    pub request_guard: Option<fn(&str) -> bool>,
+}
+
+pub(crate) struct RenderedPage {
+    pub html: String,
+    pub url: String,
+    pub ready: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn direct_config() -> MoliLaunchConfig {
+        MoliLaunchConfig {
+            proxy_server: None,
+            no_proxy: None,
+        }
+    }
+
+    #[test]
+    fn browser_config_preserves_profile_proxy_and_egress_policy() {
+        let profile_dir = PathBuf::from("profile");
+        let config = browser_config(
+            &MoliLaunchConfig {
+                proxy_server: Some("http://proxy.test:8080".to_owned()),
+                no_proxy: Some("localhost,.corp.test".to_owned()),
+            },
+            &profile_dir,
+        );
+
+        assert_eq!(config.profile_dir(), Some(profile_dir.as_path()));
+        assert_eq!(config.fetch().http_proxy(), Some("http://proxy.test:8080"));
+        assert_eq!(config.fetch().http_no_proxy(), Some("localhost,.corp.test"));
+        assert!(config.fetch().block_private_networks());
+    }
+
+    #[tokio::test]
+    async fn worker_renders_and_cleans_up_on_its_owner_thread() {
+        let runtime = BrowserRuntime::new(direct_config());
+        let profile_dir = runtime.profile_dir().to_owned();
+
+        let rendered = runtime
+            .render(RenderRequest {
+                url: "about:blank",
+                preflight_url: None,
+                ready_selector: "html",
+                timeout: Duration::from_secs(5),
+                request_guard: None,
+            })
+            .await
+            .expect("about:blank should render");
+
+        assert_eq!(rendered.url, "about:blank");
+        assert!(rendered.ready);
+        assert!(rendered.html.contains("<html"));
+        drop(runtime);
+        assert!(!profile_dir.exists());
+    }
 }

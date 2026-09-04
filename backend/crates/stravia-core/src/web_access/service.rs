@@ -50,10 +50,9 @@ pub struct WebAccessService {
 
 impl WebAccessService {
     pub(crate) fn new(gateway: crate::Gateway) -> Self {
-        let renderer_factory = Arc::clone(&gateway.page_renderer_factory);
         Self {
             gateway,
-            adapter_factory: Arc::new(ProductionAdapterFactory { renderer_factory }),
+            adapter_factory: Arc::new(ProductionAdapterFactory),
         }
     }
 
@@ -309,9 +308,7 @@ pub(super) trait AdapterFactory: Send + Sync {
     ) -> Result<Arc<dyn WebProviderAdapter>, WebAccessError>;
 }
 
-struct ProductionAdapterFactory {
-    renderer_factory: Arc<dyn stravia_web_access::renderer::PageRendererFactory>,
-}
+struct ProductionAdapterFactory;
 
 impl AdapterFactory for ProductionAdapterFactory {
     fn build(
@@ -335,11 +332,10 @@ impl AdapterFactory for ProductionAdapterFactory {
                         )
                     })
                     .collect();
-                stravia_web_access::local::build_local_adapter_with_renderer_factory(
+                stravia_web_access::local::build_local_adapter(
                     provider.id.clone(),
                     outbound,
                     engines,
-                    Arc::clone(&self.renderer_factory),
                 )
                 .map_err(provider_failure)
             }

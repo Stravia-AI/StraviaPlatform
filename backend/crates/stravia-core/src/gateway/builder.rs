@@ -8,7 +8,6 @@ pub struct GatewayBuilder {
     mcp_tools: Vec<Arc<dyn McpTool>>,
     agent_definitions: Vec<agent::AgentDefinitionSpec>,
     generation_chain_ttl: Duration,
-    page_renderer_factory: Option<Arc<dyn stravia_web_access::renderer::PageRendererFactory>>,
 }
 
 impl GatewayBuilder {
@@ -21,7 +20,6 @@ impl GatewayBuilder {
             mcp_tools: Vec::new(),
             agent_definitions: Vec::new(),
             generation_chain_ttl: Duration::from_secs(7 * 24 * 60 * 60),
-            page_renderer_factory: None,
         }
     }
 
@@ -54,14 +52,6 @@ impl GatewayBuilder {
         self
     }
 
-    pub fn page_renderer_factory(
-        mut self,
-        factory: Arc<dyn stravia_web_access::renderer::PageRendererFactory>,
-    ) -> Self {
-        self.page_renderer_factory = Some(factory);
-        self
-    }
-
     pub async fn build(self) -> anyhow::Result<(Gateway, mpsc::Receiver<LogEntry>)> {
         let Self {
             config,
@@ -71,7 +61,6 @@ impl GatewayBuilder {
             mcp_tools,
             agent_definitions,
             generation_chain_ttl,
-            page_renderer_factory,
         } = self;
         let (mut gateway, log_rx) = if let Some(storage) = storage {
             Gateway::from_storage(config, storage).await?
@@ -84,9 +73,6 @@ impl GatewayBuilder {
             gateway.artifact_store.clone(),
         )
         .with_history_markers(Arc::clone(&gateway.history_markers));
-        if let Some(factory) = page_renderer_factory {
-            gateway.page_renderer_factory = factory;
-        }
         gateway.install_model_turn();
         configure_gateway_extensions(&mut gateway, hooks, tools, mcp_tools, agent_definitions)
             .await?;

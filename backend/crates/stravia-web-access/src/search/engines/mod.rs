@@ -16,9 +16,9 @@ use tokio::sync::mpsc;
 use tracing::{error, info};
 use url::{Host, Url};
 
+use crate::browser::BrowserRuntime;
 #[cfg(test)]
-use crate::outbound::{direct_http_client, direct_renderer};
-use crate::renderer::PageRenderer;
+use crate::outbound::{direct_browser, direct_http_client};
 
 mod macros;
 mod ranking;
@@ -117,7 +117,7 @@ pub struct SearchQuery {
     /// custom config.
     pub config: Arc<Config>,
     pub http: wreq::Client,
-    pub(crate) renderer: std::sync::Arc<dyn PageRenderer>,
+    pub(crate) browser: BrowserRuntime,
 }
 
 impl SearchQuery {
@@ -130,7 +130,7 @@ impl SearchQuery {
             ip: String::new(),
             config: Arc::new(Config::default()),
             http: direct_http_client(),
-            renderer: direct_renderer(),
+            browser: direct_browser(),
         }
     }
 }

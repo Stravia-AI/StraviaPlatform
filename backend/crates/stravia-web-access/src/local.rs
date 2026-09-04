@@ -49,19 +49,6 @@ pub fn build_local_adapter(
     build_local_adapter_with_runtime(id, engines, Arc::new(runtime))
 }
 
-pub fn build_local_adapter_with_renderer_factory(
-    id: String,
-    outbound: OutboundProxyMode,
-    engines: LocalSearchEngineSettings,
-    renderer_factory: Arc<dyn crate::renderer::PageRendererFactory>,
-) -> Result<Arc<dyn WebProviderAdapter>, ProviderFailure> {
-    let runtime =
-        LocalWeb::new_with_renderer_factory(outbound, renderer_factory).map_err(|error| {
-            ProviderFailure::new(WebAccessErrorCode::Unavailable, error.to_string())
-        })?;
-    build_local_adapter_with_runtime(id, engines, Arc::new(runtime))
-}
-
 pub fn build_local_adapter_with_runtime(
     id: String,
     engines: LocalSearchEngineSettings,

@@ -1,7 +1,5 @@
 mod commands;
 mod desktop_gateway_runtime;
-mod guarded_proxy;
-mod webview_renderer;
 
 use std::sync::Arc;
 
@@ -16,7 +14,6 @@ use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
 };
-use webview_renderer::TauriPageRendererFactory;
 
 pub(crate) struct DesktopTray {
     tray: TrayIcon,
@@ -65,27 +62,6 @@ pub fn run() {
     let builder = builder
         .plugin(tauri_plugin_wdio::init())
         .plugin(tauri_plugin_wdio_webdriver::init());
-    #[cfg(feature = "desktop-e2e")]
-    let builder = builder.invoke_handler(tauri::generate_handler![
-        commands::get_server_port,
-        commands::get_desktop_port_state,
-        commands::set_desktop_fixed_port,
-        commands::recheck_desktop_fixed_port,
-        commands::list_provider_allowances,
-        commands::refresh_provider_allowances,
-        commands::refresh_provider_allowance,
-        commands::render_webview_smoke,
-    ]);
-    #[cfg(not(feature = "desktop-e2e"))]
-    let builder = builder.invoke_handler(tauri::generate_handler![
-        commands::get_server_port,
-        commands::get_desktop_port_state,
-        commands::set_desktop_fixed_port,
-        commands::recheck_desktop_fixed_port,
-        commands::list_provider_allowances,
-        commands::refresh_provider_allowances,
-        commands::refresh_provider_allowance,
-    ]);
 
     builder
         .on_window_event(|window, event| {
@@ -108,24 +84,13 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::default().build())
         .setup(|app| {
             let data_dir = desktop_runtime_dir(app);
-            let renderer_factory = Arc::new(TauriPageRendererFactory::new(
-                app.handle().clone(),
-                data_dir.join("webview-renderer"),
-            ));
-            let (gateway, log_rx) = tauri::async_runtime::block_on(
-                Gateway::builder(GatewayConfig {
-                    data_dir: data_dir.clone(),
-                    #[cfg(debug_assertions)]
-                    wire_capture_dir: std::env::var_os("STRAVIA_WIRE_CAPTURE_DIR")
-                        .map(std::path::PathBuf::from),
-                    ..Default::default()
-                })
-                .page_renderer_factory(Arc::clone(&renderer_factory)
-                    as Arc<dyn stravia_web_access::renderer::PageRendererFactory>)
-                .build(),
-            )?;
-            #[cfg(feature = "desktop-e2e")]
-            app.manage(renderer_factory);
+            let (gateway, log_rx) = tauri::async_runtime::block_on(Gateway::new(GatewayConfig {
+                data_dir: data_dir.clone(),
+                #[cfg(debug_assertions)]
+                wire_capture_dir: std::env::var_os("STRAVIA_WIRE_CAPTURE_DIR")
+                    .map(std::path::PathBuf::from),
+                ..Default::default()
+            }))?;
 
             let cors_origins = desktop_origins();
             let app_router = build_http_app(
@@ -158,6 +123,15 @@ pub fn run() {
             }));
             Ok(())
         })
+        .invoke_handler(tauri::generate_handler![
+            commands::get_server_port,
+            commands::get_desktop_port_state,
+            commands::set_desktop_fixed_port,
+            commands::recheck_desktop_fixed_port,
+            commands::list_provider_allowances,
+            commands::refresh_provider_allowances,
+            commands::refresh_provider_allowance,
+        ])
         .build(tauri::generate_context!())
         .expect("error while running Stravia application")
         .run(|app, event| {

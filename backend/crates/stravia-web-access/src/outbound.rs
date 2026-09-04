@@ -3,9 +3,7 @@ use std::{net::IpAddr, str::FromStr, sync::Arc, time::Duration};
 use url::Url;
 use wreq_util::Emulation;
 
-use crate::renderer::{
-    default_page_renderer_factory, PageRenderer, PageRendererConfig, PageRendererFactory,
-};
+use crate::browser::BrowserRuntime;
 
 const SEARCH_TIMEOUT: Duration = Duration::from_secs(10);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
@@ -37,7 +35,7 @@ struct LocalWebInner {
     snapshot: ResolvedProxy,
     http: wreq::Client,
     fetch_proxied: wreq::Client,
-    renderer: Arc<dyn PageRenderer>,
+    browser: BrowserRuntime,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,22 +66,15 @@ impl ResolvedProxy {
             .is_some_and(|host| self.no_proxy.contains(host))
     }
 
-    fn renderer_config(&self) -> PageRendererConfig {
-        PageRendererConfig::new(
-            self.http.clone(),
-            self.https.clone(),
-            self.no_proxy.entries.clone(),
-        )
+    fn moli_proxy_server(&self) -> Option<String> {
+        self.https
+            .as_ref()
+            .or(self.http.as_ref())
+            .map(chrome_proxy_uri)
     }
 
-    #[cfg(test)]
-    fn chrome_proxy_server(&self) -> Option<String> {
-        self.renderer_config().chromium_proxy_server()
-    }
-
-    #[cfg(test)]
-    fn chrome_exclude_hosts(&self) -> Vec<String> {
-        self.renderer_config().proxy_hosts()
+    fn moli_no_proxy(&self) -> Option<String> {
+        (!self.no_proxy.entries.is_empty()).then(|| self.no_proxy.entries.join(","))
     }
 }
 
@@ -124,33 +115,23 @@ impl NoProxyList {
 
 impl LocalWeb {
     pub fn new(mode: OutboundProxyMode) -> Result<Self, LocalWebError> {
-        Self::new_with_renderer_factory(mode, default_page_renderer_factory())
-    }
-
-    pub fn new_with_renderer_factory(
-        mode: OutboundProxyMode,
-        renderer_factory: Arc<dyn PageRendererFactory>,
-    ) -> Result<Self, LocalWebError> {
-        Self::from_env(mode, |key| std::env::var(key).ok(), renderer_factory)
+        Self::from_env(mode, |key| std::env::var(key).ok())
     }
 
     fn from_env(
         mode: OutboundProxyMode,
         env: impl Fn(&str) -> Option<String>,
-        renderer_factory: Arc<dyn PageRendererFactory>,
     ) -> Result<Self, LocalWebError> {
         let snapshot = resolve_mode(mode, env)?;
         let http = build_http_client(&snapshot, SEARCH_TIMEOUT, false, true)?;
         let fetch_proxied = build_http_client(&snapshot, FETCH_TIMEOUT, true, false)?;
-        let renderer = renderer_factory
-            .build(snapshot.renderer_config())
-            .map_err(LocalWebError)?;
+        let browser = BrowserRuntime::new(moli_launch_config(&snapshot));
         Ok(Self {
             inner: Arc::new(LocalWebInner {
                 snapshot,
                 http,
                 fetch_proxied,
-                renderer,
+                browser,
             }),
         })
     }
@@ -167,12 +148,12 @@ impl LocalWeb {
             ip: String::new(),
             config: std::sync::Arc::new(crate::search::config::Config::default()),
             http: self.http_client(),
-            renderer: self.renderer(),
+            browser: self.browser(),
         }
     }
 
-    pub(crate) fn renderer(&self) -> Arc<dyn PageRenderer> {
-        Arc::clone(&self.inner.renderer)
+    pub(crate) fn browser(&self) -> BrowserRuntime {
+        self.inner.browser.clone()
     }
 
     pub(crate) fn snapshot(&self) -> &ResolvedProxy {
@@ -196,7 +177,7 @@ impl LocalWeb {
         progress_tx: tokio::sync::mpsc::UnboundedSender<crate::search::engines::ProgressUpdate>,
     ) -> eyre::Result<()> {
         query.http = self.http_client();
-        query.renderer = self.renderer();
+        query.browser = self.browser();
         crate::search::engines::search(&query, progress_tx).await
     }
 
@@ -293,6 +274,17 @@ fn normalize_socks(mut url: Url) -> Url {
     url
 }
 
+fn chrome_proxy_uri(url: &Url) -> String {
+    url.as_str().trim_end_matches('/').to_string()
+}
+
+fn moli_launch_config(snapshot: &ResolvedProxy) -> crate::browser::MoliLaunchConfig {
+    crate::browser::MoliLaunchConfig {
+        proxy_server: snapshot.moli_proxy_server(),
+        no_proxy: snapshot.moli_no_proxy(),
+    }
+}
+
 fn build_http_client(
     snapshot: &ResolvedProxy,
     timeout: Duration,
@@ -368,10 +360,8 @@ pub(crate) fn direct_http_client() -> wreq::Client {
 }
 
 #[cfg(test)]
-pub(crate) fn direct_renderer() -> Arc<dyn PageRenderer> {
-    default_page_renderer_factory()
-        .build(ResolvedProxy::direct().renderer_config())
-        .expect("direct page renderer")
+pub(crate) fn direct_browser() -> BrowserRuntime {
+    BrowserRuntime::new(moli_launch_config(&ResolvedProxy::direct()))
 }
 
 pub fn parse_cli_proxy(value: &str) -> Result<OutboundProxyMode, LocalWebError> {
@@ -384,34 +374,9 @@ pub fn parse_cli_proxy(value: &str) -> Result<OutboundProxyMode, LocalWebError> 
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::HashMap,
-        sync::atomic::{AtomicBool, Ordering},
-    };
+    use std::collections::HashMap;
 
     use super::*;
-    use crate::renderer::{RenderRequest, RenderedPage};
-
-    struct RecordingRendererFactory {
-        built: AtomicBool,
-    }
-
-    impl PageRendererFactory for RecordingRendererFactory {
-        fn build(&self, config: PageRendererConfig) -> Result<Arc<dyn PageRenderer>, String> {
-            assert!(config.is_direct());
-            self.built.store(true, Ordering::Relaxed);
-            Ok(Arc::new(FakeRenderer))
-        }
-    }
-
-    struct FakeRenderer;
-
-    #[async_trait::async_trait]
-    impl PageRenderer for FakeRenderer {
-        async fn render(&self, _request: RenderRequest<'_>) -> eyre::Result<RenderedPage> {
-            unreachable!("renderer construction test does not render")
-        }
-    }
 
     fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
         let map: HashMap<String, String> = pairs
@@ -422,19 +387,6 @@ mod tests {
     }
 
     #[test]
-    fn local_web_uses_injected_renderer_factory() {
-        let factory = Arc::new(RecordingRendererFactory {
-            built: AtomicBool::new(false),
-        });
-        let _web = LocalWeb::new_with_renderer_factory(
-            OutboundProxyMode::Direct,
-            Arc::clone(&factory) as Arc<dyn PageRendererFactory>,
-        )
-        .expect("Local Web");
-        assert!(factory.built.load(Ordering::Relaxed));
-    }
-
-    #[test]
     fn explicit_http_proxy_applies_to_both_schemes() {
         let snapshot = resolve_mode(
             OutboundProxyMode::Explicit("http://127.0.0.1:7890".into()),
@@ -442,13 +394,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            snapshot.chrome_proxy_server().as_deref(),
+            snapshot.moli_proxy_server().as_deref(),
             Some("http://127.0.0.1:7890")
         );
         assert!(!snapshot.pins_origin(&Url::parse("https://example.com/").unwrap()));
-        assert!(snapshot
-            .chrome_exclude_hosts()
-            .contains(&"127.0.0.1".into()));
+        assert_eq!(snapshot.moli_no_proxy(), None);
     }
 
     #[test]
@@ -459,7 +409,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            snapshot.chrome_proxy_server().as_deref(),
+            snapshot.moli_proxy_server().as_deref(),
             Some("socks5://127.0.0.1:1080")
         );
     }
@@ -500,8 +450,12 @@ mod tests {
             Some("http://http-proxy:8080/")
         );
         assert_eq!(
-            snapshot.chrome_proxy_server().as_deref(),
-            Some("http=http://http-proxy:8080;https=http://https-proxy:8080")
+            snapshot.moli_proxy_server().as_deref(),
+            Some("http://https-proxy:8080")
+        );
+        assert_eq!(
+            snapshot.moli_no_proxy().as_deref(),
+            Some("localhost,.corp.example")
         );
         assert!(snapshot.pins_origin(&Url::parse("https://app.corp.example/").unwrap()));
         assert!(!snapshot.pins_origin(&Url::parse("https://example.com/").unwrap()));
@@ -512,7 +466,7 @@ mod tests {
         let snapshot = resolve_mode(OutboundProxyMode::System, env(&[])).unwrap();
         assert!(snapshot.is_direct());
         assert!(snapshot.pins_origin(&Url::parse("https://example.com/").unwrap()));
-        assert_eq!(snapshot.chrome_proxy_server(), None);
+        assert_eq!(snapshot.moli_proxy_server(), None);
     }
 
     #[test]

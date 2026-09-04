@@ -9,9 +9,9 @@ rust-version = "1.97.1"
 license = "AGPL-3.0-only"
 
 [workspace.dependencies]
-stravia-core = { path = "backend/crates/stravia-core", default-features = false }
+stravia-core = { path = "backend/crates/stravia-core" }
 stravia-server = { path = "backend/apps/stravia-server", default-features = false }
-stravia-web-access = { path = "backend/crates/stravia-web-access", default-features = false }
+stravia-web-access = { path = "backend/crates/stravia-web-access" }
 stravia-web-access-contract = { path = "backend/crates/stravia-web-access-contract" }
 tokio = { version = "1", features = ["full"] }
 ammonia = "4.1.4"
@@ -38,11 +38,8 @@ eyre = "0.6.14"
 fend-core = "1.5.8"
 thiserror = "2"
 tokio-stream = "0.1"
-tokio-rustls = "0.26.4"
 futures = "0.3"
 http-body-util = "0.1"
-httparse = "1.10.1"
-headless_chrome = "1.0.22"
 htmd = "0.5"
 bytes = "1"
 dirs = "6"
@@ -57,11 +54,11 @@ gcp_auth = "0.12.7"
 aws-credential-types = "1.3.0"
 aws-sigv4 = "1.5.1"
 maud = "0.27.0"
+moli-core = { git = "https://github.com/Stravia-AI/moli-stealth.git", rev = "ac4506acd5844dd590b3e9fb027c29d9e6494af4" }
 numbat = "1.24.0"
 parking_lot = "0.12.5"
 tempfile = "3"
 regex = "1.13.1"
-rustls-native-certs = "0.8.4"
 scraper = "0.27.0"
 tower = { version = "0.5", features = ["util"] }
 clap = { version = "4", features = ["derive", "env"] }
@@ -79,6 +76,22 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-opener = "2.5.4"
 tauri-plugin-store = "2"
 tauri-build = { version = "2", features = [] }
+
+[patch.crates-io]
+btls = { git = "https://github.com/0x676e67/btls.git", rev = "de7ab84fdb58641a2bdfdf9d8ebd7db1dcf4b29b" }
+btls-sys = { git = "https://github.com/0x676e67/btls.git", rev = "de7ab84fdb58641a2bdfdf9d8ebd7db1dcf4b29b" }
+cookie = { git = "https://github.com/ldm0/cookie-rs", branch = "priority" }
+curl = { git = "https://github.com/ldm0/curl-rust", branch = "moli" }
+curl-sys = { git = "https://github.com/ldm0/curl-rust", branch = "moli" }
+selectors = { git = "https://github.com/ldm0/stylo", rev = "32c3de3f2aab3340c51f03f2a0878d1e4eed7fd6" }
+stylo = { git = "https://github.com/ldm0/stylo", rev = "32c3de3f2aab3340c51f03f2a0878d1e4eed7fd6" }
+stylo_atoms = { git = "https://github.com/ldm0/stylo", rev = "32c3de3f2aab3340c51f03f2a0878d1e4eed7fd6" }
+stylo_dom = { git = "https://github.com/ldm0/stylo", rev = "32c3de3f2aab3340c51f03f2a0878d1e4eed7fd6" }
+stylo_static_prefs = { git = "https://github.com/ldm0/stylo", rev = "32c3de3f2aab3340c51f03f2a0878d1e4eed7fd6" }
+stylo_traits = { git = "https://github.com/ldm0/stylo", rev = "32c3de3f2aab3340c51f03f2a0878d1e4eed7fd6" }
+taffy = { git = "https://github.com/ldm0/taffy", rev = "71bc149ce5358406cdabba66da853ceb11ac74ee" }
+tokio-btls = { git = "https://github.com/0x676e67/btls.git", rev = "de7ab84fdb58641a2bdfdf9d8ebd7db1dcf4b29b" }
+v8 = { git = "https://github.com/Stravia-AI/moli-stealth.git", rev = "ac4506acd5844dd590b3e9fb027c29d9e6494af4" }
 
 [profile.dev]
 opt-level = 0

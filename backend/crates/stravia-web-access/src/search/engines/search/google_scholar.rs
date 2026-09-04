@@ -3,7 +3,7 @@ use std::time::Duration;
 use url::Url;
 
 use crate::{
-    renderer::{RenderRequest, RenderRequestPolicy},
+    browser::RenderRequest,
     search::{
         engines::{EngineResponse, RequestResponse, SearchQuery},
         parse::{parse_html_response_with_opts, ParseOpts},
@@ -28,13 +28,13 @@ pub(crate) fn requires_browser_render(status: wreq::StatusCode) -> bool {
 
 pub(crate) async fn render_response(search: &SearchQuery) -> eyre::Result<EngineResponse> {
     let rendered = search
-        .renderer
+        .browser
         .render(RenderRequest {
             url: search_url(search).as_str(),
             preflight_url: Some(GOOGLE_SCHOLAR_HOME_URL),
             ready_selector: GOOGLE_SCHOLAR_RESULT_SELECTOR,
             timeout: BROWSER_RENDER_TIMEOUT,
-            request_policy: RenderRequestPolicy::Unrestricted,
+            request_guard: None,
         })
         .await
         .map_err(|error| eyre::eyre!("Google Scholar browser renderer failed: {error}"))?;

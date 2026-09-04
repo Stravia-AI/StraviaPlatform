@@ -9,12 +9,6 @@ interface DesktopPortState {
   mode: 'fixed' | 'fallback' | 'configError'
 }
 
-interface RenderWebviewSmokeResult {
-  ready: boolean
-  finalUrl: string
-  containsSmokeMarker: boolean
-}
-
 async function unusedPort(): Promise<number> {
   const server = createServer()
   await new Promise<void>((resolve, reject) => {
@@ -42,12 +36,6 @@ describe('Stravia desktop smoke', () => {
     expect(serverPort).toEqual(expect.any(Number))
     expect(portState.currentPort).toEqual(serverPort)
     expect((await fetch(`http://127.0.0.1:${serverPort}/api/v1/status`)).ok).toBe(true)
-    const renderedPage = (await browser.tauri.execute(({ core }) =>
-      core.invoke('render_webview_smoke'),
-    )) as RenderWebviewSmokeResult
-    expect(renderedPage.ready).toBe(true)
-    expect(renderedPage.finalUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/$/)
-    expect(renderedPage.containsSmokeMarker).toBe(true)
 
     const brand = await $('[aria-label="Stravia 观策行"]')
     await expect(brand).toBeDisplayed()

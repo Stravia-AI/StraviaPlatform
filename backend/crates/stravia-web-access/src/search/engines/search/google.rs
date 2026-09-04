@@ -5,7 +5,7 @@ use scraper::{ElementRef, Selector};
 use url::Url;
 
 use crate::{
-    renderer::{RenderRequest, RenderRequestPolicy},
+    browser::RenderRequest,
     search::{
         engines::{EngineResponse, RequestResponse, SearchQuery},
         parse::{parse_html_response_with_opts, ParseOpts, QueryMethod},
@@ -31,13 +31,13 @@ pub(crate) fn requires_browser_render(body: &str) -> bool {
 pub(crate) async fn render_response(search: &SearchQuery) -> eyre::Result<EngineResponse> {
     let url = search_url(search);
     let rendered = search
-        .renderer
+        .browser
         .render(RenderRequest {
             url: url.as_str(),
             preflight_url: Some(GOOGLE_HOME_URL),
             ready_selector: GOOGLE_READY_SELECTOR,
             timeout: BROWSER_RENDER_TIMEOUT,
-            request_policy: RenderRequestPolicy::Unrestricted,
+            request_guard: None,
         })
         .await
         .map_err(|error| eyre::eyre!("Google browser renderer failed: {error}"))?;

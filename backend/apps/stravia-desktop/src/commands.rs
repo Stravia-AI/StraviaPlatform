@@ -86,68 +86,6 @@ async fn refresh_provider_allowance_for_gateway(
         .map_err(|_| "failed to refresh provider allowance".to_string())
 }
 
-#[cfg(feature = "desktop-e2e")]
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RenderWebviewSmokeResult {
-    ready: bool,
-    final_url: String,
-    contains_smoke_marker: bool,
-}
-
-#[cfg(feature = "desktop-e2e")]
-#[tauri::command]
-pub async fn render_webview_smoke(
-    factory: State<'_, Arc<crate::webview_renderer::TauriPageRendererFactory>>,
-) -> Result<RenderWebviewSmokeResult, String> {
-    use stravia_web_access::renderer::{
-        PageRendererConfig, PageRendererFactory, RenderRequest, RenderRequestPolicy,
-    };
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    const HTML: &str = "<!doctype html><html><body><script>document.body.innerHTML = '<h1 id=\"rendered\">Native WebView Rendered</h1>';</script></body></html>";
-    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-        .await
-        .map_err(|error| error.to_string())?;
-    let address = listener.local_addr().map_err(|error| error.to_string())?;
-    let fixture = tokio::spawn(async move {
-        let (mut stream, _) = listener.accept().await?;
-        let mut request = [0_u8; 4096];
-        let _ = stream.read(&mut request).await?;
-        stream
-            .write_all(
-                format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{HTML}",
-                    HTML.len()
-                )
-                .as_bytes(),
-            )
-            .await?;
-        Ok::<_, std::io::Error>(())
-    });
-    let renderer = factory.build(PageRendererConfig::direct())?;
-    let fixture_url = format!("http://{address}/");
-    let page = renderer
-        .render(RenderRequest {
-            url: &fixture_url,
-            preflight_url: None,
-            ready_selector: "#rendered",
-            timeout: std::time::Duration::from_secs(15),
-            request_policy: RenderRequestPolicy::Unrestricted,
-        })
-        .await
-        .map_err(|error| error.to_string())?;
-    fixture
-        .await
-        .map_err(|error| error.to_string())?
-        .map_err(|error| error.to_string())?;
-    Ok(RenderWebviewSmokeResult {
-        ready: page.ready,
-        final_url: page.url,
-        contains_smoke_marker: page.html.contains("Native WebView Rendered"),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;

@@ -6,7 +6,7 @@ use scraper::{ElementRef, Selector};
 use url::Url;
 
 use crate::{
-    renderer::{RenderRequest, RenderRequestPolicy},
+    browser::RenderRequest,
     search::{
         engines::{EngineResponse, EngineSearchResult, RequestResponse, SearchQuery},
         parse::{parse_html_response_with_opts, ParseOpts, QueryMethod},
@@ -54,13 +54,13 @@ pub(crate) fn requires_browser_render(body: &str) -> bool {
 pub(crate) async fn render_response(search: &SearchQuery) -> eyre::Result<EngineResponse> {
     let url = search_url(search);
     let rendered = search
-        .renderer
+        .browser
         .render(RenderRequest {
             url: url.as_str(),
             preflight_url: Some(SOGOU_WECHAT_ORIGIN),
             ready_selector: SOGOU_WECHAT_RESULT_SELECTOR,
             timeout: BROWSER_RENDER_TIMEOUT,
-            request_policy: RenderRequestPolicy::Unrestricted,
+            request_guard: None,
         })
         .await
         .map_err(|error| eyre::eyre!("Sogou WeChat browser renderer failed: {error}"))?;
