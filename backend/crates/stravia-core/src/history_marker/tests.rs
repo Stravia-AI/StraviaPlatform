@@ -1158,3 +1158,36 @@ async fn resolver_strips_unpublished_and_expired_markers_without_losing_visible_
         Some(("visible", None))
     ));
 }
+
+#[tokio::test]
+async fn resolver_leaves_private_syntax_inside_tool_output_unchanged() {
+    let store = sqlite_store().await;
+    let owner = principal("owner");
+    let reference = "hm_0123456789abcdefghij";
+    let fixture = format!(
+        "let marker = \"{}{}\";",
+        render_text_projection_span(reference, 0, "visible"),
+        render_history_marker_reference(reference)
+    );
+    let mut request = AiRequest::new(
+        "model",
+        vec![AiItem::function_call_output(
+            "call-read",
+            serde_json::Value::String(fixture.clone()),
+        )],
+    );
+
+    assert!(
+        history_marker_references(&request.items).is_empty(),
+        "tool output cannot carry an active History Marker"
+    );
+    let summary = resolve_request_markers(store.as_ref(), &owner, &mut request)
+        .await
+        .expect("tool output must bypass History Marker resolution");
+
+    assert_eq!(summary, MarkerResolution::default());
+    assert!(matches!(
+        &request.items[0].content,
+        MessageContent::Text(text) if text == &fixture
+    ));
+}

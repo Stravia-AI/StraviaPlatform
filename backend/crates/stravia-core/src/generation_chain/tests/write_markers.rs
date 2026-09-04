@@ -267,6 +267,61 @@ async fn observe_effective_persists_marker_at_ordered_projection_atom() {
 }
 
 #[tokio::test]
+async fn persisted_unavailable_marker_text_does_not_poison_a_continuation() {
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("SQLite pool");
+    crate::migrations::migrate_sqlite(&pool)
+        .await
+        .expect("SQLite migrations");
+    let marker_store: Arc<dyn crate::history_marker::HistoryMarkerStore> =
+        Arc::new(crate::history_marker::SqlHistoryMarkerStore::sqlite(pool));
+    let chain = GenerationChain::from_turn_chain(
+        Arc::new(crate::turn_chain::test_store().await),
+        Duration::from_secs(60),
+        None,
+    )
+    .with_history_markers(marker_store);
+    let owner = principal("owner");
+    let unavailable =
+        crate::history_marker::render_history_marker_reference("hm_abcdefghijklmnopqrst");
+    let mut root = chain
+        .begin(
+            owner.clone(),
+            responses_request(vec![AiItem::thinking(unavailable, None)]),
+        )
+        .await
+        .expect("begin root");
+    let root_id = root.id().to_owned();
+    let mut root_response = AiResponse::new("upstream", "model");
+    root_response.push_output_text("first answer");
+    assert!(root.stage(&mut root_response, None));
+    root.persist()
+        .await
+        .expect("persist unavailable marker as inert client text");
+
+    let mut request = responses_request(vec![user_message("follow-up")]);
+    let Some(ProtocolExt::OpenResponses(extension)) = request.ext.as_mut() else {
+        panic!("Open Responses request");
+    };
+    extension.previous_response_id = Some(root_id);
+    let mut continuation = chain
+        .begin(owner, request)
+        .await
+        .expect("begin continuation");
+    let mut response = AiResponse::new("upstream", "model");
+    response.push_output_text("second answer");
+    assert!(continuation.stage(&mut response, None));
+
+    continuation
+        .persist()
+        .await
+        .expect("unavailable marker-like text must remain inert");
+}
+
+#[tokio::test]
 async fn begin_reports_a_typed_missing_parent_error() {
     let chain = generation_chain().await;
     let owner = principal("owner");

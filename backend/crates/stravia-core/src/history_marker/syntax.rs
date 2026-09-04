@@ -376,6 +376,9 @@ fn strip_markers(text: &str) -> (String, Vec<String>) {
 pub fn history_marker_references(items: &[AiItem]) -> Vec<String> {
     let mut references = Vec::new();
     for item in items {
+        if item.role != Role::Assistant {
+            continue;
+        }
         match &item.content {
             MessageContent::Text(text) => references.extend(strip_markers(text).1),
             MessageContent::Blocks(blocks) => {
@@ -519,6 +522,9 @@ fn contains_private_syntax(text: &str) -> bool {
 }
 
 fn parse_item(item: AiItem) -> ParsedItem {
+    if item.role != Role::Assistant {
+        return ParsedItem::Unchanged(item);
+    }
     let mut atoms = Vec::new();
     let mut changed = false;
     match &item.content {

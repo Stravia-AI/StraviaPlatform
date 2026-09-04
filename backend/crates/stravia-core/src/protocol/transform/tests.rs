@@ -116,6 +116,92 @@ fn same_protocol_stream_does_not_apply_cross_protocol_loss_policy() {
 }
 
 #[test]
+fn responses_stream_buffers_utf8_code_point_split_across_transport_chunks() {
+    let pair = ProtocolTransform::global()
+        .bind(OPEN_RESPONSES_2026_04_24, OPEN_RESPONSES_2026_04_24)
+        .expect("registered protocol pair");
+    let (mut decoder, _) = pair.stream().expect("stream-capable pair").into_parts();
+    let created = crate::protocol::codec::open_responses::formatter::response_resource_snapshot(
+        "resp_utf8",
+        "grok-4.6",
+        "in_progress",
+        Vec::new(),
+        Value::Null,
+        Value::Null,
+        Value::Null,
+    );
+    let event = |event: &str, sequence_number: u64, payload: Value| {
+        let mut body = payload.as_object().expect("SSE payload object").clone();
+        body.insert("type".into(), Value::String(event.to_owned()));
+        body.insert("sequence_number".into(), sequence_number.into());
+        format!("event: {event}\ndata: {}\n\n", Value::Object(body))
+    };
+    let upstream = [
+        event("response.created", 0, json!({"response": created})),
+        event(
+            "response.output_item.added",
+            1,
+            json!({
+                "output_index": 0,
+                "item": {
+                    "id": "msg_utf8",
+                    "type": "message",
+                    "status": "in_progress",
+                    "role": "assistant",
+                    "content": []
+                }
+            }),
+        ),
+        event(
+            "response.content_part.added",
+            2,
+            json!({
+                "output_index": 0,
+                "item_id": "msg_utf8",
+                "content_index": 0,
+                "part": {
+                    "type": "output_text",
+                    "text": "",
+                    "annotations": [],
+                    "logprobs": []
+                }
+            }),
+        ),
+        event(
+            "response.output_text.delta",
+            3,
+            json!({
+                "output_index": 0,
+                "item_id": "msg_utf8",
+                "content_index": 0,
+                "delta": "中文"
+            }),
+        ),
+    ]
+    .concat();
+    let split = upstream.find("中文").expect("multibyte text") + 1;
+
+    let mut deltas = decoder
+        .decode_chunk(&upstream.as_bytes()[..split])
+        .expect("an incomplete trailing code point must be buffered");
+    deltas.extend(
+        decoder
+            .decode_chunk(&upstream.as_bytes()[split..])
+            .expect("the next chunk must complete the code point"),
+    );
+    let text = deltas
+        .into_iter()
+        .filter_map(|delta| match delta {
+            AiStreamDelta::TextDelta(text) => Some(text),
+            AiStreamDelta::TextDeltaWithMetadata { text, .. } => Some(text),
+            _ => None,
+        })
+        .collect::<String>();
+
+    assert_eq!(text, "中文");
+}
+
+#[test]
 fn responses_to_chat_omits_advisory_include_fields() {
     let pair = ProtocolTransform::global()
         .bind(

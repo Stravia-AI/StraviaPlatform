@@ -99,8 +99,8 @@ Platform Tool 是由平台拥有、注册和执行的模型工具。平台向模
 
 ## Client Projection
 
-Client Projection 是把 canonical response 变成客户端可见视图：Platform Tool call/result 与 authoritative Thinking 可替换为 History Marker，普通可见 Text 不因潜在或实际 Platform ToolCall 而延迟交付；OpenAI-compatible 的 Post-Text Thinking 以 Markdown 引用 Preview、Projection Delimiter 与一对一 History Marker 经 Text carrier 交付，其他协议保持原生 carrier，不能表示该顺序时显式失败而不回退缓冲。它拥有 Thinking History Marker 的 reserve → 落盘 → 交付 → publish 顺序；不拥有 Platform Tool Execution，也不拥有 Marker 的持久化事实源。它不是 Protocol Conversion，也不拥有 ingress 协议形态改写；Generation Chain 保存的是投影完成之后、按 ingress 协议落盘的结果。
-_避免使用_：History Marker Projection；把 Generation Chain 的协议形态改写称为 Client Projection；把 Platform Tool Execution 生命周期称为 Client Projection
+Client Projection 是把 canonical response 变成客户端可见视图：Platform Tool call/result 与 authoritative Thinking 可替换为 History Marker，普通可见 Text 不因潜在或实际 Platform ToolCall 而延迟交付；OpenAI-compatible 的 Post-Text Thinking 以 Markdown 引用 Preview、Projection Delimiter 与一对一 History Marker 经 Text carrier 交付，其他协议保持原生 carrier，不能表示该顺序时显式失败而不回退缓冲。它拥有 Thinking History Marker 的 reserve → 落盘 → 交付 → publish 顺序；live 流式 delta 与 staged 完整响应走同一 Client Projection，不是两套投影。它不拥有 Hook 变换、Delivery 发送、Model Leg 循环、Platform Tool Execution，也不拥有 Marker 的持久化事实源。它不按 Target 的 egress 协议 id 选择缓冲或 carrier。它不是 Protocol Conversion，也不拥有 ingress 协议形态改写；Generation Chain 保存的是投影完成之后、按 ingress 协议落盘的结果。
+_避免使用_：History Marker Projection；把 Generation Chain 的协议形态改写称为 Client Projection；把 Platform Tool Execution 生命周期称为 Client Projection；把 live 流式路径称为第二套投影
 
 ## Post-Text Thinking
 
@@ -346,7 +346,7 @@ _避免使用_：Output Started、Response Committed、Delivery Commit
 
 ## Protocol Conversion
 
-Protocol Conversion 是在改变客户端与上游 wire protocol 时保留一次推理的 canonical semantics。目标协议无法表示任务内容、实际使用的工具、身份、结构或硬约束时必须拒绝；additive metadata、响应装饰和未被强制选择的 hosted tool 可以兼容性省略。它不把响应投影成客户端历史。
+Protocol Conversion 是在改变客户端与上游 wire protocol 时保留一次推理的 canonical semantics。目标协议无法表示任务内容、实际使用的工具、身份、结构或硬约束时必须拒绝；additive metadata、响应装饰和未被强制选择的 hosted tool 可以兼容性省略。它不把响应投影成客户端历史。它向 Client Projection 提供 Thinking 载体形状（是否 indexed、是否可能 protected、未保护 summary 能否直播），不执行投影。
 _避免使用_：把硬约束丢失称为兼容、把客户端可见投影当作 Protocol Conversion 的阶段
 
 ## Thinking Level

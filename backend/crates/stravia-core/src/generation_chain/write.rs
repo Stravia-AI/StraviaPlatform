@@ -141,8 +141,20 @@ impl GenerationChainWrite {
     pub(crate) async fn persist(&mut self) -> Result<(), PersistError> {
         let mut staged = self.staged.clone().ok_or(PersistError::NotStaged)?;
         if let Some(store) = &self.chain.history_markers {
-            let mut references =
+            let mut parent_references =
                 crate::history_marker::history_marker_references(&self.parent.parent_client_items);
+            parent_references.sort();
+            parent_references.dedup();
+            let mut references = Vec::with_capacity(parent_references.len());
+            for reference in parent_references {
+                let resolved = store
+                    .resolve(&self.principal, &reference)
+                    .await
+                    .map_err(PersistError::HistoryMarker)?;
+                if resolved.as_ref().is_some_and(|marker| marker.published) {
+                    references.push(reference);
+                }
+            }
             let mut untrusted =
                 crate::history_marker::history_marker_references(&self.request_delta.items);
             untrusted.extend(crate::history_marker::history_marker_references(
