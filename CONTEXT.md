@@ -99,7 +99,7 @@ Platform Tool 是由平台拥有、注册和执行的模型工具。平台向模
 
 ## Client Projection
 
-Client Projection 是把 canonical response 变成客户端可见视图：Platform Tool call/result 与 authoritative Thinking 可替换为 History Marker，普通可见 Text 不因潜在或实际 Platform ToolCall 而延迟交付；OpenAI-compatible 的 Post-Text Thinking 以 Markdown 引用 Preview、Projection Delimiter 与一对一 History Marker 经 Text carrier 交付，其他协议保持原生 carrier，不能表示该顺序时显式失败而不回退缓冲。它拥有 Thinking History Marker 的 reserve → 落盘 → 交付 → publish 顺序；live 流式 delta 与 staged 完整响应走同一 Client Projection，不是两套投影。它不拥有 Hook 变换、Delivery 发送、Model Leg 循环、Platform Tool Execution，也不拥有 Marker 的持久化事实源。它不按 Target 的 egress 协议 id 选择缓冲或 carrier。它不是 Protocol Conversion，也不拥有 ingress 协议形态改写；Generation Chain 保存的是投影完成之后、按 ingress 协议落盘的结果。
+Client Projection 是把 canonical response 变成客户端可见视图：Platform Tool call/result 与 authoritative Thinking 可替换为 History Marker，普通可见 Text 不因潜在或实际 Platform ToolCall 而延迟交付；OpenAI-compatible 的 Post-Text Thinking 以 Markdown 引用 Preview、Projection Delimiter 与一对一 History Marker 经 Text carrier 交付，其他协议保持原生 carrier，不能表示该顺序时显式失败而不回退缓冲。它拥有 Thinking History Marker 的 reserve → 落盘 → 交付 → publish 顺序，以及 Platform History Marker 的投影与交付 → publish；交付指把 Marker 交给 Delivery，publish 只在 caller 确认 Sent 之后；Cancelled 或失败则废弃 Reserved Thinking Marker。Platform Tool Execution 的落盘与执行仍不在 Client Projection。live 流式 delta 与 staged 完整响应走同一 Client Projection，不是两套投影。它不拥有 Hook 变换、Delivery 发送、Model Leg 循环、Platform Tool Execution，也不拥有 Marker 的持久化事实源。它不按 Target 的 egress 协议 id 选择缓冲或 carrier。它不是 Protocol Conversion，也不拥有 ingress 协议形态改写；Generation Chain 保存的是投影完成之后、按 ingress 协议落盘的结果。
 _避免使用_：History Marker Projection；把 Generation Chain 的协议形态改写称为 Client Projection；把 Platform Tool Execution 生命周期称为 Client Projection；把 live 流式路径称为第二套投影
 
 ## Post-Text Thinking
