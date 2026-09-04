@@ -1,7 +1,6 @@
 use crate::Gateway;
 use crate::history_marker::{
     ClaimOutcome, HiddenHistorySegment, HistoryMarker, HistoryMarkerError, PlatformMarkerInput,
-    render_history_marker,
 };
 use crate::hook::{DetachedPlatformExecution, Principal};
 use crate::model_turn::TargetIdentity;
@@ -119,23 +118,9 @@ pub(super) struct PlatformOnlyContinuation {
     markers: Vec<PreparedPlatformMarker>,
     jobs: Vec<crate::HistoryMarkerExecutionJob>,
     started_executions: Vec<crate::StartedHistoryMarkerExecution>,
-    publish_references: Vec<String>,
 }
 
 impl PlatformOnlyContinuation {
-    pub(super) fn projected_response(&self) -> &AiResponse {
-        &self.projected_response
-    }
-
-    pub(super) async fn publish(
-        &self,
-        context: &CompletionContext,
-    ) -> Result<(), CompletionFailure> {
-        publish_markers(context, &self.publish_references)
-            .await
-            .map_err(|error| CompletionFailure::hook(error, context.client_output_commit))
-    }
-
     pub(super) async fn finish(
         self,
         context: &CompletionContext,
@@ -169,7 +154,6 @@ pub(super) struct CompletionLease {
     pending_generation_chain: Option<Box<crate::generation_chain::GenerationChainWrite>>,
     background_executions: Vec<crate::HistoryMarkerExecutionJob>,
     started_executions: Vec<crate::StartedHistoryMarkerExecution>,
-    publish_references: Vec<String>,
     commit: ClientOutputCommit,
 }
 
@@ -178,7 +162,6 @@ pub(super) struct PreparedDelivery {
     pub(super) pending_generation_chain: Option<crate::generation_chain::GenerationChainWrite>,
     pub(super) background_executions: Vec<crate::HistoryMarkerExecutionJob>,
     pub(super) started_executions: Vec<crate::StartedHistoryMarkerExecution>,
-    pub(super) publish_references: Vec<String>,
 }
 
 impl CompletionLease {
@@ -194,7 +177,6 @@ impl CompletionLease {
             pending_generation_chain: self.pending_generation_chain.map(|pending| *pending),
             background_executions: self.background_executions,
             started_executions: self.started_executions,
-            publish_references: self.publish_references,
         })
     }
 }
@@ -273,16 +255,8 @@ impl PreparedPlatformMarker {
         &self.call_id
     }
 
-    pub(super) fn reference(&self) -> &str {
-        &self.marker.reference
-    }
-
     pub(super) fn marker(&self) -> &HistoryMarker {
         &self.marker
-    }
-
-    pub(super) fn render(&self) -> String {
-        render_history_marker(&self.marker)
     }
 }
 
@@ -433,19 +407,6 @@ fn append_restored_platform_round(
     }));
 }
 
-pub(super) async fn publish_markers(
-    context: &CompletionContext,
-    references: &[String],
-) -> Result<(), HistoryMarkerError> {
-    const PUBLISHED_RETENTION: std::time::Duration =
-        std::time::Duration::from_secs(7 * 24 * 60 * 60);
-    context
-        .gateway
-        .history_markers
-        .publish(&context.principal, references, PUBLISHED_RETENTION)
-        .await
-}
-
 pub(super) async fn complete_canonical_response(
     context: &CompletionContext,
     input: CompletionInput<'_>,
@@ -531,33 +492,14 @@ pub(super) async fn complete_canonical_response(
             .chain(prepared)
             .collect::<Vec<_>>();
         platform_jobs = jobs;
-        let mut published = request_context
-            .extensions
-            .get::<PublishedPlatformExecutions>()
-            .unwrap_or_default();
-        for reference in prepared_platform
-            .iter()
-            .map(|prepared| prepared.marker.reference.clone())
-        {
-            if !published.references.contains(&reference) {
-                published.references.push(reference);
-            }
-        }
-        request_context.extensions.insert(published);
     }
     let platform = prepared_platform
         .iter()
         .map(|marker| (marker.call_id(), marker.marker()))
         .collect::<Vec<_>>();
-    let mut publish_references = match projection.project_staged(&mut response, &platform).await {
-        Ok(references) => references,
-        Err(error) => return CompletionOutcome::Failed(CompletionFailure::hook(error, commit)),
-    };
-    publish_references.extend(
-        prepared_platform
-            .iter()
-            .map(|prepared| prepared.marker.reference.clone()),
-    );
+    if let Err(error) = projection.project_staged(&mut response, &platform).await {
+        return CompletionOutcome::Failed(CompletionFailure::hook(error, commit));
+    }
     if has_platform_calls && !has_client_calls {
         return CompletionOutcome::PlatformOnly(Box::new(PlatformOnlyContinuation {
             projected_response: response,
@@ -565,7 +507,6 @@ pub(super) async fn complete_canonical_response(
             markers: prepared_platform,
             jobs: platform_jobs,
             started_executions,
-            publish_references,
         }));
     }
     let background_executions = platform_jobs;
@@ -611,7 +552,6 @@ pub(super) async fn complete_canonical_response(
         pending_generation_chain: pending_generation_chain.map(Box::new),
         background_executions,
         started_executions,
-        publish_references,
     }))
 }
 

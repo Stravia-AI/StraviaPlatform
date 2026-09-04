@@ -84,9 +84,12 @@ pub(super) async fn acquire_followup_model_turn(
             {
                 response.id = write.id().to_owned();
             }
-            projection.begin_model_leg();
-            let thinking_references = match projection.project_staged(&mut response, &[]).await {
-                Ok(references) => references,
+            projection.begin_model_leg(
+                super::thinking_carrier_facts(ingress, ingress, false),
+                inference_run.exposed_tool_names(),
+            );
+            match projection.project_staged(&mut response, &[]).await {
+                Ok(_) => {}
                 Err(error) => {
                     return Ok(FollowupModelTurn::StreamError(
                         crate::protocol::ir::AiError::new(
@@ -95,14 +98,6 @@ pub(super) async fn acquire_followup_model_turn(
                         ),
                     ));
                 }
-            };
-            if let Err(error) = projection.publish(&thinking_references).await {
-                return Ok(FollowupModelTurn::StreamError(
-                    crate::protocol::ir::AiError::new(
-                        crate::protocol::ir::AiErrorKind::StreamMidError,
-                        error.to_string(),
-                    ),
-                ));
             }
             let pending_generation_chain = generation.write.clone().and_then(|mut write| {
                 write.observe_effective(request.clone());

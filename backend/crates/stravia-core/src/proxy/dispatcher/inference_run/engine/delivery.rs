@@ -356,17 +356,6 @@ impl DeliveryAdapter {
             }
         }
     }
-
-    pub(super) fn commit_response_after_delivery(
-        response: Response,
-        mut write: crate::generation_chain::GenerationChainWrite,
-    ) -> Response {
-        after_body_delivery(response, async move {
-            if let Err(error) = write.persist().await {
-                tracing::error!("failed to commit delivered Generation Chain node: {error}");
-            }
-        })
-    }
 }
 
 fn stream_encoder(ingress: ProtocolId, egress: ProtocolId) -> StreamEncodeStage {

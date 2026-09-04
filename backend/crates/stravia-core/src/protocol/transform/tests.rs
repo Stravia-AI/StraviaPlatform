@@ -21,7 +21,8 @@
 use serde_json::{Value, json};
 
 use super::{
-    ProtocolTransform, TransformError, request_loss_paths, response_loss_paths, stream_loss_paths,
+    ProtocolTransform, ThinkingCarrierFacts, TransformError, request_loss_paths,
+    response_loss_paths, stream_loss_paths,
 };
 use crate::protocol::ids::{
     ANTHROPIC_MESSAGES_2023_06_01, GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
@@ -31,6 +32,44 @@ use crate::protocol::ir::{
     AiItem, AiRequest, AiResponse, AiStreamDelta, ContentBlock, MediaSource, MessageContent, Role,
     ToolCall,
 };
+
+#[test]
+fn thinking_carrier_facts_stay_behind_the_bound_protocol_pair() {
+    let responses = ProtocolTransform::global()
+        .bind(
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            OPEN_RESPONSES_2026_04_24,
+        )
+        .expect("registered protocol pair");
+    assert_eq!(
+        responses.thinking_carrier_facts(false),
+        ThinkingCarrierFacts {
+            indexed: true,
+            may_be_protected: true,
+            stream_unprotected_summaries: true,
+        }
+    );
+    assert!(
+        !responses
+            .thinking_carrier_facts(true)
+            .stream_unprotected_summaries
+    );
+
+    let anthropic = ProtocolTransform::global()
+        .bind(
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            ANTHROPIC_MESSAGES_2023_06_01,
+        )
+        .expect("registered protocol pair");
+    assert_eq!(
+        anthropic.thinking_carrier_facts(false),
+        ThinkingCarrierFacts {
+            indexed: false,
+            may_be_protected: true,
+            stream_unprotected_summaries: false,
+        }
+    );
+}
 
 fn dated_response(id: &str, status: &str, output: Value, usage: Value) -> Value {
     json!({
