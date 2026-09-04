@@ -127,6 +127,27 @@ impl Vendor for XaiVendor {
     fn map_error(&self, status: u16, body: Value) -> GatewayError {
         openai_map_error("xai", status, body)
     }
+
+    fn is_continuation_not_found(&self, status: u16, body: &Value) -> bool {
+        if matches!(status, 400 | 404)
+            && body
+                .pointer("/error/code")
+                .or_else(|| body.get("code"))
+                .and_then(Value::as_str)
+                == Some("previous_response_not_found")
+        {
+            return true;
+        }
+        status == 404
+            && body.get("code").and_then(Value::as_str) == Some("not-found")
+            && body
+                .get("error")
+                .and_then(Value::as_str)
+                .is_some_and(|message| {
+                    message.starts_with("Previous response cannot be used")
+                        && message.contains("due to Zero Data Retention")
+                })
+    }
 }
 
 inventory::submit! { VendorRegistration { make: || Box::new(XaiVendor) } }

@@ -3,22 +3,22 @@ use stravia_web_access::{
 };
 
 #[tokio::main]
-async fn main() -> eyre::Result<()> {
+async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
     let mut args = std::env::args().skip(1);
     let (mode, query) = match args.next().as_deref() {
         Some("--proxy") => {
             let proxy = args.next().ok_or_else(|| {
-                eyre::eyre!("usage: search [--proxy direct|system|<url>] <query>")
+                anyhow::anyhow!("usage: search [--proxy direct|system|<url>] <query>")
             })?;
             let query = args.next().ok_or_else(|| {
-                eyre::eyre!("usage: search [--proxy direct|system|<url>] <query>")
+                anyhow::anyhow!("usage: search [--proxy direct|system|<url>] <query>")
             })?;
             (parse_cli_proxy(&proxy)?, query)
         }
         Some(query) => (OutboundProxyMode::Direct, query.to_string()),
-        None => eyre::bail!("usage: search [--proxy direct|system|<url>] <query>"),
+        None => anyhow::bail!("usage: search [--proxy direct|system|<url>] <query>"),
     };
 
     let web = LocalWeb::new(mode)?;

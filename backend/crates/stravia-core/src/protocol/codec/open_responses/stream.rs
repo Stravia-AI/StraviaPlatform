@@ -30,6 +30,8 @@ struct PendingIndexedMessage {
 struct PendingIndexedReasoning {
     item_id: String,
     summary: BTreeMap<usize, String>,
+    // The IR retains summary deltas, not part-done events. A new index closes this part.
+    active_summary_index: Option<usize>,
     content: BTreeMap<usize, String>,
     encrypted_content: Option<String>,
 }
@@ -337,7 +339,7 @@ impl ResponsesStreamFormatter {
         self.ensure_reasoning_started(events);
         self.accumulated_reasoning_content.push_str(text);
         let mut event = serde_json::json!({
-            "type": "response.reasoning.delta",
+            "type": "response.reasoning_text.delta",
             "item_id": self.reasoning_item_id,
             "output_index": self.reasoning_output_index,
             "content_index": 0,
@@ -347,7 +349,7 @@ impl ResponsesStreamFormatter {
             event["obfuscation"] = serde_json::Value::String(obfuscation.to_owned());
         }
         events.push(SseEvent::new(
-            Some("response.reasoning.delta"),
+            Some("response.reasoning_text.delta"),
             event.to_string(),
         ));
     }
@@ -526,6 +528,7 @@ impl ResponsesStreamFormatter {
             PendingIndexedReasoning {
                 item_id,
                 summary: BTreeMap::new(),
+                active_summary_index: None,
                 content: BTreeMap::new(),
                 encrypted_content: None,
             },
@@ -551,7 +554,7 @@ impl ResponsesStreamFormatter {
             .or_default()
             .push_str(text);
         let mut event = serde_json::json!({
-            "type": "response.reasoning.delta",
+            "type": "response.reasoning_text.delta",
             "item_id": reasoning.item_id,
             "output_index": output_index,
             "content_index": content_index,
@@ -561,7 +564,7 @@ impl ResponsesStreamFormatter {
             event["obfuscation"] = serde_json::Value::String(obfuscation.to_owned());
         }
         events.push(SseEvent::new(
-            Some("response.reasoning.delta"),
+            Some("response.reasoning_text.delta"),
             event.to_string(),
         ));
     }
@@ -575,11 +578,24 @@ impl ResponsesStreamFormatter {
         obfuscation: Option<&str>,
     ) {
         self.ensure_indexed_reasoning(events, output_index, None);
+        let starts_new_part = !self
+            .indexed_reasoning
+            .get(&output_index)
+            .expect("indexed reasoning was inserted")
+            .summary
+            .contains_key(&content_index);
+        if starts_new_part {
+            let reasoning = self
+                .indexed_reasoning
+                .get_mut(&output_index)
+                .expect("indexed reasoning was inserted");
+            Self::finish_active_indexed_reasoning_summary(events, output_index, reasoning);
+        }
         let reasoning = self
             .indexed_reasoning
             .get_mut(&output_index)
             .expect("indexed reasoning was inserted");
-        if !reasoning.summary.contains_key(&content_index) {
+        if starts_new_part {
             events.push(SseEvent::new(
                 Some("response.reasoning_summary_part.added"),
                 serde_json::json!({
@@ -597,6 +613,7 @@ impl ResponsesStreamFormatter {
             .entry(content_index)
             .or_default()
             .push_str(text);
+        reasoning.active_summary_index = Some(content_index);
         let mut event = serde_json::json!({
             "type": "response.reasoning_summary_text.delta",
             "item_id": reasoning.item_id,
@@ -610,6 +627,44 @@ impl ResponsesStreamFormatter {
         events.push(SseEvent::new(
             Some("response.reasoning_summary_text.delta"),
             event.to_string(),
+        ));
+    }
+
+    fn finish_active_indexed_reasoning_summary(
+        events: &mut Vec<SseEvent>,
+        output_index: usize,
+        reasoning: &mut PendingIndexedReasoning,
+    ) {
+        let Some(summary_index) = reasoning.active_summary_index.take() else {
+            return;
+        };
+        let Some(text) = reasoning.summary.get(&summary_index) else {
+            return;
+        };
+        events.push(SseEvent::new(
+            Some("response.reasoning_summary_text.done"),
+            serde_json::json!({
+                "type": "response.reasoning_summary_text.done",
+                "item_id": reasoning.item_id,
+                "output_index": output_index,
+                "summary_index": summary_index,
+                "text": text
+            })
+            .to_string(),
+        ));
+        events.push(SseEvent::new(
+            Some("response.reasoning_summary_part.done"),
+            serde_json::json!({
+                "type": "response.reasoning_summary_part.done",
+                "item_id": reasoning.item_id,
+                "output_index": output_index,
+                "summary_index": summary_index,
+                "part": {
+                    "type": "summary_text",
+                    "text": text
+                }
+            })
+            .to_string(),
         ));
     }
 
@@ -807,9 +862,9 @@ impl ResponsesStreamFormatter {
             }
             if !self.accumulated_reasoning_content.is_empty() {
                 events.push(SseEvent::new(
-                    Some("response.reasoning.done"),
+                    Some("response.reasoning_text.done"),
                     serde_json::json!({
-                        "type": "response.reasoning.done",
+                        "type": "response.reasoning_text.done",
                         "item_id": item_id,
                         "output_index": output_index,
                         "content_index": 0,
@@ -830,40 +885,19 @@ impl ResponsesStreamFormatter {
         }
 
         let mut indexed_reasoning_output = Vec::new();
-        for (output_index, reasoning) in &self.indexed_reasoning {
+        for (output_index, reasoning) in &mut self.indexed_reasoning {
+            Self::finish_active_indexed_reasoning_summary(&mut events, *output_index, reasoning);
             let mut summary = Vec::new();
-            for (summary_index, text) in &reasoning.summary {
-                events.push(SseEvent::new(
-                    Some("response.reasoning_summary_text.done"),
-                    serde_json::json!({
-                        "type": "response.reasoning_summary_text.done",
-                        "item_id": reasoning.item_id,
-                        "output_index": output_index,
-                        "summary_index": summary_index,
-                        "text": text
-                    })
-                    .to_string(),
-                ));
+            for text in reasoning.summary.values() {
                 let part = serde_json::json!({"type": "summary_text", "text": text});
-                events.push(SseEvent::new(
-                    Some("response.reasoning_summary_part.done"),
-                    serde_json::json!({
-                        "type": "response.reasoning_summary_part.done",
-                        "item_id": reasoning.item_id,
-                        "output_index": output_index,
-                        "summary_index": summary_index,
-                        "part": part
-                    })
-                    .to_string(),
-                ));
                 summary.push(part);
             }
             let mut content = Vec::new();
             for (content_index, text) in &reasoning.content {
                 events.push(SseEvent::new(
-                    Some("response.reasoning.done"),
+                    Some("response.reasoning_text.done"),
                     serde_json::json!({
-                        "type": "response.reasoning.done",
+                        "type": "response.reasoning_text.done",
                         "item_id": reasoning.item_id,
                         "output_index": output_index,
                         "content_index": content_index,

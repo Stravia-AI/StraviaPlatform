@@ -17,6 +17,8 @@ env:
   RUST_VERSION: "1.97.1"
   BUN_VERSION: "1.4.0"
   TASK_VERSION: "3.52.0"
+  ZIG_VERSION: "0.15.1"
+  CARGO_ZIGBUILD_VERSION: "0.23.3"
   IMAGE_NAME: ghcr.io/stravia-ai/straviaplatform
 
 jobs:
@@ -178,14 +180,35 @@ jobs:
         with:
           version: ${{ env.TASK_VERSION }}
 
-      - name: Install musl toolchain
+      - name: Setup Zig
         if: matrix.libc == 'musl'
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends musl-tools
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
 
-      - name: Build server
+      - name: Install cargo-zigbuild
+        if: matrix.libc == 'musl'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild@${{ env.CARGO_ZIGBUILD_VERSION }}
+
+      - name: Configure BoringSSL for native Windows ARM64
+        if: matrix.suffix == 'windows-aarch64'
+        shell: pwsh
+        run: |
+          $toolchain = Join-Path $env:GITHUB_WORKSPACE '.github/cmake/windows-arm64.cmake'
+          "CMAKE_TOOLCHAIN_FILE=$toolchain" >> $env:GITHUB_ENV
+
+      - name: Build server with the native toolchain
+        if: matrix.libc != 'musl'
         run: task build:server TARGET="${{ matrix.target }}"
+
+      - name: Build static musl server with Zig
+        if: matrix.libc == 'musl'
+        shell: bash
+        run: |
+          task build:web
+          cargo zigbuild --locked --release -p stravia-server --target "${{ matrix.target }}"
 
       - name: Package Unix server
         if: runner.os != 'Windows'
@@ -275,6 +298,13 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev \
             patchelf
+
+      - name: Configure BoringSSL for native Windows ARM64
+        if: matrix.suffix == 'windows-aarch64'
+        shell: pwsh
+        run: |
+          $toolchain = Join-Path $env:GITHUB_WORKSPACE '.github/cmake/windows-arm64.cmake'
+          "CMAKE_TOOLCHAIN_FILE=$toolchain" >> $env:GITHUB_ENV
 
       - name: Build desktop bundle
         run: task build:desktop BUNDLES="${{ matrix.bundle }}"
@@ -446,11 +476,60 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout release metadata
+        uses: actions/checkout@v7
+
       - name: Download release assets
         uses: actions/download-artifact@v8
         with:
           name: release-assets
           path: release-assets
+
+      - name: Compose release notes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG_NAME: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          python3 <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          version = re.escape(os.environ["VERSION"])
+          changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
+          match = re.search(
+              rf"^## \[{version}\](?: - [^\n]+)?\n(?P<body>.*?)(?=^## |\Z)",
+              changelog,
+              flags=re.MULTILINE | re.DOTALL,
+          )
+          if match is None:
+              raise SystemExit(f"CHANGELOG.md has no section for {os.environ['VERSION']}")
+
+          notes = match.group("body").strip()
+          if not notes:
+              raise SystemExit(f"CHANGELOG.md section for {os.environ['VERSION']} is empty")
+
+          Path(os.environ["RUNNER_TEMP"], "curated-release-notes.md").write_text(
+              notes + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+          gh api \
+            --method POST \
+            "repos/${GH_REPO}/releases/generate-notes" \
+            -f "tag_name=${TAG_NAME}" \
+            --jq '.body' \
+            > "${RUNNER_TEMP}/generated-release-notes.md"
+
+          {
+            cat "${RUNNER_TEMP}/curated-release-notes.md"
+            printf '\n---\n\n'
+            cat "${RUNNER_TEMP}/generated-release-notes.md"
+          } > "${RUNNER_TEMP}/release-notes.md"
 
       - name: Create or refresh draft release
         shell: bash
@@ -459,12 +538,13 @@ jobs:
           GH_REPO: ${{ github.repository }}
           TAG_NAME: ${{ needs.prepare.outputs.tag }}
           IS_PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+          RELEASE_NOTES_FILE: ${{ runner.temp }}/release-notes.md
         run: |
           if gh release view "${TAG_NAME}" >/dev/null 2>&1; then
             if [[ "${IS_PRERELEASE}" == "true" ]]; then
-              gh release edit "${TAG_NAME}" --draft --prerelease --latest=false
+              gh release edit "${TAG_NAME}" --draft --prerelease --latest=false --notes-file "${RELEASE_NOTES_FILE}"
             else
-              gh release edit "${TAG_NAME}" --draft --prerelease=false --latest=false
+              gh release edit "${TAG_NAME}" --draft --prerelease=false --latest=false --notes-file "${RELEASE_NOTES_FILE}"
             fi
           else
             args=(
@@ -472,7 +552,7 @@ jobs:
               --verify-tag
               --draft
               --title "Stravia ${TAG_NAME}"
-              --generate-notes
+              --notes-file "${RELEASE_NOTES_FILE}"
               --latest=false
             )
             if [[ "${IS_PRERELEASE}" == "true" ]]; then

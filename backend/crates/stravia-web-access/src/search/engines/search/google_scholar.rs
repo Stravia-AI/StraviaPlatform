@@ -26,7 +26,7 @@ pub(crate) fn requires_browser_render(status: wreq::StatusCode) -> bool {
         )
 }
 
-pub(crate) async fn render_response(search: &SearchQuery) -> eyre::Result<EngineResponse> {
+pub(crate) async fn render_response(search: &SearchQuery) -> anyhow::Result<EngineResponse> {
     let rendered = search
         .browser
         .render(RenderRequest {
@@ -37,9 +37,9 @@ pub(crate) async fn render_response(search: &SearchQuery) -> eyre::Result<Engine
             request_guard: None,
         })
         .await
-        .map_err(|error| eyre::eyre!("Google Scholar browser renderer failed: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("Google Scholar browser renderer failed: {error}"))?;
     if !rendered.ready {
-        eyre::bail!(
+        anyhow::bail!(
             "Google Scholar search results did not render from {} within {} seconds",
             rendered.url,
             BROWSER_RENDER_TIMEOUT.as_secs()
@@ -62,7 +62,7 @@ fn search_url(search: &SearchQuery) -> Url {
     .unwrap()
 }
 
-pub fn parse_response(body: &str) -> eyre::Result<EngineResponse> {
+pub fn parse_response(body: &str) -> anyhow::Result<EngineResponse> {
     parse_html_response_with_opts(
         body,
         ParseOpts::new()

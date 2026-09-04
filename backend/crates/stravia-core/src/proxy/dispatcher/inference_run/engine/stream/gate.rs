@@ -10,44 +10,47 @@ enum UnindexedItemKind {
 #[derive(Default)]
 pub(super) struct LiveDeltaGate {
     pending_prefix: Vec<AiStreamDelta>,
-    pending_suffix: Vec<AiStreamDelta>,
     pending_tool_deltas: HashMap<usize, Vec<AiStreamDelta>>,
     pending_tool_names: HashMap<usize, String>,
     platform_tool_indices: HashSet<usize>,
+    projected_thinking_items: HashSet<usize>,
+    known_protected_thinking_indices: HashSet<usize>,
+    streamed_protected_thinking_indices: HashSet<usize>,
     pending_protected_deltas: HashMap<usize, Vec<AiStreamDelta>>,
     prebuffered_protected_counts: HashMap<usize, usize>,
     pending_unindexed_thinking: Option<(usize, Vec<AiStreamDelta>)>,
     pending_unindexed_signature: Option<String>,
     buffer_indexed_protected: bool,
+    stream_unprotected_reasoning_summaries: bool,
     buffer_unindexed_protected: bool,
     next_unindexed_output_index: usize,
     current_unindexed_item_kind: Option<UnindexedItemKind>,
-    ambiguous_suffix: bool,
-    projector: ClientProjector,
     client_output_started: bool,
     response_started: bool,
 }
 
 impl LiveDeltaGate {
-    pub(super) fn buffers_unindexed_protected(&self) -> bool {
-        self.buffer_unindexed_protected
-    }
-
-    pub(super) fn begin_model_leg(&mut self, egress: crate::protocol::ids::Protocol) {
-        debug_assert!(
-            self.pending_suffix.is_empty(),
-            "a completed Model Leg must resolve its ambiguous suffix"
-        );
-        self.projector.begin_model_leg();
+    pub(super) fn begin_model_leg(
+        &mut self,
+        projection: &mut ClientProjectionSession,
+        egress: crate::protocol::ids::Protocol,
+        reasoning_encrypted_content_requested: bool,
+    ) {
+        projection.begin_model_leg();
         self.pending_tool_deltas.clear();
         self.pending_tool_names.clear();
         self.platform_tool_indices.clear();
+        self.projected_thinking_items.clear();
+        self.known_protected_thinking_indices.clear();
+        self.streamed_protected_thinking_indices.clear();
         self.pending_protected_deltas.clear();
         self.prebuffered_protected_counts.clear();
         self.pending_unindexed_thinking = None;
         self.pending_unindexed_signature = None;
         self.buffer_indexed_protected =
             matches!(egress, crate::protocol::ids::Protocol::OpenResponses);
+        self.stream_unprotected_reasoning_summaries =
+            self.buffer_indexed_protected && !reasoning_encrypted_content_requested;
         self.buffer_unindexed_protected = matches!(
             egress,
             crate::protocol::ids::Protocol::AnthropicMessages
@@ -55,7 +58,6 @@ impl LiveDeltaGate {
         );
         self.next_unindexed_output_index = 0;
         self.current_unindexed_item_kind = None;
-        self.ambiguous_suffix = false;
     }
 
     fn observe_unindexed_item(&mut self, kind: UnindexedItemKind) -> usize {
@@ -120,6 +122,19 @@ impl LiveDeltaGate {
         ))
     }
 
+    pub(super) fn synthetic_post_text_thinking_item(
+        &self,
+        projection: &ClientProjectionSession,
+    ) -> Option<(usize, AiItem)> {
+        if self.current_unindexed_item_kind != Some(UnindexedItemKind::Thinking) {
+            return None;
+        }
+        let index = self.next_unindexed_output_index.saturating_sub(1);
+        projection
+            .synthetic_thinking_item(index)
+            .map(|item| (index, item))
+    }
+
     fn protected_candidate_index(&mut self, delta: &AiStreamDelta) -> Option<usize> {
         match delta {
             AiStreamDelta::ThinkingDeltaWithMetadata {
@@ -143,11 +158,29 @@ impl LiveDeltaGate {
         }
     }
 
-    pub(super) fn capture_protected_candidates(&mut self, deltas: &[AiStreamDelta]) {
+    fn streams_unprotected_reasoning_summary(&self, index: usize, delta: &AiStreamDelta) -> bool {
+        self.stream_unprotected_reasoning_summaries
+            && !self.known_protected_thinking_indices.contains(&index)
+            && matches!(delta, AiStreamDelta::ReasoningSummaryDelta { .. })
+    }
+
+    pub(super) fn capture_protected_candidates(
+        &mut self,
+        projection: &mut ClientProjectionSession,
+        deltas: &[AiStreamDelta],
+    ) {
         for delta in deltas {
+            if let AiStreamDelta::ProtectedThinkingStart { index } = delta {
+                self.known_protected_thinking_indices.insert(*index);
+                projection.begin_protected_thinking(*index);
+                continue;
+            }
             let Some(index) = self.protected_candidate_index(delta) else {
                 continue;
             };
+            if self.streams_unprotected_reasoning_summary(index, delta) {
+                continue;
+            }
             if matches!(
                 delta,
                 AiStreamDelta::ThinkingDeltaWithMetadata {
@@ -176,12 +209,20 @@ impl LiveDeltaGate {
         }
     }
 
-    pub(super) fn resolve_completed_item(
+    pub(super) async fn close_thinking(
         &mut self,
+        projection: &mut ClientProjectionSession,
         index: usize,
         item: &AiItem,
-        markers: &[crate::history_marker::HistoryMarker],
-    ) -> Vec<AiStreamDelta> {
+    ) -> Result<
+        (
+            Vec<AiStreamDelta>,
+            Vec<crate::history_marker::HistoryMarker>,
+        ),
+        crate::history_marker::HistoryMarkerError,
+    > {
+        self.known_protected_thinking_indices.remove(&index);
+        let streamed_protected = self.streamed_protected_thinking_indices.remove(&index);
         let pending = if let Some(pending) = self.pending_protected_deltas.remove(&index) {
             Some(pending)
         } else if self
@@ -197,27 +238,22 @@ impl LiveDeltaGate {
         } else {
             None
         };
-        let Some(pending) = pending else {
-            return Vec::new();
-        };
-        if markers.is_empty() {
-            return pending;
+        let closed = projection.close_thinking(index, item).await?;
+        if closed.had_live_projection || !closed.markers.is_empty() {
+            self.projected_thinking_items.insert(index);
         }
-        let mut preview = Vec::new();
-        let mut marker_index = 0;
-        if let MessageContent::Blocks(blocks) = &item.content {
-            for block in blocks {
-                if !is_protected_thinking(block) {
-                    continue;
-                }
-                let marker = markers
-                    .get(marker_index)
-                    .expect("protected Thinking block has a History Marker");
-                marker_index += 1;
-                preview.extend(self.projector.preview_deltas(index, block, marker));
+        let mut deltas = closed.finish_deltas;
+        if closed.markers.is_empty() {
+            if !streamed_protected && let Some(pending) = pending {
+                deltas.extend(pending);
             }
+            return Ok((deltas, closed.markers));
         }
-        preview
+        if !closed.had_live_projection && !streamed_protected {
+            deltas.extend(closed.preview_deltas);
+        }
+        deltas.extend(closed.marker_deltas);
+        Ok((deltas, closed.markers))
     }
 
     pub(super) fn commit_visible(&mut self, mut deltas: Vec<AiStreamDelta>) -> Vec<AiStreamDelta> {
@@ -236,34 +272,20 @@ impl LiveDeltaGate {
 
     pub(super) fn project_platform_marker(
         &mut self,
+        projection: &mut ClientProjectionSession,
         reference: &str,
         rendered: String,
     ) -> Vec<AiStreamDelta> {
-        self.projector.note_platform_reference(reference);
-        self.ambiguous_suffix = false;
-        let pending = std::mem::take(&mut self.pending_suffix);
-        let mut projected = pending
-            .into_iter()
-            .flat_map(|delta| self.projector.project_delta(delta))
-            .collect::<Vec<_>>();
-        projected.extend(self.projector.close_span());
-        projected.push(AiStreamDelta::ThinkingDelta(rendered));
-        self.commit_visible(projected)
+        let delta = projection.project_platform_marker_delta(reference, rendered);
+        self.commit_visible(vec![delta])
     }
 
-    pub(super) fn complete_model_leg(&mut self) -> Vec<AiStreamDelta> {
+    pub(super) fn complete_model_leg(
+        &mut self,
+        projection: &mut ClientProjectionSession,
+    ) -> Vec<AiStreamDelta> {
         let pending_thinking = self.flush_unindexed_thinking();
-        let mut suffix = std::mem::take(&mut self.pending_suffix);
-        suffix.extend(pending_thinking);
-        self.ambiguous_suffix = false;
-        if self.projector.contains_platform() {
-            suffix = suffix
-                .into_iter()
-                .flat_map(|delta| self.projector.project_delta(delta))
-                .collect();
-        }
-        suffix.extend(self.projector.close_span());
-        self.commit_visible(suffix)
+        self.route_visible_deltas(projection, pending_thinking)
     }
 
     fn unindexed_item_kind(delta: &AiStreamDelta) -> Option<UnindexedItemKind> {
@@ -314,26 +336,11 @@ impl LiveDeltaGate {
 
     pub(super) fn route_visible_deltas(
         &mut self,
-        has_exposed_tools: bool,
+        projection: &mut ClientProjectionSession,
         deltas: Vec<AiStreamDelta>,
     ) -> Vec<AiStreamDelta> {
         let mut visible = Vec::new();
         for delta in deltas {
-            if self.projector.contains_platform() {
-                visible.extend(self.projector.project_delta(delta));
-                continue;
-            }
-            if has_exposed_tools {
-                let starts_ambiguous_suffix = matches!(
-                    delta,
-                    AiStreamDelta::TextDelta(_) | AiStreamDelta::TextDeltaWithMetadata { .. }
-                );
-                if self.ambiguous_suffix || starts_ambiguous_suffix {
-                    self.ambiguous_suffix = true;
-                    self.pending_suffix.push(delta);
-                    continue;
-                }
-            }
             let prefix_only = matches!(
                 delta,
                 AiStreamDelta::MessageStart { .. }
@@ -350,7 +357,26 @@ impl LiveDeltaGate {
                 self.client_output_started = true;
                 visible.append(&mut self.pending_prefix);
             }
-            visible.push(delta);
+            let output_index = match &delta {
+                AiStreamDelta::ThinkingDeltaWithMetadata {
+                    output_index: Some(index),
+                    ..
+                }
+                | AiStreamDelta::ReasoningSummaryDelta {
+                    output_index: Some(index),
+                    ..
+                }
+                | AiStreamDelta::ItemDone { index, .. } => *index,
+                AiStreamDelta::ThinkingDelta(_)
+                | AiStreamDelta::ThinkingDeltaWithMetadata {
+                    output_index: None, ..
+                }
+                | AiStreamDelta::ReasoningSummaryDelta {
+                    output_index: None, ..
+                } => self.observe_unindexed_item(UnindexedItemKind::Thinking),
+                _ => self.next_unindexed_output_index,
+            };
+            visible.extend(projection.project_live_delta(output_index, delta));
         }
         self.response_started |= visible
             .iter()
@@ -360,46 +386,67 @@ impl LiveDeltaGate {
 
     pub(super) fn filter(
         &mut self,
+        projection: &mut ClientProjectionSession,
         run: &crate::hook::InferenceRun,
         deltas: Vec<AiStreamDelta>,
     ) -> Vec<AiStreamDelta> {
         let mut visible = Vec::new();
         for delta in deltas {
+            if matches!(delta, AiStreamDelta::ProtectedThinkingStart { .. }) {
+                continue;
+            }
             if matches!(delta, AiStreamDelta::Usage(_)) {
                 continue;
             }
             if let Some(index) = self.protected_candidate_index(&delta) {
-                if let Some(count) = self.prebuffered_protected_counts.get(&index).copied() {
-                    if count <= 1 {
-                        self.prebuffered_protected_counts.remove(&index);
-                    } else {
-                        self.prebuffered_protected_counts.insert(index, count - 1);
-                    }
+                if self.streams_unprotected_reasoning_summary(index, &delta) {
+                    visible.extend(self.route_visible_deltas(projection, vec![delta]));
                     continue;
                 }
-                if matches!(
-                    delta,
-                    AiStreamDelta::ThinkingDeltaWithMetadata {
-                        output_index: Some(_),
-                        ..
-                    } | AiStreamDelta::ReasoningSummaryDelta {
-                        output_index: Some(_),
-                        ..
-                    }
-                ) {
-                    self.pending_protected_deltas
-                        .entry(index)
-                        .or_default()
-                        .push(delta);
-                } else {
-                    match self.pending_unindexed_thinking.as_mut() {
-                        Some((pending_index, pending)) if *pending_index == index => {
-                            pending.push(delta);
+                let prebuffered =
+                    if let Some(count) = self.prebuffered_protected_counts.get(&index).copied() {
+                        if count <= 1 {
+                            self.prebuffered_protected_counts.remove(&index);
+                        } else {
+                            self.prebuffered_protected_counts.insert(index, count - 1);
                         }
-                        _ => {
-                            self.pending_unindexed_thinking = Some((index, vec![delta]));
+                        true
+                    } else {
+                        false
+                    };
+                if !prebuffered {
+                    if matches!(
+                        delta,
+                        AiStreamDelta::ThinkingDeltaWithMetadata {
+                            output_index: Some(_),
+                            ..
+                        } | AiStreamDelta::ReasoningSummaryDelta {
+                            output_index: Some(_),
+                            ..
+                        }
+                    ) {
+                        self.pending_protected_deltas
+                            .entry(index)
+                            .or_default()
+                            .push(delta.clone());
+                    } else {
+                        match self.pending_unindexed_thinking.as_mut() {
+                            Some((pending_index, pending)) if *pending_index == index => {
+                                pending.push(delta.clone());
+                            }
+                            _ => {
+                                self.pending_unindexed_thinking =
+                                    Some((index, vec![delta.clone()]));
+                            }
                         }
                     }
+                }
+                if projection.post_text_started() {
+                    visible.extend(projection.project_live_delta(index, delta));
+                } else if self.known_protected_thinking_indices.contains(&index) {
+                    self.streamed_protected_thinking_indices.insert(index);
+                    let projected = projection.project_protected_delta(index, delta);
+                    visible.extend(self.commit_visible(projected));
                 }
                 continue;
             }
@@ -409,8 +456,7 @@ impl LiveDeltaGate {
                 && self.pending_unindexed_thinking.is_some()
             {
                 let pending_thinking = self.flush_unindexed_thinking();
-                visible
-                    .extend(self.route_visible_deltas(run.has_exposed_tools(), pending_thinking));
+                visible.extend(self.route_visible_deltas(projection, pending_thinking));
             }
             if let Some(kind) = kind
                 && self.current_unindexed_item_kind != Some(kind)
@@ -443,9 +489,7 @@ impl LiveDeltaGate {
                             self.platform_tool_indices.insert(index);
                         } else if !remains_ambiguous {
                             if let Some(pending) = self.pending_tool_deltas.remove(&index) {
-                                visible.extend(
-                                    self.route_visible_deltas(run.has_exposed_tools(), pending),
-                                );
+                                visible.extend(self.route_visible_deltas(projection, pending));
                             }
                             self.pending_tool_names.remove(&index);
                         }
@@ -483,7 +527,7 @@ impl LiveDeltaGate {
                         continue;
                     }
                     if let Some(pending) = self.pending_tool_deltas.remove(index) {
-                        visible.extend(self.route_visible_deltas(run.has_exposed_tools(), pending));
+                        visible.extend(self.route_visible_deltas(projection, pending));
                     }
                     self.pending_tool_names.remove(index);
                 }
@@ -498,7 +542,7 @@ impl LiveDeltaGate {
                         continue;
                     }
                     if let Some(pending) = self.pending_tool_deltas.remove(index) {
-                        visible.extend(self.route_visible_deltas(run.has_exposed_tools(), pending));
+                        visible.extend(self.route_visible_deltas(projection, pending));
                     }
                     self.pending_tool_names.remove(index);
                 }
@@ -535,8 +579,12 @@ impl LiveDeltaGate {
             if hidden_platform_delta {
                 continue;
             }
+            if matches!(&delta, AiStreamDelta::ItemDone { index, .. } if self.projected_thinking_items.remove(index))
+            {
+                continue;
+            }
 
-            visible.extend(self.route_visible_deltas(run.has_exposed_tools(), vec![delta]));
+            visible.extend(self.route_visible_deltas(projection, vec![delta]));
         }
         visible
     }
@@ -544,20 +592,19 @@ impl LiveDeltaGate {
 
 #[cfg(test)]
 mod terminal_tests {
+    use super::super::super::test_projection_session;
     use super::super::partition_terminal_deltas;
     use super::*;
+    use crate::protocol::ir::MessageContent;
 
-    #[test]
-    fn model_leg_completion_flushes_pending_unindexed_thinking() {
-        let mut gate = LiveDeltaGate {
-            pending_unindexed_thinking: Some((
-                0,
-                vec![AiStreamDelta::ThinkingDelta("reasoning".into())],
-            )),
-            ..Default::default()
-        };
+    #[tokio::test]
+    async fn model_leg_completion_flushes_pending_unindexed_thinking() {
+        let mut projection = test_projection_session().await;
+        let mut gate = LiveDeltaGate::default();
+        gate.pending_unindexed_thinking =
+            Some((0, vec![AiStreamDelta::ThinkingDelta("reasoning".into())]));
 
-        let visible = gate.complete_model_leg();
+        let visible = gate.complete_model_leg(&mut projection);
 
         assert!(matches!(
             visible.as_slice(),
@@ -565,39 +612,25 @@ mod terminal_tests {
         ));
     }
 
-    #[test]
-    fn unindexed_thinking_keeps_ambiguous_suffix_order() {
-        let mut gate = LiveDeltaGate {
-            pending_suffix: vec![AiStreamDelta::TextDelta("earlier text".into())],
-            ambiguous_suffix: true,
-            ..Default::default()
-        };
-
+    #[tokio::test]
+    async fn exposed_platform_tools_do_not_delay_visible_text() {
+        let mut projection = test_projection_session().await;
+        let mut gate = LiveDeltaGate::default();
         let visible = gate.route_visible_deltas(
-            true,
-            vec![AiStreamDelta::ThinkingDelta("later reasoning".into())],
+            &mut projection,
+            vec![AiStreamDelta::TextDelta("live".into())],
         );
-        assert!(visible.is_empty());
-
-        let visible = gate.complete_model_leg();
         assert!(matches!(
             visible.as_slice(),
-            [
-                AiStreamDelta::TextDelta(text),
-                AiStreamDelta::ThinkingDelta(reasoning),
-            ] if text == "earlier text" && reasoning == "later reasoning"
+            [AiStreamDelta::TextDelta(text)] if text == "live"
         ));
     }
 
-    #[test]
-    fn signature_fragments_remain_buffered_until_the_thinking_item_completes() {
-        let mut gate = LiveDeltaGate {
-            pending_unindexed_thinking: Some((
-                0,
-                vec![AiStreamDelta::ThinkingDelta("reasoning".into())],
-            )),
-            ..Default::default()
-        };
+    #[tokio::test]
+    async fn signature_fragments_remain_buffered_until_the_thinking_item_completes() {
+        let mut gate = LiveDeltaGate::default();
+        gate.pending_unindexed_thinking =
+            Some((0, vec![AiStreamDelta::ThinkingDelta("reasoning".into())]));
         let mut signatures = vec![
             AiStreamDelta::ThinkingSignature("opaque-".into()),
             AiStreamDelta::ThinkingSignature("signature".into()),

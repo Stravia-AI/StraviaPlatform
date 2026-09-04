@@ -1,0 +1,3 @@
+# Connect Client Apply upserts provider, not current model
+
+Connect Client Apply incrementally upserts the Stravia provider (and any provider-owned sidecar catalog) into the Connect Client Global Config. It may set a separate active-provider key so GUI clients without a provider picker actually use Stravia. It does not write the current/default model, and does not write fused provider+model keys. Claude Code is the exception: merge only Anthropic env mappings, including the four model slots. Existing files that fail to parse are left untouched. File apply lives only in Stravia Desktop; copy-paste of the same incremental preview remains available, including on the standalone server.

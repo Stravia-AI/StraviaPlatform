@@ -94,7 +94,14 @@ impl GenerationChainWrite {
         response: &mut AiResponse,
         upstream_response_id: Option<String>,
     ) -> bool {
-        if !generation_node_is_legal(response) {
+        if !generation_node_is_legal(response)
+            || !client_projection_is_valid(
+                crate::protocol::transform::ProtocolTransform::inferred_ingress(
+                    &self.request_delta,
+                ),
+                response,
+            )
+        {
             return false;
         }
         attach_persisted_profile(
@@ -119,7 +126,9 @@ impl GenerationChainWrite {
                 }),
         );
         if let Some(target) = target {
-            effective_state = effective_state.with_provider_model(&target.actual_model);
+            effective_state = effective_state
+                .with_provider_model(&target.actual_model)
+                .with_selected_target_key(&target.selected_target_key);
         }
         self.staged = Some(StagedGeneration {
             response: response.clone(),
@@ -132,8 +141,20 @@ impl GenerationChainWrite {
     pub(crate) async fn persist(&mut self) -> Result<(), PersistError> {
         let mut staged = self.staged.clone().ok_or(PersistError::NotStaged)?;
         if let Some(store) = &self.chain.history_markers {
-            let mut references =
+            let mut parent_references =
                 crate::history_marker::history_marker_references(&self.parent.parent_client_items);
+            parent_references.sort();
+            parent_references.dedup();
+            let mut references = Vec::with_capacity(parent_references.len());
+            for reference in parent_references {
+                let resolved = store
+                    .resolve(&self.principal, &reference)
+                    .await
+                    .map_err(PersistError::HistoryMarker)?;
+                if resolved.as_ref().is_some_and(|marker| marker.published) {
+                    references.push(reference);
+                }
+            }
             let mut untrusted =
                 crate::history_marker::history_marker_references(&self.request_delta.items);
             untrusted.extend(crate::history_marker::history_marker_references(
@@ -243,6 +264,7 @@ struct StagedTarget {
     namespace: String,
     protocol: ProtocolId,
     actual_model: String,
+    selected_target_key: String,
 }
 
 fn staged_target(response: &AiResponse) -> Option<StagedTarget> {
@@ -256,5 +278,10 @@ fn staged_target(response: &AiResponse) -> Option<StagedTarget> {
         namespace: target.get("namespace")?.as_str()?.to_owned(),
         protocol: crate::protocol::registry::ProtocolRegistry::global().resolve_alias(protocol)?,
         actual_model: target.get("actual_model")?.as_str()?.to_owned(),
+        selected_target_key: target
+            .get("selected_target_key")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
     })
 }

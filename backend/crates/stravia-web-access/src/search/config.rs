@@ -238,7 +238,7 @@ impl EngineConfig {
 }
 
 impl Config {
-    pub fn read_or_create(config_path: &Path) -> eyre::Result<Self> {
+    pub fn read_or_create(config_path: &Path) -> anyhow::Result<Self> {
         let mut config = Config::default();
 
         if !config_path.exists() {

@@ -18,7 +18,7 @@ const GOOGLE_READY_SELECTOR: &str = "a h3, div[role='heading'][aria-level='2']";
 const GOOGLE_NO_RESULTS_MESSAGE: &str = "Your search did not match any documents";
 const BROWSER_RENDER_TIMEOUT: Duration = Duration::from_secs(10);
 
-pub async fn request(search: &SearchQuery) -> eyre::Result<RequestResponse> {
+pub async fn request(search: &SearchQuery) -> anyhow::Result<RequestResponse> {
     Ok(search.http.get(search_url(search).as_str()).into())
 }
 
@@ -28,7 +28,7 @@ pub(crate) fn requires_browser_render(body: &str) -> bool {
         && !is_no_results_page(body)
 }
 
-pub(crate) async fn render_response(search: &SearchQuery) -> eyre::Result<EngineResponse> {
+pub(crate) async fn render_response(search: &SearchQuery) -> anyhow::Result<EngineResponse> {
     let url = search_url(search);
     let rendered = search
         .browser
@@ -40,7 +40,7 @@ pub(crate) async fn render_response(search: &SearchQuery) -> eyre::Result<Engine
             request_guard: None,
         })
         .await
-        .map_err(|error| eyre::eyre!("Google browser renderer failed: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("Google browser renderer failed: {error}"))?;
     let body = rendered.html;
 
     if is_no_results_page(&body) {
@@ -48,19 +48,19 @@ pub(crate) async fn render_response(search: &SearchQuery) -> eyre::Result<Engine
     }
     if !rendered.ready {
         if requires_browser_render(&body) {
-            eyre::bail!("Google returned its JavaScript challenge after browser rendering");
+            anyhow::bail!("Google returned its JavaScript challenge after browser rendering");
         }
         if is_traffic_challenge(&body) {
-            eyre::bail!("Google blocked browser rendering with an automated-traffic challenge");
+            anyhow::bail!("Google blocked browser rendering with an automated-traffic challenge");
         }
-        eyre::bail!(
+        anyhow::bail!(
             "Google search results did not render from {} within {} seconds",
             rendered.url,
             BROWSER_RENDER_TIMEOUT.as_secs()
         );
     }
     if is_traffic_challenge(&body) {
-        eyre::bail!("Google blocked browser rendering with an automated-traffic challenge");
+        anyhow::bail!("Google blocked browser rendering with an automated-traffic challenge");
     }
 
     let response = parse_response(&body)?;
@@ -112,7 +112,7 @@ enum RedirectSlot {
 async fn resolve_google_redirects(
     client: &wreq::Client,
     mut response: EngineResponse,
-) -> eyre::Result<EngineResponse> {
+) -> anyhow::Result<EngineResponse> {
     let mut redirects = response
         .search_results
         .iter()
@@ -155,26 +155,26 @@ fn is_google_goto_url(url: &str) -> bool {
     url.starts_with("https://www.google.com/goto?url=")
 }
 
-async fn resolve_google_redirect(client: &wreq::Client, url: &str) -> eyre::Result<String> {
+async fn resolve_google_redirect(client: &wreq::Client, url: &str) -> anyhow::Result<String> {
     let response = client
         .get(url)
         .redirect(wreq::redirect::Policy::none())
         .send()
         .await
-        .map_err(|error| eyre::eyre!("Google result redirect request failed: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("Google result redirect request failed: {error}"))?;
     if !response.status().is_redirection() {
-        eyre::bail!("Google result redirect returned HTTP {}", response.status());
+        anyhow::bail!("Google result redirect returned HTTP {}", response.status());
     }
     let location = response
         .headers()
         .get(wreq::header::LOCATION)
-        .ok_or_else(|| eyre::eyre!("Google result redirect omitted Location"))?
+        .ok_or_else(|| anyhow::anyhow!("Google result redirect omitted Location"))?
         .to_str()
-        .map_err(|error| eyre::eyre!("Google result redirect Location was invalid: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("Google result redirect Location was invalid: {error}"))?;
     let target = Url::parse(location)
-        .map_err(|error| eyre::eyre!("Google result redirect target was invalid: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("Google result redirect target was invalid: {error}"))?;
     if !matches!(target.scheme(), "http" | "https") {
-        eyre::bail!(
+        anyhow::bail!(
             "Google result redirect used unsupported scheme {}",
             target.scheme()
         );
@@ -183,7 +183,7 @@ async fn resolve_google_redirect(client: &wreq::Client, url: &str) -> eyre::Resu
     Ok(normalize_url(target.as_str()))
 }
 
-pub fn parse_response(body: &str) -> eyre::Result<EngineResponse> {
+pub fn parse_response(body: &str) -> anyhow::Result<EngineResponse> {
     parse_html_response_with_opts(
         body,
         ParseOpts::new()
@@ -460,7 +460,7 @@ pub fn request_autocomplete(query: &str, client: &wreq::Client) -> wreq::Request
     client.get(url.as_str())
 }
 
-pub fn parse_autocomplete_response(body: &str) -> eyre::Result<Vec<String>> {
+pub fn parse_autocomplete_response(body: &str) -> anyhow::Result<Vec<String>> {
     let res = serde_json::from_str::<Vec<serde_json::Value>>(body)?;
     Ok(res
         .into_iter()
@@ -474,7 +474,7 @@ pub fn parse_autocomplete_response(body: &str) -> eyre::Result<Vec<String>> {
         .collect())
 }
 
-fn clean_url(url: &str) -> eyre::Result<String> {
+fn clean_url(url: &str) -> anyhow::Result<String> {
     if url.starts_with("/goto?url=") {
         Ok(format!("https://www.google.com{url}"))
     } else if url.starts_with("/url?q=") {

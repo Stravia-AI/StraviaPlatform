@@ -494,7 +494,7 @@ async fn manual_provider_models_are_partial_and_do_not_mutate_routes() -> anyhow
         .create_model(CreateRoute {
             model_id: "private-route".to_string(),
             display_name: None,
-            balance: Some("weighted".to_string()),
+            balance: Some("traffic_equalization".to_string()),
             target_provider: provider.id.clone(),
             target_model: "private/model".to_string(),
             targets: vec![],
@@ -686,22 +686,28 @@ async fn copy_provider_can_copy_matching_route_targets_to_copied_provider() -> a
         .create_model(CreateRoute {
             model_id: "source-model".to_string(),
             display_name: None,
-            balance: Some("priority".to_string()),
+            balance: Some("traffic_equalization".to_string()),
             target_provider: String::new(),
             target_model: String::new(),
             targets: vec![
                 CreateTarget {
                     provider_id: original.id.clone(),
                     model: "source-upstream-model".to_string(),
-                    weight: Some(80),
-                    priority: Some(1),
+                    enabled: true,
+                    priority: Some(100_000),
+                    first_token_timeout_ms: None,
+                    target_retry_budget: None,
+                    target_cooldown_ms: None,
                     thinking_level_map: Vec::new(),
                 },
                 CreateTarget {
                     provider_id: fallback.id.clone(),
                     model: "fallback-upstream-model".to_string(),
-                    weight: Some(20),
-                    priority: Some(2),
+                    enabled: true,
+                    priority: Some(0),
+                    first_token_timeout_ms: None,
+                    target_retry_budget: None,
+                    target_cooldown_ms: None,
                     thinking_level_map: Vec::new(),
                 },
             ],
@@ -741,27 +747,24 @@ async fn copy_provider_can_copy_matching_route_targets_to_copied_provider() -> a
         .find(|model| model.id == source_route.id)
         .expect("source route should remain");
     assert_eq!(updated_model.model_id, "source-model");
-    assert_eq!(updated_model.balance, "priority");
+    assert_eq!(updated_model.balance, "traffic_equalization");
     assert_eq!(updated_model.target_provider, original.id);
     assert_eq!(updated_model.target_model, "source-upstream-model");
     assert_eq!(updated_model.targets.len(), 3);
     assert!(updated_model.targets.iter().any(|target| {
         target.provider_id == original.id
             && target.model == "source-upstream-model"
-            && target.weight == 80
-            && target.priority == 1
+            && target.priority == 100_000
     }));
     assert!(updated_model.targets.iter().any(|target| {
         target.provider_id == copied.id
             && target.model == "source-upstream-model"
-            && target.weight == 80
-            && target.priority == 1
+            && target.priority == 100_000
     }));
     assert!(updated_model.targets.iter().any(|target| {
         target.provider_id == fallback.id
             && target.model == "fallback-upstream-model"
-            && target.weight == 20
-            && target.priority == 2
+            && target.priority == 0
     }));
 
     Ok(())
@@ -991,7 +994,7 @@ async fn config_epoch_starts_at_zero_and_increments_on_model_create() -> anyhow:
         .create_model(CreateRoute {
             model_id: "epoch-test-model".to_string(),
             display_name: None,
-            balance: Some("weighted".to_string()),
+            balance: Some("traffic_equalization".to_string()),
             target_provider: provider.id.clone(),
             target_model: "gpt-4".to_string(),
             targets: vec![],
@@ -1027,7 +1030,7 @@ async fn config_epoch_increments_on_model_update_and_delete() -> anyhow::Result<
         .create_model(CreateRoute {
             model_id: "epoch-update-model".to_string(),
             display_name: None,
-            balance: Some("weighted".to_string()),
+            balance: Some("traffic_equalization".to_string()),
             target_provider: provider.id.clone(),
             target_model: "gpt-4".to_string(),
             targets: vec![],

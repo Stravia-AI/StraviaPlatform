@@ -4,6 +4,26 @@
 
 Stravia 是本产品的唯一品牌名称。用户可见文本、技术标识、配置键、持久化目录、错误代码和发布元数据均使用 Stravia 派生名称；不保留旧品牌兼容名称或别名。
 
+## Stravia Desktop
+
+Stravia Desktop 是运行在本机的 Stravia 管理壳，与独立 HTTP server 相对。只有它能直接改写本机 Connect Client 的配置文件。
+_避免使用_：客户端（单独使用、未区分 Desktop 与 Connect Client）
+
+## Connect Client
+
+Connect Client 是用户本机上的第三方编程工具，可被配置为以 Stravia 为模型服务；管理面「客户端」下拉里的 Codex、Claude Code 等即此类。它不是 Principal，也不是 Agent Definition。
+_避免使用_：Agent（当指这些工具）、接入 Agent、把 Desktop 和 Connect Client 都叫客户端
+
+## Connect Client Apply
+
+Connect Client Apply 是 Stravia Desktop 把 Stravia provider 增量写入某个 Connect Client Global Config 的操作。它只 upsert Stravia 拥有的 provider 段及配套 catalog；可写与当前模型分离的激活 provider 键；不写当前/默认模型，也不写把 provider 和模型焊在一起的键。Claude Code 例外：只 merge Anthropic 的 base URL、token 与四套模型映射。它不是 admin HTTP API。
+_避免使用_：一键覆盖配置、在 Gateway 进程里写用户 home、把完整可粘贴示例整文件写盘
+
+## Connect Client Global Config
+
+Connect Client Global Config 是该 Connect Client 的用户级配置文件，路径由该工具的官方目录环境变量与默认目录解析；Connect Client Apply 只改这份文件，不改仓库内的项目配置。
+_避免使用_：项目级 `.codex/config.toml`、项目级 `.claude/settings.json`、把任意 OPENCODE_CONFIG 文件都当成全局配置
+
 ## Principal
 
 Principal 是由有效 Stravia API Key 建立、用于归属 Turn Chain、Artifact、配额、并发限制与执行状态的认证客户端身份。Stravia 不存在 Anonymous Principal，也不以连接或 Session 代替认证身份。
@@ -79,22 +99,37 @@ Platform Tool 是由平台拥有、注册和执行的模型工具。平台向模
 
 ## Client Projection
 
-Client Projection 是把一次 Model Leg 的 canonical response 变成客户端可见视图：Platform Tool call/result 与受保护 Thinking 替换为 History Marker；含 Platform ToolCall 的 Model Leg 中，canonical Text 仅在该视图里改用带 Projection Delimiter 的 Thinking 承载。它不是 Protocol Conversion，也不拥有 ingress 协议形态改写；Generation Chain 保存的是投影完成之后、按 ingress 协议落盘的结果。
-_避免使用_：History Marker Projection；把 Generation Chain 的协议形态改写称为 Client Projection
+Client Projection 是把 canonical response 变成客户端可见视图：Platform Tool call/result 与 authoritative Thinking 可替换为 History Marker，普通可见 Text 不因潜在或实际 Platform ToolCall 而延迟交付；OpenAI-compatible 的 Post-Text Thinking 以 Markdown 引用 Preview、Projection Delimiter 与一对一 History Marker 经 Text carrier 交付，其他协议保持原生 carrier，不能表示该顺序时显式失败而不回退缓冲。它拥有 Thinking History Marker 的 reserve → 落盘 → 交付 → publish 顺序，以及 Platform History Marker 的投影与交付 → publish；交付指把 Marker 交给 Delivery，publish 只在 caller 确认 Sent 之后；Cancelled 或失败则废弃 Reserved Thinking Marker。Platform Tool Execution 的落盘与执行仍不在 Client Projection。live 流式 delta 与 staged 完整响应走同一 Client Projection，不是两套投影。它不拥有 Hook 变换、Delivery 发送、Model Leg 循环、Platform Tool Execution，也不拥有 Marker 的持久化事实源。它不按 Target 的 egress 协议 id 选择缓冲或 carrier。它不是 Protocol Conversion，也不拥有 ingress 协议形态改写；Generation Chain 保存的是投影完成之后、按 ingress 协议落盘的结果。
+_避免使用_：History Marker Projection；把 Generation Chain 的协议形态改写称为 Client Projection；把 Platform Tool Execution 生命周期称为 Client Projection；把 live 流式路径称为第二套投影
+
+## Post-Text Thinking
+
+Post-Text Thinking 是同一 Inference Run 的 Client Projection 顺序中首个非空 Text 后出现的 canonical Thinking，不因 Model Leg 切换而重置；live 与 staged 都在 Client Projection 产出该非空 Text 时进入 Post-Text，不因 Delivery 的 Sent 或 Client Output Commit 翻转；空 delta 不触发，非空空白属于 Text。OpenAI-compatible Client Projection 仅将其中原本可公开的字节作为 Markdown 引用 Preview，权威内容由一对一 Thinking History Marker 恢复；protected payload 没有公开 Preview 时只交付 Marker。
+_避免使用_：Late Reasoning、Quoted Text
+
+## Quoted Thinking Preview
+
+Quoted Thinking Preview 是 Post-Text Thinking 中可公开字节的 Markdown blockquote 展示，每个物理行及空行都属于同一外层引用块；它只保证内容不逃逸该引用块，不保证内部 Markdown 采用统一样式。其布局字节属于 Projection Delimiter span，authoritative Thinking 仍由 Marker 恢复；仅编辑 Preview 而保留 Marker 不改变 authoritative Thinking，删除 Marker 后引用按普通客户端 Text 保留。编码器可以保留不超过最长私有语法前缀的固定 lookbehind，以跨 delta 转义 Marker 与 Delimiter 伪造，这不构成 Model Leg Text 缓冲。
+_避免使用_：Thinking Text、Authoritative Thinking
 
 ## History Marker
 
-History Marker 是 Client Projection 中、归属于 Principal 的 opaque 历史引用，用于在原位置等待并恢复一个 Hidden History Segment。一个 Marker 只能引用一个 Platform Tool Execution（其 call 与 terminal result）或一个受保护 Thinking block，禁止聚合多个工具执行或多个 block。新 Marker 以无签名 Thinking block 中仅供机器读取的 HTML comment 呈现；各生成协议使用原生 reasoning、thinking 或 thought 载体，旧 Text 载体只在保留期内兼容读取。周边客户端历史可以独立修改，同一 Marker 在保留期内可以被重试和并发分支重复使用。
+History Marker 是 Client Projection 中、归属于 Principal 的 opaque 历史引用，用于在原位置等待并恢复一个 Hidden History Segment。一个 Marker 只能引用一个 Platform Tool Execution（其 call 与 terminal result）或一个 authoritative Thinking block，禁止聚合多个工具执行或多个 block。新 Marker 默认以无签名 Thinking block 中仅供机器读取的 HTML comment 呈现；OpenAI-compatible 客户端收到首个 Text 后，所有 Thinking 与 Platform Marker 均改用 Text carrier，以保留它们与后续内容的顺序。Markdown renderer 通常隐藏该 comment，纯文本客户端可能直接显示它，这是 Text carrier 的显式协议行为；周边客户端历史可以独立修改，同一 Marker 在保留期内可以被重试和并发分支重复使用。
 _避免使用_：占位文本、Platform Tool Call、Client History Token
+
+## Reserved Thinking Marker
+
+Reserved Thinking Marker 是每个 canonical Post-Text Thinking block 的首个 delta 到达时由 Client Projection 在当前 Inference Run 中分配、尚未落盘且未发布的 History Marker reference；它允许 Preview 立即流式交付，只有完整 block 以同一 reference 原子落盘、Marker 按顺序交付并发布后才能恢复，后续 Text 必须等待该过程完成。落盘或发布失败必须显式终止交付且不得提交 Generation Chain，不得把 Preview 降级为 canonical Text；失败或未完整交付的 reference 必须废弃。无原生 block identity 时，一个连续 Thinking delta run 构成一个 block。
+_避免使用_：Published Marker、Partial Thinking
 
 ## Projection Delimiter
 
-Projection Delimiter 是 Client Projection 中围绕一段可见字节的成对、无状态机器语法，表示该段 canonical Text 仅为客户端展示而使用 Thinking 载体。它绑定一个既有 Principal-scoped History Marker reference 和 span ordinal，不拥有 hidden payload、不创建 Store 记录；客户端回放时只有 Marker 仍存在、Delimiter 正确配对且 Marker 可解析，范围内字节才恢复为 canonical Text。删除或破坏任一边界属于显式历史编辑。
+Projection Delimiter 是 Client Projection 中围绕一段可见字节的成对、无状态机器语法，表示该段 canonical content 为客户端展示临时使用了不同 carrier；Text mode 将 Thinking carrier 中的可见字节恢复为 canonical Text，Preview mode 在绑定 Marker 可恢复时删除仅供展示的字节，由 Marker 提供 authoritative content。Delimiter span 拥有为展示插入的换行、Markdown 引用前缀与转义字节，它们不属于 canonical content；客户端回放时只有绑定的 Principal-scoped History Marker 仍存在、Delimiter 正确配对且 Marker 可解析，范围内字节才按 mode 恢复。删除或破坏任一边界属于显式历史编辑。
 _避免使用_：History Marker、Hidden History Segment、Projection Record
 
 ## Hidden History Segment
 
-Hidden History Segment 是 Client Projection 省略、但属于模型有效上下文的单个受保护单元；它是一个 Thinking block，或一个 Platform Tool Execution 的 call/result 对。恢复只替换对应 History Marker，不覆盖 Marker 之外的客户端历史，也不拥有同一模型轮次中客户端可见的工具调用。
+Hidden History Segment 是 Client Projection 省略、但属于模型有效上下文的单个受保护单元；它是一个 Thinking block，或一个 Platform Tool Execution 的 call/result 对。恢复只替换对应 History Marker，不覆盖 Marker 之外的客户端历史，也不拥有同一模型轮次中客户端可见的工具调用。一次恢复同时给出模型可见历史，以及仍带 Marker 的 client-shaped 对照；Generation Chain 落盘 effective request 时使用该对照，不自己回锚 Marker。
 _避免使用_：Hidden Client History、完整历史快照
 
 ## Opaque Context Requirement
@@ -119,7 +154,7 @@ _避免使用_：Client History（当作独立事实源）；把客户端可见�
 
 ## Generation Chain Write
 
-Generation Chain Write 是一次尚未落盘的 Generation Chain 节点写入尝试，由进行中的 Inference Run 持有；完整交付后才成为节点，失败或中止则丢弃。Write 拥有节点合法性（仅 `completed` 或 `incomplete` 可落盘，并在 stage 时写入 ingress 协议形态）；Inference Run 只在完整交付后提交，不解释投影或终态合法性。它不是 Model Turn、Agent Turn、Search Turn、Media Understanding Turn，也不是已持久化的 Generation Chain 节点。
+Generation Chain Write 是一次尚未落盘的 Generation Chain 节点写入尝试，由进行中的 Inference Run 持有；完整交付后才成为节点，失败或中止则丢弃。Write 拥有节点合法性（仅 `completed` 或 `incomplete` 可落盘，并在 stage 时写入 ingress 协议形态与 Target 身份）；effective request 在观察时必须已是恢复给出的 client-shaped 对照，Write 不回锚 History Marker。Inference Run 只在完整交付后提交，不解释投影或终态合法性。它不是 Model Turn、Agent Turn、Search Turn、Media Understanding Turn，也不是已持久化的 Generation Chain 节点。
 _避免使用_：GenerationChainTurn、GenerationChainDraft、Session
 
 ## Generation Materialization Cache
@@ -198,7 +233,24 @@ _避免使用_：Provider Status、Model Status
 
 ## Route
 
-Route 将 Route ID 映射到一组 Target，并规定这些 Target 的选择策略。
+Route 将 Route ID 映射到一组 Target，并规定这些 Target 的选择策略。一条 Route 必须至少有一个已启用 Target。
+
+## Route Scheduling Strategy
+
+Route Scheduling Strategy 是同一 Target Priority 组内选择 Target 的策略，取值为 Traffic Equalization 或 Latency Preference；缺省为 Traffic Equalization。它不替代 Target Continuation、Conversation Affinity、Cache Affinity 或 Target Priority。
+_避免使用_：balance、weighted、priority（当指 Route 旧四档）、cooldown（当指 Route 旧四档）、平均调度、Cost Equalization
+
+## Traffic Equalization
+
+Traffic Equalization 是把下一个请求分给同组内近期加权 token 流量最低的 Target 的调度策略。它均衡的是流量，不是美元成本。
+_避免使用_：平均调度、Cost Equalization、weighted、round-robin、计费
+
+
+## Latency Preference
+
+Latency Preference 是按上游近期 Token 速度与成功率选择同组 Target 的调度策略。
+_避免使用_：latency（当指 Route 旧四档）、EMA 延迟
+
 
 ## Route ID
 
@@ -210,9 +262,14 @@ _避免使用_：Route 名、展示名、昵称、大小写折叠、用存储主
 Model Display Name 是 Route 可选、可重复的人类可读标签。它不参与路由、授权、绑定或 Target 选择；为空时，面向人的展示统一回退到 Route ID。
 _避免使用_：Route ID、模型身份、查找键
 
+## Conversation Affinity
+
+Conversation Affinity 是客户端给出 Generation Chain 父节点或 Prompt Cache Directive 路由键时，对同一身份优先选择该身份上次成功 Target 的软性偏好。不同身份不共享该偏好；两种身份都没有时不生效。它按 Principal 与 Route 隔离，可压过 Target Priority，不形成 Session，也不替代 Target Continuation。
+_避免使用_：Session、Session Affinity、Client Session
+
 ## Cache Affinity
 
-Cache Affinity 是 Route 在候选 Target 间为提高上游 Prompt Cache 复用率施加的软性偏好。它按 Principal 隔离；对一个由 Canonical Item Hash 顺序组成的 Cache Prefix，它优先选择曾成功处理该前缀、且报告 `prompt_tokens` 不少于 20,000 的合格 Target；没有合格命中时，回退到 Route 的选择策略。它适用于所有通过 Route 选择 Target 的调用，不形成客户端、连接或 Session 绑定，不改变 Effective Model Request，也不复用响应或 Target Continuation。
+Cache Affinity 是在 Conversation Affinity 不生效时，为提高上游 Prompt Cache 复用率施加的软性偏好。它按 Principal 隔离；对一个由 Canonical Item Hash 顺序组成的 Cache Prefix，它优先选择曾成功处理该前缀、且报告 `prompt_tokens` 不少于 20,000 的合格 Target；没有合格命中时，回退到 Target Priority 与 Route Scheduling Strategy。它可压过 Target Priority，不形成客户端、连接或 Session 绑定，不改变 Effective Model Request，也不复用响应或 Target Continuation。
 
 ## Canonical Item Hash
 
@@ -241,16 +298,55 @@ Cache Prefix Token Count 是 Target 在成功处理 Cache Prefix 后报告的 `p
 
 ## Target
 
-Target 是 Route 中一个可尝试的上游目的地。只有当前 Target 的上游失败被明确判定为可重试时，当前 Run 才会按 Route 的选择策略尝试下一个 Target；Hook、Platform Tool、状态不变量错误与取消不会触发 Target 切换。
+Target 是 Route 上一个已配置的上游目的地。只有已启用 Target 会被尝试；只有当前 Target 的上游失败被明确判定为可重试时，当前 Run 才会按 Route 的选择策略尝试下一个已启用 Target；Hook、Platform Tool、状态不变量错误与取消不会触发 Target 切换。
+_避免使用_：调度泳池
+
+## Enabled Target
+
+已启用 Target 是参与该 Route 上 Target 选择、亲和与冷却的 Target。缺省为已启用。它必须已配置 Provider 与上游 model。
+_避免使用_：调度泳池、可调度 Target、在线 Target
+
+## Disabled Target
+
+已禁用 Target 是仍属于该 Route、但不参与选择、亲和或冷却的 Target。它不是已删除的 Target。
+_避免使用_：删除的 Target、暂存 Target、断开的 Target
+
+## Target Priority
+
+Target Priority 是 Target 上的分组整数，取值 -2147483648–2147483647，缺省为 0；数值越高越优先。用于选择时，仅已启用且数值相同的 Target 构成同一优先级组。它不是列表顺序，也不是 Weight。
+_避免使用_：列表序号、唯一排名、Weight（当指优先级）
+
+
+## First Token
+
+First Token 是当前 Target 本次尝试从上游收到的第一个 canonical 输出，包含 Thinking。它不是 Client Output Commit，也不要求该输出已经对客户端可见。
+_避免使用_：首个可见 Text、Client Output Commit
+
+## First Token Timeout
+
+First Token Timeout 是 Target 在发出上游请求后等待 First Token 的最长时限；缺省 60 秒，0 表示关闭。超时按瞬时失败处置。
+_避免使用_：总超时、Connect Timeout
+
+## Target Cooldown
+
+Target Cooldown 是 Target 在被本次请求放弃后，一段时间内不再承接新请求的状态；缺省 120 秒。它不阻止当前请求的同 Target 重试。
+_避免使用_：HealthRegistry、熔断（当指这个冷却）
+
+## Target Retry Budget
+
+Target Retry Budget 是瞬时失败时在更换 Target 前对同一 Target 的额外尝试次数；缺省 5 次（含首次共 6 次），间隔指数退避并 full jitter。
+_避免使用_：Route 重试、循环重试
+
 
 ## Client Output Commit
 
 Client Output Commit 是一次 Run 的输出首次不可逆地对客户端可见的时点。此前，当前 Target 的明确可重试上游失败可以触发 Target 切换；此后禁止切换 Target。它不表示响应正文已完整交付，完整交付只在正文成功结束时成立。
 _避免使用_：Output Started、Response Committed、Delivery Commit
 
+
 ## Protocol Conversion
 
-Protocol Conversion 是在改变客户端与上游 wire protocol 时保留一次推理的 canonical semantics。目标协议无法表示任务内容、实际使用的工具、身份、结构或硬约束时必须拒绝；additive metadata、响应装饰和未被强制选择的 hosted tool 可以兼容性省略。它不把响应投影成客户端历史。
+Protocol Conversion 是在改变客户端与上游 wire protocol 时保留一次推理的 canonical semantics。目标协议无法表示任务内容、实际使用的工具、身份、结构或硬约束时必须拒绝；additive metadata、响应装饰和未被强制选择的 hosted tool 可以兼容性省略。它不把响应投影成客户端历史。它向 Client Projection 提供 Thinking 载体形状（是否 indexed、是否可能 protected、未保护 summary 能否直播），不执行投影。
 _避免使用_：把硬约束丢失称为兼容、把客户端可见投影当作 Protocol Conversion 的阶段
 
 ## Thinking Level

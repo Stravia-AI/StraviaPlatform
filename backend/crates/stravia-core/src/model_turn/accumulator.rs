@@ -89,6 +89,7 @@ impl StreamResponseAccumulator {
             AiStreamDelta::ResponseMetadata { metadata } => {
                 self.response_metadata = Some(metadata.clone());
             }
+            AiStreamDelta::ProtectedThinkingStart { .. } => {}
             AiStreamDelta::ThinkingDelta(text) => match self.items.last_mut() {
                 Some(AccumulatedItem::Thinking { text: current, .. }) => current.push_str(text),
                 _ => self.items.push(AccumulatedItem::Thinking {

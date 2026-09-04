@@ -1,8 +1,16 @@
 use super::*;
 
 pub(super) fn normalize_model_balance(balance: Option<&str>) -> anyhow::Result<String> {
-    balance
-        .unwrap_or("weighted")
+    let input = balance
+        .unwrap_or("traffic_equalization")
+        .trim()
+        .to_ascii_lowercase();
+    let normalized = match input.as_str() {
+        "weighted" | "priority" | "cooldown" => "traffic_equalization",
+        "latency" => "latency_preference",
+        value => value,
+    };
+    normalized
         .parse::<RouteSelectionStrategy>()
         .map(|strategy| strategy.as_str().to_string())
 }
@@ -17,8 +25,11 @@ pub(super) fn normalize_create_route_targets(
         return Ok(vec![CreateTarget {
             provider_id: input.target_provider.clone(),
             model: input.target_model.clone(),
-            weight: Some(100),
-            priority: Some(1),
+            enabled: true,
+            priority: None,
+            first_token_timeout_ms: None,
+            target_retry_budget: None,
+            target_cooldown_ms: None,
             thinking_level_map: Vec::new(),
         }]);
     }
@@ -35,8 +46,11 @@ pub(super) fn normalize_update_route_targets(
             .map(|target| CreateTarget {
                 provider_id: target.provider_id.clone(),
                 model: target.model.clone(),
-                weight: target.weight,
+                enabled: target.enabled,
                 priority: target.priority,
+                first_token_timeout_ms: target.first_token_timeout_ms,
+                target_retry_budget: target.target_retry_budget,
+                target_cooldown_ms: target.target_cooldown_ms,
                 thinking_level_map: target.thinking_level_map.clone(),
             })
             .collect();
@@ -57,15 +71,21 @@ pub(super) fn normalize_update_route_targets(
     Ok(vec![CreateTarget {
         provider_id: provider,
         model,
-        weight: Some(100),
-        priority: Some(1),
+        enabled: true,
+        priority: None,
+        first_token_timeout_ms: None,
+        target_retry_budget: None,
+        target_cooldown_ms: None,
         thinking_level_map: Vec::new(),
     }])
 }
 
 pub(super) fn ensure_route_targets_valid(backends: &[CreateTarget]) -> anyhow::Result<()> {
     if backends.is_empty() {
-        anyhow::bail!("at least one model backend is required");
+        anyhow::bail!("at least one enabled Target is required");
+    }
+    if !backends.iter().any(|backend| backend.enabled) {
+        anyhow::bail!("at least one enabled Target is required");
     }
     let mut targets = std::collections::BTreeSet::new();
     for backend in backends {
@@ -82,13 +102,17 @@ pub(super) fn ensure_route_targets_valid(backends: &[CreateTarget]) -> anyhow::R
                 "a Route cannot contain the same Provider and Provider Model more than once"
             );
         }
-        let weight = backend.weight.unwrap_or(100);
-        if weight < 0 {
-            anyhow::bail!("backend weight must be >= 0");
+        if backend
+            .first_token_timeout_ms
+            .is_some_and(|value| value < 0)
+        {
+            anyhow::bail!("First Token Timeout must be >= 0");
         }
-        let priority = backend.priority.unwrap_or(1);
-        if !(1..=2).contains(&priority) {
-            anyhow::bail!("backend priority must be 1 or 2");
+        if backend.target_retry_budget.is_some_and(|value| value < 0) {
+            anyhow::bail!("Target Retry Budget must be >= 0");
+        }
+        if backend.target_cooldown_ms.is_some_and(|value| value < 0) {
+            anyhow::bail!("Target Cooldown must be >= 0");
         }
     }
     Ok(())

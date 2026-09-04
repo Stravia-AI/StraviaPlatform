@@ -67,6 +67,55 @@ impl LogStore for PostgresLogStore {
         Ok(())
     }
 
+    async fn route_scheduling_snapshot(
+        &self,
+    ) -> anyhow::Result<Vec<crate::router::TargetSchedulingSnapshot>> {
+        let now = chrono::Utc::now().timestamp_millis();
+        let hour_ago = now.saturating_sub(60 * 60 * 1_000);
+        let day_ago = now.saturating_sub(24 * 60 * 60 * 1_000);
+        Ok(sqlx::query_as::<_, crate::router::TargetSchedulingSnapshot>(
+            "SELECT provider_id || ':' || upstream_model AS target_key,
+                    COALESCE(SUM(CASE WHEN client_status_code BETWEEN 200 AND 299
+                                          AND upstream_status_code BETWEEN 200 AND 299
+                                     THEN input_tokens ELSE 0 END), 0)::BIGINT AS input_tokens_24h,
+                    COALESCE(SUM(CASE WHEN client_status_code BETWEEN 200 AND 299
+                                          AND upstream_status_code BETWEEN 200 AND 299
+                                     THEN output_tokens ELSE 0 END), 0)::BIGINT AS output_tokens_24h,
+                    COALESCE(SUM(CASE WHEN client_status_code BETWEEN 200 AND 299
+                                          AND upstream_status_code BETWEEN 200 AND 299
+                                     THEN cache_read_tokens ELSE 0 END), 0)::BIGINT AS cache_read_tokens_24h,
+                    COALESCE(SUM(CASE WHEN client_status_code BETWEEN 200 AND 299
+                                          AND upstream_status_code BETWEEN 200 AND 299
+                                     THEN cache_write_tokens ELSE 0 END), 0)::BIGINT AS cache_write_tokens_24h,
+                    COALESCE(SUM(CASE WHEN created_at >= $1 THEN 1 ELSE 0 END), 0)::BIGINT AS attempts_1h,
+                    COALESCE(SUM(CASE WHEN created_at >= $1
+                                          AND client_status_code BETWEEN 200 AND 299
+                                          AND upstream_status_code BETWEEN 200 AND 299
+                                     THEN 1 ELSE 0 END), 0)::BIGINT AS successes_1h,
+                    COALESCE(SUM(CASE WHEN created_at >= $1
+                                          AND client_status_code BETWEEN 200 AND 299
+                                          AND upstream_status_code BETWEEN 200 AND 299
+                                     THEN output_tokens ELSE 0 END), 0)::BIGINT AS successful_output_tokens_1h,
+                    COALESCE(SUM(CASE WHEN created_at >= $1
+                                          AND client_status_code BETWEEN 200 AND 299
+                                          AND upstream_status_code BETWEEN 200 AND 299
+                                     THEN latency_upstream_ms ELSE 0 END), 0)::BIGINT AS successful_upstream_ms_1h,
+                    NULL::DOUBLE PRECISION AS cost_input,
+                    NULL::DOUBLE PRECISION AS cost_output,
+                    NULL::DOUBLE PRECISION AS cost_cache_read,
+                    NULL::DOUBLE PRECISION AS cost_cache_write
+             FROM request_logs
+             WHERE created_at >= $2
+               AND provider_id IS NOT NULL AND provider_id <> ''
+               AND upstream_model IS NOT NULL AND upstream_model <> ''
+             GROUP BY provider_id, upstream_model",
+        )
+        .bind(hour_ago)
+        .bind(day_ago)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
     async fn query(&self, query: LogQuery) -> anyhow::Result<LogPage> {
         let mut count_sql = String::from("SELECT COUNT(*) AS total FROM request_logs WHERE 1=1");
         // List query skips heavy body/header columns (NULL placeholders preserve struct layout).

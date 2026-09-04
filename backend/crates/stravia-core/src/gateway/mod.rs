@@ -74,6 +74,7 @@ pub struct Gateway {
     pub model_cache: Arc<tokio::sync::RwLock<router::RouteCache>>,
     pub health_registry: Arc<HealthRegistry>,
     pub(crate) cache_affinity: router::cache_affinity::CacheAffinity,
+    pub(crate) route_policy_state: router::RoutePolicyState,
     pub ollama_capability_cache: Arc<tokio::sync::RwLock<HashMap<String, CapabilityCacheEntry>>>,
     pub log_tx: mpsc::Sender<LogEntry>,
     #[cfg(debug_assertions)]
@@ -122,6 +123,7 @@ impl Gateway {
             model_cache: Arc::clone(&self.model_cache),
             health_registry: Arc::clone(&self.health_registry),
             cache_affinity: self.cache_affinity.clone(),
+            route_policy_state: self.route_policy_state.clone(),
             ollama_capability_cache: Arc::clone(&self.ollama_capability_cache),
             log_tx: self.log_tx.clone(),
             #[cfg(debug_assertions)]

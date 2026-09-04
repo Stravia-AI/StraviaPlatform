@@ -1098,6 +1098,14 @@ impl ResponsesStreamParser {
                     {
                         anyhow::bail!("output item index {index} was added more than once");
                     }
+                    if item_type == "reasoning"
+                        && item
+                            .get("encrypted_content")
+                            .and_then(Value::as_str)
+                            .is_some_and(|value| !value.is_empty())
+                    {
+                        deltas.push(AiStreamDelta::ProtectedThinkingStart { index });
+                    }
                 } else {
                     if self
                         .open_content_parts

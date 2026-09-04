@@ -12,18 +12,17 @@ embed-webui = ["dep:rust-embed"]
 
 [dependencies]
 stravia-core = { workspace = true }
-tokio = { workspace = true }
-axum = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+axum = { workspace = true, features = ["http1", "json", "original-uri", "query", "tokio"] }
 tower-http = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tracing-subscriber = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 tracing = { workspace = true }
 clap = { workspace = true }
 dotenvy = { workspace = true }
 shellexpand = { workspace = true }
 anyhow = { workspace = true }
-chrono = { workspace = true }
 rust-embed = { workspace = true, optional = true }
 
 [dev-dependencies]

@@ -13,10 +13,6 @@ pub(super) async fn load_route_targets(_gw: &Gateway, model: &Route) -> Vec<Targ
     model.targets.clone()
 }
 
-pub(super) fn is_retryable(status: u16) -> bool {
-    matches!(status, 408 | 429 | 500 | 502 | 503 | 529)
-}
-
 pub(super) fn runtime_binding_headers(
     binding: &crate::auth::RuntimeBinding,
 ) -> anyhow::Result<ReqwestHeaderMap> {

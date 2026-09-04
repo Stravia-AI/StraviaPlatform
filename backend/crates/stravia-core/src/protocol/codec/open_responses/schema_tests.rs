@@ -56,8 +56,12 @@ fn event_schema_name(event_type: &str) -> &'static str {
         "response.output_text.delta" => "ResponseOutputTextDeltaStreamingEvent",
         "response.output_text.done" => "ResponseOutputTextDoneStreamingEvent",
         "response.queued" => "ResponseQueuedStreamingEvent",
-        "response.reasoning.delta" => "ResponseReasoningDeltaStreamingEvent",
-        "response.reasoning.done" => "ResponseReasoningDoneStreamingEvent",
+        "response.reasoning.delta" | "response.reasoning_text.delta" => {
+            "ResponseReasoningDeltaStreamingEvent"
+        }
+        "response.reasoning.done" | "response.reasoning_text.done" => {
+            "ResponseReasoningDoneStreamingEvent"
+        }
         "response.reasoning_summary_part.added" => {
             "ResponseReasoningSummaryPartAddedStreamingEvent"
         }
@@ -77,7 +81,17 @@ fn assert_valid_events(events: impl IntoIterator<Item = crate::protocol::SseEven
         let body: Value = serde_json::from_str(&event.data).expect("SSE JSON body");
         let event_type = body["type"].as_str().expect("event type");
         assert_eq!(event.event.as_deref(), Some(event_type));
-        assert_valid(event_schema_name(event_type), &body);
+        let mut dated_body = body.clone();
+        match event_type {
+            "response.reasoning_text.delta" => {
+                dated_body["type"] = Value::String("response.reasoning.delta".into());
+            }
+            "response.reasoning_text.done" => {
+                dated_body["type"] = Value::String("response.reasoning.done".into());
+            }
+            _ => {}
+        }
+        assert_valid(event_schema_name(event_type), &dated_body);
     }
 }
 

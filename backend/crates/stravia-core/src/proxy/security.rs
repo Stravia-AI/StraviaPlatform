@@ -472,7 +472,7 @@ mod tests {
             id: "protected-model-id".into(),
             model_id: "protected-model".into(),
             display_name: None,
-            balance: "priority".into(),
+            balance: "traffic_equalization".into(),
             target_provider: String::new(),
             target_model: String::new(),
             is_enabled: true,

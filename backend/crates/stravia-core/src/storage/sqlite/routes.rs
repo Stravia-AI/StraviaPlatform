@@ -1,3 +1,5 @@
+use sqlx::Connection;
+
 use super::*;
 
 #[derive(Clone)]
@@ -13,9 +15,9 @@ impl SqliteRouteStore {
             ""
         };
         let sql = format!(
-            "SELECT id, model_id, display_name, COALESCE(balance, 'weighted') AS balance, \
-             COALESCE((SELECT provider_id FROM model_backends WHERE model_id = models.id ORDER BY priority ASC, created_at ASC LIMIT 1), '') AS target_provider, \
-             COALESCE((SELECT model FROM model_backends WHERE model_id = models.id ORDER BY priority ASC, created_at ASC LIMIT 1), '') AS target_model, \
+            "SELECT id, model_id, display_name, COALESCE(balance, 'traffic_equalization') AS balance, \
+             COALESCE((SELECT provider_id FROM model_backends WHERE model_id = models.id AND enabled = 1 ORDER BY priority DESC, created_at ASC LIMIT 1), '') AS target_provider, \
+             COALESCE((SELECT model FROM model_backends WHERE model_id = models.id AND enabled = 1 ORDER BY priority DESC, created_at ASC LIMIT 1), '') AS target_model, \
              COALESCE(is_enabled, 1) AS is_enabled, created_at \
              FROM models{where_clause} ORDER BY created_at DESC"
         );
@@ -31,7 +33,7 @@ impl SqliteRouteStore {
 
     async fn load_targets(&self, route_storage_id: &str) -> anyhow::Result<Vec<Target>> {
         Ok(sqlx::query_as::<_, Target>(
-            "SELECT id, model_id, provider_id, model, weight, priority, created_at, thinking_level_map FROM model_backends WHERE model_id = ? ORDER BY priority ASC, created_at ASC",
+            "SELECT id, model_id, provider_id, model, enabled, priority, first_token_timeout_ms, target_retry_budget, target_cooldown_ms, created_at, thinking_level_map FROM model_backends WHERE model_id = ? ORDER BY priority DESC, created_at ASC",
         )
         .bind(route_storage_id)
         .fetch_all(&self.pool)
@@ -40,9 +42,9 @@ impl SqliteRouteStore {
 
     async fn load_route(&self, route_id: &str) -> anyhow::Result<Option<Route>> {
         let route = sqlx::query_as::<_, Route>(
-            "SELECT id, model_id, display_name, COALESCE(balance, 'weighted') AS balance, \
-             COALESCE((SELECT provider_id FROM model_backends WHERE model_id = models.id ORDER BY priority ASC, created_at ASC LIMIT 1), '') AS target_provider, \
-             COALESCE((SELECT model FROM model_backends WHERE model_id = models.id ORDER BY priority ASC, created_at ASC LIMIT 1), '') AS target_model, \
+            "SELECT id, model_id, display_name, COALESCE(balance, 'traffic_equalization') AS balance, \
+             COALESCE((SELECT provider_id FROM model_backends WHERE model_id = models.id AND enabled = 1 ORDER BY priority DESC, created_at ASC LIMIT 1), '') AS target_provider, \
+             COALESCE((SELECT model FROM model_backends WHERE model_id = models.id AND enabled = 1 ORDER BY priority DESC, created_at ASC LIMIT 1), '') AS target_model, \
              COALESCE(is_enabled, 1) AS is_enabled, created_at \
              FROM models WHERE model_id = ?",
         )
@@ -73,14 +75,15 @@ impl RouteStore for SqliteRouteStore {
     }
 
     async fn put(&self, route: PutRoute) -> anyhow::Result<Route> {
-        if route.targets.is_empty() {
-            anyhow::bail!("a Route requires at least one Target");
+        if !route.targets.iter().any(|target| target.enabled) {
+            anyhow::bail!("a Route requires at least one enabled Target");
         }
         let route_storage_id = route
             .id
             .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let mut tx = self.pool.begin().await?;
+        let mut connection = self.pool.acquire().await?;
+        let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
         let conflict = sqlx::query_scalar::<_, String>(
             "SELECT id FROM models WHERE model_id = ? AND id != ? LIMIT 1",
         )
@@ -120,7 +123,7 @@ impl RouteStore for SqliteRouteStore {
         }
 
         let existing = sqlx::query_as::<_, Target>(
-            "SELECT id, model_id, provider_id, model, weight, priority, created_at, thinking_level_map FROM model_backends WHERE model_id = ?",
+            "SELECT id, model_id, provider_id, model, enabled, priority, first_token_timeout_ms, target_retry_budget, target_cooldown_ms, created_at, thinking_level_map FROM model_backends WHERE model_id = ?",
         )
         .bind(&route_storage_id)
         .fetch_all(&mut *tx)
@@ -139,20 +142,36 @@ impl RouteStore for SqliteRouteStore {
                 .map(|row| row.id.clone())
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
             sqlx::query(
-                "INSERT INTO model_backends (id, model_id, provider_id, model, weight, priority, thinking_level_map) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO model_backends (id, model_id, provider_id, model, enabled, priority, first_token_timeout_ms, target_retry_budget, target_cooldown_ms, thinking_level_map) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(id)
             .bind(&route_storage_id)
             .bind(target.provider_id.trim())
             .bind(target.model.trim())
-            .bind(target.weight.unwrap_or(100).max(0))
-            .bind(target.priority.unwrap_or(1).max(1))
+            .bind(target.enabled)
+            .bind(target.priority.unwrap_or(DEFAULT_TARGET_PRIORITY))
+            .bind(
+                target
+                    .first_token_timeout_ms
+                    .unwrap_or(DEFAULT_FIRST_TOKEN_TIMEOUT_MS),
+            )
+            .bind(
+                target
+                    .target_retry_budget
+                    .unwrap_or(DEFAULT_TARGET_RETRY_BUDGET),
+            )
+            .bind(
+                target
+                    .target_cooldown_ms
+                    .unwrap_or(DEFAULT_TARGET_COOLDOWN_MS),
+            )
             .bind(sqlx::types::Json(&target.thinking_level_map))
             .execute(&mut *tx)
             .await?;
         }
 
         tx.commit().await?;
+        drop(connection);
         self.get(route.model_id.trim())
             .await?
             .context("Route missing after put")
@@ -169,16 +188,21 @@ impl RouteStore for SqliteRouteStore {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use sqlx::sqlite::SqlitePoolOptions;
 
     use super::*;
 
     fn target(provider_id: &str, model: &str) -> crate::db::models::CreateTarget {
         crate::db::models::CreateTarget {
+            enabled: true,
             provider_id: provider_id.into(),
             model: model.into(),
-            weight: Some(100),
-            priority: Some(1),
+            priority: Some(0),
+            first_token_timeout_ms: None,
+            target_retry_budget: None,
+            target_cooldown_ms: None,
             thinking_level_map: Vec::new(),
         }
     }
@@ -211,7 +235,7 @@ mod tests {
                 id: None,
                 model_id: "atomic-route".into(),
                 display_name: None,
-                selection_strategy: "weighted".into(),
+                selection_strategy: "traffic_equalization".into(),
                 is_enabled: true,
                 targets: vec![target("provider-1", "working-model")],
             })
@@ -223,7 +247,7 @@ mod tests {
                 id: Some(route.id),
                 model_id: "atomic-route".into(),
                 display_name: None,
-                selection_strategy: "priority".into(),
+                selection_strategy: "latency_preference".into(),
                 is_enabled: true,
                 targets: vec![target("missing-provider", "broken-model")],
             })
@@ -235,9 +259,68 @@ mod tests {
             .await
             .expect("get")
             .expect("Route");
-        assert_eq!(persisted.balance, "weighted");
+        assert_eq!(persisted.balance, "traffic_equalization");
         assert_eq!(persisted.targets.len(), 1);
         assert_eq!(persisted.targets[0].provider_id, "provider-1");
         assert_eq!(persisted.targets[0].model, "working-model");
+    }
+
+    #[tokio::test]
+    async fn route_put_waits_for_a_concurrent_sqlite_writer() {
+        let data_dir = tempfile::tempdir().expect("temporary data directory");
+        let pool = crate::db::init_pool(data_dir.path())
+            .await
+            .expect("SQLite pool");
+        crate::migrations::migrate_sqlite(&pool)
+            .await
+            .expect("migrations");
+        sqlx::query(
+            "INSERT INTO providers (
+                id, name, protocol, base_url, api_key, auth_mode
+             ) VALUES ('provider-1', 'Provider 1', 'openai-compatible', 'https://example.com', '', 'apikey')",
+        )
+        .execute(&pool)
+        .await
+        .expect("Provider");
+        let store = SqliteRouteStore { pool: pool.clone() };
+
+        let mut writer = pool.acquire().await.expect("writer connection");
+        let writer_tx = writer
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .expect("writer transaction");
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let put_task = tokio::spawn(async move {
+            started_tx.send(()).expect("signal Route put start");
+            store
+                .put(PutRoute {
+                    id: None,
+                    model_id: "concurrent-route".into(),
+                    display_name: None,
+                    selection_strategy: "traffic_equalization".into(),
+                    is_enabled: true,
+                    targets: vec![target("provider-1", "provider-model")],
+                })
+                .await
+        });
+        started_rx.await.expect("Route put start");
+
+        let mut put_task = put_task;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), &mut put_task)
+                .await
+                .is_err(),
+            "Route put must wait while another write transaction owns the database"
+        );
+        writer_tx
+            .commit()
+            .await
+            .expect("release writer transaction");
+
+        let route = put_task
+            .await
+            .expect("Route put task")
+            .expect("create Route");
+        assert_eq!(route.model_id, "concurrent-route");
     }
 }

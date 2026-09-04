@@ -14,6 +14,14 @@ pub struct ContinuationTarget<'a> {
 
 #[async_trait]
 pub trait ContinuationLookup: Send + Sync {
+    async fn preferred_target(
+        &self,
+        _principal: &Principal,
+        _request: &AiRequest,
+    ) -> Option<String> {
+        None
+    }
+
     async fn prepare(
         &self,
         principal: &Principal,

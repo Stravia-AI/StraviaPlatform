@@ -19,7 +19,9 @@ use stravia_core::web_search::WebSearchConfig;
 use crate::oauth_callback::OAuthCallbackManager;
 use stravia_core::db::models::*;
 
+mod connect_clients;
 mod provider_allowances;
+use connect_clients::preview_connect_client_handler;
 use provider_allowances::{
     list_provider_allowances, refresh_provider_allowance, refresh_provider_allowances,
 };
@@ -73,6 +75,10 @@ pub fn create_router(gateway: Gateway, admin_token: Option<String>) -> Router {
 
     let mut api = Router::new()
         .route("/system/extensions", get(list_loaded_extensions))
+        .route(
+            "/connect-clients/preview",
+            post(preview_connect_client_handler),
+        )
         .route("/vendors", get(list_vendor_metadata))
         .route(
             "/media-understanding",

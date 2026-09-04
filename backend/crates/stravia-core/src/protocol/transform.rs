@@ -127,6 +127,7 @@ impl ProtocolTransform {
                 egress: endpoint,
             },
             decoder: adapter.stream_decoder()?,
+            pending_utf8: Vec::new(),
             closed: false,
         })
     }
@@ -229,6 +230,7 @@ impl ProtocolPair {
             decoder: StreamDecodeStage {
                 pair: self,
                 decoder,
+                pending_utf8: Vec::new(),
                 closed: false,
             },
             encoder: StreamEncodeStage {
@@ -253,6 +255,7 @@ impl StreamSession {
 pub(crate) struct StreamDecodeStage {
     pair: ProtocolPair,
     decoder: WireStreamDecoder,
+    pending_utf8: Vec<u8>,
     closed: bool,
 }
 
@@ -268,7 +271,7 @@ impl StreamDecodeStage {
             ));
         }
         self.decoder
-            .parse_chunk(raw)
+            .parse_chunk(raw, &mut self.pending_utf8)
             .map_err(|source| TransformError::Wire {
                 endpoint: self.pair.egress,
                 direction: TransformDirection::UpstreamStream.as_str(),
@@ -284,6 +287,13 @@ impl StreamDecodeStage {
             ));
         }
         self.closed = true;
+        if let Err(source) = std::str::from_utf8(&self.pending_utf8) {
+            return Err(TransformError::Wire {
+                endpoint: self.pair.egress,
+                direction: TransformDirection::UpstreamStream.as_str(),
+                source: source.into(),
+            });
+        }
         self.decoder
             .finish()
             .map_err(|source| TransformError::Wire {
@@ -368,15 +378,62 @@ pub(crate) enum WireStreamDecoder {
 }
 
 impl WireStreamDecoder {
-    fn parse_chunk(&mut self, raw: &[u8]) -> anyhow::Result<Vec<AiStreamDelta>> {
+    fn parse_chunk(
+        &mut self,
+        raw: &[u8],
+        pending_utf8: &mut Vec<u8>,
+    ) -> anyhow::Result<Vec<AiStreamDelta>> {
+        if let Self::Bedrock(parser) = self {
+            debug_assert!(pending_utf8.is_empty());
+            return parser.parse_chunk(raw);
+        }
+
+        let mut deltas = Vec::new();
+        let mut remaining = raw;
+        while !pending_utf8.is_empty() {
+            let Some((&next, rest)) = remaining.split_first() else {
+                return Ok(deltas);
+            };
+            pending_utf8.push(next);
+            remaining = rest;
+            match std::str::from_utf8(pending_utf8) {
+                Ok(completed) => {
+                    deltas.extend(self.parse_text_chunk(completed)?);
+                    pending_utf8.clear();
+                }
+                Err(error) if error.error_len().is_none() => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+
+        match std::str::from_utf8(remaining) {
+            Ok(text) => deltas.extend(self.parse_text_chunk(text)?),
+            Err(error) if error.error_len().is_none() => {
+                let (valid, incomplete) = remaining.split_at(error.valid_up_to());
+                if !valid.is_empty() {
+                    deltas.extend(
+                        self.parse_text_chunk(
+                            std::str::from_utf8(valid)
+                                .expect("bytes before valid_up_to must be valid UTF-8"),
+                        )?,
+                    );
+                }
+                pending_utf8.extend_from_slice(incomplete);
+            }
+            Err(error) => return Err(error.into()),
+        }
+        Ok(deltas)
+    }
+
+    fn parse_text_chunk(&mut self, raw: &str) -> anyhow::Result<Vec<AiStreamDelta>> {
         match self {
-            Self::OpenAi(parser) => parser.parse_chunk(std::str::from_utf8(raw)?),
-            Self::Responses(parser) => parser.parse_chunk(std::str::from_utf8(raw)?),
-            Self::Anthropic(parser) => parser.parse_chunk(std::str::from_utf8(raw)?),
-            Self::Google(parser) => parser.parse_chunk(std::str::from_utf8(raw)?),
-            Self::Bedrock(parser) => parser.parse_chunk(raw),
-            Self::Cohere(parser) => parser.parse_chunk(std::str::from_utf8(raw)?),
-            Self::Gateway(parser) => parser.parse_chunk(std::str::from_utf8(raw)?),
+            Self::OpenAi(parser) => parser.parse_chunk(raw),
+            Self::Responses(parser) => parser.parse_chunk(raw),
+            Self::Anthropic(parser) => parser.parse_chunk(raw),
+            Self::Google(parser) => parser.parse_chunk(raw),
+            Self::Bedrock(_) => unreachable!("Bedrock stream decoding is byte-oriented"),
+            Self::Cohere(parser) => parser.parse_chunk(raw),
+            Self::Gateway(parser) => parser.parse_chunk(raw),
         }
     }
 

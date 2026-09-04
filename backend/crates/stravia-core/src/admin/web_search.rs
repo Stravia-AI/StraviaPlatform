@@ -580,7 +580,7 @@ mod tests {
             .create_model(crate::db::models::CreateRoute {
                 model_id: "Search Model".into(),
                 display_name: None,
-                balance: Some("weighted".into()),
+                balance: Some("traffic_equalization".into()),
                 target_provider: provider.id.clone(),
                 target_model: "tool-model".into(),
                 targets: vec![],

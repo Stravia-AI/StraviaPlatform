@@ -202,6 +202,9 @@ pub trait AuthAccessStore: Send + Sync {
 #[async_trait]
 pub trait LogStore: Send + Sync {
     async fn append_batch(&self, entries: Vec<LogEntry>) -> anyhow::Result<()>;
+    async fn route_scheduling_snapshot(
+        &self,
+    ) -> anyhow::Result<Vec<crate::router::TargetSchedulingSnapshot>>;
     async fn query(&self, query: LogQuery) -> anyhow::Result<LogPage>;
     async fn find_by_id(&self, id: &str) -> anyhow::Result<Option<RequestLog>>;
     async fn cleanup_before(&self, cutoff_expression: &str) -> anyhow::Result<u64>;

@@ -65,20 +65,20 @@ impl BrowserRuntime {
         }
     }
 
-    fn worker(&self) -> eyre::Result<&BrowserWorker> {
+    fn worker(&self) -> anyhow::Result<&BrowserWorker> {
         self.inner
             .worker
             .get_or_init(|| {
                 start_browser_worker(self.inner.config.clone(), &self.inner.profile_dir)
             })
             .as_ref()
-            .map_err(|error| eyre::eyre!(error.clone()))
+            .map_err(|error| anyhow::anyhow!(error.clone()))
     }
 
-    pub(crate) async fn render(&self, request: RenderRequest<'_>) -> eyre::Result<RenderedPage> {
+    pub(crate) async fn render(&self, request: RenderRequest<'_>) -> anyhow::Result<RenderedPage> {
         if let Some(guard) = request.request_guard {
             if !guard(request.url) {
-                eyre::bail!("Moli renderer rejected non-public URL `{}`", request.url);
+                anyhow::bail!("Moli renderer rejected non-public URL `{}`", request.url);
             }
         }
 
@@ -96,12 +96,12 @@ impl BrowserRuntime {
                 request,
                 response: response_tx,
             })
-            .map_err(|_| eyre::eyre!("Moli renderer thread is unavailable"))?;
+            .map_err(|_| anyhow::anyhow!("Moli renderer thread is unavailable"))?;
 
         response_rx
             .await
-            .map_err(|_| eyre::eyre!("Moli renderer thread exited before returning a result"))?
-            .map_err(eyre::Report::msg)
+            .map_err(|_| anyhow::anyhow!("Moli renderer thread exited before returning a result"))?
+            .map_err(anyhow::Error::msg)
     }
 
     #[cfg(test)]

@@ -906,6 +906,142 @@ ADD COLUMN allow_media_understanding BOOLEAN NOT NULL DEFAULT FALSE;\n";
     }
 
     #[tokio::test]
+    async fn route_target_migrations_preserve_enabled_defaults_and_add_selection_controls() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("SQLite pool");
+        sqlx::query("PRAGMA foreign_keys = ON")
+            .execute(&pool)
+            .await
+            .expect("enable foreign keys");
+        migrate_sqlite_range(&pool, 1, 30).await;
+        sqlx::query(
+            "INSERT INTO providers (id, name, protocol, base_url, api_key, auth_mode)
+             VALUES ('provider-1', 'Provider 1', 'openai-compatible', 'https://example.com', '', 'apikey')",
+        )
+        .execute(&pool)
+        .await
+        .expect("legacy Provider");
+        for (route_id, balance) in [
+            ("weighted-route", "weighted"),
+            ("priority-route", "priority"),
+            ("cooldown-route", "cooldown"),
+            ("latency-route", "latency"),
+        ] {
+            sqlx::query(
+                "INSERT INTO models (id, model_id, balance)
+                 VALUES (?, ?, ?)",
+            )
+            .bind(route_id)
+            .bind(route_id)
+            .bind(balance)
+            .execute(&pool)
+            .await
+            .expect("legacy Route");
+            sqlx::query(
+                "INSERT INTO model_backends
+                    (id, model_id, provider_id, model, weight, priority)
+                 VALUES (?, ?, 'provider-1', ?, 73, ?)",
+            )
+            .bind(format!("{route_id}-target"))
+            .bind(route_id)
+            .bind(format!("{route_id}-model"))
+            .bind(if balance == "latency" { 2 } else { 1 })
+            .execute(&pool)
+            .await
+            .expect("legacy Target");
+        }
+
+        migrate_sqlite_range(&pool, 31, 32).await;
+
+        let routes =
+            sqlx::query_as::<_, (String, String)>("SELECT id, balance FROM models ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .expect("migrated Routes");
+        assert_eq!(
+            routes,
+            vec![
+                ("cooldown-route".into(), "traffic_equalization".into()),
+                ("latency-route".into(), "latency_preference".into()),
+                ("priority-route".into(), "traffic_equalization".into()),
+                ("weighted-route".into(), "traffic_equalization".into()),
+            ]
+        );
+        let targets = sqlx::query_as::<_, (i64, i64, i64, i64, bool)>(
+            "SELECT priority, first_token_timeout_ms, target_retry_budget, target_cooldown_ms, enabled
+             FROM model_backends ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("migrated Targets");
+        assert_eq!(targets, vec![(0, 60_000, 5, 120_000, true); 4]);
+        let columns = sqlx::query_scalar::<_, String>(
+            "SELECT name FROM pragma_table_info('model_backends') ORDER BY cid",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("Target columns");
+        assert!(!columns.iter().any(|column| column == "weight"));
+        let balance_default = sqlx::query_scalar::<_, String>(
+            "SELECT dflt_value
+             FROM pragma_table_info('models')
+             WHERE name = 'balance'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("Route Scheduling Strategy default");
+        assert_eq!(balance_default, "'traffic_equalization'");
+        for (table, query) in [
+            (
+                "model_backends",
+                "SELECT \"table\" FROM pragma_foreign_key_list('model_backends')
+                 WHERE \"from\" = 'model_id'",
+            ),
+            (
+                "api_key_models",
+                "SELECT \"table\" FROM pragma_foreign_key_list('api_key_models')
+                 WHERE \"from\" = 'model_id'",
+            ),
+            (
+                "agent_definition_configs",
+                "SELECT \"table\" FROM pragma_foreign_key_list('agent_definition_configs')
+                 WHERE \"from\" = 'model_id'",
+            ),
+        ] {
+            let referenced = sqlx::query_scalar::<_, String>(query)
+                .fetch_one(&pool)
+                .await
+                .expect("Route foreign key");
+            assert_eq!(referenced, "models", "{table} Route foreign key");
+        }
+    }
+
+    #[test]
+    fn route_target_selection_migration_is_present_for_both_backends() {
+        for migrator in [&SQLITE_MIGRATOR, &POSTGRES_MIGRATOR] {
+            let migration = migrator
+                .iter()
+                .find(|migration| migration.version == 31)
+                .expect("Layer Route Target selection migration");
+            for clause in [
+                "first_token_timeout_ms",
+                "target_retry_budget",
+                "target_cooldown_ms",
+                "traffic_equalization",
+                "latency_preference",
+            ] {
+                assert!(
+                    migration.sql.as_str().contains(clause),
+                    "missing `{clause}`"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn postgres_route_display_name_migration_matches_sqlite_when_configured() {
         let Some(url) = std::env::var("DB_URL")
             .ok()

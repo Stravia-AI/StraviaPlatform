@@ -11,14 +11,14 @@ name = "stravia-tools"
 path = "src/main.rs"
 
 [dependencies]
-tokio = { workspace = true }
-axum = { workspace = true }
-reqwest = { workspace = true }
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time"] }
+axum = { workspace = true, features = ["http1", "json", "tokio"] }
+reqwest = { workspace = true, features = ["http2", "json", "rustls"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-chrono = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+chrono = { workspace = true, features = ["clock", "std"] }
 anyhow = { workspace = true }
 
 clap = { workspace = true }

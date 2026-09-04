@@ -23,7 +23,7 @@ fn search_url(search: &SearchQuery) -> Url {
     .expect("Baidu search URL is valid")
 }
 
-pub fn parse_response(body: &str) -> eyre::Result<EngineResponse> {
+pub fn parse_response(body: &str) -> anyhow::Result<EngineResponse> {
     parse_html_response_with_opts(
         body,
         ParseOpts::new()
@@ -36,7 +36,7 @@ pub fn parse_response(body: &str) -> eyre::Result<EngineResponse> {
     )
 }
 
-fn source_url(el: &ElementRef) -> eyre::Result<String> {
+fn source_url(el: &ElementRef) -> anyhow::Result<String> {
     if let Some(url) = el.value().attr("mu").filter(|url| !url.is_empty()) {
         return Ok(url.to_string());
     }
@@ -68,7 +68,7 @@ struct AutocompleteItem {
     q: String,
 }
 
-pub fn parse_autocomplete_response(body: &str) -> eyre::Result<Vec<String>> {
+pub fn parse_autocomplete_response(body: &str) -> anyhow::Result<Vec<String>> {
     let response: AutocompleteResponse = serde_json::from_str(body)?;
 
     if response.g.is_empty() {

@@ -5,9 +5,10 @@ use async_trait::async_trait;
 use tokio::sync::RwLock;
 
 use crate::db::models::{
-    ApiKeyStats, CreateProviderRecord, LogPage, LogQuery, ModelStats, OAuthCredential, Provider,
-    ProviderStats, PutRoute, RequestLog, Route, StatsHourly, StatsOverview, Target, UpdateProvider,
-    UpsertOAuthCredential,
+    ApiKeyStats, CreateProviderRecord, DEFAULT_FIRST_TOKEN_TIMEOUT_MS, DEFAULT_TARGET_COOLDOWN_MS,
+    DEFAULT_TARGET_PRIORITY, DEFAULT_TARGET_RETRY_BUDGET, LogPage, LogQuery, ModelStats,
+    OAuthCredential, Provider, ProviderStats, PutRoute, RequestLog, Route, StatsHourly,
+    StatsOverview, Target, UpdateProvider, UpsertOAuthCredential,
 };
 use crate::logging::LogEntry;
 use crate::provider_models::{
@@ -244,8 +245,8 @@ impl RouteStore for MemoryStorage {
 
     async fn put(&self, input: PutRoute) -> anyhow::Result<Route> {
         anyhow::ensure!(
-            !input.targets.is_empty(),
-            "a Route requires at least one Target"
+            input.targets.iter().any(|target| target.enabled),
+            "a Route requires at least one enabled Target"
         );
         let mut routes = self.models.write().await;
         let storage_id = input
@@ -283,8 +284,17 @@ impl RouteStore for MemoryStorage {
                 model_id: storage_id.clone(),
                 provider_id: target.provider_id,
                 model: target.model,
-                weight: target.weight.unwrap_or(100).max(0),
-                priority: target.priority.unwrap_or(1).max(1),
+                enabled: target.enabled,
+                priority: target.priority.unwrap_or(DEFAULT_TARGET_PRIORITY),
+                first_token_timeout_ms: target
+                    .first_token_timeout_ms
+                    .unwrap_or(DEFAULT_FIRST_TOKEN_TIMEOUT_MS),
+                target_retry_budget: target
+                    .target_retry_budget
+                    .unwrap_or(DEFAULT_TARGET_RETRY_BUDGET),
+                target_cooldown_ms: target
+                    .target_cooldown_ms
+                    .unwrap_or(DEFAULT_TARGET_COOLDOWN_MS),
                 created_at: now_rfc3339(),
                 thinking_level_map: sqlx::types::Json(target.thinking_level_map),
             })
@@ -294,8 +304,18 @@ impl RouteStore for MemoryStorage {
             model_id: input.model_id,
             display_name: input.display_name,
             balance: input.selection_strategy,
-            target_provider: targets[0].provider_id.clone(),
-            target_model: targets[0].model.clone(),
+            target_provider: targets
+                .iter()
+                .find(|target| target.enabled)
+                .expect("validated enabled Target")
+                .provider_id
+                .clone(),
+            target_model: targets
+                .iter()
+                .find(|target| target.enabled)
+                .expect("validated enabled Target")
+                .model
+                .clone(),
             is_enabled: input.is_enabled,
             created_at,
             supported_thinking_levels: sqlx::types::Json(Vec::new()),
@@ -347,6 +367,12 @@ impl SettingsStore for MemoryStorage {
 impl LogStore for MemoryStorage {
     async fn append_batch(&self, _entries: Vec<LogEntry>) -> anyhow::Result<()> {
         Ok(())
+    }
+
+    async fn route_scheduling_snapshot(
+        &self,
+    ) -> anyhow::Result<Vec<crate::router::TargetSchedulingSnapshot>> {
+        Ok(Vec::new())
     }
 
     async fn query(&self, _query: LogQuery) -> anyhow::Result<LogPage> {
@@ -750,10 +776,13 @@ mod tests {
 
     fn target(provider_id: &str, model: &str) -> crate::db::models::CreateTarget {
         crate::db::models::CreateTarget {
+            enabled: true,
             provider_id: provider_id.into(),
             model: model.into(),
-            weight: Some(100),
             priority: Some(1),
+            first_token_timeout_ms: None,
+            target_retry_budget: None,
+            target_cooldown_ms: None,
             thinking_level_map: Vec::new(),
         }
     }
@@ -766,7 +795,7 @@ mod tests {
                 id: None,
                 model_id: "CaseRoute".into(),
                 display_name: None,
-                selection_strategy: "priority".into(),
+                selection_strategy: "traffic_equalization".into(),
                 is_enabled: true,
                 targets: vec![target("p1", "m1"), target("p2", "m2")],
             })
@@ -800,7 +829,7 @@ mod tests {
                 id: Some(route.id),
                 model_id: "CaseRoute".into(),
                 display_name: None,
-                selection_strategy: "weighted".into(),
+                selection_strategy: "traffic_equalization".into(),
                 is_enabled: true,
                 targets: vec![target("p2", "m2")],
             })
@@ -819,7 +848,7 @@ mod tests {
                 id: None,
                 model_id: "empty-after-delete".into(),
                 display_name: None,
-                selection_strategy: "weighted".into(),
+                selection_strategy: "traffic_equalization".into(),
                 is_enabled: true,
                 targets: vec![target("p1", "m1")],
             })
@@ -830,7 +859,7 @@ mod tests {
                 id: None,
                 model_id: "survives-delete".into(),
                 display_name: None,
-                selection_strategy: "priority".into(),
+                selection_strategy: "traffic_equalization".into(),
                 is_enabled: true,
                 targets: vec![target("p1", "m1"), target("p2", "m2")],
             })

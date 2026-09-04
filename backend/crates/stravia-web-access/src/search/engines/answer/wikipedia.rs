@@ -68,7 +68,7 @@ pub struct WikipediaThumbnail {
     pub height: u64,
 }
 
-pub fn parse_response(body: &str) -> eyre::Result<EngineResponse> {
+pub fn parse_response(body: &str) -> anyhow::Result<EngineResponse> {
     let Ok(res) = serde_json::from_str::<WikipediaResponse>(body) else {
         return Ok(EngineResponse::new());
     };

@@ -47,7 +47,7 @@ macro_rules! engine_parse_response {
 macro_rules! engine_requests {
     ($($engine:ident => $module:ident::$engine_id:ident::$request:ident, $parse_response:ident),* $(,)?) => {
         impl Engine {
-            pub async fn request(&self, query: &SearchQuery) -> eyre::Result<RequestResponse> {
+            pub async fn request(&self, query: &SearchQuery) -> anyhow::Result<RequestResponse> {
                 #[allow(clippy::useless_conversion)]
                 match self {
                     $(
@@ -58,14 +58,14 @@ macro_rules! engine_requests {
             }
 
             #[tracing::instrument(skip(self, res), fields(engine = %self))]
-            pub fn parse_response(&self, res: &HttpResponse) -> eyre::Result<EngineResponse> {
+            pub fn parse_response(&self, res: &HttpResponse) -> anyhow::Result<EngineResponse> {
                 #[allow(clippy::useless_conversion)]
                 match self {
                     $(
                         Engine::$engine => $crate::engine_parse_response! { res, $module::$engine_id::$parse_response }
-                            .ok_or_else(|| eyre::eyre!("engine {self:?} can't parse response"))?,
+                            .ok_or_else(|| anyhow::anyhow!("engine {self:?} can't parse response"))?,
                     )*
-                    _ => eyre::bail!("engine {self:?} can't parse response"),
+                    _ => anyhow::bail!("engine {self:?} can't parse response"),
                 }
             }
         }
@@ -86,13 +86,13 @@ macro_rules! engine_autocomplete_requests {
                 }
             }
 
-            pub fn parse_autocomplete_response(&self, body: &str) -> eyre::Result<Vec<String>> {
+            pub fn parse_autocomplete_response(&self, body: &str) -> anyhow::Result<Vec<String>> {
                 match self {
                     $(
                         Engine::$engine => $crate::engine_parse_response! { body, $module::$engine_id::$parse_response }
-                            .ok_or_else(|| eyre::eyre!("engine {self:?} can't parse autocomplete response"))?,
+                            .ok_or_else(|| anyhow::anyhow!("engine {self:?} can't parse autocomplete response"))?,
                     )*
-                    _ => eyre::bail!("engine {self:?} can't parse autocomplete response"),
+                    _ => anyhow::bail!("engine {self:?} can't parse autocomplete response"),
                 }
             }
         }

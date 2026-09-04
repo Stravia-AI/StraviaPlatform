@@ -82,7 +82,7 @@ impl ParseOpts {
     }
 }
 
-type ManualQueryMethod = Box<dyn Fn(&scraper::ElementRef) -> eyre::Result<String>>;
+type ManualQueryMethod = Box<dyn Fn(&scraper::ElementRef) -> anyhow::Result<String>>;
 
 #[derive(Default)]
 pub enum QueryMethod {
@@ -103,7 +103,7 @@ impl QueryMethod {
         &self,
         el: &scraper::ElementRef,
         with_css_selector: impl Fn(&scraper::ElementRef, &'static str) -> Option<String>,
-    ) -> eyre::Result<String> {
+    ) -> anyhow::Result<String> {
         match self {
             QueryMethod::None => Ok(String::new()),
             QueryMethod::CssSelector(s) => Ok(with_css_selector(el, s).unwrap_or_default()),
@@ -111,7 +111,7 @@ impl QueryMethod {
         }
     }
 
-    pub fn call(&self, el: &scraper::ElementRef) -> eyre::Result<String> {
+    pub fn call(&self, el: &scraper::ElementRef) -> anyhow::Result<String> {
         self.call_with_css_selector_override(el, |el, s| {
             el.select(&Selector::parse(s).unwrap())
                 .next()
@@ -123,7 +123,7 @@ impl QueryMethod {
 pub(super) fn parse_html_response_with_opts(
     body: &str,
     opts: ParseOpts,
-) -> eyre::Result<EngineResponse> {
+) -> anyhow::Result<EngineResponse> {
     let dom = Html::parse_document(body);
 
     let mut search_results = Vec::new();

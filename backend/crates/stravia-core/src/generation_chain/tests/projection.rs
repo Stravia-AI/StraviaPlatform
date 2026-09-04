@@ -1,6 +1,45 @@
 use super::*;
 
 #[tokio::test]
+async fn generation_parent_prefers_its_target_without_native_continuation() {
+    let chain = generation_chain().await;
+    let owner = principal("owner");
+    let mut root = chain
+        .begin(
+            owner.clone(),
+            responses_request(vec![user_message("question")]),
+        )
+        .await
+        .expect("begin root");
+    let mut response = AiResponse::new("response", "model");
+    response.items = vec![AiItem::output_text("answer")];
+    mark_generation_target(
+        &mut response,
+        "provider:model",
+        OPEN_RESPONSES_2026_04_24,
+        "model",
+        "provider:model",
+    );
+    root.stage(&mut response, None);
+    root.persist().await.expect("persist root");
+
+    let mut continuation = responses_request(vec![user_message("follow-up")]);
+    let Some(ProtocolExt::OpenResponses(extension)) = continuation.ext.as_mut() else {
+        panic!("Open Responses extension");
+    };
+    extension.previous_response_id = Some(root.id().to_owned());
+
+    assert_eq!(
+        chain
+            .continuation_lookup()
+            .preferred_target(&owner, &continuation)
+            .await
+            .as_deref(),
+        Some("provider:model")
+    );
+}
+
+#[tokio::test]
 async fn chat_reasoning_prefix_restores_encrypted_effective_history() {
     let chain = GenerationChain::from_turn_chain(
         Arc::new(crate::turn_chain::test_store().await),

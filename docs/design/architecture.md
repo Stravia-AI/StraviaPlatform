@@ -698,14 +698,16 @@ Route ID 存于 `name`，客户端请求中的 `model` 值以大小写敏感的�
 |---|---|---|
 | `id` | TEXT PK | UUID |
 | `name` | TEXT | Route ID，同时是客户端模型 ID |
-| `balance` | TEXT | Target 选择策略：`weighted` / `priority` / `cooldown` / `latency` |
+| `balance` | TEXT | Route Scheduling Strategy：`traffic_equalization` / `latency_preference` |
 | `is_enabled` | BOOL | Route 启用状态，默认 true |
 
 > `ingress_protocol` 不在数据库中。协议在运行时由 `RequestContext` 携带，日志写入 `request_logs.client_protocol`。
 
-**Target 列表（model_backends）**：一个 Route 可绑定多个 Target，每个 Target 指向 `provider_id` + `model`，带 `weight`（weighted）、`priority`（priority）和七行 `thinking_level_map`；Target 健康状态在内存 `HealthRegistry` 管理，不入库。Route 记录和完整 Target 列表由一个聚合持久化接口在同一事务内写入。
+**Target 列表（model_backends）**：一个 Route 可绑定多个 Target，每个 Target 指向 `provider_id` + `model`，并保存启用状态、有符号 32 位 Target Priority、First Token Timeout、Target Retry Budget、Target Cooldown 和七行 `thinking_level_map`。数值更高的 Priority 组先参与选择；同组由 Traffic Equalization 或 Latency Preference 调度。已禁用 Target 仍保留在 Route 上，但不参与选择、亲和、冷却或 Route 能力交集。Target 健康状态、冷却和进行中流量占位在进程内管理，不入库。Route 记录和完整 Target 列表由一个聚合持久化接口在同一事务内写入。
 
-客户端继续使用 Chat Completions、Open Responses、Anthropic Messages 或 Gemini 的原生 thinking 字段。codec 先解码为规范 Thinking Level，Request Hook 可修改该等级；Route 以所有 Target 非 Hidden Thinking Level Map 的交集派生支持等级并据此钳制，每次 Target 尝试再用该 Target 的 Thinking Level Map 生成 protocol-native control。`GET /v1/models` 仅在派生交集非空时返回可选的 `stravia:thinking_levels`，不暴露 Target control。
+运行时固定按 Target Continuation、Conversation Affinity、无对话身份时的 Cache Affinity、Target Priority、组内 Route Scheduling Strategy 分层选择。Traffic Equalization 比较过去 24 小时成功请求的加权 Token 流量与进行中输入占位；Latency Preference 在至少两个 Target 各有 20 个近期成功样本时比较过去一小时的成功率与输出 Token 速度，否则回退 Traffic Equalization。
+
+客户端继续使用 Chat Completions、Open Responses、Anthropic Messages 或 Gemini 的原生 thinking 字段。codec 先解码为规范 Thinking Level，Request Hook 可修改该等级；Route 以所有已启用 Target 非 Hidden Thinking Level Map 的交集派生支持等级并据此钳制，每次 Target 尝试再用该 Target 的 Thinking Level Map 生成 protocol-native control。`GET /v1/models` 仅在派生交集非空时返回可选的 `stravia:thinking_levels`，不暴露 Target control。
 
 ### 8.2 API Token 模型
 
@@ -716,7 +718,7 @@ API Token ──── (授权绑定) ──── Route
   │                             │
   ├── 并发上限: concurrency_limit ├── 匹配键 (name)
   ├── 过期时间                  ├── 后端列表 (model_backends)
-  ├── 状态: is_enabled           ├── 负载策略 (balance)
+  ├── 状态: is_enabled           ├── 调度策略 (balance)
   └── 名称                       └── 语义 (operation)
 ```
 
@@ -809,18 +811,25 @@ CREATE TABLE providers (
 CREATE TABLE models (
     id              TEXT PRIMARY KEY,
     name            TEXT NOT NULL UNIQUE,  -- 大小写敏感的 Route ID
-    balance         TEXT NOT NULL DEFAULT 'weighted',
+    balance         TEXT NOT NULL DEFAULT 'traffic_equalization',
     is_enabled      INTEGER NOT NULL DEFAULT 1,
     created_at      TEXT NOT NULL
 );
 
 -- Target 列表
 CREATE TABLE model_backends (
-    id          TEXT PRIMARY KEY,
-    model_id    TEXT NOT NULL REFERENCES models(id) ON DELETE CASCADE,
-    provider_id TEXT NOT NULL REFERENCES providers(id),
-    model       TEXT NOT NULL,        -- 上游实际模型名
-    weight      INTEGER NOT NULL DEFAULT 100,
+    id                     TEXT PRIMARY KEY,
+    model_id               TEXT NOT NULL REFERENCES models(id) ON DELETE CASCADE,
+    provider_id            TEXT NOT NULL REFERENCES providers(id),
+    model                  TEXT NOT NULL,  -- 上游实际模型名
+    enabled                INTEGER NOT NULL DEFAULT 1,
+    priority               INTEGER NOT NULL DEFAULT 0,
+    thinking_level_map     TEXT NOT NULL,
+    first_token_timeout_ms INTEGER NOT NULL DEFAULT 60000,
+    target_retry_budget    INTEGER NOT NULL DEFAULT 5,
+    target_cooldown_ms     INTEGER NOT NULL DEFAULT 120000
+);
+
 -- 访问控制 Token
 CREATE TABLE api_keys (
     id                 TEXT PRIMARY KEY,
@@ -973,9 +982,9 @@ tests/stream/
 - Azure AI Foundry（Azure AD token + deployment URL pattern）
 - Cohere / Mistral / Together AI 等
 
-### 12.8 Router 故障策略（部分已落地）
+### 12.8 Router 故障策略
 
-已落地：多 backend 健康感知迭代（`HealthRegistry`）+ `balance` 策略（weighted / priority / cooldown / latency）+ 可重试状态码自动续跑。待补充：指数退避 + jitter、可配置重试上限、单 backend 精细化熔断（滑动窗口）。
+已落地：`RouteAttemptPolicy` 统一 Target 分层选择、健康过滤、同 Target full-jitter 重试、QuotaExceeded 换 Target、First Token Timeout 与进程内 Target Cooldown。Client Output Commit 后不再换 Target。更细粒度的滑动窗口熔断仍属于后续能力。
 
 ### 12.9 Transport 策略
 

@@ -1,6 +1,8 @@
 import * as m from '$lib/paraglide/messages.js'
 
 import { clearAdminToken, getAdminToken } from '$lib/auth'
+import type { ConnectClientApplyPlan } from '$lib/connect-client-apply'
+import type { ConnectClientApplyRequest } from '$lib/connect'
 import type { Locale } from '$lib/paraglide/runtime.js'
 import type {
   ApiKey,
@@ -84,6 +86,12 @@ function mapRequest(command: string, args?: Record<string, unknown>): RequestMap
   switch (command) {
     case 'listProviders':
       return { method: 'GET', path: '/providers' }
+    case 'previewConnectClient':
+      return {
+        method: 'POST',
+        path: '/connect-clients/preview',
+        body: args?.input as unknown as Record<string, unknown>,
+      }
     case 'listCatalogProviders':
       return { method: 'GET', path: '/catalog/providers' }
     case 'listVendorMetadata':
@@ -354,6 +362,9 @@ function parseJson(value: string): unknown {
 }
 
 export const admin = {
+  connectClients: {
+    preview: (input: ConnectClientApplyRequest) => request<ConnectClientApplyPlan>('previewConnectClient', { input }),
+  },
   providers: {
     vendors: () => request<VendorMetadata[]>('listVendorMetadata'),
     list: () => request<Provider[]>('listProviders'),
