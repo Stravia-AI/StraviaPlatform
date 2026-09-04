@@ -46,7 +46,7 @@ impl BrowserRuntime {
         }
     }
 
-    pub(crate) async fn render(&self, request: RenderRequest<'_>) -> eyre::Result<RenderedPage> {
+    pub(crate) async fn render(&self, request: RenderRequest<'_>) -> anyhow::Result<RenderedPage> {
         let runtime = self.clone();
         let url = request.url.to_string();
         let preflight_url = request.preflight_url.map(str::to_string);
@@ -64,7 +64,7 @@ impl BrowserRuntime {
             )
         })
         .await
-        .map_err(|error| eyre::eyre!("browser renderer task failed: {error}"))?
+        .map_err(|error| anyhow::anyhow!("browser renderer task failed: {error}"))?
     }
 
     fn render_blocking(
@@ -74,18 +74,18 @@ impl BrowserRuntime {
         ready_selector: &str,
         timeout: Duration,
         request_guard: Option<fn(&str) -> bool>,
-    ) -> eyre::Result<RenderedPage> {
+    ) -> anyhow::Result<RenderedPage> {
         let browser = match self
             .inner
             .browser
             .get_or_init(|| launch_browser(&self.inner.config))
         {
             Ok(browser) => browser,
-            Err(error) => eyre::bail!("browser renderer is unavailable: {error}"),
+            Err(error) => anyhow::bail!("browser renderer is unavailable: {error}"),
         };
         let tab = browser
             .new_tab()
-            .map_err(|error| eyre::eyre!("tab creation failed: {error}"))?;
+            .map_err(|error| anyhow::anyhow!("tab creation failed: {error}"))?;
         let rendered = render_tab(
             &tab,
             url,
@@ -142,7 +142,7 @@ fn render_tab(
     ready_selector: &str,
     timeout: Duration,
     request_guard: Option<fn(&str) -> bool>,
-) -> eyre::Result<RenderedPage> {
+) -> anyhow::Result<RenderedPage> {
     apply_omp_stealth(tab)?;
     if let Some(request_guard) = request_guard {
         tab.enable_fetch(
@@ -153,7 +153,7 @@ fn render_tab(
             }]),
             None,
         )
-        .map_err(|error| eyre::eyre!("request guard setup failed: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("request guard setup failed: {error}"))?;
         tab.enable_request_interception(Arc::new(move |_, _, intercepted: RequestPausedEvent| {
             if request_guard(&intercepted.params.request.url) {
                 RequestPausedDecision::Continue(None)
@@ -164,23 +164,23 @@ fn render_tab(
                 })
             }
         }))
-        .map_err(|error| eyre::eyre!("request guard setup failed: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("request guard setup failed: {error}"))?;
     }
     if let Some(preflight_url) = preflight_url {
         tab.navigate_to(preflight_url)
-            .map_err(|error| eyre::eyre!("preflight navigation failed: {error}"))?;
+            .map_err(|error| anyhow::anyhow!("preflight navigation failed: {error}"))?;
         tab.wait_for_element_with_custom_timeout("body", timeout)
-            .map_err(|error| eyre::eyre!("preflight page did not load: {error}"))?;
+            .map_err(|error| anyhow::anyhow!("preflight page did not load: {error}"))?;
     }
 
     tab.navigate_to(url)
-        .map_err(|error| eyre::eyre!("navigation failed: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("navigation failed: {error}"))?;
     let ready = tab
         .wait_for_element_with_custom_timeout(ready_selector, timeout)
         .is_ok();
     let html = tab
         .get_content()
-        .map_err(|error| eyre::eyre!("rendered HTML extraction failed: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("rendered HTML extraction failed: {error}"))?;
 
     Ok(RenderedPage {
         html,
@@ -189,13 +189,13 @@ fn render_tab(
     })
 }
 
-fn apply_omp_stealth(tab: &Tab) -> eyre::Result<()> {
+fn apply_omp_stealth(tab: &Tab) -> anyhow::Result<()> {
     let user_agent = tab
         .evaluate("navigator.userAgent", true)
-        .map_err(|error| eyre::eyre!("user-agent read failed: {error}"))?
+        .map_err(|error| anyhow::anyhow!("user-agent read failed: {error}"))?
         .value
         .and_then(|value| value.as_str().map(ToOwned::to_owned))
-        .ok_or_else(|| eyre::eyre!("browser did not provide a user agent"))?
+        .ok_or_else(|| anyhow::anyhow!("browser did not provide a user agent"))?
         .replace("HeadlessChrome/", "Chrome/");
     let full_version = user_agent
         .split("Chrome/")
@@ -268,21 +268,21 @@ fn apply_omp_stealth(tab: &Tab) -> eyre::Result<()> {
         platform: platform.clone(),
         user_agent_metadata: Some(user_agent_metadata.clone()),
     })
-    .map_err(|error| eyre::eyre!("user-agent override failed: {error}"))?;
+    .map_err(|error| anyhow::anyhow!("user-agent override failed: {error}"))?;
     tab.call_method(SetEmulationUserAgentOverride {
         user_agent,
         accept_language,
         platform,
         user_agent_metadata: Some(user_agent_metadata),
     })
-    .map_err(|error| eyre::eyre!("user-agent emulation failed: {error}"))?;
+    .map_err(|error| anyhow::anyhow!("user-agent emulation failed: {error}"))?;
     tab.call_method(Page::AddScriptToEvaluateOnNewDocument {
         source: STEALTH_SCRIPT.to_string(),
         world_name: None,
         include_command_line_api: None,
         run_immediately: None,
     })
-    .map_err(|error| eyre::eyre!("script injection failed: {error}"))?;
+    .map_err(|error| anyhow::anyhow!("script injection failed: {error}"))?;
 
     Ok(())
 }

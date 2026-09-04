@@ -42,7 +42,7 @@ fn generate_cvid() -> String {
     bytes.iter().map(|b| format!("{:02X}", b)).collect()
 }
 
-pub fn parse_response(body: &str) -> eyre::Result<EngineResponse> {
+pub fn parse_response(body: &str) -> anyhow::Result<EngineResponse> {
     parse_html_response_with_opts(
         body,
         ParseOpts::new()
@@ -88,7 +88,7 @@ pub fn parse_response(body: &str) -> eyre::Result<EngineResponse> {
     )
 }
 
-fn clean_url(url: &str) -> eyre::Result<String> {
+fn clean_url(url: &str) -> anyhow::Result<String> {
     // clean up bing's tracking urls
     if url.starts_with("https://www.bing.com/ck/a?") {
         // get the u param

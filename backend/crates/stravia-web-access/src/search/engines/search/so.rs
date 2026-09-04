@@ -24,7 +24,7 @@ static LOCATION_REPLACE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("360 location.replace pattern is valid")
 });
 
-pub async fn request(search: &SearchQuery) -> eyre::Result<RequestResponse> {
+pub async fn request(search: &SearchQuery) -> anyhow::Result<RequestResponse> {
     let response = search.http.get(search_url(search).as_str()).send().await?;
     let body = response.text().await?;
     let parsed = if requires_browser_render(&body) {
@@ -42,7 +42,7 @@ pub(crate) fn requires_browser_render(body: &str) -> bool {
     !body.contains("res-list")
 }
 
-pub(crate) async fn render_response(search: &SearchQuery) -> eyre::Result<EngineResponse> {
+pub(crate) async fn render_response(search: &SearchQuery) -> anyhow::Result<EngineResponse> {
     let url = search_url(search);
     let rendered = search
         .browser
@@ -54,10 +54,10 @@ pub(crate) async fn render_response(search: &SearchQuery) -> eyre::Result<Engine
             request_guard: None,
         })
         .await
-        .map_err(|error| eyre::eyre!("360 browser renderer failed: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("360 browser renderer failed: {error}"))?;
 
     if !rendered.ready {
-        eyre::bail!(
+        anyhow::bail!(
             "360 search results did not render from {} within {} seconds",
             rendered.url,
             BROWSER_RENDER_TIMEOUT.as_secs()
@@ -73,7 +73,7 @@ fn search_url(search: &SearchQuery) -> Url {
         .expect("360 search URL is valid")
 }
 
-pub fn parse_response(body: &str) -> eyre::Result<EngineResponse> {
+pub fn parse_response(body: &str) -> anyhow::Result<EngineResponse> {
     parse_html_response_with_opts(
         body,
         ParseOpts::new()
@@ -85,7 +85,7 @@ pub fn parse_response(body: &str) -> eyre::Result<EngineResponse> {
     )
 }
 
-fn source_url(el: &ElementRef) -> eyre::Result<String> {
+fn source_url(el: &ElementRef) -> anyhow::Result<String> {
     Ok(el
         .select(&Selector::parse("h3.res-title a").expect("360 title selector is valid"))
         .next()
@@ -124,10 +124,10 @@ async fn resolve_link_urls(mut response: EngineResponse, client: &wreq::Client) 
 async fn resolve_link_url(
     mut result: EngineSearchResult,
     client: wreq::Client,
-) -> eyre::Result<EngineSearchResult> {
+) -> anyhow::Result<EngineSearchResult> {
     let url = Url::parse(&result.url)?;
     if is_360_ai_url(&url) {
-        eyre::bail!("360 AI card has no destination URL");
+        anyhow::bail!("360 AI card has no destination URL");
     }
     if !is_so_tracking_link(&url) {
         return Ok(result);
@@ -141,7 +141,7 @@ async fn resolve_link_url(
         .await?;
     let body = response.text().await?;
     result.url = extract_so_link_destination(&body)
-        .ok_or_else(|| eyre::eyre!("360 /link did not contain a destination URL"))?;
+        .ok_or_else(|| anyhow::anyhow!("360 /link did not contain a destination URL"))?;
     Ok(result)
 }
 

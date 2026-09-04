@@ -15,7 +15,7 @@ fn search_url(search: &SearchQuery) -> Url {
         .expect("Brave search URL is valid")
 }
 
-pub fn parse_response(body: &str) -> eyre::Result<EngineResponse> {
+pub fn parse_response(body: &str) -> anyhow::Result<EngineResponse> {
     parse_html_response_with_opts(
         body,
         ParseOpts::new()

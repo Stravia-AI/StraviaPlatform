@@ -15,7 +15,7 @@ pub async fn request(search: &SearchQuery) -> RequestResponse {
     search.http.get(url.as_str()).into()
 }
 
-pub fn parse_response(body: &str) -> eyre::Result<EngineResponse> {
+pub fn parse_response(body: &str) -> anyhow::Result<EngineResponse> {
     parse_html_response_with_opts(
         body,
         ParseOpts::new()

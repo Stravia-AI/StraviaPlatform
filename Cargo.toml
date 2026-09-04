@@ -13,34 +13,32 @@ stravia-core = { path = "backend/crates/stravia-core" }
 stravia-server = { path = "backend/apps/stravia-server", default-features = false }
 stravia-web-access = { path = "backend/crates/stravia-web-access" }
 stravia-web-access-contract = { path = "backend/crates/stravia-web-access-contract" }
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", default-features = false }
 ammonia = "4.1.4"
-axum = { version = "0.8", features = ["macros", "multipart", "ws"] }
-rmcp = { version = "=3.1.4", default-features = false, features = ["server", "transport-streamable-http-server"] }
-reqwest = { version = "0.13", default-features = false, features = ["stream", "json", "rustls", "http2", "charset", "form", "multipart"] }
+axum = { version = "0.8", default-features = false }
+rmcp = { version = "=3.1.4", default-features = false }
+reqwest = { version = "0.13", default-features = false }
 wreq = { version = "6.0.0-rc.31", features = ["brotli", "cookies", "deflate", "gzip", "zstd", "socks"] }
 wreq-util = "3.0.0-rc.14"
-tokio-tungstenite = "0.30"
 reqwest-websocket = "0.6"
-tower-http = { version = "0.7", features = ["cors", "trace"] }
-sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "postgres", "tls-rustls", "migrate", "macros", "rust_decimal", "json"] }
+tower-http = { version = "0.6.11", features = ["cors", "trace"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite-bundled", "postgres", "tls-rustls", "migrate", "macros", "rust_decimal", "json"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["arbitrary_precision"] }
+serde_json = "1"
 serde-saphyr = "1"
 json5 = "1"
 async-trait = "0.1"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = "0.3"
 uuid = { version = "1", features = ["v4", "serde"] }
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { version = "0.4", default-features = false }
 chrono-tz = { version = "0.10.4", features = ["case-insensitive"] }
 rust_decimal = { version = "1.42", features = ["serde-with-arbitrary-precision"] }
 anyhow = "1"
-eyre = "0.6.14"
 fend-core = "1.5.8"
 thiserror = "2"
 tokio-stream = "0.1"
-futures = "0.3"
+futures = { version = "0.3", default-features = false, features = ["async-await", "std"] }
 http-body-util = "0.1"
 headless_chrome = "1.0.22"
 htmd = "0.5"
@@ -57,11 +55,10 @@ gcp_auth = "0.12.7"
 aws-credential-types = "1.3.0"
 aws-sigv4 = "1.5.1"
 maud = "0.27.0"
-numbat = "1.24.0"
-parking_lot = "0.12.5"
+numbat = { version = "1.24.0", default-features = false, features = ["fetch-exchangerates"] }
 tempfile = "3"
 regex = "1.13.1"
-scraper = "0.27.0"
+scraper = { version = "0.27.0", default-features = false, features = ["errors"] }
 tower = { version = "0.5", features = ["util"] }
 clap = { version = "4", features = ["derive", "env"] }
 dotenvy = "0.15"
