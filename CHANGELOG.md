@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## [0.1.5] - 2026-09-04
+
+### Fixed
+
+- Streaming responses now preserve UTF-8 characters split across transport chunks and exclude tool output from History Marker continuation, preventing corrupted text and invalid follow-up context.
+
 ## [0.1.4] - 2026-09-04
 
 ### Added
