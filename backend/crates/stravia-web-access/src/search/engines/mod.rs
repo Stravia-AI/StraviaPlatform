@@ -146,15 +146,15 @@ impl AllowedDomain {
     /// Schemes, ports, paths, query strings, fragments, credentials, and IP
     /// addresses are rejected because this type represents a DNS domain, not
     /// a URL prefix.
-    pub fn parse(value: &str) -> eyre::Result<Self> {
+    pub fn parse(value: &str) -> anyhow::Result<Self> {
         if value.is_empty() || value.trim() != value {
-            eyre::bail!("allowed domain must be a non-empty hostname");
+            anyhow::bail!("allowed domain must be a non-empty hostname");
         }
         if value
             .chars()
             .any(|character| matches!(character, '/' | ':' | '?' | '#' | '@'))
         {
-            eyre::bail!("allowed domain must be a hostname without URL components");
+            anyhow::bail!("allowed domain must be a hostname without URL components");
         }
 
         let url = Url::parse(&format!("https://{value}"))?;
@@ -165,17 +165,17 @@ impl AllowedDomain {
             || !url.username().is_empty()
             || url.password().is_some()
         {
-            eyre::bail!("allowed domain must be a hostname without URL components");
+            anyhow::bail!("allowed domain must be a hostname without URL components");
         }
 
         let Host::Domain(host) = url
             .host()
-            .ok_or_else(|| eyre::eyre!("allowed domain must contain a hostname"))?
+            .ok_or_else(|| anyhow::anyhow!("allowed domain must contain a hostname"))?
         else {
-            eyre::bail!("allowed domain must be a DNS hostname");
+            anyhow::bail!("allowed domain must be a DNS hostname");
         };
         if host.starts_with('.') {
-            eyre::bail!("allowed domain must not start with a dot");
+            anyhow::bail!("allowed domain must not start with a dot");
         }
 
         Ok(Self(host.to_string()))
@@ -257,26 +257,26 @@ impl From<wreq::RequestBuilder> for RequestResponse {
 }
 
 trait IntoRequestResponseResult {
-    fn into_request_response_result(self) -> eyre::Result<RequestResponse>;
+    fn into_request_response_result(self) -> anyhow::Result<RequestResponse>;
 }
 
 impl IntoRequestResponseResult for wreq::RequestBuilder {
-    fn into_request_response_result(self) -> eyre::Result<RequestResponse> {
+    fn into_request_response_result(self) -> anyhow::Result<RequestResponse> {
         Ok(RequestResponse::Http(Box::new(self)))
     }
 }
 impl IntoRequestResponseResult for EngineResponse {
-    fn into_request_response_result(self) -> eyre::Result<RequestResponse> {
+    fn into_request_response_result(self) -> anyhow::Result<RequestResponse> {
         Ok(RequestResponse::Instant(Box::new(self)))
     }
 }
 impl IntoRequestResponseResult for RequestResponse {
-    fn into_request_response_result(self) -> eyre::Result<RequestResponse> {
+    fn into_request_response_result(self) -> anyhow::Result<RequestResponse> {
         Ok(self)
     }
 }
-impl IntoRequestResponseResult for eyre::Result<RequestResponse> {
-    fn into_request_response_result(self) -> eyre::Result<RequestResponse> {
+impl IntoRequestResponseResult for anyhow::Result<RequestResponse> {
+    fn into_request_response_result(self) -> anyhow::Result<RequestResponse> {
         self
     }
 }
@@ -399,7 +399,7 @@ async fn make_request(
     engine: Engine,
     query: &SearchQuery,
     send_engine_progress_update: impl Fn(Engine, EngineProgressUpdate),
-) -> eyre::Result<HttpResponse> {
+) -> anyhow::Result<HttpResponse> {
     send_engine_progress_update(engine, EngineProgressUpdate::Requesting);
 
     let mut res = request.send().await?;
@@ -429,7 +429,7 @@ async fn make_requests(
     progress_tx: &mpsc::UnboundedSender<ProgressUpdate>,
     start_time: Instant,
     send_engine_progress_update: &impl Fn(Engine, EngineProgressUpdate),
-) -> eyre::Result<()> {
+) -> anyhow::Result<()> {
     let mut requests = Vec::new();
     for &engine in Engine::all() {
         let engine_config = query.config.engines.get(engine);
@@ -502,7 +502,7 @@ async fn make_requests(
 
     let mut responses = HashMap::new();
     for response_result in join_all(response_futures).await {
-        let response_result: eyre::Result<_> = response_result; // this line is necessary to make type inference work
+        let response_result: anyhow::Result<_> = response_result; // this line is necessary to make type inference work
         if let Ok((engine, response)) = response_result {
             responses.insert(engine, response);
         }
@@ -560,7 +560,7 @@ async fn make_requests(
             postsearch_response_futures.push(request);
         }
 
-        let postsearch_responses_result: eyre::Result<HashMap<_, _>> =
+        let postsearch_responses_result: anyhow::Result<HashMap<_, _>> =
             join_all(postsearch_response_futures)
                 .await
                 .into_iter()
@@ -586,7 +586,7 @@ async fn make_requests(
 pub async fn search(
     query: &SearchQuery,
     progress_tx: mpsc::UnboundedSender<ProgressUpdate>,
-) -> eyre::Result<()> {
+) -> anyhow::Result<()> {
     let start_time = Instant::now();
 
     info!("Doing search");
@@ -608,7 +608,7 @@ pub async fn autocomplete(
     config: &Config,
     query: &str,
     client: &wreq::Client,
-) -> eyre::Result<Vec<String>> {
+) -> anyhow::Result<Vec<String>> {
     let mut requests = Vec::new();
     for &engine in Engine::all() {
         let config = config.engines.get(engine);
@@ -636,7 +636,7 @@ pub async fn autocomplete(
         autocomplete_futures.push(request);
     }
 
-    let autocomplete_results_result: eyre::Result<HashMap<_, _>> =
+    let autocomplete_results_result: anyhow::Result<HashMap<_, _>> =
         join_all(autocomplete_futures).await.into_iter().collect();
     let autocomplete_results = autocomplete_results_result?;
 

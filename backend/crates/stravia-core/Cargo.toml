@@ -9,22 +9,22 @@ description = "Core library for Stravia AI Gateway — protocol conversion, prox
 [dependencies]
 stravia-web-access = { workspace = true }
 stravia-web-access-contract = { workspace = true }
-tokio = { workspace = true }
-axum = { workspace = true }
-rmcp = { workspace = true, features = ["client", "transport-streamable-http-client-reqwest"] }
-reqwest = { workspace = true }
+tokio = { workspace = true, features = ["fs", "io-util", "net", "rt", "sync", "time"] }
+axum = { workspace = true, features = ["json", "query", "ws"] }
+rmcp = { workspace = true, features = ["client", "server", "transport-streamable-http-client-reqwest", "transport-streamable-http-server"] }
+reqwest = { workspace = true, features = ["charset", "form", "http2", "json", "rustls", "stream"] }
 reqwest-websocket = { workspace = true }
 tower-http = { workspace = true }
 sqlx = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
+serde_json = { workspace = true, features = ["arbitrary_precision"] }
 serde-saphyr = { workspace = true }
 json5 = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
-chrono = { workspace = true }
+chrono = { workspace = true, features = ["clock", "serde", "std"] }
 rust_decimal = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
@@ -48,5 +48,5 @@ tempfile = { workspace = true }
 tower = { workspace = true }
 jsonschema = { version = "0.51.0", default-features = false }
 
-tokio = { workspace = true, features = ["test-util"] }
-tokio-tungstenite = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+axum = { workspace = true, features = ["http1"] }

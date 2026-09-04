@@ -217,7 +217,7 @@ impl LocalWeb {
         &self,
         mut query: crate::search::engines::SearchQuery,
         progress_tx: tokio::sync::mpsc::UnboundedSender<crate::search::engines::ProgressUpdate>,
-    ) -> eyre::Result<()> {
+    ) -> anyhow::Result<()> {
         query.http = self.http_client();
         query.browser = self.browser();
         crate::search::engines::search(&query, progress_tx).await
@@ -227,7 +227,7 @@ impl LocalWeb {
         &self,
         config: &crate::search::config::Config,
         query: &str,
-    ) -> eyre::Result<Vec<String>> {
+    ) -> anyhow::Result<Vec<String>> {
         crate::search::engines::autocomplete(config, query, &self.inner.http).await
     }
 }

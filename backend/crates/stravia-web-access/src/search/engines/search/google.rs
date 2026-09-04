@@ -15,7 +15,7 @@ const GOOGLE_HOME_URL: &str = "https://www.google.com/";
 const GOOGLE_RESULT_SELECTOR: &str = "a h3";
 const BROWSER_RENDER_TIMEOUT: Duration = Duration::from_secs(10);
 
-pub async fn request(search: &SearchQuery) -> eyre::Result<RequestResponse> {
+pub async fn request(search: &SearchQuery) -> anyhow::Result<RequestResponse> {
     Ok(search.http.get(search_url(search).as_str()).into())
 }
 
@@ -23,7 +23,7 @@ pub(crate) fn requires_browser_render(body: &str) -> bool {
     body.contains("/httpservice/retry/enablejs") && !contains_result_heading(body)
 }
 
-pub(crate) async fn render_response(search: &SearchQuery) -> eyre::Result<EngineResponse> {
+pub(crate) async fn render_response(search: &SearchQuery) -> anyhow::Result<EngineResponse> {
     let url = search_url(search);
     let rendered = search
         .browser
@@ -35,24 +35,24 @@ pub(crate) async fn render_response(search: &SearchQuery) -> eyre::Result<Engine
             request_guard: None,
         })
         .await
-        .map_err(|error| eyre::eyre!("Google browser renderer failed: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("Google browser renderer failed: {error}"))?;
     let body = rendered.html;
 
     if !rendered.ready {
         if requires_browser_render(&body) {
-            eyre::bail!("Google returned its JavaScript challenge after browser rendering");
+            anyhow::bail!("Google returned its JavaScript challenge after browser rendering");
         }
         if is_traffic_challenge(&body) {
-            eyre::bail!("Google blocked browser rendering with an automated-traffic challenge");
+            anyhow::bail!("Google blocked browser rendering with an automated-traffic challenge");
         }
-        eyre::bail!(
+        anyhow::bail!(
             "Google search results did not render from {} within {} seconds",
             rendered.url,
             BROWSER_RENDER_TIMEOUT.as_secs()
         );
     }
     if is_traffic_challenge(&body) {
-        eyre::bail!("Google blocked browser rendering with an automated-traffic challenge");
+        anyhow::bail!("Google blocked browser rendering with an automated-traffic challenge");
     }
 
     parse_response(&body)
@@ -89,7 +89,7 @@ fn contains_result_heading(body: &str) -> bool {
     body.contains("<h3") || body.contains("<H3")
 }
 
-pub fn parse_response(body: &str) -> eyre::Result<EngineResponse> {
+pub fn parse_response(body: &str) -> anyhow::Result<EngineResponse> {
     parse_html_response_with_opts(
         body,
         ParseOpts::new()
@@ -301,7 +301,7 @@ pub fn request_autocomplete(query: &str, client: &wreq::Client) -> wreq::Request
     client.get(url.as_str())
 }
 
-pub fn parse_autocomplete_response(body: &str) -> eyre::Result<Vec<String>> {
+pub fn parse_autocomplete_response(body: &str) -> anyhow::Result<Vec<String>> {
     let res = serde_json::from_str::<Vec<serde_json::Value>>(body)?;
     Ok(res
         .into_iter()
@@ -315,7 +315,7 @@ pub fn parse_autocomplete_response(body: &str) -> eyre::Result<Vec<String>> {
         .collect())
 }
 
-fn clean_url(url: &str) -> eyre::Result<String> {
+fn clean_url(url: &str) -> anyhow::Result<String> {
     if url.starts_with("/url?q=") {
         // get the q param
         let url = Url::parse(format!("https://www.google.com{url}").as_str())?;

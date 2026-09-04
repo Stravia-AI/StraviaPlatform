@@ -10,13 +10,12 @@ publish = false
 [dependencies]
 stravia-web-access-contract = { workspace = true }
 ammonia = { workspace = true }
+anyhow = { workspace = true }
 async-trait = { workspace = true }
 base64 = { workspace = true }
-bytes = { workspace = true }
-chrono = { workspace = true }
+chrono = { workspace = true, features = ["clock", "std"] }
 chrono-tz = { workspace = true }
 dom_smoothie = { workspace = true }
-eyre = { workspace = true }
 fend-core = { workspace = true }
 futures = { workspace = true }
 http-body-util = { workspace = true }
@@ -24,21 +23,22 @@ headless_chrome = { workspace = true }
 htmd = { workspace = true }
 maud = { workspace = true }
 numbat = { workspace = true }
-parking_lot = { workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["http2", "rustls"] }
 rmcp = { workspace = true, features = ["client", "transport-streamable-http-client-reqwest"] }
 scraper = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
-tokio-stream = { workspace = true }
+tokio = { workspace = true, features = ["net", "rt", "sync"] }
 toml = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
 url = { workspace = true }
 urlencoding = { workspace = true }
 wreq = { workspace = true }
 wreq-util = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["io-util", "macros", "rt-multi-thread"] }
+tracing-subscriber = { workspace = true }

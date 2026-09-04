@@ -24,7 +24,7 @@ static WECHAT_REDIRECT_URL_PARTS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"url\s*\+=\s*'([^']*)';").expect("Sogou WeChat redirect pattern is valid")
 });
 
-pub async fn request(search: &SearchQuery) -> eyre::Result<RequestResponse> {
+pub async fn request(search: &SearchQuery) -> anyhow::Result<RequestResponse> {
     let response = search.http.get(search_url(search).as_str()).send().await?;
     let body = response.text().await?;
     if requires_browser_render(&body) {
@@ -51,7 +51,7 @@ pub(crate) fn requires_browser_render(body: &str) -> bool {
     !body.contains("sogou_vr_11002601_box_")
 }
 
-pub(crate) async fn render_response(search: &SearchQuery) -> eyre::Result<EngineResponse> {
+pub(crate) async fn render_response(search: &SearchQuery) -> anyhow::Result<EngineResponse> {
     let url = search_url(search);
     let rendered = search
         .browser
@@ -63,10 +63,10 @@ pub(crate) async fn render_response(search: &SearchQuery) -> eyre::Result<Engine
             request_guard: None,
         })
         .await
-        .map_err(|error| eyre::eyre!("Sogou WeChat browser renderer failed: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("Sogou WeChat browser renderer failed: {error}"))?;
 
     if !rendered.ready {
-        eyre::bail!(
+        anyhow::bail!(
             "Sogou WeChat search results did not render from {} within {} seconds",
             rendered.url,
             BROWSER_RENDER_TIMEOUT.as_secs()
@@ -76,7 +76,7 @@ pub(crate) async fn render_response(search: &SearchQuery) -> eyre::Result<Engine
     Ok(resolve_article_urls(parse_response(&rendered.html)?, &search.http).await)
 }
 
-pub fn parse_response(body: &str) -> eyre::Result<EngineResponse> {
+pub fn parse_response(body: &str) -> anyhow::Result<EngineResponse> {
     parse_html_response_with_opts(
         body,
         ParseOpts::new()
@@ -87,7 +87,7 @@ pub fn parse_response(body: &str) -> eyre::Result<EngineResponse> {
     )
 }
 
-fn tracking_url(el: &ElementRef) -> eyre::Result<String> {
+fn tracking_url(el: &ElementRef) -> anyhow::Result<String> {
     let href = el
         .select(
             &Selector::parse("h3 a[id*='title'][href]")
@@ -129,7 +129,7 @@ async fn resolve_article_urls(
 async fn resolve_article_url(
     mut result: EngineSearchResult,
     client: wreq::Client,
-) -> eyre::Result<EngineSearchResult> {
+) -> anyhow::Result<EngineSearchResult> {
     // 依赖搜索 client 的 cookie jar，把结果页的 SNUID 带到这次 /link 请求。
     let response = client
         .get(&result.url)
@@ -137,8 +137,9 @@ async fn resolve_article_url(
         .send()
         .await?;
     let redirect_page = response.text().await?;
-    let url = extract_wechat_article_url(&redirect_page)
-        .ok_or_else(|| eyre::eyre!("Sogou WeChat redirect did not contain a direct article URL"))?;
+    let url = extract_wechat_article_url(&redirect_page).ok_or_else(|| {
+        anyhow::anyhow!("Sogou WeChat redirect did not contain a direct article URL")
+    })?;
 
     result.url = url;
     Ok(result)

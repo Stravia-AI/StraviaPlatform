@@ -21,9 +21,9 @@ tauri-plugin-single-instance = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 tauri-plugin-store = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync"] }
 tauri-plugin-opener = { workspace = true }
 tempfile = { workspace = true }
 tauri-plugin-wdio = { version = "1", optional = true }
@@ -37,7 +37,7 @@ tauri-build = { workspace = true }
 
 [dev-dependencies]
 reqwest = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["macros", "time"] }
 
 [lib]
 name = "stravia_desktop_lib"

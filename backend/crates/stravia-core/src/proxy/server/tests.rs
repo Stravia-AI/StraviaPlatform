@@ -520,7 +520,7 @@ async fn responses_rejects_background_with_canonical_error() {
 #[tokio::test]
 async fn responses_websocket_rejects_unknown_event_types() {
     use futures::{SinkExt, StreamExt};
-    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use reqwest_websocket::Upgrade as _;
 
     let entered = std::sync::Arc::new(tokio::sync::Notify::new());
     let release = std::sync::Arc::new(tokio::sync::Notify::new());
@@ -541,20 +541,16 @@ async fn responses_websocket_rejects_unknown_event_types() {
             .await
             .expect("serve WebSocket test router");
     });
-    let mut request = format!("ws://{address}/v1/responses")
-        .into_client_request()
-        .expect("WebSocket request");
-    request.headers_mut().insert(
-        axum::http::header::AUTHORIZATION,
-        format!("Bearer {token}")
-            .parse()
-            .expect("Authorization header"),
-    );
-    let (mut socket, _) = tokio_tungstenite::connect_async(request)
+    let response = reqwest::Client::new()
+        .get(format!("http://{address}/v1/responses"))
+        .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+        .upgrade()
+        .send()
         .await
         .expect("WebSocket handshake");
+    let mut socket = response.into_websocket().await.expect("WebSocket upgrade");
     socket
-        .send(tokio_tungstenite::tungstenite::Message::Text(
+        .send(reqwest_websocket::Message::Text(
             r#"{"type":"unknown.event"}"#.into(),
         ))
         .await
@@ -564,14 +560,14 @@ async fn responses_websocket_rejects_unknown_event_types() {
         .expect("WebSocket response timeout")
         .expect("WebSocket response")
         .expect("WebSocket message");
-    let tokio_tungstenite::tungstenite::Message::Text(message) = message else {
+    let reqwest_websocket::Message::Text(message) = message else {
         panic!("JSON text error event");
     };
     let body: serde_json::Value = serde_json::from_str(&message).expect("WebSocket error JSON");
     assert_eq!(body["type"], "error");
     assert_eq!(body["error"]["code"], "invalid_request");
     socket
-        .send(tokio_tungstenite::tungstenite::Message::Text(
+        .send(reqwest_websocket::Message::Text(
             r#"{"type":"response.create","model":"auth-model","input":"first"}"#.into(),
         ))
         .await
@@ -580,14 +576,14 @@ async fn responses_websocket_rejects_unknown_event_types() {
         .await
         .expect("request Hook timeout");
     socket
-        .send(tokio_tungstenite::tungstenite::Message::Text(
+        .send(reqwest_websocket::Message::Text(
             r#"{"type":"response.create","model":"auth-model","input":"second"}"#.into(),
         ))
         .await
         .expect("send concurrent response.create");
     let response_in_progress = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         while let Some(message) = socket.next().await {
-            let Ok(tokio_tungstenite::tungstenite::Message::Text(message)) = message else {
+            let Ok(reqwest_websocket::Message::Text(message)) = message else {
                 continue;
             };
             let Ok(body) = serde_json::from_str::<serde_json::Value>(&message) else {
@@ -608,7 +604,10 @@ async fn responses_websocket_rejects_unknown_event_types() {
     assert!(response_in_progress);
 
     release.notify_one();
-    socket.close(None).await.expect("close WebSocket");
+    socket
+        .close(reqwest_websocket::CloseCode::Normal, None)
+        .await
+        .expect("close WebSocket");
     server.abort();
 }
 #[tokio::test]
