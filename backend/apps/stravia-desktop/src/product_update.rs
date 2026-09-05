@@ -1,10 +1,13 @@
+#[cfg(not(feature = "desktop-e2e"))]
 use std::sync::Arc;
+#[cfg(any(test, not(feature = "desktop-e2e")))]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde::Serialize;
 use stravia_core::Gateway;
 use tauri::{AppHandle, Emitter, State};
+#[cfg(not(feature = "desktop-e2e"))]
 use tauri_plugin_updater::{Update, UpdaterExt};
 
 const UPDATE_PROGRESS_EVENT: &str = "stravia://product-update-progress";
@@ -49,10 +52,8 @@ struct DesktopUpdateProgress {
 }
 
 enum DownloadedUpdate {
-    Verified {
-        update: Update,
-        bytes: Vec<u8>,
-    },
+    #[cfg(not(feature = "desktop-e2e"))]
+    Verified { update: Update, bytes: Vec<u8> },
     #[cfg(any(test, feature = "desktop-e2e"))]
     TestBridge,
 }
@@ -171,7 +172,7 @@ pub async fn download_product_update(
         return Ok(downloaded);
     }
     #[cfg(feature = "desktop-e2e")]
-    {
+    let result: Result<(u64, Option<u64>, DownloadedUpdate), String> = {
         let progress = DesktopUpdateProgress {
             target_version: version.clone(),
             downloaded_bytes: 64,
@@ -180,22 +181,23 @@ pub async fn download_product_update(
         };
         let _ = app.emit(UPDATE_PROGRESS_EVENT, progress);
         tokio::time::sleep(Duration::from_millis(750)).await;
-        return Ok(state
-            .complete_download(&version, 128, Some(128), DownloadedUpdate::TestBridge)
-            .await);
-    }
+        Ok((128, Some(128), DownloadedUpdate::TestBridge))
+    };
 
     #[cfg(not(feature = "desktop-e2e"))]
-    let result = download_verified_update(&app, &gateway, &version, &available.manifest_url).await;
-    #[cfg(not(feature = "desktop-e2e"))]
-    match result {
-        Ok((update, bytes, downloaded_bytes, total_bytes)) => Ok(state
-            .complete_download(
-                &version,
+    let result = download_verified_update(&app, &gateway, &version, &available.manifest_url)
+        .await
+        .map(|(update, bytes, downloaded_bytes, total_bytes)| {
+            (
                 downloaded_bytes,
                 total_bytes,
                 DownloadedUpdate::Verified { update, bytes },
             )
+        });
+
+    match result {
+        Ok((downloaded_bytes, total_bytes, downloaded)) => Ok(state
+            .complete_download(&version, downloaded_bytes, total_bytes, downloaded)
             .await),
         Err(message) => {
             state.fail(Some(&version), message.clone()).await;
@@ -204,6 +206,7 @@ pub async fn download_product_update(
     }
 }
 
+#[cfg(not(feature = "desktop-e2e"))]
 async fn download_verified_update(
     app: &AppHandle,
     gateway: &Gateway,
@@ -323,6 +326,7 @@ pub async fn install_product_update(
     inner.snapshot.phase = DesktopUpdatePhase::Installing;
     inner.snapshot.error = None;
     let result = match inner.downloaded.as_ref() {
+        #[cfg(not(feature = "desktop-e2e"))]
         Some(DownloadedUpdate::Verified { update, bytes }) => update
             .clone()
             .restart_after_install(true)
@@ -357,6 +361,7 @@ pub async fn install_product_update(
     }
 }
 
+#[cfg(any(test, not(feature = "desktop-e2e")))]
 fn atomic_optional(value: &AtomicU64) -> Option<u64> {
     match value.load(Ordering::Relaxed) {
         u64::MAX => None,
@@ -364,6 +369,7 @@ fn atomic_optional(value: &AtomicU64) -> Option<u64> {
     }
 }
 
+#[cfg(not(feature = "desktop-e2e"))]
 fn parse_bool_setting(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().as_str(),
