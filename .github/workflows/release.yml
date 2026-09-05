@@ -360,10 +360,13 @@ jobs:
               raise SystemExit(
                   "STRAVIA_UPDATER_PUBLIC_KEY must contain a Minisign public key"
               )
-          public_key = (
+          public_key_text = (
               "untrusted comment: minisign public key\n"
-              f"{payload_match.group(1)}"
+              f"{payload_match.group(1)}\n"
           )
+          public_key = base64.b64encode(
+              public_key_text.encode("utf-8")
+          ).decode("ascii")
 
           config_path = Path("backend/apps/stravia-desktop/tauri.conf.json")
           config = json.loads(config_path.read_text(encoding="utf-8"))
