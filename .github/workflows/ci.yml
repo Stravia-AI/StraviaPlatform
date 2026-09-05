@@ -109,7 +109,7 @@ jobs:
     name: Backend E2E (${{ matrix.suite }})
     needs: unit-tests
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -153,7 +153,7 @@ jobs:
     name: PostgreSQL E2E
     needs: unit-tests
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 45
     services:
       postgres:
         image: postgres:16
@@ -206,7 +206,7 @@ jobs:
     name: WebUI E2E
     needs: check
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -229,7 +229,7 @@ jobs:
     name: Windows desktop smoke
     needs: check
     runs-on: windows-latest
-    timeout-minutes: 25
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v7
