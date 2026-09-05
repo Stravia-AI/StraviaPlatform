@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Codex OAuth model discovery now uses client version `0.153.0`, and generation sends the required model and service-tier routing hint, restoring discovery and invocation of version-gated models such as `gpt-6-astra`.
+
 ## [0.1.5] - 2026-09-04
 
 ### Fixed
