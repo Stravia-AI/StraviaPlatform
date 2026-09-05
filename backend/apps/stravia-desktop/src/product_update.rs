@@ -314,11 +314,9 @@ pub async fn install_product_update(
 ) -> Result<(), String> {
     let _operation = state.operation.lock().await;
     let mut inner = state.inner.lock().await;
-    let target_version = inner
-        .snapshot
-        .target_version
-        .clone()
-        .ok_or_else(|| "No downloaded Desktop update is available".to_string())?;
+    if inner.snapshot.target_version.is_none() {
+        return Err("No downloaded Desktop update is available".to_string());
+    }
     if inner.snapshot.phase != DesktopUpdatePhase::Downloaded {
         return Err("No downloaded Desktop update is ready to install".to_string());
     }
@@ -342,14 +340,21 @@ pub async fn install_product_update(
     drop(inner);
 
     #[cfg(feature = "desktop-e2e")]
-    return Ok(());
+    {
+        let _ = app;
+        Ok(())
+    }
 
     #[cfg(all(not(feature = "desktop-e2e"), target_os = "linux"))]
-    app.restart();
+    {
+        app.restart()
+    }
+
     #[cfg(all(not(feature = "desktop-e2e"), not(target_os = "linux")))]
-    let _ = (app, target_version);
-    #[cfg(not(feature = "desktop-e2e"))]
-    Ok(())
+    {
+        let _ = app;
+        Ok(())
+    }
 }
 
 fn atomic_optional(value: &AtomicU64) -> Option<u64> {
