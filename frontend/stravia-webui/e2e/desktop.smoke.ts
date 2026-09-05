@@ -29,6 +29,7 @@ describe('Stravia desktop smoke', () => {
       localStorage.setItem('stravia-sidebar-state', 'expanded')
     })
     await browser.refresh()
+    await browser.tauri.switchWindow('main')
     const serverPort = await browser.tauri.execute(({ core }) => core.invoke('get_server_port'))
     const portState = (await browser.tauri.execute(({ core }) =>
       core.invoke('get_desktop_port_state'),
@@ -102,5 +103,16 @@ describe('Stravia desktop smoke', () => {
       { timeout: 10_000, timeoutMsg: 'confirmed desktop listener switch did not complete' },
     )
     expect((await fetch(`http://127.0.0.1:${replacementPort}/api/v1/status`)).ok).toBe(true)
+
+    await expect($('//h2[normalize-space()="Updates"]')).toBeDisplayed()
+    await expect($('button=Download update')).toBeDisplayed()
+    await $('button=Download update').click()
+    await expect($('[role="progressbar"]')).toHaveAttribute('aria-valuenow', '50')
+    await expect($('[data-slot="dialog-title"]')).toHaveText('Install Stravia 9.9.9?')
+    await expect($('[data-slot="dialog-description"]')).toHaveText(
+      'Stravia will exit now. Any Gateway requests in progress will be interrupted.',
+    )
+    await $('button=Exit and install').click()
+    await expect($('p=Installing Stravia 9.9.9…')).toBeDisplayed()
   })
 })

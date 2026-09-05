@@ -215,6 +215,10 @@ impl Gateway {
         allowance_samples
             .cleanup_at(chrono::Utc::now().timestamp_millis())
             .await?;
+        let update_service = Arc::new(admin::updates::UpdateService::github(
+            Arc::clone(&storage),
+            config.product_update_download_supported,
+        )?);
         let mut gw = Self {
             config,
             storage,
@@ -249,6 +253,7 @@ impl Gateway {
             web_access_run_snapshots: web_access::WebAccessRunSnapshotStore::default(),
             web_search_runner_state: Arc::new(tokio::sync::RwLock::new(None)),
             web_search_config_lock: Arc::new(tokio::sync::Mutex::new(())),
+            update_service,
             _sqlite_pool: sqlite_pool,
             _postgres_pool: postgres_pool,
             history_marker_execution_gate: Arc::new(tokio::sync::RwLock::new(())),

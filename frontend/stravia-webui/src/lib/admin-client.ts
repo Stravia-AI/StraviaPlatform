@@ -4,6 +4,7 @@ import { clearAdminToken, getAdminToken } from '$lib/auth'
 import type { ConnectClientApplyPlan } from '$lib/connect-client-apply'
 import type { ConnectClientApplyRequest } from '$lib/connect'
 import type { Locale } from '$lib/paraglide/runtime.js'
+import type { UpdateStatus } from '$lib/product-update'
 import type {
   ApiKey,
   ProviderModelDetail,
@@ -308,6 +309,12 @@ function mapRequest(command: string, args?: Record<string, unknown>): RequestMap
       return { method: 'PUT', path: `/settings/${args?.key}`, body: { value: args?.value } }
     case 'getGatewayStatus':
       return { method: 'GET', path: '/status' }
+    case 'getUpdateStatus':
+      return { method: 'GET', path: '/updates' }
+    case 'checkForUpdates':
+      return { method: 'POST', path: '/updates/check', body: { mode: args?.mode } }
+    case 'setSkippedUpdateVersion':
+      return { method: 'PUT', path: '/updates/skipped-version', body: { version: args?.version ?? null } }
     default:
       throw new Error(`Unknown Stravia Admin operation: ${command}`)
   }
@@ -481,6 +488,11 @@ export const admin = {
     get: (key: string) => request<string | null>('getSetting', { key }),
     set: (key: string, value: string) => request<void>('setSetting', { key, value }),
     status: () => request<GatewayStatus>('getGatewayStatus'),
+  },
+  updates: {
+    get: () => request<UpdateStatus>('getUpdateStatus'),
+    check: (mode: 'automatic' | 'manual') => request<UpdateStatus>('checkForUpdates', { mode }),
+    skip: (version: string | null) => request<UpdateStatus>('setSkippedUpdateVersion', { version }),
   },
 }
 

@@ -37,6 +37,7 @@ jobs:
       major: ${{ steps.release.outputs.major }}
       minor: ${{ steps.release.outputs.minor }}
       prerelease: ${{ steps.release.outputs.prerelease }}
+      published_at: ${{ steps.release.outputs.published_at }}
     steps:
       - name: Checkout complete history
         uses: actions/checkout@v7
@@ -112,6 +113,10 @@ jobs:
               "major": match.group("major"),
               "minor": match.group("minor"),
               "prerelease": str(match.group("prerelease") is not None).lower(),
+              "published_at": subprocess.check_output(
+                  ["git", "show", "-s", "--format=%cI", tag if publish else "HEAD"],
+                  text=True,
+              ).strip(),
           }
           with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
               for key, value in outputs.items():
@@ -306,7 +311,22 @@ jobs:
           $toolchain = Join-Path $env:GITHUB_WORKSPACE '.github/cmake/windows-arm64.cmake'
           "CMAKE_TOOLCHAIN_FILE=$toolchain" >> $env:GITHUB_ENV
 
+      - name: Validate updater signing credentials
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          STRAVIA_UPDATER_PUBLIC_KEY: ${{ secrets.STRAVIA_UPDATER_PUBLIC_KEY }}
+        run: |
+          test -n "${TAURI_SIGNING_PRIVATE_KEY}"
+          test -n "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD}"
+          test -n "${STRAVIA_UPDATER_PUBLIC_KEY}"
+
       - name: Build desktop bundle
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          STRAVIA_UPDATER_PUBLIC_KEY: ${{ secrets.STRAVIA_UPDATER_PUBLIC_KEY }}
         run: task build:desktop BUNDLES="${{ matrix.bundle }}"
 
       - name: Collect Linux desktop bundle
@@ -323,6 +343,7 @@ jobs:
           fi
           mkdir -p dist
           cp "${bundles[0]}" "dist/${ASSET_NAME}"
+          cp "${bundles[0]}.sig" "dist/${ASSET_NAME}.sig"
 
       - name: Collect Windows desktop bundle
         if: runner.os == 'Windows'
@@ -336,6 +357,7 @@ jobs:
           }
           New-Item -ItemType Directory -Path dist -Force | Out-Null
           Copy-Item $bundles[0].FullName (Join-Path dist $env:ASSET_NAME)
+          Copy-Item "$($bundles[0].FullName).sig" (Join-Path dist "$($env:ASSET_NAME).sig")
 
       - name: Upload desktop asset
         uses: actions/upload-artifact@v7
@@ -436,6 +458,9 @@ jobs:
       - build-desktop
     runs-on: ubuntu-24.04
     steps:
+      - name: Checkout manifest generator
+        uses: actions/checkout@v7
+
       - name: Download server assets
         uses: actions/download-artifact@v8
         with:
@@ -453,6 +478,11 @@ jobs:
       - name: Generate SHA256SUMS
         shell: bash
         run: |
+          python3 .github/scripts/generate_updater_manifest.py \
+            --artifacts release-assets \
+            --version "${{ needs.prepare.outputs.version }}" \
+            --published-at "${{ needs.prepare.outputs.published_at }}" \
+            --output release-assets/stravia-updater.json
           cd release-assets
           LC_ALL=C sha256sum -- * > SHA256SUMS
 

@@ -9,6 +9,16 @@ Stravia 是本产品的唯一品牌名称。用户可见文本、技术标识、
 Stravia Desktop 是运行在本机的 Stravia 管理壳，与独立 HTTP server 相对。只有它能直接改写本机 Connect Client 的配置文件。
 _避免使用_：客户端（单独使用、未区分 Desktop 与 Connect Client）
 
+## 可用更新
+
+可用更新是版本高于当前安装、且符合当前发布通道的已发布 Stravia Release。稳定版安装只接受稳定 Release；预发布版安装接受后续预发布 Release 和版本更高的稳定 Release。
+_避免使用_：最新版（未经过版本与通道判定时）、客户端更新
+
+## 跳过版本
+
+跳过版本是一个 Stravia 安装实例对某个可用更新关闭自动通知的共享偏好。它只作用于该精确版本，不隐藏手动检查结果；出现版本更高的可用更新时自动失效。
+_避免使用_：关闭更新、永久忽略更新
+
 ## Connect Client
 
 Connect Client 是用户本机上的第三方编程工具，可被配置为以 Stravia 为模型服务；管理面「客户端」下拉里的 Codex、Claude Code 等即此类。它不是 Principal，也不是 Agent Definition。

@@ -25,6 +25,37 @@ async fn status_reports_the_running_server_version() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn update_routes_expose_instance_state_and_exact_skip_version() -> anyhow::Result<()> {
+    let data_dir = tempfile::tempdir()?;
+    let (gateway, _logs) = Gateway::new(GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await?;
+    let app = create_router(gateway, None);
+
+    let initial = app
+        .clone()
+        .oneshot(Request::get("/api/v1/updates").body(Body::empty())?)
+        .await?;
+    assert_eq!(initial.status(), StatusCode::OK);
+    let body = to_bytes(initial.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+    assert_eq!(json["data"]["check_status"], "idle");
+    assert_eq!(json["data"]["download_supported"], false);
+
+    let skipped = app
+        .oneshot(
+            Request::put("/api/v1/updates/skipped-version")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"version":"1.2.3"}"#))?,
+        )
+        .await?;
+    assert_eq!(skipped.status(), StatusCode::OK);
+    Ok(())
+}
+
+#[tokio::test]
 async fn provider_allowance_routes_share_the_core_contract() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
     let (gateway, _logs) = Gateway::new(GatewayConfig {

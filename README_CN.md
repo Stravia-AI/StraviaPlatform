@@ -109,6 +109,8 @@ SvelteKit WebUI 可管理：
 
 界面支持英文与简体中文、响应式导航，以及浅色、深色和跟随操作系统三种主题。首次使用时，简体中文（`Hans`）客户端 locale 会选择 `zh-CN`，不支持的 locale 使用英文；可在 Login 页面或**设置 → 外观**中无刷新切换语言，每个浏览器或桌面 WebView 分别记住自己的选择。
 
+管理面会检查公开 GitHub Releases 中的可选更新。Stravia Desktop 启动时检查，只在用户操作后下载签名的 Windows x86_64/ARM64 NSIS 或 Linux x86_64/ARM64 AppImage 更新；standalone server 只报告精确 Release，绝不覆盖自身程序。成功结果缓存 24 小时，失败的自动尝试限流 1 小时，**设置 → 更新**始终可以立即重试。更新流量在实例启用 Outbound proxy 时使用该代理，否则直连 GitHub。
+
 ### 存储与部署
 
 - **SQLite** 是默认存储后端。
@@ -123,13 +125,13 @@ SvelteKit WebUI 可管理：
 版本 tag 会通过 [GitHub Releases](https://github.com/Stravia-AI/StraviaPlatform/releases) 发布 Server 压缩包和 Desktop 安装包，同时发布多架构容器镜像和 Nix package。当前发布范围：
 
 - Server：Linux 和 Windows 的 x86_64、ARM64 架构；Linux 同时提供 GNU 与 musl 压缩包。
-- Desktop：Linux AppImage 和 Windows NSIS 安装包，均覆盖 x86_64 与 ARM64。
+- Desktop：签名的 Tauri updater 产物，以及普通下载用的 Linux AppImage 和 Windows NSIS 安装包，均覆盖 x86_64 与 ARM64。
 - 容器：`ghcr.io/stravia-ai/straviaplatform` 下的 `linux/amd64` 与 `linux/arm64`。
 - Nix：仓库 flake 提供原生 `x86_64-linux` 和 `aarch64-linux` package，release 构建会推送到 [`stravia-platform` Cachix cache](https://app.cachix.org/cache/stravia-platform)。
 
-当前不提供 macOS 产物。Linux GNU Server 压缩包和 Desktop AppImage 以 Ubuntu 24.04 为兼容基线；旧版 Linux 发行版应使用 musl Server 压缩包。Windows Desktop 安装包暂未签名，可能触发 Microsoft Defender SmartScreen。
+当前不提供 macOS 产物。Linux GNU Server 压缩包和 Desktop AppImage 以 Ubuntu 24.04 为兼容基线；旧版 Linux 发行版应使用 musl Server 压缩包。Windows Desktop 安装包具有 updater 签名，但暂未进行 Authenticode 签名，因此仍可能触发 Microsoft Defender SmartScreen。
 
-`SHA256SUMS` 列出了所有可下载构建产物。运行二进制或安装包前请先校验：
+`SHA256SUMS` 列出了所有可下载构建产物。Desktop updater 产物同时提供 `.sig` 和版本化 `stravia-updater.json` 清单；应用内嵌的 updater 公钥会在安装前验证所选包。手动运行二进制或安装包前请先校验 `SHA256SUMS`：
 
 ```bash
 sha256sum path/to/downloaded-asset

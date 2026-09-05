@@ -11,6 +11,7 @@ import { localizeBackendErrorMessage } from '$lib/backend-error'
 import DesktopPortSettings from '$lib/components/desktop-port-settings.svelte'
 import LanguageSelector from '$lib/components/language-selector.svelte'
 import PageHeader from '$lib/components/page-header.svelte'
+import ProductUpdateSettings from '$lib/components/product-update-settings.svelte'
 import { Button } from '$lib/components/ui/button'
 import * as Field from '$lib/components/ui/field'
 import { Input } from '$lib/components/ui/input'
@@ -19,10 +20,6 @@ import { Spinner } from '$lib/components/ui/spinner'
 import { Switch } from '$lib/components/ui/switch'
 
 const queryClient = useQueryClient()
-const statusQuery = createQuery(() => ({
-  queryKey: ['gateway-status'],
-  queryFn: admin.settings.status,
-}))
 const retentionQuery = createQuery(() => ({
   queryKey: ['setting', 'log_retention_days'],
   queryFn: () => admin.settings.get('log_retention_days'),
@@ -62,7 +59,6 @@ const proxyDirty = $derived(
 const settingsError = $derived(
   retentionQuery.error ?? proxyEnabledQuery.error ?? proxyUrlQuery.error ?? proxyBypassQuery.error,
 )
-const appVersion = $derived(statusQuery.data?.version ?? '–')
 const currentTheme = $derived(userPrefersMode.current ?? 'system')
 
 function scrollToSection(id: string): void {
@@ -266,9 +262,6 @@ function retrySettings(): void {
       </Field.FieldGroup>
     </section>
 
-    <p class="font-technical pt-8 text-center text-xs text-muted-foreground">
-      {m.settings_version()}
-      {appVersion}
-    </p>
+    <ProductUpdateSettings />
   </div>
 </div>

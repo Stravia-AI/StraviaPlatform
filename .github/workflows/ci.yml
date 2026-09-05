@@ -58,6 +58,9 @@ jobs:
       - name: Run static checks
         run: task check
 
+      - name: Test updater manifest generator
+        run: python3 .github/scripts/test_generate_updater_manifest.py
+
   unit-tests:
     name: Unit tests (Rust ${{ matrix.toolchain }})
     needs: check

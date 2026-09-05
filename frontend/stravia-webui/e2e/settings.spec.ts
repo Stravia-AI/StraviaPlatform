@@ -167,3 +167,56 @@ test('advanced features keep separate media and web search surfaces', async ({ p
   await page.getByRole('option', { name: 'Search model' }).click()
   await expect(localTurns).toHaveValue('9')
 })
+
+test('server update notification skips one version without hiding Settings or exposing download', async ({
+  page,
+}) => {
+  const releaseUrl = 'https://github.com/Stravia-AI/StraviaPlatform/releases/tag/v1.2.0'
+  let skipped = false
+  await page.addInitScript(() => {
+    window.open = (url) => {
+      sessionStorage.setItem('opened-release-url', String(url))
+      return null
+    }
+  })
+  await page.route('**/api/v1/updates**', async (route) => {
+    if (route.request().method() === 'PUT') {
+      skipped = route.request().postDataJSON()?.version === '1.2.0'
+    }
+    await route.fulfill({
+      json: {
+        data: {
+          current_version: '1.0.0',
+          check_status: 'available',
+          last_success_at: '2026-09-05T00:00:00Z',
+          last_failure: null,
+          available_update: {
+            version: '1.2.0',
+            published_at: '2026-09-04T00:00:00Z',
+            release_url: releaseUrl,
+            manifest_url:
+              'https://github.com/Stravia-AI/StraviaPlatform/releases/download/v1.2.0/stravia-updater.json',
+            download_available: true,
+            download_error: null,
+          },
+          skipped,
+          download_supported: false,
+        },
+      },
+    })
+  })
+
+  await page.goto('/')
+  await expect(page.getByText('A Stravia update is available')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Download update' })).toHaveCount(0)
+  await page.getByRole('button', { name: 'View release notes' }).click()
+  expect(await page.evaluate(() => sessionStorage.getItem('opened-release-url'))).toBe(releaseUrl)
+  await page.getByRole('button', { name: 'Skip this version' }).click()
+  await expect(page.getByText('A Stravia update is available')).toHaveCount(0)
+
+  await page.goto('/settings')
+  await expect(page.getByRole('heading', { name: 'Updates' })).toBeVisible()
+  await expect(page.getByText('1.2.0', { exact: true })).toBeVisible()
+  await expect(page.getByText('Automatic notifications are skipped for this version.')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Download update' })).toHaveCount(0)
+})

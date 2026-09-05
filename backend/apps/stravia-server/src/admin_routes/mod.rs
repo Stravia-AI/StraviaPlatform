@@ -246,6 +246,9 @@ pub fn create_router(gateway: Gateway, admin_token: Option<String>) -> Router {
             "/provider-allowances/{provider_id}/refresh",
             post(refresh_provider_allowance),
         )
+        .route("/updates", get(get_updates))
+        .route("/updates/check", post(check_updates))
+        .route("/updates/skipped-version", put(set_skipped_update_version))
         .route("/settings/{key}", get(get_setting).put(set_setting))
         .route("/status", get(get_status))
         .layer(Extension(oauth_callbacks))
@@ -304,6 +307,7 @@ mod providers;
 mod settings;
 mod stats;
 mod status;
+mod updates;
 mod web;
 
 use api_keys::*;
@@ -313,6 +317,7 @@ use providers::*;
 use settings::*;
 use stats::*;
 use status::*;
+use updates::*;
 use web::*;
 
 #[cfg(test)]

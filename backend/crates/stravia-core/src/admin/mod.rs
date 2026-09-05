@@ -31,6 +31,7 @@ pub mod provider_allowance;
 mod provider_connection;
 mod routes;
 pub mod settings;
+pub mod updates;
 mod web_access;
 mod web_search;
 

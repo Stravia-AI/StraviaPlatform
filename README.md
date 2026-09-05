@@ -109,6 +109,8 @@ The SvelteKit WebUI manages:
 
 The interface supports English and Simplified Chinese, responsive navigation, and light, dark, or operating-system themes. On first use, a Simplified Chinese (`Hans`) client locale selects `zh-CN`; unsupported locales use English. Language can be switched without reloading from Login or **Settings → Appearance**, and each browser or desktop WebView remembers its own choice.
 
+The management UI checks public GitHub Releases for optional updates. Stravia Desktop checks when the app starts and can download a signed Windows x86_64/ARM64 NSIS or Linux x86_64/ARM64 AppImage update only after the user asks; the standalone server reports the exact Release and never replaces its own executable. Successful checks are cached for 24 hours, failed automatic attempts are limited for one hour, and **Settings → Updates** can always check again. Update traffic follows the instance outbound proxy when enabled and otherwise connects directly to GitHub.
+
 ### Storage and deployment
 
 - **SQLite** is the default storage backend.
@@ -123,13 +125,13 @@ This `0.1.0` cutover supports fresh SQLite and PostgreSQL databases. It does not
 Version tags publish Server archives and Desktop installers through [GitHub Releases](https://github.com/Stravia-AI/StraviaPlatform/releases), alongside a multi-architecture container image and Nix packages. Release outputs currently cover:
 
 - Server: Linux and Windows on x86_64 and ARM64; Linux provides both GNU and musl archives.
-- Desktop: Linux AppImage and Windows NSIS installers on x86_64 and ARM64.
+- Desktop: signed Tauri updater artifacts and ordinary Linux AppImage or Windows NSIS downloads on x86_64 and ARM64.
 - Container: `linux/amd64` and `linux/arm64` under `ghcr.io/stravia-ai/straviaplatform`.
 - Nix: native `x86_64-linux` and `aarch64-linux` packages from the repository flake, published to the [`stravia-platform` Cachix cache](https://app.cachix.org/cache/stravia-platform).
 
-macOS artifacts are not currently provided. Linux GNU Server archives and Desktop AppImages use Ubuntu 24.04 as their compatibility baseline; use a musl Server archive on older Linux distributions. Windows Desktop installers are currently unsigned and may trigger Microsoft Defender SmartScreen.
+macOS artifacts are not currently provided. Linux GNU Server archives and Desktop AppImages use Ubuntu 24.04 as their compatibility baseline; use a musl Server archive on older Linux distributions. Windows Desktop installers are updater-signed but not Authenticode-signed, so they may still trigger Microsoft Defender SmartScreen.
 
-Every downloadable build asset is listed in `SHA256SUMS`. Verify it before running the binary or installer:
+Every downloadable build asset is listed in `SHA256SUMS`. Desktop updater artifacts also have `.sig` files and a versioned `stravia-updater.json` manifest; the embedded updater public key verifies the selected package before installation. Verify `SHA256SUMS` before manually running a binary or installer:
 
 ```bash
 sha256sum path/to/downloaded-asset

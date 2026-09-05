@@ -60,6 +60,8 @@ pub struct GatewayConfig {
     /// Request forwarding headers are never trusted for this value.
     pub public_origin: Option<String>,
     pub storage: GatewayStorageConfig,
+    /// Whether this process has a trusted Desktop updater bridge.
+    pub product_update_download_supported: bool,
     /// How often to poll the shared DB for a config epoch change and reload
     /// `model_cache` when a change is detected. Set to `Duration::ZERO` to
     /// disable (default for desktop / single-process deployments).
@@ -76,6 +78,7 @@ impl Default for GatewayConfig {
             auth_key: None,
             public_origin: None,
             storage: GatewayStorageConfig::default(),
+            product_update_download_supported: false,
             config_poll_interval: Duration::ZERO,
             #[cfg(debug_assertions)]
             wire_capture_dir: None,

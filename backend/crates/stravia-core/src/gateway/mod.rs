@@ -96,6 +96,7 @@ pub struct Gateway {
     pub(crate) web_search_runner_state:
         Arc<tokio::sync::RwLock<Option<web_search::WebSearchRunner>>>,
     pub(crate) web_search_config_lock: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) update_service: Arc<admin::updates::UpdateService>,
     pub(crate) _sqlite_pool: Option<SqlitePool>,
     pub(crate) _postgres_pool: Option<Pool<Postgres>>,
     history_marker_execution_gate: Arc<tokio::sync::RwLock<()>>,
@@ -143,6 +144,7 @@ impl Gateway {
             web_access_run_snapshots: self.web_access_run_snapshots.clone(),
             web_search_runner_state: Arc::clone(&self.web_search_runner_state),
             web_search_config_lock: Arc::clone(&self.web_search_config_lock),
+            update_service: Arc::clone(&self.update_service),
             _sqlite_pool: self._sqlite_pool.clone(),
             _postgres_pool: self._postgres_pool.clone(),
             history_marker_execution_gate: Arc::clone(&self.history_marker_execution_gate),
