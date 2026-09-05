@@ -114,7 +114,13 @@ jobs:
               "minor": match.group("minor"),
               "prerelease": str(match.group("prerelease") is not None).lower(),
               "published_at": subprocess.check_output(
-                  ["git", "show", "-s", "--format=%cI", tag if publish else "HEAD"],
+                  [
+                      "git",
+                      "show",
+                      "-s",
+                      "--format=%cI",
+                      f"{tag}^{{commit}}" if publish else "HEAD",
+                  ],
                   text=True,
               ).strip(),
           }
