@@ -417,7 +417,7 @@ impl<'a> RouteModule<'a> {
             return self
                 .create(CreateRoute {
                     model_id: route_id,
-                    display_name: None,
+                    display_name: provider_model.metadata.name,
                     balance: Some("traffic_equalization".into()),
                     target_provider: provider_id.clone(),
                     target_model: provider_model_id.clone(),

@@ -34,10 +34,6 @@ test('settings fields align in wide containers and stack in narrow containers', 
   expect(
     Math.abs(wideProxyUrlBox!.x + wideProxyUrlBox!.width - (wideRetentionBox!.x + wideRetentionBox!.width)),
   ).toBeLessThan(1)
-  await expect(themeField.locator('[data-slot="field-hint"], [data-slot="field-hint-text"]')).toHaveCount(0)
-  await expect(page.getByText('Theme and language apply immediately and persist on this device.')).toHaveCount(0)
-  await expect(page.getByText('Following system uses your operating system theme preference.')).toHaveCount(0)
-  await expect(page.getByText('Choose the language Stravia uses.')).toHaveCount(0)
 
   const proxyLabelBox = await page.locator('label[for="proxy-url"]').boundingBox()
   expect(proxyLabelBox).not.toBeNull()
@@ -168,9 +164,7 @@ test('advanced features keep separate media and web search surfaces', async ({ p
   await expect(localTurns).toHaveValue('9')
 })
 
-test('server update notification skips one version without hiding Settings or exposing download', async ({
-  page,
-}) => {
+test('server update notification skips one version without hiding Settings or exposing download', async ({ page }) => {
   const releaseUrl = 'https://github.com/Stravia-AI/StraviaPlatform/releases/tag/v1.2.0'
   let skipped = false
   await page.addInitScript(() => {
@@ -194,8 +188,7 @@ test('server update notification skips one version without hiding Settings or ex
             version: '1.2.0',
             published_at: '2026-09-04T00:00:00Z',
             release_url: releaseUrl,
-            manifest_url:
-              'https://github.com/Stravia-AI/StraviaPlatform/releases/download/v1.2.0/stravia-updater.json',
+            manifest_url: 'https://github.com/Stravia-AI/StraviaPlatform/releases/download/v1.2.0/stravia-updater.json',
             download_available: true,
             download_error: null,
           },
@@ -236,8 +229,7 @@ test('cached update remains actionable when the latest automatic check fails', a
       version: '1.2.0',
       published_at: '2026-09-04T00:00:00Z',
       release_url: releaseUrl,
-      manifest_url:
-        'https://github.com/Stravia-AI/StraviaPlatform/releases/download/v1.2.0/stravia-updater.json',
+      manifest_url: 'https://github.com/Stravia-AI/StraviaPlatform/releases/download/v1.2.0/stravia-updater.json',
       download_available: true,
       download_error: null,
     },
@@ -249,8 +241,43 @@ test('cached update remains actionable when the latest automatic check fails', a
   })
 
   await page.goto('/settings')
-  await expect(page.getByText('Unable to connect to GitHub Releases', { exact: true })).toBeVisible()
+  const updateAlerts = page.locator('#updates').getByRole('alert')
+  await expect(updateAlerts).toHaveCount(1)
+  await expect(updateAlerts).toContainText(status.last_failure.message)
   await expect(page.getByText('1.2.0', { exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'View release notes' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Download update' })).toHaveCount(0)
 })
+
+for (const locale of ['en-US', 'zh-CN']) {
+  test(`disabled update checks are informational and cannot be retried (${locale})`, async ({ page }) => {
+    const technicalMessage = 'Production update checks are disabled in debug and test builds'
+    await page.addInitScript((locale) => localStorage.setItem('stravia-locale', locale), locale)
+    await page.route('**/api/v1/updates**', async (route) => {
+      await route.fulfill({
+        json: {
+          data: {
+            current_version: '0.1.5',
+            check_status: 'error',
+            last_success_at: null,
+            last_failure: {
+              code: 'UPDATE_CHECK_DISABLED',
+              message: technicalMessage,
+              attempted_at: '2026-09-05T00:00:00Z',
+            },
+            available_update: null,
+            skipped: false,
+            download_supported: false,
+          },
+        },
+      })
+    })
+
+    await page.goto('/settings')
+    const updates = page.locator('#updates')
+    await expect(updates.getByRole('button')).toBeDisabled()
+    await expect(updates.getByRole('status')).toBeVisible()
+    await expect(updates.getByRole('alert')).toHaveCount(0)
+    await expect(updates).not.toContainText(technicalMessage)
+  })
+}

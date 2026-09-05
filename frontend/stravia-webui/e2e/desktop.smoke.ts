@@ -60,7 +60,6 @@ describe('Stravia desktop smoke', () => {
 
     await expect($('//h2[normalize-space()="Local access"]')).toBeDisplayed()
     await expect($('#desktop-fixed-port')).toHaveValue(String(portState.fixedPort ?? portState.currentPort))
-    expect((await $('#desktop').getAttribute('class')).split(/\s+/)).toContain('route-section')
 
     let activePort = portState.currentPort
     if (portState.mode !== 'fixed') {

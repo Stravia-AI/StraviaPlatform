@@ -1270,7 +1270,7 @@ test('unused provider models create a matching model or append a destination', a
       const created = {
         id: 'route-new',
         model_id: 'gpt-new',
-        display_name: null,
+        display_name: providerModels[1].name,
         balance: 'weighted',
         target_provider: provider.id,
         target_model: 'gpt-new',
@@ -1311,4 +1311,9 @@ test('unused provider models create a matching model or append a destination', a
   await newAction.click()
   await expect(page.getByText('Created model gpt-new.')).toBeVisible()
   expect(bindBodies[1]).toEqual({ provider_id: provider.id, provider_model_id: 'gpt-new' })
+
+  await page.goto('/models')
+  const modelsTable = page.getByRole('table')
+  await expect(modelsTable.getByText('GPT New', { exact: true })).toBeVisible()
+  await expect(modelsTable.getByText('gpt-new', { exact: true })).toBeVisible()
 })

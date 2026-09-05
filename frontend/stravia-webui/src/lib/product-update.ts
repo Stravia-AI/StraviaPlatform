@@ -257,7 +257,6 @@ export class ProductUpdateController {
         ...initialViewState,
         phase: status.check_status,
         targetVersion: status.available_update?.version ?? null,
-        error: status.last_failure?.message ?? status.available_update?.download_error ?? null,
       }
     }
     this.publish()

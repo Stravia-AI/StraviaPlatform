@@ -26,6 +26,7 @@
 *.db-shm
 *.patch
 /.stravia-dev/
+/.stravia-desktop-e2e/
 
 # Environment files (keep safe-to-commit examples)
 .env

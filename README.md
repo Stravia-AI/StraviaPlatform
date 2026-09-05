@@ -246,6 +246,8 @@ task build:desktop
 
 Development builds keep server and desktop runtime state—including `gateway.db` and the desktop fixed-port store—under the repository-local, ignored `.stravia-dev/` directory. Release server builds use `~/.stravia`; release desktop builds continue to use the operating system application-data directory.
 
+Desktop builds with the `desktop-e2e` feature use a separate, ignored `.stravia-desktop-e2e/` directory, including when built in debug mode. The `task test:e2e:desktop` workflow seeds a fake `9.9.9` update there to exercise download and installation without fetching or installing a real release; these fixtures must not enter normal development or production data.
+
 The `task dev:server` and `task dev:desktop` workflows enable debug-only wire capture under `.scratch/wire-captures/`. Captures contain full request and response bodies even though sensitive header values are redacted. Keep them local and delete them after diagnosis.
 
 The desktop process starts the same unified HTTP application locally on `127.0.0.1`. On first use it prefers the fixed default port `23471`; later launches prefer any fixed port saved under **Settings → Desktop**. If the preferred port cannot be bound, Stravia remains available on a temporary random port, reports the conflict on Overview, and lets you recheck or replace the fixed port without restarting. This desktop-local setting does not change the standalone server options below.
