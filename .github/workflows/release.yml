@@ -327,6 +327,30 @@ jobs:
           test -n "${TAURI_SIGNING_PRIVATE_KEY}"
           test -n "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD}"
           test -n "${STRAVIA_UPDATER_PUBLIC_KEY}"
+          python3 <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          public_key = os.environ["STRAVIA_UPDATER_PUBLIC_KEY"].strip()
+          lines = public_key.splitlines()
+          if (
+              len(lines) != 2
+              or not lines[0].startswith("untrusted comment:")
+              or not lines[1].startswith("RW")
+          ):
+              raise SystemExit(
+                  "STRAVIA_UPDATER_PUBLIC_KEY must contain the complete two-line Minisign public key"
+              )
+
+          config_path = Path("backend/apps/stravia-desktop/tauri.conf.json")
+          config = json.loads(config_path.read_text(encoding="utf-8"))
+          config["plugins"]["updater"]["pubkey"] = public_key
+          config_path.write_text(
+              json.dumps(config, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          PY
 
       - name: Build desktop bundle
         env:
