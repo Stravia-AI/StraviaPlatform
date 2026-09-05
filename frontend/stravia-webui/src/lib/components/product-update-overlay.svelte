@@ -1,4 +1,5 @@
 <script lang="ts">
+import { browser } from '$app/environment'
 import * as m from '$lib/paraglide/messages.js'
 import DownloadIcon from '@lucide/svelte/icons/download'
 import ExternalLinkIcon from '@lucide/svelte/icons/external-link'
@@ -8,16 +9,17 @@ import { Button } from '$lib/components/ui/button'
 import * as Dialog from '$lib/components/ui/dialog'
 import { Spinner } from '$lib/components/ui/spinner'
 import { openExternalUrl } from '$lib/open-external'
+import { supportsInAppInstallProgress } from '$lib/product-update'
 import { getProductUpdateCoordinator } from '$lib/product-update.svelte'
 
 const updates = getProductUpdateCoordinator()
-let dismissedInstallVersion = $state<string | null>(null)
-const installPromptOpen = $derived(
-  updates.state.phase === 'downloaded' && updates.state.targetVersion !== dismissedInstallVersion,
+const showInstallingOverlay = $derived(
+  updates.state.phase === 'installing' &&
+    supportsInAppInstallProgress(browser ? navigator.userAgent : ''),
 )
 
 function handleInstallPrompt(open: boolean): void {
-  if (!open) dismissedInstallVersion = updates.state.targetVersion
+  if (!open) updates.dismissInstallPrompt()
 }
 </script>
 
@@ -54,7 +56,7 @@ function handleInstallPrompt(open: boolean): void {
   </aside>
 {/if}
 
-<Dialog.Root open={installPromptOpen} onOpenChange={handleInstallPrompt}>
+<Dialog.Root open={updates.state.installPromptOpen} onOpenChange={handleInstallPrompt}>
   <Dialog.Content>
     <Dialog.Header>
       <Dialog.Title>
@@ -62,11 +64,11 @@ function handleInstallPrompt(open: boolean): void {
       </Dialog.Title>
       <Dialog.Description>{m.settings_update_install_warning()}</Dialog.Description>
     </Dialog.Header>
-    {#if updates.status?.available_update}
+    {#if updates.state.downloadedReleaseUrl}
       <button
         type="button"
         class="w-fit text-sm font-medium text-primary underline-offset-4 hover:underline"
-        onclick={() => void openExternalUrl(updates.status!.available_update!.release_url)}>
+        onclick={() => void openExternalUrl(updates.state.downloadedReleaseUrl!)}>
         {m.settings_update_view_release()}
       </button>
     {/if}
@@ -81,7 +83,7 @@ function handleInstallPrompt(open: boolean): void {
   </Dialog.Content>
 </Dialog.Root>
 
-{#if updates.state.phase === 'installing'}
+{#if showInstallingOverlay}
   <div class="fixed inset-0 z-50 grid place-items-center bg-background/85 backdrop-blur-sm" aria-live="assertive">
     <div class="grid justify-items-center gap-3 rounded-xl border bg-popover p-6 shadow-xl">
       <Spinner class="size-6" />

@@ -212,14 +212,24 @@ impl UpdateClock for SystemClock {
 
 struct GitHubReleaseSource {
     storage: DynStorage,
+    #[cfg(test)]
+    allow_http: bool,
 }
 
 impl GitHubReleaseSource {
     fn new(storage: DynStorage) -> Self {
-        Self { storage }
+        Self {
+            storage,
+            #[cfg(test)]
+            allow_http: false,
+        }
     }
 
     async fn client(&self) -> Result<reqwest::Client, SourceError> {
+        self.client_with_timeout(Duration::from_secs(15)).await
+    }
+
+    async fn client_with_timeout(&self, timeout: Duration) -> Result<reqwest::Client, SourceError> {
         let settings = self.storage.settings();
         let proxy_enabled = settings
             .get("proxy_enabled")
@@ -229,7 +239,7 @@ impl GitHubReleaseSource {
             .is_some_and(parse_bool_setting);
 
         let mut builder = reqwest::Client::builder()
-            .timeout(Duration::from_secs(15))
+            .timeout(timeout)
             .user_agent(format!("Stravia/{}", env!("CARGO_PKG_VERSION")));
         if proxy_enabled {
             let proxy_url = settings
@@ -262,10 +272,21 @@ impl GitHubReleaseSource {
         url: &str,
         limit: usize,
     ) -> Result<Vec<u8>, SourceError> {
+        #[cfg(not(test))]
         require_https(url, "request URL")?;
+        #[cfg(test)]
+        if !self.allow_http {
+            require_https(url, "request URL")?;
+        }
         let response = client.get(url).send().await.map_err(|error| {
             SourceError::new("UPDATE_REQUEST_FAILED", format_connectivity_error(&error))
         })?;
+        #[cfg(not(test))]
+        require_https(response.url().as_str(), "redirected request URL")?;
+        #[cfg(test)]
+        if !self.allow_http {
+            require_https(response.url().as_str(), "redirected request URL")?;
+        }
         if !response.status().is_success() {
             return Err(SourceError::new(
                 "UPDATE_UPSTREAM_FAILED",
@@ -344,6 +365,7 @@ pub(crate) struct UpdateService {
     clock: Arc<dyn UpdateClock>,
     current_version: Version,
     download_supported: bool,
+    checks_enabled: bool,
     check_lock: tokio::sync::Mutex<()>,
     last_completed_at: tokio::sync::Mutex<Option<Instant>>,
 }
@@ -358,6 +380,7 @@ impl UpdateService {
             Arc::new(SystemClock),
             current_version,
             download_supported,
+            !cfg!(debug_assertions),
         ))
     }
 
@@ -367,6 +390,7 @@ impl UpdateService {
         clock: Arc<dyn UpdateClock>,
         current_version: Version,
         download_supported: bool,
+        checks_enabled: bool,
     ) -> Self {
         Self {
             storage,
@@ -374,6 +398,7 @@ impl UpdateService {
             clock,
             current_version,
             download_supported,
+            checks_enabled,
             check_lock: tokio::sync::Mutex::new(()),
             last_completed_at: tokio::sync::Mutex::new(None),
         }
@@ -416,6 +441,16 @@ impl UpdateService {
             }) {
                 return self.view(state).await;
             }
+        }
+        if !self.checks_enabled {
+            state.last_failure = Some(UpdateFailure {
+                code: "UPDATE_CHECK_DISABLED".to_string(),
+                message: "Production update checks are disabled in debug and test builds"
+                    .to_string(),
+                attempted_at: now,
+            });
+            self.save_state(&state).await?;
+            return self.view(state).await;
         }
 
         match self.discover().await {
@@ -682,6 +717,9 @@ mod tests {
     use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 
     use crate::storage::MemoryStorage;
+    use axum::Router;
+    use axum::http::StatusCode;
+    use axum::routing::get;
 
     use super::*;
 
@@ -793,6 +831,21 @@ mod tests {
         }
     }
 
+    async fn local_http_source(router: Router) -> (GitHubReleaseSource, reqwest::Client, String) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let storage: DynStorage = Arc::new(MemoryStorage::new(vec![], vec![], vec![]));
+        let source = GitHubReleaseSource {
+            storage,
+            allow_http: true,
+        };
+        let client = source.client().await.unwrap();
+        (source, client, format!("http://{address}"))
+    }
+
     fn service(source: Arc<FakeSource>, clock: Arc<FakeClock>, current: &str) -> UpdateService {
         let storage: DynStorage = Arc::new(MemoryStorage::new(vec![], vec![], vec![]));
         UpdateService::new(
@@ -801,7 +854,99 @@ mod tests {
             clock,
             Version::parse(current).unwrap(),
             true,
+            true,
         )
+    }
+
+    #[test]
+    fn debug_builds_disable_the_production_release_source_by_default() {
+        let storage: DynStorage = Arc::new(MemoryStorage::new(vec![], vec![], vec![]));
+        let service = UpdateService::github(storage, false).unwrap();
+
+        assert_eq!(service.checks_enabled, !cfg!(debug_assertions));
+    }
+
+    #[test]
+    fn github_release_filter_rejects_drafts_invalid_tags_and_non_https_urls() {
+        let release = |tag_name: &str, draft: bool, html_url: &str| GitHubRelease {
+            tag_name: tag_name.to_string(),
+            draft,
+            prerelease: false,
+            published_at: DateTime::parse_from_rfc3339("2026-09-01T00:00:00Z")
+                .ok()
+                .map(|value| value.with_timezone(&Utc)),
+            html_url: html_url.to_string(),
+            assets: vec![],
+        };
+
+        assert!(validate_github_release(release("1.2.0", true, RELEASE_URL)).is_none());
+        assert!(validate_github_release(release("not-semver", false, RELEASE_URL)).is_none());
+        assert!(
+            validate_github_release(release("1.2.0", false, "http://example.invalid")).is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn http_source_reports_non_success_oversize_and_timeout_without_github() {
+        let (source, client, url) = local_http_source(
+            Router::new().route("/failure", get(|| async { StatusCode::BAD_GATEWAY })),
+        )
+        .await;
+        let failure = source
+            .get_limited(&client, &format!("{url}/failure"), 32)
+            .await
+            .unwrap_err();
+        assert_eq!(failure.code, "UPDATE_UPSTREAM_FAILED");
+
+        let (source, client, url) =
+            local_http_source(Router::new().route("/large", get(|| async { "too large" }))).await;
+        let oversize = source
+            .get_limited(&client, &format!("{url}/large"), 4)
+            .await
+            .unwrap_err();
+        assert_eq!(oversize.code, "UPDATE_RESPONSE_TOO_LARGE");
+
+        let (source, _, url) = local_http_source(Router::new().route(
+            "/slow",
+            get(|| async {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                "late"
+            }),
+        ))
+        .await;
+        let client = source
+            .client_with_timeout(Duration::from_millis(10))
+            .await
+            .unwrap();
+        let timeout = source
+            .get_limited(&client, &format!("{url}/slow"), 32)
+            .await
+            .unwrap_err();
+        assert_eq!(timeout.code, "UPDATE_REQUEST_FAILED");
+        assert_eq!(timeout.message, "GitHub update request timed out");
+    }
+
+    #[tokio::test]
+    async fn proxy_setting_is_enforced_only_when_enabled() {
+        let storage: DynStorage = Arc::new(MemoryStorage::new(vec![], vec![], vec![]));
+        storage
+            .settings()
+            .set("proxy_url", "not a proxy URL")
+            .await
+            .unwrap();
+        let source = GitHubReleaseSource {
+            storage: Arc::clone(&storage),
+            allow_http: false,
+        };
+        source.client().await.unwrap();
+
+        storage
+            .settings()
+            .set("proxy_enabled", "true")
+            .await
+            .unwrap();
+        let error = source.client().await.unwrap_err();
+        assert_eq!(error.code, "UPDATE_PROXY_INVALID");
     }
 
     #[test]

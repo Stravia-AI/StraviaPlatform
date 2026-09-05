@@ -220,3 +220,37 @@ test('server update notification skips one version without hiding Settings or ex
   await expect(page.getByText('Automatic notifications are skipped for this version.')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Download update' })).toHaveCount(0)
 })
+
+test('cached update remains actionable when the latest automatic check fails', async ({ page }) => {
+  const releaseUrl = 'https://github.com/Stravia-AI/StraviaPlatform/releases/tag/v1.2.0'
+  const status = {
+    current_version: '1.0.0',
+    check_status: 'error',
+    last_success_at: '2026-09-04T00:00:00Z',
+    last_failure: {
+      code: 'UPDATE_REQUEST_FAILED',
+      message: 'Unable to connect to GitHub Releases',
+      attempted_at: '2026-09-05T00:00:00Z',
+    },
+    available_update: {
+      version: '1.2.0',
+      published_at: '2026-09-04T00:00:00Z',
+      release_url: releaseUrl,
+      manifest_url:
+        'https://github.com/Stravia-AI/StraviaPlatform/releases/download/v1.2.0/stravia-updater.json',
+      download_available: true,
+      download_error: null,
+    },
+    skipped: false,
+    download_supported: false,
+  }
+  await page.route('**/api/v1/updates**', async (route) => {
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ data: status }) })
+  })
+
+  await page.goto('/settings')
+  await expect(page.getByText('Unable to connect to GitHub Releases', { exact: true })).toBeVisible()
+  await expect(page.getByText('1.2.0', { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'View release notes' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Download update' })).toHaveCount(0)
+})

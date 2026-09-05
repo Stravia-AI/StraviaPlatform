@@ -68,6 +68,8 @@ export interface ProductUpdateViewState {
   downloadedBytes: number
   totalBytes: number | null
   error: string | null
+  installPromptOpen: boolean
+  downloadedReleaseUrl: string | null
 }
 
 export interface ProductUpdateCoordinatorSnapshot {
@@ -84,6 +86,12 @@ const initialViewState: ProductUpdateViewState = {
   downloadedBytes: 0,
   totalBytes: null,
   error: null,
+  installPromptOpen: false,
+  downloadedReleaseUrl: null,
+}
+
+export function supportsInAppInstallProgress(userAgent: string): boolean {
+  return !userAgent.includes('Windows')
 }
 
 export class ProductUpdateController {
@@ -189,6 +197,8 @@ export class ProductUpdateController {
       downloadedBytes: 0,
       totalBytes: null,
       error: null,
+      installPromptOpen: false,
+      downloadedReleaseUrl: update.release_url,
     }
     this.publish()
     try {
@@ -201,7 +211,7 @@ export class ProductUpdateController {
 
   async installDownloadedUpdate(): Promise<void> {
     if (!this.#desktop || this.state.phase !== 'downloaded') return
-    this.state = { ...this.state, phase: 'installing', error: null }
+    this.state = { ...this.state, phase: 'installing', error: null, installPromptOpen: false }
     this.publish()
     try {
       await this.#desktop.install()
@@ -209,6 +219,18 @@ export class ProductUpdateController {
       this.state = { ...this.state, phase: 'downloaded', error: errorMessage(error) }
       this.publish()
     }
+  }
+
+  requestInstallPrompt(): void {
+    if (this.state.phase !== 'downloaded') return
+    this.state = { ...this.state, installPromptOpen: true }
+    this.publish()
+  }
+
+  dismissInstallPrompt(): void {
+    if (!this.state.installPromptOpen) return
+    this.state = { ...this.state, installPromptOpen: false }
+    this.publish()
   }
 
   private async check(mode: 'automatic' | 'manual'): Promise<UpdateStatus> {
@@ -243,12 +265,20 @@ export class ProductUpdateController {
 
   private applyDesktopSnapshot(snapshot: DesktopUpdateSnapshot): void {
     if (snapshot.phase === 'idle') return
+    const downloadedReleaseUrl =
+      this.state.targetVersion === snapshot.target_version
+        ? this.state.downloadedReleaseUrl
+        : this.status?.available_update?.version === snapshot.target_version
+          ? this.status.available_update.release_url
+          : null
     this.state = {
       phase: snapshot.phase,
       targetVersion: snapshot.target_version,
       downloadedBytes: snapshot.downloaded_bytes,
       totalBytes: snapshot.total_bytes,
       error: snapshot.error,
+      installPromptOpen: snapshot.phase === 'downloaded',
+      downloadedReleaseUrl,
     }
     this.publish()
   }

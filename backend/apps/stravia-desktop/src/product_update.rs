@@ -53,7 +53,7 @@ enum DownloadedUpdate {
         update: Update,
         bytes: Vec<u8>,
     },
-    #[cfg(feature = "desktop-e2e")]
+    #[cfg(any(test, feature = "desktop-e2e"))]
     TestBridge,
 }
 
@@ -74,13 +74,22 @@ impl DesktopUpdateState {
         self.inner.lock().await.snapshot.clone()
     }
 
-    async fn begin_download(&self, target_version: &str) -> Result<(), String> {
+    async fn begin_download(
+        &self,
+        target_version: &str,
+    ) -> Result<Option<DesktopUpdateSnapshot>, String> {
         let mut inner = self.inner.lock().await;
         if matches!(
             inner.snapshot.phase,
             DesktopUpdatePhase::Downloading | DesktopUpdatePhase::Installing
         ) {
             return Err("A Desktop update operation is already in progress".to_string());
+        }
+        if inner.snapshot.phase == DesktopUpdatePhase::Downloaded
+            && inner.snapshot.target_version.as_deref() == Some(target_version)
+            && inner.downloaded.is_some()
+        {
+            return Ok(Some(inner.snapshot.clone()));
         }
         inner.downloaded = None;
         inner.snapshot = DesktopUpdateSnapshot {
@@ -90,7 +99,7 @@ impl DesktopUpdateState {
             total_bytes: None,
             error: None,
         };
-        Ok(())
+        Ok(None)
     }
 
     async fn complete_download(
@@ -158,7 +167,9 @@ pub async fn download_product_update(
         return Err("The selected Release has no updater manifest".to_string());
     }
 
-    state.begin_download(&version).await?;
+    if let Some(downloaded) = state.begin_download(&version).await? {
+        return Ok(downloaded);
+    }
     #[cfg(feature = "desktop-e2e")]
     {
         let progress = DesktopUpdateProgress {
@@ -319,7 +330,7 @@ pub async fn install_product_update(
             .restart_after_install(true)
             .install(bytes)
             .map_err(|error| error.to_string()),
-        #[cfg(feature = "desktop-e2e")]
+        #[cfg(any(test, feature = "desktop-e2e"))]
         Some(DownloadedUpdate::TestBridge) => Ok(()),
         None => Err("Downloaded update bytes are unavailable".to_string()),
     };
@@ -362,7 +373,7 @@ mod tests {
     #[tokio::test]
     async fn download_state_is_single_flight_and_failure_has_one_retryable_target() {
         let state = DesktopUpdateState::default();
-        state.begin_download("1.2.0").await.unwrap();
+        assert!(state.begin_download("1.2.0").await.unwrap().is_none());
         assert_eq!(
             state.begin_download("1.2.0").await.unwrap_err(),
             "A Desktop update operation is already in progress"
@@ -376,11 +387,26 @@ mod tests {
         assert_eq!(failed.target_version.as_deref(), Some("1.2.0"));
         assert_eq!(failed.error.as_deref(), Some("network unavailable"));
 
-        state.begin_download("1.2.0").await.unwrap();
+        assert!(state.begin_download("1.2.0").await.unwrap().is_none());
         assert_eq!(
             state.snapshot().await.phase,
             DesktopUpdatePhase::Downloading
         );
+    }
+
+    #[tokio::test]
+    async fn repeated_download_reuses_the_verified_same_version() {
+        let state = DesktopUpdateState::default();
+        assert!(state.begin_download("1.2.0").await.unwrap().is_none());
+        let downloaded = state
+            .complete_download("1.2.0", 42, Some(42), DownloadedUpdate::TestBridge)
+            .await;
+
+        assert_eq!(
+            state.begin_download("1.2.0").await.unwrap(),
+            Some(downloaded)
+        );
+        assert_eq!(state.snapshot().await.phase, DesktopUpdatePhase::Downloaded);
     }
 
     #[test]

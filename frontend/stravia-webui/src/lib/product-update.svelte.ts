@@ -31,6 +31,8 @@ const initialViewState: ProductUpdateViewState = {
   downloadedBytes: 0,
   totalBytes: null,
   error: null,
+  installPromptOpen: false,
+  downloadedReleaseUrl: null,
 }
 
 export class ProductUpdateCoordinator {
@@ -80,6 +82,14 @@ export class ProductUpdateCoordinator {
 
   installDownloadedUpdate(): Promise<void> {
     return this.#controller.installDownloadedUpdate()
+  }
+
+  requestInstallPrompt(): void {
+    this.#controller.requestInstallPrompt()
+  }
+
+  dismissInstallPrompt(): void {
+    this.#controller.dismissInstallPrompt()
   }
 
   private applySnapshot(snapshot: ProductUpdateCoordinatorSnapshot): void {

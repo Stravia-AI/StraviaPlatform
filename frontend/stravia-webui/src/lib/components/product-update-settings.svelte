@@ -1,4 +1,5 @@
 <script lang="ts">
+import { browser } from '$app/environment'
 import * as m from '$lib/paraglide/messages.js'
 import DownloadIcon from '@lucide/svelte/icons/download'
 import ExternalLinkIcon from '@lucide/svelte/icons/external-link'
@@ -8,12 +9,16 @@ import { toast } from 'svelte-sonner'
 import { Button } from '$lib/components/ui/button'
 import { Spinner } from '$lib/components/ui/spinner'
 import { openExternalUrl } from '$lib/open-external'
+import { supportsInAppInstallProgress } from '$lib/product-update'
 import { getProductUpdateCoordinator } from '$lib/product-update.svelte'
 
 const updates = getProductUpdateCoordinator()
 const available = $derived(updates.status?.available_update ?? null)
 const checking = $derived(updates.state.phase === 'checking')
 const busy = $derived(['downloading', 'installing'].includes(updates.state.phase))
+const showInstallingProgress = $derived(
+  supportsInAppInstallProgress(browser ? navigator.userAgent : ''),
+)
 const progressPercent = $derived.by(() => {
   const total = updates.state.totalBytes
   if (!total || total <= 0) return null
@@ -114,7 +119,7 @@ async function checkNow(): Promise<void> {
           {m.settings_update_install_failed({ message: updates.state.error })}
         </p>
       {/if}
-    {:else if updates.state.phase === 'installing'}
+    {:else if updates.state.phase === 'installing' && showInstallingProgress}
       <p class="flex items-center gap-2 text-sm font-medium" aria-live="assertive">
         <Spinner />{m.settings_update_installing({ version: updates.state.targetVersion ?? '' })}
       </p>
@@ -128,20 +133,21 @@ async function checkNow(): Promise<void> {
           {#if checking}<Spinner data-icon="inline-start" />{:else}<RefreshCwIcon data-icon="inline-start" />{/if}
           {checking ? m.settings_update_checking() : m.settings_update_check_now()}
         </Button>
+        {#if updates.state.phase === 'downloaded'}
+          <Button onclick={() => updates.requestInstallPrompt()}>{m.settings_update_install()}</Button>
+        {/if}
         {#if available}
           <Button variant="outline" onclick={() => void openExternalUrl(available.release_url)}>
             <ExternalLinkIcon data-icon="inline-start" />{m.settings_update_view_release()}
           </Button>
-          {#if updates.status?.download_supported && available.download_available}
-            {#if updates.state.phase === 'downloaded' && updates.state.targetVersion === available.version}
-              <Button onclick={() => void updates.installDownloadedUpdate()}>{m.settings_update_install()}</Button>
-            {:else}
-              <Button onclick={() => void updates.downloadAvailableUpdate()}>
-                <DownloadIcon data-icon="inline-start" />{updates.state.phase === 'error'
-                  ? m.settings_update_retry_download()
-                  : m.settings_update_download()}
-              </Button>
-            {/if}
+          {#if updates.status?.download_supported &&
+            available.download_available &&
+            (updates.state.phase !== 'downloaded' || updates.state.targetVersion !== available.version)}
+            <Button onclick={() => void updates.downloadAvailableUpdate()}>
+              <DownloadIcon data-icon="inline-start" />{updates.state.phase === 'error'
+                ? m.settings_update_retry_download()
+                : m.settings_update_download()}
+            </Button>
           {/if}
           {#if updates.status?.skipped}
             <Button variant="ghost" onclick={() => void updates.clearSkippedVersion()}>

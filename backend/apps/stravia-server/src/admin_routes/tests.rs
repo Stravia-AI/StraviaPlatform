@@ -32,6 +32,7 @@ async fn update_routes_expose_instance_state_and_exact_skip_version() -> anyhow:
         ..Default::default()
     })
     .await?;
+    let storage = gateway.storage.clone();
     let app = create_router(gateway, None);
 
     let initial = app
@@ -44,7 +45,27 @@ async fn update_routes_expose_instance_state_and_exact_skip_version() -> anyhow:
     assert_eq!(json["data"]["check_status"], "idle");
     assert_eq!(json["data"]["download_supported"], false);
 
+    for mode in ["automatic", "manual"] {
+        let checked = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/updates/check")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(r#"{{"mode":"{mode}"}}"#)))?,
+            )
+            .await?;
+        assert_eq!(checked.status(), StatusCode::OK);
+        let body = to_bytes(checked.into_body(), usize::MAX).await?;
+        let json: serde_json::Value = serde_json::from_slice(&body)?;
+        assert_eq!(json["data"]["check_status"], "error");
+        assert_eq!(
+            json["data"]["last_failure"]["code"],
+            "UPDATE_CHECK_DISABLED"
+        );
+    }
+
     let skipped = app
+        .clone()
         .oneshot(
             Request::put("/api/v1/updates/skipped-version")
                 .header("content-type", "application/json")
@@ -52,6 +73,44 @@ async fn update_routes_expose_instance_state_and_exact_skip_version() -> anyhow:
         )
         .await?;
     assert_eq!(skipped.status(), StatusCode::OK);
+    assert_eq!(
+        storage
+            .settings()
+            .get("product_update_skipped_version")
+            .await?,
+        Some("1.2.3".to_string())
+    );
+
+    let other_data_dir = tempfile::tempdir()?;
+    let (other_gateway, _logs) = Gateway::new(GatewayConfig {
+        data_dir: other_data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await?;
+    assert_eq!(
+        other_gateway
+            .storage
+            .settings()
+            .get("product_update_skipped_version")
+            .await?,
+        None
+    );
+
+    let cleared = app
+        .oneshot(
+            Request::put("/api/v1/updates/skipped-version")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"version":null}"#))?,
+        )
+        .await?;
+    assert_eq!(cleared.status(), StatusCode::OK);
+    assert_eq!(
+        storage
+            .settings()
+            .get("product_update_skipped_version")
+            .await?,
+        Some(String::new())
+    );
     Ok(())
 }
 

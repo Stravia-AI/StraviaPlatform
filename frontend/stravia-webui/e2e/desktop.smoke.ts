@@ -9,6 +9,10 @@ interface DesktopPortState {
   mode: 'fixed' | 'fallback' | 'configError'
 }
 
+interface DesktopUpdateState {
+  phase: 'idle' | 'downloading' | 'downloaded' | 'installing' | 'error'
+}
+
 async function unusedPort(): Promise<number> {
   const server = createServer()
   await new Promise<void>((resolve, reject) => {
@@ -108,11 +112,26 @@ describe('Stravia desktop smoke', () => {
     await expect($('button=Download update')).toBeDisplayed()
     await $('button=Download update').click()
     await expect($('[role="progressbar"]')).toHaveAttribute('aria-valuenow', '50')
+    await expect($('button=Pause')).not.toExist()
+    await expect($('button=Cancel')).not.toExist()
     await expect($('[data-slot="dialog-title"]')).toHaveText('Install Stravia 9.9.9?')
     await expect($('[data-slot="dialog-description"]')).toHaveText(
       'Stravia will exit now. Any Gateway requests in progress will be interrupted.',
     )
+    await (await $('[data-slot="dialog-content"]')).$('button=Close').click()
+    await expect($('[data-slot="dialog-title"]')).not.toExist()
     await $('button=Exit and install').click()
-    await expect($('p=Installing Stravia 9.9.9…')).toBeDisplayed()
+    await expect($('[data-slot="dialog-title"]')).toHaveText('Install Stravia 9.9.9?')
+    await (await $('[data-slot="dialog-content"]')).$('button=Exit and install').click()
+    await browser.waitUntil(
+      async () => {
+        const state = (await browser.tauri.execute(({ core }) =>
+          core.invoke('get_desktop_update_state'),
+        )) as DesktopUpdateState
+        return state.phase === 'installing'
+      },
+      { timeout: 10_000, timeoutMsg: 'desktop updater did not enter the installing state' },
+    )
+    await expect($('p=Installing Stravia 9.9.9…')).not.toBeDisplayed()
   })
 })
