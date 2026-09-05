@@ -334,13 +334,15 @@ jobs:
 
           public_key = os.environ["STRAVIA_UPDATER_PUBLIC_KEY"].strip()
           lines = public_key.splitlines()
-          if (
-              len(lines) != 2
-              or not lines[0].startswith("untrusted comment:")
-              or not lines[1].startswith("RW")
+          if len(lines) == 1 and lines[0].startswith("RW"):
+              public_key = f"untrusted comment: minisign public key\n{lines[0]}"
+          elif not (
+              len(lines) == 2
+              and lines[0].startswith("untrusted comment:")
+              and lines[1].startswith("RW")
           ):
               raise SystemExit(
-                  "STRAVIA_UPDATER_PUBLIC_KEY must contain the complete two-line Minisign public key"
+                  "STRAVIA_UPDATER_PUBLIC_KEY must contain a Minisign public key"
               )
 
           config_path = Path("backend/apps/stravia-desktop/tauri.conf.json")
@@ -350,13 +352,20 @@ jobs:
               json.dumps(config, ensure_ascii=False, indent=2) + "\n",
               encoding="utf-8",
           )
+
+          delimiter = "STRAVIA_UPDATER_PUBLIC_KEY_EOF"
+          with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as output:
+              output.write(
+                  f"STRAVIA_UPDATER_PUBLIC_KEY<<{delimiter}\n"
+                  f"{public_key}\n"
+                  f"{delimiter}\n"
+              )
           PY
 
       - name: Build desktop bundle
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          STRAVIA_UPDATER_PUBLIC_KEY: ${{ secrets.STRAVIA_UPDATER_PUBLIC_KEY }}
         run: task build:desktop BUNDLES="${{ matrix.bundle }}"
 
       - name: Collect Linux desktop bundle

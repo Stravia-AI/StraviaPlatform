@@ -14,7 +14,7 @@ bunx tauri signer generate -- -w /secure/offline/stravia-updater.key
 
 - `TAURI_SIGNING_PRIVATE_KEY`：私钥文件内容。
 - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`：私钥密码；发布流程不接受空值。
-- `STRAVIA_UPDATER_PUBLIC_KEY`：对应公钥文件的完整两行内容，包括 `untrusted comment:` 行。公钥不是秘密，但以 secret 注入可让 workflow 在构建前统一检查配置完整性。
+- `STRAVIA_UPDATER_PUBLIC_KEY`：对应公钥文件的完整两行内容，或以 `RW` 开头的 key payload；workflow 会为单行 payload 补齐 Minisign comment。公钥不是秘密，但以 secret 注入可让 workflow 在构建前统一检查配置完整性。
 
 至少保留一份与 GitHub 分离的离线加密私钥备份，并把密码存放在独立的受控凭据系统中。记录备份责任人、创建日期和恢复演练日期；不得把私钥、密码或其未脱敏命令输出写入仓库、日志、Actions artifact 或 Release。
 
