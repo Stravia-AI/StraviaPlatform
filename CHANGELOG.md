@@ -5,6 +5,9 @@
 ### Added
 
 - The management UI now checks GitHub Releases for optional updates; Stravia Desktop can download, verify, and install signed Windows NSIS and Linux AppImage updates, while standalone servers only open the exact Release page.
+### Fixed
+
+- Codex OAuth model discovery now uses client version `0.153.0`, and generation sends the required model and service-tier routing hint, restoring discovery and invocation of version-gated models such as `gpt-6-astra`.
 
 ## [0.1.5] - 2026-09-04
 

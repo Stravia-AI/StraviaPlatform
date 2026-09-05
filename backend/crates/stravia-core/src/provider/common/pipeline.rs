@@ -610,7 +610,7 @@ mod tests {
             protocol: OPEN_RESPONSES_2026_04_24,
             egress_base_url: &provider.base_url,
             api_key: &provider.api_key,
-            actual_model: "gpt-5.4",
+            actual_model: "gpt-6-astra",
             credential: None,
             gw: &gw,
             disable_default_auth: false,
@@ -621,5 +621,11 @@ mod tests {
             .expect("build_request succeeds");
 
         assert_eq!(out.url, "https://chatgpt.com/backend-api/codex/responses");
+        assert_eq!(
+            out.headers
+                .get("x-codex-routing-hint")
+                .and_then(|value| value.to_str().ok()),
+            Some("model=gpt-6-astra")
+        );
     }
 }

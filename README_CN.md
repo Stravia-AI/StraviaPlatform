@@ -73,6 +73,8 @@ OpenAI direct 与 Codex OAuth 的生成 Target 会为 Chat Completions、Open Re
 
 添加提供商时，先选择完整的提供商/通道选项。API Key 与 OAuth 通道是独立选项，创建后不能互相转换。Codex 与 Claude Code OAuth 在桌面端和通过回环地址访问的 WebUI 中会自动接收回调；远程 WebUI 则会在浏览器登录后要求粘贴完整 callback URL。Grok OAuth 使用 xAI device authorization flow：WebUI 打开验证页面，在需要时显示 user code，并轮询直到授权完成。
 
+Codex Provider Model 同步使用当前上游客户端契约，因此同步后可以发现新加入版本门禁的模型。生成请求会携带 Codex 后端要求的模型与可选 service tier 路由提示。
+
 WebUI 为每种资源保留唯一编辑表面。添加或编辑逻辑 Model 时，Model ID 组合框可以按名称或 ID 搜索 Canonical Model，并在目录不可用时继续接受自定义 ID；选择模板会复制其展示名称，两个字段都可继续编辑。手动 Provider Model 仍可搜索 Canonical Model 模板；选择不会创建 Backend，也不会保存隐藏 binding。新 Provider 保存后会进入详情页并开始同步 Provider Model；详情视图分别管理连接设置、持久化 Provider Model 清单和 Route 引用。Provider Model metadata 在独立抽屉中保存，Selection Policy 则立即生效，并且只控制新 Target 候选的 Effective Availability。Provider Model 变为不可用不会改写已有 Route Target。管理员可以从精确 Provider Catalog Entry 显式 re-import 已发现的 Provider Model；普通同步不会覆盖本地 metadata。
 
 接入客户端页面会根据所选 API 密钥有权使用的 Route 生成 Stravia provider 增量补丁。Stravia Desktop 可把补丁应用到 Connect Client 全局配置并保留无关设置；独立 server 只提供复制。Apply 不选择当前/默认模型，也不写入融合 provider 与 model 的键。Claude Code 是唯一例外：必须选择并合并默认、Haiku、Sonnet 和 Opus 四套模型映射，但不会改动 `effortLevel` 或 `autoCompactWindow`。
