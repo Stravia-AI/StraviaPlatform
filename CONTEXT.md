@@ -24,6 +24,41 @@ _避免使用_：关闭更新、永久忽略更新
 Connect Client 是用户本机上的第三方编程工具，可被配置为以 Stravia 为模型服务；管理面「客户端」下拉里的 Codex、Claude Code 等即此类。它不是 Principal，也不是 Agent Definition。
 _避免使用_：Agent（当指这些工具）、接入 Agent、把 Desktop 和 Connect Client 都叫客户端
 
+## Connect Client Interaction
+
+Connect Client Interaction 通常由一次新 User 输入发起，并包含其后所有未经过另一条新 User 输入的 Inference Run 续接；无法归入已有 Interaction、且不含 User item 的合法根请求也作为一个新的 Connect Client Interaction。客户端公开工具调用及工具结果可以让它跨越多个 Run；同一父响应的并发续接可以在 Interaction 内形成 Run 子树并产生多个最终生成响应。任何新 User 输入都会开启新的 Interaction；如果原执行分支尚未得到最终响应，该分支会被标记为由用户中断。失败的 Inference Run 不会单独结束 Interaction：没有新 User 输入、且后续请求续接同一 Generation Chain 父节点时，原 Interaction 可以恢复并保留失败记录。没有父节点的根 Run 仅在同 Principal、canonical request fingerprint 精确相同、前次 Run 已失败且从未发生 Client Output Commit、并在失败后两分钟内开始时，才在 Interaction Observation 中归并为同一 Interaction；这条诊断归并不建立 Generation Chain 关系。
+_避免使用_：Agent Turn、Model Turn、Inference Run、Agent Loop
+
+## Interaction Observation
+
+Interaction Observation 是管理面用于查看 Connect Client Interaction 及其 Inference Run、Model Turn、工具调用、Target attempt、交付状态和 Confirmed Upstream Usage 的可持久化诊断投影。它可以实时变化并保留失败、取消或断线记录，但不是推理执行、Generation Chain 或模型历史的事实源；观察记录失败或丢失不得改变请求结果。
+_避免使用_：Generation Chain、Request Log、Execution State Store
+
+## Rejected Request Observation
+
+Rejected Request Observation 是请求在形成 Inference Run 之前因解码、协议或认证错误被拒绝时形成的独立诊断投影。它不属于 Principal、Generation Chain 或 Connect Client Interaction。请求进入 Gateway 时 Debug 已开启的，可以附带只覆盖客户端请求与平台错误响应的 Rejected Request Debug Trace；没有上游方向不得表示为缺失抓包。
+_避免使用_：Connect Client Interaction、Anonymous Principal、孤立 Interaction
+
+## Wire Debug Capture
+
+Wire Debug Capture 是 Connect Client 到 Stravia、Stravia 到上游、上游到 Stravia、Stravia 到 Connect Client 四个方向的应用协议级诊断记录。它保留 HTTP header 与 body chunk、SSE byte，以及 WebSocket handshake 元数据和 message 的顺序与时间，但不表示 TLS、TCP、HTTP/2 frame 或其他网络分包；header、URL 与结构化 body 中的凭据值永久脱敏，其他内容保留。
+_避免使用_：Network Capture、Packet Capture、Raw Credential Dump
+
+## Inference Run Debug Trace
+
+Inference Run Debug Trace 是单个 Inference Run 准入时按当前进程级 Debug 开关独立决定是否生成的完整诊断，由该 Run 的 Wire Debug Capture 与关键 canonical 语义阶段记录组成。Trace 与所属请求记录采用相同保留期并一起删除；Debug 开关不跨进程重启保持。
+_避免使用_：Request Log、Wire Debug Capture（当指包含 canonical 阶段的完整诊断）
+
+## Interaction Debug Bundle
+
+Interaction Debug Bundle 是管理员在某一时间点导出的版本化 ZIP 诊断包，汇总一个 Connect Client Interaction 中当时已落盘的全部 Inference Run Debug Trace。Bundle 必须说明 Interaction 状态、导出时间、schema 版本，以及每个 Inference Run 的捕获状态；部分存在时明确列出未捕获或因容量限制而不完整的 Run，不得表示为完整。
+_避免使用_：完整抓包（当存在未捕获或不完整的 Inference Run）、实时备份
+
+## Confirmed Upstream Usage
+
+Confirmed Upstream Usage 是上游在某次模型调用中明确报告、Stravia 已收到的 token 用量。Connect Client Interaction 的用量是其中所有 Inference Run、隐藏 Model Turn、重试和 Target failover 已报告用量的累计值；尚未报告或永不报告的消耗保持未知，不能记为零或用本地估算冒充精确值。
+_避免使用_：Agent Token、Estimated Usage、仅最终回答 Token
+
 ## Connect Client Apply
 
 Connect Client Apply 是 Stravia Desktop 把 Stravia provider 增量写入某个 Connect Client Global Config 的操作。它只 upsert Stravia 拥有的 provider 段及配套 catalog；可写与当前模型分离的激活 provider 键；不写当前/默认模型，也不写把 provider 和模型焊在一起的键。Claude Code 例外：只 merge Anthropic 的 base URL、token 与四套模型映射。它不是 admin HTTP API。
