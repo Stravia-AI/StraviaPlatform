@@ -34,6 +34,26 @@ _避免使用_：一键覆盖配置、在 Gateway 进程里写用户 home、把�
 Connect Client Global Config 是该 Connect Client 的用户级配置文件，路径由该工具的官方目录环境变量与默认目录解析；Connect Client Apply 只改这份文件，不改仓库内的项目配置。
 _避免使用_：项目级 `.codex/config.toml`、项目级 `.claude/settings.json`、把任意 OPENCODE_CONFIG 文件都当成全局配置
 
+## 管理用户（Admin User）
+
+管理用户是访问 Stravia 管理控制台与管理功能的身份，与模型调用及 MCP 使用的 Principal 分离。Stravia API Key 不归属于管理用户；管理用户身份本身不授予模型调用或 MCP 访问资格。
+_避免使用_：Principal、Connect Client、上游账户
+
+## 实例管理员
+
+实例管理员是一个 Stravia 实例唯一的管理用户，拥有该实例的全部管理权限。实例不提供其他管理用户的创建、禁用或删除功能。
+_避免使用_：多用户管理、普通用户、API Key 所有者
+
+## 设置令牌（Setup Token）
+
+设置令牌是领取 Stravia 首次设置资格的一次性凭据，只用于选择服务存储并建立首个实例管理员。它不是日常管理凭据，也不授予覆盖已有管理员的资格。
+_避免使用_：Admin Token、API Key、管理员密码
+
+## 初始化会话
+
+初始化会话是已领取首次设置资格的操作者完成配置与管理员创建的受限操作上下文。它不具备日常管理权限，也不能代替管理员登录。
+_避免使用_：管理会话、Principal、管理员身份
+
 ## Principal
 
 Principal 是由有效 Stravia API Key 建立、用于归属 Turn Chain、Artifact、配额、并发限制与执行状态的认证客户端身份。Stravia 不存在 Anonymous Principal，也不以连接或 Session 代替认证身份。
