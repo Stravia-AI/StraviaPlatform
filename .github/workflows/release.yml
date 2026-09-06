@@ -18,6 +18,8 @@ env:
   BUN_VERSION: "1.4.0"
   TASK_VERSION: "3.52.0"
   ZIG_VERSION: "0.15.1"
+  ZIG_SHA256_X64: c61c5da6edeea14ca51ecd5e4520c6f4189ef5250383db33d01848293bfafe05
+  ZIG_SHA256_ARM64: bb4a8d2ad735e7fba764c497ddf4243cb129fece4148da3222a7046d3f1f19fe
   CARGO_ZIGBUILD_VERSION: "0.23.3"
   IMAGE_NAME: ghcr.io/stravia-ai/straviaplatform
 
@@ -162,7 +164,7 @@ jobs:
             target: ""
             libc: windows
             binary: target/release/stravia-server.exe
-          - runner: windows-11-arm
+          - runner: windows-11-vs2026-arm
             suffix: windows-aarch64
             target: ""
             libc: windows
@@ -193,9 +195,32 @@ jobs:
 
       - name: Setup Zig
         if: matrix.libc == 'musl'
-        uses: mlugg/setup-zig@v2
-        with:
-          version: ${{ env.ZIG_VERSION }}
+        shell: bash
+        run: |
+          case "${RUNNER_ARCH}" in
+            X64)
+              zig_arch=x86_64
+              zig_sha256="${ZIG_SHA256_X64}"
+              ;;
+            ARM64)
+              zig_arch=aarch64
+              zig_sha256="${ZIG_SHA256_ARM64}"
+              ;;
+            *)
+              echo "Unsupported runner architecture: ${RUNNER_ARCH}" >&2
+              exit 1
+              ;;
+          esac
+
+          zig_archive="${RUNNER_TEMP}/zig-${ZIG_VERSION}.tar.xz"
+          zig_directory="${RUNNER_TOOL_CACHE}/zig/${ZIG_VERSION}/${zig_arch}"
+          curl --fail --location --output "${zig_archive}" \
+            "https://ziglang.org/download/${ZIG_VERSION}/zig-${zig_arch}-linux-${ZIG_VERSION}.tar.xz"
+          echo "${zig_sha256}  ${zig_archive}" | sha256sum --check -
+          mkdir -p "${zig_directory}"
+          tar --extract --xz --file "${zig_archive}" --strip-components=1 --directory "${zig_directory}"
+          echo "${zig_directory}" >> "${GITHUB_PATH}"
+          "${zig_directory}/zig" version
 
       - name: Install cargo-zigbuild
         if: matrix.libc == 'musl'
@@ -275,7 +300,7 @@ jobs:
             suffix: windows-x86_64
             bundle: nsis
             bundle_directory: nsis
-          - runner: windows-11-arm
+          - runner: windows-11-vs2026-arm
             suffix: windows-aarch64
             bundle: nsis
             bundle_directory: nsis
