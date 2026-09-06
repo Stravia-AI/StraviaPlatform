@@ -30,21 +30,8 @@ def make_isolated_schema(prefix: str = "stravia_storage_e2e", *, max_len: int = 
 
 
 def load_pg_url() -> str | None:
-    for key in ("DB_URL", "DATABASE_URL"):
-        value = os.environ.get(key)
-        if value:
-            return value
-
-    env_file = REPO_ROOT / ".env"
-    if env_file.exists():
-        for line in env_file.read_text().splitlines():
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#") or "=" not in stripped:
-                continue
-            key, value = stripped.split("=", 1)
-            if key.strip() in ("DB_URL", "DATABASE_URL"):
-                return value.strip().strip("'\"")
-    return None
+    """Use only the explicitly injected isolated-test PostgreSQL connection."""
+    return os.environ.get("DB_URL")
 
 
 class _MockHandler(BaseHTTPRequestHandler):
@@ -125,6 +112,7 @@ def build_harness(work_dir: Path) -> None:
         use std::path::PathBuf;
         use std::time::Duration;
         use anyhow::{Context, ensure};
+        use stravia_core::admin::identity::AdminAuth;
         use stravia_core::config::{GatewayConfig, SqlStorageConfig, StorageBackendKind};
         use stravia_core::db::models::{
             CreateApiKey, CreateProvider, CreateRoute, CreateTarget, LogQuery, ProviderCredentialInput,
@@ -132,7 +120,7 @@ def build_harness(work_dir: Path) -> None:
         };
         use stravia_core::provider_models::CreateManualProviderModel;
         use stravia_core::{logging, Gateway};
-        use stravia_server::{HttpAppConfig, build_http_app, start_http_server, standalone_local_origins};
+        use stravia_server::{AdminMode, HttpAppConfig, build_http_app, start_http_server, standalone_local_origins};
         use reqwest::StatusCode;
         use sqlx::postgres::PgPoolOptions;
 
@@ -297,9 +285,14 @@ def build_harness(work_dir: Path) -> None:
             ensure!(preserved.targets[0].provider_id == provider.id, "failed put preserves Target");
             ensure!(admin.list_api_keys().await?.len() == 1, "api key count");
 
+            let admin_auth = AdminAuth::new(gw.storage.clone());
+            admin_auth.ensure_native_admin().await?;
+            let native_session = admin_auth.login_native().await?;
             let cors_origins = standalone_local_origins(server_port);
             let app = build_http_app(gw, HttpAppConfig {
-                admin_token: None,
+                admin_auth,
+                admin_mode: AdminMode::Desktop,
+                admin_origin: None,
                 admin_cors_origins: cors_origins.clone(),
                 proxy_cors_origins: cors_origins,
                 serve_embedded_webui: false,
@@ -307,6 +300,12 @@ def build_harness(work_dir: Path) -> None:
             let server = start_http_server(format!("127.0.0.1:{server_port}"), app).await?;
 
             let client = reqwest::Client::new();
+            let admin_status = client
+                .get(format!("http://127.0.0.1:{server_port}/api/v1/status"))
+                .bearer_auth(&native_session.access_token)
+                .send()
+                .await?;
+            ensure!(admin_status.status() == StatusCode::OK, "native admin bearer should 200");
             let url = format!("http://127.0.0.1:{server_port}/v1/chat/completions");
             let payload = serde_json::json!({"model": format!("{backend}-model"), "messages": [{"role":"user","content":"hi"}]});
 
@@ -365,7 +364,7 @@ def run_harness(
 
     if backend == "postgres":
         if not pg_url:
-            raise RuntimeError("postgres backend requires DB_URL or DATABASE_URL")
+            raise RuntimeError("postgres backend requires DB_URL")
         env["STRAVIA_STORAGE_PG_URL"] = pg_url
         env["STRAVIA_STORAGE_PG_SCHEMA"] = make_isolated_schema()
 

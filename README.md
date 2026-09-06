@@ -71,7 +71,7 @@ Built-in provider metadata currently covers:
 
 A client sends a **Model ID**. That value is the Route ID and is matched exactly, including letter case. A logical Model may also have an optional, non-unique display name; labels fall back to Model ID and never affect routing, authorization, or bindings. The matching Route can retain enabled and disabled Targets; disabled Targets keep their configuration without receiving traffic. Stravia first selects the highest eligible Target Priority group, then uses Traffic Equalization or Latency Preference within that group; conversation and cache affinity can preserve a previously successful enabled Target when applicable. Stravia refreshes its Provider Catalog from revisioned `models.stravia.cn` indexes: lightweight Provider and Canonical Model indexes update atomically, while Provider-scoped inventories load only when needed. Catalog-backed Providers use their scoped inventory; account-level discovery remains the source of callable IDs and only enriches exact matches without adding Catalog-only models.
 
-Provider setup starts by choosing a complete provider/channel option. API-key and OAuth channels are separate options and cannot be converted into one another after creation. For Codex and Claude Code OAuth, desktop and loopback WebUI sessions receive the callback automatically; remote WebUI sessions ask for the full callback URL after browser sign-in. Grok OAuth uses xAI's device authorization flow: the WebUI opens the verification page, displays the user code when needed, and polls until authorization completes.
+Provider setup starts by choosing a complete provider/channel option. API-key and OAuth channels are separate options and cannot be converted into one another after creation. For Codex and Claude Code OAuth, desktop and loopback WebUI sessions receive the callback automatically; remote WebUI sessions ask for the full callback URL after browser sign-in. While authorization is pending, all three environments also allow pasting the full callback URL manually, even when the automatic listener is active. Grok OAuth uses xAI's device authorization flow: the WebUI opens the verification page, displays the user code when needed, and polls until authorization completes; no callback URL is required.
 
 Codex Provider Model synchronization uses the current upstream client contract, so newly version-gated models become available after synchronization. Generation requests include the model and optional service-tier routing hint required by the Codex backend.
 
@@ -121,12 +121,12 @@ The management UI checks public GitHub Releases for optional updates. Stravia De
 
 ### Storage and deployment
 
-- **SQLite** is the default storage backend.
-- **PostgreSQL** provides durable storage.
-- SQLx migrations run before the listener starts.
-- `GET /healthz` is the liveness probe; `GET /readyz` reports storage readiness.
+- **SQLite** and **PostgreSQL** are selected during the first-run setup flow.
+- The selected database connection is stored only in `server.toml`; database CLI options and environment-variable overrides are not supported.
+- SQLx migrations preserve data from the currently supported schema and run before the normal Gateway becomes ready.
+- `GET /healthz` is the liveness probe; `GET /readyz` returns unavailable while setup is incomplete or the Gateway cannot start.
 
-This `0.1.0` cutover supports fresh SQLite and PostgreSQL databases. It does not provide an in-place upgrade path for legacy schemas.
+PostgreSQL must already exist and be reachable by an account that can create and migrate Stravia's own tables; Stravia does not create the database or require `CREATEDB`. Incompatible older schemas fail explicitly rather than being deleted or rebuilt.
 
 ## Releases
 
@@ -175,7 +175,7 @@ task build:server
 .\target\release\stravia-server.exe
 ```
 
-The default configuration uses SQLite and listens on `127.0.0.1:23471`. Debug builds share the repository-local `.stravia-dev/` data directory with the desktop app; release builds use `~/.stravia`. Open <http://127.0.0.1:23471> to configure a provider and create a model route.
+The server listens on `127.0.0.1:23471`. Debug builds use the repository-local `.stravia-dev/` data directory; release builds use `~/.stravia`. On first start there is no implicit database: the console prints a one-time setup token, and <http://127.0.0.1:23471/setup> uses it to select SQLite or PostgreSQL and create the single administrator. After setup, sign in with that username and password before configuring providers and model routes. The setup token is consumed by its first successful claim and is replaced if the unfinished process restarts.
 
 ### Run the server with Nix
 
@@ -209,7 +209,7 @@ For NixOS, import the service module from the flake:
 }
 ```
 
-The service listens on `127.0.0.1:23471` by default, runs with a dynamic system user, and persists its data under `/var/lib/stravia`. Set `services.stravia.host`, `port`, and `openFirewall` when exposing it on the network. Put secrets and optional server settings in `services.stravia.environmentFile`; a non-loopback listener requires `STRAVIA_ADMIN_TOKEN`.
+The service listens on `127.0.0.1:23471` by default, runs with a dynamic system user, and persists its data and `/var/lib/stravia/server.toml` under `/var/lib/stravia`. Set `services.stravia.host`, `port`, and `openFirewall` when exposing it. A non-loopback listener also requires `STRAVIA_PUBLIC_ORIGIN` to be the canonical HTTPS origin; place that non-database setting in `services.stravia.environmentFile` and terminate TLS at a reverse proxy. Database settings are never read from the environment. For an existing PostgreSQL deployment, write the `[database]` configuration shown below to `/var/lib/stravia/server.toml` before starting the upgraded service.
 
 ### Run the server with Docker
 
@@ -218,13 +218,13 @@ The service listens on `127.0.0.1:23471` by default, runs with a dynamic system 
 docker pull ghcr.io/stravia-ai/straviaplatform:latest
 
 docker run --rm \
-  --publish 23471:23471 \
-  --env STRAVIA_ADMIN_TOKEN=replace-with-a-long-random-token \
+  --publish 127.0.0.1:23471:23471 \
+  --env STRAVIA_PUBLIC_ORIGIN=https://gateway.example.com \
   --mount source=stravia-data,target=/data \
   ghcr.io/stravia-ai/straviaplatform:latest
 ```
 
-Use `docker build --tag stravia-server:local .` and replace the final image name with `stravia-server:local` to build from the current checkout. The image embeds the production WebUI, listens on `0.0.0.0:23471`, runs as a non-root user, and persists SQLite data under `/data`. `STRAVIA_ADMIN_TOKEN` is required because the container listener is not loopback-only. The built-in health check calls `GET /healthz`.
+Use `docker build --tag stravia-server:local .` and replace the final image name with `stravia-server:local` to build from the current checkout. The image embeds the production WebUI, listens on `0.0.0.0:23471` inside the container, runs as a non-root user, and persists `server.toml` and SQLite data under `/data`. Put an HTTPS reverse proxy in front of the loopback-published port and set `STRAVIA_PUBLIC_ORIGIN` to that exact external origin; management cookies are Secure and unsafe management requests require the same origin plus Stravia's CSRF header. Do not expose the container port directly over HTTP. The built-in health check calls `GET /healthz`; readiness remains unavailable until setup and Gateway startup complete.
 
 After creating a virtual model such as `my-model`, call it through any supported client protocol:
 
@@ -266,14 +266,47 @@ Common CLI options and environment variables:
 | ------------------------ | ------------------------------ | ------------ |
 | `--host`                 | `STRAVIA_HOST`                 | `127.0.0.1`  |
 | `--port`                 | `STRAVIA_PORT`                 | `23471`      |
-| `--public-origin`        | `STRAVIA_PUBLIC_ORIGIN`        | unset        |
-| `--admin-token`          | `STRAVIA_ADMIN_TOKEN`          | unset        |
+| `--public-origin`        | `STRAVIA_PUBLIC_ORIGIN`        | derived for loopback; required HTTPS origin otherwise |
+| `--config`               | —                              | `<data-dir>/server.toml` |
 | `--data-dir`             | `STRAVIA_DATA_DIR`             | Debug: `.stravia-dev`; release: `~/.stravia` |
-| `--storage-backend`      | `STRAVIA_STORAGE_BACKEND`      | `sqlite`     |
-| `--postgres-dsn`         | `STRAVIA_POSTGRES_DSN`         | unset        |
 | `--log-level`            | `STRAVIA_LOG_LEVEL`            | `info`       |
 | `--config-poll-interval` | `STRAVIA_CONFIG_POLL_INTERVAL` | `3` seconds  |
 | `--wire-capture-dir`¹    | `STRAVIA_WIRE_CAPTURE_DIR`     | unset        |
+
+`--config` selects the only database configuration source. `--data-dir` still locates runtime artifacts and supplies the default config path; it does not select or override the database. A missing config enters first-run setup. A malformed config, unreachable configured database, or incompatible schema is a startup error and never falls back to SQLite.
+
+The setup flow atomically writes one of these forms:
+
+```toml
+[database]
+backend = "sqlite"
+path = "/var/lib/stravia/gateway.db"
+```
+
+The SQLite filename must be `gateway.db`. Relative paths, including the setup wizard's default `gateway.db`, resolve from the directory containing `server.toml`, not the process working directory. Setup saves the resolved absolute path; existing absolute paths are unchanged. With the default Debug configuration, this uses `<workspace>/.stravia-dev/gateway.db`.
+
+For an already-created PostgreSQL database:
+
+```toml
+[database]
+backend = "postgres"
+url = "postgresql://stravia:replace-me@postgres.example.com:5432/stravia"
+max_connections = 10
+min_connections = 1
+idle_timeout_seconds = 300
+```
+
+The three pool settings are optional. Protect `server.toml` because a PostgreSQL URL can contain credentials. The connection account needs permission to run Stravia's migrations in that database, but not permission to create a database. Existing PostgreSQL deployments must create this file with their current connection URL **before the first upgraded start**. Removing the old database environment variables without doing so intentionally enters setup; Stravia will not infer the old PostgreSQL database or silently choose SQLite.
+
+On an unconfigured or configured-admin-free database, the console token is accepted only by `POST /api/v1/setup/claim`; the resulting `stravia_setup` HttpOnly, `SameSite=Strict` cookie (`Path=/api/v1`, and `Secure` for HTTPS) can call `/api/v1/setup/test` and `/api/v1/setup/complete`. Setup access cannot call management APIs and is closed when an administrator already exists. `GET /api/v1/auth/state` reports setup, availability, and current authentication without refreshing credentials. Normal Server authentication uses `/api/v1/auth/login`, `/api/v1/auth/refresh`, `/api/v1/auth/logout`, and `/api/v1/auth/credentials`. Access and refresh values remain in `HttpOnly`, `SameSite=Strict` cookies (`stravia_access` with `Path=/`, and `stravia_refresh` with `Path=/api/v1/auth`), not browser storage; HTTPS origins add `Secure`. Remote management requires an HTTPS canonical origin. The browser client sends `X-Stravia-CSRF: 1`, and Stravia rejects unsafe requests whose `Origin` differs from `--public-origin`.
+
+To recover forgotten credentials, run the local interactive command against the same config:
+
+```bash
+./target/release/stravia-server --config /var/lib/stravia/server.toml recover-admin
+```
+
+The command prompts for the username and reads the new password plus confirmation without echoing it or accepting it as a command-line argument. It updates the existing single administrator in place and revokes every old management session; it does not delete business data or reopen database setup.
 
 ¹ Debug builds only. When enabled, Stravia writes one correlated JSONL file per request containing client and upstream requests/responses. Sensitive header values are replaced with `***`; bodies are recorded as readable UTF-8 text in the `body` field and can contain prompts, tool data, media references, and model output. Keep captures local and delete them after diagnosis. Release builds contain neither this option nor the capture implementation.
 
@@ -284,22 +317,13 @@ $env:STRAVIA_WIRE_REPLAY_FILE = ".scratch/wire-captures/req-....jsonl"
 cargo test -p stravia-core replay_wire_capture_from_environment -- --ignored --nocapture
 ```
 
-Set `--public-origin` to the trusted, externally reachable Gateway origin (for example, `https://gateway.example.com`) before using OpenAI Images `response_format=url` or MCP image resource links. Stravia never derives signed Artifact URLs from request forwarding headers.
-
-An admin token is mandatory when the server binds to a non-loopback address:
+Set `--public-origin` to the trusted, externally reachable Gateway origin (for example, `https://gateway.example.com`) before binding to a non-loopback host. Stravia never trusts forwarding headers to derive the management origin or signed Artifact URLs. Terminate HTTPS at a reverse proxy and forward requests unchanged to the Stravia listener:
 
 ```bash
 ./target/release/stravia-server \
-  --host 0.0.0.0 \
-  --admin-token YOUR_ADMIN_TOKEN
-```
-
-For PostgreSQL:
-
-```bash
-./target/release/stravia-server \
-  --storage-backend postgres \
-  --postgres-dsn "postgres://user:pass@localhost:5432/stravia"
+  --host 127.0.0.1 \
+  --port 23471 \
+  --public-origin https://gateway.example.com
 ```
 
 ## Development
@@ -328,6 +352,10 @@ Common commands:
 
 Backend Python tests use the locked `test` dependency group in `pyproject.toml`; Task invokes them through `uv run --locked`.
 Debug server builds do not embed or serve WebUI assets. `task dev:server` starts the Vite development server alongside the backend; release server builds embed the WebUI.
+
+`task dev:server` starts Vite first and passes its actual listening origin to the backend's `--public-origin`. If port `5173` is occupied, Vite automatically selects another port; open the exact **Local** URL printed in the terminal. Concurrent workspaces should use distinct `STRAVIA_PORT` values for their backend listeners; WebUI ports need not be fixed.
+
+If you run `task dev:web` and the backend separately, pass the WebUI's actual origin to the backend, for example `cargo run -p stravia-server -- --public-origin http://localhost:5174`. `localhost` and `127.0.0.1` are different browser origins. After restarting an unfinished setup, use the new setup token printed by the new Server process.
 
 ## Documentation
 

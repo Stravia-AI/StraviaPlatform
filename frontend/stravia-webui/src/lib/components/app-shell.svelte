@@ -19,9 +19,11 @@ import SignOutIcon from '@lucide/svelte/icons/log-out'
 import { userPrefersMode } from 'mode-watcher'
 import { onMount } from 'svelte'
 import type { Snippet } from 'svelte'
+import { toast } from 'svelte-sonner'
 
 import { admin, isTauri } from '$lib/admin-client'
-import { clearAdminToken } from '$lib/auth'
+import { logout } from '$lib/auth'
+import { localizeBackendErrorMessage } from '$lib/backend-error'
 import { createWindowChrome } from '$lib/window-chrome'
 import BrandMark from '$lib/components/brand-mark.svelte'
 import StatusIndicator from '$lib/components/status-indicator.svelte'
@@ -33,7 +35,10 @@ import * as Tooltip from '$lib/components/ui/tooltip'
 let { children }: { children: Snippet } = $props()
 
 const shellMode = $derived(
-  page.url.pathname === '/login' || page.error != null || page.route.id === '/[...path]'
+  page.url.pathname === '/login' ||
+    page.url.pathname === '/setup' ||
+    page.error != null ||
+    page.route.id === '/[...path]'
     ? ('titlebar-only' as const)
     : ('navigation' as const),
 )
@@ -158,9 +163,13 @@ function isCurrent(href: string): boolean {
   return href === '/' ? currentPath === '/' : currentPath === href || currentPath.startsWith(`${href}/`)
 }
 
-function signOut(): void {
-  clearAdminToken()
-  window.location.assign(resolve('/login'))
+async function signOut(): Promise<void> {
+  try {
+    await logout()
+    window.location.assign(resolve('/login'))
+  } catch (error) {
+    toast.error(localizeBackendErrorMessage(error))
+  }
 }
 
 function setSidebarCollapsed(collapsed: boolean): void {
@@ -391,7 +400,7 @@ onMount(() => {
               class={sidebarCollapsed ? 'mt-1 size-10' : 'mt-2 w-full justify-start'}
               variant="ghost"
               size={sidebarCollapsed ? 'icon-sm' : 'default'}
-              onclick={signOut}
+              onclick={() => void signOut()}
               aria-label={m.app_shell_sign_out()}
               title={sidebarCollapsed ? m.app_shell_sign_out() : undefined}>
               <SignOutIcon data-icon={sidebarCollapsed ? undefined : 'inline-start'} />
@@ -443,7 +452,7 @@ onMount(() => {
       <Sheet.Footer class="border-t">
         <StatusIndicator compact label={gatewayLabel(false)} tone={gatewayTone} />
         {#if !isTauri}
-          <Button class="w-full justify-start" variant="ghost" onclick={signOut}>
+          <Button class="w-full justify-start" variant="ghost" onclick={() => void signOut()}>
             <SignOutIcon data-icon="inline-start" />
             {m.app_shell_sign_out()}
           </Button>

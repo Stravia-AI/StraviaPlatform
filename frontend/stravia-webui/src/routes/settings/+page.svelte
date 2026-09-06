@@ -7,6 +7,7 @@ import { toast } from 'svelte-sonner'
 import { onMount } from 'svelte'
 
 import { admin, isTauri } from '$lib/admin-client'
+import { changeCredentials, getAuthState } from '$lib/auth'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
 import DesktopPortSettings from '$lib/components/desktop-port-settings.svelte'
 import LanguageSelector from '$lib/components/language-selector.svelte'
@@ -20,6 +21,7 @@ import { Spinner } from '$lib/components/ui/spinner'
 import { Switch } from '$lib/components/ui/switch'
 
 const queryClient = useQueryClient()
+const authStateQuery = createQuery(() => ({ queryKey: ['auth-state'], queryFn: getAuthState }))
 const retentionQuery = createQuery(() => ({
   queryKey: ['setting', 'log_retention_days'],
   queryFn: () => admin.settings.get('log_retention_days'),
@@ -40,6 +42,12 @@ let editedRetention = $state<string>()
 let proxyDraft = $state<{ enabled: boolean; url: string; bypass: string }>()
 let savingRetention = $state(false)
 let savingProxy = $state(false)
+let currentPassword = $state('')
+let adminUsername = $state('')
+let newPassword = $state('')
+let confirmPassword = $state('')
+let savingCredentials = $state(false)
+let credentialsError = $state('')
 
 const retentionBaseline = $derived((retentionQuery.data ?? '7').trim())
 const retention = $derived(editedRetention ?? retentionBaseline)
@@ -128,6 +136,22 @@ async function saveProxy(): Promise<void> {
     toast.error(localizeBackendErrorMessage(error))
   } finally {
     savingProxy = false
+  }
+}
+
+async function saveCredentials(): Promise<void> {
+  const username = adminUsername.trim() || authStateQuery.data?.username?.trim() || ''
+  if (!username || !currentPassword || !newPassword || newPassword !== confirmPassword) return
+
+  savingCredentials = true
+  credentialsError = ''
+  try {
+    await changeCredentials(currentPassword, username, newPassword)
+    window.location.assign('/login')
+  } catch (error) {
+    credentialsError = localizeBackendErrorMessage(error)
+  } finally {
+    savingCredentials = false
   }
 }
 
@@ -261,6 +285,71 @@ function retrySettings(): void {
         </div>
       </Field.FieldGroup>
     </section>
+
+    {#if authStateQuery.data?.mode === 'server' || authStateQuery.data?.mode === 'unavailable'}
+      <section id="credentials" class="route-section scroll-mt-20 pb-8" aria-labelledby="credentials-title">
+        <div class="route-section-header">
+          <div>
+            <h2 id="credentials-title" class="route-section-title">{m.settings_admin_credentials()}</h2>
+            <p class="route-section-description">{m.settings_admin_credentials_summary()}</p>
+          </div>
+        </div>
+        <form
+          onsubmit={(event) => {
+            event.preventDefault()
+            void saveCredentials()
+          }}>
+          <Field.FieldGroup>
+            <Field.Field data-invalid={credentialsError ? true : undefined}>
+              <Field.FieldLabel for="current-password">{m.settings_current_password()}</Field.FieldLabel>
+              <Input
+                id="current-password"
+                type="password"
+                bind:value={currentPassword}
+                autocomplete="current-password"
+                aria-invalid={credentialsError ? true : undefined} />
+            </Field.Field>
+            <Field.Field>
+              <Field.FieldLabel for="admin-username">{m.login_username()}</Field.FieldLabel>
+              <Input
+                id="admin-username"
+                bind:value={adminUsername}
+                placeholder={authStateQuery.data.username ?? ''}
+                autocomplete="username" />
+              <Field.FieldDescription>{m.settings_username_unchanged_help()}</Field.FieldDescription>
+            </Field.Field>
+            <Field.Field>
+              <Field.FieldLabel for="new-password">{m.settings_new_password()}</Field.FieldLabel>
+              <Input id="new-password" type="password" bind:value={newPassword} autocomplete="new-password" />
+            </Field.Field>
+            <Field.Field
+              data-invalid={confirmPassword.length > 0 && newPassword !== confirmPassword ? true : undefined}>
+              <Field.FieldLabel for="confirm-password">{m.setup_confirm_password()}</Field.FieldLabel>
+              <Input
+                id="confirm-password"
+                type="password"
+                bind:value={confirmPassword}
+                autocomplete="new-password"
+                aria-invalid={confirmPassword.length > 0 && newPassword !== confirmPassword} />
+              {#if confirmPassword.length > 0 && newPassword !== confirmPassword}
+                <Field.FieldError>{m.setup_passwords_must_match()}</Field.FieldError>
+              {:else if credentialsError}
+                <Field.FieldError>{credentialsError}</Field.FieldError>
+              {/if}
+            </Field.Field>
+            <div class="field-actions">
+              <Button
+                type="submit"
+                disabled={savingCredentials || !currentPassword || !newPassword || newPassword !== confirmPassword}>
+                {#if savingCredentials}<Spinner data-icon="inline-start" />{:else}<SaveIcon
+                    data-icon="inline-start" />{/if}
+                {m.settings_save_credentials()}
+              </Button>
+            </div>
+          </Field.FieldGroup>
+        </form>
+      </section>
+    {/if}
 
     <ProductUpdateSettings />
   </div>

@@ -52,9 +52,7 @@ const userCode = $derived(
     ? (oauthStatus.user_code ?? oauthSession?.user_code)
     : oauthSession?.user_code,
 )
-const requiresManualCallback = $derived(
-  oauthSession?.callback_mode === 'manual' || oauthSession?.listener_state === 'not_started',
-)
+const supportsManualCallback = $derived(oauthSession?.scheme === 'oauth_auth_code_pkce')
 const callbackInputId = $derived(mode === 'connect' ? 'oauth-callback-url' : 'provider-oauth-callback-url')
 
 $effect(() => {
@@ -230,7 +228,7 @@ onDestroy(() => {
         </div>
       {/if}
 
-      {#if requiresManualCallback && oauthInProgress}
+      {#if supportsManualCallback && oauthInProgress}
         <Field.Field size="fill" class="mt-4">
           <Field.Label for={callbackInputId} hint={m.provider_oauth_authorization_manual_callback_help()}>
             {m.provider_oauth_authorization_callback_url()}

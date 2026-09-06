@@ -25,9 +25,13 @@ interface CreatedRoute extends CreatedResource {
 }
 
 async function adminRequest(serverPort: number, path: string, init?: RequestInit): Promise<unknown> {
+  const session = (await browser.tauri.execute(({ core }) => core.invoke('get_admin_session'))) as DesktopAdminSession
   const response = await fetch(`http://127.0.0.1:${serverPort}/api/v1${path}`, {
     ...init,
-    headers: init?.body ? { 'content-type': 'application/json' } : undefined,
+    headers: {
+      Authorization: `Bearer ${session.access_token}`,
+      ...(init?.body ? { 'content-type': 'application/json' } : {}),
+    },
   })
   const text = await response.text()
   if (!response.ok) throw new Error(`${init?.method ?? 'GET'} ${path} failed (${response.status}): ${text}`)
@@ -52,6 +56,16 @@ function createdRoute(value: unknown): CreatedRoute {
     throw new Error('Route response did not include a model_id')
   }
   return { ...resource, model_id: value.model_id }
+}
+
+interface DesktopAdminSession {
+  access_token: string
+}
+
+async function expectProtectedStatus(port: number, accessToken: string): Promise<void> {
+  const url = `http://127.0.0.1:${port}/api/v1/status`
+  expect((await fetch(url)).status).toBe(401)
+  expect((await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } })).status).toBe(200)
 }
 
 async function unusedPort(): Promise<number> {
@@ -81,7 +95,22 @@ describe('Stravia desktop smoke', () => {
     )) as DesktopPortState
     expect(serverPort).toEqual(expect.any(Number))
     expect(portState.currentPort).toEqual(serverPort)
-    expect((await fetch(`http://127.0.0.1:${serverPort}/api/v1/status`)).ok).toBe(true)
+    const nativeSession = (await browser.tauri.execute(({ core }) =>
+      core.invoke('get_admin_session'),
+    )) as DesktopAdminSession
+    expect(nativeSession).not.toHaveProperty('refresh_token')
+    await expectProtectedStatus(portState.currentPort, nativeSession.access_token)
+    await browser.refresh()
+    const restoredSession = (await browser.tauri.execute(({ core }) =>
+      core.invoke('get_admin_session'),
+    )) as DesktopAdminSession
+    await expectProtectedStatus(portState.currentPort, restoredSession.access_token)
+    expect(
+      await browser.execute(
+        (accessToken) => Object.values(localStorage).some((value) => value.includes(accessToken)),
+        nativeSession.access_token,
+      ),
+    ).toBe(false)
 
     const brand = await $('[aria-label="Stravia 观策行"]')
     await expect(brand).toBeDisplayed()
@@ -101,6 +130,8 @@ describe('Stravia desktop smoke', () => {
 
     await expect($('//h2[normalize-space()="Local access"]')).toBeDisplayed()
     await expect($('#desktop-fixed-port')).toHaveValue(String(portState.fixedPort ?? portState.currentPort))
+    await expect($('input[type="password"]')).not.toExist()
+    await expect($('button=Sign out')).not.toExist()
 
     let activePort = portState.currentPort
     if (portState.mode !== 'fixed') {
@@ -122,7 +153,7 @@ describe('Stravia desktop smoke', () => {
       )
       activePort = nextPort
       await expect($('[aria-label="Stravia 观策行"]')).toBeDisplayed()
-      expect((await fetch(`http://127.0.0.1:${nextPort}/api/v1/status`)).ok).toBe(true)
+      await expectProtectedStatus(nextPort, nativeSession.access_token)
     }
 
     let replacementPort = await unusedPort()
@@ -146,7 +177,7 @@ describe('Stravia desktop smoke', () => {
       },
       { timeout: 10_000, timeoutMsg: 'confirmed desktop listener switch did not complete' },
     )
-    expect((await fetch(`http://127.0.0.1:${replacementPort}/api/v1/status`)).ok).toBe(true)
+    await expectProtectedStatus(replacementPort, nativeSession.access_token)
 
     await expect($('//h2[normalize-space()="Updates"]')).toBeDisplayed()
     await expect($('button=Download update')).toBeDisplayed()
@@ -328,5 +359,31 @@ describe('Stravia desktop smoke', () => {
     }
     if (failures.length === 1) throw failures[0]
     if (failures.length > 1) throw new AggregateError(failures, 'Desktop Connect smoke and fixture cleanup failed')
+  })
+
+  // 退出会关闭共享的原生会话，必须在所有页面交互验证之后执行。
+  it('keeps the session in the tray and stops the listener on application exit', async () => {
+    const serverPort = (await browser.tauri.execute(({ core }) => core.invoke('get_server_port'))) as number
+    const nativeSession = (await browser.tauri.execute(({ core }) =>
+      core.invoke('get_admin_session'),
+    )) as DesktopAdminSession
+    await browser.tauri.execute(({ core }) => core.invoke('plugin:window|close', { label: 'main' }))
+    await expectProtectedStatus(serverPort, nativeSession.access_token)
+    await browser.tauri.execute(({ core }) => {
+      setTimeout(() => void core.invoke('plugin:process|exit', { code: 0 }), 0)
+    })
+    await browser.waitUntil(
+      async () => {
+        try {
+          await fetch(`http://127.0.0.1:${serverPort}/healthz`)
+          return false
+        } catch {
+          return true
+        }
+      },
+      { timeout: 10_000, timeoutMsg: 'application exit did not stop the native HTTP listener' },
+    )
+    // 原生退出已结束内嵌 WebDriver；写入真实实例，而非 @wdio/globals 的只读取代理。
+    globalThis.browser.sessionId = ''
   })
 })

@@ -43,9 +43,9 @@ in
       default = null;
       example = "/run/secrets/stravia.env";
       description = ''
-        Optional systemd environment file for Stravia settings and secrets.
-        Use it for values such as STRAVIA_ADMIN_TOKEN, STRAVIA_PUBLIC_ORIGIN,
-        STRAVIA_STORAGE_BACKEND, and STRAVIA_POSTGRES_DSN.
+        Optional systemd environment file for non-database Stravia settings,
+        such as STRAVIA_PUBLIC_ORIGIN. Database connection settings belong
+        only in /var/lib/stravia/server.toml.
       '';
     };
   };
@@ -61,7 +61,7 @@ in
       after = [ "network-online.target" ];
 
       serviceConfig = {
-        ExecStart = "${lib.getExe cfg.package} --host ${cfg.host} --port ${toString cfg.port} --data-dir /var/lib/stravia";
+        ExecStart = "${lib.getExe cfg.package} --host ${cfg.host} --port ${toString cfg.port} --data-dir /var/lib/stravia --config /var/lib/stravia/server.toml";
         Restart = "on-failure";
         RestartSec = "5s";
 
