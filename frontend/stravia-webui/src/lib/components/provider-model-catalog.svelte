@@ -18,8 +18,16 @@ import { admin } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
 import { modelIdFromCatalogId } from '$lib/catalog-model-id'
 import { getDataTableLabels } from '$lib/data-table-labels'
-import { formatNumber, formatTime } from '$lib/format'
+import { formatTime } from '$lib/format'
 import { localeState } from '$lib/localization.svelte'
+import {
+  emptySpecificationFilter,
+  matchesSpecification,
+  specificationFilterCount,
+  type SpecificationFilter,
+} from '$lib/model-specification-filter'
+import ModelSpecification from '$lib/components/model-specification.svelte'
+import ModelSpecificationFilter from '$lib/components/model-specification-filter.svelte'
 import type {
   Route,
   PreparedProviderModel,
@@ -111,6 +119,10 @@ const requestedModelId = $derived(page.url.searchParams.get('model') ?? '')
 const availabilityFilter = $derived(catalogFilterValue<AvailabilityFilter>('availability', 'all'))
 const sourceFilter = $derived(catalogFilterValue<SourceFilter>('source_kind', 'all'))
 const referenceFilter = $derived(catalogFilterValue<ReferenceFilter>('usage', 'all'))
+const specificationFilter = $derived(
+  (columnFilters.find((filter) => filter.id === 'specification')?.value as SpecificationFilter | undefined) ??
+    emptySpecificationFilter,
+)
 const filteredModels = $derived.by(() => {
   const query = search.trim().toLocaleLowerCase(localeState.current)
   return models.filter((model) => {
@@ -119,12 +131,16 @@ const filteredModels = $derived.by(() => {
       (!query || `${model.name} ${model.id}`.toLocaleLowerCase(localeState.current).includes(query)) &&
       (availabilityFilter === 'all' || model.available === (availabilityFilter === 'available')) &&
       (sourceFilter === 'all' || model.source_kind === sourceFilter) &&
-      (referenceFilter === 'all' || references.length > 0 === (referenceFilter === 'referenced'))
+      (referenceFilter === 'all' || references.length > 0 === (referenceFilter === 'referenced')) &&
+      matchesSpecification(model.specification, specificationFilter)
     )
   })
 })
 const activeFilterCount = $derived(
-  Number(availabilityFilter !== 'all') + Number(sourceFilter !== 'all') + Number(referenceFilter !== 'all'),
+  Number(availabilityFilter !== 'all') +
+    Number(sourceFilter !== 'all') +
+    Number(referenceFilter !== 'all') +
+    specificationFilterCount(specificationFilter),
 )
 const hasActiveFilters = $derived(Boolean(search.trim()) || activeFilterCount > 0)
 const selectedReferences = $derived(selectedDetail ? modelReferences(selectedDetail.id) : [])
@@ -138,7 +154,16 @@ const providerModelColumns = providerModelColumnHelper.columns([
     enableSorting: false,
     enableGlobalFilter: true,
     meta: { label: () => m.common_model(), cellClass: 'whitespace-normal py-4' },
-    size: 350,
+    size: 260,
+  }),
+  providerModelColumnHelper.accessor('specification', {
+    header: () => renderSnippet(providerModelSpecificationHeader),
+    cell: (context) => renderSnippet(providerModelSpecificationCell, context),
+    filterFn: (row, _columnId, value) => matchesSpecification(row.original.specification, value as SpecificationFilter),
+    enableSorting: false,
+    enableGlobalFilter: false,
+    meta: { label: () => m.model_specification_title(), cellClass: 'whitespace-normal py-4', exportable: false },
+    size: 360,
   }),
   providerModelColumnHelper.accessor((model) => (model.available ? 'available' : 'unavailable'), {
     id: 'availability',
@@ -256,6 +281,11 @@ function setCatalogFilter(columnId: string, value: string, emptyValue = 'all'): 
 function clearFilters(): void {
   search = ''
   columnFilters = []
+}
+
+function setSpecificationFilter(value: SpecificationFilter): void {
+  const remaining = columnFilters.filter((filter) => filter.id !== 'specification')
+  columnFilters = specificationFilterCount(value) ? [...remaining, { id: 'specification', value }] : remaining
 }
 
 function modelEditorSearch(modelId: string): string {
@@ -551,13 +581,15 @@ async function deleteManualModel(): Promise<void> {
   <div class="min-h-10 w-full min-w-0 text-left" aria-label={`${model.name} ${model.id}`}>
     <span class="block truncate font-medium">{model.name}</span>
     <span class="block truncate font-technical text-xs text-muted-foreground">{model.id}</span>
-    <span class="mt-1 flex flex-wrap gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
-      {#if model.capabilities.context}<span>{formatNumber(model.capabilities.context)} {m.common_context()}</span>{/if}
-      {#if model.capabilities.reasoning}<span>{m.common_reasoning()}</span>{/if}
-      {#if model.capabilities.tool_call}<span>{m.common_tool_calls()}</span>{/if}
-      {#if model.capabilities.attachment}<span>{m.common_attachments()}</span>{/if}
-    </span>
   </div>
+{/snippet}
+
+{#snippet providerModelSpecificationHeader()}
+  <ModelSpecificationFilter value={specificationFilter} onChange={setSpecificationFilter} />
+{/snippet}
+
+{#snippet providerModelSpecificationCell(context: DataTableCellContext<ProviderModelSummary>)}
+  <ModelSpecification specification={context.row.original.specification} />
 {/snippet}
 
 {#snippet providerModelAvailabilityCell(context: DataTableCellContext<ProviderModelSummary>)}
@@ -782,12 +814,13 @@ async function deleteManualModel(): Promise<void> {
             bind:value={search}
             placeholder={m.provider_model_catalog_search_name_model_id()} />
         </div>
-        <div class="mt-2 flex items-center justify-between gap-2">
+        <div class="mt-2 flex flex-wrap items-center justify-between gap-2">
           <Button variant="outline" onclick={() => (filtersOpen = true)}>
             <SlidersHorizontalIcon data-icon="inline-start" />
             {m.provider_model_catalog_filter_models()}
             {#if activeFilterCount > 0}<span class="font-technical">· {activeFilterCount}</span>{/if}
           </Button>
+          <ModelSpecificationFilter value={specificationFilter} onChange={setSpecificationFilter} />
           {#if hasActiveFilters}
             <Button size="sm" variant="ghost" onclick={clearFilters}>{m.provider_model_catalog_clear_filters()}</Button>
           {/if}
@@ -828,14 +861,9 @@ async function deleteManualModel(): Promise<void> {
             <div class="col-span-2 min-h-10 min-w-0 text-left" aria-label={`${model.name} ${model.id}`}>
               <span class="block truncate font-medium">{model.name}</span>
               <span class="block truncate font-technical text-xs text-muted-foreground">{model.id}</span>
-              <span class="mt-1 flex flex-wrap gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
-                {#if model.capabilities.context}<span
-                    >{formatNumber(model.capabilities.context)} {m.common_context()}</span
-                  >{/if}
-                {#if model.capabilities.reasoning}<span>{m.common_reasoning()}</span>{/if}
-                {#if model.capabilities.tool_call}<span>{m.common_tool_calls()}</span>{/if}
-                {#if model.capabilities.attachment}<span>{m.common_attachments()}</span>{/if}
-              </span>
+            </div>
+            <div class="col-span-2 min-w-0">
+              <ModelSpecification specification={model.specification} />
             </div>
             <div class="col-span-2 flex min-w-0 flex-wrap items-center gap-2">
               <Badge variant={model.available ? 'secondary' : 'outline'}

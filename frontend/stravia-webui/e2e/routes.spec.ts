@@ -28,7 +28,15 @@ test('prefilled model metadata stays clean without erasing a user draft', async 
               available: true,
               source_kind: 'discovered',
               selection_policy: 'auto',
-              capabilities: {},
+              specification: {
+                limit: null,
+                modalities: null,
+                reasoning: null,
+                tool_call: null,
+                structured_output: null,
+                attachment: null,
+                temperature: null,
+              },
               revision: 1,
             },
           ],
@@ -494,7 +502,15 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
     available: true,
     source_kind: 'discovered',
     selection_policy: 'auto',
-    capabilities: { tool_call: true, reasoning: true, attachment: true, context: 128000 },
+    specification: {
+      limit: { context: 1050000, input: 1048576, output: 32000 },
+      modalities: { input: ['image', 'pdf'], output: ['text'] },
+      reasoning: true,
+      tool_call: false,
+      structured_output: null,
+      attachment: true,
+      temperature: false,
+    },
     revision: 1,
   }
   const unavailable = { ...available, id: 'gpt-unavailable', name: 'GPT Unavailable', available: false }
@@ -516,6 +532,31 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
     }
     if (path.endsWith('/models')) {
       await route.fulfill({ json: { data: { models: [available, unavailable] } } })
+      return
+    }
+    if (path === '/providers/provider-a/model' && request.method() === 'GET') {
+      await route.fulfill({
+        json: {
+          data: {
+            ...available,
+            metadata: {
+              id: available.id,
+              name: available.name,
+              limit: available.specification.limit,
+              modalities: available.specification.modalities,
+              reasoning: true,
+              tool_call: false,
+              structured_output: null,
+              attachment: true,
+              temperature: false,
+              cost: { input: 0.25, output: 1 },
+            },
+            extensions: {},
+            created_at: '2026-08-17T00:00:00Z',
+            updated_at: '2026-08-17T00:00:00Z',
+          },
+        },
+      })
       return
     }
     if (path.endsWith('/model-capabilities')) {
@@ -617,11 +658,36 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
   await expect(page.getByRole('option', { name: /GPT Available.*gpt-available/ })).toBeVisible()
   await expect(page.getByRole('option', { name: /GPT Unavailable/ })).toHaveCount(0)
   await page.getByRole('option', { name: /GPT Available.*gpt-available/ }).click()
-  await expect(page.getByTitle('128,000 context')).toBeVisible()
-  await expect(page.getByTitle('Reasoning')).toBeVisible()
+  const dialogSpecification = page.getByRole('dialog').getByRole('group', { name: 'Model specification' })
+  await expect(dialogSpecification).toContainText('1.05M')
+  await expect(dialogSpecification).toContainText('32K')
+  await expect(dialogSpecification).toContainText('Input')
+  await expect(dialogSpecification).toContainText('Output')
+  await expect(dialogSpecification.getByRole('button', { name: 'Image input' })).toBeVisible()
+  await expect(dialogSpecification.getByRole('button', { name: 'PDF input' })).toBeVisible()
+  await expect(dialogSpecification.getByRole('button', { name: 'Text output' })).toBeVisible()
+  await expect(dialogSpecification.getByRole('button', { name: 'Reasoning' })).toBeVisible()
+  await page.getByRole('button', { name: 'View model details' }).click()
+  const detailDialog = page.getByRole('dialog').filter({ has: page.getByRole('heading', { name: 'GPT Available' }) })
+  const detailSpecification = detailDialog.getByRole('region', { name: 'Model specification' })
+  await expect(detailSpecification).toContainText('1,050,000 tokens')
+  await expect(detailSpecification).toContainText('1,048,576 tokens')
+  await expect(detailSpecification).toContainText('32,000 tokens')
+  await expect(detailSpecification).toContainText(/Input modalities.*Image.*PDF/)
+  await expect(detailSpecification).toContainText(/Output modalities.*Text/)
+  await expect(detailSpecification).toContainText(/Reasoning.*Supported/)
+  await expect(detailSpecification).toContainText(/Tool calls.*Not supported/)
+  await expect(detailSpecification).toContainText(/Structured output.*Not registered/)
+  await expect(detailSpecification).toContainText(/Attachments.*Supported/)
+  await expect(detailSpecification).toContainText(/Temperature.*Not supported/)
+  await expect(detailDialog).toContainText('Pricing')
+  await expect(detailDialog).toContainText('$0.25')
+  await detailDialog.getByRole('button', { name: 'Close' }).click()
   await page.getByRole('button', { name: 'Confirm' }).click()
-  await expect(page.getByRole('button', { name: 'Edit destination 1' })).toContainText('Provider A')
-  await expect(page.getByRole('button', { name: 'Edit destination 1' })).toContainText('gpt-available')
+  const savedDestination = page.getByRole('button', { name: 'Edit destination 1' })
+  await expect(savedDestination).toContainText('Provider A')
+  await expect(savedDestination).toContainText('gpt-available')
+  await expect(page.getByRole('group', { name: 'Model specification' })).toContainText('1.05M')
 
   await page.getByRole('button', { name: 'Add destination' }).click()
   await page.getByLabel('Destination 2 model service', { exact: true }).click()
@@ -646,7 +712,7 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
   await page.getByLabel('Destination 1 model service', { exact: true }).click()
   await page.getByRole('option', { name: 'Provider B' }).click()
   await expect(page.getByLabel('Destination 1 model', { exact: true })).toHaveText(/Choose a model/)
-  await expect(page.getByRole('dialog').getByTitle('128,000 context')).toHaveCount(0)
+  await expect(page.getByRole('dialog').getByRole('group', { name: 'Model specification' })).toHaveCount(0)
   await page.getByLabel('Destination 1 model', { exact: true }).click()
   await page.getByRole('option', { name: /GPT Available.*gpt-available/ }).click()
   await page.getByRole('button', { name: 'Confirm' }).click()

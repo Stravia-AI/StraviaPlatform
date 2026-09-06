@@ -3,27 +3,17 @@ import * as m from '$lib/paraglide/messages.js'
 import { beforeNavigate, goto } from '$app/navigation'
 import { base, resolve } from '$app/paths'
 import { createQuery, useQueryClient } from '@tanstack/svelte-query'
-import AudioLinesIcon from '@lucide/svelte/icons/audio-lines'
-import BrainCircuitIcon from '@lucide/svelte/icons/brain-circuit'
 import CirclePlusIcon from '@lucide/svelte/icons/circle-plus'
-import FileTextIcon from '@lucide/svelte/icons/file-text'
-import GaugeIcon from '@lucide/svelte/icons/gauge'
 import GripVerticalIcon from '@lucide/svelte/icons/grip-vertical'
-import ImageIcon from '@lucide/svelte/icons/image'
-import PaperclipIcon from '@lucide/svelte/icons/paperclip'
 import PlusIcon from '@lucide/svelte/icons/plus'
 import RotateCcwIcon from '@lucide/svelte/icons/rotate-ccw'
 import Trash2Icon from '@lucide/svelte/icons/trash-2'
-import TypeIcon from '@lucide/svelte/icons/type'
-import VideoIcon from '@lucide/svelte/icons/video'
 import WaypointsIcon from '@lucide/svelte/icons/waypoints'
-import WrenchIcon from '@lucide/svelte/icons/wrench'
 import { tick, untrack } from 'svelte'
 import { toast } from 'svelte-sonner'
 
 import { admin } from '$lib/admin-client'
 import { modelIdFromCatalogId } from '$lib/catalog-model-id'
-import { formatNumber } from '$lib/format'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
 import type {
   Provider,
@@ -51,6 +41,7 @@ import {
 import ModelCombobox from '$lib/components/model-combobox.svelte'
 import ModelIdCombobox from '$lib/components/model-id-combobox.svelte'
 import ModelDetailsDialog from '$lib/components/model-details-dialog.svelte'
+import ModelSpecification from '$lib/components/model-specification.svelte'
 import PageHeader from '$lib/components/page-header.svelte'
 import * as AlertDialog from '$lib/components/ui/alert-dialog'
 import { Badge } from '$lib/components/ui/badge'
@@ -197,10 +188,10 @@ async function loadInventory(target: RouteTargetForm, initializeDraft = false): 
     if (target.model) {
       const summary = selectedSummary(target)
       target.custom = !summary
-      if (summary) {
-        await loadCapabilities(target, !target.persisted)
+      if (summary && !target.persisted) {
+        await loadThinkingMap(target)
         // 初次加载的映射不是表单编辑；只推进该字段基线，保留加载期间的其他草稿。
-        if (initializeDraft && !target.persisted) acceptImmediateThinkingMap(target, target.thinkingLevelMap)
+        if (initializeDraft) acceptImmediateThinkingMap(target, target.thinkingLevelMap)
       }
     }
   } catch (error) {
@@ -216,7 +207,6 @@ async function changeProvider(target: RouteTargetForm, providerId: string): Prom
   target.providerId = providerId
   target.model = ''
   target.inventory = []
-  target.capabilities = undefined
   target.custom = false
   target.persisted = false
   target.validationError = ''
@@ -228,25 +218,17 @@ async function selectModel(target: RouteTargetForm, modelId: string): Promise<vo
   target.model = modelId
   target.custom = false
   target.validationError = ''
-  target.capabilities = undefined
   target.thinkingLevelMap = []
-  await loadCapabilities(target, true)
+  await loadThinkingMap(target)
 }
 
-async function loadCapabilities(target: RouteTargetForm, refreshThinkingMap = false): Promise<void> {
+async function loadThinkingMap(target: RouteTargetForm): Promise<void> {
   if (!target.providerId || !target.model) return
   target.loading = true
   try {
-    const [capabilities, detail] = await Promise.all([
-      admin.providers.capabilities(target.providerId, target.model),
-      refreshThinkingMap ? admin.providers.model(target.providerId, target.model) : undefined,
-    ])
-    target.capabilities = capabilities
-    if (detail) {
-      target.thinkingLevelMap = detail.thinking_level_map?.map((row) => ({ ...row, control: { ...row.control } })) ?? []
-    }
+    const detail = await admin.providers.model(target.providerId, target.model)
+    target.thinkingLevelMap = detail.thinking_level_map?.map((row) => ({ ...row, control: { ...row.control } })) ?? []
   } catch (error) {
-    target.capabilities = undefined
     target.validationError = m.model_editor_model_details_load_failed({ error: localizeBackendErrorMessage(error) })
   } finally {
     target.loading = false
@@ -256,7 +238,6 @@ async function loadCapabilities(target: RouteTargetForm, refreshThinkingMap = fa
 function useInventory(target: RouteTargetForm): void {
   target.custom = false
   target.model = ''
-  target.capabilities = undefined
   target.validationError = ''
 }
 
@@ -269,7 +250,6 @@ function cloneTarget(target: RouteTargetForm): RouteTargetForm {
   return {
     ...target,
     inventory: [...target.inventory],
-    capabilities: target.capabilities ? { ...target.capabilities } : undefined,
     thinkingLevelMap: target.thinkingLevelMap.map((row) => ({ ...row, control: { ...row.control } })),
   }
 }
@@ -571,59 +551,6 @@ async function saveModel(): Promise<void> {
 }
 </script>
 
-{#snippet targetCapabilityBadges(target: RouteTargetForm, summary: ProviderModelSummary | undefined)}
-  {#if target.capabilities}
-    <span
-      class="inline-flex h-7 items-center gap-1.5 rounded-md bg-muted px-2 font-technical text-xs tabular-nums text-muted-foreground"
-      title={`${formatNumber(target.capabilities.context_window)} ${m.common_context()}`}>
-      <GaugeIcon class="size-3.5" aria-hidden="true" />
-      {formatNumber(target.capabilities.context_window)}
-    </span>
-  {/if}
-  {#if target.capabilities?.reasoning}
-    <span
-      class="inline-flex size-7 items-center justify-center rounded-md bg-muted text-muted-foreground"
-      title={m.common_reasoning()}>
-      <BrainCircuitIcon class="size-3.5" aria-hidden="true" />
-      <span class="sr-only">{m.common_reasoning()}</span>
-    </span>
-  {/if}
-  {#if target.capabilities?.tool_call}
-    <span
-      class="inline-flex size-7 items-center justify-center rounded-md bg-muted text-muted-foreground"
-      title={m.common_tool_calls()}>
-      <WrenchIcon class="size-3.5" aria-hidden="true" />
-      <span class="sr-only">{m.common_tool_calls()}</span>
-    </span>
-  {/if}
-  {#each target.capabilities?.input_modalities ?? [] as modality (modality)}
-    <span
-      class="inline-flex size-7 items-center justify-center rounded-md bg-muted text-muted-foreground"
-      title={m.model_editor_modality_input({ modality })}>
-      {#if modality === 'image'}
-        <ImageIcon class="size-3.5" aria-hidden="true" />
-      {:else if modality === 'audio'}
-        <AudioLinesIcon class="size-3.5" aria-hidden="true" />
-      {:else if modality === 'video'}
-        <VideoIcon class="size-3.5" aria-hidden="true" />
-      {:else if modality === 'pdf'}
-        <FileTextIcon class="size-3.5" aria-hidden="true" />
-      {:else}
-        <TypeIcon class="size-3.5" aria-hidden="true" />
-      {/if}
-      <span class="sr-only">{m.model_editor_modality_input({ modality })}</span>
-    </span>
-  {/each}
-  {#if summary?.capabilities.attachment}
-    <span
-      class="inline-flex size-7 items-center justify-center rounded-md bg-muted text-muted-foreground"
-      title={m.common_attachments()}>
-      <PaperclipIcon class="size-3.5" aria-hidden="true" />
-      <span class="sr-only">{m.common_attachments()}</span>
-    </span>
-  {/if}
-{/snippet}
-
 {#snippet priorityConnector(insertion: RouteTargetInsertion, position: string)}
   <div
     data-slot="target-priority-connector"
@@ -777,19 +704,21 @@ async function saveModel(): Promise<void> {
                   <div class="flex min-w-0 flex-wrap content-start items-stretch gap-2 p-2">
                     {#each lane.targets as target (target.key)}
                       {@const summary = selectedSummary(target)}
-                      <button
-                        type="button"
+                      <div
                         draggable="true"
+                        role="group"
                         data-slot="target-card"
                         data-enabled="true"
-                        class="group flex min-h-20 min-w-60 flex-1 cursor-grab flex-col items-start rounded-lg bg-card p-3 text-left shadow-xs ring-1 ring-border transition-[box-shadow,transform] hover:-translate-y-0.5 hover:shadow-sm focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 active:scale-[0.96] active:cursor-grabbing motion-reduce:transform-none motion-reduce:transition-none"
-                        aria-label={m.model_editor_edit_destination_value({ index: targetIndex(target) + 1 })}
+                        class="group flex min-h-20 min-w-60 flex-1 cursor-grab flex-col items-start rounded-lg bg-card p-3 text-left shadow-xs ring-1 ring-border transition-[box-shadow,transform] hover:-translate-y-0.5 hover:shadow-sm active:cursor-grabbing motion-reduce:transform-none motion-reduce:transition-none"
                         ondragstart={(event) => startTargetDrag(event, target)}
                         ondragend={() => (draggedTargetKey = '')}
                         ondragover={(event) => event.preventDefault()}
-                        ondrop={(event) => dropOnLane(event, lane.priority, target.key)}
-                        onclick={() => editTarget(target)}>
-                        <span class="flex w-full min-w-0 items-center gap-2">
+                        ondrop={(event) => dropOnLane(event, lane.priority, target.key)}>
+                        <button
+                          type="button"
+                          class="flex w-full min-w-0 items-center gap-2 rounded-md text-left outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+                          aria-label={m.model_editor_edit_destination_value({ index: targetIndex(target) + 1 })}
+                          onclick={() => editTarget(target)}>
                           <GripVerticalIcon class="size-4 shrink-0 text-muted-foreground" />
                           <span class="truncate font-medium">
                             {providers.find((provider) => provider.id === target.providerId)?.name ?? target.providerId}
@@ -798,14 +727,14 @@ async function saveModel(): Promise<void> {
                             {target.model}
                           </span>
                           <span class="size-2 shrink-0 rounded-full bg-emerald-500" aria-hidden="true"></span>
-                        </span>
-                        <span class="mt-auto flex flex-wrap gap-1.5 pl-6 pt-2">
+                        </button>
+                        <div class="mt-auto flex flex-wrap gap-1.5 pl-6 pt-2">
                           {#if target.persisted && summary && !summary.available}
                             <Badge variant="destructive">{m.model_editor_model_no_longer_available()}</Badge>
                           {/if}
-                          {@render targetCapabilityBadges(target, summary)}
-                        </span>
-                      </button>
+                          {#if summary}<ModelSpecification specification={summary.specification} />{/if}
+                        </div>
+                      </div>
                     {/each}
                     {#if isDraggingTarget}
                       <span class="ml-auto flex min-h-10 items-center px-3 text-sm text-primary">
@@ -850,32 +779,36 @@ async function saveModel(): Promise<void> {
             {#each disabledTargets as target (target.key)}
               {@const summary = selectedSummary(target)}
               <div class="relative">
-                <button
-                  type="button"
+                <div
+                  role="group"
                   draggable="true"
                   class="group flex min-h-20 w-full cursor-grab flex-col items-start rounded-lg border bg-background p-3 pr-12 text-left shadow-xs transition-[border-color,box-shadow,transform] hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-sm focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 active:cursor-grabbing"
-                  aria-label={m.model_editor_edit_destination_value({ index: targetIndex(target) + 1 })}
                   ondragstart={(event) => startTargetDrag(event, target)}
-                  ondragend={() => (draggedTargetKey = '')}
-                  onclick={() => editTarget(target)}>
-                  <span class="flex w-full min-w-0 items-center gap-2">
-                    <GripVerticalIcon class="size-4 shrink-0 text-muted-foreground" />
-                    <span class="truncate font-medium">
-                      {providers.find((provider) => provider.id === target.providerId)?.name ||
-                        target.providerId ||
-                        m.model_editor_unconfigured_target()}
+                  ondragend={() => (draggedTargetKey = '')}>
+                  <button
+                    type="button"
+                    class="flex w-full min-w-0 flex-col items-start rounded-md text-left outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+                    aria-label={m.model_editor_edit_destination_value({ index: targetIndex(target) + 1 })}
+                    onclick={() => editTarget(target)}>
+                    <span class="flex w-full min-w-0 items-center gap-2">
+                      <GripVerticalIcon class="size-4 shrink-0 text-muted-foreground" />
+                      <span class="truncate font-medium">
+                        {providers.find((provider) => provider.id === target.providerId)?.name ||
+                          target.providerId ||
+                          m.model_editor_unconfigured_target()}
+                      </span>
                     </span>
-                  </span>
-                  <span class="mt-1 w-full truncate pl-6 font-technical text-sm text-muted-foreground">
-                    {target.model || m.model_editor_choose_model()}
-                  </span>
-                  <span class="mt-auto flex flex-wrap gap-1.5 pl-6 pt-2">
+                    <span class="mt-1 w-full truncate pl-6 font-technical text-sm text-muted-foreground">
+                      {target.model || m.model_editor_choose_model()}
+                    </span>
+                  </button>
+                  <div class="mt-auto flex flex-wrap gap-1.5 pl-6 pt-2">
                     {#if target.persisted && summary && !summary.available}
                       <Badge variant="destructive">{m.model_editor_model_no_longer_available()}</Badge>
                     {/if}
-                    {@render targetCapabilityBadges(target, summary)}
-                  </span>
-                </button>
+                    {#if summary}<ModelSpecification specification={summary.specification} />{/if}
+                  </div>
+                </div>
                 <Button
                   type="button"
                   variant="ghost"
@@ -1030,17 +963,13 @@ async function saveModel(): Promise<void> {
                 <div class="mt-3 flex items-center gap-2 text-sm text-muted-foreground">
                   <Spinner />{m.model_editor_loading_models_supported_features()}
                 </div>
-              {:else if target.capabilities || summary}
-                <div
-                  class="mt-4 flex flex-wrap items-center gap-2 border-t pt-3"
-                  aria-label={m.model_editor_destination_value_supported_features({ index: index + 1 })}>
-                  {@render targetCapabilityBadges(target, summary)}
-                  {#if summary}
-                    <ModelDetailsDialog
-                      providerId={target.providerId}
-                      modelId={target.model}
-                      triggerLabel={m.model_editor_view_model_details()} />
-                  {/if}
+              {:else if summary}
+                <div class="mt-4 flex flex-wrap items-center gap-2 border-t pt-3">
+                  <ModelSpecification specification={summary.specification} />
+                  <ModelDetailsDialog
+                    providerId={target.providerId}
+                    modelId={target.model}
+                    triggerLabel={m.model_editor_view_model_details()} />
                 </div>
               {/if}
               {#if target.providerId && target.model.trim() && target.thinkingLevelMap.length > 0}

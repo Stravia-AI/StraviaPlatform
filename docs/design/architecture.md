@@ -766,6 +766,10 @@ Provider discovery 只负责提供当前可见的模型 ID。动态端点响应�
 
 `provider_models` 按 `(provider_id, model_id)` 保存 Provider 实例拥有的可编辑模型快照。首次同步插入 discovery 结果；后续同步只对账 `presence` 与来源生命周期，不覆盖管理员已编辑的 metadata。管理员可显式执行 re-import，以当前来源值整体替换单个模型 metadata。未知字段保存在 `metadata_json` 中，成本与上限的常用查询列及分档成本规则同时规范化到关系列。
 
+管理列表的每个 Provider Model 返回 `specification`，替代原有不完整的 `capabilities` 摘要。Core 从已保存 metadata 投影 `limit`（`context`、`input`、`output`）、`modalities`（`input`、`output`），以及 `reasoning`、`tool_call`、`structured_output`、`attachment`、`temperature` 五项可空声明；缺失功能保持 `null`，不补 `false`，缺失限额与模态组保持 `null`。HTTP 与 Desktop 共用该投影，单模型详情继续返回完整 metadata。此管理契约变更不修改持久化 schema、推理接口或运行时能力判定。
+
+WebUI 的只读模型规格组件消费这一语义，列表与 Target 使用紧凑密度，详情展开完整限额和三态功能。数字按十进制无损缩写，不能简短精确表达时保留千位分隔全数；输入输出方向始终分开。可用模型规格列在既有列筛选状态中保存五类 AND 条件，使用原始整数做包含等于边界的下限比较，并要求选中模态与功能已明确登记；未选维度不限制。列表一次响应提供展示和筛选所需数据，不逐行请求详情，也不从实时目录或平台能力覆盖已保存规格。
+
 Canonical Model 只用作一次性模板：创建 Route 时，客户端请求使用的 Route ID 仍落在现有 `models.name` 存储列；准备手动 Provider Model 时，`POST /api/v1/providers/{provider_id}/model/prepare` 接受 `{model_id, template_id?}`，由 Core 从 active revision 复制完整 Canonical record 并把 `id` 替换为最终 upstream model ID。两个流程都不保存 Canonical Model binding。
 
 `stravia-core` 通过 crate-private Provider connection 与 Route 两个深模块收口管理写入。Provider connection 负责 Catalog/custom 解析、Adapter Credentials、Base URL、OAuth、连通性与删除；Route 负责 Provider Model snapshot、discovery、Selection Policy、Canonical Model 一次性模板、Route ID 与 Target。Admin HTTP 只做 DTO adapter：`POST /api/v1/models/bind` 执行一键或指定 Route ID 的 Target 绑定，`POST /api/v1/models/unbind` 摘除 Target，并在最后一个 Target 被摘除时删除 Route。

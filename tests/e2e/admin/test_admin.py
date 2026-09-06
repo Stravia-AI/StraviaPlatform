@@ -358,6 +358,140 @@ def test_provider_crud(admin_env: dict[str, str]) -> None:
 
 @pytest.mark.e2e
 @pytest.mark.admin
+def test_provider_model_specification_preserves_saved_metadata(admin_env: dict[str, str]) -> None:
+    provider_id = _create_provider(admin_env, "test-provider-model-specification")
+    model_id = "saved-specification-model"
+    metadata = {
+        "id": model_id,
+        "name": "Saved specification model",
+        "attachment": True,
+        "reasoning": False,
+        "structured_output": None,
+        "temperature": True,
+        "modalities": {
+            "input": ["text", "image", "pdf"],
+            "output": ["text", "audio", "custom-output"],
+        },
+        "limit": {
+            "context": 1_050_000,
+            "input": 1_048_576,
+            "output": 65_537,
+        },
+    }
+
+    status, created = http_request(
+        "POST",
+        f"{admin_env['admin']}/api/v1/providers/{provider_id}/models",
+        payload={"model_id": model_id, "metadata": metadata},
+        headers=admin_env["auth"],
+    )
+    assert status == 201, f"create provider model failed: {status} {created}"
+
+    expected_specification = {
+        "limit": {
+            "context": 1_050_000,
+            "input": 1_048_576,
+            "output": 65_537,
+        },
+        "modalities": {
+            "input": ["text", "image", "pdf"],
+            "output": ["text", "audio", "custom-output"],
+        },
+        "reasoning": False,
+        "tool_call": None,
+        "structured_output": None,
+        "attachment": True,
+        "temperature": True,
+    }
+
+    status, listed = http_request(
+        "GET",
+        f"{admin_env['admin']}/api/v1/providers/{provider_id}/models",
+        headers=admin_env["auth"],
+    )
+    assert status == 200
+    summary = next(
+        model for model in listed["data"]["models"] if model["id"] == model_id
+    )
+    assert summary["specification"] == expected_specification
+    assert "capabilities" not in summary
+    unknown_summary = next(
+        model for model in listed["data"]["models"] if model["id"] == "gpt-4o-mini"
+    )
+    assert unknown_summary["specification"] == {
+        "limit": None,
+        "modalities": None,
+        "reasoning": None,
+        "tool_call": None,
+        "structured_output": None,
+        "attachment": None,
+        "temperature": None,
+    }
+
+    status, detail = http_request(
+        "GET",
+        f"{admin_env['admin']}/api/v1/providers/{provider_id}/model?model={model_id}",
+        headers=admin_env["auth"],
+    )
+    assert status == 200
+    saved = detail["data"]
+    assert {
+        key: saved["metadata"][key] for key in expected_specification
+    } == expected_specification
+
+    revised_metadata = {
+        **metadata,
+        "attachment": False,
+        "reasoning": True,
+        "tool_call": True,
+        "structured_output": False,
+        "temperature": None,
+        "limit": {
+            "context": 1_048_576,
+            "input": 65_537,
+            "output": 1_050_000,
+        },
+    }
+    status, updated = http_request(
+        "PUT",
+        f"{admin_env['admin']}/api/v1/providers/{provider_id}/model",
+        payload={
+            "model_id": model_id,
+            "metadata": revised_metadata,
+            "revision": saved["revision"],
+        },
+        headers=admin_env["auth"],
+    )
+    assert status == 200, f"update provider model failed: {status} {updated}"
+    revised_specification = {
+        **expected_specification,
+        "limit": revised_metadata["limit"],
+        "reasoning": True,
+        "tool_call": True,
+        "structured_output": False,
+        "attachment": False,
+        "temperature": None,
+    }
+    assert updated["data"]["revision"] > saved["revision"]
+    assert {
+        key: updated["data"]["metadata"][key] for key in revised_specification
+    } == revised_specification
+
+    status, listed = http_request(
+        "GET",
+        f"{admin_env['admin']}/api/v1/providers/{provider_id}/models",
+        headers=admin_env["auth"],
+    )
+    assert status == 200
+    summary = next(
+        model for model in listed["data"]["models"] if model["id"] == model_id
+    )
+    assert summary["revision"] == updated["data"]["revision"]
+    assert summary["specification"] == revised_specification
+
+
+@pytest.mark.e2e
+@pytest.mark.admin
 def test_model_crud(admin_env: dict[str, str]) -> None:
     provider_id = _create_provider(admin_env, "test-provider-model")
     route_storage_id = _create_model(admin_env, provider_id, "test-model", "Test model")
