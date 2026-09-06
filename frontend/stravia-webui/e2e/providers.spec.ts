@@ -633,7 +633,7 @@ test('Provider Model editor uses structured fields and preserves exact decimal i
   await expect(manualModelPicker).toHaveText(/Claude Opus 4\.6.*anthropic\/claude-opus-4\.6/)
 })
 
-test('OAuth Provider configuration opens authorization without manual callback fields on localhost', async ({
+test('OAuth Provider configuration allows manual completion while the localhost listener is active', async ({
   page,
 }) => {
   await page.goto('/providers')
@@ -654,11 +654,22 @@ test('OAuth Provider configuration opens authorization without manual callback f
 
   expect((await initRequest).postDataJSON()).toMatchObject({ vendor: 'codex', use_proxy: false, callback_mode: 'auto' })
   await expect(page.getByText('Waiting for authorization…')).toBeVisible()
-  await expect(page.getByLabel('Callback URL')).toHaveCount(0)
+  await expect(page.getByLabel('Callback URL')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Complete', exact: true })).toBeDisabled()
   await expect(page.getByRole('button', { name: 'Reopen sign-in page' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Cancel sign-in' })).toBeVisible()
-  await page.getByRole('button', { name: 'Cancel sign-in' }).click()
-  await expect(page.getByRole('button', { name: 'Sign in with OAuth' })).toBeVisible()
+
+  await page.route('**/api/v1/oauth/sessions/oauth-session-1/complete', async (route) => {
+    await page.route('**/api/v1/oauth/sessions/oauth-session-1/status', async (statusRoute) => {
+      await statusRoute.fulfill({ json: { data: { status: 'ready', expires_in: 600 } } })
+    })
+    await route.fulfill({ json: { data: { status: 'ready', expires_in: 600 } } })
+  })
+  const callbackUrl = 'http://localhost:1457/auth/callback?code=test-code&state=test-state'
+  await page.getByLabel('Callback URL').fill(callbackUrl)
+  await page.getByRole('button', { name: 'Complete', exact: true }).click()
+  await expect(page.getByText('Authorization complete', { exact: true })).toBeVisible()
+  await expect(page.getByLabel('Callback URL')).toHaveCount(0)
 })
 
 test('manual OAuth fallback shows one full callback URL field', async ({ page }) => {
