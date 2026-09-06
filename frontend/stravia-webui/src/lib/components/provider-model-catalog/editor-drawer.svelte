@@ -3,6 +3,7 @@ import * as m from '$lib/paraglide/messages.js'
 import type { ProviderModelDetail, ProviderModelSelectionPolicy } from '$lib/types'
 
 import ProviderModelEditor from '$lib/components/provider-model-editor.svelte'
+import { Badge } from '$lib/components/ui/badge'
 import { Button } from '$lib/components/ui/button'
 import * as Sheet from '$lib/components/ui/sheet'
 import { Spinner } from '$lib/components/ui/spinner'
@@ -45,18 +46,20 @@ let editor = $state<{ submit: () => void }>()
       <Sheet.Header class="border-b pr-14">
         <Sheet.Title class="truncate">{detail.metadata.name || detail.id}</Sheet.Title>
         <Sheet.Description class="break-all font-technical">{detail.id}</Sheet.Description>
+        <div class="flex flex-wrap gap-2">
+          <Badge variant={detail.available ? 'secondary' : 'outline'}>
+            {detail.available ? m.common_used() : m.common_unavailable()}
+          </Badge>
+          <Badge variant="outline">
+            {detail.source_kind === 'manual' ? m.common_added_manually() : m.common_synced()}
+          </Badge>
+        </div>
       </Sheet.Header>
       <div class="route-overlay-body" data-provider-model-scroll-owner>
         {#if loading}
           <div class="grid min-h-72 place-items-center"><Spinner /></div>
         {:else}
-          <ProviderModelEditor
-            bind:this={editor}
-            {detail}
-            {draft}
-            {onSave}
-            {onSelectionChange}
-            {onDirtyChange} />
+          <ProviderModelEditor bind:this={editor} {detail} {draft} {onSave} {onSelectionChange} {onDirtyChange} />
         {/if}
       </div>
       <Sheet.Footer class="route-overlay-footer justify-between sm:justify-between">

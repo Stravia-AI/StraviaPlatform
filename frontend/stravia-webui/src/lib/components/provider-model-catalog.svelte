@@ -634,9 +634,17 @@ async function deleteManualModel(): Promise<void> {
     {:else}
       <div class="route-section-header">
         <div class="min-w-0">
-          <h2 id="provider-model-editor-title" class="route-section-title truncate">
-            {selectedDetail.metadata.name || selectedDetail.id}
-          </h2>
+          <div class="flex flex-wrap items-center gap-2">
+            <h2 id="provider-model-editor-title" class="route-section-title break-all text-balance">
+              {selectedDetail.metadata.name || selectedDetail.id}
+            </h2>
+            <Badge variant={selectedDetail.available ? 'secondary' : 'outline'}>
+              {selectedDetail.available ? m.common_used() : m.common_unavailable()}
+            </Badge>
+            <Badge variant="outline">
+              {selectedDetail.source_kind === 'manual' ? m.common_added_manually() : m.common_synced()}
+            </Badge>
+          </div>
           <p class="route-section-description break-all font-technical">{selectedDetail.id}</p>
         </div>
         <DropdownMenu.Root>
@@ -650,24 +658,26 @@ async function deleteManualModel(): Promise<void> {
                 aria-label={m.provider_model_catalog_model_actions()}><MoreHorizontalIcon /></Button>
             {/snippet}
           </DropdownMenu.Trigger>
-          <DropdownMenu.Content align="end">
-            <DropdownMenu.Item
-              onSelect={() =>
-                void goto(
-                  resolve(
-                    `/models/new?provider=${encodeURIComponent(providerId)}&model=${encodeURIComponent(selectedDetail!.id)}`,
-                  ),
-                )}>
-              {m.provider_model_catalog_use_new_model()}
-            </DropdownMenu.Item>
-            {#if selectedDetail.can_reimport}
-              <DropdownMenu.Item onSelect={requestReimport}
-                >{m.provider_model_catalog_restore_details_service()}</DropdownMenu.Item>
-            {:else}
-              <DropdownMenu.Separator />
-              <DropdownMenu.Item variant="destructive" onSelect={requestDelete}
-                >{m.provider_model_catalog_remove_manually_added_model()}</DropdownMenu.Item>
-            {/if}
+          <DropdownMenu.Content align="end" class="w-max min-w-48 max-w-[calc(100vw-2rem)]">
+            <DropdownMenu.Group>
+              <DropdownMenu.Item
+                onSelect={() =>
+                  void goto(
+                    resolve(
+                      `/models/new?provider=${encodeURIComponent(providerId)}&model=${encodeURIComponent(selectedDetail!.id)}`,
+                    ),
+                  )}>
+                {m.provider_model_catalog_use_new_model()}
+              </DropdownMenu.Item>
+              {#if selectedDetail.can_reimport}
+                <DropdownMenu.Item onSelect={requestReimport}
+                  >{m.provider_model_catalog_restore_details_service()}</DropdownMenu.Item>
+              {:else}
+                <DropdownMenu.Separator />
+                <DropdownMenu.Item variant="destructive" onSelect={requestDelete}
+                  >{m.provider_model_catalog_remove_manually_added_model()}</DropdownMenu.Item>
+              {/if}
+            </DropdownMenu.Group>
           </DropdownMenu.Content>
         </DropdownMenu.Root>
       </div>
@@ -684,8 +694,8 @@ async function deleteManualModel(): Promise<void> {
       </div>
       <div
         class="sticky bottom-0 z-20 mt-2 flex translate-y-2 justify-end gap-2 border-t bg-background py-2 after:absolute after:inset-x-0 after:top-full after:h-2 after:bg-background after:content-['']">
-        <Button variant="outline" onclick={requestClose}>{m.common_cancel()}</Button>
-        <Button onclick={() => editor?.submit()} disabled={saving}>
+        <Button variant="outline" class="min-h-10" onclick={requestClose}>{m.common_cancel()}</Button>
+        <Button class="min-h-10" onclick={() => editor?.submit()} disabled={saving}>
           {#if saving}<Spinner data-icon="inline-start" />{/if}{m.common_save_model()}
         </Button>
       </div>

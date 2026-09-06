@@ -231,6 +231,11 @@ _避免使用_：Provider Offering、Catalog Model
 Provider Model 是属于一个已保存 Provider 实例、以 upstream model ID 标识的持久化模型快照；它不同于共享 Provider Catalog 条目，也不同于负责客户端路由的 Route 和 Target。
 _避免使用_：Provider Model Override、Catalog Model
 
+## Model Specification
+
+Model Specification（模型规格）是模型记录中已登记的上下文与输入输出限额、输入输出模态和功能声明；对 Provider Model，以已保存且可人工编辑的快照为准。它不代表经过实测的能力或当前接入路径的可用保证，不包含平台补充能力；信息缺失不等于不支持。
+_避免使用_：实测能力、实际可用能力、把未登记称为不支持
+
 ## Selection Policy
 
 Selection Policy 是管理员对 Provider Model 新路由候选资格的本地策略，取值为自动跟随、强制可用或强制禁用。
