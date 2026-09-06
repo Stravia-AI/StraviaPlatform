@@ -85,7 +85,7 @@ Optional Web Search exposes one public `web_search` capability that returns a te
 
 Configure one Search Backend in the WebUI. Local Search runs a bounded Agent over ordered internal Web Access Search and Fetch sources: the seeded in-process Local Provider, Exa, or Zhipu. Each Web Provider can independently use the Gateway proxy. Codex Agentic Search uses one exact compatible Codex OAuth Responses Provider/model binding and ignores the Local budget. There is no fallback between Local and Codex.
 
-Rendered Local Search and Fetch pages use Moli. Install the compatible `moli` executable beside the Stravia executable or on `PATH`; alternatively, set `STRAVIA_MOLI_BINARY` to its absolute path. Stravia invokes Moli with an isolated browser profile and applies the selected Gateway proxy.
+Rendered Local Search and Fetch pages use the embedded `moli-core` runtime, linked directly into Stravia. Stravia creates an isolated browser profile and applies the selected Gateway proxy.
 
 The platform Web Search switch controls explicit access for every valid API key. Each key separately controls MCP access and Transparent Injection; injection only adds selected enabled capabilities to compatible requests and does not restrict explicit or MCP calls. MCP clients connect to `POST /mcp`, use `Authorization: Bearer <key>`, and discover `web_search` only when both MCP access and the platform capability are enabled. OpenAI Responses native web-search declarations and hidden tool continuations use the same Search contract.
 

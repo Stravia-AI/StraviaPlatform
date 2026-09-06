@@ -85,7 +85,7 @@ Route Builder 使用独立页面。选择 Provider 后会自动加载其可用 P
 
 在 WebUI 中配置一个 Search Backend。Local Search 使用有界 Agent 编排有序的内部 Web Access Search/Fetch 来源：自动创建的进程内 Local Provider、Exa 或智谱。每个 Web Provider 都可独立选择是否使用 Gateway 代理。Codex Agentic Search 固定到一个精确且兼容的 Codex OAuth Responses Provider/model，不使用 Local budget。Local 与 Codex 之间不做 fallback。
 
-Local Search 与 Fetch 的动态页面由 Moli 渲染。请将兼容的 `moli` 可执行文件安装在 Stravia 可执行文件同目录或 `PATH` 中；也可通过 `STRAVIA_MOLI_BINARY` 指定绝对路径。Stravia 使用隔离的 browser profile 调用 Moli，并应用所选 Gateway 代理。
+Local Search 与 Fetch 的动态页面由直接链接进 Stravia 的嵌入式 `moli-core` 运行时渲染。Stravia 会创建隔离的 browser profile，并应用所选 Gateway 代理。
 
 平台联网搜索总开关统一控制所有有效 API Key 的显式访问。每个 Key 分别控制 MCP 访问和透明注入；透明注入只把所选且已启用的能力加入兼容请求，不限制显式调用或 MCP。MCP 客户端连接 `POST /mcp`，通过 `Authorization: Bearer <key>` 认证，并且只在 MCP 权限与平台能力都开启时发现 `web_search`。OpenAI Responses 的原生 web-search 声明与隐藏 tool continuation 使用同一个 Search contract。
 
