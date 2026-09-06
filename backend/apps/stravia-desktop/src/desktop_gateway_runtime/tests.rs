@@ -13,26 +13,33 @@ use tokio::sync::{Notify, oneshot};
 
 use super::{
     BindingFailureKind, DEFAULT_PORT, DEVELOPMENT_RUNTIME_DIR, DesktopGatewayRuntime,
-    DesktopPortMode, OwnerLookupStatus, PORT_STORE_FILE, PortOperationErrorCode, PortOwner,
-    PortOwnerResolver, PortPreferenceLoad, PortPreferenceStore, PortSwitchPublisher, TestBind,
-    port_store_path, repository_root, runtime_dir, start_http_server,
+    DesktopPortMode, OwnerLookupStatus, PortOperationErrorCode, PortOwner, PortOwnerResolver,
+    PortPreferenceLoad, PortPreferenceStore, PortSwitchPublisher, TestBind, repository_root,
+    runtime_dir, start_http_server,
 };
+
+#[test]
+fn desktop_e2e_runtime_is_isolated_from_development_and_production() {
+    let production_data_dir = PathBuf::from("production-app-data");
+    for development in [true, false] {
+        let e2e_dir = runtime_dir(development, true, production_data_dir.clone());
+        assert_ne!(
+            e2e_dir,
+            runtime_dir(true, false, production_data_dir.clone())
+        );
+        assert_ne!(
+            e2e_dir,
+            runtime_dir(false, false, production_data_dir.clone())
+        );
+    }
+}
 
 #[test]
 fn development_runtime_uses_a_hidden_repository_directory() {
     let production_data_dir = PathBuf::from("production-app-data");
     assert_eq!(
-        runtime_dir(true, production_data_dir),
+        runtime_dir(true, false, production_data_dir),
         repository_root().join(DEVELOPMENT_RUNTIME_DIR)
-    );
-}
-
-#[test]
-fn development_port_store_shares_the_database_runtime_directory() {
-    let runtime_dir = repository_root().join(DEVELOPMENT_RUNTIME_DIR);
-    assert_eq!(
-        port_store_path(&runtime_dir),
-        runtime_dir.join(PORT_STORE_FILE)
     );
 }
 
@@ -40,7 +47,7 @@ fn development_port_store_shares_the_database_runtime_directory() {
 fn production_runtime_keeps_the_tauri_app_data_directory() {
     let production_data_dir = PathBuf::from("production-app-data");
     assert_eq!(
-        runtime_dir(false, production_data_dir.clone()),
+        runtime_dir(false, false, production_data_dir.clone()),
         production_data_dir
     );
 }

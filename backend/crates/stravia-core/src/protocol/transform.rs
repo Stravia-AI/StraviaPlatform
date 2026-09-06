@@ -83,6 +83,13 @@ pub(crate) struct ProtocolPair {
     egress: ProtocolEndpoint,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ThinkingCarrierFacts {
+    pub(crate) indexed: bool,
+    pub(crate) may_be_protected: bool,
+    pub(crate) stream_unprotected_summaries: bool,
+}
+
 pub(crate) struct ProtocolTransform;
 
 impl ProtocolTransform {
@@ -155,6 +162,22 @@ impl ProtocolTransform {
 }
 
 impl ProtocolPair {
+    pub(crate) fn thinking_carrier_facts(
+        self,
+        encrypted_content_requested: bool,
+    ) -> ThinkingCarrierFacts {
+        let indexed = self.egress.protocol == Protocol::OpenResponses;
+        let may_be_protected = matches!(
+            self.egress.protocol,
+            Protocol::OpenResponses | Protocol::AnthropicMessages | Protocol::GoogleGemini
+        );
+        ThinkingCarrierFacts {
+            indexed,
+            may_be_protected,
+            stream_unprotected_summaries: indexed && !encrypted_content_requested,
+        }
+    }
+
     pub(crate) fn decode_request(self, body: Value) -> Result<AiRequest, TransformError> {
         adapter(self.ingress)?
             .decode_request(body)

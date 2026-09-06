@@ -267,7 +267,15 @@ test('editing a legacy Provider preserves credentials and legacy option fields',
                 available: true,
                 source_kind: 'discovered',
                 selection_policy: 'auto',
-                capabilities: { tool_call: true, reasoning: true, attachment: false, context: 128000 },
+                specification: {
+                  limit: { context: 128000, input: null, output: null },
+                  modalities: null,
+                  reasoning: true,
+                  tool_call: true,
+                  structured_output: null,
+                  attachment: false,
+                  temperature: null,
+                },
                 revision: 1,
               },
             ],
@@ -338,6 +346,383 @@ test('OAuth Provider connection view reconnects the saved account without showin
   await expect(page.getByRole('button', { name: 'Sign in again' })).toBeVisible()
 })
 
+test('Provider Model specifications preserve direction, precision, and unknown states without per-row requests', async ({
+  page,
+}) => {
+  const provider = {
+    id: 'specification-provider',
+    name: 'Specification Provider',
+    protocol: 'openai-compatible',
+    base_url: 'https://specification.example/v1',
+    use_proxy: false,
+    is_enabled: true,
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+  }
+  const summary = {
+    id: 'precision-model',
+    name: 'Precision Model',
+    available: true,
+    source_kind: 'discovered',
+    selection_policy: 'auto',
+    specification: {
+      limit: { context: 1050000, input: 1048576, output: 32000 },
+      modalities: { input: ['image', 'pdf'], output: ['text'] },
+      reasoning: true,
+      tool_call: false,
+      structured_output: null,
+      attachment: true,
+      temperature: false,
+    },
+    revision: 1,
+  }
+  const unknownSummary = {
+    id: 'unknown-model',
+    name: 'Unknown Model',
+    available: true,
+    source_kind: 'manual',
+    selection_policy: 'auto',
+    specification: {
+      limit: null,
+      modalities: null,
+      reasoning: null,
+      tool_call: null,
+      structured_output: null,
+      attachment: null,
+      temperature: null,
+    },
+    revision: 1,
+  }
+  let detailRequests = 0
+
+  await page.route('**/api/v1/providers**', async (route) => {
+    const request = route.request()
+    const url = new URL(request.url())
+    const path = url.pathname.replace('/api/v1', '')
+    if (path === '/providers' && request.method() === 'GET') {
+      await route.fulfill({ json: { data: [provider] } })
+      return
+    }
+    if (path === `/providers/${provider.id}/models` && request.method() === 'GET') {
+      await route.fulfill({
+        json: {
+          data: {
+            models: [
+              summary,
+              unknownSummary,
+              {
+                ...summary,
+                id: 'binary-limit',
+                name: 'Binary Limit',
+                specification: { ...summary.specification, limit: { context: 1048576, input: null, output: 1050000 } },
+              },
+            ],
+          },
+        },
+      })
+      return
+    }
+    if (path === `/providers/${provider.id}/model` && request.method() === 'GET') {
+      detailRequests += 1
+      await route.fulfill({
+        json: {
+          data: {
+            ...summary,
+            metadata: {
+              id: summary.id,
+              name: summary.name,
+              limit: summary.specification.limit,
+              modalities: summary.specification.modalities,
+              reasoning: true,
+              tool_call: false,
+              structured_output: null,
+              attachment: true,
+              temperature: false,
+            },
+            extensions: {},
+            created_at: '2026-01-01T00:00:00Z',
+            updated_at: '2026-01-01T00:00:00Z',
+          },
+        },
+      })
+      return
+    }
+    await route.fallback()
+  })
+
+  await page.goto(`/providers/${provider.id}?view=models`)
+  const table = page.getByRole('table', { name: 'Models from this service' })
+  await expect(table.getByRole('columnheader', { name: /Model specification/i })).toBeVisible()
+  const precisionRow = table.getByRole('row').filter({ hasText: /Precision Model.*precision-model/ })
+  const unknownRow = table.getByRole('row').filter({ hasText: /Unknown Model.*unknown-model/ })
+  const binaryRow = table.getByRole('row').filter({ hasText: /Binary Limit.*binary-limit/ })
+  await expect(binaryRow).toContainText('Context 1,048,576')
+  await expect(binaryRow).toContainText('Max output 1.05M')
+  const identityCell = precisionRow.getByRole('cell').filter({ hasText: /Precision Model.*precision-model/ })
+  await expect(identityCell).not.toContainText('1.05M')
+  await expect(identityCell).not.toContainText('Input')
+  await expect(precisionRow).toContainText('1.05M')
+  await expect(precisionRow).toContainText('32K')
+  await expect(precisionRow).toContainText('Input')
+  await expect(precisionRow).toContainText('Output')
+  const precisionSpecification = precisionRow.getByRole('group', { name: 'Model specification' })
+  await expect(precisionSpecification.getByRole('button', { name: 'Image input' })).toBeVisible()
+  await expect(precisionSpecification.getByRole('button', { name: 'PDF input' })).toBeVisible()
+  await expect(precisionSpecification.getByRole('button', { name: 'Text output' })).toBeVisible()
+  await expect(precisionSpecification.getByRole('button', { name: 'Reasoning' })).toBeVisible()
+  await expect(precisionSpecification.getByRole('button', { name: 'Attachments' })).toBeVisible()
+  await expect(precisionSpecification.getByRole('button', { name: 'Tool calls' })).toHaveCount(0)
+  await expect(precisionSpecification.getByRole('button', { name: 'Temperature' })).toHaveCount(0)
+  await expect(precisionSpecification.getByRole('button', { name: 'Not registered: Structured output' })).toBeVisible()
+  const unknownSpecification = unknownRow.getByRole('group', { name: 'Model specification' })
+  await expect(unknownSpecification).toContainText('Not registered')
+  await expect(
+    unknownSpecification.getByRole('button', {
+      name: /Not registered:.*Reasoning.*Tool calls.*Structured output.*Attachments.*Temperature/,
+    }),
+  ).toBeVisible()
+  await expect.poll(() => detailRequests).toBe(0)
+
+  const tokenLimits = precisionSpecification.getByRole('button', {
+    name: 'Token limits: Context 1,050,000 tokens; Maximum input 1,048,576 tokens; Maximum output 32,000 tokens',
+  })
+  await tokenLimits.hover()
+  await expect(page.getByRole('tooltip')).toContainText('1,050,000 tokens')
+  await tokenLimits.focus()
+  await expect(page.getByRole('tooltip')).toContainText('1,048,576 tokens')
+  const featureTrigger = precisionSpecification.getByRole('button', { name: 'Reasoning' })
+  await featureTrigger.focus()
+  await expect(page.getByRole('tooltip').filter({ hasText: 'Reasoning' })).toBeVisible()
+  await expect.poll(() => detailRequests).toBe(0)
+})
+
+test('Model specification filters combine all conditions and compose with catalog filters', async ({ page }) => {
+  const provider = {
+    id: 'filter-provider',
+    name: 'Filter Provider',
+    protocol: 'openai-compatible',
+    base_url: 'https://filter.example/v1',
+    use_proxy: false,
+    is_enabled: true,
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+  }
+  const matchingSpecification = {
+    limit: { context: 128000, input: 100000, output: 16000 },
+    modalities: { input: ['text', 'image', 'pdf'], output: ['text', 'audio'] },
+    reasoning: true,
+    tool_call: true,
+    structured_output: true,
+    attachment: true,
+    temperature: true,
+  }
+  const model = (
+    id: string,
+    name: string,
+    specification:
+      | typeof matchingSpecification
+      | {
+          limit: { context: number | null; input: number | null; output: number | null } | null
+          modalities: { input: string[]; output: string[] } | null
+          reasoning: boolean | null
+          tool_call: boolean | null
+          structured_output: boolean | null
+          attachment: boolean | null
+          temperature: boolean | null
+        },
+    overrides: Partial<{ available: boolean; source_kind: 'discovered' | 'manual' }> = {},
+  ) => ({
+    id,
+    name,
+    available: overrides.available ?? true,
+    source_kind: overrides.source_kind ?? 'discovered',
+    selection_policy: 'auto',
+    specification,
+    revision: 1,
+  })
+  const models = [
+    model('exact-match', 'Exact Match', matchingSpecification, { source_kind: 'manual' }),
+    model('below-boundary', 'Below Boundary', {
+      ...matchingSpecification,
+      limit: { ...matchingSpecification.limit, context: 127999 },
+    }),
+    model('below-output', 'Below Output', {
+      ...matchingSpecification,
+      limit: { ...matchingSpecification.limit, output: 15999 },
+    }),
+    model('above-boundary', 'Above Boundary', {
+      ...matchingSpecification,
+      limit: { ...matchingSpecification.limit, context: 128001, output: 16001 },
+    }),
+    model('missing-input', 'Missing Input', {
+      ...matchingSpecification,
+      modalities: { input: ['text', 'image'], output: ['text', 'audio', 'pdf'] },
+    }),
+    model('missing-output', 'Missing Output', {
+      ...matchingSpecification,
+      modalities: { input: ['text', 'image', 'pdf', 'audio'], output: ['text'] },
+    }),
+    model('missing-feature', 'Missing Feature', { ...matchingSpecification, structured_output: false }),
+    model('unknown-values', 'Unknown Values', {
+      limit: null,
+      modalities: null,
+      reasoning: null,
+      tool_call: null,
+      structured_output: null,
+      attachment: null,
+      temperature: null,
+    }),
+    model('source-decoy', 'Exact Match Synced', matchingSpecification),
+    model('usage-decoy', 'Exact Match Unused', matchingSpecification, { source_kind: 'manual' }),
+    model('status-decoy', 'Exact Match Retired', matchingSpecification, { available: false, source_kind: 'manual' }),
+  ]
+  const referencedRoute = {
+    id: 'filter-route',
+    model_id: 'filter-route',
+    display_name: null,
+    balance: 'priority',
+    target_provider: provider.id,
+    target_model: 'exact-match',
+    is_enabled: true,
+    created_at: '2026-01-01T00:00:00Z',
+    targets: [
+      {
+        id: 'filter-target',
+        model_id: 'filter-route',
+        provider_id: provider.id,
+        model: 'exact-match',
+        enabled: true,
+        priority: 1,
+        created_at: '2026-01-01T00:00:00Z',
+      },
+    ],
+  }
+  let detailRequests = 0
+
+  await page.route('**/api/v1/providers**', async (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname.replace('/api/v1', '')
+    if (path === '/providers' && request.method() === 'GET') {
+      await route.fulfill({ json: { data: [provider] } })
+      return
+    }
+    if (path === `/providers/${provider.id}/models` && request.method() === 'GET') {
+      await route.fulfill({ json: { data: { models } } })
+      return
+    }
+    if (path === `/providers/${provider.id}/model` && request.method() === 'GET') detailRequests += 1
+    await route.fallback()
+  })
+  await page.route('**/api/v1/models', (route) => route.fulfill({ json: { data: [referencedRoute] } }))
+
+  await page.goto(`/providers/${provider.id}?view=models`)
+  const table = page.getByRole('table', { name: 'Models from this service' })
+  const filterButton = table.getByRole('button', { name: 'Show filter menu for Model specification' })
+  await filterButton.click()
+  const specificationDialog = page.getByRole('dialog', { name: 'Filter by Model specification' })
+  await expect(specificationDialog).toContainText('Match all selected conditions')
+
+  await specificationDialog.getByRole('spinbutton', { name: 'Minimum context tokens' }).fill('128000')
+  await expect(table.getByRole('row').filter({ hasText: 'Unknown Values' })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await filterButton.click()
+  await expect(specificationDialog.getByRole('spinbutton', { name: 'Minimum context tokens' })).toHaveValue('')
+
+  await specificationDialog.getByRole('combobox', { name: 'Context preset' }).click()
+  await page.getByRole('option', { name: '128K', exact: true }).click()
+  await specificationDialog.getByRole('combobox', { name: 'Output preset' }).click()
+  await page.getByRole('option', { name: '16K', exact: true }).click()
+  const inputGroup = specificationDialog.getByRole('group', { name: 'Input modalities' })
+  await inputGroup.getByRole('checkbox', { name: 'Image', exact: true }).check()
+  await inputGroup.getByRole('checkbox', { name: 'PDF', exact: true }).check()
+  const outputGroup = specificationDialog.getByRole('group', { name: 'Output modalities' })
+  await outputGroup.getByRole('checkbox', { name: 'Text', exact: true }).check()
+  await outputGroup.getByRole('checkbox', { name: 'Audio', exact: true }).check()
+  const featureGroup = specificationDialog.getByRole('group', { name: 'Supported features' })
+  await featureGroup.getByRole('checkbox', { name: 'Tool calls', exact: true }).check()
+  await featureGroup.getByRole('checkbox', { name: 'Structured output', exact: true }).check()
+  await specificationDialog.getByRole('button', { name: 'Apply', exact: true }).click()
+  await expect(specificationDialog).toBeHidden()
+
+  await expect(table.getByRole('row').filter({ hasText: 'Exact Match' })).toHaveCount(3)
+  await expect(table.getByRole('row').filter({ hasText: 'Below Boundary' })).toHaveCount(0)
+  await expect(table.getByRole('row').filter({ hasText: 'Below Output' })).toHaveCount(0)
+  await expect(table.getByRole('row').filter({ hasText: 'Above Boundary' })).toBeVisible()
+  await expect(table.getByRole('row').filter({ hasText: 'Missing Input' })).toHaveCount(0)
+  await expect(table.getByRole('row').filter({ hasText: 'Missing Output' })).toHaveCount(0)
+  await expect(table.getByRole('row').filter({ hasText: 'Missing Feature' })).toHaveCount(0)
+  await expect(table.getByRole('row').filter({ hasText: 'Unknown Values' })).toHaveCount(0)
+
+  await filterButton.click()
+  await specificationDialog.getByRole('spinbutton', { name: 'Minimum context tokens' }).fill('1000000')
+  await inputGroup.getByRole('checkbox', { name: 'PDF', exact: true }).uncheck()
+  await page.keyboard.press('Escape')
+  await expect(table.getByRole('row').filter({ hasText: /Exact Match.*exact-match/ })).toBeVisible()
+
+  await filterButton.click()
+  await expect(specificationDialog.getByRole('spinbutton', { name: 'Minimum context tokens' })).toHaveValue('128000')
+  await expect(inputGroup.getByRole('checkbox', { name: 'PDF', exact: true })).toBeChecked()
+  await specificationDialog.getByRole('combobox', { name: 'Context preset' }).click()
+  await page.getByRole('option', { name: 'Custom', exact: true }).click()
+  await specificationDialog.getByRole('spinbutton', { name: 'Minimum context tokens' }).fill('128000')
+  await specificationDialog.getByRole('spinbutton', { name: 'Minimum output tokens' }).fill('16000')
+  await specificationDialog.getByRole('button', { name: 'Apply', exact: true }).click()
+  await expect(table.getByRole('row').filter({ hasText: 'Exact Match' })).toHaveCount(3)
+  await expect(table.getByRole('row').filter({ hasText: 'Below Boundary' })).toHaveCount(0)
+  await expect(table.getByRole('row').filter({ hasText: 'Above Boundary' })).toBeVisible()
+  await expect(table.getByRole('row').filter({ hasText: 'Unknown Values' })).toHaveCount(0)
+
+  await page.locator('#provider-model-search-desktop').fill('Exact Match')
+  await page.getByRole('button', { name: 'Show filter menu for Model availability' }).click()
+  const availabilityDialog = page.getByRole('dialog', { name: 'Filter by Model availability' })
+  await availabilityDialog.locator('[data-slot="select-trigger"][aria-label="Model availability"]').click()
+  await page.getByRole('option', { name: 'Can be used', exact: true }).click()
+  await availabilityDialog.getByRole('button', { name: 'Apply' }).click()
+  await page.getByRole('button', { name: 'Show filter menu for How models were added' }).click()
+  const sourceDialog = page.getByRole('dialog', { name: 'Filter by How models were added' })
+  await sourceDialog.locator('[data-slot="select-trigger"][aria-label="How models were added"]').click()
+  await page.getByRole('option', { name: 'Added manually', exact: true }).click()
+  await sourceDialog.getByRole('button', { name: 'Apply' }).click()
+  await page.getByRole('button', { name: 'Show filter menu for Model usage' }).click()
+  const usageDialog = page.getByRole('dialog', { name: 'Filter by Model usage' })
+  await usageDialog.locator('[data-slot="select-trigger"][aria-label="Model usage"]').click()
+  await page.getByRole('option', { name: 'In use', exact: true }).click()
+  await usageDialog.getByRole('button', { name: 'Apply' }).click()
+  await expect(table.getByRole('row').filter({ hasText: /Exact Match.*exact-match/ })).toHaveCount(1)
+  await expect(table.getByRole('row').filter({ hasText: 'Exact Match Synced' })).toHaveCount(0)
+  await expect(table.getByRole('row').filter({ hasText: 'Exact Match Unused' })).toHaveCount(0)
+  await expect(table.getByRole('row').filter({ hasText: 'Exact Match Retired' })).toHaveCount(0)
+
+  await filterButton.click()
+  await specificationDialog.getByRole('checkbox', { name: 'Temperature', exact: true }).check()
+  await specificationDialog.getByRole('checkbox', { name: 'Reasoning', exact: true }).check()
+  await specificationDialog.getByRole('spinbutton', { name: 'Minimum output tokens' }).fill('16001')
+  await specificationDialog.getByRole('button', { name: 'Apply', exact: true }).click()
+  await expect(table).toContainText('No models match these filters.')
+  await filterButton.click()
+  await specificationDialog.getByRole('button', { name: 'Clear', exact: true }).click()
+  await expect(specificationDialog).toBeHidden()
+  await expect(table.getByRole('row').filter({ hasText: /Exact Match.*exact-match/ })).toHaveCount(1)
+  await expect(table.getByRole('row').filter({ hasText: 'Unknown Values' })).toHaveCount(0)
+  await page.locator('#provider-model-search-desktop').fill('__no_match__')
+  await expect(table).toContainText('No models match these filters.')
+  await table.getByRole('button', { name: 'Clear filters', exact: true }).click()
+  await expect(table.getByRole('row').filter({ hasText: 'Unknown Values' })).toBeVisible()
+
+  await page.setViewportSize({ width: 390, height: 844 })
+  const mobileList = page.locator('.route-mobile-list')
+  await mobileList.getByRole('button', { name: 'Filter models', exact: true }).click()
+  const mobileFilters = page.getByRole('dialog', { name: 'Filter models', exact: true })
+  await mobileFilters.getByRole('spinbutton', { name: 'Minimum context tokens' }).fill('128000')
+  await mobileFilters.getByRole('button', { name: 'Show models', exact: true }).click()
+  await expect(mobileList).not.toContainText('Unknown Values')
+  await expect(mobileList).not.toContainText('Below Boundary')
+  await expect(mobileList).toContainText('Exact Match')
+  await mobileList.getByRole('button', { name: 'Clear filters', exact: true }).click()
+  await expect(mobileList).toContainText('Unknown Values')
+  await expect.poll(() => detailRequests).toBe(0)
+})
+
 test('Provider Model editor uses structured fields and preserves exact decimal input', async ({ page }) => {
   const provider = {
     id: 'visual-provider',
@@ -361,7 +746,15 @@ test('Provider Model editor uses structured fields and preserves exact decimal i
     available: true,
     source_kind: 'discovered',
     selection_policy: 'auto',
-    capabilities: { tool_call: true, reasoning: true, attachment: false, context: 128000 },
+    specification: {
+      limit: { context: 128000, input: null, output: null },
+      modalities: null,
+      reasoning: true,
+      tool_call: true,
+      structured_output: null,
+      attachment: false,
+      temperature: null,
+    },
     revision: 1,
   }
   const unavailableSummary = { ...summary, id: 'gpt-retired', name: 'GPT Retired', available: false }
@@ -633,7 +1026,7 @@ test('Provider Model editor uses structured fields and preserves exact decimal i
   await expect(manualModelPicker).toHaveText(/Claude Opus 4\.6.*anthropic\/claude-opus-4\.6/)
 })
 
-test('OAuth Provider configuration opens authorization without manual callback fields on localhost', async ({
+test('OAuth Provider configuration allows manual completion while the localhost listener is active', async ({
   page,
 }) => {
   await page.goto('/providers')
@@ -654,11 +1047,22 @@ test('OAuth Provider configuration opens authorization without manual callback f
 
   expect((await initRequest).postDataJSON()).toMatchObject({ vendor: 'codex', use_proxy: false, callback_mode: 'auto' })
   await expect(page.getByText('Waiting for authorization…')).toBeVisible()
-  await expect(page.getByLabel('Callback URL')).toHaveCount(0)
+  await expect(page.getByLabel('Callback URL')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Complete', exact: true })).toBeDisabled()
   await expect(page.getByRole('button', { name: 'Reopen sign-in page' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Cancel sign-in' })).toBeVisible()
-  await page.getByRole('button', { name: 'Cancel sign-in' }).click()
-  await expect(page.getByRole('button', { name: 'Sign in with OAuth' })).toBeVisible()
+
+  await page.route('**/api/v1/oauth/sessions/oauth-session-1/complete', async (route) => {
+    await page.route('**/api/v1/oauth/sessions/oauth-session-1/status', async (statusRoute) => {
+      await statusRoute.fulfill({ json: { data: { status: 'ready', expires_in: 600 } } })
+    })
+    await route.fulfill({ json: { data: { status: 'ready', expires_in: 600 } } })
+  })
+  const callbackUrl = 'http://localhost:1457/auth/callback?code=test-code&state=test-state'
+  await page.getByLabel('Callback URL').fill(callbackUrl)
+  await page.getByRole('button', { name: 'Complete', exact: true }).click()
+  await expect(page.getByText('Authorization complete', { exact: true })).toBeVisible()
+  await expect(page.getByLabel('Callback URL')).toHaveCount(0)
 })
 
 test('manual OAuth fallback shows one full callback URL field', async ({ page }) => {
@@ -740,7 +1144,15 @@ test('Provider detail separates connection, inventory, references, and guarded m
     available: true,
     source_kind: 'discovered',
     selection_policy: 'auto',
-    capabilities: { tool_call: true, reasoning: true, attachment: false, context: 128000 },
+    specification: {
+      limit: { context: 128000, input: null, output: null },
+      modalities: null,
+      reasoning: true,
+      tool_call: true,
+      structured_output: null,
+      attachment: false,
+      temperature: null,
+    },
     revision: 1,
   }
   const unavailable = {
@@ -916,7 +1328,7 @@ test('Provider detail separates connection, inventory, references, and guarded m
     ),
   ).toBeVisible()
   await expect(page.locator('#provider-model-id')).toHaveValue('openai/gpt-test')
-  await page.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await page.getByRole('button', { name: 'Cancel', exact: true }).press('Enter')
   await page.getByRole('button', { name: 'Show filter menu for Model availability' }).click()
   let availabilityFilterDialog = page.getByRole('dialog', { name: 'Filter by Model availability' })
   await availabilityFilterDialog.locator('[data-slot="select-trigger"][aria-label="Model availability"]').click()
@@ -1098,7 +1510,7 @@ test('dependency previews block referenced Provider deletion and explain Route d
   await page.getByRole('button', { name: 'Cancel' }).click()
 })
 
-test('creating a Provider continues into detail and reports automatic model sync', async ({ page }) => {
+test('creating a Provider opens its saved detail and recovers automatic model sync', async ({ page }) => {
   const createdProvider = {
     id: 'created-provider',
     name: 'Created Provider',
@@ -1117,6 +1529,7 @@ test('creating a Provider continues into detail and reports automatic model sync
   }
   let created = false
   let syncCalls = 0
+  const initialSync = Promise.withResolvers<void>()
   await page.route('**/api/v1/providers**', async (route) => {
     const request = route.request()
     const path = new URL(request.url()).pathname.replace('/api/v1', '')
@@ -1131,9 +1544,11 @@ test('creating a Provider continues into detail and reports automatic model sync
     }
     if (path === `/providers/${createdProvider.id}/models/sync` && request.method() === 'POST') {
       syncCalls += 1
-      const { promise, resolve } = Promise.withResolvers<void>()
-      setTimeout(resolve, 150)
-      await promise
+      if (syncCalls === 1) {
+        await initialSync.promise
+        await route.fulfill({ status: 502, json: { error: 'The model service did not respond. Try syncing again.' } })
+        return
+      }
       await route.fulfill({ json: { data: { added: 3, missing: 1, restored: 2, deprecated: 0 } } })
       return
     }
@@ -1152,7 +1567,16 @@ test('creating a Provider continues into detail and reports automatic model sync
   await page.getByRole('button', { name: 'Connect', exact: true }).click()
 
   await expect(page).toHaveURL(new RegExp(`/providers/${createdProvider.id}\\?view=models`))
+  await expect(page.getByRole('heading', { name: createdProvider.name })).toBeVisible()
   await expect(page.getByText('Syncing models…')).toBeVisible()
+  await expect(page.getByRole('link', { name: 'Use a model' })).toHaveAttribute(
+    'href',
+    `/models/new?provider=${createdProvider.id}`,
+  )
+
+  initialSync.resolve()
+  await expect(page.getByText("Connection saved, but models couldn't be synced")).toBeVisible()
+  await page.getByRole('button', { name: 'Try again' }).click()
   await expect(page.getByText('3 new · 1 no longer offered · 2 available again', { exact: true })).toBeVisible()
   const inventorySummary = page.getByRole('heading', { name: 'Models from this service' }).locator('..')
   const freshness = inventorySummary.locator('p').filter({ hasText: 'Last checked' })
@@ -1160,14 +1584,10 @@ test('creating a Provider continues into detail and reports automatic model sync
   await expect(freshness).toContainText('3 new')
   await expect(freshness).toContainText('1 no longer offered')
   await expect(freshness).toContainText('2 available again')
-  await expect.poll(() => syncCalls).toBe(1)
-  await expect(page.getByRole('link', { name: 'Use a model' })).toHaveAttribute(
-    'href',
-    `/models/new?provider=${createdProvider.id}`,
-  )
+  await expect.poll(() => syncCalls).toBe(2)
 })
 
-test('unused provider models create a matching model or append a destination', async ({ page }) => {
+test('visible provider model actions bind exact IDs and keep inventory open', async ({ page }) => {
   const provider = {
     id: 'provider-primary',
     name: 'Primary Provider',
@@ -1185,7 +1605,15 @@ test('unused provider models create a matching model or append a destination', a
       available: true,
       source_kind: 'discovered',
       selection_policy: 'auto',
-      capabilities: { attachment: false, reasoning: true, tool_call: true, context: 128000 },
+      specification: {
+        limit: { context: 128000, input: null, output: null },
+        modalities: null,
+        reasoning: true,
+        tool_call: true,
+        structured_output: null,
+        attachment: false,
+        temperature: null,
+      },
       revision: 1,
     },
     {
@@ -1194,7 +1622,15 @@ test('unused provider models create a matching model or append a destination', a
       available: true,
       source_kind: 'discovered',
       selection_policy: 'auto',
-      capabilities: { attachment: false, reasoning: true, tool_call: true, context: 128000 },
+      specification: {
+        limit: { context: 128000, input: null, output: null },
+        modalities: null,
+        reasoning: true,
+        tool_call: true,
+        structured_output: null,
+        attachment: false,
+        temperature: null,
+      },
       revision: 1,
     },
   ]
@@ -1214,6 +1650,27 @@ test('unused provider models create a matching model or append a destination', a
           model_id: 'route-existing',
           provider_id: 'provider-secondary',
           model: 'gpt-existing',
+          weight: 100,
+          priority: 1,
+          created_at: '2026-08-21T00:00:00Z',
+        },
+      ],
+    },
+    {
+      id: 'route-near-match',
+      model_id: 'GPT-NEW',
+      display_name: null,
+      balance: 'weighted',
+      target_provider: 'provider-secondary',
+      target_model: 'gpt-new',
+      is_enabled: true,
+      created_at: '2026-08-21T00:00:00Z',
+      targets: [
+        {
+          id: 'target-near-match',
+          model_id: 'route-near-match',
+          provider_id: 'provider-secondary',
+          model: 'gpt-new',
           weight: 100,
           priority: 1,
           created_at: '2026-08-21T00:00:00Z',
@@ -1263,6 +1720,7 @@ test('unused provider models create a matching model or append a destination', a
               },
             ],
           },
+          ...routes.slice(1),
         ]
         await route.fulfill({ json: { data: routes[0] } })
         return
@@ -1270,7 +1728,7 @@ test('unused provider models create a matching model or append a destination', a
       const created = {
         id: 'route-new',
         model_id: 'gpt-new',
-        display_name: null,
+        display_name: providerModels[1].name,
         balance: 'weighted',
         target_provider: provider.id,
         target_model: 'gpt-new',
@@ -1297,18 +1755,22 @@ test('unused provider models create a matching model or append a destination', a
 
   await page.goto(`/providers/${provider.id}?view=models`)
   const existingAction = page.getByRole('button', { name: 'Add gpt-existing to a model' })
-  await expect(existingAction).toBeVisible()
-  await existingAction.hover()
-  await expect(existingAction.getByText('Add destination', { exact: true })).toBeVisible()
+  await expect(existingAction).toHaveText('Add to existing model')
 
   await existingAction.click()
-  await expect(page.getByText('Added this service to model gpt-existing.')).toBeVisible()
+  await expect(page.getByRole('status').getByText('Added this service to model gpt-existing.')).toBeVisible()
+  await expect(page.getByRole('main').getByRole('link', { name: 'Connect clients' })).toBeVisible()
   expect(bindBodies[0]).toEqual({ provider_id: provider.id, provider_model_id: 'gpt-existing' })
 
   const newAction = page.getByRole('button', { name: 'Add gpt-new to a model' })
-  await newAction.hover()
-  await expect(newAction.getByText('Create model', { exact: true })).toBeVisible()
+  await expect(newAction).toHaveText('Add model')
   await newAction.click()
-  await expect(page.getByText('Created model gpt-new.')).toBeVisible()
+  await expect(page.getByRole('status').getByText('Created model gpt-new.')).toBeVisible()
+  await expect(page).toHaveURL(`/providers/${provider.id}?view=models`)
   expect(bindBodies[1]).toEqual({ provider_id: provider.id, provider_model_id: 'gpt-new' })
+
+  await page.goto('/models')
+  const modelsTable = page.getByRole('table')
+  await expect(modelsTable.getByText('GPT New', { exact: true })).toBeVisible()
+  await expect(modelsTable.getByText('gpt-new', { exact: true })).toBeVisible()
 })

@@ -53,6 +53,23 @@ fn codex_build_url(base_url: &str, path: &str) -> String {
     openai_build_url(base_url, path)
 }
 
+fn codex_routing_hint(body: &serde_json::Value) -> anyhow::Result<HeaderValue> {
+    let model = body
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .filter(|model| !model.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("Codex Responses request is missing model"))?;
+    let service_tier = body
+        .get("service_tier")
+        .and_then(serde_json::Value::as_str)
+        .filter(|tier| !tier.is_empty());
+    let hint = match service_tier {
+        Some(tier) => format!("model={model};tier={tier}"),
+        None => format!("model={model}"),
+    };
+    Ok(HeaderValue::from_str(&hint)?)
+}
+
 #[async_trait]
 impl VendorExtension for OpenAiCodexChannel {
     fn scope(&self) -> VendorScope {
@@ -103,6 +120,12 @@ impl VendorExtension for OpenAiCodexChannel {
         headers.insert(
             HeaderName::from_static("x-client-request-id"),
             HeaderValue::from_str(&uuid::Uuid::new_v4().to_string())?,
+        );
+        // Newer Codex models are routed from this header even when the
+        // WebSocket frame omits service_tier.
+        headers.insert(
+            HeaderName::from_static("x-codex-routing-hint"),
+            codex_routing_hint(body)?,
         );
         Ok(())
     }
@@ -401,6 +424,8 @@ mod tests {
         assert_eq!(extension.store, Some(false));
 
         let mut body = serde_json::json!({
+            "model": "gpt-6-astra",
+            "service_tier": "default",
             "store": true,
             "frequency_penalty": 0.0,
             "presence_penalty": 0.0,
@@ -424,6 +449,12 @@ mod tests {
             Some("responses_websockets=2026-02-06")
         );
         assert!(headers.get("x-client-request-id").is_some());
+        assert_eq!(
+            headers
+                .get("x-codex-routing-hint")
+                .and_then(|value| value.to_str().ok()),
+            Some("model=gpt-6-astra;tier=default")
+        );
         let connection = ResponsesWebSocketConnectionMetadata {
             session_id: "session",
             thread_id: "thread",

@@ -1,11 +1,9 @@
 <script lang="ts">
 import * as m from '$lib/paraglide/messages.js'
-import { onMount } from 'svelte'
 import EyeIcon from '@lucide/svelte/icons/eye'
 import EyeOffIcon from '@lucide/svelte/icons/eye-off'
 
-import { getAdminToken, setAdminToken } from '$lib/auth'
-import { isTauri } from '$lib/admin-client'
+import { login } from '$lib/auth'
 import BrandMark from '$lib/components/brand-mark.svelte'
 import LanguageSelector from '$lib/components/language-selector.svelte'
 import { Button } from '$lib/components/ui/button'
@@ -13,68 +11,41 @@ import * as Field from '$lib/components/ui/field'
 import { Input } from '$lib/components/ui/input'
 import { Spinner } from '$lib/components/ui/spinner'
 
-let token = $state('')
-let showToken = $state(false)
+let username = $state('')
+let password = $state('')
+let showPassword = $state(false)
 let submitting = $state(false)
 let errorKind = $state<'invalid' | 'unavailable'>()
-let tokenInput = $state<HTMLInputElement | null>(null)
+let usernameInput = $state<HTMLInputElement | null>(null)
 
-const copy = $derived({
-  title: m.login_sign_stravia(),
-  subtitle: m.login_enter_admin_token_stravia_server(),
-  placeholder: m.login_enter_admin_token(),
-  signIn: m.login_sign(),
-  verifying: m.login_verifying(),
-  invalid: m.login_invalid_token_check_configured_admin_token(),
-  unavailable: m.login_cannot_reach_local_stravia_server_check_running(),
-})
 const error = $derived(
-  errorKind === 'invalid' ? copy.invalid : errorKind === 'unavailable' ? copy.unavailable : undefined,
+  errorKind === 'invalid'
+    ? m.login_invalid_credentials()
+    : errorKind === 'unavailable'
+      ? m.login_server_unavailable()
+      : undefined,
 )
 
-onMount(() => {
-  if (isTauri) {
-    window.location.replace('/')
-    return
-  }
-
-  void (async () => {
-    try {
-      const existingToken = getAdminToken()
-      const response = await fetch('/api/v1/status', {
-        headers: existingToken ? { Authorization: `Bearer ${existingToken}` } : undefined,
-      })
-      if (response.ok) window.location.replace('/')
-    } catch {
-      // Keep the login form available when the local Server is unavailable.
-    }
-  })()
-})
-
 async function submit(): Promise<void> {
-  const submittedToken = token.trim()
-  if (!submittedToken) return
+  const submittedUsername = username.trim()
+  if (!submittedUsername || !password) return
 
   submitting = true
   errorKind = undefined
   try {
-    const response = await fetch('/api/v1/status', { headers: { Authorization: `Bearer ${submittedToken}` } })
-    if (response.ok) {
-      setAdminToken(submittedToken)
-      window.location.replace('/')
-      return
-    }
-    errorKind = response.status === 401 ? 'invalid' : 'unavailable'
-    tokenInput?.focus()
-  } catch {
-    errorKind = 'unavailable'
+    await login(submittedUsername, password)
+    window.location.replace('/')
+  } catch (cause) {
+    const status = (cause as { status?: number }).status
+    errorKind = status === 400 || status === 401 ? 'invalid' : 'unavailable'
+    usernameInput?.focus()
   } finally {
     submitting = false
   }
 }
 </script>
 
-<svelte:head><title>{copy.signIn} · Stravia</title></svelte:head>
+<svelte:head><title>{m.login_sign_stravia()} · Stravia</title></svelte:head>
 
 <main class="grid place-items-center bg-background p-4 sm:p-8">
   <div class="grid w-full max-w-5xl overflow-hidden border-y bg-background min-[900px]:grid-cols-12 min-[900px]:border">
@@ -106,8 +77,8 @@ async function submit(): Promise<void> {
         <p class="font-structural text-[0.72rem] font-semibold tracking-[0.14em] text-primary uppercase">
           {m.login_sign()}
         </p>
-        <h2 id="login-form-title" class="font-structural mt-3 text-2xl font-semibold">{copy.title}</h2>
-        <p class="mt-2 text-sm text-muted-foreground">{copy.subtitle}</p>
+        <h2 id="login-form-title" class="font-structural mt-3 text-2xl font-semibold">{m.login_sign_stravia()}</h2>
+        <p class="mt-2 text-sm text-muted-foreground">{m.login_enter_credentials()}</p>
         <form
           class="mt-7"
           onsubmit={(event) => {
@@ -116,30 +87,38 @@ async function submit(): Promise<void> {
           }}>
           <Field.FieldGroup>
             <Field.Field size="fill" data-invalid={error ? true : undefined}>
-              <Field.FieldLabel for="admin-token">{m.login_admin_token_label()}</Field.FieldLabel>
+              <Field.FieldLabel for="admin-username">{m.login_username()}</Field.FieldLabel>
+              <Input
+                id="admin-username"
+                bind:ref={usernameInput}
+                bind:value={username}
+                autocomplete="username"
+                aria-invalid={error ? true : undefined}
+                autofocus />
+            </Field.Field>
+            <Field.Field size="fill" data-invalid={error ? true : undefined}>
+              <Field.FieldLabel for="admin-password">{m.login_password()}</Field.FieldLabel>
               <div class="flex gap-2">
                 <Input
-                  id="admin-token"
-                  class="font-technical"
-                  bind:ref={tokenInput}
-                  bind:value={token}
-                  type={showToken ? 'text' : 'password'}
-                  placeholder={copy.placeholder}
+                  id="admin-password"
+                  bind:value={password}
+                  type={showPassword ? 'text' : 'password'}
                   autocomplete="current-password"
-                  aria-invalid={error ? true : undefined}
-                  autofocus />
+                  aria-invalid={error ? true : undefined} />
                 <Button
                   type="button"
                   variant="outline"
                   size="icon"
-                  onclick={() => (showToken = !showToken)}
-                  aria-label={showToken ? m.login_hide_token() : m.login_show_token()}
-                  >{#if showToken}<EyeOffIcon />{:else}<EyeIcon />{/if}</Button>
+                  onclick={() => (showPassword = !showPassword)}
+                  aria-label={showPassword ? m.login_hide_password() : m.login_show_password()}>
+                  {#if showPassword}<EyeOffIcon />{:else}<EyeIcon />{/if}
+                </Button>
               </div>
               {#if error}<Field.FieldError>{error}</Field.FieldError>{/if}
             </Field.Field>
-            <Button class="w-full" type="submit" disabled={submitting || !token.trim()}
-              >{#if submitting}<Spinner data-icon="inline-start" />{copy.verifying}{:else}{copy.signIn}{/if}</Button>
+            <Button class="w-full" type="submit" disabled={submitting || !username.trim() || !password}
+              >{#if submitting}<Spinner
+                  data-icon="inline-start" />{m.login_signing_in()}{:else}{m.login_sign()}{/if}</Button>
           </Field.FieldGroup>
         </form>
       </div>

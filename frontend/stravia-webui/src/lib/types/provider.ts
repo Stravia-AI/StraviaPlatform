@@ -122,6 +122,16 @@ export interface ProviderModelLimit {
   output?: number | null
 }
 
+export interface ModelSpecification {
+  limit?: ProviderModelLimit | null
+  modalities?: ProviderModelModalities | null
+  reasoning?: boolean | null
+  tool_call?: boolean | null
+  structured_output?: boolean | null
+  attachment?: boolean | null
+  temperature?: boolean | null
+}
+
 export interface ProviderModelPrices {
   input?: number
   output?: number
@@ -141,24 +151,17 @@ export interface ProviderModelCost extends ProviderModelPrices {
   tiers: ProviderModelCostTier[]
 }
 
-export interface ProviderModelMetadata {
+export interface ProviderModelMetadata extends ModelSpecification {
   id?: string | null
   name?: string | null
   description?: string | null
   family?: string | null
-  attachment?: boolean | null
-  reasoning?: boolean | null
-  tool_call?: boolean | null
   open_weights?: boolean | null
   reasoning_options?: ProviderModelReasoningOption[] | null
   interleaved?: ProviderModelInterleaved | null
-  structured_output?: boolean | null
-  temperature?: boolean | null
   knowledge?: string | null
   release_date?: string | null
   last_updated?: string | null
-  modalities?: ProviderModelModalities | null
-  limit?: ProviderModelLimit | null
   cost?: ProviderModelCost | null
   status?: string | null
   experimental?: unknown
@@ -172,7 +175,7 @@ export interface ProviderModelSummary {
   available: boolean
   source_kind: ProviderModelSourceKind
   selection_policy: ProviderModelSelectionPolicy
-  capabilities: { attachment: boolean; reasoning: boolean; tool_call: boolean; context?: number | null }
+  specification: ModelSpecification
   revision: number
 }
 

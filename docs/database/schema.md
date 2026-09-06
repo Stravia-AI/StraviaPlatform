@@ -1,6 +1,6 @@
 # Database Schema
 
-Stravia supports **SQLite** (default) and **PostgreSQL** only. Both use the logical schema below; PostgreSQL uses native `BOOLEAN`, `TIMESTAMPTZ`, and `BIGINT` where SQLite uses `INTEGER` or `TEXT`.
+Stravia supports **SQLite** and **PostgreSQL** only. Both use the logical schema below; PostgreSQL uses native `BOOLEAN`, `TIMESTAMPTZ`, and `BIGINT` where SQLite uses `INTEGER` or `TEXT`.
 
 ## Entity Relationship
 
@@ -16,6 +16,7 @@ history_markers (principal-scoped hidden history and Platform execution state)
 agent_definition_revisions ──1:1── agent_definition_configs
 artifacts ──1:0..1── artifact_uploads ──1:N── artifact_upload_parts
     └──1:0..1── media_derivatives ──1:1── artifacts (JPEG derivative)
+admin_identity ──1:N── admin_sessions
 settings (key-value, including Web Access and revisioned Web Search configuration)
 ```
 
@@ -127,6 +128,39 @@ API Key 与模型的访问绑定关系（M:N 关联表）。所有模型请求�
 **主键**：`(api_key_id, model_id)`
 
 **索引**：`idx_api_key_models_model_id` on `model_id`
+
+---
+
+## admin_identity
+
+实例级唯一管理员身份。`singleton_id = 1` 的数据库约束保证并发初始化也只能创建一个管理员；管理身份与 API Key / Principal 完全独立。
+
+| Column | Type | Default | Description |
+|---|---|---|---|
+| `singleton_id` | SMALLINT / INTEGER PK | — | 固定为 `1` 的 singleton key |
+| `username` | TEXT UNIQUE | NULL | Server 管理员用户名；Desktop 原生管理员为 NULL |
+| `password_hash` | TEXT | NULL | Argon2id PHC 验证材料；Desktop 原生管理员为 NULL |
+| `jwt_secret` | TEXT NOT NULL | — | 实例本地 JWT 签名秘密，不通过管理 interface 回显 |
+| `credential_revision` | BIGINT / INTEGER | `1` | 凭据 revision；凭据修改或本地恢复时递增，使旧会话失效 |
+
+**约束**：`username` 与 `password_hash` 必须同时为 NULL 或同时非 NULL。
+
+---
+
+## admin_sessions
+
+可撤销的管理员登录会话。访问 JWT 每次认证时都会回查此表和 `admin_identity.credential_revision`；refresh token 只以 SHA-256 摘要持久化，并通过条件更新原子轮换。
+
+| Column | Type | Default | Description |
+|---|---|---|---|
+| `id` | TEXT PK | — | 会话 UUID，同时写入访问 JWT |
+| `identity_id` | SMALLINT / INTEGER | `1` | 固定为 `1`，FK → `admin_identity.singleton_id`，ON DELETE CASCADE |
+| `credential_revision` | BIGINT / INTEGER NOT NULL | — | 创建会话时的凭据 revision |
+| `refresh_hash` | TEXT NOT NULL UNIQUE | — | 当前 refresh token 的不可逆摘要 |
+| `expires_at` | BIGINT / INTEGER NOT NULL | — | 固定登录总期限，Unix 秒；refresh 不延长该期限 |
+| `revoked` | BOOLEAN / INTEGER | `false` / `0` | 普通退出撤销当前会话；凭据修改或恢复撤销全部会话 |
+
+**索引**：`idx_admin_sessions_expiry` on `expires_at`
 
 ---
 

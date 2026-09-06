@@ -18,8 +18,16 @@ import { admin } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
 import { modelIdFromCatalogId } from '$lib/catalog-model-id'
 import { getDataTableLabels } from '$lib/data-table-labels'
-import { formatNumber, formatTime } from '$lib/format'
+import { formatTime } from '$lib/format'
 import { localeState } from '$lib/localization.svelte'
+import {
+  emptySpecificationFilter,
+  matchesSpecification,
+  specificationFilterCount,
+  type SpecificationFilter,
+} from '$lib/model-specification-filter'
+import ModelSpecification from '$lib/components/model-specification.svelte'
+import ModelSpecificationFilter from '$lib/components/model-specification-filter.svelte'
 import type {
   Route,
   PreparedProviderModel,
@@ -93,6 +101,7 @@ let lastSyncedAt = $state<Date>()
 let loadedQueryModel = $state('')
 let editor = $state<{ submit: () => void }>()
 let addingRouteModelId = $state('')
+let addedModel = $state<{ id: string; existingRoute: boolean }>()
 
 const modelsQuery = createQuery(() => ({
   queryKey: ['provider-models', providerId],
@@ -110,6 +119,10 @@ const requestedModelId = $derived(page.url.searchParams.get('model') ?? '')
 const availabilityFilter = $derived(catalogFilterValue<AvailabilityFilter>('availability', 'all'))
 const sourceFilter = $derived(catalogFilterValue<SourceFilter>('source_kind', 'all'))
 const referenceFilter = $derived(catalogFilterValue<ReferenceFilter>('usage', 'all'))
+const specificationFilter = $derived(
+  (columnFilters.find((filter) => filter.id === 'specification')?.value as SpecificationFilter | undefined) ??
+    emptySpecificationFilter,
+)
 const filteredModels = $derived.by(() => {
   const query = search.trim().toLocaleLowerCase(localeState.current)
   return models.filter((model) => {
@@ -118,12 +131,16 @@ const filteredModels = $derived.by(() => {
       (!query || `${model.name} ${model.id}`.toLocaleLowerCase(localeState.current).includes(query)) &&
       (availabilityFilter === 'all' || model.available === (availabilityFilter === 'available')) &&
       (sourceFilter === 'all' || model.source_kind === sourceFilter) &&
-      (referenceFilter === 'all' || references.length > 0 === (referenceFilter === 'referenced'))
+      (referenceFilter === 'all' || references.length > 0 === (referenceFilter === 'referenced')) &&
+      matchesSpecification(model.specification, specificationFilter)
     )
   })
 })
 const activeFilterCount = $derived(
-  Number(availabilityFilter !== 'all') + Number(sourceFilter !== 'all') + Number(referenceFilter !== 'all'),
+  Number(availabilityFilter !== 'all') +
+    Number(sourceFilter !== 'all') +
+    Number(referenceFilter !== 'all') +
+    specificationFilterCount(specificationFilter),
 )
 const hasActiveFilters = $derived(Boolean(search.trim()) || activeFilterCount > 0)
 const selectedReferences = $derived(selectedDetail ? modelReferences(selectedDetail.id) : [])
@@ -137,7 +154,21 @@ const providerModelColumns = providerModelColumnHelper.columns([
     enableSorting: false,
     enableGlobalFilter: true,
     meta: { label: () => m.common_model(), cellClass: 'whitespace-normal py-4' },
-    size: 350,
+    size: 260,
+  }),
+  providerModelColumnHelper.accessor('specification', {
+    header: () => m.model_specification_title(),
+    cell: (context) => renderSnippet(providerModelSpecificationCell, context),
+    filterFn: (row, _columnId, value) => matchesSpecification(row.original.specification, value as SpecificationFilter),
+    enableSorting: false,
+    enableGlobalFilter: false,
+    meta: {
+      label: () => m.model_specification_title(),
+      cellClass: 'whitespace-normal py-4',
+      exportable: false,
+      filter: { variant: 'custom', content: providerModelSpecificationFilter },
+    },
+    size: 360,
   }),
   providerModelColumnHelper.accessor((model) => (model.available ? 'available' : 'unavailable'), {
     id: 'availability',
@@ -257,6 +288,11 @@ function clearFilters(): void {
   columnFilters = []
 }
 
+function setSpecificationFilter(value: SpecificationFilter): void {
+  const remaining = columnFilters.filter((filter) => filter.id !== 'specification')
+  columnFilters = specificationFilterCount(value) ? [...remaining, { id: 'specification', value }] : remaining
+}
+
 function modelEditorSearch(modelId: string): string {
   const search = new SvelteURLSearchParams(page.url.searchParams)
   search.set('view', 'models')
@@ -286,6 +322,7 @@ async function addModelToRoute(model: ProviderModelSummary): Promise<void> {
   try {
     const existingRoute = routeForModel(model.id)
     await admin.models.bind({ provider_id: providerId, provider_model_id: model.id })
+    addedModel = { id: model.id, existingRoute: Boolean(existingRoute) }
     if (existingRoute) {
       toast.success(m.provider_model_catalog_model_target_added({ id: model.id }))
     } else {
@@ -549,13 +586,17 @@ async function deleteManualModel(): Promise<void> {
   <div class="min-h-10 w-full min-w-0 text-left" aria-label={`${model.name} ${model.id}`}>
     <span class="block truncate font-medium">{model.name}</span>
     <span class="block truncate font-technical text-xs text-muted-foreground">{model.id}</span>
-    <span class="mt-1 flex flex-wrap gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
-      {#if model.capabilities.context}<span>{formatNumber(model.capabilities.context)} {m.common_context()}</span>{/if}
-      {#if model.capabilities.reasoning}<span>{m.common_reasoning()}</span>{/if}
-      {#if model.capabilities.tool_call}<span>{m.common_tool_calls()}</span>{/if}
-      {#if model.capabilities.attachment}<span>{m.common_attachments()}</span>{/if}
-    </span>
   </div>
+{/snippet}
+
+{#snippet providerModelSpecificationFilter(value: unknown, onChange: (value: unknown) => void)}
+  <ModelSpecificationFilter
+    value={(value as SpecificationFilter | undefined) ?? emptySpecificationFilter}
+    onChange={(next) => onChange(specificationFilterCount(next) ? next : undefined)} />
+{/snippet}
+
+{#snippet providerModelSpecificationCell(context: DataTableCellContext<ProviderModelSummary>)}
+  <ModelSpecification specification={context.row.original.specification} />
 {/snippet}
 
 {#snippet providerModelAvailabilityCell(context: DataTableCellContext<ProviderModelSummary>)}
@@ -586,15 +627,12 @@ async function deleteManualModel(): Promise<void> {
   {:else if routeReferencesReady}
     <button
       type="button"
-      class="group inline-flex min-h-10 w-fit items-center rounded-md px-2 text-sm text-muted-foreground hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-70"
+      class="inline-flex min-h-10 w-fit items-center rounded-md px-2 text-sm font-medium text-foreground hover:bg-muted disabled:pointer-events-none disabled:opacity-70"
       aria-label={m.provider_model_catalog_add_model_to_route({ id: model.id })}
-      disabled={Boolean(addingRouteModelId)}
+      disabled={!model.available || Boolean(addingRouteModelId)}
       onclick={() => void addModelToRoute(model)}>
       {#if addingRouteModelId === model.id}<Spinner data-icon="inline-start" />{/if}
-      <span class="group-hover:hidden group-focus-visible:hidden">{m.provider_model_catalog_not_used()}</span>
-      <span class="hidden group-hover:inline group-focus-visible:inline">
-        {matchingRoute ? m.provider_model_catalog_add_destination() : m.provider_model_catalog_create_model()}
-      </span>
+      {matchingRoute ? m.provider_model_catalog_add_destination() : m.provider_model_catalog_create_model()}
     </button>
   {:else}
     <span class="px-2 text-sm text-muted-foreground">{m.provider_model_catalog_not_used()}</span>
@@ -635,9 +673,17 @@ async function deleteManualModel(): Promise<void> {
     {:else}
       <div class="route-section-header">
         <div class="min-w-0">
-          <h2 id="provider-model-editor-title" class="route-section-title truncate">
-            {selectedDetail.metadata.name || selectedDetail.id}
-          </h2>
+          <div class="flex flex-wrap items-center gap-2">
+            <h2 id="provider-model-editor-title" class="route-section-title break-all text-balance">
+              {selectedDetail.metadata.name || selectedDetail.id}
+            </h2>
+            <Badge variant={selectedDetail.available ? 'secondary' : 'outline'}>
+              {selectedDetail.available ? m.common_used() : m.common_unavailable()}
+            </Badge>
+            <Badge variant="outline">
+              {selectedDetail.source_kind === 'manual' ? m.common_added_manually() : m.common_synced()}
+            </Badge>
+          </div>
           <p class="route-section-description break-all font-technical">{selectedDetail.id}</p>
         </div>
         <DropdownMenu.Root>
@@ -651,24 +697,26 @@ async function deleteManualModel(): Promise<void> {
                 aria-label={m.provider_model_catalog_model_actions()}><MoreHorizontalIcon /></Button>
             {/snippet}
           </DropdownMenu.Trigger>
-          <DropdownMenu.Content align="end">
-            <DropdownMenu.Item
-              onSelect={() =>
-                void goto(
-                  resolve(
-                    `/models/new?provider=${encodeURIComponent(providerId)}&model=${encodeURIComponent(selectedDetail!.id)}`,
-                  ),
-                )}>
-              {m.provider_model_catalog_use_new_model()}
-            </DropdownMenu.Item>
-            {#if selectedDetail.can_reimport}
-              <DropdownMenu.Item onSelect={requestReimport}
-                >{m.provider_model_catalog_restore_details_service()}</DropdownMenu.Item>
-            {:else}
-              <DropdownMenu.Separator />
-              <DropdownMenu.Item variant="destructive" onSelect={requestDelete}
-                >{m.provider_model_catalog_remove_manually_added_model()}</DropdownMenu.Item>
-            {/if}
+          <DropdownMenu.Content align="end" class="w-max min-w-48 max-w-[calc(100vw-2rem)]">
+            <DropdownMenu.Group>
+              <DropdownMenu.Item
+                onSelect={() =>
+                  void goto(
+                    resolve(
+                      `/models/new?provider=${encodeURIComponent(providerId)}&model=${encodeURIComponent(selectedDetail!.id)}`,
+                    ),
+                  )}>
+                {m.provider_model_catalog_use_new_model()}
+              </DropdownMenu.Item>
+              {#if selectedDetail.can_reimport}
+                <DropdownMenu.Item onSelect={requestReimport}
+                  >{m.provider_model_catalog_restore_details_service()}</DropdownMenu.Item>
+              {:else}
+                <DropdownMenu.Separator />
+                <DropdownMenu.Item variant="destructive" onSelect={requestDelete}
+                  >{m.provider_model_catalog_remove_manually_added_model()}</DropdownMenu.Item>
+              {/if}
+            </DropdownMenu.Group>
           </DropdownMenu.Content>
         </DropdownMenu.Root>
       </div>
@@ -685,8 +733,8 @@ async function deleteManualModel(): Promise<void> {
       </div>
       <div
         class="sticky bottom-0 z-20 mt-2 flex translate-y-2 justify-end gap-2 border-t bg-background py-2 after:absolute after:inset-x-0 after:top-full after:h-2 after:bg-background after:content-['']">
-        <Button variant="outline" onclick={requestClose}>{m.common_cancel()}</Button>
-        <Button onclick={() => editor?.submit()} disabled={saving}>
+        <Button variant="outline" class="min-h-10" onclick={requestClose}>{m.common_cancel()}</Button>
+        <Button class="min-h-10" onclick={() => editor?.submit()} disabled={saving}>
           {#if saving}<Spinner data-icon="inline-start" />{/if}{m.common_save_model()}
         </Button>
       </div>
@@ -727,6 +775,20 @@ async function deleteManualModel(): Promise<void> {
       </div>
     </div>
 
+    {#if addedModel}
+      <div
+        class="flex flex-wrap items-center justify-between gap-3 rounded-xl border p-4"
+        role="status"
+        aria-live="polite">
+        <p class="text-sm font-medium">
+          {addedModel.existingRoute
+            ? m.provider_model_catalog_model_target_added({ id: addedModel.id })
+            : m.provider_model_catalog_model_route_created({ id: addedModel.id })}
+        </p>
+        <Button href="/connect" variant="outline">{m.connect_connect_apps()}</Button>
+      </div>
+    {/if}
+
     <div class="route-desktop-table">
       <DataTable
         data={modelsQuery.isError ? [] : models}
@@ -759,7 +821,7 @@ async function deleteManualModel(): Promise<void> {
             bind:value={search}
             placeholder={m.provider_model_catalog_search_name_model_id()} />
         </div>
-        <div class="mt-2 flex items-center justify-between gap-2">
+        <div class="mt-2 flex flex-wrap items-center justify-between gap-2">
           <Button variant="outline" onclick={() => (filtersOpen = true)}>
             <SlidersHorizontalIcon data-icon="inline-start" />
             {m.provider_model_catalog_filter_models()}
@@ -805,14 +867,9 @@ async function deleteManualModel(): Promise<void> {
             <div class="col-span-2 min-h-10 min-w-0 text-left" aria-label={`${model.name} ${model.id}`}>
               <span class="block truncate font-medium">{model.name}</span>
               <span class="block truncate font-technical text-xs text-muted-foreground">{model.id}</span>
-              <span class="mt-1 flex flex-wrap gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
-                {#if model.capabilities.context}<span
-                    >{formatNumber(model.capabilities.context)} {m.common_context()}</span
-                  >{/if}
-                {#if model.capabilities.reasoning}<span>{m.common_reasoning()}</span>{/if}
-                {#if model.capabilities.tool_call}<span>{m.common_tool_calls()}</span>{/if}
-                {#if model.capabilities.attachment}<span>{m.common_attachments()}</span>{/if}
-              </span>
+            </div>
+            <div class="col-span-2 min-w-0">
+              <ModelSpecification specification={model.specification} />
             </div>
             <div class="col-span-2 flex min-w-0 flex-wrap items-center gap-2">
               <Badge variant={model.available ? 'secondary' : 'outline'}
@@ -828,19 +885,12 @@ async function deleteManualModel(): Promise<void> {
               {:else if routeReferencesReady}
                 <button
                   type="button"
-                  class="group inline-flex min-h-10 items-center rounded-md px-2 text-sm text-muted-foreground hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-70"
+                  class="inline-flex min-h-10 items-center rounded-md px-2 text-sm font-medium text-foreground hover:bg-muted disabled:pointer-events-none disabled:opacity-70"
                   aria-label={m.provider_model_catalog_add_model_to_route({ id: model.id })}
-                  disabled={Boolean(addingRouteModelId)}
+                  disabled={!model.available || Boolean(addingRouteModelId)}
                   onclick={() => void addModelToRoute(model)}>
                   {#if addingRouteModelId === model.id}<Spinner data-icon="inline-start" />{/if}
-                  <span class="group-hover:hidden group-focus-visible:hidden">
-                    {m.provider_model_catalog_not_used()}
-                  </span>
-                  <span class="hidden group-hover:inline group-focus-visible:inline">
-                    {matchingRoute
-                      ? m.provider_model_catalog_add_destination()
-                      : m.provider_model_catalog_create_model()}
-                  </span>
+                  {matchingRoute ? m.provider_model_catalog_add_destination() : m.provider_model_catalog_create_model()}
                 </button>
               {:else}
                 <span class="px-2 text-sm text-muted-foreground">{m.provider_model_catalog_not_used()}</span>
@@ -859,6 +909,8 @@ async function deleteManualModel(): Promise<void> {
   availability={availabilityFilter}
   source={sourceFilter}
   reference={referenceFilter}
+  specification={specificationFilter}
+  onSpecificationChange={setSpecificationFilter}
   onFilterChange={setCatalogFilter}
   onClear={clearFilters} />
 

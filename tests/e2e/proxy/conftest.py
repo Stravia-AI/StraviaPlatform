@@ -31,9 +31,11 @@ import pytest
 from tests.common.helpers import (
     find_free_port,
     http_request,
+    initialize_server,
     is_port_free,
     start_stravia_server,
     stop_stravia_server,
+    wait_for_setup_token,
     wait_until_ready,
 )
 
@@ -305,7 +307,6 @@ def stravia_proxy_base(
     replay_models: dict[str, list[str]],
 ) -> Iterator[tuple[str, str]]:
     server_port = find_free_port()
-    admin_token = "proxy-e2e-token"
     data_dir = tempfile.TemporaryDirectory(prefix="stravia-proxy-e2e-")
     proc, logs = start_stravia_server(
         stravia_binary=stravia_binary,
@@ -314,21 +315,22 @@ def stravia_proxy_base(
             "127.0.0.1",
             "--port",
             str(server_port),
-            "--admin-token",
-            admin_token,
             "--data-dir",
             data_dir.name,
         ],
     )
     base = f"http://127.0.0.1:{server_port}"
     admin_base = base
-    admin_headers = {"authorization": f"Bearer {admin_token}"}
     try:
-        wait_until_ready(
-            f"{admin_base}/api/v1/status", timeout=30.0, headers=admin_headers
+        wait_until_ready(f"{admin_base}/api/v1/auth/state", timeout=30.0)
+        setup_token = wait_for_setup_token(logs, proc)
+        session = initialize_server(
+            admin_base,
+            setup_token,
+            {"backend": "sqlite", "path": str(Path(data_dir.name) / "gateway.db")},
         )
         api_key = _configure_proxy_routes(
-            admin_base, admin_headers, replay_cluster, replay_models
+            admin_base, session.auth_headers(), replay_cluster, replay_models
         )
         wait_until_ready(f"{base}/v1/chat/completions", timeout=30.0)
         yield base, api_key

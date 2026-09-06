@@ -11,7 +11,7 @@ import { toast } from 'svelte-sonner'
 import { admin } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
 import { getDataTableLabels } from '$lib/data-table-labels'
-import { effectiveModelDisplayName, logicalModelSecondaryId, sortLogicalModels } from '$lib/logical-model'
+import { effectiveModelDisplayName, sortLogicalModels } from '$lib/logical-model'
 import type { Route, RouteSelectionStrategy } from '$lib/types'
 import PageHeader from '$lib/components/page-header.svelte'
 import StatusIndicator from '$lib/components/status-indicator.svelte'
@@ -58,12 +58,18 @@ function strategyLabel(strategy: RouteSelectionStrategy): string {
 }
 
 const modelColumns = modelColumnHelper.columns([
-  modelColumnHelper.accessor((model) => `${effectiveModelDisplayName(model)} ${model.model_id}`, {
-    id: 'model',
-    header: () => m.common_model(),
-    cell: (context) => renderSnippet(modelIdentityCell, context),
-    meta: { label: () => m.common_model() },
-    size: 200,
+  modelColumnHelper.accessor((model) => effectiveModelDisplayName(model), {
+    id: 'display-name',
+    header: () => m.models_display_name(),
+    cell: (context) => renderSnippet(modelDisplayNameCell, context),
+    meta: { label: () => m.models_display_name() },
+    size: 180,
+  }),
+  modelColumnHelper.accessor('model_id', {
+    header: () => m.models_client_model_id(),
+    cell: (context) => renderSnippet(modelIdCell, context),
+    meta: { label: () => m.models_client_model_id() },
+    size: 190,
   }),
   modelColumnHelper.accessor('balance', {
     header: () => m.models_request_handling(),
@@ -71,12 +77,12 @@ const modelColumns = modelColumnHelper.columns([
     meta: { label: () => m.models_request_handling() },
     size: 170,
   }),
-  modelColumnHelper.accessor((model) => targetsLabel(model), {
-    id: 'destinations',
-    header: () => m.models_destinations(),
-    cell: (context) => renderSnippet(modelTargetsCell, context),
-    meta: { label: () => m.models_destinations() },
-    size: 420,
+  modelColumnHelper.accessor((model) => associatedServicesLabel(model), {
+    id: 'services',
+    header: () => m.models_associated_services(),
+    cell: (context) => renderSnippet(modelServicesCell, context),
+    meta: { label: () => m.models_associated_services() },
+    size: 280,
   }),
   modelColumnHelper.accessor('is_enabled', {
     header: () => m.common_status(),
@@ -120,14 +126,14 @@ const deletesMediaUnderstandingRoute = $derived(
   Boolean(deleteTarget && mediaUnderstandingQuery.data?.model_id === deleteTarget.id),
 )
 
-function targetsLabel(model: Route): string {
-  return model.targets
-    .filter((target) => target.enabled)
-    .map(
-      (target) =>
-        `${providers.find((provider) => provider.id === target.provider_id)?.name ?? target.provider_id}: ${target.model}`,
-    )
-    .join(', ')
+function associatedServicesLabel(model: Route): string {
+  return [
+    ...new Set(
+      model.targets.map(
+        (target) => providers.find((provider) => provider.id === target.provider_id)?.name ?? target.provider_id,
+      ),
+    ),
+  ].join(', ')
 }
 
 function enabledTargetCount(model: Route): number {
@@ -225,14 +231,12 @@ async function deleteModel(): Promise<void> {
   </DropdownMenu.Root>
 {/snippet}
 
-{#snippet modelIdentityCell(context: DataTableCellContext<Route>)}
-  {@const model = context.row.original}
-  <div class="min-w-0">
-    <span class="block truncate font-medium">{effectiveModelDisplayName(model)}</span>
-    {#if logicalModelSecondaryId(model)}
-      <span class="block truncate font-technical text-xs text-muted-foreground">{model.model_id}</span>
-    {/if}
-  </div>
+{#snippet modelDisplayNameCell(context: DataTableCellContext<Route>)}
+  <span class="block truncate font-medium">{effectiveModelDisplayName(context.row.original)}</span>
+{/snippet}
+
+{#snippet modelIdCell(context: DataTableCellContext<Route>)}
+  <TechnicalValue value={context.row.original.model_id} copyable />
 {/snippet}
 
 {#snippet modelBalanceCell(context: DataTableCellContext<Route>)}
@@ -241,8 +245,13 @@ async function deleteModel(): Promise<void> {
   </Badge>
 {/snippet}
 
-{#snippet modelTargetsCell(context: DataTableCellContext<Route>)}
-  <TechnicalValue value={targetsLabel(context.row.original)} copyable />
+{#snippet modelServicesCell(context: DataTableCellContext<Route>)}
+  {@const services = associatedServicesLabel(context.row.original)}
+  {#if services}
+    <span class="block truncate">{services}</span>
+  {:else}
+    <span class="text-muted-foreground">{m.models_no_associated_services()}</span>
+  {/if}
 {/snippet}
 
 {#snippet modelStatusCell(context: DataTableCellContext<Route>)}
@@ -336,15 +345,18 @@ async function deleteModel(): Promise<void> {
             onkeydown={(event) => handleModelRowKeydown(event, model)}>
             <div class="min-w-0">
               <p class="truncate font-medium">{effectiveModelDisplayName(model)}</p>
-              {#if logicalModelSecondaryId(model)}
-                <p class="truncate font-technical text-xs text-muted-foreground">{model.model_id}</p>
-              {/if}
+              <p class="truncate text-xs text-muted-foreground">
+                {m.models_client_model_id()}: <span class="font-technical">{model.model_id}</span>
+              </p>
               <p class="mt-1 text-xs text-muted-foreground">
                 {strategyLabel(model.balance)} · {targetCount === 1
                   ? m.common_1_destination()
                   : m.models_value_destinations({ target_count: targetCount })}
               </p>
-              <TechnicalValue class="mt-1 text-muted-foreground" value={targetsLabel(model)} /><StatusIndicator
+              <p class="mt-1 truncate text-xs text-muted-foreground">
+                {m.models_associated_services()}: {associatedServicesLabel(model) || m.models_no_associated_services()}
+              </p>
+              <StatusIndicator
                 class="mt-1"
                 compact
                 label={model.is_enabled ? m.common_enabled_status() : m.common_disabled_status()}

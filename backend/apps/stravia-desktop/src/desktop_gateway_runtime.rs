@@ -19,6 +19,7 @@ use tokio::sync::{Mutex, RwLock};
 
 const FIXED_PORT_KEY: &str = "fixed_port";
 const DEVELOPMENT_RUNTIME_DIR: &str = ".stravia-dev";
+const E2E_RUNTIME_DIR: &str = ".stravia-desktop-e2e";
 const PORT_STORE_FILE: &str = "desktop-port.json";
 const MIN_FIXED_PORT: u16 = 1024;
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
@@ -87,7 +88,11 @@ pub(crate) fn desktop_runtime_dir(app: &tauri::App) -> PathBuf {
         .path()
         .app_data_dir()
         .unwrap_or_else(|_| PathBuf::from(".stravia"));
-    runtime_dir(cfg!(debug_assertions), production_data_dir)
+    runtime_dir(
+        cfg!(debug_assertions),
+        cfg!(feature = "desktop-e2e"),
+        production_data_dir,
+    )
 }
 
 pub(crate) fn desktop_port_store(
@@ -102,8 +107,11 @@ pub(crate) fn desktop_port_store(
     Ok(Arc::new(TauriPortPreferenceStore { store }))
 }
 
-fn runtime_dir(development: bool, production_data_dir: PathBuf) -> PathBuf {
-    if development {
+fn runtime_dir(development: bool, desktop_e2e: bool, production_data_dir: PathBuf) -> PathBuf {
+    // E2E 会写入假更新等夹具，必须先于 Debug 分支隔离整个运行目录。
+    if desktop_e2e {
+        repository_root().join(E2E_RUNTIME_DIR)
+    } else if development {
         repository_root().join(DEVELOPMENT_RUNTIME_DIR)
     } else {
         production_data_dir

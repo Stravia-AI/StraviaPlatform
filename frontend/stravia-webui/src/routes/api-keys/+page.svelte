@@ -5,8 +5,10 @@ import { renderSnippet } from '@tanstack/svelte-table'
 import MoreHorizontalIcon from '@lucide/svelte/icons/more-horizontal'
 import PlusIcon from '@lucide/svelte/icons/plus'
 import { toast } from 'svelte-sonner'
+import { onMount } from 'svelte'
 
 import { admin } from '$lib/admin-client'
+import { getConnectSetup } from '$lib/connect-setup'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
 import { getDataTableLabels } from '$lib/data-table-labels'
 import { formatLogTime } from '$lib/format'
@@ -28,6 +30,13 @@ import * as Empty from '$lib/components/ui/empty'
 import { Skeleton } from '$lib/components/ui/skeleton'
 
 const queryClient = useQueryClient()
+const connectSetup = getConnectSetup()
+onMount(() => {
+  if (connectSetup.draft && connectSetup.createKey) {
+    connectSetup.createKey = false
+    openCreate()
+  }
+})
 const apiKeysQuery = createQuery(() => ({ queryKey: ['api-keys'], queryFn: admin.apiKeys.list }))
 const modelsQuery = createQuery(() => ({ queryKey: ['models'], queryFn: admin.models.list }))
 const webSearchQuery = createQuery(() => ({ queryKey: ['web-search-config'], queryFn: admin.webSearch.config.get }))

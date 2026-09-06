@@ -25,7 +25,7 @@ Claude Code · Codex CLI · Gemini CLI · OpenCode
 | Desktop | Tauri v2 桌面应用（macOS / Windows / Linux） | 个人开发者，零部署，数据不离开本机 |
 | Server | 独立 Rust 二进制，始终启动 Proxy、Admin API 与内嵌 WebUI | 自托管、团队共享 |
 
-核心原则：`stravia-core` 不绑定 HTTP listener，只保留 Gateway 业务能力、AdminService 和 Proxy 路由处理。独立 Server 与 Desktop 复用 `stravia-server` 的 HTTP application；WebUI 通过 HTTP REST 调用管理 API，Desktop IPC 仅用于发现本地 Server 端口。
+核心原则：`stravia-core` 不绑定 HTTP listener，只保留 Gateway 业务能力、AdminService 和 Proxy 路由处理。独立 Server 与 Desktop 复用 `stravia-server` 的 HTTP application；WebUI 通过 HTTP REST 调用管理 API，Desktop IPC 提供本地 Server 端口发现与原生管理会话凭据。
 
 ---
 
@@ -216,7 +216,7 @@ graph TD
     desktopApp["stravia-desktop (Tauri desktop app)"]
     serverApp["stravia-server (HTTP app + server binary)"]
     webui["stravia-webui (SvelteKit + TypeScript)"]
-    tauriIPC["Tauri IPC (port discovery)"]
+    tauriIPC["Tauri IPC (port discovery + native session)"]
     httpREST["HTTP REST"]
 
     desktopApp --> straviaCoreLib
@@ -766,6 +766,10 @@ Provider discovery 只负责提供当前可见的模型 ID。动态端点响应�
 
 `provider_models` 按 `(provider_id, model_id)` 保存 Provider 实例拥有的可编辑模型快照。首次同步插入 discovery 结果；后续同步只对账 `presence` 与来源生命周期，不覆盖管理员已编辑的 metadata。管理员可显式执行 re-import，以当前来源值整体替换单个模型 metadata。未知字段保存在 `metadata_json` 中，成本与上限的常用查询列及分档成本规则同时规范化到关系列。
 
+管理列表的每个 Provider Model 返回 `specification`，替代原有不完整的 `capabilities` 摘要。Core 从已保存 metadata 投影 `limit`（`context`、`input`、`output`）、`modalities`（`input`、`output`），以及 `reasoning`、`tool_call`、`structured_output`、`attachment`、`temperature` 五项可空声明；缺失功能保持 `null`，不补 `false`，缺失限额与模态组保持 `null`。HTTP 与 Desktop 共用该投影，单模型详情继续返回完整 metadata。此管理契约变更不修改持久化 schema、推理接口或运行时能力判定。
+
+WebUI 的只读模型规格组件消费这一语义，列表与 Target 使用紧凑密度，详情展开完整限额和三态功能。数字按十进制无损缩写，不能简短精确表达时保留千位分隔全数；输入输出方向始终分开。可用模型规格列在既有列筛选状态中保存五类 AND 条件，使用原始整数做包含等于边界的下限比较，并要求选中模态与功能已明确登记；未选维度不限制。列表一次响应提供展示和筛选所需数据，不逐行请求详情，也不从实时目录或平台能力覆盖已保存规格。
+
 Canonical Model 只用作一次性模板：创建 Route 时，客户端请求使用的 Route ID 仍落在现有 `models.name` 存储列；准备手动 Provider Model 时，`POST /api/v1/providers/{provider_id}/model/prepare` 接受 `{model_id, template_id?}`，由 Core 从 active revision 复制完整 Canonical record 并把 `id` 替换为最终 upstream model ID。两个流程都不保存 Canonical Model binding。
 
 `stravia-core` 通过 crate-private Provider connection 与 Route 两个深模块收口管理写入。Provider connection 负责 Catalog/custom 解析、Adapter Credentials、Base URL、OAuth、连通性与删除；Route 负责 Provider Model snapshot、discovery、Selection Policy、Canonical Model 一次性模板、Route ID 与 Target。Admin HTTP 只做 DTO adapter：`POST /api/v1/models/bind` 执行一键或指定 Route ID 的 Target 绑定，`POST /api/v1/models/unbind` 摘除 Target，并在最后一个 Target 被摘除时删除 Route。
@@ -780,16 +784,16 @@ Canonical Model 只用作一次性模板：创建 Route 时，客户端请求使
 
 | 后端 | 适用形态 | 路径 |
 |---|---|---|
-| SQLite | Desktop（单用户本地） | `backend/crates/stravia-core/src/storage/sqlite/` |
-| PostgreSQL | Server（多用户自托管） | `backend/crates/stravia-core/src/storage/postgres/` |
+| SQLite | Desktop 或 Server 本地文件 | `backend/crates/stravia-core/src/storage/sqlite/` |
+| PostgreSQL | Server 自托管实例 | `backend/crates/stravia-core/src/storage/postgres/` |
 | Memory | 测试 / mock | `backend/crates/stravia-core/src/storage/memory.rs` |
 
 统一接口定义在 `backend/crates/stravia-core/src/storage/traits.rs`，上层代码不感知具体后端。
-SQLite 与 PostgreSQL 在启动服务前应用 SQLx versioned migrations；权威 Schema 文档为 [docs/database/schema.md](../database/schema.md)（含供审阅的 `deploy/schema/postgres.sql`）。
+SQLite 与 PostgreSQL 通过 SQLx versioned migrations 演进。Server 未配置时先提供设置服务，选择并保存数据库配置后才运行 migration 和正常 Gateway；Desktop 直接打开本地 SQLite。当前受支持 schema 的增量迁移保留业务数据，不兼容 schema 明确失败且不自动清空。权威 Schema 文档为 [docs/database/schema.md](../database/schema.md)（含供审阅的 `deploy/schema/postgres.sql`）。
 
 ### 10.2 核心表结构（最终态，post-migration）
 
-> 首个 SQLx migration 直接创建最终表名；仅支持新建数据库，不提供旧 schema 的就地升级。
+> 首个 SQLx migration 直接创建基础表；后续版本在 SQLite 与 PostgreSQL 中等价演进，不通过删除数据库处理不兼容版本。
 
 ```sql
 -- 提供商配置
@@ -911,8 +915,10 @@ CREATE TABLE provider_oauth_credentials (
 
 ### 10.3 安全
 
-- Desktop 模式下共享 HTTP Server 监听 `127.0.0.1:0`，由操作系统分配端口；Desktop 不设 Admin token，其他本机进程可访问该管理 API 是已接受的风险
-- Server 模式下 Proxy、Admin API、健康探针和 WebUI 共用一个 listener；当 `--host` 不是回环地址时必须设置 Admin token
+- 每个数据库只有一个独立管理用户，唯一角色为 `admin`；它不拥有 API Key，管理 JWT 也不能替代推理/MCP 的 API Key。
+- Desktop 模式下共享 HTTP Server 监听 `127.0.0.1:0`，由操作系统分配端口；只有受限 Tauri 原生通道能取得内存中的 Bearer JWT，普通回环 HTTP 请求仍需有效管理认证。
+- Server 模式下 Proxy、Admin API、健康探针和 WebUI 共用一个 listener。WebUI 使用可撤销会话的 HttpOnly Cookie；所有会修改状态的管理请求执行精确 origin 和 CSRF 校验。非回环 `--host` 必须配置 HTTPS `--public-origin`。
+- Server 数据库连接只来自 `server.toml`。配置缺失进入受控制台一次性令牌保护的设置模式；配置损坏、数据库不可达或 schema 不兼容均失败关闭，不回退到 SQLite。
 
 ---
 
@@ -920,7 +926,7 @@ CREATE TABLE provider_oauth_credentials (
 
 前端（`frontend/stravia-webui/`）通过单一管理 transport 兼容两种部署形态（`frontend/stravia-webui/src/lib/admin-client.ts`）：
 
-- **Desktop 版**：仅通过 Tauri IPC 取得动态端口，随后通过 loopback HTTP 调用 `/api/v1/*`
+- **Desktop 版**：通过 Tauri IPC 取得动态端口与原生管理会话的 access JWT，随后以 Bearer JWT 通过 loopback HTTP 调用 `/api/v1/*`；refresh token 只保留在原生进程内存中
 - **Server 版**：通过当前页面 origin 的 HTTP 调用 `/api/v1/*`
 
 **技术栈：**

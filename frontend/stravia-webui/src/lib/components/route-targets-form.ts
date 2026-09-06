@@ -1,11 +1,4 @@
-import type {
-  CreateTarget,
-  ModelCapabilities,
-  ProviderModelSummary,
-  Route,
-  ThinkingLevelMapping,
-  UpsertTarget,
-} from '$lib/types'
+import type { CreateTarget, ProviderModelSummary, Route, ThinkingLevelMapping, UpsertTarget } from '$lib/types'
 
 export interface RouteTargetForm {
   key: string
@@ -18,7 +11,6 @@ export interface RouteTargetForm {
   targetRetryBudget: number
   targetCooldownSeconds: number
   inventory: ProviderModelSummary[]
-  capabilities?: ModelCapabilities
   custom: boolean
   persisted: boolean
   loading: boolean

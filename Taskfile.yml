@@ -19,12 +19,11 @@ tasks:
 
   dev:server:
     desc: Start the Vite WebUI and standalone server in debug mode.
-    deps: [dev:web, dev:server:backend]
-
-  dev:server:backend:
-    internal: true
+    deps: [install:web]
+    env:
+      STRAVIA_WIRE_CAPTURE_DIR: "{{.WIRE_CAPTURE_DIR}}"
     cmds:
-      - cargo run -p stravia-server -- --wire-capture-dir "{{.WIRE_CAPTURE_DIR}}"
+      - bun run dev:server
 
   dev:desktop:
     desc: Start the Stravia desktop application in Tauri development mode.

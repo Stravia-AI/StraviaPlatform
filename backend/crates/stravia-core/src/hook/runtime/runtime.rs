@@ -403,10 +403,8 @@ impl InferenceRun {
         self.exposed_tools.contains_key(name)
     }
 
-    pub(crate) fn could_be_exposed_tool_prefix(&self, name: &str) -> bool {
-        self.exposed_tools
-            .keys()
-            .any(|registered| registered.starts_with(name))
+    pub(crate) fn exposed_tool_names(&self) -> impl Iterator<Item = String> + '_ {
+        self.exposed_tools.keys().cloned()
     }
 
     pub(crate) fn remove_exposed_tools(&self, request: &mut AiRequest) {

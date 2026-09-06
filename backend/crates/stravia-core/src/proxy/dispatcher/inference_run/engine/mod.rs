@@ -160,6 +160,17 @@ fn enter_phase(phase: &mut PhaseTracker, next: Phase) -> Result<(), Box<Response
         .map_err(|error| Box::new(hook_failure_response(error)))
 }
 
+fn thinking_carrier_facts(
+    ingress: ProtocolId,
+    egress: ProtocolId,
+    encrypted_content_requested: bool,
+) -> crate::protocol::transform::ThinkingCarrierFacts {
+    crate::protocol::transform::ProtocolTransform::global()
+        .bind(ingress, egress)
+        .expect("Inference Run uses a registered protocol pair")
+        .thinking_carrier_facts(encrypted_content_requested)
+}
+
 /// Materialized Generation Chain state owned by the Inference Run while the
 /// Model Turn Executor prepares only the selected target's continuation.
 #[derive(Clone)]
@@ -436,24 +447,27 @@ pub(super) async fn orchestrate(
     phase.finish();
     if response.status().is_success() {
         let (delivery_admission, background_admission) = split_admission(admission);
-        let references = ctx
-            .extensions
-            .get::<PublishedPlatformExecutions>()
-            .unwrap_or_default()
-            .references;
-        if references.is_empty() {
-            drop(background_admission);
-        } else {
-            let store = Arc::clone(&gw.history_markers);
-            let principal = generation.principal.clone();
-            gw.lifecycle.spawn(async move {
+        let response = wrap_delivery(response, delivery_admission);
+        let store = Arc::clone(&gw.history_markers);
+        let principal = generation.principal.clone();
+        let extensions = ctx.extensions.clone();
+        let lifecycle = gw.lifecycle.clone();
+        after_body_delivery(response, async move {
+            let references = extensions
+                .get::<PublishedPlatformExecutions>()
+                .unwrap_or_default()
+                .references;
+            if references.is_empty() {
+                drop(background_admission);
+                return;
+            }
+            lifecycle.spawn(async move {
                 for reference in references {
                     let _ = store.wait_terminal(&principal, &reference).await;
                 }
                 drop(background_admission);
             });
-        }
-        wrap_delivery(response, delivery_admission)
+        })
     } else {
         response
     }
@@ -594,18 +608,18 @@ async fn dispatch_round(
                     {
                         response.id = write.id().to_owned();
                     }
-                    let projection = projection
+                    let projection_session = projection
                         .as_mut()
                         .expect("buffered Client Projection session");
-                    projection.begin_model_leg();
-                    let thinking_references =
-                        match projection.project_staged(&mut response, &[]).await {
-                            Ok(references) => references,
-                            Err(error) => return hook_failure_response(error),
-                        };
-                    if let Err(error) = projection.publish(&thinking_references).await {
+                    projection_session.begin_model_leg(
+                        thinking_carrier_facts(ingress, ingress, false),
+                        run.exposed_tool_names(),
+                    );
+                    if let Err(error) = projection_session.project_staged(&mut response, &[]).await
+                    {
                         return hook_failure_response(error);
                     }
+                    let marker_delivery = projection_session.take_staged_delivery();
                     let pending_generation_chain =
                         generation_chain.write.take().and_then(|mut write| {
                             write.observe_effective(request.clone());
@@ -641,11 +655,27 @@ async fn dispatch_round(
                         ingress,
                         request.stream.enabled,
                     );
-                    return if let Some(pending) = pending_generation_chain {
-                        DeliveryAdapter::commit_response_after_delivery(response, pending)
-                    } else {
-                        response
-                    };
+                    let mut projection = projection
+                        .take()
+                        .expect("delivered Hook Client Projection session");
+                    return after_body_delivery(response, async move {
+                        if let Err(error) = projection
+                            .report_delivery(marker_delivery, ProjectionDelivery::Sent)
+                            .await
+                        {
+                            tracing::error!(
+                                "failed to publish delivered Hook history markers: {error}"
+                            );
+                            return;
+                        }
+                        if let Some(mut pending) = pending_generation_chain
+                            && let Err(error) = pending.persist().await
+                        {
+                            tracing::error!(
+                                "failed to commit delivered Hook Generation Chain node: {error}"
+                            );
+                        }
+                    });
                 }
                 Ok(control) => {
                     return render_hook_control(control, ingress, request.stream.enabled);
@@ -867,10 +897,20 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
         .await;
     }
 
-    let projection = projection
+    let projection_session = projection
         .as_mut()
         .expect("buffered Client Projection session");
-    projection.begin_model_leg();
+    projection_session.begin_model_leg(
+        thinking_carrier_facts(
+            ingress,
+            turn.route.egress,
+            turn.reasoning_encrypted_content_requested,
+        ),
+        inference_run
+            .as_ref()
+            .expect("buffered Inference Run before projection")
+            .exposed_tool_names(),
+    );
 
     let route = turn.route.clone();
     let streamed = turn.streamed;
@@ -1006,7 +1046,7 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
             response,
             upstream_response_id,
             early_platform_executions: Vec::new(),
-            projection,
+            projection: projection_session,
         },
     )
     .await
@@ -1017,12 +1057,26 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
                 .expect("current Model Turn log")
                 .without_client_exchange()
                 .emit();
-            if let Err(failure) = continuation.publish(&completion_context).await {
-                return buffered_response(render_completion_failure(
-                    failure,
-                    ingress,
-                    request.stream.enabled,
-                ));
+            let marker_delivery = projection_session.take_staged_delivery();
+            match projection_session
+                .report_delivery(marker_delivery, ProjectionDelivery::Sent)
+                .await
+            {
+                Ok(references) => {
+                    let mut published = request_context
+                        .extensions
+                        .get::<PublishedPlatformExecutions>()
+                        .unwrap_or_default();
+                    published.references.extend(references);
+                    request_context.extensions.insert(published);
+                }
+                Err(error) => {
+                    return buffered_response(render_completion_failure(
+                        CompletionFailure::hook(error, ClientOutputCommit::Pending),
+                        ingress,
+                        request.stream.enabled,
+                    ));
+                }
             }
             if let Err(failure) = continuation
                 .finish(
@@ -1071,18 +1125,8 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
         pending_generation_chain,
         background_executions,
         started_executions,
-        mut publish_references,
     } = completed;
-    if !request.stream.enabled && !publish_references.is_empty() {
-        if let Err(error) = publish_markers(&completion_context, &publish_references).await {
-            return buffered_response(render_completion_failure(
-                CompletionFailure::hook(error, ClientOutputCommit::Pending),
-                ingress,
-                false,
-            ));
-        }
-        publish_references.clear();
-    }
+    let marker_delivery = projection_session.take_staged_delivery();
     let mut delivery = if request.stream.enabled {
         DeliveryAdapter::buffered_stream(ingress, route.egress)
     } else {
@@ -1098,13 +1142,17 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
         .is_none()
         .then(|| delivered.body.clone());
 
-    if !publish_references.is_empty()
+    if !marker_delivery.is_empty()
         || !background_executions.is_empty()
         || !started_executions.is_empty()
         || pending_generation_chain.is_some()
     {
         let mut marker_context = completion_context.clone();
         let gateway = gateway.clone();
+        let request_context = request_context.clone();
+        let mut projection_session = projection
+            .take()
+            .expect("delivered buffered Client Projection session");
         let mut pending_generation_chain = pending_generation_chain;
         let run = if !background_executions.is_empty() || !started_executions.is_empty() {
             inference_run.take()
@@ -1113,11 +1161,25 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
         };
         delivered.response = after_body_delivery(delivered.response, async move {
             marker_context.mark_client_output_committed();
-            if !publish_references.is_empty()
-                && let Err(error) = publish_markers(&marker_context, &publish_references).await
+            let published_references = match projection_session
+                .report_delivery(marker_delivery, ProjectionDelivery::Sent)
+                .await
             {
-                tracing::error!("failed to publish delivered history markers: {error}");
-                return;
+                Ok(references) => references,
+                Err(error) => {
+                    tracing::error!(
+                        "failed to publish delivered buffered history markers: {error}"
+                    );
+                    return;
+                }
+            };
+            if !published_references.is_empty() {
+                let mut published = request_context
+                    .extensions
+                    .get::<PublishedPlatformExecutions>()
+                    .unwrap_or_default();
+                published.references.extend(published_references);
+                request_context.extensions.insert(published);
             }
             let mut started_executions = started_executions;
             if !background_executions.is_empty() {

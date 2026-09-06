@@ -1,8 +1,9 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main-capability",
-  "description": "Main desktop window permissions",
+  "description": "Bundled main WebView permissions; remote content receives no native API access",
   "windows": ["main"],
+  "local": true,
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",
@@ -11,6 +12,19 @@
     "core:window:allow-toggle-maximize",
     "core:window:allow-is-maximized",
     "core:window:allow-close",
-    "opener:default"
+    "opener:default",
+    "allow-get-admin-session",
+    "allow-get-server-port",
+    "allow-get-desktop-port-state",
+    "allow-set-desktop-fixed-port",
+    "allow-recheck-desktop-fixed-port",
+    "allow-plan-connect-client",
+    "allow-apply-connect-client",
+    "allow-list-provider-allowances",
+    "allow-refresh-provider-allowances",
+    "allow-refresh-provider-allowance",
+    "allow-get-desktop-update-state",
+    "allow-download-product-update",
+    "allow-install-product-update"
   ]
 }

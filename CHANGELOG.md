@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+### Added
+
+- Standalone servers now offer a one-time-token setup wizard and an interactive `recover-admin` command that resets the existing administrator and revokes prior sessions without rebuilding business data.
+
+### Changed
+
+- The WebUI now links service connection, visible model inventory actions, and client setup through lightweight task guidance, reuses eligible API Keys, and preserves selections when returning from resource management.
+- Model lists distinguish display names, client Model IDs, enabled state, and associated services; modified model drafts now warn before navigation without changing priority lanes or immediately applied destination settings.
+- Client setup distinguishes copied and written configuration from verified connections, and credential guidance no longer claims editable secrets are shown only once.
+- **Breaking:** A single administrator account and revocable sessions replace the static Admin Token. Web sign-in uses HttpOnly cookies, 15-minute access JWTs, rotating refresh tokens, and a fixed seven-day session lifetime. Inference and MCP continue to use API Keys.
+- **Breaking:** Server database connections now come only from `server.toml`, selected with `--config`. Existing deployments must move database CLI and environment settings into this file before upgrading; missing or invalid configuration never silently selects another database.
+- Desktop management now requires the same session authentication as Server. Only the native application can obtain its in-memory session; closing to the tray preserves it, while exiting revokes it.
+
+### Fixed
+
+- The Server development workflow now passes Vite's actual listening origin to the backend for setup and sign-in, including when Vite selects another port for concurrent workspaces.
+- Relative SQLite paths now resolve from the directory containing `server.toml` throughout setup, startup, and local recovery, keeping the default Debug database in the workspace's `.stravia-dev` directory instead of creating a database in the process working directory.
+
+## [0.1.6] - 2026-09-05
+
+### Added
+
+- The management UI now checks GitHub Releases for optional updates; Stravia Desktop can download, verify, and install signed Windows NSIS and Linux AppImage updates, while standalone servers only open the exact Release page.
+
+### Fixed
+
+- Codex OAuth model discovery now uses client version `0.153.0`, and generation sends the required model and service-tier routing hint, restoring discovery and invocation of version-gated models such as `gpt-6-astra`.
+
+## [0.1.5] - 2026-09-04
+
+### Fixed
+
+- Streaming responses now preserve UTF-8 characters split across transport chunks and exclude tool output from History Marker continuation, preventing corrupted text and invalid follow-up context.
+
 ## [0.1.4] - 2026-09-04
 
 ### Added

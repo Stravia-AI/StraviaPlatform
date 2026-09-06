@@ -25,7 +25,10 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 tauri-plugin-store = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync"] }
 tauri-plugin-opener = { workspace = true }
+tauri-plugin-process = { workspace = true }
+tauri-plugin-updater = { workspace = true }
 tempfile = { workspace = true }
+url = { workspace = true }
 tauri-plugin-wdio = { version = "1", optional = true }
 tauri-plugin-wdio-webdriver = { version = "1", optional = true }
 

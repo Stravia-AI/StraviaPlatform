@@ -22,6 +22,7 @@ use crate::storage::traits::ProviderTestResult;
 mod api_keys;
 mod auth_data;
 mod extensions;
+pub mod identity;
 mod media;
 mod model_catalog;
 mod model_data;
@@ -31,6 +32,7 @@ pub mod provider_allowance;
 mod provider_connection;
 mod routes;
 pub mod settings;
+pub mod updates;
 mod web_access;
 mod web_search;
 

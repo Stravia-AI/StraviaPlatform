@@ -1,9 +1,10 @@
 import * as m from '$lib/paraglide/messages.js'
 
-import { clearAdminToken, getAdminToken } from '$lib/auth'
+import { apiBase, authenticatedFetch, authenticationRequired, isTauri } from '$lib/auth'
 import type { ConnectClientApplyPlan } from '$lib/connect-client-apply'
 import type { ConnectClientApplyRequest } from '$lib/connect'
 import type { Locale } from '$lib/paraglide/runtime.js'
+import type { UpdateStatus } from '$lib/product-update'
 import type {
   ApiKey,
   ProviderModelDetail,
@@ -54,18 +55,7 @@ import type {
   ProviderAllowanceSnapshot,
 } from '$lib/types'
 
-export const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
-
-let desktopApiBase: Promise<string> | undefined
-
-async function resolveApiBase(): Promise<string> {
-  if (!isTauri) return '/api/v1'
-
-  desktopApiBase ??= import('@tauri-apps/api/core')
-    .then(({ invoke }) => invoke<number>('get_server_port'))
-    .then((port) => `http://127.0.0.1:${port}/api/v1`)
-  return desktopApiBase
-}
+export { isTauri }
 
 type HttpMethod = 'DELETE' | 'GET' | 'POST' | 'PUT'
 
@@ -308,6 +298,12 @@ function mapRequest(command: string, args?: Record<string, unknown>): RequestMap
       return { method: 'PUT', path: `/settings/${args?.key}`, body: { value: args?.value } }
     case 'getGatewayStatus':
       return { method: 'GET', path: '/status' }
+    case 'getUpdateStatus':
+      return { method: 'GET', path: '/updates' }
+    case 'checkForUpdates':
+      return { method: 'POST', path: '/updates/check', body: { mode: args?.mode } }
+    case 'setSkippedUpdateVersion':
+      return { method: 'PUT', path: '/updates/skipped-version', body: { version: args?.version ?? null } }
     default:
       throw new Error(`Unknown Stravia Admin operation: ${command}`)
   }
@@ -320,21 +316,16 @@ function statsPath(path: string, hours: unknown): string {
 async function request<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   const mapping = mapRequest(command, args)
   const headers = new Headers()
-  const token = getAdminToken()
-  if (token) headers.set('Authorization', `Bearer ${token}`)
+  if (mapping.method !== 'GET') headers.set('X-Stravia-CSRF', '1')
   if (mapping.body) headers.set('Content-Type', 'application/json')
 
-  const response = await fetch(`${await resolveApiBase()}${mapping.path}`, {
+  const response = await authenticatedFetch(mapping.path, {
     method: mapping.method,
     headers,
     body: mapping.body ? (typeof mapping.body === 'string' ? mapping.body : JSON.stringify(mapping.body)) : undefined,
   })
 
-  if (response.status === 401 && window.location.pathname !== '/login') {
-    clearAdminToken()
-    window.location.assign('/login')
-    throw new Error(m.frontend_error_authentication_required())
-  }
+  if (response.status === 401 && window.location.pathname !== '/login') authenticationRequired()
 
   const text = await response.text()
   const payload = text ? parseJson(text) : undefined
@@ -482,13 +473,18 @@ export const admin = {
     set: (key: string, value: string) => request<void>('setSetting', { key, value }),
     status: () => request<GatewayStatus>('getGatewayStatus'),
   },
+  updates: {
+    get: () => request<UpdateStatus>('getUpdateStatus'),
+    check: (mode: 'automatic' | 'manual') => request<UpdateStatus>('checkForUpdates', { mode }),
+    skip: (version: string | null) => request<UpdateStatus>('setSkippedUpdateVersion', { version }),
+  },
 }
 
 export async function proxyBase(): Promise<string> {
   if (!isTauri) return window.location.origin
-  return (await resolveApiBase()).slice(0, -'/api/v1'.length)
+  return (await apiBase()).slice(0, -'/api/v1'.length)
 }
 
 export async function catalogLogoUrl(providerId: string): Promise<string> {
-  return `${await resolveApiBase()}/catalog/providers/${encodeURIComponent(providerId)}/logo`
+  return `${await apiBase()}/catalog/providers/${encodeURIComponent(providerId)}/logo`
 }

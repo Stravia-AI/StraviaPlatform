@@ -15,10 +15,11 @@ use crate::db::models::{
 use crate::logging::LogEntry;
 use crate::storage::sql::config::SqlBackendConfig;
 use crate::storage::traits::{
-    ApiKeyAccessRecord, ApiKeyStore, AuthAccessStore, LogStore, OAuthCredentialStore,
-    ProviderModelStore, ProviderStore, ProviderTestResult, RouteStore, SettingsStore, Storage,
-    StorageBackend, StorageBootstrap, StorageHealth, WebProviderStore,
+    AdminIdentityStore, ApiKeyAccessRecord, ApiKeyStore, AuthAccessStore, LogStore,
+    OAuthCredentialStore, ProviderModelStore, ProviderStore, ProviderTestResult, RouteStore,
+    SettingsStore, Storage, StorageBackend, StorageBootstrap, StorageHealth, WebProviderStore,
 };
+mod admin_identity;
 mod provider_models;
 mod web_providers;
 
@@ -44,7 +45,7 @@ impl PostgresAdapter {
             .idle_timeout(config.idle_timeout)
             .connect(&config.url)
             .await
-            .with_context(|| format!("failed to connect postgres: {}", config.url))?;
+            .context("failed to connect postgres")?;
         Ok(Self { pool })
     }
 
@@ -82,6 +83,7 @@ pub struct PostgresStorage {
     settings_store: Arc<PostgresSettingsStore>,
     api_key_store: Arc<PostgresApiKeyStore>,
     auth_store: Arc<PostgresAuthAccessStore>,
+    admin_identity_store: Arc<PostgresAdminIdentityStore>,
     oauth_credential_store: Arc<PostgresOAuthCredentialStore>,
     log_store: Arc<PostgresLogStore>,
     bootstrap: Arc<PostgresBootstrap>,
@@ -97,6 +99,7 @@ impl PostgresStorage {
         let settings_store = Arc::new(PostgresSettingsStore { pool: pool.clone() });
         let api_key_store = Arc::new(PostgresApiKeyStore { pool: pool.clone() });
         let auth_store = Arc::new(PostgresAuthAccessStore { pool: pool.clone() });
+        let admin_identity_store = Arc::new(PostgresAdminIdentityStore { pool: pool.clone() });
         let oauth_credential_store = Arc::new(PostgresOAuthCredentialStore { pool: pool.clone() });
         let log_store = Arc::new(PostgresLogStore { pool: pool.clone() });
         let bootstrap = Arc::new(PostgresBootstrap { adapter });
@@ -108,6 +111,7 @@ impl PostgresStorage {
             settings_store,
             api_key_store,
             auth_store,
+            admin_identity_store,
             oauth_credential_store,
             log_store,
             bootstrap,
@@ -148,6 +152,10 @@ impl Storage for PostgresStorage {
         Some(self.auth_store.as_ref())
     }
 
+    fn admin_identity(&self) -> Option<&dyn AdminIdentityStore> {
+        Some(self.admin_identity_store.as_ref())
+    }
+
     fn logs(&self) -> &dyn LogStore {
         self.log_store.as_ref()
     }
@@ -169,6 +177,7 @@ mod providers;
 mod routes;
 mod settings;
 
+use admin_identity::*;
 use api_keys::*;
 use bootstrap::*;
 use logs::*;

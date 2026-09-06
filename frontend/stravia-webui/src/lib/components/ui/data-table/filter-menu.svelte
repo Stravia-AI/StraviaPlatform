@@ -78,15 +78,17 @@ let {
   </Popover.Trigger>
   <Popover.Content
     align={column.columnDef.meta?.align === 'end' ? 'end' : 'start'}
-    class="w-72 p-0"
+    class="flex max-h-[min(42rem,var(--bits-popover-content-available-height))] w-72 flex-col p-0"
     role="dialog"
     aria-label={labels.filterBy(columnName)}>
-    <Popover.Header class="border-b border-border/60 px-4 py-3">
+    <Popover.Header class="shrink-0 border-b border-border/60 px-4 py-3">
       <Popover.Title>{labels.filterBy(columnName)}</Popover.Title>
     </Popover.Header>
     {#if draft}
-      <div class="space-y-3 p-4">
-        {#if filter.variant === 'text'}
+      <div class="flex min-h-0 flex-col gap-3 overflow-y-auto p-4">
+        {#if filter.variant === 'custom'}
+          {@render filter.content(draft.constraints[0]?.value, (value) => onUpdateConstraint(0, { value }))}
+        {:else if filter.variant === 'text'}
           {#if draft.constraints.length > 1}
             <Select.Root
               type="single"
@@ -178,7 +180,7 @@ let {
           </div>
         {/if}
       </div>
-      <div class="flex items-center justify-between border-t border-border/60 px-4 py-3">
+      <div class="flex shrink-0 items-center justify-between border-t border-border/60 px-4 py-3">
         <Button variant="outline" class="h-10" onclick={onClear}>{labels.clearFilter}</Button>
         <Button class="h-10" onclick={onApply}>{labels.applyFilter}</Button>
       </div>

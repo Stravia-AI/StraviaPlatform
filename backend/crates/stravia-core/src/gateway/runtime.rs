@@ -25,7 +25,50 @@ async fn run_provider_allowance_sampler<F, Fut>(
     }
 }
 
+async fn open_storage_runtime(config: &GatewayConfig) -> anyhow::Result<StorageRuntime> {
+    let (storage_kind, storage, sqlite_pool, postgres_pool): StorageRuntime =
+        match config.storage.backend {
+            StorageBackendKind::Sqlite => {
+                let pool = db::init_pool(&config.data_dir).await?;
+                migrations::migrate_sqlite(&pool).await?;
+                let sqlite_storage = SqliteStorage::from_pool(pool.clone());
+                (
+                    RuntimeStorageKind::Sqlite,
+                    Arc::new(sqlite_storage),
+                    Some(pool),
+                    None,
+                )
+            }
+            StorageBackendKind::Postgres => {
+                let backend_config = to_sql_backend_config(&config.storage.postgres, "postgres")?;
+                let postgres_storage = PostgresStorage::connect(backend_config).await?;
+                let pool = postgres_storage.pool().clone();
+                migrations::migrate_postgres(&pool).await?;
+                (
+                    RuntimeStorageKind::Postgres,
+                    Arc::new(postgres_storage),
+                    None,
+                    Some(pool),
+                )
+            }
+        };
+
+    let health = storage.bootstrap().health().await?;
+    if !health.can_connect {
+        anyhow::bail!("selected storage backend is not reachable");
+    }
+
+    Ok((storage_kind, storage, sqlite_pool, postgres_pool))
+}
+
 impl Gateway {
+    /// 打开配置指定的存储，执行迁移并检查连接，不启动 Gateway 后台任务。
+    /// SQLite 会按需创建数据目录和数据库；连接、迁移或健康检查失败时返回错误。
+    pub async fn open_storage(config: &GatewayConfig) -> anyhow::Result<DynStorage> {
+        let (_, storage, _, _) = open_storage_runtime(config).await?;
+        Ok(storage)
+    }
+
     pub fn builder(config: GatewayConfig) -> GatewayBuilder {
         GatewayBuilder::new(config)
     }
@@ -35,39 +78,8 @@ impl Gateway {
     }
 
     pub async fn new(config: GatewayConfig) -> anyhow::Result<(Self, mpsc::Receiver<LogEntry>)> {
-        let (storage_kind, storage, sqlite_pool, postgres_pool): StorageRuntime =
-            match config.storage.backend {
-                StorageBackendKind::Sqlite => {
-                    let pool = db::init_pool(&config.data_dir).await?;
-                    migrations::migrate_sqlite(&pool).await?;
-                    let sqlite_storage = SqliteStorage::from_pool(pool.clone());
-                    (
-                        RuntimeStorageKind::Sqlite,
-                        Arc::new(sqlite_storage),
-                        Some(pool),
-                        None,
-                    )
-                }
-                StorageBackendKind::Postgres => {
-                    let backend_config =
-                        to_sql_backend_config(&config.storage.postgres, "postgres")?;
-                    let postgres_storage = PostgresStorage::connect(backend_config).await?;
-                    let pool = postgres_storage.pool().clone();
-                    migrations::migrate_postgres(&pool).await?;
-                    (
-                        RuntimeStorageKind::Postgres,
-                        Arc::new(postgres_storage),
-                        None,
-                        Some(pool),
-                    )
-                }
-            };
-
-        let health = storage.bootstrap().health().await?;
-        if !health.can_connect {
-            anyhow::bail!("selected storage backend is not reachable");
-        }
-
+        let (storage_kind, storage, sqlite_pool, postgres_pool) =
+            open_storage_runtime(&config).await?;
         Self::from_storage_with_kind(config, storage, storage_kind, sqlite_pool, postgres_pool)
             .await
     }
@@ -215,6 +227,10 @@ impl Gateway {
         allowance_samples
             .cleanup_at(chrono::Utc::now().timestamp_millis())
             .await?;
+        let update_service = Arc::new(admin::updates::UpdateService::github(
+            Arc::clone(&storage),
+            config.product_update_download_supported,
+        )?);
         let mut gw = Self {
             config,
             storage,
@@ -249,6 +265,7 @@ impl Gateway {
             web_access_run_snapshots: web_access::WebAccessRunSnapshotStore::default(),
             web_search_runner_state: Arc::new(tokio::sync::RwLock::new(None)),
             web_search_config_lock: Arc::new(tokio::sync::Mutex::new(())),
+            update_service,
             _sqlite_pool: sqlite_pool,
             _postgres_pool: postgres_pool,
             history_marker_execution_gate: Arc::new(tokio::sync::RwLock::new(())),

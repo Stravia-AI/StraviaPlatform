@@ -56,6 +56,7 @@ import {
   type SortingState,
 } from '@tanstack/svelte-table'
 import type { SvelteTable } from '@tanstack/svelte-table'
+import type { Snippet } from 'svelte'
 
 export type DataTableSize = 'small' | 'default' | 'large'
 export type DataTableSortMode = 'single' | 'multiple'
@@ -106,14 +107,14 @@ export interface DataTableFilterOption {
 }
 
 export type DataTableColumnFilter =
-  | {
-      variant: 'text'
-      placeholder?: string
-      matchModes?: readonly DataTableFilterMatchMode[]
-      maxConstraints?: number
-    }
+  | { variant: 'text'; placeholder?: string; matchModes?: readonly DataTableFilterMatchMode[]; maxConstraints?: number }
   | { variant: 'select'; placeholder?: string; allLabel?: string; options?: readonly DataTableFilterOption[] }
   | { variant: 'number-range'; minPlaceholder?: string; maxPlaceholder?: string }
+  | {
+      variant: 'custom'
+      /** Replace the draft through onChange instead of mutating it; undefined clears the filter. */
+      content: Snippet<[value: unknown, onChange: (value: unknown) => void]>
+    }
 
 export interface DataTableColumnMeta {
   /** Human-readable label used by column controls and CSV export. */

@@ -21,7 +21,6 @@ import {
   type ProviderModelCostForm,
   type ProviderModelPriceForm,
 } from './provider-model-form.js'
-import { Badge } from '$lib/components/ui/badge'
 import { Button } from '$lib/components/ui/button'
 import * as Field from '$lib/components/ui/field'
 import { Input } from '$lib/components/ui/input'
@@ -271,119 +270,120 @@ export function submit(): void {
 }
 </script>
 
-<div bind:this={editorRoot} class="flex flex-col gap-5">
-  <div class="flex flex-wrap items-start justify-between gap-3 border-b pb-4">
-    <div class="min-w-0">
-      <div class="flex flex-wrap items-center gap-2">
-        <h3 class="truncate text-base font-semibold">{metadata.name || detail.id}</h3>
-        <Badge variant={detail.available ? 'secondary' : 'outline'}>
-          {detail.available ? m.common_used() : m.common_unavailable()}
-        </Badge>
-        <Badge variant="outline">
-          {detail.source_kind === 'manual' ? m.common_added_manually() : m.common_synced()}
-        </Badge>
-      </div>
-      <p class="mt-1 break-all font-technical text-xs text-muted-foreground">{detail.id}</p>
-    </div>
-    {#if !draft}
-      <div class="min-w-64 rounded-lg border bg-muted/20 p-3">
-        <div class="flex items-center justify-between gap-3">
-          <div>
-            <p class="text-sm font-medium">{m.provider_model_editor_available_adding_models()}</p>
-            <p class="mt-1 text-xs text-muted-foreground">
-              {m.provider_model_editor_visibility_help()}
-            </p>
-          </div>
-          <Select.Root
-            type="single"
-            value={detail.selection_policy}
-            onValueChange={(value) => value && onSelectionChange(value as ProviderModelSelectionPolicy)}>
-            <Select.Trigger class="w-40" aria-label={m.common_availability_adding_models()}>
-              {providerModelSelectionPolicyLabel(detail.selection_policy, localeState.current)}
-            </Select.Trigger>
-            <Select.Content>
+<div bind:this={editorRoot} class="@container/model-editor flex min-w-0 flex-col gap-5">
+  {#if !draft}
+    <Field.Group class="rounded-xl bg-muted/30 p-4">
+      <Field.Field orientation="horizontal" class="[&>[data-slot=field-layout]]:flex-wrap">
+        <Field.Content class="min-w-48 flex-1">
+          <Field.Label for="provider-model-selection">{m.provider_model_editor_available_adding_models()}</Field.Label>
+          <Field.Description id="provider-model-selection-help"
+            >{m.provider_model_editor_visibility_help()}</Field.Description>
+        </Field.Content>
+        <Select.Root
+          type="single"
+          value={detail.selection_policy}
+          onValueChange={(value) => value && onSelectionChange(value as ProviderModelSelectionPolicy)}>
+          <Select.Trigger
+            id="provider-model-selection"
+            class="min-h-10 w-full shrink-0 @sm/model-editor:w-44"
+            aria-label={m.common_availability_adding_models()}
+            aria-describedby="provider-model-selection-help">
+            {providerModelSelectionPolicyLabel(detail.selection_policy, localeState.current)}
+          </Select.Trigger>
+          <Select.Content>
+            <Select.Group>
               <Select.Item value="auto">{m.common_use_synced_status()}</Select.Item>
               <Select.Item value="force_enabled">{m.common_always_allow()}</Select.Item>
               <Select.Item value="force_disabled">{m.common_don_t_allow()}</Select.Item>
-            </Select.Content>
-          </Select.Root>
-        </div>
+            </Select.Group>
+          </Select.Content>
+        </Select.Root>
+      </Field.Field>
+    </Field.Group>
+  {/if}
+
+  <div class="grid min-w-0 gap-5 @4xl/model-editor:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+    <section class="flex min-w-0 flex-col gap-4 rounded-xl border p-4">
+      <div class="flex items-center justify-between gap-3">
+        <h4 class="text-sm font-semibold">{m.provider_model_editor_model_information()}</h4>
       </div>
-    {/if}
+      <Field.Group class="grid gap-4 @xl/model-editor:grid-cols-2">
+        <Field.Field orientation="vertical">
+          <Field.Label for="provider-model-id">{m.provider_model_editor_model_id()}</Field.Label>
+          <Input id="provider-model-id" class="font-technical" value={detail.id} readonly />
+        </Field.Field>
+        {#each stringFields as field (field.key)}
+          {#if hasField(field.key)}
+            <Field.Field orientation="vertical" class={field.multiline ? '@xl/model-editor:col-span-2' : ''}>
+              <Field.Label for={`provider-model-${field.key}`}>{field.label()}</Field.Label>
+              {#if field.multiline}
+                <Textarea
+                  id={`provider-model-${field.key}`}
+                  class="min-h-24 resize-y"
+                  value={String(metadata[field.key] ?? '')}
+                  oninput={(event) => setStringField(field.key, event.currentTarget.value)} />
+              {:else}
+                <Input
+                  id={`provider-model-${field.key}`}
+                  value={String(metadata[field.key] ?? '')}
+                  oninput={(event) => setStringField(field.key, event.currentTarget.value)} />
+              {/if}
+            </Field.Field>
+          {/if}
+        {/each}
+      </Field.Group>
+      <div class="flex flex-wrap gap-2 empty:hidden">
+        {#each stringFields.filter((field) => !hasField(field.key)) as field (field.key)}
+          <Button type="button" variant="outline" size="sm" class="min-h-10" onclick={() => addStringField(field.key)}>
+            <PlusIcon data-icon="inline-start" />{field.label()}
+          </Button>
+        {/each}
+      </div>
+    </section>
+
+    <div class="min-w-0 rounded-xl border p-4">
+      <Field.Set class="gap-4">
+        <Field.Legend variant="label">{m.provider_model_editor_supported_features()}</Field.Legend>
+        <Field.Group class="grid gap-2 @xl/model-editor:grid-cols-2">
+          {#each booleanFields as field (field.key)}
+            {#if hasField(field.key)}
+              <Field.Field orientation="horizontal" class="rounded-lg bg-muted/30 px-3 py-1">
+                <Field.Label for={`provider-model-${field.key}`}>{field.label()}</Field.Label>
+                <Switch
+                  id={`provider-model-${field.key}`}
+                  size="sm"
+                  checked={metadata[field.key] === true}
+                  onCheckedChange={(checked) => setBooleanField(field.key, checked)} />
+              </Field.Field>
+            {/if}
+          {/each}
+        </Field.Group>
+        <div class="flex flex-wrap gap-2 empty:hidden">
+          {#each booleanFields.filter((field) => !hasField(field.key)) as field (field.key)}
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              class="min-h-10"
+              onclick={() => addBooleanField(field.key)}>
+              <PlusIcon data-icon="inline-start" />{field.label()}
+            </Button>
+          {/each}
+        </div>
+      </Field.Set>
+    </div>
   </div>
 
-  <section class="flex flex-col gap-3">
-    <div class="flex items-center justify-between gap-3">
-      <h4 class="text-sm font-semibold">{m.provider_model_editor_model_information()}</h4>
-    </div>
-    <div class="grid gap-3 sm:grid-cols-2">
-      <Field.Field>
-        <Field.Label for="provider-model-id">{m.provider_model_editor_model_id()}</Field.Label>
-        <Input id="provider-model-id" class="font-technical" value={detail.id} readonly />
-      </Field.Field>
-      {#each stringFields as field (field.key)}
-        {#if hasField(field.key)}
-          <Field.Field class={field.multiline ? 'sm:col-span-2' : ''}>
-            <Field.Label for={`provider-model-${field.key}`}>{field.label()}</Field.Label>
-            {#if field.multiline}
-              <Textarea
-                id={`provider-model-${field.key}`}
-                value={String(metadata[field.key] ?? '')}
-                oninput={(event) => setStringField(field.key, event.currentTarget.value)} />
-            {:else}
-              <Input
-                id={`provider-model-${field.key}`}
-                value={String(metadata[field.key] ?? '')}
-                oninput={(event) => setStringField(field.key, event.currentTarget.value)} />
-            {/if}
-          </Field.Field>
-        {/if}
-      {/each}
-    </div>
-    <div class="flex flex-wrap gap-1.5">
-      {#each stringFields.filter((field) => !hasField(field.key)) as field (field.key)}
-        <Button type="button" variant="outline" size="xs" onclick={() => addStringField(field.key)}>
-          <PlusIcon data-icon="inline-start" />{field.label()}
-        </Button>
-      {/each}
-    </div>
-  </section>
-
-  <section class="flex flex-col gap-3 border-t pt-4">
-    <h4 class="text-sm font-semibold">{m.provider_model_editor_supported_features()}</h4>
-    <div class="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
-      {#each booleanFields as field (field.key)}
-        {#if hasField(field.key)}
-          <div class="flex min-h-10 items-center justify-between gap-3 rounded-lg border px-3 py-2">
-            <Field.Label for={`provider-model-${field.key}`}>{field.label()}</Field.Label>
-            <Switch
-              id={`provider-model-${field.key}`}
-              size="sm"
-              checked={metadata[field.key] === true}
-              onCheckedChange={(checked) => setBooleanField(field.key, checked)} />
-          </div>
-        {/if}
-      {/each}
-    </div>
-    <div class="flex flex-wrap gap-1.5">
-      {#each booleanFields.filter((field) => !hasField(field.key)) as field (field.key)}
-        <Button type="button" variant="outline" size="xs" onclick={() => addBooleanField(field.key)}>
-          <PlusIcon data-icon="inline-start" />{field.label()}
-        </Button>
-      {/each}
-    </div>
-  </section>
-
-  <section class="flex flex-col gap-3 border-t pt-4">
+  <section class="flex min-w-0 flex-col gap-4 rounded-xl border p-4">
     <div class="flex items-center justify-between gap-3">
       <h4 class="text-sm font-semibold">{m.provider_model_editor_inputs_outputs_limits()}</h4>
     </div>
     {#if hasField('modalities') && metadata.modalities}
       <div class="rounded-lg border p-3">
         <p class="mb-3 text-sm font-medium">{m.provider_model_editor_supported_content_types()}</p>
-        <div class="grid gap-3 sm:grid-cols-2">
+        <Field.Group class="grid gap-4 @xl/model-editor:grid-cols-2">
           {#each modalityTargets as target (target)}
-            <Field.Field>
+            <Field.Field orientation="vertical">
               <Field.Label for={`provider-model-${target}-modalities`}>
                 {target === 'input'
                   ? m.provider_model_editor_accepted_input_types()
@@ -413,15 +413,15 @@ export function submit(): void {
               </Select.Root>
             </Field.Field>
           {/each}
-        </div>
+        </Field.Group>
       </div>
     {/if}
     {#if hasField('limit') && metadata.limit}
       <div class="rounded-lg border p-3">
         <p class="mb-3 text-sm font-medium">{m.provider_model_editor_token_limits()}</p>
-        <div class="grid gap-3 sm:grid-cols-3">
+        <Field.Group class="grid gap-4 @xl/model-editor:grid-cols-3">
           {#each ['context', 'input', 'output'] as key (key)}
-            <Field.Field>
+            <Field.Field orientation="vertical">
               <Field.Label for={`provider-model-limit-${key}`}>{key}</Field.Label>
               <Input
                 id={`provider-model-limit-${key}`}
@@ -432,20 +432,21 @@ export function submit(): void {
                 oninput={(event) => setLimit(key as 'context' | 'input' | 'output', event.currentTarget.value)} />
             </Field.Field>
           {/each}
-        </div>
+        </Field.Group>
       </div>
     {/if}
-    <div class="flex flex-wrap gap-1.5">
+    <div class="flex flex-wrap gap-2 empty:hidden">
       {#if !hasField('modalities')}
         <Button
           type="button"
           variant="outline"
-          size="xs"
+          size="sm"
+          class="min-h-10"
           onclick={() => (metadata.modalities = { input: [], output: [] })}
           ><PlusIcon data-icon="inline-start" />{m.provider_model_editor_modalities()}</Button>
       {/if}
       {#if !hasField('limit')}
-        <Button type="button" variant="outline" size="xs" onclick={() => (metadata.limit = {})}
+        <Button type="button" variant="outline" size="sm" class="min-h-10" onclick={() => (metadata.limit = {})}
           ><PlusIcon data-icon="inline-start" />{m.provider_model_editor_token_limits()}</Button>
       {/if}
     </div>

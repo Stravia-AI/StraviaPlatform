@@ -379,6 +379,7 @@ async fn one_click_bind_is_idempotent_and_uses_upstream_id_as_route_id() -> anyh
 
     assert_eq!(first.id, second.id);
     assert_eq!(first.model_id, "upstream-model");
+    assert_eq!(first.display_name.as_deref(), Some("Upstream Model"));
     assert_eq!(second.targets.len(), 1);
     assert_eq!(second.targets[0].provider_id, provider.id);
     assert_eq!(second.targets[0].model, "upstream-model");

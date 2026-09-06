@@ -521,16 +521,19 @@ pub struct ProviderModelSummary {
     pub available: bool,
     pub source_kind: ProviderModelSourceKind,
     pub selection_policy: ProviderModelSelectionPolicy,
-    pub capabilities: ProviderModelCapabilitySummary,
+    pub specification: ModelSpecification,
     pub revision: i64,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProviderModelCapabilitySummary {
-    pub attachment: bool,
-    pub reasoning: bool,
-    pub tool_call: bool,
-    pub context: Option<u64>,
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ModelSpecification {
+    pub limit: Option<ModelLimit>,
+    pub modalities: Option<ModelModalities>,
+    pub reasoning: Option<bool>,
+    pub tool_call: Option<bool>,
+    pub structured_output: Option<bool>,
+    pub attachment: Option<bool>,
+    pub temperature: Option<bool>,
 }
 
 impl From<&ProviderModelRecord> for ProviderModelSummary {
@@ -545,15 +548,14 @@ impl From<&ProviderModelRecord> for ProviderModelSummary {
             available: record.effective_available(),
             source_kind: record.source_kind,
             selection_policy: record.selection_policy,
-            capabilities: ProviderModelCapabilitySummary {
-                attachment: record.metadata.attachment.unwrap_or(false),
-                reasoning: record.metadata.reasoning.unwrap_or(false),
-                tool_call: record.metadata.tool_call.unwrap_or(false),
-                context: record
-                    .metadata
-                    .limit
-                    .as_ref()
-                    .and_then(|limit| limit.context),
+            specification: ModelSpecification {
+                limit: record.metadata.limit.clone(),
+                modalities: record.metadata.modalities.clone(),
+                reasoning: record.metadata.reasoning,
+                tool_call: record.metadata.tool_call,
+                structured_output: record.metadata.structured_output,
+                attachment: record.metadata.attachment,
+                temperature: record.metadata.temperature,
             },
             revision: record.revision,
         }

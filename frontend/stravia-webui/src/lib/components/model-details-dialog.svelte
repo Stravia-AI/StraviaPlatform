@@ -1,21 +1,13 @@
 <script lang="ts">
 import * as m from '$lib/paraglide/messages.js'
-import FileQuestionIcon from '@lucide/svelte/icons/file-question'
-import FileTextIcon from '@lucide/svelte/icons/file-text'
-import ImageIcon from '@lucide/svelte/icons/image'
-import TypeIcon from '@lucide/svelte/icons/type'
-import VideoIcon from '@lucide/svelte/icons/video'
-import Volume2Icon from '@lucide/svelte/icons/volume-2'
-
 import { admin } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
 import { formatNumber } from '$lib/format'
 import type { ProviderModelDetail, ProviderModelMetadata, ProviderModelPrices } from '$lib/types'
-import { Badge } from '$lib/components/ui/badge'
+import ModelSpecification from '$lib/components/model-specification.svelte'
 import { Button } from '$lib/components/ui/button'
 import * as Dialog from '$lib/components/ui/dialog'
 import { Spinner } from '$lib/components/ui/spinner'
-import * as Tooltip from '$lib/components/ui/tooltip'
 
 interface Props {
   providerId: string
@@ -23,16 +15,8 @@ interface Props {
   triggerLabel: string
 }
 
-type FeatureKey = 'attachment' | 'reasoning' | 'tool_call' | 'structured_output' | 'temperature'
 type PriceKey = keyof ProviderModelPrices
 
-const featureFields: Array<{ key: FeatureKey; label: () => string }> = [
-  { key: 'attachment', label: m.provider_model_field_attachments },
-  { key: 'reasoning', label: m.provider_model_field_reasoning },
-  { key: 'tool_call', label: m.provider_model_field_tool_calls },
-  { key: 'structured_output', label: m.provider_model_field_structured_output },
-  { key: 'temperature', label: m.provider_model_field_temperature },
-]
 const priceFields: Array<{ key: PriceKey; label: () => string }> = [
   { key: 'input', label: m.provider_model_field_input },
   { key: 'output', label: m.provider_model_field_output },
@@ -42,16 +26,6 @@ const priceFields: Array<{ key: PriceKey; label: () => string }> = [
   { key: 'input_audio', label: m.provider_model_field_audio_input },
   { key: 'output_audio', label: m.provider_model_field_audio_output },
 ]
-const modalityIcons = {
-  text: TypeIcon,
-  image: ImageIcon,
-  video: VideoIcon,
-  audio: Volume2Icon,
-  pdf: FileTextIcon,
-  document: FileTextIcon,
-  file: FileTextIcon,
-}
-
 let { providerId, modelId, triggerLabel }: Props = $props()
 let open = $state(false)
 let detail = $state<ProviderModelDetail>()
@@ -59,7 +33,6 @@ let loading = $state(false)
 let error = $state('')
 
 const metadata = $derived<ProviderModelMetadata>(detail?.metadata ?? {})
-const supportedFeatures = $derived(featureFields.filter(({ key }) => metadata[key] === true))
 const prices = $derived.by(() => {
   const cost = metadata.cost
   if (!cost) return []
@@ -68,17 +41,6 @@ const prices = $derived.by(() => {
     return value == null ? [] : [{ key, label: label(), value }]
   })
 })
-const hasModalities = $derived(Boolean(metadata.modalities?.input.length || metadata.modalities?.output.length))
-const hasLimits = $derived(
-  Boolean(
-    metadata.limit && (metadata.limit.context != null || metadata.limit.input != null || metadata.limit.output != null),
-  ),
-)
-
-function modalityIcon(modality: string) {
-  return modalityIcons[modality.toLocaleLowerCase() as keyof typeof modalityIcons] ?? FileQuestionIcon
-}
-
 async function loadDetails(): Promise<void> {
   loading = true
   error = ''
@@ -92,28 +54,6 @@ async function loadDetails(): Promise<void> {
   }
 }
 </script>
-
-{#snippet modalityGroup(label: string, modalities: string[])}
-  {#if modalities.length > 0}
-    <div class="flex flex-col gap-2">
-      <p class="text-xs font-medium text-muted-foreground">{label}</p>
-      <div class="flex flex-wrap gap-2">
-        {#each modalities as modality (modality)}
-          {@const ModalityIcon = modalityIcon(modality)}
-          <Tooltip.Root>
-            <Tooltip.Trigger
-              type="button"
-              class="inline-flex size-10 cursor-default items-center justify-center rounded-lg border bg-background text-muted-foreground shadow-xs outline-none transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50 [&_svg]:size-5"
-              aria-label={modality.toLocaleUpperCase()}>
-              <ModalityIcon />
-            </Tooltip.Trigger>
-            <Tooltip.Content side="top" sideOffset={8}>{modality.toLocaleUpperCase()}</Tooltip.Content>
-          </Tooltip.Root>
-        {/each}
-      </div>
-    </div>
-  {/if}
-{/snippet}
 
 <Dialog.Root
   bind:open
@@ -144,45 +84,7 @@ async function loadDetails(): Promise<void> {
     {:else if detail}
       <div class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 py-5">
         <div class="flex flex-col gap-5">
-          {#if hasModalities && metadata.modalities}
-            <section class="flex flex-wrap gap-x-8 gap-y-4">
-              {@render modalityGroup(m.provider_model_editor_accepted_input_types(), metadata.modalities.input)}
-              {@render modalityGroup(m.provider_model_editor_generated_output_types(), metadata.modalities.output)}
-            </section>
-          {/if}
-
-          {#if supportedFeatures.length > 0}
-            <section class={['flex flex-col gap-3', hasModalities && 'border-t pt-4']}>
-              <h3 class="text-sm font-semibold">{m.provider_model_editor_supported_features()}</h3>
-              <div class="flex flex-wrap gap-2">
-                {#each supportedFeatures as feature (feature.key)}
-                  <Badge variant="outline">{feature.label()}</Badge>
-                {/each}
-              </div>
-            </section>
-          {/if}
-
-          {#if hasLimits && metadata.limit}
-            <section class="flex flex-col gap-3 border-t pt-4">
-              <h3 class="text-sm font-semibold">{m.provider_model_editor_token_limits()}</h3>
-              <div class="rounded-lg border p-4">
-                <dl class="grid grid-cols-3 gap-3 text-sm">
-                  <div>
-                    <dt class="text-xs text-muted-foreground">{m.common_context()}</dt>
-                    <dd class="mt-1 font-technical">{formatNumber(metadata.limit.context)}</dd>
-                  </div>
-                  <div>
-                    <dt class="text-xs text-muted-foreground">{m.provider_model_field_input()}</dt>
-                    <dd class="mt-1 font-technical">{formatNumber(metadata.limit.input)}</dd>
-                  </div>
-                  <div>
-                    <dt class="text-xs text-muted-foreground">{m.provider_model_field_output()}</dt>
-                    <dd class="mt-1 font-technical">{formatNumber(metadata.limit.output)}</dd>
-                  </div>
-                </dl>
-              </div>
-            </section>
-          {/if}
+          <ModelSpecification specification={metadata} density="detail" />
 
           {#if prices.length > 0}
             <section class="flex flex-col gap-3 border-t pt-4">

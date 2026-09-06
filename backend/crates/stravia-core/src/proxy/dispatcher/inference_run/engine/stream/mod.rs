@@ -2,9 +2,7 @@
 //! deltas, applies HookRuntime stream transformations, and encodes the resulting
 //! semantic stream for the ingress protocol.
 
-mod gate;
-
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Instant;
@@ -13,19 +11,19 @@ use axum::http::HeaderMap;
 use futures::StreamExt;
 
 use crate::agent::{CanonicalEvent, ModelTurn, ModelTurnExecutor};
-use crate::protocol::ir::{AiItem, AiRequest, AiResponse, AiStreamDelta};
+use crate::protocol::ir::{AiRequest, AiResponse, AiStreamDelta};
 use crate::proxy::context::RequestContext;
 
 use super::delivery::LiveStreamRequest;
 use super::{
     ClientOutputCommit, ClientProjectionSession, CompletionContext, CompletionFailure,
     CompletionInput, CompletionOutcome, DeliveryAdapter, DeliveryProgress, EarlyPlatformExecution,
-    FollowupModelTurn, LogBuilder, PhaseTracker, PublishedPlatformExecutions, RequestExtras,
-    RoundOutcome, StreamResponseAccumulator, acquire_followup_model_turn, ai_response_to_deltas,
-    buffered_response, complete_canonical_response, error_response, hook_failure_response,
-    live_response, prepare_platform_markers, publish_markers, render_completion_failure,
+    FollowupModelTurn, LogBuilder, PhaseTracker, ProjectedDeltaBatch, ProjectionDelivery,
+    PublishedPlatformExecutions, RequestExtras, RoundOutcome, StreamResponseAccumulator,
+    acquire_followup_model_turn, ai_response_to_deltas, buffered_response,
+    complete_canonical_response, error_response, hook_failure_response, live_response,
+    prepare_platform_markers, render_completion_failure,
 };
-use gate::LiveDeltaGate;
 
 pub(super) struct HookLegGuard<'a> {
     run: &'a mut crate::hook::InferenceRun,
@@ -78,46 +76,31 @@ pub(super) struct ModelTurnStreamInput {
     pub(super) projection: ClientProjectionSession,
 }
 
-fn projected_marker_carriers(response: &AiResponse) -> Vec<(String, String, bool)> {
-    let mut carriers = Vec::new();
-    for item in &response.items {
-        let text_carrier = item.output_text_ref().is_some();
-        let text = item
-            .thinking_ref()
-            .map(|(text, _)| text)
-            .or_else(|| item.output_text_ref());
-        let Some(text) =
-            text.filter(|text| text.contains(crate::history_marker::HISTORY_MARKER_PREFIX))
-        else {
-            continue;
-        };
-        for reference in
-            crate::history_marker::history_marker_references(std::slice::from_ref(item))
-        {
-            carriers.push((reference, text.to_owned(), text_carrier));
-        }
-    }
-    carriers
+enum ProjectedDeliveryFailure {
+    Delivery(DeliveryProgress),
+    Marker(crate::history_marker::HistoryMarkerError),
 }
 
-fn marker_deltas(
-    response: &AiResponse,
-    emitted: &mut HashSet<String>,
-    gate: &mut LiveDeltaGate,
-) -> Vec<AiStreamDelta> {
-    let mut deltas = Vec::new();
-    for (_, rendered, text_carrier) in projected_marker_carriers(response) {
-        if !emitted.insert(rendered.clone()) {
-            continue;
-        }
-        let marker = if text_carrier {
-            AiStreamDelta::TextDelta(rendered)
-        } else {
-            AiStreamDelta::ThinkingDelta(rendered)
-        };
-        deltas.extend(gate.commit_visible(vec![marker]));
+async fn deliver_projected(
+    delivery: &mut DeliveryAdapter,
+    projection: &mut ClientProjectionSession,
+    batch: ProjectedDeltaBatch,
+) -> Result<Vec<String>, ProjectedDeliveryFailure> {
+    let progress = delivery.send_deltas(batch.deltas()).await;
+    let outcome = if progress == DeliveryProgress::Sent {
+        ProjectionDelivery::Sent
+    } else {
+        ProjectionDelivery::Cancelled
+    };
+    let published = projection
+        .report_delivery(batch, outcome)
+        .await
+        .map_err(ProjectedDeliveryFailure::Marker)?;
+    if progress == DeliveryProgress::Sent {
+        Ok(published)
+    } else {
+        Err(ProjectedDeliveryFailure::Delivery(progress))
     }
-    deltas
 }
 
 pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> RoundOutcome {
@@ -162,14 +145,13 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
         });
         delivery.set_response_profile(&request, previous_response_id.as_deref());
         let mut projection = projection;
-        let mut live_delta_gate = LiveDeltaGate::default();
-        let mut emitted_marker_texts = HashSet::new();
         'model_legs: loop {
-            live_delta_gate.begin_model_leg(
-                &mut projection,
-                turn.route.egress.protocol,
+            let carrier_facts = super::thinking_carrier_facts(
+                ingress,
+                turn.route.egress,
                 turn.reasoning_encrypted_content_requested,
             );
+            projection.begin_model_leg(carrier_facts, inference_run.exposed_tool_names());
             let attempt_trace = turn.transport.clone();
             let mut completion_context = CompletionContext::from_model_turn(
                 gateway.clone(),
@@ -194,7 +176,6 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
             let mut preflight_failure = None;
             let mut leg_client_output_committed = false;
             let mut early_platform_executions = Vec::new();
-            let mut deferred_thinking_publish_references = Vec::new();
 
             while !aborted && !cancelled && !receiver_closed && !protocol_failed {
                 let event = tokio::select! {
@@ -253,100 +234,57 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                             &mut transformed,
                             completion_context.generation_chain_identity(),
                         );
-                        if !buffer_terminal_hooks {
-                            live_delta_gate
-                                .capture_protected_candidates(&mut projection, &transformed);
-                        }
-                        if !buffer_terminal_hooks {
-                            live_delta_gate.capture_unindexed_signatures(&mut transformed);
-                            let thinking_completed = !terminal_deltas.is_empty()
-                                || transformed
-                                    .iter()
-                                    .any(LiveDeltaGate::ends_unindexed_thinking);
-                            if thinking_completed
-                                && let Some((index, item)) = live_delta_gate
-                                    .synthetic_signed_thinking_item()
-                                    .or_else(|| {
-                                        live_delta_gate
-                                            .synthetic_post_text_thinking_item(&projection)
-                                    })
-                            {
-                                transformed.insert(0, AiStreamDelta::ItemDone { index, item });
-                            }
-                        }
                         accumulator.apply_all(&transformed);
                         if !buffer_terminal_hooks {
-                            let mut completed_thinking_indices = HashSet::new();
-                            let completed_thinking_items = transformed
-                                .iter()
-                                .filter_map(|delta| match delta {
-                                    AiStreamDelta::ItemDone { index, item }
-                                        if completed_thinking_indices.insert(*index) =>
-                                    {
-                                        Some((*index, item))
-                                    }
-                                    _ => None,
-                                })
-                                .collect::<Vec<_>>();
-                            for (output_index, item) in completed_thinking_items {
-                                let (marker_deltas, markers) = match live_delta_gate
-                                    .close_thinking(&mut projection, output_index, &item)
-                                    .await
-                                {
-                                    Ok(projected) => projected,
-                                    Err(error) => {
-                                        aborted = true;
-                                        preflight_failure =
-                                            Some(buffered_response(render_completion_failure(
-                                                CompletionFailure::hook(
-                                                    error,
-                                                    completion_context.client_output_commit(),
-                                                ),
-                                                ingress,
-                                                true,
-                                            )));
-                                        break;
-                                    }
-                                };
-                                let references = markers
-                                    .iter()
-                                    .map(|marker| marker.reference.clone())
-                                    .collect::<Vec<_>>();
-                                emitted_marker_texts.extend(
-                                    markers
-                                        .iter()
-                                        .map(crate::history_marker::render_history_marker),
-                                );
-                                let marker_deltas = live_delta_gate
-                                    .route_visible_deltas(&mut projection, marker_deltas);
-                                if marker_deltas.is_empty() {
-                                    deferred_thinking_publish_references
-                                        .extend(references.iter().cloned());
-                                    continue;
-                                }
-                                match delivery.send_deltas(&marker_deltas).await {
-                                    DeliveryProgress::Sent => {
-                                        leg_client_output_committed = true;
-                                    }
-                                    DeliveryProgress::Cancelled => {
-                                        cancelled = true;
-                                        break;
-                                    }
-                                    DeliveryProgress::ReceiverClosed => {
-                                        receiver_closed = true;
-                                        break;
-                                    }
-                                    DeliveryProgress::ProtocolFailed => {
-                                        protocol_failed = true;
-                                        break;
-                                    }
-                                }
-                                if let Err(error) = projection.publish(&references).await {
-                                    tracing::error!(
-                                        "failed to publish streamed thinking marker: {error}"
-                                    );
+                            let projected_batches = match projection
+                                .project_live_deltas(
+                                    transformed.clone(),
+                                    !terminal_deltas.is_empty(),
+                                )
+                                .await
+                            {
+                                Ok(projected) => projected,
+                                Err(error) => {
                                     aborted = true;
+                                    preflight_failure =
+                                        Some(buffered_response(render_completion_failure(
+                                            CompletionFailure::hook(
+                                                error,
+                                                completion_context.client_output_commit(),
+                                            ),
+                                            ingress,
+                                            true,
+                                        )));
                                     break;
+                                }
+                            };
+                            for batch in projected_batches {
+                                let has_visible = !batch.is_empty();
+                                match deliver_projected(&mut delivery, &mut projection, batch).await
+                                {
+                                    Ok(_) => leg_client_output_committed |= has_visible,
+                                    Err(ProjectedDeliveryFailure::Delivery(progress)) => {
+                                        match progress {
+                                            DeliveryProgress::Cancelled => cancelled = true,
+                                            DeliveryProgress::ReceiverClosed => {
+                                                receiver_closed = true
+                                            }
+                                            DeliveryProgress::ProtocolFailed => {
+                                                protocol_failed = true
+                                            }
+                                            DeliveryProgress::Sent => {
+                                                unreachable!("Sent is not a delivery failure")
+                                            }
+                                        }
+                                        break;
+                                    }
+                                    Err(ProjectedDeliveryFailure::Marker(error)) => {
+                                        tracing::error!(
+                                            "failed to publish streamed Thinking marker: {error}"
+                                        );
+                                        aborted = true;
+                                        break;
+                                    }
                                 }
                             }
                             if aborted || cancelled || receiver_closed || protocol_failed {
@@ -412,57 +350,48 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                                         break;
                                     }
                                 };
-                                let references = markers
-                                    .iter()
-                                    .map(|marker| marker.reference().to_owned())
-                                    .collect::<Vec<_>>();
-                                let marker_deltas = markers
-                                    .iter()
-                                    .flat_map(|marker| {
-                                        let rendered = marker.render();
-                                        emitted_marker_texts.insert(rendered.clone());
-                                        live_delta_gate.project_platform_marker(
-                                            &mut projection,
-                                            marker.reference(),
-                                            rendered,
-                                        )
-                                    })
-                                    .collect::<Vec<_>>();
-                                match delivery.send_deltas(&marker_deltas).await {
-                                    DeliveryProgress::Sent => {
-                                        leg_client_output_committed = true;
-                                    }
-                                    DeliveryProgress::Cancelled => {
-                                        cancelled = true;
-                                        break;
-                                    }
-                                    DeliveryProgress::ReceiverClosed => {
-                                        receiver_closed = true;
-                                        break;
-                                    }
-                                    DeliveryProgress::ProtocolFailed => {
-                                        protocol_failed = true;
-                                        break;
+                                let mut published_references = Vec::new();
+                                for marker in &markers {
+                                    let batch = projection.project_platform_marker(marker.marker());
+                                    match deliver_projected(&mut delivery, &mut projection, batch)
+                                        .await
+                                    {
+                                        Ok(references) => {
+                                            leg_client_output_committed = true;
+                                            published_references.extend(references);
+                                        }
+                                        Err(ProjectedDeliveryFailure::Delivery(progress)) => {
+                                            match progress {
+                                                DeliveryProgress::Cancelled => cancelled = true,
+                                                DeliveryProgress::ReceiverClosed => {
+                                                    receiver_closed = true
+                                                }
+                                                DeliveryProgress::ProtocolFailed => {
+                                                    protocol_failed = true
+                                                }
+                                                DeliveryProgress::Sent => {
+                                                    unreachable!("Sent is not a delivery failure")
+                                                }
+                                            }
+                                            break;
+                                        }
+                                        Err(ProjectedDeliveryFailure::Marker(error)) => {
+                                            tracing::error!(
+                                                "failed to publish streamed Platform marker: {error}"
+                                            );
+                                            aborted = true;
+                                            break;
+                                        }
                                     }
                                 }
-                                let mut delivered_references =
-                                    std::mem::take(&mut deferred_thinking_publish_references);
-                                delivered_references.extend(references.iter().cloned());
-                                if let Err(error) =
-                                    publish_markers(&completion_context, &delivered_references)
-                                        .await
-                                {
-                                    tracing::error!(
-                                        "failed to publish streamed history marker: {error}"
-                                    );
-                                    aborted = true;
+                                if aborted || cancelled || receiver_closed || protocol_failed {
                                     break;
                                 }
                                 let mut published = request_context
                                     .extensions
                                     .get::<PublishedPlatformExecutions>()
                                     .unwrap_or_default();
-                                published.references.extend(references);
+                                published.references.extend(published_references);
                                 request_context.extensions.insert(published);
                                 let started = gateway.start_history_marker_executions(
                                     completion_context.principal().clone(),
@@ -474,21 +403,8 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                                     }),
                                 );
                             }
-                        }
-                        if !buffer_terminal_hooks {
-                            let visible = live_delta_gate.filter(
-                                &mut projection,
-                                hook_leg.run_mut(),
-                                transformed,
-                            );
-                            let has_visible = !visible.is_empty();
-                            match delivery.send_deltas(&visible).await {
-                                DeliveryProgress::Sent => {
-                                    leg_client_output_committed |= has_visible;
-                                }
-                                DeliveryProgress::Cancelled => cancelled = true,
-                                DeliveryProgress::ReceiverClosed => receiver_closed = true,
-                                DeliveryProgress::ProtocolFailed => protocol_failed = true,
+                            if aborted || cancelled || receiver_closed || protocol_failed {
+                                break;
                             }
                         }
                     }
@@ -511,16 +427,51 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                     accumulator.apply_all(&flushed);
                     if !buffer_terminal_hooks && !cancelled && !receiver_closed && !protocol_failed
                     {
-                        let visible =
-                            live_delta_gate.filter(&mut projection, hook_leg.run_mut(), flushed);
-                        let has_visible = !visible.is_empty();
-                        match delivery.send_deltas(&visible).await {
-                            DeliveryProgress::Sent => {
-                                leg_client_output_committed |= has_visible;
+                        match projection.project_live_deltas(flushed, true).await {
+                            Ok(batches) => {
+                                for batch in batches {
+                                    let has_visible = !batch.is_empty();
+                                    match deliver_projected(&mut delivery, &mut projection, batch)
+                                        .await
+                                    {
+                                        Ok(_) => leg_client_output_committed |= has_visible,
+                                        Err(ProjectedDeliveryFailure::Delivery(progress)) => {
+                                            match progress {
+                                                DeliveryProgress::Cancelled => cancelled = true,
+                                                DeliveryProgress::ReceiverClosed => {
+                                                    receiver_closed = true
+                                                }
+                                                DeliveryProgress::ProtocolFailed => {
+                                                    protocol_failed = true
+                                                }
+                                                DeliveryProgress::Sent => {
+                                                    unreachable!("Sent is not a delivery failure")
+                                                }
+                                            }
+                                            break;
+                                        }
+                                        Err(ProjectedDeliveryFailure::Marker(error)) => {
+                                            tracing::error!(
+                                                "failed to publish flushed Thinking marker: {error}"
+                                            );
+                                            aborted = true;
+                                            break;
+                                        }
+                                    }
+                                }
                             }
-                            DeliveryProgress::Cancelled => cancelled = true,
-                            DeliveryProgress::ReceiverClosed => receiver_closed = true,
-                            DeliveryProgress::ProtocolFailed => protocol_failed = true,
+                            Err(error) => {
+                                aborted = true;
+                                preflight_failure =
+                                    Some(buffered_response(render_completion_failure(
+                                        CompletionFailure::hook(
+                                            error,
+                                            completion_context.client_output_commit(),
+                                        ),
+                                        ingress,
+                                        true,
+                                    )));
+                            }
                         }
                     }
                 }
@@ -583,7 +534,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
             let mut pending_generation_chain = None;
             let mut background_executions = Vec::new();
             let mut started_executions = Vec::new();
-            let mut publish_references = Vec::new();
+            let mut staged_delivery = None;
             if !aborted && !cancelled && !receiver_closed && !protocol_failed {
                 if leg_client_output_committed {
                     completion_context.mark_client_output_committed();
@@ -610,27 +561,39 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                             .expect("current Model Turn log")
                             .without_client_exchange()
                             .emit();
-                        let marker_deltas = marker_deltas(
-                            continuation.projected_response(),
-                            &mut emitted_marker_texts,
-                            &mut live_delta_gate,
-                        );
-                        match delivery.send_deltas(&marker_deltas).await {
-                            DeliveryProgress::Sent => {}
-                            DeliveryProgress::Cancelled => cancelled = true,
-                            DeliveryProgress::ReceiverClosed => receiver_closed = true,
-                            DeliveryProgress::ProtocolFailed => protocol_failed = true,
+                        let marker_delivery = projection.take_staged_delivery();
+                        if !marker_delivery.is_empty() {
+                            match deliver_projected(&mut delivery, &mut projection, marker_delivery)
+                                .await
+                            {
+                                Ok(references) => {
+                                    let mut published = request_context
+                                        .extensions
+                                        .get::<PublishedPlatformExecutions>()
+                                        .unwrap_or_default();
+                                    published.references.extend(references);
+                                    request_context.extensions.insert(published);
+                                }
+                                Err(ProjectedDeliveryFailure::Delivery(progress)) => match progress
+                                {
+                                    DeliveryProgress::Cancelled => cancelled = true,
+                                    DeliveryProgress::ReceiverClosed => receiver_closed = true,
+                                    DeliveryProgress::ProtocolFailed => protocol_failed = true,
+                                    DeliveryProgress::Sent => {
+                                        unreachable!("Sent is not a delivery failure")
+                                    }
+                                },
+                                Err(ProjectedDeliveryFailure::Marker(error)) => {
+                                    tracing::error!(
+                                        "failed to publish staged Platform marker: {error}"
+                                    );
+                                    aborted = true;
+                                }
+                            }
                         }
                         response = completion_context.empty_response();
-                        if !cancelled && !receiver_closed && !protocol_failed {
-                            if let Err(failure) = continuation.publish(&completion_context).await {
-                                if commit == ClientOutputCommit::Pending {
-                                    preflight_failure = Some(buffered_response(
-                                        render_completion_failure(failure, ingress, true),
-                                    ));
-                                }
-                                aborted = true;
-                            } else if let Err(failure) = continuation
+                        if !aborted && !cancelled && !receiver_closed && !protocol_failed {
+                            if let Err(failure) = continuation
                                 .finish(
                                     &completion_context,
                                     &request_context,
@@ -693,12 +656,8 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                                     );
                                     response = hook_response;
                                     pending_generation_chain = hook_generation_chain;
+                                    let hook_marker_delivery = projection.take_staged_delivery();
                                     if !buffer_terminal_hooks {
-                                        live_delta_gate.begin_model_leg(
-                                            &mut projection,
-                                            ingress.protocol,
-                                            true,
-                                        );
                                         let mut deltas = ai_response_to_deltas(&response);
                                         terminal_deltas = deltas
                                             .iter()
@@ -718,18 +677,45 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                                                     | AiStreamDelta::Done { .. }
                                             )
                                         });
-                                        let deltas = live_delta_gate
-                                            .route_visible_deltas(&mut projection, deltas);
-                                        match delivery.send_deltas(&deltas).await {
-                                            DeliveryProgress::Sent => {}
-                                            DeliveryProgress::Cancelled => cancelled = true,
-                                            DeliveryProgress::ReceiverClosed => {
-                                                receiver_closed = true
+                                        let progress = delivery.send_deltas(&deltas).await;
+                                        let outcome = if progress == DeliveryProgress::Sent {
+                                            ProjectionDelivery::Sent
+                                        } else {
+                                            ProjectionDelivery::Cancelled
+                                        };
+                                        match projection
+                                            .report_delivery(hook_marker_delivery, outcome)
+                                            .await
+                                        {
+                                            Ok(references)
+                                                if progress == DeliveryProgress::Sent =>
+                                            {
+                                                let mut published = request_context
+                                                    .extensions
+                                                    .get::<PublishedPlatformExecutions>()
+                                                    .unwrap_or_default();
+                                                published.references.extend(references);
+                                                request_context.extensions.insert(published);
                                             }
-                                            DeliveryProgress::ProtocolFailed => {
-                                                protocol_failed = true
+                                            Ok(_) => match progress {
+                                                DeliveryProgress::Cancelled => cancelled = true,
+                                                DeliveryProgress::ReceiverClosed => {
+                                                    receiver_closed = true
+                                                }
+                                                DeliveryProgress::ProtocolFailed => {
+                                                    protocol_failed = true
+                                                }
+                                                DeliveryProgress::Sent => {}
+                                            },
+                                            Err(error) => {
+                                                tracing::error!(
+                                                    "failed to publish Hook response markers: {error}"
+                                                );
+                                                aborted = true;
                                             }
                                         }
+                                    } else {
+                                        staged_delivery = Some(hook_marker_delivery);
                                     }
                                 }
                                 Ok(FollowupModelTurn::StreamError(error)) => {
@@ -769,7 +755,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                             pending_generation_chain = prepared.pending_generation_chain;
                             background_executions = prepared.background_executions;
                             started_executions = prepared.started_executions;
-                            publish_references = prepared.publish_references;
+                            staged_delivery = Some(projection.take_staged_delivery());
                         }
                         Err(failure) => {
                             if commit == ClientOutputCommit::Pending {
@@ -792,7 +778,6 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                     }
                 }
             }
-            publish_references.extend(deferred_thinking_publish_references);
             drop(hook_leg);
             let mut owned_run = Some(inference_run);
             let mut owned_phase = Some(phase);
@@ -805,28 +790,53 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                 && !receiver_closed
                 && !protocol_failed
             {
-                let markers =
-                    marker_deltas(&response, &mut emitted_marker_texts, &mut live_delta_gate);
-                if !markers.is_empty() {
-                    match delivery.send_deltas(&markers).await {
-                        DeliveryProgress::Sent => {}
-                        DeliveryProgress::Cancelled => cancelled = true,
-                        DeliveryProgress::ReceiverClosed => receiver_closed = true,
-                        DeliveryProgress::ProtocolFailed => protocol_failed = true,
-                    }
-                }
-                if !cancelled && !receiver_closed && !protocol_failed {
-                    let suffix = live_delta_gate.complete_model_leg(&mut projection);
-                    if !suffix.is_empty() {
-                        match delivery.send_deltas(&suffix).await {
-                            DeliveryProgress::Sent => {}
+                if let Some(marker_delivery) = staged_delivery.take()
+                    && !marker_delivery.is_empty()
+                {
+                    match deliver_projected(&mut delivery, &mut projection, marker_delivery).await {
+                        Ok(references) => {
+                            let mut published = request_context
+                                .extensions
+                                .get::<PublishedPlatformExecutions>()
+                                .unwrap_or_default();
+                            published.references.extend(references);
+                            request_context.extensions.insert(published);
+                        }
+                        Err(ProjectedDeliveryFailure::Delivery(progress)) => match progress {
                             DeliveryProgress::Cancelled => cancelled = true,
                             DeliveryProgress::ReceiverClosed => receiver_closed = true,
                             DeliveryProgress::ProtocolFailed => protocol_failed = true,
+                            DeliveryProgress::Sent => {
+                                unreachable!("Sent is not a delivery failure")
+                            }
+                        },
+                        Err(ProjectedDeliveryFailure::Marker(error)) => {
+                            tracing::error!("failed to publish final projected markers: {error}");
+                            aborted = true;
                         }
                     }
                 }
-                if !cancelled && !receiver_closed && !protocol_failed {
+                if !aborted && !cancelled && !receiver_closed && !protocol_failed {
+                    let suffix = projection.complete_live_model_leg();
+                    if !suffix.is_empty() {
+                        match deliver_projected(&mut delivery, &mut projection, suffix).await {
+                            Ok(_) => {}
+                            Err(ProjectedDeliveryFailure::Delivery(progress)) => match progress {
+                                DeliveryProgress::Cancelled => cancelled = true,
+                                DeliveryProgress::ReceiverClosed => receiver_closed = true,
+                                DeliveryProgress::ProtocolFailed => protocol_failed = true,
+                                DeliveryProgress::Sent => {
+                                    unreachable!("Sent is not a delivery failure")
+                                }
+                            },
+                            Err(ProjectedDeliveryFailure::Marker(error)) => {
+                                tracing::error!("failed to publish projected suffix: {error}");
+                                aborted = true;
+                            }
+                        }
+                    }
+                }
+                if !aborted && !cancelled && !receiver_closed && !protocol_failed {
                     let usage = [AiStreamDelta::Usage(response.usage.clone())];
                     match delivery.send_deltas(&usage).await {
                         DeliveryProgress::Sent => {}
@@ -835,7 +845,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                         DeliveryProgress::ProtocolFailed => protocol_failed = true,
                     }
                 }
-                if !cancelled && !receiver_closed && !protocol_failed {
+                if !aborted && !cancelled && !receiver_closed && !protocol_failed {
                     let response_terminal = terminal_deltas
                         .iter()
                         .filter(|delta| matches!(delta, AiStreamDelta::ResponseTerminal { .. }))
@@ -848,7 +858,8 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                         DeliveryProgress::ProtocolFailed => protocol_failed = true,
                     }
                 }
-                marker_output_delivered = !cancelled && !receiver_closed && !protocol_failed;
+                marker_output_delivered =
+                    !aborted && !cancelled && !receiver_closed && !protocol_failed;
             }
 
             if buffer_terminal_hooks
@@ -861,22 +872,39 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                 delivery.reset_stream_encoder();
                 let mut final_deltas = ai_response_to_deltas(&response);
                 final_deltas.retain(|delta| !matches!(delta, AiStreamDelta::Done { .. }));
-                match delivery.send_deltas(&final_deltas).await {
+                let progress = delivery.send_deltas(&final_deltas).await;
+                match progress {
                     DeliveryProgress::Sent => {}
                     DeliveryProgress::Cancelled => cancelled = true,
                     DeliveryProgress::ReceiverClosed => receiver_closed = true,
                     DeliveryProgress::ProtocolFailed => protocol_failed = true,
                 }
-                marker_output_delivered = !cancelled && !receiver_closed && !protocol_failed;
+                if let Some(marker_delivery) = staged_delivery.take() {
+                    let outcome = if progress == DeliveryProgress::Sent {
+                        ProjectionDelivery::Sent
+                    } else {
+                        ProjectionDelivery::Cancelled
+                    };
+                    match projection.report_delivery(marker_delivery, outcome).await {
+                        Ok(references) if progress == DeliveryProgress::Sent => {
+                            let mut published = request_context
+                                .extensions
+                                .get::<PublishedPlatformExecutions>()
+                                .unwrap_or_default();
+                            published.references.extend(references);
+                            request_context.extensions.insert(published);
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            tracing::error!("failed to publish terminal Hook markers: {error}");
+                            aborted = true;
+                        }
+                    }
+                }
+                marker_output_delivered =
+                    !aborted && !cancelled && !receiver_closed && !protocol_failed;
             }
 
-            if marker_output_delivered && !publish_references.is_empty() {
-                if let Err(error) = publish_markers(&completion_context, &publish_references).await
-                {
-                    tracing::error!("failed to publish delivered history markers: {error}");
-                    aborted = true;
-                }
-            }
             if marker_output_delivered && !aborted && !background_executions.is_empty() {
                 started_executions.extend(gateway.start_history_marker_executions(
                     completion_context.principal().clone(),

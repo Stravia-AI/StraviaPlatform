@@ -414,11 +414,11 @@ mod tests {
         );
         assert_eq!(
             binding.extra_headers.get("user-agent").map(String::as_str),
-            Some("codex_cli_rs/0.149.1")
+            Some("codex_cli_rs/0.153.0")
         );
         assert_eq!(
             binding.extra_headers.get("version").map(String::as_str),
-            Some("0.149.1")
+            Some("0.153.0")
         );
     }
 }

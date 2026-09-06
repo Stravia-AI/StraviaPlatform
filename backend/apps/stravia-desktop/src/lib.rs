@@ -1,5 +1,6 @@
 mod commands;
 mod desktop_gateway_runtime;
+mod product_update;
 
 use std::sync::Arc;
 
@@ -7,8 +8,8 @@ use desktop_gateway_runtime::{
     DesktopGatewayRuntime, PortSwitchPublisher, SystemPortOwnerResolver, desktop_port_store,
     desktop_runtime_dir,
 };
-use stravia_core::{Gateway, config::GatewayConfig, logging};
-use stravia_server::{HttpAppConfig, build_http_app, desktop_origins};
+use stravia_core::{Gateway, admin::identity::AdminAuth, config::GatewayConfig, logging};
+use stravia_server::{AdminMode, HttpAppConfig, build_http_app, desktop_origins};
 use tauri::{
     Manager,
     menu::{Menu, MenuItem},
@@ -77,6 +78,8 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
@@ -86,17 +89,42 @@ pub fn run() {
             let data_dir = desktop_runtime_dir(app);
             let (gateway, log_rx) = tauri::async_runtime::block_on(Gateway::new(GatewayConfig {
                 data_dir: data_dir.clone(),
+                product_update_download_supported: true,
                 #[cfg(debug_assertions)]
                 wire_capture_dir: std::env::var_os("STRAVIA_WIRE_CAPTURE_DIR")
                     .map(std::path::PathBuf::from),
                 ..Default::default()
             }))?;
+            #[cfg(feature = "desktop-e2e")]
+            tauri::async_runtime::block_on(gateway.storage.settings().set(
+                "product_update_state",
+                &serde_json::json!({
+                    "last_success_at": "2026-09-05T00:00:00Z",
+                    "last_failure": null,
+                    "available_update": {
+                        "version": "9.9.9",
+                        "published_at": "2026-09-04T00:00:00Z",
+                        "release_url": "https://github.com/Stravia-AI/StraviaPlatform/releases/tag/v9.9.9",
+                        "manifest_url": "https://github.com/Stravia-AI/StraviaPlatform/releases/download/v9.9.9/stravia-updater.json",
+                        "download_available": true,
+                        "download_error": null
+                    }
+                })
+                .to_string(),
+            ))?;
+
+            let admin_auth = AdminAuth::new(gateway.storage.clone());
+            let native_admin_session = tauri::async_runtime::block_on(
+                commands::NativeAdminSession::initialize(admin_auth.clone()),
+            )?;
 
             let cors_origins = desktop_origins();
             let app_router = build_http_app(
                 gateway.clone(),
                 HttpAppConfig {
-                    admin_token: None,
+                    admin_auth,
+                    admin_mode: AdminMode::Desktop,
+                    admin_origin: None,
                     admin_cors_origins: cors_origins.clone(),
                     proxy_cors_origins: cors_origins,
                     serve_embedded_webui: false,
@@ -116,7 +144,9 @@ pub fn run() {
             });
 
             app.manage(gateway);
+            app.manage(native_admin_session);
             app.manage(runtime.clone());
+            app.manage(product_update::DesktopUpdateState::default());
             app.manage(setup_tray(app, server_port)?);
             runtime.set_switch_publisher(Arc::new(TauriPortSwitchPublisher {
                 app: app.handle().clone(),
@@ -124,6 +154,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::get_admin_session,
             commands::get_server_port,
             commands::get_desktop_port_state,
             commands::set_desktop_fixed_port,
@@ -133,6 +164,9 @@ pub fn run() {
             commands::list_provider_allowances,
             commands::refresh_provider_allowances,
             commands::refresh_provider_allowance,
+            product_update::get_desktop_update_state,
+            product_update::download_product_update,
+            product_update::install_product_update,
         ])
         .build(tauri::generate_context!())
         .expect("error while running Stravia application")
@@ -151,10 +185,17 @@ pub fn run() {
                 }
             }
 
-            if let tauri::RunEvent::ExitRequested { .. } = &event
-                && let Some(runtime) = app.try_state::<Arc<DesktopGatewayRuntime>>()
-            {
-                runtime.request_shutdown();
+            if let tauri::RunEvent::ExitRequested { api, .. } = &event {
+                if let Some(session) = app.try_state::<commands::NativeAdminSession>()
+                    && tauri::async_runtime::block_on(session.revoke()).is_err()
+                {
+                    api.prevent_exit();
+                    tracing::error!("exit cancelled: failed to revoke the native admin session");
+                    return;
+                }
+                if let Some(runtime) = app.try_state::<Arc<DesktopGatewayRuntime>>() {
+                    runtime.request_shutdown();
+                }
             }
 
             #[cfg(not(target_os = "macos"))]

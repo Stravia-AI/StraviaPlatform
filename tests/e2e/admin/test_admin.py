@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sqlite3
 import subprocess
 import tempfile
 import time
@@ -26,7 +25,12 @@ from tests.common.helpers import (
     ("argument", "value"),
     [
         ("--mode", "removed-mode"),
-        ("--config", "removed.yaml"),
+        ("--admin-token", "removed-token"),
+        ("--storage-backend", "sqlite"),
+        ("--postgres-dsn", "postgresql://removed"),
+        ("--postgres-max-connections", "5"),
+        ("--postgres-min-connections", "1"),
+        ("--postgres-idle-timeout", "60"),
         ("--migrate-only", None),
         ("--migrate-on-start", "false"),
         ("--webui-dir", "removed"),
@@ -53,36 +57,6 @@ def test_server_rejects_removed_options(
 
     assert result.returncode != 0
     assert f"unexpected argument '{argument}'" in result.stderr
-
-
-@pytest.mark.e2e
-@pytest.mark.admin
-def test_server_rejects_mysql_storage_backend(stravia_binary: Path) -> None:
-    result = subprocess.run(
-        [str(stravia_binary), "--storage-backend", "mysql"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert result.returncode != 0
-    assert "possible values: sqlite, postgres" in result.stderr
-
-
-@pytest.mark.e2e
-@pytest.mark.admin
-def test_server_requires_admin_token_for_non_loopback_binding(
-    stravia_binary: Path,
-) -> None:
-    result = subprocess.run(
-        [str(stravia_binary), "--host", "0.0.0.0", "--port", "0"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert result.returncode != 0
-    assert "--admin-token is required when --host is not loopback" in result.stderr
 
 
 def _create_provider(env: dict[str, str], name: str) -> str:
@@ -219,7 +193,7 @@ def test_health_probes_are_distinct_from_webui_routes(admin_env: dict[str, str])
 
 @pytest.mark.e2e
 @pytest.mark.admin
-def test_readyz_reports_schema_pending(
+def test_setup_mode_is_live_but_not_ready(
     stravia_binary: Path,
 ) -> None:
     with tempfile.TemporaryDirectory(prefix="stravia-readyz-e2e-") as data_dir:
@@ -238,18 +212,16 @@ def test_readyz_reports_schema_pending(
         base = f"http://127.0.0.1:{port}"
 
         try:
-            wait_until_ready(f"{base}/readyz")
-
-            connection = sqlite3.connect(Path(data_dir) / "gateway.db")
-            try:
-                connection.execute("DROP TABLE models")
-                connection.commit()
-            finally:
-                connection.close()
-
-            status, body = http_request("GET", f"{base}/readyz")
+            wait_until_ready(f"{base}/healthz")
+            status, body = http_request("GET", f"{base}/healthz")
+            assert status == 200
+            assert body == {"status": "ok"}
+            status, _ = http_request("GET", f"{base}/readyz")
             assert status == 503
-            assert body == {"status": "schema_pending"}
+            status, state = http_request("GET", f"{base}/api/v1/auth/state")
+            assert status == 200
+            assert state["mode"] == "setup"
+            assert not (Path(data_dir) / "gateway.db").exists()
         finally:
             stop_stravia_server(proc, logs)
 
@@ -358,6 +330,140 @@ def test_provider_crud(admin_env: dict[str, str]) -> None:
 
 @pytest.mark.e2e
 @pytest.mark.admin
+def test_provider_model_specification_preserves_saved_metadata(admin_env: dict[str, str]) -> None:
+    provider_id = _create_provider(admin_env, "test-provider-model-specification")
+    model_id = "saved-specification-model"
+    metadata = {
+        "id": model_id,
+        "name": "Saved specification model",
+        "attachment": True,
+        "reasoning": False,
+        "structured_output": None,
+        "temperature": True,
+        "modalities": {
+            "input": ["text", "image", "pdf"],
+            "output": ["text", "audio", "custom-output"],
+        },
+        "limit": {
+            "context": 1_050_000,
+            "input": 1_048_576,
+            "output": 65_537,
+        },
+    }
+
+    status, created = http_request(
+        "POST",
+        f"{admin_env['admin']}/api/v1/providers/{provider_id}/models",
+        payload={"model_id": model_id, "metadata": metadata},
+        headers=admin_env["auth"],
+    )
+    assert status == 201, f"create provider model failed: {status} {created}"
+
+    expected_specification = {
+        "limit": {
+            "context": 1_050_000,
+            "input": 1_048_576,
+            "output": 65_537,
+        },
+        "modalities": {
+            "input": ["text", "image", "pdf"],
+            "output": ["text", "audio", "custom-output"],
+        },
+        "reasoning": False,
+        "tool_call": None,
+        "structured_output": None,
+        "attachment": True,
+        "temperature": True,
+    }
+
+    status, listed = http_request(
+        "GET",
+        f"{admin_env['admin']}/api/v1/providers/{provider_id}/models",
+        headers=admin_env["auth"],
+    )
+    assert status == 200
+    summary = next(
+        model for model in listed["data"]["models"] if model["id"] == model_id
+    )
+    assert summary["specification"] == expected_specification
+    assert "capabilities" not in summary
+    unknown_summary = next(
+        model for model in listed["data"]["models"] if model["id"] == "gpt-4o-mini"
+    )
+    assert unknown_summary["specification"] == {
+        "limit": None,
+        "modalities": None,
+        "reasoning": None,
+        "tool_call": None,
+        "structured_output": None,
+        "attachment": None,
+        "temperature": None,
+    }
+
+    status, detail = http_request(
+        "GET",
+        f"{admin_env['admin']}/api/v1/providers/{provider_id}/model?model={model_id}",
+        headers=admin_env["auth"],
+    )
+    assert status == 200
+    saved = detail["data"]
+    assert {
+        key: saved["metadata"][key] for key in expected_specification
+    } == expected_specification
+
+    revised_metadata = {
+        **metadata,
+        "attachment": False,
+        "reasoning": True,
+        "tool_call": True,
+        "structured_output": False,
+        "temperature": None,
+        "limit": {
+            "context": 1_048_576,
+            "input": 65_537,
+            "output": 1_050_000,
+        },
+    }
+    status, updated = http_request(
+        "PUT",
+        f"{admin_env['admin']}/api/v1/providers/{provider_id}/model",
+        payload={
+            "model_id": model_id,
+            "metadata": revised_metadata,
+            "revision": saved["revision"],
+        },
+        headers=admin_env["auth"],
+    )
+    assert status == 200, f"update provider model failed: {status} {updated}"
+    revised_specification = {
+        **expected_specification,
+        "limit": revised_metadata["limit"],
+        "reasoning": True,
+        "tool_call": True,
+        "structured_output": False,
+        "attachment": False,
+        "temperature": None,
+    }
+    assert updated["data"]["revision"] > saved["revision"]
+    assert {
+        key: updated["data"]["metadata"][key] for key in revised_specification
+    } == revised_specification
+
+    status, listed = http_request(
+        "GET",
+        f"{admin_env['admin']}/api/v1/providers/{provider_id}/models",
+        headers=admin_env["auth"],
+    )
+    assert status == 200
+    summary = next(
+        model for model in listed["data"]["models"] if model["id"] == model_id
+    )
+    assert summary["revision"] == updated["data"]["revision"]
+    assert summary["specification"] == revised_specification
+
+
+@pytest.mark.e2e
+@pytest.mark.admin
 def test_model_crud(admin_env: dict[str, str]) -> None:
     provider_id = _create_provider(admin_env, "test-provider-model")
     route_storage_id = _create_model(admin_env, provider_id, "test-model", "Test model")
@@ -414,6 +520,20 @@ def test_api_key_crud(admin_env: dict[str, str]) -> None:
     model_id = _create_model(admin_env, provider_id, "test-model-key")
     api_key = _create_api_key(admin_env, model_id, "test-key")
     assert api_key.get("key"), f"missing api key material: {api_key}"
+
+    status, _ = http_request(
+        "GET",
+        f"{admin_env['admin']}/api/v1/providers",
+        headers={"authorization": f"Bearer {api_key['key']}"},
+    )
+    assert status == 401
+    status, _ = http_request(
+        "POST",
+        f"{admin_env['proxy']}/v1/chat/completions",
+        payload={"model": "test-model-key", "messages": [{"role": "user", "content": "hi"}]},
+        headers=admin_env["auth"],
+    )
+    assert status == 401
 
 
 @pytest.mark.e2e

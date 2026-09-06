@@ -19,6 +19,7 @@ sqlx = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["arbitrary_precision"] }
+semver = { workspace = true }
 serde-saphyr = { workspace = true }
 json5 = { workspace = true }
 toml = { workspace = true }
@@ -36,6 +37,8 @@ dirs = { workspace = true }
 base64 = { workspace = true }
 rand = { workspace = true }
 sha2 = { workspace = true }
+argon2 = { workspace = true }
+jsonwebtoken = { workspace = true }
 image = { workspace = true }
 dashmap = { workspace = true }
 inventory = { workspace = true }

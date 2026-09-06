@@ -515,14 +515,6 @@ html[lang='zh-CN'] .font-structural {
   content: '';
 }
 
-.route-spine__index {
-  margin-top: 0.1rem;
-  color: var(--primary);
-  font-family: var(--font-technical);
-  font-size: 0.68rem;
-  line-height: 1.2;
-}
-
 .route-spine__label {
   display: block;
   font-family: var(--font-structural);

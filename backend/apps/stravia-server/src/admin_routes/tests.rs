@@ -12,7 +12,7 @@ async fn status_reports_the_running_server_version() -> anyhow::Result<()> {
         ..Default::default()
     })
     .await?;
-    let response = create_router(gateway, None)
+    let response = create_unprotected_router(gateway)
         .oneshot(Request::get("/api/v1/status").body(Body::empty())?)
         .await?;
 
@@ -25,6 +25,96 @@ async fn status_reports_the_running_server_version() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn update_routes_expose_instance_state_and_exact_skip_version() -> anyhow::Result<()> {
+    let data_dir = tempfile::tempdir()?;
+    let (gateway, _logs) = Gateway::new(GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await?;
+    let storage = gateway.storage.clone();
+    let app = create_unprotected_router(gateway);
+
+    let initial = app
+        .clone()
+        .oneshot(Request::get("/api/v1/updates").body(Body::empty())?)
+        .await?;
+    assert_eq!(initial.status(), StatusCode::OK);
+    let body = to_bytes(initial.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+    assert_eq!(json["data"]["check_status"], "idle");
+    assert_eq!(json["data"]["download_supported"], false);
+
+    for mode in ["automatic", "manual"] {
+        let checked = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/updates/check")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(r#"{{"mode":"{mode}"}}"#)))?,
+            )
+            .await?;
+        assert_eq!(checked.status(), StatusCode::OK);
+        let body = to_bytes(checked.into_body(), usize::MAX).await?;
+        let json: serde_json::Value = serde_json::from_slice(&body)?;
+        assert_eq!(json["data"]["check_status"], "error");
+        assert_eq!(
+            json["data"]["last_failure"]["code"],
+            "UPDATE_CHECK_DISABLED"
+        );
+    }
+
+    let skipped = app
+        .clone()
+        .oneshot(
+            Request::put("/api/v1/updates/skipped-version")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"version":"1.2.3"}"#))?,
+        )
+        .await?;
+    assert_eq!(skipped.status(), StatusCode::OK);
+    assert_eq!(
+        storage
+            .settings()
+            .get("product_update_skipped_version")
+            .await?,
+        Some("1.2.3".to_string())
+    );
+
+    let other_data_dir = tempfile::tempdir()?;
+    let (other_gateway, _logs) = Gateway::new(GatewayConfig {
+        data_dir: other_data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await?;
+    assert_eq!(
+        other_gateway
+            .storage
+            .settings()
+            .get("product_update_skipped_version")
+            .await?,
+        None
+    );
+
+    let cleared = app
+        .oneshot(
+            Request::put("/api/v1/updates/skipped-version")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"version":null}"#))?,
+        )
+        .await?;
+    assert_eq!(cleared.status(), StatusCode::OK);
+    assert_eq!(
+        storage
+            .settings()
+            .get("product_update_skipped_version")
+            .await?,
+        Some(String::new())
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn provider_allowance_routes_share_the_core_contract() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
     let (gateway, _logs) = Gateway::new(GatewayConfig {
@@ -32,7 +122,7 @@ async fn provider_allowance_routes_share_the_core_contract() -> anyhow::Result<(
         ..Default::default()
     })
     .await?;
-    let app = create_router(gateway, None);
+    let app = create_unprotected_router(gateway);
 
     for request in [
         Request::get("/api/v1/provider-allowances").body(Body::empty())?,
@@ -63,7 +153,7 @@ async fn automatic_callback_failure_body(locale: &str) -> anyhow::Result<String>
         ..Default::default()
     })
     .await?;
-    let app = create_router(gateway, None);
+    let app = create_unprotected_router(gateway);
     let init_response = app
         .clone()
         .oneshot(
@@ -121,7 +211,7 @@ async fn manual_oauth_init_exposes_the_effective_callback_contract() -> anyhow::
         ..Default::default()
     })
     .await?;
-    let app = create_router(gateway, None);
+    let app = create_unprotected_router(gateway);
     let response = app
         .oneshot(
             Request::post("/api/v1/oauth/sessions/init")
@@ -180,7 +270,7 @@ async fn general_provider_endpoint_rejects_oauth_channels_without_a_session() ->
         "credential": { "type": "none" },
         "use_proxy": false
     }))?;
-    let response = create_router(gateway, None)
+    let response = create_unprotected_router(gateway)
         .oneshot(
             Request::post("/api/v1/providers")
                 .header("content-type", "application/json")
@@ -203,7 +293,7 @@ async fn terminal_manual_completion_releases_the_auto_listener() -> anyhow::Resu
         ..Default::default()
     })
     .await?;
-    let app = create_router(gateway, None);
+    let app = create_unprotected_router(gateway);
     let init_response = app
         .clone()
         .oneshot(
@@ -262,7 +352,7 @@ async fn automatic_callback_listener_is_loopback_only_and_returns_safe_html() ->
         ..Default::default()
     })
     .await?;
-    let app = create_router(gateway, None);
+    let app = create_unprotected_router(gateway);
     let init_response = app
         .clone()
         .oneshot(
@@ -338,7 +428,7 @@ async fn automatic_callback_uses_the_requested_simplified_chinese_locale() -> an
         ..Default::default()
     })
     .await?;
-    let app = create_router(gateway, None);
+    let app = create_unprotected_router(gateway);
     let init_response = app
             .clone()
             .oneshot(
@@ -382,7 +472,7 @@ async fn catalog_routes_replace_the_legacy_provider_presets_route() -> anyhow::R
         ..Default::default()
     })
     .await?;
-    let app = create_router(gateway, None);
+    let app = create_unprotected_router(gateway);
 
     let response = app
         .clone()
@@ -487,7 +577,7 @@ async fn prepare_provider_model_uses_the_post_template_contract() -> anyhow::Res
             use_proxy: false,
         })
         .await?;
-    let app = create_router(gateway, None);
+    let app = create_unprotected_router(gateway);
 
     let prepared = app
         .clone()
@@ -558,7 +648,7 @@ async fn web_search_routes_replace_the_legacy_web_research_routes() -> anyhow::R
         ..Default::default()
     })
     .await?;
-    let app = create_router(gateway, None);
+    let app = create_unprotected_router(gateway);
 
     let current = app
         .clone()
@@ -574,28 +664,6 @@ async fn web_search_routes_replace_the_legacy_web_research_routes() -> anyhow::R
     Ok(())
 }
 
-#[tokio::test]
-async fn catalog_logo_proxy_does_not_require_the_admin_bearer_token() -> anyhow::Result<()> {
-    let data_dir = tempfile::tempdir()?;
-    let (gateway, _logs) = Gateway::new(GatewayConfig {
-        data_dir: data_dir.path().to_path_buf(),
-        ..Default::default()
-    })
-    .await?;
-    let app = create_router(gateway, Some("admin-secret".to_string()));
-
-    let catalog = app
-        .clone()
-        .oneshot(Request::get("/api/v1/catalog/providers").body(Body::empty())?)
-        .await?;
-    assert_eq!(catalog.status(), StatusCode::UNAUTHORIZED);
-
-    let logo = app
-        .oneshot(Request::get("/api/v1/catalog/providers/not-a-provider/logo").body(Body::empty())?)
-        .await?;
-    assert_ne!(logo.status(), StatusCode::UNAUTHORIZED);
-    Ok(())
-}
 #[tokio::test]
 async fn provider_model_routes_support_slash_ids_and_exact_decimal_costs() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
@@ -619,7 +687,7 @@ async fn provider_model_routes_support_slash_ids_and_exact_decimal_costs() -> an
             use_proxy: false,
         })
         .await?;
-    let app = create_router(gateway, None);
+    let app = create_unprotected_router(gateway);
 
     let created = app
             .clone()
@@ -705,7 +773,7 @@ async fn route_bind_endpoint_owns_one_click_target_creation() -> anyhow::Result<
             },
         )
         .await?;
-    let app = create_router(gateway, None);
+    let app = create_unprotected_router(gateway);
     let body = serde_json::to_vec(&serde_json::json!({
         "provider_id": provider.id,
         "provider_model_id": "route-model"
@@ -746,7 +814,7 @@ async fn web_access_admin_routes_persist_masked_providers_and_atomic_priority() 
         ..Default::default()
     })
     .await?;
-    let app = create_router(gateway, None);
+    let app = create_unprotected_router(gateway);
 
     let created = app
             .clone()

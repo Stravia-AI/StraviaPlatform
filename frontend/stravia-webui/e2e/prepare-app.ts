@@ -1,4 +1,5 @@
 import type { Page } from '@playwright/test'
+import type { UpdateStatus } from '../src/lib/product-update'
 
 const settingValues: Record<string, string> = {
   log_retention_days: '7',
@@ -8,8 +9,16 @@ const settingValues: Record<string, string> = {
 }
 
 export async function prepareApp(page: Page): Promise<void> {
+  let updateStatus: UpdateStatus = {
+    current_version: '0.1.5',
+    check_status: 'up-to-date',
+    last_success_at: '2026-09-05T00:00:00Z',
+    last_failure: null,
+    available_update: null,
+    skipped: false,
+    download_supported: false,
+  }
   await page.addInitScript(() => {
-    localStorage.setItem('stravia-admin-token', 'playwright-token')
     localStorage.setItem('stravia-locale', 'en-US')
     localStorage.setItem('stravia-sidebar-state', 'expanded')
     localStorage.setItem('stravia-theme', 'system')
@@ -19,8 +28,24 @@ export async function prepareApp(page: Page): Promise<void> {
     const request = route.request()
     const path = new URL(request.url()).pathname.replace('/api/v1', '')
 
+    if (path === '/auth/state') {
+      await route.fulfill({
+        json: { mode: 'server', authenticated: true, setup_authorized: false, username: 'playwright-admin' },
+      })
+      return
+    }
     if (path === '/status') {
       await route.fulfill({ json: { data: { status: 'running' } } })
+      return
+    }
+    if (path === '/updates' || path === '/updates/check') {
+      await route.fulfill({ json: { data: updateStatus } })
+      return
+    }
+    if (path === '/updates/skipped-version') {
+      const version = request.postDataJSON()?.version as string | null
+      updateStatus = { ...updateStatus, skipped: version != null && version === updateStatus.available_update?.version }
+      await route.fulfill({ json: { data: updateStatus } })
       return
     }
 

@@ -1,67 +1,64 @@
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use clap::Parser;
-use stravia_core::{
-    Gateway,
-    config::{GatewayConfig, GatewayStorageConfig, SqlStorageConfig, StorageBackendKind},
-    logging,
+use anyhow::{Context, bail};
+use clap::{Parser, Subcommand};
+use stravia_core::config::GatewayConfig;
+use stravia_server::{
+    DEFAULT_PORT, ServerStartupConfig, prepare_server_app, recover_admin, standalone_local_origins,
+    start_http_server,
 };
-use stravia_server::{HttpAppConfig, build_http_app, standalone_local_origins, start_http_server};
-
-// ── CLI ───────────────────────────────────────────────────────────────────────
 
 #[derive(Parser)]
 #[command(name = "stravia-server", version, about = "Stravia AI Gateway")]
 struct Args {
-    // ── Server ────────────────────────────────────────────────────────────────
+    #[command(subcommand)]
+    command: Option<Command>,
+
     #[arg(
         long,
         default_value = "127.0.0.1",
         env = "STRAVIA_HOST",
-        help_heading = "Server"
+        help_heading = "Server",
+        global = true
     )]
     host: String,
 
     #[arg(
         long,
-        default_value_t = stravia_server::DEFAULT_PORT,
+        default_value_t = DEFAULT_PORT,
         env = "STRAVIA_PORT",
-        help_heading = "Server"
+        help_heading = "Server",
+        global = true
     )]
     port: u16,
 
     #[arg(
         long,
         env = "STRAVIA_PUBLIC_ORIGIN",
-        help = "Canonical public origin for signed Artifact URLs (for example https://gateway.example.com)",
-        help_heading = "Server"
+        help = "Canonical HTTPS public origin used for browser security and signed Artifact URLs",
+        help_heading = "Server",
+        global = true
     )]
     public_origin: Option<String>,
-
-    #[arg(
-        long,
-        env = "STRAVIA_ADMIN_TOKEN",
-        help = "Bearer token for admin API authentication",
-        help_heading = "Server"
-    )]
-    admin_token: Option<String>,
 
     #[arg(
         long,
         default_value = "info",
         env = "STRAVIA_LOG_LEVEL",
         value_parser = ["error", "warn", "info", "debug", "trace"],
-        help_heading = "Server"
+        help_heading = "Server",
+        global = true
     )]
     log_level: String,
 
-    // ── Advanced (CORS) ───────────────────────────────────────────────────────
     #[arg(
         long = "admin-cors-origin",
         action = clap::ArgAction::Append,
-        help = "Allowed CORS origin for admin API (repeatable, use '*' for any)",
-        help_heading = "Advanced"
+        help = "Allowed CORS origin for admin API (repeatable; wildcard is not accepted)",
+        help_heading = "Advanced",
+        global = true
     )]
     admin_cors_origins: Vec<String>,
 
@@ -69,61 +66,36 @@ struct Args {
         long = "proxy-cors-origin",
         action = clap::ArgAction::Append,
         help = "Allowed CORS origin for proxy API (repeatable, use '*' for any)",
-        help_heading = "Advanced"
+        help_heading = "Advanced",
+        global = true
     )]
     proxy_cors_origins: Vec<String>,
 
-    // ── Storage ───────────────────────────────────────────────────────────────
     #[arg(
         long,
         default_value_t = default_data_dir(),
         env = "STRAVIA_DATA_DIR",
-        help_heading = "Storage"
+        help = "Runtime data and artifact directory (not a database override)",
+        help_heading = "Storage",
+        global = true
     )]
     data_dir: String,
 
-    #[arg(long, value_parser = ["sqlite", "postgres"], default_value = "sqlite",
-          env = "STRAVIA_STORAGE_BACKEND", help_heading = "Storage")]
-    storage_backend: String,
-
     #[arg(
         long,
-        env = "STRAVIA_POSTGRES_DSN",
-        help = "PostgreSQL connection string (required when --storage-backend=postgres)",
-        help_heading = "Storage"
+        help = "Server configuration file (defaults to <data-dir>/server.toml)",
+        help_heading = "Storage",
+        global = true
     )]
-    postgres_dsn: Option<String>,
+    config: Option<String>,
 
-    #[arg(
-        long,
-        default_value_t = 10,
-        help = "Postgres: max connection pool size",
-        help_heading = "Storage"
-    )]
-    postgres_max_connections: u32,
-
-    #[arg(
-        long,
-        default_value_t = 1,
-        help = "Postgres: min connection pool size",
-        help_heading = "Storage"
-    )]
-    postgres_min_connections: u32,
-
-    #[arg(
-        long,
-        help = "Postgres: idle connection timeout (seconds)",
-        help_heading = "Storage"
-    )]
-    postgres_idle_timeout: Option<u64>,
-
-    // ── Advanced ──────────────────────────────────────────────────────────────
     #[arg(
         long,
         default_value_t = 3,
         env = "STRAVIA_CONFIG_POLL_INTERVAL",
         help = "Seconds between config epoch polls (0 = disabled); does not coordinate multiple replicas",
-        help_heading = "Advanced"
+        help_heading = "Advanced",
+        global = true
     )]
     config_poll_interval: u64,
 
@@ -132,20 +104,137 @@ struct Args {
         long,
         env = "STRAVIA_WIRE_CAPTURE_DIR",
         help = "Diagnostic JSONL directory for client/upstream wire payloads; headers are redacted but bodies may contain sensitive content",
-        help_heading = "Advanced"
+        help_heading = "Advanced",
+        global = true
     )]
     wire_capture_dir: Option<PathBuf>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Interactively replace the sole administrator credentials and revoke all sessions.
+    RecoverAdmin,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     load_dotenv()?;
     let args = Args::parse();
-
     let filter = format!("stravia={level},tower_http={level}", level = args.log_level);
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
-    run_full(&args).await
+    let data_dir = expanded_path(&args.data_dir);
+    let config_path = args
+        .config
+        .as_deref()
+        .map(expanded_path)
+        .unwrap_or_else(|| data_dir.join("server.toml"));
+    let gateway = base_gateway_config(&args, data_dir);
+
+    match args.command {
+        Some(Command::RecoverAdmin) => recover_admin(&config_path, gateway).await,
+        None => run_server(&args, config_path, gateway).await,
+    }
+}
+
+async fn run_server(
+    args: &Args,
+    config_path: PathBuf,
+    mut gateway: GatewayConfig,
+) -> anyhow::Result<()> {
+    let admin_origin = canonical_admin_origin(args)?;
+    gateway.public_origin = Some(admin_origin.clone());
+    if args
+        .admin_cors_origins
+        .iter()
+        .any(|origin| origin.trim() == "*")
+    {
+        bail!("wildcard admin CORS origin is not allowed with cookie authentication");
+    }
+    let local_origins = standalone_local_origins(args.port);
+    let mut admin_cors_origins = args.admin_cors_origins.clone();
+    if !admin_cors_origins
+        .iter()
+        .any(|origin| origin.trim() == admin_origin.as_str())
+    {
+        admin_cors_origins.push(admin_origin.clone());
+    }
+    let proxy_cors_origins = if args.proxy_cors_origins.is_empty() {
+        local_origins
+    } else {
+        args.proxy_cors_origins.clone()
+    };
+
+    let prepared = prepare_server_app(ServerStartupConfig {
+        config_path,
+        gateway,
+        admin_origin,
+        admin_cors_origins,
+        proxy_cors_origins,
+        serve_embedded_webui: true,
+    })
+    .await?;
+    if let Some(token) = prepared.setup_token.as_deref() {
+        println!("Stravia setup token: {token}");
+        std::io::stdout().flush()?;
+    }
+
+    let server = start_http_server(listener_address(&args.host, args.port), prepared.app).await?;
+    let address = server.local_addr();
+    tracing::info!(%address, "Stravia Server listening");
+    shutdown_signal().await;
+    server.shutdown().await
+}
+
+fn base_gateway_config(args: &Args, data_dir: PathBuf) -> GatewayConfig {
+    GatewayConfig {
+        data_dir,
+        public_origin: args
+            .public_origin
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
+        config_poll_interval: Duration::from_secs(args.config_poll_interval),
+        #[cfg(debug_assertions)]
+        wire_capture_dir: args.wire_capture_dir.clone(),
+        ..Default::default()
+    }
+}
+
+fn canonical_admin_origin(args: &Args) -> anyhow::Result<String> {
+    let origin = match args
+        .public_origin
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(value) => {
+            let url =
+                url::Url::parse(value).context("--public-origin must be a valid HTTP(S) origin")?;
+            if !matches!(url.scheme(), "http" | "https")
+                || url.host_str().is_none()
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || url.query().is_some()
+                || url.fragment().is_some()
+                || url.path() != "/"
+            {
+                bail!(
+                    "--public-origin must contain only an HTTP(S) scheme, host, and optional port"
+                );
+            }
+            url.origin().ascii_serialization()
+        }
+        None if is_loopback_host(&args.host) => {
+            format!("http://{}:{}", display_origin_host(&args.host), args.port)
+        }
+        None => bail!("--public-origin is required when --host is not loopback"),
+    };
+    if !is_loopback_host(&args.host) && !origin.starts_with("https://") {
+        bail!("--public-origin must use HTTPS when --host is not loopback");
+    }
+    Ok(origin)
 }
 
 fn load_dotenv() -> anyhow::Result<()> {
@@ -156,80 +245,12 @@ fn load_dotenv() -> anyhow::Result<()> {
     }
 }
 
-async fn run_full(args: &Args) -> anyhow::Result<()> {
-    let data_dir = shellexpand::tilde(&args.data_dir).to_string();
-    let admin_token = args
-        .admin_token
-        .clone()
-        .filter(|token| !token.trim().is_empty());
-
-    if !is_loopback_host(&args.host) && admin_token.is_none() {
-        anyhow::bail!(
-            "--admin-token is required when --host is not loopback (localhost/127.0.0.1/::1)"
-        );
-    }
-
-    let default_origins = standalone_local_origins(args.port);
-    let admin_cors_origins = if args.admin_cors_origins.is_empty() {
-        default_origins.clone()
-    } else {
-        args.admin_cors_origins.clone()
-    };
-    let proxy_cors_origins = if args.proxy_cors_origins.is_empty() {
-        default_origins
-    } else {
-        args.proxy_cors_origins.clone()
-    };
-
-    let config = GatewayConfig {
-        data_dir: PathBuf::from(data_dir),
-        public_origin: args
-            .public_origin
-            .as_deref()
-            .map(str::trim)
-            .filter(|origin| !origin.is_empty())
-            .map(ToOwned::to_owned),
-        storage: build_storage_config(args)?,
-        config_poll_interval: Duration::from_secs(args.config_poll_interval),
-        #[cfg(debug_assertions)]
-        wire_capture_dir: args.wire_capture_dir.clone(),
-        ..Default::default()
-    };
-
-    let (gateway, log_rx) = Gateway::new(config).await?;
-    let storage_for_logs = gateway.storage.clone();
-    tokio::spawn(async move {
-        logging::run_collector(log_rx, storage_for_logs).await;
-    });
-
-    let app = build_http_app(
-        gateway,
-        HttpAppConfig {
-            admin_token: admin_token.clone(),
-            admin_cors_origins,
-            proxy_cors_origins,
-            serve_embedded_webui: true,
-        },
-    );
-    let server = start_http_server(listener_address(&args.host, args.port), app).await?;
-    let address = server.local_addr();
-    tracing::info!(%address, "Stravia Server listening");
-
-    if admin_token.is_none() {
-        tracing::warn!("admin API auth disabled: set --admin-token for production");
-    }
-
-    shutdown_signal().await;
-    server.shutdown().await
-}
-
 async fn shutdown_signal() {
     let ctrl_c = async {
         if let Err(error) = tokio::signal::ctrl_c().await {
             tracing::warn!(%error, "failed to listen for shutdown signal");
         }
     };
-
     #[cfg(unix)]
     let terminate = async {
         match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
@@ -239,66 +260,30 @@ async fn shutdown_signal() {
             Err(error) => tracing::warn!(%error, "failed to listen for SIGTERM"),
         }
     };
-
     #[cfg(not(unix))]
     let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        _ = ctrl_c => {},
-        _ = terminate => {},
-    }
-
+    tokio::select! { _ = ctrl_c => {}, _ = terminate => {} }
     tracing::info!("shutdown signal received");
-}
-
-fn build_storage_config(args: &Args) -> anyhow::Result<GatewayStorageConfig> {
-    let backend = parse_storage_backend(&args.storage_backend)?;
-
-    let postgres_url = if matches!(backend, StorageBackendKind::Postgres) {
-        let dsn = args
-            .postgres_dsn
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "--postgres-dsn (or env STRAVIA_POSTGRES_DSN) is required \
-                     when --storage-backend=postgres"
-                )
-            })?;
-        Some(dsn.to_string())
-    } else {
-        None
-    };
-
-    let postgres = SqlStorageConfig {
-        url: postgres_url,
-        max_connections: args.postgres_max_connections,
-        min_connections: args.postgres_min_connections,
-        idle_timeout: args.postgres_idle_timeout.map(Duration::from_secs),
-    };
-
-    Ok(GatewayStorageConfig { backend, postgres })
-}
-
-fn parse_storage_backend(value: &str) -> anyhow::Result<StorageBackendKind> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "sqlite" => Ok(StorageBackendKind::Sqlite),
-        "postgres" => Ok(StorageBackendKind::Postgres),
-        other => anyhow::bail!("unsupported storage backend: {other}"),
-    }
 }
 
 fn is_loopback_host(host: &str) -> bool {
     matches!(host, "127.0.0.1" | "localhost" | "::1")
 }
 
-fn listener_address(host: &str, port: u16) -> String {
+fn display_origin_host(host: &str) -> String {
     if host.contains(':') && !host.starts_with('[') {
-        format!("[{host}]:{port}")
+        format!("[{host}]")
     } else {
-        format!("{host}:{port}")
+        host.to_string()
     }
+}
+
+fn listener_address(host: &str, port: u16) -> String {
+    format!("{}:{port}", display_origin_host(host))
+}
+
+fn expanded_path(value: &str) -> PathBuf {
+    PathBuf::from(shellexpand::tilde(value).as_ref())
 }
 
 fn default_data_dir() -> String {

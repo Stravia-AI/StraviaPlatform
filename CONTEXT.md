@@ -9,6 +9,16 @@ Stravia 是本产品的唯一品牌名称。用户可见文本、技术标识、
 Stravia Desktop 是运行在本机的 Stravia 管理壳，与独立 HTTP server 相对。只有它能直接改写本机 Connect Client 的配置文件。
 _避免使用_：客户端（单独使用、未区分 Desktop 与 Connect Client）
 
+## 可用更新
+
+可用更新是版本高于当前安装、且符合当前发布通道的已发布 Stravia Release。稳定版安装只接受稳定 Release；预发布版安装接受后续预发布 Release 和版本更高的稳定 Release。
+_避免使用_：最新版（未经过版本与通道判定时）、客户端更新
+
+## 跳过版本
+
+跳过版本是一个 Stravia 安装实例对某个可用更新关闭自动通知的共享偏好。它只作用于该精确版本，不隐藏手动检查结果；出现版本更高的可用更新时自动失效。
+_避免使用_：关闭更新、永久忽略更新
+
 ## Connect Client
 
 Connect Client 是用户本机上的第三方编程工具，可被配置为以 Stravia 为模型服务；管理面「客户端」下拉里的 Codex、Claude Code 等即此类。它不是 Principal，也不是 Agent Definition。
@@ -23,6 +33,26 @@ _避免使用_：一键覆盖配置、在 Gateway 进程里写用户 home、把�
 
 Connect Client Global Config 是该 Connect Client 的用户级配置文件，路径由该工具的官方目录环境变量与默认目录解析；Connect Client Apply 只改这份文件，不改仓库内的项目配置。
 _避免使用_：项目级 `.codex/config.toml`、项目级 `.claude/settings.json`、把任意 OPENCODE_CONFIG 文件都当成全局配置
+
+## 管理用户（Admin User）
+
+管理用户是访问 Stravia 管理控制台与管理功能的身份，与模型调用及 MCP 使用的 Principal 分离。Stravia API Key 不归属于管理用户；管理用户身份本身不授予模型调用或 MCP 访问资格。
+_避免使用_：Principal、Connect Client、上游账户
+
+## 实例管理员
+
+实例管理员是一个 Stravia 实例唯一的管理用户，拥有该实例的全部管理权限。实例不提供其他管理用户的创建、禁用或删除功能。
+_避免使用_：多用户管理、普通用户、API Key 所有者
+
+## 设置令牌（Setup Token）
+
+设置令牌是领取 Stravia 首次设置资格的一次性凭据，只用于选择服务存储并建立首个实例管理员。它不是日常管理凭据，也不授予覆盖已有管理员的资格。
+_避免使用_：Admin Token、API Key、管理员密码
+
+## 初始化会话
+
+初始化会话是已领取首次设置资格的操作者完成配置与管理员创建的受限操作上下文。它不具备日常管理权限，也不能代替管理员登录。
+_避免使用_：管理会话、Principal、管理员身份
 
 ## Principal
 
@@ -220,6 +250,11 @@ _避免使用_：Provider Offering、Catalog Model
 
 Provider Model 是属于一个已保存 Provider 实例、以 upstream model ID 标识的持久化模型快照；它不同于共享 Provider Catalog 条目，也不同于负责客户端路由的 Route 和 Target。
 _避免使用_：Provider Model Override、Catalog Model
+
+## Model Specification
+
+Model Specification（模型规格）是模型记录中已登记的上下文与输入输出限额、输入输出模态和功能声明；对 Provider Model，以已保存且可人工编辑的快照为准。它不代表经过实测的能力或当前接入路径的可用保证，不包含平台补充能力；信息缺失不等于不支持。
+_避免使用_：实测能力、实际可用能力、把未登记称为不支持
 
 ## Selection Policy
 
