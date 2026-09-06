@@ -12,6 +12,11 @@
 - **Breaking:** Server database connections now come only from `server.toml`, selected with `--config`. Existing deployments must move database CLI and environment settings into this file before upgrading; missing or invalid configuration never silently selects another database.
 - Desktop management now requires the same session authentication as Server. Only the native application can obtain its in-memory session; closing to the tray preserves it, while exiting revokes it.
 
+### Fixed
+
+- The Server development workflow now passes Vite's actual listening origin to the backend for setup and sign-in, including when Vite selects another port for concurrent workspaces.
+- Relative SQLite paths now resolve from the directory containing `server.toml` throughout setup, startup, and local recovery, keeping the default Debug database in the workspace's `.stravia-dev` directory instead of creating a database in the process working directory.
+
 ## [0.1.6] - 2026-09-05
 
 ### Added

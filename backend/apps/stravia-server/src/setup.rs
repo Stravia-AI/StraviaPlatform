@@ -144,6 +144,9 @@ pub async fn prepare_server_app(startup: ServerStartupConfig) -> anyhow::Result<
     })
 }
 
+/// Read the database configuration, returning `None` when the file is absent.
+/// Relative SQLite paths are resolved from the configuration file's directory.
+/// Unreadable or invalid configurations and unresolvable paths return an error.
 pub fn read_database_config(path: &Path) -> anyhow::Result<Option<DatabaseConfig>> {
     let source = match std::fs::read_to_string(path) {
         Ok(source) => source,
@@ -152,8 +155,26 @@ pub fn read_database_config(path: &Path) -> anyhow::Result<Option<DatabaseConfig
     };
     let config: ServerFileConfig =
         toml::from_str(&source).map_err(|_| anyhow::anyhow!("server configuration is invalid"))?;
-    validate_database_config(&config.database)?;
-    Ok(Some(config.database))
+    resolve_database_config(path, config.database).map(Some)
+}
+
+fn resolve_database_config(
+    config_path: &Path,
+    mut database: DatabaseConfig,
+) -> anyhow::Result<DatabaseConfig> {
+    validate_database_config(&database)?;
+    if let DatabaseConfig::Sqlite { path } = &mut database {
+        *path = expand_path(path);
+        if path.is_relative() {
+            let config_path =
+                std::path::absolute(config_path).context("resolve configuration file path")?;
+            let directory = config_path
+                .parent()
+                .context("configuration file has no parent directory")?;
+            *path = directory.join(&*path);
+        }
+    }
+    Ok(database)
 }
 
 pub fn gateway_config(
@@ -343,7 +364,11 @@ async fn test_database(
     if let Err(response) = authorize_setup(&runtime, &headers, true).await {
         return response;
     }
-    match preflight_database(&input.database).await {
+    let database = match resolve_database_config(&runtime.startup.config_path, input.database) {
+        Ok(database) => database,
+        Err(_) => return auth_error(StatusCode::BAD_REQUEST, "database_unavailable"),
+    };
+    match preflight_database(&database).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(_) => auth_error(StatusCode::BAD_REQUEST, "database_unavailable"),
     }
@@ -365,16 +390,20 @@ async fn complete_setup(
     {
         return auth_error(StatusCode::CONFLICT, "setup_complete");
     }
-    if let Err(error) = preflight_database(&input.database).await {
+    let database = match resolve_database_config(&runtime.startup.config_path, input.database) {
+        Ok(database) => database,
+        Err(_) => return auth_error(StatusCode::BAD_REQUEST, "database_unavailable"),
+    };
+    if let Err(error) = preflight_database(&database).await {
         tracing::warn!(error = %redacted_database_error(&error), "database preflight failed");
         return auth_error(StatusCode::BAD_REQUEST, "database_unavailable");
     }
-    if let Err(error) = save_database_config(&runtime.startup.config_path, &input.database) {
+    if let Err(error) = save_database_config(&runtime.startup.config_path, &database) {
         tracing::warn!(error = %error, "server configuration save failed");
         return auth_error(StatusCode::INTERNAL_SERVER_ERROR, "config_save_failed");
     }
 
-    let gateway_config = match gateway_config(&runtime.startup.gateway, &input.database) {
+    let gateway_config = match gateway_config(&runtime.startup.gateway, &database) {
         Ok(config) => config,
         Err(_) => return auth_error(StatusCode::BAD_REQUEST, "invalid_database_config"),
     };

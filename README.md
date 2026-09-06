@@ -277,7 +277,9 @@ backend = "sqlite"
 path = "/var/lib/stravia/gateway.db"
 ```
 
-The SQLite filename must be `gateway.db`. For an already-created PostgreSQL database:
+The SQLite filename must be `gateway.db`. Relative paths, including the setup wizard's default `gateway.db`, resolve from the directory containing `server.toml`, not the process working directory. Setup saves the resolved absolute path; existing absolute paths are unchanged. With the default Debug configuration, this uses `<workspace>/.stravia-dev/gateway.db`.
+
+For an already-created PostgreSQL database:
 
 ```toml
 [database]
@@ -344,6 +346,10 @@ Common commands:
 
 Backend Python tests use the locked `test` dependency group in `pyproject.toml`; Task invokes them through `uv run --locked`.
 Debug server builds do not embed or serve WebUI assets. `task dev:server` starts the Vite development server alongside the backend; release server builds embed the WebUI.
+
+`task dev:server` starts Vite first and passes its actual listening origin to the backend's `--public-origin`. If port `5173` is occupied, Vite automatically selects another port; open the exact **Local** URL printed in the terminal. Concurrent workspaces should use distinct `STRAVIA_PORT` values for their backend listeners; WebUI ports need not be fixed.
+
+If you run `task dev:web` and the backend separately, pass the WebUI's actual origin to the backend, for example `cargo run -p stravia-server -- --public-origin http://localhost:5174`. `localhost` and `127.0.0.1` are different browser origins. After restarting an unfinished setup, use the new setup token printed by the new Server process.
 
 ## Documentation
 

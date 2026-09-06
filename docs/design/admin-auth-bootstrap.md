@@ -48,6 +48,7 @@
 - SQLite 自动创建本地数据库文件。PostgreSQL 连接用户事先创建的数据库，验证连接后运行 Stravia 自身的 schema migrations；不创建 PostgreSQL 数据库，不要求 `CREATEDB` 权限，也不安装或启动 PostgreSQL 服务。
 - 数据库连接以 `server.toml` 配置文件为唯一来源；`--config <path>` 显式选择文件，默认路径是 `<data-dir>/server.toml`。`--data-dir` 仅定位运行时产物，不覆盖数据库。旧数据库 CLI 参数与环境变量入口已删除，不保留覆盖或兼容读取路径。
 - 配置使用带 `backend` tag 的 `[database]`：SQLite 写入 `backend = "sqlite"` 与以 `gateway.db` 结尾的 `path`；PostgreSQL 写入 `backend = "postgres"`、`url`，并可选 `max_connections`、`min_connections`、`idle_timeout_seconds`。PostgreSQL URL 属于秘密，配置文件需受文件权限保护。
+- SQLite 相对路径以配置文件所在目录为基准，连接测试、初始化、启动和本地恢复使用同一解析规则；向导保存解析后的绝对路径。默认 Debug 配置和 SQLite 数据库分别位于当前 workspace 的 `.stravia-dev/server.toml` 与 `.stravia-dev/gateway.db`，不随进程工作目录改变。
 - 若向导选择的数据库已有管理员，保存连接配置后关闭设置权限，转到正常登录页；必须使用该数据库已有管理员的凭据，设置令牌不能重建或覆盖管理员。
 - 数据库配置来源取舍见 [ADR-0041](../adr/0041-own-database-connection-in-config-file.md)。
 

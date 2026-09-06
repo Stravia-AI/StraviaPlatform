@@ -277,7 +277,9 @@ backend = "sqlite"
 path = "/var/lib/stravia/gateway.db"
 ```
 
-SQLite 文件名必须是 `gateway.db`。对于已创建好的 PostgreSQL 数据库：
+SQLite 文件名必须是 `gateway.db`。相对路径（包括设置向导默认的 `gateway.db`）以 `server.toml` 所在目录为基准，不依赖进程工作目录。向导保存解析后的绝对路径；已有绝对路径保持不变。使用默认 Debug 配置时，数据库位于 `<workspace>/.stravia-dev/gateway.db`。
+
+对于已创建好的 PostgreSQL 数据库：
 
 ```toml
 [database]
@@ -344,6 +346,10 @@ tests/e2e/                         Python 后端 E2E 套件与协议录制样本
 
 后端 Python 测试使用 `pyproject.toml` 中锁定的 `test` 依赖组，Task 通过 `uv run --locked` 执行。
 Debug 服务端构建不会内嵌或提供 WebUI 资源。`task dev:server` 会同时启动 Vite 开发服务器和后端；Release 服务端构建仍会内嵌 WebUI。
+
+`task dev:server` 会先启动 Vite，再把实际监听地址作为 `--public-origin` 传给后端。端口 `5173` 被占用时，Vite 会自动选择其他端口；请打开终端输出的精确 **Local** 地址。多个 workspace 并行开发时，各后端使用不同的 `STRAVIA_PORT`；前端端口无需固定。
+
+如果分别启动 `task dev:web` 和后端，请把 WebUI 的实际来源传给后端，例如 `cargo run -p stravia-server -- --public-origin http://localhost:5174`。`localhost` 和 `127.0.0.1` 是不同的浏览器来源。首次设置未完成时重启服务，需要使用新 Server 进程输出的新设置令牌。
 
 ## 文档
 

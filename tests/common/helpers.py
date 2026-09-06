@@ -208,6 +208,7 @@ def start_stravia_server(
     stravia_binary: Path,
     args: list[str],
     env: dict[str, str] | None = None,
+    cwd: Path | None = None,
 ) -> tuple[subprocess.Popen[str], list[str]]:
     """Start stravia-server with explicit CLI arguments; return (proc, log_lines)."""
     logs: list[str] = []
@@ -217,6 +218,7 @@ def start_stravia_server(
         stderr=subprocess.STDOUT,
         text=True,
         env={**os.environ, **(env or {})},
+        cwd=cwd,
     )
 
     def _drain() -> None:

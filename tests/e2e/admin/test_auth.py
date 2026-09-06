@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import errno
 import os
 import re
+import signal
+import socket
 import subprocess
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Iterator
 
@@ -22,6 +26,173 @@ from tests.common.helpers import (
     wait_for_setup_token,
     wait_until_ready,
 )
+
+
+@pytest.mark.e2e
+@pytest.mark.admin
+def test_development_task_accepts_vite_origin_without_bypassing_csrf(
+    repo_root: Path, tmp_path: Path,
+) -> None:
+    port = find_free_port()
+    listeners = ExitStack()
+    # Occupy both localhost address families without disturbing existing workspaces.
+    for family, _, _, _, address in set(socket.getaddrinfo("localhost", 5173, type=socket.SOCK_STREAM)):
+        listener = listeners.enter_context(socket.socket(family, socket.SOCK_STREAM))
+        try:
+            listener.bind(address)
+            listener.listen()
+        except OSError as error:
+            if error.errno != errno.EADDRINUSE:
+                listeners.close()
+                raise
+    logs: list[str] = []
+    origins: list[str] = []
+    frontend_ready = threading.Event()
+    proc = subprocess.Popen(
+        ["task", "--color=false", "dev:server", f"WIRE_CAPTURE_DIR={tmp_path.as_posix()}/wire"],
+        cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        env={
+            **os.environ, "NO_COLOR": "1", "FORCE_COLOR": "0",
+            "STRAVIA_HOST": "127.0.0.1", "STRAVIA_PORT": str(port),
+            "STRAVIA_DATA_DIR": str(tmp_path),
+        },
+        start_new_session=os.name != "nt",
+    )
+
+    def drain() -> None:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            logs.append(line.rstrip())
+            match = re.search(r"Local:.*?(http://localhost:\d+)", line)
+            if match:
+                origins.append(match.group(1))
+                frontend_ready.set()
+
+    reader = threading.Thread(target=drain, daemon=True)
+    reader.start()
+    try:
+        assert frontend_ready.wait(90), "development WebUI did not start"
+        base = origins[0]
+        wait_until_ready(f"{base}/api/v1/auth/state", timeout=90)
+        status, state = http_request("GET", f"{base}/api/v1/auth/state")
+        assert status == 200, state
+        assert state["mode"] == "setup", state
+        token = wait_for_setup_token(logs, proc)
+        origin = base
+        status, body = http_request(
+            "POST", f"{base}/api/v1/setup/claim", payload={"token": token},
+            headers={
+                "origin": "https://attacker.invalid", "x-stravia-csrf": "1",
+                "x-forwarded-host": "localhost:5173",
+            },
+        )
+        assert status == 403, body
+        status, _ = http_request(
+            "POST", f"{base}/api/v1/setup/claim", payload={"token": token},
+            headers={"origin": origin},
+        )
+        assert status == 403
+
+        operator = WebSession(base)
+        status, body = operator.request(
+            "POST", "/api/v1/setup/claim", {"token": token}, headers={"origin": origin},
+        )
+        assert status == 204, body
+        status, body = operator.request(
+            "POST", "/api/v1/setup/complete",
+            {
+                "database": {"backend": "sqlite", "path": str(tmp_path / "gateway.db")},
+                "username": "owner", "password": "correct horse battery staple",
+            },
+            headers={"origin": origin}, timeout=40.0,
+        )
+        assert status == 200, body
+        status, body = operator.request(
+            "POST", "/api/v1/auth/login",
+            {"username": "owner", "password": "correct horse battery staple"},
+            headers={"origin": origin},
+        )
+        assert status == 200, body
+        assert operator.request("GET", "/api/v1/status")[0] == 200
+    finally:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                capture_output=True, check=False,
+            )
+        else:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        proc.wait(timeout=15)
+        reader.join(timeout=5)
+        if proc.stdout is not None:
+            proc.stdout.close()
+        listeners.close()
+
+
+@pytest.mark.e2e
+@pytest.mark.admin
+def test_relative_sqlite_path_uses_config_directory_across_setup_and_restart(
+    stravia_binary: Path, tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / ".stravia-dev"
+    config_path = data_dir / "server.toml"
+    other_cwd = tmp_path / "other-workdir"
+    other_cwd.mkdir()
+    port = find_free_port()
+    base = f"http://127.0.0.1:{port}"
+    args = [
+        "--host", "127.0.0.1", "--port", str(port),
+        "--data-dir", str(data_dir), "--config", str(config_path),
+    ]
+    proc, logs = start_stravia_server(
+        stravia_binary=stravia_binary, args=args, cwd=tmp_path,
+    )
+    try:
+        wait_until_ready(f"{base}/api/v1/auth/state")
+        operator = WebSession(base)
+        token = wait_for_setup_token(logs, proc)
+        assert operator.request("POST", "/api/v1/setup/claim", {"token": token})[0] == 204
+        database = {"backend": "sqlite", "path": "gateway.db"}
+        status, body = operator.request("POST", "/api/v1/setup/test", {"database": database})
+        assert status == 204, body
+        assert (data_dir / "gateway.db").is_file()
+        assert not (tmp_path / "gateway.db").exists()
+        status, body = operator.request(
+            "POST", "/api/v1/setup/complete",
+            {
+                "database": database,
+                "username": "existing-owner", "password": "correct horse battery staple",
+            },
+            timeout=40.0,
+        )
+        assert status == 200, body
+    finally:
+        stop_stravia_server(proc, logs)
+
+    # Neither cwd nor the runtime directory may redirect an existing relative configuration.
+    config_path.write_text('[database]\nbackend = "sqlite"\npath = "gateway.db"\n', encoding="utf-8")
+    args[args.index("--data-dir") + 1] = str(other_cwd / "runtime")
+    proc, logs = start_stravia_server(
+        stravia_binary=stravia_binary, args=args, cwd=other_cwd,
+    )
+    try:
+        wait_until_ready(f"{base}/api/v1/auth/state")
+        operator = WebSession(base)
+        status, state = operator.request("GET", "/api/v1/auth/state")
+        assert status == 200
+        assert state["mode"] == "server"
+        status, body = operator.request(
+            "POST", "/api/v1/auth/login",
+            {"username": "existing-owner", "password": "correct horse battery staple"},
+        )
+        assert status == 200, body
+        assert operator.request("GET", "/api/v1/status")[0] == 200
+        assert not (other_cwd / "gateway.db").exists()
+    finally:
+        stop_stravia_server(proc, logs)
 
 
 @pytest.mark.e2e
