@@ -8,6 +8,7 @@ pub use memory::MemoryStorage;
 pub use postgres::PostgresStorage;
 pub use sqlite::SqliteStorage;
 pub use traits::{
-    ApiKeyAccessRecord, ApiKeyStore, AuthAccessStore, DynStorage, LogStore, ProviderModelStore,
+    AdminIdentityRecord, AdminIdentityStore, AdminSessionRecord, ApiKeyAccessRecord, ApiKeyStore,
+    AuthAccessStore, DynStorage, LogStore, NewAdminIdentity, NewAdminSession, ProviderModelStore,
     ProviderStore, RouteStore, SettingsStore, Storage, StorageBootstrap,
 };

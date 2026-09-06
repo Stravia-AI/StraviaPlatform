@@ -1,9 +1,11 @@
-use axum::extract::{Path, Query, Request, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
-use axum::middleware::{self, Next};
+use axum::middleware;
 use axum::response::IntoResponse;
 use axum::routing::{get, post, put};
 use axum::{Extension, Json, Router};
+
+use crate::http_auth::{AdminHttpState, auth_router, require_admin};
 use serde::Deserialize;
 use stravia_core::Gateway;
 use stravia_core::admin::MediaUnderstandingConfigUpdate;
@@ -26,38 +28,16 @@ use provider_allowances::{
     list_provider_allowances, refresh_provider_allowance, refresh_provider_allowances,
 };
 
-#[derive(Clone)]
-struct AdminToken(String);
-
-async fn admin_auth(
-    token_ext: Option<Extension<AdminToken>>,
-    req: Request,
-    next: Next,
-) -> impl IntoResponse {
-    let Some(Extension(admin_token)) = token_ext else {
-        return next.run(req).await;
-    };
-
-    let auth_header = req
-        .headers()
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-
-    let token = auth_header.strip_prefix("Bearer ").unwrap_or(auth_header);
-
-    if token == admin_token.0 {
-        next.run(req).await
-    } else {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": "invalid admin token"})),
-        )
-            .into_response()
-    }
+#[cfg(test)]
+pub(crate) fn create_unprotected_router(gateway: Gateway) -> Router {
+    create_router_inner(gateway, None)
 }
 
-pub fn create_router(gateway: Gateway, admin_token: Option<String>) -> Router {
+pub(crate) fn create_router(gateway: Gateway, auth: AdminHttpState) -> Router {
+    create_router_inner(gateway, Some(auth))
+}
+
+fn create_router_inner(gateway: Gateway, auth: Option<AdminHttpState>) -> Router {
     let oauth_callbacks = OAuthCallbackManager::new(gateway.clone());
     let providers_item = get(get_provider_handler)
         .put(update_provider_handler)
@@ -253,6 +233,9 @@ pub fn create_router(gateway: Gateway, admin_token: Option<String>) -> Router {
         .route("/status", get(get_status))
         .layer(Extension(oauth_callbacks))
         .with_state(gateway.clone());
+    if let Some(auth_state) = auth.clone() {
+        api = api.layer(middleware::from_fn_with_state(auth_state, require_admin));
+    }
     // Catalog logos proxy only public Provider Catalog assets and remain unauthenticated
     // so browser image requests do not need to expose the admin bearer token.
     let public_api = Router::new()
@@ -262,14 +245,6 @@ pub fn create_router(gateway: Gateway, admin_token: Option<String>) -> Router {
         )
         .with_state(gateway.clone());
 
-    if let Some(token) = admin_token
-        && !token.is_empty()
-    {
-        api = api
-            .layer(middleware::from_fn(admin_auth))
-            .layer(Extension(AdminToken(token)));
-    }
-
     // Health probes are unauthenticated so K8s/load-balancers can reach them
     // without an admin token.
     let health_routes = Router::new()
@@ -277,9 +252,13 @@ pub fn create_router(gateway: Gateway, admin_token: Option<String>) -> Router {
         .route("/readyz", get(readyz_handler))
         .with_state(gateway);
 
-    Router::new()
+    let mut router = Router::new()
         .merge(health_routes)
-        .nest("/api/v1", public_api.merge(api))
+        .nest("/api/v1", public_api.merge(api));
+    if let Some(auth) = auth {
+        router = router.merge(auth_router(auth));
+    }
+    router
 }
 
 async fn healthz_handler() -> impl IntoResponse {

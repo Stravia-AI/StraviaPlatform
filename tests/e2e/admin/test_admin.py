@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sqlite3
 import subprocess
 import tempfile
 import time
@@ -26,7 +25,12 @@ from tests.common.helpers import (
     ("argument", "value"),
     [
         ("--mode", "removed-mode"),
-        ("--config", "removed.yaml"),
+        ("--admin-token", "removed-token"),
+        ("--storage-backend", "sqlite"),
+        ("--postgres-dsn", "postgresql://removed"),
+        ("--postgres-max-connections", "5"),
+        ("--postgres-min-connections", "1"),
+        ("--postgres-idle-timeout", "60"),
         ("--migrate-only", None),
         ("--migrate-on-start", "false"),
         ("--webui-dir", "removed"),
@@ -53,36 +57,6 @@ def test_server_rejects_removed_options(
 
     assert result.returncode != 0
     assert f"unexpected argument '{argument}'" in result.stderr
-
-
-@pytest.mark.e2e
-@pytest.mark.admin
-def test_server_rejects_mysql_storage_backend(stravia_binary: Path) -> None:
-    result = subprocess.run(
-        [str(stravia_binary), "--storage-backend", "mysql"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert result.returncode != 0
-    assert "possible values: sqlite, postgres" in result.stderr
-
-
-@pytest.mark.e2e
-@pytest.mark.admin
-def test_server_requires_admin_token_for_non_loopback_binding(
-    stravia_binary: Path,
-) -> None:
-    result = subprocess.run(
-        [str(stravia_binary), "--host", "0.0.0.0", "--port", "0"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert result.returncode != 0
-    assert "--admin-token is required when --host is not loopback" in result.stderr
 
 
 def _create_provider(env: dict[str, str], name: str) -> str:
@@ -219,7 +193,7 @@ def test_health_probes_are_distinct_from_webui_routes(admin_env: dict[str, str])
 
 @pytest.mark.e2e
 @pytest.mark.admin
-def test_readyz_reports_schema_pending(
+def test_setup_mode_is_live_but_not_ready(
     stravia_binary: Path,
 ) -> None:
     with tempfile.TemporaryDirectory(prefix="stravia-readyz-e2e-") as data_dir:
@@ -238,18 +212,16 @@ def test_readyz_reports_schema_pending(
         base = f"http://127.0.0.1:{port}"
 
         try:
-            wait_until_ready(f"{base}/readyz")
-
-            connection = sqlite3.connect(Path(data_dir) / "gateway.db")
-            try:
-                connection.execute("DROP TABLE models")
-                connection.commit()
-            finally:
-                connection.close()
-
-            status, body = http_request("GET", f"{base}/readyz")
+            wait_until_ready(f"{base}/healthz")
+            status, body = http_request("GET", f"{base}/healthz")
+            assert status == 200
+            assert body == {"status": "ok"}
+            status, _ = http_request("GET", f"{base}/readyz")
             assert status == 503
-            assert body == {"status": "schema_pending"}
+            status, state = http_request("GET", f"{base}/api/v1/auth/state")
+            assert status == 200
+            assert state["mode"] == "setup"
+            assert not (Path(data_dir) / "gateway.db").exists()
         finally:
             stop_stravia_server(proc, logs)
 
@@ -414,6 +386,20 @@ def test_api_key_crud(admin_env: dict[str, str]) -> None:
     model_id = _create_model(admin_env, provider_id, "test-model-key")
     api_key = _create_api_key(admin_env, model_id, "test-key")
     assert api_key.get("key"), f"missing api key material: {api_key}"
+
+    status, _ = http_request(
+        "GET",
+        f"{admin_env['admin']}/api/v1/providers",
+        headers={"authorization": f"Bearer {api_key['key']}"},
+    )
+    assert status == 401
+    status, _ = http_request(
+        "POST",
+        f"{admin_env['proxy']}/v1/chat/completions",
+        payload={"model": "test-model-key", "messages": [{"role": "user", "content": "hi"}]},
+        headers=admin_env["auth"],
+    )
+    assert status == 401
 
 
 @pytest.mark.e2e

@@ -115,12 +115,12 @@ SvelteKit WebUI 可管理：
 
 ### 存储与部署
 
-- **SQLite** 是默认存储后端。
-- **PostgreSQL** 提供持久化存储。
-- SQLx migrations 会在监听器启动前执行。
-- `GET /healthz` 是存活探针；`GET /readyz` 用于报告存储就绪状态。
+- 首次设置流程可选择 **SQLite** 或 **PostgreSQL**。
+- 所选数据库连接只保存在 `server.toml`；不支持数据库命令行参数或环境变量覆盖。
+- SQLx migrations 会保留当前受支持 schema 的数据，并在正常 Gateway 就绪前执行。
+- `GET /healthz` 是存活探针；设置未完成或 Gateway 无法启动时，`GET /readyz` 返回未就绪。
 
-`0.1.0` 当前仅支持新建的 SQLite 和 PostgreSQL 数据库，不提供旧 schema 的就地升级路径。
+PostgreSQL 数据库必须已由部署者创建，连接账户只需能创建和迁移 Stravia 自身表；Stravia 不创建数据库，也不要求 `CREATEDB` 权限。不兼容的旧 schema 会明确失败，而不是被删除或重建。
 
 ## 发布版本
 
@@ -169,7 +169,7 @@ task build:server
 .\target\release\stravia-server.exe
 ```
 
-默认配置使用 SQLite，并监听 `127.0.0.1:23471`。Debug 构建与桌面端共用仓库内的 `.stravia-dev/` 数据目录；Release 构建使用 `~/.stravia`。打开 <http://127.0.0.1:23471>，配置提供商并创建模型路由。
+服务端监听 `127.0.0.1:23471`。Debug 构建使用仓库内的 `.stravia-dev/` 数据目录；Release 构建使用 `~/.stravia`。首次启动不会隐式选择数据库：控制台会打印一次性设置令牌，在 <http://127.0.0.1:23471/setup> 输入令牌后选择 SQLite 或 PostgreSQL，并创建唯一管理员。完成后用该用户名和密码登录，再配置提供商和模型路由。设置令牌在首次成功领取时即被消费；若设置尚未完成而进程重启，会生成新令牌。
 
 ### 使用 Nix 运行服务端
 
@@ -203,7 +203,7 @@ flake 支持 `x86_64-linux` 和 `aarch64-linux`，会把内嵌 WebUI 与 Server 
 }
 ```
 
-service 默认监听 `127.0.0.1:23471`，使用动态系统用户运行，并将数据持久化到 `/var/lib/stravia`。如需对外提供服务，请配置 `services.stravia.host`、`port` 和 `openFirewall`。密钥及其他可选服务端设置应放入 `services.stravia.environmentFile`；监听非 loopback 地址时必须设置 `STRAVIA_ADMIN_TOKEN`。
+service 默认监听 `127.0.0.1:23471`，使用动态系统用户运行，并将数据及 `/var/lib/stravia/server.toml` 持久化到 `/var/lib/stravia`。如需对外提供服务，请配置 `services.stravia.host`、`port` 和 `openFirewall`。监听非回环地址还必须将 `STRAVIA_PUBLIC_ORIGIN` 设为规范 HTTPS origin；把该非数据库设置放入 `services.stravia.environmentFile`，并由反向代理终止 TLS。数据库设置绝不从环境变量读取。已有 PostgreSQL 部署升级前，必须先按下文格式写入 `/var/lib/stravia/server.toml`，再启动升级后的 service。
 
 ### 使用 Docker 运行服务端
 
@@ -212,13 +212,13 @@ service 默认监听 `127.0.0.1:23471`，使用动态系统用户运行，并将
 docker pull ghcr.io/stravia-ai/straviaplatform:latest
 
 docker run --rm \
-  --publish 23471:23471 \
-  --env STRAVIA_ADMIN_TOKEN=replace-with-a-long-random-token \
+  --publish 127.0.0.1:23471:23471 \
+  --env STRAVIA_PUBLIC_ORIGIN=https://gateway.example.com \
   --mount source=stravia-data,target=/data \
   ghcr.io/stravia-ai/straviaplatform:latest
 ```
 
-如需从当前 checkout 构建，请运行 `docker build --tag stravia-server:local .`，并把最后的镜像名替换为 `stravia-server:local`。镜像内嵌生产 WebUI，监听 `0.0.0.0:23471`，以非 root 用户运行，并把 SQLite 数据持久化到 `/data`。由于容器监听地址不是 loopback，必须设置 `STRAVIA_ADMIN_TOKEN`。内置健康检查会请求 `GET /healthz`。
+如需从当前 checkout 构建，请运行 `docker build --tag stravia-server:local .`，并把最后的镜像名替换为 `stravia-server:local`。镜像内嵌生产 WebUI，在容器内监听 `0.0.0.0:23471`，以非 root 用户运行，并把 `server.toml` 和 SQLite 数据持久化到 `/data`。请在仅发布到回环地址的端口前放置 HTTPS 反向代理，并将 `STRAVIA_PUBLIC_ORIGIN` 设为完全一致的外部 origin；管理 Cookie 使用 Secure，非安全管理请求必须具有相同 origin 和 Stravia 的 CSRF header。不得通过 HTTP 直接暴露容器端口。内置健康检查会请求 `GET /healthz`；完成设置且 Gateway 成功启动前，就绪探针仍返回未就绪。
 
 创建名为 `my-model` 的虚拟模型后，可以通过任意受支持协议调用：
 
@@ -260,14 +260,45 @@ task build:desktop
 | ------------------------ | ------------------------------ | ------------ |
 | `--host`                 | `STRAVIA_HOST`                 | `127.0.0.1`  |
 | `--port`                 | `STRAVIA_PORT`                 | `23471`      |
-| `--public-origin`        | `STRAVIA_PUBLIC_ORIGIN`        | 未设置       |
-| `--admin-token`          | `STRAVIA_ADMIN_TOKEN`          | 未设置       |
+| `--public-origin`        | `STRAVIA_PUBLIC_ORIGIN`        | 回环地址自动推导；其他地址必须提供 HTTPS origin |
+| `--config`               | —                              | `<data-dir>/server.toml` |
 | `--data-dir`             | `STRAVIA_DATA_DIR`             | Debug：`.stravia-dev`；Release：`~/.stravia` |
-| `--storage-backend`      | `STRAVIA_STORAGE_BACKEND`      | `sqlite`     |
-| `--postgres-dsn`         | `STRAVIA_POSTGRES_DSN`         | 未设置       |
 | `--log-level`            | `STRAVIA_LOG_LEVEL`            | `info`       |
 | `--config-poll-interval` | `STRAVIA_CONFIG_POLL_INTERVAL` | `3` 秒       |
 | `--wire-capture-dir`¹    | `STRAVIA_WIRE_CAPTURE_DIR`     | 未设置       |
+
+`--config` 选择唯一的数据库配置来源。`--data-dir` 仍用于运行时产物及默认配置文件路径，不选择或覆盖数据库。配置文件缺失时进入首次设置；配置文件损坏、已配置数据库不可达或 schema 不兼容时启动失败，绝不回退到 SQLite。
+
+设置流程会原子写入以下两种格式之一：
+
+```toml
+[database]
+backend = "sqlite"
+path = "/var/lib/stravia/gateway.db"
+```
+
+SQLite 文件名必须是 `gateway.db`。对于已创建好的 PostgreSQL 数据库：
+
+```toml
+[database]
+backend = "postgres"
+url = "postgresql://stravia:replace-me@postgres.example.com:5432/stravia"
+max_connections = 10
+min_connections = 1
+idle_timeout_seconds = 300
+```
+
+三个连接池设置均可省略。PostgreSQL URL 可能包含凭据，因此必须保护 `server.toml`。连接账户需有权在该数据库中运行 Stravia migrations，但无需创建数据库。已有 PostgreSQL 部署必须在首次运行升级版本**之前**，用当前连接 URL 创建此文件。只删除旧数据库环境变量而未创建该文件，会按设计进入设置流程；Stravia 不会推断旧 PostgreSQL 数据库，也不会静默选择 SQLite。
+
+对于未配置数据库或已配置但还没有管理员的数据库，控制台令牌只能由 `POST /api/v1/setup/claim` 领取；得到的 `stravia_setup` HttpOnly、`SameSite=Strict` Cookie（`Path=/api/v1`，HTTPS 下同时为 `Secure`）可调用 `/api/v1/setup/test` 和 `/api/v1/setup/complete`。设置权限不能调用管理 API；数据库已有管理员时设置入口会关闭。`GET /api/v1/auth/state` 会报告设置、可用性与当前认证状态，但不会刷新凭据。Server 正常认证使用 `/api/v1/auth/login`、`/api/v1/auth/refresh`、`/api/v1/auth/logout` 和 `/api/v1/auth/credentials`。访问与刷新凭据只保存在 `HttpOnly`、`SameSite=Strict` Cookie（`stravia_access` 使用 `Path=/`，`stravia_refresh` 使用 `Path=/api/v1/auth`）中，不写入浏览器存储；HTTPS origin 下同时设置 `Secure`。远程管理必须使用 HTTPS 规范 origin。浏览器客户端会发送 `X-Stravia-CSRF: 1`；会修改状态的请求其 `Origin` 与 `--public-origin` 不一致时，Stravia 会拒绝请求。
+
+忘记凭据时，使用同一配置运行本地交互命令：
+
+```bash
+./target/release/stravia-server --config /var/lib/stravia/server.toml recover-admin
+```
+
+该命令会提示输入用户名，并无回显地读取新密码及确认；密码不接受命令行参数。它会原地更新已有唯一管理员，并撤销全部旧管理会话；不会删除业务数据或重新开放数据库设置。
 
 ¹ 仅 Debug 构建提供。启用后，Stravia 为每个请求写入一份关联 JSONL，包含客户端和上游的请求与响应。敏感请求头值会替换为 `***`；请求体和响应体以可读 UTF-8 文本保存到 `body` 字段，可能包含提示词、工具数据、媒体引用和模型输出。录制文件应仅保留在本机，并在诊断后删除。Release 构建不包含该参数和录制实现。
 
@@ -278,22 +309,13 @@ $env:STRAVIA_WIRE_REPLAY_FILE = ".scratch/wire-captures/req-....jsonl"
 cargo test -p stravia-core replay_wire_capture_from_environment -- --ignored --nocapture
 ```
 
-使用 OpenAI Images `response_format=url` 或 MCP 图片 resource link 前，须通过 `--public-origin` 配置可信且可从外部访问的 Gateway origin（例如 `https://gateway.example.com`）。Stravia 不会从请求转发头推导签名 Artifact URL。
-
-服务监听非回环地址时，必须设置 admin token：
+监听非回环地址前，必须通过 `--public-origin` 指定可信且可从外部访问的 Gateway origin（例如 `https://gateway.example.com`）。Stravia 不会信任转发 header 来推导管理 origin 或签名 Artifact URL。请由反向代理终止 HTTPS，并将请求原样转发至 Stravia listener：
 
 ```bash
 ./target/release/stravia-server \
-  --host 0.0.0.0 \
-  --admin-token YOUR_ADMIN_TOKEN
-```
-
-使用 PostgreSQL：
-
-```bash
-./target/release/stravia-server \
-  --storage-backend postgres \
-  --postgres-dsn "postgres://user:pass@localhost:5432/stravia"
+  --host 127.0.0.1 \
+  --port 23471 \
+  --public-origin https://gateway.example.com
 ```
 
 ## 开发

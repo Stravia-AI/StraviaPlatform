@@ -8,8 +8,8 @@ use desktop_gateway_runtime::{
     DesktopGatewayRuntime, PortSwitchPublisher, SystemPortOwnerResolver, desktop_port_store,
     desktop_runtime_dir,
 };
-use stravia_core::{Gateway, config::GatewayConfig, logging};
-use stravia_server::{HttpAppConfig, build_http_app, desktop_origins};
+use stravia_core::{Gateway, admin::identity::AdminAuth, config::GatewayConfig, logging};
+use stravia_server::{AdminMode, HttpAppConfig, build_http_app, desktop_origins};
 use tauri::{
     Manager,
     menu::{Menu, MenuItem},
@@ -113,11 +113,18 @@ pub fn run() {
                 .to_string(),
             ))?;
 
+            let admin_auth = AdminAuth::new(gateway.storage.clone());
+            let native_admin_session = tauri::async_runtime::block_on(
+                commands::NativeAdminSession::initialize(admin_auth.clone()),
+            )?;
+
             let cors_origins = desktop_origins();
             let app_router = build_http_app(
                 gateway.clone(),
                 HttpAppConfig {
-                    admin_token: None,
+                    admin_auth,
+                    admin_mode: AdminMode::Desktop,
+                    admin_origin: None,
                     admin_cors_origins: cors_origins.clone(),
                     proxy_cors_origins: cors_origins,
                     serve_embedded_webui: false,
@@ -137,6 +144,7 @@ pub fn run() {
             });
 
             app.manage(gateway);
+            app.manage(native_admin_session);
             app.manage(runtime.clone());
             app.manage(product_update::DesktopUpdateState::default());
             app.manage(setup_tray(app, server_port)?);
@@ -146,6 +154,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::get_admin_session,
             commands::get_server_port,
             commands::get_desktop_port_state,
             commands::set_desktop_fixed_port,
@@ -176,10 +185,17 @@ pub fn run() {
                 }
             }
 
-            if let tauri::RunEvent::ExitRequested { .. } = &event
-                && let Some(runtime) = app.try_state::<Arc<DesktopGatewayRuntime>>()
-            {
-                runtime.request_shutdown();
+            if let tauri::RunEvent::ExitRequested { api, .. } = &event {
+                if let Some(session) = app.try_state::<commands::NativeAdminSession>()
+                    && tauri::async_runtime::block_on(session.revoke()).is_err()
+                {
+                    api.prevent_exit();
+                    tracing::error!("exit cancelled: failed to revoke the native admin session");
+                    return;
+                }
+                if let Some(runtime) = app.try_state::<Arc<DesktopGatewayRuntime>>() {
+                    runtime.request_shutdown();
+                }
             }
 
             #[cfg(not(target_os = "macos"))]

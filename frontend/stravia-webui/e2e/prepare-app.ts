@@ -19,7 +19,6 @@ export async function prepareApp(page: Page): Promise<void> {
     download_supported: false,
   }
   await page.addInitScript(() => {
-    localStorage.setItem('stravia-admin-token', 'playwright-token')
     localStorage.setItem('stravia-locale', 'en-US')
     localStorage.setItem('stravia-sidebar-state', 'expanded')
     localStorage.setItem('stravia-theme', 'system')
@@ -29,6 +28,12 @@ export async function prepareApp(page: Page): Promise<void> {
     const request = route.request()
     const path = new URL(request.url()).pathname.replace('/api/v1', '')
 
+    if (path === '/auth/state') {
+      await route.fulfill({
+        json: { mode: 'server', authenticated: true, setup_authorized: false, username: 'playwright-admin' },
+      })
+      return
+    }
     if (path === '/status') {
       await route.fulfill({ json: { data: { status: 'running' } } })
       return
@@ -39,10 +44,7 @@ export async function prepareApp(page: Page): Promise<void> {
     }
     if (path === '/updates/skipped-version') {
       const version = request.postDataJSON()?.version as string | null
-      updateStatus = {
-        ...updateStatus,
-        skipped: version != null && version === updateStatus.available_update?.version,
-      }
+      updateStatus = { ...updateStatus, skipped: version != null && version === updateStatus.available_update?.version }
       await route.fulfill({ json: { data: updateStatus } })
       return
     }

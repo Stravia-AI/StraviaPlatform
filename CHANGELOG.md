@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Added
+
+- Standalone servers now offer a one-time-token setup wizard and an interactive `recover-admin` command that resets the existing administrator and revokes prior sessions without rebuilding business data.
+
+### Changed
+
+- **Breaking:** A single administrator account and revocable sessions replace the static Admin Token. Web sign-in uses HttpOnly cookies, 15-minute access JWTs, rotating refresh tokens, and a fixed seven-day session lifetime. Inference and MCP continue to use API Keys.
+- **Breaking:** Server database connections now come only from `server.toml`, selected with `--config`. Existing deployments must move database CLI and environment settings into this file before upgrading; missing or invalid configuration never silently selects another database.
+- Desktop management now requires the same session authentication as Server. Only the native application can obtain its in-memory session; closing to the tray preserves it, while exiting revokes it.
+
 ## [0.1.6] - 2026-09-05
 
 ### Added

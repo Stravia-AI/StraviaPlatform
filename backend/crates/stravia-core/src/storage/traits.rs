@@ -251,6 +251,66 @@ pub trait OAuthCredentialStore: Send + Sync {
     async fn recover_stale_refreshing(&self, timeout: Duration) -> anyhow::Result<u64>;
 }
 
+#[derive(Clone)]
+pub struct AdminIdentityRecord {
+    pub username: Option<String>,
+    pub password_hash: Option<String>,
+    pub jwt_secret: String,
+    pub credential_revision: i64,
+}
+
+#[derive(Clone)]
+pub struct AdminSessionRecord {
+    pub id: String,
+    pub credential_revision: i64,
+    pub refresh_hash: String,
+    pub expires_at: i64,
+    pub revoked: bool,
+}
+
+pub struct NewAdminIdentity<'a> {
+    pub username: Option<&'a str>,
+    pub password_hash: Option<&'a str>,
+    pub jwt_secret: &'a str,
+}
+
+pub struct NewAdminSession<'a> {
+    pub id: &'a str,
+    pub credential_revision: i64,
+    pub refresh_hash: &'a str,
+    pub expires_at: i64,
+}
+
+#[async_trait]
+pub trait AdminIdentityStore: Send + Sync {
+    async fn load_identity(&self) -> anyhow::Result<Option<AdminIdentityRecord>>;
+    async fn create_identity(&self, identity: NewAdminIdentity<'_>) -> anyhow::Result<bool>;
+    async fn create_session(&self, session: NewAdminSession<'_>) -> anyhow::Result<bool>;
+    async fn load_session_by_id(&self, id: &str) -> anyhow::Result<Option<AdminSessionRecord>>;
+    async fn load_session_by_refresh_hash(
+        &self,
+        refresh_hash: &str,
+    ) -> anyhow::Result<Option<AdminSessionRecord>>;
+    async fn rotate_refresh(
+        &self,
+        id: &str,
+        expected_refresh_hash: &str,
+        new_refresh_hash: &str,
+    ) -> anyhow::Result<bool>;
+    async fn revoke_session(&self, id: &str) -> anyhow::Result<()>;
+    async fn update_credentials_and_revoke_all(
+        &self,
+        expected_revision: i64,
+        username: &str,
+        password_hash: &str,
+    ) -> anyhow::Result<bool>;
+    async fn recover_credentials_and_revoke_all(
+        &self,
+        username: &str,
+        password_hash: &str,
+    ) -> anyhow::Result<bool>;
+}
+
 #[async_trait]
 pub trait StorageBootstrap: Send + Sync {
     async fn health(&self) -> anyhow::Result<StorageHealth>;
@@ -268,6 +328,9 @@ pub trait Storage: Send + Sync {
         None
     }
     fn auth(&self) -> Option<&dyn AuthAccessStore> {
+        None
+    }
+    fn admin_identity(&self) -> Option<&dyn AdminIdentityStore> {
         None
     }
     fn logs(&self) -> &dyn LogStore;

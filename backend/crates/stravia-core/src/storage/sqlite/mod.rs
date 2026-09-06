@@ -14,10 +14,11 @@ use crate::db::models::{
 };
 use crate::logging::LogEntry;
 use crate::storage::traits::{
-    ApiKeyAccessRecord, ApiKeyStore, AuthAccessStore, LogStore, OAuthCredentialStore,
-    ProviderModelStore, ProviderStore, ProviderTestResult, RouteStore, SettingsStore, Storage,
-    StorageBackend, StorageBootstrap, StorageHealth, WebProviderStore,
+    AdminIdentityStore, ApiKeyAccessRecord, ApiKeyStore, AuthAccessStore, LogStore,
+    OAuthCredentialStore, ProviderModelStore, ProviderStore, ProviderTestResult, RouteStore,
+    SettingsStore, Storage, StorageBackend, StorageBootstrap, StorageHealth, WebProviderStore,
 };
+mod admin_identity;
 mod provider_models;
 mod web_providers;
 
@@ -32,6 +33,7 @@ pub struct SqliteStorage {
     settings_store: Arc<SqliteSettingsStore>,
     api_key_store: Arc<SqliteApiKeyStore>,
     auth_store: Arc<SqliteAuthAccessStore>,
+    admin_identity_store: Arc<SqliteAdminIdentityStore>,
     oauth_credential_store: Arc<SqliteOAuthCredentialStore>,
     log_store: Arc<SqliteLogStore>,
     bootstrap: Arc<SqliteBootstrap>,
@@ -45,6 +47,7 @@ impl SqliteStorage {
         let settings_store = Arc::new(SqliteSettingsStore { pool: pool.clone() });
         let api_key_store = Arc::new(SqliteApiKeyStore { pool: pool.clone() });
         let auth_store = Arc::new(SqliteAuthAccessStore { pool: pool.clone() });
+        let admin_identity_store = Arc::new(SqliteAdminIdentityStore { pool: pool.clone() });
         let oauth_credential_store = Arc::new(SqliteOAuthCredentialStore { pool: pool.clone() });
         let log_store = Arc::new(SqliteLogStore { pool: pool.clone() });
         let bootstrap = Arc::new(SqliteBootstrap { pool: pool.clone() });
@@ -56,6 +59,7 @@ impl SqliteStorage {
             settings_store,
             api_key_store,
             auth_store,
+            admin_identity_store,
             oauth_credential_store,
             log_store,
             bootstrap,
@@ -96,6 +100,10 @@ impl Storage for SqliteStorage {
         Some(self.auth_store.as_ref())
     }
 
+    fn admin_identity(&self) -> Option<&dyn AdminIdentityStore> {
+        Some(self.admin_identity_store.as_ref())
+    }
+
     fn logs(&self) -> &dyn LogStore {
         self.log_store.as_ref()
     }
@@ -117,6 +125,7 @@ mod providers;
 mod routes;
 mod settings;
 
+use admin_identity::*;
 use api_keys::*;
 use bootstrap::*;
 use logs::*;

@@ -73,6 +73,34 @@ export function localizeBackendErrorMessage(error: unknown, locale: Locale = get
 
   const name = extractName(payload.params) || m.backend_error_unnamed({}, options)
   switch (payload.code) {
+    case 'invalid_credentials':
+      return m.login_invalid_credentials({}, options)
+    case 'unauthorized':
+      return m.frontend_error_authentication_required({}, options)
+    case 'auth_unavailable':
+      return m.admin_auth_service_unavailable({}, options)
+    case 'invalid_input':
+      return m.admin_auth_invalid_input({}, options)
+    case 'origin_required':
+    case 'origin_mismatch':
+    case 'csrf_required':
+    case 'json_required':
+      return m.admin_auth_request_rejected({}, options)
+    case 'invalid_setup_token':
+      return m.setup_error_token({}, options)
+    case 'setup_unauthorized':
+      return m.setup_error_session({}, options)
+    case 'setup_complete':
+    case 'conflict':
+      return m.setup_error_completed({}, options)
+    case 'invalid_database_config':
+      return m.setup_error_database_config({}, options)
+    case 'database_unavailable':
+      return m.setup_error_database_connection({}, options)
+    case 'config_save_failed':
+      return m.setup_error_config_save({}, options)
+    case 'gateway_unavailable':
+      return m.setup_error_gateway({}, options)
     case 'PROVIDER_NAME_CONFLICT':
       return m.backend_error_provider_name_conflict({ name }, options)
     case 'ROUTE_ID_CONFLICT':

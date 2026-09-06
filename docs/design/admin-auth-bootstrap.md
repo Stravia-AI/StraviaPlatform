@@ -1,6 +1,6 @@
 # 管理用户与首次初始化设计
 
-状态：整体方案已由用户确认，可作为后续实现契约。本文描述目标行为，尚未修改实现。
+状态：已实施。本文记录当前管理认证、首次设置与部署迁移契约。
 
 ## 身份与权限
 
@@ -13,8 +13,10 @@
 
 - 访问 JWT 有效期为 15 分钟；使用可撤销、轮换的 refresh token 静默续期，登录总有效期最多为 7 天。
 - JWT 验签之外还必须校验服务端会话状态。退出撤销当前会话，修改密码或本地恢复凭据撤销全部旧会话；后续请求与刷新均不得继续使用已撤销会话。
-- Server WebUI 通过 HttpOnly Cookie 携带凭据，配套同源与 CSRF 防护；远程部署使用 HTTPS。前端不将凭据存入 localStorage。
-- Desktop 通过受限原生通道取得凭据，仅在内存中保存，以 Bearer JWT 请求 HTTP 管理 API；两种载体共享后端会话验证。登录总有效期耗尽后，Desktop 可通过原生通道重新取得会话。
+- 认证存储故障返回 `503`，不能被当成无效凭据或成功注销。撤销未完成时不得清除 Cookie；WebUI 保留当前页面并显示错误，避免把仍有效的服务端会话误报为已退出。
+- Server WebUI 通过 `stravia_access`（`Path=/`）与 `stravia_refresh`（`Path=/api/v1/auth`）两个 `HttpOnly`、`SameSite=Strict` Cookie 携带凭据；HTTPS origin 下同时设置 `Secure`。前端不将凭据存入 localStorage。
+- `GET /api/v1/auth/state` 报告 `setup`、`server`、`desktop` 或 `unavailable` 模式，以及当前请求的认证/设置资格；该只读检查不会刷新凭据。`POST /api/v1/auth/login`、`POST /api/v1/auth/refresh`、`POST /api/v1/auth/logout` 与 `PUT /api/v1/auth/credentials` 是 Server 日常认证入口；响应正文不返回 token。所有会修改状态的 Web 请求均要求 `Origin` 精确等于规范 origin，并携带 `X-Stravia-CSRF: 1`；需要正文时还必须使用 JSON content type。
+- Desktop 通过受限原生通道取得 access JWT，仅在内存中保存，以 Bearer JWT 请求 HTTP 管理 API；refresh token 只保留在原生进程内存中。两种载体共享后端会话验证。登录总有效期耗尽后，Desktop 可通过原生通道重新取得会话。
 - 取舍见 [ADR-0040](../adr/0040-separate-admin-identity-and-revoke-sessions.md)。
 
 ## Desktop
@@ -36,7 +38,7 @@
 
 ### 一次性设置令牌
 
-- 未完成初始化的 Server 启动时在控制台打印设置令牌。令牌首次验证成功即消费，换取只能操作初始化的临时会话，不能直接调用正常管理 API。
+- 未完成初始化的 Server 启动时在控制台打印设置令牌。`POST /api/v1/setup/claim` 首次验证成功即消费令牌，并发领取最多一个成功；它换取 `Path=/api/v1`、`SameSite=Strict` 的 `stravia_setup` HttpOnly 设置 Cookie（HTTPS origin 下同时设置 `Secure`），只能访问 `POST /api/v1/setup/test` 与 `POST /api/v1/setup/complete`，不能调用正常管理 API。
 - 设置令牌和初始化会话在当前进程内不限时。数据库连接测试失败可在该会话内修正后重新提交。
 - 未完成初始化时重启 Server 会打印新令牌，旧令牌与旧初始化会话均失效；初始化完成后关闭设置权限。
 - 已接受风险：未消费的令牌若进入持久化控制台日志，在该进程存活且未完成初始化期间持续有效。
@@ -44,7 +46,8 @@
 ### 数据库选择与配置
 
 - SQLite 自动创建本地数据库文件。PostgreSQL 连接用户事先创建的数据库，验证连接后运行 Stravia 自身的 schema migrations；不创建 PostgreSQL 数据库，不要求 `CREATEDB` 权限，也不安装或启动 PostgreSQL 服务。
-- 数据库连接以配置文件为唯一来源，移除现有数据库 CLI 参数与环境变量入口，不保留覆盖或兼容读取路径。Docker、Nix 与启动脚本必须同步迁移。
+- 数据库连接以 `server.toml` 配置文件为唯一来源；`--config <path>` 显式选择文件，默认路径是 `<data-dir>/server.toml`。`--data-dir` 仅定位运行时产物，不覆盖数据库。旧数据库 CLI 参数与环境变量入口已删除，不保留覆盖或兼容读取路径。
+- 配置使用带 `backend` tag 的 `[database]`：SQLite 写入 `backend = "sqlite"` 与以 `gateway.db` 结尾的 `path`；PostgreSQL 写入 `backend = "postgres"`、`url`，并可选 `max_connections`、`min_connections`、`idle_timeout_seconds`。PostgreSQL URL 属于秘密，配置文件需受文件权限保护。
 - 若向导选择的数据库已有管理员，保存连接配置后关闭设置权限，转到正常登录页；必须使用该数据库已有管理员的凭据，设置令牌不能重建或覆盖管理员。
 - 数据库配置来源取舍见 [ADR-0041](../adr/0041-own-database-connection-in-config-file.md)。
 
@@ -62,8 +65,9 @@
 
 - 当前仓库支持的 schema 通过本次增量迁移加入用户与会话结构，保留 Provider、API Key、历史及其他已有业务数据。不补齐所有历史 schema 的升级链；更旧或不兼容的 schema 明确报错，不删库重建。
 - 已有 Server 首次升级通过新的设置令牌创建管理员，完成前只提供初始化服务。已有 PostgreSQL 安装必须先将原连接配置迁入文件，不能因缺少配置默认切换到 SQLite。
-- Server 提供显式本地交互式凭据恢复命令，在终端读取新的用户名和密码，原地更新唯一管理员并撤销全部旧会话。
-- 恢复不删除管理员、不重新开放数据库选择向导、不提供邮件找回。密码不得通过命令行参数或日志传递。
+- Server 提供 `stravia-server --config <path> recover-admin` 本地交互式凭据恢复命令；操作者针对同一数据库运行它。命令在终端读取用户名，并以无回显方式读取新密码及确认，原地更新唯一管理员并撤销全部旧会话。
+- 恢复要求配置文件、目标数据库与既有管理员均可读；它不删除管理员、不重新开放数据库选择向导、不提供邮件找回。密码不得通过命令行参数或日志传递。
+- 非回环 `--host` 必须同时配置 HTTPS `--public-origin`；远程部署应由反向代理终止 TLS，不信任转发 header 推导规范 origin。Docker 与 Nix 的数据库连接同样只来自持久化的 `server.toml`。
 
 ## 实施验收
 
@@ -78,6 +82,6 @@
 - Server 初始化成功后无需重启即可使用正常服务；本地凭据恢复不影响业务数据。
 - 同步更新 README 两种语言、部署入口、数据库 schema 文档与生成的 PostgreSQL 参考 schema，并验证 WebUI、Server 和实际 Desktop 表面。
 
-## 实施授权
+## 实施状态
 
-整体方案确认只表示设计访谈结束。除术语、设计文档与 ADR 外，本轮不修改实现；开始编码需要用户另行明确授权。
+该设计已完成干净切换：静态 Admin Token 与数据库 CLI/环境变量入口不再受支持。部署者必须按本文迁移 `server.toml`；API Key 与 Principal 的推理/MCP 契约不受影响。

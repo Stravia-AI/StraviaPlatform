@@ -15,6 +15,13 @@ async function prepareLocalePage(page: Page, languages: string[], savedLocale?: 
   )
 
   await page.route('**/api/v1/**', async (route) => {
+    const path = new URL(route.request().url()).pathname
+    if (path.endsWith('/auth/state')) {
+      await route.fulfill({
+        json: { mode: 'server', authenticated: true, setup_authorized: false, username: 'locale-admin' },
+      })
+      return
+    }
     await route.fulfill({ json: { data: [] } })
   })
 }
@@ -52,13 +59,17 @@ test('saved language takes precedence over the client locale', async ({ page }) 
 
 test('Login switches language without navigation or losing form state', async ({ page }) => {
   await prepareLocalePage(page, ['en-US'])
-  await page.route('**/api/v1/status', async (route) => {
+  await page.route('**/api/v1/auth/state', async (route) => {
+    await route.fulfill({ json: { mode: 'server', authenticated: false, setup_authorized: false, username: null } })
+  })
+  await page.route('**/api/v1/auth/login', async (route) => {
     await route.fulfill({ status: 401, json: { error: 'unauthorized' } })
   })
   await page.goto('/login')
-  await page.getByLabel('Admin Token').fill('draft-admin-token')
+  await page.getByLabel('Username').fill('draft-admin')
+  await page.getByLabel('Password', { exact: true }).fill('draft-password')
   await page.getByRole('button', { name: 'Sign in', exact: true }).click()
-  await expect(page.getByText('Invalid token. Check the configured Admin Token.', { exact: true })).toBeVisible()
+  await expect(page.getByText('The username or password is incorrect.', { exact: true })).toBeVisible()
 
   let navigationCount = 0
   page.on('framenavigated', (frame) => {
@@ -68,10 +79,11 @@ test('Login switches language without navigation or losing form state', async ({
   await page.getByRole('option', { name: '简体中文' }).click()
 
   await expect(page.getByRole('heading', { name: '登录 Stravia' })).toBeVisible()
-  await expect(page.getByText('Token 无效，请检查已配置的 Admin Token。', { exact: true })).toBeVisible()
+  await expect(page.getByText('用户名或密码错误。', { exact: true })).toBeVisible()
   await expect(page.locator('[aria-label="语言"]')).toBeVisible()
-  await expect(page.getByLabel('Admin Token')).toHaveValue('draft-admin-token')
-  await expect(page.getByRole('button', { name: '显示 Token' })).toBeVisible()
+  await expect(page.getByLabel('用户名')).toHaveValue('draft-admin')
+  await expect(page.getByLabel('密码', { exact: true })).toHaveValue('draft-password')
+  await expect(page.getByRole('button', { name: '显示密码' })).toBeVisible()
   await expect(page.locator('html')).toHaveAttribute('lang', 'zh-CN')
   await expect(page).toHaveURL(/\/login$/)
   expect(navigationCount).toBe(0)

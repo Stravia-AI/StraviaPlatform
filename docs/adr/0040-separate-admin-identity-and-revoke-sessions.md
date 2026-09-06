@@ -10,4 +10,6 @@ status: accepted
 
 访问 JWT 有效期为 15 分钟，通过可撤销、轮换的 refresh token 将登录维持至最多 7 天。Server WebUI 使用 HttpOnly Cookie 与同源、CSRF 防护；Desktop 凭据仅保存在内存，通过 Bearer JWT 调用共享的管理认证实现。
 
-这是已确认的目标设计，不表示实现已经完成。完整契约见 [管理用户与首次初始化设计](../design/admin-auth-bootstrap.md)。
+管理凭据因此不能替代推理或 MCP 的 API Key，API Key 也不能登录管理面。Server 只通过 HttpOnly Cookie 承载登录凭据并执行精确 origin 与 CSRF 校验；Desktop 只允许受限原生通道取得内存中的 Bearer 凭据，普通回环 HTTP 调用不获得隐式信任。静态 Admin Token 已删除，不保留双认证路径。
+
+完整运行契约见 [管理用户与首次初始化设计](../design/admin-auth-bootstrap.md)。

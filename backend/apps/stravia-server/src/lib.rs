@@ -17,9 +17,17 @@ use axum::response::{IntoResponse, Response};
 use rust_embed::RustEmbed;
 
 use stravia_core::Gateway;
+use stravia_core::admin::identity::AdminAuth;
 
 mod admin_routes;
+mod http_auth;
 mod oauth_callback;
+mod setup;
+
+pub use setup::{
+    DatabaseConfig, PreparedServerApp, ServerStartupConfig, gateway_config, prepare_server_app,
+    read_database_config, recover_admin,
+};
 
 pub const DEFAULT_PORT: u16 = 23471;
 
@@ -28,9 +36,17 @@ pub const DEFAULT_PORT: u16 = 23471;
 #[folder = "../../../frontend/stravia-webui/dist/"]
 struct WebUiAssets;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdminMode {
+    Server,
+    Desktop,
+}
+
+#[derive(Clone)]
 pub struct HttpAppConfig {
-    pub admin_token: Option<String>,
+    pub admin_auth: AdminAuth,
+    pub admin_mode: AdminMode,
+    pub admin_origin: Option<String>,
     pub admin_cors_origins: Vec<String>,
     pub proxy_cors_origins: Vec<String>,
     pub serve_embedded_webui: bool,
@@ -55,8 +71,15 @@ pub fn desktop_origins() -> Vec<String> {
 }
 
 pub fn build_http_app(gateway: Gateway, config: HttpAppConfig) -> Router {
-    let admin_router = admin_routes::create_router(gateway.clone(), config.admin_token)
-        .layer(build_admin_cors_layer(&config.admin_cors_origins));
+    let admin_router = admin_routes::create_router(
+        gateway.clone(),
+        http_auth::AdminHttpState {
+            auth: config.admin_auth,
+            mode: config.admin_mode,
+            origin: config.admin_origin,
+        },
+    )
+    .layer(build_admin_cors_layer(&config.admin_cors_origins));
     let proxy_router = stravia_core::proxy::server::create_router(gateway)
         .layer(Extension(
             stravia_core::proxy::server::AllowedWebSocketOrigins::new(
@@ -231,23 +254,29 @@ fn infer_mime(path: &str) -> &'static str {
 }
 
 fn build_admin_cors_layer(origins: &[String]) -> CorsLayer {
-    build_cors_layer(
-        origins,
-        [
+    let origins = origins
+        .iter()
+        .filter(|origin| origin.trim() != "*")
+        .filter_map(|origin| HeaderValue::from_str(origin.trim()).ok())
+        .collect::<Vec<_>>();
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::list(origins))
+        .allow_methods([
             Method::GET,
             Method::POST,
             Method::PUT,
             Method::DELETE,
             Method::OPTIONS,
-        ],
-        [
+        ])
+        .allow_headers([
             header::AUTHORIZATION,
             header::CONTENT_TYPE,
             header::ACCEPT,
             header::HeaderName::from_static("x-api-key"),
             header::HeaderName::from_static("anthropic-version"),
-        ],
-    )
+            header::HeaderName::from_static("x-stravia-csrf"),
+        ])
+        .allow_credentials(true)
 }
 
 fn build_proxy_cors_layer(origins: &[String]) -> CorsLayer {
