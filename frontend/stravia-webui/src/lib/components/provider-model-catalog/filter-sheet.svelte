@@ -1,6 +1,8 @@
 <script lang="ts">
 import * as m from '$lib/paraglide/messages.js'
 
+import ModelSpecificationFilter from '$lib/components/model-specification-filter.svelte'
+import type { SpecificationFilter } from '$lib/model-specification-filter'
 import { Button } from '$lib/components/ui/button'
 import * as Field from '$lib/components/ui/field'
 import * as Select from '$lib/components/ui/select'
@@ -11,6 +13,8 @@ interface Props {
   availability: string
   source: string
   reference: string
+  specification: SpecificationFilter
+  onSpecificationChange: (value: SpecificationFilter) => void
   onFilterChange: (columnId: string, value: string) => void
   onClear: () => void
 }
@@ -20,6 +24,8 @@ let {
   availability,
   source,
   reference,
+  specification,
+  onSpecificationChange,
   onFilterChange,
   onClear,
 }: Props = $props()
@@ -76,17 +82,24 @@ let {
     <div class="route-overlay-body">
       <Field.FieldGroup>
         <Field.Field>
-          <Field.FieldLabel for="provider-model-availability-mobile">{m.provider_model_catalog_model_availability()}</Field.FieldLabel>
+          <Field.FieldLabel for="provider-model-availability-mobile"
+            >{m.provider_model_catalog_model_availability()}</Field.FieldLabel>
           {@render availabilitySelect('provider-model-availability-mobile')}
         </Field.Field>
         <Field.Field>
-          <Field.FieldLabel for="provider-model-source-mobile">{m.provider_model_catalog_how_models_were_added()}</Field.FieldLabel>
+          <Field.FieldLabel for="provider-model-source-mobile"
+            >{m.provider_model_catalog_how_models_were_added()}</Field.FieldLabel>
           {@render sourceSelect('provider-model-source-mobile')}
         </Field.Field>
         <Field.Field>
-          <Field.FieldLabel for="provider-model-reference-mobile">{m.provider_model_catalog_model_usage()}</Field.FieldLabel>
+          <Field.FieldLabel for="provider-model-reference-mobile"
+            >{m.provider_model_catalog_model_usage()}</Field.FieldLabel>
           {@render referenceSelect('provider-model-reference-mobile')}
         </Field.Field>
+        <Field.FieldSet>
+          <Field.FieldLegend>{m.model_specification_title()}</Field.FieldLegend>
+          <ModelSpecificationFilter value={specification} onChange={onSpecificationChange} />
+        </Field.FieldSet>
       </Field.FieldGroup>
     </div>
     <Sheet.Footer class="route-overlay-footer">

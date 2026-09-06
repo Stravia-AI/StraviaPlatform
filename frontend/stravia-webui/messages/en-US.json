@@ -1230,7 +1230,6 @@
   "model_specification_not_registered_features": "Not registered: {features}",
   "model_specification_declaration_caveat": "This is the saved Provider Model specification. It is a recorded declaration, not a tested capability or a guarantee that the current connection path supports it.",
   "model_specification_attachment_caveat": "Attachments are declared separately from input modalities and do not imply that every file type is accepted.",
-  "model_specification_filter": "Filter model specification",
   "model_specification_minimum_context": "Minimum context tokens",
   "model_specification_minimum_output": "Minimum output tokens",
   "model_specification_context_preset": "Context preset",
@@ -1238,6 +1237,5 @@
   "model_specification_integer_required": "Enter a non-negative whole number of tokens.",
   "model_specification_match_all": "Match all selected conditions",
   "model_specification_no_minimum": "No minimum",
-  "model_specification_custom": "Custom",
-  "model_specification_clear_filters": "Clear specification filters"
+  "model_specification_custom": "Custom"
 }

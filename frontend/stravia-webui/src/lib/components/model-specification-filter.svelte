@@ -1,17 +1,10 @@
 <script lang="ts">
 import * as m from '$lib/paraglide/messages.js'
-import FilterIcon from '@lucide/svelte/icons/list-filter'
 import { formatSpecificationTokens, specificationFeatures, specificationModalities } from '$lib/model-specification'
-import {
-  emptySpecificationFilter,
-  specificationFilterCount,
-  type SpecificationFilter,
-} from '$lib/model-specification-filter'
-import { Button } from '$lib/components/ui/button'
+import type { SpecificationFilter } from '$lib/model-specification-filter'
 import { Checkbox } from '$lib/components/ui/checkbox'
 import * as Field from '$lib/components/ui/field'
 import { Input } from '$lib/components/ui/input'
-import * as Popover from '$lib/components/ui/popover'
 import * as Select from '$lib/components/ui/select'
 
 interface Props {
@@ -21,7 +14,6 @@ interface Props {
 
 let { value, onChange }: Props = $props()
 const id = $props.id()
-const count = $derived(specificationFilterCount(value))
 const limits = $derived([
   {
     key: 'context' as const,
@@ -49,104 +41,82 @@ function toggle<T extends string>(selected: T[], key: T, checked: boolean): T[] 
 }
 </script>
 
-<Popover.Root>
-  <Popover.Trigger>
-    {#snippet child({ props })}
-      <Button {...props} variant={count ? 'secondary' : 'ghost'} size="sm" aria-label={m.model_specification_filter()}>
-        <FilterIcon data-icon="inline-start" />
-        {m.model_specification_title()}
-        {#if count}<span class="font-technical">{count}</span>{/if}
-      </Button>
-    {/snippet}
-  </Popover.Trigger>
-  <Popover.Content
-    role="dialog"
-    align="start"
-    class="max-h-[min(42rem,var(--bits-popover-content-available-height))] w-[min(24rem,calc(100vw-2rem))] overflow-y-auto"
-    aria-label={m.model_specification_title()}>
-    <Popover.Header>
-      <Popover.Title>{m.model_specification_title()}</Popover.Title>
-      <Popover.Description>{m.model_specification_match_all()}</Popover.Description>
-    </Popover.Header>
-    <Field.FieldGroup>
-      {#each limits as limit (limit.key)}
-        {@const selected = value[limit.key]}
-        <Field.Field>
-          <Field.FieldLabel for={`${id}-${limit.key}`}>{limit.label}</Field.FieldLabel>
-          <Select.Root
-            type="single"
-            value={selected == null ? 'none' : limit.presets.includes(selected) ? String(selected) : 'custom'}
-            onValueChange={(next) => {
-              if (next === 'custom') document.getElementById(`${id}-${limit.key}`)?.focus()
-              else onChange({ ...value, [limit.key]: next === 'none' ? undefined : Number(next) })
-            }}>
-            <Select.Trigger role="combobox" aria-label={limit.presetLabel} class="w-full">
-              {selected == null
-                ? m.model_specification_no_minimum()
-                : limit.presets.includes(selected)
-                  ? formatSpecificationTokens(selected)
-                  : m.model_specification_custom()}
-            </Select.Trigger>
-            <Select.Content>
-              <Select.Group>
-                <Select.Item value="none">{m.model_specification_no_minimum()}</Select.Item>
-                {#each limit.presets as preset (preset)}
-                  <Select.Item value={String(preset)}>{formatSpecificationTokens(preset)}</Select.Item>
-                {/each}
-                <Select.Item value="custom">{m.model_specification_custom()}</Select.Item>
-              </Select.Group>
-            </Select.Content>
-          </Select.Root>
-          <Input
-            id={`${id}-${limit.key}`}
-            type="number"
-            min="0"
-            max={Number.MAX_SAFE_INTEGER}
-            step="1"
-            value={selected ?? ''}
-            placeholder={m.model_specification_no_minimum()}
-            oninput={(event) => setLimit(limit.key, event.currentTarget)} />
-          <Field.FieldDescription>{m.model_specification_integer_required()}</Field.FieldDescription>
+<Field.FieldDescription>{m.model_specification_match_all()}</Field.FieldDescription>
+<Field.FieldGroup>
+  {#each limits as limit (limit.key)}
+    {@const selected = value[limit.key]}
+    <Field.Field>
+      <Field.FieldLabel for={`${id}-${limit.key}`}>{limit.label}</Field.FieldLabel>
+      <Select.Root
+        type="single"
+        value={selected == null ? 'none' : limit.presets.includes(selected) ? String(selected) : 'custom'}
+        onValueChange={(next) => {
+          if (next === 'custom') document.getElementById(`${id}-${limit.key}`)?.focus()
+          else onChange({ ...value, [limit.key]: next === 'none' ? undefined : Number(next) })
+        }}>
+        <Select.Trigger role="combobox" aria-label={limit.presetLabel} class="w-full">
+          {selected == null
+            ? m.model_specification_no_minimum()
+            : limit.presets.includes(selected)
+              ? formatSpecificationTokens(selected)
+              : m.model_specification_custom()}
+        </Select.Trigger>
+        <Select.Content>
+          <Select.Group>
+            <Select.Item value="none">{m.model_specification_no_minimum()}</Select.Item>
+            {#each limit.presets as preset (preset)}
+              <Select.Item value={String(preset)}>{formatSpecificationTokens(preset)}</Select.Item>
+            {/each}
+            <Select.Item value="custom">{m.model_specification_custom()}</Select.Item>
+          </Select.Group>
+        </Select.Content>
+      </Select.Root>
+      <Input
+        id={`${id}-${limit.key}`}
+        type="number"
+        min="0"
+        max={Number.MAX_SAFE_INTEGER}
+        step="1"
+        value={selected ?? ''}
+        placeholder={m.model_specification_no_minimum()}
+        oninput={(event) => setLimit(limit.key, event.currentTarget)} />
+      <Field.FieldDescription>{m.model_specification_integer_required()}</Field.FieldDescription>
+    </Field.Field>
+  {/each}
+  {#each ['inputModalities', 'outputModalities'] as direction (direction)}
+    {@const key = direction as 'inputModalities' | 'outputModalities'}
+    <Field.FieldSet>
+      <Field.FieldLegend
+        >{key === 'inputModalities'
+          ? m.model_specification_input_modalities()
+          : m.model_specification_output_modalities()}</Field.FieldLegend>
+      <Field.FieldGroup class="grid grid-cols-2 gap-2">
+        {#each specificationModalities as modality (modality.key)}
+          <Field.Field orientation="horizontal">
+            <Checkbox
+              id={`${id}-${key}-${modality.key}`}
+              checked={value[key].includes(modality.key)}
+              onCheckedChange={(checked) =>
+                onChange({ ...value, [key]: toggle(value[key], modality.key, checked === true) })} />
+            <Field.FieldLabel for={`${id}-${key}-${modality.key}`}>{modality.label()}</Field.FieldLabel>
+          </Field.Field>
+        {/each}
+      </Field.FieldGroup>
+    </Field.FieldSet>
+  {/each}
+  <Field.FieldSet>
+    <Field.FieldLegend>{m.model_specification_supported_features()}</Field.FieldLegend>
+    <Field.FieldGroup class="grid grid-cols-2 gap-2">
+      {#each specificationFeatures as feature (feature.key)}
+        <Field.Field orientation="horizontal">
+          <Checkbox
+            id={`${id}-${feature.key}`}
+            checked={value.features.includes(feature.key)}
+            onCheckedChange={(checked) =>
+              onChange({ ...value, features: toggle(value.features, feature.key, checked === true) })} />
+          <Field.FieldLabel for={`${id}-${feature.key}`}>{feature.label()}</Field.FieldLabel>
         </Field.Field>
       {/each}
-      {#each ['inputModalities', 'outputModalities'] as direction (direction)}
-        {@const key = direction as 'inputModalities' | 'outputModalities'}
-        <Field.FieldSet>
-          <Field.FieldLegend
-            >{key === 'inputModalities'
-              ? m.model_specification_input_modalities()
-              : m.model_specification_output_modalities()}</Field.FieldLegend>
-          <Field.FieldGroup class="grid grid-cols-2 gap-2">
-            {#each specificationModalities as modality (modality.key)}
-              <Field.Field orientation="horizontal">
-                <Checkbox
-                  id={`${id}-${key}-${modality.key}`}
-                  checked={value[key].includes(modality.key)}
-                  onCheckedChange={(checked) =>
-                    onChange({ ...value, [key]: toggle(value[key], modality.key, checked === true) })} />
-                <Field.FieldLabel for={`${id}-${key}-${modality.key}`}>{modality.label()}</Field.FieldLabel>
-              </Field.Field>
-            {/each}
-          </Field.FieldGroup>
-        </Field.FieldSet>
-      {/each}
-      <Field.FieldSet>
-        <Field.FieldLegend>{m.model_specification_supported_features()}</Field.FieldLegend>
-        <Field.FieldGroup class="grid grid-cols-2 gap-2">
-          {#each specificationFeatures as feature (feature.key)}
-            <Field.Field orientation="horizontal">
-              <Checkbox
-                id={`${id}-${feature.key}`}
-                checked={value.features.includes(feature.key)}
-                onCheckedChange={(checked) =>
-                  onChange({ ...value, features: toggle(value.features, feature.key, checked === true) })} />
-              <Field.FieldLabel for={`${id}-${feature.key}`}>{feature.label()}</Field.FieldLabel>
-            </Field.Field>
-          {/each}
-        </Field.FieldGroup>
-      </Field.FieldSet>
     </Field.FieldGroup>
-    <Button variant="outline" onclick={() => onChange(emptySpecificationFilter)}
-      >{m.model_specification_clear_filters()}</Button>
-  </Popover.Content>
-</Popover.Root>
+  </Field.FieldSet>
+</Field.FieldGroup>

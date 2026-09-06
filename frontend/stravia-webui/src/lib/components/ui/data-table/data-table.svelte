@@ -842,12 +842,11 @@ function removeFilterConstraint(index: number): void {
 function applyColumnFilter(column: Column<typeof dataTableFeatures, TData, unknown>): void {
   const activeConstraints = filterDraft?.constraints.filter((constraint) => !isFilterValueEmpty(constraint.value)) ?? []
   column.setFilterValue(
-    activeConstraints.length > 0
-      ? {
-          operator: filterDraft?.operator ?? 'and',
-          constraints: activeConstraints,
-        }
-      : undefined,
+    column.columnDef.meta?.filter?.variant === 'custom'
+      ? activeConstraints[0]?.value
+      : activeConstraints.length > 0
+        ? { operator: filterDraft?.operator ?? 'and', constraints: activeConstraints }
+        : undefined,
   )
   openFilterColumnId = undefined
 }
@@ -1653,6 +1652,8 @@ $effect(() => {
                       aria-label={filter.maxPlaceholder ?? resolvedLabels.maximum}
                       oninput={(event) => updateNumberFilter(column, 1, event.currentTarget.value)} />
                   </div>
+                {:else if filter?.variant === 'custom'}
+                  {@render filter.content(column.getFilterValue(), (value) => column.setFilterValue(value))}
                 {/if}
               </Table.Head>
             {/each}

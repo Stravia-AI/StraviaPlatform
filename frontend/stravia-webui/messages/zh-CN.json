@@ -1227,7 +1227,6 @@
   "model_specification_not_registered_features": "未登记：{features}",
   "model_specification_declaration_caveat": "这里显示已保存的 Provider Model 规格。它是登记声明，并非实测能力，也不保证当前接入路径一定支持。",
   "model_specification_attachment_caveat": "附件声明与输入模态分别登记，不表示模型接受任意文件类型。",
-  "model_specification_filter": "筛选模型规格",
   "model_specification_minimum_context": "最小上下文 Token 数",
   "model_specification_minimum_output": "最小输出 Token 数",
   "model_specification_context_preset": "上下文预设",
@@ -1235,6 +1234,5 @@
   "model_specification_integer_required": "请输入非负整数 Token 数。",
   "model_specification_match_all": "满足全部所选条件",
   "model_specification_no_minimum": "不限",
-  "model_specification_custom": "自定义",
-  "model_specification_clear_filters": "清除规格筛选"
+  "model_specification_custom": "自定义"
 }

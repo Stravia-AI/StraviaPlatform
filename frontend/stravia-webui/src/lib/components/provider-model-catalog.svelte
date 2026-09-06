@@ -157,12 +157,17 @@ const providerModelColumns = providerModelColumnHelper.columns([
     size: 260,
   }),
   providerModelColumnHelper.accessor('specification', {
-    header: () => renderSnippet(providerModelSpecificationHeader),
+    header: () => m.model_specification_title(),
     cell: (context) => renderSnippet(providerModelSpecificationCell, context),
     filterFn: (row, _columnId, value) => matchesSpecification(row.original.specification, value as SpecificationFilter),
     enableSorting: false,
     enableGlobalFilter: false,
-    meta: { label: () => m.model_specification_title(), cellClass: 'whitespace-normal py-4', exportable: false },
+    meta: {
+      label: () => m.model_specification_title(),
+      cellClass: 'whitespace-normal py-4',
+      exportable: false,
+      filter: { variant: 'custom', content: providerModelSpecificationFilter },
+    },
     size: 360,
   }),
   providerModelColumnHelper.accessor((model) => (model.available ? 'available' : 'unavailable'), {
@@ -584,8 +589,10 @@ async function deleteManualModel(): Promise<void> {
   </div>
 {/snippet}
 
-{#snippet providerModelSpecificationHeader()}
-  <ModelSpecificationFilter value={specificationFilter} onChange={setSpecificationFilter} />
+{#snippet providerModelSpecificationFilter(value: unknown, onChange: (value: unknown) => void)}
+  <ModelSpecificationFilter
+    value={(value as SpecificationFilter | undefined) ?? emptySpecificationFilter}
+    onChange={(next) => onChange(specificationFilterCount(next) ? next : undefined)} />
 {/snippet}
 
 {#snippet providerModelSpecificationCell(context: DataTableCellContext<ProviderModelSummary>)}
@@ -820,7 +827,6 @@ async function deleteManualModel(): Promise<void> {
             {m.provider_model_catalog_filter_models()}
             {#if activeFilterCount > 0}<span class="font-technical">· {activeFilterCount}</span>{/if}
           </Button>
-          <ModelSpecificationFilter value={specificationFilter} onChange={setSpecificationFilter} />
           {#if hasActiveFilters}
             <Button size="sm" variant="ghost" onclick={clearFilters}>{m.provider_model_catalog_clear_filters()}</Button>
           {/if}
@@ -903,6 +909,8 @@ async function deleteManualModel(): Promise<void> {
   availability={availabilityFilter}
   source={sourceFilter}
   reference={referenceFilter}
+  specification={specificationFilter}
+  onSpecificationChange={setSpecificationFilter}
   onFilterChange={setCatalogFilter}
   onClear={clearFilters} />
 
