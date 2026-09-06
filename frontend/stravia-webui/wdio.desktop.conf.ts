@@ -1,6 +1,26 @@
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { basename, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const appBinaryPath = fileURLToPath(new URL('../../target/debug/stravia-desktop.exe', import.meta.url))
+const runRootPrefix = 'stravia-desktop-e2e-'
+const inheritedRunRoot = process.env.STRAVIA_DESKTOP_E2E_RUN_ROOT
+const inheritedRelativePath = inheritedRunRoot ? relative(resolve(tmpdir()), resolve(inheritedRunRoot)) : ''
+const inheritedRootIsSafe = Boolean(
+  inheritedRunRoot &&
+  inheritedRelativePath &&
+  !isAbsolute(inheritedRelativePath) &&
+  !inheritedRelativePath.startsWith('..') &&
+  basename(inheritedRunRoot).startsWith(runRootPrefix),
+)
+const runRoot =
+  inheritedRootIsSafe && inheritedRunRoot ? resolve(inheritedRunRoot) : mkdtempSync(join(tmpdir(), runRootPrefix))
+const codexHome = join(runRoot, 'codex')
+
+mkdirSync(codexHome, { recursive: true })
+process.env.STRAVIA_DESKTOP_E2E_RUN_ROOT = runRoot
+process.env.CODEX_HOME = codexHome
 
 export const config: WebdriverIO.Config = {
   runner: 'local',
@@ -29,4 +49,7 @@ export const config: WebdriverIO.Config = {
   connectionRetryTimeout: 90_000,
   connectionRetryCount: 1,
   mochaOpts: { ui: 'bdd', timeout: 60_000 },
+  onComplete: () => {
+    rmSync(runRoot, { recursive: true, force: true })
+  },
 }

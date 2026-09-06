@@ -93,6 +93,7 @@ let lastSyncedAt = $state<Date>()
 let loadedQueryModel = $state('')
 let editor = $state<{ submit: () => void }>()
 let addingRouteModelId = $state('')
+let addedModel = $state<{ id: string; existingRoute: boolean }>()
 
 const modelsQuery = createQuery(() => ({
   queryKey: ['provider-models', providerId],
@@ -286,6 +287,7 @@ async function addModelToRoute(model: ProviderModelSummary): Promise<void> {
   try {
     const existingRoute = routeForModel(model.id)
     await admin.models.bind({ provider_id: providerId, provider_model_id: model.id })
+    addedModel = { id: model.id, existingRoute: Boolean(existingRoute) }
     if (existingRoute) {
       toast.success(m.provider_model_catalog_model_target_added({ id: model.id }))
     } else {
@@ -586,15 +588,12 @@ async function deleteManualModel(): Promise<void> {
   {:else if routeReferencesReady}
     <button
       type="button"
-      class="group inline-flex min-h-10 w-fit items-center rounded-md px-2 text-sm text-muted-foreground hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-70"
+      class="inline-flex min-h-10 w-fit items-center rounded-md px-2 text-sm font-medium text-foreground hover:bg-muted disabled:pointer-events-none disabled:opacity-70"
       aria-label={m.provider_model_catalog_add_model_to_route({ id: model.id })}
-      disabled={Boolean(addingRouteModelId)}
+      disabled={!model.available || Boolean(addingRouteModelId)}
       onclick={() => void addModelToRoute(model)}>
       {#if addingRouteModelId === model.id}<Spinner data-icon="inline-start" />{/if}
-      <span class="group-hover:hidden group-focus-visible:hidden">{m.provider_model_catalog_not_used()}</span>
-      <span class="hidden group-hover:inline group-focus-visible:inline">
-        {matchingRoute ? m.provider_model_catalog_add_destination() : m.provider_model_catalog_create_model()}
-      </span>
+      {matchingRoute ? m.provider_model_catalog_add_destination() : m.provider_model_catalog_create_model()}
     </button>
   {:else}
     <span class="px-2 text-sm text-muted-foreground">{m.provider_model_catalog_not_used()}</span>
@@ -727,6 +726,20 @@ async function deleteManualModel(): Promise<void> {
       </div>
     </div>
 
+    {#if addedModel}
+      <div
+        class="flex flex-wrap items-center justify-between gap-3 rounded-xl border p-4"
+        role="status"
+        aria-live="polite">
+        <p class="text-sm font-medium">
+          {addedModel.existingRoute
+            ? m.provider_model_catalog_model_target_added({ id: addedModel.id })
+            : m.provider_model_catalog_model_route_created({ id: addedModel.id })}
+        </p>
+        <Button href="/connect" variant="outline">{m.connect_connect_apps()}</Button>
+      </div>
+    {/if}
+
     <div class="route-desktop-table">
       <DataTable
         data={modelsQuery.isError ? [] : models}
@@ -828,19 +841,12 @@ async function deleteManualModel(): Promise<void> {
               {:else if routeReferencesReady}
                 <button
                   type="button"
-                  class="group inline-flex min-h-10 items-center rounded-md px-2 text-sm text-muted-foreground hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-70"
+                  class="inline-flex min-h-10 items-center rounded-md px-2 text-sm font-medium text-foreground hover:bg-muted disabled:pointer-events-none disabled:opacity-70"
                   aria-label={m.provider_model_catalog_add_model_to_route({ id: model.id })}
-                  disabled={Boolean(addingRouteModelId)}
+                  disabled={!model.available || Boolean(addingRouteModelId)}
                   onclick={() => void addModelToRoute(model)}>
                   {#if addingRouteModelId === model.id}<Spinner data-icon="inline-start" />{/if}
-                  <span class="group-hover:hidden group-focus-visible:hidden">
-                    {m.provider_model_catalog_not_used()}
-                  </span>
-                  <span class="hidden group-hover:inline group-focus-visible:inline">
-                    {matchingRoute
-                      ? m.provider_model_catalog_add_destination()
-                      : m.provider_model_catalog_create_model()}
-                  </span>
+                  {matchingRoute ? m.provider_model_catalog_add_destination() : m.provider_model_catalog_create_model()}
                 </button>
               {:else}
                 <span class="px-2 text-sm text-muted-foreground">{m.provider_model_catalog_not_used()}</span>

@@ -4,6 +4,76 @@ import { prepareApp } from './prepare-app'
 
 const thinkingLevels = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
 
+test('prefilled model metadata stays clean without erasing a user draft', async ({ page }) => {
+  let holdDetails = false
+  let releaseDetails!: () => void
+  const detailsReady = new Promise<void>((resolve) => {
+    releaseDetails = resolve
+  })
+  await page.route('**/api/v1/providers', (route) =>
+    route.fulfill({
+      json: {
+        data: [{ id: 'prefill-provider', name: 'Prefill service', protocol: 'openai-compatible', is_enabled: true }],
+      },
+    }),
+  )
+  await page.route('**/api/v1/providers/prefill-provider/models', (route) =>
+    route.fulfill({
+      json: {
+        data: {
+          models: [
+            {
+              id: 'prefill-model',
+              name: 'Prefill model',
+              available: true,
+              source_kind: 'discovered',
+              selection_policy: 'auto',
+              capabilities: {},
+              revision: 1,
+            },
+          ],
+        },
+      },
+    }),
+  )
+  await page.route('**/api/v1/providers/prefill-provider/model-capabilities?*', (route) =>
+    route.fulfill({ json: { data: { reasoning: true } } }),
+  )
+  await page.route('**/api/v1/providers/prefill-provider/model?*', async (route) => {
+    if (holdDetails) await detailsReady
+    await route.fulfill({
+      json: {
+        data: {
+          id: 'prefill-model',
+          metadata: {},
+          thinking_level_map: [{ level: 'high', control: { type: 'effort', value: 'high' }, source: 'generated' }],
+        },
+      },
+    })
+  })
+
+  await page.goto('/models/new?provider=prefill-provider&model=prefill-model')
+  await expect(page.locator('[data-slot="route-thinking-level"][data-level="high"]')).toHaveAttribute(
+    'data-supported',
+    'true',
+  )
+  await page.getByRole('link', { name: 'Cancel', exact: true }).click()
+  await expect(page).toHaveURL(/\/models$/)
+  await expect(page.getByRole('alertdialog')).toHaveCount(0)
+
+  holdDetails = true
+  await page.goto('/models/new?provider=prefill-provider&model=prefill-model')
+  await page.getByLabel('Display name', { exact: true }).fill('My unsaved label')
+  releaseDetails()
+  await expect(page.locator('[data-slot="route-thinking-level"][data-level="high"]')).toHaveAttribute(
+    'data-supported',
+    'true',
+  )
+  await page.getByRole('link', { name: 'Cancel', exact: true }).click()
+  await page.getByRole('alertdialog').getByRole('button', { name: 'Keep editing' }).click()
+  await expect(page.getByLabel('Display name', { exact: true })).toHaveValue('My unsaved label')
+})
+
 function thinkingMap(visible: ReadonlySet<string>) {
   return thinkingLevels.map((level) => ({
     level,
@@ -14,229 +84,6 @@ function thinkingMap(visible: ReadonlySet<string>) {
 
 test.beforeEach(async ({ page }) => {
   await prepareApp(page)
-})
-
-test('Connect clients previews incremental global configuration patches', async ({ page }) => {
-  await page.route('**/api/v1/models', async (route) => {
-    await route.fulfill({
-      json: {
-        data: [
-          {
-            model_id: 'claude-opus',
-            display_name: 'Claude Opus',
-            supported_thinking_levels: ['off', 'high', 'max'],
-            context_window: 200_000,
-            output_max_tokens: 32_000,
-          },
-          {
-            model_id: 'gpt-5.6-sol',
-            display_name: 'GPT 5.6 Sol',
-            supported_thinking_levels: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
-            context_window: 272_000,
-            output_max_tokens: 128_000,
-          },
-          {
-            model_id: 'gpt-5.6-luna',
-            display_name: 'GPT 5.6 Luna',
-            supported_thinking_levels: ['off', 'low', 'medium', 'high'],
-            context_window: 196_000,
-            output_max_tokens: 64_000,
-          },
-        ].map((model) => ({
-          id: `model-${model.model_id}`,
-          balance: 'priority',
-          is_enabled: true,
-          supports_image_input: model.model_id === 'gpt-5.6-sol',
-          targets: [],
-          ...model,
-        })),
-      },
-    })
-  })
-  await page.route('**/api/v1/api-keys', async (route) => {
-    await route.fulfill({
-      json: {
-        data: [
-          {
-            id: 'key-client',
-            key: 'sk-test-secret',
-            name: 'Client key',
-            model_ids: ['model-claude-opus', 'model-gpt-5.6-sol', 'model-gpt-5.6-luna'],
-            transparent_injection_enabled: false,
-            inject_media_understanding: true,
-          },
-        ],
-      },
-    })
-  })
-  await page.route('**/api/v1/connect-clients/preview', async (route) => {
-    const input = route.request().postDataJSON() as { tool: string; apiKey: string; mappings?: Record<string, string> }
-    const previews: Record<string, string> = {
-      'claude-code': JSON.stringify(
-        {
-          env: {
-            ANTHROPIC_AUTH_TOKEN: input.apiKey,
-            ANTHROPIC_BASE_URL: 'http://127.0.0.1:4173',
-            ANTHROPIC_MODEL: input.mappings?.defaultModel,
-            ANTHROPIC_DEFAULT_HAIKU_MODEL: input.mappings?.haikuModel,
-            ANTHROPIC_DEFAULT_SONNET_MODEL: input.mappings?.sonnetModel,
-            ANTHROPIC_DEFAULT_OPUS_MODEL: input.mappings?.opusModel,
-          },
-        },
-        null,
-        2,
-      ),
-      'codex-cli': `model_provider = "stravia"
-model_catalog_json = "~/.codex/stravia-models.json"
-[model_providers.stravia]
-experimental_bearer_token = "${input.apiKey}"
-{"slug": "claude-opus", "slug": "gpt-5.6-sol", "slug": "gpt-5.6-luna", "display_name": "GPT 5.6 Sol", "context_window": 272000, "input_modalities": ["text", "image"], "effort": "xhigh"}`,
-      opencode: JSON.stringify(
-        {
-          provider: {
-            stravia: {
-              npm: '@ai-sdk/open-responses',
-              options: { url: 'http://127.0.0.1:4173/v1/responses' },
-              models: {
-                'gpt-5.6-sol': {
-                  limit: { context: 272000, output: 128000 },
-                  modalities: {},
-                  variants: { xhigh: { reasoningEffort: 'xhigh' } },
-                },
-              },
-            },
-          },
-        },
-        null,
-        2,
-      ),
-      zcode: `%USERPROFILE%\\.zcode\\v2\\config.json
-${JSON.stringify(
-  {
-    provider: {
-      'custom:stravia': {
-        kind: 'openai-compatible',
-        models: { 'gpt-5.6-sol': { limit: { context: 272000, output: 128000 }, modalities: { input: ['image'] } } },
-      },
-    },
-  },
-  null,
-  2,
-)}
-ZCode rewrites this file at startup and does not preserve custom per-level request mappings.
-Reasoning controls are available only when ZCode recognizes the model itself.`,
-      workbuddy: JSON.stringify(
-        [
-          { id: 'gpt-5.6-sol', supportsImages: true, supportedEfforts: ['minimal', 'xhigh'] },
-          { id: 'gpt-5.6-luna', supportsImages: false },
-        ],
-        null,
-        2,
-      ),
-    }
-    await route.fulfill({
-      json: { data: { paths: ['~/.config'], preview: previews[input.tool] ?? '{"provider":{"stravia":{}}}' } },
-    })
-  })
-
-  await page.goto('/connect')
-  await expect(page.getByRole('heading', { name: 'Connect clients' })).toBeVisible()
-  await expect(page.getByRole('tab', { name: 'Clients' })).toBeVisible()
-  await expect(page.getByRole('heading', { name: 'Client setup' })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Apply' })).toHaveCount(0)
-  await expect(page.getByRole('button', { name: 'Copy' })).toBeVisible()
-  await page.getByRole('button', { name: 'Client' }).click()
-  await expect(page.getByRole('listbox').getByRole('option')).toHaveText([
-    'Codex',
-    'Claude Code',
-    'OpenCode',
-    'OpenClaw',
-    'Hermes Agent',
-    'TRAE',
-    'WorkBuddy',
-    'ZCode',
-    'DeepSeek Harness',
-    'Pi',
-    'OMP',
-  ])
-  await page.getByRole('option', { name: 'Claude Code' }).click()
-
-  await page.getByRole('button', { name: 'API Key' }).click()
-  await page.getByRole('option', { name: /Client key/ }).click()
-
-  for (const [field, model] of [
-    ['Default model', 'claude-opus'],
-    ['Haiku model mapping', 'gpt-5.6-luna'],
-    ['Sonnet model mapping', 'gpt-5.6-sol'],
-    ['Opus model mapping', 'claude-opus'],
-  ] as const) {
-    await page.getByRole('button', { name: field }).click()
-    const option = page.getByRole('option', { name: new RegExp(model) })
-    await expect(option).toContainText(model)
-    if (field === 'Default model') await expect(option).toContainText('Claude Opus')
-    await option.click()
-  }
-
-  const generatedConfig = page.locator('pre.route-code-plane')
-  await expect(generatedConfig).toContainText('"ANTHROPIC_DEFAULT_HAIKU_MODEL": "gpt-5.6-luna"')
-  await expect(generatedConfig).toContainText('"ANTHROPIC_DEFAULT_SONNET_MODEL": "gpt-5.6-sol"')
-  await expect(generatedConfig).not.toContainText('"effortLevel"')
-  await expect(generatedConfig).not.toContainText('"autoCompactWindow"')
-
-  await page.getByRole('button', { name: 'Client' }).click()
-  await page.getByRole('option', { name: 'Codex', exact: true }).click()
-  await expect(page.getByRole('button', { name: 'Haiku model mapping' })).toHaveCount(0)
-  await expect(page.getByRole('button', { name: 'Default model' })).toHaveCount(0)
-
-  await expect(generatedConfig).toContainText('model_provider = "stravia"')
-  await expect(generatedConfig).toContainText('model_catalog_json = "~/.codex/stravia-models.json"')
-  await expect(generatedConfig).toContainText('experimental_bearer_token = "sk-test-secret"')
-  await expect(generatedConfig).not.toContainText('env_key')
-  await expect(generatedConfig).not.toContainText('model =')
-  await expect(generatedConfig).not.toContainText('requires_openai_auth')
-  await expect(generatedConfig).toContainText('"context_window": 272000')
-  await expect(generatedConfig).toContainText('"input_modalities"')
-  await expect(generatedConfig).toContainText('"effort": "xhigh"')
-  await expect(generatedConfig).toContainText('"slug": "claude-opus"')
-  await expect(generatedConfig).toContainText('"slug": "gpt-5.6-sol"')
-  await expect(generatedConfig).toContainText('"slug": "gpt-5.6-luna"')
-  await expect(generatedConfig).toContainText('"display_name": "GPT 5.6 Sol"')
-
-  await page.getByRole('button', { name: 'Client' }).click()
-  await page.getByRole('option', { name: 'OpenCode' }).click()
-  await expect(page.getByText(/^Open Responses ·/)).toBeVisible()
-  await expect(generatedConfig).toContainText('"npm": "@ai-sdk/open-responses"')
-  await expect(generatedConfig).toContainText('"url": "http://127.0.0.1:4173/v1/responses"')
-  await expect(generatedConfig).toContainText('"context": 272000')
-  await expect(generatedConfig).toContainText('"output": 128000')
-  await expect(generatedConfig).toContainText('"modalities"')
-  await expect(generatedConfig).toContainText('"xhigh":')
-  await expect(generatedConfig).toContainText('"reasoningEffort": "xhigh"')
-
-  await page.getByRole('button', { name: 'Client' }).click()
-  await page.getByRole('option', { name: 'ZCode' }).click()
-  await expect(generatedConfig).toContainText('%USERPROFILE%\\.zcode\\v2\\config.json')
-  await expect(generatedConfig).toContainText('"kind": "openai-compatible"')
-  await expect(generatedConfig).toContainText('"context": 272000')
-  await expect(generatedConfig).toContainText('"output": 128000')
-  await expect(generatedConfig).not.toContainText('"providerOptionsByLevel"')
-  await expect(generatedConfig).not.toContainText('"reasoningEffort"')
-  await expect(generatedConfig).toContainText(
-    'ZCode rewrites this file at startup and does not preserve custom per-level request mappings.',
-  )
-  await expect(generatedConfig).toContainText(
-    'Reasoning controls are available only when ZCode recognizes the model itself.',
-  )
-  await expect(generatedConfig).toContainText('"image"')
-  await expect(generatedConfig).not.toContainText('default model')
-
-  await page.getByRole('button', { name: 'Client' }).click()
-  await page.getByRole('option', { name: 'WorkBuddy' }).click()
-  await expect(generatedConfig).toContainText('"supportsImages": true')
-  await expect(generatedConfig).toContainText('"supportsImages": false')
-  await expect(generatedConfig).toContainText('"supportedEfforts"')
-  await expect(generatedConfig).toContainText('"minimal"')
-  await expect(generatedConfig).toContainText('"xhigh"')
 })
 
 test('Models table fits the desktop content width without horizontal scrolling', async ({ page }) => {
@@ -294,12 +141,18 @@ test('Models table fits the desktop content width without horizontal scrolling',
   await page.goto('/models')
   const tableContainer = page.locator('[data-slot="table-container"]')
   await expect(tableContainer).toBeVisible()
+  await expect(tableContainer.getByRole('columnheader', { name: 'Display name' })).toBeVisible()
+  await expect(tableContainer.getByRole('columnheader', { name: 'Client Model ID' })).toBeVisible()
+  await expect(tableContainer.getByRole('columnheader', { name: 'Associated services' })).toBeVisible()
   await expect(tableContainer.getByText('GPT 5.6 Sol', { exact: true })).toBeVisible()
   await expect(tableContainer.getByText('gpt-5.6-sol', { exact: true })).toBeVisible()
-  await expect(tableContainer.getByText('grok-4.6', { exact: true })).toHaveCount(1)
+  await expect(tableContainer.getByText('grok-4.6', { exact: true })).toHaveCount(2)
   await expect(tableContainer.getByText('disabled-shadow-model', { exact: true })).toHaveCount(0)
   const rows = tableContainer.getByRole('row')
   await expect(rows.nth(1)).toContainText('GPT 5.6 Sol')
+  await expect(rows.nth(1)).toContainText('gpt-5.6-sol')
+  await expect(rows.nth(1)).toContainText('Codex')
+  await expect(rows.nth(1)).toContainText('Enabled')
   await expect(rows.nth(1)).not.toContainText('disabled-shadow-model')
   await expect(rows.nth(2)).toContainText('gpt-5.6-luna')
   await expect(rows.nth(3)).toContainText('grok-4.6')
@@ -330,7 +183,9 @@ test('Model Route curl always includes the selected API Key', async ({ page }) =
   })
   await page.route('**/api/v1/api-keys', async (route) => {
     await route.fulfill({
-      json: { data: [{ id: 'key-gpt', key: 'sk-test-secret', name: 'GPT key', model_ids: ['model-gpt'] }] },
+      json: {
+        data: [{ id: 'key-gpt', key: 'sk-test-secret', name: 'GPT key', is_enabled: true, model_ids: ['model-gpt'] }],
+      },
     })
   })
 
@@ -341,13 +196,10 @@ test('Model Route curl always includes the selected API Key', async ({ page }) =
   await page.getByRole('tab', { name: 'cURL' }).click()
 
   const generatedRequest = page.locator('pre.route-code-plane')
-  await expect(page.getByText('Select an API Key before using this sample.')).toBeVisible()
   await expect(generatedRequest).toContainText('Authorization')
-  await expect(generatedRequest).toContainText('sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx')
-
-  await page.getByRole('button', { name: 'API Key' }).click()
-  await page.getByRole('option', { name: /GPT key/ }).click()
   await expect(generatedRequest).toContainText('sk-test-secret')
+  await expect(generatedRequest).toContainText('gpt-5.4')
+  await expect(page.getByRole('button', { name: 'Copy', exact: true })).toBeEnabled()
 })
 
 test('Model Route editor omits API Key and payload toggles', async ({ page }) => {
@@ -408,7 +260,7 @@ test('Model Route editor omits API Key and payload toggles', async ({ page }) =>
     .click()
   await expect(page.getByRole('heading', { name: 'Edit model' })).toBeVisible()
   const editModelId = page.getByRole('combobox', { name: 'Model ID', exact: true })
-  const editDisplayName = page.getByLabel('Model name', { exact: true })
+  const editDisplayName = page.getByLabel('Display name', { exact: true })
   await expect(editModelId).toHaveValue('gpt-5.4')
   await expect(editDisplayName).toHaveValue('Team GPT')
   await editModelId.fill('custom/edit-model')
@@ -546,12 +398,7 @@ test('Model Route editor derives thinking levels and identifies blocking destina
   })
 
   await page.goto('/models')
-  await page
-    .locator('main')
-    .getByRole('link')
-    .filter({ hasText: 'thinking-route' })
-    .getByText('thinking-route', { exact: true })
-    .click()
+  await page.locator('main').getByRole('link').filter({ hasText: 'thinking-route' }).click()
   await expect(page.getByRole('button', { name: 'Advanced', exact: true })).toHaveCount(0)
   const enabledSwitch = page.getByRole('switch', { name: 'Enable' })
   await expect(enabledSwitch).toBeChecked()
@@ -569,7 +416,7 @@ test('Model Route editor derives thinking levels and identifies blocking destina
     await Promise.all([
       page.getByText('Model ID', { exact: true }).boundingBox(),
       page.locator('#route-model-id').boundingBox(),
-      page.getByText('Model name', { exact: true }).boundingBox(),
+      page.getByText('Display name', { exact: true }).boundingBox(),
       page.locator('#route-display-name').boundingBox(),
       page.getByText('How requests are sent', { exact: true }).boundingBox(),
       page.locator('#route-balance').boundingBox(),
@@ -708,12 +555,37 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
   })
 
   await page.goto('/models/new')
+  await page.getByRole('link', { name: 'Cancel' }).click()
+  await expect(page).toHaveURL(/\/models$/)
+  await expect(page.getByRole('alertdialog', { name: 'Discard unsaved changes?' })).toHaveCount(0)
+
+  await page.goto('/models/new')
+  const modelSearch = page.getByRole('combobox', { name: 'Model ID', exact: true })
+  const displayName = page.getByLabel('Display name', { exact: true })
+  await modelSearch.fill('draft-model')
+  const beforeUnloadDialog = page.waitForEvent('dialog')
+  const reloadAttempt = page.evaluate(() => window.location.reload())
+  const browserLeaveWarning = await beforeUnloadDialog
+  expect(browserLeaveWarning.type()).toBe('beforeunload')
+  await browserLeaveWarning.dismiss()
+  await reloadAttempt
+  await expect(modelSearch).toHaveValue('draft-model')
+
+  await page.getByRole('link', { name: 'Cancel' }).click()
+  const discardDialog = page.getByRole('alertdialog', { name: 'Discard unsaved changes?' })
+  await expect(discardDialog).toBeVisible()
+  await discardDialog.getByRole('button', { name: 'Keep editing' }).click()
+  await expect(page).toHaveURL(/\/models\/new$/)
+  await expect(modelSearch).toHaveValue('draft-model')
+  await page.getByRole('link', { name: 'Cancel' }).click()
+  await discardDialog.getByRole('button', { name: 'Discard changes' }).click()
+  await expect(page).toHaveURL(/\/models$/)
+
+  await page.goto('/models/new')
   await expect(page.getByRole('heading', { name: 'Add model' })).toBeVisible()
   const createRouteBreadcrumb = page.getByRole('navigation', { name: 'Breadcrumb' })
   await expect(createRouteBreadcrumb.getByRole('link', { name: 'Models' })).toHaveAttribute('href', '/models')
   await expect(createRouteBreadcrumb.getByText('Create', { exact: true })).toHaveAttribute('aria-current', 'page')
-  const modelSearch = page.getByRole('combobox', { name: 'Model ID', exact: true })
-  const displayName = page.getByLabel('Model name', { exact: true })
   await expect(modelSearch).toHaveAttribute('placeholder', 'Search or enter Model ID')
   await expect(displayName).toHaveAttribute('placeholder', 'e.g. GPT-5.4')
   await modelSearch.fill('GPT-5.4')
@@ -795,6 +667,8 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
   expect(createBody?.model_id).toBe('gpt-5.4')
   expect(createBody?.display_name).toBe('')
   await expect.poll(() => disableBody?.is_enabled).toBe(false)
+  await expect(page).toHaveURL(/\/models$/)
+  await expect(page.getByRole('alertdialog', { name: 'Discard unsaved changes?' })).toHaveCount(0)
 })
 
 test('Model ID remains editable while the Canonical Model catalog fails to load', async ({ page }) => {

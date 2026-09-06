@@ -1,7 +1,7 @@
 <script lang="ts">
 import * as m from '$lib/paraglide/messages.js'
-import { goto } from '$app/navigation'
-import { resolve } from '$app/paths'
+import { beforeNavigate, goto } from '$app/navigation'
+import { base, resolve } from '$app/paths'
 import { createQuery, useQueryClient } from '@tanstack/svelte-query'
 import AudioLinesIcon from '@lucide/svelte/icons/audio-lines'
 import BrainCircuitIcon from '@lucide/svelte/icons/brain-circuit'
@@ -18,7 +18,7 @@ import TypeIcon from '@lucide/svelte/icons/type'
 import VideoIcon from '@lucide/svelte/icons/video'
 import WaypointsIcon from '@lucide/svelte/icons/waypoints'
 import WrenchIcon from '@lucide/svelte/icons/wrench'
-import { untrack } from 'svelte'
+import { tick, untrack } from 'svelte'
 import { toast } from 'svelte-sonner'
 
 import { admin } from '$lib/admin-client'
@@ -94,6 +94,47 @@ let targetEditorTarget = $state<RouteTargetForm>()
 let targetEditorIsNew = $state(false)
 let targetEditorClosing = false
 let draggedTargetKey = $state('')
+let leaveConfirmOpen = $state(false)
+let pendingNavigation = $state<() => void | Promise<void>>()
+
+function draftTarget(target: RouteTargetForm) {
+  return {
+    key: target.key,
+    id: target.id,
+    providerId: target.providerId,
+    model: target.model,
+    enabled: target.enabled,
+    priority: target.priority,
+    firstTokenTimeoutSeconds: target.firstTokenTimeoutSeconds,
+    targetRetryBudget: target.targetRetryBudget,
+    targetCooldownSeconds: target.targetCooldownSeconds,
+    thinkingLevelMap: target.thinkingLevelMap.map((row) => ({ ...row, control: { ...row.control } })),
+  }
+}
+
+function draftSnapshot() {
+  const editedTarget = targetEditorOpen ? targetEditorTarget : undefined
+  return {
+    form: { ...form },
+    targets: targets
+      .map((target) => draftTarget(editedTarget?.key === target.key ? editedTarget : target))
+      .toSorted((left, right) => left.key.localeCompare(right.key)),
+  }
+}
+
+let savedDraft = $state.raw(untrack(draftSnapshot))
+const draftChanged = $derived(JSON.stringify(draftSnapshot()) !== JSON.stringify(savedDraft))
+
+beforeNavigate((navigation) => {
+  if (!draftChanged) return
+  navigation.cancel()
+  if (navigation.willUnload || !navigation.to?.url) return
+
+  const { pathname, search, hash } = navigation.to.url
+  const href = `/${pathname.slice(base.length + 1)}${search}${hash}` as const
+  pendingNavigation = navigation.type === 'popstate' ? () => history.go(navigation.delta) : () => goto(resolve(href))
+  leaveConfirmOpen = true
+})
 
 const availableProviders = $derived(providers)
 const targetLanes = $derived(priorityLanes(targets))
@@ -131,7 +172,7 @@ $effect(() => {
   if (!initialized && providers.length > 0) {
     initialized = true
     for (const target of targets) {
-      if (target.providerId) void loadInventory(target)
+      if (target.providerId) void loadInventory(target, true)
     }
   }
 })
@@ -147,7 +188,7 @@ function selectedSummary(target: RouteTargetForm): ProviderModelSummary | undefi
   return target.inventory.find((item) => item.id === target.model)
 }
 
-async function loadInventory(target: RouteTargetForm): Promise<void> {
+async function loadInventory(target: RouteTargetForm, initializeDraft = false): Promise<void> {
   if (!target.providerId) return
   target.loading = true
   target.validationError = ''
@@ -156,7 +197,11 @@ async function loadInventory(target: RouteTargetForm): Promise<void> {
     if (target.model) {
       const summary = selectedSummary(target)
       target.custom = !summary
-      if (summary) await loadCapabilities(target, !target.persisted)
+      if (summary) {
+        await loadCapabilities(target, !target.persisted)
+        // 初次加载的映射不是表单编辑；只推进该字段基线，保留加载期间的其他草稿。
+        if (initializeDraft && !target.persisted) acceptImmediateThinkingMap(target, target.thinkingLevelMap)
+      }
     }
   } catch (error) {
     target.inventory = []
@@ -268,6 +313,34 @@ function removeDisabledTarget(target: RouteTargetForm): void {
   if (target.enabled) return
   const index = targets.findIndex((candidate) => candidate.key === target.key)
   if (index >= 0) removeRouteTarget(targets, index)
+}
+
+function acceptImmediateThinkingMap(target: RouteTargetForm, thinkingLevelMap: ThinkingLevelMapping[]): void {
+  const nextMap = thinkingLevelMap.map((row) => ({ ...row, control: { ...row.control } }))
+  target.thinkingLevelMap = nextMap
+  const currentTarget = targets.find((candidate) => candidate.key === target.key)
+  if (currentTarget) currentTarget.thinkingLevelMap = nextMap
+  savedDraft = {
+    ...savedDraft,
+    targets: savedDraft.targets.map((candidate) =>
+      candidate.key === target.key ? { ...candidate, thinkingLevelMap: nextMap } : candidate,
+    ),
+  }
+}
+
+async function discardDraftAndLeave(): Promise<void> {
+  const navigate = pendingNavigation
+  pendingNavigation = undefined
+  leaveConfirmOpen = false
+  if (!navigate) return
+
+  savedDraft = draftSnapshot()
+  await tick()
+  await navigate()
+}
+
+function keepEditing(): void {
+  pendingNavigation = undefined
 }
 
 function targetIndex(target: RouteTargetForm): number {
@@ -389,8 +462,10 @@ async function resetThinkingRow(target: RouteTargetForm, level: ThinkingLevel): 
   target.validationError = ''
   try {
     const updated = await admin.models.resetThinkingMapping(initialModel.model_id, target.id, level)
-    target.thinkingLevelMap =
-      updated.targets.find((candidate) => candidate.id === target.id)?.thinking_level_map ?? target.thinkingLevelMap
+    acceptImmediateThinkingMap(
+      target,
+      updated.targets.find((candidate) => candidate.id === target.id)?.thinking_level_map ?? target.thinkingLevelMap,
+    )
   } catch (error) {
     target.validationError = localizeBackendErrorMessage(error)
   }
@@ -409,8 +484,10 @@ async function regenerateThinkingMap(): Promise<void> {
   target.validationError = ''
   try {
     const updated = await admin.models.regenerateThinkingMap(initialModel.model_id, target.id)
-    target.thinkingLevelMap =
-      updated.targets.find((candidate) => candidate.id === target.id)?.thinking_level_map ?? target.thinkingLevelMap
+    acceptImmediateThinkingMap(
+      target,
+      updated.targets.find((candidate) => candidate.id === target.id)?.thinking_level_map ?? target.thinkingLevelMap,
+    )
   } catch (error) {
     target.validationError = localizeBackendErrorMessage(error)
   } finally {
@@ -469,6 +546,8 @@ async function saveModel(): Promise<void> {
         } catch {
           await queryClient.invalidateQueries({ queryKey: ['models'] })
           toast.error(m.model_editor_model_was_added_but_not_disabled_review_status())
+          savedDraft = draftSnapshot()
+          await tick()
           await goto(resolve('/models/[id]', { id: created.model_id }))
           return
         }
@@ -479,6 +558,8 @@ async function saveModel(): Promise<void> {
       queryClient.invalidateQueries({ queryKey: ['api-keys'] }),
       queryClient.invalidateQueries({ queryKey: ['providers'] }),
     ])
+    savedDraft = draftSnapshot()
+    await tick()
     toast.success(m.model_editor_model_saved())
     onSaved?.()
     if (!onSaved) await goto(resolve('/models'))
@@ -1131,6 +1212,21 @@ async function saveModel(): Promise<void> {
       <AlertDialog.Cancel onclick={() => (regenerateTarget = undefined)}>{m.common_cancel()}</AlertDialog.Cancel>
       <AlertDialog.Action onclick={() => void regenerateThinkingMap()}>
         {m.model_editor_thinking_regenerate()}
+      </AlertDialog.Action>
+    </AlertDialog.Footer>
+  </AlertDialog.Content>
+</AlertDialog.Root>
+
+<AlertDialog.Root bind:open={leaveConfirmOpen}>
+  <AlertDialog.Content>
+    <AlertDialog.Header>
+      <AlertDialog.Title>{m.model_editor_discard_unsaved_changes()}</AlertDialog.Title>
+      <AlertDialog.Description>{m.model_editor_unsaved_changes_warning()}</AlertDialog.Description>
+    </AlertDialog.Header>
+    <AlertDialog.Footer>
+      <AlertDialog.Cancel onclick={keepEditing}>{m.model_editor_keep_editing()}</AlertDialog.Cancel>
+      <AlertDialog.Action variant="destructive" onclick={() => void discardDraftAndLeave()}>
+        {m.model_editor_discard_changes()}
       </AlertDialog.Action>
     </AlertDialog.Footer>
   </AlertDialog.Content>

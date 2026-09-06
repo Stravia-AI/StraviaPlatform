@@ -1,6 +1,6 @@
 import * as m from '$lib/paraglide/messages.js'
 import { effectiveModelDisplayName } from '$lib/logical-model'
-import type { Route, ThinkingLevel } from '$lib/types'
+import type { ApiKey, Route, ThinkingLevel } from '$lib/types'
 
 export type CodeLanguage = 'python' | 'typescript' | 'curl'
 export type GatewayProtocol = 'openai-compatible' | 'open-responses' | 'anthropic-messages' | 'google-gemini'
@@ -101,6 +101,19 @@ export function defineClientModel(model: Route): ClientModelDefinition {
 
 export function apiKeyAllowsModel(modelIds: readonly string[], modelId: string): boolean {
   return modelIds.length === 0 || modelIds.includes(modelId)
+}
+
+export function eligibleConnectKeys(keys: readonly ApiKey[], models: readonly Route[]): ApiKey[] {
+  const now = Date.now()
+  return keys.filter((key) => {
+    if (!key.is_enabled) return false
+    if (key.expires_at) {
+      // PostgreSQL 的管理面时间可能不带时区；与网关一样按 UTC 解释。
+      const expiry = key.expires_at.includes('T') ? key.expires_at : `${key.expires_at.replace(' ', 'T')}Z`
+      if (!(Date.parse(expiry) > now)) return false
+    }
+    return models.some((model) => model.is_enabled && apiKeyAllowsModel(key.model_ids, model.id))
+  })
 }
 
 export function maskApiKey(key: string): string {

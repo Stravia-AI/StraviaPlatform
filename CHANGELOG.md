@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Changed
+
+- The WebUI now links service connection, visible model inventory actions, and client setup through lightweight task guidance, reuses eligible API Keys, and preserves selections when returning from resource management.
+- Model lists distinguish display names, client Model IDs, enabled state, and associated services; modified model drafts now warn before navigation without changing priority lanes or immediately applied destination settings.
+- Client setup distinguishes copied and written configuration from verified connections, and credential guidance no longer claims editable secrets are shown only once.
+
 ## [0.1.6] - 2026-09-05
 
 ### Added

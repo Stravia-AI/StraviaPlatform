@@ -1,5 +1,8 @@
 import { createServer } from 'node:net'
+import { execFileSync } from 'node:child_process'
 import type { AddressInfo } from 'node:net'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { basename, isAbsolute, join, relative, resolve } from 'node:path'
 
 import { $, browser, expect } from '@wdio/globals'
 
@@ -11,6 +14,44 @@ interface DesktopPortState {
 
 interface DesktopUpdateState {
   phase: 'idle' | 'downloading' | 'downloaded' | 'installing' | 'error'
+}
+
+interface CreatedResource {
+  id: string
+}
+
+interface CreatedRoute extends CreatedResource {
+  model_id: string
+}
+
+async function adminRequest(serverPort: number, path: string, init?: RequestInit): Promise<unknown> {
+  const response = await fetch(`http://127.0.0.1:${serverPort}/api/v1${path}`, {
+    ...init,
+    headers: init?.body ? { 'content-type': 'application/json' } : undefined,
+  })
+  const text = await response.text()
+  if (!response.ok) throw new Error(`${init?.method ?? 'GET'} ${path} failed (${response.status}): ${text}`)
+  if (!text) return undefined
+  const payload: unknown = JSON.parse(text)
+  if (typeof payload !== 'object' || payload === null) {
+    throw new Error(`${init?.method ?? 'GET'} ${path} returned an invalid response`)
+  }
+  return 'data' in payload ? payload.data : undefined
+}
+
+function createdResource(value: unknown, label: string): CreatedResource {
+  if (typeof value !== 'object' || value === null || !('id' in value) || typeof value.id !== 'string') {
+    throw new Error(`${label} response did not include an id`)
+  }
+  return { id: value.id }
+}
+
+function createdRoute(value: unknown): CreatedRoute {
+  const resource = createdResource(value, 'Route')
+  if (typeof value !== 'object' || value === null || !('model_id' in value) || typeof value.model_id !== 'string') {
+    throw new Error('Route response did not include a model_id')
+  }
+  return { ...resource, model_id: value.model_id }
 }
 
 async function unusedPort(): Promise<number> {
@@ -55,7 +96,7 @@ describe('Stravia desktop smoke', () => {
       await expect($('//h2[normalize-space()="Desktop port setting unavailable"]')).toBeDisplayed()
       await $('a=Open Desktop Settings').click()
     } else {
-      await browser.execute(() => setTimeout(() => window.location.assign('/settings#desktop'), 0))
+      await $('a[href="/settings"]').click()
     }
 
     await expect($('//h2[normalize-space()="Local access"]')).toBeDisplayed()
@@ -132,5 +173,160 @@ describe('Stravia desktop smoke', () => {
       { timeout: 10_000, timeoutMsg: 'desktop updater did not enter the installing state' },
     )
     await expect($('p=Installing Stravia 9.9.9…')).not.toBeDisplayed()
+  })
+
+  it('writes Codex global configuration incrementally from the actual Connect page', async () => {
+    const runRoot = process.env.STRAVIA_DESKTOP_E2E_RUN_ROOT
+    const codexHome = process.env.CODEX_HOME
+    if (!runRoot || !codexHome) throw new Error('Desktop smoke isolation directories were not configured')
+    const relativeCodexHome = relative(resolve(runRoot), resolve(codexHome))
+    if (
+      !relativeCodexHome ||
+      isAbsolute(relativeCodexHome) ||
+      relativeCodexHome.startsWith('..') ||
+      basename(runRoot).startsWith('stravia-desktop-e2e-') === false
+    ) {
+      throw new Error(`Refusing to run Connect Apply outside the isolated desktop smoke directory: ${codexHome}`)
+    }
+
+    await mkdir(codexHome, { recursive: true })
+    const configPath = join(codexHome, 'config.toml')
+    const catalogPath = join(codexHome, 'stravia-models.json')
+    await writeFile(
+      configPath,
+      [
+        'model = "user-current-model"',
+        'approval_policy = "never"',
+        '',
+        '[model_providers.existing]',
+        'name = "Existing provider"',
+        'base_url = "https://existing.invalid/v1"',
+        '',
+        '[profiles.personal]',
+        'model = "profile-current-model"',
+        '',
+      ].join('\n'),
+      'utf8',
+    )
+
+    const serverPort = (await browser.tauri.execute(({ core }) => core.invoke('get_server_port'))) as number
+    const fixtureSuffix = basename(runRoot).slice('stravia-desktop-e2e-'.length)
+    const modelId = `desktop-smoke-${fixtureSuffix}`
+    const keyName = `Desktop smoke key ${fixtureSuffix}`
+    let provider: CreatedResource | undefined
+    let route: CreatedRoute | undefined
+    let apiKey: CreatedResource | undefined
+    const failures: unknown[] = []
+
+    try {
+      provider = createdResource(
+        await adminRequest(serverPort, '/providers', {
+          method: 'POST',
+          body: JSON.stringify({
+            name: `Desktop smoke provider ${fixtureSuffix}`,
+            source: { type: 'custom', protocol: 'open-responses', base_url: 'https://desktop-smoke.invalid' },
+            credential: { type: 'none' },
+            use_proxy: false,
+          }),
+        }),
+        'Provider',
+      )
+      await adminRequest(serverPort, `/providers/${provider.id}/models`, {
+        method: 'POST',
+        body: JSON.stringify({ model_id: modelId, metadata: { id: modelId, name: 'Desktop Smoke Model' } }),
+      })
+      route = createdRoute(
+        await adminRequest(serverPort, '/models/bind', {
+          method: 'POST',
+          body: JSON.stringify({ provider_id: provider.id, provider_model_id: modelId }),
+        }),
+      )
+      apiKey = createdResource(
+        await adminRequest(serverPort, '/api-keys', {
+          method: 'POST',
+          body: JSON.stringify({ key: `sk-desktop-smoke-${fixtureSuffix}`, name: keyName, model_ids: [route.id] }),
+        }),
+        'API Key',
+      )
+
+      // 管理 API 在页面外准备夹具，重新加载以免复用前一个 smoke 的配置查询缓存。
+      await browser.refresh()
+      await browser.tauri.switchWindow('main')
+      await $('a[href="/connect"]').click()
+      await expect($('//h1[normalize-space()="Connect clients"]')).toBeDisplayed()
+      // WebDriver 桥的合成 click 不产生 Select 所需的 pointer 事件，使用其键盘交互。
+      await $('#cli-key').click()
+      await browser.keys('ArrowDown')
+      await expect($(`//*[@role="option" and contains(normalize-space(), "${keyName}")]`)).toBeDisplayed()
+      await browser.keys(keyName)
+      await browser.keys('Enter')
+      await expect($('#cli-key')).toHaveText(expect.stringContaining(keyName))
+
+      const writeConfiguration = await $('button=Write configuration')
+      const copyConfiguration = await $('button=Copy')
+      await expect(writeConfiguration).toBeDisplayed()
+      await expect(writeConfiguration).toBeEnabled()
+      await expect(copyConfiguration).toBeDisplayed()
+      await expect(copyConfiguration).toBeEnabled()
+      const incrementalPreview = await $('pre.route-code-plane')
+      await expect(incrementalPreview).toBeDisplayed()
+      await expect(incrementalPreview).toHaveText(expect.stringContaining('model_provider = "stravia"'))
+      await expect(incrementalPreview).not.toHaveText(expect.stringContaining('user-current-model'))
+      await expect(incrementalPreview).not.toHaveText(expect.stringContaining('approval_policy'))
+
+      // 原生剪贴板拒绝未聚焦的文档。
+      await browser.execute(() => window.focus())
+      await copyConfiguration.click()
+      await expect($('//*[@data-sonner-toast and contains(., "Copied to clipboard")]')).toBeDisplayed()
+
+      await writeConfiguration.click()
+      await expect($('//*[@data-sonner-toast and contains(., "Configuration written for Codex")]')).toBeDisplayed()
+
+      // WDIO 运行于 Node，借用已有 Bun 解析 TOML，不固定序列化器的引号格式。
+      const writtenConfig: unknown = JSON.parse(
+        execFileSync('bun', ['-e', 'process.stdout.write(JSON.stringify(Bun.TOML.parse(await Bun.stdin.text())))'], {
+          input: await readFile(configPath, 'utf8'),
+          encoding: 'utf8',
+        }),
+      )
+      expect(writtenConfig).toMatchObject({
+        model: 'user-current-model',
+        approval_policy: 'never',
+        model_provider: 'stravia',
+        model_catalog_json: catalogPath,
+        model_providers: {
+          existing: { name: 'Existing provider', base_url: 'https://existing.invalid/v1' },
+          stravia: expect.any(Object),
+        },
+        profiles: { personal: { model: 'profile-current-model' } },
+      })
+
+      const catalogPayload: unknown = JSON.parse(await readFile(catalogPath, 'utf8'))
+      if (typeof catalogPayload !== 'object' || catalogPayload === null || !('models' in catalogPayload)) {
+        throw new Error('Codex model catalog did not contain a models collection')
+      }
+      if (!Array.isArray(catalogPayload.models)) throw new Error('Codex model catalog models value was not an array')
+      const writtenModel = catalogPayload.models.find(
+        (candidate) =>
+          typeof candidate === 'object' && candidate !== null && 'slug' in candidate && candidate.slug === modelId,
+      )
+      expect(writtenModel).toBeDefined()
+    } catch (error) {
+      failures.push(error)
+    }
+    const resources = [
+      apiKey && `/api-keys/${apiKey.id}`,
+      route && `/models/${encodeURIComponent(route.model_id)}`,
+      provider && `/providers/${provider.id}`,
+    ].filter((path): path is string => Boolean(path))
+    for (const path of resources) {
+      try {
+        await adminRequest(serverPort, path, { method: 'DELETE' })
+      } catch (error) {
+        failures.push(error)
+      }
+    }
+    if (failures.length === 1) throw failures[0]
+    if (failures.length > 1) throw new AggregateError(failures, 'Desktop Connect smoke and fixture cleanup failed')
   })
 })

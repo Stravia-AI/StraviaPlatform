@@ -77,7 +77,9 @@ Codex Provider Model 同步使用当前上游客户端契约，因此同步后�
 
 WebUI 为每种资源保留唯一编辑表面。添加或编辑逻辑 Model 时，Model ID 组合框可以按名称或 ID 搜索 Canonical Model，并在目录不可用时继续接受自定义 ID；选择模板会复制其展示名称，两个字段都可继续编辑。手动 Provider Model 仍可搜索 Canonical Model 模板；选择不会创建 Backend，也不会保存隐藏 binding。新 Provider 保存后会进入详情页并开始同步 Provider Model；详情视图分别管理连接设置、持久化 Provider Model 清单和 Route 引用。Provider Model metadata 在独立抽屉中保存，Selection Policy 则立即生效，并且只控制新 Target 候选的 Effective Availability。Provider Model 变为不可用不会改写已有 Route Target。管理员可以从精确 Provider Catalog Entry 显式 re-import 已发现的 Provider Model；普通同步不会覆盖本地 metadata。
 
-接入客户端页面会根据所选 API 密钥有权使用的 Route 生成 Stravia provider 增量补丁。Stravia Desktop 可把补丁应用到 Connect Client 全局配置并保留无关设置；独立 server 只提供复制。Apply 不选择当前/默认模型，也不写入融合 provider 与 model 的键。Claude Code 是唯一例外：必须选择并合并默认、Haiku、Sonnet 和 Opus 四套模型映射，但不会改动 `effortLevel` 或 `autoCompactWindow`。
+概览根据已加载的配置推荐一个下一步操作，不以请求记录判断接入是否完成。连接模型服务后，可搜索清单并沿用上游 ID 添加所需模型；Model ID 精确相同时，会把该服务加入已有模型而非重复创建。添加动作始终可见，成功后可选择接入客户端，也可留在清单继续添加。已配置与已启用数量只描述保存的设置，不代表上游连接已经验证成功。
+
+接入客户端页面会根据所选 API 密钥有权使用的 Route 生成 Stravia provider 增量补丁。默认复用已启用、未过期且有权访问已启用模型的密钥：只有一个候选时自动选中，多个候选时由用户选择。缺少资源时可进入其既有编辑器，通过「继续接入」保留本次页面任务中仍有效的选择，不存储 secret 或流程进度。Stravia Desktop 以写入 Connect Client 全局配置为主操作，并保留复制；独立 server 只提供复制。成功反馈仅确认复制或写入，不声称客户端已连接，接入流程也不会自动发送验证请求。Apply 不选择当前/默认模型，也不写入融合 provider 与 model 的键。Claude Code 是唯一例外：必须选择并合并默认、Haiku、Sonnet 和 Opus 四套模型映射，但不会改动 `effortLevel` 或 `autoCompactWindow`。
 
 Route Builder 使用独立页面。选择 Provider 后会自动加载其可用 Provider Model；如需绑定清单外的 upstream model ID，必须显式进入未经验证的自定义分支。已启用 Target 按优先级从上到下分层，已禁用的备用 Target 保留在右侧坞中；详情弹窗用秒编辑 First Token Timeout 与 Target Cooldown，并编辑 Target Retry Budget 和 Thinking Level Map，不暴露 Priority 整数。Route 可选择同层 Target 使用 Traffic Equalization 或 Latency Preference。删除 Provider 时会在同一事务内移除其 Target、删除由此变空的 Route，并保留仍有其他 Target 的 Route。
 

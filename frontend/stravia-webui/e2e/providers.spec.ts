@@ -916,7 +916,7 @@ test('Provider detail separates connection, inventory, references, and guarded m
     ),
   ).toBeVisible()
   await expect(page.locator('#provider-model-id')).toHaveValue('openai/gpt-test')
-  await page.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await page.getByRole('button', { name: 'Cancel', exact: true }).press('Enter')
   await page.getByRole('button', { name: 'Show filter menu for Model availability' }).click()
   let availabilityFilterDialog = page.getByRole('dialog', { name: 'Filter by Model availability' })
   await availabilityFilterDialog.locator('[data-slot="select-trigger"][aria-label="Model availability"]').click()
@@ -1098,7 +1098,7 @@ test('dependency previews block referenced Provider deletion and explain Route d
   await page.getByRole('button', { name: 'Cancel' }).click()
 })
 
-test('creating a Provider continues into detail and reports automatic model sync', async ({ page }) => {
+test('creating a Provider opens its saved detail and recovers automatic model sync', async ({ page }) => {
   const createdProvider = {
     id: 'created-provider',
     name: 'Created Provider',
@@ -1117,6 +1117,7 @@ test('creating a Provider continues into detail and reports automatic model sync
   }
   let created = false
   let syncCalls = 0
+  const initialSync = Promise.withResolvers<void>()
   await page.route('**/api/v1/providers**', async (route) => {
     const request = route.request()
     const path = new URL(request.url()).pathname.replace('/api/v1', '')
@@ -1131,9 +1132,11 @@ test('creating a Provider continues into detail and reports automatic model sync
     }
     if (path === `/providers/${createdProvider.id}/models/sync` && request.method() === 'POST') {
       syncCalls += 1
-      const { promise, resolve } = Promise.withResolvers<void>()
-      setTimeout(resolve, 150)
-      await promise
+      if (syncCalls === 1) {
+        await initialSync.promise
+        await route.fulfill({ status: 502, json: { error: 'The model service did not respond. Try syncing again.' } })
+        return
+      }
       await route.fulfill({ json: { data: { added: 3, missing: 1, restored: 2, deprecated: 0 } } })
       return
     }
@@ -1152,7 +1155,16 @@ test('creating a Provider continues into detail and reports automatic model sync
   await page.getByRole('button', { name: 'Connect', exact: true }).click()
 
   await expect(page).toHaveURL(new RegExp(`/providers/${createdProvider.id}\\?view=models`))
+  await expect(page.getByRole('heading', { name: createdProvider.name })).toBeVisible()
   await expect(page.getByText('Syncing models…')).toBeVisible()
+  await expect(page.getByRole('link', { name: 'Use a model' })).toHaveAttribute(
+    'href',
+    `/models/new?provider=${createdProvider.id}`,
+  )
+
+  initialSync.resolve()
+  await expect(page.getByText("Connection saved, but models couldn't be synced")).toBeVisible()
+  await page.getByRole('button', { name: 'Try again' }).click()
   await expect(page.getByText('3 new · 1 no longer offered · 2 available again', { exact: true })).toBeVisible()
   const inventorySummary = page.getByRole('heading', { name: 'Models from this service' }).locator('..')
   const freshness = inventorySummary.locator('p').filter({ hasText: 'Last checked' })
@@ -1160,14 +1172,10 @@ test('creating a Provider continues into detail and reports automatic model sync
   await expect(freshness).toContainText('3 new')
   await expect(freshness).toContainText('1 no longer offered')
   await expect(freshness).toContainText('2 available again')
-  await expect.poll(() => syncCalls).toBe(1)
-  await expect(page.getByRole('link', { name: 'Use a model' })).toHaveAttribute(
-    'href',
-    `/models/new?provider=${createdProvider.id}`,
-  )
+  await expect.poll(() => syncCalls).toBe(2)
 })
 
-test('unused provider models create a matching model or append a destination', async ({ page }) => {
+test('visible provider model actions bind exact IDs and keep inventory open', async ({ page }) => {
   const provider = {
     id: 'provider-primary',
     name: 'Primary Provider',
@@ -1220,6 +1228,27 @@ test('unused provider models create a matching model or append a destination', a
         },
       ],
     },
+    {
+      id: 'route-near-match',
+      model_id: 'GPT-NEW',
+      display_name: null,
+      balance: 'weighted',
+      target_provider: 'provider-secondary',
+      target_model: 'gpt-new',
+      is_enabled: true,
+      created_at: '2026-08-21T00:00:00Z',
+      targets: [
+        {
+          id: 'target-near-match',
+          model_id: 'route-near-match',
+          provider_id: 'provider-secondary',
+          model: 'gpt-new',
+          weight: 100,
+          priority: 1,
+          created_at: '2026-08-21T00:00:00Z',
+        },
+      ],
+    },
   ]
   const bindBodies: Record<string, unknown>[] = []
 
@@ -1263,6 +1292,7 @@ test('unused provider models create a matching model or append a destination', a
               },
             ],
           },
+          ...routes.slice(1),
         ]
         await route.fulfill({ json: { data: routes[0] } })
         return
@@ -1297,19 +1327,18 @@ test('unused provider models create a matching model or append a destination', a
 
   await page.goto(`/providers/${provider.id}?view=models`)
   const existingAction = page.getByRole('button', { name: 'Add gpt-existing to a model' })
-  await expect(existingAction).toBeVisible()
-  await existingAction.hover()
-  await expect(existingAction.getByText('Add destination', { exact: true })).toBeVisible()
+  await expect(existingAction).toHaveText('Add to existing model')
 
   await existingAction.click()
-  await expect(page.getByText('Added this service to model gpt-existing.')).toBeVisible()
+  await expect(page.getByRole('status').getByText('Added this service to model gpt-existing.')).toBeVisible()
+  await expect(page.getByRole('main').getByRole('link', { name: 'Connect clients' })).toBeVisible()
   expect(bindBodies[0]).toEqual({ provider_id: provider.id, provider_model_id: 'gpt-existing' })
 
   const newAction = page.getByRole('button', { name: 'Add gpt-new to a model' })
-  await newAction.hover()
-  await expect(newAction.getByText('Create model', { exact: true })).toBeVisible()
+  await expect(newAction).toHaveText('Add model')
   await newAction.click()
-  await expect(page.getByText('Created model gpt-new.')).toBeVisible()
+  await expect(page.getByRole('status').getByText('Created model gpt-new.')).toBeVisible()
+  await expect(page).toHaveURL(`/providers/${provider.id}?view=models`)
   expect(bindBodies[1]).toEqual({ provider_id: provider.id, provider_model_id: 'gpt-new' })
 
   await page.goto('/models')

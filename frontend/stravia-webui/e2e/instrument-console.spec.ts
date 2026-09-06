@@ -7,22 +7,48 @@ test.beforeEach(async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 })
 })
 
-test('empty Overview hides charts, keeps error rate neutral, and shows the next setup action', async ({ page }) => {
+test('empty Overview offers one service setup action and one no-traffic state', async ({ page }) => {
   await page.goto('/')
 
-  await expect(page.getByRole('heading', { name: 'Overview', exact: true })).toBeVisible()
-  await expect(page.getByRole('navigation', { name: 'Request path' })).toBeVisible()
-  await expect(page.getByText('01', { exact: true })).toBeVisible()
-  await expect(page.getByText('Live · 10s')).toHaveCount(0)
-  await expect(page.getByLabel('Request volume chart')).toHaveCount(0)
-  await expect(page.getByLabel('Latency chart')).toHaveCount(0)
+  const main = page.getByRole('main')
+  await expect(main.getByRole('heading', { name: 'Overview', exact: true })).toBeVisible()
+  await expect(main.getByRole('navigation', { name: 'Request path' })).toBeVisible()
+  const nextAction = main.getByRole('region', { name: 'Connect a model service' })
+  await expect(nextAction.getByRole('link', { name: 'Connect a model service' })).toBeVisible()
+  await expect(nextAction.getByRole('link')).toHaveCount(1)
+  await expect(main.getByRole('heading', { name: 'Most-used models' })).toHaveCount(0)
+  await expect(main.getByRole('heading', { name: 'Model service performance' })).toHaveCount(0)
+})
 
-  const errorRate = page.locator('.route-metric-strip__item').filter({ hasText: 'Error rate' })
-  await expect(errorRate).toContainText('–')
-  await expect(errorRate.locator('.text-destructive')).toHaveCount(0)
-  await expect(page.getByRole('navigation', { name: 'Request path' }).getByText('0 available').first()).toBeVisible()
-  await expect(page.getByRole('link', { name: 'Create API Key' })).toBeVisible()
-  await expect(page.getByRole('link', { name: 'Connect a model service' })).toBeVisible()
+test('configured Overview stays available before the first request and keeps the client shortcut', async ({ page }) => {
+  await stubConnectableConfiguration(page)
+  await page.goto('/')
+
+  const main = page.getByRole('main')
+  await expect(main.getByRole('link', { name: 'Connect clients' })).toBeVisible()
+  await expect(main.getByRole('region', { name: 'Connect a model service' })).toHaveCount(0)
+  await expect(main.getByRole('heading', { name: 'Most-used models' })).toHaveCount(0)
+  await expect(main.getByRole('heading', { name: 'Model service performance' })).toHaveCount(0)
+})
+
+test('Overview does not treat a failed configuration fetch as an empty instance', async ({ page }) => {
+  let providerFetchFails = true
+  await page.route('**/api/v1/providers', async (route) => {
+    if (providerFetchFails) {
+      await route.fulfill({ status: 500, json: { error: 'Configuration fetch failed' } })
+      return
+    }
+    await route.fulfill({ json: { data: [] } })
+  })
+  await page.goto('/')
+
+  const main = page.getByRole('main')
+  await expect(main.getByRole('heading', { name: 'Configuration unavailable' })).toBeVisible()
+  await expect(main.getByRole('region', { name: 'Connect a model service' })).toHaveCount(0)
+
+  providerFetchFails = false
+  await main.getByRole('button', { name: 'Retry' }).click()
+  await expect(main.getByRole('region', { name: 'Connect a model service' })).toBeVisible()
 })
 
 test('Overview with traffic shows request and second-based latency charts', async ({ page }) => {
@@ -79,7 +105,6 @@ test('empty Model services, Models, API Keys, and logs speak the missing depende
   await expect(page.getByRole('link', { name: 'Add model' })).toHaveCount(0)
 
   await page.goto('/api-keys')
-  await expect(page.getByText('Create a client credential, then copy its one-time secret immediately.')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Create first API Key' })).toHaveCount(1)
   await expect(page.getByRole('button', { name: 'Create API Key' })).toHaveCount(0)
 
@@ -91,13 +116,16 @@ test('empty Model services, Models, API Keys, and logs speak the missing depende
   ).toBeVisible()
 })
 
-test('Connect an app lists missing Model and API Key instead of empty dropdowns', async ({ page }) => {
+test('Connect keeps client selection available while exposing missing resource recovery', async ({ page }) => {
   await page.goto('/connect')
 
-  await expect(page.getByRole('link', { name: 'Add a Model' })).toBeVisible()
-  await expect(page.getByRole('link', { name: 'Create an API Key' })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Model' })).toHaveCount(0)
-  await expect(page.getByRole('button', { name: 'API Key' })).toHaveCount(0)
+  await expect(page.locator('#cli-tool')).toBeEnabled()
+  await expect(page.locator('#cli-key')).toBeDisabled()
+  await expect(page.getByRole('button', { name: 'Go to models', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Create an API Key', exact: true }).click()
+  await expect(page.getByRole('heading', { name: 'Create API Key', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await expect(page.getByRole('link', { name: 'Continue setup', exact: true })).toBeVisible()
 })
 
 test('API Key editor keeps compact controls and help inside the editor', async ({ page }) => {
@@ -123,7 +151,9 @@ test('API Key editor keeps compact controls and help inside the editor', async (
   expect(Math.abs((concurrencyBox?.y ?? 0) - (expiresAtBox?.y ?? 0))).toBeLessThan(1)
 
   await expect(
-    page.getByText('Leave empty for unlimited. Each Proxy request and MCP tools/call uses one slot; nested work reuses it.'),
+    page.getByText(
+      'Leave empty for unlimited. Each Proxy request and MCP tools/call uses one slot; nested work reuses it.',
+    ),
   ).toBeHidden()
   const help = overlay
     .getByRole('group')
@@ -206,6 +236,84 @@ test('a Provider without a catalog logo uses a steel initial instead of a black 
   await expect(mark).toHaveAttribute('data-fallback', 'true')
   await expect(mark.locator('img')).toHaveCount(0)
 })
+
+async function stubConnectableConfiguration(page: Page): Promise<void> {
+  await page.route('**/api/v1/providers', async (route) => {
+    await route.fulfill({
+      json: {
+        data: [
+          {
+            id: 'provider-openai',
+            name: 'OpenAI',
+            protocol: 'openai-compatible',
+            base_url: 'https://api.openai.example/v1',
+            use_proxy: false,
+            is_enabled: true,
+            created_at: '2026-01-01T00:00:00Z',
+            updated_at: '2026-01-01T00:00:00Z',
+          },
+        ],
+      },
+    })
+  })
+  await page.route('**/api/v1/models', async (route) => {
+    await route.fulfill({
+      json: {
+        data: [
+          {
+            id: 'gpt-5',
+            model_id: 'gpt-5',
+            display_name: 'GPT-5',
+            balance: 'traffic_equalization',
+            target_provider: 'provider-openai',
+            target_model: 'gpt-5',
+            is_enabled: true,
+            created_at: '2026-01-01T00:00:00Z',
+            supported_thinking_levels: [],
+            targets: [
+              {
+                id: 'target-gpt',
+                model_id: 'gpt-5',
+                provider_id: 'provider-openai',
+                model: 'gpt-5',
+                enabled: true,
+                priority: 0,
+                first_token_timeout_ms: 5_000,
+                target_retry_budget: 0,
+                target_cooldown_ms: 0,
+                created_at: '2026-01-01T00:00:00Z',
+                thinking_level_map: [],
+              },
+            ],
+          },
+        ],
+      },
+    })
+  })
+  await page.route('**/api/v1/api-keys', async (route) => {
+    await route.fulfill({
+      json: {
+        data: [
+          {
+            id: 'key-client',
+            key: 'sk-overview-client',
+            name: 'Client key',
+            concurrency_limit: null,
+            is_enabled: true,
+            mcp_access_enabled: false,
+            transparent_injection_enabled: false,
+            inject_web_search: false,
+            inject_media_understanding: false,
+            expires_at: null,
+            created_at: '2026-01-01T00:00:00Z',
+            updated_at: '2026-01-01T00:00:00Z',
+            model_ids: ['gpt-5'],
+          },
+        ],
+      },
+    })
+  })
+}
 
 async function stubTraffic(page: Page, counts: { requests: number; errors: number }): Promise<void> {
   await page.route('**/api/v1/stats/overview**', async (route) => {
