@@ -22,6 +22,8 @@ import {
   type ProviderModelPriceForm,
 } from './provider-model-form.js'
 import { Button } from '$lib/components/ui/button'
+import * as Alert from '$lib/components/ui/alert'
+import * as Collapsible from '$lib/components/ui/collapsible'
 import * as Field from '$lib/components/ui/field'
 import { Input } from '$lib/components/ui/input'
 import * as Select from '$lib/components/ui/select'
@@ -82,6 +84,7 @@ let metadata = $state<ProviderModelMetadata>({})
 let cost = $state<ProviderModelCostForm>(emptyProviderModelCost())
 let structuralErrors = $state<string[]>([])
 let advancedOpen = $state(false)
+let extensionsOpen = $state(false)
 let errorAlert = $state<HTMLDivElement>()
 let initialFingerprint = $state('')
 let editorRoot = $state<HTMLDivElement>()
@@ -196,9 +199,15 @@ function reasoningOptionForType(type: ProviderModelReasoningOption['type']): Pro
 }
 
 function changeReasoningType(index: number, type: ProviderModelReasoningOption['type']): void {
-  if (hasReasoningOption(type, index)) return
-  metadata.reasoning_options ??= []
-  metadata.reasoning_options[index] = reasoningOptionForType(type)
+  const option = metadata.reasoning_options?.[index]
+  if (!option || hasReasoningOption(type, index)) return
+  // 保持行身份与 Select 焦点，同时删除旧变体的字段。
+  if (option.type === 'effort') Reflect.deleteProperty(option, 'values')
+  else if (option.type === 'budget_tokens') {
+    Reflect.deleteProperty(option, 'min')
+    Reflect.deleteProperty(option, 'max')
+  }
+  Object.assign(option, reasoningOptionForType(type))
 }
 
 function effortValueKey(value: string | null): string {
@@ -452,14 +461,14 @@ export function submit(): void {
     </div>
   </section>
 
-  <details class="rounded-xl border bg-muted/10" bind:open={advancedOpen}>
-    <summary class="min-h-12 cursor-pointer content-center px-4 text-sm font-semibold">
+  <Collapsible.Root class="rounded-xl border" bind:open={advancedOpen}>
+    <Collapsible.Trigger type="button" class="min-h-12 w-full px-4 text-left">
       {m.provider_model_editor_advanced_model_settings()}
       <span class="ml-2 font-normal text-muted-foreground">
         {m.provider_model_editor_advanced_fields_help()}
       </span>
-    </summary>
-    <div class="flex flex-col gap-5 border-t p-4">
+    </Collapsible.Trigger>
+    <Collapsible.Content class="flex flex-col gap-5 border-t p-4">
       <section class="flex flex-col gap-3 border-t pt-4">
         <div class="flex flex-wrap items-center justify-between gap-3">
           <h4 class="text-sm font-semibold">{m.provider_model_editor_reasoning_behavior()}</h4>
@@ -469,12 +478,14 @@ export function submit(): void {
               type="single"
               value={interleavedMode()}
               onValueChange={(value) => value && setInterleavedMode(value as ReturnType<typeof interleavedMode>)}>
-              <Select.Trigger class="w-32">{interleavedMode()}</Select.Trigger>
+              <Select.Trigger class="w-32" aria-label={m.common_interleaved()}>{interleavedMode()}</Select.Trigger>
               <Select.Content>
-                <Select.Item value="unset">{m.provider_model_editor_unspecified()}</Select.Item>
-                <Select.Item value="enabled">{m.common_enable_action()}</Select.Item>
-                <Select.Item value="disabled">{m.common_disable_action()}</Select.Item>
-                <Select.Item value="field">{m.provider_model_editor_request_field()}</Select.Item>
+                <Select.Group>
+                  <Select.Item value="unset">{m.provider_model_editor_unspecified()}</Select.Item>
+                  <Select.Item value="enabled">{m.common_enable_action()}</Select.Item>
+                  <Select.Item value="disabled">{m.common_disable_action()}</Select.Item>
+                  <Select.Item value="field">{m.provider_model_editor_request_field()}</Select.Item>
+                </Select.Group>
               </Select.Content>
             </Select.Root>
           </div>
@@ -491,14 +502,15 @@ export function submit(): void {
         {/if}
         {#if hasField('reasoning_options') && metadata.reasoning_options}
           <div class="flex flex-col gap-2">
-            {#each metadata.reasoning_options as option, index (index)}
+            {#each metadata.reasoning_options as option, index (option)}
               <div class="grid gap-2 rounded-lg border p-3 sm:grid-cols-[10rem_1fr_auto]">
                 <Select.Root
                   type="single"
                   value={option.type}
                   onValueChange={(value) =>
                     value && changeReasoningType(index, value as ProviderModelReasoningOption['type'])}>
-                  <Select.Trigger>{option.type}</Select.Trigger>
+                  <Select.Trigger aria-label={m.provider_model_editor_reasoning_behavior()}
+                    >{option.type}</Select.Trigger>
                   <Select.Content>
                     <Select.Group>
                       {#each reasoningOptionTypes as type (type)}
@@ -514,7 +526,10 @@ export function submit(): void {
                     type="multiple"
                     value={option.values.map(effortValueKey)}
                     onValueChange={(values) => setEffortValues(option, values)}>
-                    <Select.Trigger class="w-full min-w-0" data-effort-values-select>
+                    <Select.Trigger
+                      class="w-full min-w-0"
+                      aria-label={m.provider_model_editor_reasoning_options()}
+                      data-effort-values-select>
                       <span class="truncate">{option.values.map(effortValueLabel).join(', ')}</span>
                     </Select.Trigger>
                     <Select.Content>
@@ -625,7 +640,7 @@ export function submit(): void {
               {/each}
             </div>
           </div>
-          {#each cost.tiers as tier, index (index)}
+          {#each cost.tiers as tier, index (tier)}
             <div class="rounded-lg border p-3">
               <div class="mb-3 flex items-end justify-between gap-3">
                 <Field.Field class="max-w-64">
@@ -670,38 +685,38 @@ export function submit(): void {
       </section>
 
       {#if extensionEntries.length > 0}
-        <details class="rounded-lg border bg-muted/20 p-3">
-          <summary class="cursor-pointer text-sm font-medium"
-            >{m.provider_model_editor_extension_fields_read_only()} · {extensionEntries.length}</summary>
-          <pre
-            class="mt-3 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-md bg-muted p-3 font-technical text-xs">{JSON.stringify(
-              detail.extensions,
-              null,
-              2,
-            )}</pre>
-        </details>
+        <Collapsible.Root class="rounded-lg border p-3" bind:open={extensionsOpen}>
+          <Collapsible.Trigger type="button" class="w-full text-left"
+            >{m.provider_model_editor_extension_fields_read_only()} · {extensionEntries.length}</Collapsible.Trigger>
+          <Collapsible.Content>
+            <pre
+              class="mt-3 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-md bg-muted p-3 font-technical text-xs">{JSON.stringify(
+                detail.extensions,
+                null,
+                2,
+              )}</pre>
+          </Collapsible.Content>
+        </Collapsible.Root>
       {/if}
-    </div>
-  </details>
+    </Collapsible.Content>
+  </Collapsible.Root>
 
   {#if semanticWarnings.length > 0}
-    <div class="rounded-lg border border-warning/40 bg-warning/5 p-3 text-sm text-warning">
-      <p class="font-medium">{m.provider_model_editor_review_saving()}</p>
-      <ul class="mt-1 list-disc pl-5">
-        {#each semanticWarnings as warning (warning)}<li>{warning}</li>{/each}
-      </ul>
-    </div>
+    <Alert.Root variant="warning" role="status">
+      <Alert.Title>{m.provider_model_editor_review_saving()}</Alert.Title>
+      <Alert.Description
+        ><ul class="list-disc pl-5">
+          {#each semanticWarnings as warning (warning)}<li>{warning}</li>{/each}
+        </ul></Alert.Description>
+    </Alert.Root>
   {/if}
   {#if structuralErrors.length > 0}
-    <div
-      bind:this={errorAlert}
-      tabindex="-1"
-      class="rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive"
-      role="alert">
-      <p class="font-medium">{m.provider_model_editor_cannot_save()}</p>
-      <ul class="mt-1 list-disc pl-5">
-        {#each structuralErrors as error (error)}<li>{error}</li>{/each}
-      </ul>
-    </div>
+    <Alert.Root bind:ref={errorAlert} tabindex={-1} variant="destructive" role="alert">
+      <Alert.Title>{m.provider_model_editor_cannot_save()}</Alert.Title>
+      <Alert.Description
+        ><ul class="list-disc pl-5">
+          {#each structuralErrors as error (error)}<li>{error}</li>{/each}
+        </ul></Alert.Description>
+    </Alert.Root>
   {/if}
 </div>

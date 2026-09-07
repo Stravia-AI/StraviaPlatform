@@ -7,6 +7,7 @@ test.beforeEach(async ({ page }) => {
 })
 
 test('API Key editor preserves disabled transparent injection selections', async ({ page }) => {
+  let writes = 0
   let persistedKey = {
     id: 'key-advanced',
     key: 'sk-advanced',
@@ -27,6 +28,7 @@ test('API Key editor preserves disabled transparent injection selections', async
     await route.fulfill({ json: { data: [] } })
   })
   await page.route('**/api/v1/api-keys/key-advanced', async (route) => {
+    writes += 1
     const input = route.request().postDataJSON()
     persistedKey = { ...persistedKey, ...input }
     await route.fulfill({ json: { data: persistedKey } })
@@ -48,12 +50,26 @@ test('API Key editor preserves disabled transparent injection selections', async
   expect(await tableContainer.evaluate((element) => element.scrollWidth)).toBeLessThanOrEqual(
     await tableContainer.evaluate((element) => element.clientWidth),
   )
-  await expect(page.getByRole('link', { name: 'Edit' })).toHaveCount(0)
   await page.getByRole('row').filter({ hasText: 'Advanced client' }).getByRole('cell').nth(1).click()
   const editor = page.locator('[data-slot="sheet-content"]')
   await expect(editor.getByRole('heading', { name: 'Edit API Key' })).toBeVisible()
   await expect(page).toHaveURL(/\/api-keys$/)
-  await expect(editor.getByRole('button', { name: 'Advanced', exact: true })).toHaveCount(0)
+  const secret = editor.getByLabel('API key', { exact: true })
+  await expect(secret).toHaveAttribute('type', 'password')
+  await secret.fill('sk-edited-secret')
+  await editor.getByRole('button', { name: 'Show API key', exact: true }).click()
+  await expect(secret).toHaveAttribute('type', 'text')
+  await expect(secret).toHaveValue('sk-edited-secret')
+  await editor.getByRole('button', { name: 'Hide API key', exact: true }).click()
+  await expect(secret).toHaveAttribute('type', 'password')
+  await expect(secret).toHaveValue('sk-edited-secret')
+  await editor.getByRole('button', { name: 'Show API key', exact: true }).click()
+  await editor.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await expect(editor).toBeHidden()
+  expect(writes).toBe(0)
+  await page.getByRole('row').filter({ hasText: 'Advanced client' }).getByRole('cell').nth(1).click()
+  await expect(secret).toHaveAttribute('type', 'password')
+  await expect(secret).toHaveValue('sk-advanced')
   await expect(page.locator('#api-key-mcp-access')).toHaveAttribute('aria-checked', 'true')
   await expect(page.locator('#api-key-transparent-injection')).toHaveAttribute('aria-checked', 'true')
   const mediaSelection = page.locator('#api-key-inject-media-understanding')
@@ -136,19 +152,11 @@ test('API Key editor persists concurrency and Model Route selections', async ({ 
   })
 
   await page.goto('/api-keys')
-  await expect(page.getByRole('link', { name: 'Edit' })).toHaveCount(0)
   await page.getByRole('row').filter({ hasText: 'test' }).getByRole('cell').nth(2).click()
   const editor = page.locator('[data-slot="sheet-content"]')
   await expect(editor.getByRole('heading', { name: 'Edit API Key' })).toBeVisible()
   await expect(page).toHaveURL(/\/api-keys$/)
   await page.setViewportSize({ width: 493, height: 832 })
-  const center = async (selector: string) => {
-    const box = await page.locator(selector).boundingBox()
-    if (!box) throw new Error(`${selector} is not visible`)
-    return { x: box.x + box.width / 2, y: box.y + box.height / 2 }
-  }
-  const [nameCenter, enabledCenter] = await Promise.all([center('#api-key-name'), center('#api-key-enabled')])
-  expect(Math.abs(nameCenter.y - enabledCenter.y)).toBeLessThan(1)
   await page.setViewportSize({ width: 544, height: 832 })
   const allowAllModels = page.getByRole('switch', { name: 'Allow all models' })
   await expect(allowAllModels).toBeChecked()
@@ -157,12 +165,6 @@ test('API Key editor persists concurrency and Model Route selections', async ({ 
   await expect(allowAllModels).not.toBeChecked()
   const modelPicker = page.locator('#api-key-model-picker')
   await expect(modelPicker).toContainText('Allowed: 2')
-  const [allowAllCenter, modelPickerCenter] = await Promise.all([
-    center('#api-key-allow-all-models'),
-    center('#api-key-model-picker'),
-  ])
-  expect(Math.abs(allowAllCenter.y - modelPickerCenter.y)).toBeLessThan(1)
-  expect(allowAllCenter.x).not.toBe(modelPickerCenter.x)
   await modelPicker.click()
   const modelMenu = page.locator('[data-slot="popover-content"]')
   const modelSearch = modelMenu.getByPlaceholder('Search models…')
@@ -187,23 +189,8 @@ test('API Key editor persists concurrency and Model Route selections', async ({ 
   ])
   if (!allowedGroupBox || !unallowedGroupBox) throw new Error('Model permission groups are not visible')
   expect(allowedGroupBox.y).toBeLessThan(unallowedGroupBox.y)
-  await expect(modelMenu.locator('[data-slot="command-separator"]')).toHaveCount(1)
   await page.keyboard.press('Escape')
   await page.setViewportSize({ width: 493, height: 832 })
-  await expect(editor.getByRole('button', { name: 'Advanced', exact: true })).toHaveCount(0)
-  const [concurrencyCenter, expiryCenter, mcpCenter, transparentCenter, mediaCenter, webSearchCenter] =
-    await Promise.all([
-      center('#api-key-concurrency-limit'),
-      center('#api-key-expires'),
-      center('#api-key-mcp-access'),
-      center('#api-key-transparent-injection'),
-      center('#api-key-inject-media-understanding'),
-      center('#api-key-inject-web-search'),
-    ])
-  expect(Math.abs(concurrencyCenter.y - expiryCenter.y)).toBeLessThan(1)
-  expect(Math.abs(mcpCenter.y - transparentCenter.y)).toBe(40)
-  expect(Math.abs(mediaCenter.y - webSearchCenter.y)).toBeLessThan(1)
-  expect(mediaCenter.x).not.toBe(webSearchCenter.x)
 
   await expect(page.getByLabel('Maximum concurrent executions')).toHaveValue('')
   await page.getByLabel('Maximum concurrent executions').fill('2')

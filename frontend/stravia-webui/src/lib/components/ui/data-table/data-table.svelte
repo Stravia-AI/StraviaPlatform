@@ -42,6 +42,7 @@ import { Checkbox } from '$lib/components/ui/checkbox'
 import * as Empty from '$lib/components/ui/empty'
 import { Input } from '$lib/components/ui/input'
 import * as InputGroup from '$lib/components/ui/input-group'
+import * as Pagination from '$lib/components/ui/pagination'
 import * as Select from '$lib/components/ui/select'
 import { Skeleton } from '$lib/components/ui/skeleton'
 import { Spinner } from '$lib/components/ui/spinner'
@@ -391,10 +392,7 @@ function commitExpanded(next: ExpandedState): void {
 
 const table = createTable({
   features: dataTableFeatures,
-  defaultColumn: {
-    filterFn: 'dataTable',
-    minSize: 0,
-  },
+  defaultColumn: { filterFn: 'dataTable', minSize: 0 },
   get data() {
     return data
   },
@@ -558,26 +556,24 @@ const controlColumnCount = $derived(
 )
 const renderedColumnCount = $derived(visibleLeafColumns.length + controlColumnCount)
 const controlRowSpan = $derived(headerGroups.length + (filterDisplay === 'row' ? 1 : 0))
-const hasConfiguredColumnFilters = $derived(
-  visibleLeafColumns.some((column) => Boolean(column.columnDef.meta?.filter)),
-)
+const hasConfiguredColumnFilters = $derived(visibleLeafColumns.some((column) => Boolean(column.columnDef.meta?.filter)))
 const activeFilterCount = $derived(
   columnFilters.filter((entry) => isFilterValueActive(entry.value)).length + Number(Boolean(globalFilter.trim())),
 )
 const pageCount = $derived(Math.max(1, table.getPageCount()))
-const visiblePageIndexes = $derived.by(() => {
-  const linkCount = Math.min(5, pageCount)
-  const first = Math.min(Math.max(0, pagination.pageIndex - Math.floor(linkCount / 2)), pageCount - linkCount)
-  return Array.from({ length: linkCount }, (_, index) => first + index)
+$effect(() => {
+  if (!paginator || loading) return
+  const lastPageIndex = pageCount - 1
+  if (pagination.pageIndex > lastPageIndex) table.setPageIndex(lastPageIndex)
 })
 const showToolbar = $derived(
   Boolean(
     toolbar ||
-      toolbarEnd ||
-      globalFilterEnabled ||
-      columnToggle ||
-      exportable ||
-      (filterDisplay !== 'none' && hasConfiguredColumnFilters),
+    toolbarEnd ||
+    globalFilterEnabled ||
+    columnToggle ||
+    exportable ||
+    (filterDisplay !== 'none' && hasConfiguredColumnFilters),
   ),
 )
 const headerHeight = $derived(size === 'small' ? 32 : size === 'large' ? 48 : 40)
@@ -588,33 +584,27 @@ const rowRegions = $derived.by(() => {
   const center = table.getCenterRows()
   const bottom = table.getBottomRows()
   return {
-    top: top.map(
-      (row, regionIndex): RenderedRow => ({
-        row,
-        region: 'top',
-        regionIndex,
-        regionCount: top.length,
-        rowIndex: regionIndex,
-      }),
-    ),
-    center: center.map(
-      (row, regionIndex): RenderedRow => ({
-        row,
-        region: 'center',
-        regionIndex,
-        regionCount: center.length,
-        rowIndex: top.length + regionIndex,
-      }),
-    ),
-    bottom: bottom.map(
-      (row, regionIndex): RenderedRow => ({
-        row,
-        region: 'bottom',
-        regionIndex,
-        regionCount: bottom.length,
-        rowIndex: top.length + center.length + regionIndex,
-      }),
-    ),
+    top: top.map((row, regionIndex): RenderedRow => ({
+      row,
+      region: 'top',
+      regionIndex,
+      regionCount: top.length,
+      rowIndex: regionIndex,
+    })),
+    center: center.map((row, regionIndex): RenderedRow => ({
+      row,
+      region: 'center',
+      regionIndex,
+      regionCount: center.length,
+      rowIndex: top.length + regionIndex,
+    })),
+    bottom: bottom.map((row, regionIndex): RenderedRow => ({
+      row,
+      region: 'bottom',
+      regionIndex,
+      regionCount: bottom.length,
+      rowIndex: top.length + center.length + regionIndex,
+    })),
   }
 })
 const renderedRows = $derived([...rowRegions.top, ...rowRegions.center, ...rowRegions.bottom])
@@ -801,12 +791,7 @@ function updateFilterConstraint(
   update: Partial<{ value: unknown; matchMode: DataTableFilterMatchMode }>,
 ): void {
   if (!filterDraft?.constraints[index]) return
-  filterDraft = {
-    ...filterDraft,
-    constraints: filterDraft.constraints.map((constraint, constraintIndex) =>
-      constraintIndex === index ? { ...constraint, ...update } : constraint,
-    ),
-  }
+  Object.assign(filterDraft.constraints[index], update)
 }
 
 function updateDraftNumberFilter(index: number, edge: 0 | 1, raw: string): void {
@@ -824,10 +809,7 @@ function addFilterConstraint(filter: DataTableColumnFilter): void {
   if (filterDraft.constraints.length >= maximum) return
   filterDraft = {
     ...filterDraft,
-    constraints: [
-      ...filterDraft.constraints,
-      { value: undefined, matchMode: defaultFilterMatchMode(filter) },
-    ],
+    constraints: [...filterDraft.constraints, { value: undefined, matchMode: defaultFilterMatchMode(filter) }],
   }
 }
 
@@ -872,12 +854,7 @@ function selectFilterOptions(column: Column<typeof dataTableFeatures, TData, unk
 }
 
 function cellEditEvent(cell: DataTableCell<TData>): DataTableCellEditEvent<TData> {
-  return {
-    cell,
-    columnId: cell.column.id,
-    row: cell.row,
-    original: cell.row.original,
-  }
+  return { cell, columnId: cell.column.id, row: cell.row, original: cell.row.original }
 }
 
 function startCellEdit(cell: DataTableCell<TData>): void {
@@ -1039,14 +1016,7 @@ function handleViewportScroll(event: Event): void {
 }
 
 export function exportCsv(options: DataTableExportOptions<TData> = {}): void {
-  exportDataTableCsv({
-    table,
-    options,
-    defaultFilename: exportFilename,
-    columnLabel,
-    getExportValue,
-    onExport,
-  })
+  exportDataTableCsv({ table, options, defaultFilename: exportFilename, columnLabel, getExportValue, onExport })
 }
 
 export function getTable(): DataTable<TData> {
@@ -1251,10 +1221,7 @@ $effect(() => {
                 }
               }
             : undefined}>
-          {#if cellEditor &&
-          !cell.getIsGrouped() &&
-          ((editMode === 'cell' && editingCell?.rowId === item.row.id && editingCell.columnId === cell.column.id) ||
-            (editMode === 'row' && editingRows[item.row.id]))}
+          {#if cellEditor && !cell.getIsGrouped() && ((editMode === 'cell' && editingCell?.rowId === item.row.id && editingCell.columnId === cell.column.id) || (editMode === 'row' && editingRows[item.row.id]))}
             {@render cellEditor(
               cell,
               editMode === 'cell' ? () => saveCellEdit(cell) : () => saveRowEdit(item.row),
@@ -1328,7 +1295,7 @@ $effect(() => {
       <Select.Root
         type="single"
         bind:value={() => String(pagination.pageSize), (value) => table.setPageSize(Number(value))}>
-        <Select.Trigger class="h-10 w-20">{pagination.pageSize}</Select.Trigger>
+        <Select.Trigger class="h-10 w-20" aria-label={resolvedLabels.rowsPerPage}>{pagination.pageSize}</Select.Trigger>
         <Select.Content>
           <Select.Group>
             {#each pageSizeOptions as option (option)}
@@ -1341,55 +1308,65 @@ $effect(() => {
     <span class="min-w-24 text-center text-sm text-muted-foreground tabular-nums">
       {resolvedLabels.pageStatus(pagination.pageIndex + 1, pageCount)}
     </span>
-    <nav class="flex items-center gap-1" aria-label={resolvedLabels.pageStatus(pagination.pageIndex + 1, pageCount)}>
-      <Button
-        variant="outline"
-        size="icon"
-        class="size-10"
-        aria-label={resolvedLabels.firstPage}
-        disabled={!table.getCanPreviousPage()}
-        onclick={() => table.firstPage()}>
-        <ArrowLeftToLineIcon />
-      </Button>
-      <Button
-        variant="outline"
-        size="icon"
-        class="size-10"
-        aria-label={resolvedLabels.previousPage}
-        disabled={!table.getCanPreviousPage()}
-        onclick={() => table.previousPage()}>
-        <ChevronLeftIcon />
-      </Button>
-      {#each visiblePageIndexes as pageIndex (pageIndex)}
-        <Button
-          variant={pageIndex === pagination.pageIndex ? 'default' : 'outline'}
-          size="icon"
-          class="size-10 tabular-nums"
-          aria-label={resolvedLabels.pageStatus(pageIndex + 1, pageCount)}
-          aria-current={pageIndex === pagination.pageIndex ? 'page' : undefined}
-          onclick={() => table.setPageIndex(pageIndex)}>
-          {pageIndex + 1}
-        </Button>
-      {/each}
-      <Button
-        variant="outline"
-        size="icon"
-        class="size-10"
-        aria-label={resolvedLabels.nextPage}
-        disabled={!table.getCanNextPage()}
-        onclick={() => table.nextPage()}>
-        <ChevronRightIcon />
-      </Button>
-      <Button
-        variant="outline"
-        size="icon"
-        class="size-10"
-        aria-label={resolvedLabels.lastPage}
-        disabled={!table.getCanNextPage()}
-        onclick={() => table.lastPage()}>
-        <ArrowRightToLineIcon />
-      </Button>
-    </nav>
+    <Pagination.Root
+      class="mx-0 w-auto"
+      count={table.getRowCount()}
+      perPage={pagination.pageSize}
+      bind:page={() => pagination.pageIndex + 1, (page) => table.setPageIndex(page - 1)}
+      aria-label={resolvedLabels.pageStatus(pagination.pageIndex + 1, pageCount)}>
+      {#snippet children({ pages, currentPage })}
+        <Pagination.Content class="flex-wrap">
+          <Pagination.Item>
+            <Button
+              type="button"
+              variant="outline"
+              size="icon"
+              class="size-10"
+              aria-label={resolvedLabels.firstPage}
+              disabled={!table.getCanPreviousPage()}
+              onclick={() => table.firstPage()}>
+              <ArrowLeftToLineIcon />
+            </Button>
+          </Pagination.Item>
+          <Pagination.Item>
+            <Pagination.Previous aria-label={resolvedLabels.previousPage} disabled={!table.getCanPreviousPage()}>
+              <ChevronLeftIcon />
+            </Pagination.Previous>
+          </Pagination.Item>
+          {#each pages as page (page.key)}
+            <Pagination.Item>
+              {#if page.type === 'ellipsis'}
+                <Pagination.Ellipsis />
+              {:else}
+                <Pagination.Link
+                  {page}
+                  isActive={currentPage === page.value}
+                  aria-label={resolvedLabels.pageStatus(page.value, pageCount)}>
+                  {page.value}
+                </Pagination.Link>
+              {/if}
+            </Pagination.Item>
+          {/each}
+          <Pagination.Item>
+            <Pagination.Next aria-label={resolvedLabels.nextPage} disabled={!table.getCanNextPage()}>
+              <ChevronRightIcon />
+            </Pagination.Next>
+          </Pagination.Item>
+          <Pagination.Item>
+            <Button
+              type="button"
+              variant="outline"
+              size="icon"
+              class="size-10"
+              aria-label={resolvedLabels.lastPage}
+              disabled={!table.getCanNextPage()}
+              onclick={() => table.lastPage()}>
+              <ArrowRightToLineIcon />
+            </Button>
+          </Pagination.Item>
+        </Pagination.Content>
+      {/snippet}
+    </Pagination.Root>
   </div>
 {/snippet}
 
@@ -1491,9 +1468,7 @@ $effect(() => {
                   class={cn('w-10', sizeClass('head'), showGridlines && 'border-e')} />
               {/if}
               {#if hasEditControl}
-                <Table.Head
-                  rowspan={controlRowSpan}
-                  class={cn('w-20', sizeClass('head'), showGridlines && 'border-e')}>
+                <Table.Head rowspan={controlRowSpan} class={cn('w-20', sizeClass('head'), showGridlines && 'border-e')}>
                   <span class="sr-only">{resolvedLabels.editRow(0)}</span>
                 </Table.Head>
               {/if}
@@ -1738,9 +1713,7 @@ $effect(() => {
     {/if}
   </div>
 
-  {#if (paginator && (paginatorPosition === 'bottom' || paginatorPosition === 'both')) ||
-    selectionMode === 'multiple' ||
-    footer}
+  {#if (paginator && (paginatorPosition === 'bottom' || paginatorPosition === 'both')) || selectionMode === 'multiple' || footer}
     <div class="flex flex-wrap items-center gap-3" data-slot="data-table-footer">
       {#if selectionMode === 'multiple'}
         <p class="me-auto text-sm text-muted-foreground">

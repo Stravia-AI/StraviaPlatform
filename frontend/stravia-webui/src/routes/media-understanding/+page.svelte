@@ -1,5 +1,6 @@
 <script lang="ts">
 import * as m from '$lib/paraglide/messages.js'
+import RequestFailure from '$lib/components/request-failure.svelte'
 import { resolve } from '$app/paths'
 import { createQuery, useQueryClient } from '@tanstack/svelte-query'
 import { toast } from 'svelte-sonner'
@@ -11,6 +12,7 @@ import PageHeader from '$lib/components/page-header.svelte'
 import { Badge } from '$lib/components/ui/badge'
 import { Button } from '$lib/components/ui/button'
 import * as Field from '$lib/components/ui/field'
+import * as Empty from '$lib/components/ui/empty'
 import * as Select from '$lib/components/ui/select'
 import { Spinner } from '$lib/components/ui/spinner'
 import { Switch } from '$lib/components/ui/switch'
@@ -109,15 +111,13 @@ function selectThinkingLevel(value?: string): void {
     actions={pageActions} />
 
   {#if configQuery.isError}
-    <section class="route-section">
-      <p class="text-sm font-medium text-destructive">
-        {m.media_understanding_settings_not_loaded()}
-      </p>
-      <Button class="mt-3" variant="outline" onclick={() => void configQuery.refetch()}>
-        {m.common_retry()}
-      </Button>
-    </section>
-  {:else}
+    <RequestFailure
+      title={m.media_understanding_settings_not_loaded()}
+      message={localizeBackendErrorMessage(configQuery.error)}
+      retry={() => configQuery.refetch()}
+      retrying={configQuery.isFetching} />
+  {/if}
+  {#if configQuery.data !== undefined || !configQuery.isError}
     <section class="route-section" aria-labelledby="media-service-title">
       <div class="route-section-header">
         <div>
@@ -149,12 +149,11 @@ function selectThinkingLevel(value?: string): void {
         </div>
       </div>
       {#if configQuery.data?.eligible_models.length === 0}
-        <div class="flex flex-col gap-3 border-y py-6">
-          <p class="text-sm text-muted-foreground">{m.media_understanding_add_logical_model()}</p>
-          <a class="font-medium text-primary underline-offset-4 hover:underline" href={resolve('/models')}>
-            {m.connect_add_a_model()}
-          </a>
-        </div>
+        <Empty.Root class="border-y py-6"
+          ><Empty.Header
+            ><Empty.Description>{m.media_understanding_add_logical_model()}</Empty.Description></Empty.Header
+          ><Empty.Content><Button href={resolve('/models')}>{m.connect_add_a_model()}</Button></Empty.Content
+          ></Empty.Root>
       {:else}
         <Field.Group>
           <Field.Field size="select">
@@ -163,17 +162,18 @@ function selectThinkingLevel(value?: string): void {
               <Select.Trigger id="media-model" class="w-full">
                 {selectedModel?.display_name ?? m.media_understanding_select_model()}
               </Select.Trigger>
-              <Select.Content>
-                {#each eligibleModels as model (model.id)}
-                  {@const secondaryId = logicalModelSecondaryId(model)}
-                  <Select.Item value={model.id} label={model.display_name}>
-                    <span class="min-w-0 flex-1 truncate">{model.display_name}</span>
-                    {#if secondaryId}
-                      <span class="truncate font-technical text-xs text-muted-foreground">{secondaryId}</span>
-                    {/if}
-                  </Select.Item>
-                {/each}
-              </Select.Content>
+              <Select.Content
+                ><Select.Group>
+                  {#each eligibleModels as model (model.id)}
+                    {@const secondaryId = logicalModelSecondaryId(model)}
+                    <Select.Item value={model.id} label={model.display_name}>
+                      <span class="min-w-0 flex-1 truncate">{model.display_name}</span>
+                      {#if secondaryId}
+                        <span class="truncate font-technical text-xs text-muted-foreground">{secondaryId}</span>
+                      {/if}
+                    </Select.Item>
+                  {/each}
+                </Select.Group></Select.Content>
             </Select.Root>
           </Field.Field>
           <Field.Field size="select">
@@ -188,11 +188,12 @@ function selectThinkingLevel(value?: string): void {
               <Select.Trigger id="media-thinking-level" class="w-full">
                 {thinkingLevel || m.media_understanding_select_thinking_level()}
               </Select.Trigger>
-              <Select.Content>
-                {#each selectedModel?.supported_thinking_levels ?? [] as level (level)}
-                  <Select.Item value={level} label={level}>{level}</Select.Item>
-                {/each}
-              </Select.Content>
+              <Select.Content
+                ><Select.Group>
+                  {#each selectedModel?.supported_thinking_levels ?? [] as level (level)}
+                    <Select.Item value={level} label={level}>{level}</Select.Item>
+                  {/each}
+                </Select.Group></Select.Content>
             </Select.Root>
           </Field.Field>
         </Field.Group>

@@ -12,6 +12,7 @@ import {
 } from '$lib/model-specification'
 import type { ModelSpecification } from '$lib/types'
 import * as Tooltip from '$lib/components/ui/tooltip'
+import { Badge } from '$lib/components/ui/badge'
 
 type Density = 'compact' | 'detail'
 
@@ -105,10 +106,10 @@ function featureStatus(value: boolean | null | undefined): string {
         {#each values as modality (`${direction}-${modality}`)}
           {@const entry = specificationModality(modality)}
           {@const ModalityIcon = entry.icon}
-          <span class="inline-flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-sm">
+          <Badge variant="outline" class="gap-2 px-2.5 py-1.5">
             <ModalityIcon class="size-4 text-muted-foreground" aria-hidden="true" />
             {entry.label()}
-          </span>
+          </Badge>
         {/each}
       {:else}
         <span class="text-sm text-muted-foreground">{m.model_specification_not_registered()}</span>

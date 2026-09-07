@@ -1,6 +1,6 @@
 <script lang="ts">
 import * as m from '$lib/paraglide/messages.js'
-import { onMount, tick } from 'svelte'
+import { onMount, tick, untrack } from 'svelte'
 import ChevronDownIcon from '@lucide/svelte/icons/chevron-down'
 import CrosshairIcon from '@lucide/svelte/icons/crosshair'
 import LocateFixedIcon from '@lucide/svelte/icons/locate-fixed'
@@ -23,6 +23,7 @@ import { observationStatusLabel } from '$lib/observation-labels'
 import type { ForestRoot, InteractionNodeData, InteractionSummary } from '$lib/types'
 import InteractionNode from '$lib/components/interaction-node.svelte'
 import { Button } from '$lib/components/ui/button'
+import { Progress } from '$lib/components/ui/progress'
 
 type FlowInteractionNode = Node<InteractionNodeData, 'interaction'>
 
@@ -62,7 +63,7 @@ let {
   onfollow,
 }: Props = $props()
 
-const { fitView, setCenter, zoomIn, zoomOut, getViewport } = useSvelteFlow<FlowInteractionNode, Edge>()
+const { fitView, setCenter, zoomIn, zoomOut, getViewport, getNode } = useSvelteFlow<FlowInteractionNode, Edge>()
 const nodeTypes = { interaction: InteractionNode }
 let positions = $state.raw(new Map<string, { x: number; y: number }>())
 let canvasElement = $state<HTMLDivElement>()
@@ -81,6 +82,8 @@ let nodes = $derived.by<FlowInteractionNode[]>(() =>
       id: interaction.id,
       type: 'interaction' as const,
       position: positions.get(interaction.id) ?? { x: 0, y: 0 },
+      // 保留画布已测得的尺寸；仅更新选中路径不应让等尺寸节点重新变成不可见。
+      measured: untrack(() => getNode(interaction.id)?.measured),
       data: {
         interaction,
         onSelectedPath: selectedPath.has(interaction.id),
@@ -292,9 +295,9 @@ export async function focusLatest(): Promise<void> {
     <Panel position="top-left" class="canvas-progress">
       <span>{m.observation_roots_loaded({ loaded: roots.length, total: rootTotal })}</span>
       {#if loadingMore}<span>{m.observation_loading_more()}</span>{/if}
-      {#if fitProgress != null}<progress value={fitProgress} max="100" aria-label={m.observation_loading_all_roots()}
-        ></progress
-        >{/if}
+      {#if fitProgress != null}
+        <Progress value={fitProgress} max={100} class="h-1.5 w-20" aria-label={m.observation_loading_all_roots()} />
+      {/if}
     </Panel>
     <Panel position="bottom-left" class="canvas-controls">
       <Button
@@ -375,11 +378,6 @@ export async function focusLatest(): Promise<void> {
   font-family: var(--font-technical);
   font-size: 0.7rem;
   backdrop-filter: blur(8px);
-}
-.observation-canvas :global(.canvas-progress progress) {
-  width: 5rem;
-  height: 0.35rem;
-  accent-color: var(--primary);
 }
 .activity-mark {
   width: 0.45rem;

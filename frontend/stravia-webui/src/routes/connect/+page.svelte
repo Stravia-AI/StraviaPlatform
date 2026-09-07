@@ -1,5 +1,8 @@
 <script lang="ts">
 import * as m from '$lib/paraglide/messages.js'
+import RequestFailure from '$lib/components/request-failure.svelte'
+import * as Alert from '$lib/components/ui/alert'
+import { Spinner } from '$lib/components/ui/spinner'
 import { resolve } from '$app/paths'
 import { goto } from '$app/navigation'
 import { untrack } from 'svelte'
@@ -214,10 +217,12 @@ function cliModelName(modelId: string): string | undefined {
 
 {#snippet keyRecovery(noCandidates: boolean)}
   {#if noCandidates}
-    <p class="text-sm text-warning" role="status">{m.connect_no_eligible_key()}</p>
-    <p class="text-sm text-muted-foreground">
-      {apiKeys.length ? m.connect_no_eligible_key_description() : m.connect_create_key_description()}
-    </p>
+    <Alert.Root variant="warning" role="status"
+      ><Alert.Title>{m.connect_no_eligible_key()}</Alert.Title><Alert.Description
+        >{apiKeys.length
+          ? m.connect_no_eligible_key_description()
+          : m.connect_create_key_description()}</Alert.Description
+      ></Alert.Root>
   {/if}
   <div class="flex flex-wrap gap-2">
     <Button variant="outline" onclick={() => manageResource('/api-keys', true)}>{m.connect_create_an_api_key()}</Button>
@@ -242,23 +247,17 @@ function cliModelName(modelId: string): string | undefined {
       <Skeleton class="h-96 min-[1100px]:col-span-7" />
     </div>
   {:else if blockingResourceError}
-    <section class="route-section" aria-labelledby="connect-resources-error">
-      <h2 id="connect-resources-error" class="route-section-title">
-        {m.connect_connection_setup_unavailable()}
-      </h2>
-      <p class="route-section-description text-destructive">
-        {localizeBackendErrorMessage(blockingResourceError)}
-      </p>
-      <Button class="mt-3" variant="outline" onclick={retryResources}>{m.common_retry()}</Button>
-    </section>
+    <RequestFailure
+      title={m.connect_connection_setup_unavailable()}
+      message={localizeBackendErrorMessage(blockingResourceError)}
+      retry={retryResources}
+      retrying={modelsQuery.isFetching || keysQuery.isFetching || proxyQuery.isFetching} />
   {:else}
     {#if resourceError}
-      <section class="route-section" role="alert">
-        <p class="route-section-description text-destructive">
-          {m.connect_stale_data_warning()}
-        </p>
-        <Button class="mt-3" variant="outline" onclick={retryResources}>{m.common_retry()}</Button>
-      </section>
+      <RequestFailure
+        message={m.connect_stale_data_warning()}
+        retry={retryResources}
+        retrying={modelsQuery.isFetching || keysQuery.isFetching || proxyQuery.isFetching} />
     {/if}
 
     <Tabs.Root bind:value={tab}>
@@ -392,7 +391,8 @@ function cliModelName(modelId: string): string | undefined {
                   <Button
                     onclick={() => void applySelectedClient()}
                     disabled={!connectClientInput || !connectPlanQuery.data || applyingClient}
-                    ><CheckIcon data-icon="inline-start" />{applyingClient
+                    >{#if applyingClient}<Spinner data-icon="inline-start" />{:else}<CheckIcon
+                        data-icon="inline-start" />{/if}{applyingClient
                       ? m.connect_applying()
                       : m.connect_apply()}</Button>
                 {/if}
@@ -405,15 +405,14 @@ function cliModelName(modelId: string): string | undefined {
             </div>
             {#if connectPlanQuery.isError}
               {@const planError = asConnectClientApplyError(connectPlanQuery.error)}
-              <div class="mb-3 border-l-2 border-destructive bg-destructive/5 px-3 py-2" role="alert">
-                <p class="text-sm font-medium text-destructive">{m.connect_apply_plan_failed()}</p>
-                {#if planError.path}
-                  <p class="font-technical mt-1 break-all text-xs text-muted-foreground">{planError.path}</p>
-                {/if}
-                <p class="mt-1 text-sm text-muted-foreground">{planError.message}</p>
-                <Button variant="outline" class="mt-2" onclick={() => void connectPlanQuery.refetch()}
-                  >{m.common_retry()}</Button>
-              </div>
+              <RequestFailure
+                class="mb-3"
+                title={m.connect_apply_plan_failed()}
+                message={planError.message}
+                retry={() => connectPlanQuery.refetch()}
+                retrying={connectPlanQuery.isFetching}>
+                {#if planError.path}<p class="font-technical break-all">{planError.path}</p>{/if}
+              </RequestFailure>
             {/if}
             {#if generatedCliConfig}
               <pre class="route-code-plane">{generatedCliConfig}</pre>
@@ -549,9 +548,11 @@ function cliModelName(modelId: string): string | undefined {
               <Tabs.Content value={codeLanguage} class="mt-3">
                 {#if codeModel}
                   <pre class="route-code-plane">{generatedCode}</pre>
-                  {#if !selectedCodeKey}<p class="mt-3 text-sm text-warning">
-                      {m.connect_select_api_key_using_sample_current_output_contains()}
-                    </p>{/if}
+                  {#if !selectedCodeKey}<Alert.Root class="mt-3" variant="warning" role="status"
+                      ><Alert.Description
+                        >{m.connect_select_api_key_using_sample_current_output_contains()}</Alert.Description
+                      ></Alert.Root
+                    >{/if}
                 {:else}
                   <Empty.Root class="min-h-72 border-y"
                     ><Empty.Header

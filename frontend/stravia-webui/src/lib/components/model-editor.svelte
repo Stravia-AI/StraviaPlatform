@@ -605,7 +605,7 @@ async function saveModel(): Promise<void> {
             bind:checked={() => form.enabled, (checked) => (form.enabled = checked)} />
         </div>
       </div>
-      <div class="grid gap-4 md:grid-cols-4">
+      <Field.Group class="grid gap-4 md:grid-cols-4">
         <Field.Field orientation="vertical" class="md:col-span-2">
           <Field.Label for="route-model-id">{m.model_editor_model_id()}</Field.Label>
           <ModelIdCombobox
@@ -642,12 +642,14 @@ async function saveModel(): Promise<void> {
               {strategyLabel(form.balance)}
             </Select.Trigger>
             <Select.Content>
-              <Select.Item value="traffic_equalization">{m.model_editor_traffic_equalization()}</Select.Item>
-              <Select.Item value="latency_preference">{m.model_editor_latency_preference()}</Select.Item>
+              <Select.Group>
+                <Select.Item value="traffic_equalization">{m.model_editor_traffic_equalization()}</Select.Item>
+                <Select.Item value="latency_preference">{m.model_editor_latency_preference()}</Select.Item>
+              </Select.Group>
             </Select.Content>
           </Select.Root>
         </Field.Field>
-      </div>
+      </Field.Group>
     </section>
 
     <section class="route-section" aria-labelledby="route-targets-title">
@@ -872,7 +874,7 @@ async function saveModel(): Promise<void> {
                 </div>
               </div>
 
-              <div class="grid gap-4 lg:grid-cols-2">
+              <Field.Group class="grid gap-4 lg:grid-cols-2">
                 <Field.Field size="select">
                   <Field.Label for={`target-provider-${target.key}`}>{m.common_model_service()}</Field.Label>
                   <Select.Root
@@ -887,10 +889,12 @@ async function saveModel(): Promise<void> {
                         m.model_editor_choose_model_service()}
                     </Select.Trigger>
                     <Select.Content>
-                      {#each availableProviders as provider (provider.id)}<Select.Item
-                          value={provider.id}
-                          label={provider.name}>{provider.name}</Select.Item
-                        >{/each}
+                      <Select.Group>
+                        {#each availableProviders as provider (provider.id)}<Select.Item
+                            value={provider.id}
+                            label={provider.name}>{provider.name}</Select.Item
+                          >{/each}
+                      </Select.Group>
                     </Select.Content>
                   </Select.Root>
                 </Field.Field>
@@ -922,9 +926,9 @@ async function saveModel(): Promise<void> {
                       onSelect={(value) => void selectModel(target, value)} />
                   {/if}
                 </Field.Field>
-              </div>
+              </Field.Group>
 
-              <div class="mt-4 grid gap-4 border-t pt-4 md:grid-cols-3">
+              <Field.Group class="mt-4 grid gap-4 border-t pt-4 md:grid-cols-3">
                 <Field.Field size="number">
                   <Field.Label for={`target-first-token-timeout-${target.key}`}
                     >{m.model_editor_first_token_timeout()}</Field.Label>
@@ -957,7 +961,7 @@ async function saveModel(): Promise<void> {
                     bind:value={target.targetCooldownSeconds} />
                   <Field.Description>{m.model_editor_target_cooldown_help()}</Field.Description>
                 </Field.Field>
-              </div>
+              </Field.Group>
 
               {#if target.loading}
                 <div class="mt-3 flex items-center gap-2 text-sm text-muted-foreground">
@@ -1014,10 +1018,12 @@ async function saveModel(): Promise<void> {
                               {thinkingControlLabel(row.control.type)}
                             </Select.Trigger>
                             <Select.Content>
-                              {#each ['effort', 'budget', 'enabled', 'disabled', 'hidden'] as type (type)}
-                                <Select.Item value={type}
-                                  >{thinkingControlLabel(type as TargetThinkingControl['type'])}</Select.Item>
-                              {/each}
+                              <Select.Group>
+                                {#each ['effort', 'budget', 'enabled', 'disabled', 'hidden'] as type (type)}
+                                  <Select.Item value={type}
+                                    >{thinkingControlLabel(type as TargetThinkingControl['type'])}</Select.Item>
+                                {/each}
+                              </Select.Group>
                             </Select.Content>
                           </Select.Root>
                           {#if row.control.type === 'effort'}
@@ -1094,7 +1100,7 @@ async function saveModel(): Promise<void> {
               </Tooltip.Trigger>
               <Tooltip.Content side="top" sideOffset={8} class="max-w-96 flex-col items-start gap-1.5">
                 <p class="font-medium">{m.model_editor_thinking_blocked_by()}</p>
-                <ul class="w-full list-disc space-y-0.5 pl-4 text-left">
+                <ul class="flex w-full list-disc flex-col gap-0.5 pl-4 text-left">
                   {#each blockers as blocker (blocker)}
                     <li>{blocker}</li>
                   {/each}

@@ -28,6 +28,8 @@ import InteractionCanvas from '$lib/components/interaction-canvas.svelte'
 import ObservationInspector from '$lib/components/observation-inspector.svelte'
 import PageHeader from '$lib/components/page-header.svelte'
 import StatusIndicator from '$lib/components/status-indicator.svelte'
+import RequestFailure from '$lib/components/request-failure.svelte'
+import * as Alert from '$lib/components/ui/alert'
 import * as AlertDialog from '$lib/components/ui/alert-dialog'
 import { Badge } from '$lib/components/ui/badge'
 import { Button } from '$lib/components/ui/button'
@@ -449,14 +451,17 @@ function formatBytes(value: number | undefined): string {
     actions={headerActions} />
 
   {#if (debugQuery.data?.partial_trace_count ?? 0) > 0}
-    <div class="persistent-warning" role="alert">
-      {m.observation_partial_traces_warning({ count: debugQuery.data?.partial_trace_count ?? 0 })}
-    </div>
+    <Alert.Root variant="warning" role="status">
+      <Alert.Description
+        >{m.observation_partial_traces_warning({
+          count: debugQuery.data?.partial_trace_count ?? 0,
+        })}</Alert.Description>
+    </Alert.Root>
   {/if}
   {#if clearResult?.skipped_active}
-    <div class="persistent-warning" role="status">
-      {m.observation_clear_skipped_active({ count: clearResult.skipped_active })}
-    </div>
+    <Alert.Root variant="warning" role="status">
+      <Alert.Description>{m.observation_clear_skipped_active({ count: clearResult.skipped_active })}</Alert.Description>
+    </Alert.Root>
   {/if}
 
   <section class="observation-workspace" aria-labelledby="observation-workspace-title">
@@ -490,8 +495,7 @@ function formatBytes(value: number | undefined): string {
           <div class="stage-state"><p>{m.observation_loading_chains()}</p></div>
         {:else if loadError}
           <div class="stage-state">
-            <p class="text-destructive">{localizeBackendErrorMessage(loadError)}</p>
-            <Button variant="outline" onclick={() => void loadForest(true)}>{m.common_retry()}</Button>
+            <RequestFailure message={localizeBackendErrorMessage(loadError)} retry={() => loadForest(true)} />
           </div>
         {:else if roots.length === 0}
           <div class="stage-state">
@@ -789,14 +793,6 @@ function formatBytes(value: number | undefined): string {
 }
 .debug-toggle > :global(svg) {
   width: 1rem;
-}
-.persistent-warning {
-  border: 1px solid color-mix(in oklab, var(--warning) 40%, var(--border));
-  border-radius: var(--radius);
-  background: color-mix(in oklab, var(--warning) 7%, var(--background));
-  padding: 0.65rem 0.8rem;
-  color: var(--warning);
-  font-size: 0.8rem;
 }
 .rejections-view {
   position: relative;

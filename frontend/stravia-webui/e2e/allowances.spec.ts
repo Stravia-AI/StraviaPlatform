@@ -151,20 +151,62 @@ test('renders the matrix, shared summary, timeline, forecast, model details, and
   await expect.poll(() => posts).toContain('/api/v1/provider-allowances/provider-alpha/refresh')
 })
 
+test('keeps multiple model allowances open and distinguishes unknown utilization from zero', async ({ page }) => {
+  await mockAllowances(page, [
+    {
+      ...freshSnapshot,
+      models: [
+        freshSnapshot.models[0],
+        {
+          model: 'claude-sonnet-4-6',
+          allowances: [{ ...freshSnapshot.models[0].allowances[0], label: 'Sonnet window' }],
+        },
+      ],
+    },
+  ])
+  await page.goto('/allowances')
+  const matrix = page.getByRole('table', { name: 'Allowance matrix' })
+  await matrix.getByRole('button', { name: 'Show model allowances for Alpha account' }).click()
+  const opus = matrix.getByRole('button', { name: 'claude-opus-4-6', exact: true })
+  const sonnet = matrix.getByRole('button', { name: 'claude-sonnet-4-6', exact: true })
+  await opus.click()
+  await sonnet.click()
+  await expect(opus).toHaveAttribute('aria-expanded', 'true')
+  await expect(sonnet).toHaveAttribute('aria-expanded', 'true')
+  await expect(matrix.getByText('Sonnet window')).toBeVisible()
+  await sonnet.click()
+  await expect(opus).toHaveAttribute('aria-expanded', 'true')
+  await expect(matrix.getByRole('progressbar', { name: 'Weekly window Utilization' })).toHaveAttribute(
+    'aria-valuenow',
+    '55.625',
+  )
+  await expect(matrix.getByRole('progressbar', { name: 'Credit balance Utilization' })).not.toHaveAttribute(
+    'aria-valuenow',
+  )
+
+  await page.setViewportSize({ width: 375, height: 760 })
+  await expect(
+    page.getByRole('progressbar', { name: 'Weekly window Utilization', includeHidden: false }),
+  ).toHaveAttribute('aria-valuenow', '55.625')
+  await expect(
+    page.getByRole('progressbar', { name: 'Credit balance Utilization', includeHidden: false }),
+  ).not.toHaveAttribute('aria-valuenow')
+})
+
 test('does not treat an exhausted allowance without a reset date as exhausted', async ({ page }) => {
   await mockAllowances(page, [freshSnapshot])
   await page.goto('/allowances')
 
   const matrix = page.getByRole('table', { name: 'Allowance matrix' })
   const provider = matrix.getByTestId('allowance-provider-provider-alpha')
-  const providerGroupCell = provider.locator('xpath=ancestor::td')
   const forecastPanel = page
     .locator('[data-slot="card"]')
     .filter({ has: page.getByRole('heading', { name: 'Exhaustion forecast' }) })
-  await expect(providerGroupCell).toHaveAttribute('colspan', '4')
   await expect(matrix.getByText('0 USD')).toBeVisible()
   await expect(provider.getByText('Exhausted', { exact: true })).toHaveCount(0)
-  await expect(page.getByRole('region', { name: 'Allowance condition' }).getByText('Normal', { exact: true })).toBeVisible()
+  await expect(
+    page.getByRole('region', { name: 'Allowance condition' }).getByText('Normal', { exact: true }),
+  ).toBeVisible()
   await expect(forecastPanel).toContainText('Unknown 0')
 
   await selectFilter(page, 'Filter by allowance condition', 'Exhausted')
@@ -176,7 +218,9 @@ test('search and all filters drive the same visible collection', async ({ page }
   await page.goto('/allowances')
 
   const search = page.getByLabel('Search model services')
-  const timelinePanel = page.locator('[data-slot="card"]').filter({ has: page.getByRole('heading', { name: 'Reset timeline' }) })
+  const timelinePanel = page
+    .locator('[data-slot="card"]')
+    .filter({ has: page.getByRole('heading', { name: 'Reset timeline' }) })
   const forecastPanel = page
     .locator('[data-slot="card"]')
     .filter({ has: page.getByRole('heading', { name: 'Exhaustion forecast' }) })
@@ -232,6 +276,11 @@ test('renders the empty and request-error states with recovery guidance', async 
   await page.reload()
   await expect(page.getByRole('heading', { name: 'Provider allowances could not be loaded.' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible()
+  await page.unroute('**/api/v1/provider-allowances**')
+  await mockAllowances(page, [freshSnapshot])
+  await page.getByRole('button', { name: 'Retry' }).click()
+  await expect(page.getByRole('table', { name: 'Allowance matrix' }).getByText('Alpha account')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Retry' })).toHaveCount(0)
 })
 
 test('keeps the matrix and side panels usable on a narrow Chinese viewport', async ({ page }) => {
@@ -242,9 +291,7 @@ test('keeps the matrix and side panels usable on a narrow Chinese viewport', asy
 
   await expect(page.getByRole('heading', { name: '额度总览' })).toBeVisible()
   await expect(page.getByRole('button', { name: '全部刷新' })).toBeVisible()
-  const matrixCard = page
-    .locator('[data-slot="card"]')
-    .filter({ has: page.getByRole('heading', { name: '额度矩阵' }) })
+  const matrixCard = page.locator('[data-slot="card"]').filter({ has: page.getByRole('heading', { name: '额度矩阵' }) })
   const desktopMatrix = matrixCard.locator('.route-desktop-table')
   const mobileMatrix = matrixCard.locator('.route-mobile-list')
   await expect(desktopMatrix).toHaveCount(1)

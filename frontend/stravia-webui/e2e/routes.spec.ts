@@ -169,6 +169,57 @@ test('Models table fits the desktop content width without horizontal scrolling',
   )
 })
 
+test('Mobile model links preserve new-tab navigation and keep row actions independent', async ({ page, context }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.route('**/api/v1/providers', (route) =>
+    route.fulfill({
+      json: {
+        data: [{ id: 'mobile-provider', name: 'Mobile provider', protocol: 'open-responses', is_enabled: true }],
+      },
+    }),
+  )
+  await page.route('**/api/v1/models', (route) =>
+    route.fulfill({
+      json: {
+        data: [
+          {
+            id: 'mobile-route',
+            model_id: 'mobile-model',
+            display_name: 'Mobile model',
+            balance: 'traffic_equalization',
+            is_enabled: true,
+            targets: [],
+          },
+        ],
+      },
+    }),
+  )
+  await page.goto('/models')
+  const modelLink = page.getByRole('link', { name: /^Mobile model/ })
+  await expect(modelLink).toBeVisible()
+  await page.getByRole('button', { name: 'More actions for Mobile model', exact: true }).click()
+  await expect(page.getByRole('menuitem', { name: 'Disable model', exact: true })).toBeVisible()
+  await expect(page).toHaveURL(/\/models$/)
+  await page.keyboard.press('Escape')
+
+  await context.route('**/api/v1/auth/state', (route) =>
+    route.fulfill({
+      json: { mode: 'server', authenticated: true, setup_authorized: false, username: 'playwright-admin' },
+    }),
+  )
+  const newTab = context.waitForEvent('page')
+  await modelLink.click({ modifiers: ['ControlOrMeta'] })
+  const opened = await newTab
+  await prepareApp(opened)
+  await expect(opened).toHaveURL(/\/models\/mobile-model$/)
+  await expect(page).toHaveURL(/\/models$/)
+  await opened.close()
+
+  await modelLink.focus()
+  await page.keyboard.press('Enter')
+  await expect(page).toHaveURL(/\/models\/mobile-model$/)
+})
+
 test('Model Route curl always includes the selected API Key', async ({ page }) => {
   await page.route('**/api/v1/models', async (route) => {
     await route.fulfill({

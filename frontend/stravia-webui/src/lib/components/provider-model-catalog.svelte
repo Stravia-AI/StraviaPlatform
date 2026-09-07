@@ -47,7 +47,11 @@ import {
   type DataTableRowPointerEvent,
 } from '$lib/components/ui/data-table'
 import * as DropdownMenu from '$lib/components/ui/dropdown-menu'
-import { Input } from '$lib/components/ui/input'
+import * as InputGroup from '$lib/components/ui/input-group'
+import * as Empty from '$lib/components/ui/empty'
+import * as Alert from '$lib/components/ui/alert'
+import RequestFailure from '$lib/components/request-failure.svelte'
+import { allCatalogFilterValue, catalogFilterOptions } from './provider-model-catalog/filter-options'
 import { Spinner } from '$lib/components/ui/spinner'
 import CatalogConfirmations from './provider-model-catalog/confirmations.svelte'
 import CatalogEditorDrawer from './provider-model-catalog/editor-drawer.svelte'
@@ -146,92 +150,75 @@ const hasActiveFilters = $derived(Boolean(search.trim()) || activeFilterCount > 
 const selectedReferences = $derived(selectedDetail ? modelReferences(selectedDetail.id) : [])
 const tableLabels = $derived(getDataTableLabels())
 const providerModelColumnHelper = createDataTableColumnHelper<ProviderModelSummary>()
-const providerModelColumns = providerModelColumnHelper.columns([
-  providerModelColumnHelper.accessor((model) => `${model.name} ${model.id}`, {
-    id: 'model',
-    header: () => m.common_model(),
-    cell: (context) => renderSnippet(providerModelIdentityCell, context),
-    enableSorting: false,
-    enableGlobalFilter: true,
-    meta: { label: () => m.common_model(), cellClass: 'whitespace-normal py-4' },
-    size: 260,
-  }),
-  providerModelColumnHelper.accessor('specification', {
-    header: () => m.model_specification_title(),
-    cell: (context) => renderSnippet(providerModelSpecificationCell, context),
-    filterFn: (row, _columnId, value) => matchesSpecification(row.original.specification, value as SpecificationFilter),
-    enableSorting: false,
-    enableGlobalFilter: false,
-    meta: {
-      label: () => m.model_specification_title(),
-      cellClass: 'whitespace-normal py-4',
-      exportable: false,
-      filter: { variant: 'custom', content: providerModelSpecificationFilter },
-    },
-    size: 360,
-  }),
-  providerModelColumnHelper.accessor((model) => (model.available ? 'available' : 'unavailable'), {
-    id: 'availability',
-    header: () => m.provider_model_catalog_model_availability(),
-    cell: (context) => renderSnippet(providerModelAvailabilityCell, context),
-    enableSorting: false,
-    enableGlobalFilter: false,
-    meta: {
-      label: () => m.provider_model_catalog_model_availability(),
-      cellClass: 'whitespace-normal',
-      filter: {
-        variant: 'select',
-        allLabel: m.common_all_models(),
-        options: [
-          { value: 'available', label: m.common_used() },
-          { value: 'unavailable', label: m.common_unavailable() },
-        ],
-      },
-    },
-    size: 160,
-  }),
-  providerModelColumnHelper.accessor('source_kind', {
-    header: () => m.provider_model_catalog_how_models_were_added(),
-    cell: (context) => renderSnippet(providerModelSourceCell, context),
-    enableSorting: false,
-    enableGlobalFilter: false,
-    meta: {
-      label: () => m.provider_model_catalog_how_models_were_added(),
-      filter: {
-        variant: 'select',
-        allLabel: m.provider_model_catalog_all_sources(),
-        options: [
-          { value: 'discovered', label: m.common_synced() },
-          { value: 'manual', label: m.common_added_manually() },
-        ],
-      },
-    },
-    size: 160,
-  }),
-  providerModelColumnHelper.accessor(
-    (model) => (modelReferences(model.id).length > 0 ? 'referenced' : 'unreferenced'),
-    {
-      id: 'usage',
-      header: () => m.provider_model_catalog_model_usage(),
-      cell: (context) => renderSnippet(providerModelUsageCell, context),
+const filterOptions = $derived(catalogFilterOptions())
+const providerModelColumns = $derived(
+  providerModelColumnHelper.columns([
+    providerModelColumnHelper.accessor((model) => `${model.name} ${model.id}`, {
+      id: 'model',
+      header: () => m.common_model(),
+      cell: (context) => renderSnippet(providerModelIdentityCell, context),
+      enableSorting: false,
+      enableGlobalFilter: true,
+      meta: { label: () => m.common_model(), cellClass: 'whitespace-normal py-4' },
+      size: 260,
+    }),
+    providerModelColumnHelper.accessor('specification', {
+      header: () => m.model_specification_title(),
+      cell: (context) => renderSnippet(providerModelSpecificationCell, context),
+      filterFn: (row, _columnId, value) =>
+        matchesSpecification(row.original.specification, value as SpecificationFilter),
       enableSorting: false,
       enableGlobalFilter: false,
       meta: {
-        label: () => m.provider_model_catalog_model_usage(),
-        cellClass: 'whitespace-normal',
-        filter: {
-          variant: 'select',
-          allLabel: m.provider_model_catalog_all_usage(),
-          options: [
-            { value: 'referenced', label: m.provider_model_catalog_use() },
-            { value: 'unreferenced', label: m.provider_model_catalog_not_use() },
-          ],
-        },
+        label: () => m.model_specification_title(),
+        cellClass: 'whitespace-normal py-4',
+        exportable: false,
+        filter: { variant: 'custom', content: providerModelSpecificationFilter },
       },
-      size: 190,
-    },
-  ),
-])
+      size: 360,
+    }),
+    providerModelColumnHelper.accessor((model) => (model.available ? 'available' : 'unavailable'), {
+      id: 'availability',
+      header: () => m.provider_model_catalog_model_availability(),
+      cell: (context) => renderSnippet(providerModelAvailabilityCell, context),
+      enableSorting: false,
+      enableGlobalFilter: false,
+      meta: {
+        label: () => m.provider_model_catalog_model_availability(),
+        cellClass: 'whitespace-normal',
+        filter: { variant: 'select', ...filterOptions.availability },
+      },
+      size: 160,
+    }),
+    providerModelColumnHelper.accessor('source_kind', {
+      header: () => m.provider_model_catalog_how_models_were_added(),
+      cell: (context) => renderSnippet(providerModelSourceCell, context),
+      enableSorting: false,
+      enableGlobalFilter: false,
+      meta: {
+        label: () => m.provider_model_catalog_how_models_were_added(),
+        filter: { variant: 'select', ...filterOptions.source },
+      },
+      size: 160,
+    }),
+    providerModelColumnHelper.accessor(
+      (model) => (modelReferences(model.id).length > 0 ? 'referenced' : 'unreferenced'),
+      {
+        id: 'usage',
+        header: () => m.provider_model_catalog_model_usage(),
+        cell: (context) => renderSnippet(providerModelUsageCell, context),
+        enableSorting: false,
+        enableGlobalFilter: false,
+        meta: {
+          label: () => m.provider_model_catalog_model_usage(),
+          cellClass: 'whitespace-normal',
+          filter: { variant: 'select', ...filterOptions.reference },
+        },
+        size: 190,
+      },
+    ),
+  ]),
+)
 
 function getProviderModelRowId(model: ProviderModelSummary): string {
   return model.id
@@ -269,7 +256,7 @@ function catalogFilterValue<TValue extends string>(columnId: string, fallback: T
   return typeof candidate === 'string' ? (candidate as TValue) : fallback
 }
 
-function setCatalogFilter(columnId: string, value: string, emptyValue = 'all'): void {
+function setCatalogFilter(columnId: string, value: string, emptyValue = allCatalogFilterValue): void {
   const remaining = columnFilters.filter((filter) => filter.id !== columnId)
   columnFilters =
     value === emptyValue
@@ -307,12 +294,6 @@ function openProviderModel(model: ProviderModelSummary, event: MouseEvent): void
 
 function handleProviderModelTableRowClick({ event, original }: DataTableRowPointerEvent<ProviderModelSummary>): void {
   openProviderModel(original, event)
-}
-
-function handleProviderModelRowKeydown(event: KeyboardEvent, model: ProviderModelSummary): void {
-  if (event.key !== 'Enter' || event.target !== event.currentTarget) return
-  event.preventDefault()
-  void goto(resolve(`/providers/${encodeURIComponent(providerId)}?${modelEditorSearch(model.id)}`))
 }
 
 async function addModelToRoute(model: ProviderModelSummary): Promise<void> {
@@ -644,19 +625,31 @@ async function deleteManualModel(): Promise<void> {
 {/snippet}
 
 {#snippet providerModelsEmpty()}
-  <div class="py-6">
-    {#if modelsQuery.isError}
-      <p class="text-sm text-destructive">{localizeBackendErrorMessage(modelsQuery.error)}</p>
-      <Button class="mt-3" variant="outline" onclick={() => void modelsQuery.refetch()}>{m.common_retry()}</Button>
-    {:else}
-      <p class="text-sm text-muted-foreground">{m.provider_model_catalog_no_models_match_filters()}</p>
-      {#if hasActiveFilters}
-        <Button class="mt-3" size="sm" variant="outline" onclick={clearFilters}>
-          {m.provider_model_catalog_clear_filters()}
-        </Button>
-      {/if}
-    {/if}
-  </div>
+  {#if modelsQuery.isError && !modelsQuery.data}
+    <RequestFailure
+      message={localizeBackendErrorMessage(modelsQuery.error)}
+      retry={() => modelsQuery.refetch()}
+      retrying={modelsQuery.isFetching} />
+  {:else}
+    <Empty.Root>
+      <Empty.Header>
+        <Empty.Description
+          >{models.length === 0
+            ? m.provider_model_catalog_no_models_available()
+            : m.provider_model_catalog_no_models_match_filters()}</Empty.Description>
+      </Empty.Header>
+      <Empty.Content>
+        {#if models.length === 0}
+          <Button variant="outline" onclick={() => (manualOpen = true)}
+            >{m.provider_model_catalog_add_model_manually()}</Button>
+          <Button variant="outline" onclick={requestSync} disabled={syncing}
+            >{m.provider_model_catalog_sync_models()}</Button>
+        {:else if hasActiveFilters}
+          <Button size="sm" variant="outline" onclick={clearFilters}>{m.provider_model_catalog_clear_filters()}</Button>
+        {/if}
+      </Empty.Content>
+    </Empty.Root>
+  {/if}
 {/snippet}
 
 {#if requestedModelId && !draft}
@@ -664,12 +657,12 @@ async function deleteManualModel(): Promise<void> {
     {#if loadingDetail || modelsQuery.isPending}
       <div class="grid min-h-72 place-items-center"><Spinner /></div>
     {:else if detailError || !selectedDetail}
-      <div class="py-8">
-        <p class="text-sm text-destructive">
-          {detailError ? localizeBackendErrorMessage(detailError) : m.backend_error_catalog_model_not_found()}
-        </p>
-        <Button class="mt-3" variant="outline" onclick={requestClose}>{m.common_cancel()}</Button>
-      </div>
+      <RequestFailure
+        message={detailError ? localizeBackendErrorMessage(detailError) : m.backend_error_catalog_model_not_found()}
+        retry={detailError ? () => loadDetail(requestedModelId) : undefined}
+        retrying={loadingDetail}>
+        <Button variant="outline" onclick={requestClose}>{m.common_cancel()}</Button>
+      </RequestFailure>
     {:else}
       <div class="route-section-header">
         <div class="min-w-0">
@@ -776,22 +769,26 @@ async function deleteManualModel(): Promise<void> {
     </div>
 
     {#if addedModel}
-      <div
-        class="flex flex-wrap items-center justify-between gap-3 rounded-xl border p-4"
-        role="status"
-        aria-live="polite">
-        <p class="text-sm font-medium">
+      <Alert.Root role="status" aria-live="polite">
+        <Alert.Description>
           {addedModel.existingRoute
             ? m.provider_model_catalog_model_target_added({ id: addedModel.id })
             : m.provider_model_catalog_model_route_created({ id: addedModel.id })}
-        </p>
-        <Button href="/connect" variant="outline">{m.connect_connect_apps()}</Button>
-      </div>
+          <Button href="/connect" variant="outline">{m.connect_connect_apps()}</Button>
+        </Alert.Description>
+      </Alert.Root>
+    {/if}
+
+    {#if modelsQuery.isError && modelsQuery.data}
+      <RequestFailure
+        message={localizeBackendErrorMessage(modelsQuery.error)}
+        retry={() => modelsQuery.refetch()}
+        retrying={modelsQuery.isFetching} />
     {/if}
 
     <div class="route-desktop-table">
       <DataTable
-        data={modelsQuery.isError ? [] : models}
+        data={models}
         columns={providerModelColumns}
         labels={tableLabels}
         getRowId={getProviderModelRowId}
@@ -811,16 +808,14 @@ async function deleteManualModel(): Promise<void> {
 
     <div class="route-mobile-list">
       <div class="border-y py-3">
-        <div class="relative">
-          <SearchIcon
-            class="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-          <Input
+        <InputGroup.Root>
+          <InputGroup.Input
             id="provider-model-search-mobile"
             aria-label={m.provider_model_catalog_search_models()}
-            class="h-10 pl-9"
             bind:value={search}
             placeholder={m.provider_model_catalog_search_name_model_id()} />
-        </div>
+          <InputGroup.Addon><SearchIcon /></InputGroup.Addon>
+        </InputGroup.Root>
         <div class="mt-2 flex flex-wrap items-center justify-between gap-2">
           <Button variant="outline" onclick={() => (filtersOpen = true)}>
             <SlidersHorizontalIcon data-icon="inline-start" />
@@ -835,39 +830,21 @@ async function deleteManualModel(): Promise<void> {
 
       {#if modelsQuery.isPending}
         <div class="grid min-h-56 place-items-center"><Spinner /></div>
-      {:else if modelsQuery.isError}
-        <div class="border-b py-8">
-          <p class="text-sm text-destructive">
-            {localizeBackendErrorMessage(modelsQuery.error)}
-          </p>
-          <Button class="mt-3" variant="outline" onclick={() => void modelsQuery.refetch()}>{m.common_retry()}</Button>
-        </div>
-      {:else if filteredModels.length === 0}
-        <div class="border-b py-8">
-          <p class="text-sm text-muted-foreground">
-            {m.provider_model_catalog_no_models_match_filters()}
-          </p>
-          {#if hasActiveFilters}
-            <Button class="mt-3" size="sm" variant="outline" onclick={clearFilters}>
-              {m.provider_model_catalog_clear_filters()}
-            </Button>
-          {/if}
-        </div>
+      {:else if (modelsQuery.isError && !modelsQuery.data) || filteredModels.length === 0}
+        {@render providerModelsEmpty()}
       {:else}
         {#each filteredModels as model (model.id)}
           {@const references = modelReferences(model.id)}
           {@const reason = availabilityReason(model)}
           {@const matchingRoute = routeForModel(model.id)}
-          <div
-            class="route-mobile-row cursor-pointer"
-            role="link"
-            tabindex="0"
-            onclick={(event) => openProviderModel(model, event)}
-            onkeydown={(event) => handleProviderModelRowKeydown(event, model)}>
-            <div class="col-span-2 min-h-10 min-w-0 text-left" aria-label={`${model.name} ${model.id}`}>
+          <div class="route-mobile-row">
+            <a
+              class="col-span-2 min-h-10 min-w-0 text-left"
+              href={resolve(`/providers/${encodeURIComponent(providerId)}?${modelEditorSearch(model.id)}`)}
+              aria-label={`${model.name} ${model.id}`}>
               <span class="block truncate font-medium">{model.name}</span>
               <span class="block truncate font-technical text-xs text-muted-foreground">{model.id}</span>
-            </div>
+            </a>
             <div class="col-span-2 min-w-0">
               <ModelSpecification specification={model.specification} />
             </div>

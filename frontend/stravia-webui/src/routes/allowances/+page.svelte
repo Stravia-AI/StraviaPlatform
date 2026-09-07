@@ -1,11 +1,17 @@
 <script lang="ts">
 import * as m from '$lib/paraglide/messages.js'
+import RequestFailure from '$lib/components/request-failure.svelte'
 import { createQuery, useQueryClient } from '@tanstack/svelte-query'
 import { renderSnippet } from '@tanstack/svelte-table'
 import ChevronDownIcon from '@lucide/svelte/icons/chevron-down'
 import Clock3Icon from '@lucide/svelte/icons/clock-3'
 import GaugeIcon from '@lucide/svelte/icons/gauge'
-import LoaderCircleIcon from '@lucide/svelte/icons/loader-circle'
+import { Spinner } from '$lib/components/ui/spinner'
+import { Progress } from '$lib/components/ui/progress'
+import * as Collapsible from '$lib/components/ui/collapsible'
+import * as Accordion from '$lib/components/ui/accordion'
+import * as Empty from '$lib/components/ui/empty'
+import * as Alert from '$lib/components/ui/alert'
 import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw'
 import SearchIcon from '@lucide/svelte/icons/search'
 import TrendingDownIcon from '@lucide/svelte/icons/trending-down'
@@ -81,7 +87,9 @@ const catalogOptions = $derived.by(() => {
     const value = catalogValue(snapshot)
     options.set(value, `${snapshot.catalog_provider_id} / ${snapshot.channel}`)
   }
-  return [...options].map(([value, label]) => ({ value, label })).sort((left, right) => collator.compare(left.label, right.label))
+  return [...options]
+    .map(([value, label]) => ({ value, label }))
+    .sort((left, right) => collator.compare(left.label, right.label))
 })
 const catalogFilterLabel = $derived(
   catalogFilter === 'all'
@@ -155,7 +163,9 @@ const allowanceColumns = allowanceColumnHelper.columns([
 ])
 const allowanceGrouping = ['provider']
 const allowanceColumnVisibility = { provider: false }
-const overallCondition = $derived(worstCondition(visibleAllowances.map(({ allowance }) => effectiveCondition(allowance))))
+const overallCondition = $derived(
+  worstCondition(visibleAllowances.map(({ allowance }) => effectiveCondition(allowance))),
+)
 const lowestRemaining = $derived.by(() => {
   const values = visibleAllowances
     .map(({ allowance }) => remainingPercent(allowance))
@@ -164,7 +174,10 @@ const lowestRemaining = $derived.by(() => {
 })
 const timeline = $derived.by(() =>
   visibleAllowances
-    .filter((item): item is VisibleAllowance & { allowance: Allowance & { reset_at: number } } => item.allowance.reset_at != null)
+    .filter(
+      (item): item is VisibleAllowance & { allowance: Allowance & { reset_at: number } } =>
+        item.allowance.reset_at != null,
+    )
     .sort(
       (left, right) =>
         left.allowance.reset_at - right.allowance.reset_at ||
@@ -195,13 +208,7 @@ const forecastSummary = $derived.by(() => {
         break
     }
   }
-  return {
-    noRisk,
-    willExhaust,
-    unknown,
-    lowestProjected: projected.length ? Math.min(...projected) : undefined,
-    risks,
-  }
+  return { noRisk, willExhaust, unknown, lowestProjected: projected.length ? Math.min(...projected) : undefined, risks }
 })
 const latestFetchedAt = $derived.by(() => {
   const timestamps = snapshots
@@ -272,11 +279,11 @@ function conditionVariant(condition: AllowanceCondition | undefined): BadgeVaria
 function conditionTone(condition: AllowanceCondition | undefined): string {
   switch (condition) {
     case 'exhausted':
-      return 'border-red-500/35 bg-red-500/8'
+      return 'border-destructive/35 bg-destructive/5'
     case 'tight':
-      return 'border-amber-500/35 bg-amber-500/8'
+      return 'border-warning/35 bg-warning/5'
     case 'normal':
-      return 'border-emerald-500/35 bg-emerald-500/8'
+      return 'border-success/35 bg-success/5'
     default:
       return 'border-border bg-muted/30'
   }
@@ -299,7 +306,12 @@ function remainingPercent(allowance: Allowance): number | undefined {
   if (allowance.used_percent != null && Number.isFinite(allowance.used_percent)) {
     return Math.max(0, 100 - allowance.used_percent)
   }
-  if (allowance.remaining && allowance.limit && Number.isFinite(allowance.remaining.value) && allowance.limit.value > 0) {
+  if (
+    allowance.remaining &&
+    allowance.limit &&
+    Number.isFinite(allowance.remaining.value) &&
+    allowance.limit.value > 0
+  ) {
     return Math.max(0, (allowance.remaining.value / allowance.limit.value) * 100)
   }
   return undefined
@@ -365,9 +377,7 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
 }
 
 function allowanceRowId(item: AllowanceMatrixRow): string {
-  return item.allowance
-    ? `${item.snapshot.provider_id}:${item.allowance.key}`
-    : `${item.snapshot.provider_id}:empty`
+  return item.allowance ? `${item.snapshot.provider_id}:${item.allowance.key}` : `${item.snapshot.provider_id}:empty`
 }
 
 function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
@@ -386,25 +396,29 @@ function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
     <div class="flex flex-wrap items-center gap-2">
       <h3 class="font-semibold">{snapshot.provider_name}</h3>
       <Badge variant={presentation.variant}>{presentation.label}</Badge>
-      {#if providerCondition}<Badge variant={conditionVariant(providerCondition)}>{conditionLabel(providerCondition)}</Badge>{/if}
+      {#if providerCondition}<Badge variant={conditionVariant(providerCondition)}
+          >{conditionLabel(providerCondition)}</Badge
+        >{/if}
       {#if snapshot.plan_label}<span class="text-xs text-muted-foreground">{snapshot.plan_label}</span>{/if}
     </div>
     <p class="font-technical mt-1 text-xs text-muted-foreground">{snapshot.catalog_provider_id} / {snapshot.channel}</p>
     {#if snapshot.error}
-      <p class="mt-1.5 text-xs text-muted-foreground">
-        {snapshot.status === 'stale' ? `${m.allowances_stale_message()} ` : ''}{allowanceErrorMessage(snapshot.error.category)}
-      </p>
+      <Alert.Root class="mt-1.5" variant={snapshot.status === 'stale' ? 'warning' : 'destructive'} role="status"
+        ><Alert.Description
+          >{snapshot.status === 'stale' ? `${m.allowances_stale_message()} ` : ''}{allowanceErrorMessage(
+            snapshot.error.category,
+          )}</Alert.Description
+        ></Alert.Root>
     {/if}
     {#if snapshot.models.length > 0}
-      <details class="group mt-1.5">
-        <summary
-          class="inline-flex cursor-pointer list-none items-center gap-1 text-xs font-medium text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      <Collapsible.Root class="mt-1.5">
+        <Collapsible.Trigger
+          class="inline-flex min-h-8 items-center gap-1"
           aria-label={m.allowances_show_model_allowances({ provider: snapshot.provider_name })}>
-          {m.allowances_model_allowances()}
-          <ChevronDownIcon class="size-3.5 transition-transform group-open:rotate-180" />
-        </summary>
-        <div class="mt-3 max-w-2xl">{@render modelRows(snapshot.models)}</div>
-      </details>
+          {m.allowances_model_allowances()}<ChevronDownIcon class="size-3.5" />
+        </Collapsible.Trigger>
+        <Collapsible.Content class="mt-3 max-w-2xl">{@render modelRows(snapshot.models)}</Collapsible.Content>
+      </Collapsible.Root>
     {/if}
   </div>
   <Button
@@ -414,7 +428,9 @@ function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
     onclick={() => refreshProvider(snapshot)}
     disabled={refreshingProvider || refreshingAll}
     aria-label={m.allowances_refresh_provider({ provider: snapshot.provider_name })}>
-    {#if refreshingProvider}<LoaderCircleIcon class="animate-spin" />{:else}<RefreshCwIcon />{/if}
+    {#if refreshingProvider}<Spinner
+        data-icon="inline-start"
+        aria-label={m.allowances_loading()} />{:else}<RefreshCwIcon />{/if}
   </Button>
 {/snippet}
 
@@ -422,7 +438,7 @@ function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
   {@const leaves = row.getLeafRows()}
   {@const snapshot = leaves[0]?.original.snapshot}
   {#if snapshot}
-    {@const allowances = leaves.flatMap(({ original }) => original.allowance ? [original.allowance] : [])}
+    {@const allowances = leaves.flatMap(({ original }) => (original.allowance ? [original.allowance] : []))}
     <div
       class="flex min-h-14 items-center justify-between gap-3 px-3 py-2"
       data-testid={`allowance-provider-${snapshot.provider_id}`}>
@@ -446,11 +462,10 @@ function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
   {#if allowance}
     {@const percent = allowance.used_percent == null ? undefined : Math.min(100, Math.max(0, allowance.used_percent))}
     <span class="font-technical tabular-nums">{usedDisplay(allowance)}</span>
-    {#if percent != null}
-      <div class="mt-1.5 h-1 overflow-hidden rounded-full bg-muted" role="progressbar" aria-label={`${allowanceLabel(allowance)} ${m.allowances_utilization()}`} aria-valuemin="0" aria-valuemax="100" aria-valuenow={percent}>
-        <div class="h-full rounded-full bg-primary" style:width={`${percent}%`}></div>
-      </div>
-    {/if}
+    <Progress
+      value={percent ?? null}
+      class="mt-1.5 h-1"
+      aria-label={`${allowanceLabel(allowance)} ${m.allowances_utilization()}`} />
   {/if}
 {/snippet}
 
@@ -459,7 +474,12 @@ function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
   {#if allowance}
     {@const condition = effectiveCondition(allowance)}
     <div class="flex min-w-0 items-center gap-2">
-      {#if condition}<span class={['size-1.5 shrink-0 rounded-full', condition === 'exhausted' ? 'bg-red-500' : condition === 'tight' ? 'bg-amber-500' : 'bg-emerald-500']}></span>{/if}
+      {#if condition}<span
+          class={[
+            'size-1.5 shrink-0 rounded-full',
+            condition === 'exhausted' ? 'bg-destructive' : condition === 'tight' ? 'bg-warning' : 'bg-success',
+          ]}></span
+        >{/if}
       <span class="font-technical tabular-nums">{remainingDisplay(allowance)}</span>
     </div>
   {/if}
@@ -484,21 +504,27 @@ function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
         <span class="truncate font-medium">{allowanceLabel(allowance)}</span>
       </div>
       <div class="flex shrink-0 items-center gap-2">
-        {#if condition}<span class={['size-1.5 rounded-full', condition === 'exhausted' ? 'bg-red-500' : condition === 'tight' ? 'bg-amber-500' : 'bg-emerald-500']}></span>{/if}
+        {#if condition}<span
+            class={[
+              'size-1.5 rounded-full',
+              condition === 'exhausted' ? 'bg-destructive' : condition === 'tight' ? 'bg-warning' : 'bg-success',
+            ]}></span
+          >{/if}
         <span class="font-technical tabular-nums">{remainingDisplay(allowance)}</span>
       </div>
     </div>
     <div class="mt-1.5 grid grid-cols-[auto_minmax(0,1fr)] gap-3 text-xs text-muted-foreground">
       <span class="font-technical tabular-nums">{m.allowances_used()} {usedDisplay(allowance)}</span>
       <span class="font-technical truncate text-right tabular-nums">
-        {allowance.reset_at != null ? m.allowances_reset_at({ time: formatLogTime(allowance.reset_at, localeState.current) }) : '–'}
+        {allowance.reset_at != null
+          ? m.allowances_reset_at({ time: formatLogTime(allowance.reset_at, localeState.current) })
+          : '–'}
       </span>
     </div>
-    {#if percent != null}
-      <div class="mt-2 h-1 overflow-hidden rounded-full bg-muted" role="progressbar" aria-label={`${allowanceLabel(allowance)} ${m.allowances_utilization()}`} aria-valuemin="0" aria-valuemax="100" aria-valuenow={percent}>
-        <div class="h-full rounded-full bg-primary" style:width={`${percent}%`}></div>
-      </div>
-    {/if}
+    <Progress
+      value={percent ?? null}
+      class="mt-2 h-1"
+      aria-label={`${allowanceLabel(allowance)} ${m.allowances_utilization()}`} />
   </div>
 {/snippet}
 
@@ -509,7 +535,9 @@ function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
         <span class="font-medium">{allowanceLabel(allowance)}</span>
         <span class="font-technical tabular-nums">{remainingDisplay(allowance)}</span>
         <span class="font-technical text-muted-foreground tabular-nums">
-          {allowance.reset_at != null ? m.allowances_reset_at({ time: formatLogTime(allowance.reset_at, localeState.current) }) : '–'}
+          {allowance.reset_at != null
+            ? m.allowances_reset_at({ time: formatLogTime(allowance.reset_at, localeState.current) })
+            : '–'}
         </span>
       </div>
     {/each}
@@ -517,17 +545,14 @@ function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
 {/snippet}
 
 {#snippet modelRows(models: ModelAllowance[])}
-  <div class="grid gap-2">
+  <Accordion.Root type="multiple" class="grid gap-2">
     {#each models as model (model.model)}
-      <details class="group rounded-lg border bg-background">
-        <summary class="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 px-3 py-2 text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-          <span class="min-w-0 break-all">{model.model}</span>
-          <ChevronDownIcon class="size-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-180" />
-        </summary>
-        <div class="border-t p-3">{@render compactAllowanceRows(model.allowances)}</div>
-      </details>
+      <Accordion.Item value={model.model}>
+        <Accordion.Trigger><span class="min-w-0 break-all">{model.model}</span></Accordion.Trigger>
+        <Accordion.Content>{@render compactAllowanceRows(model.allowances)}</Accordion.Content>
+      </Accordion.Item>
     {/each}
-  </div>
+  </Accordion.Root>
 {/snippet}
 
 <div class="allowances-page route-page">
@@ -535,10 +560,14 @@ function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
     {#snippet actions()}
       <div class="flex flex-wrap items-center justify-end gap-3">
         <span class="font-technical text-xs text-muted-foreground tabular-nums">
-          {latestFetchedAt ? m.allowances_last_updated({ time: formatLogTime(latestFetchedAt, localeState.current) }) : m.allowances_never_updated()}
+          {latestFetchedAt
+            ? m.allowances_last_updated({ time: formatLogTime(latestFetchedAt, localeState.current) })
+            : m.allowances_never_updated()}
         </span>
         <Button onclick={refreshAll} disabled={refreshingAll || allowanceQuery.isPending}>
-          {#if refreshingAll}<LoaderCircleIcon class="animate-spin" />{:else}<RefreshCwIcon />{/if}
+          {#if refreshingAll}<Spinner
+              data-icon="inline-start"
+              aria-label={m.allowances_loading()} />{:else}<RefreshCwIcon />{/if}
           {m.allowances_refresh_all()}
         </Button>
       </div>
@@ -551,21 +580,28 @@ function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
       <div class="grid gap-5"><Skeleton class="h-48 w-full" /><Skeleton class="h-56 w-full" /></div>
     </div>
   {:else if allowanceQuery.error && allowanceQuery.data === undefined}
-    <section class="route-section py-12 text-center" role="alert">
-      <GaugeIcon class="mx-auto size-8 text-destructive" />
-      <h2 class="route-section-title mt-4">{m.allowances_load_failed()}</h2>
-      <p class="mt-2 text-sm text-destructive">{localizeBackendErrorMessage(allowanceQuery.error)}</p>
-      <Button class="mt-4" variant="outline" onclick={() => void allowanceQuery.refetch()}>{m.common_retry()}</Button>
-    </section>
+    <RequestFailure
+      title={m.allowances_load_failed()}
+      message={localizeBackendErrorMessage(allowanceQuery.error)}
+      retry={() => allowanceQuery.refetch()}
+      retrying={allowanceQuery.isFetching} />
   {:else if snapshots.length === 0}
-    <section class="route-section py-12 text-center">
-      <GaugeIcon class="mx-auto size-8 text-muted-foreground" />
-      <h2 class="route-section-title mt-4">{m.allowances_empty_title()}</h2>
-      <p class="route-section-description mx-auto max-w-lg">{m.allowances_empty_description()}</p>
-      <Button class="mt-4" variant="outline" href="/providers">{m.allowances_manage_providers()}</Button>
-    </section>
+    <Empty.Root
+      ><Empty.Header
+        ><Empty.Media variant="icon"><GaugeIcon /></Empty.Media><Empty.Title role="heading" aria-level={2}
+          >{m.allowances_empty_title()}</Empty.Title
+        ><Empty.Description>{m.allowances_empty_description()}</Empty.Description></Empty.Header
+      ><Empty.Content
+        ><Button variant="outline" href="/providers">{m.allowances_manage_providers()}</Button></Empty.Content
+      ></Empty.Root>
   {:else}
-    <section class="route-section grid gap-2 p-2 sm:grid-cols-2 xl:grid-cols-[minmax(14rem,1fr)_repeat(3,minmax(10rem,auto))]">
+    {#if allowanceQuery.error}<RequestFailure
+        title={m.allowances_stale_message()}
+        message={localizeBackendErrorMessage(allowanceQuery.error)}
+        retry={() => allowanceQuery.refetch()}
+        retrying={allowanceQuery.isFetching} />{/if}
+    <section
+      class="route-section grid gap-2 p-2 sm:grid-cols-2 xl:grid-cols-[minmax(14rem,1fr)_repeat(3,minmax(10rem,auto))]">
       <InputGroup.Root class="min-w-0">
         <InputGroup.Input
           type="search"
@@ -586,7 +622,8 @@ function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
         </Select.Content>
       </Select.Root>
       <Select.Root type="single" bind:value={conditionFilter}>
-        <Select.Trigger class="w-full" aria-label={m.allowances_filter_condition()}>{conditionFilterLabel}</Select.Trigger>
+        <Select.Trigger class="w-full" aria-label={m.allowances_filter_condition()}
+          >{conditionFilterLabel}</Select.Trigger>
         <Select.Content>
           <Select.Group>
             <Select.Item value="all">{m.allowances_filter_all()}</Select.Item>
@@ -597,7 +634,8 @@ function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
         </Select.Content>
       </Select.Root>
       <Select.Root type="single" bind:value={freshnessFilter}>
-        <Select.Trigger class="w-full" aria-label={m.allowances_filter_freshness()}>{freshnessFilterLabel}</Select.Trigger>
+        <Select.Trigger class="w-full" aria-label={m.allowances_filter_freshness()}
+          >{freshnessFilterLabel}</Select.Trigger>
         <Select.Content>
           <Select.Group>
             <Select.Item value="all">{m.allowances_filter_all()}</Select.Item>
@@ -615,7 +653,9 @@ function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
       <div class="absolute inset-y-0 left-0 w-1 bg-current opacity-60"></div>
       <div class="grid items-center gap-3 sm:grid-cols-[minmax(9rem,1fr)_repeat(2,minmax(0,1fr))]">
         <div>
-          <p class="text-xs font-medium uppercase tracking-[0.12em] text-muted-foreground">{m.allowances_condition_title()}</p>
+          <p class="text-xs font-medium uppercase tracking-[0.12em] text-muted-foreground">
+            {m.allowances_condition_title()}
+          </p>
           <p class="mt-0.5 text-base font-semibold">{conditionLabel(overallCondition)}</p>
         </div>
         <p class="font-technical text-sm tabular-nums">
@@ -633,10 +673,13 @@ function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
 
     <div class="grid min-w-0 items-start gap-3 xl:grid-cols-[minmax(0,2fr)_minmax(17rem,1fr)]">
       <Card.Root class="min-w-0 gap-0 overflow-hidden" size="sm">
-        <Card.Header class="border-b"><h2 class="text-base font-semibold">{m.allowances_matrix_title()}</h2></Card.Header>
+        <Card.Header class="border-b"
+          ><h2 class="text-base font-semibold">{m.allowances_matrix_title()}</h2></Card.Header>
         <Card.Content class="p-0">
           {#if visibleProviders.length === 0}
-            <p class="p-8 text-center text-sm text-muted-foreground">{m.allowances_filter_empty()}</p>
+            <Empty.Root class="p-8"
+              ><Empty.Header><Empty.Description>{m.allowances_filter_empty()}</Empty.Description></Empty.Header
+              ></Empty.Root>
           {:else}
             <div class="route-desktop-table">
               <DataTable
@@ -675,7 +718,10 @@ function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
       <div class="grid min-w-0 gap-3">
         <Card.Root class="gap-0" size="sm">
           <Card.Header class="border-b">
-            <div class="flex items-center gap-2"><Clock3Icon class="size-4 text-primary" /><h2 class="text-base font-semibold">{m.allowances_timeline_title()}</h2></div>
+            <div class="flex items-center gap-2">
+              <Clock3Icon class="size-4 text-primary" />
+              <h2 class="text-base font-semibold">{m.allowances_timeline_title()}</h2>
+            </div>
           </Card.Header>
           <Card.Content class="pt-3">
             {#if timeline.length === 0}
@@ -684,9 +730,14 @@ function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
               <ol class="relative ml-2 border-l">
                 {#each timeline as item (`${item.snapshot.provider_id}:${item.allowance.key}`)}
                   <li class="relative pb-3 pl-5 last:pb-0">
-                    <span class="absolute -left-1.5 top-1 size-3 rounded-full border-2 border-background bg-primary"></span>
-                    <p class="font-technical text-sm font-medium tabular-nums">{formatLogTime(item.allowance.reset_at, localeState.current)}</p>
-                    <p class="mt-1 text-sm text-muted-foreground">{item.snapshot.provider_name} · {allowanceLabel(item.allowance)}</p>
+                    <span class="absolute -left-1.5 top-1 size-3 rounded-full border-2 border-background bg-primary"
+                    ></span>
+                    <p class="font-technical text-sm font-medium tabular-nums">
+                      {formatLogTime(item.allowance.reset_at, localeState.current)}
+                    </p>
+                    <p class="mt-1 text-sm text-muted-foreground">
+                      {item.snapshot.provider_name} · {allowanceLabel(item.allowance)}
+                    </p>
                   </li>
                 {/each}
               </ol>
@@ -696,19 +747,39 @@ function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
 
         <Card.Root class="gap-0" size="sm">
           <Card.Header class="border-b">
-            <div class="flex items-center gap-2"><TrendingDownIcon class="size-4 text-primary" /><h2 class="text-base font-semibold">{m.allowances_forecast_title()}</h2></div>
+            <div class="flex items-center gap-2">
+              <TrendingDownIcon class="size-4 text-primary" />
+              <h2 class="text-base font-semibold">{m.allowances_forecast_title()}</h2>
+            </div>
             <Card.Description>{m.allowances_forecast_basis()}</Card.Description>
           </Card.Header>
           <Card.Content class="pt-3">
             <div class="grid grid-cols-3 gap-2 text-center">
-              <div class="rounded-lg bg-emerald-500/8 px-2 py-3"><p class="font-technical text-lg font-semibold tabular-nums">{forecastSummary.noRisk}</p><p class="text-xs text-muted-foreground">{m.allowances_forecast_no_risk({ count: forecastSummary.noRisk })}</p></div>
-              <div class="rounded-lg bg-red-500/8 px-2 py-3"><p class="font-technical text-lg font-semibold tabular-nums">{forecastSummary.willExhaust}</p><p class="text-xs text-muted-foreground">{m.allowances_forecast_will_exhaust({ count: forecastSummary.willExhaust })}</p></div>
-              <div class="rounded-lg bg-muted px-2 py-3"><p class="font-technical text-lg font-semibold tabular-nums">{forecastSummary.unknown}</p><p class="text-xs text-muted-foreground">{m.allowances_forecast_unknown({ count: forecastSummary.unknown })}</p></div>
+              <div class="rounded-lg bg-success/8 px-2 py-3">
+                <p class="font-technical text-lg font-semibold tabular-nums">{forecastSummary.noRisk}</p>
+                <p class="text-xs text-muted-foreground">
+                  {m.allowances_forecast_no_risk({ count: forecastSummary.noRisk })}
+                </p>
+              </div>
+              <div class="rounded-lg bg-destructive/8 px-2 py-3">
+                <p class="font-technical text-lg font-semibold tabular-nums">{forecastSummary.willExhaust}</p>
+                <p class="text-xs text-muted-foreground">
+                  {m.allowances_forecast_will_exhaust({ count: forecastSummary.willExhaust })}
+                </p>
+              </div>
+              <div class="rounded-lg bg-muted px-2 py-3">
+                <p class="font-technical text-lg font-semibold tabular-nums">{forecastSummary.unknown}</p>
+                <p class="text-xs text-muted-foreground">
+                  {m.allowances_forecast_unknown({ count: forecastSummary.unknown })}
+                </p>
+              </div>
             </div>
             <p class="mt-4 border-t pt-4 text-sm text-muted-foreground">
               {forecastSummary.lowestProjected == null
                 ? m.allowances_forecast_no_projection()
-                : m.allowances_forecast_lowest({ value: formatAllowancePercent(forecastSummary.lowestProjected, localeState.current) })}
+                : m.allowances_forecast_lowest({
+                    value: formatAllowancePercent(forecastSummary.lowestProjected, localeState.current),
+                  })}
             </p>
             {#if forecastSummary.risks.length > 0}
               <ul class="mt-4 grid gap-2 border-t pt-4">
@@ -716,7 +787,11 @@ function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
                   <li class="text-sm">
                     {item.allowance.forecast.exhausts_at == null
                       ? `${item.snapshot.provider_name} · ${allowanceLabel(item.allowance)}`
-                      : m.allowances_forecast_exhausts_at({ provider: item.snapshot.provider_name, item: allowanceLabel(item.allowance), time: formatLogTime(item.allowance.forecast.exhausts_at, localeState.current) })}
+                      : m.allowances_forecast_exhausts_at({
+                          provider: item.snapshot.provider_name,
+                          item: allowanceLabel(item.allowance),
+                          time: formatLogTime(item.allowance.forecast.exhausts_at, localeState.current),
+                        })}
                   </li>
                 {/each}
               </ul>

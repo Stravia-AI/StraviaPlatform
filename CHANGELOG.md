@@ -10,6 +10,7 @@
 
 ### Changed
 
+- The WebUI now shares shadcn-svelte feedback, progress, disclosure, navigation and pagination controls, with reusable secret inputs, request recovery, model filters and metric loading states. Mobile observation details use a modal Sheet while desktop details remain a resizable overlay; update notifications use the existing persistent toast surface without changing skip policy.
 - **Breaking:** Interaction Observation replaces legacy flat request logs and debug-build wire capture. Migration 34 removes old request-log rows instead of backfilling them; analytics and Route scheduling now read Confirmed Upstream Usage from Model Turn and Target attempt observations.
 - Debug defaults off after every process start, is snapshotted independently when each run is admitted, and retains Observation metadata and managed Trace segments for the configured request-record retention period (seven days by default).
 - The latest Request Records page continuously accepts new activity after its fixed anchor; historical 24-hour pages keep fixed boundaries and preserve already-open root membership until an explicit refresh or migration.
@@ -22,6 +23,7 @@
 
 ### Fixed
 
+- Model ID suggestions no longer select a catalog entry during input-method composition, preserving the administrator's display-name draft. Observation canvas selection updates retain measured node dimensions so returning from mobile details does not hide the originating node or lose focus.
 - Completed HTTP streams no longer appear interrupted or lose their Request Records parent links when clients stop reading after the protocol terminal event; observation finalization now waits for the stream's delivery and Generation Chain commit result.
 - The Server development workflow now passes Vite's actual listening origin to the backend for setup and sign-in, including when Vite selects another port for concurrent workspaces.
 - Relative SQLite paths now resolve from the directory containing `server.toml` throughout setup, startup, and local recovery, keeping the default Debug database in the workspace's `.stravia-dev` directory instead of creating a database in the process working directory.

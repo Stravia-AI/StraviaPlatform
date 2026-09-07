@@ -1,6 +1,7 @@
 <script lang="ts">
 import * as m from '$lib/paraglide/messages.js'
 import ClipboardCopyIcon from '@lucide/svelte/icons/clipboard-copy'
+import { onDestroy } from 'svelte'
 import { toast } from 'svelte-sonner'
 
 import { cn } from '$lib/utils'
@@ -17,15 +18,23 @@ interface Props {
 let { value, display = value, copyable = false, class: className }: Props = $props()
 let copied = $state(false)
 let copiedTimer: ReturnType<typeof setTimeout> | undefined
+let disposed = false
+
+onDestroy(() => {
+  disposed = true
+  clearTimeout(copiedTimer)
+})
 
 async function copyValue(): Promise<void> {
   try {
     await navigator.clipboard.writeText(value)
+    if (disposed) return
     copied = true
     clearTimeout(copiedTimer)
     copiedTimer = setTimeout(() => (copied = false), 1200)
     toast.success(m.common_copied_clipboard())
   } catch {
+    if (disposed) return
     toast.error(m.common_not_copy_clipboard())
   }
 }
@@ -38,12 +47,12 @@ async function copyValue(): Promise<void> {
         'font-technical flex min-h-10 min-w-0 items-center truncate text-left text-xs tabular-nums transition-colors duration-[140ms] ease-[cubic-bezier(0.2,0,0,1)]',
         copied && 'text-signal',
         className,
-      )}
-      >{display}</Tooltip.Trigger>
+      )}>{display}</Tooltip.Trigger>
     <Tooltip.Content class="max-w-[min(32rem,calc(100vw-2rem))] break-all font-mono text-xs">{value}</Tooltip.Content>
   </Tooltip.Root>
   {#if copyable}
     <Button
+      type="button"
       size="icon-sm"
       variant="ghost"
       onclick={() => void copyValue()}

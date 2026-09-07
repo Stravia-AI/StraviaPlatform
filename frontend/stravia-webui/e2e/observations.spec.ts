@@ -101,7 +101,11 @@ interface ObservationFixture {
   debugWrites: Array<{ enabled: boolean; confirmed: boolean }>
 }
 
-async function installObservationFixture(page: Page, holdRemainingRoots = false): Promise<ObservationFixture> {
+async function installObservationFixture(
+  page: Page,
+  holdRemainingRoots = false,
+  captureDebug = false,
+): Promise<ObservationFixture> {
   let releaseRemainingRoots!: () => void
   const remainingRootsReady = new Promise<void>((resolve) => {
     releaseRemainingRoots = resolve
@@ -193,7 +197,13 @@ async function installObservationFixture(page: Page, holdRemainingRoots = false)
       const detail: InteractionDetail = {
         interaction: selected,
         root,
-        runs: [runFor(selected)],
+        runs: [
+          {
+            ...runFor(selected),
+            debug_enabled: captureDebug,
+            debug_events: captureDebug ? [{ fixture: 'retained diagnostic record' }] : [],
+          },
+        ],
         snapshot_sequence: snapshotSequence,
       }
       await route.fulfill({ json: { data: detail } })
@@ -341,6 +351,13 @@ test.describe('Interaction Observation canvas', () => {
     await resize.press('ArrowRight')
     await resize.press('ArrowRight')
     await expect.poll(async () => (await inspector.boundingBox())!.width).toBeGreaterThan(widthBefore)
+    const widthBeforeDrag = (await inspector.boundingBox())!.width
+    const handleBox = (await resize.boundingBox())!
+    await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + handleBox.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(handleBox.x - 30, handleBox.y + handleBox.height / 2)
+    await page.mouse.up()
+    await expect.poll(async () => (await inspector.boundingBox())!.width).toBeGreaterThan(widthBeforeDrag)
     await page.getByRole('button', { name: 'Close', exact: true }).click()
 
     await node(page, 'Boreal', 'waiting_client').focus()
@@ -433,6 +450,33 @@ test.describe('Interaction Observation canvas', () => {
     await expect(migration).toHaveCount(0)
   })
 
+  test('retains the selected observation and detail tab across mobile and desktop layouts', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 })
+    await installObservationFixture(page, false, true)
+    await page.goto('/logs')
+    const selectedNode = node(page, 'Atlas', 'completed')
+    await selectedNode.focus()
+    await selectedNode.press('Enter')
+    const desktop = page.getByRole('complementary', { name: 'Observation details' })
+    await desktop.getByRole('tab', { name: 'Debug records' }).click()
+    await expect(desktop.getByText('retained diagnostic record', { exact: false })).toBeVisible()
+
+    await page.setViewportSize({ width: 390, height: 740 })
+    const mobile = page.getByRole('dialog', { name: 'Observation details' })
+    await expect(mobile.getByRole('heading', { name: 'Atlas', exact: true })).toBeVisible()
+    await expect(mobile.getByRole('tab', { name: 'Debug records' })).toHaveAttribute('aria-selected', 'true')
+    await expect(mobile.getByText('retained diagnostic record', { exact: false })).toBeVisible()
+    await expect(desktop).toBeHidden()
+
+    await page.setViewportSize({ width: 1280, height: 800 })
+    await expect(desktop.getByRole('heading', { name: 'Atlas', exact: true })).toBeVisible()
+    await expect(desktop.getByRole('tab', { name: 'Debug records' })).toHaveAttribute('aria-selected', 'true')
+    await expect(desktop.getByText('retained diagnostic record', { exact: false })).toBeVisible()
+    await expect(mobile).toBeHidden()
+    await desktop.getByRole('button', { name: 'Close', exact: true }).click()
+    await expect(selectedNode).toBeFocused()
+  })
+
   test.describe('touch input', () => {
     test.use({ hasTouch: true })
 
@@ -449,13 +493,29 @@ test.describe('Interaction Observation canvas', () => {
       await expect(runningDot).toHaveCSS('animation-name', 'none')
       await expect(waitingDot).toHaveCSS('animation-name', 'none')
 
-      await node(page, 'Cinder', 'running').click()
-      const inspector = page.getByRole('complementary', { name: 'Observation details' })
+      const selectedNode = node(page, 'Cinder', 'running')
+      await selectedNode.focus()
+      await selectedNode.press('Enter')
+      const inspector = page.getByRole('dialog', { name: 'Observation details' })
+      await expect(inspector.getByRole('heading', { name: 'Cinder' })).toBeVisible()
       const inspectorBox = (await inspector.boundingBox())!
       expect(inspectorBox.x).toBeLessThanOrEqual(1)
       expect(inspectorBox.width).toBeGreaterThanOrEqual(389)
       await expect(page.getByRole('slider', { name: 'Resize details inspector' })).toBeHidden()
-      await page.getByRole('button', { name: 'Close', exact: true }).click()
+      const close = inspector.getByRole('button', { name: 'Close', exact: true })
+      await expect(close).toBeFocused()
+      await close.press('Shift+Tab')
+      await expect(close).not.toBeFocused()
+      await expect.poll(() => inspector.evaluate((element) => element.contains(document.activeElement))).toBe(true)
+      await page.keyboard.press('Tab')
+      await expect(close).toBeFocused()
+      await page.keyboard.press('Escape')
+      await expect(inspector).toBeHidden()
+      await expect(selectedNode).toBeFocused()
+      await selectedNode.press('Enter')
+      await close.click()
+      await expect(inspector).toBeHidden()
+      await expect(selectedNode).toBeFocused()
 
       const debugSwitch = page.getByRole('switch', { name: 'Debug' })
       await debugSwitch.click()

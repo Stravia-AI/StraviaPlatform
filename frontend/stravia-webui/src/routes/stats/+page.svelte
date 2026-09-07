@@ -1,5 +1,6 @@
 <script lang="ts">
 import * as m from '$lib/paraglide/messages.js'
+import RequestFailure from '$lib/components/request-failure.svelte'
 import { createQuery } from '@tanstack/svelte-query'
 import { BarChart, LineChart } from 'layerchart'
 
@@ -24,6 +25,8 @@ import { Button } from '$lib/components/ui/button'
 import { DataTable, createDataTableColumnHelper } from '$lib/components/ui/data-table'
 import * as Select from '$lib/components/ui/select'
 import { Skeleton } from '$lib/components/ui/skeleton'
+import { Progress } from '$lib/components/ui/progress'
+import * as Empty from '$lib/components/ui/empty'
 
 let hours = $state('24')
 const hoursNumber = $derived(Number(hours))
@@ -233,11 +236,14 @@ function retryAll(): void {
 {/snippet}
 
 {#snippet providerStatsEmpty()}
-  <p class="py-6 text-center text-sm text-muted-foreground">{m.stats_no_model_service_traffic()}</p>
+  <Empty.Root class="border-y py-6"
+    ><Empty.Header><Empty.Description>{m.stats_no_model_service_traffic()}</Empty.Description></Empty.Header
+    ></Empty.Root>
 {/snippet}
 
 {#snippet apiKeyStatsEmpty()}
-  <p class="py-6 text-center text-sm text-muted-foreground">{m.stats_no_api_key_traffic()}</p>
+  <Empty.Root class="border-y py-6"
+    ><Empty.Header><Empty.Description>{m.stats_no_api_key_traffic()}</Empty.Description></Empty.Header></Empty.Root>
 {/snippet}
 
 {#snippet liveMeta()}
@@ -247,13 +253,8 @@ function retryAll(): void {
     tone={anyError ? 'error' : 'healthy'} />
 {/snippet}
 
-{#snippet queryFailure(error: unknown, retry: () => unknown)}
-  <div class="border-y py-6 text-center" role="alert">
-    <p class="text-sm text-destructive">
-      {localizeBackendErrorMessage(error)}
-    </p>
-    <Button class="mt-3" variant="outline" size="sm" onclick={() => void retry()}>{m.common_retry()}</Button>
-  </div>
+{#snippet queryFailure(error: unknown, retry: () => unknown, retrying: boolean)}
+  <RequestFailure message={localizeBackendErrorMessage(error)} {retry} {retrying} />
 {/snippet}
 
 <div class="route-page">
@@ -265,31 +266,18 @@ function retryAll(): void {
     actions={rangeAction} />
 
   {#if analyticsPending}
-    <div class="route-metric-strip" aria-label={m.stats_loading_analytics_metrics()}>
-      {#each Array(6) as _, index (index)}<div class="route-metric-strip__item">
-          <Skeleton class="h-4 w-24" /><Skeleton class="mt-2 h-7 w-20" />
-        </div>{/each}
-    </div>
+    <MetricStrip loading loadingLabel={m.stats_loading_analytics_metrics()} placeholderCount={7} />
     <div class="grid gap-6 min-[1280px]:grid-cols-12">
       <Skeleton class="h-96 min-[1280px]:col-span-7" /><Skeleton class="h-96 min-[1280px]:col-span-5" />
     </div>
   {:else}
     {#if anyError}
-      <section class="route-section" role="alert">
-        <h2 class="route-section-title">
-          {m.stats_some_usage_data_not_refreshed()}
-        </h2>
-        <p class="route-section-description text-destructive">
-          {m.stats_refresh_failed({ labels: formatList(failedAnalyticsLabels) })}
-        </p>
-        <p class="mt-1 text-sm text-destructive">
-          {localizeBackendErrorMessage(anyError)}
-        </p>
-        <p class="route-section-description">
-          {m.stats_refresh_error_help()}
-        </p>
-        <Button class="mt-3" variant="outline" onclick={retryAll}>{m.stats_retry_all()}</Button>
-      </section>
+      <RequestFailure title={m.stats_some_usage_data_not_refreshed()} message={localizeBackendErrorMessage(anyError)}>
+        <p>{m.stats_refresh_failed({ labels: formatList(failedAnalyticsLabels) })}</p>
+        <p>{m.stats_refresh_error_help()}</p>
+        <Button type="button" variant="outline" disabled={analyticsFetching} onclick={retryAll}
+          >{m.stats_retry_all()}</Button>
+      </RequestFailure>
     {/if}
 
     {#if overviewQuery.error && overviewQuery.data === undefined}
@@ -297,7 +285,7 @@ function retryAll(): void {
         <h2 id="analytics-summary-error" class="route-section-title">
           {m.stats_usage_summary_unavailable()}
         </h2>
-        {@render queryFailure(overviewQuery.error, overviewQuery.refetch)}
+        {@render queryFailure(overviewQuery.error, overviewQuery.refetch, overviewQuery.isFetching)}
       </section>
     {:else}
       <MetricStrip {metrics} label={m.common_usage_summary()} />
@@ -316,7 +304,7 @@ function retryAll(): void {
           </div>
         </div>
         {#if hourlyQuery.error && hourlyQuery.data === undefined}
-          {@render queryFailure(hourlyQuery.error, hourlyQuery.refetch)}
+          {@render queryFailure(hourlyQuery.error, hourlyQuery.refetch, hourlyQuery.isFetching)}
         {:else if hasTraffic && tokenChart.length > 0}<div
             class="min-h-80 min-w-0 flex-1"
             aria-label={m.stats_token_usage_chart()}>
@@ -332,9 +320,13 @@ function retryAll(): void {
               ]}
               seriesLayout="stack"
               props={{ xAxis: { ticks: 4 } }} />
-          </div>{:else}<div class="grid min-h-80 flex-1 place-items-center border-y text-sm text-muted-foreground">
-            {hasTraffic ? m.stats_no_token_usage_range() : m.stats_send_first_request()}
-          </div>{/if}
+          </div>{:else}<Empty.Root class="min-h-80 flex-1 border-y"
+            ><Empty.Header
+              ><Empty.Description
+                >{hasTraffic ? m.stats_no_token_usage_range() : m.stats_send_first_request()}</Empty.Description
+              ></Empty.Header
+            ></Empty.Root
+          >{/if}
       </section>
 
       <div class="grid gap-6 min-[1280px]:col-span-5">
@@ -352,7 +344,7 @@ function retryAll(): void {
             </div>
           </div>
           {#if hourlyQuery.error && hourlyQuery.data === undefined}
-            {@render queryFailure(hourlyQuery.error, hourlyQuery.refetch)}
+            {@render queryFailure(hourlyQuery.error, hourlyQuery.refetch, hourlyQuery.isFetching)}
           {:else if hasTraffic && latencyChart.length > 0}<div
               class="h-36 min-w-0"
               aria-label={m.overview_latency_chart()}>
@@ -364,9 +356,13 @@ function retryAll(): void {
                   { key: 'duration', label: m.stats_duration_seconds(), color: 'var(--chart-1)' },
                 ]}
                 props={{ xAxis: { ticks: 4 } }} />
-            </div>{:else}<div class="grid h-36 place-items-center border-y text-sm text-muted-foreground">
-              {hasTraffic ? m.stats_no_latency_data() : m.stats_send_first_request()}
-            </div>{/if}
+            </div>{:else}<Empty.Root class="h-36 border-y"
+              ><Empty.Header
+                ><Empty.Description
+                  >{hasTraffic ? m.stats_no_latency_data() : m.stats_send_first_request()}</Empty.Description
+                ></Empty.Header
+              ></Empty.Root
+            >{/if}
         </section>
         <section class="route-section" aria-labelledby="error-trend-title">
           <div class="route-section-header">
@@ -376,19 +372,23 @@ function retryAll(): void {
                 {m.stats_failed_requests_time_bucket()}
               </p>
             </div>
-            <span class="font-technical text-xs text-destructive tabular-nums">{overview?.error_count ?? 0}</span>
+            <span class="font-technical text-xs text-destructive tabular-nums">{overview?.error_count ?? '–'}</span>
           </div>
           {#if hourlyQuery.error && hourlyQuery.data === undefined}
-            {@render queryFailure(hourlyQuery.error, hourlyQuery.refetch)}
+            {@render queryFailure(hourlyQuery.error, hourlyQuery.refetch, hourlyQuery.isFetching)}
           {:else if hasTraffic && errorChart.length > 0}<div class="h-36 min-w-0">
               <BarChart
                 data={errorChart}
                 x={(item) => item.bucket}
                 series={[{ key: 'errors', label: m.common_errors_label(), color: 'var(--chart-5)' }]}
                 props={{ xAxis: { ticks: 4 } }} />
-            </div>{:else}<div class="grid h-36 place-items-center border-y text-sm text-muted-foreground">
-              {hasTraffic ? m.stats_no_error_data() : m.stats_send_first_request()}
-            </div>{/if}
+            </div>{:else}<Empty.Root class="h-36 border-y"
+              ><Empty.Header
+                ><Empty.Description
+                  >{hasTraffic ? m.stats_no_error_data() : m.stats_send_first_request()}</Empty.Description
+                ></Empty.Header
+              ></Empty.Root
+            >{/if}
         </section>
       </div>
     </div>
@@ -402,7 +402,7 @@ function retryAll(): void {
           </div>
         </div>
         {#if modelsQuery.error && modelsQuery.data === undefined}
-          {@render queryFailure(modelsQuery.error, modelsQuery.refetch)}
+          {@render queryFailure(modelsQuery.error, modelsQuery.refetch, modelsQuery.isFetching)}
         {:else if modelStats.length > 0}<div class="flex flex-col gap-4">
             {#each modelStats.slice(0, 6) as model (model.model)}<div>
                 <div class="mb-1 flex justify-between gap-3 text-sm">
@@ -410,16 +410,15 @@ function retryAll(): void {
                     class="font-technical text-muted-foreground tabular-nums"
                     >{formatPercent(modelTotal > 0 ? model.request_count / modelTotal : 0)}</span>
                 </div>
-                <div class="h-1.5 overflow-hidden rounded-full bg-muted">
-                  <div
-                    class="h-full rounded-full bg-chart-1"
-                    style:width={formatPercent(modelTotal > 0 ? model.request_count / modelTotal : 0)}>
-                  </div>
-                </div>
+                <Progress
+                  value={modelTotal > 0 ? (model.request_count / modelTotal) * 100 : 0}
+                  aria-label={model.model}
+                  class="h-1.5" />
               </div>{/each}
-          </div>{:else}<p class="border-y py-8 text-center text-sm text-muted-foreground">
-            {m.stats_no_model_traffic()}
-          </p>{/if}
+          </div>{:else}<Empty.Root class="border-y py-6"
+            ><Empty.Header><Empty.Description>{m.stats_no_model_traffic()}</Empty.Description></Empty.Header
+            ></Empty.Root
+          >{/if}
       </section>
 
       <section class="route-section min-[1280px]:col-span-7" aria-labelledby="analytics-provider-title">
@@ -434,7 +433,7 @@ function retryAll(): void {
           </div>
         </div>
         {#if providersQuery.error && providersQuery.data === undefined}
-          {@render queryFailure(providersQuery.error, providersQuery.refetch)}
+          {@render queryFailure(providersQuery.error, providersQuery.refetch, providersQuery.isFetching)}
         {:else}
           <div class="route-desktop-table">
             <DataTable
@@ -447,9 +446,10 @@ function retryAll(): void {
               stripedRows />
           </div>
           <div class="route-mobile-list">
-            {#if providerStats.length === 0}<p class="border-y py-8 text-center text-sm text-muted-foreground">
-                {m.stats_no_model_service_traffic()}
-              </p>{:else}{#each providerStats.slice(0, 8) as provider (provider.provider)}<div class="route-mobile-row">
+            {#if providerStats.length === 0}<Empty.Root class="border-y py-6"
+                ><Empty.Header><Empty.Description>{m.stats_no_model_service_traffic()}</Empty.Description></Empty.Header
+                ></Empty.Root
+              >{:else}{#each providerStats.slice(0, 8) as provider (provider.provider)}<div class="route-mobile-row">
                   <div class="min-w-0">
                     <p class="truncate font-medium">{provider.provider}</p>
                     <p class="font-technical mt-1 text-xs text-muted-foreground">
@@ -474,7 +474,7 @@ function retryAll(): void {
         </div>
       </div>
       {#if apiKeysQuery.error && apiKeysQuery.data === undefined}
-        {@render queryFailure(apiKeysQuery.error, apiKeysQuery.refetch)}
+        {@render queryFailure(apiKeysQuery.error, apiKeysQuery.refetch, apiKeysQuery.isFetching)}
       {:else}
         <div class="route-desktop-table">
           <DataTable
@@ -487,9 +487,10 @@ function retryAll(): void {
             stripedRows />
         </div>
         <div class="route-mobile-list">
-          {#if apiKeyStats.length === 0}<p class="border-y py-8 text-center text-sm text-muted-foreground">
-              {m.stats_no_api_key_traffic()}
-            </p>{:else}{#each apiKeyStats.slice(0, 8) as apiKey (apiKey.api_key_id)}<div class="route-mobile-row">
+          {#if apiKeyStats.length === 0}<Empty.Root class="border-y py-6"
+              ><Empty.Header><Empty.Description>{m.stats_no_api_key_traffic()}</Empty.Description></Empty.Header
+              ></Empty.Root
+            >{:else}{#each apiKeyStats.slice(0, 8) as apiKey (apiKey.api_key_id)}<div class="route-mobile-row">
                 <div class="min-w-0">
                   <p class="truncate font-medium">{apiKey.api_key_name || apiKey.api_key_id}</p>
                   <p class="font-technical mt-1 text-xs text-muted-foreground">

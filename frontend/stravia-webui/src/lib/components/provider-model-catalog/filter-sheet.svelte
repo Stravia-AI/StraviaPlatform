@@ -7,6 +7,7 @@ import { Button } from '$lib/components/ui/button'
 import * as Field from '$lib/components/ui/field'
 import * as Select from '$lib/components/ui/select'
 import * as Sheet from '$lib/components/ui/sheet'
+import { allCatalogFilterValue, catalogFilterOptions } from './filter-options'
 
 interface Props {
   open?: boolean
@@ -29,43 +30,60 @@ let {
   onFilterChange,
   onClear,
 }: Props = $props()
+const options = $derived(catalogFilterOptions())
 </script>
 
 {#snippet availabilitySelect(id: string)}
-  <Select.Root type="single" bind:value={() => availability, (value) => onFilterChange('availability', value ?? 'all')}>
+  <Select.Root
+    type="single"
+    bind:value={() => availability, (value) => onFilterChange('availability', value ?? allCatalogFilterValue)}>
     <Select.Trigger {id} class="h-10 w-full font-normal" aria-label={m.provider_model_catalog_model_availability()}>
-      {availability === 'all' ? m.common_all_models() : availability === 'available' ? m.common_used() : m.common_unavailable()}
+      {options.availability.options.find((option) => option.value === availability)?.label ??
+        options.availability.allLabel}
     </Select.Trigger>
     <Select.Content>
-      <Select.Item value="all">{m.common_all_models()}</Select.Item>
-      <Select.Item value="available">{m.common_used()}</Select.Item>
-      <Select.Item value="unavailable">{m.common_unavailable()}</Select.Item>
+      <Select.Group>
+        <Select.Item value={allCatalogFilterValue}>{options.availability.allLabel}</Select.Item>
+        {#each options.availability.options as option (option.value)}
+          <Select.Item value={option.value}>{option.label}</Select.Item>
+        {/each}
+      </Select.Group>
     </Select.Content>
   </Select.Root>
 {/snippet}
 
 {#snippet sourceSelect(id: string)}
-  <Select.Root type="single" bind:value={() => source, (value) => onFilterChange('source_kind', value ?? 'all')}>
+  <Select.Root
+    type="single"
+    bind:value={() => source, (value) => onFilterChange('source_kind', value ?? allCatalogFilterValue)}>
     <Select.Trigger {id} class="h-10 w-full font-normal" aria-label={m.provider_model_catalog_how_models_were_added()}>
-      {source === 'all' ? m.provider_model_catalog_all_sources() : source === 'manual' ? m.common_added_manually() : m.common_synced()}
+      {options.source.options.find((option) => option.value === source)?.label ?? options.source.allLabel}
     </Select.Trigger>
     <Select.Content>
-      <Select.Item value="all">{m.provider_model_catalog_all_sources()}</Select.Item>
-      <Select.Item value="discovered">{m.common_synced()}</Select.Item>
-      <Select.Item value="manual">{m.common_added_manually()}</Select.Item>
+      <Select.Group>
+        <Select.Item value={allCatalogFilterValue}>{options.source.allLabel}</Select.Item>
+        {#each options.source.options as option (option.value)}
+          <Select.Item value={option.value}>{option.label}</Select.Item>
+        {/each}
+      </Select.Group>
     </Select.Content>
   </Select.Root>
 {/snippet}
 
 {#snippet referenceSelect(id: string)}
-  <Select.Root type="single" bind:value={() => reference, (value) => onFilterChange('usage', value ?? 'all')}>
+  <Select.Root
+    type="single"
+    bind:value={() => reference, (value) => onFilterChange('usage', value ?? allCatalogFilterValue)}>
     <Select.Trigger {id} class="h-10 w-full font-normal" aria-label={m.provider_model_catalog_model_usage()}>
-      {reference === 'all' ? m.provider_model_catalog_all_usage() : reference === 'referenced' ? m.provider_model_catalog_use() : m.provider_model_catalog_not_use()}
+      {options.reference.options.find((option) => option.value === reference)?.label ?? options.reference.allLabel}
     </Select.Trigger>
     <Select.Content>
-      <Select.Item value="all">{m.provider_model_catalog_all_usage()}</Select.Item>
-      <Select.Item value="referenced">{m.provider_model_catalog_use()}</Select.Item>
-      <Select.Item value="unreferenced">{m.provider_model_catalog_not_use()}</Select.Item>
+      <Select.Group>
+        <Select.Item value={allCatalogFilterValue}>{options.reference.allLabel}</Select.Item>
+        {#each options.reference.options as option (option.value)}
+          <Select.Item value={option.value}>{option.label}</Select.Item>
+        {/each}
+      </Select.Group>
     </Select.Content>
   </Select.Root>
 {/snippet}

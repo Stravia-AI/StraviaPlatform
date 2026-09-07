@@ -29,8 +29,8 @@ import BrandMark from '$lib/components/brand-mark.svelte'
 import StatusIndicator from '$lib/components/status-indicator.svelte'
 import WindowControls from '$lib/components/window-controls.svelte'
 import { Button } from '$lib/components/ui/button'
-import * as Sheet from '$lib/components/ui/sheet'
-import * as Tooltip from '$lib/components/ui/tooltip'
+import * as Sidebar from '$lib/components/ui/sidebar'
+import * as Breadcrumb from '$lib/components/ui/breadcrumb'
 
 let { children }: { children: Snippet } = $props()
 
@@ -198,7 +198,7 @@ function handleGlobalKeydown(event: KeyboardEvent): void {
   const target = event.target
   if (
     target instanceof Element &&
-    target.closest("input,textarea,select,[contenteditable='true'],[data-no-shortcut]")
+    target.closest("input,textarea,select,[contenteditable]:not([contenteditable='false']),[data-no-shortcut]")
   ) {
     return
   }
@@ -253,62 +253,52 @@ onMount(() => {
 
 <svelte:window onkeydown={handleGlobalKeydown} />
 
-{#snippet navigationItem(item: NavigationItem, closeAfterSelection: boolean, compact: boolean)}
-  {@const label = item.label()}
-  {@const current = isCurrent(item.href)}
-  <Tooltip.Root disabled={!compact}>
-    <Tooltip.Trigger>
-      {#snippet child({ props })}
-        <a
-          {...props}
-          href={resolve(item.href)}
-          aria-label={compact ? label : undefined}
-          aria-current={current ? 'page' : undefined}
-          class={[
-            'relative flex min-h-10 items-center rounded-md transition-[background-color,color] duration-[140ms] ease-[cubic-bezier(0.2,0,0,1)]',
-            compact ? 'justify-center' : 'gap-3 px-3 text-[0.8125rem] font-medium',
-            current
-              ? 'bg-sidebar-accent text-sidebar-accent-foreground'
-              : 'text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground',
-          ]}
-          onclick={() => {
-            if (closeAfterSelection) navigationOpen = false
-          }}>
-          <item.icon class="size-4 shrink-0" />
-          {#if !compact}<span class="truncate">{label}</span>{/if}
-        </a>
-      {/snippet}
-    </Tooltip.Trigger>
-    {#if compact}<Tooltip.Content side="right" sideOffset={8}>{label}</Tooltip.Content>{/if}
-  </Tooltip.Root>
+{#snippet navigation()}
+  <Sidebar.Content
+    class={sidebarCollapsed && isDesktopNavigation ? 'navigation-scrollbar-compact' : 'navigation-scrollbar'}>
+    <nav aria-label={m.app_shell_primary_navigation()}>
+      {#each navigationGroups as group (group.label)}
+        <Sidebar.Group>
+          <Sidebar.GroupLabel>{group.label()}</Sidebar.GroupLabel>
+          <Sidebar.GroupContent>
+            <Sidebar.Menu>
+              {#each group.items as item (item.href)}
+                {@const label = item.label()}
+                {@const current = isCurrent(item.href)}
+                <Sidebar.MenuItem>
+                  <Sidebar.MenuButton isActive={current} tooltipContent={label}>
+                    {#snippet child({ props })}
+                      <a
+                        {...props}
+                        href={resolve(item.href)}
+                        aria-label={label}
+                        data-sveltekit-keepfocus={!isDesktopNavigation ? true : undefined}
+                        aria-current={current ? 'page' : undefined}
+                        onclick={() => {
+                          navigationOpen = false
+                        }}>
+                        <item.icon />
+                        <span>{label}</span>
+                      </a>
+                    {/snippet}
+                  </Sidebar.MenuButton>
+                </Sidebar.MenuItem>
+              {/each}
+            </Sidebar.Menu>
+          </Sidebar.GroupContent>
+        </Sidebar.Group>
+      {/each}
+    </nav>
+  </Sidebar.Content>
 {/snippet}
 
-{#snippet navigation(closeAfterSelection: boolean, compact: boolean)}
-  <nav
-    class={[
-      'flex min-h-0 flex-1 flex-col overflow-y-auto py-4',
-      compact ? 'navigation-scrollbar-compact gap-3 px-1' : 'navigation-scrollbar gap-5 px-3',
-    ]}
-    aria-label={m.app_shell_primary_navigation()}>
-    {#each navigationGroups as group (group.label)}
-      <div class="flex flex-col gap-1">
-        {#if !compact}
-          <p
-            class="font-structural px-3 pb-1 text-[0.68rem] font-semibold tracking-[0.14em] text-muted-foreground uppercase">
-            {group.label()}
-          </p>
-        {/if}
-        {#each group.items as item (item.href)}
-          {@render navigationItem(item, closeAfterSelection, compact)}
-        {/each}
-      </div>
-    {/each}
-  </nav>
-{/snippet}
-
-<div
+<Sidebar.Provider
+  bind:open={() => !sidebarCollapsed, (open) => setSidebarCollapsed(!open)}
+  bind:openMobile={navigationOpen}
+  isMobile={!isDesktopNavigation}
+  style={`--sidebar-top: 2.5rem; --sidebar-surface: ${translucentChrome ? 'transparent' : 'var(--sidebar)'}`}
   class={[
-    'shell-root flex h-svh min-h-screen flex-col overflow-hidden text-foreground',
+    'shell-root relative flex h-svh min-h-screen flex-col overflow-hidden text-foreground',
     translucentChrome ? 'bg-transparent' : 'bg-background',
   ]}>
   <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -334,6 +324,7 @@ onMount(() => {
       {#if hasNavigation}
         <Button
           bind:ref={navigationTrigger}
+          type="button"
           variant="ghost"
           class="relative me-2 ms-auto size-6 shrink-0 rounded-md text-sidebar-foreground before:absolute before:-inset-2 before:content-[''] hover:bg-sidebar-accent hover:text-sidebar-accent-foreground aria-expanded:bg-transparent aria-expanded:text-sidebar-foreground aria-expanded:hover:bg-sidebar-accent aria-expanded:hover:text-sidebar-accent-foreground"
           size="icon-sm"
@@ -348,22 +339,21 @@ onMount(() => {
 
     <div class="flex min-w-0 flex-1 items-center px-4">
       {#if hasNavigation && breadcrumbItems.length > 0}
-        <nav class="min-w-0 text-xs text-muted-foreground" aria-label={m.app_shell_breadcrumb()}>
-          <ol class="flex min-w-0 items-center gap-2">
+        <Breadcrumb.Root class="min-w-0" aria-label={m.app_shell_breadcrumb()}>
+          <Breadcrumb.List class="flex-nowrap gap-2">
             {#each breadcrumbItems as item, index (`${item.href ?? 'current'}-${item.label}`)}
-              <li class="flex min-w-0 items-center gap-2">
-                {#if index > 0}<span aria-hidden="true">/</span>{/if}
+              {#if index > 0}<Breadcrumb.Separator>/</Breadcrumb.Separator>{/if}
+              <Breadcrumb.Item class="min-w-0">
                 {#if item.href}
-                  <a
-                    class="inline-flex min-h-10 min-w-0 items-center truncate font-medium transition-colors hover:text-foreground"
-                    href={resolve(item.href)}>{item.label}</a>
+                  <Breadcrumb.Link class="inline-flex min-h-10 min-w-0 items-center truncate" href={resolve(item.href)}
+                    >{item.label}</Breadcrumb.Link>
                 {:else}
-                  <span class="truncate font-medium text-foreground" aria-current="page">{item.label}</span>
+                  <Breadcrumb.Page class="truncate">{item.label}</Breadcrumb.Page>
                 {/if}
-              </li>
+              </Breadcrumb.Item>
             {/each}
-          </ol>
-        </nav>
+          </Breadcrumb.List>
+        </Breadcrumb.Root>
       {/if}
     </div>
     {#if windowChrome.controls === 'custom'}
@@ -381,38 +371,51 @@ onMount(() => {
 
   {#if hasNavigation}
     <div class={['flex min-h-0 flex-1', translucentChrome ? 'bg-sidebar/50' : 'bg-sidebar']}>
-      <aside
-        class={[
-          'hidden min-h-0 shrink-0 flex-col overflow-hidden text-sidebar-foreground transition-[width] duration-200 ease-[cubic-bezier(0.2,0,0,1)] md:flex',
-          sidebarCollapsed ? 'w-12' : 'w-64',
-          translucentChrome ? 'bg-transparent' : 'bg-sidebar',
-        ]}>
-        {@render navigation(false, sidebarCollapsed)}
-
-        <div class={['border-t border-sidebar-border p-1', sidebarCollapsed ? 'flex flex-col items-center' : 'p-3']}>
+      <Sidebar.Root
+        bind:ref={navigationPanel}
+        collapsible="icon"
+        title={m.app_shell_primary_navigation()}
+        description={m.app_shell_local_ai_gateway()}
+        closeLabel={m.app_shell_close_navigation()}
+        onOpenAutoFocus={focusNavigation}
+        onCloseAutoFocus={restoreNavigationFocus}>
+        {#if !isDesktopNavigation}
+          <Sidebar.Header class="border-b p-4">
+            <div class="flex items-center gap-2">
+              <BrandMark class="size-8" />
+              <div>
+                <p class="font-structural tracking-[0.04em]">STRAVIA</p>
+                <p class="text-sm text-muted-foreground">{m.app_shell_local_ai_gateway()}</p>
+              </div>
+            </div>
+          </Sidebar.Header>
+        {/if}
+        {@render navigation()}
+        <Sidebar.Footer class="border-t border-sidebar-border">
+          {@const compact = isDesktopNavigation && sidebarCollapsed}
           <StatusIndicator
-            class={sidebarCollapsed ? 'justify-center [&>span:last-child]:sr-only' : ''}
+            class={compact ? 'justify-center [&>span:last-child]:sr-only' : ''}
             compact
-            label={gatewayLabel(sidebarCollapsed)}
+            label={gatewayLabel(compact)}
             tone={gatewayTone} />
           {#if !isTauri}
-            <Button
-              class={sidebarCollapsed ? 'mt-1 size-10' : 'mt-2 w-full justify-start'}
-              variant="ghost"
-              size={sidebarCollapsed ? 'icon-sm' : 'default'}
-              onclick={() => void signOut()}
-              aria-label={m.app_shell_sign_out()}
-              title={sidebarCollapsed ? m.app_shell_sign_out() : undefined}>
-              <SignOutIcon data-icon={sidebarCollapsed ? undefined : 'inline-start'} />
-              {#if !sidebarCollapsed}{m.app_shell_sign_out()}{/if}
-            </Button>
-          {:else if !sidebarCollapsed}
-            <p class="mt-2 px-3 py-2 text-xs text-muted-foreground">
-              {m.app_shell_local_desktop_session()}
-            </p>
+            <Sidebar.Menu>
+              <Sidebar.MenuItem>
+                <Sidebar.MenuButton
+                  type="button"
+                  onclick={() => void signOut()}
+                  aria-label={m.app_shell_sign_out()}
+                  tooltipContent={m.app_shell_sign_out()}>
+                  <SignOutIcon />
+                  <span>{m.app_shell_sign_out()}</span>
+                </Sidebar.MenuButton>
+              </Sidebar.MenuItem>
+            </Sidebar.Menu>
+          {:else if !compact}
+            <p class="px-3 py-2 text-xs text-muted-foreground">{m.app_shell_local_desktop_session()}</p>
           {/if}
-        </div>
-      </aside>
+        </Sidebar.Footer>
+      </Sidebar.Root>
 
       <div class="min-w-0 flex-1 overflow-hidden p-0 md:pr-2 md:pb-2">
         <main
@@ -428,44 +431,10 @@ onMount(() => {
       {@render children()}
     </div>
   {/if}
-</div>
-
-{#if hasNavigation}
-  <Sheet.Root bind:open={navigationOpen}>
-    <Sheet.Content
-      bind:ref={navigationPanel}
-      side="left"
-      class="data-[side=left]:w-[min(18rem,100vw)] data-[side=left]:sm:max-w-[18rem] gap-0 p-0"
-      onOpenAutoFocus={focusNavigation}
-      onCloseAutoFocus={restoreNavigationFocus}
-      closeLabel={m.app_shell_close_navigation()}>
-      <Sheet.Header class="border-b">
-        <div class="flex items-center gap-2">
-          <BrandMark class="size-8" />
-          <div>
-            <Sheet.Title class="font-structural tracking-[0.04em]">STRAVIA</Sheet.Title>
-            <Sheet.Description>{m.app_shell_local_ai_gateway()}</Sheet.Description>
-          </div>
-        </div>
-      </Sheet.Header>
-      {@render navigation(true, false)}
-      <Sheet.Footer class="border-t">
-        <StatusIndicator compact label={gatewayLabel(false)} tone={gatewayTone} />
-        {#if !isTauri}
-          <Button class="w-full justify-start" variant="ghost" onclick={() => void signOut()}>
-            <SignOutIcon data-icon="inline-start" />
-            {m.app_shell_sign_out()}
-          </Button>
-        {:else}
-          <p class="text-xs text-muted-foreground">{m.app_shell_local_desktop_session()}</p>
-        {/if}
-      </Sheet.Footer>
-    </Sheet.Content>
-  </Sheet.Root>
-{/if}
+</Sidebar.Provider>
 
 <style>
-.shell-root {
+:global(.shell-root) {
   /* Keep inner route overflow from enlarging the document scroll area; main owns navigation-page scrolling. */
   contain: size layout;
 }
@@ -474,15 +443,15 @@ onMount(() => {
   scrollbar-gutter: stable both-edges;
 }
 
-.navigation-scrollbar {
+:global(.navigation-scrollbar) {
   scrollbar-gutter: stable both-edges;
 }
 
-.navigation-scrollbar-compact {
+:global(.navigation-scrollbar-compact) {
   scrollbar-width: none;
 }
 
-.navigation-scrollbar-compact::-webkit-scrollbar {
+:global(.navigation-scrollbar-compact::-webkit-scrollbar) {
   display: none;
 }
 </style>

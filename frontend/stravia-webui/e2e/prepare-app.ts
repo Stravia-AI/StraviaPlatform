@@ -20,7 +20,9 @@ export async function prepareApp(page: Page): Promise<void> {
   }
   await page.addInitScript(() => {
     localStorage.setItem('stravia-locale', 'en-US')
-    localStorage.setItem('stravia-sidebar-state', 'expanded')
+    if (localStorage.getItem('stravia-sidebar-state') === null) {
+      localStorage.setItem('stravia-sidebar-state', 'expanded')
+    }
     localStorage.setItem('stravia-theme', 'system')
   })
 

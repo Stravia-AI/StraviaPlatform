@@ -674,6 +674,7 @@
   "provider_model_catalog_no_longer_offered": "no longer offered",
   "provider_model_catalog_no_models_match_filters": "No models match these filters.",
   "provider_model_catalog_no_models_found": "No matching models.",
+  "provider_model_catalog_no_models_available": "No models from this service yet.",
   "provider_model_catalog_not_use": "Not in use",
   "provider_model_catalog_not_used": "Not used",
   "provider_model_catalog_remove_list": "Remove from list",

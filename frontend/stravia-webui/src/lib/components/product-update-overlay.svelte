@@ -1,9 +1,11 @@
 <script lang="ts">
 import { browser } from '$app/environment'
 import * as m from '$lib/paraglide/messages.js'
-import DownloadIcon from '@lucide/svelte/icons/download'
-import ExternalLinkIcon from '@lucide/svelte/icons/external-link'
-import XIcon from '@lucide/svelte/icons/x'
+import { onDestroy, untrack } from 'svelte'
+import { toast } from 'svelte-sonner'
+
+import UpdateNotification from '$lib/components/update-notification.svelte'
+import * as Alert from '$lib/components/ui/alert'
 
 import { Button } from '$lib/components/ui/button'
 import * as Dialog from '$lib/components/ui/dialog'
@@ -14,47 +16,46 @@ import { getProductUpdateCoordinator } from '$lib/product-update.svelte'
 
 const updates = getProductUpdateCoordinator()
 const showInstallingOverlay = $derived(
-  updates.state.phase === 'installing' &&
-    supportsInAppInstallProgress(browser ? navigator.userAgent : ''),
+  updates.state.phase === 'installing' && supportsInAppInstallProgress(browser ? navigator.userAgent : ''),
 )
+
+const notificationId = 'product-update-available'
+
+// Sonner 只承接展示，关闭通知与跳过版本的规则仍由更新协调器持有。
+$effect(() => {
+  const update = updates.notification
+  const downloadSupported = updates.status?.download_supported ?? false
+  untrack(() => {
+    if (!update) {
+      toast.dismiss(notificationId)
+      return
+    }
+    const dismiss = () => {
+      if (updates.notification?.version === update.version) updates.dismissNotification()
+    }
+    toast.custom(UpdateNotification, {
+      id: notificationId,
+      duration: Number.POSITIVE_INFINITY,
+      position: 'bottom-right',
+      onDismiss: dismiss,
+      componentProps: {
+        update,
+        downloadSupported,
+        onDismiss: dismiss,
+        onDownload: () => void updates.downloadAvailableUpdate(),
+        onViewRelease: () => void openExternalUrl(update.release_url),
+        onSkip: () => void updates.skipAvailableVersion(),
+      },
+    })
+  })
+})
+
+onDestroy(() => toast.dismiss(notificationId))
 
 function handleInstallPrompt(open: boolean): void {
   if (!open) updates.dismissInstallPrompt()
 }
 </script>
-
-{#if updates.notification}
-  <aside
-    class="fixed right-4 bottom-4 z-40 grid w-[min(24rem,calc(100vw-2rem))] gap-3 rounded-xl border bg-popover p-4 text-popover-foreground shadow-xl"
-    aria-live="polite">
-    <Button
-      class="absolute top-2 right-2"
-      size="icon-sm"
-      variant="ghost"
-      aria-label={m.common_close()}
-      onclick={() => updates.dismissNotification()}><XIcon /></Button>
-    <div class="pr-8">
-      <p class="font-semibold">{m.settings_update_notification_title()}</p>
-      <p class="mt-1 text-sm text-muted-foreground">
-        {m.settings_update_notification_body({ version: updates.notification.version })}
-      </p>
-    </div>
-    <div class="flex flex-wrap gap-2">
-      {#if updates.status?.download_supported && updates.notification.download_available}
-        <Button onclick={() => void updates.downloadAvailableUpdate()}>
-          <DownloadIcon data-icon="inline-start" />{m.settings_update_download()}
-        </Button>
-      {:else}
-        <Button onclick={() => void openExternalUrl(updates.notification!.release_url)}>
-          <ExternalLinkIcon data-icon="inline-start" />{m.settings_update_view_release()}
-        </Button>
-      {/if}
-      <Button variant="ghost" onclick={() => void updates.skipAvailableVersion()}>
-        {m.settings_update_skip()}
-      </Button>
-    </div>
-  </aside>
-{/if}
 
 <Dialog.Root open={updates.state.installPromptOpen} onOpenChange={handleInstallPrompt}>
   <Dialog.Content>
@@ -73,12 +74,13 @@ function handleInstallPrompt(open: boolean): void {
       </button>
     {/if}
     {#if updates.state.error}
-      <p class="text-sm text-destructive" role="alert">
-        {m.settings_update_install_failed({ message: updates.state.error })}
-      </p>
+      <Alert.Root variant="destructive">
+        <Alert.Description>{m.settings_update_install_failed({ message: updates.state.error })}</Alert.Description>
+      </Alert.Root>
     {/if}
     <Dialog.Footer>
-      <Button onclick={() => void updates.installDownloadedUpdate()}>{m.settings_update_install()}</Button>
+      <Button type="button" onclick={() => void updates.installDownloadedUpdate()}
+        >{m.settings_update_install()}</Button>
     </Dialog.Footer>
   </Dialog.Content>
 </Dialog.Root>

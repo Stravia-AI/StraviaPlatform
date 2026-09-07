@@ -7,6 +7,8 @@ import ExternalLinkIcon from '@lucide/svelte/icons/external-link'
 import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw'
 import { toast } from 'svelte-sonner'
 
+import * as Alert from '$lib/components/ui/alert'
+import { Progress } from '$lib/components/ui/progress'
 import { Button } from '$lib/components/ui/button'
 import { Spinner } from '$lib/components/ui/spinner'
 import { openExternalUrl } from '$lib/open-external'
@@ -58,6 +60,7 @@ async function checkNow(): Promise<void> {
       <p class="route-section-description">{m.settings_update_summary()}</p>
     </div>
     <Button
+      type="button"
       variant="outline"
       disabled={checking || busy || checkUnavailable}
       aria-describedby={checkUnavailable ? 'update-check-unavailable' : undefined}
@@ -87,27 +90,32 @@ async function checkNow(): Promise<void> {
     </dl>
 
     {#if checkUnavailable}
-      <p id="update-check-unavailable" class="text-sm text-pretty text-muted-foreground" role="status">
-        {m.settings_update_check_unavailable()}
-      </p>
+      <Alert.Root id="update-check-unavailable" role="status">
+        <Alert.Description>{m.settings_update_check_unavailable()}</Alert.Description>
+      </Alert.Root>
     {:else if updates.status?.last_failure}
-      <p class="text-sm text-destructive" role="alert">
-        {m.settings_update_check_failed({ message: updates.status.last_failure.message })}
-      </p>
+      <Alert.Root variant="destructive">
+        <Alert.Description
+          >{m.settings_update_check_failed({ message: updates.status.last_failure.message })}</Alert.Description>
+      </Alert.Root>
     {/if}
 
     {#if available}
-      <div class="grid gap-2">
-        <p class="text-sm font-medium">{m.settings_update_available({ version: available.version })}</p>
+      <Alert.Root role="status">
+        <Alert.Title>{m.settings_update_available({ version: available.version })}</Alert.Title>
         {#if updates.status?.skipped}
-          <p class="text-sm text-muted-foreground">{m.settings_update_skipped()}</p>
+          <Alert.Description>{m.settings_update_skipped()}</Alert.Description>
         {/if}
-        {#if available.download_error}
-          <p class="text-sm text-destructive" role="alert">{available.download_error}</p>
-        {/if}
-      </div>
+      </Alert.Root>
+      {#if available.download_error}
+        <Alert.Root variant="destructive">
+          <Alert.Description>{available.download_error}</Alert.Description>
+        </Alert.Root>
+      {/if}
     {:else if updates.status?.check_status === 'up-to-date'}
-      <p class="text-sm text-muted-foreground">{m.settings_update_up_to_date()}</p>
+      <Alert.Root role="status">
+        <Alert.Description>{m.settings_update_up_to_date()}</Alert.Description>
+      </Alert.Root>
     {/if}
 
     {#if updates.state.phase === 'downloading'}
@@ -116,36 +124,30 @@ async function checkNow(): Promise<void> {
           <span>{m.settings_update_downloading({ version: updates.state.targetVersion ?? '' })}</span>
           {#if progressPercent != null}<span class="font-technical tabular-nums">{progressPercent}%</span>{/if}
         </div>
-        <div
-          class="h-2 overflow-hidden rounded-full bg-muted"
-          role="progressbar"
-          aria-label={m.settings_update_downloading({ version: updates.state.targetVersion ?? '' })}
-          aria-valuemin="0"
-          aria-valuemax="100"
-          aria-valuenow={progressPercent ?? undefined}>
-          <div
-            class={progressPercent == null
-              ? 'h-full w-1/3 rounded-full bg-primary motion-safe:animate-pulse'
-              : 'h-full rounded-full bg-primary motion-safe:transition-[width]'}
-            style:width={progressPercent == null ? undefined : `${progressPercent}%`}>
-          </div>
-        </div>
+        <Progress
+          value={progressPercent}
+          aria-label={m.settings_update_downloading({ version: updates.state.targetVersion ?? '' })} />
       </div>
     {:else if updates.state.phase === 'downloaded'}
-      <p class="text-sm font-medium">
-        {m.settings_update_downloaded({ version: updates.state.targetVersion ?? '' })}
-      </p>
+      <Alert.Root role="status">
+        <Alert.Description
+          >{m.settings_update_downloaded({ version: updates.state.targetVersion ?? '' })}</Alert.Description>
+      </Alert.Root>
       {#if updates.state.error}
-        <p class="text-sm text-destructive" role="alert">
-          {m.settings_update_install_failed({ message: updates.state.error })}
-        </p>
+        <Alert.Root variant="destructive">
+          <Alert.Description>{m.settings_update_install_failed({ message: updates.state.error })}</Alert.Description>
+        </Alert.Root>
       {/if}
     {:else if updates.state.phase === 'installing' && showInstallingProgress}
-      <p class="flex items-center gap-2 text-sm font-medium" aria-live="assertive">
-        <Spinner />{m.settings_update_installing({ version: updates.state.targetVersion ?? '' })}
-      </p>
+      <Alert.Root role="status" aria-live="assertive">
+        <Spinner />
+        <Alert.Description
+          >{m.settings_update_installing({ version: updates.state.targetVersion ?? '' })}</Alert.Description>
+      </Alert.Root>
     {:else if updates.state.phase === 'error' && updates.state.error}
-      <p class="text-sm text-destructive" role="alert">{updates.state.error}</p>
+      <Alert.Root variant="destructive">
+        <Alert.Description>{updates.state.error}</Alert.Description>
+      </Alert.Root>
     {/if}
 
     <div class="flex flex-wrap items-end justify-between gap-x-6 gap-y-4 border-t pt-4">
@@ -157,23 +159,23 @@ async function checkNow(): Promise<void> {
         <div class="flex flex-wrap items-center gap-2">
           {#if available}
             {#if updates.status?.skipped}
-              <Button variant="ghost" onclick={() => void updates.clearSkippedVersion()}>
+              <Button type="button" variant="ghost" onclick={() => void updates.clearSkippedVersion()}>
                 {m.settings_update_restore_notifications()}
               </Button>
             {:else}
-              <Button variant="ghost" onclick={() => void updates.skipAvailableVersion()}>
+              <Button type="button" variant="ghost" onclick={() => void updates.skipAvailableVersion()}>
                 {m.settings_update_skip()}
               </Button>
             {/if}
-            <Button variant="outline" onclick={() => void openExternalUrl(available.release_url)}>
+            <Button type="button" variant="outline" onclick={() => void openExternalUrl(available.release_url)}>
               <ExternalLinkIcon data-icon="inline-start" />{m.settings_update_view_release()}
             </Button>
           {/if}
           {#if updates.state.phase === 'downloaded'}
-            <Button onclick={() => updates.requestInstallPrompt()}>{m.settings_update_install()}</Button>
+            <Button type="button" onclick={() => updates.requestInstallPrompt()}>{m.settings_update_install()}</Button>
           {/if}
           {#if available && updates.status?.download_supported && available.download_available && (updates.state.phase !== 'downloaded' || updates.state.targetVersion !== available.version)}
-            <Button onclick={() => void updates.downloadAvailableUpdate()}>
+            <Button type="button" onclick={() => void updates.downloadAvailableUpdate()}>
               <DownloadIcon data-icon="inline-start" />{updates.state.phase === 'error'
                 ? m.settings_update_retry_download()
                 : m.settings_update_download()}

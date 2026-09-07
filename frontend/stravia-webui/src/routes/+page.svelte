@@ -1,5 +1,6 @@
 <script lang="ts">
 import * as m from '$lib/paraglide/messages.js'
+import RequestFailure from '$lib/components/request-failure.svelte'
 import { createQuery } from '@tanstack/svelte-query'
 import { BarChart, LineChart } from 'layerchart'
 
@@ -236,11 +237,15 @@ function retryConfiguration(): void {
 {/snippet}
 
 {#snippet modelStatsEmpty()}
-  <p class="py-6 text-center text-sm text-muted-foreground">{m.overview_no_model_traffic_yet()}</p>
+  <Empty.Root class="border-y py-6"
+    ><Empty.Header><Empty.Description>{m.overview_no_model_traffic_yet()}</Empty.Description></Empty.Header
+    ></Empty.Root>
 {/snippet}
 
 {#snippet providerStatsEmpty()}
-  <p class="py-6 text-center text-sm text-muted-foreground">{m.overview_no_model_service_traffic_yet()}</p>
+  <Empty.Root class="border-y py-6"
+    ><Empty.Header><Empty.Description>{m.overview_no_model_service_traffic_yet()}</Empty.Description></Empty.Header
+    ></Empty.Root>
 {/snippet}
 
 {#snippet connectAction()}
@@ -258,13 +263,11 @@ function retryConfiguration(): void {
   {#if isTauri}<DesktopPortNotice />{/if}
 
   {#if configurationError}
-    <section class="route-section" aria-labelledby="configuration-error-title">
-      <h2 id="configuration-error-title" class="route-section-title">{m.overview_configuration_unavailable()}</h2>
-      <p class="route-section-description text-destructive">
-        {localizeBackendErrorMessage(configurationError)}
-      </p>
-      <Button class="mt-3" variant="outline" onclick={retryConfiguration}>{m.common_retry()}</Button>
-    </section>
+    <RequestFailure
+      title={m.overview_configuration_unavailable()}
+      message={localizeBackendErrorMessage(configurationError)}
+      retry={retryConfiguration}
+      retrying={providersQuery.isFetching || modelsQuery.isFetching || apiKeysQuery.isFetching} />
   {:else if !configurationLoaded}
     <Card.Root aria-label={m.overview_loading_configuration()}>
       <Card.Header>
@@ -293,32 +296,24 @@ function retryConfiguration(): void {
     currentPath="/" />
 
   {#if overviewQuery.isPending && overview === undefined}
-    <div class="route-metric-strip" aria-label={m.overview_loading_overview_metrics()}>
-      {#each Array(6) as _, index (index)}
-        <div class="route-metric-strip__item"><Skeleton class="h-4 w-24" /><Skeleton class="mt-2 h-7 w-20" /></div>
-      {/each}
-    </div>
+    <MetricStrip loading loadingLabel={m.overview_loading_overview_metrics()} placeholderCount={6} />
     <div class="grid gap-6 min-[1280px]:grid-cols-12">
       <Skeleton class="h-80 min-[1280px]:col-span-7" />
       <Skeleton class="h-80 min-[1280px]:col-span-5" />
     </div>
   {:else if overviewQuery.isError && overview === undefined}
-    <section class="route-section" aria-labelledby="overview-error-title">
-      <h2 id="overview-error-title" class="route-section-title">{m.overview_overview_unavailable()}</h2>
-      <p class="route-section-description text-destructive">
-        {localizeBackendErrorMessage(overviewQuery.error)}
-      </p>
-      <Button class="mt-3" variant="outline" onclick={() => void overviewQuery.refetch()}>{m.common_retry()}</Button>
-    </section>
+    <RequestFailure
+      title={m.overview_overview_unavailable()}
+      message={localizeBackendErrorMessage(overviewQuery.error)}
+      retry={() => overviewQuery.refetch()}
+      retrying={overviewQuery.isFetching} />
   {:else}
     {#if overviewQuery.isError}
-      <section class="route-section" aria-labelledby="overview-refresh-error-title">
-        <h2 id="overview-refresh-error-title" class="route-section-title">{m.overview_refresh_failed()}</h2>
-        <p class="route-section-description text-destructive">
-          {localizeBackendErrorMessage(overviewQuery.error)}
-        </p>
-        <Button class="mt-3" variant="outline" onclick={() => void overviewQuery.refetch()}>{m.common_retry()}</Button>
-      </section>
+      <RequestFailure
+        title={m.overview_refresh_failed()}
+        message={localizeBackendErrorMessage(overviewQuery.error)}
+        retry={() => overviewQuery.refetch()}
+        retrying={overviewQuery.isFetching} />
     {/if}
     <MetricStrip {metrics} label={m.common_usage_summary()} />
 
@@ -347,9 +342,10 @@ function retryConfiguration(): void {
                 props={{ xAxis: { ticks: 4 } }} />
             </div>
           {:else}
-            <div class="grid h-72 place-items-center border-y text-sm text-muted-foreground">
-              {m.overview_no_request_traffic_has_recorded()}
-            </div>
+            <Empty.Root class="h-72 border-y"
+              ><Empty.Header
+                ><Empty.Description>{m.overview_no_request_traffic_has_recorded()}</Empty.Description></Empty.Header
+              ></Empty.Root>
           {/if}
         </section>
 
@@ -388,9 +384,10 @@ function retryConfiguration(): void {
                 props={{ xAxis: { ticks: 4 } }} />
             </div>
           {:else}
-            <div class="grid h-72 place-items-center border-y text-sm text-muted-foreground">
-              {m.overview_latency_appears_first_request()}
-            </div>
+            <Empty.Root class="h-72 border-y"
+              ><Empty.Header
+                ><Empty.Description>{m.overview_latency_appears_first_request()}</Empty.Description></Empty.Header
+              ></Empty.Root>
           {/if}
         </section>
       </div>
@@ -428,9 +425,9 @@ function retryConfiguration(): void {
           </div>
           <div class="route-mobile-list">
             {#if modelStats.length === 0}
-              <p class="border-y py-8 text-center text-sm text-muted-foreground">
-                {m.overview_no_model_traffic_yet()}
-              </p>
+              <Empty.Root class="border-y py-6"
+                ><Empty.Header><Empty.Description>{m.overview_no_model_traffic_yet()}</Empty.Description></Empty.Header
+                ></Empty.Root>
             {:else}
               {#each modelStats.slice(0, 6) as model (model.model)}
                 <div class="route-mobile-row">
@@ -471,9 +468,10 @@ function retryConfiguration(): void {
           </div>
           <div class="route-mobile-list">
             {#if providerStats.length === 0}
-              <p class="border-y py-8 text-center text-sm text-muted-foreground">
-                {m.overview_no_model_service_traffic_yet()}
-              </p>
+              <Empty.Root class="border-y py-6"
+                ><Empty.Header
+                  ><Empty.Description>{m.overview_no_model_service_traffic_yet()}</Empty.Description></Empty.Header
+                ></Empty.Root>
             {:else}
               {#each providerStats.slice(0, 6) as provider (provider.provider)}
                 <div class="route-mobile-row">

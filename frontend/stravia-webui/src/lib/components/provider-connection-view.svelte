@@ -1,8 +1,6 @@
 <script lang="ts">
 import * as m from '$lib/paraglide/messages.js'
 import { useQueryClient } from '@tanstack/svelte-query'
-import EyeIcon from '@lucide/svelte/icons/eye'
-import EyeOffIcon from '@lucide/svelte/icons/eye-off'
 import { untrack } from 'svelte'
 import { toast } from 'svelte-sonner'
 
@@ -14,6 +12,7 @@ import type { Provider, UpdateProvider } from '$lib/types'
 import ProviderOAuthAuthorization from '$lib/components/provider-oauth-authorization.svelte'
 import * as Field from '$lib/components/ui/field'
 import { Button } from '$lib/components/ui/button'
+import SecretInput from '$lib/components/secret-input.svelte'
 import { Input } from '$lib/components/ui/input'
 import * as Select from '$lib/components/ui/select'
 import { Spinner } from '$lib/components/ui/spinner'
@@ -41,7 +40,6 @@ let form = $state({
 let saving = $state(false)
 let testing = $state(false)
 let credentialError = $state('')
-let showApiKey = $state(false)
 let oauthSessionId = $state<string>()
 let oauthReady = $state(false)
 let oauthAuthorization = $state<{ consume: () => void; updateProxy: (useProxy: boolean) => Promise<void> }>()
@@ -122,7 +120,7 @@ async function save(): Promise<void> {
       event.preventDefault()
       void save()
     }}>
-    <div class="grid gap-4 sm:grid-cols-2">
+    <Field.Group class="grid gap-4 sm:grid-cols-2">
       <Field.Field size="name" class="sm:col-span-2">
         <Field.Label for="provider-name">{m.common_connection_name()}</Field.Label>
         <Input id="provider-name" bind:value={form.name} required />
@@ -135,9 +133,11 @@ async function save(): Promise<void> {
               {PROTOCOL_TABLE.find((entry) => entry.id === form.protocol)?.displayName}
             </Select.Trigger>
             <Select.Content>
-              {#each PROTOCOL_TABLE as entry (entry.id)}
-                <Select.Item value={entry.id}>{entry.displayName}</Select.Item>
-              {/each}
+              <Select.Group>
+                {#each PROTOCOL_TABLE as entry (entry.id)}
+                  <Select.Item value={entry.id}>{entry.displayName}</Select.Item>
+                {/each}
+              </Select.Group>
             </Select.Content>
           </Select.Root>
         {:else}
@@ -175,31 +175,23 @@ async function save(): Promise<void> {
         <Field.Field size="fill" data-invalid={credentialError ? true : undefined}>
           <Field.Label for="provider-api-key">{m.common_api_key()}</Field.Label>
           <div class="flex flex-wrap gap-2">
-            <Input
-              id="provider-api-key"
-              class="font-technical min-w-0 flex-1"
-              bind:value={form.apiKey}
-              type={showApiKey ? 'text' : 'password'}
-              autocomplete="off"
-              oninput={() => (credentialError = '')}
-              placeholder={m.provider_connection_view_leave_blank_keep_current_key()} />
-            <Button
-              type="button"
-              variant="outline"
-              size="icon"
-              onclick={() => (showApiKey = !showApiKey)}
-              aria-label={showApiKey ? m.common_hide_secret() : m.common_show_secret()}>
-              {#if showApiKey}<EyeOffIcon />{:else}<EyeIcon />{/if}
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              onclick={() => void testConnection()}
-              disabled={testing || saving}>
+            <div class="min-w-0 flex-1">
+              <SecretInput
+                id="provider-api-key"
+                class="font-technical"
+                bind:value={form.apiKey}
+                resetKey={provider.id}
+                autocomplete="off"
+                aria-invalid={credentialError ? true : undefined}
+                aria-describedby={credentialError ? 'provider-credential-error' : undefined}
+                oninput={() => (credentialError = '')}
+                placeholder={m.provider_connection_view_leave_blank_keep_current_key()} />
+            </div>
+            <Button type="button" variant="outline" onclick={() => void testConnection()} disabled={testing || saving}>
               {#if testing}<Spinner data-icon="inline-start" />{/if}{m.providers_test_connection()}
             </Button>
           </div>
-          {#if credentialError}<Field.Error>{credentialError}</Field.Error>{/if}
+          {#if credentialError}<Field.Error id="provider-credential-error">{credentialError}</Field.Error>{/if}
         </Field.Field>
       {/if}
       {#if custom}
@@ -212,8 +204,8 @@ async function save(): Promise<void> {
           <Textarea id="provider-static-models" class="min-h-28 font-technical" bind:value={form.staticModels} />
         </Field.Field>
       {/if}
-    </div>
-    <div class="flex min-h-10 items-center justify-between gap-3 rounded-lg border px-3 py-2">
+    </Field.Group>
+    <Field.Field orientation="horizontal" class="min-h-10 justify-between rounded-lg border px-3 py-2">
       <div>
         <Field.Label for="provider-use-proxy" hint={m.common_send_requests_service_proxy_configured_settings()}>
           {m.common_use_proxy()}
@@ -226,7 +218,7 @@ async function save(): Promise<void> {
           form.useProxy = checked
           void oauthAuthorization?.updateProxy(checked)
         }} />
-    </div>
+    </Field.Field>
     <div class="flex justify-end border-t pt-4">
       <Button
         type="submit"

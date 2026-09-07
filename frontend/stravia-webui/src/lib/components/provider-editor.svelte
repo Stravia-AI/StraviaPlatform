@@ -1,8 +1,6 @@
 <script lang="ts">
 import * as m from '$lib/paraglide/messages.js'
 import { createQuery, useQueryClient } from '@tanstack/svelte-query'
-import EyeIcon from '@lucide/svelte/icons/eye'
-import EyeOffIcon from '@lucide/svelte/icons/eye-off'
 import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw'
 import SearchIcon from '@lucide/svelte/icons/search'
 import { toast } from 'svelte-sonner'
@@ -27,6 +25,9 @@ import { Badge } from '$lib/components/ui/badge'
 import { Button, buttonVariants } from '$lib/components/ui/button'
 import ProviderMark from '$lib/components/provider-mark.svelte'
 import * as Field from '$lib/components/ui/field'
+import * as Empty from '$lib/components/ui/empty'
+import * as InputGroup from '$lib/components/ui/input-group'
+import SecretInput from '$lib/components/secret-input.svelte'
 import { Input } from '$lib/components/ui/input'
 import * as Select from '$lib/components/ui/select'
 import * as Sheet from '$lib/components/ui/sheet'
@@ -83,22 +84,16 @@ let oauthAuthorization = $state<{
 let saving = $state(false)
 let refreshingCatalog = $state(false)
 let adapterCredentials = $state<Record<string, string>>({})
-let visibleCredentialKeys = $state<Record<string, boolean>>({})
-
-function toggleCredentialVisibility(key: string): void {
-  visibleCredentialKeys[key] = !visibleCredentialKeys[key]
-}
+const secretResetKey = $derived(`${open}:${selectedOptionKey}:${step}`)
 
 const queryClient = useQueryClient()
-const vendorMetadataQuery = createQuery(() => ({
-  queryKey: ['vendor-metadata'],
-  queryFn: admin.providers.vendors,
-}))
+const vendorMetadataQuery = createQuery(() => ({ queryKey: ['vendor-metadata'], queryFn: admin.providers.vendors }))
 const options = $derived(buildProviderOptions(presets))
 const selectedOption = $derived(options.find((option) => option.key === selectedOptionKey))
 const credentialFields = $derived<VendorCredentialField[]>(
   selectedOption
-    ? (vendorMetadataQuery.data?.find((vendor) => vendor.id === selectedOption.preset.vendor_id)?.credentialFields ?? [])
+    ? (vendorMetadataQuery.data?.find((vendor) => vendor.id === selectedOption.preset.vendor_id)?.credentialFields ??
+        [])
     : [],
 )
 const usesDynamicCredentials = $derived(
@@ -106,10 +101,7 @@ const usesDynamicCredentials = $derived(
 )
 const previewsBaseUrl = $derived(
   Boolean(
-    selectedOption &&
-      !selectedOption.isCustom &&
-      !selectedOption.channel.base_url.trim() &&
-      usesDynamicCredentials,
+    selectedOption && !selectedOption.isCustom && !selectedOption.channel.base_url.trim() && usesDynamicCredentials,
   ),
 )
 const baseUrlCredentials = $derived(
@@ -121,11 +113,8 @@ const baseUrlCredentials = $derived(
 )
 const baseUrlPreviewQuery = createQuery(() => ({
   queryKey: ['provider-base-url-preview', selectedOption?.preset.vendor_id, baseUrlCredentials],
-  queryFn: () =>
-    admin.providers.previewBaseUrl(selectedOption!.preset.vendor_id, baseUrlCredentials),
-  enabled:
-    previewsBaseUrl &&
-    Object.values(baseUrlCredentials).some((value) => value.length > 0),
+  queryFn: () => admin.providers.previewBaseUrl(selectedOption!.preset.vendor_id, baseUrlCredentials),
+  enabled: previewsBaseUrl && Object.values(baseUrlCredentials).some((value) => value.length > 0),
   retry: false,
 }))
 const assembledBaseUrl = $derived(baseUrlPreviewQuery.data?.base_url ?? '')
@@ -178,7 +167,6 @@ async function chooseOption(option: ProviderOption): Promise<void> {
     staticModels: '',
   }
   adapterCredentials = {}
-  visibleCredentialKeys = {}
   step = 'configure'
 }
 
@@ -259,9 +247,9 @@ async function saveProvider(): Promise<void> {
               credentialFields.map((field) => [field.key, adapterCredentials[field.key]?.trim() ?? '']),
             ),
           }
-      : form.authMode === 'apikey' && form.apiKey.trim()
-        ? { type: 'api_key', value: form.apiKey.trim() }
-        : { type: 'none' }
+        : form.authMode === 'apikey' && form.apiKey.trim()
+          ? { type: 'api_key', value: form.apiKey.trim() }
+          : { type: 'none' }
   const input: CreateProvider = {
     name: form.name.trim(),
     source: selectedOption.isCustom
@@ -368,22 +356,21 @@ async function saveProvider(): Promise<void> {
         <div
           data-provider-toolbar
           class="sticky -top-4 z-10 -mx-4 -mt-4 mb-4 flex items-center gap-2 border-b bg-popover px-4 py-4">
-          <div class="relative min-w-0 flex-1">
-            <SearchIcon
-              class="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-            <Input
+          <InputGroup.Root class="min-w-0 flex-1">
+            <InputGroup.Input
               aria-label={m.provider_editor_search_services_sign_methods()}
-              class="pl-9"
               bind:value={search}
               placeholder={m.common_search_services()} />
-          </div>
+            <InputGroup.Addon><SearchIcon /></InputGroup.Addon>
+          </InputGroup.Root>
           <Button
             type="button"
             variant="outline"
             class="shrink-0"
             onclick={() => void refreshCatalog()}
             disabled={refreshingCatalog}>
-            <RefreshCwIcon data-icon="inline-start" class={refreshingCatalog ? 'animate-spin' : ''} />
+            {#if refreshingCatalog}<Spinner data-icon="inline-start" />{:else}<RefreshCwIcon
+                data-icon="inline-start" />{/if}
             {m.provider_editor_update_service_list()}
           </Button>
         </div>
@@ -398,20 +385,18 @@ async function saveProvider(): Promise<void> {
             {/each}
           </div>
         {:else}
-          <div class="grid min-h-48 place-items-center rounded-xl border border-dashed px-6 text-center">
-            <div>
-              <SearchIcon class="mx-auto size-5 text-muted-foreground" />
-              <p class="mt-3 font-medium">
-                {m.provider_editor_no_matching_services()}
-              </p>
-              <p class="mt-1 text-sm text-muted-foreground">
-                {m.provider_editor_try_another_service_name_sign_method()}
-              </p>
-              <Button type="button" variant="outline" size="sm" class="mt-4" onclick={() => (search = '')}>
+          <Empty.Root class="min-h-48 border border-dashed">
+            <Empty.Header>
+              <Empty.Media variant="icon"><SearchIcon /></Empty.Media>
+              <Empty.Title>{m.provider_editor_no_matching_services()}</Empty.Title>
+              <Empty.Description>{m.provider_editor_try_another_service_name_sign_method()}</Empty.Description>
+            </Empty.Header>
+            <Empty.Content>
+              <Button type="button" variant="outline" size="sm" onclick={() => (search = '')}>
                 {m.provider_editor_clear_search()}
               </Button>
-            </div>
-          </div>
+            </Empty.Content>
+          </Empty.Root>
         {/if}
       </div>
       <Sheet.Footer class="route-overlay-footer flex-row justify-start">
@@ -430,7 +415,7 @@ async function saveProvider(): Promise<void> {
           void saveProvider()
         }}>
         <div class="route-overlay-body">
-          <div class="grid gap-6 sm:grid-cols-2">
+          <Field.Group class="grid gap-6 sm:grid-cols-2">
             <Field.Field size="name" class="sm:col-span-2">
               <Field.Label for="provider-name">{m.common_connection_name()}</Field.Label>
               <Input id="provider-name" bind:value={form.name} required />
@@ -448,9 +433,11 @@ async function saveProvider(): Promise<void> {
                   <Select.Trigger id="provider-protocol" class="w-full"
                     >{PROTOCOL_TABLE.find((item) => item.id === form.protocol)?.displayName}</Select.Trigger>
                   <Select.Content>
-                    {#each availableProtocols as protocol (protocol.id)}
-                      <Select.Item value={protocol.id}>{protocol.displayName}</Select.Item>
-                    {/each}
+                    <Select.Group>
+                      {#each availableProtocols as protocol (protocol.id)}
+                        <Select.Item value={protocol.id}>{protocol.displayName}</Select.Item>
+                      {/each}
+                    </Select.Group>
                   </Select.Content>
                 </Select.Root>
               </Field.Field>
@@ -459,7 +446,9 @@ async function saveProvider(): Promise<void> {
             <Field.Field class="justify-end">
               <div class="flex items-center justify-between gap-3 rounded-lg border px-3 py-2.5">
                 <div>
-                  <Field.Label for="provider-use-proxy" hint={m.common_send_requests_service_proxy_configured_settings()}>
+                  <Field.Label
+                    for="provider-use-proxy"
+                    hint={m.common_send_requests_service_proxy_configured_settings()}>
                     {m.common_use_proxy()}
                   </Field.Label>
                 </div>
@@ -484,22 +473,12 @@ async function saveProvider(): Promise<void> {
               </Field.Field>
               <Field.Field size="fill" class="sm:col-span-2">
                 <Field.Label for="provider-api-key">{m.common_api_key()}</Field.Label>
-                <div class="flex gap-2">
-                  <Input
-                    id="provider-api-key"
-                    class="font-technical"
-                    bind:value={form.apiKey}
-                    type={visibleCredentialKeys['provider-api-key'] ? 'text' : 'password'}
-                    autocomplete="off" />
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="icon"
-                    onclick={() => toggleCredentialVisibility('provider-api-key')}
-                    aria-label={visibleCredentialKeys['provider-api-key'] ? m.common_hide_secret() : m.common_show_secret()}>
-                    {#if visibleCredentialKeys['provider-api-key']}<EyeOffIcon />{:else}<EyeIcon />{/if}
-                  </Button>
-                </div>
+                <SecretInput
+                  id="provider-api-key"
+                  class="font-technical"
+                  bind:value={form.apiKey}
+                  resetKey={secretResetKey}
+                  autocomplete="off" />
               </Field.Field>
               <Field.Field size="fill">
                 <Field.Label for="provider-models-source">{m.common_model_list_url()}</Field.Label>
@@ -539,11 +518,7 @@ async function saveProvider(): Promise<void> {
                   {@const credentialId = `provider-credential-${field.key}`}
                   <Field.Field size="fill" class="sm:col-span-2">
                     <Field.Label for={credentialId}>
-                      {providerCredentialFieldLabel(
-                        selectedOption.preset.vendor_id,
-                        field,
-                        localeState.current,
-                      )}
+                      {providerCredentialFieldLabel(selectedOption.preset.vendor_id, field, localeState.current)}
                     </Field.Label>
                     {#if field.input === 'textarea'}
                       <Textarea
@@ -552,55 +527,42 @@ async function saveProvider(): Promise<void> {
                         bind:value={adapterCredentials[field.key]}
                         required={field.required}
                         autocomplete="off" />
+                    {:else if field.input === 'password'}
+                      <SecretInput
+                        id={credentialId}
+                        class="font-technical"
+                        bind:value={adapterCredentials[field.key]}
+                        resetKey={secretResetKey}
+                        autocomplete="off"
+                        required={field.required} />
                     {:else}
-                      <div class="flex gap-2">
-                        <Input
-                          id={credentialId}
-                          class="font-technical"
-                          bind:value={adapterCredentials[field.key]}
-                          type={field.input === 'password' && !visibleCredentialKeys[credentialId] ? 'password' : 'text'}
-                          autocomplete="off"
-                          required={field.required} />
-                        {#if field.input === 'password'}
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="icon"
-                            onclick={() => toggleCredentialVisibility(credentialId)}
-                            aria-label={visibleCredentialKeys[credentialId] ? m.common_hide_secret() : m.common_show_secret()}>
-                            {#if visibleCredentialKeys[credentialId]}<EyeOffIcon />{:else}<EyeIcon />{/if}
-                          </Button>
-                        {/if}
-                      </div>
+                      <Input
+                        id={credentialId}
+                        class="font-technical"
+                        bind:value={adapterCredentials[field.key]}
+                        autocomplete="off"
+                        required={field.required} />
                     {/if}
                   </Field.Field>
                 {/each}
               {:else}
                 <Field.Field size="fill" class="sm:col-span-2">
-                  <Field.Label for="provider-api-key" hint={selectedOption.credentialMode === 'setup_token'
-                    ? m.provider_editor_sign_method_requires_setup_token()
-                    : undefined}>
+                  <Field.Label
+                    for="provider-api-key"
+                    hint={selectedOption.credentialMode === 'setup_token'
+                      ? m.provider_editor_sign_method_requires_setup_token()
+                      : undefined}>
                     {selectedOption.credentialMode === 'setup_token'
                       ? m.provider_options_setup_token()
                       : m.common_api_key()}
                   </Field.Label>
-                  <div class="flex gap-2">
-                    <Input
-                      id="provider-api-key"
-                      class="font-technical"
-                      bind:value={form.apiKey}
-                      type={visibleCredentialKeys['provider-api-key'] ? 'text' : 'password'}
-                      autocomplete="off"
-                      required={apiKeyRequired} />
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="icon"
-                      onclick={() => toggleCredentialVisibility('provider-api-key')}
-                      aria-label={visibleCredentialKeys['provider-api-key'] ? m.common_hide_secret() : m.common_show_secret()}>
-                      {#if visibleCredentialKeys['provider-api-key']}<EyeOffIcon />{:else}<EyeIcon />{/if}
-                    </Button>
-                  </div>
+                  <SecretInput
+                    id="provider-api-key"
+                    class="font-technical"
+                    bind:value={form.apiKey}
+                    resetKey={secretResetKey}
+                    autocomplete="off"
+                    required={apiKeyRequired} />
                 </Field.Field>
               {/if}
             {:else}
@@ -616,7 +578,7 @@ async function saveProvider(): Promise<void> {
                   oauthReady = ready
                 }} />
             {/if}
-          </div>
+          </Field.Group>
         </div>
 
         <Sheet.Footer class="route-overlay-footer flex-row justify-between sm:justify-between">

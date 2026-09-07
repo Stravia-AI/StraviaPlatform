@@ -97,25 +97,31 @@ let {
                 {draft.operator === 'and' ? labels.matchAll : labels.matchAny}
               </Select.Trigger>
               <Select.Content>
-                <Select.Item value="and">{labels.matchAll}</Select.Item>
-                <Select.Item value="or">{labels.matchAny}</Select.Item>
+                <Select.Group>
+                  <Select.Item value="and">{labels.matchAll}</Select.Item>
+                  <Select.Item value="or">{labels.matchAny}</Select.Item>
+                </Select.Group>
               </Select.Content>
             </Select.Root>
           {/if}
-          {#each draft.constraints as constraint, constraintIndex (constraintIndex)}
-            <div class="space-y-2">
+          {#each draft.constraints as constraint, constraintIndex (constraint)}
+            <div class="flex flex-col gap-2">
               <div class="flex items-center gap-2">
                 <Select.Root
                   type="single"
-                  bind:value={() => constraint.matchMode, (value) =>
-                    onUpdateConstraint(constraintIndex, { matchMode: value as DataTableFilterMatchMode })}>
+                  bind:value={
+                    () => constraint.matchMode,
+                    (value) => onUpdateConstraint(constraintIndex, { matchMode: value as DataTableFilterMatchMode })
+                  }>
                   <Select.Trigger class="h-10 min-w-0 flex-1" aria-label={labels.matchMode}>
                     {labels.filterMatchMode(constraint.matchMode)}
                   </Select.Trigger>
                   <Select.Content>
-                    {#each textMatchModes as matchMode (matchMode)}
-                      <Select.Item value={matchMode}>{labels.filterMatchMode(matchMode)}</Select.Item>
-                    {/each}
+                    <Select.Group>
+                      {#each textMatchModes as matchMode (matchMode)}
+                        <Select.Item value={matchMode}>{labels.filterMatchMode(matchMode)}</Select.Item>
+                      {/each}
+                    </Select.Group>
                   </Select.Content>
                 </Select.Root>
                 {#if draft.constraints.length > 1}
@@ -134,7 +140,8 @@ let {
                 value={String(constraint.value ?? '')}
                 placeholder={filter.placeholder ?? columnName}
                 aria-label={filter.placeholder ?? columnName}
-                oninput={(event) => onUpdateConstraint(constraintIndex, { value: event.currentTarget.value || undefined })} />
+                oninput={(event) =>
+                  onUpdateConstraint(constraintIndex, { value: event.currentTarget.value || undefined })} />
             </div>
           {/each}
           {#if draft.constraints.length < Math.max(1, Math.min(filter.maxConstraints ?? 3, 3))}
@@ -145,23 +152,26 @@ let {
         {:else if filter.variant === 'select'}
           <Select.Root
             type="single"
-            bind:value={() => String(draft.constraints[0]?.value ?? allFilterValue), (value) =>
-              onUpdateConstraint(0, { value: value === allFilterValue ? undefined : value })}>
+            bind:value={
+              () => String(draft.constraints[0]?.value ?? allFilterValue),
+              (value) => onUpdateConstraint(0, { value: value === allFilterValue ? undefined : value })
+            }>
             <Select.Trigger class="h-10 w-full" aria-label={filter.placeholder ?? columnName}>
               {filter.options?.find((option) => option.value === draft.constraints[0]?.value)?.label ??
                 filter.allLabel ??
                 labels.allValues}
             </Select.Trigger>
             <Select.Content>
-              <Select.Item value={allFilterValue}>{filter.allLabel ?? labels.allValues}</Select.Item>
-              {#each selectOptions as option (option.value)}
-                <Select.Item value={option.value}>{option.label}</Select.Item>
-              {/each}
+              <Select.Group>
+                <Select.Item value={allFilterValue}>{filter.allLabel ?? labels.allValues}</Select.Item>
+                {#each selectOptions as option (option.value)}
+                  <Select.Item value={option.value}>{option.label}</Select.Item>
+                {/each}
+              </Select.Group>
             </Select.Content>
           </Select.Root>
         {:else}
-          {@const range =
-            (draft.constraints[0]?.value as [number | undefined, number | undefined] | undefined) ?? []}
+          {@const range = (draft.constraints[0]?.value as [number | undefined, number | undefined] | undefined) ?? []}
           <div class="grid grid-cols-2 gap-2">
             <Input
               class="h-10 min-w-0"

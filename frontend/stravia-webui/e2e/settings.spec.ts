@@ -166,7 +166,8 @@ test('advanced features keep separate media and web search surfaces', async ({ p
 
 test('server update notification skips one version without hiding Settings or exposing download', async ({ page }) => {
   const releaseUrl = 'https://github.com/Stravia-AI/StraviaPlatform/releases/tag/v1.2.0'
-  let skipped = false
+  let version = '1.2.0'
+  let skippedVersion: string | null = null
   await page.addInitScript(() => {
     window.open = (url) => {
       sessionStorage.setItem('opened-release-url', String(url))
@@ -175,7 +176,7 @@ test('server update notification skips one version without hiding Settings or ex
   })
   await page.route('**/api/v1/updates**', async (route) => {
     if (route.request().method() === 'PUT') {
-      skipped = route.request().postDataJSON()?.version === '1.2.0'
+      skippedVersion = route.request().postDataJSON()?.version ?? null
     }
     await route.fulfill({
       json: {
@@ -185,22 +186,43 @@ test('server update notification skips one version without hiding Settings or ex
           last_success_at: '2026-09-05T00:00:00Z',
           last_failure: null,
           available_update: {
-            version: '1.2.0',
+            version,
             published_at: '2026-09-04T00:00:00Z',
             release_url: releaseUrl,
             manifest_url: 'https://github.com/Stravia-AI/StraviaPlatform/releases/download/v1.2.0/stravia-updater.json',
             download_available: true,
             download_error: null,
           },
-          skipped,
+          skipped: skippedVersion === version,
           download_supported: false,
         },
       },
     })
   })
 
+  await page.clock.install()
+  await page.goto('/settings')
+  const notificationTitle = page.getByText('A Stravia update is available', { exact: true })
+  await expect(notificationTitle).toHaveCount(1)
+  await page.clock.fastForward(60_000)
+  await expect(notificationTitle).toHaveCount(1)
+  await page.getByRole('button', { name: 'Check for updates', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Check for updates', exact: true })).toBeEnabled()
+  await page.getByRole('button', { name: 'Check for updates', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Check for updates', exact: true })).toBeEnabled()
+  await expect(notificationTitle).toHaveCount(1)
+  const notification = page.getByRole('status').filter({ hasText: 'A Stravia update is available' })
+  await notification.getByRole('button', { name: 'Close', exact: true }).click()
+  await expect(notificationTitle).toHaveCount(0)
+  expect(skippedVersion).toBeNull()
+  await expect(page.getByRole('button', { name: 'Skip this version', exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'View release notes', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Check for updates', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Check for updates', exact: true })).toBeEnabled()
+  await expect(notificationTitle).toHaveCount(0)
+
   await page.goto('/')
-  await expect(page.getByText('A Stravia update is available')).toBeVisible()
+  await expect(notificationTitle).toHaveCount(1)
   await expect(page.getByRole('button', { name: 'Download update' })).toHaveCount(0)
   await page.getByRole('button', { name: 'View release notes' }).click()
   expect(await page.evaluate(() => sessionStorage.getItem('opened-release-url'))).toBe(releaseUrl)
@@ -212,6 +234,14 @@ test('server update notification skips one version without hiding Settings or ex
   await expect(page.getByText('1.2.0', { exact: true })).toBeVisible()
   await expect(page.getByText('Automatic notifications are skipped for this version.')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Download update' })).toHaveCount(0)
+  expect(skippedVersion).toBe('1.2.0')
+  await expect(notificationTitle).toHaveCount(0)
+
+  version = '1.3.0'
+  await page.goto('/')
+  await expect(notificationTitle).toHaveCount(1)
+  await expect(notification).toContainText('1.3.0')
+  expect(skippedVersion).toBe('1.2.0')
 })
 
 test('cached update remains actionable when the latest automatic check fails', async ({ page }) => {

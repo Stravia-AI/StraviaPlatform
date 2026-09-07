@@ -16,6 +16,7 @@ import { effectiveModelDisplayName } from '$lib/logical-model'
 import type { ApiKey } from '$lib/types'
 import ApiKeyEditor from '$lib/components/api-key-editor.svelte'
 import PageHeader from '$lib/components/page-header.svelte'
+import RequestFailure from '$lib/components/request-failure.svelte'
 import StatusIndicator from '$lib/components/status-indicator.svelte'
 import * as AlertDialog from '$lib/components/ui/alert-dialog'
 import { Button } from '$lib/components/ui/button'
@@ -143,12 +144,6 @@ function handleApiKeyTableRowClick({ event, original }: DataTableRowPointerEvent
   openApiKey(original, event)
 }
 
-function handleApiKeyRowKeydown(event: KeyboardEvent, apiKey: ApiKey): void {
-  if (event.key !== 'Enter' || event.target !== event.currentTarget) return
-  event.preventDefault()
-  openEditor(apiKey)
-}
-
 function openCreate(): void {
   openEditor()
 }
@@ -264,6 +259,14 @@ async function deleteKey(): Promise<void> {
       </div>
     </div>
 
+    {#if apiKeysQuery.isError || modelsQuery.isError}
+      <RequestFailure
+        title={m.api_keys_api_keys_not_loaded()}
+        message={localizeBackendErrorMessage(apiKeysQuery.error ?? modelsQuery.error)}
+        retry={() => Promise.all([apiKeysQuery.refetch(), modelsQuery.refetch()])}
+        retrying={apiKeysQuery.isFetching || modelsQuery.isFetching} />
+    {/if}
+
     {#if apiKeysQuery.isPending || modelsQuery.isPending}
       <div class="flex flex-col border-y" aria-label={m.api_keys_loading_api_keys()}>
         {#each Array(5) as _, index (index)}<div
@@ -271,20 +274,7 @@ async function deleteKey(): Promise<void> {
             <Skeleton class="h-6" /><Skeleton class="h-6" /><Skeleton class="h-6" /><Skeleton class="h-6" />
           </div>{/each}
       </div>
-    {:else if apiKeysQuery.isError || modelsQuery.isError}
-      <div class="border-y py-6">
-        <p class="text-sm font-medium text-destructive">
-          {m.api_keys_api_keys_not_loaded()}
-        </p>
-        <p class="mt-1 text-sm text-muted-foreground">
-          {localizeBackendErrorMessage(apiKeysQuery.error ?? modelsQuery.error)}
-        </p>
-        <Button
-          class="mt-3"
-          variant="outline"
-          onclick={() => void Promise.all([apiKeysQuery.refetch(), modelsQuery.refetch()])}>{m.common_retry()}</Button>
-      </div>
-    {:else if apiKeys.length === 0}
+    {:else if apiKeysQuery.data !== undefined && modelsQuery.data !== undefined && apiKeys.length === 0}
       <Empty.Root class="border-y py-10"
         ><Empty.Header
           ><Empty.Title>{m.api_keys_no_api_keys_created()}</Empty.Title><Empty.Description
@@ -292,7 +282,7 @@ async function deleteKey(): Promise<void> {
           ></Empty.Header
         ><Empty.Content><Button onclick={openCreate}>{m.api_keys_create_first_api_key()}</Button></Empty.Content
         ></Empty.Root>
-    {:else}
+    {:else if apiKeysQuery.data !== undefined && modelsQuery.data !== undefined}
       <div class="route-desktop-table">
         <DataTable
           data={apiKeys}
@@ -307,25 +297,21 @@ async function deleteKey(): Promise<void> {
       </div>
       <div class="route-mobile-list">
         {#each apiKeys as apiKey (apiKey.id)}
-          <div
-            class="route-mobile-row cursor-pointer"
-            role="link"
-            tabindex="0"
-            onclick={(event) => openApiKey(apiKey, event)}
-            onkeydown={(event) => handleApiKeyRowKeydown(event, apiKey)}>
-            <div class="min-w-0">
-              <p class="truncate font-medium">{apiKey.name}</p>
-              <p class="font-technical mt-1 text-xs text-muted-foreground">{maskedKey(apiKey.key)}</p>
-              <p class="font-technical mt-2 text-xs text-muted-foreground tabular-nums">{limitsLabel(apiKey)}</p>
-              <p class="mt-1 truncate text-xs text-muted-foreground">{modelAccessLabel(apiKey)}</p>
-              <div class="mt-1 flex flex-wrap items-center gap-x-3">
+          <div class="route-mobile-row">
+            <button type="button" class="min-w-0 cursor-pointer text-start" onclick={() => openEditor(apiKey)}>
+              <span class="block truncate font-medium">{apiKey.name}</span>
+              <span class="block font-technical mt-1 text-xs text-muted-foreground">{maskedKey(apiKey.key)}</span>
+              <span class="block font-technical mt-2 text-xs text-muted-foreground tabular-nums"
+                >{limitsLabel(apiKey)}</span>
+              <span class="block mt-1 truncate text-xs text-muted-foreground">{modelAccessLabel(apiKey)}</span>
+              <span class="mt-1 flex flex-wrap items-center gap-x-3">
                 <StatusIndicator
                   compact
                   label={apiKey.is_enabled ? m.common_enabled_status() : m.common_disabled_status()}
                   tone={apiKey.is_enabled ? 'healthy' : 'neutral'} /><span
                   class="font-technical text-xs text-muted-foreground">{expirationLabel(apiKey.expires_at)}</span>
-              </div>
-            </div>
+              </span>
+            </button>
             <div class="flex items-start gap-1">{@render keyActions(apiKey)}</div>
           </div>
         {/each}

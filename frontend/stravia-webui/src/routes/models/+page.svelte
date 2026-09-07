@@ -14,6 +14,7 @@ import { getDataTableLabels } from '$lib/data-table-labels'
 import { effectiveModelDisplayName, sortLogicalModels } from '$lib/logical-model'
 import type { Route, RouteSelectionStrategy } from '$lib/types'
 import PageHeader from '$lib/components/page-header.svelte'
+import RequestFailure from '$lib/components/request-failure.svelte'
 import StatusIndicator from '$lib/components/status-indicator.svelte'
 import TechnicalValue from '$lib/components/technical-value.svelte'
 import * as AlertDialog from '$lib/components/ui/alert-dialog'
@@ -149,12 +150,6 @@ function handleModelTableRowClick({ event, original }: DataTableRowPointerEvent<
   openModel(original, event)
 }
 
-function handleModelRowKeydown(event: KeyboardEvent, model: Route): void {
-  if (event.key !== 'Enter' || event.target !== event.currentTarget) return
-  event.preventDefault()
-  void goto(resolve(`/models/${encodeURIComponent(model.model_id)}`))
-}
-
 function askDelete(model: Route): void {
   deleteTarget = model
   deleteOpen = true
@@ -283,6 +278,14 @@ async function deleteModel(): Promise<void> {
       </div>
     </div>
 
+    {#if modelsQuery.isError || providersQuery.isError}
+      <RequestFailure
+        title={m.models_models_not_loaded()}
+        message={localizeBackendErrorMessage(modelsQuery.error ?? providersQuery.error)}
+        retry={() => Promise.all([modelsQuery.refetch(), providersQuery.refetch()])}
+        retrying={modelsQuery.isFetching || providersQuery.isFetching} />
+    {/if}
+
     {#if modelsQuery.isPending || providersQuery.isPending}
       <div class="flex flex-col border-y" aria-label={m.models_loading_models()}>
         {#each Array(5) as _, index (index)}<div
@@ -290,21 +293,7 @@ async function deleteModel(): Promise<void> {
             <Skeleton class="h-6" /><Skeleton class="h-6" /><Skeleton class="h-6" /><Skeleton class="h-6" />
           </div>{/each}
       </div>
-    {:else if modelsQuery.isError || providersQuery.isError}
-      <div class="border-y py-6">
-        <p class="text-sm font-medium text-destructive">
-          {m.models_models_not_loaded()}
-        </p>
-        <p class="mt-1 text-sm text-muted-foreground">
-          {localizeBackendErrorMessage(modelsQuery.error ?? providersQuery.error)}
-        </p>
-        <Button
-          class="mt-3"
-          variant="outline"
-          onclick={() => void Promise.all([modelsQuery.refetch(), providersQuery.refetch()])}
-          >{m.common_retry()}</Button>
-      </div>
-    {:else if models.length === 0}
+    {:else if modelsQuery.data !== undefined && providersQuery.data !== undefined && models.length === 0}
       <Empty.Root class="border-y py-10">
         <Empty.Header
           ><Empty.Title
@@ -321,7 +310,7 @@ async function deleteModel(): Promise<void> {
               href="/models/new">{m.models_add_first_model()}</Button
             >{/if}</Empty.Content>
       </Empty.Root>
-    {:else}
+    {:else if modelsQuery.data !== undefined && providersQuery.data !== undefined}
       <div class="route-desktop-table">
         <DataTable
           data={models}
@@ -337,13 +326,8 @@ async function deleteModel(): Promise<void> {
       <div class="route-mobile-list">
         {#each models as model (model.id)}
           {@const targetCount = enabledTargetCount(model)}
-          <div
-            class="route-mobile-row cursor-pointer"
-            role="link"
-            tabindex="0"
-            onclick={(event) => openModel(model, event)}
-            onkeydown={(event) => handleModelRowKeydown(event, model)}>
-            <div class="min-w-0">
+          <div class="route-mobile-row">
+            <a class="min-w-0" href={resolve(`/models/${encodeURIComponent(model.model_id)}`)}>
               <p class="truncate font-medium">{effectiveModelDisplayName(model)}</p>
               <p class="truncate text-xs text-muted-foreground">
                 {m.models_client_model_id()}: <span class="font-technical">{model.model_id}</span>
@@ -361,7 +345,7 @@ async function deleteModel(): Promise<void> {
                 compact
                 label={model.is_enabled ? m.common_enabled_status() : m.common_disabled_status()}
                 tone={model.is_enabled ? 'healthy' : 'neutral'} />
-            </div>
+            </a>
             <div class="flex items-start gap-1">{@render modelActions(model)}</div>
           </div>
         {/each}

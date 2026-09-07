@@ -37,7 +37,7 @@ let {
       <Dialog.Title>{m.provider_model_catalog_add_model_manually_label()}</Dialog.Title>
     </Dialog.Header>
     <Field.Field>
-      <Field.Label>{m.provider_model_catalog_search_model()}</Field.Label>
+      <Field.Label for="manual-provider-model-search">{m.provider_model_catalog_search_model()}</Field.Label>
       <ModelCombobox
         id="manual-provider-model-search"
         value={templateId}

@@ -119,10 +119,10 @@ describe('Stravia desktop smoke', () => {
     await expect(navigationTrigger).toBeDisplayed()
 
     if (portState.mode === 'fallback') {
-      await expect($('//h2[normalize-space()="Fixed desktop port unavailable"]')).toBeDisplayed()
+      await expect($('aria/Fixed desktop port unavailable')).toBeDisplayed()
       await $('a=Resolve in Desktop Settings').click()
     } else if (portState.mode === 'configError') {
-      await expect($('//h2[normalize-space()="Desktop port setting unavailable"]')).toBeDisplayed()
+      await expect($('aria/Desktop port setting unavailable')).toBeDisplayed()
       await $('a=Open Desktop Settings').click()
     } else {
       await $('a[href="/settings"]').click()

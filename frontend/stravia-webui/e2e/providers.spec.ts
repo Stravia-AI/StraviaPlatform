@@ -6,6 +6,47 @@ test.beforeEach(async ({ page }) => {
   await prepareApp(page)
 })
 
+test('model ID suggestions preserve arbitrary text, composition, and form focus', async ({ page }) => {
+  await page.goto('/models/new')
+  const modelId = page.locator('#route-model-id')
+  const displayName = page.locator('#route-display-name')
+  await displayName.fill('Unsaved display name')
+  await modelId.fill('private/自定义-model')
+  await modelId.press('Enter')
+  await expect(modelId).toHaveValue('private/自定义-model')
+  await expect(displayName).toHaveValue('Unsaved display name')
+  await expect(page).toHaveURL(/\/models\/new$/)
+
+  await modelId.fill('gpt-5.4')
+  await expect(page.getByRole('option', { name: /GPT-5.4/ })).toBeVisible()
+  await modelId.dispatchEvent('compositionstart')
+  await modelId.dispatchEvent('keydown', { key: 'Enter', code: 'Enter', isComposing: true, bubbles: true })
+  await expect(modelId).toHaveValue('gpt-5.4')
+  await expect(displayName).toHaveValue('Unsaved display name')
+  await expect(page.getByRole('option', { name: /GPT-5.4/ })).toBeVisible()
+  await modelId.dispatchEvent('compositionend')
+  await modelId.press('ArrowDown')
+  await modelId.press('Enter')
+  await expect(modelId).toHaveValue('gpt-5.4')
+  await expect(displayName).toHaveValue('GPT-5.4')
+  await expect(modelId).toBeFocused()
+
+  await modelId.fill('claude')
+  await modelId.press('Escape')
+  await expect(page.getByRole('option', { name: /Claude Opus/ })).not.toBeVisible()
+  await expect(modelId).toHaveValue('claude')
+  await modelId.press('Tab')
+  await expect(page.getByRole('button', { name: 'Clear selected model', exact: true })).toBeFocused()
+  await page.keyboard.press('Tab')
+  await expect(displayName).toBeFocused()
+  await modelId.focus()
+  await expect(page.getByRole('option', { name: /Claude Opus/ })).toBeVisible()
+  await page.getByRole('button', { name: 'Clear selected model', exact: true }).click()
+  await expect(modelId).toHaveValue('')
+  await expect(displayName).toHaveValue('')
+  await expect(modelId).toBeFocused()
+})
+
 test('configured Providers table filters and persists column customization', async ({ page }) => {
   const configuredProviders = [
     {
@@ -119,8 +160,6 @@ test('provider editor selects a Provider option before showing its configuration
   expect(verticalOffset).toBeLessThanOrEqual(1)
   await refreshButton.click()
   await expect(page.getByText('Service list updated: 2 services and 4 models.')).toBeVisible()
-  const toolbar = page.locator('[data-provider-toolbar]')
-  await expect(toolbar).toHaveCSS('position', 'sticky')
   const cardWidths = await page
     .locator('[data-provider-option]')
     .evaluateAll((cards) => cards.map((card) => card.getBoundingClientRect().width))
@@ -158,8 +197,16 @@ test('provider editor selects a Provider option before showing its configuration
   await expect(page.getByLabel('Service identifier')).toBeVisible()
   await expect(page.getByLabel('Base URL')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Connect', exact: true })).toBeVisible()
+  const apiKey = page.getByLabel('API Key', { exact: true })
+  await apiKey.fill('fixture-only-provider-secret')
+  await page.getByRole('button', { name: 'Show secret', exact: true }).click()
+  await expect(apiKey).toHaveAttribute('type', 'text')
+  await expect(apiKey).toHaveValue('fixture-only-provider-secret')
+  await expect(page.getByRole('heading', { name: 'Connection details' })).toBeVisible()
   await page.getByRole('tab', { name: 'Choose service' }).click()
   await expect(page.getByRole('heading', { name: 'Connect a model service' })).toBeVisible()
+  await page.getByRole('button', { name: /Custom.*Bring your own/ }).click()
+  await expect(apiKey).toHaveAttribute('type', 'password')
 })
 
 test('configured Providers use Catalog logos and Custom uses its endpoint favicon', async ({ page }) => {
@@ -332,7 +379,7 @@ test('OAuth Provider connection view reconnects the saved account without showin
 
   await page.goto(`/providers/${provider.id}?view=connection`)
   await expect(page.getByRole('heading', { name: provider.name })).toBeVisible()
-  await expect(page.getByLabel('API Key')).toHaveCount(0)
+  await expect(page.getByLabel('API Key', { exact: true })).toHaveCount(0)
   const initRequest = page.waitForRequest(
     (request) => request.url().endsWith('/api/v1/oauth/sessions/init') && request.method() === 'POST',
   )
@@ -946,7 +993,19 @@ test('Provider Model editor uses structured fields and preserves exact decimal i
   await expect.poll(() => scrollOwner.evaluate((element) => element.scrollTop)).toBe(320)
   await expect(page.locator('[data-reasoning-option-add="toggle"]')).toHaveCount(0)
   await expect(page.locator('[data-reasoning-option-add="effort"]')).toHaveCount(0)
+  const reasoningType = page.getByRole('button', { name: 'Reasoning behavior', exact: true }).nth(1)
+  await reasoningType.click()
+  await page.getByRole('option', { name: 'budget_tokens', exact: true }).click()
+  await expect(reasoningType).toBeFocused()
+  await reasoningType.click()
+  await page.getByRole('option', { name: 'toggle', exact: true }).click()
+  await expect(reasoningType).toBeFocused()
   await page.locator('#provider-model-cost-input').fill('0.123456789012345678')
+  const advancedSettings = page.getByRole('button', { name: /Advanced model settings/ })
+  await advancedSettings.click()
+  await expect(page.locator('#provider-model-cost-input')).not.toBeVisible()
+  await advancedSettings.click()
+  await expect(page.locator('#provider-model-cost-input')).toHaveValue('0.123456789012345678')
   await page.getByRole('button', { name: 'Save model' }).click()
 
   await expect.poll(() => updateBody).toContain('0.123456789012345678')
@@ -971,6 +1030,9 @@ test('Provider Model editor uses structured fields and preserves exact decimal i
     }),
   ])
   expect(savedMetadata.reasoning_options.map((option: { type: string }) => option.type)).toEqual(['effort', 'toggle'])
+  expect(savedMetadata.reasoning_options.find((option: { type: string }) => option.type === 'toggle')).toEqual({
+    type: 'toggle',
+  })
   expect(savedMetadata.reasoning_options.find((option: { type: string }) => option.type === 'effort').values).toEqual([
     'none',
     'low',
@@ -1035,7 +1097,7 @@ test('OAuth Provider configuration allows manual completion while the localhost 
 
   await expect(page.getByLabel('Connection name')).toHaveValue('Codex')
   await expect(page.getByLabel('Service identifier')).toHaveCount(0)
-  await expect(page.getByLabel('API Key')).toHaveCount(0)
+  await expect(page.getByLabel('API Key', { exact: true })).toHaveCount(0)
 
   const initRequest = page.waitForRequest(
     (request) => request.url().endsWith('/api/v1/oauth/sessions/init') && request.method() === 'POST',

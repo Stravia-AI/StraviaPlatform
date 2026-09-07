@@ -4,8 +4,6 @@ import { resolve } from '$app/paths'
 import { useQueryClient } from '@tanstack/svelte-query'
 import ChevronsUpDownIcon from '@lucide/svelte/icons/chevrons-up-down'
 import CopyIcon from '@lucide/svelte/icons/copy'
-import EyeIcon from '@lucide/svelte/icons/eye'
-import EyeOffIcon from '@lucide/svelte/icons/eye-off'
 import { toast } from 'svelte-sonner'
 
 import { admin } from '$lib/admin-client'
@@ -16,6 +14,8 @@ import PageHeader from '$lib/components/page-header.svelte'
 import * as Field from '$lib/components/ui/field'
 import { Button, buttonVariants } from '$lib/components/ui/button'
 import * as Command from '$lib/components/ui/command'
+import SecretInput from '$lib/components/secret-input.svelte'
+import * as InputGroup from '$lib/components/ui/input-group'
 import { Input } from '$lib/components/ui/input'
 import * as Popover from '$lib/components/ui/popover'
 import * as Sheet from '$lib/components/ui/sheet'
@@ -59,7 +59,7 @@ const queryClient = useQueryClient()
 let form = $state(keyForm())
 let saving = $state(false)
 let createdSecret = $state<string>()
-let secretVisible = $state(false)
+const secretResetKey = $derived(`${open}:${apiKey?.id ?? 'new'}`)
 let modelPickerOpen = $state(false)
 const allowAllModels = $derived(form.modelIds.length === 0)
 const sortedModels = $derived(sortLogicalModels(models))
@@ -165,7 +165,7 @@ async function saveKey(): Promise<void> {
 
 {#snippet keyFields()}
   <Field.Group>
-    <div class="flex flex-wrap items-end gap-x-4 gap-y-3">
+    <Field.Group class="flex-row flex-wrap items-end gap-x-4 gap-y-3">
       <Field.Field orientation="vertical" class="w-auto min-w-64 flex-1">
         <Field.Label for="api-key-name">{m.common_name()}</Field.Label>
         <Input id="api-key-name" bind:value={form.name} required />
@@ -176,7 +176,7 @@ async function saveKey(): Promise<void> {
           <Field.Label for="api-key-enabled">{m.common_enabled_status()}</Field.Label>
         </Field.Field>
       {/if}
-    </div>
+    </Field.Group>
     {#if !apiKey}
       <Field.Field orientation="horizontal">
         <Switch id="api-key-custom" bind:checked={form.customKey} />
@@ -188,26 +188,21 @@ async function saveKey(): Promise<void> {
     {#if apiKey || form.customKey}
       <Field.Field orientation="vertical">
         <Field.Label for="api-key-secret">{m.api_key_editor_api_key()}</Field.Label>
-        <div class="flex gap-2">
-          <Input
-            id="api-key-secret"
-            class="font-technical"
-            bind:value={form.key}
-            type={secretVisible ? 'text' : 'password'}
-            autocomplete="off"
-            required />
-          <Button
-            type="button"
-            size="icon"
-            variant="outline"
-            aria-label={secretVisible ? m.api_key_editor_hide_api_key() : m.api_key_editor_show_api_key()}
-            onclick={() => (secretVisible = !secretVisible)}>
-            {#if secretVisible}<EyeOffIcon />{:else}<EyeIcon />{/if}
-          </Button>
-          <Button type="button" variant="outline" onclick={() => void copySecret(form.key)}>
-            <CopyIcon data-icon="inline-start" />{m.common_copy()}
-          </Button>
-        </div>
+        <SecretInput
+          id="api-key-secret"
+          class="font-technical"
+          bind:value={form.key}
+          resetKey={secretResetKey}
+          showLabel={m.api_key_editor_show_api_key()}
+          hideLabel={m.api_key_editor_hide_api_key()}
+          autocomplete="off"
+          required>
+          {#snippet actions()}
+            <InputGroup.Button type="button" onclick={() => void copySecret(form.key)}>
+              <CopyIcon data-icon="inline-start" />{m.common_copy()}
+            </InputGroup.Button>
+          {/snippet}
+        </SecretInput>
         <Field.Description>{m.api_key_editor_api_key_help()}</Field.Description>
       </Field.Field>
     {/if}
@@ -288,7 +283,7 @@ async function saveKey(): Promise<void> {
         </Field.Field>
       {/if}
     </Field.Group>
-    <div class="flex flex-wrap items-end gap-4">
+    <Field.Group class="flex-row flex-wrap items-end gap-4">
       <Field.Field orientation="vertical" class="w-auto min-w-52 flex-1">
         <Field.Label for="api-key-concurrency-limit" hint={m.api_key_editor_concurrency_limit_help()}>
           {m.api_key_editor_maximum_concurrent_executions()}
@@ -311,7 +306,7 @@ async function saveKey(): Promise<void> {
           type="datetime-local"
           placeholder={m.api_key_editor_never_expires_placeholder()} />
       </Field.Field>
-    </div>
+    </Field.Group>
     <Field.Group class="gap-0!">
       <Field.Field orientation="horizontal">
         <Switch id="api-key-mcp-access" class="-mt-2" bind:checked={form.mcpAccessEnabled} />
@@ -332,11 +327,8 @@ async function saveKey(): Promise<void> {
     </Field.Group>
     {#if form.transparentInjectionEnabled}
       <Field.Set>
-        <Field.Field>
-          <Field.Label hint={m.api_key_editor_choose_automatic_capabilities()}>
-            {m.api_key_editor_automatically_exposed_capabilities()}
-          </Field.Label>
-        </Field.Field>
+        <Field.Legend variant="label">{m.api_key_editor_automatically_exposed_capabilities()}</Field.Legend>
+        <Field.Description>{m.api_key_editor_choose_automatic_capabilities()}</Field.Description>
         <Field.Group class="flex-row flex-wrap gap-x-4 gap-y-3">
           <Field.Field orientation="horizontal" class="min-w-52 flex-1 basis-52">
             <Switch
@@ -441,13 +433,20 @@ async function saveKey(): Promise<void> {
           <Field.Group>
             <Field.Field size="fill">
               <Field.Label for="created-api-key">{m.api_key_editor_copy_api_key_now()}</Field.Label>
-              <div class="flex flex-col gap-2 sm:flex-row">
-                <Input id="created-api-key" class="font-technical text-lg" value={createdSecret} readonly /><Button
-                  type="button"
-                  variant="outline"
-                  onclick={() => void copySecret(createdSecret ?? '')}
-                  ><CopyIcon data-icon="inline-start" />{m.common_copy()}</Button>
-              </div>
+              <SecretInput
+                id="created-api-key"
+                class="font-technical"
+                value={createdSecret}
+                resetKey={secretResetKey}
+                showLabel={m.api_key_editor_show_api_key()}
+                hideLabel={m.api_key_editor_hide_api_key()}
+                readonly>
+                {#snippet actions()}
+                  <InputGroup.Button type="button" onclick={() => void copySecret(createdSecret ?? '')}>
+                    <CopyIcon data-icon="inline-start" />{m.common_copy()}
+                  </InputGroup.Button>
+                {/snippet}
+              </SecretInput>
               <Field.Description>{m.api_key_editor_api_key_manage_later()}</Field.Description>
             </Field.Field>
           </Field.Group>

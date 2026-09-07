@@ -1,7 +1,6 @@
 <script lang="ts">
 import * as m from '$lib/paraglide/messages.js'
-import EyeIcon from '@lucide/svelte/icons/eye'
-import EyeOffIcon from '@lucide/svelte/icons/eye-off'
+import SecretInput from '$lib/components/secret-input.svelte'
 
 import { login } from '$lib/auth'
 import BrandMark from '$lib/components/brand-mark.svelte'
@@ -13,7 +12,6 @@ import { Spinner } from '$lib/components/ui/spinner'
 
 let username = $state('')
 let password = $state('')
-let showPassword = $state(false)
 let submitting = $state(false)
 let errorKind = $state<'invalid' | 'unavailable'>()
 let usernameInput = $state<HTMLInputElement | null>(null)
@@ -98,23 +96,15 @@ async function submit(): Promise<void> {
             </Field.Field>
             <Field.Field size="fill" data-invalid={error ? true : undefined}>
               <Field.FieldLabel for="admin-password">{m.login_password()}</Field.FieldLabel>
-              <div class="flex gap-2">
-                <Input
-                  id="admin-password"
-                  bind:value={password}
-                  type={showPassword ? 'text' : 'password'}
-                  autocomplete="current-password"
-                  aria-invalid={error ? true : undefined} />
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="icon"
-                  onclick={() => (showPassword = !showPassword)}
-                  aria-label={showPassword ? m.login_hide_password() : m.login_show_password()}>
-                  {#if showPassword}<EyeOffIcon />{:else}<EyeIcon />{/if}
-                </Button>
-              </div>
-              {#if error}<Field.FieldError>{error}</Field.FieldError>{/if}
+              <SecretInput
+                id="admin-password"
+                bind:value={password}
+                autocomplete="current-password"
+                showLabel={m.login_show_password()}
+                hideLabel={m.login_hide_password()}
+                aria-describedby={error ? 'login-password-error' : undefined}
+                aria-invalid={error ? true : undefined} />
+              {#if error}<Field.FieldError id="login-password-error">{error}</Field.FieldError>{/if}
             </Field.Field>
             <Button class="w-full" type="submit" disabled={submitting || !username.trim() || !password}
               >{#if submitting}<Spinner

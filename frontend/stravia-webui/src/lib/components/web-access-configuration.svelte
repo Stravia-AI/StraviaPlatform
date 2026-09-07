@@ -1,5 +1,6 @@
 <script lang="ts">
 import * as m from '$lib/paraglide/messages.js'
+import RequestFailure from '$lib/components/request-failure.svelte'
 import { createQuery, useQueryClient } from '@tanstack/svelte-query'
 import ArrowDownIcon from '@lucide/svelte/icons/arrow-down'
 import ArrowUpIcon from '@lucide/svelte/icons/arrow-up'
@@ -18,6 +19,8 @@ import type {
   WebProviderKind,
 } from '$lib/types'
 import * as AlertDialog from '$lib/components/ui/alert-dialog'
+import * as Empty from '$lib/components/ui/empty'
+import SecretInput from '$lib/components/secret-input.svelte'
 import { Badge } from '$lib/components/ui/badge'
 import { Button, buttonVariants } from '$lib/components/ui/button'
 import * as Field from '$lib/components/ui/field'
@@ -65,10 +68,7 @@ const localEngineOptions: ReadonlyArray<{ id: LocalSearchEngineId; label: string
 
 function defaultLocalEngines(): LocalSearchEngineConfigs {
   return Object.fromEntries(
-    localEngineOptions.map(({ id }) => [
-      id,
-      { enabled: ['google', 'bing', 'brave', 'baidu'].includes(id) },
-    ]),
+    localEngineOptions.map(({ id }) => [id, { enabled: ['google', 'bing', 'brave', 'baidu'].includes(id) }]),
   ) as LocalSearchEngineConfigs
 }
 
@@ -94,10 +94,7 @@ function openEdit(provider: WebProvider): void {
   editorKind = provider.kind
   editorSecret = ''
   editorUseProxy = provider.use_proxy
-  editorLocalEngines = {
-    ...defaultLocalEngines(),
-    ...(provider.local_engines ?? {}),
-  }
+  editorLocalEngines = { ...defaultLocalEngines(), ...(provider.local_engines ?? {}) }
   editorOpen = true
 }
 
@@ -124,11 +121,7 @@ async function saveEditor(): Promise<void> {
       await admin.webAccess.providers.update(
         editingProvider.id,
         editorKind === 'local'
-          ? {
-              name: editorName.trim(),
-              use_proxy: editorUseProxy,
-              local_engines: editorLocalEngines,
-            }
+          ? { name: editorName.trim(), use_proxy: editorUseProxy, local_engines: editorLocalEngines }
           : {
               name: editorName.trim(),
               use_proxy: editorUseProxy,
@@ -232,12 +225,11 @@ async function deleteProvider(): Promise<void> {
       onCheckedChange={(checked) => void saveSettings({ ...settings, enabled: checked })} />
   </div>
   {#if settingsQuery.isError}
-    <div class="border-t pt-4">
-      <p class="text-sm font-medium text-destructive">
-        {m.web_access_configuration_web_search_settings_not_loaded()}
-      </p>
-      <Button class="mt-3" variant="outline" onclick={() => void settingsQuery.refetch()}>{m.common_retry()}</Button>
-    </div>
+    <RequestFailure
+      title={m.web_access_configuration_web_search_settings_not_loaded()}
+      message={localizeBackendErrorMessage(settingsQuery.error)}
+      retry={() => settingsQuery.refetch()}
+      retrying={settingsQuery.isFetching} />
   {/if}
 </section>
 
@@ -257,28 +249,31 @@ async function deleteProvider(): Promise<void> {
     </div>
   </div>
 
+  {#if providersQuery.isError && providersQuery.data !== undefined}
+    <RequestFailure
+      message={localizeBackendErrorMessage(providersQuery.error)}
+      retry={() => providersQuery.refetch()}
+      retrying={providersQuery.isFetching} />
+  {/if}
   {#if providersQuery.isPending}
-    <div class="border-y py-8 text-sm text-muted-foreground">
-      {m.web_access_configuration_loading_search_services()}
+    <div class="flex items-center gap-2 border-y py-8" role="status">
+      <Spinner aria-hidden="true" />{m.web_access_configuration_loading_search_services()}
     </div>
-  {:else if providersQuery.isError}
-    <div class="border-y py-6">
-      <p class="text-sm font-medium text-destructive">
-        {m.web_access_configuration_search_services_not_loaded()}
-      </p>
-      <Button class="mt-3" variant="outline" onclick={() => void providersQuery.refetch()}>{m.common_retry()}</Button>
-    </div>
+  {:else if providersQuery.isError && providersQuery.data === undefined}
+    <RequestFailure
+      title={m.web_access_configuration_search_services_not_loaded()}
+      message={localizeBackendErrorMessage(providersQuery.error)}
+      retry={() => providersQuery.refetch()}
+      retrying={providersQuery.isFetching} />
   {:else if webProviders.length === 0}
-    <div class="flex flex-col items-start gap-3 border-y py-8">
-      <Globe2Icon class="size-5 text-muted-foreground" />
-      <div>
-        <p class="font-medium">{m.web_access_configuration_no_search_services_connected()}</p>
-        <p class="mt-1 text-sm text-muted-foreground">
-          {m.web_access_configuration_enable_prerequisite()}
-        </p>
-      </div>
-      <Button variant="outline" onclick={openCreate}>{m.common_connect_first_service()}</Button>
-    </div>
+    <Empty.Root class="border-y py-8"
+      ><Empty.Header
+        ><Empty.Media variant="icon"><Globe2Icon /></Empty.Media><Empty.Title
+          >{m.web_access_configuration_no_search_services_connected()}</Empty.Title
+        ><Empty.Description>{m.web_access_configuration_enable_prerequisite()}</Empty.Description></Empty.Header
+      ><Empty.Content
+        ><Button variant="outline" onclick={openCreate}>{m.common_connect_first_service()}</Button></Empty.Content
+      ></Empty.Root>
   {:else}
     <div class="divide-y border-y">
       {#each webProviders as provider (provider.id)}
@@ -415,13 +410,14 @@ async function deleteProvider(): Promise<void> {
             <Field.Label for="web-provider-kind">{m.web_access_configuration_service()}</Field.Label>
             <Select.Root type="single" bind:value={editorKind} disabled={Boolean(editingProvider)}>
               <Select.Trigger id="web-provider-kind" class="w-full">{kindLabel(editorKind)}</Select.Trigger>
-              <Select.Content>
-                <Select.Item value="exa" label="Exa">Exa</Select.Item>
-                <Select.Item value="zhipu" label="Zhipu">Zhipu</Select.Item>
-              </Select.Content>
+              <Select.Content
+                ><Select.Group>
+                  <Select.Item value="exa" label="Exa">Exa</Select.Item>
+                  <Select.Item value="zhipu" label="Zhipu">Zhipu</Select.Item>
+                </Select.Group></Select.Content>
             </Select.Root>
           </Field.Field>
-          <div class="flex items-center justify-between gap-4 rounded-md border p-3">
+          <Field.Field orientation="horizontal" class="rounded-md border p-3">
             <div>
               <Field.Label
                 for="web-provider-use-proxy"
@@ -431,10 +427,10 @@ async function deleteProvider(): Promise<void> {
               id="web-provider-use-proxy"
               checked={editorUseProxy}
               onCheckedChange={(checked) => (editorUseProxy = checked)} />
-          </div>
+          </Field.Field>
           {#if editorKind === 'local'}
-            <Field.Field size="fill">
-              <Field.Label>{m.web_access_configuration_local_search_engines()}</Field.Label>
+            <Field.Set>
+              <Field.Legend>{m.web_access_configuration_local_search_engines()}</Field.Legend>
               <div class="divide-y rounded-md border">
                 {#each localEngineOptions as engine (engine.id)}
                   <div class="flex min-h-12 items-center justify-between gap-4 px-3">
@@ -446,13 +442,13 @@ async function deleteProvider(): Promise<void> {
                   </div>
                 {/each}
               </div>
-            </Field.Field>
+            </Field.Set>
           {:else}
             <Field.Field size="fill">
               <Field.Label for="web-provider-secret">{m.common_api_key()}</Field.Label>
-              <Input
+              <SecretInput
                 id="web-provider-secret"
-                type="password"
+                resetKey={`${editorOpen}:${editingProvider?.id ?? 'new'}:${editorKind}`}
                 autocomplete="new-password"
                 bind:value={editorSecret}
                 placeholder={editingProvider ? m.web_access_configuration_leave_blank_keep_existing() : ''} />

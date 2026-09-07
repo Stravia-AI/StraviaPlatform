@@ -1,5 +1,6 @@
 <script lang="ts">
 import * as m from '$lib/paraglide/messages.js'
+import RequestFailure from '$lib/components/request-failure.svelte'
 import { createQuery, useQueryClient } from '@tanstack/svelte-query'
 import SearchCheckIcon from '@lucide/svelte/icons/search-check'
 import { toast } from 'svelte-sonner'
@@ -10,7 +11,9 @@ import { logicalModelSecondaryId, sortLogicalModels } from '$lib/logical-model'
 import type { WebSearchBackend, WebSearchConfig } from '$lib/types'
 import PageHeader from '$lib/components/page-header.svelte'
 import WebAccessConfiguration from '$lib/components/web-access-configuration.svelte'
-import { Button } from '$lib/components/ui/button'
+import { Button, buttonVariants } from '$lib/components/ui/button'
+import * as Alert from '$lib/components/ui/alert'
+import * as Collapsible from '$lib/components/ui/collapsible'
 import * as Field from '$lib/components/ui/field'
 import { Input } from '$lib/components/ui/input'
 import * as Select from '$lib/components/ui/select'
@@ -71,6 +74,10 @@ $effect(() => {
   totalSeconds = String(config.total_time_seconds)
 })
 
+$effect(() => {
+  if (limits && !localLimitsReady) advancedOpen = true
+})
+
 function backendDraft(): WebSearchBackend {
   return backendKind === 'local'
     ? { kind: 'local', model_id: localModelId || null }
@@ -118,13 +125,13 @@ async function save(): Promise<void> {
     actions={pageActions} />
 
   {#if configQuery.isError}
-    <section class="route-section">
-      <p class="text-sm font-medium text-destructive">
-        {m.web_search_settings_not_loaded()}
-      </p>
-      <Button class="mt-3" variant="outline" onclick={() => void configQuery.refetch()}>{m.common_retry()}</Button>
-    </section>
-  {:else}
+    <RequestFailure
+      title={m.web_search_settings_not_loaded()}
+      message={localizeBackendErrorMessage(configQuery.error)}
+      retry={() => configQuery.refetch()}
+      retrying={configQuery.isFetching} />
+  {/if}
+  {#if configQuery.data !== undefined || !configQuery.isError}
     <section class="route-section" aria-labelledby="search-gate-title">
       <div class="route-section-header">
         <div>
@@ -156,12 +163,13 @@ async function save(): Promise<void> {
             <Select.Trigger id="search-backend" class="w-full">
               {backendKind === 'local' ? m.web_search_use_stravia_model() : m.web_search_use_codex()}
             </Select.Trigger>
-            <Select.Content>
-              <Select.Item value="local" label={m.web_search_use_stravia_model()}>
-                {m.web_search_use_stravia_model()}
-              </Select.Item>
-              <Select.Item value="codex" label={m.web_search_use_codex()}>{m.web_search_use_codex()}</Select.Item>
-            </Select.Content>
+            <Select.Content
+              ><Select.Group>
+                <Select.Item value="local" label={m.web_search_use_stravia_model()}>
+                  {m.web_search_use_stravia_model()}
+                </Select.Item>
+                <Select.Item value="codex" label={m.web_search_use_codex()}>{m.web_search_use_codex()}</Select.Item>
+              </Select.Group></Select.Content>
           </Select.Root>
         </Field.Field>
 
@@ -174,17 +182,18 @@ async function save(): Promise<void> {
               <Select.Trigger id="search-local-model" class="w-full">
                 {eligibleModels.find((model) => model.id === localModelId)?.display_name ?? m.common_select_model()}
               </Select.Trigger>
-              <Select.Content>
-                {#each eligibleModels as model (model.id)}
-                  {@const secondaryId = logicalModelSecondaryId(model)}
-                  <Select.Item value={model.id} label={model.display_name}>
-                    <span class="min-w-0 flex-1 truncate">{model.display_name}</span>
-                    {#if secondaryId}
-                      <span class="truncate font-technical text-xs text-muted-foreground">{secondaryId}</span>
-                    {/if}
-                  </Select.Item>
-                {/each}
-              </Select.Content>
+              <Select.Content
+                ><Select.Group>
+                  {#each eligibleModels as model (model.id)}
+                    {@const secondaryId = logicalModelSecondaryId(model)}
+                    <Select.Item value={model.id} label={model.display_name}>
+                      <span class="min-w-0 flex-1 truncate">{model.display_name}</span>
+                      {#if secondaryId}
+                        <span class="truncate font-technical text-xs text-muted-foreground">{secondaryId}</span>
+                      {/if}
+                    </Select.Item>
+                  {/each}
+                </Select.Group></Select.Content>
             </Select.Root>
           </Field.Field>
         {:else}
@@ -200,11 +209,12 @@ async function save(): Promise<void> {
                 {codexProviders.find((provider) => provider.id === codexProviderId)?.name ??
                   m.web_search_select_codex_account()}
               </Select.Trigger>
-              <Select.Content>
-                {#each codexProviders as provider (provider.id)}
-                  <Select.Item value={provider.id} label={provider.name}>{provider.name}</Select.Item>
-                {/each}
-              </Select.Content>
+              <Select.Content
+                ><Select.Group>
+                  {#each codexProviders as provider (provider.id)}
+                    <Select.Item value={provider.id} label={provider.name}>{provider.name}</Select.Item>
+                  {/each}
+                </Select.Group></Select.Content>
             </Select.Root>
           </Field.Field>
           <Field.Field size="select">
@@ -213,84 +223,80 @@ async function save(): Promise<void> {
               <Select.Trigger id="search-codex-model" class="w-full">
                 {codexModels.find((model) => model.id === codexModelId)?.id ?? m.web_search_select_codex_model()}
               </Select.Trigger>
-              <Select.Content>
-                {#each codexModels as model (model.id)}
-                  <Select.Item value={model.id} label={model.id}>{model.id}</Select.Item>
-                {/each}
-              </Select.Content>
+              <Select.Content
+                ><Select.Group>
+                  {#each codexModels as model (model.id)}
+                    <Select.Item value={model.id} label={model.id}>{model.id}</Select.Item>
+                  {/each}
+                </Select.Group></Select.Content>
             </Select.Root>
           </Field.Field>
         {/if}
       </Field.Group>
       {#if backendKind === 'local'}
-        <div class="mt-4 rounded-md border border-border bg-muted/40 p-4 text-sm text-muted-foreground">
-          {m.web_search_data_disclosure_notice()}
-        </div>
+        <Alert.Root class="mt-4" role="note"
+          ><Alert.Description>{m.web_search_data_disclosure_notice()}</Alert.Description></Alert.Root>
       {/if}
     </section>
 
     {#if backendKind === 'local'}
       <WebAccessConfiguration />
 
-      <div class="border-t pt-4">
-        <Button
-          type="button"
-          variant="outline"
-          aria-expanded={advancedOpen}
-          aria-controls="web-search-advanced-fields"
-          onclick={() => (advancedOpen = !advancedOpen)}>
-          {m.common_advanced()}
-        </Button>
-      </div>
-
-      {#if advancedOpen}
-        <section id="web-search-advanced-fields" class="route-section" aria-labelledby="search-limits-title">
-          <div class="route-section-header">
-            <div>
-              <h2 id="search-limits-title" class="route-section-title">{m.web_search_limits_title()}</h2>
-              <p class="route-section-description">
-                {m.web_search_limits_help()}
-              </p>
+      <Collapsible.Root bind:open={advancedOpen} class="flex flex-col gap-4 border-t pt-4">
+        <Collapsible.Trigger class={buttonVariants({ variant: 'outline', class: 'self-start' })}
+          >{m.common_advanced()}</Collapsible.Trigger>
+        <Collapsible.Content>
+          <section id="web-search-advanced-fields" class="route-section" aria-labelledby="search-limits-title">
+            <div class="route-section-header">
+              <div>
+                <h2 id="search-limits-title" class="route-section-title">{m.web_search_limits_title()}</h2>
+                <p class="route-section-description">
+                  {m.web_search_limits_help()}
+                </p>
+              </div>
+              <SearchCheckIcon class="size-5 text-muted-foreground" />
             </div>
-            <SearchCheckIcon class="size-5 text-muted-foreground" />
-          </div>
-          <div class="grid max-w-md gap-4 sm:grid-cols-2">
-            <Field.Field size="number">
-              <Field.Label for="search-max-turns">{m.web_search_maximum_steps()}</Field.Label>
-              <Input
-                id="search-max-turns"
-                type="number"
-                min={limits?.min_turns}
-                max={limits?.max_turns}
-                bind:value={maxTurns} />
-              <Field.Description>{limits ? `${limits.min_turns}–${limits.max_turns}` : '—'}</Field.Description>
-            </Field.Field>
-            <Field.Field size="number">
-              <Field.Label for="search-total-seconds">{m.web_search_time_limit_seconds()}</Field.Label>
-              <Input
-                id="search-total-seconds"
-                type="number"
-                min={limits?.min_total_time_seconds}
-                max={limits?.max_total_time_seconds}
-                bind:value={totalSeconds} />
-              <Field.Description>
-                {limits ? `${limits.min_total_time_seconds}–${limits.max_total_time_seconds}` : '—'}
-              </Field.Description>
-            </Field.Field>
-          </div>
-          {#if !localLimitsReady}
-            <p class="mt-4 text-sm font-medium text-destructive">
-              {m.web_search_choose_supported_limits()}
-            </p>
-          {/if}
-        </section>
-      {/if}
+            <Field.Group class="grid max-w-md gap-4 sm:grid-cols-2">
+              <Field.Field size="number" data-invalid={!localLimitsReady}>
+                <Field.Label for="search-max-turns">{m.web_search_maximum_steps()}</Field.Label>
+                <Input
+                  id="search-max-turns"
+                  type="number"
+                  aria-invalid={!localLimitsReady}
+                  aria-describedby={!localLimitsReady ? 'search-limits-error' : undefined}
+                  min={limits?.min_turns}
+                  max={limits?.max_turns}
+                  bind:value={maxTurns} />
+                <Field.Description>{limits ? `${limits.min_turns}–${limits.max_turns}` : '—'}</Field.Description>
+              </Field.Field>
+              <Field.Field size="number" data-invalid={!localLimitsReady}>
+                <Field.Label for="search-total-seconds">{m.web_search_time_limit_seconds()}</Field.Label>
+                <Input
+                  id="search-total-seconds"
+                  type="number"
+                  aria-invalid={!localLimitsReady}
+                  aria-describedby={!localLimitsReady ? 'search-limits-error' : undefined}
+                  min={limits?.min_total_time_seconds}
+                  max={limits?.max_total_time_seconds}
+                  bind:value={totalSeconds} />
+                <Field.Description>
+                  {limits ? `${limits.min_total_time_seconds}–${limits.max_total_time_seconds}` : '—'}
+                </Field.Description>
+              </Field.Field>
+            </Field.Group>
+            {#if !localLimitsReady}
+              <p id="search-limits-error" class="mt-4 text-sm font-medium text-destructive">
+                {m.web_search_choose_supported_limits()}
+              </p>
+            {/if}
+          </section>
+        </Collapsible.Content>
+      </Collapsible.Root>
     {/if}
 
     {#if enabled && !bindingReady}
-      <p class="text-sm font-medium text-destructive">
-        {m.web_search_enable_prerequisite()}
-      </p>
+      <Alert.Root variant="warning" role="status"
+        ><Alert.Description>{m.web_search_enable_prerequisite()}</Alert.Description></Alert.Root>
     {/if}
   {/if}
 </div>
