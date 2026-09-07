@@ -53,9 +53,16 @@ pub(crate) struct TraceRecord {
 }
 
 impl TraceRecord {
-    fn redact_before_queue(&mut self) -> Result<(), &'static str> {
+    fn redact_before_queue(
+        &mut self,
+        protected: &super::redaction::ProtectedSecrets,
+    ) -> Result<(), &'static str> {
         self.schema_version = TRACE_SCHEMA_VERSION;
         let mut kinds = BTreeSet::new();
+        let protect = self.direction.as_deref() != Some("client_to_platform");
+        if protect {
+            protected.value(&mut self.headers);
+        }
         kinds.extend(redact_headers(&mut self.headers).into_kinds());
         let wrapped_base64 = self
             .payload
@@ -87,6 +94,9 @@ impl TraceRecord {
                 .map_err(|_| CREDENTIAL_REDACTION_UNSUPPORTED)?;
             if let Ok(text) = String::from_utf8(decoded) {
                 let mut decoded_payload = Value::String(text);
+                if protect {
+                    protected.value(&mut decoded_payload);
+                }
                 kinds.extend(redact_value(&mut decoded_payload).into_kinds());
                 let Value::String(redacted_text) = decoded_payload else {
                     return Err(CREDENTIAL_REDACTION_UNSUPPORTED);
@@ -96,14 +106,21 @@ impl TraceRecord {
                 );
             }
         } else {
+            if protect {
+                protected.value(&mut self.payload);
+            }
             kinds.extend(redact_value(&mut self.payload).into_kinds());
         }
         if let Some(url) = &mut self.url {
+            if protect {
+                protected.text(url);
+            }
             let (redacted, report) = redact_url(url);
             *url = redacted;
             kinds.extend(report.into_kinds());
         }
         if let Some(error) = &mut self.error {
+            protected.text(error);
             let (redacted, report) = redact_error(error);
             *error = redacted;
             kinds.extend(report.into_kinds());
@@ -158,6 +175,7 @@ pub(crate) struct TraceHandle {
 }
 
 struct TraceState {
+    protected: super::redaction::ProtectedSecrets,
     bytes_written: AtomicU64,
     retained_and_reserved: AtomicU64,
     event_count: AtomicU64,
@@ -226,6 +244,7 @@ impl TraceManager {
     pub(crate) fn create(&self) -> TraceHandle {
         let trace_id = uuid::Uuid::new_v4().simple().to_string();
         let state = Arc::new(TraceState {
+            protected: super::redaction::ProtectedSecrets::default(),
             bytes_written: AtomicU64::new(0),
             retained_and_reserved: AtomicU64::new(0),
             event_count: AtomicU64::new(0),
@@ -346,12 +365,15 @@ impl TraceManager {
 }
 
 impl TraceHandle {
+    pub(crate) fn protected_secrets(&self) -> super::redaction::ProtectedSecrets {
+        self.state.protected.clone()
+    }
     pub(crate) fn record(&self, mut record: TraceRecord) -> TraceWriteOutcome {
         if self.state.stopped.load(Ordering::Acquire) || self.state.finished.load(Ordering::Acquire)
         {
             return TraceWriteOutcome::Partial(STORAGE_ERROR);
         }
-        if let Err(reason) = record.redact_before_queue() {
+        if let Err(reason) = record.redact_before_queue(&self.state.protected) {
             self.mark_partial(reason, false);
             return TraceWriteOutcome::Partial(reason);
         }
@@ -849,14 +871,22 @@ mod tests {
     fn opaque_binary_is_preserved_while_utf8_structured_bytes_are_redacted() {
         let opaque = base64::engine::general_purpose::STANDARD.encode([0xff, 0x00, 0x81]);
         let mut opaque_record = binary_record(opaque.clone());
-        assert!(opaque_record.redact_before_queue().is_ok());
+        assert!(
+            opaque_record
+                .redact_before_queue(&super::super::redaction::ProtectedSecrets::default())
+                .is_ok()
+        );
         assert_eq!(opaque_record.payload, Value::String(opaque));
 
         let sentinel = "never-persist-this";
         let encoded_json = base64::engine::general_purpose::STANDARD
             .encode(format!(r#"{{"api_key":"{sentinel}","content":"keep"}}"#));
         let mut structured_record = binary_record(encoded_json);
-        assert!(structured_record.redact_before_queue().is_ok());
+        assert!(
+            structured_record
+                .redact_before_queue(&super::super::redaction::ProtectedSecrets::default())
+                .is_ok()
+        );
         let redacted = structured_record.payload.as_str().expect("base64 payload");
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(redacted)

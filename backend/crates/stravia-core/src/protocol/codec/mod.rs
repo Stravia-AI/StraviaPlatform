@@ -12,7 +12,48 @@ pub mod reasoning;
 pub mod tool_correlation;
 pub mod watsonx;
 
-use crate::protocol::ir::MediaSource;
+use crate::protocol::ir::{ContentBlock, DocumentSource, MediaSource};
+
+/// Preserve legacy fallback wire shapes without exposing persisted IR metadata.
+fn content_block_wire_value(block: &ContentBlock) -> serde_json::Value {
+    fn strip_internal_fields(block: &ContentBlock, value: &mut serde_json::Value) {
+        match block {
+            ContentBlock::ToolResult { .. } | ContentBlock::ServerToolResult { .. } => {
+                if let Some(object) = value.as_object_mut() {
+                    object.remove("content_kind");
+                }
+            }
+            ContentBlock::SearchResult { content, .. } => {
+                if let Some(values) = value
+                    .get_mut("content")
+                    .and_then(serde_json::Value::as_array_mut)
+                {
+                    for (block, value) in content.iter().zip(values) {
+                        strip_internal_fields(block, value);
+                    }
+                }
+            }
+            ContentBlock::Document {
+                source: DocumentSource::Blocks { content },
+                ..
+            } => {
+                if let Some(values) = value
+                    .pointer_mut("/source/content")
+                    .and_then(serde_json::Value::as_array_mut)
+                {
+                    for (block, value) in content.iter().zip(values) {
+                        strip_internal_fields(block, value);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut value = serde_json::to_value(block).unwrap_or(serde_json::Value::Null);
+    strip_internal_fields(block, &mut value);
+    value
+}
 
 /// Parse a `data:<media_type>;base64,<data>` URL into canonical media.
 ///

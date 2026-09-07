@@ -172,6 +172,7 @@ impl SqlHistoryMarkerStore {
         .map_err(|error| HistoryMarkerError::Storage(error.to_string()))?;
         let segment = HiddenHistorySegment::Platform {
             result: ContentBlock::ToolResult {
+                content_kind: Some(crate::protocol::ir::ToolResultContentKind::Json),
                 tool_use_id: call.id.clone(),
                 content: serde_json::Value::String(message.into()),
                 is_error: Some(true),

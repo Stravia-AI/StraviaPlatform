@@ -977,6 +977,7 @@ mod tests {
             content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
                 tool_use_id: "call_1".into(),
                 content: serde_json::json!("result"),
+                content_kind: Some(crate::protocol::ir::ToolResultContentKind::ContentBlocks),
                 is_error: None,
                 cache_control: None,
             }]),

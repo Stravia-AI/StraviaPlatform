@@ -575,13 +575,16 @@ pub(crate) fn decode_input_item(item: &Value) -> Result<Option<AiItem>> {
                 }
                 _ => anyhow::bail!("function_call_output 'output' must be a string or array"),
             };
-            Ok(Some(AiItem {
-                role: Role::Tool,
-                content,
-                tool_calls: None,
-                tool_call_id: Some(call_id),
-                meta: None,
-            }))
+            Ok(Some(
+                AiItem {
+                    role: Role::Tool,
+                    content,
+                    tool_calls: None,
+                    tool_call_id: Some(call_id),
+                    meta: None,
+                }
+                .with_plain_tool_text_kind(),
+            ))
         }
 
         "function_call" => {
@@ -782,13 +785,16 @@ fn decode_message_item(item: &Value, allow_video: bool) -> Result<Option<AiItem>
     if let Some(phase) = item.get("phase") {
         meta.insert("phase".into(), phase.clone());
     }
-    Ok(Some(AiItem {
-        role,
-        content,
-        tool_calls: None,
-        tool_call_id: None,
-        meta: (!meta.is_empty()).then_some(Value::Object(meta)),
-    }))
+    Ok(Some(
+        AiItem {
+            role,
+            content,
+            tool_calls: None,
+            tool_call_id: None,
+            meta: (!meta.is_empty()).then_some(Value::Object(meta)),
+        }
+        .with_plain_tool_text_kind(),
+    ))
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

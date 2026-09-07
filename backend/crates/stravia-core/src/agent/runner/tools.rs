@@ -142,13 +142,15 @@ impl AgentRunner {
                     Ok(output) => PlatformToolResult {
                         tool_id: ToolId::new(tool_id.id.clone()),
                         call_id: call.id.clone(),
-                        content: output,
+                        content_kind: output.content_kind,
+                        content: output.content,
                         is_error: false,
                         metadata: serde_json::Map::new(),
                     },
                     Err(error) => PlatformToolResult {
                         tool_id: ToolId::new(tool_id.id.clone()),
                         call_id: call.id.clone(),
+                        content_kind: crate::protocol::ir::ToolResultContentKind::Json,
                         content: serde_json::json!({
                             "code": error.code,
                             "message": error.message
@@ -192,6 +194,7 @@ impl AgentRunner {
                         content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
                             tool_use_id: call.id.clone(),
                             content,
+                            content_kind: Some(result.content_kind),
                             is_error: Some(is_error),
                             cache_control: None,
                         }]),

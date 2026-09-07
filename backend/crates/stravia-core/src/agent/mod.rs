@@ -24,7 +24,7 @@ pub use runner::{
     AgentOutputValidator, AgentResult, AgentRunError, AgentRunLimits, AgentTurnId,
 };
 pub(crate) use runner::{AgentRunGuard, AgentRunLifecycle, AgentRunner, AgentToolAuthorizer};
-pub use tool::{AgentTool, AgentToolContext, AgentToolError};
+pub use tool::{AgentTool, AgentToolContext, AgentToolError, AgentToolOutput};
 
 #[cfg(test)]
 pub(crate) use crate::model_turn::InMemoryModelTurnExecutor;

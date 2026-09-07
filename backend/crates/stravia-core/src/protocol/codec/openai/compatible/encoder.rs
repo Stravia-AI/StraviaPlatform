@@ -646,7 +646,7 @@ fn encode_content_block_for_openai(b: &ContentBlock) -> Value {
         other => {
             // Other block types (Document, SearchResult, etc.) not supported
             // by OpenAI chat/completions; serialise raw as fallback.
-            serde_json::to_value(other).unwrap_or(Value::Null)
+            crate::protocol::codec::content_block_wire_value(other)
         }
     }
 }

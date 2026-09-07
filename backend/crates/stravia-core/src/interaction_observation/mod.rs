@@ -643,6 +643,10 @@ impl IngressObserver {
                 .expect("trace registry")
                 .insert(start.id.clone(), trace.clone());
         }
+        let protected = self.trace.as_ref().map_or_else(
+            redaction::ProtectedSecrets::default,
+            TraceHandle::protected_secrets,
+        );
         let inner = Arc::new(RunObserverInner {
             observation: self.observation.clone(),
             run_id: start.id.clone(),
@@ -652,7 +656,10 @@ impl IngressObserver {
             gap: AtomicBool::new(false),
             finalization: Mutex::new(self.finalization.take()),
             pending_finish: Mutex::new(None),
-            visible_redaction: Mutex::new(redaction::VisibleTextRedactor::new()),
+            visible_redaction: Mutex::new(redaction::VisibleTextRedactor::with_protected(
+                protected.clone(),
+            )),
+            protected,
         });
         if self
             .observation
@@ -729,8 +736,12 @@ struct RunObserverInner {
     finalization: Mutex<Option<mpsc::OwnedPermit<WriterCommand>>>,
     pending_finish: Mutex<Option<RunOutcome>>,
     visible_redaction: Mutex<redaction::VisibleTextRedactor>,
+    protected: redaction::ProtectedSecrets,
 }
 impl RunObserver {
+    pub(crate) fn protect_secrets<'a>(&self, secrets: impl IntoIterator<Item = &'a str>) {
+        self.inner.protected.register(secrets);
+    }
     pub(crate) fn debug_enabled(&self) -> bool {
         self.inner.debug_enabled
     }
@@ -777,6 +788,7 @@ impl RunObserver {
         }
     }
     fn send_event(&self, mut event: RunEvent) {
+        self.inner.protected.event(&mut event);
         redaction::redact_run_event(&mut event);
         if matches!(event, RunEvent::ObservationGap { .. }) {
             if let Some(trace) = &self.inner.trace {
@@ -817,6 +829,10 @@ impl RunObserver {
     }
     pub(crate) fn finish(&self, mut outcome: RunOutcome) {
         self.flush_visible();
+        self.inner.protected.text(&mut outcome.status);
+        if let Some(reason) = &mut outcome.terminal_reason {
+            self.inner.protected.text(reason);
+        }
         redaction::redact_run_outcome(&mut outcome);
         if !self.inner.terminal.swap(true, Ordering::AcqRel) {
             if let Err(error) =

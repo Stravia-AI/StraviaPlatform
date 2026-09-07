@@ -521,6 +521,7 @@ async fn automatic_parent_matches_gemini_reasoning_and_tool_id_replay() {
         AiItem {
             role: Role::Tool,
             content: MessageContent::Blocks(vec![crate::protocol::ir::ContentBlock::ToolResult {
+                content_kind: Some(crate::protocol::ir::ToolResultContentKind::Json),
                 tool_use_id: "lookup".into(),
                 content: serde_json::Value::String("result".into()),
                 is_error: None,
@@ -591,6 +592,7 @@ async fn automatic_parent_matches_gemini_reasoning_and_tool_id_replay() {
     let tool_result = |value: &str| AiItem {
         role: Role::Tool,
         content: MessageContent::Blocks(vec![crate::protocol::ir::ContentBlock::ToolResult {
+            content_kind: Some(crate::protocol::ir::ToolResultContentKind::Json),
             tool_use_id: "lookup".into(),
             content: serde_json::Value::String(value.into()),
             is_error: None,

@@ -705,6 +705,7 @@ mod tests {
             AiItem {
                 role: Role::Tool,
                 content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                    content_kind: Some(crate::protocol::ir::ToolResultContentKind::Json),
                     tool_use_id: "fetch_1".into(),
                     content: serde_json::json!({
                         "results": [

@@ -234,6 +234,7 @@ async fn response_and_tool_result_stages_are_distinct_and_ordered() {
         tool_id: ToolId::new("tool"),
         call_id: "call".into(),
         content: serde_json::json!("raw"),
+        content_kind: crate::protocol::ir::ToolResultContentKind::Json,
         is_error: false,
         metadata: serde_json::Map::new(),
     };

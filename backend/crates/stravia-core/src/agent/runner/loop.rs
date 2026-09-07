@@ -782,7 +782,15 @@ impl AgentRunner {
             };
             match event.map_err(|error| AgentRunError::new(error.code, error.message))? {
                 CanonicalEvent::Delta(_) => {}
-                CanonicalEvent::Completed(response) => return Ok(*response),
+                CanonicalEvent::Completed(response) => {
+                    if let Some(publication) = turn.redaction_publication.as_ref() {
+                        publication
+                            .publish()
+                            .await
+                            .map_err(|error| AgentRunError::new(error.code, error.message))?;
+                    }
+                    return Ok(*response);
+                }
             }
         }
         Err(AgentRunError::new(

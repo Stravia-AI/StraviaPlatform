@@ -1130,6 +1130,11 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
             "Model Turn ended without a completion",
         ));
     };
+    if let Some(publication) = turn.redaction_publication.as_ref()
+        && let Err(error) = publication.publish().await
+    {
+        return model_turn_error_outcome(error);
+    }
     let mut response = streamed_response
         .map(StreamResponseAccumulator::into_ai_response)
         .unwrap_or_else(|| completed_response.clone());

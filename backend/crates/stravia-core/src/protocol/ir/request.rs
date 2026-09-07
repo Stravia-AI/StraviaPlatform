@@ -67,6 +67,17 @@ pub enum DocumentSource {
 
 // ── Content blocks ────────────────────────────────────────────────────────────
 
+/// Tool payload interpretation is assigned by its producer, never inferred from
+/// business JSON fields. Persist it so restored history keeps the same semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolResultContentKind {
+    Json,
+    ContentBlocks,
+}
+
+pub(crate) const TOOL_RESULT_CONTENT_KIND_META: &str = "__stravia_tool_result_content_kind";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
@@ -129,6 +140,9 @@ pub enum ContentBlock {
     ToolResult {
         tool_use_id: String,
         content: Value,
+        /// Absent only in history written before payload semantics were recorded.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content_kind: Option<ToolResultContentKind>,
         #[serde(skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -153,6 +167,8 @@ pub enum ContentBlock {
     ServerToolResult {
         tool_use_id: String,
         content: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content_kind: Option<ToolResultContentKind>,
         /// Discriminator matching the originating `ServerToolUse.server_type`.
         #[serde(skip_serializing_if = "Option::is_none")]
         server_type: Option<String>,
@@ -461,24 +477,42 @@ impl AiItem {
         }
     }
 
+    /// Mark plain tool text only at a fresh producer boundary, never during replay.
+    pub(crate) fn with_plain_tool_text_kind(mut self) -> Self {
+        if self.role == Role::Tool && matches!(self.content, MessageContent::Text(_)) {
+            let meta = self
+                .meta
+                .get_or_insert_with(|| Value::Object(Default::default()));
+            if let Some(meta) = meta.as_object_mut() {
+                meta.insert(
+                    TOOL_RESULT_CONTENT_KIND_META.into(),
+                    Value::String("json".into()),
+                );
+            }
+        }
+        self
+    }
+
     pub fn function_call_output(call_id: impl Into<String>, output: Value) -> Self {
+        let call_id = call_id.into();
         let content = match output {
             Value::String(text) => MessageContent::Text(text),
-            Value::Array(items) => MessageContent::Blocks(
-                items
-                    .into_iter()
-                    .map(|raw| ContentBlock::Unknown { raw })
-                    .collect(),
-            ),
-            other => MessageContent::Blocks(vec![ContentBlock::Unknown { raw: other }]),
+            other => MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                tool_use_id: call_id.clone(),
+                content: other,
+                content_kind: Some(ToolResultContentKind::Json),
+                is_error: None,
+                cache_control: None,
+            }]),
         };
         Self {
             role: Role::Tool,
             content,
             tool_calls: None,
-            tool_call_id: Some(call_id.into()),
+            tool_call_id: Some(call_id),
             meta: None,
         }
+        .with_plain_tool_text_kind()
     }
 
     pub fn search_result(
@@ -890,6 +924,8 @@ pub struct RequestMetadata {
     /// Three-segment vendor extension bag.
     pub vendor: VendorExtensions,
     pub(crate) media_routing: Option<MediaRoutingPlan>,
+    #[serde(skip_serializing)]
+    pub(crate) redaction: crate::reversible_redaction::RedactionTrace,
 }
 
 // ── AiRequest ─────────────────────────────────────────────────────────────────

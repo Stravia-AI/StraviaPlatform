@@ -8,7 +8,7 @@ use futures::FutureExt;
 use serde_json::Value;
 
 use super::Principal;
-use crate::protocol::ir::{ContentBlock, ToolSpec};
+use crate::protocol::ir::{ContentBlock, ToolResultContentKind, ToolSpec};
 use crate::proxy::context::CancellationToken;
 
 pub const DEFAULT_PLATFORM_TOOL_EXECUTION_LIMIT: Duration = Duration::from_secs(120);
@@ -65,6 +65,7 @@ pub struct PlatformToolResult {
     pub tool_id: ToolId,
     pub call_id: String,
     pub content: Value,
+    pub content_kind: ToolResultContentKind,
     pub is_error: bool,
     pub metadata: serde_json::Map<String, Value>,
 }
@@ -73,6 +74,7 @@ impl PlatformToolResult {
         ContentBlock::ToolResult {
             tool_use_id: self.call_id.clone(),
             content: self.content.clone(),
+            content_kind: Some(self.content_kind),
             is_error: Some(self.is_error),
             cache_control: None,
         }
@@ -241,25 +243,32 @@ impl PlatformToolRegistry {
                 tool_id: id.clone(),
                 call_id,
                 content: Value::String(format!("platform tool not found: {id}")),
+                content_kind: ToolResultContentKind::Json,
                 is_error: true,
                 metadata: serde_json::Map::new(),
             };
         };
-        match std::panic::AssertUnwindSafe(tool.execute_result(arguments, context))
-            .catch_unwind()
-            .await
+        match std::panic::AssertUnwindSafe(async {
+            let output = tool.execute_result(arguments, context).await?;
+            let (content, content_kind) = blocks_to_value(output.content)?;
+            Ok::<_, PlatformToolError>((content, content_kind, output.is_error, output.metadata))
+        })
+        .catch_unwind()
+        .await
         {
-            Ok(Ok(output)) => PlatformToolResult {
+            Ok(Ok((content, content_kind, is_error, metadata))) => PlatformToolResult {
                 tool_id: id.clone(),
                 call_id,
-                content: blocks_to_value(output.content),
-                is_error: output.is_error,
-                metadata: output.metadata,
+                content,
+                content_kind,
+                is_error,
+                metadata,
             },
             Ok(Err(error)) => PlatformToolResult {
                 tool_id: id.clone(),
                 call_id,
                 content: Value::String(error.to_string()),
+                content_kind: ToolResultContentKind::Json,
                 is_error: true,
                 metadata: serde_json::Map::new(),
             },
@@ -267,6 +276,7 @@ impl PlatformToolRegistry {
                 tool_id: id.clone(),
                 call_id,
                 content: Value::String("platform tool panicked".into()),
+                content_kind: ToolResultContentKind::Json,
                 is_error: true,
                 metadata: serde_json::Map::new(),
             },
@@ -274,14 +284,28 @@ impl PlatformToolRegistry {
     }
 }
 
-fn blocks_to_value(blocks: Vec<ContentBlock>) -> Value {
-    if let [ContentBlock::Unknown { raw }] = blocks.as_slice() {
-        raw.clone()
-    } else if let [ContentBlock::Text { text, .. }] = blocks.as_slice() {
-        Value::String(text.clone())
-    } else {
-        serde_json::to_value(blocks).unwrap_or(Value::Null)
+pub(crate) fn blocks_to_value(
+    mut blocks: Vec<ContentBlock>,
+) -> Result<(Value, ToolResultContentKind), PlatformToolError> {
+    if blocks.len() == 1 {
+        match &mut blocks[0] {
+            ContentBlock::Unknown { raw } => {
+                return Ok((raw.take(), ToolResultContentKind::Json));
+            }
+            ContentBlock::Text { text, .. } => {
+                return Ok((
+                    Value::String(std::mem::take(text)),
+                    ToolResultContentKind::Json,
+                ));
+            }
+            _ => {}
+        }
     }
+    serde_json::to_value(blocks)
+        .map(|content| (content, ToolResultContentKind::ContentBlocks))
+        .map_err(|error| {
+            PlatformToolError::new(format!("tool output serialization failed: {error}"))
+        })
 }
 
 fn provider_safe_name(name: &str) -> String {

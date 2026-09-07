@@ -4052,6 +4052,8 @@ mod persist;
 #[cfg(test)]
 mod projection;
 #[cfg(test)]
+mod reversible_redaction;
+#[cfg(test)]
 mod stream_commit;
 #[cfg(test)]
 mod websocket;

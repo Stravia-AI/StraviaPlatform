@@ -11,6 +11,9 @@ impl AdminService {
     }
 
     pub async fn set_setting(&self, key: &str, value: &str) -> anyhow::Result<()> {
+        if key == "reversible_redaction_enabled" && !matches!(value, "true" | "false") {
+            anyhow::bail!("reversible_redaction_enabled must be true or false");
+        }
         let retention_days =
             if key == "log_retention_days" {
                 Some(value.parse::<u32>().map_err(|_| {

@@ -18,16 +18,18 @@ use serde_json::Value;
 
 use super::{
     AgentDefinitionId, AgentDefinitionRegistry, AgentEvent, AgentInput, AgentRunError, AgentRunner,
-    AgentTool, AgentToolContext, AgentToolError, AgentTurnId, ArtifactId, VersionedToolId,
+    AgentTool, AgentToolContext, AgentToolError, AgentToolOutput, AgentTurnId, ArtifactId,
+    VersionedToolId,
 };
 use crate::Gateway;
+use crate::hook::tool::blocks_to_value;
 use crate::hook::{
     ActionBatch, EventKind, Hook, HookAction, HookDescriptor, HookEvent, HookSession, PlatformTool,
     PlatformToolError, Principal, RequestKind, ResponsePatch, SessionContext, ToolExecutionContext,
     ToolId,
 };
 use crate::mcp::{McpContext, McpTool, McpToolError, McpToolOutput};
-use crate::protocol::ir::ContentBlock;
+use crate::protocol::ir::ToolResultContentKind;
 use crate::proxy::context::CancellationToken;
 use crate::proxy::security::Security;
 
@@ -87,7 +89,7 @@ impl AgentTool for PlatformToolAgentAdapter {
         &self,
         context: AgentToolContext,
         input: Value,
-    ) -> Result<Value, AgentToolError> {
+    ) -> Result<AgentToolOutput, AgentToolError> {
         let output = self
             .tool
             .execute_result(
@@ -102,14 +104,18 @@ impl AgentTool for PlatformToolAgentAdapter {
             )
             .await
             .map_err(|error| AgentToolError::new("platform_tool_failed", error.message))?;
-        let content = blocks_to_value(output.content);
+        let (content, content_kind) = blocks_to_value(output.content)
+            .map_err(|error| AgentToolError::new("platform_tool_failed", error.message))?;
         if output.is_error {
             Err(AgentToolError::new(
                 "platform_tool_error",
                 content.to_string(),
             ))
         } else {
-            Ok(content)
+            Ok(AgentToolOutput {
+                content,
+                content_kind,
+            })
         }
     }
 }
@@ -151,7 +157,7 @@ impl AgentTool for McpToolAgentAdapter {
         &self,
         context: AgentToolContext,
         input: Value,
-    ) -> Result<Value, AgentToolError> {
+    ) -> Result<AgentToolOutput, AgentToolError> {
         let mcp = McpContext::new(context.principal.api_key_id().to_owned());
         if !self
             .tool
@@ -175,17 +181,10 @@ impl AgentTool for McpToolAgentAdapter {
                 output.structured_content.to_string(),
             ))
         } else {
-            Ok(output.structured_content)
+            Ok(AgentToolOutput {
+                content: output.structured_content,
+                content_kind: ToolResultContentKind::Json,
+            })
         }
-    }
-}
-
-fn blocks_to_value(blocks: Vec<ContentBlock>) -> Value {
-    if let [ContentBlock::Unknown { raw }] = blocks.as_slice() {
-        raw.clone()
-    } else if let [ContentBlock::Text { text, .. }] = blocks.as_slice() {
-        Value::String(text.clone())
-    } else {
-        serde_json::to_value(blocks).unwrap_or(Value::Null)
     }
 }

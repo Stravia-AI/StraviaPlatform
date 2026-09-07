@@ -740,6 +740,7 @@ fn anthropic_encoder_normalizes_tool_use_ids_for_tool_and_result() {
             content: IrMessageContent::Blocks(vec![IrContentBlock::ToolResult {
                 tool_use_id: "call_function_abc_1".to_string(),
                 content: serde_json::json!({"ok": true}),
+                content_kind: Some(crate::protocol::ir::ToolResultContentKind::Json),
                 is_error: None,
                 cache_control: None,
             }]),

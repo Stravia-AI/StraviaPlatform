@@ -97,6 +97,7 @@ const navigationGroups = [
     items: [
       { href: '/media-understanding', label: m.app_shell_nav_media_understanding, icon: ImagesIcon },
       { href: '/web-search', label: m.app_shell_nav_web_search, icon: SearchCheckIcon },
+      { href: '/reversible-redaction', label: m.reversible_redaction_title, icon: KeyRoundIcon },
     ],
   },
   {

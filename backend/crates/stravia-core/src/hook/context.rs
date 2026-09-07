@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 
 use crate::protocol::ir::{
     AiItem, AiRequest, CacheControl, ContentBlock, MessageContent, ProtocolExt, Role, ToolCall,
+    ToolResultContentKind,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -101,6 +102,8 @@ pub enum ContextItem {
         role: Role,
         tool_use_id: String,
         content: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content_kind: Option<ToolResultContentKind>,
         is_error: Option<bool>,
         cache_control: Option<CacheControl>,
         meta: Option<serde_json::Value>,
@@ -234,6 +237,18 @@ fn normalized_context_items(messages: &[AiItem]) -> Vec<ContextItem> {
                     role: message.role,
                     tool_use_id: message.tool_call_id.clone().unwrap_or_default(),
                     content: serde_json::Value::String(text.clone()),
+                    content_kind: message
+                        .meta
+                        .as_ref()
+                        .and_then(|meta| {
+                            meta.get(crate::protocol::ir::TOOL_RESULT_CONTENT_KIND_META)
+                        })
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(|kind| match kind {
+                            "json" => Some(ToolResultContentKind::Json),
+                            "content_blocks" => Some(ToolResultContentKind::ContentBlocks),
+                            _ => None,
+                        }),
                     is_error: None,
                     cache_control: None,
                     meta: message_meta.take(),
@@ -287,6 +302,7 @@ fn normalized_context_items(messages: &[AiItem]) -> Vec<ContextItem> {
                         ContentBlock::ToolResult {
                             tool_use_id,
                             content,
+                            content_kind,
                             is_error,
                             cache_control,
                         } => Some(ContextItem::ToolResult {
@@ -294,6 +310,7 @@ fn normalized_context_items(messages: &[AiItem]) -> Vec<ContextItem> {
                             role: message.role,
                             tool_use_id: tool_use_id.clone(),
                             content: content.clone(),
+                            content_kind: *content_kind,
                             is_error: *is_error,
                             cache_control: cache_control.clone(),
                             meta: None,
@@ -521,6 +538,7 @@ impl ContextSnapshot {
                     role,
                     tool_use_id,
                     content,
+                    content_kind,
                     is_error,
                     cache_control,
                     meta,
@@ -530,6 +548,7 @@ impl ContextSnapshot {
                     content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
                         tool_use_id: tool_use_id.clone(),
                         content: content.clone(),
+                        content_kind: *content_kind,
                         is_error: *is_error,
                         cache_control: cache_control.clone(),
                     }]),
@@ -783,6 +802,7 @@ mod tests {
             content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
                 tool_use_id: "call-1".into(),
                 content: serde_json::json!({"answer": 42}),
+                content_kind: Some(ToolResultContentKind::Json),
                 is_error: Some(false),
                 cache_control: None,
             }]),

@@ -555,6 +555,7 @@ mod tests {
             role: crate::protocol::ir::Role::Tool,
             content: crate::protocol::ir::MessageContent::Blocks(vec![
                 crate::protocol::ir::ContentBlock::ToolResult {
+                    content_kind: Some(crate::protocol::ir::ToolResultContentKind::Json),
                     tool_use_id: "media-call".into(),
                     content: serde_json::json!({
                         "turn_id": "aturn_parent",

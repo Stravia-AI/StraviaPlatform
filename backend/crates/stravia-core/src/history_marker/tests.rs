@@ -81,6 +81,7 @@ async fn assert_store_contract(store: Arc<dyn HistoryMarkerStore>) {
     let segment = HiddenHistorySegment::Platform {
         call: call("call-1"),
         result: ContentBlock::ToolResult {
+            content_kind: Some(crate::protocol::ir::ToolResultContentKind::Json),
             tool_use_id: "call-1".into(),
             content: serde_json::json!({"answer": "stable"}),
             is_error: Some(false),
@@ -106,6 +107,7 @@ async fn assert_store_contract(store: Arc<dyn HistoryMarkerStore>) {
             HiddenHistorySegment::Platform {
                 call: call("call-1"),
                 result: ContentBlock::ToolResult {
+                    content_kind: Some(crate::protocol::ir::ToolResultContentKind::Json),
                     tool_use_id: "call-1".into(),
                     content: serde_json::json!({"answer": "stable"}),
                     is_error: Some(false),
@@ -128,6 +130,74 @@ async fn assert_store_contract(store: Arc<dyn HistoryMarkerStore>) {
         resolved.segment,
         Some(HiddenHistorySegment::Platform { .. })
     ));
+
+    // Identical array shapes can be JSON, typed blocks, or ambiguous legacy data.
+    // Persisted semantics, not shape or Platform provenance, decide how to read them.
+    for content_kind in [
+        Some(crate::protocol::ir::ToolResultContentKind::Json),
+        Some(crate::protocol::ir::ToolResultContentKind::ContentBlocks),
+        None,
+    ] {
+        let mut payload = serde_json::json!({
+            "type": "tool_result",
+            "tool_use_id": "semantic-call",
+            "content": [{"type": "text", "text": "secret", "value": "business data"}],
+            "is_error": false
+        });
+        if let Some(kind) = content_kind {
+            payload["content_kind"] = serde_json::to_value(kind).unwrap();
+        }
+        let result: ContentBlock = serde_json::from_value(payload).unwrap();
+        let marker = store
+            .create_platform(
+                &owner,
+                PlatformMarkerInput {
+                    tool_id: "semantic-tool".into(),
+                    call: call("semantic-call"),
+                    activity: "Reading data".into(),
+                    execution_limit: Duration::from_secs(30),
+                    pending_retention: Duration::from_secs(60),
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .claim_execution(&owner, &marker.reference, "worker", Duration::from_secs(30))
+            .await
+            .unwrap();
+        store
+            .finish_execution(
+                &owner,
+                &marker.reference,
+                "worker",
+                PlatformExecutionState::Completed,
+                HiddenHistorySegment::Platform {
+                    call: call("semantic-call"),
+                    result: result.clone(),
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .publish(
+                &owner,
+                std::slice::from_ref(&marker.reference),
+                Duration::from_secs(60),
+            )
+            .await
+            .unwrap();
+        let mut request = AiRequest::new(
+            "model",
+            vec![AiItem::output_text(render_history_marker(&marker))],
+        );
+        resolve_request_markers(store.as_ref(), &owner, &mut request)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&request.items[1].content).unwrap(),
+            serde_json::to_value(MessageContent::Blocks(vec![result])).unwrap()
+        );
+    }
 }
 
 #[tokio::test]
@@ -323,6 +393,7 @@ async fn sqlite_deadline_and_lost_lease_become_distinct_terminal_errors() {
                 HiddenHistorySegment::Platform {
                     call: call("interrupted"),
                     result: ContentBlock::ToolResult {
+                        content_kind: Some(crate::protocol::ir::ToolResultContentKind::Json),
                         tool_use_id: "interrupted".into(),
                         content: serde_json::json!("late"),
                         is_error: Some(false),
@@ -359,6 +430,7 @@ async fn sqlite_completed_marker_remains_immutable_after_its_execution_deadline(
     let segment = HiddenHistorySegment::Platform {
         call: call("completed"),
         result: ContentBlock::ToolResult {
+            content_kind: Some(crate::protocol::ir::ToolResultContentKind::Json),
             tool_use_id: "completed".into(),
             content: serde_json::json!("done"),
             is_error: Some(false),
@@ -640,6 +712,7 @@ async fn resolver_restores_projected_text_and_platform_segment_at_exact_marker_p
             HiddenHistorySegment::Platform {
                 call: call("call-ordered"),
                 result: ContentBlock::ToolResult {
+                    content_kind: Some(crate::protocol::ir::ToolResultContentKind::Json),
                     tool_use_id: "call-ordered".into(),
                     content: serde_json::json!({"answer": "stable"}),
                     is_error: Some(false),

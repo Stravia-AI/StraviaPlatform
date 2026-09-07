@@ -410,10 +410,10 @@ def build_harness(work_dir: Path) -> None:
         """
     ).strip() + "\n"
 
-    (work_dir / "Cargo.toml").write_text(cargo_toml)
+    (work_dir / "Cargo.toml").write_text(cargo_toml, encoding="utf-8")
     src_dir = work_dir / "src"
     src_dir.mkdir(parents=True, exist_ok=True)
-    (src_dir / "main.rs").write_text(main_rs)
+    (src_dir / "main.rs").write_text(main_rs, encoding="utf-8")
 
 
 def run_harness(
@@ -440,6 +440,7 @@ def run_harness(
         env=env,
         cwd=str(REPO_ROOT),
         text=True,
+        encoding="utf-8",
         capture_output=True,
         check=False,
     )
@@ -470,6 +471,7 @@ def run_schema_action(action: str, *, work_dir: Path, pg_url: str, schema: str) 
         env=env,
         cwd=str(REPO_ROOT),
         text=True,
+        encoding="utf-8",
         capture_output=True,
         check=False,
     )

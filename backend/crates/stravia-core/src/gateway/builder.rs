@@ -72,7 +72,8 @@ impl GatewayBuilder {
             generation_chain_ttl,
             gateway.artifact_store.clone(),
         )
-        .with_history_markers(Arc::clone(&gateway.history_markers));
+        .with_history_markers(Arc::clone(&gateway.history_markers))
+        .with_redaction_mappings(Arc::clone(&gateway.redaction.mappings));
         gateway.install_model_turn();
         configure_gateway_extensions(&mut gateway, hooks, tools, mcp_tools, agent_definitions)
             .await?;

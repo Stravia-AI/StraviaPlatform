@@ -1,0 +1,25 @@
+{
+  "repository": "https://github.com/betterleaks/betterleaks",
+  "commit": "95237cf8eb4d8e9f67409595b245e674832992cf",
+  "commitDate": "2026-09-01T14:32:51Z",
+  "rulesPath": "config/betterleaks.toml",
+  "rulesSha256": "b45bd602f46f1fce1f9a6d86b054096d9f2d1c2fe29d2e5b9ef3a7923195fe1a",
+  "rulesBytes": 559373,
+  "rules": 462,
+  "ruleFilters": 411,
+  "uniqueNonemptyRuleFilters": 53,
+  "compositeRules": 36,
+  "license": "MIT; see LICENSE.betterleaks",
+  "wordListSource": "internal/words/words.txt.gz (decompressed verbatim into words.txt)",
+  "wordListSha256": "e811a9be4d82bef94c0134d66ab7de8c7f656b160b2f0e9d033c528b613905c8",
+  "tokenizer": "tiktoken-rs 0.12.0 cl100k_base; bundled vocabulary, no runtime fetching",
+  "modelTextPolicy": {
+    "path": "empty trusted virtual-source path; never inferred from model text",
+    "fileOnly": "Compiled and evaluated, but no filename/binary payload exists for path-only detection",
+    "components": "Same text field only; required component secrets protected with primary; optional username evidence does not itself become a secret",
+    "confidence": "Local expressions evaluated; report confidence does not gate protection",
+    "inlineAllowComments": "Not honored in untrusted model text",
+    "decoding": "No optional encoded-file decoding passes",
+    "validate": "Never compiled or executed"
+  }
+}

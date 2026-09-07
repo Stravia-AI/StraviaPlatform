@@ -52,6 +52,7 @@ impl Gateway {
             hook::PlatformToolResult {
                 tool_id: hook::ToolId::new("deadline"),
                 call_id: call.id.clone(),
+                content_kind: protocol::ir::ToolResultContentKind::Json,
                 content: serde_json::Value::String(
                     "Platform tool execution reached its registered deadline.".into(),
                 ),
@@ -69,6 +70,7 @@ impl Gateway {
                 Err(_) => hook::PlatformToolResult {
                     tool_id: hook::ToolId::new("deadline"),
                     call_id: call.id.clone(),
+                    content_kind: protocol::ir::ToolResultContentKind::Json,
                     content: serde_json::Value::String(
                         "Platform tool execution reached its registered deadline.".into(),
                     ),

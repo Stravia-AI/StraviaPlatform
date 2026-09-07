@@ -380,6 +380,7 @@ fn decode_message(message: &Value) -> anyhow::Result<AiItem> {
                 blocks.push(ContentBlock::ToolResult {
                     tool_use_id: tool_call_id.clone().unwrap_or_default(),
                     content: Value::String(text),
+                    content_kind: Some(crate::protocol::ir::ToolResultContentKind::Json),
                     is_error: None,
                     cache_control: None,
                 });

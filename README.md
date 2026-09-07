@@ -103,6 +103,22 @@ Media Understanding exposes one `understand_media` capability for static JPEG, P
 
 Enable the platform capability, select a logical Model, and choose its Thinking Level on the **Media Understanding** page. The selector only lists enabled Models where every Target explicitly advertises image input, and the Thinking Level selector only lists levels supported by every Target. All valid API keys can then call `understand_media` explicitly; MCP access and Transparent Injection remain independent per-key controls. Hidden calls consume the caller's quota without granting direct access to the selected Model. External image URLs are restricted to public HTTPS destinations and snapshotted before use. Preprocessing always creates a bounded lossy JPEG derivative, ignores ICC profiles, and may reduce exact-color or fine-text OCR accuracy.
 
+### Reversible redaction
+
+In **Advanced Features → Reversible redaction**, enable instance-wide credential text protection. It is **off by default** and applies to every valid Stravia API Key, with no per-key exemption, MCP tool, or Transparent Injection option. Server and Desktop use the same core setting and behavior; clients keep their existing protocols and plaintext view.
+
+Before each model request, Stravia locally replaces detected credentials in system instructions, user and historical messages, tool arguments, tool results, and platform-internal requests with opaque placeholders. Bundled Betterleaks rules update with Stravia releases; runtime rule downloads and online credential validation are never performed. Valid known secrets for the same API Key are also replaced by exact text, including all occurrences elsewhere in a request that first identifies a secret. Surrounding non-secret text, protocol structure, and necessary upstream connection authentication remain unchanged.
+
+Returned valid placeholders restore to plaintext in answers, client tool arguments, and platform tool execution arguments, including streamed responses. While enabled, tool results are protected again before reaching the model. Mappings are isolated by API Key, persist across restarts, and reuse the same placeholder for the same secret while valid across conversations and branches. Sharing a key shares this access boundary. Retention follows History Marker rules: one hour before publication, at least seven days on publication, and extension with retained history without reviving expired mappings. Unknown, expired, or other-key placeholders remain unchanged. Detection, replacement, and mapping storage failures explicitly fail the request or terminate an active stream rather than bypass protection.
+
+**Turning the feature off stops new detection and replacement, not restoration.** It does not delete mappings: existing valid placeholders still restore in answers and both client and platform tool arguments until expiry. New outgoing text, including restored tool results, is no longer protected by this feature while off.
+
+**Older tool history:** when an older conversation contains tool-output arrays whose interpretation cannot be verified, protection rejects the request before contacting the provider. This includes arrays previously saved as text. Start a new conversation to continue with protection. With protection off, ambiguous legacy payloads remain unchanged; Stravia does not guess their text or media boundaries.
+
+This is credential-text protection, **not general DLP or an all-secret guarantee**. Detection can miss secrets or flag non-secrets; images, audio, video, binary attachments, and opaque payloads are not scanned. Local mappings and client-visible history can contain plaintext; database, disk, and backup protection remain deployment responsibilities, with no additional application-layer encryption. A model can place a placeholder in a URL or other tool argument and cause the tool to exfiltrate the restored credential. Existing tool authorization and outbound controls remain essential; the toggle is not credential revocation or an exfiltration barrier.
+
+Restored secrets are permanently masked as `***` before response and tool-execution diagnostics are persisted, including Debug Bundles. Original client ingress still follows the existing diagnostic redaction policy; this does not make prompts, tool results, or diagnostic exports generally non-sensitive.
+
 ### Local management
 
 The SvelteKit WebUI manages:

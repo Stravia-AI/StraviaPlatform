@@ -53,7 +53,7 @@ impl LiveModelTurnExecutor {
 
 #[async_trait]
 impl ModelTurnExecutor for LiveModelTurnExecutor {
-    async fn execute(&self, input: TurnInput) -> Result<ModelTurn, ModelTurnError> {
+    async fn execute(&self, mut input: TurnInput) -> Result<ModelTurn, ModelTurnError> {
         let model_turn_id = uuid::Uuid::new_v4().to_string();
         let observer = input.observer.clone();
         if let Some(observer) = &observer {
@@ -103,7 +103,20 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
             let cancellation = input.cancellation.clone();
             tokio::select! {
                 biased;
-                result = execute_inner(self.clone(), input, model_turn_id.clone()) => result,
+                result = async {
+                    let trace = input.request.meta.redaction.clone();
+                    let mappings = self.gateway.redaction
+                        .protect(&input.principal, &mut input.request).await?;
+                    if let Some(observer) = &observer {
+                        observer.protect_secrets(mappings.iter().map(|mapping| mapping.secret.as_str()));
+                    }
+                    let publication = self.gateway.redaction
+                        .publication(input.principal.clone(), trace.clone());
+                    let mut turn = execute_inner(self.clone(), input, model_turn_id.clone()).await?;
+                    turn.output = self.gateway.redaction.restore_stream(turn.output, mappings, trace);
+                    turn.redaction_publication = Some(publication);
+                    Ok::<_, ModelTurnError>(turn)
+                } => result,
                 _ = cancellation.cancelled() => {
                     Err(ModelTurnError::new("cancelled", "Model Turn cancelled"))
                 }
@@ -710,6 +723,14 @@ async fn prepare_attempt(
     {
         normalize_provider_effective_request(&mut full_provider_request, &profile);
     }
+    input
+        .request
+        .meta
+        .redaction
+        .observe_provider_request(&full_provider_request)
+        .map_err(|error| {
+            AttemptFailure::terminal("reversible_redaction_failed", error.to_string())
+        })?;
     let require_affinity = provider.channel.as_deref() == Some("codex")
         || full_outbound
             .body
@@ -1017,6 +1038,7 @@ async fn begin_attempt(
         events.push(Ok(CanonicalEvent::Completed(Box::new(response))));
         return Ok(ModelTurn {
             model_turn_id: prepared.model_turn_id,
+            redaction_publication: None,
             route: prepared.route,
             target: target_identity,
             output: Box::pin(stream::iter(events)),
@@ -1319,6 +1341,7 @@ async fn begin_attempt(
 
     Ok(ModelTurn {
         model_turn_id: prepared.model_turn_id,
+        redaction_publication: None,
         route: prepared.route,
         target: target_identity,
         output: Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)),

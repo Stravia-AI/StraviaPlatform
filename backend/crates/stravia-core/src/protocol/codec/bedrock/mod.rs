@@ -599,6 +599,7 @@ fn decode_content_block(block: &Value) -> anyhow::Result<ContentBlock> {
     if let Some(result) = block.get("toolResult") {
         return Ok(ContentBlock::ToolResult {
             tool_use_id: required_string(result, "toolUseId")?,
+            content_kind: Some(crate::protocol::ir::ToolResultContentKind::ContentBlocks),
             content: result
                 .get("content")
                 .cloned()
