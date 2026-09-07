@@ -5,8 +5,6 @@ pub mod context;
 pub(crate) mod dispatcher;
 pub mod handler;
 pub mod ingress;
-pub mod intake;
-pub mod observability;
 pub mod planner;
 pub(crate) mod security;
 pub mod server;

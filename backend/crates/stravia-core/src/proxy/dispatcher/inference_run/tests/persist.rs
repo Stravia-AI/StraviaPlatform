@@ -11,7 +11,7 @@ async fn cancelled_run_stops_before_provider_io() {
         )),
         ..Default::default()
     };
-    let (gateway, _logs) = Gateway::new(config).await.expect("gateway init");
+    let gateway = Gateway::new(config).await.expect("gateway init");
     configure_route(&gateway, "cancelled-route", &[base_url]).await;
     let context = RequestContext::new(
         OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
@@ -50,7 +50,7 @@ async fn cancelled_run_stops_before_provider_io() {
 async fn automatic_parent_discovery_failure_falls_back_to_a_chat_root() {
     let (base_url, calls) = serve_openai_sequence(vec![openai_response("answer")]).await;
     let data_dir = tempfile::tempdir().expect("temporary data directory");
-    let (mut gateway, _logs) = Gateway::new(crate::config::GatewayConfig {
+    let mut gateway = Gateway::new(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -97,7 +97,7 @@ async fn embeddings_skip_generation_chain_begin() {
     });
     let (base_url, calls) = serve_openai_sequence(vec![embedding_response]).await;
     let data_dir = tempfile::tempdir().expect("temporary data directory");
-    let (mut gateway, _logs) = Gateway::new(crate::config::GatewayConfig {
+    let mut gateway = Gateway::new(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -142,83 +142,6 @@ async fn embeddings_skip_generation_chain_begin() {
 }
 
 #[tokio::test]
-async fn dropped_stream_before_terminal_does_not_publish_response_chain() {
-    let (provider_url, _) = serve_sse_sequence(vec![openai_sse("partial output")]).await;
-    let data_dir = tempfile::tempdir().expect("temp data dir");
-    let config = crate::config::GatewayConfig {
-        data_dir: data_dir.path().to_path_buf(),
-        ..Default::default()
-    };
-    let (gateway, mut logs) = Gateway::new(config).await.expect("gateway init");
-    configure_route(&gateway, "dropped-terminal", &[provider_url]).await;
-
-    let response = execute_protocol_request(
-        gateway.clone(),
-        "dropped-terminal",
-        OPEN_RESPONSES_2026_04_24,
-        "/v1/responses",
-        true,
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let mut body = response.into_body().into_data_stream();
-    let first = body
-        .next()
-        .await
-        .expect("response.created frame")
-        .expect("stream frame");
-    let first = String::from_utf8(first.to_vec()).expect("UTF-8 stream frame");
-    let response_id_start = first
-        .find("resp_")
-        .unwrap_or_else(|| panic!("gateway response ID in first frame: {first}"));
-    let response_id: String = first[response_id_start..]
-        .chars()
-        .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
-        .collect();
-    drop(body);
-
-    tokio::time::timeout(std::time::Duration::from_secs(1), logs.recv())
-        .await
-        .expect("stream completion log")
-        .expect("log channel remains open");
-
-    let mut continuation = AiRequest::new("dropped-terminal", Vec::new());
-    continuation.ext = Some(crate::protocol::ir::ProtocolExt::OpenResponses(
-        crate::protocol::ir::OpenResponsesExt {
-            previous_response_id: Some(response_id.clone()),
-            ..Default::default()
-        },
-    ));
-    let headers = authorized_headers(&gateway).await;
-    let continuation_response = execute(RunInput {
-        gateway: gateway.clone(),
-        executor: std::sync::Arc::clone(&gateway.model_turn),
-        headers,
-        envelope: RawEnvelope::new(
-            Some(serde_json::json!({
-                "model": "dropped-terminal",
-                "previous_response_id": response_id
-            })),
-            HashMap::new(),
-            "POST",
-            "/v1/responses",
-        ),
-        request: continuation,
-        ingress: OPEN_RESPONSES_2026_04_24,
-        context: RequestContext::new(
-            OPEN_RESPONSES_2026_04_24,
-            std::time::Duration::from_secs(30),
-        ),
-    })
-    .await;
-    assert_eq!(continuation_response.status(), StatusCode::BAD_REQUEST);
-    let continuation_body = to_bytes(continuation_response.into_body(), usize::MAX)
-        .await
-        .expect("continuation error body");
-    assert!(String::from_utf8_lossy(&continuation_body).contains("previous_response_not_found"));
-}
-
-#[tokio::test]
 async fn delivered_terminal_publishes_response_chain() {
     let (provider_url, provider_calls) = serve_sse_sequence(vec![
         openai_sse("first output"),
@@ -230,7 +153,7 @@ async fn delivered_terminal_publishes_response_chain() {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     };
-    let (gateway, _logs) = Gateway::new(config).await.expect("gateway init");
+    let gateway = Gateway::new(config).await.expect("gateway init");
     configure_route(&gateway, "delivered-terminal", &[provider_url]).await;
 
     let response = execute_protocol_request(
@@ -303,7 +226,7 @@ async fn store_false_keeps_the_gateway_generation_chain_available() {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     };
-    let (gateway, _logs) = Gateway::new(config).await.expect("gateway init");
+    let gateway = Gateway::new(config).await.expect("gateway init");
     let model = "store-false-generation-chain";
     configure_route(&gateway, model, &[provider_url]).await;
     let headers = authorized_headers(&gateway).await;

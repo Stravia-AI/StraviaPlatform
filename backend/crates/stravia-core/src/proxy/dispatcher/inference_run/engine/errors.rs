@@ -166,31 +166,6 @@ pub(super) fn model_turn_error_outcome(error: crate::agent::ModelTurnError) -> R
     buffered_response(response)
 }
 
-pub(super) fn model_turn_execute_failure(
-    gateway: &Gateway,
-    request: &AiRequest,
-    ingress: ProtocolId,
-    start: Instant,
-    request_extras: &RequestExtras,
-    auth_subject: Option<&crate::proxy::context::AuthSubject>,
-    error: crate::agent::ModelTurnError,
-) -> RoundOutcome {
-    let outcome = model_turn_error_outcome(error);
-    let status = match &outcome {
-        RoundOutcome::Deliver { response, .. } => response.status().as_u16(),
-        RoundOutcome::NextRound { .. } => 500,
-    };
-    LogBuilder::from_dispatch(
-        gateway,
-        &ingress.to_string(),
-        &request.model,
-        request.reasoning.level,
-        auth_subject,
-        start,
-    )
-    .stream_flag(request.stream.enabled)
-    .status(status)
-    .with_req_extras(request_extras)
-    .emit();
-    outcome
+pub(super) fn model_turn_execute_failure(error: crate::agent::ModelTurnError) -> RoundOutcome {
+    model_turn_error_outcome(error)
 }

@@ -1,0 +1,1231 @@
+mod bundle;
+mod grouping;
+mod query;
+pub(crate) mod redaction;
+mod retention;
+pub(crate) mod scope;
+mod store;
+mod trace;
+mod types;
+mod writer;
+
+pub use types::*;
+
+use sqlx::{PgPool, SqlitePool};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+    },
+};
+use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio_stream::wrappers::ReceiverStream;
+
+use bundle::{BundleRunSnapshot, BundleService, BundleSnapshot};
+use store::ObservationStore;
+use trace::{
+    RUN_LIMIT_BYTES, TOTAL_LIMIT_BYTES, TRACE_SCHEMA_VERSION, TraceHandle, TraceManager,
+    TraceRecord,
+};
+use writer::WriterCommand;
+
+#[derive(Clone)]
+pub(crate) struct InteractionObservation {
+    inner: Arc<Inner>,
+}
+struct Inner {
+    store: ObservationStore,
+    writer: mpsc::Sender<WriterCommand>,
+    writer_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    updates: broadcast::Sender<ObservationUpdate>,
+    debug: AtomicBool,
+    retention_days: Arc<AtomicU32>,
+    traces: TraceManager,
+    bundles: BundleService,
+    active_traces: Arc<Mutex<HashMap<String, TraceHandle>>>,
+    partial_trace_count: Arc<AtomicU64>,
+    ephemeral_root: Option<PathBuf>,
+    stopped: AtomicBool,
+}
+
+impl InteractionObservation {
+    pub(crate) async fn new(
+        sqlite: Option<SqlitePool>,
+        postgres: Option<PgPool>,
+        data_dir: PathBuf,
+        retention_days: u32,
+        persistent: bool,
+    ) -> Self {
+        let store = ObservationStore::new(sqlite, postgres)
+            .expect("Gateway provides exactly one observation SQL backend");
+        if store.recover_after_restart().await.is_err() {
+            tracing::warn!("observation restart recovery unavailable");
+        }
+        let ephemeral_root = (!persistent).then(|| {
+            std::env::temp_dir().join(format!("stravia-observation-{}", uuid::Uuid::new_v4()))
+        });
+        let trace_data_dir = ephemeral_root.clone().unwrap_or(data_dir);
+        let traces = TraceManager::new(trace_data_dir).unwrap_or_else(|_| {
+            tracing::warn!("observation trace storage unavailable");
+            TraceManager::degraded()
+        });
+        match store.manifest_ids().await {
+            Ok((retained, tombstoned)) => match traces.reconcile(retained, tombstoned).await {
+                Ok(report) => {
+                    if store
+                        .delete_manifests(&report.removed_tombstones)
+                        .await
+                        .is_err()
+                    {
+                        tracing::warn!("trace tombstone reconciliation persistence unavailable");
+                    }
+                }
+                Err(_) => tracing::warn!("trace file reconciliation unavailable"),
+            },
+            // 数据库不可读不等于没有保留记录，不能据此删除诊断文件。
+            Err(_) => tracing::warn!("trace manifest reconciliation unavailable"),
+        }
+        let (updates, _) = broadcast::channel(2048);
+        let retention_days = Arc::new(AtomicU32::new(retention_days));
+        let (_, partial_count) = store.debug_manifest_counts().await.unwrap_or((0, 0));
+        let active_traces = Arc::new(Mutex::new(HashMap::new()));
+        let partial_trace_count = Arc::new(AtomicU64::new(partial_count));
+        let (writer, task) = writer::spawn(
+            store.clone(),
+            Arc::clone(&retention_days),
+            updates.clone(),
+            traces.clone(),
+            Arc::clone(&active_traces),
+            Arc::clone(&partial_trace_count),
+        );
+        Self {
+            inner: Arc::new(Inner {
+                store,
+                writer,
+                writer_task: Mutex::new(Some(task)),
+                updates,
+                debug: AtomicBool::new(false),
+                retention_days,
+                traces,
+                bundles: BundleService::default(),
+                active_traces,
+                partial_trace_count,
+                ephemeral_root,
+                stopped: AtomicBool::new(false),
+            }),
+        }
+    }
+    pub(crate) fn observe_ingress(&self, mut start: IngressStart) -> IngressObserver {
+        redaction::redact_ingress(&mut start);
+        let debug = self.inner.debug.load(Ordering::Acquire);
+        // 保留一个控制槽，最终状态与 Trace 关闭不能被普通事件挤出队列。
+        let finalization = self.inner.writer.clone().try_reserve_owned().ok();
+        let trace = (debug && finalization.is_some()).then(|| self.inner.traces.create());
+        let websocket = start.method == "WEBSOCKET";
+        IngressObserver {
+            observation: self.clone(),
+            start: Some(start),
+            debug_enabled: debug,
+            trace,
+            finalization,
+            rejection_id: None,
+            websocket,
+        }
+    }
+    pub(crate) async fn query_forest(&self, q: ForestQuery) -> anyhow::Result<ForestPage> {
+        self.inner.store.query_forest(q).await
+    }
+    pub(crate) async fn get_interaction(
+        &self,
+        id: &str,
+        filters: ForestQuery,
+    ) -> anyhow::Result<Option<InteractionDetail>> {
+        self.flush().await?;
+        let Some(mut detail) = self.inner.store.get_interaction(id, filters).await? else {
+            return Ok(None);
+        };
+        for run in &mut detail.runs {
+            if !run.debug_enabled {
+                continue;
+            }
+            let active = {
+                self.inner
+                    .active_traces
+                    .lock()
+                    .expect("trace registry")
+                    .get(&run.id)
+                    .cloned()
+            };
+            let snapshot = if let Some(handle) = active {
+                run.trace = Some(handle.manifest());
+                handle.snapshot(detail.snapshot_sequence).await.ok()
+            } else if let Some(manifest) = &run.trace {
+                self.inner
+                    .traces
+                    .snapshot(&manifest.trace_id, detail.snapshot_sequence)
+                    .await
+                    .ok()
+            } else {
+                None
+            };
+            if let Some(snapshot) = snapshot {
+                run.debug_events = load_trace_values(snapshot).await?;
+            }
+        }
+        Ok(Some(detail))
+    }
+    pub(crate) async fn query_rejections(
+        &self,
+        q: RejectionQuery,
+    ) -> anyhow::Result<RejectionPage> {
+        self.inner.store.query_rejections(q).await
+    }
+    pub(crate) async fn get_rejection(&self, id: &str) -> anyhow::Result<Option<RejectionDetail>> {
+        let Some(mut detail) = self.inner.store.get_rejection(id).await? else {
+            return Ok(None);
+        };
+        if let Some(manifest) = &detail.trace {
+            if let Ok(snapshot) = self
+                .inner
+                .traces
+                .snapshot(&manifest.trace_id, detail.snapshot_sequence)
+                .await
+            {
+                detail.debug_events = load_trace_values(snapshot).await?;
+            }
+        }
+        Ok(Some(detail))
+    }
+    pub(crate) fn debug_state(&self) -> DebugState {
+        let active_partial = self
+            .inner
+            .active_traces
+            .lock()
+            .expect("trace registry")
+            .values()
+            .filter(|trace| trace.manifest().status == "partial")
+            .count() as u64;
+        DebugState {
+            enabled: self.inner.debug.load(Ordering::Acquire),
+            run_limit_bytes: RUN_LIMIT_BYTES,
+            total_limit_bytes: TOTAL_LIMIT_BYTES,
+            retained_bytes: self.inner.traces.retained_bytes(),
+            partial_trace_count: self
+                .inner
+                .partial_trace_count
+                .load(Ordering::Acquire)
+                .saturating_add(active_partial),
+            retention_days: self.inner.retention_days.load(Ordering::Relaxed),
+        }
+    }
+    pub(crate) fn set_debug_enabled(&self, enabled: bool) -> DebugState {
+        self.inner.debug.store(enabled, Ordering::Release);
+        self.debug_state()
+    }
+    pub(crate) async fn set_retention_days(&self, days: u32) -> anyhow::Result<DebugState> {
+        self.inner.store.update_retention(days).await?;
+        self.inner.retention_days.store(days, Ordering::Release);
+        self.sweep().await?;
+        Ok(self.debug_state())
+    }
+    pub(crate) async fn clear_history(&self) -> anyhow::Result<ClearHistoryResult> {
+        self.flush().await?;
+        let result = self.inner.store.mark_clear_tombstones().await?;
+        let (_, tomb) = self.inner.store.manifest_ids().await?;
+        let mut deleted = Vec::new();
+        for id in &tomb {
+            match self.inner.traces.delete(id).await {
+                Ok(()) => deleted.push(id.clone()),
+                Err(error) => tracing::warn!(trace_id=%id,%error,"trace clear failed"),
+            }
+        }
+        self.inner.store.delete_manifests(&deleted).await?;
+        self.inner.store.purge_clear_rows().await?;
+        let (_, partial) = self
+            .inner
+            .store
+            .debug_manifest_counts()
+            .await
+            .unwrap_or((0, 0));
+        self.inner
+            .partial_trace_count
+            .store(partial, Ordering::Release);
+        Ok(result)
+    }
+    pub(crate) async fn sweep_retention(&self) -> anyhow::Result<()> {
+        self.sweep().await
+    }
+    async fn sweep(&self) -> anyhow::Result<()> {
+        self.flush().await?;
+        let now = chrono::Utc::now().timestamp_millis();
+        let ids = self.inner.store.mark_expired_tombstones(now).await?;
+        let mut deleted = Vec::new();
+        for id in ids {
+            if self.inner.traces.delete(&id).await.is_ok() {
+                deleted.push(id)
+            }
+        }
+        self.inner.store.delete_manifests(&deleted).await?;
+        self.inner.store.purge_expired_rows(now).await?;
+        let (_, partial) = self
+            .inner
+            .store
+            .debug_manifest_counts()
+            .await
+            .unwrap_or((0, 0));
+        self.inner
+            .partial_trace_count
+            .store(partial, Ordering::Release);
+        Ok(())
+    }
+    pub(crate) fn subscribe(&self, after: i64) -> ObservationStream {
+        let store = self.inner.store.clone();
+        let mut live = self.inner.updates.subscribe();
+        let (tx, rx) = mpsc::channel(256);
+        tokio::spawn(async move {
+            let min = store.min_sequence().await.ok().flatten();
+            let max = store.max_sequence().await.unwrap_or(0);
+            if after > max
+                || (after > 0 && min.map_or(after < max, |min| after < min.saturating_sub(1)))
+            {
+                let _ = tx
+                    .send(ObservationUpdate::ResetRequired {
+                        snapshot_sequence: max,
+                    })
+                    .await;
+                return;
+            }
+            let mut last = after;
+            match store.replay(after).await {
+                Ok(events) => {
+                    for e in events {
+                        last = last.max(e.sequence);
+                        if tx.send(ObservationUpdate::Event(e)).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+                Err(_) => {
+                    let _ = tx
+                        .send(ObservationUpdate::ResetRequired {
+                            snapshot_sequence: max,
+                        })
+                        .await;
+                    return;
+                }
+            }
+            loop {
+                match live.recv().await {
+                    Ok(ObservationUpdate::Event(event)) => {
+                        if event.sequence <= last {
+                            continue;
+                        }
+                        if event.sequence > last.saturating_add(1) {
+                            match store.replay(last).await {
+                                Ok(events) => {
+                                    for event in events {
+                                        last = last.max(event.sequence);
+                                        if tx.send(ObservationUpdate::Event(event)).await.is_err() {
+                                            return;
+                                        }
+                                    }
+                                }
+                                Err(_) => {
+                                    let _ = tx
+                                        .send(ObservationUpdate::ResetRequired {
+                                            snapshot_sequence: store
+                                                .max_sequence()
+                                                .await
+                                                .unwrap_or(last),
+                                        })
+                                        .await;
+                                    return;
+                                }
+                            }
+                            continue;
+                        }
+                        last = event.sequence;
+                        if tx.send(ObservationUpdate::Event(event)).await.is_err() {
+                            return;
+                        }
+                    }
+                    Ok(update) => {
+                        if tx.send(update).await.is_err() {
+                            return;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        let snapshot = store.max_sequence().await.unwrap_or(max);
+                        let _ = tx
+                            .send(ObservationUpdate::ResetRequired {
+                                snapshot_sequence: snapshot,
+                            })
+                            .await;
+                        return;
+                    }
+                    Err(_) => return,
+                }
+            }
+        });
+        Box::pin(ReceiverStream::new(rx))
+    }
+    pub(crate) async fn issue_bundle_ticket(
+        &self,
+        request: BundleRequest,
+    ) -> anyhow::Result<DownloadTicket> {
+        self.flush().await?;
+        let max = self.inner.store.max_sequence().await?;
+        let through = request.through_sequence.unwrap_or(max).min(max);
+        let exported_at = chrono::Utc::now().timestamp_millis();
+        let snapshot = match request.kind {
+            BundleResourceKind::Interaction => {
+                let detail = self
+                    .inner
+                    .store
+                    .get_interaction(&request.resource_id, ForestQuery::default())
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("interaction not found"))?;
+                let mut snapshot_events: Vec<ObservationEvent> = detail
+                    .runs
+                    .iter()
+                    .flat_map(|run| run.events.iter())
+                    .filter(|event| event.sequence <= through)
+                    .cloned()
+                    .collect();
+                snapshot_events.sort_unstable_by_key(|event| event.sequence);
+                let admitted: std::collections::HashSet<String> = snapshot_events
+                    .iter()
+                    .filter(|event| event.kind == "run_admitted")
+                    .filter_map(|event| event.run_id.clone())
+                    .collect();
+                if admitted.is_empty() {
+                    anyhow::bail!("bundle snapshot unavailable");
+                }
+                let projected_status = project_bundle_status(&snapshot_events);
+                let summary =
+                    project_bundle_summary(&detail, &snapshot_events, through, &projected_status);
+                let mut runs = Vec::with_capacity(admitted.len());
+                for run in detail.runs.iter().filter(|run| admitted.contains(&run.id)) {
+                    let active = {
+                        self.inner
+                            .active_traces
+                            .lock()
+                            .expect("trace registry")
+                            .get(&run.id)
+                            .cloned()
+                    };
+                    let (status, bytes, reasons, trace) = if let Some(handle) = active {
+                        let manifest = handle.manifest();
+                        let snap = handle.snapshot(through).await.ok();
+                        (
+                            manifest.status,
+                            manifest.bytes_written,
+                            manifest.reasons,
+                            snap,
+                        )
+                    } else if let Some(manifest) = &run.trace {
+                        let snap = self
+                            .inner
+                            .traces
+                            .snapshot(&manifest.trace_id, through)
+                            .await
+                            .ok();
+                        (
+                            manifest.status.clone(),
+                            manifest.bytes_written,
+                            manifest.reasons.clone(),
+                            snap,
+                        )
+                    } else {
+                        ("none".to_owned(), 0, Vec::new(), None)
+                    };
+                    runs.push(BundleRunSnapshot {
+                        run_id: run.id.clone(),
+                        debug_enabled: run.debug_enabled,
+                        trace_status: status,
+                        bytes_written: bytes,
+                        reasons,
+                        trace,
+                    });
+                }
+                BundleSnapshot {
+                    kind: BundleResourceKind::Interaction,
+                    resource_id: request.resource_id,
+                    exported_at,
+                    through_sequence: through,
+                    resource_status: projected_status,
+                    summary,
+                    runs,
+                }
+            }
+            BundleResourceKind::RejectedRequest => {
+                let detail = self
+                    .inner
+                    .store
+                    .get_rejection(&request.resource_id)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("rejected request not found"))?;
+                let snapshot_events: Vec<_> = detail
+                    .events
+                    .iter()
+                    .filter(|event| event.sequence <= through)
+                    .cloned()
+                    .collect();
+                if snapshot_events.is_empty() {
+                    anyhow::bail!("bundle snapshot unavailable");
+                }
+                let summary = serde_json::json!({"schema_version":1,"rejection_id":request.resource_id.clone(),"through_event_sequence":through,"events":snapshot_events});
+                let mut runs = Vec::new();
+                if let Some(manifest) = &detail.trace {
+                    runs.push(BundleRunSnapshot {
+                        run_id: detail.rejection.id.clone(),
+                        debug_enabled: detail.rejection.debug_enabled,
+                        trace_status: manifest.status.clone(),
+                        bytes_written: manifest.bytes_written,
+                        reasons: manifest.reasons.clone(),
+                        trace: self
+                            .inner
+                            .traces
+                            .snapshot(&manifest.trace_id, through)
+                            .await
+                            .ok(),
+                    });
+                } else {
+                    runs.push(BundleRunSnapshot {
+                        run_id: detail.rejection.id.clone(),
+                        debug_enabled: detail.rejection.debug_enabled,
+                        trace_status: "none".into(),
+                        bytes_written: 0,
+                        reasons: if detail.rejection.debug_enabled {
+                            vec!["trace_missing".into()]
+                        } else {
+                            Vec::new()
+                        },
+                        trace: None,
+                    });
+                }
+                BundleSnapshot {
+                    kind: BundleResourceKind::RejectedRequest,
+                    resource_id: request.resource_id,
+                    exported_at,
+                    through_sequence: through,
+                    resource_status: "rejected".into(),
+                    summary,
+                    runs,
+                }
+            }
+        };
+        Ok(self.inner.bundles.issue(snapshot))
+    }
+    pub(crate) async fn consume_bundle_ticket(&self, ticket: &str) -> anyhow::Result<BundleStream> {
+        Ok(self
+            .inner
+            .bundles
+            .consume(ticket)
+            .map_err(anyhow::Error::new)?
+            .stream)
+    }
+    async fn flush(&self) -> anyhow::Result<()> {
+        let (sender, receiver) = oneshot::channel();
+        self.inner
+            .writer
+            .send(WriterCommand::Barrier(sender))
+            .await
+            .map_err(|_| anyhow::anyhow!("observation writer unavailable"))?;
+        receiver
+            .await
+            .map_err(|_| anyhow::anyhow!("observation writer unavailable"))?;
+        Ok(())
+    }
+    pub(crate) fn stop_background(&self) {
+        if !self.inner.stopped.swap(true, Ordering::AcqRel) {
+            let (tx, _) = oneshot::channel();
+            let _ = self.inner.writer.try_send(WriterCommand::Shutdown(tx));
+        }
+    }
+    pub(crate) async fn shutdown(&self) {
+        self.inner.stopped.store(true, Ordering::Release);
+        let task = { self.inner.writer_task.lock().expect("writer lock").take() };
+        if let Some(task) = task {
+            let (tx, rx) = oneshot::channel();
+            if self
+                .inner
+                .writer
+                .send(WriterCommand::Shutdown(tx))
+                .await
+                .is_ok()
+            {
+                let _ = rx.await;
+            }
+            let _ = task.await;
+        }
+        self.inner.traces.shutdown().await;
+        if let Some(root) = &self.inner.ephemeral_root {
+            let _ = tokio::fs::remove_dir_all(root).await;
+        }
+    }
+}
+
+pub(crate) struct IngressObserver {
+    observation: InteractionObservation,
+    start: Option<IngressStart>,
+    debug_enabled: bool,
+    trace: Option<TraceHandle>,
+    finalization: Option<mpsc::OwnedPermit<WriterCommand>>,
+    rejection_id: Option<String>,
+    websocket: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct IngressCapture {
+    trace: TraceHandle,
+}
+
+impl IngressCapture {
+    pub(crate) const MAX_BODY_BYTES: usize = RUN_LIMIT_BYTES as usize;
+
+    pub(crate) fn record(&self, event: RunEvent) {
+        record_trace(&self.trace, None, None, event);
+    }
+
+    pub(crate) fn mark_partial(&self, reason: &'static str) {
+        self.trace.mark_partial(reason, false);
+    }
+}
+
+impl IngressObserver {
+    pub(crate) fn is_websocket(&self) -> bool {
+        self.websocket
+    }
+    pub(crate) fn capture(&self) -> Option<IngressCapture> {
+        self.debug_enabled
+            .then(|| self.trace.clone())
+            .flatten()
+            .map(|trace| IngressCapture { trace })
+    }
+    pub(crate) fn reject_pending(&mut self, outcome: RejectedOutcome) {
+        self.reject_inner(outcome);
+    }
+    pub(crate) fn record_debug(&self, event: impl FnOnce() -> RunEvent) {
+        if self.debug_enabled {
+            self.record(event());
+        }
+    }
+    pub(crate) fn record(&self, event: RunEvent) {
+        if let Some(trace) = &self.trace {
+            if matches!(event, RunEvent::ObservationGap { .. }) {
+                trace.mark_partial("observation_gap", false);
+                return;
+            }
+            record_trace(trace, None, None, event)
+        }
+    }
+    pub(crate) fn admit(mut self, start: RunStart) -> RunObserver {
+        let ingress = self.start.take();
+        let debug_enabled = self.observation.inner.debug.load(Ordering::Acquire);
+        let discarded_trace = if !debug_enabled {
+            self.trace.take()
+        } else {
+            None
+        };
+        if debug_enabled && self.trace.is_none() && self.finalization.is_some() {
+            let trace = self.observation.inner.traces.create();
+            trace.mark_partial("debug_enabled_after_ingress", false);
+            self.trace = Some(trace);
+        }
+        if let Some(trace) = &self.trace {
+            self.observation
+                .inner
+                .active_traces
+                .lock()
+                .expect("trace registry")
+                .insert(start.id.clone(), trace.clone());
+        }
+        let inner = Arc::new(RunObserverInner {
+            observation: self.observation.clone(),
+            run_id: start.id.clone(),
+            debug_enabled,
+            trace: self.trace.take(),
+            terminal: AtomicBool::new(false),
+            gap: AtomicBool::new(false),
+            finalization: Mutex::new(self.finalization.take()),
+            pending_finish: Mutex::new(None),
+            visible_redaction: Mutex::new(redaction::VisibleTextRedactor::new()),
+        });
+        if self
+            .observation
+            .inner
+            .writer
+            .try_send(WriterCommand::Admit {
+                start,
+                debug_enabled,
+                trace: inner.trace.clone(),
+                discarded_trace,
+            })
+            .is_err()
+        {
+            inner.gap.store(true, Ordering::Release)
+        }
+        drop(ingress);
+        RunObserver { inner }
+    }
+    pub(crate) fn reject(mut self, outcome: RejectedOutcome) {
+        self.reject_inner(outcome);
+    }
+    fn reject_inner(&mut self, mut outcome: RejectedOutcome) {
+        redaction::redact_rejected_outcome(&mut outcome);
+        if let Some(start) = self.start.take() {
+            if self
+                .observation
+                .inner
+                .writer
+                .try_send(WriterCommand::Reject {
+                    ingress: start.clone(),
+                    outcome,
+                    debug_enabled: self.debug_enabled,
+                })
+                .is_err()
+            {
+                tracing::warn!(rejection_id=%start.id,"rejection observation queue full")
+            };
+            self.rejection_id = Some(start.id);
+        }
+    }
+}
+impl Drop for IngressObserver {
+    fn drop(&mut self) {
+        if self.start.is_some() {
+            self.reject_inner(RejectedOutcome {
+                stage: "ingress".into(),
+                code: "request_aborted".into(),
+                status_code: 499,
+            });
+        }
+        if let Some(permit) = self.finalization.take() {
+            permit.send(WriterCommand::Finalize {
+                run_id: None,
+                rejection_id: self.rejection_id.take(),
+                trace: self.trace.take(),
+                pending_finish: None,
+                gap: false,
+            });
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct RunObserver {
+    inner: Arc<RunObserverInner>,
+}
+struct RunObserverInner {
+    observation: InteractionObservation,
+    run_id: String,
+    debug_enabled: bool,
+    trace: Option<TraceHandle>,
+    terminal: AtomicBool,
+    gap: AtomicBool,
+    finalization: Mutex<Option<mpsc::OwnedPermit<WriterCommand>>>,
+    pending_finish: Mutex<Option<RunOutcome>>,
+    visible_redaction: Mutex<redaction::VisibleTextRedactor>,
+}
+impl RunObserver {
+    pub(crate) fn debug_enabled(&self) -> bool {
+        self.inner.debug_enabled
+    }
+    pub(crate) fn record_debug(&self, event: impl FnOnce() -> RunEvent) {
+        if self.inner.debug_enabled {
+            self.record(event());
+        }
+    }
+    pub(crate) fn record(&self, event: RunEvent) {
+        if !self.inner.debug_enabled
+            && matches!(event, RunEvent::Checkpoint { .. } | RunEvent::Wire { .. })
+        {
+            return;
+        }
+        if let RunEvent::ClientVisibleContentDelta { text } = event {
+            let ready = self
+                .inner
+                .visible_redaction
+                .lock()
+                .expect("visible redaction state")
+                .push(text);
+            if let Some(text) = ready {
+                self.send_event(RunEvent::ClientVisibleContentDelta { text });
+            }
+            return;
+        }
+        if matches!(
+            event,
+            RunEvent::ClientOutputCommitted | RunEvent::DeliveryFinished { .. }
+        ) {
+            self.flush_visible();
+        }
+        self.send_event(event);
+    }
+    fn flush_visible(&self) {
+        let ready = self
+            .inner
+            .visible_redaction
+            .lock()
+            .expect("visible redaction state")
+            .finish();
+        if let Some(text) = ready {
+            self.send_event(RunEvent::ClientVisibleContentDelta { text });
+        }
+    }
+    fn send_event(&self, mut event: RunEvent) {
+        redaction::redact_run_event(&mut event);
+        if matches!(event, RunEvent::ObservationGap { .. }) {
+            if let Some(trace) = &self.inner.trace {
+                trace.mark_partial("observation_gap", false);
+            }
+        }
+        let trace = matches!(event, RunEvent::Checkpoint { .. } | RunEvent::Wire { .. })
+            .then(|| self.inner.trace.clone())
+            .flatten();
+        if self.inner.gap.swap(false, Ordering::AcqRel) {
+            let _ = self
+                .inner
+                .observation
+                .inner
+                .writer
+                .try_send(WriterCommand::Event {
+                    run_id: self.inner.run_id.clone(),
+                    event: RunEvent::ObservationGap {
+                        reason: "writer_overflow".into(),
+                    },
+                    trace: None,
+                });
+        }
+        if self
+            .inner
+            .observation
+            .inner
+            .writer
+            .try_send(WriterCommand::Event {
+                run_id: self.inner.run_id.clone(),
+                event,
+                trace,
+            })
+            .is_err()
+        {
+            self.inner.gap.store(true, Ordering::Release)
+        }
+    }
+    pub(crate) fn finish(&self, mut outcome: RunOutcome) {
+        self.flush_visible();
+        redaction::redact_run_outcome(&mut outcome);
+        if !self.inner.terminal.swap(true, Ordering::AcqRel) {
+            if let Err(error) =
+                self.inner
+                    .observation
+                    .inner
+                    .writer
+                    .try_send(WriterCommand::Finish {
+                        run_id: self.inner.run_id.clone(),
+                        outcome,
+                    })
+            {
+                if let WriterCommand::Finish { outcome, .. } = error.into_inner() {
+                    *self.inner.pending_finish.lock().expect("terminal state") = Some(outcome);
+                    self.inner.gap.store(true, Ordering::Release);
+                }
+            }
+        }
+    }
+}
+impl Drop for RunObserverInner {
+    fn drop(&mut self) {
+        if let Some(text) = self
+            .visible_redaction
+            .get_mut()
+            .expect("visible redaction state")
+            .finish()
+        {
+            if self
+                .observation
+                .inner
+                .writer
+                .try_send(WriterCommand::Event {
+                    run_id: self.run_id.clone(),
+                    event: RunEvent::ClientVisibleContentDelta { text },
+                    trace: None,
+                })
+                .is_err()
+            {
+                *self.gap.get_mut() = true;
+            }
+        }
+        let mut pending_finish = self
+            .pending_finish
+            .get_mut()
+            .expect("terminal state")
+            .take();
+        if !*self.terminal.get_mut() {
+            pending_finish = Some(RunOutcome {
+                status: "interrupted".into(),
+                terminal_reason: Some("observer_dropped".into()),
+                generation_node_id: None,
+                generation_root_id: None,
+            });
+        }
+        let command = WriterCommand::Finalize {
+            run_id: Some(self.run_id.clone()),
+            rejection_id: None,
+            trace: self.trace.take(),
+            pending_finish,
+            gap: *self.gap.get_mut(),
+        };
+        if let Some(permit) = self
+            .finalization
+            .get_mut()
+            .expect("finalization permit")
+            .take()
+        {
+            permit.send(command);
+        } else if self.observation.inner.writer.try_send(command).is_err() {
+            tracing::warn!(run_id=%self.run_id, "observation finalization unavailable");
+        }
+    }
+}
+fn project_bundle_status(events: &[ObservationEvent]) -> String {
+    let mut runs: HashMap<&str, &str> = HashMap::new();
+    let mut parents = std::collections::HashSet::new();
+    let mut active = std::collections::HashSet::new();
+    for event in events {
+        let Some(run) = event.run_id.as_deref() else {
+            continue;
+        };
+        match event.kind.as_str() {
+            "run_admitted" => {
+                runs.insert(run, "running");
+                if let Some(parent) = event
+                    .payload
+                    .get("parent_run_id")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    parents.insert(parent);
+                }
+            }
+            "client_tool_handoff" => {
+                runs.insert(run, "waiting_client");
+            }
+            "run_finished" | "run_state_changed" | "process_restarted" => {
+                let status = event
+                    .payload
+                    .get("status")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("interrupted");
+                runs.insert(run, status);
+                if event.kind == "process_restarted" {
+                    active.retain(|(owner, _, _)| *owner != run);
+                }
+            }
+            "model_turn_started" | "target_attempt_started" | "platform_tool_started" => {
+                let (kind, field) = match event.kind.as_str() {
+                    "model_turn_started" => ("turn", "model_turn_id"),
+                    "target_attempt_started" => ("attempt", "attempt_id"),
+                    _ => ("tool", "tool_id"),
+                };
+                if let Some(id) = event.payload.get(field).and_then(serde_json::Value::as_str) {
+                    active.insert((run, kind, id));
+                }
+            }
+            "model_turn_finished" | "target_attempt_finished" | "platform_tool_finished" => {
+                let (kind, field) = match event.kind.as_str() {
+                    "model_turn_finished" => ("turn", "model_turn_id"),
+                    "target_attempt_finished" => ("attempt", "attempt_id"),
+                    _ => ("tool", "tool_id"),
+                };
+                if let Some(id) = event.payload.get(field).and_then(serde_json::Value::as_str) {
+                    active.remove(&(run, kind, id));
+                }
+            }
+            _ => {}
+        }
+    }
+    if !active.is_empty() {
+        return "running".into();
+    }
+    grouping::rollup_status(
+        runs.into_iter()
+            .map(|(run, status)| (status, !parents.contains(run))),
+    )
+    .into()
+}
+
+fn project_bundle_summary(
+    detail: &InteractionDetail,
+    events: &[ObservationEvent],
+    through: i64,
+    status: &str,
+) -> serde_json::Value {
+    let mut attempts = HashMap::<&str, ConfirmedUsage>::new();
+    let mut visible_tail = String::new();
+    let mut observation_gap = false;
+    for event in events {
+        match event.kind.as_str() {
+            "target_attempt_started" => {
+                if let Some(id) = event
+                    .payload
+                    .get("attempt_id")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    attempts.entry(id).or_default();
+                }
+            }
+            "usage_confirmed" => {
+                if let Some(id) = event
+                    .payload
+                    .get("attempt_id")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    match serde_json::from_value(
+                        event.payload.get("usage").cloned().unwrap_or_default(),
+                    ) {
+                        Ok(usage) => {
+                            attempts.insert(id, usage);
+                        }
+                        Err(_) => {
+                            attempts.insert(id, ConfirmedUsage::default());
+                            observation_gap = true;
+                        }
+                    }
+                }
+            }
+            "client_visible_content_delta" => {
+                if let Some(text) = event
+                    .payload
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    visible_tail.push_str(text);
+                    if let Some((offset, _)) = visible_tail.char_indices().rev().nth(4095) {
+                        visible_tail.drain(..offset);
+                    }
+                }
+            }
+            "observation_gap" => observation_gap = true,
+            _ => {}
+        }
+    }
+    let mut usage = ConfirmedUsage::default();
+    if !attempts.is_empty() {
+        usage = ConfirmedUsage {
+            input_tokens: Some(0),
+            output_tokens: Some(0),
+            cache_read_tokens: Some(0),
+            cache_write_tokens: Some(0),
+            reasoning_tokens: Some(0),
+        };
+        for attempt in attempts.values() {
+            grouping::add_usage(&mut usage.input_tokens, attempt.input_tokens);
+            grouping::add_usage(&mut usage.output_tokens, attempt.output_tokens);
+            grouping::add_usage(&mut usage.cache_read_tokens, attempt.cache_read_tokens);
+            grouping::add_usage(&mut usage.cache_write_tokens, attempt.cache_write_tokens);
+            grouping::add_usage(&mut usage.reasoning_tokens, attempt.reasoning_tokens);
+        }
+    }
+    let admission = events.iter().find(|event| event.kind == "run_admitted");
+    let run_ids: Vec<_> = events
+        .iter()
+        .filter(|event| event.kind == "run_admitted")
+        .filter_map(|event| event.run_id.as_deref())
+        .collect();
+    serde_json::json!({
+        "schema_version": 1, "interaction_id": detail.interaction.id,
+        "root_id": detail.interaction.root_id,
+        "parent_interaction_id": admission.and_then(|event| event.payload.get("parent_interaction_id")),
+        "first_route_id": admission.and_then(|event| event.payload.get("route_id")),
+        "first_model_display_name": admission.and_then(|event| event.payload.get("model_display_name")),
+        "started_at": admission.map(|event| event.occurred_at),
+        "last_active_at": events.last().map(|event| event.occurred_at),
+        "through_event_sequence": through, "status": status, "usage": usage,
+        "visible_tail": visible_tail, "observation_gap": observation_gap, "run_ids": run_ids,
+        "events": events,
+    })
+}
+async fn load_trace_values(
+    snapshot: trace::TraceSnapshot,
+) -> anyhow::Result<Vec<serde_json::Value>> {
+    let mut values = Vec::new();
+    for segment in snapshot.segments {
+        let mut bytes = tokio::fs::read(segment.path).await?;
+        bytes.truncate(usize::try_from(segment.bytes).unwrap_or(usize::MAX));
+        for line in bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+        {
+            values.push(serde_json::from_slice(line)?);
+        }
+    }
+    Ok(values)
+}
+fn record_trace(trace: &TraceHandle, run: Option<&str>, rejection: Option<&str>, event: RunEvent) {
+    record_trace_at(trace, run, rejection, event, 0)
+}
+pub(super) fn record_trace_at(
+    trace: &TraceHandle,
+    run: Option<&str>,
+    rejection: Option<&str>,
+    event: RunEvent,
+    sequence: i64,
+) {
+    let (
+        stage,
+        direction,
+        transport,
+        protocol,
+        message_type,
+        status_code,
+        url,
+        headers,
+        payload,
+        model_turn_id,
+        attempt_id,
+    ) = match event {
+        RunEvent::Checkpoint {
+            stage,
+            payload,
+            model_turn_id,
+            attempt_id,
+        } => (
+            Some(stage),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            serde_json::Value::Null,
+            payload,
+            model_turn_id,
+            attempt_id,
+        ),
+        RunEvent::Wire {
+            direction,
+            transport,
+            protocol,
+            message_type,
+            status_code,
+            url,
+            headers,
+            payload,
+            model_turn_id,
+            attempt_id,
+        } => (
+            None,
+            Some(direction),
+            Some(transport),
+            Some(protocol),
+            Some(message_type),
+            status_code,
+            url,
+            headers,
+            payload,
+            model_turn_id,
+            attempt_id,
+        ),
+        _ => return,
+    };
+    let (payload_encoding, payload) = match payload {
+        serde_json::Value::Object(mut object)
+            if object.get("encoding").and_then(serde_json::Value::as_str) == Some("base64") =>
+        {
+            (
+                "base64".to_owned(),
+                object.remove("data").unwrap_or(serde_json::Value::Null),
+            )
+        }
+        other => ("json".to_owned(), other),
+    };
+    let _ = trace.record(TraceRecord {
+        schema_version: TRACE_SCHEMA_VERSION,
+        sequence,
+        recorded_at: chrono::Utc::now().timestamp_millis(),
+        interaction_id: None,
+        run_id: run.map(str::to_owned),
+        rejection_id: rejection.map(str::to_owned),
+        model_turn_id,
+        attempt_id,
+        layer: if direction.is_some() {
+            "wire".into()
+        } else {
+            "canonical".into()
+        },
+        direction,
+        stage,
+        transport,
+        protocol,
+        message_type,
+        representation: "json".into(),
+        status: None,
+        status_code,
+        url,
+        headers,
+        payload_encoding,
+        payload,
+        error: None,
+        redactions: Vec::new(),
+    });
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_status_keeps_detached_work_active_and_consumes_parent_handoff() {
+        let records = [
+            ("parent", "run_admitted", serde_json::json!({})),
+            (
+                "parent",
+                "platform_tool_started",
+                serde_json::json!({"tool_id":"background"}),
+            ),
+            (
+                "parent",
+                "client_tool_handoff",
+                serde_json::json!({"tool_id":"client"}),
+            ),
+            (
+                "parent",
+                "run_finished",
+                serde_json::json!({"status":"waiting_client"}),
+            ),
+            (
+                "child",
+                "run_admitted",
+                serde_json::json!({"parent_run_id":"parent"}),
+            ),
+            (
+                "child",
+                "run_finished",
+                serde_json::json!({"status":"completed"}),
+            ),
+            (
+                "parent",
+                "platform_tool_finished",
+                serde_json::json!({"tool_id":"background","status":"completed"}),
+            ),
+        ];
+        let events: Vec<_> = records
+            .into_iter()
+            .enumerate()
+            .map(|(index, (run, kind, payload))| ObservationEvent {
+                sequence: index as i64 + 1,
+                occurred_at: index as i64,
+                interaction_id: Some("interaction".into()),
+                run_id: Some(run.into()),
+                rejection_id: None,
+                kind: kind.into(),
+                payload,
+            })
+            .collect();
+        assert_eq!(project_bundle_status(&events[..6]), "running");
+        assert_eq!(project_bundle_status(&events), "completed");
+    }
+}

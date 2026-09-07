@@ -48,6 +48,121 @@ impl AllowedWebSocketOrigins {
     }
 }
 
+fn ws_wire(
+    direction: &str,
+    message_type: &str,
+    payload: Value,
+) -> crate::interaction_observation::RunEvent {
+    crate::interaction_observation::RunEvent::Wire {
+        direction: direction.into(),
+        transport: "websocket".into(),
+        protocol: OPEN_RESPONSES_2026_04_24.to_string(),
+        message_type: message_type.into(),
+        model_turn_id: None,
+        attempt_id: None,
+        status_code: None,
+        url: Some("/v1/responses".into()),
+        headers: Value::Null,
+        payload,
+    }
+}
+
+fn handshake_ingress(
+    gateway: &Gateway,
+    headers: &HeaderMap,
+) -> crate::interaction_observation::IngressObserver {
+    let observer =
+        gateway
+            .observation
+            .observe_ingress(crate::interaction_observation::IngressStart {
+                id: format!("ws-handshake-{}", uuid::Uuid::new_v4()),
+                method: "GET".into(),
+                path: "/v1/responses".into(),
+                protocol: OPEN_RESPONSES_2026_04_24.to_string(),
+            });
+    observer.record_debug(|| crate::interaction_observation::RunEvent::Wire {
+        direction: "client_to_platform".into(),
+        transport: "http".into(),
+        protocol: OPEN_RESPONSES_2026_04_24.to_string(),
+        message_type: "request_head".into(),
+        model_turn_id: None,
+        attempt_id: None,
+        status_code: None,
+        url: Some("/v1/responses".into()),
+        headers: serde_json::Value::Object(
+            headers
+                .iter()
+                .filter_map(|(name, value)| {
+                    value
+                        .to_str()
+                        .ok()
+                        .map(|value| (name.as_str().to_owned(), Value::String(value.to_owned())))
+                })
+                .collect(),
+        ),
+        payload: Value::Null,
+    });
+    observer
+}
+
+fn websocket_ingress(
+    gateway: &Gateway,
+    headers: &HeaderMap,
+    handshake_response: &Value,
+    suffix: &str,
+) -> crate::interaction_observation::IngressObserver {
+    let observer =
+        gateway
+            .observation
+            .observe_ingress(crate::interaction_observation::IngressStart {
+                id: format!("ws-{suffix}-{}", uuid::Uuid::new_v4()),
+                method: "WEBSOCKET".into(),
+                path: "/v1/responses".into(),
+                protocol: OPEN_RESPONSES_2026_04_24.to_string(),
+            });
+    observer.record_debug(|| crate::interaction_observation::RunEvent::Wire {
+        direction: "client_to_platform".into(),
+        transport: "http".into(),
+        protocol: OPEN_RESPONSES_2026_04_24.to_string(),
+        message_type: "handshake_request".into(),
+        model_turn_id: None,
+        attempt_id: None,
+        status_code: None,
+        url: Some("/v1/responses".into()),
+        headers: serde_json::Value::Object(
+            headers
+                .iter()
+                .filter_map(|(name, value)| {
+                    value
+                        .to_str()
+                        .ok()
+                        .map(|value| (name.as_str().to_owned(), Value::String(value.to_owned())))
+                })
+                .collect(),
+        ),
+        payload: Value::Null,
+    });
+    observer.record_debug(|| crate::interaction_observation::RunEvent::Wire {
+        direction: "platform_to_client".into(),
+        transport: "http".into(),
+        protocol: OPEN_RESPONSES_2026_04_24.to_string(),
+        message_type: "handshake_response".into(),
+        model_turn_id: None,
+        attempt_id: None,
+        status_code: handshake_response
+            .get("status")
+            .and_then(Value::as_u64)
+            .map(|status| status as u16),
+        url: Some("/v1/responses".into()),
+        headers: handshake_response
+            .get("headers")
+            .cloned()
+            .unwrap_or(Value::Null),
+        payload: Value::Null,
+    });
+    observer
+}
+
 pub async fn handler(
     ws: WebSocketUpgrade,
     State(gateway): State<Gateway>,
@@ -61,14 +176,39 @@ pub async fn handler(
             .as_ref()
             .is_some_and(|origins| origins.allows(origin))
     {
-        return (StatusCode::FORBIDDEN, "WebSocket Origin is not allowed.").into_response();
+        let ingress = handshake_ingress(&gateway, &headers);
+        let response = (StatusCode::FORBIDDEN, "WebSocket Origin is not allowed.").into_response();
+        return crate::proxy::ingress::observation::reject(
+            ingress,
+            "protocol",
+            "origin_forbidden",
+            response,
+        );
     }
     if let Err(response) = super::responses::authenticate(&gateway, &headers).await {
-        return response;
+        let ingress = handshake_ingress(&gateway, &headers);
+        return crate::proxy::ingress::observation::reject(
+            ingress,
+            "authentication",
+            "authentication_error",
+            response,
+        );
     }
 
-    ws.max_message_size(MAX_MESSAGE_BYTES)
-        .on_upgrade(move |socket| serve(socket, gateway, headers))
+    let handshake_response = Arc::new(Mutex::new(Value::Null));
+    let serve_handshake_response = handshake_response.clone();
+    let response = ws
+        .max_message_size(MAX_MESSAGE_BYTES)
+        .on_upgrade(move |socket| serve(socket, gateway, headers, serve_handshake_response));
+    *handshake_response.lock().expect("handshake response lock") = serde_json::json!({
+        "status": response.status().as_u16(),
+        "headers": response.headers().iter().filter_map(|(name, value)| {
+            value.to_str().ok().map(|value| {
+                (name.as_str().to_owned(), Value::String(value.to_owned()))
+            })
+        }).collect::<serde_json::Map<String, Value>>(),
+    });
+    response
 }
 
 struct OutgoingMessage {
@@ -76,19 +216,14 @@ struct OutgoingMessage {
     delivered: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
-impl OutgoingMessage {
-    fn queued(message: Message) -> Self {
-        Self {
-            message,
-            delivered: None,
-        }
-    }
-}
+type SharedRunDelivery =
+    Arc<Mutex<Option<Arc<Mutex<crate::proxy::dispatcher::WebSocketRunDelivery>>>>>;
 
 #[derive(Clone, Debug, Default)]
 struct StreamForwardProgress {
     response: Option<Value>,
     next_sequence_number: u64,
+    terminal_failure: Option<String>,
 }
 
 impl StreamForwardProgress {
@@ -102,10 +237,27 @@ impl StreamForwardProgress {
         if body.get("type").and_then(Value::as_str) == Some("response.created") {
             self.response = body.get("response").cloned();
         }
+        if body.get("type").and_then(Value::as_str) == Some("response.failed") {
+            self.terminal_failure = Some(
+                body.pointer("/response/error/code")
+                    .and_then(Value::as_str)
+                    .unwrap_or("response_failed")
+                    .to_owned(),
+            );
+        }
     }
 }
 
-async fn serve(socket: WebSocket, gateway: Gateway, headers: HeaderMap) {
+async fn serve(
+    socket: WebSocket,
+    gateway: Gateway,
+    headers: HeaderMap,
+    handshake_response: Arc<Mutex<Value>>,
+) {
+    let handshake_response = handshake_response
+        .lock()
+        .expect("handshake response lock")
+        .clone();
     let (mut sink, mut source) = socket.split();
     let (outgoing, mut outgoing_rx) = mpsc::channel::<OutgoingMessage>(OUTGOING_QUEUE_CAPACITY);
     let writer = tokio::spawn(async move {
@@ -120,6 +272,10 @@ async fn serve(socket: WebSocket, gateway: Gateway, headers: HeaderMap) {
     });
     let in_flight = Arc::new(AtomicBool::new(false));
     let cancellation = Arc::new(Mutex::new(None::<CancellationToken>));
+    let active_observer = Arc::new(Mutex::new(
+        None::<crate::interaction_observation::RunObserver>,
+    ));
+    let active_delivery: SharedRunDelivery = Arc::new(Mutex::new(None));
 
     let read_loop = async {
         while let Some(message) = source.next().await {
@@ -128,45 +284,140 @@ async fn serve(socket: WebSocket, gateway: Gateway, headers: HeaderMap) {
             };
             match message {
                 Message::Text(text) => {
+                    let request_context =
+                        RequestContext::new(OPEN_RESPONSES_2026_04_24, RUN_DEADLINE);
+                    let ingress =
+                        websocket_ingress(&gateway, &headers, &handshake_response, "message");
+                    ingress.record_debug(|| {
+                        ws_wire(
+                            "client_to_platform",
+                            "text",
+                            Value::String(text.to_string()),
+                        )
+                    });
                     let Ok(mut event) = serde_json::from_str::<Value>(&text) else {
-                        send_error(
+                        if send_error(
                             &outgoing,
                             400,
                             "invalid_request",
                             "WebSocket message must be valid JSON.",
                         )
-                        .await;
+                        .await
+                        {
+                            ingress.record_debug(|| {
+                                ws_wire(
+                                    "platform_to_client",
+                                    "text",
+                                    Value::String(
+                                        error_body(
+                                            400,
+                                            "invalid_request",
+                                            "WebSocket message must be valid JSON.",
+                                        )
+                                        .to_string(),
+                                    ),
+                                )
+                            });
+                        }
+                        ingress.reject(crate::interaction_observation::RejectedOutcome {
+                            stage: "decode".into(),
+                            code: "invalid_request".into(),
+                            status_code: 400,
+                        });
                         continue;
                     };
                     if event.get("type").and_then(Value::as_str) != Some("response.create") {
-                        send_error(
+                        if send_error(
                             &outgoing,
                             400,
                             "invalid_request",
                             "WebSocket message type must be response.create.",
                         )
-                        .await;
+                        .await
+                        {
+                            ingress.record_debug(|| {
+                                ws_wire(
+                                    "platform_to_client",
+                                    "text",
+                                    Value::String(
+                                        error_body(
+                                            400,
+                                            "invalid_request",
+                                            "WebSocket message type must be response.create.",
+                                        )
+                                        .to_string(),
+                                    ),
+                                )
+                            });
+                        }
+                        ingress.reject(crate::interaction_observation::RejectedOutcome {
+                            stage: "protocol".into(),
+                            code: "invalid_request".into(),
+                            status_code: 400,
+                        });
                         continue;
                     }
                     if in_flight.swap(true, Ordering::AcqRel) {
-                        send_error(
+                        if send_error(
                             &outgoing,
                             409,
                             "response_in_progress",
                             "A response is already in progress on this connection.",
                         )
-                        .await;
+                        .await
+                        {
+                            ingress.record_debug(|| {
+                                ws_wire(
+                                    "platform_to_client",
+                                    "text",
+                                    Value::String(
+                                        error_body(
+                                            409,
+                                            "response_in_progress",
+                                            "A response is already in progress on this connection.",
+                                        )
+                                        .to_string(),
+                                    ),
+                                )
+                            });
+                        }
+                        ingress.reject(crate::interaction_observation::RejectedOutcome {
+                            stage: "admission".into(),
+                            code: "response_in_progress".into(),
+                            status_code: 409,
+                        });
                         continue;
                     }
                     let Some(object) = event.as_object_mut() else {
                         in_flight.store(false, Ordering::Release);
-                        send_error(
+                        if send_error(
                             &outgoing,
                             400,
                             "invalid_request",
                             "response.create must be an object.",
                         )
-                        .await;
+                        .await
+                        {
+                            ingress.record_debug(|| {
+                                ws_wire(
+                                    "platform_to_client",
+                                    "text",
+                                    Value::String(
+                                        error_body(
+                                            400,
+                                            "invalid_request",
+                                            "response.create must be an object.",
+                                        )
+                                        .to_string(),
+                                    ),
+                                )
+                            });
+                        }
+                        ingress.reject(crate::interaction_observation::RejectedOutcome {
+                            stage: "decode".into(),
+                            code: "invalid_request".into(),
+                            status_code: 400,
+                        });
                         continue;
                     };
                     object.remove("type");
@@ -177,12 +428,15 @@ async fn serve(socket: WebSocket, gateway: Gateway, headers: HeaderMap) {
                     let outgoing = outgoing.clone();
                     let in_flight = in_flight.clone();
                     let cancellation_slot = cancellation.clone();
-                    let request_context =
-                        RequestContext::new(OPEN_RESPONSES_2026_04_24, RUN_DEADLINE);
+                    let active_observer = active_observer.clone();
+                    request_context.extensions.insert(ingress);
+                    crate::proxy::dispatcher::defer_websocket_delivery(&request_context);
                     let request_cancellation = request_context.cancellation.clone();
+                    let timeout_context = request_context.clone();
                     *cancellation_slot.lock().expect("cancellation lock") =
                         Some(request_cancellation.clone());
                     let progress = Arc::new(Mutex::new(StreamForwardProgress::default()));
+                    let delivery_slot = active_delivery.clone();
                     tokio::spawn(async move {
                         let result = tokio::time::timeout(
                             RUN_DEADLINE,
@@ -193,32 +447,148 @@ async fn serve(socket: WebSocket, gateway: Gateway, headers: HeaderMap) {
                                 event,
                                 &outgoing,
                                 &progress,
+                                &active_observer,
+                                &delivery_slot,
                             ),
                         )
                         .await;
                         if result.is_err() {
                             request_cancellation.cancel();
+                            if active_observer
+                                .lock()
+                                .expect("active observer lock")
+                                .is_none()
+                                && let Some(observer) = timeout_context
+                                    .extensions
+                                    .get::<crate::interaction_observation::RunObserver>(
+                                )
+                            {
+                                *active_observer.lock().expect("active observer lock") =
+                                    Some(observer);
+                            }
                             let _ = tokio::time::timeout(
                                 WRITER_SHUTDOWN_GRACE,
-                                send_run_timeout(&outgoing, &progress),
+                                send_run_timeout(
+                                    &outgoing,
+                                    &progress,
+                                    &delivery_slot,
+                                    &active_observer,
+                                ),
                             )
                             .await;
                         }
                         *cancellation_slot.lock().expect("cancellation lock") = None;
+                        *active_observer.lock().expect("active observer lock") = None;
+                        *delivery_slot.lock().expect("delivery slot lock") = None;
                         in_flight.store(false, Ordering::Release);
                     });
                 }
                 Message::Ping(payload) => {
+                    let observer = active_observer
+                        .lock()
+                        .expect("active observer lock")
+                        .clone();
+                    let observed_payload = observer.as_ref().map(|_| payload.clone());
+                    if let (Some(observer), Some(observed_payload)) =
+                        (&observer, observed_payload.as_ref())
+                    {
+                        observer.record_debug(|| ws_wire(
+                            "client_to_platform",
+                            "ping",
+                            serde_json::json!({"encoding":"base64","data":base64::Engine::encode(&base64::engine::general_purpose::STANDARD, observed_payload)}),
+                        ));
+                    }
+                    let (delivered, delivered_rx) = tokio::sync::oneshot::channel();
                     if outgoing
-                        .send(OutgoingMessage::queued(Message::Pong(payload)))
+                        .send(OutgoingMessage {
+                            message: Message::Pong(payload),
+                            delivered: Some(delivered),
+                        })
                         .await
                         .is_err()
+                        || delivered_rx.await.is_err()
                     {
                         break;
                     }
+                    if let (Some(observer), Some(observed_payload)) = (observer, observed_payload) {
+                        observer.record_debug(|| ws_wire(
+                            "platform_to_client",
+                            "pong",
+                            serde_json::json!({"encoding":"base64","data":base64::Engine::encode(&base64::engine::general_purpose::STANDARD, observed_payload)}),
+                        ));
+                    }
                 }
-                Message::Close(_) => break,
-                Message::Binary(_) | Message::Pong(_) => {}
+                Message::Pong(payload) => {
+                    if let Some(observer) = active_observer
+                        .lock()
+                        .expect("active observer lock")
+                        .clone()
+                    {
+                        observer.record_debug(|| ws_wire(
+                            "client_to_platform",
+                            "pong",
+                            serde_json::json!({"encoding":"base64","data":base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &payload)}),
+                        ));
+                    }
+                }
+                Message::Close(frame) => {
+                    if let Some(observer) = active_observer
+                        .lock()
+                        .expect("active observer lock")
+                        .clone()
+                    {
+                        observer.record_debug(|| {
+                            ws_wire(
+                                "client_to_platform",
+                                "close",
+                                frame.map_or(Value::Null, |frame| {
+                                    serde_json::json!({
+                                        "code": u16::from(frame.code),
+                                        "reason": frame.reason.as_str(),
+                                    })
+                                }),
+                            )
+                        });
+                    }
+                    break;
+                }
+                Message::Binary(payload) => {
+                    let ingress =
+                        websocket_ingress(&gateway, &headers, &handshake_response, "binary");
+                    ingress.record_debug(|| ws_wire(
+                        "client_to_platform",
+                        "binary",
+                        serde_json::json!({"encoding":"base64","data":base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &payload)}),
+                    ));
+                    if send_error(
+                        &outgoing,
+                        400,
+                        "invalid_request",
+                        "WebSocket request messages must be text.",
+                    )
+                    .await
+                    {
+                        ingress.record_debug(|| {
+                            ws_wire(
+                                "platform_to_client",
+                                "text",
+                                Value::String(
+                                    error_body(
+                                        400,
+                                        "invalid_request",
+                                        "WebSocket request messages must be text.",
+                                    )
+                                    .to_string(),
+                                ),
+                            )
+                        });
+                    }
+                    ingress.reject(crate::interaction_observation::RejectedOutcome {
+                        stage: "decode".into(),
+                        code: "invalid_request".into(),
+                        status_code: 400,
+                    });
+                }
             }
         }
     };
@@ -227,8 +597,15 @@ async fn serve(socket: WebSocket, gateway: Gateway, headers: HeaderMap) {
         .await
         .is_err();
     if expired {
-        terminate_expired_connection(&outgoing, &cancellation, &writer, WRITER_SHUTDOWN_GRACE)
-            .await;
+        terminate_expired_connection(
+            &outgoing,
+            &cancellation,
+            &active_observer,
+            &active_delivery,
+            &writer,
+            WRITER_SHUTDOWN_GRACE,
+        )
+        .await;
     } else if let Some(token) = cancellation.lock().expect("cancellation lock").take() {
         token.cancel();
     }
@@ -243,34 +620,89 @@ async fn forward_response(
     body: Value,
     outgoing: &mpsc::Sender<OutgoingMessage>,
     progress: &Arc<Mutex<StreamForwardProgress>>,
+    active_observer: &Arc<Mutex<Option<crate::interaction_observation::RunObserver>>>,
+    delivery_slot: &SharedRunDelivery,
 ) {
-    let response =
-        super::responses::handler(State(gateway), Extension(context), headers, Ok(Json(body)))
-            .await;
+    let mut response = super::responses::handler(
+        State(gateway),
+        Extension(context.clone()),
+        headers,
+        Ok(Json(body)),
+    )
+    .await;
+    let rejection_observer =
+        crate::proxy::ingress::observation::take_rejection_observer(&mut response);
+    let delivery = crate::proxy::dispatcher::take_websocket_delivery(&context)
+        .map(|delivery| Arc::new(Mutex::new(delivery)));
+    *delivery_slot.lock().expect("delivery slot lock") = delivery.clone();
+    if let Some(delivery) = delivery.as_ref() {
+        *active_observer.lock().expect("active observer lock") =
+            Some(delivery.lock().expect("delivery lock").observer());
+    }
     let status = response.status();
     let mut stream = response.into_body().into_data_stream();
     let mut buffer = String::new();
     while let Some(chunk) = stream.next().await {
         let Ok(chunk) = chunk else {
-            send_error(outgoing, 500, "server_error", "Response stream failed.").await;
+            if send_error(outgoing, 500, "server_error", "Response stream failed.").await
+                && let Some(delivery) = delivery.as_ref()
+            {
+                delivery.lock().expect("delivery lock").sent_error_text(
+                    &error_body(500, "server_error", "Response stream failed.").to_string(),
+                );
+            }
+            if let Some(delivery) = delivery.as_ref() {
+                delivery
+                    .lock()
+                    .expect("delivery lock")
+                    .finish("delivery_failed", Some("response_stream_failed".into()));
+            }
             return;
         };
         let Ok(text) = std::str::from_utf8(&chunk) else {
-            send_error(
+            if send_error(
                 outgoing,
                 500,
                 "server_error",
                 "Response stream was not UTF-8.",
             )
-            .await;
+            .await
+                && let Some(delivery) = delivery.as_ref()
+            {
+                delivery.lock().expect("delivery lock").sent_error_text(
+                    &error_body(500, "server_error", "Response stream was not UTF-8.").to_string(),
+                );
+            }
+            if let Some(delivery) = delivery.as_ref() {
+                delivery
+                    .lock()
+                    .expect("delivery lock")
+                    .finish("delivery_failed", Some("response_stream_not_utf8".into()));
+            }
             return;
         };
         buffer.push_str(text);
-        if status.is_success() && !forward_sse_frames(&mut buffer, outgoing, progress).await {
+        if status.is_success()
+            && !forward_sse_frames(&mut buffer, outgoing, progress, delivery.as_ref()).await
+        {
             return;
         }
     }
-    if !status.is_success() {
+    if status.is_success() {
+        let terminal_failure = progress
+            .lock()
+            .expect("stream progress lock")
+            .terminal_failure
+            .clone();
+        if let Some(delivery) = delivery.as_ref() {
+            let mut delivery = delivery.lock().expect("delivery lock");
+            if let Some(reason) = terminal_failure {
+                delivery.finish("delivery_failed", Some(reason));
+            } else {
+                delivery.finish("delivered", None);
+            }
+        }
+    } else {
         let message = serde_json::from_str::<Value>(&buffer)
             .ok()
             .and_then(|body| {
@@ -287,7 +719,30 @@ async fn forward_response(
                     .map(str::to_owned)
             })
             .unwrap_or_else(|| "invalid_request".into());
-        send_error(outgoing, status.as_u16(), &code, &message).await;
+        let error_text = error_body(status.as_u16(), &code, &message).to_string();
+        if send_error(outgoing, status.as_u16(), &code, &message).await {
+            if let Some(observer) = rejection_observer.as_ref() {
+                observer.record_debug(|| {
+                    ws_wire(
+                        "platform_to_client",
+                        "text",
+                        Value::String(error_text.clone()),
+                    )
+                });
+            }
+            if let Some(delivery) = delivery.as_ref() {
+                delivery
+                    .lock()
+                    .expect("delivery lock")
+                    .sent_error_text(&error_text);
+            }
+        }
+        if let Some(delivery) = delivery.as_ref() {
+            delivery
+                .lock()
+                .expect("delivery lock")
+                .finish("delivery_failed", Some(code));
+        }
     }
 }
 
@@ -295,6 +750,7 @@ async fn forward_sse_frames(
     buffer: &mut String,
     outgoing: &mpsc::Sender<OutgoingMessage>,
     progress: &Arc<Mutex<StreamForwardProgress>>,
+    delivery: Option<&Arc<Mutex<crate::proxy::dispatcher::WebSocketRunDelivery>>>,
 ) -> bool {
     while let Some(end) = buffer.find("\n\n") {
         let frame = buffer[..end].to_owned();
@@ -316,7 +772,16 @@ async fn forward_sse_frames(
                 .is_err()
                 || delivered_rx.await.is_err()
             {
+                if let Some(delivery) = delivery {
+                    delivery
+                        .lock()
+                        .expect("delivery lock")
+                        .finish("delivery_failed", Some("websocket_write_failed".into()));
+                }
                 return false;
+            }
+            if let Some(delivery) = delivery {
+                delivery.lock().expect("delivery lock").sent_text(data);
             }
             progress
                 .lock()
@@ -330,16 +795,47 @@ async fn forward_sse_frames(
 async fn send_run_timeout(
     outgoing: &mpsc::Sender<OutgoingMessage>,
     progress: &Arc<Mutex<StreamForwardProgress>>,
+    delivery_slot: &SharedRunDelivery,
+    active_observer: &Arc<Mutex<Option<crate::interaction_observation::RunObserver>>>,
 ) {
+    let delivery = delivery_slot.lock().expect("delivery slot lock").clone();
     let progress = progress.lock().expect("stream progress lock").clone();
     let Some(mut response) = progress.response else {
-        send_error(
+        if send_error(
             outgoing,
             408,
             "request_timeout",
             "The response exceeded the 300 second deadline.",
         )
-        .await;
+        .await
+        {
+            let error_text = error_body(
+                408,
+                "request_timeout",
+                "The response exceeded the 300 second deadline.",
+            )
+            .to_string();
+            if let Some(delivery) = delivery.as_ref() {
+                delivery
+                    .lock()
+                    .expect("delivery lock")
+                    .sent_error_text(&error_text);
+            } else if let Some(observer) = active_observer
+                .lock()
+                .expect("active observer lock")
+                .clone()
+            {
+                observer.record_debug(|| {
+                    ws_wire("platform_to_client", "text", Value::String(error_text))
+                });
+            }
+        }
+        if let Some(delivery) = delivery {
+            delivery
+                .lock()
+                .expect("delivery lock")
+                .finish("delivery_failed", Some("request_timeout".into()));
+        }
         return;
     };
     let public_error = serde_json::json!({
@@ -369,50 +865,97 @@ async fn send_run_timeout(
         }),
     ] {
         let (delivered, delivered_rx) = tokio::sync::oneshot::channel();
+        let text = body.to_string();
         if outgoing
             .send(OutgoingMessage {
-                message: Message::Text(body.to_string().into()),
+                message: Message::Text(text.clone().into()),
                 delivered: Some(delivered),
             })
             .await
             .is_err()
             || delivered_rx.await.is_err()
         {
+            if let Some(delivery) = delivery.as_ref() {
+                delivery
+                    .lock()
+                    .expect("delivery lock")
+                    .finish("delivery_failed", Some("websocket_write_failed".into()));
+            }
             return;
         }
+        if let Some(delivery) = delivery.as_ref() {
+            delivery
+                .lock()
+                .expect("delivery lock")
+                .sent_error_text(&text);
+        } else if let Some(observer) = active_observer
+            .lock()
+            .expect("active observer lock")
+            .clone()
+        {
+            observer.record_debug(|| ws_wire("platform_to_client", "text", Value::String(text)));
+        }
+    }
+    if let Some(delivery) = delivery {
+        delivery
+            .lock()
+            .expect("delivery lock")
+            .finish("delivery_failed", Some("request_timeout".into()));
     }
 }
 
 async fn terminate_expired_connection(
     outgoing: &mpsc::Sender<OutgoingMessage>,
     cancellation: &Arc<Mutex<Option<CancellationToken>>>,
+    active_observer: &Arc<Mutex<Option<crate::interaction_observation::RunObserver>>>,
+    active_delivery: &SharedRunDelivery,
     writer: &tokio::task::JoinHandle<()>,
     grace: Duration,
 ) {
+    if matches!(
+        tokio::time::timeout(grace, send_connection_limit_error(outgoing)).await,
+        Ok(true)
+    ) {
+        let error_text = error_body(
+            429,
+            "websocket_connection_limit_reached",
+            "The WebSocket connection exceeded the 60 minute limit.",
+        )
+        .to_string();
+        if let Some(delivery) = active_delivery.lock().expect("delivery slot lock").clone() {
+            let mut delivery = delivery.lock().expect("delivery lock");
+            delivery.sent_error_text(&error_text);
+            delivery.finish(
+                "cancelled",
+                Some("websocket_connection_limit_reached".into()),
+            );
+        } else if let Some(observer) = active_observer
+            .lock()
+            .expect("active observer lock")
+            .clone()
+        {
+            observer
+                .record_debug(|| ws_wire("platform_to_client", "text", Value::String(error_text)));
+        }
+    }
     if let Some(token) = cancellation.lock().expect("cancellation lock").take() {
         token.cancel();
     }
-    let _ = tokio::time::timeout(grace, send_connection_limit_error(outgoing)).await;
     writer.abort();
 }
 
-async fn send_connection_limit_error(outgoing: &mpsc::Sender<OutgoingMessage>) {
+async fn send_connection_limit_error(outgoing: &mpsc::Sender<OutgoingMessage>) -> bool {
     send_error(
         outgoing,
         429,
         "websocket_connection_limit_reached",
         "The WebSocket connection exceeded the 60 minute limit.",
     )
-    .await;
+    .await
 }
 
-async fn send_error(
-    outgoing: &mpsc::Sender<OutgoingMessage>,
-    status: u16,
-    code: &str,
-    message: &str,
-) {
-    let body = serde_json::json!({
+fn error_body(status: u16, code: &str, message: &str) -> Value {
+    serde_json::json!({
         "type": "error",
         "status": status,
         "error": {
@@ -421,18 +964,25 @@ async fn send_error(
             "message": message,
             "param": null
         }
-    });
+    })
+}
+
+async fn send_error(
+    outgoing: &mpsc::Sender<OutgoingMessage>,
+    status: u16,
+    code: &str,
+    message: &str,
+) -> bool {
+    let body = error_body(status, code, message);
     let (delivered, delivered_rx) = tokio::sync::oneshot::channel();
-    if outgoing
+    outgoing
         .send(OutgoingMessage {
             message: Message::Text(body.to_string().into()),
             delivered: Some(delivered),
         })
         .await
         .is_ok()
-    {
-        let _ = delivered_rx.await;
-    }
+        && delivered_rx.await.is_ok()
 }
 
 #[cfg(test)]
@@ -460,7 +1010,7 @@ mod tests {
         )
         .to_string();
         let progress = Arc::new(Mutex::new(StreamForwardProgress::default()));
-        let forwarding = async { forward_sse_frames(&mut buffer, &tx, &progress).await };
+        let forwarding = async { forward_sse_frames(&mut buffer, &tx, &progress, None).await };
         let receiving = async {
             let Some(OutgoingMessage {
                 message: Message::Text(event),
@@ -494,7 +1044,8 @@ mod tests {
             delivered.send(()).expect("delivery ack receiver");
             event
         };
-        let ((), event) = tokio::join!(sending, receiving);
+        let (delivered, event) = tokio::join!(sending, receiving);
+        assert!(delivered);
         let body: Value = serde_json::from_str(&event).expect("error JSON");
         assert_eq!(body["type"], "error");
         assert_eq!(body["status"], 409);
@@ -517,7 +1068,8 @@ mod tests {
             delivered.send(()).expect("delivery ack receiver");
             event
         };
-        let ((), event) = tokio::join!(sending, receiving);
+        let (delivered, event) = tokio::join!(sending, receiving);
+        assert!(delivered);
         let body: Value = serde_json::from_str(&event).expect("error JSON");
         assert_eq!(body["status"], 429);
         assert_eq!(body["error"]["code"], "websocket_connection_limit_reached");
@@ -539,8 +1091,11 @@ mod tests {
                 ),
             ),
             next_sequence_number: 7,
+            terminal_failure: None,
         }));
-        let sending = send_run_timeout(&tx, &progress);
+        let delivery = Arc::new(Mutex::new(None));
+        let active_observer = Arc::new(Mutex::new(None));
+        let sending = send_run_timeout(&tx, &progress, &delivery, &active_observer);
         let receiving = async {
             let mut bodies = Vec::new();
             for _ in 0..2 {
@@ -569,14 +1124,25 @@ mod tests {
     #[tokio::test]
     async fn ttl_shutdown_cancels_the_run_and_aborts_a_blocked_writer() {
         let (tx, _rx) = mpsc::channel(1);
-        tx.send(OutgoingMessage::queued(Message::Text("queued".into())))
-            .await
-            .expect("fill outgoing queue");
+        tx.send(OutgoingMessage {
+            message: Message::Text("queued".into()),
+            delivered: None,
+        })
+        .await
+        .expect("fill outgoing queue");
         let token = CancellationToken::new();
         let cancellation = Arc::new(Mutex::new(Some(token.clone())));
         let writer = tokio::spawn(std::future::pending::<()>());
 
-        terminate_expired_connection(&tx, &cancellation, &writer, Duration::from_millis(10)).await;
+        terminate_expired_connection(
+            &tx,
+            &cancellation,
+            &Arc::new(Mutex::new(None)),
+            &Arc::new(Mutex::new(None)),
+            &writer,
+            Duration::from_millis(10),
+        )
+        .await;
 
         assert!(token.is_cancelled());
         assert!(

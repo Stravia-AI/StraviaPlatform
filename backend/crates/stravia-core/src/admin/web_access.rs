@@ -295,7 +295,7 @@ mod tests {
     #[tokio::test]
     async fn creates_zhipu_provider_with_search_and_fetch_capabilities() {
         let data_dir = tempfile::tempdir().expect("temp data dir");
-        let (gateway, _logs) = crate::Gateway::new(crate::config::GatewayConfig {
+        let gateway = crate::Gateway::new(crate::config::GatewayConfig {
             data_dir: data_dir.path().to_path_buf(),
             ..Default::default()
         })
@@ -327,7 +327,7 @@ mod tests {
     #[tokio::test]
     async fn seeded_local_provider_is_a_non_deletable_singleton() {
         let data_dir = tempfile::tempdir().expect("temp data dir");
-        let (gateway, _logs) = crate::Gateway::new(crate::config::GatewayConfig {
+        let gateway = crate::Gateway::new(crate::config::GatewayConfig {
             data_dir: data_dir.path().to_path_buf(),
             ..Default::default()
         })
@@ -380,7 +380,7 @@ mod tests {
     #[tokio::test]
     async fn validates_local_engines_proxy_and_secret_non_echo() {
         let data_dir = tempfile::tempdir().expect("temp data dir");
-        let (gateway, _logs) = crate::Gateway::new(crate::config::GatewayConfig {
+        let gateway = crate::Gateway::new(crate::config::GatewayConfig {
             data_dir: data_dir.path().to_path_buf(),
             ..Default::default()
         })
@@ -486,7 +486,7 @@ mod tests {
     #[tokio::test]
     async fn accepts_only_configured_exa_and_zhipu_remote_providers() {
         let data_dir = tempfile::tempdir().expect("temp data dir");
-        let (gateway, _logs) = crate::Gateway::new(crate::config::GatewayConfig {
+        let gateway = crate::Gateway::new(crate::config::GatewayConfig {
             data_dir: data_dir.path().to_path_buf(),
             ..Default::default()
         })

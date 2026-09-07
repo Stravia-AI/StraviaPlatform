@@ -1,5 +1,269 @@
 use super::*;
 
+#[tokio::test]
+async fn anthropic_cache_breakpoint_on_reusable_history_keeps_target_continuation() {
+    let (base_url, connections, requests) =
+        serve_responses_websocket_sequence(vec!["first answer", "second answer"]).await;
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let gateway = Gateway::new(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .expect("Gateway");
+    configure_route_with_protocol(
+        &gateway,
+        "cache-breakpoint-continuation",
+        &[base_url],
+        "openai",
+        "openai-compatible",
+    )
+    .await;
+    let headers = authorized_headers(&gateway).await;
+    let authorization = headers
+        .get(header::AUTHORIZATION)
+        .expect("authorization header")
+        .clone();
+    let mut events = gateway.observation.subscribe(0);
+    let router = crate::proxy::server::create_router(gateway);
+
+    let first_response = router
+        .clone()
+        .oneshot(
+            Request::post("/v1/messages")
+                .header("content-type", "application/json")
+                .header("anthropic-version", "2023-06-01")
+                .header(header::AUTHORIZATION, authorization.clone())
+                .body(Body::from(
+                    serde_json::json!({
+                        "model": "cache-breakpoint-continuation",
+                        "max_tokens": 128,
+                        "messages": [{
+                            "role": "user",
+                            "content": [{"type": "text", "text": "first"}]
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .expect("first Anthropic request"),
+        )
+        .await
+        .expect("first Anthropic response");
+    assert_eq!(first_response.status(), StatusCode::OK);
+    let first_body = to_bytes(first_response.into_body(), usize::MAX)
+        .await
+        .expect("first Anthropic response body");
+    assert!(
+        String::from_utf8_lossy(&first_body).contains("first answer"),
+        "{}",
+        String::from_utf8_lossy(&first_body)
+    );
+    wait_for_observed_run_finish(&mut events).await;
+
+    let second_response = router
+        .oneshot(
+            Request::post("/v1/messages")
+                .header("content-type", "application/json")
+                .header("anthropic-version", "2023-06-01")
+                .header(header::AUTHORIZATION, authorization)
+                .body(Body::from(
+                    serde_json::json!({
+                        "model": "cache-breakpoint-continuation",
+                        "max_tokens": 128,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [{
+                                    "type": "text",
+                                    "text": "first",
+                                    "cache_control": {"type": "ephemeral"}
+                                }]
+                            },
+                            {
+                                "role": "assistant",
+                                "content": [{"type": "text", "text": "first answer"}]
+                            },
+                            {
+                                "role": "user",
+                                "content": [{"type": "text", "text": "second"}]
+                            }
+                        ]
+                    })
+                    .to_string(),
+                ))
+                .expect("second Anthropic request"),
+        )
+        .await
+        .expect("second Anthropic response");
+    assert_eq!(second_response.status(), StatusCode::OK);
+    let second_body = to_bytes(second_response.into_body(), usize::MAX)
+        .await
+        .expect("second Anthropic response body");
+    assert!(
+        String::from_utf8_lossy(&second_body).contains("second answer"),
+        "{}",
+        String::from_utf8_lossy(&second_body)
+    );
+
+    let requests = requests
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[1]["previous_response_id"],
+        serde_json::json!("resp-provider")
+    );
+    assert_eq!(requests[1]["input"].as_array().map(Vec::len), Some(1));
+    assert!(requests[1]["input"][0].to_string().contains("second"));
+    assert_eq!(connections.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn anthropic_combined_assistant_turn_reuses_generation_chain() {
+    let (base_url, _connections, requests) = serve_responses_websocket_streams(vec![
+        openai_responses_tool_sse("planning", "call-1"),
+        openai_responses_sse("done"),
+    ])
+    .await;
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let gateway = Gateway::new(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .expect("Gateway");
+    configure_route_with_protocol(
+        &gateway,
+        "combined-assistant-continuation",
+        &[base_url],
+        "openai",
+        "openai-compatible",
+    )
+    .await;
+    let headers = authorized_headers(&gateway).await;
+    let authorization = headers
+        .get(header::AUTHORIZATION)
+        .expect("authorization header")
+        .clone();
+    let mut events = gateway.observation.subscribe(0);
+    let router = crate::proxy::server::create_router(gateway);
+    let tools = serde_json::json!([{
+        "name": "client_tool",
+        "description": "Client-owned tool",
+        "input_schema": {
+            "type": "object",
+            "properties": {"value": {"type": "integer"}},
+            "required": ["value"]
+        }
+    }]);
+
+    let first_response = router
+        .clone()
+        .oneshot(
+            Request::post("/v1/messages")
+                .header("content-type", "application/json")
+                .header("anthropic-version", "2023-06-01")
+                .header(header::AUTHORIZATION, authorization.clone())
+                .body(Body::from(
+                    serde_json::json!({
+                        "model": "combined-assistant-continuation",
+                        "max_tokens": 128,
+                        "tools": tools.clone(),
+                        "messages": [{"role": "user", "content": "first"}]
+                    })
+                    .to_string(),
+                ))
+                .expect("first Anthropic request"),
+        )
+        .await
+        .expect("first Anthropic response");
+    let first_status = first_response.status();
+    let first_body = to_bytes(first_response.into_body(), usize::MAX)
+        .await
+        .expect("first Anthropic response body");
+    assert_eq!(
+        first_status,
+        StatusCode::OK,
+        "{}; upstream requests: {}",
+        String::from_utf8_lossy(&first_body),
+        requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
+    );
+    assert!(
+        String::from_utf8_lossy(&first_body).contains("call-1"),
+        "{}",
+        String::from_utf8_lossy(&first_body)
+    );
+    wait_for_observed_run_finish(&mut events).await;
+
+    let second_response = router
+        .oneshot(
+            Request::post("/v1/messages")
+                .header("content-type", "application/json")
+                .header("anthropic-version", "2023-06-01")
+                .header(header::AUTHORIZATION, authorization)
+                .body(Body::from(
+                    serde_json::json!({
+                        "model": "combined-assistant-continuation",
+                        "max_tokens": 128,
+                        "tools": tools,
+                        "messages": [
+                            {"role": "user", "content": "first"},
+                            {
+                                "role": "assistant",
+                                "content": [
+                                    {"type": "text", "text": "planning"},
+                                    {
+                                        "type": "tool_use",
+                                        "id": "call-1",
+                                        "name": "client_tool",
+                                        "input": {"value": 1}
+                                    }
+                                ]
+                            },
+                            {
+                                "role": "user",
+                                "content": [{
+                                    "type": "tool_result",
+                                    "tool_use_id": "call-1",
+                                    "content": "tool result"
+                                }]
+                            }
+                        ]
+                    })
+                    .to_string(),
+                ))
+                .expect("second Anthropic request"),
+        )
+        .await
+        .expect("second Anthropic response");
+    assert_eq!(second_response.status(), StatusCode::OK);
+    let second_body = to_bytes(second_response.into_body(), usize::MAX)
+        .await
+        .expect("second Anthropic response body");
+    assert!(
+        String::from_utf8_lossy(&second_body).contains("done"),
+        "{}",
+        String::from_utf8_lossy(&second_body)
+    );
+
+    let requests = requests
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[1]["previous_response_id"],
+        serde_json::json!("resp-provider")
+    );
+    assert_eq!(requests[1]["input"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        requests[1]["input"][0]["call_id"],
+        serde_json::json!("call-1")
+    );
+}
+
 #[test]
 fn buffered_platform_only_executes_hidden_round_before_returning() {
     std::thread::Builder::new()
@@ -125,7 +389,7 @@ async fn chat_full_history_uses_upstream_websocket_and_longest_reusable_prefix()
         serve_responses_websocket_sequence(vec!["first answer", "second answer", "third answer"])
             .await;
     let data_dir = tempfile::tempdir().expect("temporary data directory");
-    let (gateway, _logs) = Gateway::new(crate::config::GatewayConfig {
+    let gateway = Gateway::new(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -244,7 +508,7 @@ async fn store_false_chat_chain_generates_a_stable_prompt_cache_key() {
     let (base_url, connections, requests) =
         serve_responses_websocket_sequence(vec!["first answer", "second answer"]).await;
     let data_dir = tempfile::tempdir().expect("temporary data directory");
-    let (gateway, _logs) = Gateway::new(crate::config::GatewayConfig {
+    let gateway = Gateway::new(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -315,278 +579,10 @@ async fn store_false_chat_chain_generates_a_stable_prompt_cache_key() {
 }
 
 #[tokio::test]
-async fn anthropic_cache_breakpoint_on_reusable_history_keeps_target_continuation() {
-    let (base_url, connections, requests) =
-        serve_responses_websocket_sequence(vec!["first answer", "second answer"]).await;
-    let data_dir = tempfile::tempdir().expect("temporary data directory");
-    let (gateway, mut logs) = Gateway::new(crate::config::GatewayConfig {
-        data_dir: data_dir.path().to_path_buf(),
-        ..Default::default()
-    })
-    .await
-    .expect("Gateway");
-    configure_route_with_protocol(
-        &gateway,
-        "cache-breakpoint-continuation",
-        &[base_url],
-        "openai",
-        "openai-compatible",
-    )
-    .await;
-    let headers = authorized_headers(&gateway).await;
-    let authorization = headers
-        .get(header::AUTHORIZATION)
-        .expect("authorization header")
-        .clone();
-    let router = crate::proxy::server::create_router(gateway);
-
-    let first_response = router
-        .clone()
-        .oneshot(
-            Request::post("/v1/messages")
-                .header("content-type", "application/json")
-                .header("anthropic-version", "2023-06-01")
-                .header(header::AUTHORIZATION, authorization.clone())
-                .body(Body::from(
-                    serde_json::json!({
-                        "model": "cache-breakpoint-continuation",
-                        "max_tokens": 128,
-                        "messages": [{
-                            "role": "user",
-                            "content": [{"type": "text", "text": "first"}]
-                        }]
-                    })
-                    .to_string(),
-                ))
-                .expect("first Anthropic request"),
-        )
-        .await
-        .expect("first Anthropic response");
-    assert_eq!(first_response.status(), StatusCode::OK);
-    let first_body = to_bytes(first_response.into_body(), usize::MAX)
-        .await
-        .expect("first Anthropic response body");
-    assert!(
-        String::from_utf8_lossy(&first_body).contains("first answer"),
-        "{}",
-        String::from_utf8_lossy(&first_body)
-    );
-    tokio::time::timeout(std::time::Duration::from_secs(1), logs.recv())
-        .await
-        .expect("first request completion log")
-        .expect("log channel remains open");
-
-    let second_response = router
-        .oneshot(
-            Request::post("/v1/messages")
-                .header("content-type", "application/json")
-                .header("anthropic-version", "2023-06-01")
-                .header(header::AUTHORIZATION, authorization)
-                .body(Body::from(
-                    serde_json::json!({
-                        "model": "cache-breakpoint-continuation",
-                        "max_tokens": 128,
-                        "messages": [
-                            {
-                                "role": "user",
-                                "content": [{
-                                    "type": "text",
-                                    "text": "first",
-                                    "cache_control": {"type": "ephemeral"}
-                                }]
-                            },
-                            {
-                                "role": "assistant",
-                                "content": [{"type": "text", "text": "first answer"}]
-                            },
-                            {
-                                "role": "user",
-                                "content": [{"type": "text", "text": "second"}]
-                            }
-                        ]
-                    })
-                    .to_string(),
-                ))
-                .expect("second Anthropic request"),
-        )
-        .await
-        .expect("second Anthropic response");
-    assert_eq!(second_response.status(), StatusCode::OK);
-    let second_body = to_bytes(second_response.into_body(), usize::MAX)
-        .await
-        .expect("second Anthropic response body");
-    assert!(
-        String::from_utf8_lossy(&second_body).contains("second answer"),
-        "{}",
-        String::from_utf8_lossy(&second_body)
-    );
-
-    let requests = requests
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    assert_eq!(requests.len(), 2);
-    assert_eq!(
-        requests[1]["previous_response_id"],
-        serde_json::json!("resp-provider")
-    );
-    assert_eq!(requests[1]["input"].as_array().map(Vec::len), Some(1));
-    assert!(requests[1]["input"][0].to_string().contains("second"));
-    assert_eq!(connections.load(Ordering::SeqCst), 1);
-}
-
-#[tokio::test]
-async fn anthropic_combined_assistant_turn_reuses_generation_chain() {
-    let (base_url, _connections, requests) = serve_responses_websocket_streams(vec![
-        openai_responses_tool_sse("planning", "call-1"),
-        openai_responses_sse("done"),
-    ])
-    .await;
-    let data_dir = tempfile::tempdir().expect("temporary data directory");
-    let (gateway, mut logs) = Gateway::new(crate::config::GatewayConfig {
-        data_dir: data_dir.path().to_path_buf(),
-        ..Default::default()
-    })
-    .await
-    .expect("Gateway");
-    configure_route_with_protocol(
-        &gateway,
-        "combined-assistant-continuation",
-        &[base_url],
-        "openai",
-        "openai-compatible",
-    )
-    .await;
-    let headers = authorized_headers(&gateway).await;
-    let authorization = headers
-        .get(header::AUTHORIZATION)
-        .expect("authorization header")
-        .clone();
-    let router = crate::proxy::server::create_router(gateway);
-    let tools = serde_json::json!([{
-        "name": "client_tool",
-        "description": "Client-owned tool",
-        "input_schema": {
-            "type": "object",
-            "properties": {"value": {"type": "integer"}},
-            "required": ["value"]
-        }
-    }]);
-
-    let first_response = router
-        .clone()
-        .oneshot(
-            Request::post("/v1/messages")
-                .header("content-type", "application/json")
-                .header("anthropic-version", "2023-06-01")
-                .header(header::AUTHORIZATION, authorization.clone())
-                .body(Body::from(
-                    serde_json::json!({
-                        "model": "combined-assistant-continuation",
-                        "max_tokens": 128,
-                        "tools": tools.clone(),
-                        "messages": [{"role": "user", "content": "first"}]
-                    })
-                    .to_string(),
-                ))
-                .expect("first Anthropic request"),
-        )
-        .await
-        .expect("first Anthropic response");
-    let first_status = first_response.status();
-    let first_body = to_bytes(first_response.into_body(), usize::MAX)
-        .await
-        .expect("first Anthropic response body");
-    assert_eq!(
-        first_status,
-        StatusCode::OK,
-        "{}; upstream requests: {}",
-        String::from_utf8_lossy(&first_body),
-        requests
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .len()
-    );
-    assert!(
-        String::from_utf8_lossy(&first_body).contains("call-1"),
-        "{}",
-        String::from_utf8_lossy(&first_body)
-    );
-    tokio::time::timeout(std::time::Duration::from_secs(1), logs.recv())
-        .await
-        .expect("first request completion log")
-        .expect("log channel remains open");
-
-    let second_response = router
-        .oneshot(
-            Request::post("/v1/messages")
-                .header("content-type", "application/json")
-                .header("anthropic-version", "2023-06-01")
-                .header(header::AUTHORIZATION, authorization)
-                .body(Body::from(
-                    serde_json::json!({
-                        "model": "combined-assistant-continuation",
-                        "max_tokens": 128,
-                        "tools": tools,
-                        "messages": [
-                            {"role": "user", "content": "first"},
-                            {
-                                "role": "assistant",
-                                "content": [
-                                    {"type": "text", "text": "planning"},
-                                    {
-                                        "type": "tool_use",
-                                        "id": "call-1",
-                                        "name": "client_tool",
-                                        "input": {"value": 1}
-                                    }
-                                ]
-                            },
-                            {
-                                "role": "user",
-                                "content": [{
-                                    "type": "tool_result",
-                                    "tool_use_id": "call-1",
-                                    "content": "tool result"
-                                }]
-                            }
-                        ]
-                    })
-                    .to_string(),
-                ))
-                .expect("second Anthropic request"),
-        )
-        .await
-        .expect("second Anthropic response");
-    assert_eq!(second_response.status(), StatusCode::OK);
-    let second_body = to_bytes(second_response.into_body(), usize::MAX)
-        .await
-        .expect("second Anthropic response body");
-    assert!(
-        String::from_utf8_lossy(&second_body).contains("done"),
-        "{}",
-        String::from_utf8_lossy(&second_body)
-    );
-
-    let requests = requests
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    assert_eq!(requests.len(), 2);
-    assert_eq!(
-        requests[1]["previous_response_id"],
-        serde_json::json!("resp-provider")
-    );
-    assert_eq!(requests[1]["input"].as_array().map(Vec::len), Some(1));
-    assert_eq!(
-        requests[1]["input"][0]["call_id"],
-        serde_json::json!("call-1")
-    );
-}
-
-#[tokio::test]
 async fn missing_upstream_prefix_replays_full_history_once_on_the_same_socket() {
     let (base_url, connections, requests) = serve_missing_previous_websocket(false).await;
     let data_dir = tempfile::tempdir().expect("temporary data directory");
-    let (gateway, _logs) = Gateway::new(crate::config::GatewayConfig {
+    let gateway = Gateway::new(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -659,7 +655,7 @@ async fn missing_upstream_prefix_replays_full_history_once_on_the_same_socket() 
 async fn missing_upstream_prefix_is_not_replayed_after_upstream_event() {
     let (base_url, connections, requests) = serve_missing_previous_websocket(true).await;
     let data_dir = tempfile::tempdir().expect("temporary data directory");
-    let (gateway, _logs) = Gateway::new(crate::config::GatewayConfig {
+    let gateway = Gateway::new(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -734,7 +730,7 @@ async fn cache_affinity_prefers_the_target_that_processed_a_long_exact_prefix() 
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     };
-    let (gateway, _logs) = Gateway::new(config).await.expect("gateway init");
+    let gateway = Gateway::new(config).await.expect("gateway init");
     let model = "cache-affinity-route";
     let route_id = configure_route_with_protocol(
         &gateway,

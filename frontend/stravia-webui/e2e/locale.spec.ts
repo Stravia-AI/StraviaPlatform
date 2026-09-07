@@ -102,101 +102,68 @@ test('Settings uses the shared language selector and updates immediately', async
   await expect.poll(() => page.evaluate(() => localStorage.getItem('stravia-locale'))).toBe('zh-CN')
 })
 
-test('localized Logs keep one local timestamp across list and detail surfaces', async ({ page }) => {
+test('localized Request Records keep one local timestamp across canvas and detail', async ({ page }) => {
   await prepareLocalePage(page, ['zh-CN'], 'zh-CN')
-  const requestLog = {
-    id: 'localized-log',
-    created_at: Date.UTC(2026, 0, 2, 0, 4, 5),
-    method: 'POST',
-    path: '/v1/chat/completions',
-    client_status_code: 200,
-    latency_total_ms: 42,
-    input_tokens: 1200,
-    output_tokens: 34,
-    is_stream: false,
-    stream_chunks_count: 0,
+  const startedAt = Date.UTC(2026, 0, 2, 0, 4, 5)
+  const interaction = {
+    id: 'localized-interaction',
+    root_id: 'localized-root',
+    parent_interaction_id: null,
+    generation_root_id: null,
+    first_route_id: 'gpt-route',
+    first_model_display_name: 'GPT 5.6',
+    status: 'completed',
+    started_at: startedAt,
+    last_active_at: startedAt + 42,
+    visible_tail: '客户端可见回答',
+    usage: {
+      input_tokens: 1200,
+      output_tokens: 34,
+      cache_read_tokens: null,
+      cache_write_tokens: null,
+      reasoning_tokens: null,
+    },
+    debug_status: 'none',
+    observation_gap: false,
+    matched: true,
+    last_event_sequence: 4,
   }
-  await page.route('**/api/v1/logs**', async (route) => {
-    await route.fulfill({ json: { data: { items: [requestLog], total: 1 } } })
+  const root = { id: 'localized-root', last_active_at: startedAt + 42, interactions: [interaction] }
+  await page.route('**/api/v1/observations/interactions?**', async (route) => {
+    await route.fulfill({
+      json: {
+        data: {
+          anchor_at: startedAt + 86_400_000,
+          window_index: 0,
+          window_start: startedAt,
+          window_end: startedAt + 86_400_000,
+          roots: [root],
+          root_total: 1,
+          next_cursor: null,
+          snapshot_sequence: 4,
+        },
+      },
+    })
   })
-  await page.route('**/api/v1/logs/localized-log', async (route) => {
-    await route.fulfill({ json: { data: requestLog } })
+  await page.route('**/api/v1/observations/interactions/localized-interaction**', async (route) => {
+    await route.fulfill({ json: { data: { interaction, root, runs: [], snapshot_sequence: 4 } } })
   })
   await page.goto('/logs')
 
   const localTimestamp = '2026/1/2 08:04:05'
-  await expect(page.getByRole('columnheader', { name: 'Token', exact: true })).toBeVisible()
-  await expect(page.getByRole('cell', { name: localTimestamp })).toBeVisible()
-  await page.getByRole('button', { name: '查看详情' }).click()
-
-  const detail = page.getByRole('dialog', { name: '请求详情' })
-  await expect(detail).toBeVisible()
-  await expect(detail.getByText(localTimestamp, { exact: true })).toBeVisible()
-  await expect(detail.getByRole('button', { name: '关闭请求详情' })).toBeVisible()
-})
-
-test('Logs keep Token metrics inside their column at desktop width', async ({ page }) => {
-  await page.setViewportSize({ width: 1254, height: 784 })
-  await prepareLocalePage(page, ['zh-CN'], 'zh-CN')
-  const requestLog = {
-    id: 'token-layout-log',
-    created_at: Date.UTC(2026, 7, 28, 8, 18, 24),
-    method: 'POST',
-    path: '/v1/responses',
-    client_status_code: 200,
-    latency_total_ms: 2600,
-    stream_first_chunk_ms: 1900,
-    latency_upstream_ms: 2300,
-    input_tokens: 10361,
-    output_tokens: 128,
-    cache_read_tokens: 10280,
-    cache_write_tokens: 0,
-    is_stream: true,
-    stream_chunks_count: 20,
-    model_name: 'grok-4.6',
-    upstream_model: 'grok-4.6',
-    provider_name: 'Grok',
-  }
-  const requestLogs = [
-    requestLog,
-    {
-      ...requestLog,
-      id: 'token-layout-log-codex',
-      model_name: 'gpt-5.6-luna',
-      upstream_model: 'gpt-5.6-luna',
-      provider_name: 'Codex',
-      thinking_level: 'medium',
-    },
-    {
-      ...requestLog,
-      id: 'token-layout-log-sol',
-      model_name: 'gpt-5.6-sol',
-      upstream_model: 'gpt-5.6-sol',
-      provider_name: 'Codex',
-      thinking_level: 'medium',
-    },
-  ]
-  await page.route('**/api/v1/logs**', async (route) => {
-    await route.fulfill({ json: { data: { items: requestLogs, total: requestLogs.length } } })
-  })
-  await page.goto('/logs')
-
-  await expect(page.getByRole('columnheader', { name: '请求' })).toHaveCount(0)
-  const tokenCell = page.locator('tbody td').filter({ hasText: 'C-IN' }).first()
-  await expect(tokenCell).toBeVisible()
-  expect(await tokenCell.evaluate((cell) => cell.scrollWidth)).toBeLessThanOrEqual(
-    await tokenCell.evaluate((cell) => cell.clientWidth),
-  )
-  await expect(page.getByRole('button', { name: '查看详情' }).first()).toBeInViewport()
-  await page.getByRole('button', { name: '列' }).click()
-  const requestColumnToggle = page.getByRole('menuitemcheckbox', { name: '请求' })
-  await expect(requestColumnToggle).not.toBeChecked()
-  await requestColumnToggle.click()
-  await expect(page.getByRole('columnheader', { name: '请求' })).toBeVisible()
-
-  await page.setViewportSize({ width: 1063, height: 800 })
-  await expect(page.getByRole('table', { name: '最近请求' })).toBeHidden()
-  await expect(page.locator('.route-mobile-list').filter({ hasText: 'C-IN' })).toBeVisible()
+  await expect(page.getByText(localTimestamp, { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'GPT 5.6, 已完成', exact: true }).click()
+  const inspector = page.getByRole('complementary', { name: '观测详情' })
+  await expect(inspector).toBeVisible()
+  await expect(
+    inspector
+      .locator('dt')
+      .filter({ hasText: /^开始时间$/ })
+      .locator('..')
+      .locator('dd'),
+  ).toHaveText(localTimestamp)
+  await expect(inspector.getByText('未捕获', { exact: true })).toBeVisible()
+  await expect(inspector.getByRole('button', { name: '关闭' })).toBeVisible()
 })
 
 test('known backend errors localize while unknown diagnostics remain visible', async ({ page }) => {

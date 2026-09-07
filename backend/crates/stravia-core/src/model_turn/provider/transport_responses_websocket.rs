@@ -19,9 +19,11 @@ pub(super) struct ResponsesWebSocketStream {
     event_seen: bool,
     replayed_full_request: bool,
     full_request: Value,
+    websocket_url: String,
     client: ProxyClient,
     fallback_outbound: OutboundRequest,
     http_fallback: Option<BoxStream<'static, Result<bytes::Bytes, reqwest::Error>>>,
+    pub(super) fallback_attempt: Option<Arc<AttemptObservation>>,
 }
 
 pub(crate) struct ResponsesWebSocketBinding {
@@ -139,8 +141,24 @@ impl ProviderCall {
             let mut headers = self.outbound.headers.clone();
             self.adapter
                 .prepare_responses_websocket_headers(&mut headers, connection)?;
-            #[cfg(debug_assertions)]
-            let capture_headers = headers.clone();
+            let observation_headers = headers.clone();
+            let handshake_attempt = Arc::new(std::sync::Mutex::new(None));
+            let handshake_attempt_slot = Arc::clone(&handshake_attempt);
+            let handshake_adapter = self.adapter.clone();
+            let handshake_url = websocket_url.clone();
+            let handshake_headers = observation_headers.clone();
+            let on_connect_start: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+                let attempt = handshake_adapter.begin_attempt_with_message(
+                    "websocket",
+                    &handshake_url,
+                    "handshake_request",
+                    &handshake_headers,
+                    || Value::Null,
+                );
+                *handshake_attempt_slot
+                    .lock()
+                    .expect("handshake attempt slot") = Some(attempt);
+            });
             let lease = websocket
                 .registry
                 .acquire(
@@ -154,6 +172,7 @@ impl ProviderCall {
                     ResponsesWebSocketRequest {
                         url: &websocket_url,
                         headers,
+                        on_connect_start: Some(on_connect_start),
                     },
                     previous_response_id,
                     websocket.session_affinity.as_deref(),
@@ -176,13 +195,39 @@ impl ProviderCall {
                         &websocket.full_outbound.body,
                         connection,
                     )?;
-                    #[cfg(debug_assertions)]
-                    self.adapter.capture_upstream_request(
-                        crate::wire_capture::CaptureTransport::WebSocket,
-                        &capture_headers,
-                        &request,
-                    );
-                    if let Err(error) = lease.send(&request).await {
+                    let serialized_request = serde_json::to_string(&request)?;
+                    let attempt = if lease.reused_connection() {
+                        self.adapter.begin_attempt_with_message(
+                            "websocket",
+                            &websocket_url,
+                            "text",
+                            &observation_headers,
+                            || Value::String(serialized_request.clone()),
+                        )
+                    } else {
+                        let attempt = handshake_attempt
+                            .lock()
+                            .expect("handshake attempt slot")
+                            .take()
+                            .expect("new WebSocket connection starts an observed handshake");
+                        attempt.wire(
+                            "upstream_response",
+                            "handshake_response",
+                            Some(101),
+                            Some(lease.handshake_headers()),
+                            Value::Null,
+                        );
+                        attempt.wire(
+                            "upstream_request",
+                            "text",
+                            None,
+                            None,
+                            Value::String(serialized_request.clone()),
+                        );
+                        attempt
+                    };
+                    if let Err(error) = lease.send_text(serialized_request).await {
+                        attempt.finish("failed", None, Some("websocket_send_error".into()), None);
                         if lease.reused_connection() {
                             let trace = lease.trace();
                             tracing::warn!(
@@ -191,10 +236,10 @@ impl ProviderCall {
                                 target_id = trace.target_id,
                                 transport_attempt = trace.transport_attempt,
                                 failure_stage = "send",
-                                error = %error,
                                 fallback_transport = "http_sse",
                                 "reused upstream WebSocket failed before a response; retrying silently"
                             );
+                            attempt.wire("upstream_request", "close", None, None, Value::Null);
                             lease.terminal();
                             drop(lease);
                             let mut outbound = websocket.full_outbound.clone();
@@ -207,28 +252,76 @@ impl ProviderCall {
                     }
                     let mut fallback_outbound = websocket.full_outbound.clone();
                     fallback_outbound.body["stream"] = Value::Bool(true);
-                    return self.websocket_stream(lease, full_request, fallback_outbound);
+                    return self.websocket_stream(
+                        lease,
+                        full_request,
+                        fallback_outbound,
+                        websocket_url,
+                        attempt,
+                    );
                 }
-                Err(
-                    error @ (ResponsesWebSocketAcquireError::Unsupported
-                    | ResponsesWebSocketAcquireError::Cooldown
-                    | ResponsesWebSocketAcquireError::Transport(_)),
-                ) => {
-                    let fallback_reason = match &error {
-                        ResponsesWebSocketAcquireError::Unsupported => "unsupported",
-                        ResponsesWebSocketAcquireError::Cooldown => "cooldown",
-                        ResponsesWebSocketAcquireError::Transport(_) => "connect_failure",
-                        ResponsesWebSocketAcquireError::Rejected(_) => unreachable!(),
+                Err(ResponsesWebSocketAcquireError::Unsupported {
+                    attempted,
+                    status,
+                    headers,
+                    body,
+                }) => {
+                    if attempted {
+                        let attempt = handshake_attempt
+                            .lock()
+                            .expect("handshake attempt slot")
+                            .take()
+                            .expect("network handshake starts an observed attempt");
+                        attempt.wire_lazy(
+                            "upstream_response",
+                            "handshake_response",
+                            status,
+                            Some(&headers),
+                            || bytes_value(&body),
+                        );
+                        attempt.finish(
+                            "failed",
+                            status,
+                            Some("websocket_unsupported".into()),
+                            None,
+                        );
+                    }
+                    let mut outbound = if websocket.require_affinity {
+                        websocket.full_outbound.clone()
+                    } else {
+                        self.outbound.clone()
                     };
-                    tracing::debug!(
-                        transport = "responses_websocket",
-                        target_namespace = websocket.namespace,
-                        provider_id = websocket.provider_id,
-                        target_id = websocket.target_id,
-                        transport_attempt = websocket.transport_attempt,
-                        fallback_reason,
-                        error = %error,
-                        "falling back from Responses WebSocket to HTTP/SSE"
+                    outbound.body["stream"] = Value::Bool(true);
+                    return self.http_stream(outbound).await;
+                }
+                Err(ResponsesWebSocketAcquireError::Cooldown) => {
+                    let mut outbound = if websocket.require_affinity {
+                        websocket.full_outbound.clone()
+                    } else {
+                        self.outbound.clone()
+                    };
+                    outbound.body["stream"] = Value::Bool(true);
+                    return self.http_stream(outbound).await;
+                }
+                Err(ResponsesWebSocketAcquireError::HandshakeBodyRead { status, headers }) => {
+                    let attempt = handshake_attempt
+                        .lock()
+                        .expect("handshake attempt slot")
+                        .take()
+                        .expect("network handshake starts an observed attempt");
+                    attempt.wire(
+                        "upstream_response",
+                        "handshake_response",
+                        Some(status),
+                        Some(&headers),
+                        Value::Null,
+                    );
+                    attempt.gap("websocket_handshake_body_read_failed");
+                    attempt.finish(
+                        "failed",
+                        Some(status),
+                        Some("websocket_handshake_body_read_failed".into()),
+                        None,
                     );
                     let mut outbound = if websocket.require_affinity {
                         websocket.full_outbound.clone()
@@ -238,7 +331,38 @@ impl ProviderCall {
                     outbound.body["stream"] = Value::Bool(true);
                     return self.http_stream(outbound).await;
                 }
-                Err(ResponsesWebSocketAcquireError::Rejected(status)) => {
+                Err(ResponsesWebSocketAcquireError::Transport(_)) => {
+                    let attempt = handshake_attempt
+                        .lock()
+                        .expect("handshake attempt slot")
+                        .take()
+                        .expect("network connect starts an observed attempt");
+                    attempt.finish("failed", None, Some("websocket_connect_error".into()), None);
+                    let mut outbound = if websocket.require_affinity {
+                        websocket.full_outbound.clone()
+                    } else {
+                        self.outbound.clone()
+                    };
+                    outbound.body["stream"] = Value::Bool(true);
+                    return self.http_stream(outbound).await;
+                }
+                Err(ResponsesWebSocketAcquireError::Rejected {
+                    status,
+                    headers,
+                    body,
+                }) => {
+                    let attempt = handshake_attempt
+                        .lock()
+                        .expect("handshake attempt slot")
+                        .take()
+                        .expect("network handshake starts an observed attempt");
+                    attempt.wire_lazy(
+                        "upstream_response",
+                        "handshake_response",
+                        Some(status),
+                        Some(&headers),
+                        || bytes_value(&body),
+                    );
                     tracing::debug!(
                         transport = "responses_websocket",
                         target_namespace = websocket.namespace,
@@ -250,12 +374,13 @@ impl ProviderCall {
                     );
                     return Ok(ProviderStreamResponse::Error {
                         status,
-                        headers: HeaderMap::new(),
+                        headers,
                         body: Ok(serde_json::json!({
                             "error": {
                                 "message": "Responses WebSocket handshake was rejected"
                             }
                         })),
+                        attempt,
                     });
                 }
             }
@@ -268,6 +393,8 @@ impl ProviderCall {
         lease: ResponsesWebSocketLease,
         full_request: Value,
         fallback_outbound: OutboundRequest,
+        websocket_url: String,
+        attempt: AttemptObservation,
     ) -> anyhow::Result<ProviderStreamResponse> {
         let response_continuation_available = Arc::new(AtomicBool::new(true));
         Ok(ProviderStreamResponse::Stream(Box::new(ProviderStream {
@@ -284,10 +411,12 @@ impl ProviderCall {
                 client: self.client.clone(),
                 fallback_outbound,
                 http_fallback: None,
+                fallback_attempt: None,
                 full_request,
+                websocket_url,
             })),
             status: 200,
-            headers: HeaderMap::new(),
+            attempt,
             response_continuation_available,
         })))
     }
@@ -301,12 +430,34 @@ impl ResponsesWebSocketStream {
     pub(super) async fn next_raw(
         &mut self,
         adapter: &ProviderAdapter,
-        _status: u16,
+        base_attempt: &AttemptObservation,
+        status: u16,
     ) -> Result<Option<bytes::Bytes>, ProviderStreamError> {
         if let Some(stream) = &mut self.http_fallback {
             return match stream.next().await {
-                Some(Ok(bytes)) => Ok(Some(bytes)),
-                Some(Err(error)) => Err(ProviderStreamError::Transport(error.to_string())),
+                Some(Ok(bytes)) => {
+                    if let Some(fallback_attempt) = &self.fallback_attempt {
+                        fallback_attempt.wire_lazy(
+                            "upstream_response",
+                            "sse_chunk",
+                            Some(status),
+                            None,
+                            || bytes_value(&bytes),
+                        );
+                    }
+                    Ok(Some(bytes))
+                }
+                Some(Err(error)) => {
+                    if let Some(fallback_attempt) = &self.fallback_attempt {
+                        fallback_attempt.finish(
+                            "failed",
+                            None,
+                            Some("provider_transport_error".into()),
+                            None,
+                        );
+                    }
+                    Err(ProviderStreamError::Transport(error.to_string()))
+                }
                 None => Ok(None),
             };
         }
@@ -318,16 +469,20 @@ impl ResponsesWebSocketStream {
             return Ok(Some(bytes::Bytes::from_static(b"data: [DONE]\n\n")));
         }
         loop {
+            let active_attempt = self.fallback_attempt.clone();
+            let attempt = active_attempt.as_deref().unwrap_or(base_attempt);
             let message = match self.lease.next().await {
                 Some(Ok(message)) => message,
                 Some(Err(error)) => {
                     return self
-                        .recover_reused_connection("receive", error.to_string())
+                        .recover_reused_connection(adapter, attempt, "receive", error.to_string())
                         .await;
                 }
                 None => {
                     return self
                         .recover_reused_connection(
+                            adapter,
+                            attempt,
                             "receive",
                             "Responses WebSocket closed before a terminal event".into(),
                         )
@@ -336,28 +491,44 @@ impl ResponsesWebSocketStream {
             };
             let text = match message {
                 reqwest_websocket::Message::Text(text) => {
-                    #[cfg(debug_assertions)]
-                    adapter.capture_upstream_response(
-                        crate::wire_capture::CaptureTransport::WebSocket,
-                        crate::wire_capture::CaptureRepresentation::Wire,
-                        _status,
-                        None,
-                        text.as_bytes(),
-                    );
+                    attempt.wire_lazy("upstream_response", "text", Some(status), None, || {
+                        Value::String(text.to_string())
+                    });
                     text
                 }
-                reqwest_websocket::Message::Ping(_) | reqwest_websocket::Message::Pong(_) => {
+                reqwest_websocket::Message::Ping(bytes) => {
+                    attempt.wire_lazy("upstream_response", "ping", Some(status), None, || {
+                        bytes_value(&bytes)
+                    });
                     continue;
                 }
-                reqwest_websocket::Message::Close { .. } => {
+                reqwest_websocket::Message::Pong(bytes) => {
+                    attempt.wire_lazy("upstream_response", "pong", Some(status), None, || {
+                        bytes_value(&bytes)
+                    });
+                    continue;
+                }
+                reqwest_websocket::Message::Close { code, reason } => {
+                    attempt.wire_lazy(
+                        "upstream_response",
+                        "close",
+                        Some(status),
+                        None,
+                        || serde_json::json!({"code": format!("{code:?}"), "reason": reason.to_string()}),
+                    );
                     return self
                         .recover_reused_connection(
+                            adapter,
+                            attempt,
                             "receive",
                             "Responses WebSocket closed before a terminal event".into(),
                         )
                         .await;
                 }
-                reqwest_websocket::Message::Binary(_) => {
+                reqwest_websocket::Message::Binary(bytes) => {
+                    attempt.wire_lazy("upstream_response", "binary", Some(status), None, || {
+                        bytes_value(&bytes)
+                    });
                     return Err(ProviderStreamError::Uncertain(
                         "Responses WebSocket returned a binary event".into(),
                     ));
@@ -403,8 +574,9 @@ impl ResponsesWebSocketStream {
                         fallback_reason = "connection_limit",
                         "falling back from Responses WebSocket to HTTP/SSE"
                     );
+                    attempt.wire("upstream_request", "close", None, None, Value::Null);
                     self.lease.connection_limit();
-                    return self.switch_to_http_fallback().await;
+                    return self.switch_to_http_fallback(adapter, attempt).await;
                 }
                 if code == Some("previous_response_not_found")
                     && self.lease.previous_response_id().is_some()
@@ -412,14 +584,36 @@ impl ResponsesWebSocketStream {
                     && !self.replayed_full_request
                 {
                     self.lease.invalidate_previous();
-                    self.lease
-                        .send(&self.full_request)
-                        .await
+                    attempt.finish(
+                        "failed",
+                        Some(status),
+                        Some("previous_response_not_found".into()),
+                        None,
+                    );
+                    let replay_text = serde_json::to_string(&self.full_request)
                         .map_err(|error| ProviderStreamError::Uncertain(error.to_string()))?;
+                    let replay_attempt = Arc::new(adapter.begin_attempt_with_message(
+                        "websocket",
+                        &self.websocket_url,
+                        "text",
+                        &HeaderMap::new(),
+                        || Value::String(replay_text.clone()),
+                    ));
+                    if let Err(error) = self.lease.send_text(replay_text).await {
+                        replay_attempt.finish(
+                            "failed",
+                            None,
+                            Some("websocket_send_error".into()),
+                            None,
+                        );
+                        return Err(ProviderStreamError::Uncertain(error.to_string()));
+                    }
+                    self.fallback_attempt = Some(replay_attempt);
                     self.replayed_full_request = true;
                     continue;
                 }
                 self.lease.invalidate_previous();
+                attempt.wire("upstream_request", "close", None, None, Value::Null);
                 self.lease.terminal();
                 self.done = true;
             } else {
@@ -433,6 +627,7 @@ impl ResponsesWebSocketStream {
                         {
                             self.lease.completed(response_id);
                         } else {
+                            attempt.wire("upstream_request", "close", None, None, Value::Null);
                             self.lease.terminal();
                         }
                     } else {
@@ -447,6 +642,7 @@ impl ResponsesWebSocketStream {
                             "received unsuccessful upstream WebSocket terminal event"
                         );
                         self.lease.invalidate_previous();
+                        attempt.wire("upstream_request", "close", None, None, Value::Null);
                         self.lease.terminal();
                     }
                     self.done = true;
@@ -462,6 +658,8 @@ impl ResponsesWebSocketStream {
 
     async fn recover_reused_connection(
         &mut self,
+        adapter: &ProviderAdapter,
+        attempt: &AttemptObservation,
         failure_stage: &'static str,
         error: String,
     ) -> Result<Option<bytes::Bytes>, ProviderStreamError> {
@@ -475,39 +673,100 @@ impl ResponsesWebSocketStream {
             target_id = trace.target_id,
             transport_attempt = trace.transport_attempt,
             failure_stage,
-            error,
             fallback_transport = "http_sse",
             "reused upstream WebSocket failed before a response; retrying silently"
         );
+        attempt.wire("upstream_request", "close", None, None, Value::Null);
+        attempt.finish(
+            "failed",
+            None,
+            Some("websocket_connection_error".into()),
+            None,
+        );
         self.lease.terminal();
-        self.switch_to_http_fallback().await
+        self.switch_to_http_fallback(adapter, attempt).await
     }
 
     async fn switch_to_http_fallback(
         &mut self,
+        adapter: &ProviderAdapter,
+        attempt: &AttemptObservation,
     ) -> Result<Option<bytes::Bytes>, ProviderStreamError> {
-        let (response, status) = self
+        attempt.finish(
+            "failed",
+            None,
+            Some("responses_websocket_fallback".into()),
+            None,
+        );
+        let request_body = bytes::Bytes::from(
+            serde_json::to_vec(&self.fallback_outbound.body)
+                .map_err(|error| ProviderStreamError::Uncertain(error.to_string()))?,
+        );
+        let fallback_attempt = Arc::new(adapter.begin_attempt(
+            "sse",
+            &self.fallback_outbound.url,
+            &self.fallback_outbound.headers,
+            || bytes_value(&request_body),
+        ));
+        let result = self
             .client
-            .call_stream(
+            .call_stream_raw(
                 &self.fallback_outbound.url,
                 self.fallback_outbound.headers.clone(),
-                self.fallback_outbound.body.clone(),
+                request_body,
             )
-            .await
-            .map_err(|error| ProviderStreamError::Transport(error.to_string()))?;
+            .await;
+        let (response, status) = match result {
+            Ok(response) => response,
+            Err(error) => {
+                fallback_attempt.finish(
+                    "failed",
+                    None,
+                    Some("provider_transport_error".into()),
+                    None,
+                );
+                return Err(ProviderStreamError::Transport(error.to_string()));
+            }
+        };
+        fallback_attempt.wire(
+            "upstream_response",
+            "http_headers",
+            Some(status),
+            Some(response.headers()),
+            Value::Null,
+        );
         if status >= 400 {
+            fallback_attempt.finish("failed", Some(status), Some("upstream_error".into()), None);
             return Err(ProviderStreamError::Transport(format!(
                 "HTTP/SSE fallback was rejected with status {status}"
             )));
         }
+        self.fallback_attempt = Some(fallback_attempt);
         self.http_fallback = Some(response.bytes_stream().boxed());
         let stream = self
             .http_fallback
             .as_mut()
             .expect("HTTP fallback stream was just installed");
         match stream.next().await {
-            Some(Ok(bytes)) => Ok(Some(bytes)),
-            Some(Err(error)) => Err(ProviderStreamError::Transport(error.to_string())),
+            Some(Ok(bytes)) => {
+                if let Some(attempt) = &self.fallback_attempt {
+                    attempt.wire_lazy("upstream_response", "sse_chunk", Some(status), None, || {
+                        bytes_value(&bytes)
+                    });
+                }
+                Ok(Some(bytes))
+            }
+            Some(Err(error)) => {
+                if let Some(attempt) = &self.fallback_attempt {
+                    attempt.finish(
+                        "failed",
+                        None,
+                        Some("provider_transport_error".into()),
+                        None,
+                    );
+                }
+                Err(ProviderStreamError::Transport(error.to_string()))
+            }
             None => Ok(None),
         }
     }

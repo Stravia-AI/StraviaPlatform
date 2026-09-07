@@ -11,7 +11,18 @@ impl AdminService {
     }
 
     pub async fn set_setting(&self, key: &str, value: &str) -> anyhow::Result<()> {
+        let retention_days =
+            if key == "log_retention_days" {
+                Some(value.parse::<u32>().map_err(|_| {
+                    anyhow::anyhow!("log_retention_days must be a nonnegative integer")
+                })?)
+            } else {
+                None
+            };
         self.gw.storage.settings().set(key, value).await?;
+        if let Some(days) = retention_days {
+            self.gw.observation.set_retention_days(days).await?;
+        }
         Ok(())
     }
 

@@ -124,6 +124,11 @@ const apiKeyStatsColumns = apiKeyStatsColumnHelper.columns([
     cell: (context) => formatCompactCount(context.getValue()),
     meta: { label: () => m.logs_cache_output_tokens(), align: 'end', cellClass: 'font-technical tabular-nums' },
   }),
+  apiKeyStatsColumnHelper.accessor('reasoning_tokens', {
+    header: () => m.common_reasoning(),
+    cell: (context) => formatCompactCount(context.getValue()),
+    meta: { label: () => m.common_reasoning(), align: 'end', cellClass: 'font-technical tabular-nums' },
+  }),
   apiKeyStatsColumnHelper.accessor('last_used_at', {
     header: () => m.stats_last_used(),
     cell: (context) => formatLogTime(context.getValue()),
@@ -139,6 +144,7 @@ const tokenChart = $derived(
     output: item.total_output_tokens,
     cacheInput: item.total_cache_read_tokens,
     cacheOutput: item.total_cache_write_tokens,
+    reasoning: item.total_reasoning_tokens,
   })),
 )
 const latencyChart = $derived(buildLatencyChart(hourlyStats, formatBucket))
@@ -146,11 +152,12 @@ const errorChart = $derived(hourlyStats.map((item) => ({ bucket: formatBucket(it
 const modelTotal = $derived(modelStats.slice(0, 6).reduce((total, item) => total + item.request_count, 0))
 const metrics = $derived([
   { label: m.common_total_requests(), value: formatCompactCount(overview?.total_requests ?? 0) },
-  { label: m.stats_input_tokens(), value: formatCompactCount(overview?.total_input_tokens ?? 0) },
-  { label: m.stats_output_tokens(), value: formatCompactCount(overview?.total_output_tokens ?? 0) },
-  { label: m.logs_cache_input_tokens(), value: formatCompactCount(overview?.total_cache_read_tokens ?? 0) },
-  { label: m.logs_cache_output_tokens(), value: formatCompactCount(overview?.total_cache_write_tokens ?? 0) },
-  { label: m.common_avg_latency(), value: formatDuration(overview?.avg_duration_ms ?? 0) },
+  { label: m.stats_input_tokens(), value: formatCompactCount(overview?.total_input_tokens) },
+  { label: m.stats_output_tokens(), value: formatCompactCount(overview?.total_output_tokens) },
+  { label: m.logs_cache_input_tokens(), value: formatCompactCount(overview?.total_cache_read_tokens) },
+  { label: m.logs_cache_output_tokens(), value: formatCompactCount(overview?.total_cache_write_tokens) },
+  { label: m.common_reasoning(), value: formatCompactCount(overview?.total_reasoning_tokens) },
+  { label: m.common_avg_latency(), value: formatDuration(overview?.avg_duration_ms) },
 ])
 const anyError = $derived(
   overviewQuery.error ?? hourlyQuery.error ?? providersQuery.error ?? apiKeysQuery.error ?? modelsQuery.error,
@@ -321,6 +328,7 @@ function retryAll(): void {
                 { key: 'output', label: m.stats_output(), color: 'var(--chart-3)' },
                 { key: 'cacheInput', label: m.logs_cache_input_tokens(), color: 'var(--chart-2)' },
                 { key: 'cacheOutput', label: m.logs_cache_output_tokens(), color: 'var(--chart-4)' },
+                { key: 'reasoning', label: m.common_reasoning(), color: 'var(--chart-5)' },
               ]}
               seriesLayout="stack"
               props={{ xAxis: { ticks: 4 } }} />
@@ -487,7 +495,9 @@ function retryAll(): void {
                   <p class="font-technical mt-1 text-xs text-muted-foreground">
                     IN {formatCompactCount(apiKey.total_input_tokens)} · OUT {formatCompactCount(
                       apiKey.total_output_tokens,
-                    )} · CACHE {formatCompactCount(apiKey.cache_read_tokens)}
+                    )} · CACHE {formatCompactCount(apiKey.cache_read_tokens)} · RSN {formatCompactCount(
+                      apiKey.reasoning_tokens,
+                    )}
                   </p>
                   <p class="font-technical mt-1 text-xs text-muted-foreground">{formatLogTime(apiKey.last_used_at)}</p>
                 </div>

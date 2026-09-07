@@ -944,7 +944,7 @@ async fn build_gateway() -> anyhow::Result<Gateway> {
         data_dir: test_data_dir(),
         ..Default::default()
     };
-    let (mut gw, _log_rx) = Gateway::new(config).await?;
+    let mut gw = Gateway::new(config).await?;
     gw.provider_catalog =
         ProviderCatalog::with_source(&gw.config.data_dir, Arc::new(TestCatalogSource))?;
     Ok(gw)

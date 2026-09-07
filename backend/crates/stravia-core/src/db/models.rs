@@ -275,65 +275,6 @@ pub struct ApiKeyWithBindings {
     pub model_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
-pub struct RequestLog {
-    pub id: String,
-    /// Unix 毫秒时间戳
-    pub created_at: i64,
-    pub api_key_id: Option<String>,
-    pub api_key_name: Option<String>,
-
-    pub client_protocol: Option<String>,
-    pub upstream_protocol: Option<String>,
-    pub provider_id: Option<String>,
-    pub provider_name: Option<String>,
-    #[serde(alias = "route_id")]
-    pub model_id: Option<String>,
-    #[serde(alias = "route_name")]
-    pub model_name: Option<String>,
-    pub upstream_url: Option<String>,
-    pub client_model: Option<String>,
-    pub upstream_model: Option<String>,
-
-    pub method: Option<String>,
-    pub path: Option<String>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub client_request_headers: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub client_request_body: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub client_response_headers: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub client_response_body: Option<String>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub upstream_request_headers: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub upstream_request_body: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub upstream_response_headers: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub upstream_response_body: Option<String>,
-
-    pub upstream_status_code: Option<i32>,
-    pub client_status_code: Option<i32>,
-
-    pub latency_total_ms: Option<i64>,
-    pub latency_upstream_ms: Option<i64>,
-    pub input_tokens: i32,
-    pub output_tokens: i32,
-    #[serde(default)]
-    pub cache_read_tokens: i32,
-    #[serde(default)]
-    pub cache_write_tokens: i32,
-    pub thinking_level: Option<String>,
-
-    pub is_stream: bool,
-    pub stream_chunks_count: i32,
-    pub stream_first_chunk_ms: Option<i64>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateProvider {
     #[serde(default)]
@@ -703,31 +644,15 @@ pub struct WebAccessSettings {
     pub fetch_provider_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct LogQuery {
-    pub limit: Option<i64>,
-    pub offset: Option<i64>,
-    pub provider: Option<String>,
-    pub model: Option<String>,
-    pub status_min: Option<i32>,
-    pub status_max: Option<i32>,
-    pub api_key: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LogPage {
-    pub items: Vec<RequestLog>,
-    pub total: i64,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, Default, FromRow)]
 pub struct StatsOverview {
     pub total_requests: i64,
-    pub total_input_tokens: i64,
-    pub total_output_tokens: i64,
-    pub total_cache_read_tokens: i64,
-    pub total_cache_write_tokens: i64,
-    pub avg_duration_ms: f64,
+    pub total_input_tokens: Option<i64>,
+    pub total_output_tokens: Option<i64>,
+    pub total_cache_read_tokens: Option<i64>,
+    pub total_cache_write_tokens: Option<i64>,
+    pub total_reasoning_tokens: Option<i64>,
+    pub avg_duration_ms: Option<f64>,
     pub avg_first_token_ms: Option<f64>,
     pub error_count: i64,
 }
@@ -737,11 +662,12 @@ pub struct StatsHourly {
     pub hour: String,
     pub request_count: i64,
     pub error_count: i64,
-    pub total_input_tokens: i64,
-    pub total_output_tokens: i64,
-    pub total_cache_read_tokens: i64,
-    pub total_cache_write_tokens: i64,
-    pub avg_duration_ms: f64,
+    pub total_input_tokens: Option<i64>,
+    pub total_output_tokens: Option<i64>,
+    pub total_cache_read_tokens: Option<i64>,
+    pub total_cache_write_tokens: Option<i64>,
+    pub total_reasoning_tokens: Option<i64>,
+    pub avg_duration_ms: Option<f64>,
     pub avg_first_token_ms: Option<f64>,
 }
 
@@ -749,9 +675,10 @@ pub struct StatsHourly {
 pub struct ModelStats {
     pub model: String,
     pub request_count: i64,
-    pub total_input_tokens: i64,
-    pub total_output_tokens: i64,
-    pub avg_duration_ms: f64,
+    pub total_input_tokens: Option<i64>,
+    pub total_output_tokens: Option<i64>,
+    pub total_reasoning_tokens: Option<i64>,
+    pub avg_duration_ms: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -759,7 +686,7 @@ pub struct ProviderStats {
     pub provider: String,
     pub request_count: i64,
     pub error_count: i64,
-    pub avg_duration_ms: f64,
+    pub avg_duration_ms: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -767,10 +694,11 @@ pub struct ApiKeyStats {
     pub api_key_id: String,
     pub api_key_name: String,
     pub request_count: i64,
-    pub total_input_tokens: i64,
-    pub total_output_tokens: i64,
-    pub cache_read_tokens: i64,
-    pub cache_write_tokens: i64,
+    pub total_input_tokens: Option<i64>,
+    pub total_output_tokens: Option<i64>,
+    pub cache_read_tokens: Option<i64>,
+    pub cache_write_tokens: Option<i64>,
+    pub reasoning_tokens: Option<i64>,
     pub last_used_at: i64,
 }
 

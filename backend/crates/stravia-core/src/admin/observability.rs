@@ -1,21 +1,59 @@
 use super::*;
 
 impl AdminService {
-    // ── Logs ──
+    // ── Interaction Observation ──
 
-    pub async fn query_logs(&self, q: LogQuery) -> anyhow::Result<LogPage> {
-        let mut q = q;
-        q.limit = Some(q.limit.unwrap_or(50).min(500));
-        q.offset = Some(q.offset.unwrap_or(0));
-        self.gw.storage.logs().query(q).await
+    pub async fn observation_forest(&self, query: ForestQuery) -> anyhow::Result<ForestPage> {
+        self.gw.observation.query_forest(query).await
     }
 
-    pub async fn get_log(&self, id: &str) -> anyhow::Result<Option<RequestLog>> {
-        self.gw.storage.logs().find_by_id(id).await
+    pub async fn observation_interaction(
+        &self,
+        id: &str,
+        filters: ForestQuery,
+    ) -> anyhow::Result<Option<InteractionDetail>> {
+        self.gw.observation.get_interaction(id, filters).await
     }
 
-    pub async fn clear_logs(&self) -> anyhow::Result<u64> {
-        self.gw.storage.logs().clear_all().await
+    pub async fn observation_rejections(
+        &self,
+        query: RejectionQuery,
+    ) -> anyhow::Result<RejectionPage> {
+        self.gw.observation.query_rejections(query).await
+    }
+
+    pub async fn observation_rejection(&self, id: &str) -> anyhow::Result<Option<RejectionDetail>> {
+        self.gw.observation.get_rejection(id).await
+    }
+
+    pub fn observation_subscribe(&self, after: i64) -> ObservationStream {
+        self.gw.observation.subscribe(after)
+    }
+
+    pub fn observation_debug(&self) -> DebugState {
+        self.gw.observation.debug_state()
+    }
+
+    pub fn set_observation_debug(&self, enabled: bool) -> DebugState {
+        self.gw.observation.set_debug_enabled(enabled)
+    }
+
+    pub async fn clear_observation_history(&self) -> anyhow::Result<ClearHistoryResult> {
+        self.gw.observation.clear_history().await
+    }
+
+    pub async fn issue_observation_bundle_ticket(
+        &self,
+        request: BundleRequest,
+    ) -> anyhow::Result<DownloadTicket> {
+        self.gw.observation.issue_bundle_ticket(request).await
+    }
+
+    pub async fn consume_observation_bundle_ticket(
+        &self,
+        ticket: &str,
+    ) -> anyhow::Result<BundleStream> {
+        self.gw.observation.consume_bundle_ticket(ticket).await
     }
 
     // ── Stats ──
@@ -27,7 +65,7 @@ impl AdminService {
     pub async fn get_stats_overview(&self, hours: Option<i32>) -> anyhow::Result<StatsOverview> {
         self.gw
             .storage
-            .logs()
+            .usage_stats()
             .stats_overview(Self::normalize_hours(hours).map(i64::from))
             .await
     }
@@ -35,7 +73,7 @@ impl AdminService {
     pub async fn get_stats_hourly(&self, hours: i32) -> anyhow::Result<Vec<StatsHourly>> {
         self.gw
             .storage
-            .logs()
+            .usage_stats()
             .stats_hourly(i64::from(hours.max(1)))
             .await
     }
@@ -43,7 +81,7 @@ impl AdminService {
     pub async fn get_stats_by_model(&self, hours: Option<i32>) -> anyhow::Result<Vec<ModelStats>> {
         self.gw
             .storage
-            .logs()
+            .usage_stats()
             .stats_by_model(Self::normalize_hours(hours).map(i64::from))
             .await
     }
@@ -54,7 +92,7 @@ impl AdminService {
     ) -> anyhow::Result<Vec<ProviderStats>> {
         self.gw
             .storage
-            .logs()
+            .usage_stats()
             .stats_by_provider(Self::normalize_hours(hours).map(i64::from))
             .await
     }
@@ -65,7 +103,7 @@ impl AdminService {
     ) -> anyhow::Result<Vec<ApiKeyStats>> {
         self.gw
             .storage
-            .logs()
+            .usage_stats()
             .stats_by_api_key(Self::normalize_hours(hours).map(i64::from))
             .await
     }

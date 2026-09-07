@@ -49,7 +49,7 @@ def test_development_task_accepts_vite_origin_without_bypassing_csrf(
     origins: list[str] = []
     frontend_ready = threading.Event()
     proc = subprocess.Popen(
-        ["task", "--color=false", "dev:server", f"WIRE_CAPTURE_DIR={tmp_path.as_posix()}/wire"],
+        ["task", "--color=false", "dev:server"],
         cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         env={
             **os.environ, "NO_COLOR": "1", "FORCE_COLOR": "0",

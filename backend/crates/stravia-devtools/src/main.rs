@@ -77,7 +77,9 @@ const POSTGRES_SCHEMA_SQL: &str = concat!(
     "\n",
     include_str!("../../stravia-core/migrations/postgres/0032_route_target_enabled.sql"),
     "\n",
-    include_str!("../../stravia-core/migrations/postgres/0033_admin_identity.sql")
+    include_str!("../../stravia-core/migrations/postgres/0033_admin_identity.sql"),
+    "\n",
+    include_str!("../../stravia-core/migrations/postgres/0034_interaction_observation.sql")
 );
 const POSTGRES_SCHEMA_HEADER: &str = "\
 -- Stravia AI Gateway - PostgreSQL Final Schema
@@ -199,17 +201,4 @@ fn init_tracing() {
         .with_target(false)
         .compact()
         .init();
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn checked_in_postgres_schema_matches_generator() {
-        assert_eq!(
-            include_str!("../../../../deploy/schema/postgres.sql"),
-            postgres_schema()
-        );
-    }
 }

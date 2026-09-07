@@ -5,12 +5,13 @@
 //! - Audit logging (what did the client actually send?).
 //! - Debug round-trip verification.
 
+use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
 
 /// A snapshot of the original inbound request, captured before any codec
 /// transformation.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct RawEnvelope {
     /// The original JSON body as received from the client.
     pub body: Option<Value>,

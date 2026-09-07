@@ -26,7 +26,7 @@ impl ProviderModelDiscovery for StubModelDiscovery {
 #[tokio::test]
 async fn route_model_discovery_uses_the_injected_adapter() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
-    let (gateway, _logs) = Gateway::new(GatewayConfig {
+    let gateway = Gateway::new(GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..GatewayConfig::default()
     })
@@ -57,7 +57,7 @@ async fn discovery_http_failure_is_typed_and_hides_the_response_body() -> anyhow
     });
 
     let data_dir = tempfile::tempdir()?;
-    let (gateway, _logs) = Gateway::new(GatewayConfig {
+    let gateway = Gateway::new(GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..GatewayConfig::default()
     })
@@ -102,7 +102,7 @@ async fn route_fixture_with_protocol(
     protocol: &str,
 ) -> anyhow::Result<(tempfile::TempDir, Gateway, Provider)> {
     let data_dir = tempfile::tempdir()?;
-    let (gateway, _logs) = Gateway::new(GatewayConfig {
+    let gateway = Gateway::new(GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..GatewayConfig::default()
     })
@@ -738,7 +738,7 @@ async fn open_responses_accepts_max_effort_map() -> anyhow::Result<()> {
 
 async fn create_openai_compatible_toggle_route(vendor: &str, model: &str) -> anyhow::Result<Route> {
     let data_dir = tempfile::tempdir()?;
-    let (gateway, _logs) = Gateway::new(GatewayConfig {
+    let gateway = Gateway::new(GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..GatewayConfig::default()
     })
@@ -810,7 +810,7 @@ async fn unknown_compatible_provider_does_not_guess_toggle_wire_shape() {
 #[tokio::test]
 async fn gemini_accepts_generated_effort_maps() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
-    let (gateway, _logs) = Gateway::new(GatewayConfig {
+    let gateway = Gateway::new(GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..GatewayConfig::default()
     })

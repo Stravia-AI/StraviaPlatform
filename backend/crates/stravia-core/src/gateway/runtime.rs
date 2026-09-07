@@ -75,19 +75,17 @@ impl Gateway {
 
     pub async fn shutdown(&self) {
         self.lifecycle.shutdown().await;
+        self.observation.shutdown().await;
     }
 
-    pub async fn new(config: GatewayConfig) -> anyhow::Result<(Self, mpsc::Receiver<LogEntry>)> {
+    pub async fn new(config: GatewayConfig) -> anyhow::Result<Self> {
         let (storage_kind, storage, sqlite_pool, postgres_pool) =
             open_storage_runtime(&config).await?;
         Self::from_storage_with_kind(config, storage, storage_kind, sqlite_pool, postgres_pool)
             .await
     }
 
-    pub async fn from_storage(
-        config: GatewayConfig,
-        storage: DynStorage,
-    ) -> anyhow::Result<(Self, mpsc::Receiver<LogEntry>)> {
+    pub async fn from_storage(config: GatewayConfig, storage: DynStorage) -> anyhow::Result<Self> {
         Self::from_storage_with_kind(config, storage, RuntimeStorageKind::Memory, None, None).await
     }
 
@@ -97,7 +95,7 @@ impl Gateway {
         storage_kind: RuntimeStorageKind,
         sqlite_pool: Option<SqlitePool>,
         postgres_pool: Option<Pool<Postgres>>,
-    ) -> anyhow::Result<(Self, mpsc::Receiver<LogEntry>)> {
+    ) -> anyhow::Result<Self> {
         let history_sqlite_pool = if sqlite_pool.is_none() && postgres_pool.is_none() {
             let pool = sqlx::sqlite::SqlitePoolOptions::new()
                 .max_connections(1)
@@ -122,23 +120,23 @@ impl Gateway {
         let health_registry = Arc::new(HealthRegistry::new());
         let ollama_capability_cache = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
         let provider_catalog = provider_catalog::ProviderCatalog::new(&config.data_dir)?;
-        #[cfg(debug_assertions)]
-        let wire_capture = {
-            let capture = config
-                .wire_capture_dir
-                .clone()
-                .map(wire_capture::WireCapture::new)
-                .transpose()?;
-            if let Some(directory) = &config.wire_capture_dir {
-                tracing::warn!(
-                    directory = %directory.display(),
-                    "wire capture enabled; redacted headers and full request/response bodies will be written to disk"
-                );
+        let retention_days = match storage.settings().get("log_retention_days").await {
+            Ok(value) => value
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(7),
+            Err(_) => {
+                tracing::warn!("observation retention setting unavailable; using seven days");
+                7
             }
-            capture
         };
-
-        let (log_tx, log_rx) = mpsc::channel(1024);
+        let observation = interaction_observation::InteractionObservation::new(
+            history_sqlite_pool.clone(),
+            postgres_pool.clone(),
+            config.data_dir.clone(),
+            retention_days,
+            !matches!(storage_kind, RuntimeStorageKind::Memory),
+        )
+        .await;
         let turn_chains: Arc<dyn turn_chain::TurnChainStore> =
             if let Some(pool) = history_sqlite_pool.as_ref() {
                 Arc::new(turn_chain::SqlTurnChainStore::sqlite(pool.clone()))
@@ -247,9 +245,7 @@ impl Gateway {
             cache_affinity: router::cache_affinity::CacheAffinity::default(),
             route_policy_state: router::RoutePolicyState::default(),
             ollama_capability_cache,
-            log_tx,
-            #[cfg(debug_assertions)]
-            wire_capture,
+            observation,
             auth_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             agent_definitions,
             artifact_store,
@@ -432,6 +428,7 @@ impl Gateway {
             let turn_chains = Arc::clone(&gw.turn_chains);
             let history_markers = Arc::clone(&gw.history_markers);
             let artifact_store = gw.artifact_store.clone();
+            let observation = gw.observation.clone();
             let cancellation = gw.lifecycle.cancellation.clone();
             gw.lifecycle.spawn(async move {
                 let mut interval = tokio::time::interval(STORE_SWEEP_INTERVAL);
@@ -439,6 +436,14 @@ impl Gateway {
                     tokio::select! {
                         _ = cancellation.cancelled() => return,
                         _ = interval.tick() => {}
+                    }
+
+                    let observation_result = tokio::select! {
+                        _ = cancellation.cancelled() => return,
+                        result = observation.sweep_retention() => result,
+                    };
+                    if observation_result.is_err() {
+                        tracing::warn!("observation retention cleanup incomplete");
                     }
 
                     let turn_result = tokio::select! {
@@ -470,7 +475,7 @@ impl Gateway {
             });
         }
 
-        Ok((gw, log_rx))
+        Ok(gw)
     }
 
     pub fn admin(&self) -> admin::AdminService {

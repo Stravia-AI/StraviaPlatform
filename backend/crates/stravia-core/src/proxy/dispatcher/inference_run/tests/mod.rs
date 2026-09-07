@@ -27,6 +27,28 @@ use crate::protocol::ids::{
 };
 use crate::protocol::ir::AiResponse;
 
+async fn wait_for_observed_run_finish(
+    events: &mut crate::interaction_observation::ObservationStream,
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let event = events
+                .next()
+                .await
+                .expect("Observation stream remains open");
+            if matches!(
+                event,
+                crate::interaction_observation::ObservationUpdate::Event(event)
+                    if event.kind == "run_finished"
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("first request completes before continuation");
+}
+
 struct NormalizingTestVendor;
 
 struct FailingParentDiscoveryStore {
@@ -345,6 +367,192 @@ impl crate::hook::HookSession for PrependContextSession {
     }
 }
 
+async fn hidden_round_request_hook_response_is_delivered_impl() {
+    let platform_round = serde_json::json!({
+        "id": "chatcmpl-hook-followup", "object": "chat.completion",
+        "created": 1, "model": "provider-model",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant", "content": null,
+                "tool_calls": [{
+                    "id": "platform-call", "type": "function",
+                    "function": { "name": "stravia__ordered_tool", "arguments": "{\"index\":1}" }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }],
+        "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 }
+    });
+    let (base_url, provider_calls) = serve_openai_sequence(vec![platform_round]).await;
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let tool_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let gateway = crate::Gateway::builder(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .hook(Arc::new(HiddenRoundRespondHook))
+    .platform_tool(Arc::new(OrderedTool {
+        calls: Arc::clone(&tool_calls),
+    }))
+    .build()
+    .await
+    .expect("Gateway");
+    configure_route(&gateway, "hook-followup", &[base_url]).await;
+    let response = execute_stream(gateway.clone(), "hook-followup").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("hidden-round Hook response body");
+    let body = String::from_utf8_lossy(&body);
+    assert!(
+        body.contains(crate::history_marker::HISTORY_MARKER_PREFIX),
+        "{body}"
+    );
+    assert!(body.contains("hook completed hidden round"), "{body}");
+    assert!(!body.contains("stream_mid_error"), "{body}");
+    assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        *tool_calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        vec![1]
+    );
+    let generation_payload = sqlx::query_scalar::<_, String>(
+        "SELECT payload FROM turn_chain_nodes WHERE kind = 'response' ORDER BY created_at DESC LIMIT 1",
+    )
+    .fetch_one(gateway._sqlite_pool.as_ref().expect("Gateway SQLite pool"))
+    .await.expect("hidden-round Hook Generation Chain payload");
+    assert!(
+        generation_payload.contains(crate::history_marker::HISTORY_MARKER_PREFIX),
+        "{generation_payload}"
+    );
+    assert!(
+        generation_payload.contains("hook completed hidden round"),
+        "{generation_payload}"
+    );
+}
+
+async fn platform_only_stream_continues_with_marker_impl() {
+    let (base_url, provider_calls) = serve_sse_sequence(vec![
+        openai_sse_platform_tool_call(),
+        openai_sse_with_usage("final answer", 22, 2),
+        openai_sse_with_usage("continued answer", 33, 3),
+    ])
+    .await;
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let tool_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (expose_tool_hook, _request_hook_rounds) = ExposeOrderedToolHook::counting();
+    let gateway = crate::Gateway::builder(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .hook(Arc::new(expose_tool_hook))
+    .platform_tool(Arc::new(OrderedTool {
+        calls: Arc::clone(&tool_calls),
+    }))
+    .build()
+    .await
+    .expect("Gateway");
+    configure_route(&gateway, "platform-only-stream", &[base_url]).await;
+    let response = execute_stream(gateway.clone(), "platform-only-stream").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("Platform-only stream body");
+    let body = String::from_utf8_lossy(&body);
+    assert!(
+        body.contains(crate::history_marker::HISTORY_MARKER_PREFIX),
+        "{body}"
+    );
+    assert!(
+        !body.contains(r#""content":"\n\n<!-- stravia-history-marker:"#),
+        "{body}"
+    );
+    assert_eq!(
+        body.matches(crate::history_marker::HISTORY_MARKER_PREFIX)
+            .count(),
+        1,
+        "{body}"
+    );
+    assert!(body.contains("final answer"), "{body}");
+    assert!(!body.contains("platform-call"), "{body}");
+    assert!(!body.contains("stravia__ordered_tool"), "{body}");
+    assert!(!body.contains(r#"{\"index\":1}"#), "{body}");
+    let assistant_reasoning = body
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+        .filter_map(|event| {
+            event["choices"][0]["delta"]["reasoning_content"]
+                .as_str()
+                .map(str::to_owned)
+        })
+        .collect::<String>();
+    assert!(
+        assistant_reasoning.starts_with(crate::history_marker::HISTORY_MARKER_PREFIX),
+        "{assistant_reasoning}"
+    );
+    let assistant_text = body
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+        .filter_map(|event| {
+            event["choices"][0]["delta"]["content"]
+                .as_str()
+                .map(str::to_owned)
+        })
+        .collect::<String>();
+    assert_eq!(assistant_text, "final answer");
+    let mut first_user = crate::protocol::ir::AiItem::output_text("test");
+    first_user.role = crate::protocol::ir::Role::User;
+    let mut second_user = crate::protocol::ir::AiItem::output_text("follow up");
+    second_user.role = crate::protocol::ir::Role::User;
+    let mut second_request = AiRequest::new(
+        "platform-only-stream",
+        vec![
+            first_user,
+            crate::protocol::ir::AiItem::thinking(assistant_reasoning, None),
+            crate::protocol::ir::AiItem::output_text(assistant_text),
+            second_user,
+        ],
+    );
+    second_request.stream.enabled = true;
+    let second_response = execute_non_stream_request(gateway.clone(), second_request).await;
+    let second_status = second_response.status();
+    let second_body = to_bytes(second_response.into_body(), usize::MAX)
+        .await
+        .expect("continued response body");
+    assert_eq!(
+        second_status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&second_body)
+    );
+    assert!(
+        String::from_utf8_lossy(&second_body).contains("continued answer"),
+        "{}",
+        String::from_utf8_lossy(&second_body)
+    );
+    let child_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM turn_chain_nodes WHERE kind = 'response' AND parent_id IS NOT NULL",
+    )
+    .fetch_one(gateway._sqlite_pool.as_ref().expect("Gateway SQLite pool"))
+    .await
+    .expect("count Generation Chain children");
+    assert_eq!(
+        child_count, 1,
+        "the streamed assistant output must discover the first response as its exact parent"
+    );
+    assert_eq!(provider_calls.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        *tool_calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        vec![1]
+    );
+}
+
 async fn gateway_rewriting_model(test_name: &str, final_model: &str) -> Gateway {
     let config = crate::config::GatewayConfig {
         data_dir: std::env::temp_dir()
@@ -358,7 +566,6 @@ async fn gateway_rewriting_model(test_name: &str, final_model: &str) -> Gateway 
         .build()
         .await
         .expect("gateway init")
-        .0
 }
 
 fn bearer_headers(token: &str) -> HeaderMap {
@@ -1563,7 +1770,7 @@ async fn assert_hidden_round_rechecks_access(
         ..Default::default()
     };
     let access = AccessMutationFixture::default();
-    let (gateway, _logs) = crate::Gateway::builder(config)
+    let gateway = crate::Gateway::builder(config)
         .hook(Arc::new(ExposeAccessMutationHook(mutation)))
         .platform_tool(Arc::new(AccessMutationTool {
             access: access.clone(),
@@ -1654,7 +1861,7 @@ async fn buffered_platform_only_executes_hidden_round_impl() {
     let data_dir = tempfile::tempdir().expect("temporary data directory");
     let tool_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
     let (expose_tool_hook, _request_hook_rounds) = ExposeOrderedToolHook::counting();
-    let (gateway, _logs) = crate::Gateway::builder(crate::config::GatewayConfig {
+    let gateway = crate::Gateway::builder(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -1695,104 +1902,6 @@ async fn buffered_platform_only_executes_hidden_round_impl() {
     assert_eq!(completed_marker_count, 1);
 }
 
-async fn hidden_round_request_hook_response_is_delivered_impl() {
-    let platform_round = serde_json::json!({
-        "id": "chatcmpl-hook-followup",
-        "object": "chat.completion",
-        "created": 1,
-        "model": "provider-model",
-        "choices": [{
-            "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": null,
-                "tool_calls": [{
-                    "id": "platform-call",
-                    "type": "function",
-                    "function": {
-                        "name": "stravia__ordered_tool",
-                        "arguments": "{\"index\":1}"
-                    }
-                }]
-            },
-            "finish_reason": "tool_calls"
-        }],
-        "usage": {
-            "prompt_tokens": 1,
-            "completion_tokens": 1,
-            "total_tokens": 2
-        }
-    });
-    let (base_url, provider_calls) = serve_openai_sequence(vec![platform_round]).await;
-    let data_dir = tempfile::tempdir().expect("temporary data directory");
-    let tool_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let (gateway, mut logs) = crate::Gateway::builder(crate::config::GatewayConfig {
-        data_dir: data_dir.path().to_path_buf(),
-        ..Default::default()
-    })
-    .hook(Arc::new(HiddenRoundRespondHook))
-    .platform_tool(Arc::new(OrderedTool {
-        calls: Arc::clone(&tool_calls),
-    }))
-    .build()
-    .await
-    .expect("Gateway");
-    configure_route(&gateway, "hook-followup", &[base_url]).await;
-
-    let response = execute_stream(gateway.clone(), "hook-followup").await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("hidden-round Hook response body");
-    let body = String::from_utf8_lossy(&body);
-    assert!(
-        body.contains(crate::history_marker::HISTORY_MARKER_PREFIX),
-        "{body}"
-    );
-    assert!(body.contains("hook completed hidden round"), "{body}");
-    assert!(!body.contains("stream_mid_error"), "{body}");
-    assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        *tool_calls
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()),
-        vec![1]
-    );
-    let generation_payload = sqlx::query_scalar::<_, String>(
-        "SELECT payload FROM turn_chain_nodes WHERE kind = 'response' \
-         ORDER BY created_at DESC LIMIT 1",
-    )
-    .fetch_one(gateway._sqlite_pool.as_ref().expect("Gateway SQLite pool"))
-    .await
-    .expect("hidden-round Hook Generation Chain payload");
-    assert!(
-        generation_payload.contains(crate::history_marker::HISTORY_MARKER_PREFIX),
-        "{generation_payload}"
-    );
-    assert!(
-        generation_payload.contains("hook completed hidden round"),
-        "{generation_payload}"
-    );
-    let mut entries = Vec::new();
-    for _ in 0..2 {
-        entries.push(
-            tokio::time::timeout(std::time::Duration::from_secs(1), logs.recv())
-                .await
-                .expect("hidden-round Hook log should be emitted")
-                .expect("hidden-round Hook log channel should remain open"),
-        );
-    }
-    assert!(
-        entries.iter().any(|entry| {
-            entry
-                .client_response_body
-                .as_deref()
-                .is_some_and(|body| body.contains("hook completed hidden round"))
-        }),
-        "{entries:#?}"
-    );
-}
-
 async fn hidden_round_request_hook_rejection_is_delivered_impl() {
     let platform_round = serde_json::json!({
         "id": "chatcmpl-hook-reject",
@@ -1824,7 +1933,7 @@ async fn hidden_round_request_hook_rejection_is_delivered_impl() {
     let (base_url, provider_calls) = serve_openai_sequence(vec![platform_round]).await;
     let data_dir = tempfile::tempdir().expect("temporary data directory");
     let tool_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let (gateway, _logs) = crate::Gateway::builder(crate::config::GatewayConfig {
+    let gateway = crate::Gateway::builder(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -1913,7 +2022,7 @@ async fn mixed_tool_continuation_replays_impl() {
     };
     let tool_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
     let (expose_tool_hook, _request_hook_rounds) = ExposeOrderedToolHook::counting();
-    let (gateway, _logs) = crate::Gateway::builder(config)
+    let gateway = crate::Gateway::builder(config)
         .hook(Arc::new(expose_tool_hook))
         .platform_tool(Arc::new(OrderedTool {
             calls: tool_calls.clone(),
@@ -2034,148 +2143,6 @@ async fn mixed_tool_continuation_replays_impl() {
     assert_eq!(provider_calls.load(Ordering::SeqCst), 3);
 }
 
-async fn platform_only_stream_continues_with_marker_impl() {
-    let (base_url, provider_calls) = serve_sse_sequence(vec![
-        openai_sse_platform_tool_call(),
-        openai_sse_with_usage("final answer", 22, 2),
-        openai_sse_with_usage("continued answer", 33, 3),
-    ])
-    .await;
-    let data_dir = tempfile::tempdir().expect("temporary data directory");
-    let tool_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let (expose_tool_hook, _request_hook_rounds) = ExposeOrderedToolHook::counting();
-    let (gateway, mut logs) = crate::Gateway::builder(crate::config::GatewayConfig {
-        data_dir: data_dir.path().to_path_buf(),
-        ..Default::default()
-    })
-    .hook(Arc::new(expose_tool_hook))
-    .platform_tool(Arc::new(OrderedTool {
-        calls: Arc::clone(&tool_calls),
-    }))
-    .build()
-    .await
-    .expect("Gateway");
-    configure_route(&gateway, "platform-only-stream", &[base_url]).await;
-
-    let response = execute_stream(gateway.clone(), "platform-only-stream").await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("Platform-only stream body");
-    let body = String::from_utf8_lossy(&body);
-    assert!(
-        body.contains(crate::history_marker::HISTORY_MARKER_PREFIX),
-        "{body}"
-    );
-    assert!(
-        !body.contains(r#""content":"\n\n<!-- stravia-history-marker:"#),
-        "streamed history markers must match the canonical assistant output exactly: {body}"
-    );
-    assert_eq!(
-        body.matches(crate::history_marker::HISTORY_MARKER_PREFIX)
-            .count(),
-        1,
-        "{body}"
-    );
-    assert!(body.contains("final answer"), "{body}");
-    assert!(!body.contains("platform-call"), "{body}");
-    assert!(!body.contains("stravia__ordered_tool"), "{body}");
-    assert!(!body.contains(r#"{\"index\":1}"#), "{body}");
-    let assistant_reasoning = body
-        .lines()
-        .filter_map(|line| line.strip_prefix("data: "))
-        .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
-        .filter_map(|event| {
-            event["choices"][0]["delta"]["reasoning_content"]
-                .as_str()
-                .map(str::to_owned)
-        })
-        .collect::<String>();
-    assert!(
-        assistant_reasoning.starts_with(crate::history_marker::HISTORY_MARKER_PREFIX),
-        "{assistant_reasoning}"
-    );
-    let assistant_text = body
-        .lines()
-        .filter_map(|line| line.strip_prefix("data: "))
-        .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
-        .filter_map(|event| {
-            event["choices"][0]["delta"]["content"]
-                .as_str()
-                .map(str::to_owned)
-        })
-        .collect::<String>();
-    assert_eq!(assistant_text, "final answer");
-
-    let mut first_user = crate::protocol::ir::AiItem::output_text("test");
-    first_user.role = crate::protocol::ir::Role::User;
-    let mut second_user = crate::protocol::ir::AiItem::output_text("follow up");
-    second_user.role = crate::protocol::ir::Role::User;
-    let mut second_request = AiRequest::new(
-        "platform-only-stream",
-        vec![
-            first_user,
-            crate::protocol::ir::AiItem::thinking(assistant_reasoning, None),
-            crate::protocol::ir::AiItem::output_text(assistant_text),
-            second_user,
-        ],
-    );
-    second_request.stream.enabled = true;
-    let second_response = execute_non_stream_request(gateway.clone(), second_request).await;
-    let second_status = second_response.status();
-    let second_body = to_bytes(second_response.into_body(), usize::MAX)
-        .await
-        .expect("continued response body");
-    assert_eq!(
-        second_status,
-        StatusCode::OK,
-        "{}",
-        String::from_utf8_lossy(&second_body)
-    );
-    assert!(
-        String::from_utf8_lossy(&second_body).contains("continued answer"),
-        "{}",
-        String::from_utf8_lossy(&second_body)
-    );
-
-    let child_count = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM turn_chain_nodes WHERE kind = 'response' AND parent_id IS NOT NULL",
-    )
-    .fetch_one(gateway._sqlite_pool.as_ref().expect("Gateway SQLite pool"))
-    .await
-    .expect("count Generation Chain children");
-    assert_eq!(
-        child_count, 1,
-        "the streamed assistant output must discover the first response as its exact parent"
-    );
-    assert_eq!(provider_calls.load(Ordering::SeqCst), 3);
-    assert_eq!(
-        *tool_calls
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()),
-        vec![1]
-    );
-    let mut entries = Vec::new();
-    for _ in 0..3 {
-        entries.push(
-            tokio::time::timeout(std::time::Duration::from_secs(1), logs.recv())
-                .await
-                .expect("one log per streamed Model Turn")
-                .expect("request log channel remains open"),
-        );
-    }
-    assert_eq!(
-        entries
-            .iter()
-            .map(|entry| entry.usage.prompt_tokens)
-            .collect::<Vec<_>>(),
-        vec![11, 22, 33]
-    );
-    assert!(entries[0].path.is_none());
-    assert!(entries[1].path.is_some());
-    assert!(entries[2].path.is_some());
-}
-
 async fn platform_only_stream_preserves_client_tool_arguments_impl() {
     let (base_url, provider_calls) = serve_sse_sequence(vec![
         openai_sse_platform_tool_call(),
@@ -2185,7 +2152,7 @@ async fn platform_only_stream_preserves_client_tool_arguments_impl() {
     let data_dir = tempfile::tempdir().expect("temporary data directory");
     let tool_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
     let (expose_tool_hook, _request_hook_rounds) = ExposeOrderedToolHook::counting();
-    let (gateway, _logs) = crate::Gateway::builder(crate::config::GatewayConfig {
+    let gateway = crate::Gateway::builder(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -2292,7 +2259,7 @@ async fn platform_markers_are_ingress_neutral_impl() {
     let data_dir = tempfile::tempdir().expect("temporary data directory");
     let tool_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
     let (expose_tool_hook, _request_hook_rounds) = ExposeOrderedToolHook::counting();
-    let (gateway, _logs) = crate::Gateway::builder(crate::config::GatewayConfig {
+    let gateway = crate::Gateway::builder(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })

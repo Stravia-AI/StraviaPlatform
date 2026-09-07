@@ -1,54 +1,12 @@
 use super::*;
 
-struct ClearHiddenMediaPlanHook;
-
-struct ClearHiddenMediaPlanSession;
-
-impl crate::hook::Hook for ClearHiddenMediaPlanHook {
-    fn descriptor(&self) -> crate::hook::HookDescriptor {
-        crate::hook::HookDescriptor {
-            event_kinds: vec![crate::hook::EventKind::Request],
-            ..crate::hook::HookDescriptor::all("clear-hidden-media-plan")
-        }
-    }
-
-    fn create_session(
-        &self,
-        _context: &crate::hook::SessionContext,
-    ) -> Box<dyn crate::hook::HookSession> {
-        Box::new(ClearHiddenMediaPlanSession)
-    }
-}
-
-#[async_trait]
-impl crate::hook::HookSession for ClearHiddenMediaPlanSession {
-    async fn handle(
-        &mut self,
-        event: crate::hook::HookEvent<'_>,
-    ) -> Result<crate::hook::ActionBatch, String> {
-        let crate::hook::HookEvent::Request { current, round, .. } = event else {
-            return Ok(crate::hook::ActionBatch::default());
-        };
-        if round == 0 {
-            return Ok(crate::hook::ActionBatch::default());
-        }
-        let mut replacement = current.clone();
-        replacement.meta.media_routing = None;
-        Ok(crate::hook::ActionBatch::one(
-            crate::hook::HookAction::PatchRequest(Box::new(
-                crate::hook::RequestPatch::ReplaceCanonical(Box::new(replacement)),
-            )),
-        ))
-    }
-}
-
 #[tokio::test]
 async fn non_vision_parent_uses_capability_owned_media_model() {
     let source_id = Arc::new(std::sync::Mutex::new(None));
     let (parent_url, parent_calls) = serve_media_parent(source_id.clone()).await;
     let (media_url, media_calls) = serve_media_model(source_id).await;
     let data_dir = tempfile::tempdir().expect("temporary data directory");
-    let (gateway, mut logs) = crate::Gateway::builder(crate::config::GatewayConfig {
+    let gateway = crate::Gateway::builder(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -215,15 +173,6 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
         .as_str()
         .expect("first assistant reasoning")
         .to_owned();
-    let trusted_media_turns = sqlx::query_scalar::<_, i64>(
-        "SELECT json_array_length(json_extract(payload, '$.trusted_media_turn_ids')) \
-         FROM turn_chain_nodes WHERE kind = 'response' ORDER BY created_at DESC LIMIT 1",
-    )
-    .fetch_one(gateway._sqlite_pool.as_ref().expect("Gateway SQLite pool"))
-    .await
-    .expect("persisted trusted Media Turns");
-    assert_eq!(trusted_media_turns, 1);
-
     let mut second_user = crate::protocol::ir::AiItem::output_text("What is its subject?");
     second_user.role = crate::protocol::ir::Role::User;
     let second_request = AiRequest::new(
@@ -255,36 +204,48 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
 
     assert_eq!(parent_calls.load(Ordering::SeqCst), 4);
     assert_eq!(media_calls.load(Ordering::SeqCst), 2);
-    let mut entries = Vec::new();
-    for _ in 0..6 {
-        let entry = tokio::time::timeout(std::time::Duration::from_secs(1), logs.recv())
-            .await
-            .expect("Media request log should be emitted")
-            .expect("Media request log channel should remain open");
-        assert!(
-            entry.client_request_body.is_none()
-                && entry.client_response_body.is_none()
-                && entry.upstream_request_body.is_none()
-                && entry.upstream_response_body.is_none(),
-            "Media request payloads must remain redacted: {entry:?}"
-        );
-        entries.push(entry);
+}
+
+struct ClearHiddenMediaPlanHook;
+
+struct ClearHiddenMediaPlanSession;
+
+impl crate::hook::Hook for ClearHiddenMediaPlanHook {
+    fn descriptor(&self) -> crate::hook::HookDescriptor {
+        crate::hook::HookDescriptor {
+            event_kinds: vec![crate::hook::EventKind::Request],
+            ..crate::hook::HookDescriptor::all("clear-hidden-media-plan")
+        }
     }
-    let parent_entries = entries
-        .iter()
-        .filter(|entry| entry.client_model == "text-parent")
-        .collect::<Vec<_>>();
-    let media_entries = entries
-        .iter()
-        .filter(|entry| entry.client_model == "media-vision")
-        .collect::<Vec<_>>();
-    assert_eq!(parent_entries.len(), 4, "{entries:#?}");
-    assert_eq!(media_entries.len(), 2, "{entries:#?}");
-    assert!(entries.iter().all(|entry| {
-        entry.usage.prompt_tokens == 1
-            && entry.usage.completion_tokens == 1
-            && entry.usage.total_tokens == 2
-    }));
+
+    fn create_session(
+        &self,
+        _context: &crate::hook::SessionContext,
+    ) -> Box<dyn crate::hook::HookSession> {
+        Box::new(ClearHiddenMediaPlanSession)
+    }
+}
+
+#[async_trait]
+impl crate::hook::HookSession for ClearHiddenMediaPlanSession {
+    async fn handle(
+        &mut self,
+        event: crate::hook::HookEvent<'_>,
+    ) -> Result<crate::hook::ActionBatch, String> {
+        let crate::hook::HookEvent::Request { current, round, .. } = event else {
+            return Ok(crate::hook::ActionBatch::default());
+        };
+        if round == 0 {
+            return Ok(crate::hook::ActionBatch::default());
+        }
+        let mut replacement = current.clone();
+        replacement.meta.media_routing = None;
+        Ok(crate::hook::ActionBatch::one(
+            crate::hook::HookAction::PatchRequest(Box::new(
+                crate::hook::RequestPatch::ReplaceCanonical(Box::new(replacement)),
+            )),
+        ))
+    }
 }
 
 #[tokio::test]
@@ -296,7 +257,7 @@ async fn mixed_media_route_prefers_native_targets_and_rejects_targets_without_to
     let (no_tools_url, no_tools_calls) =
         serve_openai_sequence(vec![openai_response("unsupported must not run")]).await;
     let data_dir = tempfile::tempdir().expect("temporary data directory");
-    let (gateway, _logs) = Gateway::new(crate::config::GatewayConfig {
+    let gateway = Gateway::new(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })

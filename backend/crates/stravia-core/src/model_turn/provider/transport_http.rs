@@ -1,58 +1,78 @@
 use super::*;
 
 impl ProviderCall {
+    async fn call_non_stream_once(
+        &self,
+        outbound: &OutboundRequest,
+    ) -> anyhow::Result<(Value, u16, HeaderMap, AttemptObservation)> {
+        let request_body = bytes::Bytes::from(serde_json::to_vec(&outbound.body)?);
+        let mut request_headers = outbound.headers.clone();
+        request_headers
+            .entry(reqwest::header::CONTENT_TYPE)
+            .or_insert(reqwest::header::HeaderValue::from_static(
+                "application/json",
+            ));
+        let attempt = self
+            .adapter
+            .begin_attempt("http", &outbound.url, &request_headers, || {
+                bytes_value(&request_body)
+            });
+        let result = self
+            .client
+            .call_non_stream_raw(&outbound.url, request_headers, request_body)
+            .await;
+        let (raw, status, headers, response_body) = match result {
+            Ok(response) => response,
+            Err(error) => {
+                if let Some(decode) =
+                    error.downcast_ref::<crate::proxy::client::UpstreamResponseDecodeError>()
+                {
+                    attempt.wire_lazy(
+                        "upstream_response",
+                        "http_response",
+                        Some(decode.status),
+                        Some(&decode.headers),
+                        || bytes_value(&decode.body),
+                    );
+                    attempt.finish(
+                        "failed",
+                        Some(decode.status),
+                        Some("response_decode_error".into()),
+                        None,
+                    );
+                } else {
+                    attempt.finish(
+                        "failed",
+                        None,
+                        Some("provider_transport_error".into()),
+                        None,
+                    );
+                }
+                return Err(error);
+            }
+        };
+        attempt.wire_lazy(
+            "upstream_response",
+            "http_response",
+            Some(status),
+            Some(&headers),
+            || bytes_value(&response_body),
+        );
+        Ok((raw, status, headers, attempt))
+    }
+
     pub(crate) async fn call_non_stream(&mut self) -> anyhow::Result<ProviderUnaryResponse> {
         loop {
-            #[cfg(debug_assertions)]
-            self.adapter.capture_upstream_request(
-                crate::wire_capture::CaptureTransport::Http,
-                &self.outbound.headers,
-                &self.outbound.body,
-            );
-            let (mut raw, mut status, mut headers) = self
-                .client
-                .call_non_stream(
-                    &self.outbound.url,
-                    self.outbound.headers.clone(),
-                    self.outbound.body.clone(),
-                )
-                .await?;
-            #[cfg(debug_assertions)]
-            self.adapter.capture_upstream_response(
-                crate::wire_capture::CaptureTransport::Http,
-                crate::wire_capture::CaptureRepresentation::Wire,
-                status,
-                Some(&headers),
-                &serde_json::to_vec(&raw).unwrap_or_default(),
-            );
+            let (mut raw, mut status, mut headers, mut attempt) =
+                self.call_non_stream_once(&self.outbound).await?;
             if status == 401
                 && self
                     .adapter
                     .refresh_auth_on_unauthorized(&mut self.outbound)
                     .await?
             {
-                #[cfg(debug_assertions)]
-                self.adapter.capture_upstream_request(
-                    crate::wire_capture::CaptureTransport::Http,
-                    &self.outbound.headers,
-                    &self.outbound.body,
-                );
-                (raw, status, headers) = self
-                    .client
-                    .call_non_stream(
-                        &self.outbound.url,
-                        self.outbound.headers.clone(),
-                        self.outbound.body.clone(),
-                    )
-                    .await?;
-                #[cfg(debug_assertions)]
-                self.adapter.capture_upstream_response(
-                    crate::wire_capture::CaptureTransport::Http,
-                    crate::wire_capture::CaptureRepresentation::Wire,
-                    status,
-                    Some(&headers),
-                    &serde_json::to_vec(&raw).unwrap_or_default(),
-                );
+                attempt.finish("failed", Some(status), Some("unauthorized".into()), None);
+                (raw, status, headers, attempt) = self.call_non_stream_once(&self.outbound).await?;
             }
             if self
                 .outbound
@@ -63,6 +83,12 @@ impl ProviderCall {
                 && self.adapter.is_continuation_not_found(status, &raw)
                 && let Some(full_outbound) = self.continuation_fallback.take()
             {
+                attempt.finish(
+                    "failed",
+                    Some(status),
+                    Some("previous_response_not_found".into()),
+                    None,
+                );
                 tracing::debug!(
                     transport = "http",
                     provider_id = self.adapter.binding.provider.id,
@@ -72,16 +98,63 @@ impl ProviderCall {
                 self.outbound = full_outbound;
                 continue;
             }
-            let canonical = self.adapter.parse_response(InboundResponse {
-                status,
-                body: raw.clone(),
-            });
+            let canonical = self
+                .adapter
+                .parse_response(InboundResponse {
+                    status,
+                    body: raw.clone(),
+                })
+                .await;
             return Ok(ProviderUnaryResponse {
                 raw,
-                canonical: canonical.await,
+                canonical,
                 status,
                 headers,
+                attempt,
             });
+        }
+    }
+
+    async fn call_stream_once(
+        &self,
+        outbound: &OutboundRequest,
+    ) -> anyhow::Result<(reqwest::Response, u16, AttemptObservation)> {
+        let request_body = bytes::Bytes::from(serde_json::to_vec(&outbound.body)?);
+        let mut request_headers = outbound.headers.clone();
+        request_headers
+            .entry(reqwest::header::CONTENT_TYPE)
+            .or_insert(reqwest::header::HeaderValue::from_static(
+                "application/json",
+            ));
+        let attempt = self
+            .adapter
+            .begin_attempt("sse", &outbound.url, &request_headers, || {
+                bytes_value(&request_body)
+            });
+        match self
+            .client
+            .call_stream_raw(&outbound.url, request_headers, request_body)
+            .await
+        {
+            Ok((response, status)) => {
+                attempt.wire(
+                    "upstream_response",
+                    "http_headers",
+                    Some(status),
+                    Some(response.headers()),
+                    Value::Null,
+                );
+                Ok((response, status, attempt))
+            }
+            Err(error) => {
+                attempt.finish(
+                    "failed",
+                    None,
+                    Some("provider_transport_error".into()),
+                    None,
+                );
+                Err(error)
+            }
         }
     }
 
@@ -90,70 +163,26 @@ impl ProviderCall {
         mut outbound: OutboundRequest,
     ) -> anyhow::Result<ProviderStreamResponse> {
         loop {
-            #[cfg(debug_assertions)]
-            self.adapter.capture_upstream_request(
-                crate::wire_capture::CaptureTransport::Sse,
-                &outbound.headers,
-                &outbound.body,
-            );
-            let (mut response, mut status) = self
-                .client
-                .call_stream(
-                    &outbound.url,
-                    outbound.headers.clone(),
-                    outbound.body.clone(),
-                )
-                .await?;
-            #[cfg(debug_assertions)]
-            self.adapter.capture_upstream_response(
-                crate::wire_capture::CaptureTransport::Sse,
-                crate::wire_capture::CaptureRepresentation::Wire,
-                status,
-                Some(response.headers()),
-                &[],
-            );
+            let (mut response, mut status, mut attempt) = self.call_stream_once(&outbound).await?;
             if status == 401
                 && self
                     .adapter
                     .refresh_auth_on_unauthorized(&mut outbound)
                     .await?
             {
-                #[cfg(debug_assertions)]
-                self.adapter.capture_upstream_request(
-                    crate::wire_capture::CaptureTransport::Sse,
-                    &outbound.headers,
-                    &outbound.body,
-                );
-                (response, status) = self
-                    .client
-                    .call_stream(
-                        &outbound.url,
-                        outbound.headers.clone(),
-                        outbound.body.clone(),
-                    )
-                    .await?;
-                #[cfg(debug_assertions)]
-                self.adapter.capture_upstream_response(
-                    crate::wire_capture::CaptureTransport::Sse,
-                    crate::wire_capture::CaptureRepresentation::Wire,
-                    status,
-                    Some(response.headers()),
-                    &[],
-                );
+                attempt.finish("failed", Some(status), Some("unauthorized".into()), None);
+                (response, status, attempt) = self.call_stream_once(&outbound).await?;
             }
             let headers = response.headers().clone();
             if status >= 400 {
-                let body = response.json().await.map_err(anyhow::Error::from);
-                #[cfg(debug_assertions)]
-                if let Ok(body) = &body {
-                    self.adapter.capture_upstream_response(
-                        crate::wire_capture::CaptureTransport::Sse,
-                        crate::wire_capture::CaptureRepresentation::Wire,
-                        status,
-                        Some(&headers),
-                        &serde_json::to_vec(body).unwrap_or_default(),
-                    );
+                let body_bytes = response.bytes().await.map_err(anyhow::Error::from);
+                if let Ok(bytes) = &body_bytes {
+                    attempt.wire_lazy("upstream_response", "http_body", Some(status), None, || {
+                        bytes_value(bytes)
+                    });
                 }
+                let body = body_bytes
+                    .and_then(|bytes| serde_json::from_slice(&bytes).map_err(anyhow::Error::from));
                 if outbound
                     .body
                     .get("previous_response_id")
@@ -164,6 +193,12 @@ impl ProviderCall {
                         .is_ok_and(|body| self.adapter.is_continuation_not_found(status, body))
                     && let Some(full_outbound) = self.continuation_fallback.take()
                 {
+                    attempt.finish(
+                        "failed",
+                        Some(status),
+                        Some("previous_response_not_found".into()),
+                        None,
+                    );
                     tracing::debug!(
                         transport = "http_sse",
                         provider_id = self.adapter.binding.provider.id,
@@ -178,6 +213,7 @@ impl ProviderCall {
                     status,
                     headers,
                     body,
+                    attempt,
                 });
             }
             self.outbound = outbound;
@@ -188,7 +224,7 @@ impl ProviderCall {
                 reasoning: StreamReasoningNormalizer::default(),
                 source: ProviderStreamSource::Http(response.bytes_stream().boxed()),
                 status,
-                headers,
+                attempt,
                 response_continuation_available: Arc::new(AtomicBool::new(false)),
             })));
         }

@@ -25,6 +25,7 @@ use async_trait::async_trait;
 use futures::Stream;
 
 use crate::hook::{Principal, RouteContext};
+use crate::interaction_observation::RunObserver;
 use crate::protocol::ir::{AiRequest, AiResponse, AiStreamDelta};
 use crate::proxy::context::CancellationToken;
 
@@ -41,8 +42,7 @@ pub struct TurnInput {
     pub extra_headers: reqwest::header::HeaderMap,
     pub cancellation: CancellationToken,
     pub deadline: Instant,
-    #[cfg(debug_assertions)]
-    pub(crate) wire_capture_id: Option<String>,
+    pub(crate) observer: Option<RunObserver>,
 }
 
 impl TurnInput {
@@ -54,8 +54,7 @@ impl TurnInput {
             extra_headers: reqwest::header::HeaderMap::new(),
             cancellation: CancellationToken::new(),
             deadline: Instant::now() + Duration::from_secs(300),
-            #[cfg(debug_assertions)]
-            wire_capture_id: None,
+            observer: None,
         }
     }
 
@@ -75,9 +74,8 @@ impl TurnInput {
         self
     }
 
-    #[cfg(debug_assertions)]
-    pub(crate) fn with_wire_capture_id(mut self, capture_id: String) -> Self {
-        self.wire_capture_id = Some(capture_id);
+    pub(crate) fn with_observer(mut self, observer: RunObserver) -> Self {
+        self.observer = Some(observer);
         self
     }
 }
@@ -112,54 +110,18 @@ pub struct TargetIdentity {
     pub actual_model: String,
     pub provider_id: String,
     pub target_id: String,
-    pub(crate) provider_name: String,
-    pub(crate) route_name: String,
     pub(crate) namespace: String,
     pub(crate) response_continuation_available: Arc<AtomicBool>,
 }
 
-#[derive(Clone, Default)]
-pub(crate) struct TurnTransport {
-    pub upstream_url: String,
-    pub request_headers: Option<String>,
-    pub request_body: Option<String>,
-    pub response_headers: Arc<std::sync::Mutex<Option<String>>>,
-    pub response_body: Arc<std::sync::Mutex<Vec<u8>>>,
-    stream_metrics: Arc<std::sync::Mutex<TurnStreamMetrics>>,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct TurnStreamMetrics {
-    pub chunks_count: i32,
-    pub first_chunk_ms: Option<i64>,
-}
-
-impl TurnTransport {
-    pub(crate) fn record_stream_chunk(&self, started_at: std::time::Instant, raw: &[u8]) {
-        self.response_body
-            .lock()
-            .expect("response body")
-            .extend_from_slice(raw);
-        let mut metrics = self.stream_metrics.lock().expect("stream metrics");
-        metrics.chunks_count = metrics.chunks_count.saturating_add(1);
-        metrics
-            .first_chunk_ms
-            .get_or_insert(started_at.elapsed().as_millis() as i64);
-    }
-
-    pub(crate) fn stream_metrics(&self) -> TurnStreamMetrics {
-        *self.stream_metrics.lock().expect("stream metrics")
-    }
-}
-
 pub struct ModelTurn {
+    pub(crate) model_turn_id: String,
     pub route: RouteContext,
     pub target: TargetIdentity,
     pub output: CanonicalEventStream,
     /// The actual upstream request asked the Target to return opaque reasoning state.
     pub(crate) reasoning_encrypted_content_requested: bool,
     pub(crate) streamed: bool,
-    pub(crate) transport: TurnTransport,
 }
 
 impl ModelTurn {
@@ -171,12 +133,11 @@ impl ModelTurn {
     ) -> Self {
         let events = events.into_iter().collect::<Vec<_>>();
         Self {
+            model_turn_id: uuid::Uuid::new_v4().to_string(),
             target: TargetIdentity {
                 actual_model: request.model.clone(),
                 provider_id: route.provider_id.clone(),
                 target_id: route.target_id.clone(),
-                provider_name: route.provider_id.clone(),
-                route_name: route.model_id.clone(),
                 namespace: String::new(),
                 response_continuation_available: Arc::new(AtomicBool::new(false)),
             },
@@ -184,7 +145,6 @@ impl ModelTurn {
             output: Box::pin(futures::stream::iter(events)),
             reasoning_encrypted_content_requested: false,
             streamed: false,
-            transport: TurnTransport::default(),
         }
     }
 }

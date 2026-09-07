@@ -35,7 +35,6 @@ pub(super) enum BufferedDeliveryProgress {
 
 pub(super) struct BufferedDelivery {
     pub(super) response: Response,
-    pub(super) body: String,
     pub(super) progress: BufferedDeliveryProgress,
 }
 
@@ -66,7 +65,6 @@ pub(super) struct LiveStreamRequest {
     pub(super) preflight: tokio::sync::oneshot::Sender<Result<(), RoundOutcome>>,
     pub(super) terminal_delivery: tokio::sync::oneshot::Receiver<()>,
     pub(super) commit: tokio::sync::oneshot::Receiver<()>,
-    pub(super) capture_payload: bool,
 }
 
 pub(super) struct LiveStreamSink {
@@ -75,7 +73,6 @@ pub(super) struct LiveStreamSink {
     preflight: Option<tokio::sync::oneshot::Sender<Result<(), RoundOutcome>>>,
     commit: Option<tokio::sync::oneshot::Receiver<()>>,
     terminal_delivery: Option<tokio::sync::oneshot::Receiver<()>>,
-    captured: Option<Vec<String>>,
     committed: bool,
 }
 
@@ -103,7 +100,6 @@ impl DeliveryAdapter {
             preflight,
             terminal_delivery,
             commit,
-            capture_payload,
         } = request;
         Self::Stream {
             ingress,
@@ -116,7 +112,6 @@ impl DeliveryAdapter {
                 preflight: Some(preflight),
                 commit: Some(commit),
                 terminal_delivery: Some(terminal_delivery),
-                captured: capture_payload.then(Vec::new),
                 committed: false,
             }),
         }
@@ -143,21 +138,15 @@ impl DeliveryAdapter {
                     .bind(*ingress, *egress)
                     .expect("registered protocol pair");
                 match pair.encode_response(response) {
-                    Ok(output) => {
-                        let body = serde_json::to_string(&output).unwrap_or_default();
-                        BufferedDelivery {
-                            response: (status, Json(output)).into_response(),
-                            body,
-                            progress: BufferedDeliveryProgress::Prepared,
-                        }
-                    }
+                    Ok(output) => BufferedDelivery {
+                        response: (status, Json(output)).into_response(),
+                        progress: BufferedDeliveryProgress::Prepared,
+                    },
                     Err(error) => {
                         let output = protocol_error_json(*ingress, &error);
-                        let body = serde_json::to_string(&output).unwrap_or_default();
                         BufferedDelivery {
                             response: (StatusCode::UNPROCESSABLE_ENTITY, Json(output))
                                 .into_response(),
-                            body,
                             progress: BufferedDeliveryProgress::ProtocolFailed,
                         }
                     }
@@ -196,8 +185,7 @@ impl DeliveryAdapter {
                 };
                 let body = parts.join("");
                 BufferedDelivery {
-                    response: streaming_response(Body::from(body.clone())),
-                    body,
+                    response: streaming_response(Body::from(body)),
                     progress,
                 }
             }
@@ -314,14 +302,6 @@ impl DeliveryAdapter {
             .is_some_and(|preflight| preflight.send(Err(outcome)).is_ok())
     }
 
-    pub(super) fn captured_body(&mut self) -> Option<String> {
-        let Self::Stream { live, .. } = self else {
-            return None;
-        };
-        live.as_mut()
-            .and_then(|sink| sink.captured.take())
-            .map(|parts| parts.join(""))
-    }
     pub(super) fn response_from_receiver(
         receiver: tokio::sync::mpsc::Receiver<Result<String, Infallible>>,
         commit: tokio::sync::oneshot::Sender<()>,
@@ -501,7 +481,6 @@ async fn send_event(sink: &mut LiveStreamSink, event: String) -> DeliveryProgres
     if sink.cancellation.is_cancelled() {
         return DeliveryProgress::Cancelled;
     }
-    let captured_event = sink.captured.is_some().then(|| event.clone());
     let result = tokio::select! {
         biased;
         _ = sink.cancellation.cancelled() => DeliveryProgress::Cancelled,
@@ -540,9 +519,6 @@ async fn send_event(sink: &mut LiveStreamSink, event: String) -> DeliveryProgres
             return committed;
         }
     }
-    if let (Some(parts), Some(event)) = (&mut sink.captured, captured_event) {
-        parts.push(event);
-    }
     DeliveryProgress::Sent
 }
 
@@ -574,7 +550,7 @@ mod tests {
         DeliveryCommit,
     );
 
-    fn live_delivery(cancellation: CancellationToken, capture_payload: bool) -> LiveDelivery {
+    fn live_delivery(cancellation: CancellationToken) -> LiveDelivery {
         let (tx, rx) = tokio::sync::mpsc::channel(8);
         let (preflight_tx, preflight_rx) = tokio::sync::oneshot::channel();
         let (commit_tx, commit_rx) = tokio::sync::oneshot::channel();
@@ -588,7 +564,6 @@ mod tests {
                 preflight: preflight_tx,
                 terminal_delivery: terminal_delivery_rx,
                 commit: commit_rx,
-                capture_payload,
             }),
             rx,
             preflight_rx,
@@ -596,8 +571,8 @@ mod tests {
         )
     }
 
-    #[test]
-    fn non_stream_delivery_enforces_the_selected_protocol_pair() {
+    #[tokio::test]
+    async fn non_stream_delivery_enforces_the_selected_protocol_pair() {
         let mut response = AiResponse::new("response", "model");
         response.vendor.passthrough_safe.insert(
             "provider_metadata".into(),
@@ -614,12 +589,12 @@ mod tests {
             delivered.response.status(),
             StatusCode::UNPROCESSABLE_ENTITY
         );
-        assert!(delivered.body.contains("STRAVIA_PROTOCOL_LOSSY_REJECTED"));
-        assert!(
-            delivered
-                .body
-                .contains("vendor.passthrough_safe.provider_metadata")
-        );
+        let body = axum::body::to_bytes(delivered.response.into_body(), usize::MAX)
+            .await
+            .expect("delivery body");
+        let body = std::str::from_utf8(&body).expect("UTF-8 error response");
+        assert!(body.contains("STRAVIA_PROTOCOL_LOSSY_REJECTED"));
+        assert!(body.contains("vendor.passthrough_safe.provider_metadata"));
     }
 
     #[tokio::test]
@@ -637,7 +612,6 @@ mod tests {
             preflight: preflight_tx,
             terminal_delivery: terminal_delivery_rx,
             commit: commit_rx,
-            capture_payload: false,
         });
 
         let progress = delivery
@@ -658,8 +632,7 @@ mod tests {
 
     #[tokio::test]
     async fn receiver_close_stops_delivery_before_commit() {
-        let (mut delivery, receiver, _preflight, _commit) =
-            live_delivery(CancellationToken::new(), false);
+        let (mut delivery, receiver, _preflight, _commit) = live_delivery(CancellationToken::new());
         drop(receiver);
 
         let progress = delivery
@@ -673,7 +646,7 @@ mod tests {
     async fn cancellation_wins_before_delivery_commit() {
         let cancellation = CancellationToken::new();
         cancellation.cancel();
-        let (mut delivery, _receiver, _preflight, _commit) = live_delivery(cancellation, false);
+        let (mut delivery, _receiver, _preflight, _commit) = live_delivery(cancellation);
 
         let progress = delivery
             .send_deltas(&[AiStreamDelta::TextDelta("cancelled".into())])
@@ -683,9 +656,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn first_sent_frame_commits_and_payload_capture_matches_wire() {
+    async fn first_sent_frame_commits_without_retaining_payload() {
         let (mut delivery, mut receiver, preflight, commit) =
-            live_delivery(CancellationToken::new(), true);
+            live_delivery(CancellationToken::new());
         commit.send(()).expect("commit receiver");
 
         let progress = delivery
@@ -699,9 +672,7 @@ mod tests {
             .await
             .expect("first wire event")
             .expect("infallible wire event");
-        let captured = delivery.captured_body().expect("captured payload");
-        assert!(captured.starts_with(&event));
-        assert!(captured.contains("visible"));
+        assert!(event.contains("visible"));
     }
 
     #[tokio::test]
@@ -719,7 +690,6 @@ mod tests {
             preflight: preflight_tx,
             terminal_delivery: terminal_delivery_rx,
             commit: commit_rx,
-            capture_payload: false,
         });
 
         let progress = delivery

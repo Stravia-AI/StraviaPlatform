@@ -8,7 +8,7 @@ use desktop_gateway_runtime::{
     DesktopGatewayRuntime, PortSwitchPublisher, SystemPortOwnerResolver, desktop_port_store,
     desktop_runtime_dir,
 };
-use stravia_core::{Gateway, admin::identity::AdminAuth, config::GatewayConfig, logging};
+use stravia_core::{Gateway, admin::identity::AdminAuth, config::GatewayConfig};
 use stravia_server::{AdminMode, HttpAppConfig, build_http_app, desktop_origins};
 use tauri::{
     Manager,
@@ -87,12 +87,9 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::default().build())
         .setup(|app| {
             let data_dir = desktop_runtime_dir(app);
-            let (gateway, log_rx) = tauri::async_runtime::block_on(Gateway::new(GatewayConfig {
+            let gateway = tauri::async_runtime::block_on(Gateway::new(GatewayConfig {
                 data_dir: data_dir.clone(),
                 product_update_download_supported: true,
-                #[cfg(debug_assertions)]
-                wire_capture_dir: std::env::var_os("STRAVIA_WIRE_CAPTURE_DIR")
-                    .map(std::path::PathBuf::from),
                 ..Default::default()
             }))?;
             #[cfg(feature = "desktop-e2e")]
@@ -137,11 +134,6 @@ pub fn run() {
                 Arc::new(SystemPortOwnerResolver),
             ))?;
             let server_port = runtime.current_port();
-
-            let storage_for_logs = gateway.storage.clone();
-            tauri::async_runtime::spawn(async move {
-                logging::run_collector(log_rx, storage_for_logs).await;
-            });
 
             app.manage(gateway);
             app.manage(native_admin_session);
@@ -195,6 +187,9 @@ pub fn run() {
                 }
                 if let Some(runtime) = app.try_state::<Arc<DesktopGatewayRuntime>>() {
                     runtime.request_shutdown();
+                }
+                if let Some(gateway) = app.try_state::<Gateway>() {
+                    tauri::async_runtime::block_on(gateway.shutdown());
                 }
             }
 

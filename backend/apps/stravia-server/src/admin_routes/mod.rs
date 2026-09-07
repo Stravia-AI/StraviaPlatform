@@ -210,8 +210,27 @@ fn create_router_inner(gateway: Gateway, auth: Option<AdminHttpState>) -> Router
             get(list_api_keys_handler).post(create_api_key_handler),
         )
         .route("/api-keys/{id}", api_keys_item)
-        .route("/logs", get(query_logs_handler).delete(clear_logs_handler))
-        .route("/logs/{id}", get(get_log_handler))
+        .route("/observations/interactions", get(interaction_forest))
+        .route("/observations/interactions/{id}", get(interaction_detail))
+        .route("/observations/rejections", get(rejection_list))
+        .route("/observations/rejections/{id}", get(rejection_detail))
+        .route("/observations/events", get(observation_events))
+        .route(
+            "/observations/debug",
+            get(observation_debug).put(update_observation_debug),
+        )
+        .route(
+            "/observations/history",
+            axum::routing::delete(clear_observation_history),
+        )
+        .route(
+            "/observations/interactions/{id}/debug-bundle-tickets",
+            post(issue_interaction_bundle_ticket),
+        )
+        .route(
+            "/observations/rejections/{id}/debug-bundle-tickets",
+            post(issue_rejection_bundle_ticket),
+        )
         .route("/stats/overview", get(stats_overview))
         .route("/stats/hourly", get(stats_hourly))
         .route("/stats/models", get(stats_by_model))
@@ -236,12 +255,16 @@ fn create_router_inner(gateway: Gateway, auth: Option<AdminHttpState>) -> Router
     if let Some(auth_state) = auth.clone() {
         api = api.layer(middleware::from_fn_with_state(auth_state, require_admin));
     }
-    // Catalog logos proxy only public Provider Catalog assets and remain unauthenticated
-    // so browser image requests do not need to expose the admin bearer token.
+    // Catalog logos are public assets. Debug bundle downloads are separately authorized
+    // by a single-use opaque ticket so browser navigation never exposes Admin credentials.
     let public_api = Router::new()
         .route(
             "/catalog/providers/{provider_id}/logo",
             get(catalog_logo_handler),
+        )
+        .route(
+            "/observations/debug-bundles/{ticket}",
+            get(consume_bundle_ticket),
         )
         .with_state(gateway.clone());
 
@@ -280,8 +303,8 @@ async fn readyz_handler(State(gw): State<Gateway>) -> impl IntoResponse {
 }
 
 mod api_keys;
-mod logs;
 mod models;
+mod observations;
 mod providers;
 mod settings;
 mod stats;
@@ -290,8 +313,8 @@ mod updates;
 mod web;
 
 use api_keys::*;
-use logs::*;
 use models::*;
+use observations::*;
 use providers::*;
 use settings::*;
 use stats::*;

@@ -4,10 +4,15 @@
 
 ### Added
 
+- Request Records now presents Connect Client Interactions as a live causal forest with a chronological inspector, Rejected Requests, and point-in-time Debug Bundle downloads.
+- Administrators can explicitly enable process-local Debug capture for newly admitted runs, with mandatory credential redaction, 64 MiB per-Run and 2 GiB retained limits, visible partial-capture reasons, and 60-second single-use bundle tickets.
 - Standalone servers now offer a one-time-token setup wizard and an interactive `recover-admin` command that resets the existing administrator and revokes prior sessions without rebuilding business data.
 
 ### Changed
 
+- **Breaking:** Interaction Observation replaces legacy flat request logs and debug-build wire capture. Migration 34 removes old request-log rows instead of backfilling them; analytics and Route scheduling now read Confirmed Upstream Usage from Model Turn and Target attempt observations.
+- Debug defaults off after every process start, is snapshotted independently when each run is admitted, and retains Observation metadata and managed Trace segments for the configured request-record retention period (seven days by default).
+- The latest Request Records page continuously accepts new activity after its fixed anchor; historical 24-hour pages keep fixed boundaries and preserve already-open root membership until an explicit refresh or migration.
 - The WebUI now links service connection, visible model inventory actions, and client setup through lightweight task guidance, reuses eligible API Keys, and preserves selections when returning from resource management.
 - Model lists distinguish display names, client Model IDs, enabled state, and associated services; modified model drafts now warn before navigation without changing priority lanes or immediately applied destination settings.
 - Client setup distinguishes copied and written configuration from verified connections, and credential guidance no longer claims editable secrets are shown only once.

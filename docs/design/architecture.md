@@ -69,8 +69,7 @@ stravia/
 │           │   │   └── websocket.rs
 │           │   ├── context.rs    # RequestContext / ContextBag
 │           │   ├── handler.rs    # models_list 只读端点（≤110 行）
-│           │   ├── intake.rs     # 请求接入预处理
-│           │   ├── observability.rs  # 日志工具（header 脱敏、URL 脱敏等）
+│           │   ├── artifacts.rs  # artifact upload endpoints
 │           │   ├── security.rs   # crate-private client credential policy deep module
 │           │   ├── server.rs     # axum HTTP Server 启动
 │           │   ├── server/tests.rs   # Proxy HTTP 装配契约
@@ -81,15 +80,16 @@ stravia/
 │           │   │   └── inference_run/
 │           │   │       ├── engine/
 │           │   │       │   ├── mod.rs        # orchestrate：Inference Run 内部编排
-│           │   │       │   ├── claim.rs · log.rs · errors.rs · projection.rs
+│           │   │       │   ├── claim.rs · errors.rs · projection.rs · util.rs
 │           │   │       │   ├── completion.rs · delivery.rs · followup.rs · canonical_stream.rs
-│           │   │       │   └── stream/{mod,gate}.rs  # stream 编排与 LiveDeltaGate
+│           │   │       │   └── stream/mod.rs  # stream 编排
 │           │   │       └── tests/            # lifecycle / projection / transport 契约与共享 support
 │           │   ├── planner/      # 协议协商
 │           │   │   ├── mod.rs        # ProtocolPlan / ProtocolMode 等 re-export
 │           │   │   └── negotiator.rs # negotiate() / RoutingStrategy / OrderedStrategy
-│           │   └── ingress/      # 4 个薄 ingress shell（按协议族分目录）
+│           │   └── ingress/      # 4 个协议族薄 shell + observation admission
 │           │       ├── mod.rs
+│           │       ├── observation.rs  # observation admission / rejection shell
 │           │       ├── openai_compatible/
 │           │       │   ├── mod.rs
 │           │       │   ├── chat_completions.rs   # decode → inference_run::execute
@@ -188,12 +188,15 @@ stravia/
 │           ├── admission.rs      # Principal Concurrency Limit（private）
 │           ├── error.rs          # GatewayError taxonomy
 │           ├── router/           # TargetSelector / HealthRegistry / CacheAffinity
+│           ├── interaction_observation/ # Interaction Observation deep module（crate-private）
+│           │   ├── mod.rs            # 小 interface：准入、事件、查询、SSE、Debug、清理、bundle
+│           │   ├── grouping.rs · writer.rs · query.rs · store.rs
+│           │   └── trace.rs · redaction.rs · retention.rs · bundle.rs
 │           ├── storage/          # SQLite / PostgreSQL 真实 adapters + Memory 测试替身
-│           │   ├── sqlite/           # oauth/providers/models/api_keys/logs/settings 按表分文件
-│           │   └── postgres/         # 与 SQLite 保持独立、同样按表分文件
+│           │   ├── sqlite/           # oauth/providers/models/api_keys/usage_stats/settings 按职责分文件
+│           │   └── postgres/         # 与 SQLite 保持独立、同样按职责分文件
 │           ├── migrations.rs     # SQLx versioned migrations
 │           ├── db/               # SQLite 连接与模型辅助函数
-│           ├── logging/          # LogEntry / send_log
 │           └── auth/
 │   └── stravia-devtools/
 ├── backend/apps/
@@ -228,16 +231,15 @@ graph TD
     httpREST --> serverApp
 ```
 
-**stravia-core 顶层 `pub mod`（lib.rs，共 20 个）：**
+**stravia-core 顶层 `pub mod`（lib.rs，共 21 个）：**
 
 ```
-admin · agent · auth · config · db · error · hook · logging · mcp
-plugin · protocol · provider · provider_catalog · provider_models · proxy
+admin · agent · auth · config · connect_client_apply · db · error · history_marker
+hook · mcp · plugin · protocol · provider · provider_catalog · provider_models · proxy
 router · storage · thinking · turn_chain · web_search
 ```
 
-crate-private 运行时 module：`generation_chain`、`media`、`model_turn`、`web_access`；
-`admission` 保持 crate root private。Generation Chain 不属于 Hook。
+crate-private 运行时 module：`generation_chain`、`interaction_observation`、`media`、`model_turn`、`web_access`；`admission` 保持 crate root private。Generation Chain 与 Interaction Observation 都不属于 Hook，且彼此保持独立：前者保存不可变交付历史，后者保存可丢失的可变诊断投影。
 
 **核心 API：**
 
@@ -250,7 +252,12 @@ Gateway::admin()          → 返回 AdminService，提供全部管理操作
   ├── .create_provider(input)
   ├── .test_provider(id)
   ├── .list_api_keys()
-  ├── .query_logs(filter)
+  ├── .observation_forest(query) / .observation_interaction(id, filters)
+  ├── .observation_rejections(query) / .observation_rejection(id)
+  ├── .observation_subscribe(after_sequence)
+  ├── .observation_debug() / .set_observation_debug(enabled)
+  ├── .clear_observation_history()
+  ├── .issue_observation_bundle_ticket(...) / .consume_observation_bundle_ticket(...)
   ├── .get_stats_overview()
   ├── .list_loaded_extensions()  ← provider/protocol 内建能力清单
   └── ...
@@ -285,11 +292,16 @@ Client / CLI / SDK
     │ HTTP/SSE/WebSocket（协议 ingress）
     ▼
 Ingress shell（proxy/ingress/<family>/）
-    ├─ 捕获 RawEnvelope + 建立 RequestContext（request_id / cancel / extensions）
+    ├─ 建立 RequestContext，并在认证/解码前创建 IngressObserver
+    ├─ pre-Run decode / protocol / auth 失败 → Rejected Request Observation
     └─ ProtocolPair::decode_request → AiRequest（canonical IR）
     │
     ▼
 inference_run::execute(RunInput)（一次性 crate-private interface）
+    ├─ 准入时 IngressObserver::admit → RunObserver；独立快照进程 Debug 开关
+    ├─ 通过单一 typed event seam 记录 Run / Model Turn / Target attempt / tool / projection / delivery
+    ├─ Observation/Trace/SSE/export 失败仅产生 gap/partial，绝不改变推理、选路或交付
+    ├─ Interaction grouping 在 Observation writer 内完成，不反写 Generation Chain
     ├─ Phase 状态机约束 Request → Selecting → Calling → Inspecting
     │                         → HiddenRound / SemanticComplete → AwaitingDelivery → Finished
     ├─ Responses gate：拒绝 background / conversation / server-side context management
@@ -480,8 +492,22 @@ OpenAI direct 与 Codex OAuth 的 generation Target 通过同一个 Provider Tra
 
 - Hook 运行在受信 in-process Rust 环境，不获得可变 `Gateway`、任意存储、原始 `Authorization`、API key、provider credential 或 raw request/response。
 - Runtime 仅提供 canonical IR、稳定主体/路由标识、受限 ContextSnapshot 和受控 PlatformTool；凭据始终由 dispatcher/Vendor adapter 持有。
-- 默认 payload logging 为关闭：默认日志只记录 HookId、事件、动作类型、跳过原因、耗时、tool/continuation 元数据和状态，不记录 messages、arguments、results 或 replacement 内容。只有显式启用 payload logging 才记录完整载荷，并由运维负责敏感数据访问与留存。
+- 普通 Interaction Observation 只持久化拓扑、生命周期、时间、路由/Target、错误分类、工具生命周期、Client Projection 可见内容和 Confirmed Upstream Usage，不保存 hidden Thinking、canonical payload 或工具 arguments/results。进程级 Debug 默认为关闭且启用必须确认；它只让后续准入 Run 记录 canonical checkpoint 与应用协议消息。
 - 管理面、非推理路由和 provider adapter 不通过 HookRuntime 的事件面；Vendor 是独立 adapter seam，而不是 hook 的凭据出口。
+
+### 4.10 Interaction Observation
+
+`interaction_observation` 是 Generation Chain 外部的 crate-private deep module。一个 Connect Client Interaction 通常从新的 canonical User item 开始，并容纳其客户端工具续接的 Inference Run tree；后续新 User item 创建 child Interaction。显式 Generation Chain parent 可恢复既有 Interaction；无 parent 的失败 root 仅在同 Principal、exact canonical fingerprint、未 Client Output Commit、无并发相同 Run、两分钟内等全部条件满足时在进程内推断重试归组。推断边绝不写回 Generation Chain。
+
+普通 Observation 使用有界非阻塞事件 seam，writer 在数据库事务中先提交 event 与 projection，再广播同一单调 sequence。forest snapshot 返回 `snapshot_sequence`，authenticated fetch SSE 从 `after` 续接；游标已超出保留范围时发送明确 `reset_required`。记录失败产生 `observation_gap`，Debug 写入失败产生带稳定 reason 的 `partial`，两者均不能改变 inference、Target retry/selection、Client Output Commit、Delivery 或 Generation Chain。
+
+Request Records 以 anchored 24 小时窗口查询完整 root DAG；root 按最新 activity 只归属一个窗口，cursor 分批加载 root，filter 保留整棵因果上下文并标记命中节点。WebUI 以自动布局的无限 canvas 展示 forest：root 横向排列、因果向下、共享祖先只出现一次；右侧 inspector 按时间保持 Run、Model Turn、Target attempt、Platform Tool、client handoff 与 Delivery 层级。窄屏 inspector 全屏；canvas 支持 pan/zoom、fit all、minimap、键盘与触控。Interaction card 只预览 Client Projection；canonical 与应用协议 payload 仅在 Debug Run inspector 中出现。
+
+Debug 是单进程原子开关，每次进程启动为 off；启用必须确认敏感度和容量。Run 在 admission 时、Rejected Request 在 ingress 时分别 snapshot 开关，因而同一 Interaction 可包含 captured、uncaptured 与 partial Run。Trace 保存 canonical checkpoint 及 client↔platform↔upstream 四方向适用的 HTTP header/body chunk、SSE bytes 与 WebSocket handshake/message 应用层顺序；它不声称 TLS、TCP、HTTP/2 frame 或 packet fidelity。凭据 header、URL userinfo、credential-like query value 以及结构化 JSON/form 中显式 credential 字段在进入队列或磁盘前永久替换，但 prompt、业务内容和工具输入/结果仍可能保留。
+
+Trace segment 位于 data directory 下的托管 `observation-debug` 目录；每 Run 固定上限 64 MiB，全局 retained Trace 固定上限 2 GiB，容量压力不提前逐出未过期数据。Observation、Rejected Request、event、manifest 与 segment 共用 `log_retention_days`（默认 7 天）。定期清理与 Clear History 都保留 `running` / `waiting_client` Interaction，并报告 skipped active；manifest tombstone 与启动 reconciliation 保证 crash 后继续删除 orphan/残留托管目录。
+
+已认证 POST 可为 Interaction 或 Rejected Request 固定 through-sequence 的 snapshot，并签发 60 秒、单次使用、高熵 opaque ticket；普通 GET 消费 ticket 并流式生成 versioned ZIP，URL 不携带 Admin credential。manifest 记录 export time、through-sequence、resource status、每 Run capture state/bytes/reason 及整体 `complete|partial|none`；运行中导出只能是 point-in-time partial。过期、重放、跨资源或进程重启后的 ticket 统一失效。当前 realtime、Debug switch、Trace storage 与 ticket 都仅保证单 Gateway instance，不提供 cluster fanout、共享 Trace 或跨实例 ticket。
 
 ---
 
@@ -701,11 +727,11 @@ Route ID 存于 `name`，客户端请求中的 `model` 值以大小写敏感的�
 | `balance` | TEXT | Route Scheduling Strategy：`traffic_equalization` / `latency_preference` |
 | `is_enabled` | BOOL | Route 启用状态，默认 true |
 
-> `ingress_protocol` 不在数据库中。协议在运行时由 `RequestContext` 携带，日志写入 `request_logs.client_protocol`。
+> `ingress_protocol` 不属于 Route 配置；它由 `RequestContext` 携带，并写入 `inference_run_observations.ingress_protocol`。Rejected Request 则写入 `rejected_request_observations.ingress_protocol`。
 
 **Target 列表（model_backends）**：一个 Route 可绑定多个 Target，每个 Target 指向 `provider_id` + `model`，并保存启用状态、有符号 32 位 Target Priority、First Token Timeout、Target Retry Budget、Target Cooldown 和七行 `thinking_level_map`。数值更高的 Priority 组先参与选择；同组由 Traffic Equalization 或 Latency Preference 调度。已禁用 Target 仍保留在 Route 上，但不参与选择、亲和、冷却或 Route 能力交集。Target 健康状态、冷却和进行中流量占位在进程内管理，不入库。Route 记录和完整 Target 列表由一个聚合持久化接口在同一事务内写入。
 
-运行时固定按 Target Continuation、Conversation Affinity、无对话身份时的 Cache Affinity、Target Priority、组内 Route Scheduling Strategy 分层选择。Traffic Equalization 比较过去 24 小时成功请求的加权 Token 流量与进行中输入占位；Latency Preference 在至少两个 Target 各有 20 个近期成功样本时比较过去一小时的成功率与输出 Token 速度，否则回退 Traffic Equalization。
+运行时固定按 Target Continuation、Conversation Affinity、无对话身份时的 Cache Affinity、Target Priority、组内 Route Scheduling Strategy 分层选择。`UsageStatsStore` 从 `target_attempt_observations` 读取 Confirmed Upstream Usage：Traffic Equalization 比较过去 24 小时的加权 Token 流量与进行中输入占位；Latency Preference 在至少两个 Target 各有 20 个近期成功样本时比较过去一小时的成功率与输出 Token 速度，否则回退 Traffic Equalization。查询失败时返回最后一次成功的进程内 snapshot 并标记 `stale`；尚无 snapshot 或 Observation gap 造成历史不完整时按无历史样本执行原有确定性 fallback，观测故障不能阻断选路。
 
 客户端继续使用 Chat Completions、Open Responses、Anthropic Messages 或 Gemini 的原生 thinking 字段。codec 先解码为规范 Thinking Level，Request Hook 可修改该等级；Route 以所有已启用 Target 非 Hidden Thinking Level Map 的交集派生支持等级并据此钳制，每次 Target 尝试再用该 Target 的 Thinking Level Map 生成 protocol-native control。`GET /v1/models` 仅在派生交集非空时返回可选的 `stravia:thinking_levels`，不暴露 Target control。
 
@@ -851,42 +877,93 @@ CREATE TABLE api_key_models (
     PRIMARY KEY (api_key_id, model_id)
 );
 
--- 请求日志（append-only，快照，无 FK）
-CREATE TABLE request_logs (
-    id                        TEXT PRIMARY KEY,
-    created_at                INTEGER NOT NULL,  -- Unix 毫秒
-    api_key_id                TEXT,
-    api_key_name              TEXT,
-    client_protocol           TEXT,              -- ingress 协议
-    upstream_protocol         TEXT,              -- egress 协议
-    provider_id               TEXT,
-    provider_name             TEXT,
-    model_id                  TEXT,
-    model_name                TEXT,
-    upstream_url              TEXT,
-    client_model              TEXT,
-    upstream_model            TEXT,
-    method                    TEXT,
-    path                      TEXT,
-    upstream_status_code      INTEGER,
-    client_status_code        INTEGER NOT NULL,
-    latency_total_ms          INTEGER,
-    latency_upstream_ms       INTEGER,
-    input_tokens              INTEGER,
-    output_tokens             INTEGER,
-    cache_read_tokens         INTEGER,
-    is_stream                 INTEGER,
-    stream_chunks_count       INTEGER,
-    stream_first_chunk_ms     INTEGER,
-    -- payload（固定记录；敏感 header 脱敏，媒体桥接正文按安全策略清除）
-    client_request_headers    TEXT,
-    client_request_body       TEXT,
-    client_response_headers   TEXT,
-    client_response_body      TEXT,
-    upstream_request_headers  TEXT,
-    upstream_request_body     TEXT,
-    upstream_response_headers TEXT,
-    upstream_response_body    TEXT
+-- Interaction Observation（完整列与索引见 docs/database/schema.md / migration 34）
+CREATE TABLE interaction_observations (
+    id TEXT PRIMARY KEY,
+    principal TEXT NOT NULL,
+    parent_interaction_id TEXT REFERENCES interaction_observations(id) ON DELETE SET NULL,
+    root_id TEXT NOT NULL,
+    root_run_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    last_active_at INTEGER NOT NULL,
+    visible_tail TEXT NOT NULL,
+    input_tokens INTEGER, output_tokens INTEGER,
+    cache_read_tokens INTEGER, cache_write_tokens INTEGER, reasoning_tokens INTEGER,
+    observation_gap INTEGER NOT NULL,
+    last_event_sequence INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL
+);
+
+CREATE TABLE inference_run_observations (
+    id TEXT PRIMARY KEY,
+    interaction_id TEXT NOT NULL REFERENCES interaction_observations(id) ON DELETE CASCADE,
+    parent_run_id TEXT REFERENCES inference_run_observations(id) ON DELETE SET NULL,
+    ingress_protocol TEXT NOT NULL,
+    status TEXT NOT NULL,
+    debug_enabled INTEGER NOT NULL,
+    client_output_committed INTEGER NOT NULL,
+    last_event_sequence INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL
+);
+
+CREATE TABLE model_turn_observations (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES inference_run_observations(id) ON DELETE CASCADE,
+    interaction_id TEXT NOT NULL REFERENCES interaction_observations(id) ON DELETE CASCADE,
+    route_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    input_tokens INTEGER, output_tokens INTEGER,
+    cache_read_tokens INTEGER, cache_write_tokens INTEGER, reasoning_tokens INTEGER
+);
+
+CREATE TABLE target_attempt_observations (
+    id TEXT PRIMARY KEY,
+    model_turn_id TEXT NOT NULL REFERENCES model_turn_observations(id) ON DELETE CASCADE,
+    target_id TEXT NOT NULL,
+    provider_id TEXT NOT NULL,
+    upstream_model TEXT NOT NULL,
+    protocol TEXT NOT NULL,
+    status TEXT NOT NULL,
+    duration_ms INTEGER, first_token_ms INTEGER,
+    input_tokens INTEGER, output_tokens INTEGER,
+    cache_read_tokens INTEGER, cache_write_tokens INTEGER, reasoning_tokens INTEGER,
+    usage_recorded INTEGER NOT NULL
+);
+
+CREATE TABLE rejected_request_observations (
+    id TEXT PRIMARY KEY,
+    occurred_at INTEGER NOT NULL,
+    ingress_protocol TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    code TEXT NOT NULL,
+    status_code INTEGER NOT NULL,
+    debug_enabled INTEGER NOT NULL,
+    debug_status TEXT NOT NULL,
+    expires_at INTEGER NOT NULL
+);
+
+CREATE TABLE debug_trace_manifests (
+    trace_id TEXT PRIMARY KEY,
+    run_id TEXT REFERENCES inference_run_observations(id) ON DELETE CASCADE,
+    rejection_id TEXT REFERENCES rejected_request_observations(id) ON DELETE CASCADE,
+    relative_directory TEXT NOT NULL UNIQUE,
+    bytes_written INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    partial_reason TEXT,
+    tombstoned INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    CHECK ((run_id IS NOT NULL) <> (rejection_id IS NOT NULL))
+);
+
+CREATE TABLE observation_events (
+    sequence INTEGER PRIMARY KEY,
+    occurred_at INTEGER NOT NULL,
+    interaction_id TEXT REFERENCES interaction_observations(id) ON DELETE CASCADE,
+    run_id TEXT REFERENCES inference_run_observations(id) ON DELETE CASCADE,
+    rejection_id TEXT REFERENCES rejected_request_observations(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    expires_at INTEGER NOT NULL
 );
 
 -- 全局配置 KV
@@ -911,6 +988,10 @@ CREATE TABLE provider_oauth_credentials (
 );
 ```
 
+Migration 34 在 SQLite/PostgreSQL 都先删除旧 `request_logs` 及其行，不做 Generation Chain backfill，再创建等价 Observation schema 与 sequence/index。升级后没有 legacy logs API、别名或 dual-write。`UsageStatsStore` 的 overview/hourly/model/provider/API-key 统计从 `model_turn_observations` 与 `target_attempt_observations` 计算；每个真实 attempt 的 provider-reported usage 只计一次，任何适用 attempt 缺某维时该聚合维度保持 unknown，而不是估算或补零。
+
+Observation metadata 与数据库 manifest 共用 `log_retention_days`（默认 7 天）；大 payload 位于 data directory 下的托管 segment，不进入数据库 WAL。expiry 与 Clear History 都跳过 active Interaction；Trace 先 tombstone、幂等删除目录，再删除 owner rows，启动 reconciliation 继续处理 tombstone 与 orphan directory。
+
 > 后端健康状态（熔断 / 成功率）在运行时内存 `HealthRegistry`（`router/health.rs`）管理，**不持久化到数据库**。
 
 ### 10.3 安全
@@ -928,6 +1009,8 @@ CREATE TABLE provider_oauth_credentials (
 
 - **Desktop 版**：通过 Tauri IPC 取得动态端口与原生管理会话的 access JWT，随后以 Bearer JWT 通过 loopback HTTP 调用 `/api/v1/*`；refresh token 只保留在原生进程内存中
 - **Server 版**：通过当前页面 origin 的 HTTP 调用 `/api/v1/*`
+
+Request Records 使用 `/api/v1/observations/interactions`、`/interactions/{id}`、`/rejections`、`/rejections/{id}` 和 authenticated fetch SSE `/events?after=<sequence>`；`GET|PUT /debug` 读取或确认切换进程状态，`DELETE /history` 清理非 active 历史。Interaction/Rejection 的 `POST .../debug-bundle-tickets` 固定 snapshot；公开导航路径 `GET /api/v1/observations/debug-bundles/{ticket}` 只消费 60 秒单次 ticket，并返回 `no-store` / `no-referrer`。旧 logs collection/detail 与 flat CSV surface 不保留。
 
 **技术栈：**
 
@@ -973,13 +1056,13 @@ tests/stream/
 
 自动化验证每个 ingress→egress protocol 组合的支持程度（Native / Transform / LossyTransform / Reject），在 CI 生成兼容性报告，防止回归。
 
-### 12.5 Record-Replay
+### 12.5 Observation Debug Bundle 边界
 
-捕获真实上游请求/响应 pair，存为 fixture，用于离线复现 bug、provider 更新后兼容性测试、流式异常场景精确重放。
+产品诊断出口是管理员按 Interaction 或 Rejected Request 创建的 point-in-time Debug Bundle；不提供环境变量驱动的 wire replay、旧 JSONL 文件路径或把 capture 自动转成测试 fixture 的 CLI。Bundle 保留应用协议与 canonical checkpoint 证据，并通过 manifest 明示边界、脱敏声明和缺口，不能充当网络 packet capture 或自动重放输入。
 
 ### 12.6 可观测性 Exporter（后续适配）
 
-当前运行时默认记录 HookRuntime、PlatformTool、continuation 和 Generation Chain 的结构化元数据；完整 payload logging 必须显式开启。将这些元数据导出到 OTel Collector / Jaeger / Prometheus / Grafana 仍属于后续观测适配，不改变当前 HookRuntime seam。
+当前实现只提供 Gateway-local Interaction Observation、SSE 与 Debug Bundle。将结构化元数据导出到 OTel Collector / Jaeger / Prometheus / Grafana，以及 multi-instance realtime fanout、共享 Trace storage 或 cluster-wide Debug switch，仍属于后续适配；这些能力不能复用 Generation Chain 作为可变观测存储。
 
 ### 12.7 长尾厂商适配
 

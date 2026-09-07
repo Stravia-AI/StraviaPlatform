@@ -1,655 +1,854 @@
 <script lang="ts">
 import * as m from '$lib/paraglide/messages.js'
+import { onMount, tick } from 'svelte'
+import { SvelteSet } from 'svelte/reactivity'
 import { createQuery, useQueryClient } from '@tanstack/svelte-query'
-import { renderSnippet } from '@tanstack/svelte-table'
+import { SvelteFlowProvider } from '@xyflow/svelte'
+import BugIcon from '@lucide/svelte/icons/bug'
+import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw'
 import SlidersHorizontalIcon from '@lucide/svelte/icons/sliders-horizontal'
+import Trash2Icon from '@lucide/svelte/icons/trash-2'
 import { toast } from 'svelte-sonner'
 
 import { admin } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
-import { getDataTableLabels } from '$lib/data-table-labels'
-import { effectiveModelDisplayName, logicalModelSecondaryId, sortLogicalModels } from '$lib/logical-model'
-import {
-  computeTps,
-  formatDuration,
-  formatDurationSeconds,
-  formatLogTime,
-  formatTokenCount,
-  formatTps,
-} from '$lib/format'
-import type { RequestLog } from '$lib/types'
-import LogDetailDialog from '$lib/components/log-detail-dialog.svelte'
+import { formatLogTime } from '$lib/format'
+import { observationDebugStatusLabel, observationStatusLabel } from '$lib/observation-labels'
+import { navigateToBundle, subscribeToObservations, type ObservationSubscription } from '$lib/observation-stream'
+import type {
+  ForestPage,
+  ForestQuery,
+  ForestRoot,
+  InteractionDetail,
+  InteractionSummary,
+  RejectionDetail,
+  RejectionSummary,
+} from '$lib/types'
+import InteractionCanvas from '$lib/components/interaction-canvas.svelte'
+import ObservationInspector from '$lib/components/observation-inspector.svelte'
 import PageHeader from '$lib/components/page-header.svelte'
 import StatusIndicator from '$lib/components/status-indicator.svelte'
-import TechnicalValue from '$lib/components/technical-value.svelte'
 import * as AlertDialog from '$lib/components/ui/alert-dialog'
 import { Badge } from '$lib/components/ui/badge'
 import { Button } from '$lib/components/ui/button'
-import {
-  DataTable,
-  createDataTableColumnHelper,
-  type DataTableCellContext,
-  type DataTableRow,
-} from '$lib/components/ui/data-table'
 import * as Empty from '$lib/components/ui/empty'
 import * as Field from '$lib/components/ui/field'
 import * as Select from '$lib/components/ui/select'
 import * as Sheet from '$lib/components/ui/sheet'
-import { Skeleton } from '$lib/components/ui/skeleton'
+import { Switch } from '$lib/components/ui/switch'
+import * as Tabs from '$lib/components/ui/tabs'
 
-const pageSize = 25
-type RequestFilterKey = 'provider' | 'model' | 'apiKey' | 'status'
-
-interface ActiveRequestFilter {
-  key: RequestFilterKey
-  label: string
-  value: string
-}
-
+const batchSize = 12
 const queryClient = useQueryClient()
-let pageIndex = $state(0)
+let activeTab = $state('interactions')
+let anchorAt = $state(Date.now())
+let windowIndex = $state(0)
+let roots = $state.raw<ForestRoot[]>([])
+let rootTotal = $state(0)
+let nextCursor = $state<string | null>()
+let snapshotSequence = $state(0)
+let windowStart = $state(0)
+let windowEnd = $state(0)
+let loading = $state(true)
+let loadingMore = $state(false)
+let rootBatchRequest: Promise<void> | undefined
+let loadError = $state<unknown>()
+let selectedInteraction = $state<InteractionSummary>()
+let selectedRejection = $state<RejectionSummary>()
+let interactionDetail = $state<InteractionDetail>()
+let rejectionDetail = $state<RejectionDetail>()
+let detailLoading = $state(false)
+let inspectorWidth = $state(46)
+let canvas = $state<InteractionCanvas>()
+let stream: ObservationSubscription | undefined
+let streamConnected = $state(false)
+let filterOpen = $state(false)
 let providerFilter = $state('all')
 let modelFilter = $state('all')
 let apiKeyFilter = $state('all')
 let statusFilter = $state('all')
-let filterOpen = $state(false)
 let clearOpen = $state(false)
 let clearing = $state(false)
-let selectedLog = $state<RequestLog>()
-let detailOpen = $state(false)
+let clearResult = $state<{ skipped_active: number }>()
+let debugConfirmOpen = $state(false)
+let changingDebug = $state(false)
+let fitProgress = $state<number>()
+let followPaused = $state(false)
+let hasNewActivity = $state(false)
+let migratedRoots = $state.raw(new Set<string>())
+let rejections = $state.raw<RejectionSummary[]>([])
+let rejectionTotal = $state(0)
+let rejectionCursor = $state<string | null>()
+let rejectionLoading = $state(false)
 
 const providersQuery = createQuery(() => ({ queryKey: ['providers'], queryFn: admin.providers.list }))
 const modelsQuery = createQuery(() => ({ queryKey: ['models'], queryFn: admin.models.list }))
 const keysQuery = createQuery(() => ({ queryKey: ['api-keys'], queryFn: admin.apiKeys.list }))
-const logsQuery = createQuery(() => ({
-  queryKey: ['logs', pageIndex, providerFilter, modelFilter, apiKeyFilter, statusFilter],
-  queryFn: () =>
-    admin.logs.query({
-      limit: pageSize,
-      offset: pageIndex * pageSize,
-      provider: providerFilter === 'all' ? undefined : providerFilter,
-      model: modelFilter === 'all' ? undefined : modelFilter,
-      api_key: apiKeyFilter === 'all' ? undefined : apiKeyFilter,
-      status_min: statusFilter === 'success' ? 200 : statusFilter === 'error' ? 400 : undefined,
-      status_max: statusFilter === 'success' ? 399 : statusFilter === 'error' ? 599 : undefined,
-    }),
-  refetchInterval: 5_000,
-}))
+const debugQuery = createQuery(() => ({ queryKey: ['observation-debug'], queryFn: admin.observations.debug }))
 
-const logs = $derived(logsQuery.data?.items ?? [])
-const models = $derived(sortLogicalModels(modelsQuery.data ?? []))
-const total = $derived(logsQuery.data?.total ?? 0)
-const pageCount = $derived(Math.max(1, Math.ceil(total / pageSize)))
-const tableLabels = $derived(getDataTableLabels())
-const modelDisplayName = (modelId: string | undefined) => {
-  const model = models.find((candidate) => candidate.id === modelId)
-  return model ? effectiveModelDisplayName(model) : undefined
-}
-const modelLabel = (log: RequestLog) =>
-  log.model_name ?? modelDisplayName(log.model_id) ?? log.model_id ?? log.client_model ?? '–'
-const providerLabel = (log: RequestLog) =>
-  log.provider_name ??
-  providersQuery.data?.find((provider) => provider.id === log.provider_id)?.name ??
-  log.provider_id ??
-  '–'
-const upstreamModelLabel = (log: RequestLog) => log.upstream_model ?? '–'
-const logColumnHelper = createDataTableColumnHelper<RequestLog>()
-const logColumns = logColumnHelper.columns([
-  logColumnHelper.accessor('created_at', {
-    header: () => m.logs_time(),
-    cell: (context) => formatLogTime(context.getValue()),
-    enableSorting: false,
-    meta: { label: () => m.logs_time(), cellClass: 'font-technical whitespace-nowrap text-xs tabular-nums' },
-  }),
-  logColumnHelper.accessor((log) => log.path ?? '–', {
-    id: 'request',
-    header: () => m.logs_request(),
-    cell: (context) => renderSnippet(logRequestCell, context),
-    enableSorting: false,
-    meta: { label: () => m.logs_request() },
-  }),
-  logColumnHelper.accessor((log) => modelLabel(log), {
-    id: 'logicalModel',
-    header: () => m.logs_logical_model(),
-    cell: (context) => renderSnippet(logicalModelCell, context),
-    enableSorting: false,
-    meta: { label: () => m.logs_logical_model() },
-  }),
-  logColumnHelper.accessor((log) => upstreamModelLabel(log), {
-    id: 'upstreamModel',
-    header: () => m.logs_upstream_model(),
-    cell: (context) => renderSnippet(upstreamModelCell, context),
-    enableSorting: false,
-    meta: { label: () => m.logs_upstream_model() },
-  }),
-  logColumnHelper.accessor('thinking_level', {
-    header: () => m.logs_thinking_level(),
-    cell: (context) => context.getValue() ?? '–',
-    enableSorting: false,
-    meta: {
-      label: () => m.logs_thinking_level(),
-      cellClass: 'font-technical whitespace-nowrap text-xs text-muted-foreground',
-    },
-    size: 88,
-  }),
-  logColumnHelper.accessor('client_status_code', {
-    header: () => m.common_status(),
-    cell: (context) => renderSnippet(logStatusCell, context),
-    enableSorting: false,
-    meta: { label: () => m.common_status() },
-  }),
-  logColumnHelper.accessor(
-    (log) =>
-      `${m.logs_first_token_short()}: ${formatDurationSeconds(log.stream_first_chunk_ms)} / ${m.logs_duration_short()}: ${formatDurationSeconds(log.latency_total_ms)}`,
-    {
-      id: 'latency',
-      header: () => m.common_latency(),
-      cell: (context) => renderSnippet(latencyCell, context),
-      enableSorting: false,
-      meta: { label: () => m.common_latency(), align: 'end', cellClass: 'whitespace-nowrap' },
-      size: 152,
-    },
-  ),
-  logColumnHelper.accessor((log) => computeTps(log), {
-    id: 'tokenSpeed',
-    header: () => m.logs_token_speed(),
-    cell: (context) => formatTps(context.getValue()),
-    enableSorting: false,
-    meta: {
-      label: () => m.logs_token_speed(),
-      align: 'end',
-      cellClass: 'font-technical whitespace-nowrap text-xs tabular-nums',
-    },
-  }),
-  logColumnHelper.accessor((log) => log.input_tokens + log.output_tokens, {
-    id: 'tokens',
-    header: () => m.common_token(),
-    cell: (context) => renderSnippet(tokenUsageCell, context),
-    enableSorting: false,
-    meta: { label: () => m.common_token(), cellClass: 'whitespace-nowrap' },
-    size: 156,
-  }),
-  logColumnHelper.display({
-    id: 'actions',
-    header: () => m.logs_action(),
-    cell: (context) => renderSnippet(logActionCell, context),
-    enableHiding: false,
-    enableSorting: false,
-    meta: { label: () => m.logs_action(), align: 'end', exportable: false },
-    size: 88,
-  }),
-])
-
-function getLogRowId(log: RequestLog): string {
-  return log.id
-}
-
-function logRowClass(row: DataTableRow<RequestLog>): string | undefined {
-  return selectedLog?.id === row.original.id ? 'bg-muted' : undefined
-}
-const activeFilters = $derived.by(() => {
-  const filters: ActiveRequestFilter[] = []
-  if (providerFilter !== 'all') {
-    filters.push({
-      key: 'provider',
-      label: m.common_model_service(),
-      value: providersQuery.data?.find((provider) => provider.id === providerFilter)?.name ?? providerFilter,
-    })
+const interactions = $derived(roots.flatMap((root) => root.interactions))
+const activeFilterCount = $derived(
+  [providerFilter, modelFilter, apiKeyFilter, statusFilter].filter((value) => value !== 'all').length,
+)
+const latestInteraction = $derived.by(
+  () =>
+    [...interactions].sort(
+      (a, b) => Number(b.status === 'running') - Number(a.status === 'running') || b.last_active_at - a.last_active_at,
+    )[0],
+)
+const selectedPath = $derived.by(() => {
+  const path = new SvelteSet<string>()
+  let current = selectedInteraction
+  while (current) {
+    path.add(current.id)
+    current = interactions.find((candidate) => candidate.id === current?.parent_interaction_id)
   }
-  if (modelFilter !== 'all') {
-    filters.push({ key: 'model', label: m.common_model(), value: modelDisplayName(modelFilter) ?? modelFilter })
-  }
-  if (apiKeyFilter !== 'all') {
-    filters.push({
-      key: 'apiKey',
-      label: m.common_api_key(),
-      value: keysQuery.data?.find((key) => key.id === apiKeyFilter)?.name ?? apiKeyFilter,
-    })
-  }
-  if (statusFilter !== 'all') {
-    filters.push({
-      key: 'status',
-      label: m.common_status(),
-      value: statusFilter === 'success' ? m.logs_success() : m.common_errors_label(),
-    })
-  }
-  return filters
+  return path
 })
-const activeFilterCount = $derived(activeFilters.length)
+const currentQuery = $derived<ForestQuery>({
+  anchor_at: anchorAt,
+  window_index: windowIndex,
+  limit: batchSize,
+  provider: providerFilter === 'all' ? undefined : providerFilter,
+  model: modelFilter === 'all' ? undefined : modelFilter,
+  api_key: apiKeyFilter === 'all' ? undefined : apiKeyFilter,
+  status: statusFilter === 'all' ? undefined : statusFilter,
+})
+const selectedMigrated = $derived(
+  selectedInteraction
+    ? roots.find((root) => root.interactions.some((item) => item.id === selectedInteraction?.id))?.id
+    : undefined,
+)
 
-function selectLog(log: RequestLog): void {
-  selectedLog = log
-  detailOpen = true
+onMount(() => {
+  void loadForest(true)
+  return () => stream?.close()
+})
+
+function applyPage(page: ForestPage, replace: boolean): void {
+  roots = replace
+    ? page.roots
+    : [...roots, ...page.roots.filter((root) => !roots.some((known) => known.id === root.id))]
+  rootTotal = page.root_total
+  nextCursor = page.next_cursor
+  snapshotSequence = page.snapshot_sequence
+  windowStart = page.window_start
+  windowEnd = page.window_end
+  if (replace) stream?.setCursor(page.snapshot_sequence)
+  if (!stream) {
+    stream = subscribeToObservations(
+      page.snapshot_sequence,
+      handleObservationUpdate,
+      (connected) => (streamConnected = connected),
+    )
+  }
 }
 
-function resetPage(): void {
-  pageIndex = 0
+async function loadForest(replace: boolean): Promise<void> {
+  if (replace) {
+    loading = true
+    loadError = undefined
+  } else loadingMore = true
+  try {
+    const page = await admin.observations.forest({
+      ...currentQuery,
+      cursor: replace ? undefined : (nextCursor ?? undefined),
+    })
+    applyPage(page, replace)
+    loadError = undefined
+    if (replace && windowIndex === 0 && !followPaused) {
+      await tick()
+      await canvas?.focusLatest()
+    }
+  } catch (error) {
+    loadError = error
+  } finally {
+    loading = false
+    loadingMore = false
+  }
 }
 
-function clearFilters(): void {
-  providerFilter = 'all'
-  modelFilter = 'all'
-  apiKeyFilter = 'all'
-  statusFilter = 'all'
-  pageIndex = 0
+async function reloadForFilters(): Promise<void> {
+  selectedInteraction = undefined
+  interactionDetail = undefined
+  followPaused = false
+  hasNewActivity = false
+  migratedRoots = new Set()
+  await loadForest(true)
 }
 
-function removeFilter(key: RequestFilterKey): void {
-  if (key === 'provider') providerFilter = 'all'
-  else if (key === 'model') modelFilter = 'all'
-  else if (key === 'apiKey') apiKeyFilter = 'all'
-  else statusFilter = 'all'
-  pageIndex = 0
+function loadNextRootBatch(): Promise<void> {
+  if (rootBatchRequest) return rootBatchRequest
+  if (!nextCursor) return Promise.resolve()
+  rootBatchRequest = loadForest(false).finally(() => {
+    rootBatchRequest = undefined
+  })
+  return rootBatchRequest
 }
 
-async function clearRequests(): Promise<void> {
+async function fitAll(): Promise<void> {
+  if (!nextCursor) {
+    await canvas?.fitAfterAllLoaded()
+    return
+  }
+  fitProgress = Math.round((roots.length / Math.max(rootTotal, 1)) * 100)
+  while (nextCursor) {
+    await loadNextRootBatch()
+    fitProgress = Math.round((roots.length / Math.max(rootTotal, 1)) * 100)
+    if (loadError) break
+  }
+  await tick()
+  await canvas?.fitAfterAllLoaded()
+  fitProgress = undefined
+}
+
+async function selectInteraction(interaction: InteractionSummary): Promise<void> {
+  selectedInteraction = interaction
+  selectedRejection = undefined
+  interactionDetail = undefined
+  rejectionDetail = undefined
+  detailLoading = true
+  if (interaction.id !== latestInteraction?.id) followPaused = true
+  try {
+    interactionDetail = await admin.observations.interaction(interaction.id, currentQuery)
+  } catch (error) {
+    toast.error(localizeBackendErrorMessage(error))
+  } finally {
+    detailLoading = false
+  }
+}
+
+async function selectRejection(rejection: RejectionSummary): Promise<void> {
+  selectedRejection = rejection
+  selectedInteraction = undefined
+  rejectionDetail = undefined
+  interactionDetail = undefined
+  detailLoading = true
+  try {
+    rejectionDetail = await admin.observations.rejection(rejection.id)
+  } catch (error) {
+    toast.error(localizeBackendErrorMessage(error))
+  } finally {
+    detailLoading = false
+  }
+}
+
+function closeInspector(): void {
+  selectedInteraction = undefined
+  selectedRejection = undefined
+  interactionDetail = undefined
+  rejectionDetail = undefined
+}
+
+async function handleObservationUpdate(update: import('$lib/types').ObservationStreamUpdate): Promise<void> {
+  if (update.type === 'reset_required') {
+    await loadForest(true)
+    if (loadError) throw loadError
+    return
+  }
+  snapshotSequence = Math.max(snapshotSequence, update.event.sequence)
+  if (followPaused) hasNewActivity = true
+  if (windowIndex > 0 && update.event.interaction_id && update.event.occurred_at >= windowEnd) {
+    const root = roots.find((item) =>
+      item.interactions.some((interaction) => interaction.id === update.event.interaction_id),
+    )
+    if (root) migratedRoots = new Set([...migratedRoots, root.id])
+  }
+  if (update.event.interaction_id && interactions.some((item) => item.id === update.event.interaction_id)) {
+    const known = interactions.find((item) => item.id === update.event.interaction_id)
+    const inspectorNeedsEvent =
+      selectedInteraction?.id === update.event.interaction_id &&
+      (interactionDetail?.snapshot_sequence ?? 0) < update.event.sequence
+    if (known && known.last_event_sequence >= update.event.sequence && !inspectorNeedsEvent) return
+    try {
+      const detail = await admin.observations.interaction(update.event.interaction_id, currentQuery)
+      if (detail.root.interactions.some((item) => item.matched)) {
+        roots = roots.map((root) => (root.id === detail.root.id ? detail.root : root))
+      } else {
+        roots = roots.filter((root) => root.id !== detail.root.id)
+        rootTotal = Math.max(0, rootTotal - 1)
+      }
+      if (selectedInteraction?.id === detail.interaction.id) {
+        selectedInteraction = detail.interaction
+        interactionDetail = detail
+      }
+      loadError = undefined
+    } catch (error) {
+      loadError = error
+      throw error
+    }
+  } else if (windowIndex === 0 && update.event.interaction_id) {
+    try {
+      const detail = await admin.observations.interaction(update.event.interaction_id, currentQuery)
+      const existingIndex = roots.findIndex((root) => root.id === detail.root.id)
+      if (existingIndex >= 0) roots = roots.map((root) => (root.id === detail.root.id ? detail.root : root))
+      else if (detail.root.interactions.some((interaction) => interaction.matched)) {
+        roots = [...roots, detail.root]
+        rootTotal += 1
+      }
+      loadError = undefined
+    } catch (error) {
+      loadError = error
+      throw error
+    }
+  }
+  if (!followPaused && windowIndex === 0) {
+    await tick()
+    await canvas?.focusLatest()
+  }
+}
+
+async function changeWindow(delta: number): Promise<void> {
+  windowIndex = Math.max(0, windowIndex + delta)
+  closeInspector()
+  migratedRoots = new Set()
+  followPaused = windowIndex !== 0
+  hasNewActivity = false
+  await loadForest(true)
+}
+
+async function refreshAnchor(focusId?: string): Promise<void> {
+  anchorAt = Date.now()
+  windowIndex = 0
+  migratedRoots = new Set()
+  followPaused = false
+  hasNewActivity = false
+  await loadForest(true)
+  if (focusId) {
+    const interaction = interactions.find((item) => item.id === focusId)
+    if (interaction) await selectInteraction(interaction)
+  }
+}
+
+async function loadRejections(replace = true): Promise<void> {
+  rejectionLoading = true
+  try {
+    const page = await admin.observations.rejections({
+      anchor_at: anchorAt,
+      window_index: windowIndex,
+      limit: 30,
+      cursor: replace ? undefined : (rejectionCursor ?? undefined),
+    })
+    rejections = replace ? page.items : [...rejections, ...page.items]
+    rejectionTotal = page.total
+    rejectionCursor = page.next_cursor
+  } catch (error) {
+    toast.error(localizeBackendErrorMessage(error))
+  } finally {
+    rejectionLoading = false
+  }
+}
+
+async function tabChanged(value: string): Promise<void> {
+  activeTab = value
+  closeInspector()
+  if (value === 'rejections' && rejections.length === 0) await loadRejections()
+}
+
+async function disableDebug(): Promise<void> {
+  changingDebug = true
+  try {
+    await admin.observations.setDebug(false)
+    await queryClient.invalidateQueries({ queryKey: ['observation-debug'] })
+  } catch (error) {
+    toast.error(localizeBackendErrorMessage(error))
+  } finally {
+    changingDebug = false
+  }
+}
+
+async function enableDebug(): Promise<void> {
+  changingDebug = true
+  try {
+    await admin.observations.setDebug(true)
+    debugConfirmOpen = false
+    await queryClient.invalidateQueries({ queryKey: ['observation-debug'] })
+  } catch (error) {
+    toast.error(localizeBackendErrorMessage(error))
+  } finally {
+    changingDebug = false
+  }
+}
+
+async function clearHistory(): Promise<void> {
   clearing = true
   try {
-    await admin.logs.clear()
-    await Promise.all([
-      queryClient.invalidateQueries({ queryKey: ['logs'] }),
-      queryClient.invalidateQueries({ queryKey: ['stats-overview'] }),
-      queryClient.invalidateQueries({ queryKey: ['stats-hourly'] }),
-      queryClient.invalidateQueries({ queryKey: ['stats-models'] }),
-      queryClient.invalidateQueries({ queryKey: ['stats-providers'] }),
-      queryClient.invalidateQueries({ queryKey: ['stats-api-keys'] }),
-    ])
+    const result = await admin.observations.clearHistory()
+    clearResult = result
     clearOpen = false
-    pageIndex = 0
-    toast.success(m.logs_request_history_cleared())
+    await Promise.all([loadForest(true), activeTab === 'rejections' ? loadRejections() : Promise.resolve()])
+    toast.success(
+      m.observation_history_cleared({
+        interactions: result.deleted_interactions,
+        rejections: result.deleted_rejections,
+        skipped: result.skipped_active,
+      }),
+    )
   } catch (error) {
     toast.error(localizeBackendErrorMessage(error))
   } finally {
     clearing = false
   }
 }
+
+async function downloadBundle(): Promise<void> {
+  const kind = interactionDetail ? 'interaction' : 'rejected_request'
+  const id = interactionDetail?.interaction.id ?? rejectionDetail?.rejection.id
+  const through = interactionDetail?.snapshot_sequence ?? rejectionDetail?.snapshot_sequence
+  if (!id) return
+  try {
+    await navigateToBundle(await admin.observations.issueBundleTicket(kind, id, through))
+  } catch (error) {
+    toast.error(localizeBackendErrorMessage(error))
+  }
+}
+
+function formatBytes(value: number | undefined): string {
+  if (value == null) return '–'
+  const unit = value >= 1024 ** 3 ? 'GiB' : 'MiB'
+  const divisor = unit === 'GiB' ? 1024 ** 3 : 1024 ** 2
+  return `${(value / divisor).toFixed(value % divisor === 0 ? 0 : 1)} ${unit}`
+}
 </script>
-
-{#snippet logRequestCell(context: DataTableCellContext<RequestLog>)}
-  {@const log = context.row.original}
-  <div class="flex min-w-0 items-center gap-2">
-    <Badge variant="outline">{log.method ?? '–'}</Badge>
-    <TechnicalValue value={log.path ?? '–'} copyable />
-  </div>
-{/snippet}
-
-{#snippet logicalModelCell(context: DataTableCellContext<RequestLog>)}
-  <p class="max-w-72 truncate font-medium">{modelLabel(context.row.original)}</p>
-{/snippet}
-
-{#snippet upstreamModelCell(context: DataTableCellContext<RequestLog>)}
-  <div class="max-w-72">
-    <p class="truncate font-medium">{upstreamModelLabel(context.row.original)}</p>
-    <p class="truncate text-xs text-muted-foreground">{providerLabel(context.row.original)}</p>
-  </div>
-{/snippet}
-
-{#snippet logStatusCell(context: DataTableCellContext<RequestLog>)}
-  {@const status = context.row.original.client_status_code}
-  <StatusIndicator
-    compact
-    label={String(status ?? '–')}
-    tone={status == null ? 'neutral' : status >= 400 ? 'error' : 'healthy'} />
-{/snippet}
-
-{#snippet latencyCell(context: DataTableCellContext<RequestLog>)}
-  {@const log = context.row.original}
-  <div class="font-technical grid w-max grid-cols-[auto_auto] justify-end gap-x-2 text-[11px] leading-4 tabular-nums">
-    <span class="text-muted-foreground">{m.logs_first_token_short()}</span>
-    <span>{formatDurationSeconds(log.stream_first_chunk_ms)}</span>
-    <span class="text-muted-foreground">{m.logs_duration_short()}</span>
-    <span>{formatDurationSeconds(log.latency_total_ms)}</span>
-  </div>
-{/snippet}
-
-{#snippet tokenUsage(log: RequestLog)}
-  <span title={m.logs_input_tokens()}
-    ><span class="text-muted-foreground">{m.common_input_abbreviation()}</span>
-    {formatTokenCount(log.input_tokens)}</span>
-  <span title={m.logs_output_tokens()}
-    ><span class="text-muted-foreground">{m.common_output_abbreviation()}</span>
-    {formatTokenCount(log.output_tokens)}</span>
-  <span title={m.logs_cache_input_tokens()}
-    ><span class="text-muted-foreground">C-IN</span>
-    {formatTokenCount(log.cache_read_tokens)}</span>
-  <span title={m.logs_cache_output_tokens()}
-    ><span class="text-muted-foreground">C-OUT</span>
-    {formatTokenCount(log.cache_write_tokens)}</span>
-{/snippet}
-
-{#snippet tokenUsageCell(context: DataTableCellContext<RequestLog>)}
-  <div class="font-technical grid w-max grid-cols-2 gap-x-3 gap-y-0.5 text-[11px] leading-4 tabular-nums">
-    {@render tokenUsage(context.row.original)}
-  </div>
-{/snippet}
-
-{#snippet logActionCell(context: DataTableCellContext<RequestLog>)}
-  <Button variant="ghost" size="sm" onclick={() => selectLog(context.row.original)}>
-    {m.logs_view_details()}
-  </Button>
-{/snippet}
 
 <svelte:head><title>{m.common_request_history()} · Stravia</title></svelte:head>
 
 {#snippet liveMeta()}
   <StatusIndicator
     compact
-    label={logsQuery.isFetching ? m.logs_updating_5s() : m.logs_live_5s()}
-    tone={logsQuery.isError ? 'error' : 'healthy'} />
+    label={streamConnected ? m.observation_live() : m.observation_reconnecting()}
+    tone={streamConnected ? 'healthy' : 'neutral'} />
 {/snippet}
 
-{#snippet clearAction()}
-  <Button variant="destructive" onclick={() => (clearOpen = true)} disabled={total === 0}
-    >{m.logs_clear_history()}</Button>
-{/snippet}
-
-{#snippet filters()}
-  <Field.Field>
-    <Field.FieldLabel for="request-provider-filter">{m.common_model_service()}</Field.FieldLabel>
-    <Select.Root type="single" bind:value={providerFilter}>
-      <Select.Trigger id="request-provider-filter" class="w-full"
-        >{providersQuery.data?.find((provider) => provider.id === providerFilter)?.name ??
-          m.logs_all_model_services()}</Select.Trigger>
-      <Select.Content
-        ><Select.Group
-          ><Select.Item value="all" onclick={resetPage}>{m.logs_all_model_services()}</Select.Item
-          >{#each providersQuery.data ?? [] as provider (provider.id)}<Select.Item
-              value={provider.id}
-              label={provider.name}
-              onclick={resetPage}>{provider.name}</Select.Item
-            >{/each}</Select.Group
-        ></Select.Content>
-    </Select.Root>
-  </Field.Field>
-  <Field.Field>
-    <Field.FieldLabel for="request-model-filter">{m.common_model()}</Field.FieldLabel>
-    <Select.Root type="single" bind:value={modelFilter}>
-      <Select.Trigger id="request-model-filter" class="w-full"
-        >{modelDisplayName(modelFilter) ?? m.common_all_models()}</Select.Trigger>
-      <Select.Content
-        ><Select.Group
-          ><Select.Item value="all" onclick={resetPage}>{m.common_all_models()}</Select.Item
-          >{#each models as model (model.id)}<Select.Item
-              value={model.id}
-              label={effectiveModelDisplayName(model)}
-              onclick={resetPage}>
-              <span class="min-w-0 flex-1 truncate">{effectiveModelDisplayName(model)}</span>
-              {#if logicalModelSecondaryId(model)}
-                <span class="truncate font-technical text-xs text-muted-foreground">{model.model_id}</span>
-              {/if}
-            </Select.Item>{/each}</Select.Group
-        ></Select.Content>
-    </Select.Root>
-  </Field.Field>
-  <Field.Field>
-    <Field.FieldLabel for="request-key-filter">{m.common_api_key()}</Field.FieldLabel>
-    <Select.Root type="single" bind:value={apiKeyFilter}>
-      <Select.Trigger id="request-key-filter" class="w-full"
-        >{keysQuery.data?.find((key) => key.id === apiKeyFilter)?.name ?? m.logs_all_api_keys()}</Select.Trigger>
-      <Select.Content
-        ><Select.Group
-          ><Select.Item value="all" onclick={resetPage}>{m.logs_all_api_keys()}</Select.Item
-          >{#each keysQuery.data ?? [] as key (key.id)}<Select.Item value={key.id} label={key.name} onclick={resetPage}
-              >{key.name}</Select.Item
-            >{/each}</Select.Group
-        ></Select.Content>
-    </Select.Root>
-  </Field.Field>
-  <Field.Field>
-    <Field.FieldLabel for="request-status-filter">{m.common_status()}</Field.FieldLabel>
-    <Select.Root type="single" bind:value={statusFilter}>
-      <Select.Trigger id="request-status-filter" class="w-full"
-        >{statusFilter === 'success'
-          ? m.logs_success()
-          : statusFilter === 'error'
-            ? m.common_errors_label()
-            : m.logs_all_statuses()}</Select.Trigger>
-      <Select.Content
-        ><Select.Group
-          ><Select.Item value="all" onclick={resetPage}>{m.logs_all_statuses()}</Select.Item><Select.Item
-            value="success"
-            onclick={resetPage}>{m.logs_success_2xx_3xx()}</Select.Item
-          ><Select.Item value="error" onclick={resetPage}>{m.logs_errors_4xx_5xx()}</Select.Item></Select.Group
-        ></Select.Content>
-    </Select.Root>
-  </Field.Field>
-{/snippet}
-
-{#snippet activeFilterRows()}
-  {#if activeFilters.length > 0}
-    <div class="divide-y border-y" aria-label={m.logs_active_request_filters()}>
-      {#each activeFilters as filter (filter.key)}
-        <div class="flex min-h-10 items-center justify-between gap-3 py-1 text-sm">
-          <p class="min-w-0 truncate">
-            <span class="text-muted-foreground">{filter.label}:</span>
-            <span class="font-medium">{filter.value}</span>
-          </p>
-          <Button
-            variant="ghost"
-            size="sm"
-            aria-label={m.logs_remove_value_filter({ label: filter.label })}
-            onclick={() => removeFilter(filter.key)}>{m.common_remove()}</Button>
-        </div>
-      {/each}
+{#snippet headerActions()}
+  <div class="flex flex-wrap items-center gap-2">
+    <div class="debug-toggle">
+      <BugIcon aria-hidden="true" /><span>{m.observation_debug()}</span><Switch
+        bind:checked={
+          () => debugQuery.data?.enabled ?? false,
+          (enabled) => (enabled ? (debugConfirmOpen = true) : void disableDebug())
+        }
+        disabled={changingDebug || debugQuery.isPending || !debugQuery.data}
+        aria-label={m.observation_debug()} />
     </div>
-  {/if}
+    <Button variant="outline" onclick={() => (filterOpen = true)} disabled={activeTab !== 'interactions'}
+      ><SlidersHorizontalIcon data-icon="inline-start" />{m.observation_filters()}{#if activeFilterCount}<span
+          >· {activeFilterCount}</span
+        >{/if}</Button>
+    <Button variant="destructive" onclick={() => (clearOpen = true)}
+      ><Trash2Icon data-icon="inline-start" />{m.observation_clear_history()}</Button>
+  </div>
 {/snippet}
 
-{#snippet desktopActiveFilters()}
-  {#each activeFilters as filter (filter.key)}
-    <Button
-      variant="outline"
-      size="sm"
-      aria-label={m.logs_remove_value_filter({ label: filter.label })}
-      onclick={() => removeFilter(filter.key)}>
-      <span class="text-muted-foreground">{filter.label}:</span>
-      <span class="max-w-40 truncate">{filter.value}</span>
-      <span aria-hidden="true">×</span>
-    </Button>
-  {/each}
-  {#if activeFilterCount > 1}
-    <Button variant="ghost" size="sm" onclick={clearFilters}>{m.logs_clear_filters()}</Button>
-  {/if}
-{/snippet}
-
-{#snippet desktopFilterAction()}
-  <Button variant="outline" size="sm" onclick={() => (filterOpen = true)}>
-    <SlidersHorizontalIcon data-icon="inline-start" />
-    {m.logs_filters()}
-    {#if activeFilterCount > 0}
-      <span class="font-technical tabular-nums">· {activeFilterCount}</span>
-    {/if}
-  </Button>
-{/snippet}
-
-{#snippet tableEmpty()}
-  <Empty.Root class="py-8">
-    <Empty.Header>
-      <Empty.Title>
-        {activeFilterCount > 0 ? m.logs_no_requests_match_filters() : m.logs_no_requests_recorded()}
-      </Empty.Title>
-      <Empty.Description>
-        {activeFilterCount > 0
-          ? m.logs_remove_filter_wait_matching_request()
-          : m.logs_requests_appear_app_sends_traffic_stravia()}
-      </Empty.Description>
-    </Empty.Header>
-    <Empty.Content>
-      {#if activeFilterCount > 0}
-        <Button variant="outline" onclick={clearFilters}>{m.logs_clear_filters()}</Button>
-      {:else}
-        <Button href="/connect">{m.connect_connect_apps()}</Button>
-      {/if}
-    </Empty.Content>
-  </Empty.Root>
-{/snippet}
-
-<div class="route-page">
+<div class="route-page observation-page">
   <PageHeader
     eyebrow={m.common_monitor()}
     title={m.common_request_history()}
-    description={m.logs_page_summary()}
+    description={m.observation_page_summary()}
     meta={liveMeta}
-    actions={clearAction} />
+    actions={headerActions} />
 
-  <section class="route-section" aria-labelledby="request-ledger-title">
-    <div class="route-section-header">
-      <div>
-        <h2 id="request-ledger-title" class="route-section-title">{m.logs_recent_requests()}</h2>
-        <p class="route-section-description">
-          {m.logs_sensitive_content_notice()}
-        </p>
+  {#if (debugQuery.data?.partial_trace_count ?? 0) > 0}
+    <div class="persistent-warning" role="alert">
+      {m.observation_partial_traces_warning({ count: debugQuery.data?.partial_trace_count ?? 0 })}
+    </div>
+  {/if}
+  {#if clearResult?.skipped_active}
+    <div class="persistent-warning" role="status">
+      {m.observation_clear_skipped_active({ count: clearResult.skipped_active })}
+    </div>
+  {/if}
+
+  <section class="observation-workspace" aria-labelledby="observation-workspace-title">
+    <h2 id="observation-workspace-title" class="sr-only">{m.observation_interaction_chains()}</h2>
+    <div class="workspace-toolbar">
+      <Tabs.Root value={activeTab} onValueChange={(value) => void tabChanged(value)}>
+        <Tabs.List
+          ><Tabs.Trigger value="interactions">{m.observation_interaction_chains()}</Tabs.Trigger><Tabs.Trigger
+            value="rejections">{m.observation_rejected_requests()}</Tabs.Trigger
+          ></Tabs.List>
+      </Tabs.Root>
+      <div class="window-controls">
+        <Button variant="ghost" size="sm" onclick={() => void changeWindow(1)}>{m.observation_older_window()}</Button>
+        <span class="font-technical text-xs text-muted-foreground"
+          >{windowStart
+            ? `${formatLogTime(windowStart)} — ${windowIndex === 0 ? m.observation_live() : formatLogTime(windowEnd)}`
+            : m.observation_loading_window()}</span>
+        <Button variant="ghost" size="sm" disabled={windowIndex === 0} onclick={() => void changeWindow(-1)}
+          >{m.observation_newer_window()}</Button>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          aria-label={m.observation_refresh_anchor()}
+          onclick={() => void refreshAnchor()}><RefreshCwIcon /></Button>
       </div>
-      {#if total > 0}
-        <span class="font-technical text-xs text-muted-foreground tabular-nums">{total}</span>
-      {/if}
     </div>
 
-    {#if logs.length > 0 || activeFilterCount > 0}
-      <div class="mb-4 flex items-center justify-between md:hidden">
-        <Button variant="outline" onclick={() => (filterOpen = true)}
-          ><SlidersHorizontalIcon data-icon="inline-start" />{m.logs_filters()}{#if activeFilterCount > 0}<span
-              class="font-technical">· {activeFilterCount}</span
-            >{/if}</Button>
-        {#if activeFilterCount > 0}<Button variant="ghost" size="sm" onclick={clearFilters}>{m.logs_clear()}</Button
-          >{/if}
-      </div>
-    {/if}
-
-    {#if logsQuery.isPending}
-      <div class="flex flex-col border-y" aria-label={m.logs_loading_requests()}>
-        {#each Array(8) as _, index (index)}<div
-            class="grid grid-cols-[1fr_3fr_2fr_1fr] gap-4 border-b p-3 last:border-b-0">
-            <Skeleton class="h-6" /><Skeleton class="h-6" /><Skeleton class="h-6" /><Skeleton class="h-6" />
-          </div>{/each}
-      </div>
-    {:else if logsQuery.isError}
-      <div class="border-y py-6">
-        <p class="text-sm font-medium text-destructive">
-          {m.logs_requests_not_loaded()}
-        </p>
-        <p class="mt-1 text-sm text-muted-foreground">
-          {localizeBackendErrorMessage(logsQuery.error)}
-        </p>
-        <Button class="mt-3" variant="outline" onclick={() => void logsQuery.refetch()}>{m.common_retry()}</Button>
-      </div>
-    {:else}
-      <div class="route-desktop-table">
-        <DataTable
-          data={logs}
-          columns={logColumns}
-          labels={tableLabels}
-          getRowId={getLogRowId}
-          columnVisibility={{ request: false }}
-          ariaLabel={m.logs_recent_requests()}
-          rowClass={logRowClass}
-          stripedRows
-          toolbar={desktopActiveFilters}
-          toolbarEnd={desktopFilterAction}
-          columnToggle
-          exportable
-          exportFilename="request-history.csv"
-          empty={tableEmpty} />
-      </div>
-
-      <div class="route-mobile-list">
-        {#if logs.length === 0}
-          <div class="border-y">{@render tableEmpty()}</div>
+    {#if activeTab === 'interactions'}
+      <div class="canvas-stage">
+        {#if loading}
+          <div class="stage-state"><p>{m.observation_loading_chains()}</p></div>
+        {:else if loadError}
+          <div class="stage-state">
+            <p class="text-destructive">{localizeBackendErrorMessage(loadError)}</p>
+            <Button variant="outline" onclick={() => void loadForest(true)}>{m.common_retry()}</Button>
+          </div>
+        {:else if roots.length === 0}
+          <div class="stage-state">
+            <Empty.Root
+              ><Empty.Header
+                ><Empty.Title
+                  >{activeFilterCount ? m.observation_no_matching_chains() : m.observation_no_chains()}</Empty.Title
+                ><Empty.Description
+                  >{activeFilterCount
+                    ? m.observation_clear_filters_help()
+                    : m.observation_new_requests_appear()}</Empty.Description
+                ></Empty.Header
+              >{#if activeFilterCount}<Empty.Content
+                  ><Button
+                    variant="outline"
+                    onclick={() => {
+                      providerFilter = 'all'
+                      modelFilter = 'all'
+                      apiKeyFilter = 'all'
+                      statusFilter = 'all'
+                      void reloadForFilters()
+                    }}>{m.observation_clear_filters()}</Button
+                  ></Empty.Content
+                >{/if}</Empty.Root>
+          </div>
         {:else}
-          {#each logs as log (log.id)}
-            <div class="route-mobile-row">
-              <div class="min-w-0">
-                <div class="flex min-w-0 items-center gap-2">
-                  <Badge variant="outline">{log.method ?? '–'}</Badge><TechnicalValue
-                    value={log.path ?? '–'}
-                    copyable />
-                </div>
-                <dl class="mt-2 grid grid-cols-[auto_minmax(0,1fr)] gap-x-2 text-sm">
-                  <dt class="text-muted-foreground">{m.logs_logical_model()}</dt>
-                  <dd class="truncate font-medium">{modelLabel(log)}</dd>
-                  <dt class="text-muted-foreground">{m.logs_upstream_model()}</dt>
-                  <dd class="truncate font-medium">
-                    {upstreamModelLabel(log)}
-                    <span class="font-normal text-muted-foreground">· {providerLabel(log)}</span>
-                  </dd>
-                </dl>
-                <div class="mt-1 flex flex-wrap items-center gap-x-3">
-                  <StatusIndicator
-                    compact
-                    label={String(log.client_status_code ?? '–')}
-                    tone={log.client_status_code == null
-                      ? 'neutral'
-                      : log.client_status_code >= 400
-                        ? 'error'
-                        : 'healthy'} /><span class="font-technical text-xs text-muted-foreground"
-                    >{formatDuration(log.latency_total_ms)}</span
-                  >{#if log.thinking_level}<span class="font-technical text-xs text-muted-foreground"
-                      >{m.logs_thinking_level()} {log.thinking_level}</span
-                    >{/if}
-                </div>
-                <div class="font-technical mt-1 grid grid-cols-2 gap-x-3 text-[11px] leading-4 tabular-nums">
-                  {@render tokenUsage(log)}
-                </div>
-                <time class="font-technical mt-1 block text-xs text-muted-foreground"
-                  >{formatLogTime(log.created_at)}</time>
-              </div>
-              <Button variant="ghost" size="sm" onclick={() => selectLog(log)}>{m.logs_view_details()}</Button>
-            </div>
-          {/each}
+          <SvelteFlowProvider>
+            <InteractionCanvas
+              bind:this={canvas}
+              {roots}
+              selectedId={selectedInteraction?.id}
+              {selectedPath}
+              {loadingMore}
+              {nextCursor}
+              {rootTotal}
+              latestId={latestInteraction?.id}
+              {followPaused}
+              newActivityAvailable={hasNewActivity}
+              {fitProgress}
+              onselect={(item) => void selectInteraction(item)}
+              onloadmore={() => void loadNextRootBatch()}
+              onfitall={() => void fitAll()}
+              onmanualmove={() => (followPaused = true)}
+              onfollow={() => {
+                followPaused = false
+                hasNewActivity = false
+              }} />
+          </SvelteFlowProvider>
+        {/if}
+        {#if selectedInteraction}
+          <ObservationInspector
+            interaction={interactionDetail}
+            loading={detailLoading}
+            width={inspectorWidth}
+            onwidthchange={(value) => (inspectorWidth = value)}
+            onclose={closeInspector}
+            onbundle={() => void downloadBundle()}
+            onlatest={selectedMigrated && migratedRoots.has(selectedMigrated)
+              ? () => void refreshAnchor(selectedInteraction?.id)
+              : undefined} />
         {/if}
       </div>
-    {/if}
-
-    {#if total > 0}
-      <div class="mt-4 flex items-center justify-between gap-4 border-t pt-4">
-        <p class="font-technical text-xs text-muted-foreground tabular-nums">
-          {m.logs_pagination({ pageIndex: pageIndex + 1, pageCount: pageCount })}
-        </p>
-        <div class="flex gap-2">
-          <Button variant="outline" size="sm" disabled={pageIndex === 0} onclick={() => (pageIndex -= 1)}
-            >{m.logs_previous()}</Button
-          ><Button variant="outline" size="sm" disabled={pageIndex + 1 >= pageCount} onclick={() => (pageIndex += 1)}
-            >{m.logs_next()}</Button>
-        </div>
+    {:else}
+      <div class="rejections-view">
+        <header class="flex items-center justify-between gap-3 border-b p-4">
+          <div>
+            <h2 class="font-structural text-lg font-semibold">{m.observation_rejected_requests()}</h2>
+            <p class="text-sm text-muted-foreground">{m.observation_rejections_description()}</p>
+          </div>
+          <span class="font-technical text-xs text-muted-foreground">{rejections.length} / {rejectionTotal}</span>
+        </header>
+        {#if rejectionLoading && rejections.length === 0}<div class="stage-state">
+            {m.observation_loading_rejections()}
+          </div>
+        {:else if rejections.length === 0}<Empty.Root class="py-16"
+            ><Empty.Header
+              ><Empty.Title>{m.observation_no_rejections()}</Empty.Title><Empty.Description
+                >{m.observation_no_rejections_description()}</Empty.Description
+              ></Empty.Header
+            ></Empty.Root>
+        {:else}<ol class="rejection-list">
+            {#each rejections as rejection (rejection.id)}<li>
+                <button
+                  class={selectedRejection?.id === rejection.id ? 'selected' : undefined}
+                  onclick={() => void selectRejection(rejection)}
+                  ><span class="font-technical text-xs text-muted-foreground"
+                    >{formatLogTime(rejection.occurred_at)}</span
+                  ><span class="min-w-0 flex-1"
+                    ><strong>{rejection.method} {rejection.path}</strong><small
+                      >{rejection.stage} · {rejection.code} · HTTP {rejection.status_code}</small
+                    ></span
+                  ><Badge variant={rejection.debug_status === 'partial' ? 'destructive' : 'outline'}
+                    >{observationDebugStatusLabel(rejection.debug_status)}</Badge
+                  ></button>
+              </li>{/each}
+          </ol>{/if}
+        {#if rejectionCursor}<div class="border-t p-3 text-center">
+            <Button variant="outline" disabled={rejectionLoading} onclick={() => void loadRejections(false)}
+              >{rejectionLoading ? m.observation_loading_more() : m.observation_load_more()}</Button>
+          </div>{/if}
+        {#if selectedRejection}<ObservationInspector
+            rejection={rejectionDetail}
+            loading={detailLoading}
+            width={inspectorWidth}
+            onwidthchange={(value) => (inspectorWidth = value)}
+            onclose={closeInspector}
+            onbundle={() => void downloadBundle()} />{/if}
       </div>
     {/if}
   </section>
 </div>
 
-<Sheet.Root bind:open={filterOpen}>
-  <Sheet.Content
-    side="right"
-    class="w-full! max-w-none! gap-0 p-0 sm:max-w-sm!"
-    closeLabel={m.logs_close_request_filters()}>
-    <Sheet.Header class="border-b"
-      ><Sheet.Title>{m.logs_request_filters()}</Sheet.Title><Sheet.Description
-        >{m.logs_choose_filters_show_only_requests_need()}</Sheet.Description
+<Sheet.Root bind:open={filterOpen}
+  ><Sheet.Content side="right" class="w-full! max-w-none! sm:max-w-sm!" closeLabel={m.observation_close_filters()}
+    ><Sheet.Header
+      ><Sheet.Title>{m.observation_filters()}</Sheet.Title><Sheet.Description
+        >{m.observation_filters_description()}</Sheet.Description
       ></Sheet.Header>
-    <div class="route-overlay-body flex flex-col gap-5">
-      {@render activeFilterRows()}
-      <Field.FieldGroup>{@render filters()}</Field.FieldGroup>
+    <div class="route-overlay-body">
+      <Field.FieldGroup>
+        <Field.Field
+          ><Field.FieldLabel for="observation-provider">{m.common_model_service()}</Field.FieldLabel><Select.Root
+            type="single"
+            bind:value={providerFilter}
+            ><Select.Trigger id="observation-provider" class="w-full"
+              >{providersQuery.data?.find((item) => item.id === providerFilter)?.name ??
+                m.observation_all()}</Select.Trigger
+            ><Select.Content
+              ><Select.Group
+                ><Select.Item value="all">{m.observation_all()}</Select.Item
+                >{#each providersQuery.data ?? [] as provider (provider.id)}<Select.Item
+                    value={provider.id}
+                    label={provider.name}>{provider.name}</Select.Item
+                  >{/each}</Select.Group
+              ></Select.Content
+            ></Select.Root
+          ></Field.Field>
+        <Field.Field
+          ><Field.FieldLabel for="observation-model">{m.common_model()}</Field.FieldLabel><Select.Root
+            type="single"
+            bind:value={modelFilter}
+            ><Select.Trigger id="observation-model" class="w-full"
+              >{modelsQuery.data?.find((item) => item.id === modelFilter)?.display_name ??
+                m.observation_all()}</Select.Trigger
+            ><Select.Content
+              ><Select.Group
+                ><Select.Item value="all">{m.observation_all()}</Select.Item
+                >{#each modelsQuery.data ?? [] as model (model.id)}<Select.Item
+                    value={model.id}
+                    label={model.display_name || model.id}>{model.display_name || model.id}</Select.Item
+                  >{/each}</Select.Group
+              ></Select.Content
+            ></Select.Root
+          ></Field.Field>
+        <Field.Field
+          ><Field.FieldLabel for="observation-key">{m.common_api_key()}</Field.FieldLabel><Select.Root
+            type="single"
+            bind:value={apiKeyFilter}
+            ><Select.Trigger id="observation-key" class="w-full"
+              >{keysQuery.data?.find((item) => item.id === apiKeyFilter)?.name ?? m.observation_all()}</Select.Trigger
+            ><Select.Content
+              ><Select.Group
+                ><Select.Item value="all">{m.observation_all()}</Select.Item
+                >{#each keysQuery.data ?? [] as key (key.id)}<Select.Item value={key.id} label={key.name}
+                    >{key.name}</Select.Item
+                  >{/each}</Select.Group
+              ></Select.Content
+            ></Select.Root
+          ></Field.Field>
+        <Field.Field
+          ><Field.FieldLabel for="observation-status">{m.common_status()}</Field.FieldLabel><Select.Root
+            type="single"
+            bind:value={statusFilter}
+            ><Select.Trigger id="observation-status" class="w-full"
+              >{statusFilter === 'all' ? m.observation_all() : observationStatusLabel(statusFilter)}</Select.Trigger
+            ><Select.Content
+              ><Select.Group
+                >{#each ['all', 'running', 'waiting_client', 'completed', 'interrupted'] as status (status)}<Select.Item
+                    value={status}
+                    >{status === 'all' ? m.observation_all() : observationStatusLabel(status)}</Select.Item
+                  >{/each}</Select.Group
+              ></Select.Content
+            ></Select.Root
+          ></Field.Field>
+      </Field.FieldGroup>
     </div>
-    <Sheet.Footer class="route-overlay-footer"
-      ><Button variant="outline" onclick={clearFilters}>{m.logs_clear_filters()}</Button><Sheet.Close
-        class="h-10 rounded-md bg-primary px-3 text-primary-foreground">{m.logs_show_requests()}</Sheet.Close
-      ></Sheet.Footer>
-  </Sheet.Content>
-</Sheet.Root>
+    <Sheet.Footer
+      ><Button
+        variant="ghost"
+        onclick={() => {
+          providerFilter = 'all'
+          modelFilter = 'all'
+          apiKeyFilter = 'all'
+          statusFilter = 'all'
+        }}>{m.observation_clear_filters()}</Button
+      ><Button
+        onclick={() => {
+          filterOpen = false
+          void reloadForFilters()
+        }}>{m.observation_apply_filters()}</Button
+      ></Sheet.Footer
+    ></Sheet.Content
+  ></Sheet.Root>
 
-<LogDetailDialog bind:open={detailOpen} logId={selectedLog?.id} summary={selectedLog} />
-
-<AlertDialog.Root bind:open={clearOpen}>
-  <AlertDialog.Content
+<AlertDialog.Root bind:open={debugConfirmOpen}
+  ><AlertDialog.Content
     ><AlertDialog.Header
-      ><AlertDialog.Title>{m.logs_clear_all_request_history()}</AlertDialog.Title><AlertDialog.Description
-        >{m.logs_clear_history_warning()}</AlertDialog.Description
+      ><AlertDialog.Title>{m.observation_enable_debug()}</AlertDialog.Title><AlertDialog.Description
+        >{m.observation_debug_warning({
+          run_limit: formatBytes(debugQuery.data?.run_limit_bytes),
+          total_limit: formatBytes(debugQuery.data?.total_limit_bytes),
+          retention_days: debugQuery.data?.retention_days ?? 0,
+        })}</AlertDialog.Description
+      ></AlertDialog.Header>
+    <div class="rounded-md border p-3 text-sm">
+      <p>{m.observation_debug_retained({ retained: formatBytes(debugQuery.data?.retained_bytes) })}</p>
+      <p class="mt-1 text-muted-foreground">{m.observation_debug_disable_retains()}</p>
+    </div>
+    <AlertDialog.Footer
+      ><AlertDialog.Cancel>{m.common_cancel()}</AlertDialog.Cancel><AlertDialog.Action
+        disabled={changingDebug}
+        onclick={() => void enableDebug()}
+        >{changingDebug ? m.observation_enabling() : m.observation_enable_debug()}</AlertDialog.Action
+      ></AlertDialog.Footer
+    ></AlertDialog.Content
+  ></AlertDialog.Root>
+
+<AlertDialog.Root bind:open={clearOpen}
+  ><AlertDialog.Content
+    ><AlertDialog.Header
+      ><AlertDialog.Title>{m.observation_clear_history()}</AlertDialog.Title><AlertDialog.Description
+        >{m.observation_clear_warning()}</AlertDialog.Description
       ></AlertDialog.Header
     ><AlertDialog.Footer
       ><AlertDialog.Cancel>{m.common_cancel()}</AlertDialog.Cancel><AlertDialog.Action
         variant="destructive"
         disabled={clearing}
-        onclick={() => void clearRequests()}
-        >{clearing ? m.logs_clearing() : m.logs_clear_all_history()}</AlertDialog.Action
+        onclick={() => void clearHistory()}
+        >{clearing ? m.observation_clearing() : m.observation_clear_history()}</AlertDialog.Action
       ></AlertDialog.Footer
-    ></AlertDialog.Content>
-</AlertDialog.Root>
+    ></AlertDialog.Content
+  ></AlertDialog.Root>
+
+<style>
+.observation-page {
+  min-height: 0;
+}
+.observation-workspace {
+  position: relative;
+  min-height: 38rem;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--background);
+}
+.workspace-toolbar {
+  display: flex;
+  min-height: 3.5rem;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  border-bottom: 1px solid var(--border);
+  padding: 0.55rem 0.75rem;
+}
+.window-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+.canvas-stage {
+  position: relative;
+  height: min(68vh, 50rem);
+  min-height: 34rem;
+  overflow: hidden;
+}
+.stage-state {
+  display: grid;
+  height: 100%;
+  place-items: center;
+  gap: 0.75rem;
+  padding: 2rem;
+  text-align: center;
+  color: var(--muted-foreground);
+}
+.debug-toggle {
+  display: inline-flex;
+  height: 2.25rem;
+  align-items: center;
+  gap: 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding-inline: 0.65rem;
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+.debug-toggle > :global(svg) {
+  width: 1rem;
+}
+.persistent-warning {
+  border: 1px solid color-mix(in oklab, var(--warning) 40%, var(--border));
+  border-radius: var(--radius);
+  background: color-mix(in oklab, var(--warning) 7%, var(--background));
+  padding: 0.65rem 0.8rem;
+  color: var(--warning);
+  font-size: 0.8rem;
+}
+.rejections-view {
+  position: relative;
+  min-height: 34rem;
+}
+.rejection-list {
+  max-height: 65vh;
+  overflow-y: auto;
+}
+.rejection-list button {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 1rem;
+  border-bottom: 1px solid var(--border);
+  padding: 0.8rem 1rem;
+  text-align: start;
+}
+.rejection-list button:hover,
+.rejection-list button.selected {
+  background: var(--muted);
+}
+.rejection-list strong,
+.rejection-list small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rejection-list small {
+  margin-top: 0.2rem;
+  color: var(--muted-foreground);
+  font-size: 0.72rem;
+}
+@media (max-width: 767px) {
+  .workspace-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .window-controls {
+    justify-content: space-between;
+    overflow-x: auto;
+  }
+  .window-controls > span {
+    min-width: max-content;
+  }
+  .canvas-stage {
+    height: 70svh;
+    min-height: 30rem;
+  }
+  .observation-workspace {
+    min-height: 32rem;
+  }
+}
+</style>

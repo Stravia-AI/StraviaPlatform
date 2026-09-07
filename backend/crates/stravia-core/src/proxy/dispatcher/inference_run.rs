@@ -8,6 +8,7 @@ use axum::response::Response;
 use futures::Stream;
 
 use crate::Gateway;
+use crate::interaction_observation::{IngressStart, RunEvent, RunObserver, RunOutcome};
 use crate::protocol::ids::ProtocolId;
 use crate::protocol::ir::{AiRequest, RawEnvelope};
 use crate::proxy::context::RequestContext;
@@ -37,15 +38,15 @@ impl Default for PhaseTracker {
 }
 
 impl PhaseTracker {
-    pub(super) fn current(&self) -> Phase {
+    pub(crate) fn current(&self) -> Phase {
         self.current
     }
 
-    pub(super) fn at(current: Phase) -> Self {
+    pub(crate) fn at(current: Phase) -> Self {
         Self { current }
     }
 
-    pub(super) fn transition(&mut self, next: Phase) -> Result<(), String> {
+    pub(crate) fn transition(&mut self, next: Phase) -> Result<(), String> {
         let current = self.current;
         let valid = matches!(
             (current, next),
@@ -88,7 +89,7 @@ impl PhaseTracker {
         Ok(())
     }
 
-    pub(super) fn finish(&mut self) {
+    pub(crate) fn finish(&mut self) {
         self.current = Phase::Finished;
     }
 }
@@ -165,6 +166,313 @@ fn wrap_deadline_monitor(response: Response, monitor: tokio::task::JoinHandle<()
     Response::from_parts(parts, axum::body::Body::from_stream(stream))
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct DeferredWebSocketDelivery;
+
+pub(crate) struct WebSocketRunDelivery {
+    observer: RunObserver,
+    terminal: RunTerminalContext,
+    committed: bool,
+    finished: bool,
+}
+
+impl WebSocketRunDelivery {
+    pub(crate) fn observer(&self) -> RunObserver {
+        self.observer.clone()
+    }
+
+    pub(crate) fn sent_text(&mut self, text: &str) {
+        if !self.committed {
+            self.committed = true;
+            self.observer.record(RunEvent::ClientOutputCommitted);
+        }
+        self.record_wire_text(text);
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
+            if let Some(visible) = value
+                .get("delta")
+                .and_then(serde_json::Value::as_str)
+                .filter(|_| {
+                    matches!(
+                        value.get("type").and_then(serde_json::Value::as_str),
+                        Some("response.output_text.delta" | "response.refusal.delta")
+                    )
+                })
+            {
+                self.observer.record(RunEvent::ClientVisibleContentDelta {
+                    text: visible.to_owned(),
+                });
+            }
+            self.observer.record_debug(|| RunEvent::Checkpoint {
+                stage: "client_projection_event".into(),
+                model_turn_id: None,
+                attempt_id: None,
+                payload: value,
+            });
+        }
+    }
+
+    pub(crate) fn sent_error_text(&self, text: &str) {
+        self.record_wire_text(text);
+    }
+
+    fn record_wire_text(&self, text: &str) {
+        self.observer.record_debug(|| RunEvent::Wire {
+            direction: "platform_to_client".into(),
+            transport: "websocket".into(),
+            protocol: crate::protocol::ids::OPEN_RESPONSES_2026_04_24.to_string(),
+            message_type: "text".into(),
+            model_turn_id: None,
+            attempt_id: None,
+            status_code: None,
+            url: None,
+            headers: serde_json::Value::Null,
+            payload: serde_json::Value::String(text.to_owned()),
+        });
+    }
+
+    pub(crate) fn finish(&mut self, status: &str, reason: Option<String>) {
+        if self.finished {
+            return;
+        }
+        self.finished = true;
+        self.observer.record_debug(|| RunEvent::Checkpoint {
+            stage: "delivery_terminal".into(),
+            model_turn_id: None,
+            attempt_id: None,
+            payload: serde_json::json!({ "status": status, "reason": reason.clone() }),
+        });
+        self.observer.record(RunEvent::DeliveryFinished {
+            status: status.to_owned(),
+            reason: reason.clone(),
+        });
+        let delivered = status == "delivered";
+        self.observer.finish(RunOutcome {
+            status: if delivered {
+                if self.terminal.waiting_client {
+                    "waiting_client"
+                } else {
+                    "completed"
+                }
+            } else if status == "cancelled" {
+                "cancelled"
+            } else {
+                "failed"
+            }
+            .into(),
+            terminal_reason: reason,
+            generation_node_id: (delivered
+                && self
+                    .terminal
+                    .generation_committed
+                    .load(std::sync::atomic::Ordering::Acquire))
+            .then(|| self.terminal.generation_node_id.clone())
+            .flatten(),
+            generation_root_id: (delivered
+                && self
+                    .terminal
+                    .generation_committed
+                    .load(std::sync::atomic::Ordering::Acquire))
+            .then(|| self.terminal.generation_root_id.clone())
+            .flatten(),
+        });
+    }
+}
+
+impl Drop for WebSocketRunDelivery {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.finish("cancelled", Some("websocket_delivery_dropped".into()));
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct RunTerminalContext {
+    pub generation_node_id: Option<String>,
+    pub generation_root_id: Option<String>,
+    pub generation_committed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub waiting_client: bool,
+    pub visible_text: Vec<String>,
+}
+
+struct ObservedDeliveryStream {
+    inner: Pin<Box<dyn Stream<Item = Result<bytes::Bytes, axum::Error>> + Send>>,
+    observer: RunObserver,
+    protocol: String,
+    transport: &'static str,
+    status_code: u16,
+    terminal: RunTerminalContext,
+    committed: bool,
+    finished: bool,
+}
+
+impl ObservedDeliveryStream {
+    fn finish(&mut self, delivery_status: &str, reason: Option<String>) {
+        if self.finished {
+            return;
+        }
+        self.finished = true;
+        self.observer.record_debug(|| RunEvent::Checkpoint {
+            stage: "delivery_terminal".into(),
+            model_turn_id: None,
+            attempt_id: None,
+            payload: serde_json::json!({
+                "status": delivery_status,
+                "reason": reason.clone(),
+                "http_status": self.status_code,
+            }),
+        });
+        self.observer.record(RunEvent::DeliveryFinished {
+            status: delivery_status.to_owned(),
+            reason: reason.clone(),
+        });
+        let status = if delivery_status == "delivered" {
+            if self.terminal.waiting_client {
+                "waiting_client"
+            } else {
+                "completed"
+            }
+        } else if delivery_status == "cancelled" {
+            "cancelled"
+        } else {
+            "failed"
+        };
+        let delivered = delivery_status == "delivered";
+        self.observer.finish(RunOutcome {
+            status: status.to_owned(),
+            terminal_reason: reason,
+            generation_node_id: (delivered
+                && self
+                    .terminal
+                    .generation_committed
+                    .load(std::sync::atomic::Ordering::Acquire))
+            .then(|| self.terminal.generation_node_id.clone())
+            .flatten(),
+            generation_root_id: (delivered
+                && self
+                    .terminal
+                    .generation_committed
+                    .load(std::sync::atomic::Ordering::Acquire))
+            .then(|| self.terminal.generation_root_id.clone())
+            .flatten(),
+        });
+    }
+}
+
+impl Stream for ObservedDeliveryStream {
+    type Item = Result<bytes::Bytes, axum::Error>;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        context: &mut TaskContext<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        match self.inner.as_mut().poll_next(context) {
+            Poll::Ready(Some(Ok(bytes))) => {
+                if !self.committed && self.status_code < 400 {
+                    self.committed = true;
+                    self.observer.record(RunEvent::ClientOutputCommitted);
+                    for text in std::mem::take(&mut self.terminal.visible_text) {
+                        self.observer
+                            .record(RunEvent::ClientVisibleContentDelta { text });
+                    }
+                }
+                self.observer.record_debug(|| RunEvent::Wire {
+                    direction: "platform_to_client".into(),
+                    transport: self.transport.into(),
+                    protocol: self.protocol.clone(),
+                    message_type: "body_chunk".into(),
+                    model_turn_id: None,
+                    attempt_id: None,
+                    status_code: Some(self.status_code),
+                    url: None,
+                    headers: serde_json::Value::Null,
+                    payload: serde_json::Value::String(
+                        String::from_utf8_lossy(&bytes).into_owned(),
+                    ),
+                });
+                Poll::Ready(Some(Ok(bytes)))
+            }
+            Poll::Ready(Some(Err(error))) => {
+                self.finish("delivery_failed", Some(error.to_string()));
+                Poll::Ready(Some(Err(error)))
+            }
+            Poll::Ready(None) => {
+                if self.status_code < 400 {
+                    self.finish("delivered", None);
+                } else {
+                    let reason = format!("http_status_{}", self.status_code);
+                    self.finish("delivery_failed", Some(reason));
+                }
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl Drop for ObservedDeliveryStream {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.finish("cancelled", Some("client_disconnected".into()));
+        }
+    }
+}
+
+fn wrap_observed_delivery(
+    response: Response,
+    observer: RunObserver,
+    protocol: String,
+    terminal: RunTerminalContext,
+) -> Response {
+    let status_code = response.status().as_u16();
+    observer.record_debug(|| {
+        let headers = serde_json::Value::Object(
+            response
+                .headers()
+                .iter()
+                .filter_map(|(name, value)| {
+                    value.to_str().ok().map(|value| {
+                        (
+                            name.as_str().to_owned(),
+                            serde_json::Value::String(value.to_owned()),
+                        )
+                    })
+                })
+                .collect(),
+        );
+        RunEvent::Wire {
+            direction: "platform_to_client".into(),
+            transport: "http".into(),
+            protocol: protocol.clone(),
+            message_type: "response_head".into(),
+            model_turn_id: None,
+            attempt_id: None,
+            status_code: Some(status_code),
+            url: None,
+            headers,
+            payload: serde_json::Value::Null,
+        }
+    });
+    let transport = response
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| value.starts_with("text/event-stream"))
+        .map_or("http", |_| "sse");
+    let (parts, body) = response.into_parts();
+    let stream = ObservedDeliveryStream {
+        inner: Box::pin(body.into_data_stream()),
+        observer,
+        protocol,
+        transport,
+        status_code,
+        terminal,
+        committed: false,
+        finished: false,
+    };
+    Response::from_parts(parts, axum::body::Body::from_stream(stream))
+}
+
 pub(super) struct RunInput {
     pub gateway: Gateway,
     pub executor: std::sync::Arc<dyn crate::agent::ModelTurnExecutor>,
@@ -176,15 +484,15 @@ pub(super) struct RunInput {
 }
 
 pub(super) async fn execute(input: RunInput) -> Response {
-    #[cfg(debug_assertions)]
-    let capture = input.gateway.wire_capture.clone();
-    #[cfg(debug_assertions)]
-    let capture_id = input.context.request_id.clone();
-    #[cfg(debug_assertions)]
+    let extensions = input.context.extensions.clone();
     let protocol = input.ingress.to_string();
-    #[cfg(debug_assertions)]
-    if let Some(capture) = &capture {
-        capture.record_client_request(&capture_id, &protocol, &input.envelope);
+    if !extensions.contains::<crate::interaction_observation::IngressObserver>() {
+        extensions.insert(input.gateway.observation.observe_ingress(IngressStart {
+            id: input.context.request_id.clone(),
+            method: input.envelope.method.clone(),
+            path: input.envelope.path.clone(),
+            protocol: protocol.clone(),
+        }));
     }
     let response = Run {
         input,
@@ -193,20 +501,28 @@ pub(super) async fn execute(input: RunInput) -> Response {
     }
     .execute()
     .await;
-    #[cfg(debug_assertions)]
-    if let Some(capture) = capture {
-        return capture.wrap_client_response(capture_id, protocol, response);
+    match (
+        extensions.get::<RunObserver>(),
+        extensions.get::<RunTerminalContext>(),
+    ) {
+        (Some(observer), Some(terminal)) if extensions.contains::<DeferredWebSocketDelivery>() => {
+            extensions.insert(WebSocketRunDelivery {
+                observer,
+                terminal,
+                committed: false,
+                finished: false,
+            });
+            response
+        }
+        (Some(observer), Some(terminal)) => {
+            wrap_observed_delivery(response, observer, protocol, terminal)
+        }
+        _ => response,
     }
-    response
 }
 
-pub(super) fn log_decode_error(
-    gateway: &Gateway,
-    envelope: &RawEnvelope,
-    ingress: ProtocolId,
-    error: impl std::fmt::Display,
-) -> Response {
-    engine::log_decode_error(gateway, envelope, ingress, error)
+pub(crate) fn decode_error_response(error: impl std::fmt::Display) -> Response {
+    engine::error_response(400, &error.to_string())
 }
 
 #[cfg(test)]

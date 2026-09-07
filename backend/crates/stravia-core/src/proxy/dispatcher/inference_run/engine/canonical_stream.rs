@@ -122,11 +122,6 @@ pub(super) fn ai_response_to_deltas(resp: &AiResponse) -> Vec<crate::protocol::i
     deltas
 }
 
-/// Emit a `LogEntry` for a request that failed to decode at the ingress
-/// boundary (before `orchestrate` runs) and return the corresponding
-/// 400 `Response`. Ensures decode failures show up in the in-app log module
-/// rather than only in stdout tracing.
-
 #[cfg(test)]
 mod canonical_stream_tests {
     use super::*;

@@ -1,57 +1,6 @@
 use super::*;
 
 #[tokio::test]
-async fn lifecycle_uses_in_memory_model_turn_executor_without_an_upstream() {
-    let config = crate::config::GatewayConfig {
-        data_dir: std::env::temp_dir().join(format!(
-            "stravia-lifecycle-in-memory-test-{}",
-            uuid::Uuid::new_v4()
-        )),
-        ..Default::default()
-    };
-    let (gateway, mut logs) = crate::Gateway::new(config).await.expect("gateway init");
-    let headers = authorized_headers(&gateway).await;
-    let mut scripted = AiResponse::new("response-in-memory", "in-memory-model");
-    scripted.push_output_text("delivered from InMemory");
-    let executor = crate::agent::InMemoryModelTurnExecutor::scripted([scripted]);
-
-    let response = execute(RunInput {
-        gateway: gateway.clone(),
-        executor: std::sync::Arc::new(executor.clone()),
-        headers,
-        envelope: RawEnvelope::new(
-            Some(serde_json::json!({"model": "in-memory-model"})),
-            HashMap::new(),
-            "POST",
-            "/v1/chat/completions",
-        ),
-        request: AiRequest::new("in-memory-model", Vec::new()),
-        ingress: OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
-        context: RequestContext::new(
-            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
-            std::time::Duration::from_secs(30),
-        ),
-    })
-    .await;
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("InMemory response body");
-    assert!(String::from_utf8_lossy(&body).contains("delivered from InMemory"));
-    assert_eq!(executor.requests().len(), 1);
-    let log = logs
-        .recv()
-        .await
-        .expect("successful Model Turn should emit a request log");
-    assert_eq!(log.model_id.as_deref(), Some("in-memory-model"));
-    assert_eq!(log.model_name.as_deref(), Some("in-memory-model"));
-    assert_eq!(log.provider_id, "in-memory");
-    assert_eq!(log.provider_name, "in-memory");
-    assert_eq!(log.upstream_model, "in-memory-model");
-}
-
-#[tokio::test]
 async fn edited_visible_reasoning_restores_the_authoritative_protected_block() {
     let data_dir = std::env::temp_dir().join(format!(
         "stravia-protected-history-test-{}",
@@ -61,7 +10,7 @@ async fn edited_visible_reasoning_restores_the_authoritative_protected_block() {
         data_dir,
         ..Default::default()
     };
-    let (gateway, _logs) = crate::Gateway::new(config.clone())
+    let gateway = crate::Gateway::new(config.clone())
         .await
         .expect("gateway init");
     let (incompatible_url, incompatible_calls) =
@@ -122,7 +71,7 @@ async fn edited_visible_reasoning_restores_the_authoritative_protected_block() {
     assert!(!projected.contains("opaque-signature"), "{projected}");
     let edited = projected.replace("provider reasoning", "client-edited reasoning");
     drop(gateway);
-    let (gateway, _logs) = crate::Gateway::new(config)
+    let gateway = crate::Gateway::new(config)
         .await
         .expect("gateway reconstruction");
     let rejected = execute_non_stream_request_with_headers(
@@ -282,7 +231,7 @@ async fn signed_reasoning_stream_replay_uses_one_preview_and_authoritative_marke
     ])
     .await;
     let data_dir = tempfile::tempdir().expect("temporary data directory");
-    let (gateway, _logs) = Gateway::new(crate::config::GatewayConfig {
+    let gateway = Gateway::new(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -431,7 +380,7 @@ async fn protected_reasoning_replay_preserves_parallel_public_tool_calls() {
         ..Default::default()
     };
     let (expose_tool_hook, _request_hook_rounds) = ExposeOrderedToolHook::counting();
-    let (gateway, _logs) = crate::Gateway::builder(config)
+    let gateway = crate::Gateway::builder(config)
         .hook(Arc::new(expose_tool_hook))
         .platform_tool(Arc::new(OrderedTool {
             calls: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -645,7 +594,7 @@ async fn unary_completion_fills_canonical_response_defaults() {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     };
-    let (gateway, _logs) = Gateway::new(config).await.expect("gateway init");
+    let gateway = Gateway::new(config).await.expect("gateway init");
     configure_route(&gateway, "canonical-defaults", &[upstream_url]).await;
 
     let response = execute_non_stream(gateway, "canonical-defaults").await;
@@ -673,7 +622,7 @@ async fn open_responses_owns_response_identity_and_logical_model() {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     };
-    let (gateway, _logs) = Gateway::new(config).await.expect("gateway init");
+    let gateway = Gateway::new(config).await.expect("gateway init");
     configure_route(&gateway, "logical-model", &[upstream_url]).await;
 
     let response = execute_protocol_request(
@@ -709,7 +658,7 @@ async fn catalog_provider_without_dedicated_vendor_adapter_reaches_upstream() {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     };
-    let (gateway, _logs) = Gateway::new(config).await.expect("gateway init");
+    let gateway = Gateway::new(config).await.expect("gateway init");
     let catalog = gateway.provider_catalog.providers().await;
     let catalog_provider = catalog
         .providers
@@ -822,7 +771,7 @@ async fn hidden_rounds_are_iterative_and_platform_tools_keep_response_order() {
     };
     let tool_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
     let (expose_tool_hook, request_hook_rounds) = ExposeOrderedToolHook::counting();
-    let (gateway, _logs) = crate::Gateway::builder(config)
+    let gateway = crate::Gateway::builder(config)
         .hook(Arc::new(expose_tool_hook))
         .platform_tool(Arc::new(OrderedTool {
             calls: tool_calls.clone(),
@@ -885,7 +834,7 @@ async fn thinking_level_is_clamped_and_mapped_without_replaying_omitted_control(
     ])
     .await;
     let data_dir = tempfile::tempdir().expect("temporary data directory");
-    let (gateway, _logs) = Gateway::new(crate::config::GatewayConfig {
+    let gateway = Gateway::new(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -938,7 +887,7 @@ async fn thinking_level_is_clamped_and_mapped_without_replaying_omitted_control(
 async fn unrepresentable_thinking_control_is_a_typed_422_before_upstream() {
     let (base_url, calls) = serve_openai_sequence(vec![openai_response("must not run")]).await;
     let data_dir = tempfile::tempdir().expect("temporary data directory");
-    let (gateway, _logs) = Gateway::new(crate::config::GatewayConfig {
+    let gateway = Gateway::new(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -1020,7 +969,7 @@ async fn unrepresentable_thinking_control_is_a_typed_422_before_upstream() {
 async fn explicit_thinking_is_rejected_when_the_route_opens_no_levels() {
     let (base_url, calls) = serve_openai_sequence(vec![openai_response("must not run")]).await;
     let data_dir = tempfile::tempdir().expect("temporary data directory");
-    let (gateway, _logs) = Gateway::new(crate::config::GatewayConfig {
+    let gateway = Gateway::new(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -1099,7 +1048,7 @@ async fn failover_remaps_the_same_clamped_level_for_the_next_target() {
     let (fallback_url, fallback_calls, fallback_requests) =
         serve_openai_sequence_with_requests(vec![openai_response("fallback")]).await;
     let data_dir = tempfile::tempdir().expect("temporary data directory");
-    let (gateway, _logs) = Gateway::new(crate::config::GatewayConfig {
+    let gateway = Gateway::new(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -1181,110 +1130,4 @@ async fn failover_remaps_the_same_clamped_level_for_the_next_target() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     assert!(fallback_requests[0].contains("\"reasoning_effort\":\"high\""));
-}
-
-#[cfg(debug_assertions)]
-#[tokio::test]
-async fn wire_capture_records_both_sides_and_redacts_headers() {
-    let (base_url, _connections, _requests) =
-        serve_responses_websocket_sequence(vec!["first answer", "second answer"]).await;
-    let data_dir = tempfile::tempdir().expect("temporary data directory");
-    let capture_dir = data_dir.path().join("wire-captures");
-    let (gateway, _logs) = Gateway::new(crate::config::GatewayConfig {
-        data_dir: data_dir.path().to_path_buf(),
-        wire_capture_dir: Some(capture_dir.clone()),
-        ..Default::default()
-    })
-    .await
-    .expect("Gateway");
-    let model = "wire-capture-model";
-    configure_route_with_protocol(&gateway, model, &[base_url], "openai", "openai-compatible")
-        .await;
-    let headers = authorized_headers(&gateway).await;
-
-    let mut first_user = crate::protocol::ir::AiItem::output_text("test");
-    first_user.role = crate::protocol::ir::Role::User;
-    let first_response = execute_request_with_headers(
-        gateway.clone(),
-        headers.clone(),
-        AiRequest::new(model, vec![first_user.clone()]),
-        OPEN_RESPONSES_2026_04_24,
-        "/v1/responses",
-    )
-    .await;
-    assert_eq!(first_response.status(), StatusCode::OK);
-    let _ = to_bytes(first_response.into_body(), usize::MAX)
-        .await
-        .expect("first captured client response");
-
-    let mut second_user = crate::protocol::ir::AiItem::output_text("continue");
-    second_user.role = crate::protocol::ir::Role::User;
-    let second_response = execute_request_with_headers(
-        gateway,
-        headers,
-        AiRequest::new(
-            model,
-            vec![
-                first_user,
-                crate::protocol::ir::AiItem::output_text("first answer"),
-                second_user,
-            ],
-        ),
-        OPEN_RESPONSES_2026_04_24,
-        "/v1/responses",
-    )
-    .await;
-    assert_eq!(second_response.status(), StatusCode::OK);
-    let _ = to_bytes(second_response.into_body(), usize::MAX)
-        .await
-        .expect("second captured client response");
-
-    let paths = std::fs::read_dir(&capture_dir)
-        .expect("capture directory")
-        .map(|entry| entry.expect("capture entry").path())
-        .collect::<Vec<_>>();
-    assert_eq!(paths.len(), 1);
-    assert!(
-        paths[0]
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.contains("__chain-resp_"))
-    );
-    let capture = std::fs::read_to_string(&paths[0]).expect("wire capture");
-    let events = capture
-        .lines()
-        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("capture event"))
-        .collect::<Vec<_>>();
-    let capture_ids = events
-        .iter()
-        .filter_map(|event| event["capture_id"].as_str())
-        .collect::<std::collections::HashSet<_>>();
-    assert_eq!(capture_ids.len(), 2);
-    for (peer, phase) in [
-        ("client", "request"),
-        ("client", "response"),
-        ("upstream", "request"),
-        ("upstream", "response"),
-    ] {
-        assert!(
-            events
-                .iter()
-                .any(|event| event["peer"] == peer && event["phase"] == phase),
-            "missing {peer} {phase}: {capture}"
-        );
-    }
-    assert!(!capture.contains("test-key"));
-    assert!(capture.contains(r#"\"authorization\":\"***\""#));
-    assert!(
-        events
-            .iter()
-            .all(|event| event.get("body_base64").is_none())
-    );
-    assert!(events.iter().any(|event| {
-        event["peer"] == "upstream"
-            && event["phase"] == "request"
-            && event["body"]
-                .as_str()
-                .is_some_and(|body| body.contains("\"test\""))
-    }));
 }

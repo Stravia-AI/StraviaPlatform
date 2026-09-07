@@ -397,7 +397,7 @@ impl AllowanceTransport for ConditionFixtureTransport {
 #[tokio::test]
 async fn admin_service_derives_allowance_condition_from_the_live_snapshot() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
-    let (gateway, _logs) = Gateway::new(GatewayConfig {
+    let gateway = Gateway::new(GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -436,7 +436,7 @@ async fn admin_service_derives_allowance_condition_from_the_live_snapshot() -> a
 async fn fresh_monitor_reads_persist_account_samples_and_start_with_unknown_forecasts()
 -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
-    let (gateway, _logs) = Gateway::new(GatewayConfig {
+    let gateway = Gateway::new(GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -469,7 +469,7 @@ async fn fresh_monitor_reads_persist_account_samples_and_start_with_unknown_fore
 #[tokio::test]
 async fn fresh_monitor_reads_prune_samples_older_than_fourteen_days() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
-    let (gateway, _logs) = Gateway::new(GatewayConfig {
+    let gateway = Gateway::new(GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -542,7 +542,7 @@ impl AllowanceTransport for ForecastFixtureTransport {
 #[tokio::test]
 async fn current_window_samples_forecast_exhaustion_before_reset() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
-    let (gateway, _logs) = Gateway::new(GatewayConfig {
+    let gateway = Gateway::new(GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -586,7 +586,7 @@ async fn current_window_samples_forecast_exhaustion_before_reset() -> anyhow::Re
 #[tokio::test]
 async fn forecast_excludes_prior_windows_and_projects_remaining_at_reset() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
-    let (gateway, _logs) = Gateway::new(GatewayConfig {
+    let gateway = Gateway::new(GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -664,7 +664,7 @@ impl AllowanceTransport for BalanceFixtureTransport {
 async fn balance_samples_without_reset_forecast_when_the_balance_reaches_zero() -> anyhow::Result<()>
 {
     let data_dir = tempfile::tempdir()?;
-    let (gateway, _logs) = Gateway::new(GatewayConfig {
+    let gateway = Gateway::new(GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -705,7 +705,7 @@ async fn balance_samples_without_reset_forecast_when_the_balance_reaches_zero() 
 #[tokio::test]
 async fn exhausted_balance_is_not_forecast_as_no_risk() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
-    let (gateway, _logs) = Gateway::new(GatewayConfig {
+    let gateway = Gateway::new(GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -756,7 +756,7 @@ async fn exhausted_balance_is_not_forecast_as_no_risk() -> anyhow::Result<()> {
 #[tokio::test]
 async fn admin_service_filters_sorts_caches_and_keeps_accounts_isolated() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
-    let (gateway, _logs) = Gateway::new(GatewayConfig {
+    let gateway = Gateway::new(GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -923,7 +923,7 @@ impl AllowanceTransport for IsolatedFailureTransport {
 async fn one_provider_failure_does_not_fail_the_aggregate_or_change_provider_health()
 -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
-    let (gateway, _logs) = Gateway::new(GatewayConfig {
+    let gateway = Gateway::new(GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -984,7 +984,7 @@ impl AllowanceTransport for StaleFixtureTransport {
 async fn refresh_failure_preserves_last_success_without_leaking_credentials() -> anyhow::Result<()>
 {
     let data_dir = tempfile::tempdir()?;
-    let (gateway, _logs) = Gateway::new(GatewayConfig {
+    let gateway = Gateway::new(GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -1059,7 +1059,7 @@ impl AllowanceTransport for BlockingTransport {
 #[tokio::test]
 async fn concurrent_manual_refreshes_for_one_provider_share_one_request() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
-    let (gateway, _logs) = Gateway::new(GatewayConfig {
+    let gateway = Gateway::new(GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -1146,7 +1146,7 @@ impl AllowanceTransport for ParallelTransport {
 #[tokio::test]
 async fn different_providers_refresh_concurrently_with_a_bound() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
-    let (gateway, _logs) = Gateway::new(GatewayConfig {
+    let gateway = Gateway::new(GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })

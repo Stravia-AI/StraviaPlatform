@@ -52,7 +52,7 @@ impl GatewayBuilder {
         self
     }
 
-    pub async fn build(self) -> anyhow::Result<(Gateway, mpsc::Receiver<LogEntry>)> {
+    pub async fn build(self) -> anyhow::Result<Gateway> {
         let Self {
             config,
             storage,
@@ -62,7 +62,7 @@ impl GatewayBuilder {
             agent_definitions,
             generation_chain_ttl,
         } = self;
-        let (mut gateway, log_rx) = if let Some(storage) = storage {
+        let mut gateway = if let Some(storage) = storage {
             Gateway::from_storage(config, storage).await?
         } else {
             Gateway::new(config).await?
@@ -76,6 +76,6 @@ impl GatewayBuilder {
         gateway.install_model_turn();
         configure_gateway_extensions(&mut gateway, hooks, tools, mcp_tools, agent_definitions)
             .await?;
-        Ok((gateway, log_rx))
+        Ok(gateway)
     }
 }

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -17,7 +18,7 @@ from tests.common.helpers import (
 
 
 @pytest.fixture(scope="module")
-def admin_env(stravia_binary: Path) -> dict[str, str]:
+def admin_env(stravia_binary: Path) -> dict[str, Any]:
     mock_port = find_free_port()
     server_port = find_free_port()
 
@@ -54,6 +55,9 @@ def admin_env(stravia_binary: Path) -> dict[str, str]:
                     "auth": session.auth_headers(),
                     "username": "admin",
                     "password": "correct horse battery staple",
+                    "data_dir": Path(data_dir),
+                    "logs": logs,
+                    "process": proc,
                 }
             finally:
                 stop_stravia_server(proc, logs)

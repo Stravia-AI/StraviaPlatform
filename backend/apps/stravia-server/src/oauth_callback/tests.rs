@@ -122,7 +122,7 @@ async fn fixed_callback_falls_back_to_manual_when_both_registered_ports_are_busy
 async fn newest_session_replaces_an_active_listener_without_overwriting_the_reason()
 -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
-    let (gateway, _logs) = Gateway::new(stravia_core::config::GatewayConfig {
+    let gateway = Gateway::new(stravia_core::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -161,7 +161,7 @@ async fn newest_session_replaces_an_active_listener_without_overwriting_the_reas
 async fn invalid_callback_keeps_the_listener_and_session_available_for_retry() -> anyhow::Result<()>
 {
     let data_dir = tempfile::tempdir()?;
-    let (gateway, _logs) = Gateway::new(stravia_core::config::GatewayConfig {
+    let gateway = Gateway::new(stravia_core::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })

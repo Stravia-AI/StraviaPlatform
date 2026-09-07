@@ -1,8 +1,9 @@
 //! Thin ingress shell: POST /v1/embeddings
 
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{State, rejection::JsonRejection};
 use axum::http::HeaderMap;
+use axum::response::IntoResponse;
 use axum::response::Response;
 use serde_json::Value;
 
@@ -11,15 +12,41 @@ use crate::protocol::ids::OPENAI_COMPATIBLE_EMBEDDINGS_V1;
 use crate::protocol::ir::RawEnvelope;
 use crate::protocol::transform::ProtocolTransform;
 use crate::proxy::context::RequestContext;
-use crate::proxy::dispatcher::{dispatch_pipeline, log_decode_error};
+use crate::proxy::dispatcher::dispatch_pipeline;
+use crate::proxy::ingress::observation;
 
 pub async fn handler(
     State(gw): State<Gateway>,
     mut ctx: axum::extract::Extension<RequestContext>,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
     ctx.ingress_protocol = OPENAI_COMPATIBLE_EMBEDDINGS_V1;
+    let body = match body {
+        Ok(Json(body)) => body,
+        Err(rejection) => {
+            let observer = observation::begin(
+                &gw,
+                &ctx,
+                "POST",
+                "/v1/embeddings",
+                OPENAI_COMPATIBLE_EMBEDDINGS_V1,
+            );
+            return observation::reject(
+                observer,
+                "decode",
+                "invalid_json",
+                rejection.into_response(),
+            );
+        }
+    };
+    let observer = observation::begin(
+        &gw,
+        &ctx,
+        "POST",
+        "/v1/embeddings",
+        OPENAI_COMPATIBLE_EMBEDDINGS_V1,
+    );
     let flat_headers: std::collections::HashMap<String, String> = headers
         .iter()
         .filter_map(|(k, v)| {
@@ -37,10 +64,20 @@ pub async fn handler(
         .expect("registered ingress adapter");
     let request = match pair.decode_request(body) {
         Ok(request) => request,
-        Err(e) => return log_decode_error(&gw, &envelope, OPENAI_COMPATIBLE_EMBEDDINGS_V1, e),
+        Err(error) => {
+            return observation::reject(
+                observer,
+                "decode",
+                "invalid_request",
+                crate::proxy::dispatcher::decode_error_response(format!(
+                    "invalid request: {error}"
+                )),
+            );
+        }
     };
     dispatch_pipeline(
         gw,
+        observer,
         headers,
         envelope,
         request,

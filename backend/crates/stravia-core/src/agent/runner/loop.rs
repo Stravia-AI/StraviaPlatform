@@ -132,10 +132,11 @@ impl AgentRunner {
         resolved: Option<ResolvedAgentExecution>,
     ) -> AgentEventStream {
         let runner = self.clone();
+        let observation = crate::interaction_observation::scope::current();
         let (events, receiver) = mpsc::channel(32);
         let driver = stream::once(async move {
             let terminal = match runner
-                .execute(input, commit_policy, resolved, &events)
+                .execute(input, commit_policy, resolved, &events, observation)
                 .await
             {
                 Ok(result) if result.completion == AgentCompletion::Completed => {
@@ -157,6 +158,7 @@ impl AgentRunner {
         commit_policy: AgentCommitPolicy,
         resolved: Option<ResolvedAgentExecution>,
         events: &mpsc::Sender<AgentEvent>,
+        observation: Option<crate::interaction_observation::RunObserver>,
     ) -> Result<AgentResult, AgentRunError> {
         let cancellation = input.cancellation.clone();
         let ParentAgentContext {
@@ -507,6 +509,9 @@ impl AgentRunner {
                         let mut turn_input =
                             TurnInput::new(input.principal.clone(), request.clone())
                                 .with_execution(cancellation.clone(), turn_deadline);
+                        if let Some(observer) = observation.as_ref() {
+                            turn_input = turn_input.with_observer(observer.clone());
+                        }
                         if capability_authorization.is_some() {
                             turn_input = turn_input
                                 .with_authorization(ModelTurnAuthorization::CapabilityGrant);

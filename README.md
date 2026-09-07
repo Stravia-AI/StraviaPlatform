@@ -110,10 +110,16 @@ The SvelteKit WebUI manages:
 - Providers, authentication, model discovery, and connectivity checks
 - Virtual models and their upstream backends
 - API keys with generated or custom editable secrets, model bindings, expiration, Principal Concurrency Limit, and execution permissions
-- Request logs, latency and token usage statistics
+- Request Records as a live Interaction forest with causal branches, Rejected Requests, a chronological inspector, and Confirmed Upstream Usage statistics; the latest page keeps receiving new activity, while historical 24-hour pages retain fixed boundaries and open-page membership
 - Provider-reported quotas, request allowances, and balances in an **Allowance overview** matrix with filters, a reset timeline, and current-window exhaustion forecasts backed by 30-minute samples; live reads retain three-minute caching, per-provider refresh, and the last successful result when a refresh fails
 - Runtime settings
 - Ready-to-copy integration examples for SDKs and coding tools
+
+Interaction Observation is available in both Debug and release builds. Its process-local **Debug** switch starts off after every restart and requires confirmation before enabling. Each newly admitted Inference Run snapshots the current switch, so changing it affects only later admissions. Debug records canonical checkpoints and ordered HTTP, SSE, and WebSocket application messages—not TLS records, TCP packets, HTTP/2 frames, or packet/chunk fidelity below the application adapter. Credential headers, URL userinfo, credential-like query values, and structured credential fields are permanently redacted before persistence; prompts, business content, and tool inputs/results may still remain sensitive.
+
+Debug redaction covers protocol credential fields and complete recognizable patterns within one application message. Business text that forms a credential only after joining multiple messages may remain and must still be treated as sensitive.
+
+Observation metadata and managed Debug Trace segments use `log_retention_days` (seven days by default). Debug is capped at 64 MiB per Run and 2 GiB total; limit, queue, writer, or storage loss is reported as an explicit gap or partial Trace and never changes inference. Clear History preserves running and waiting-client Interactions and reports how many were skipped. An Interaction or Rejected Request can be exported as a point-in-time, streamed ZIP via a 60-second single-use download ticket; its manifest records the event-sequence boundary and `complete`, `partial`, or `none` capture status. Realtime updates, Debug state, Trace storage, and tickets are local to one Gateway process—there is no cluster-wide fanout, shared capture storage, or cross-instance ticket use.
 
 The interface supports English and Simplified Chinese, responsive navigation, and light, dark, or operating-system themes. On first use, a Simplified Chinese (`Hans`) client locale selects `zh-CN`; unsupported locales use English. Language can be switched without reloading from Login or **Settings → Appearance**, and each browser or desktop WebView remembers its own choice.
 
@@ -254,8 +260,6 @@ Development builds keep server and desktop runtime state—including `gateway.db
 
 Desktop builds with the `desktop-e2e` feature use a separate, ignored `.stravia-desktop-e2e/` directory, including when built in debug mode. The `task test:e2e:desktop` workflow seeds a fake `9.9.9` update there to exercise download and installation without fetching or installing a real release; these fixtures must not enter normal development or production data.
 
-The `task dev:server` and `task dev:desktop` workflows enable debug-only wire capture under `.scratch/wire-captures/`. Captures contain full request and response bodies even though sensitive header values are redacted. Keep them local and delete them after diagnosis.
-
 The desktop process starts the same unified HTTP application locally on `127.0.0.1`. On first use it prefers the fixed default port `23471`; later launches prefer any fixed port saved under **Settings → Desktop**. If the preferred port cannot be bound, Stravia remains available on a temporary random port, reports the conflict on Overview, and lets you recheck or replace the fixed port without restarting. This desktop-local setting does not change the standalone server options below.
 
 ## Server Configuration
@@ -271,7 +275,6 @@ Common CLI options and environment variables:
 | `--data-dir`             | `STRAVIA_DATA_DIR`             | Debug: `.stravia-dev`; release: `~/.stravia` |
 | `--log-level`            | `STRAVIA_LOG_LEVEL`            | `info`       |
 | `--config-poll-interval` | `STRAVIA_CONFIG_POLL_INTERVAL` | `3` seconds  |
-| `--wire-capture-dir`¹    | `STRAVIA_WIRE_CAPTURE_DIR`     | unset        |
 
 `--config` selects the only database configuration source. `--data-dir` still locates runtime artifacts and supplies the default config path; it does not select or override the database. A missing config enters first-run setup. A malformed config, unreachable configured database, or incompatible schema is a startup error and never falls back to SQLite.
 
@@ -308,15 +311,6 @@ To recover forgotten credentials, run the local interactive command against the 
 
 The command prompts for the username and reads the new password plus confirmation without echoing it or accepting it as a command-line argument. It updates the existing single administrator in place and revokes every old management session; it does not delete business data or reopen database setup.
 
-¹ Debug builds only. When enabled, Stravia writes one correlated JSONL file per request containing client and upstream requests/responses. Sensitive header values are replaced with `***`; bodies are recorded as readable UTF-8 text in the `body` field and can contain prompts, tool data, media references, and model output. Keep captures local and delete them after diagnosis. Release builds contain neither this option nor the capture implementation.
-
-Replay the upstream response frames through the real protocol decoder:
-
-```powershell
-$env:STRAVIA_WIRE_REPLAY_FILE = ".scratch/wire-captures/req-....jsonl"
-cargo test -p stravia-core replay_wire_capture_from_environment -- --ignored --nocapture
-```
-
 Set `--public-origin` to the trusted, externally reachable Gateway origin (for example, `https://gateway.example.com`) before binding to a non-loopback host. Stravia never trusts forwarding headers to derive the management origin or signed Artifact URLs. Terminate HTTPS at a reverse proxy and forward requests unchanged to the Stravia listener:
 
 ```bash
@@ -330,7 +324,7 @@ Set `--public-origin` to the trusted, externally reachable Gateway origin (for e
 
 ```text
 backend/crates/stravia-core/       Transport-independent gateway, protocols, providers, storage, and admin service
-backend/crates/stravia-devtools/   Fixture recording and replay tools
+backend/crates/stravia-devtools/   Development and protocol-fixture tools
 backend/apps/stravia-server/       Standalone unified HTTP server
 backend/apps/stravia-desktop/      Tauri desktop shell
 frontend/stravia-webui/            SvelteKit management interface

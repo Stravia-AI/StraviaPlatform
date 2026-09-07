@@ -6,11 +6,10 @@ use async_trait::async_trait;
 
 use crate::db::models::{
     ApiKeyStats, ApiKeyWithBindings, CreateApiKey, CreateProviderRecord, CreateWebProvider,
-    LogPage, LogQuery, ModelStats, OAuthCredential, Provider, ProviderStats, PutRoute, RequestLog,
-    Route, StatsHourly, StatsOverview, UpdateApiKey, UpdateProvider, UpdateWebProvider,
-    UpsertOAuthCredential, WebAccessSettings, WebProvider,
+    ModelStats, OAuthCredential, Provider, ProviderStats, PutRoute, Route, StatsHourly,
+    StatsOverview, UpdateApiKey, UpdateProvider, UpdateWebProvider, UpsertOAuthCredential,
+    WebAccessSettings, WebProvider,
 };
-use crate::logging::LogEntry;
 use crate::provider_models::{
     NewProviderModelRecord, ProviderModelMutation, ProviderModelReconciliation,
     ProviderModelRecord, ProviderModelSelectionPolicy,
@@ -199,16 +198,15 @@ pub trait AuthAccessStore: Send + Sync {
     async fn list_bound_model_ids(&self, api_key_id: &str) -> anyhow::Result<Vec<String>>;
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct RouteSchedulingUsage {
+    pub targets: Vec<crate::router::TargetSchedulingSnapshot>,
+    pub stale: bool,
+}
+
 #[async_trait]
-pub trait LogStore: Send + Sync {
-    async fn append_batch(&self, entries: Vec<LogEntry>) -> anyhow::Result<()>;
-    async fn route_scheduling_snapshot(
-        &self,
-    ) -> anyhow::Result<Vec<crate::router::TargetSchedulingSnapshot>>;
-    async fn query(&self, query: LogQuery) -> anyhow::Result<LogPage>;
-    async fn find_by_id(&self, id: &str) -> anyhow::Result<Option<RequestLog>>;
-    async fn cleanup_before(&self, cutoff_expression: &str) -> anyhow::Result<u64>;
-    async fn clear_all(&self) -> anyhow::Result<u64>;
+pub trait UsageStatsStore: Send + Sync {
+    async fn route_scheduling_snapshot(&self) -> RouteSchedulingUsage;
     async fn stats_overview(&self, hours: Option<i64>) -> anyhow::Result<StatsOverview>;
     async fn stats_hourly(&self, hours: i64) -> anyhow::Result<Vec<StatsHourly>>;
     async fn stats_by_model(&self, hours: Option<i64>) -> anyhow::Result<Vec<ModelStats>>;
@@ -333,7 +331,7 @@ pub trait Storage: Send + Sync {
     fn admin_identity(&self) -> Option<&dyn AdminIdentityStore> {
         None
     }
-    fn logs(&self) -> &dyn LogStore;
+    fn usage_stats(&self) -> &dyn UsageStatsStore;
     fn oauth_credentials(&self) -> &dyn OAuthCredentialStore;
     fn bootstrap(&self) -> &dyn StorageBootstrap;
 }

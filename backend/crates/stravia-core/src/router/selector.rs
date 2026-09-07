@@ -35,14 +35,14 @@ pub enum ConversationIdentity {
 #[derive(Debug, Clone, Default, sqlx::FromRow)]
 pub struct TargetSchedulingSnapshot {
     pub target_key: String,
-    pub input_tokens_24h: i64,
-    pub output_tokens_24h: i64,
-    pub cache_read_tokens_24h: i64,
-    pub cache_write_tokens_24h: i64,
+    pub input_tokens_24h: Option<i64>,
+    pub output_tokens_24h: Option<i64>,
+    pub cache_read_tokens_24h: Option<i64>,
+    pub cache_write_tokens_24h: Option<i64>,
     pub attempts_1h: i64,
     pub successes_1h: i64,
-    pub successful_output_tokens_1h: i64,
-    pub successful_upstream_ms_1h: i64,
+    pub successful_output_tokens_1h: Option<i64>,
+    pub successful_upstream_ms_1h: Option<i64>,
     pub cost_input: Option<f64>,
     pub cost_output: Option<f64>,
     pub cost_cache_read: Option<f64>,
@@ -517,10 +517,10 @@ fn traffic_score(
         .get(key.as_str())
         .map(|snapshot| {
             (
-                snapshot.input_tokens_24h,
-                snapshot.output_tokens_24h,
-                snapshot.cache_read_tokens_24h,
-                snapshot.cache_write_tokens_24h,
+                snapshot.input_tokens_24h.unwrap_or_default(),
+                snapshot.output_tokens_24h.unwrap_or_default(),
+                snapshot.cache_read_tokens_24h.unwrap_or_default(),
+                snapshot.cache_write_tokens_24h.unwrap_or_default(),
             )
         })
         .unwrap_or_default();
@@ -533,15 +533,18 @@ fn traffic_score(
 }
 
 fn latency_score(snapshot: &TargetSchedulingSnapshot) -> Option<f64> {
-    if snapshot.successes_1h < 20
-        || snapshot.attempts_1h == 0
-        || snapshot.successful_upstream_ms_1h == 0
-    {
+    let (Some(successful_output_tokens), Some(successful_upstream_ms)) = (
+        snapshot.successful_output_tokens_1h,
+        snapshot.successful_upstream_ms_1h,
+    ) else {
+        return None;
+    };
+    if snapshot.successes_1h < 20 || snapshot.attempts_1h == 0 || successful_upstream_ms == 0 {
         return None;
     }
     let success_rate = snapshot.successes_1h as f64 / snapshot.attempts_1h as f64;
-    let output_tokens_per_second = snapshot.successful_output_tokens_1h as f64
-        / (snapshot.successful_upstream_ms_1h as f64 / 1_000.0);
+    let output_tokens_per_second =
+        successful_output_tokens as f64 / (successful_upstream_ms as f64 / 1_000.0);
     Some(success_rate * output_tokens_per_second)
 }
 
@@ -854,8 +857,8 @@ mod tests {
         let snapshot = RouteSchedulingSnapshot {
             targets: vec![TargetSchedulingSnapshot {
                 target_key: "busy:model".into(),
-                input_tokens_24h: 1_000,
-                cache_read_tokens_24h: 900,
+                input_tokens_24h: Some(1_000),
+                cache_read_tokens_24h: Some(900),
                 ..Default::default()
             }],
         };
@@ -888,7 +891,7 @@ mod tests {
         let snapshot = RouteSchedulingSnapshot {
             targets: vec![TargetSchedulingSnapshot {
                 target_key: "busy:model".into(),
-                input_tokens_24h: 100,
+                input_tokens_24h: Some(100),
                 ..Default::default()
             }],
         };
@@ -926,7 +929,7 @@ mod tests {
             targets: vec![
                 TargetSchedulingSnapshot {
                     target_key: "cached:model".into(),
-                    cache_read_tokens_24h: 100,
+                    cache_read_tokens_24h: Some(100),
                     cost_input: Some(2.0),
                     cost_output: Some(10.0),
                     cost_cache_read: None,
@@ -935,7 +938,7 @@ mod tests {
                 },
                 TargetSchedulingSnapshot {
                     target_key: "output:model".into(),
-                    output_tokens_24h: 3,
+                    output_tokens_24h: Some(3),
                     cost_input: Some(4.0),
                     cost_output: Some(20.0),
                     cost_cache_read: Some(0.8),
@@ -960,14 +963,14 @@ mod tests {
             targets: vec![
                 TargetSchedulingSnapshot {
                     target_key: "cached:model".into(),
-                    cache_write_tokens_24h: 1,
+                    cache_write_tokens_24h: Some(1),
                     cost_input: Some(2.0),
                     cost_output: Some(10.0),
                     ..Default::default()
                 },
                 TargetSchedulingSnapshot {
                     target_key: "output:model".into(),
-                    output_tokens_24h: 1,
+                    output_tokens_24h: Some(1),
                     cost_input: Some(4.0),
                     cost_output: Some(20.0),
                     ..Default::default()
@@ -998,16 +1001,16 @@ mod tests {
                     target_key: "slow:model".into(),
                     attempts_1h: 20,
                     successes_1h: 20,
-                    successful_output_tokens_1h: 2_000,
-                    successful_upstream_ms_1h: 20_000,
+                    successful_output_tokens_1h: Some(2_000),
+                    successful_upstream_ms_1h: Some(20_000),
                     ..Default::default()
                 },
                 TargetSchedulingSnapshot {
                     target_key: "fast:model".into(),
                     attempts_1h: 25,
                     successes_1h: 20,
-                    successful_output_tokens_1h: 4_000,
-                    successful_upstream_ms_1h: 10_000,
+                    successful_output_tokens_1h: Some(4_000),
+                    successful_upstream_ms_1h: Some(10_000),
                     ..Default::default()
                 },
             ],
@@ -1026,19 +1029,19 @@ mod tests {
             targets: vec![
                 TargetSchedulingSnapshot {
                     target_key: "sampled:model".into(),
-                    input_tokens_24h: 100,
+                    input_tokens_24h: Some(100),
                     attempts_1h: 20,
                     successes_1h: 20,
-                    successful_output_tokens_1h: 2_000,
-                    successful_upstream_ms_1h: 1_000,
+                    successful_output_tokens_1h: Some(2_000),
+                    successful_upstream_ms_1h: Some(1_000),
                     ..Default::default()
                 },
                 TargetSchedulingSnapshot {
                     target_key: "cold:model".into(),
                     attempts_1h: 19,
                     successes_1h: 19,
-                    successful_output_tokens_1h: 19_000,
-                    successful_upstream_ms_1h: 1_000,
+                    successful_output_tokens_1h: Some(19_000),
+                    successful_upstream_ms_1h: Some(1_000),
                     ..Default::default()
                 },
             ],

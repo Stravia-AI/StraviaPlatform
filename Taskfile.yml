@@ -3,7 +3,6 @@ version: "3"
 vars:
   DESKTOP_DIR: backend/apps/stravia-desktop
   TAURI_CLI_VERSION: 2.11.1
-  WIRE_CAPTURE_DIR: "{{.ROOT_DIR}}/.scratch/wire-captures"
 
 tasks:
   install:web:
@@ -20,8 +19,6 @@ tasks:
   dev:server:
     desc: Start the Vite WebUI and standalone server in debug mode.
     deps: [install:web]
-    env:
-      STRAVIA_WIRE_CAPTURE_DIR: "{{.WIRE_CAPTURE_DIR}}"
     cmds:
       - bun run dev:server
 
@@ -29,8 +26,6 @@ tasks:
     desc: Start the Stravia desktop application in Tauri development mode.
     deps: [install:web]
     dir: "{{.DESKTOP_DIR}}"
-    env:
-      STRAVIA_WIRE_CAPTURE_DIR: "{{.WIRE_CAPTURE_DIR}}"
     cmds:
       - bunx @tauri-apps/cli@{{.TAURI_CLI_VERSION}} dev
 

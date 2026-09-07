@@ -168,6 +168,47 @@ export async function prepareApp(page: Page): Promise<void> {
       })
       return
     }
+    if (path === '/observations/interactions') {
+      const now = Date.now()
+      await route.fulfill({
+        json: {
+          data: {
+            anchor_at: now,
+            window_index: 0,
+            window_start: now - 86_400_000,
+            window_end: now,
+            roots: [],
+            root_total: 0,
+            next_cursor: null,
+            snapshot_sequence: 0,
+          },
+        },
+      })
+      return
+    }
+    if (path === '/observations/rejections') {
+      await route.fulfill({ json: { data: { items: [], total: 0, next_cursor: null, snapshot_sequence: 0 } } })
+      return
+    }
+    if (path === '/observations/debug') {
+      await route.fulfill({
+        json: {
+          data: {
+            enabled: false,
+            run_limit_bytes: 67_108_864,
+            total_limit_bytes: 2_147_483_648,
+            retained_bytes: 0,
+            partial_trace_count: 0,
+            retention_days: 7,
+          },
+        },
+      })
+      return
+    }
+    if (path === '/observations/events') {
+      await route.fulfill({ contentType: 'text/event-stream', body: '' })
+      return
+    }
     if (path === '/oauth/sessions/oauth-session-1/status') {
       await route.fulfill({
         json: {

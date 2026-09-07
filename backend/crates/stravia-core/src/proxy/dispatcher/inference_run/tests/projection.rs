@@ -59,7 +59,7 @@ async fn non_stream_projection_matches_ordered_content_and_replays_canonical_his
     let data_dir = tempfile::tempdir().expect("temporary data directory");
     let tool_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
     let (expose_tool_hook, _request_hook_rounds) = ExposeOrderedToolHook::counting();
-    let (gateway, _logs) = crate::Gateway::builder(crate::config::GatewayConfig {
+    let gateway = crate::Gateway::builder(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -329,7 +329,7 @@ async fn failed_platform_call_and_successful_retry_preserve_marker_and_result_or
     let data_dir = tempfile::tempdir().expect("temporary data directory");
     let tool_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
     let (expose_tool_hook, _request_hook_rounds) = ExposeOrderedToolHook::counting();
-    let (gateway, _logs) = crate::Gateway::builder(crate::config::GatewayConfig {
+    let gateway = crate::Gateway::builder(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -430,7 +430,7 @@ async fn platform_stream_projects_post_text_thinking_into_ordered_content() {
     let data_dir = tempfile::tempdir().expect("temporary data directory");
     let tool_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
     let (expose_tool_hook, _request_hook_rounds) = ExposeOrderedToolHook::counting();
-    let (gateway, _logs) = crate::Gateway::builder(crate::config::GatewayConfig {
+    let gateway = crate::Gateway::builder(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -527,7 +527,7 @@ async fn post_text_thinking_without_tool_call_gets_its_own_ordered_marker() {
         serve_sse_sequence(vec![openai_sse_text_thinking_text()]).await;
     let data_dir = tempfile::tempdir().expect("temporary data directory");
     let (expose_tool_hook, _request_hook_rounds) = ExposeOrderedToolHook::counting();
-    let (gateway, _logs) = crate::Gateway::builder(crate::config::GatewayConfig {
+    let gateway = crate::Gateway::builder(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -602,7 +602,7 @@ async fn platform_stream_projection_matrix_for_registered_generation_ingresses()
     let data_dir = tempfile::tempdir().expect("temporary data directory");
     let tool_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
     let (expose_tool_hook, _request_hook_rounds) = ExposeOrderedToolHook::counting();
-    let (gateway, _logs) = crate::Gateway::builder(crate::config::GatewayConfig {
+    let gateway = crate::Gateway::builder(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -744,7 +744,7 @@ async fn exposed_platform_tools_preserve_non_platform_stream_order_and_bytes() {
     let data_dir = tempfile::tempdir().expect("temporary data directory");
     let tool_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
     let (expose_tool_hook, _request_hook_rounds) = ExposeOrderedToolHook::counting();
-    let (gateway, _logs) = crate::Gateway::builder(crate::config::GatewayConfig {
+    let gateway = crate::Gateway::builder(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })

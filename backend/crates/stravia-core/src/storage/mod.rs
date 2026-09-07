@@ -9,6 +9,7 @@ pub use postgres::PostgresStorage;
 pub use sqlite::SqliteStorage;
 pub use traits::{
     AdminIdentityRecord, AdminIdentityStore, AdminSessionRecord, ApiKeyAccessRecord, ApiKeyStore,
-    AuthAccessStore, DynStorage, LogStore, NewAdminIdentity, NewAdminSession, ProviderModelStore,
-    ProviderStore, RouteStore, SettingsStore, Storage, StorageBootstrap,
+    AuthAccessStore, DynStorage, NewAdminIdentity, NewAdminSession, ProviderModelStore,
+    ProviderStore, RouteSchedulingUsage, RouteStore, SettingsStore, Storage, StorageBootstrap,
+    UsageStatsStore,
 };

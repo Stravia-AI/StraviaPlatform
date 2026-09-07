@@ -568,7 +568,7 @@ async fn stream_transformer_is_rejected_when_its_buffer_exceeds_descriptor_limit
 async fn gateway_builder_registers_hooks_in_declared_order() {
     let storage: crate::storage::DynStorage =
         Arc::new(crate::storage::MemoryStorage::new(vec![], vec![], vec![]));
-    let (gateway, _logs) = crate::Gateway::builder(crate::config::GatewayConfig::default())
+    let gateway = crate::Gateway::builder(crate::config::GatewayConfig::default())
         .storage(storage)
         .hook(Arc::new(TestHook {
             descriptor: HookDescriptor::all("first"),

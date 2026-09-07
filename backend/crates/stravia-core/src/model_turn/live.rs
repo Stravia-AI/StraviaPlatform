@@ -7,8 +7,8 @@ use rust_decimal::prelude::ToPrimitive;
 
 use super::continuation::{ContinuationLookup, ContinuationTarget};
 use super::provider::{
-    ProviderAdapter, ProviderBinding, ProviderCall, ProviderStreamError, ProviderStreamResponse,
-    ResponsesWebSocketBinding,
+    AttemptObservation, ProviderAdapter, ProviderBinding, ProviderCall, ProviderStreamError,
+    ProviderStreamResponse, ResponsesWebSocketBinding,
 };
 use super::support::{
     ai_response_to_deltas, is_openai_generation_target, load_route_targets, merge_provider_headers,
@@ -16,20 +16,19 @@ use super::support::{
 };
 use super::{
     CanonicalEvent, ModelTurn, ModelTurnAuthorization, ModelTurnError, ModelTurnExecutor,
-    StreamResponseAccumulator, TargetIdentity, TurnInput, TurnTransport,
+    StreamResponseAccumulator, TargetIdentity, TurnInput,
 };
 use crate::Gateway;
 use crate::error::GatewayError;
 use crate::hook::RouteContext;
-use crate::logging::LogEntry;
+use crate::interaction_observation::RunEvent;
 use crate::protocol::ProviderProtocols;
 use crate::protocol::ids::OPEN_RESPONSES_2026_04_24;
 use crate::protocol::ir::request::MediaRoutingMode;
-use crate::protocol::ir::{AiError, AiRequest, AiStreamDelta, Usage};
+use crate::protocol::ir::{AiError, AiRequest, AiStreamDelta};
 use crate::provider::VendorRegistry;
 use crate::proxy::client::ProxyClient;
 use crate::proxy::context::RequestContext;
-use crate::proxy::observability::send_log;
 use crate::proxy::planner::{ProtocolMode, ProtocolPlan, negotiate};
 use crate::proxy::security::Security;
 use crate::router::{
@@ -55,33 +54,80 @@ impl LiveModelTurnExecutor {
 #[async_trait]
 impl ModelTurnExecutor for LiveModelTurnExecutor {
     async fn execute(&self, input: TurnInput) -> Result<ModelTurn, ModelTurnError> {
-        if input.cancellation.is_cancelled() {
-            return Err(ModelTurnError::new("cancelled", "Model Turn cancelled"));
+        let model_turn_id = uuid::Uuid::new_v4().to_string();
+        let observer = input.observer.clone();
+        if let Some(observer) = &observer {
+            let (route_id, model_display_name) = self
+                .gateway
+                .model_cache
+                .read()
+                .await
+                .models
+                .iter()
+                .find(|route| route.model_id == input.request.model)
+                .map(|route| {
+                    (
+                        route.id.clone(),
+                        Some(route.effective_display_name().to_owned()),
+                    )
+                })
+                .unwrap_or_else(|| (input.request.model.clone(), None));
+            observer.record(RunEvent::ModelTurnStarted {
+                model_turn_id: model_turn_id.clone(),
+                route_id,
+                model_display_name,
+            });
+            if observer.debug_enabled() {
+                match serde_json::to_value(&input.request) {
+                    Ok(payload) => observer.record(RunEvent::Checkpoint {
+                        stage: "canonical_request".into(),
+                        model_turn_id: Some(model_turn_id.clone()),
+                        attempt_id: None,
+                        payload,
+                    }),
+                    Err(_) => observer.record(RunEvent::ObservationGap {
+                        reason: "canonical_request_serialization_failed".into(),
+                    }),
+                }
+            }
         }
-        if Instant::now() >= input.deadline {
-            return Err(ModelTurnError::new(
+        let result = if input.cancellation.is_cancelled() {
+            Err(ModelTurnError::new("cancelled", "Model Turn cancelled"))
+        } else if Instant::now() >= input.deadline {
+            Err(ModelTurnError::new(
                 "deadline_exceeded",
                 "Model Turn deadline exceeded",
-            ));
-        }
-        let deadline = tokio::time::Instant::from_std(input.deadline);
-        let cancellation = input.cancellation.clone();
-        tokio::select! {
-            biased;
-            result = execute_inner(self.clone(), input) => result,
-            _ = cancellation.cancelled() => {
-                Err(ModelTurnError::new("cancelled", "Model Turn cancelled"))
+            ))
+        } else {
+            let deadline = tokio::time::Instant::from_std(input.deadline);
+            let cancellation = input.cancellation.clone();
+            tokio::select! {
+                biased;
+                result = execute_inner(self.clone(), input, model_turn_id.clone()) => result,
+                _ = cancellation.cancelled() => {
+                    Err(ModelTurnError::new("cancelled", "Model Turn cancelled"))
+                }
+                _ = tokio::time::sleep_until(deadline) => {
+                    Err(ModelTurnError::new("deadline_exceeded", "Model Turn deadline exceeded"))
+                }
             }
-            _ = tokio::time::sleep_until(deadline) => {
-                Err(ModelTurnError::new("deadline_exceeded", "Model Turn deadline exceeded"))
-            }
+        };
+        if let Err(error) = &result
+            && let Some(observer) = observer
+        {
+            observer.record(RunEvent::ModelTurnFinished {
+                model_turn_id,
+                status: error.code.clone(),
+            });
         }
+        result
     }
 }
 
 async fn execute_inner(
     executor: LiveModelTurnExecutor,
     mut input: TurnInput,
+    model_turn_id: String,
 ) -> Result<ModelTurn, ModelTurnError> {
     let gateway = &executor.gateway;
     let route = {
@@ -121,7 +167,7 @@ async fn execute_inner(
     }
 
     let security = Security::new(gateway.storage.auth());
-    let access = match input.authorization {
+    let _access = match input.authorization {
         ModelTurnAuthorization::RouteBinding => {
             security
                 .authorize_principal_model(&input.principal, &route)
@@ -152,15 +198,14 @@ async fn execute_inner(
     } else {
         None
     };
-    let scheduling_snapshot =
-        load_scheduling_snapshot(gateway, &targets)
-            .await
-            .map_err(|error| {
-                ModelTurnError::new(
-                    "route_scheduling_unavailable",
-                    format!("Route scheduling snapshot is unavailable: {error}"),
-                )
-            })?;
+    let scheduling_snapshot = load_scheduling_snapshot(gateway, &targets, input.observer.as_ref())
+        .await
+        .map_err(|error| {
+            ModelTurnError::new(
+                "route_scheduling_unavailable",
+                format!("Route scheduling snapshot is unavailable: {error}"),
+            )
+        })?;
     let attempt_context = RouteAttemptContext {
         principal: input.principal.continuation_key(),
         route_id: route.id.clone(),
@@ -197,41 +242,41 @@ async fn execute_inner(
     while let Some(target) = attempts.next_healthy(&gateway.health_registry) {
         loop {
             let attempt_started = Instant::now();
-            let result = match prepare_attempt(&executor, &route, &target, &input).await {
-                Ok(prepared) => {
-                    let attempt = begin_attempt(
-                        gateway,
-                        &route,
-                        &target,
-                        &input,
-                        prepared,
-                        &access,
-                        attempt_started,
-                        gateway.route_policy_state.clone(),
-                        attempt_context.clone(),
-                    );
-                    if target.first_token_timeout_ms == 0 {
-                        attempt.await
-                    } else {
-                        match tokio::time::timeout(
-                            Duration::from_millis(target.first_token_timeout_ms as u64),
-                            attempt,
-                        )
-                        .await
-                        {
-                            Ok(result) => result,
-                            Err(_) => Err(AttemptFailure::upstream(
-                                crate::protocol::ir::AiErrorKind::Timeout,
-                                None,
-                                "first_token_timeout",
-                                "Target did not produce a First Token before its timeout",
-                                None,
-                            )),
+            let result =
+                match prepare_attempt(&executor, &route, &target, &input, &model_turn_id).await {
+                    Ok(prepared) => {
+                        let attempt = begin_attempt(
+                            gateway,
+                            &route,
+                            &target,
+                            &input,
+                            prepared,
+                            attempt_started,
+                            gateway.route_policy_state.clone(),
+                            attempt_context.clone(),
+                        );
+                        if target.first_token_timeout_ms == 0 {
+                            attempt.await
+                        } else {
+                            match tokio::time::timeout(
+                                Duration::from_millis(target.first_token_timeout_ms as u64),
+                                attempt,
+                            )
+                            .await
+                            {
+                                Ok(result) => result,
+                                Err(_) => Err(AttemptFailure::upstream(
+                                    crate::protocol::ir::AiErrorKind::Timeout,
+                                    None,
+                                    "first_token_timeout",
+                                    "Target did not produce a First Token before its timeout",
+                                    None,
+                                )),
+                            }
                         }
                     }
-                }
-                Err(failure) => Err(failure),
-            };
+                    Err(failure) => Err(failure),
+                };
             let failure = match result {
                 Ok(turn) => {
                     attempts.accept_current();
@@ -275,9 +320,22 @@ async fn execute_inner(
 async fn load_scheduling_snapshot(
     gateway: &Gateway,
     targets: &[crate::db::models::Target],
+    observer: Option<&crate::interaction_observation::RunObserver>,
 ) -> anyhow::Result<RouteSchedulingSnapshot> {
+    let usage = gateway
+        .storage
+        .usage_stats()
+        .route_scheduling_snapshot()
+        .await;
+    if usage.stale
+        && let Some(observer) = observer
+    {
+        observer.record(RunEvent::ObservationGap {
+            reason: "usage_stats_snapshot_stale".into(),
+        });
+    }
     let mut snapshot = RouteSchedulingSnapshot {
-        targets: gateway.storage.logs().route_scheduling_snapshot().await?,
+        targets: usage.targets,
     };
     for target in targets {
         let key = format!("{}:{}", target.provider_id, target.model);
@@ -321,14 +379,13 @@ fn estimate_uncached_input_tokens(request: &AiRequest) -> u64 {
 }
 
 struct PreparedAttempt {
+    model_turn_id: String,
     route: RouteContext,
     provider_call: ProviderCall,
     reasoning_encrypted_content_requested: bool,
     force_stream: bool,
     actual_model: String,
-    provider: crate::db::models::Provider,
     namespace: String,
-    trace: TurnTransport,
 }
 
 struct AttemptFailure {
@@ -391,6 +448,7 @@ async fn prepare_attempt(
     route: &crate::db::models::Route,
     target: &SelectedTarget,
     input: &TurnInput,
+    model_turn_id: &str,
 ) -> Result<PreparedAttempt, AttemptFailure> {
     let gateway = &executor.gateway;
     let target_key = selected_target_key(target);
@@ -596,8 +654,10 @@ async fn prepare_attempt(
             actual_model: actual_model.clone(),
             gateway: gateway.clone(),
             disable_default_auth: provider_runtime.binding.disable_default_auth,
-            #[cfg(debug_assertions)]
-            wire_capture_id: input.wire_capture_id.clone(),
+            observer: input.observer.clone(),
+            model_turn_id: model_turn_id.to_owned(),
+            target_id: target_key.clone(),
+            provider_name: provider.name.clone(),
         },
     );
 
@@ -741,20 +801,8 @@ async fn prepare_attempt(
     } else {
         adapter.bind(client, outbound)
     };
-    let trace = TurnTransport {
-        upstream_url: provider_call.url().to_owned(),
-        request_headers: provider_call.request_headers_json(),
-        request_body: input
-            .request
-            .meta
-            .media_routing
-            .is_none()
-            .then(|| provider_call.request_body_string())
-            .flatten(),
-        ..Default::default()
-    };
-
     Ok(PreparedAttempt {
+        model_turn_id: model_turn_id.to_owned(),
         route: RouteContext {
             model_id: route.id.clone(),
             provider_id: provider.id.clone(),
@@ -767,9 +815,7 @@ async fn prepare_attempt(
             || websocket_enabled
             || target_capabilities.stream_only,
         actual_model,
-        provider,
         namespace: target_namespace,
-        trace,
     })
 }
 
@@ -870,7 +916,6 @@ async fn begin_attempt(
     target: &SelectedTarget,
     input: &TurnInput,
     mut prepared: PreparedAttempt,
-    access: &crate::proxy::security::ModelAccessGrant,
     attempt_started: Instant,
     route_policy_state: RoutePolicyState,
     attempt_context: RouteAttemptContext,
@@ -879,8 +924,6 @@ async fn begin_attempt(
         actual_model: prepared.actual_model.clone(),
         provider_id: prepared.route.provider_id.clone(),
         target_id: prepared.route.target_id.clone(),
-        provider_name: prepared.provider.name.clone(),
-        route_name: route.model_id.clone(),
         namespace: prepared.namespace.clone(),
         response_continuation_available: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
             false,
@@ -915,6 +958,12 @@ async fn begin_attempt(
                 .and_then(|response| response.error.as_ref())
                 .map(|error| error.kind.clone())
                 .unwrap_or_else(|| AiError::kind_from_status(call.status, Some(&call.raw)));
+            call.attempt.finish(
+                "failed",
+                Some(call.status),
+                Some("upstream_error".into()),
+                None,
+            );
             return Err(AttemptFailure::upstream(
                 kind,
                 Some(call.status),
@@ -923,17 +972,21 @@ async fn begin_attempt(
                 retry_after(&call.headers),
             ));
         }
-        *prepared
-            .trace
-            .response_headers
-            .lock()
-            .expect("response headers") =
-            crate::proxy::observability::headers_to_json(&call.headers);
-        *prepared.trace.response_body.lock().expect("response body") =
-            serde_json::to_vec(&call.raw).unwrap_or_default();
-        let response = call
-            .canonical
-            .map_err(|error| AttemptFailure::terminal(error.stable_code(), error.to_string()))?;
+        let response = match call.canonical {
+            Ok(response) => response,
+            Err(error) => {
+                call.attempt.finish(
+                    "failed",
+                    Some(call.status),
+                    Some(error.stable_code().to_owned()),
+                    None,
+                );
+                return Err(AttemptFailure::terminal(
+                    error.stable_code(),
+                    error.to_string(),
+                ));
+            }
+        };
         gateway.cache_affinity.record_success(
             &input.principal,
             &route.id,
@@ -942,28 +995,33 @@ async fn begin_attempt(
             &response.usage,
         );
         record_success(gateway, target, &route_policy_state, &attempt_context);
-        emit_internal_model_log(
-            gateway,
-            route,
-            &prepared,
-            access,
-            input,
-            response.usage.clone(),
-            attempt_started,
+        call.attempt.confirm_usage(&response.usage);
+        call.attempt
+            .checkpoint("canonical_terminal_response", &response);
+        call.attempt.finish(
+            "completed",
+            Some(call.status),
+            None,
+            Some(attempt_started.elapsed().as_millis() as i64),
         );
-        let mut events = ai_response_to_deltas(&response)
+        let canonical_deltas = ai_response_to_deltas(&response);
+        for delta in &canonical_deltas {
+            call.attempt.checkpoint("canonical_delta", delta);
+        }
+        call.attempt.model_turn_finished("completed");
+        let mut events = canonical_deltas
             .into_iter()
             .map(CanonicalEvent::Delta)
             .map(Ok)
             .collect::<Vec<_>>();
         events.push(Ok(CanonicalEvent::Completed(Box::new(response))));
         return Ok(ModelTurn {
+            model_turn_id: prepared.model_turn_id,
             route: prepared.route,
             target: target_identity,
             output: Box::pin(stream::iter(events)),
             reasoning_encrypted_content_requested: prepared.reasoning_encrypted_content_requested,
             streamed: false,
-            transport: prepared.trace,
         });
     }
 
@@ -979,18 +1037,11 @@ async fn begin_attempt(
             status,
             headers,
             body,
+            attempt,
         } => {
-            *prepared
-                .trace
-                .response_headers
-                .lock()
-                .expect("response headers") =
-                crate::proxy::observability::headers_to_json(&headers);
             let kind = AiError::kind_from_status(status, body.as_ref().ok());
             let retry_after = retry_after(&headers);
-            *prepared.trace.response_body.lock().expect("response body") = body
-                .map(|body| serde_json::to_vec(&body).unwrap_or_default())
-                .unwrap_or_default();
+            attempt.finish("failed", Some(status), Some("upstream_error".into()), None);
             return Err(AttemptFailure::upstream(
                 kind,
                 Some(status),
@@ -1009,40 +1060,60 @@ async fn begin_attempt(
     target_identity.response_continuation_available =
         provider_stream.response_continuation_available();
     debug_assert!(provider_stream.status < 400);
-    *prepared
-        .trace
-        .response_headers
-        .lock()
-        .expect("response headers") =
-        crate::proxy::observability::headers_to_json(&provider_stream.headers);
 
     let mut first_deltas = Vec::new();
+    let mut first_token_ms = None;
     loop {
         match provider_stream.next().await {
             Ok(Some(chunk)) => {
-                prepared
-                    .trace
-                    .record_stream_chunk(stream_started, &chunk.raw);
                 let ready = chunk
                     .deltas
                     .iter()
                     .any(|delta| is_first_output(delta) || is_terminal_delta(delta));
                 first_deltas.extend(chunk.deltas);
                 if ready {
+                    first_token_ms = Some(stream_started.elapsed().as_millis() as i64);
                     break;
                 }
             }
             Ok(None) => {
-                first_deltas.extend(provider_stream.finish().await.map_err(stream_failure)?);
+                match provider_stream.finish().await {
+                    Ok(deltas) => first_deltas.extend(deltas),
+                    Err(error) => {
+                        let failure = stream_failure(error);
+                        provider_stream.attempt().finish(
+                            "failed",
+                            None,
+                            Some(failure.error.code.clone()),
+                            None,
+                        );
+                        return Err(failure);
+                    }
+                }
                 break;
             }
-            Err(error) => return Err(stream_failure(error)),
+            Err(error) => {
+                let failure = stream_failure(error);
+                provider_stream.attempt().finish(
+                    "failed",
+                    None,
+                    Some(failure.error.code.clone()),
+                    None,
+                );
+                return Err(failure);
+            }
         }
     }
     if let Some(error) = first_deltas.iter().find_map(|delta| match delta {
         AiStreamDelta::StreamError { error } => Some(error),
         _ => None,
     }) {
+        provider_stream.attempt().finish(
+            "failed",
+            error.status_code,
+            Some("upstream_stream_error".into()),
+            first_token_ms,
+        );
         return Err(AttemptFailure::upstream(
             error.kind.clone(),
             error.status_code,
@@ -1053,8 +1124,6 @@ async fn begin_attempt(
     }
 
     let (tx, rx) = tokio::sync::mpsc::channel(32);
-    let internal_log =
-        PendingInternalModelLog::new(gateway, route, &prepared, access, input, attempt_started);
     let principal = input.principal.clone();
     let request = input.request.clone();
     let route_id = route.id.clone();
@@ -1068,32 +1137,53 @@ async fn begin_attempt(
     let target = target.clone();
     let cancellation = input.cancellation.clone();
     let deadline = input.deadline;
-    let trace = prepared.trace.clone();
     tokio::spawn(async move {
-        let mut internal_log = internal_log;
         let mut accumulator = StreamResponseAccumulator::default();
         let terminal_error = handle_terminal_stream_error(
             &gateway.health_registry,
             &health_target_key,
             &first_deltas,
         );
-        if send_deltas(&tx, &mut accumulator, first_deltas)
-            .await
-            .is_err()
+        if send_deltas(
+            &tx,
+            &mut accumulator,
+            provider_stream.attempt(),
+            first_deltas,
+        )
+        .await
+        .is_err()
         {
+            provider_stream.attempt().finish(
+                "interrupted",
+                Some(provider_stream.status),
+                Some("consumer_disconnected".into()),
+                None,
+            );
+            provider_stream.attempt().model_turn_finished("interrupted");
             return;
         }
         if terminal_error {
+            provider_stream.attempt().finish(
+                "failed",
+                Some(provider_stream.status),
+                Some("upstream_stream_error".into()),
+                first_token_ms,
+            );
+            provider_stream.attempt().model_turn_finished("failed");
             return;
         }
         loop {
             let next = tokio::select! {
                 biased;
                 _ = cancellation.cancelled() => {
+                    provider_stream.attempt().finish("cancelled", None, Some("cancelled".into()), None);
+                    provider_stream.attempt().model_turn_finished("cancelled");
                     let _ = tx.send(Err(ModelTurnError::new("cancelled", "Model Turn cancelled"))).await;
                     return;
                 }
                 _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                    provider_stream.attempt().finish("failed", None, Some("deadline_exceeded".into()), None);
+                    provider_stream.attempt().model_turn_finished("deadline_exceeded");
                     let _ = tx.send(Err(ModelTurnError::new("deadline_exceeded", "Model Turn deadline exceeded"))).await;
                     return;
                 }
@@ -1101,19 +1191,37 @@ async fn begin_attempt(
             };
             match next {
                 Ok(Some(chunk)) => {
-                    trace.record_stream_chunk(stream_started, &chunk.raw);
                     let terminal_error = handle_terminal_stream_error(
                         &gateway.health_registry,
                         &health_target_key,
                         &chunk.deltas,
                     );
-                    if send_deltas(&tx, &mut accumulator, chunk.deltas)
-                        .await
-                        .is_err()
+                    if send_deltas(
+                        &tx,
+                        &mut accumulator,
+                        provider_stream.attempt(),
+                        chunk.deltas,
+                    )
+                    .await
+                    .is_err()
                     {
+                        provider_stream.attempt().finish(
+                            "interrupted",
+                            Some(provider_stream.status),
+                            Some("consumer_disconnected".into()),
+                            None,
+                        );
+                        provider_stream.attempt().model_turn_finished("interrupted");
                         return;
                     }
                     if terminal_error {
+                        provider_stream.attempt().finish(
+                            "failed",
+                            Some(provider_stream.status),
+                            Some("upstream_stream_error".into()),
+                            None,
+                        );
+                        provider_stream.attempt().model_turn_finished("failed");
                         return;
                     }
                 }
@@ -1122,7 +1230,17 @@ async fn begin_attempt(
                     gateway
                         .health_registry
                         .record_failure(&selected_target_key(&target));
-                    let _ = tx.send(Err(stream_failure(error).error)).await;
+                    let failure = stream_failure(error);
+                    provider_stream.attempt().finish(
+                        "failed",
+                        None,
+                        Some(failure.error.code.clone()),
+                        None,
+                    );
+                    provider_stream
+                        .attempt()
+                        .model_turn_finished(&failure.error.code);
+                    let _ = tx.send(Err(failure.error)).await;
                     return;
                 }
             }
@@ -1134,22 +1252,46 @@ async fn begin_attempt(
                     &health_target_key,
                     &deltas,
                 );
-                if send_deltas(&tx, &mut accumulator, deltas).await.is_err() {
+                if send_deltas(&tx, &mut accumulator, provider_stream.attempt(), deltas)
+                    .await
+                    .is_err()
+                {
+                    provider_stream.attempt().finish(
+                        "interrupted",
+                        Some(provider_stream.status),
+                        Some("consumer_disconnected".into()),
+                        None,
+                    );
+                    provider_stream.attempt().model_turn_finished("interrupted");
                     return;
                 }
                 if terminal_error {
+                    provider_stream.attempt().finish(
+                        "failed",
+                        Some(provider_stream.status),
+                        Some("upstream_stream_error".into()),
+                        None,
+                    );
+                    provider_stream.attempt().model_turn_finished("failed");
                     return;
                 }
             }
             Err(error) => {
-                let _ = tx.send(Err(stream_failure(error).error)).await;
+                let failure = stream_failure(error);
+                provider_stream.attempt().finish(
+                    "failed",
+                    None,
+                    Some(failure.error.code.clone()),
+                    None,
+                );
+                provider_stream
+                    .attempt()
+                    .model_turn_finished(&failure.error.code);
+                let _ = tx.send(Err(failure.error)).await;
                 return;
             }
         }
         let response = accumulator.into_ai_response();
-        if let Some(log) = internal_log.as_mut() {
-            log.set_usage(response.usage.clone());
-        }
         gateway.cache_affinity.record_success(
             &principal,
             &route_id,
@@ -1159,28 +1301,41 @@ async fn begin_attempt(
         );
         record_success(&gateway, &target, &route_policy_state, &attempt_context);
         reservation.complete();
+        provider_stream.attempt().confirm_usage(&response.usage);
+        provider_stream
+            .attempt()
+            .checkpoint("canonical_terminal_response", &response);
+        provider_stream.attempt().finish(
+            "completed",
+            Some(provider_stream.status),
+            None,
+            first_token_ms,
+        );
+        provider_stream.attempt().model_turn_finished("completed");
         let _ = tx
             .send(Ok(CanonicalEvent::Completed(Box::new(response))))
             .await;
     });
 
     Ok(ModelTurn {
+        model_turn_id: prepared.model_turn_id,
         route: prepared.route,
         target: target_identity,
         output: Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)),
         reasoning_encrypted_content_requested: prepared.reasoning_encrypted_content_requested,
         streamed: true,
-        transport: prepared.trace,
     })
 }
 
 async fn send_deltas(
     tx: &tokio::sync::mpsc::Sender<Result<CanonicalEvent, ModelTurnError>>,
     accumulator: &mut StreamResponseAccumulator,
+    attempt: &AttemptObservation,
     deltas: Vec<AiStreamDelta>,
 ) -> Result<(), ()> {
     accumulator.apply_all(&deltas);
     for delta in deltas {
+        attempt.checkpoint("canonical_delta", &delta);
         tx.send(Ok(CanonicalEvent::Delta(delta)))
             .await
             .map_err(|_| ())?;
@@ -1366,141 +1521,6 @@ fn supports_modality(
 
 fn model_turn_gateway_error(error: GatewayError) -> ModelTurnError {
     ModelTurnError::new(error.stable_code(), error.message())
-}
-
-fn emit_internal_model_log(
-    gateway: &Gateway,
-    route: &crate::db::models::Route,
-    prepared: &PreparedAttempt,
-    access: &crate::proxy::security::ModelAccessGrant,
-    input: &TurnInput,
-    usage: Usage,
-    started_at: Instant,
-) {
-    let Some(entry) = internal_model_log_entry(route, prepared, access, input, usage, started_at)
-    else {
-        return;
-    };
-    send_log(gateway, entry);
-}
-
-fn internal_model_log_entry(
-    route: &crate::db::models::Route,
-    prepared: &PreparedAttempt,
-    access: &crate::proxy::security::ModelAccessGrant,
-    input: &TurnInput,
-    usage: Usage,
-    started_at: Instant,
-) -> Option<LogEntry> {
-    if input.authorization == ModelTurnAuthorization::RouteBinding {
-        return None;
-    }
-    let protocol = input
-        .request
-        .meta
-        .source_protocol
-        .unwrap_or(OPEN_RESPONSES_2026_04_24)
-        .to_string();
-    Some(LogEntry {
-        api_key_id: access.api_key_id.clone(),
-        api_key_name: access.api_key_name.clone(),
-        created_at: chrono::Utc::now().timestamp_millis(),
-        client_protocol: protocol.clone(),
-        upstream_protocol: prepared.route.egress.to_string(),
-        provider_id: prepared.provider.id.clone(),
-        provider_name: prepared.provider.name.clone(),
-        model_id: Some(route.id.clone()),
-        model_name: Some(route.effective_display_name().to_string()),
-        upstream_url: Some(prepared.trace.upstream_url.clone()),
-        client_model: route.model_id.clone(),
-        upstream_model: prepared.actual_model.clone(),
-        method: None,
-        path: None,
-        client_request_headers: None,
-        client_request_body: None,
-        client_response_headers: None,
-        client_response_body: None,
-        upstream_request_headers: prepared.trace.request_headers.clone(),
-        upstream_request_body: None,
-        upstream_response_headers: prepared
-            .trace
-            .response_headers
-            .lock()
-            .expect("response headers")
-            .clone(),
-        upstream_response_body: None,
-        upstream_status_code: Some(200),
-        client_status_code: 200,
-        latency_total_ms: started_at.elapsed().as_millis() as i64,
-        latency_upstream_ms: None,
-        usage,
-        thinking_level: input.request.reasoning.level,
-        is_stream: prepared.force_stream,
-        stream_chunks_count: 0,
-        stream_first_chunk_ms: None,
-    })
-}
-
-struct PendingInternalModelLog {
-    gateway: Gateway,
-    entry: Option<LogEntry>,
-    trace: crate::model_turn::TurnTransport,
-    started_at: Instant,
-}
-
-impl PendingInternalModelLog {
-    fn new(
-        gateway: &Gateway,
-        route: &crate::db::models::Route,
-        prepared: &PreparedAttempt,
-        access: &crate::proxy::security::ModelAccessGrant,
-        input: &TurnInput,
-        started_at: Instant,
-    ) -> Option<Self> {
-        Some(Self {
-            gateway: gateway.clone(),
-            entry: Some(internal_model_log_entry(
-                route,
-                prepared,
-                access,
-                input,
-                Usage::default(),
-                started_at,
-            )?),
-            trace: prepared.trace.clone(),
-            started_at,
-        })
-    }
-
-    fn set_usage(&mut self, usage: Usage) {
-        if let Some(entry) = self.entry.as_mut() {
-            entry.usage = usage;
-        }
-    }
-
-    fn emit(&mut self) {
-        let Some(mut entry) = self.entry.take() else {
-            return;
-        };
-        let metrics = self.trace.stream_metrics();
-        entry.created_at = chrono::Utc::now().timestamp_millis();
-        entry.latency_total_ms = self.started_at.elapsed().as_millis() as i64;
-        entry.upstream_response_headers = self
-            .trace
-            .response_headers
-            .lock()
-            .expect("response headers")
-            .clone();
-        entry.stream_chunks_count = metrics.chunks_count;
-        entry.stream_first_chunk_ms = metrics.first_chunk_ms;
-        send_log(&self.gateway, entry);
-    }
-}
-
-impl Drop for PendingInternalModelLog {
-    fn drop(&mut self) {
-        self.emit();
-    }
 }
 
 fn normalize_provider_effective_request(

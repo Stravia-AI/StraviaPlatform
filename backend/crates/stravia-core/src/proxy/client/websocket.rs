@@ -19,6 +19,7 @@ pub(crate) struct ResponsesWebSocketTrace<'a> {
 pub(crate) struct ResponsesWebSocketRequest<'a> {
     pub url: &'a str,
     pub headers: HeaderMap,
+    pub on_connect_start: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
 }
 
 #[derive(Default)]
@@ -80,11 +81,22 @@ enum ResponsesWebSocketCapability {
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ResponsesWebSocketAcquireError {
     #[error("Responses WebSocket is unsupported for this Target")]
-    Unsupported,
+    Unsupported {
+        attempted: bool,
+        status: Option<u16>,
+        headers: HeaderMap,
+        body: bytes::Bytes,
+    },
     #[error("Responses WebSocket is cooling down for this Target")]
     Cooldown,
-    #[error("Responses WebSocket request was rejected: {0}")]
-    Rejected(u16),
+    #[error("Responses WebSocket request was rejected: {status}")]
+    Rejected {
+        status: u16,
+        headers: HeaderMap,
+        body: bytes::Bytes,
+    },
+    #[error("Responses WebSocket handshake body could not be read")]
+    HandshakeBodyRead { status: u16, headers: HeaderMap },
     #[error("Responses WebSocket connection failed: {0}")]
     Transport(String),
 }
@@ -100,6 +112,7 @@ pub(crate) struct ResponsesWebSocketLease {
     previous_response_id: Option<String>,
     session_affinity: Option<String>,
     reused_connection: bool,
+    handshake_headers: HeaderMap,
     terminal: bool,
 }
 
@@ -137,7 +150,11 @@ impl ResponsesWebSocketRegistry {
         session_affinity: Option<&str>,
         require_affinity: bool,
     ) -> Result<ResponsesWebSocketLease, ResponsesWebSocketAcquireError> {
-        let ResponsesWebSocketRequest { url, headers } = request;
+        let ResponsesWebSocketRequest {
+            url,
+            headers,
+            on_connect_start,
+        } = request;
         let response_affinity =
             previous_response_id.map(|id| ResponsesWebSocketAffinity::response(namespace, id));
         let session_affinity_key =
@@ -150,7 +167,12 @@ impl ResponsesWebSocketRegistry {
             prune_expired_connections(&mut state);
             match state.capabilities.get(namespace) {
                 Some(ResponsesWebSocketCapability::Unsupported) => {
-                    return Err(ResponsesWebSocketAcquireError::Unsupported);
+                    return Err(ResponsesWebSocketAcquireError::Unsupported {
+                        attempted: false,
+                        status: None,
+                        headers: HeaderMap::new(),
+                        body: bytes::Bytes::new(),
+                    });
                 }
                 Some(ResponsesWebSocketCapability::CooldownUntil(until))
                     if *until > tokio::time::Instant::now() =>
@@ -228,6 +250,7 @@ impl ResponsesWebSocketRegistry {
                     previous_response_id: reusable_previous.map(str::to_owned),
                     session_affinity: session_affinity.map(str::to_owned),
                     reused_connection: true,
+                    handshake_headers: HeaderMap::new(),
                     terminal: false,
                 });
             }
@@ -252,6 +275,9 @@ impl ResponsesWebSocketRegistry {
         let thread_id = connection_value("thread-id");
         let window_id = connection_value("x-codex-window-id");
 
+        if let Some(on_connect_start) = on_connect_start {
+            on_connect_start();
+        }
         let response = {
             use reqwest_websocket::Upgrade as _;
             client
@@ -269,11 +295,16 @@ impl ResponsesWebSocketRegistry {
                 return Err(ResponsesWebSocketAcquireError::Transport(error.to_string()));
             }
         };
-        let socket = match response.into_websocket().await {
-            Ok(socket) => socket,
-            Err(reqwest_websocket::Error::Handshake(
-                reqwest_websocket::HandshakeError::UnexpectedStatusCode(status),
-            )) if status.is_success() || matches!(status.as_u16(), 400 | 404 | 405 | 426 | 501) => {
+        let status = response.status().as_u16();
+        let handshake_headers = response.headers().clone();
+        if status != 101 {
+            let body = response.into_inner().bytes().await.map_err(|_| {
+                ResponsesWebSocketAcquireError::HandshakeBodyRead {
+                    status,
+                    headers: handshake_headers.clone(),
+                }
+            })?;
+            if (200..300).contains(&status) || matches!(status, 400 | 404 | 405 | 426 | 501) {
                 self.state
                     .lock()
                     .expect("Responses WebSocket registry poisoned")
@@ -282,28 +313,29 @@ impl ResponsesWebSocketRegistry {
                         namespace.to_owned(),
                         ResponsesWebSocketCapability::Unsupported,
                     );
-                tracing::debug!(
-                    transport = "responses_websocket",
-                    target_namespace = namespace,
-                    provider_id = trace.provider_id,
-                    target_id = trace.target_id,
-                    transport_attempt = trace.transport_attempt,
-                    rejection_status = status.as_u16(),
-                    capability = "unsupported",
-                    "cached upstream WebSocket capability"
-                );
-                return Err(ResponsesWebSocketAcquireError::Unsupported);
+                return Err(ResponsesWebSocketAcquireError::Unsupported {
+                    attempted: true,
+                    status: Some(status),
+                    headers: handshake_headers,
+                    body,
+                });
             }
-            Err(reqwest_websocket::Error::Handshake(
-                reqwest_websocket::HandshakeError::UnexpectedStatusCode(status),
-            )) if matches!(status.as_u16(), 401 | 403 | 429) => {
-                return Err(ResponsesWebSocketAcquireError::Rejected(status.as_u16()));
+            if matches!(status, 401 | 403 | 429) {
+                return Err(ResponsesWebSocketAcquireError::Rejected {
+                    status,
+                    headers: handshake_headers,
+                    body,
+                });
             }
-            Err(error) => {
-                self.mark_transient_failure(namespace, trace);
-                return Err(ResponsesWebSocketAcquireError::Transport(error.to_string()));
-            }
-        };
+            self.mark_transient_failure(namespace, trace);
+            return Err(ResponsesWebSocketAcquireError::Transport(format!(
+                "unexpected WebSocket handshake status {status}"
+            )));
+        }
+        let socket = response.into_websocket().await.map_err(|error| {
+            self.mark_transient_failure(namespace, trace);
+            ResponsesWebSocketAcquireError::Transport(error.to_string())
+        })?;
         let connection_id = uuid::Uuid::new_v4().to_string();
         let connection =
             std::sync::Arc::new(tokio::sync::Mutex::new(ResponsesWebSocketConnection {
@@ -385,6 +417,7 @@ impl ResponsesWebSocketRegistry {
                 .flatten(),
             session_affinity: session_affinity.map(str::to_owned),
             reused_connection: false,
+            handshake_headers,
             terminal: false,
         })
     }
@@ -451,13 +484,11 @@ impl ResponsesWebSocketLease {
         }
     }
 
-    pub(crate) async fn send(&mut self, request: &serde_json::Value) -> anyhow::Result<()> {
+    pub(crate) async fn send_text(&mut self, request: String) -> anyhow::Result<()> {
         use futures::SinkExt as _;
         self.connection
             .socket
-            .send(reqwest_websocket::Message::Text(serde_json::to_string(
-                request,
-            )?))
+            .send(reqwest_websocket::Message::Text(request))
             .await?;
         Ok(())
     }
@@ -536,6 +567,10 @@ impl ResponsesWebSocketLease {
 
     pub(crate) fn reused_connection(&self) -> bool {
         self.reused_connection
+    }
+
+    pub(crate) fn handshake_headers(&self) -> &HeaderMap {
+        &self.handshake_headers
     }
 
     pub(crate) fn invalidate_previous(&mut self) {
@@ -814,6 +849,7 @@ mod tests {
                 ResponsesWebSocketRequest {
                     url: &url,
                     headers: HeaderMap::new(),
+                    on_connect_start: None,
                 },
                 None,
                 None,
@@ -829,11 +865,14 @@ mod tests {
             )
         };
         first
-            .send(&serde_json::json!({
-                "type": "response.create",
-                "model": "gpt-test",
-                "input": [{"role": "user", "content": "first"}]
-            }))
+            .send_text(
+                serde_json::json!({
+                    "type": "response.create",
+                    "model": "gpt-test",
+                    "input": [{"role": "user", "content": "first"}]
+                })
+                .to_string(),
+            )
             .await
             .expect("send first request");
         let first_request = requests.recv().await.expect("observe first request");
@@ -851,6 +890,7 @@ mod tests {
                 ResponsesWebSocketRequest {
                     url: &url,
                     headers: HeaderMap::new(),
+                    on_connect_start: None,
                 },
                 Some("upstream-1"),
                 None,
@@ -864,12 +904,15 @@ mod tests {
             assert_eq!(metadata.thread_id, first_connection.1);
         }
         second
-            .send(&serde_json::json!({
-                "type": "response.create",
-                "model": "gpt-test",
-                "previous_response_id": "upstream-1",
-                "input": [{"role": "user", "content": "second"}]
-            }))
+            .send_text(
+                serde_json::json!({
+                    "type": "response.create",
+                    "model": "gpt-test",
+                    "previous_response_id": "upstream-1",
+                    "input": [{"role": "user", "content": "second"}]
+                })
+                .to_string(),
+            )
             .await
             .expect("send continuation");
         let second_request = requests.recv().await.expect("observe continuation");
@@ -896,6 +939,7 @@ mod tests {
                 ResponsesWebSocketRequest {
                     url: &url,
                     headers: HeaderMap::new(),
+                    on_connect_start: None,
                 },
                 None,
                 Some("session-1"),
@@ -912,10 +956,13 @@ mod tests {
             )
         };
         first
-            .send(&serde_json::json!({
-                "type": "response.create",
-                "input": ["first"]
-            }))
+            .send_text(
+                serde_json::json!({
+                    "type": "response.create",
+                    "input": ["first"]
+                })
+                .to_string(),
+            )
             .await
             .expect("send first request");
         let _ = requests.recv().await.expect("observe first request");
@@ -931,6 +978,7 @@ mod tests {
                 ResponsesWebSocketRequest {
                     url: &url,
                     headers: HeaderMap::new(),
+                    on_connect_start: None,
                 },
                 None,
                 Some("session-1"),
@@ -946,10 +994,13 @@ mod tests {
             assert_eq!(metadata.window_id, first_connection.2);
         }
         second
-            .send(&serde_json::json!({
-                "type": "response.create",
-                "input": ["first", "second"]
-            }))
+            .send_text(
+                serde_json::json!({
+                    "type": "response.create",
+                    "input": ["first", "second"]
+                })
+                .to_string(),
+            )
             .await
             .expect("send full second request");
         let second_request = requests.recv().await.expect("observe second request");
@@ -973,6 +1024,7 @@ mod tests {
                 ResponsesWebSocketRequest {
                     url: &url,
                     headers: HeaderMap::new(),
+                    on_connect_start: None,
                 },
                 None,
                 None,
@@ -981,11 +1033,14 @@ mod tests {
             .await
             .expect("connect parent");
         parent
-            .send(&serde_json::json!({
-                "type": "response.create",
-                "model": "gpt-test",
-                "input": ["parent"]
-            }))
+            .send_text(
+                serde_json::json!({
+                    "type": "response.create",
+                    "model": "gpt-test",
+                    "input": ["parent"]
+                })
+                .to_string(),
+            )
             .await
             .expect("send parent");
         let _ = requests.recv().await.expect("observe parent");
@@ -1001,6 +1056,7 @@ mod tests {
                 ResponsesWebSocketRequest {
                     url: &url,
                     headers: HeaderMap::new(),
+                    on_connect_start: None,
                 },
                 Some("upstream-1"),
                 None,
@@ -1020,6 +1076,7 @@ mod tests {
                     ResponsesWebSocketRequest {
                         url: &second_url,
                         headers: HeaderMap::new(),
+                        on_connect_start: None,
                     },
                     Some("upstream-1"),
                     None,
@@ -1029,12 +1086,15 @@ mod tests {
         });
 
         first_branch
-            .send(&serde_json::json!({
-                "type": "response.create",
-                "model": "gpt-test",
-                "previous_response_id": "upstream-1",
-                "input": ["first branch"]
-            }))
+            .send_text(
+                serde_json::json!({
+                    "type": "response.create",
+                    "model": "gpt-test",
+                    "previous_response_id": "upstream-1",
+                    "input": ["first branch"]
+                })
+                .to_string(),
+            )
             .await
             .expect("send first branch");
         let _ = requests.recv().await.expect("observe first branch");
@@ -1048,11 +1108,14 @@ mod tests {
             .expect("open second branch socket");
         assert_eq!(second_branch.previous_response_id(), None);
         second_branch
-            .send(&serde_json::json!({
-                "type": "response.create",
-                "model": "gpt-test",
-                "input": ["parent", "second branch"]
-            }))
+            .send_text(
+                serde_json::json!({
+                    "type": "response.create",
+                    "model": "gpt-test",
+                    "input": ["parent", "second branch"]
+                })
+                .to_string(),
+            )
             .await
             .expect("send full second branch");
         let second_request = requests.recv().await.expect("observe second branch");
@@ -1081,13 +1144,14 @@ mod tests {
                     ResponsesWebSocketRequest {
                         url: &url,
                         headers: HeaderMap::new(),
+                        on_connect_start: None,
                     },
                     None,
                     None,
                     false,
                 )
                 .await,
-            Err(ResponsesWebSocketAcquireError::Unsupported)
+            Err(ResponsesWebSocketAcquireError::Unsupported { .. })
         ));
         assert!(matches!(
             registry
@@ -1098,13 +1162,14 @@ mod tests {
                     ResponsesWebSocketRequest {
                         url: &url,
                         headers: HeaderMap::new(),
+                        on_connect_start: None,
                     },
                     None,
                     None,
                     false,
                 )
                 .await,
-            Err(ResponsesWebSocketAcquireError::Unsupported)
+            Err(ResponsesWebSocketAcquireError::Unsupported { .. })
         ));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
 
@@ -1117,13 +1182,14 @@ mod tests {
                     ResponsesWebSocketRequest {
                         url: &url,
                         headers: HeaderMap::new(),
+                        on_connect_start: None,
                     },
                     None,
                     None,
                     false,
                 )
                 .await,
-            Err(ResponsesWebSocketAcquireError::Unsupported)
+            Err(ResponsesWebSocketAcquireError::Unsupported { .. })
         ));
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
@@ -1148,6 +1214,7 @@ mod tests {
                     ResponsesWebSocketRequest {
                         url: &url,
                         headers: HeaderMap::new(),
+                        on_connect_start: None,
                     },
                     None,
                     None,
@@ -1165,6 +1232,7 @@ mod tests {
                     ResponsesWebSocketRequest {
                         url: &url,
                         headers: HeaderMap::new(),
+                        on_connect_start: None,
                     },
                     None,
                     None,
@@ -1190,13 +1258,14 @@ mod tests {
                     ResponsesWebSocketRequest {
                         url: &url,
                         headers: HeaderMap::new(),
+                        on_connect_start: None,
                     },
                     None,
                     None,
                     false,
                 )
                 .await;
-            let Err(ResponsesWebSocketAcquireError::Rejected(code)) = result else {
+            let Err(ResponsesWebSocketAcquireError::Rejected { status: code, .. }) = result else {
                 panic!("{status} must remain a typed handshake rejection");
             };
             assert_eq!(code, status.as_u16());
@@ -1240,6 +1309,7 @@ mod tests {
                     ResponsesWebSocketRequest {
                         url: "wss://provider.invalid/v1/responses",
                         headers: HeaderMap::new(),
+                        on_connect_start: None,
                     },
                     None,
                     None,
@@ -1274,6 +1344,7 @@ mod tests {
                 ResponsesWebSocketRequest {
                     url: &url,
                     headers: HeaderMap::new(),
+                    on_connect_start: None,
                 },
                 None,
                 None,
@@ -1282,7 +1353,9 @@ mod tests {
             .await
             .expect("connect parent");
         parent
-            .send(&serde_json::json!({"type": "response.create", "input": ["parent"]}))
+            .send_text(
+                serde_json::json!({"type": "response.create", "input": ["parent"]}).to_string(),
+            )
             .await
             .expect("send parent");
         let _ = requests.recv().await.expect("observe parent");
@@ -1319,6 +1392,7 @@ mod tests {
                 ResponsesWebSocketRequest {
                     url: &url,
                     headers: HeaderMap::new(),
+                    on_connect_start: None,
                 },
                 Some("upstream-1"),
                 None,
@@ -1343,6 +1417,7 @@ mod tests {
                 ResponsesWebSocketRequest {
                     url: &url,
                     headers: HeaderMap::new(),
+                    on_connect_start: None,
                 },
                 None,
                 None,
@@ -1351,10 +1426,13 @@ mod tests {
             .await
             .expect("connect request");
         lease
-            .send(&serde_json::json!({
-                "type": "response.create",
-                "input": ["parent"]
-            }))
+            .send_text(
+                serde_json::json!({
+                    "type": "response.create",
+                    "input": ["parent"]
+                })
+                .to_string(),
+            )
             .await
             .expect("send request");
         let _ = requests.recv().await.expect("observe request");
@@ -1387,6 +1465,7 @@ mod tests {
                 ResponsesWebSocketRequest {
                     url: &url,
                     headers: HeaderMap::new(),
+                    on_connect_start: None,
                 },
                 None,
                 None,

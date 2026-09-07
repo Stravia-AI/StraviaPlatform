@@ -57,6 +57,10 @@ const overview = $derived(overviewQuery.data)
 const modelStats = $derived(modelStatsQuery.data ?? [])
 const providerStats = $derived(providerStatsQuery.data ?? [])
 const tableLabels = $derived(getDataTableLabels())
+const modelTokenTotal = (model: ModelStats): number | null =>
+  model.total_input_tokens == null || model.total_output_tokens == null
+    ? null
+    : model.total_input_tokens + model.total_output_tokens
 const modelStatsColumnHelper = createDataTableColumnHelper<ModelStats>()
 const modelStatsColumns = modelStatsColumnHelper.columns([
   modelStatsColumnHelper.accessor('model', {
@@ -68,7 +72,7 @@ const modelStatsColumns = modelStatsColumnHelper.columns([
     cell: (context) => formatCompactCount(context.getValue()),
     meta: { label: () => m.common_request_count_label(), align: 'end', cellClass: 'font-technical tabular-nums' },
   }),
-  modelStatsColumnHelper.accessor((model) => model.total_input_tokens + model.total_output_tokens, {
+  modelStatsColumnHelper.accessor((model) => modelTokenTotal(model), {
     id: 'tokens',
     header: () => m.common_token(),
     cell: (context) => formatCompactCount(context.getValue()),
@@ -191,11 +195,12 @@ const metrics = $derived([
   { label: m.common_total_requests(), value: hasTraffic ? formatCompactCount(overview?.total_requests ?? 0) : dash },
   {
     label: m.overview_total_tokens(),
-    value: hasTraffic
-      ? formatCompactCount((overview?.total_input_tokens ?? 0) + (overview?.total_output_tokens ?? 0))
-      : dash,
+    value:
+      hasTraffic && overview?.total_input_tokens != null && overview.total_output_tokens != null
+        ? formatCompactCount(overview.total_input_tokens + overview.total_output_tokens)
+        : dash,
   },
-  { label: m.common_avg_latency(), value: hasTraffic ? formatDuration(overview?.avg_duration_ms ?? 0) : dash },
+  { label: m.common_avg_latency(), value: hasTraffic ? formatDuration(overview?.avg_duration_ms) : dash },
   {
     label: m.common_error_rate(),
     value: hasTraffic ? formatPercent(errorRate / 100) : dash,
@@ -432,9 +437,7 @@ function retryConfiguration(): void {
                   <div class="min-w-0">
                     <p class="font-technical truncate font-medium">{model.model}</p>
                     <p class="mt-1 text-xs text-muted-foreground">
-                      {formatDuration(model.avg_duration_ms)} · {formatCompactCount(
-                        model.total_input_tokens + model.total_output_tokens,
-                      )}
+                      {formatDuration(model.avg_duration_ms)} · {formatCompactCount(modelTokenTotal(model))}
                       {m.common_token()}
                     </p>
                   </div>

@@ -211,7 +211,7 @@ mod expiry_tests {
     #[tokio::test]
     async fn api_key_concurrency_limit_crud_uses_nullable_tri_state() {
         let data_dir = tempfile::tempdir().expect("temporary data dir");
-        let (gateway, _logs) = Gateway::new(crate::config::GatewayConfig {
+        let gateway = Gateway::new(crate::config::GatewayConfig {
             data_dir: data_dir.path().to_path_buf(),
             ..Default::default()
         })
@@ -320,7 +320,7 @@ mod expiry_tests {
     #[tokio::test]
     async fn api_key_crud_accepts_custom_and_replacement_keys() {
         let data_dir = tempfile::tempdir().expect("temporary data dir");
-        let (gateway, _logs) = Gateway::new(crate::config::GatewayConfig {
+        let gateway = Gateway::new(crate::config::GatewayConfig {
             data_dir: data_dir.path().to_path_buf(),
             ..Default::default()
         })
@@ -368,7 +368,7 @@ mod expiry_tests {
     #[tokio::test]
     async fn api_key_crud_uses_transparent_injection_without_capability_grants() {
         let data_dir = tempfile::tempdir().expect("temporary data dir");
-        let (gateway, _logs) = Gateway::new(crate::config::GatewayConfig {
+        let gateway = Gateway::new(crate::config::GatewayConfig {
             data_dir: data_dir.path().to_path_buf(),
             ..Default::default()
         })

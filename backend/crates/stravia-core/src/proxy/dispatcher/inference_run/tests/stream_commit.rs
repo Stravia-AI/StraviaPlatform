@@ -141,7 +141,7 @@ async fn protected_reasoning_marker_failures_abort_after_live_summary() {
         .collect();
     let (upstream_url, provider_calls) = serve_sse_sequence(responses).await;
     let data_dir = tempfile::tempdir().expect("temp data dir");
-    let (mut gateway, _logs) = Gateway::new(crate::config::GatewayConfig {
+    let mut gateway = Gateway::new(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -227,7 +227,7 @@ async fn disconnect_during_post_text_preview_persists_no_marker_or_generation_no
     let (upstream_url, _calls, release_upstream) =
         serve_gated_sse(first_events, remaining_events).await;
     let data_dir = tempfile::tempdir().expect("temp data dir");
-    let (gateway, _logs) = Gateway::new(crate::config::GatewayConfig {
+    let gateway = Gateway::new(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -279,7 +279,7 @@ async fn post_text_marker_failures_abort_stream_and_skip_generation_commit() {
     ])
     .await;
     let data_dir = tempfile::tempdir().expect("temp data dir");
-    let (mut gateway, _logs) = Gateway::new(crate::config::GatewayConfig {
+    let mut gateway = Gateway::new(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -362,7 +362,7 @@ async fn non_stream_post_text_marker_persistence_failure_is_typed_error() {
     .await;
     let data_dir = tempfile::tempdir().expect("temp data dir");
     let (expose_tool_hook, _request_hook_rounds) = ExposeOrderedToolHook::counting();
-    let (mut gateway, _logs) = Gateway::builder(crate::config::GatewayConfig {
+    let mut gateway = Gateway::builder(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -407,7 +407,7 @@ async fn protocol_delivery_contract_matrix_covers_unary_and_sse_lifecycles() {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     };
-    let (gateway, _logs) = Gateway::new(config).await.expect("gateway init");
+    let gateway = Gateway::new(config).await.expect("gateway init");
     let protocols = [
         (
             "openai",
@@ -507,7 +507,7 @@ async fn canonical_completion_contract_matrix_covers_four_delivery_paths() {
     .await;
     let data_dir = tempfile::tempdir().expect("temp data dir");
 
-    let (gateway, _logs) = Gateway::builder(crate::config::GatewayConfig {
+    let gateway = Gateway::builder(crate::config::GatewayConfig {
         data_dir: data_dir.path().join("collected"),
         ..Default::default()
     })
@@ -532,7 +532,7 @@ async fn canonical_completion_contract_matrix_covers_four_delivery_paths() {
     .await;
 
     let observed_live_responses = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let (live_gateway, _logs) = Gateway::builder(crate::config::GatewayConfig {
+    let live_gateway = Gateway::builder(crate::config::GatewayConfig {
         data_dir: data_dir.path().join("live"),
         ..Default::default()
     })
@@ -552,7 +552,7 @@ async fn canonical_completion_contract_matrix_covers_four_delivery_paths() {
 
     let tool_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
     let (expose_tool_hook, _) = ExposeOrderedToolHook::counting();
-    let (buffered_gateway, _logs) = Gateway::builder(crate::config::GatewayConfig {
+    let buffered_gateway = Gateway::builder(crate::config::GatewayConfig {
         data_dir: data_dir.path().join("buffered"),
         ..Default::default()
     })
@@ -713,7 +713,7 @@ async fn reasoning_tags_are_canonicalized_across_delivery_modes() {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     };
-    let (gateway, _logs) = Gateway::builder(config)
+    let gateway = Gateway::builder(config)
         .build()
         .await
         .expect("gateway init");
@@ -800,7 +800,7 @@ async fn stream_and_non_stream_share_terminal_hook_semantics() {
         )),
         ..Default::default()
     };
-    let (gateway, _logs) = Gateway::builder(config)
+    let gateway = Gateway::builder(config)
         .hook(Arc::new(RewriteUpstreamHook))
         .build()
         .await
@@ -816,42 +816,6 @@ async fn stream_and_non_stream_share_terminal_hook_semantics() {
     assert!(body.contains("rewritten"), "{body}");
     assert!(!body.contains("original"), "{body}");
     assert_eq!(body.matches("[DONE]").count(), 1, "{body}");
-}
-
-#[tokio::test]
-async fn stream_logs_capture_request_and_response_payloads() {
-    let base_url = serve_sse_response().await;
-    let data_dir = tempfile::tempdir().expect("temporary data directory");
-    let (gateway, mut logs) = Gateway::new(crate::config::GatewayConfig {
-        data_dir: data_dir.path().to_path_buf(),
-        ..Default::default()
-    })
-    .await
-    .expect("Gateway");
-    configure_route(&gateway, "logged-stream", &[base_url]).await;
-
-    let response = execute_stream(gateway, "logged-stream").await;
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("stream response body");
-    assert!(String::from_utf8_lossy(&body).contains("original"));
-    let entry = tokio::time::timeout(std::time::Duration::from_secs(1), logs.recv())
-        .await
-        .expect("stream completion log")
-        .expect("log channel remains open");
-    assert!(
-        entry
-            .client_request_body
-            .as_deref()
-            .is_some_and(|body| body.contains(r#""stream":true"#))
-    );
-    assert!(entry.client_response_body.is_some());
-    assert!(entry.upstream_request_body.is_some());
-    assert!(entry.upstream_response_body.is_some());
-    assert!(entry.stream_chunks_count > 0);
-    assert!(entry.stream_first_chunk_ms.is_some());
 }
 
 #[tokio::test]
@@ -871,7 +835,7 @@ async fn hidden_stream_rounds_close_each_provider_leg_once() {
     let begins = Arc::new(AtomicUsize::new(0));
     let closes = Arc::new(AtomicUsize::new(0));
     let tool_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let (gateway, _logs) = Gateway::builder(config)
+    let gateway = Gateway::builder(config)
         .hook(Arc::new(CountingStreamToolHook {
             begins: begins.clone(),
             closes: closes.clone(),
@@ -915,7 +879,7 @@ async fn run_deadline_remains_authoritative_after_stream_preflight() {
         )),
         ..Default::default()
     };
-    let (gateway, _logs) = Gateway::new(config).await.expect("gateway init");
+    let gateway = Gateway::new(config).await.expect("gateway init");
     configure_route(&gateway, "stream-deadline-route", &[base_url]).await;
     let response = execute_stream_with_timeout(
         gateway,
@@ -952,7 +916,7 @@ async fn dropping_unpolled_live_body_closes_provider_leg() {
     };
     let begins = Arc::new(AtomicUsize::new(0));
     let closes = Arc::new(AtomicUsize::new(0));
-    let (gateway, _logs) = Gateway::builder(config)
+    let gateway = Gateway::builder(config)
         .hook(Arc::new(CountingStreamToolHook {
             begins: begins.clone(),
             closes: closes.clone(),
@@ -999,7 +963,7 @@ async fn run_deadline_cancels_forced_stream_collection() {
         )),
         ..Default::default()
     };
-    let (gateway, _logs) = Gateway::new(config).await.expect("gateway init");
+    let gateway = Gateway::new(config).await.expect("gateway init");
     configure_route_with_protocol(
         &gateway,
         "forced-stream-deadline-route",
@@ -1044,7 +1008,7 @@ async fn post_commit_hook_failures_end_the_stream_without_retry_or_response_chai
             data_dir: data_dir.path().to_path_buf(),
             ..Default::default()
         };
-        let (gateway, _logs) = Gateway::builder(config)
+        let gateway = Gateway::builder(config)
             .hook(Arc::new(PostCommitFailureHook(failure)))
             .build()
             .await
@@ -1152,7 +1116,7 @@ async fn terminal_stream_hook_rejection_is_returned_before_http_commit() {
         )),
         ..Default::default()
     };
-    let (gateway, _logs) = Gateway::builder(config)
+    let gateway = Gateway::builder(config)
         .hook(Arc::new(RejectStreamHook))
         .build()
         .await
@@ -1181,7 +1145,7 @@ async fn terminal_stream_hook_response_replaces_output_before_http_commit() {
         )),
         ..Default::default()
     };
-    let (gateway, _logs) = Gateway::builder(config)
+    let gateway = Gateway::builder(config)
         .hook(Arc::new(RespondStreamHook))
         .build()
         .await

@@ -361,6 +361,41 @@ describe('Stravia desktop smoke', () => {
     if (failures.length > 1) throw new AggregateError(failures, 'Desktop Connect smoke and fixture cleanup failed')
   })
 
+  it('captures a rejected request through native Request Records and clears retained diagnostics', async () => {
+    const serverPort = (await browser.tauri.execute(({ core }) => core.invoke('get_server_port'))) as number
+    await $('a[href="/logs"]').click()
+    const debugSwitch = await $('[role="switch"][aria-label="Debug"]')
+    await expect(debugSwitch).toHaveAttribute('aria-checked', 'false')
+    await debugSwitch.click()
+    await expect($('[role="alertdialog"]')).toBeDisplayed()
+    await (await $('[role="alertdialog"]')).$('button=Enable Debug').click()
+    await expect(debugSwitch).toHaveAttribute('aria-checked', 'true')
+
+    const rejected = await fetch(`http://127.0.0.1:${serverPort}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'desktop-observation', messages: [{ role: 'user', content: 'local smoke' }] }),
+    })
+    expect(rejected.status).toBe(401)
+    await $('button=Rejected Requests').click()
+    const request = await $('.rejection-list button')
+    await expect(request).toHaveText(expect.stringContaining('POST /v1/chat/completions'))
+    await expect(request).toHaveText(expect.stringContaining('HTTP 401'))
+    await request.click()
+    const inspector = await $('[aria-label="Observation details"]')
+    await expect(inspector).toBeDisplayed()
+    await inspector.$('button=Debug records').click()
+    await expect(inspector.$('.debug-record pre')).toHaveText(
+      expect.stringContaining('"direction": "client_to_platform"'),
+    )
+    await debugSwitch.click()
+    await expect(debugSwitch).toHaveAttribute('aria-checked', 'false')
+
+    await $('button=Clear history').click()
+    await (await $('[role="alertdialog"]')).$('button=Clear history').click()
+    await expect($('.rejection-list')).not.toExist()
+  })
+
   // 退出会关闭共享的原生会话，必须在所有页面交互验证之后执行。
   it('keeps the session in the tray and stops the listener on application exit', async () => {
     const serverPort = (await browser.tauri.execute(({ core }) => core.invoke('get_server_port'))) as number

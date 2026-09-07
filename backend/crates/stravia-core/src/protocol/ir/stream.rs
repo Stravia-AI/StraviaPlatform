@@ -3,6 +3,7 @@
 use crate::protocol::ir::error::AiError;
 use crate::protocol::ir::request::ToolCall;
 use crate::protocol::ir::usage::Usage;
+use serde::Serialize;
 
 use super::AiItem;
 
@@ -10,7 +11,8 @@ use super::AiItem;
 ///
 /// The stream parser emits a sequence of `StreamDelta` values.  The accumulator
 /// (PR-4) coalesces them into a complete `AiResponse`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum StreamDelta {
     /// First chunk — identifies the response and model.
     MessageStart { id: String, model: String },

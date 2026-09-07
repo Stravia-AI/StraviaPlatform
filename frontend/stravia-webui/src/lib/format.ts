@@ -93,7 +93,7 @@ export function formatDurationSeconds(ms: number | null | undefined, locale = ge
 }
 
 export function formatCompactCount(value: number | null | undefined, locale = getLocale()): string {
-  if (value == null || !Number.isFinite(value)) return '0'
+  if (value == null || !Number.isFinite(value)) return '–'
   const count = Math.max(0, Math.floor(value))
   if (count < 1_000) return integerFormatters[locale].format(count)
   if (count < 1_000_000) return `${formatDecimal(count / 1_000, locale, 1)}K`
@@ -124,7 +124,7 @@ export function formatList(values: readonly string[], locale = getLocale()): str
   return values.join(locale === 'zh-CN' ? '、' : ', ')
 }
 
-/** 计算 TPS 所需的最小字段集(结构兼容 `RequestLog`)。 */
+/** 计算客户端可见输出速率所需的最小字段集。 */
 export interface TpsInput {
   output_tokens?: number | null
   is_stream?: boolean | null

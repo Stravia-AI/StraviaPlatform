@@ -4,7 +4,7 @@ use super::*;
 async fn precommit_connection_limit_falls_back_to_http_on_the_same_target() {
     let (base_url, websocket_requests, http_requests) = serve_connection_limit_fallback().await;
     let data_dir = tempfile::tempdir().expect("temporary data directory");
-    let (gateway, _logs) = Gateway::new(crate::config::GatewayConfig {
+    let gateway = Gateway::new(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -46,7 +46,7 @@ async fn stale_reused_websocket_falls_back_then_retries_websocket() {
     let (base_url, websocket_connections, http_requests, websocket_closed) =
         serve_stale_websocket_fallback().await;
     let data_dir = tempfile::tempdir().expect("temporary data directory");
-    let (gateway, _logs) = Gateway::new(crate::config::GatewayConfig {
+    let gateway = Gateway::new(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -142,7 +142,7 @@ async fn unsupported_websocket_handshake_falls_back_before_sending_a_request() {
     ])
     .await;
     let data_dir = tempfile::tempdir().expect("temporary data directory");
-    let (gateway, _logs) = Gateway::new(crate::config::GatewayConfig {
+    let gateway = Gateway::new(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -192,7 +192,7 @@ async fn generation_ingresses_preserve_unary_and_stream_contracts_over_upstream_
     let (base_url, connections, requests) =
         serve_responses_websocket_sequence(responses.to_vec()).await;
     let data_dir = tempfile::tempdir().expect("temporary data directory");
-    let (gateway, _logs) = Gateway::new(crate::config::GatewayConfig {
+    let gateway = Gateway::new(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })

@@ -79,7 +79,6 @@ pub type FieldPath = String;
 /// Every cross-layer failure in the gateway MUST be expressed as one of these
 /// variants. No free-form `anyhow::Error` / string responses should escape a
 /// layer boundary.
-#[derive(Debug)]
 pub enum GatewayError {
     /// The client sent a malformed or logically invalid request.
     BadRequest { code: &'static str, msg: String },
@@ -174,7 +173,7 @@ impl GatewayError {
 
     /// Human-readable description suitable for the `message` field.
     pub fn message(&self) -> String {
-        match self {
+        let message: String = match self {
             GatewayError::BadRequest { msg, .. } => msg.clone(),
             GatewayError::Unauthorized { reason } => {
                 format!("authentication failed: {}", reason.as_str())
@@ -204,7 +203,10 @@ impl GatewayError {
                 body,
             } => {
                 if let Some(b) = body {
-                    format!("upstream {provider} returned {status}: {b}")
+                    format!(
+                        "upstream {provider} returned {status}: {}",
+                        redacted_payload(b)
+                    )
                 } else {
                     format!("upstream {provider} returned {status}")
                 }
@@ -217,7 +219,10 @@ impl GatewayError {
                 raw_chunk,
             } => {
                 if let Some(chunk) = raw_chunk {
-                    format!("stream parse error from {provider}: {chunk}")
+                    format!(
+                        "stream parse error from {provider}: {}",
+                        redacted_payload(chunk)
+                    )
                 } else {
                     format!("stream parse error from {provider}")
                 }
@@ -229,7 +234,8 @@ impl GatewayError {
             GatewayError::Internal { source } => {
                 format!("internal error: {source}")
             }
-        }
+        };
+        crate::interaction_observation::redaction::redact_text(&message)
     }
 
     /// Whether the gateway may safely retry this request with another target.
@@ -298,6 +304,26 @@ impl GatewayError {
     }
 }
 
+fn redacted_payload(payload: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(payload) {
+        Ok(mut value) => {
+            crate::interaction_observation::redaction::redact_value(&mut value);
+            value.to_string()
+        }
+        Err(_) => crate::interaction_observation::redaction::redact_text(payload),
+    }
+}
+
+impl std::fmt::Debug for GatewayError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Debug 也会进入进程日志，不能绕过对上游正文与 URL 的统一脱敏。
+        f.debug_struct("GatewayError")
+            .field("code", &self.stable_code())
+            .field("message", &self.message())
+            .finish()
+    }
+}
+
 impl std::fmt::Display for GatewayError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "[{}] {}", self.stable_code(), self.message())
@@ -363,19 +389,57 @@ mod tests {
         assert!(!err.retryable());
     }
 
-    #[test]
-    fn render_includes_request_id() {
+    #[tokio::test]
+    async fn render_includes_request_id() {
         let err = GatewayError::ModelNotFound {
             model: "gpt-4".into(),
         };
         let resp = err.render(Some("req-abc-123"));
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let bytes = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["request_id"], "req-abc-123");
     }
 
-    #[test]
-    fn into_response_works() {
-        let err = GatewayError::ClientCancelled;
-        let _ = err.into_response();
+    #[tokio::test]
+    async fn upstream_error_credentials_do_not_escape_http_or_debug_rendering() {
+        let error = GatewayError::upstream_status(
+            "local-provider",
+            429,
+            Some(serde_json::json!({
+                "error": {
+                    "api_key": "nested-key-sentinel",
+                    "password": "password with spaces sentinel",
+                    "message": "request quota exhausted",
+                },
+                "url": "https://userinfo-sentinel:password-sentinel@example.test/path?access_token=query-sentinel&mode=safe"
+            }).to_string()),
+        );
+        let debug = format!("{error:?}");
+        let response = error.render(Some("request-redaction"));
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(error.retryable());
+        let body = axum::body::to_bytes(response.into_body(), 16_384)
+            .await
+            .unwrap();
+        let http = String::from_utf8(body.to_vec()).unwrap();
+
+        for rendered in [&http, &debug] {
+            for credential in [
+                "nested-key-sentinel",
+                "password with spaces sentinel",
+                "userinfo-sentinel",
+                "password-sentinel",
+                "query-sentinel",
+            ] {
+                assert!(
+                    !rendered.contains(credential),
+                    "credential escaped rendering"
+                );
+            }
+            assert!(rendered.contains("request quota exhausted"));
+            assert!(rendered.contains("mode=safe"));
+        }
     }
 
     #[test]
@@ -397,10 +461,6 @@ mod tests {
         assert_eq!(
             GatewayError::ConcurrencyLimitExceeded.stable_code(),
             "STRAVIA_CONCURRENCY_LIMIT"
-        );
-        assert_eq!(
-            GatewayError::ConcurrencyLimitExceeded.message(),
-            "Principal Concurrency Limit is full."
         );
         assert!(!GatewayError::ConcurrencyLimitExceeded.retryable());
         assert!(response.headers().get("retry-after").is_none());

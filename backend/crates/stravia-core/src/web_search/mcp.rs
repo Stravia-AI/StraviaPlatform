@@ -139,7 +139,7 @@ mod tests {
         use crate::web_search::config::SettingsWebSearchConfigStore;
 
         let directory = tempfile::tempdir().expect("temporary directory");
-        let (gateway, _logs) = crate::Gateway::new(crate::config::GatewayConfig {
+        let gateway = crate::Gateway::new(crate::config::GatewayConfig {
             data_dir: directory.path().to_path_buf(),
             ..Default::default()
         })

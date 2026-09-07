@@ -342,7 +342,7 @@ async fn build_gateway() -> anyhow::Result<Gateway> {
         data_dir: test_data_dir(),
         ..Default::default()
     };
-    let (gw, _log_rx) = Gateway::new(config).await?;
+    let gw = Gateway::new(config).await?;
     Ok(gw)
 }
 

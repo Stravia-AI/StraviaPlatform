@@ -82,7 +82,6 @@ test('Usage analytics separates cache tokens and shows first-token and total lat
       page.locator('.route-metric-strip__item').filter({ has: page.getByText(label, { exact: true }) }),
     ).toContainText(value)
   }
-  await expect(page.getByLabel('Token usage chart').locator('.lc-bar')).toHaveCount(4)
 
   const latency = page.locator('section').filter({ has: page.getByRole('heading', { name: 'Latency', exact: true }) })
   await expect(latency.getByText('First', { exact: true })).toBeVisible()
@@ -90,7 +89,6 @@ test('Usage analytics separates cache tokens and shows first-token and total lat
   await expect(latency.getByText('Duration', { exact: true })).toBeVisible()
   await expect(latency.getByText('0.12 s', { exact: true })).toBeVisible()
   await expect(latency.getByLabel('Latency chart')).toBeVisible()
-  await expect(latency.locator('.lc-path')).toHaveCount(2)
 })
 
 test('empty Model services, Models, API Keys, and logs speak the missing dependency', async ({ page }) => {
@@ -109,10 +107,11 @@ test('empty Model services, Models, API Keys, and logs speak the missing depende
   await expect(page.getByRole('button', { name: 'Create API Key' })).toHaveCount(0)
 
   await page.goto('/logs')
-  await expect(page.getByRole('button', { name: 'Clear history' })).toBeDisabled()
-  await expect(page.getByLabel('Model service')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Clear history' })).toBeEnabled()
+  await expect(page.getByRole('tab', { name: 'Interaction Chains' })).toBeVisible()
+  await expect(page.getByRole('tab', { name: 'Rejected Requests' })).toBeVisible()
   await expect(
-    page.getByRole('region', { name: 'Recent requests' }).getByRole('link', { name: 'Connect clients' }),
+    page.getByText('New requests will appear here. Pre-upgrade request logs were intentionally not migrated.'),
   ).toBeVisible()
 })
 

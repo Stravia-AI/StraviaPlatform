@@ -11,6 +11,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+use std::time::Instant;
 
 use futures::{StreamExt, stream::BoxStream};
 use reqwest::header::HeaderMap;
@@ -19,6 +20,7 @@ use serde_json::Value;
 use crate::Gateway;
 use crate::db::models::Provider;
 use crate::error::GatewayError;
+use crate::interaction_observation::{ConfirmedUsage, RunEvent, RunObserver};
 use crate::protocol::ids::ProtocolId;
 use crate::protocol::ir::{AiRequest, AiResponse, AiStreamDelta};
 use crate::provider::inbound::InboundResponse;
@@ -42,6 +44,7 @@ pub(crate) struct ProviderUnaryResponse {
     pub canonical: Result<AiResponse, GatewayError>,
     pub status: u16,
     pub headers: HeaderMap,
+    pub attempt: AttemptObservation,
 }
 
 pub(crate) enum ProviderStreamResponse {
@@ -49,6 +52,7 @@ pub(crate) enum ProviderStreamResponse {
         status: u16,
         headers: HeaderMap,
         body: anyhow::Result<Value>,
+        attempt: AttemptObservation,
     },
     Stream(Box<ProviderStream>),
     Uncertain {
@@ -62,7 +66,7 @@ pub(crate) struct ProviderStream {
     source: ProviderStreamSource,
     reasoning: StreamReasoningNormalizer,
     pub status: u16,
-    pub headers: HeaderMap,
+    pub attempt: AttemptObservation,
     response_continuation_available: Arc<AtomicBool>,
 }
 
@@ -84,7 +88,6 @@ enum ProviderStreamSource {
 }
 
 pub(crate) struct ProviderStreamChunk {
-    pub raw: bytes::Bytes,
     pub deltas: Vec<AiStreamDelta>,
 }
 
@@ -109,8 +112,241 @@ pub(crate) struct ProviderBinding {
     pub(crate) actual_model: String,
     pub(crate) gateway: Gateway,
     pub(crate) disable_default_auth: bool,
-    #[cfg(debug_assertions)]
-    pub(crate) wire_capture_id: Option<String>,
+    pub(crate) observer: Option<RunObserver>,
+    pub(crate) model_turn_id: String,
+    pub(crate) target_id: String,
+    pub(crate) provider_name: String,
+}
+
+pub(crate) struct AttemptObservation {
+    observer: Option<RunObserver>,
+    pub(crate) id: String,
+    model_turn_id: String,
+    transport: String,
+    protocol: String,
+    url: String,
+    started_at: Instant,
+    finished: AtomicBool,
+    usage_confirmed: AtomicBool,
+}
+
+impl AttemptObservation {
+    fn new(adapter: &ProviderAdapter, transport: &str, url: &str) -> Self {
+        let binding = &adapter.binding;
+        let id = binding
+            .observer
+            .as_ref()
+            .map(|_| uuid::Uuid::new_v4().to_string())
+            .unwrap_or_default();
+        if let Some(observer) = &binding.observer {
+            observer.record(RunEvent::TargetAttemptStarted {
+                model_turn_id: binding.model_turn_id.clone(),
+                attempt_id: id.clone(),
+                target_id: binding.target_id.clone(),
+                provider_id: binding.provider.id.clone(),
+                provider_name: binding.provider_name.clone(),
+                upstream_model: binding.actual_model.clone(),
+                protocol: binding.protocol.to_string(),
+                upstream_url: url.to_owned(),
+            });
+        }
+        let observed = binding.observer.is_some();
+        let attempt = Self {
+            observer: binding.observer.clone(),
+            id,
+            model_turn_id: observed
+                .then(|| binding.model_turn_id.clone())
+                .unwrap_or_default(),
+            transport: observed.then(|| transport.to_owned()).unwrap_or_default(),
+            protocol: observed
+                .then(|| binding.protocol.to_string())
+                .unwrap_or_default(),
+            url: observed.then(|| url.to_owned()).unwrap_or_default(),
+            started_at: Instant::now(),
+            finished: AtomicBool::new(false),
+            usage_confirmed: AtomicBool::new(false),
+        };
+        attempt
+    }
+
+    pub(crate) fn debug_enabled(&self) -> bool {
+        self.observer
+            .as_ref()
+            .is_some_and(RunObserver::debug_enabled)
+    }
+
+    pub(crate) fn wire_lazy(
+        &self,
+        direction: &str,
+        message_type: &str,
+        status_code: Option<u16>,
+        headers: Option<&HeaderMap>,
+        payload: impl FnOnce() -> Value,
+    ) {
+        if self.debug_enabled() {
+            self.wire(direction, message_type, status_code, headers, payload());
+        }
+    }
+
+    pub(crate) fn wire(
+        &self,
+        direction: &str,
+        message_type: &str,
+        status_code: Option<u16>,
+        headers: Option<&HeaderMap>,
+        payload: Value,
+    ) {
+        let Some(observer) = self
+            .observer
+            .as_ref()
+            .filter(|observer| observer.debug_enabled())
+        else {
+            return;
+        };
+        observer.record(RunEvent::Wire {
+            direction: direction.to_owned(),
+            transport: self.transport.clone(),
+            protocol: self.protocol.clone(),
+            message_type: message_type.to_owned(),
+            model_turn_id: Some(self.model_turn_id.clone()),
+            attempt_id: Some(self.id.clone()),
+            status_code,
+            url: Some(self.url.clone()),
+            headers: headers.map(headers_value).unwrap_or(Value::Null),
+            payload,
+        });
+    }
+
+    pub(crate) fn checkpoint<T: serde::Serialize>(&self, stage: &str, payload: &T) {
+        let Some(observer) = self
+            .observer
+            .as_ref()
+            .filter(|observer| observer.debug_enabled())
+        else {
+            return;
+        };
+        match serde_json::to_value(payload) {
+            Ok(payload) => observer.record(RunEvent::Checkpoint {
+                stage: stage.to_owned(),
+                model_turn_id: Some(self.model_turn_id.clone()),
+                attempt_id: Some(self.id.clone()),
+                payload,
+            }),
+            Err(_) => observer.record(RunEvent::ObservationGap {
+                reason: format!("{stage}_serialization_failed"),
+            }),
+        }
+    }
+
+    pub(crate) fn gap(&self, reason: &str) {
+        if let Some(observer) = &self.observer {
+            observer.record(RunEvent::ObservationGap {
+                reason: reason.to_owned(),
+            });
+        }
+    }
+
+    pub(crate) fn model_turn_finished(&self, status: &str) {
+        if let Some(observer) = &self.observer {
+            observer.record(RunEvent::ModelTurnFinished {
+                model_turn_id: self.model_turn_id.clone(),
+                status: status.to_owned(),
+            });
+        }
+    }
+
+    pub(crate) fn confirm_usage(&self, usage: &crate::protocol::ir::Usage) {
+        if self.usage_confirmed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        if let Some(observer) = &self.observer {
+            observer.record(RunEvent::UsageConfirmed {
+                model_turn_id: self.model_turn_id.clone(),
+                attempt_id: self.id.clone(),
+                usage: confirmed_usage(usage),
+            });
+        }
+    }
+
+    pub(crate) fn finish(
+        &self,
+        status: &str,
+        status_code: Option<u16>,
+        error_code: Option<String>,
+        first_token_ms: Option<i64>,
+    ) {
+        if self.finished.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        if let Some(observer) = &self.observer {
+            observer.record(RunEvent::TargetAttemptFinished {
+                model_turn_id: self.model_turn_id.clone(),
+                attempt_id: self.id.clone(),
+                status: status.to_owned(),
+                status_code,
+                error_code,
+                duration_ms: self.started_at.elapsed().as_millis() as i64,
+                first_token_ms,
+            });
+        }
+    }
+}
+
+impl Drop for AttemptObservation {
+    fn drop(&mut self) {
+        self.finish("failed", None, Some("attempt_aborted".into()), None);
+    }
+}
+
+fn headers_value(headers: &HeaderMap) -> Value {
+    let mut values = serde_json::Map::new();
+    for (name, value) in headers {
+        let value = value
+            .to_str()
+            .map(|value| Value::String(value.to_owned()))
+            .unwrap_or_else(|_| bytes_value(value.as_bytes()));
+        match values.entry(name.as_str().to_owned()) {
+            serde_json::map::Entry::Vacant(entry) => {
+                entry.insert(value);
+            }
+            serde_json::map::Entry::Occupied(mut entry) => match entry.get_mut() {
+                Value::Array(existing) => existing.push(value),
+                existing => {
+                    let first = std::mem::replace(existing, Value::Null);
+                    *existing = Value::Array(vec![first, value]);
+                }
+            },
+        }
+    }
+    Value::Object(values)
+}
+
+fn bytes_value(bytes: &[u8]) -> Value {
+    std::str::from_utf8(bytes)
+        .map(|text| Value::String(text.to_owned()))
+        .unwrap_or_else(|_| {
+            serde_json::json!({
+                "encoding": "base64",
+                "data": base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    bytes,
+                ),
+            })
+        })
+}
+
+fn confirmed_usage(usage: &crate::protocol::ir::Usage) -> ConfirmedUsage {
+    ConfirmedUsage {
+        input_tokens: usage
+            .required_components_known
+            .then_some(i64::from(usage.prompt_tokens)),
+        output_tokens: usage
+            .required_components_known
+            .then_some(i64::from(usage.completion_tokens)),
+        cache_read_tokens: usage.cache_read_tokens.map(i64::from),
+        cache_write_tokens: usage.cache_creation_tokens.map(i64::from),
+        reasoning_tokens: usage.reasoning_tokens.map(i64::from),
+    }
 }
 
 impl ProviderAdapter {
@@ -131,70 +367,27 @@ impl ProviderAdapter {
         &self.binding
     }
 
-    #[cfg(debug_assertions)]
-    fn capture_upstream_request(
+    fn begin_attempt(
         &self,
-        transport: crate::wire_capture::CaptureTransport,
+        transport: &str,
+        url: &str,
         headers: &HeaderMap,
-        body: &Value,
-    ) {
-        let Some(capture) = &self.binding.gateway.wire_capture else {
-            return;
-        };
-        let Some(capture_id) = &self.binding.wire_capture_id else {
-            return;
-        };
-        let body = serde_json::to_vec(body).unwrap_or_default();
-        capture.record(
-            capture_id,
-            crate::wire_capture::CapturePeer::Upstream,
-            crate::wire_capture::CapturePhase::Request,
-            transport,
-            self.binding.protocol.to_string(),
-            None,
-            crate::proxy::observability::reqwest_headers_to_json(headers),
-            &body,
-        );
+        body: impl FnOnce() -> Value,
+    ) -> AttemptObservation {
+        self.begin_attempt_with_message(transport, url, "request", headers, body)
     }
 
-    #[cfg(debug_assertions)]
-    fn capture_upstream_response(
+    fn begin_attempt_with_message(
         &self,
-        transport: crate::wire_capture::CaptureTransport,
-        representation: crate::wire_capture::CaptureRepresentation,
-        status: u16,
-        headers: Option<&HeaderMap>,
-        body: &[u8],
-    ) {
-        let Some(capture) = &self.binding.gateway.wire_capture else {
-            return;
-        };
-        let Some(capture_id) = &self.binding.wire_capture_id else {
-            return;
-        };
-        let headers = headers.and_then(crate::proxy::observability::reqwest_headers_to_json);
-        match representation {
-            crate::wire_capture::CaptureRepresentation::Wire => capture.record(
-                capture_id,
-                crate::wire_capture::CapturePeer::Upstream,
-                crate::wire_capture::CapturePhase::Response,
-                transport,
-                self.binding.protocol.to_string(),
-                Some(status),
-                headers,
-                body,
-            ),
-            crate::wire_capture::CaptureRepresentation::Normalized => capture.record_normalized(
-                capture_id,
-                crate::wire_capture::CapturePeer::Upstream,
-                crate::wire_capture::CapturePhase::Response,
-                transport,
-                self.binding.protocol.to_string(),
-                Some(status),
-                headers,
-                body,
-            ),
-        }
+        transport: &str,
+        url: &str,
+        message_type: &str,
+        headers: &HeaderMap,
+        body: impl FnOnce() -> Value,
+    ) -> AttemptObservation {
+        let attempt = AttemptObservation::new(self, transport, url);
+        attempt.wire_lazy("upstream_request", message_type, None, Some(headers), body);
+        attempt
     }
 
     pub(crate) fn bind(self, client: ProxyClient, outbound: OutboundRequest) -> ProviderCall {
@@ -297,21 +490,16 @@ impl ProviderAdapter {
     }
 }
 
-impl ProviderCall {
-    pub(crate) fn url(&self) -> &str {
-        &self.outbound.url
-    }
-
-    pub(crate) fn request_headers_json(&self) -> Option<String> {
-        crate::proxy::observability::reqwest_headers_to_json(&self.outbound.headers)
-    }
-
-    pub(crate) fn request_body_string(&self) -> Option<String> {
-        serde_json::to_string(&self.outbound.body).ok()
-    }
-}
-
 impl ProviderStream {
+    pub(crate) fn attempt(&self) -> &AttemptObservation {
+        match &self.source {
+            ProviderStreamSource::ResponsesWebSocket(stream) => {
+                stream.fallback_attempt.as_deref().unwrap_or(&self.attempt)
+            }
+            ProviderStreamSource::Http(_) => &self.attempt,
+        }
+    }
+
     pub(crate) fn response_continuation_available(&self) -> Arc<AtomicBool> {
         self.response_continuation_available.clone()
     }
@@ -328,7 +516,7 @@ impl ProviderStream {
                 raw.map_err(|error| ProviderStreamError::Transport(error.to_string()))?
             }
             ProviderStreamSource::ResponsesWebSocket(stream) => {
-                let raw = stream.next_raw(adapter, self.status).await?;
+                let raw = stream.next_raw(adapter, &self.attempt, self.status).await?;
                 if stream.using_http_fallback() {
                     self.response_continuation_available
                         .store(false, Ordering::Release);
@@ -339,20 +527,15 @@ impl ProviderStream {
                 raw
             }
         };
-        #[cfg(debug_assertions)]
-        let (transport, representation) = match &self.source {
-            ProviderStreamSource::Http(_) => (
-                crate::wire_capture::CaptureTransport::Sse,
-                crate::wire_capture::CaptureRepresentation::Wire,
-            ),
-            ProviderStreamSource::ResponsesWebSocket(_) => (
-                crate::wire_capture::CaptureTransport::WebSocket,
-                crate::wire_capture::CaptureRepresentation::Normalized,
-            ),
-        };
-        #[cfg(debug_assertions)]
-        self.adapter
-            .capture_upstream_response(transport, representation, self.status, None, &raw);
+        if matches!(&self.source, ProviderStreamSource::Http(_)) {
+            self.attempt.wire_lazy(
+                "upstream_response",
+                "sse_chunk",
+                Some(self.status),
+                None,
+                || bytes_value(&raw),
+            );
+        }
         let normalized = self
             .adapter
             .normalize_stream_chunk(&raw)
@@ -371,7 +554,7 @@ impl ProviderStream {
             .normalize_stream_deltas(&mut deltas)
             .await
             .map_err(ProviderStreamError::Normalize)?;
-        Ok(Some(ProviderStreamChunk { raw, deltas }))
+        Ok(Some(ProviderStreamChunk { deltas }))
     }
 
     pub(crate) async fn finish(&mut self) -> Result<Vec<AiStreamDelta>, ProviderStreamError> {
@@ -525,7 +708,7 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
         };
-        let (gateway, _logs) = Gateway::new(crate::config::GatewayConfig {
+        let gateway = Gateway::new(crate::config::GatewayConfig {
             data_dir: std::env::temp_dir().join(format!(
                 "stravia-gitlab-retry-test-{}",
                 uuid::Uuid::new_v4()
@@ -544,8 +727,10 @@ mod tests {
                 actual_model: "gpt-test".into(),
                 gateway: gateway.clone(),
                 disable_default_auth: false,
-                #[cfg(debug_assertions)]
-                wire_capture_id: None,
+                observer: None,
+                model_turn_id: "test-turn".into(),
+                target_id: "test-target".into(),
+                provider_name: "GitLab".into(),
             },
         );
         let mut request = AiRequest::new(
@@ -589,8 +774,10 @@ mod tests {
                 actual_model: "gpt-test".into(),
                 gateway,
                 disable_default_auth: false,
-                #[cfg(debug_assertions)]
-                wire_capture_id: None,
+                observer: None,
+                model_turn_id: "test-turn-stream".into(),
+                target_id: "test-target".into(),
+                provider_name: "GitLab".into(),
             },
         );
         let stream_outbound = stream_adapter

@@ -6,20 +6,19 @@ use tokio::sync::RwLock;
 
 use crate::db::models::{
     ApiKeyStats, CreateProviderRecord, DEFAULT_FIRST_TOKEN_TIMEOUT_MS, DEFAULT_TARGET_COOLDOWN_MS,
-    DEFAULT_TARGET_PRIORITY, DEFAULT_TARGET_RETRY_BUDGET, LogPage, LogQuery, ModelStats,
-    OAuthCredential, Provider, ProviderStats, PutRoute, RequestLog, Route, StatsHourly,
-    StatsOverview, Target, UpdateProvider, UpsertOAuthCredential,
+    DEFAULT_TARGET_PRIORITY, DEFAULT_TARGET_RETRY_BUDGET, ModelStats, OAuthCredential, Provider,
+    ProviderStats, PutRoute, Route, StatsHourly, StatsOverview, Target, UpdateProvider,
+    UpsertOAuthCredential,
 };
-use crate::logging::LogEntry;
 use crate::provider_models::{
     NewProviderModelRecord, ProviderModelMutation, ProviderModelReconciliation,
     ProviderModelRecord, ProviderModelSelectionPolicy, ProviderModelSourceKind,
 };
 
 use super::traits::{
-    ApiKeyStore, AuthAccessStore, LogStore, OAuthCredentialStore, ProviderModelStore,
-    ProviderStore, ProviderTestResult, RouteStore, SettingsStore, Storage, StorageBackend,
-    StorageBootstrap, StorageHealth,
+    ApiKeyStore, AuthAccessStore, OAuthCredentialStore, ProviderModelStore, ProviderStore,
+    ProviderTestResult, RouteStore, SettingsStore, Storage, StorageBackend, StorageBootstrap,
+    StorageHealth, UsageStatsStore,
 };
 
 use std::sync::Arc;
@@ -74,7 +73,7 @@ impl Storage for MemoryStorage {
     fn auth(&self) -> Option<&dyn AuthAccessStore> {
         None
     }
-    fn logs(&self) -> &dyn LogStore {
+    fn usage_stats(&self) -> &dyn UsageStatsStore {
         self
     }
     fn oauth_credentials(&self) -> &dyn OAuthCredentialStore {
@@ -364,34 +363,9 @@ impl SettingsStore for MemoryStorage {
 }
 
 #[async_trait]
-impl LogStore for MemoryStorage {
-    async fn append_batch(&self, _entries: Vec<LogEntry>) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    async fn route_scheduling_snapshot(
-        &self,
-    ) -> anyhow::Result<Vec<crate::router::TargetSchedulingSnapshot>> {
-        Ok(Vec::new())
-    }
-
-    async fn query(&self, _query: LogQuery) -> anyhow::Result<LogPage> {
-        Ok(LogPage {
-            items: vec![],
-            total: 0,
-        })
-    }
-
-    async fn find_by_id(&self, _id: &str) -> anyhow::Result<Option<RequestLog>> {
-        Ok(None)
-    }
-
-    async fn cleanup_before(&self, _cutoff: &str) -> anyhow::Result<u64> {
-        Ok(0)
-    }
-
-    async fn clear_all(&self) -> anyhow::Result<u64> {
-        Ok(0)
+impl UsageStatsStore for MemoryStorage {
+    async fn route_scheduling_snapshot(&self) -> super::traits::RouteSchedulingUsage {
+        super::traits::RouteSchedulingUsage::default()
     }
 
     async fn stats_overview(&self, _hours: Option<i64>) -> anyhow::Result<StatsOverview> {

@@ -1,8 +1,9 @@
 //! Thin ingress shell: POST /v1beta/models/:model_action
 
 use axum::Json;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query, State, rejection::JsonRejection};
 use axum::http::{HeaderMap, HeaderValue};
+use axum::response::IntoResponse;
 use axum::response::Response;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -12,7 +13,8 @@ use crate::protocol::codec::google::gemini::decoder::GoogleDecoder;
 use crate::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA;
 use crate::protocol::ir::RawEnvelope;
 use crate::proxy::context::RequestContext;
-use crate::proxy::dispatcher::{dispatch_pipeline, log_decode_error};
+use crate::proxy::dispatcher::dispatch_pipeline;
+use crate::proxy::ingress::observation;
 
 pub async fn handler(
     State(gw): State<Gateway>,
@@ -20,15 +22,40 @@ pub async fn handler(
     headers: HeaderMap,
     Path(model_action): Path<String>,
     Query(query): Query<HashMap<String, String>>,
-    Json(body): Json<Value>,
+    body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
     ctx.ingress_protocol = GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA;
+    let path = format!("/v1beta/models/{model_action}");
+    let body = match body {
+        Ok(Json(body)) => body,
+        Err(rejection) => {
+            let observer = observation::begin(
+                &gw,
+                &ctx,
+                "POST",
+                &path,
+                GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+            );
+            return observation::reject(
+                observer,
+                "decode",
+                "invalid_json",
+                rejection.into_response(),
+            );
+        }
+    };
+    let observer = observation::begin(
+        &gw,
+        &ctx,
+        "POST",
+        &path,
+        GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+    );
     let (model, action) = match model_action.rsplit_once(':') {
         Some((m, a)) => (m.to_string(), a.to_string()),
         None => (model_action.clone(), "generateContent".to_string()),
     };
     let is_stream = action == "streamGenerateContent";
-    let path = format!("/v1beta/models/{model_action}");
     let flat_headers: std::collections::HashMap<String, String> = headers
         .iter()
         .filter_map(|(k, v)| {
@@ -42,17 +69,20 @@ pub async fn handler(
     inject_query_key_for_auth(&mut auth_headers, &query);
     let request = match GoogleDecoder.decode_with_model(body, &model, is_stream) {
         Ok(r) => r,
-        Err(e) => {
-            return log_decode_error(
-                &gw,
-                &envelope,
-                GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
-                format!("Gemini decode error: {e}"),
+        Err(error) => {
+            return observation::reject(
+                observer,
+                "decode",
+                "invalid_request",
+                crate::proxy::dispatcher::decode_error_response(format!(
+                    "invalid request: Gemini decode error: {error}"
+                )),
             );
         }
     };
     dispatch_pipeline(
         gw,
+        observer,
         auth_headers,
         envelope,
         request,

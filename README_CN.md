@@ -110,10 +110,16 @@ SvelteKit WebUI 可管理：
 - 提供商、认证、模型发现和连通性检查
 - 虚拟模型及其上游后端
 - 可自动生成或自定义并编辑完整密钥的 API Key、模型绑定、有效期、Principal Concurrency Limit 和执行权限
-- 请求日志、延迟和 Token 用量统计
+- 以实时 Interaction 因果森林展示的请求记录、Rejected Request、时间序检查器及 Confirmed Upstream Usage 统计；最新页持续接收新活动，历史 24 小时页保持固定边界及已打开页面的成员
 - 在**额度总览**矩阵中查看 Provider 上报的配额、请求额度和余额，并按条件筛选、查看重置时间轴及基于 30 分钟采样的当前窗口耗尽预报；现场读取仍支持三分钟缓存、单个 Provider 刷新，并在刷新失败时保留上次成功结果
 - 运行时设置
 - SDK 与 AI 编码工具的可复制集成示例
+
+Interaction Observation 在 Debug 与 Release 构建中均可用。进程级 **Debug** 开关每次重启后默认为关闭，启用前必须确认；每个新准入的 Inference Run 独立快照当时开关，因此切换只影响之后准入的 Run。Debug 记录 canonical checkpoint 与有序 HTTP、SSE、WebSocket 应用协议消息，不是 TLS record、TCP packet、HTTP/2 frame，也不保证应用 adapter 以下的 packet/chunk 保真。凭据 header、URL userinfo、疑似凭据的 query value 和结构化凭据字段会在持久化前永久脱敏；提示词、业务正文及工具输入/输出仍可能属于敏感数据。
+
+Debug 脱敏覆盖协议凭据字段与单条应用消息中的完整可识别模式。跨多条消息拼接业务文本后才形成的凭据仍可能保留，必须继续按敏感数据处理。
+
+Observation 元数据与托管 Debug Trace segment 共用 `log_retention_days`（默认七天）。每个 Run 的 Debug 上限为 64 MiB，总上限为 2 GiB；容量、队列、writer 或存储造成的丢失会显示为明确 gap 或 partial Trace，绝不改变推理结果。清除历史会保留 running 与 waiting-client Interaction，并报告跳过数量。Interaction 或 Rejected Request 可通过 60 秒、单次使用的下载 ticket 导出时间点固定的流式 ZIP；manifest 会记录 event sequence 边界和 `complete`、`partial` 或 `none` 状态。实时更新、Debug 状态、Trace 存储及 ticket 均限于单个 Gateway 进程；不提供集群级 fanout、共享 capture 存储或跨实例 ticket。
 
 界面支持英文与简体中文、响应式导航，以及浅色、深色和跟随操作系统三种主题。首次使用时，简体中文（`Hans`）客户端 locale 会选择 `zh-CN`，不支持的 locale 使用英文；可在 Login 页面或**设置 → 外观**中无刷新切换语言，每个浏览器或桌面 WebView 分别记住自己的选择。
 
@@ -254,8 +260,6 @@ task build:desktop
 
 启用 `desktop-e2e` feature 的桌面构建（包括 Debug 模式）使用独立且已忽略的 `.stravia-desktop-e2e/` 目录。`task test:e2e:desktop` 会在其中写入假的 `9.9.9` 更新，用于验证下载和安装流程，不会下载或安装真实发布版本；这些测试夹具不得进入日常开发或生产数据。
 
-`task dev:server` 和 `task dev:desktop` 会启用仅限 Debug 构建的 wire capture，并写入 `.scratch/wire-captures/`。即使敏感请求头值已脱敏，录制文件仍包含完整请求体和响应体；请仅在本机保留，并在诊断后删除。
-
 桌面进程会在 `127.0.0.1` 上启动同一个统一 HTTP 应用。首次使用时，应用优先绑定默认固定端口 `23471`；后续启动会优先使用在 **设置 → 桌面端** 保存的固定端口。若首选端口无法绑定，Stravia 仍会使用临时随机端口保持可用，在概览页报告冲突，并允许用户无需重启即可重新检测或更换固定端口。此桌面本机设置不会改变下方独立服务端的参数。
 
 ## 服务端配置
@@ -271,7 +275,6 @@ task build:desktop
 | `--data-dir`             | `STRAVIA_DATA_DIR`             | Debug：`.stravia-dev`；Release：`~/.stravia` |
 | `--log-level`            | `STRAVIA_LOG_LEVEL`            | `info`       |
 | `--config-poll-interval` | `STRAVIA_CONFIG_POLL_INTERVAL` | `3` 秒       |
-| `--wire-capture-dir`¹    | `STRAVIA_WIRE_CAPTURE_DIR`     | 未设置       |
 
 `--config` 选择唯一的数据库配置来源。`--data-dir` 仍用于运行时产物及默认配置文件路径，不选择或覆盖数据库。配置文件缺失时进入首次设置；配置文件损坏、已配置数据库不可达或 schema 不兼容时启动失败，绝不回退到 SQLite。
 
@@ -308,15 +311,6 @@ idle_timeout_seconds = 300
 
 该命令会提示输入用户名，并无回显地读取新密码及确认；密码不接受命令行参数。它会原地更新已有唯一管理员，并撤销全部旧管理会话；不会删除业务数据或重新开放数据库设置。
 
-¹ 仅 Debug 构建提供。启用后，Stravia 为每个请求写入一份关联 JSONL，包含客户端和上游的请求与响应。敏感请求头值会替换为 `***`；请求体和响应体以可读 UTF-8 文本保存到 `body` 字段，可能包含提示词、工具数据、媒体引用和模型输出。录制文件应仅保留在本机，并在诊断后删除。Release 构建不包含该参数和录制实现。
-
-可将录制的上游响应帧交给真实协议 decoder 回放：
-
-```powershell
-$env:STRAVIA_WIRE_REPLAY_FILE = ".scratch/wire-captures/req-....jsonl"
-cargo test -p stravia-core replay_wire_capture_from_environment -- --ignored --nocapture
-```
-
 监听非回环地址前，必须通过 `--public-origin` 指定可信且可从外部访问的 Gateway origin（例如 `https://gateway.example.com`）。Stravia 不会信任转发 header 来推导管理 origin 或签名 Artifact URL。请由反向代理终止 HTTPS，并将请求原样转发至 Stravia listener：
 
 ```bash
@@ -330,7 +324,7 @@ cargo test -p stravia-core replay_wire_capture_from_environment -- --ignored --n
 
 ```text
 backend/crates/stravia-core/       与传输层无关的网关、协议、提供商、存储和管理服务
-backend/crates/stravia-devtools/   协议样本录制与回放工具
+backend/crates/stravia-devtools/   开发与协议 fixture 工具
 backend/apps/stravia-server/       独立统一 HTTP 服务端
 backend/apps/stravia-desktop/      Tauri 桌面外壳
 frontend/stravia-webui/            SvelteKit 管理界面

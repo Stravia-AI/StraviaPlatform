@@ -4,7 +4,7 @@
 //! dispatcher (PR-5) consume it.  Until PR-2 lands, `compat.rs` provides
 //! lossless `From` conversions from/to the old `InternalRequest`.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use serde_json::Value;
 
 use crate::protocol::ids::ProtocolId;
@@ -853,24 +853,39 @@ pub struct SafetySettings {
 
 // ── Request metadata ──────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub(crate) enum MediaRoutingMode {
     Native,
     Bridge,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct MediaRoutingPlan {
     pub mode: MediaRoutingMode,
     pub target_keys: Vec<String>,
     pub source_artifact_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default)]
+fn serialize_optional_protocol<S>(
+    protocol: &Option<ProtocolId>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    protocol
+        .as_ref()
+        .map(ToString::to_string)
+        .serialize(serializer)
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct RequestMetadata {
     /// The protocol the client spoke.
+    #[serde(serialize_with = "serialize_optional_protocol")]
     pub source_protocol: Option<ProtocolId>,
-    /// Raw envelope preserved for pass-through / audit.
+    /// Raw envelope preserved for pass-through / audit, never part of canonical identity.
+    #[serde(skip_serializing)]
     pub raw: Option<RawEnvelope>,
     /// Three-segment vendor extension bag.
     pub vendor: VendorExtensions,
@@ -899,7 +914,7 @@ pub struct EmbeddingRequest {
 ///
 /// Fields are annotated with the FIELD_HOMING.md category that they belong to:
 /// `[IR]` = core, `[OAIChat]` = OpenAIChatExt, etc.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct AiRequest {
     // ── Core ──────────────────────────────────────────────────────────────────
     /// [IR] The model identifier as received from the client.
@@ -972,6 +987,17 @@ impl AiRequest {
             ext: None,
             meta: RequestMetadata::default(),
         }
+    }
+
+    /// Serialize the complete Debug checkpoint, including the raw ingress envelope.
+    pub(crate) fn debug_value(&self) -> Result<Value, serde_json::Error> {
+        let mut value = serde_json::to_value(self)?;
+        if let Some(raw) = &self.meta.raw
+            && let Some(meta) = value.get_mut("meta").and_then(Value::as_object_mut)
+        {
+            meta.insert("raw".into(), serde_json::to_value(raw)?);
+        }
+        Ok(value)
     }
 
     /// Return the modalities from `OpenAIChatExt` if present.

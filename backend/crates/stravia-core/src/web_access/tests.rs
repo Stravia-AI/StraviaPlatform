@@ -241,7 +241,7 @@ impl WebProviderAdapter for FakeSearchProvider {
 #[tokio::test]
 async fn configured_local_adapter_observes_proxy_snapshot_empty_success_and_failover() {
     let data_dir = tempfile::tempdir().expect("temp data dir");
-    let (gateway, _logs) = crate::Gateway::new(crate::config::GatewayConfig {
+    let gateway = crate::Gateway::new(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -558,7 +558,7 @@ async fn search_strictly_filters_allowed_and_blocked_subdomains() {
 #[tokio::test]
 async fn configuration_changes_do_not_replace_an_inference_run_snapshot() {
     let data_dir = tempfile::tempdir().expect("temp data dir");
-    let (gateway, _logs) = crate::Gateway::new(crate::config::GatewayConfig {
+    let gateway = crate::Gateway::new(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -738,7 +738,7 @@ async fn fetch_retries_only_failed_urls_and_preserves_input_order() {
 #[tokio::test]
 async fn configured_local_fetch_retries_only_failed_urls_on_zhipu() {
     let data_dir = tempfile::tempdir().expect("temp data dir");
-    let (gateway, _logs) = crate::Gateway::new(crate::config::GatewayConfig {
+    let gateway = crate::Gateway::new(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })

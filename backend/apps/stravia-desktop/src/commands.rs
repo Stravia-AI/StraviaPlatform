@@ -471,7 +471,7 @@ mod tests {
         NativeAdminSession,
     ) {
         let data = tempfile::tempdir().expect("isolated desktop database");
-        let (gateway, _log_rx) = Gateway::new(GatewayConfig {
+        let gateway = Gateway::new(GatewayConfig {
             data_dir: data.path().to_path_buf(),
             ..Default::default()
         })
@@ -502,10 +502,17 @@ mod tests {
 
     #[tokio::test]
     async fn allowance_commands_preserve_the_core_result_shape() {
+        let data = tempfile::tempdir().expect("isolated desktop observation data");
         let storage: DynStorage = Arc::new(MemoryStorage::new(vec![], vec![], vec![]));
-        let (gateway, _log_rx) = Gateway::from_storage(GatewayConfig::default(), storage)
-            .await
-            .expect("desktop gateway should initialize from memory storage");
+        let gateway = Gateway::from_storage(
+            GatewayConfig {
+                data_dir: data.path().to_path_buf(),
+                ..Default::default()
+            },
+            storage,
+        )
+        .await
+        .expect("desktop gateway should initialize from memory storage");
 
         assert_eq!(
             list_provider_allowances_for_gateway(&gateway)

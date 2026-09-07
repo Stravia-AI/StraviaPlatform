@@ -20,7 +20,7 @@ async fn proxy_router() -> Router {
         )),
         ..Default::default()
     };
-    let (gateway, _log_rx) = Gateway::new(config).await.expect("gateway init");
+    let gateway = Gateway::new(config).await.expect("gateway init");
     create_router(gateway)
 }
 
@@ -42,7 +42,7 @@ async fn protected_responses_router_with_hook(
         ..Default::default()
     };
     let builder = Gateway::builder(config);
-    let (gateway, _logs) = match hook {
+    let gateway = match hook {
         Some(hook) => builder.hook(hook).build().await,
         None => builder.build().await,
     }
@@ -617,7 +617,7 @@ async fn responses_native_web_search_is_concealed_when_search_is_unavailable() {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     };
-    let (gateway, _logs) = Gateway::new(config).await.expect("gateway");
+    let gateway = Gateway::new(config).await.expect("gateway");
     let admin = gateway.admin();
     let provider = admin
         .create_provider(CreateProvider {
@@ -721,7 +721,7 @@ async fn responses_native_web_search_is_concealed_when_search_is_unavailable() {
 #[tokio::test]
 async fn artifact_upload_is_api_key_scoped_and_completes() {
     let data_dir = tempfile::tempdir().expect("temp data dir");
-    let (gateway, _logs) = Gateway::new(GatewayConfig {
+    let gateway = Gateway::new(GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })

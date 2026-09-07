@@ -8,15 +8,14 @@ use std::time::Duration;
 use crate::db::models::{
     ApiKey, ApiKeyStats, ApiKeyWithBindings, CreateApiKey, CreateProviderRecord,
     DEFAULT_FIRST_TOKEN_TIMEOUT_MS, DEFAULT_TARGET_COOLDOWN_MS, DEFAULT_TARGET_PRIORITY,
-    DEFAULT_TARGET_RETRY_BUDGET, LogPage, LogQuery, ModelStats, OAuthCredential, Provider,
-    ProviderStats, PutRoute, RequestLog, Route, StatsHourly, StatsOverview, Target, UpdateApiKey,
-    UpdateProvider, UpsertOAuthCredential, is_valid_provider_auth_mode,
+    DEFAULT_TARGET_RETRY_BUDGET, ModelStats, OAuthCredential, Provider, ProviderStats, PutRoute,
+    Route, StatsHourly, StatsOverview, Target, UpdateApiKey, UpdateProvider, UpsertOAuthCredential,
+    is_valid_provider_auth_mode,
 };
-use crate::logging::LogEntry;
 use crate::storage::traits::{
-    AdminIdentityStore, ApiKeyAccessRecord, ApiKeyStore, AuthAccessStore, LogStore,
-    OAuthCredentialStore, ProviderModelStore, ProviderStore, ProviderTestResult, RouteStore,
-    SettingsStore, Storage, StorageBackend, StorageBootstrap, StorageHealth, WebProviderStore,
+    AdminIdentityStore, ApiKeyAccessRecord, ApiKeyStore, AuthAccessStore, OAuthCredentialStore,
+    ProviderModelStore, ProviderStore, ProviderTestResult, RouteStore, SettingsStore, Storage,
+    StorageBackend, StorageBootstrap, StorageHealth, UsageStatsStore, WebProviderStore,
 };
 mod admin_identity;
 mod provider_models;
@@ -35,7 +34,7 @@ pub struct SqliteStorage {
     auth_store: Arc<SqliteAuthAccessStore>,
     admin_identity_store: Arc<SqliteAdminIdentityStore>,
     oauth_credential_store: Arc<SqliteOAuthCredentialStore>,
-    log_store: Arc<SqliteLogStore>,
+    usage_stats_store: Arc<SqliteUsageStatsStore>,
     bootstrap: Arc<SqliteBootstrap>,
 }
 
@@ -49,7 +48,10 @@ impl SqliteStorage {
         let auth_store = Arc::new(SqliteAuthAccessStore { pool: pool.clone() });
         let admin_identity_store = Arc::new(SqliteAdminIdentityStore { pool: pool.clone() });
         let oauth_credential_store = Arc::new(SqliteOAuthCredentialStore { pool: pool.clone() });
-        let log_store = Arc::new(SqliteLogStore { pool: pool.clone() });
+        let usage_stats_store = Arc::new(SqliteUsageStatsStore {
+            pool: pool.clone(),
+            last_route_snapshot: Arc::new(std::sync::RwLock::new(Vec::new())),
+        });
         let bootstrap = Arc::new(SqliteBootstrap { pool: pool.clone() });
         Self {
             pool,
@@ -61,7 +63,7 @@ impl SqliteStorage {
             auth_store,
             admin_identity_store,
             oauth_credential_store,
-            log_store,
+            usage_stats_store,
             bootstrap,
         }
     }
@@ -104,8 +106,8 @@ impl Storage for SqliteStorage {
         Some(self.admin_identity_store.as_ref())
     }
 
-    fn logs(&self) -> &dyn LogStore {
-        self.log_store.as_ref()
+    fn usage_stats(&self) -> &dyn UsageStatsStore {
+        self.usage_stats_store.as_ref()
     }
 
     fn oauth_credentials(&self) -> &dyn OAuthCredentialStore {
@@ -119,17 +121,17 @@ impl Storage for SqliteStorage {
 
 mod api_keys;
 mod bootstrap;
-mod logs;
 mod oauth;
 mod providers;
 mod routes;
 mod settings;
+mod usage_stats;
 
 use admin_identity::*;
 use api_keys::*;
 use bootstrap::*;
-use logs::*;
 use oauth::*;
 use providers::*;
 use routes::*;
 use settings::*;
+use usage_stats::*;

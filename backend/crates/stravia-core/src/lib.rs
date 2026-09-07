@@ -10,7 +10,7 @@ mod gateway;
 pub(crate) mod generation_chain;
 pub mod history_marker;
 pub mod hook;
-pub mod logging;
+mod interaction_observation;
 pub mod mcp;
 pub(crate) mod media;
 mod migrations;
@@ -27,8 +27,6 @@ pub mod thinking;
 pub mod turn_chain;
 pub(crate) mod web_access;
 pub mod web_search;
-#[cfg(debug_assertions)]
-mod wire_capture;
 
 #[cfg(test)]
 use config::GatewayConfig;

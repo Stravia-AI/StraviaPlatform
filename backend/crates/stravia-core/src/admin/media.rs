@@ -195,7 +195,7 @@ mod tests {
     #[tokio::test]
     async fn media_config_defaults_to_disabled_with_read_only_contract() {
         let directory = tempfile::tempdir().expect("temporary directory");
-        let (gateway, _logs) = crate::Gateway::builder(crate::config::GatewayConfig {
+        let gateway = crate::Gateway::builder(crate::config::GatewayConfig {
             data_dir: directory.path().to_path_buf(),
             ..Default::default()
         })
@@ -217,15 +217,21 @@ mod tests {
     }
     #[tokio::test]
     async fn enabling_media_rejects_a_gateway_without_runtime_storage() {
+        let directory = tempfile::tempdir().expect("temporary directory");
         let storage = std::sync::Arc::new(crate::storage::MemoryStorage::new(
             Vec::new(),
             Vec::new(),
             Vec::new(),
         ));
-        let (gateway, _logs) =
-            crate::Gateway::from_storage(crate::config::GatewayConfig::default(), storage)
-                .await
-                .expect("Gateway");
+        let gateway = crate::Gateway::from_storage(
+            crate::config::GatewayConfig {
+                data_dir: directory.path().to_path_buf(),
+                ..Default::default()
+            },
+            storage,
+        )
+        .await
+        .expect("Gateway");
 
         let error = gateway
             .admin()
@@ -243,7 +249,7 @@ mod tests {
     #[tokio::test]
     async fn enabling_media_requires_and_persists_an_explicit_image_model() {
         let directory = tempfile::tempdir().expect("temporary directory");
-        let (gateway, _logs) = crate::Gateway::builder(crate::config::GatewayConfig {
+        let gateway = crate::Gateway::builder(crate::config::GatewayConfig {
             data_dir: directory.path().to_path_buf(),
             ..Default::default()
         })

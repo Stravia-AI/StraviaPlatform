@@ -10,7 +10,10 @@ providers ──1:N── model_backends ──N:1── models ──M:N── 
     ├──1:N── provider_models ──1:N── provider_model_cost_rules
     └──1:N── provider_allowance_samples
 web_providers (Local Web Search / Fetch upstreams)
-request_logs (append-only)
+interaction_observations ──1:N── inference_run_observations ──1:N── model_turn_observations ──1:N── target_attempt_observations
+    ├──1:N── observation_events
+    └──1:N── debug_trace_manifests (managed Trace files)
+rejected_request_observations ──1:N── observation_events / debug_trace_manifests
 turn_chain_nodes (principal-scoped Response / Agent / Web Search DAG)
 history_markers (principal-scoped hidden history and Platform execution state)
 agent_definition_revisions ──1:1── agent_definition_configs
@@ -274,56 +277,167 @@ Provider 账户级额度的历史样本，用于估算当前重置窗口内的�
 
 ---
 
-## request_logs
+## Interaction Observation
 
-请求日志（追加写入，记录每次代理请求的完整信息）。
+Migration 34 removes `request_logs` and its rows without backfill, then installs the Observation schema below. Ordinary Observation is the diagnostic fact source for the Request Records forest, inspector, Confirmed Upstream Usage analytics, and Route scheduling; it is separate from the immutable Generation Chain. All timestamps and expiry values are Unix milliseconds. SQLite uses integer booleans and an `observation_sequence` singleton; PostgreSQL uses native booleans and `observation_event_sequence`.
+
+### observation_sequence (SQLite only)
+
+| Column | Type | Description |
+|---|---|---|
+| `singleton_id` | INTEGER PK | Fixed to `1` |
+| `next_sequence` | INTEGER NOT NULL | Next monotonic persisted event sequence |
+
+PostgreSQL provides the equivalent with the `observation_event_sequence` `BIGINT` sequence.
+
+### interaction_observations
+
+One row per Connect Client Interaction. `root_id` and `parent_interaction_id` project the outer Generation Chain forest without changing Generation Chain facts.
 
 | Column | Type | Default | Description |
 |---|---|---|---|
-| `id` | TEXT PK | — | 日志 ID |
-| `created_at` | INTEGER | `0` | Unix 毫秒时间戳 |
-| `api_key_id` | TEXT | NULL | 认证使用的 API Key ID |
-| `api_key_name` | TEXT | NULL | API Key 名称（快照） |
-| `client_protocol` | TEXT | NULL | 客户端协议（如 `openai/chat/v1`） |
-| `upstream_protocol` | TEXT | NULL | 上游协议 |
-| `provider_id` | TEXT | NULL | 供应商 ID |
-| `provider_name` | TEXT | NULL | 供应商名称（快照） |
-| `model_id` | TEXT | NULL | 匹配到的模型 ID |
-| `model_name` | TEXT | NULL | 模型名称（快照） |
-| `upstream_url` | TEXT | NULL | 上游请求 URL |
-| `client_model` | TEXT | NULL | 客户端请求中的模型名 |
-| `upstream_model` | TEXT | NULL | 实际发送给上游的模型名 |
-| `method` | TEXT | NULL | HTTP 方法 |
-| `path` | TEXT | NULL | 请求路径 |
-| `client_request_headers` | TEXT | NULL | 客户端请求头（JSON，可选记录） |
-| `client_request_body` | TEXT | NULL | 客户端请求体（可选记录） |
-| `client_response_headers` | TEXT | NULL | 客户端响应头（JSON，可选记录） |
-| `client_response_body` | TEXT | NULL | 客户端响应体（可选记录） |
-| `upstream_request_headers` | TEXT | NULL | 上游请求头（JSON，可选记录） |
-| `upstream_request_body` | TEXT | NULL | 上游请求体（可选记录） |
-| `upstream_response_headers` | TEXT | NULL | 上游响应头（JSON，可选记录） |
-| `upstream_response_body` | TEXT | NULL | 上游响应体（可选记录） |
-| `upstream_status_code` | INTEGER | NULL | 上游 HTTP 状态码 |
-| `client_status_code` | INTEGER | NULL | 返回给客户端的 HTTP 状态码 |
-| `latency_total_ms` | INTEGER | NULL | 总延迟（毫秒） |
-| `latency_upstream_ms` | INTEGER | NULL | 上游延迟（毫秒） |
-| `input_tokens` | INTEGER | `0` | 输入 token 数 |
-| `output_tokens` | INTEGER | `0` | 输出 token 数 |
-| `cache_read_tokens` | INTEGER | `0` | 缓存输入（命中）token 数 |
-| `cache_write_tokens` | INTEGER | `0` | 缓存输出（创建）token 数 |
-| `thinking_level` | TEXT | NULL | 请求实际使用的思考等级 |
-| `is_stream` | INTEGER | `0` | 是否为流式请求 |
-| `stream_chunks_count` | INTEGER | `0` | 流式分块数量 |
-| `stream_first_chunk_ms` | INTEGER | NULL | 首个分块延迟（毫秒） |
+| `id` | TEXT PK | — | Interaction UUID |
+| `principal` | TEXT NOT NULL | — | Authenticated Principal |
+| `api_key_id`, `api_key_name` | TEXT | NULL | API-key identity/name snapshot |
+| `generation_root_id` | TEXT | NULL | Confirmed Generation Chain root when present |
+| `parent_interaction_id` | TEXT FK | NULL | Parent Interaction; ON DELETE SET NULL |
+| `root_id`, `root_run_id` | TEXT NOT NULL | — | Observation forest root and first Run |
+| `first_route_id` | TEXT NOT NULL | — | Stable title fallback |
+| `first_model_display_name` | TEXT | NULL | First Run display name snapshot |
+| `status` | TEXT NOT NULL | — | Activity-first Interaction status |
+| `started_at`, `last_active_at` | BIGINT / INTEGER | — | Lifecycle times |
+| `visible_tail` | TEXT NOT NULL | `''` | Coalesced Client Projection tail only |
+| `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `reasoning_tokens` | BIGINT / INTEGER | NULL | Nullable Confirmed Upstream Usage; NULL remains unknown |
+| `observation_gap` | BOOLEAN / INTEGER | `false` / `0` | Explicit projection/recording loss |
+| `last_event_sequence` | BIGINT / INTEGER | `0` | Last applied persisted event |
+| `expires_at` | BIGINT / INTEGER | — | Retention boundary |
 
-**索引**：
-- `idx_logs_created_at` on `created_at`
-- `idx_logs_provider_id` on `provider_id`
-- `idx_logs_client_status` on `client_status_code`
-- `idx_logs_upstream_model` on `upstream_model`
-- `idx_logs_api_key` on `api_key_id`
-- `idx_logs_client_protocol` on `client_protocol`
-- `idx_logs_upstream_protocol` on `upstream_protocol`
+**索引**：`interaction_observations_window_idx`、`interaction_observations_generation_idx`、`interaction_observations_filter_idx`、`interaction_observations_expiry_idx`
+
+### inference_run_observations
+
+| Column | Type | Default | Description |
+|---|---|---|---|
+| `id` | TEXT PK | — | Inference Run UUID |
+| `interaction_id` | TEXT FK NOT NULL | — | Owner Interaction; ON DELETE CASCADE |
+| `parent_run_id` | TEXT FK | NULL | Run branch parent; ON DELETE SET NULL |
+| `generation_node_id`, `generation_parent_id` | TEXT | NULL | Confirmed Generation Chain associations |
+| `ingress_protocol` | TEXT NOT NULL | — | Client protocol snapshot |
+| `route_id` | TEXT NOT NULL | — | Effective Route ID |
+| `model_display_name` | TEXT | NULL | Display-name snapshot |
+| `status` | TEXT NOT NULL | — | Run lifecycle state |
+| `terminal_reason` | TEXT | NULL | Stable terminal reason |
+| `user_interrupted` | BOOLEAN / INTEGER | `false` / `0` | Superseded by later User input |
+| `background_active` | BIGINT / INTEGER | `0` | Active internal work count |
+| `debug_enabled` | BOOLEAN / INTEGER NOT NULL | — | Process Debug state snapshotted at admission |
+| `client_output_committed` | BOOLEAN / INTEGER | `false` / `0` | Client Output Commit boundary |
+| `started_at`, `last_active_at`, `finished_at` | BIGINT / INTEGER | `finished_at` NULL | Lifecycle times |
+| `last_event_sequence` | BIGINT / INTEGER | `0` | Last applied persisted event |
+| `expires_at` | BIGINT / INTEGER | — | Retention boundary |
+
+**索引**：`inference_runs_interaction_idx`、`inference_runs_generation_idx`、`inference_runs_status_idx`
+
+### model_turn_observations
+
+| Column | Type | Default | Description |
+|---|---|---|---|
+| `id` | TEXT PK | — | Model Turn UUID |
+| `run_id` | TEXT FK NOT NULL | — | Owner Run; ON DELETE CASCADE |
+| `interaction_id` | TEXT FK NOT NULL | — | Owner Interaction; ON DELETE CASCADE |
+| `route_id` | TEXT NOT NULL | — | Effective Route |
+| `model_display_name` | TEXT | NULL | Display-name snapshot |
+| `api_key_id`, `api_key_name` | TEXT | NULL | API-key identity/name snapshot |
+| `status` | TEXT NOT NULL | — | Turn lifecycle state |
+| `started_at`, `finished_at` | BIGINT / INTEGER | `finished_at` NULL | Timing |
+| `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `reasoning_tokens` | BIGINT / INTEGER | NULL | Nullable confirmed usage rollup |
+| `last_event_sequence` | BIGINT / INTEGER NOT NULL | — | Last applied persisted event |
+
+**索引**：`model_turns_interaction_idx`、`model_turns_analytics_idx`
+
+### target_attempt_observations
+
+One row per real upstream Target attempt, including retries and failovers.
+
+| Column | Type | Default | Description |
+|---|---|---|---|
+| `id` | TEXT PK | — | Attempt UUID |
+| `model_turn_id`, `run_id`, `interaction_id` | TEXT FK NOT NULL | — | Owner Turn, Run, and Interaction; ON DELETE CASCADE |
+| `target_id` | TEXT NOT NULL | — | Actual Target ID |
+| `provider_id`, `provider_name` | TEXT NOT NULL | — | Provider identity/name snapshot |
+| `upstream_model` | TEXT NOT NULL | — | Actual upstream model |
+| `protocol` | TEXT NOT NULL | — | Egress protocol |
+| `status` | TEXT NOT NULL | — | Attempt lifecycle result |
+| `status_code` | BIGINT / INTEGER | NULL | Upstream status when applicable |
+| `error_code` | TEXT | NULL | Stable error classification |
+| `started_at`, `finished_at` | BIGINT / INTEGER | `finished_at` NULL | Timing |
+| `duration_ms`, `first_token_ms` | BIGINT / INTEGER | NULL | Attempt and first canonical output latency |
+| `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `reasoning_tokens` | BIGINT / INTEGER | NULL | Provider-reported usage |
+| `usage_recorded` | BOOLEAN / INTEGER | `false` / `0` | Attempt-level usage deduplication guard |
+| `last_event_sequence` | BIGINT / INTEGER NOT NULL | — | Last applied persisted event |
+
+**索引**：`target_attempts_turn_idx`、`target_attempts_analytics_idx`
+
+### rejected_request_observations
+
+Pre-admission decode, protocol, or authentication failures remain outside Principal and Generation Chain.
+
+| Column | Type | Default | Description |
+|---|---|---|---|
+| `id` | TEXT PK | — | Rejected Request UUID |
+| `occurred_at` | BIGINT / INTEGER NOT NULL | — | Ingress time |
+| `method`, `path`, `ingress_protocol` | TEXT NOT NULL | — | Minimal ingress identity |
+| `stage`, `code` | TEXT NOT NULL | — | Rejection classification |
+| `status_code` | BIGINT / INTEGER NOT NULL | — | Client HTTP status |
+| `debug_enabled` | BOOLEAN / INTEGER NOT NULL | — | Debug state snapshotted at ingress |
+| `debug_status` | TEXT NOT NULL | — | Capture result |
+| `last_event_sequence` | BIGINT / INTEGER NOT NULL | — | Last applied persisted event |
+| `expires_at` | BIGINT / INTEGER NOT NULL | — | Retention boundary |
+
+**索引**：`rejected_requests_window_idx`、`rejected_requests_expiry_idx`
+
+### debug_trace_manifests
+
+| Column | Type | Default | Description |
+|---|---|---|---|
+| `trace_id` | TEXT PK | — | Opaque managed Trace identity |
+| `run_id` | TEXT FK | NULL | Owner Run; ON DELETE CASCADE |
+| `rejection_id` | TEXT FK | NULL | Owner Rejected Request; ON DELETE CASCADE |
+| `relative_directory` | TEXT UNIQUE NOT NULL | — | Managed relative identity beneath the data directory; never an absolute path |
+| `bytes_written`, `event_count` | BIGINT / INTEGER | `0` | Persisted capture size/count |
+| `status` | TEXT NOT NULL | — | `running`, `complete`, or `partial` capture state |
+| `partial_reason` | TEXT | NULL | Stable missing/partial reason(s) |
+| `tombstoned` | BOOLEAN / INTEGER | `false` / `0` | Pending idempotent managed-file deletion |
+| `created_at`, `completed_at` | BIGINT / INTEGER | `completed_at` NULL | Lifecycle times |
+| `expires_at` | BIGINT / INTEGER NOT NULL | — | Retention boundary |
+
+Exactly one of `run_id` and `rejection_id` is non-NULL. Large Debug payloads are not stored in relational rows. They are segmented JSONL under the managed `observation-debug` data directory, capped at 64 MiB per Run and 2 GiB retained total. The relational manifest permits startup reconciliation of tombstones and orphan managed directories.
+
+**索引**：`debug_manifests_expiry_idx`
+
+### observation_events
+
+| Column | Type | Default | Description |
+|---|---|---|---|
+| `sequence` | BIGINT / INTEGER PK | PostgreSQL `nextval`; SQLite explicit | Monotonic persisted sequence; SSE event IDs use this value |
+| `occurred_at` | BIGINT / INTEGER NOT NULL | — | Event time |
+| `interaction_id` | TEXT FK | NULL | Interaction association; ON DELETE CASCADE |
+| `run_id` | TEXT FK | NULL | Run association; ON DELETE CASCADE |
+| `rejection_id` | TEXT FK | NULL | Rejected Request association; ON DELETE CASCADE |
+| `kind` | TEXT NOT NULL | — | Typed Observation event kind |
+| `payload` | JSONB / TEXT NOT NULL | — | Redacted structured event payload |
+| `expires_at` | BIGINT / INTEGER NOT NULL | — | Retention boundary |
+
+**索引**：`observation_events_interaction_idx`、`observation_events_run_idx`、`observation_events_rejection_idx`、`observation_events_expiry_idx`
+
+### Usage statistics and retention
+
+`UsageStatsStore` computes overview, hourly, model, provider, API-key, and Route-scheduling projections directly from `model_turn_observations` and `target_attempt_observations`; there is no separate `usage_stats` table. Provider-reported values are counted once per attempt, and a dimension remains NULL when any applicable attempt is unknown. Route scheduling uses 24-hour token totals and one-hour attempt success/latency from Target attempts; a failed refresh returns the last successful in-process snapshot marked stale.
+
+Observation rows, Rejected Requests, events, manifests, and managed Trace segments use the `log_retention_days` setting, default seven days. Expiry and Clear History preserve `running` and `waiting_client` Interactions; Clear History reports them as skipped. Trace deletion is tombstoned and reconciled before owning rows are removed.
+
+Debug starts disabled for each process and requires explicit confirmation to enable. A Run snapshots Debug at admission, while a rejected request snapshots it at ingress. Credential headers, URL userinfo, credential-like query values, and explicit structured credential fields are redacted before queueing or persistence, but other prompts, business content, and tool inputs/results may remain sensitive. Capture records application-level HTTP, SSE, and WebSocket messages; it is not TLS, TCP, HTTP/2-frame, or packet capture.
+
+Interaction and Rejected Request bundles are streamed, versioned point-in-time ZIPs. Their manifests fix a through-sequence and report `complete`, `partial`, or `none`, per-Run capture state, byte counts, and missing reasons. Authenticated issuance returns a high-entropy, 60-second, single-use download ticket; expiry, replay, another resource, or process restart makes it unusable. Observation realtime delivery, Debug state, Trace storage, and tickets are single-Gateway only; cluster-wide fanout and shared Trace storage are not implemented.
 
 ---
 
@@ -497,7 +611,7 @@ Artifact multipart 上传会话；只存 upload token hash，完成后删除。
 
 ## settings
 
-系统配置键值对。`web_search_config` 保存带 revision 的完整替换配置；Web Access 保存 Local backend 使用的有序 Search / Fetch source IDs。
+系统配置键值对。`web_search_config` 保存带 revision 的完整替换配置；Web Access 保存 Local backend 使用的有序 Search / Fetch source IDs。`log_retention_days` 控制 Observation、Rejected Request、event、Debug manifest 与托管 Trace segment 的共同保留期；未设置或不可读时运行时使用 7 天。
 
 | Column | Type | Default | Description |
 |---|---|---|---|
@@ -529,6 +643,8 @@ Web Access Adapter migration 28 是不兼容旧二进制的 clean cutover：把 
 Layer Route Target Selection migration 31 删除 `model_backends.weight`，把既有 Target Priority 全部重置为 `0`，增加 First Token Timeout、Target Retry Budget 与 Target Cooldown，并把旧 `weighted|priority|cooldown|latency` Strategy 归一化为 `traffic_equalization|latency_preference`。
 
 Route Target Enabled migration 32 为 `model_backends` 增加缺省为已启用的 `enabled`；既有 Target 全部保持参与选择，写入省略该字段时也按已启用处理。
+
+Interaction Observation migration 34 是 clean cutover：SQLite 与 PostgreSQL 都先删除 `request_logs` 及其全部历史行，不从 Generation Chain 回填，再创建 Interaction、Inference Run、Model Turn、Target attempt、Rejected Request、Debug manifest、event 与单调 event sequence schema。升级后 Request Records、usage analytics 与 Route scheduling 只读取 Observation；没有旧日志别名或 dual-write。升级前若需要旧日志必须另行备份；仅回退应用二进制不能恢复已删除行。
 
 Allowance Samples migration 29 新增 `provider_allowance_samples`。样本随 Provider 删除而级联删除；应用按 14 天 TTL 清理，预报只读取当前重置窗口内且语义一致的样本。
 

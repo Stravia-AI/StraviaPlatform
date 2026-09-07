@@ -226,7 +226,7 @@ async fn test_app_with_tools(mcp_tools: Vec<Arc<dyn McpTool>>) -> TestApp {
         .fold(crate::Gateway::builder(config), |builder, tool| {
             builder.mcp_tool(tool)
         });
-    let (gateway, _logs) = builder.build().await.expect("gateway");
+    let gateway = builder.build().await.expect("gateway");
     let key = gateway
         .admin()
         .create_api_key(crate::db::models::CreateApiKey {
@@ -336,7 +336,7 @@ async fn media_test_app() -> (TestApp, crate::agent::ArtifactId, Arc<AtomicUsize
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     };
-    let (gateway, _logs) = crate::Gateway::new(config).await.expect("Gateway");
+    let gateway = crate::Gateway::new(config).await.expect("Gateway");
     let key = gateway
         .admin()
         .create_api_key(crate::db::models::CreateApiKey {
@@ -951,7 +951,7 @@ async fn mcp_transport_maps_missing_auth_store_to_unavailable() {
         Vec::new(),
         Vec::new(),
     ));
-    let (gateway, _logs) = crate::Gateway::builder(config)
+    let gateway = crate::Gateway::builder(config)
         .storage(storage)
         .mcp_tool(Arc::new(EchoTool))
         .build()

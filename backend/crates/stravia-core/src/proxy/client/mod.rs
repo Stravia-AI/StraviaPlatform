@@ -54,12 +54,25 @@ impl ProxyClient {
         url: &str,
         headers: HeaderMap,
         body: Value,
-    ) -> Result<(Value, u16, HeaderMap)> {
+    ) -> Result<(Value, u16, HeaderMap, bytes::Bytes)> {
+        self.call_non_stream_raw(url, headers, bytes::Bytes::from(serde_json::to_vec(&body)?))
+            .await
+    }
+
+    pub(crate) async fn call_non_stream_raw(
+        &self,
+        url: &str,
+        mut headers: HeaderMap,
+        body: bytes::Bytes,
+    ) -> Result<(Value, u16, HeaderMap, bytes::Bytes)> {
+        headers.entry(reqwest::header::CONTENT_TYPE).or_insert(
+            reqwest::header::HeaderValue::from_static("application/json"),
+        );
         let resp = self
             .http
             .post(url)
             .headers(headers)
-            .json(&body)
+            .body(body)
             .send()
             .await?;
         let status = resp.status().as_u16();
@@ -70,9 +83,9 @@ impl ProxyClient {
                 source,
                 status,
                 headers: resp_headers.clone(),
-                body: bytes,
+                body: bytes.clone(),
             })?;
-        Ok((json, status, resp_headers))
+        Ok((json, status, resp_headers, bytes))
     }
 
     pub async fn call_stream(
@@ -81,11 +94,24 @@ impl ProxyClient {
         headers: HeaderMap,
         body: Value,
     ) -> Result<(reqwest::Response, u16)> {
+        self.call_stream_raw(url, headers, bytes::Bytes::from(serde_json::to_vec(&body)?))
+            .await
+    }
+
+    pub(crate) async fn call_stream_raw(
+        &self,
+        url: &str,
+        mut headers: HeaderMap,
+        body: bytes::Bytes,
+    ) -> Result<(reqwest::Response, u16)> {
+        headers.entry(reqwest::header::CONTENT_TYPE).or_insert(
+            reqwest::header::HeaderValue::from_static("application/json"),
+        );
         let resp = self
             .http
             .post(url)
             .headers(headers)
-            .json(&body)
+            .body(body)
             .send()
             .await?;
         let status = resp.status().as_u16();

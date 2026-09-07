@@ -11,7 +11,7 @@ async fn principal_concurrency_limit_rejects_new_roots_until_delivery_completes(
     };
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
-    let (gateway, _logs) = crate::Gateway::builder(config)
+    let gateway = crate::Gateway::builder(config)
         .hook(Arc::new(BlockingRequestHook {
             entered: Arc::clone(&entered),
             release: Arc::clone(&release),
@@ -81,7 +81,7 @@ async fn principal_concurrency_limit_allows_multiple_slots_and_isolates_principa
     };
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
-    let (gateway, _logs) = crate::Gateway::builder(config)
+    let gateway = crate::Gateway::builder(config)
         .hook(Arc::new(BlockingRequestHook {
             entered: Arc::clone(&entered),
             release: Arc::clone(&release),

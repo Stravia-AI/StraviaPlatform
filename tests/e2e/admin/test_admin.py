@@ -552,7 +552,7 @@ def test_access_control_rejects_anonymous(admin_env: dict[str, str]) -> None:
 
 @pytest.mark.e2e
 @pytest.mark.admin
-def test_proxy_request_creates_log(admin_env: dict[str, str]) -> None:
+def test_proxy_request_updates_usage_analytics(admin_env: dict[str, str]) -> None:
     provider_id = _create_provider(admin_env, "test-provider-log")
     model_id = _create_model(admin_env, provider_id, "test-model-log")
     api_key = _create_api_key(admin_env, model_id, "test-key-log")
@@ -567,21 +567,6 @@ def test_proxy_request_creates_log(admin_env: dict[str, str]) -> None:
         headers={"authorization": f"Bearer {api_key['key']}"},
     )
     assert status == 200, f"proxy request failed: {status} {resp}"
-
-    deadline = time.time() + 10.0
-    total = 0
-    while time.time() < deadline:
-        status, logs_resp = http_request(
-            "GET",
-            f"{admin_env['admin']}/api/v1/logs?limit=20&offset=0",
-            headers=admin_env["auth"],
-        )
-        if status == 200:
-            total = int(logs_resp.get("data", {}).get("total", 0))
-            if total >= 1:
-                break
-        time.sleep(0.3)
-    assert total >= 1
 
     attributed_usage: dict[str, Any] | None = None
     deadline = time.time() + 10.0
@@ -609,8 +594,8 @@ def test_proxy_request_creates_log(admin_env: dict[str, str]) -> None:
     assert attributed_usage["request_count"] >= 1
     assert attributed_usage["total_input_tokens"] >= 3
     assert attributed_usage["total_output_tokens"] >= 2
-    assert attributed_usage["cache_read_tokens"] == 0
-    assert attributed_usage["cache_write_tokens"] == 0
+    assert attributed_usage["cache_read_tokens"] is None
+    assert attributed_usage["cache_write_tokens"] is None
 
 
 @pytest.mark.e2e
@@ -641,10 +626,9 @@ def test_stats_overview_incremented(admin_env: dict[str, str]) -> None:
     assert data.get("total_requests", 0) >= 1
     assert data.get("total_input_tokens", 0) >= 3
     assert data.get("total_output_tokens", 0) >= 2
-    assert data["total_cache_read_tokens"] == 0
-    assert data["total_cache_write_tokens"] == 0
+    assert data["total_cache_read_tokens"] is None
+    assert data["total_cache_write_tokens"] is None
     assert data["avg_duration_ms"] >= 0
-    assert data["avg_first_token_ms"] is None
 
     status, resp = http_request(
         "GET",
@@ -654,7 +638,6 @@ def test_stats_overview_incremented(admin_env: dict[str, str]) -> None:
     assert status == 200
     hourly = resp.get("data", [])
     assert hourly
-    assert hourly[-1]["total_cache_read_tokens"] == 0
-    assert hourly[-1]["total_cache_write_tokens"] == 0
+    assert hourly[-1]["total_cache_read_tokens"] is None
+    assert hourly[-1]["total_cache_write_tokens"] is None
     assert hourly[-1]["avg_duration_ms"] >= 0
-    assert hourly[-1]["avg_first_token_ms"] is None

@@ -1,7 +1,7 @@
 use super::*;
 
 pub(super) enum FollowupModelTurn {
-    Turn(crate::agent::ModelTurn, Instant),
+    Turn(crate::agent::ModelTurn),
     HookResponse {
         response: AiResponse,
         pending_generation_chain: Option<crate::generation_chain::GenerationChainWrite>,
@@ -35,7 +35,6 @@ fn hook_stream_error(control: crate::hook::HookControl) -> crate::protocol::ir::
 
 pub(super) async fn acquire_followup_model_turn(
     executor: &dyn ModelTurnExecutor,
-    gateway: &Gateway,
     headers: &HeaderMap,
     request: &mut AiRequest,
     ingress: ProtocolId,
@@ -46,8 +45,6 @@ pub(super) async fn acquire_followup_model_turn(
     principal: &crate::hook::Principal,
     generation: &GenerationChainRun,
     fixed_media_plan: Option<&crate::protocol::ir::request::MediaRoutingPlan>,
-    start: Instant,
-    request_extras: &RequestExtras,
 ) -> Result<FollowupModelTurn, RoundOutcome> {
     if request_context.cancellation.is_cancelled() {
         return Err(buffered_response(error_response(499, "request cancelled")));
@@ -158,21 +155,17 @@ pub(super) async fn acquire_followup_model_turn(
         ));
     }
     enter_phase(phase, Phase::Selecting).map_err(|response| buffered_response(*response))?;
-    let (turn, effective_request, turn_started) = acquire_turn(
+    let (turn, effective_request) = acquire_turn(
         executor,
-        gateway,
         headers,
         request,
-        ingress,
         request_context,
         inference_run,
         principal,
-        start,
-        request_extras,
     )
     .await?;
     *request = effective_request;
     inference_run.set_route(turn.route.clone());
     enter_phase(phase, Phase::Calling).map_err(|response| buffered_response(*response))?;
-    Ok(FollowupModelTurn::Turn(turn, turn_started))
+    Ok(FollowupModelTurn::Turn(turn))
 }

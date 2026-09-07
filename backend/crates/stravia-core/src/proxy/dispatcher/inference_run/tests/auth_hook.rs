@@ -9,7 +9,7 @@ async fn request_hook_response_bypasses_route_lookup_through_lifecycle_interface
         )),
         ..Default::default()
     };
-    let (gateway, _logs) = crate::Gateway::builder(config)
+    let gateway = crate::Gateway::builder(config)
         .hook(Arc::new(RuntimeShortCircuitHook))
         .build()
         .await
@@ -51,7 +51,7 @@ async fn request_hook_rejection_bypasses_route_lookup_and_model_authorization() 
         )),
         ..Default::default()
     };
-    let (gateway, _logs) = crate::Gateway::builder(config)
+    let gateway = crate::Gateway::builder(config)
         .hook(Arc::new(RuntimeShortCircuitHook))
         .build()
         .await
@@ -100,7 +100,7 @@ async fn expired_key_is_rejected_before_request_hook_model_rewrite() {
     };
     let initial_model = "initial-before-hook";
     let final_model = "final-after-hook";
-    let (gateway, _logs) = crate::Gateway::builder(config)
+    let gateway = crate::Gateway::builder(config)
         .hook(Arc::new(RewriteModelHook {
             model: final_model.into(),
         }))
@@ -267,59 +267,6 @@ async fn hook_rewrite_checks_the_final_model_binding() {
 }
 
 #[tokio::test]
-async fn missing_route_logs_redacted_client_headers_through_lifecycle_interface() {
-    let config = crate::config::GatewayConfig {
-        data_dir: std::env::temp_dir().join(format!(
-            "stravia-lifecycle-header-redaction-test-{}",
-            uuid::Uuid::new_v4()
-        )),
-        ..Default::default()
-    };
-    let (gateway, mut logs) = Gateway::new(config).await.expect("gateway init");
-    let mut envelope_headers = HashMap::new();
-    envelope_headers.insert("authorization".into(), "Bearer client-secret".into());
-    envelope_headers.insert("x-api-key".into(), "client-key".into());
-    envelope_headers.insert("content-type".into(), "application/json".into());
-    let model = "missing-model";
-    let headers = authorized_headers(&gateway).await;
-
-    let response = execute(RunInput {
-        gateway: gateway.clone(),
-        executor: std::sync::Arc::clone(&gateway.model_turn),
-        headers,
-        envelope: RawEnvelope::new(
-            Some(serde_json::json!({"model": model})),
-            envelope_headers,
-            "POST",
-            "/v1/chat/completions",
-        ),
-        request: AiRequest::new(model, Vec::new()),
-        ingress: OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
-        context: RequestContext::new(
-            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
-            std::time::Duration::from_secs(30),
-        ),
-    })
-    .await;
-
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    let entry = tokio::time::timeout(std::time::Duration::from_secs(1), logs.recv())
-        .await
-        .expect("log entry should be emitted")
-        .expect("log channel should remain open");
-    let headers = entry
-        .client_request_headers
-        .as_deref()
-        .expect("client headers should be logged");
-    let parsed: serde_json::Value = serde_json::from_str(headers).expect("headers should be JSON");
-    assert_eq!(parsed["authorization"], "***");
-    assert_eq!(parsed["x-api-key"], "***");
-    assert_eq!(parsed["content-type"], "application/json");
-    assert!(!headers.contains("client-secret"));
-    assert!(!headers.contains("client-key"));
-}
-
-#[tokio::test]
 async fn hidden_round_rechecks_key_binding_after_platform_tool_execution() {
     for (mutation, status, error_type, message) in [
         (
@@ -346,7 +293,7 @@ async fn automatic_parent_materializes_rewritten_history_before_the_current_hook
             .await;
     let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
     let data_dir = tempfile::tempdir().expect("temporary data directory");
-    let (gateway, _logs) = Gateway::builder(crate::config::GatewayConfig {
+    let gateway = Gateway::builder(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })

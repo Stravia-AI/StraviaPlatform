@@ -234,7 +234,7 @@ mod tests {
     async fn memory_gateway() -> anyhow::Result<(tempfile::TempDir, Gateway)> {
         let data_dir = tempfile::tempdir()?;
         let storage: DynStorage = Arc::new(MemoryStorage::new(Vec::new(), Vec::new(), Vec::new()));
-        let (gateway, _logs) = Gateway::from_storage(
+        let gateway = Gateway::from_storage(
             GatewayConfig {
                 data_dir: data_dir.path().to_path_buf(),
                 ..GatewayConfig::default()

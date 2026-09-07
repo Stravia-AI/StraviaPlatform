@@ -5,6 +5,8 @@ pub(crate) struct HistoryMarkerExecutionJob {
     pub(crate) owner_id: String,
     pub(crate) execution_deadline_unix_ms: i64,
     pub(crate) execution: hook::DetachedPlatformExecution,
+    pub(crate) observer: Option<interaction_observation::RunObserver>,
+    pub(crate) model_turn_id: String,
 }
 
 pub(crate) struct StartedHistoryMarkerExecution {
@@ -23,7 +25,26 @@ impl Gateway {
     async fn execute_history_marker_job(
         job: HistoryMarkerExecutionJob,
     ) -> RawHistoryMarkerExecution {
+        use interaction_observation::RunEvent;
+
         let call = job.execution.call().call.clone();
+        let observer = job.observer;
+        let started = Instant::now();
+        if let Some(observer) = observer.as_ref() {
+            observer.record(RunEvent::PlatformToolStarted {
+                model_turn_id: job.model_turn_id.clone(),
+                tool_id: call.id.clone(),
+                name: call.name.clone(),
+            });
+            if observer.debug_enabled() {
+                observer.record_debug(|| RunEvent::Checkpoint {
+                    stage: "platform_tool_call".into(),
+                    model_turn_id: Some(job.model_turn_id.clone()),
+                    attempt_id: None,
+                    payload: serde_json::json!(&call),
+                });
+            }
+        }
         let remaining_ms = job
             .execution_deadline_unix_ms
             .saturating_sub(chrono::Utc::now().timestamp_millis());
@@ -40,7 +61,7 @@ impl Gateway {
         } else {
             match tokio::time::timeout(
                 std::time::Duration::from_millis(remaining_ms as u64),
-                job.execution.execute(),
+                interaction_observation::scope::scope(observer.clone(), job.execution.execute()),
             )
             .await
             {
@@ -56,6 +77,33 @@ impl Gateway {
                 },
             }
         };
+        if let Some(observer) = observer.as_ref() {
+            observer.record(RunEvent::PlatformToolFinished {
+                model_turn_id: job.model_turn_id.clone(),
+                tool_id: call.id.clone(),
+                status: if result.is_error {
+                    "failed"
+                } else {
+                    "completed"
+                }
+                .into(),
+                duration_ms: started.elapsed().as_millis().min(i64::MAX as u128) as i64,
+            });
+            if observer.debug_enabled() {
+                observer.record_debug(|| RunEvent::Checkpoint {
+                    stage: "platform_tool_result".into(),
+                    model_turn_id: Some(job.model_turn_id),
+                    attempt_id: None,
+                    payload: serde_json::json!({
+                        "tool_id": result.tool_id.as_str(),
+                        "call_id": result.call_id,
+                        "content": result.content,
+                        "is_error": result.is_error,
+                        "metadata": result.metadata,
+                    }),
+                });
+            }
+        }
         RawHistoryMarkerExecution { call, result }
     }
 

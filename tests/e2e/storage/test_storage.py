@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+import sqlite3
 import tempfile
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -36,15 +39,122 @@ def test_storage_backend_equivalence(storage_runtime: dict[str, object], backend
     )
 
     assert f"backend={backend}" in output
-    assert "logs_total=" in output
+    assert "observation_roots=" in output
     assert "stats_total_requests=" in output
     assert "proxy_status_ok=200" in output
     assert "proxy_status_no_key=401" in output
 
 
+def _prepare_legacy_sqlite(database: Path, migrations: Path) -> None:
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute(
+            """
+            CREATE TABLE _sqlx_migrations (
+                version BIGINT PRIMARY KEY,
+                description TEXT NOT NULL,
+                installed_on TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                success BOOLEAN NOT NULL,
+                checksum BLOB NOT NULL,
+                execution_time BIGINT NOT NULL
+            )
+            """
+        )
+        for migration in sorted(migrations.glob("*.sql")):
+            version = int(migration.name.split("_", 1)[0])
+            if version >= 34:
+                continue
+            sql = migration.read_text(encoding="utf-8")
+            connection.executescript(sql)
+            description = migration.stem.split("_", 1)[1].replace("_", " ")
+            connection.execute(
+                "INSERT INTO _sqlx_migrations "
+                "(version, description, success, checksum, execution_time) "
+                "VALUES (?, ?, 1, ?, 0)",
+                (version, description, hashlib.sha384(sql.encode()).digest()),
+            )
+        connection.execute(
+            "INSERT INTO request_logs (id, created_at, client_request_body) VALUES (?, ?, ?)",
+            ("legacy-log-must-not-survive", 1, '{"secret":"legacy"}'),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
 @pytest.mark.e2e
 @pytest.mark.storage
-def test_server_boots_postgres_with_migrations(
+def test_sqlite_upgrade_removes_legacy_logs_and_installs_observation_schema(
+    stravia_binary: Path, repo_root: Path, tmp_path: Path
+) -> None:
+    database = tmp_path / "gateway.db"
+    _prepare_legacy_sqlite(
+        database, repo_root / "backend" / "crates" / "stravia-core" / "migrations" / "sqlite"
+    )
+    orphan = tmp_path / "observation-debug" / "00000000000040008000000000000001"
+    orphan.mkdir(parents=True)
+    (orphan / "segment-000001.jsonl").write_text('{"orphan":true}\n', encoding="utf-8")
+    server_port = find_free_port()
+    proc, logs = start_stravia_server(
+        stravia_binary=stravia_binary,
+        args=["--data-dir", str(tmp_path), "--host", "127.0.0.1", "--port", str(server_port)],
+    )
+    base = f"http://127.0.0.1:{server_port}"
+    try:
+        wait_until_ready(f"{base}/api/v1/auth/state", timeout=30.0)
+        session = initialize_server(
+            base,
+            wait_for_setup_token(logs, proc),
+            {"backend": "sqlite", "path": str(database)},
+        )
+        status, body = http_request(
+            "GET", f"{base}/api/v1/observations/interactions", headers=session.auth_headers()
+        )
+        assert status == 200, body
+        assert body["data"]["root_total"] == 0
+        deadline = time.time() + 5.0
+        while orphan.exists() and time.time() < deadline:
+            time.sleep(0.05)
+        assert not orphan.exists()
+        status, _ = http_request("GET", f"{base}/api/v1/logs", headers=session.auth_headers())
+        assert status == 404
+
+        with sqlite3.connect(database) as connection:
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+            assert "request_logs" not in tables
+            assert {
+                "interaction_observations",
+                "inference_run_observations",
+                "model_turn_observations",
+                "target_attempt_observations",
+                "observation_events",
+                "rejected_request_observations",
+                "debug_trace_manifests",
+            } <= tables
+            indexes = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'index'"
+                )
+            }
+            assert {
+                "interaction_observations_window_idx",
+                "model_turns_analytics_idx",
+                "target_attempts_analytics_idx",
+                "observation_events_expiry_idx",
+            } <= indexes
+    finally:
+        stop_stravia_server(proc, logs)
+
+
+@pytest.mark.e2e
+@pytest.mark.storage
+def test_postgres_legacy_upgrade_installs_observation_schema_and_reconnects(
     stravia_binary: Path, storage_runtime: dict[str, object]
 ) -> None:
     pg_url = storage_runtime["pg_url"]
@@ -55,12 +165,13 @@ def test_server_boots_postgres_with_migrations(
     work_dir = storage_runtime["work_dir"]
     assert isinstance(work_dir, Path)
     make_schema: Callable[..., str] = storage_runtime["make_isolated_schema"]  # type: ignore[assignment]
-    run_schema_action: Callable[..., None] = storage_runtime["run_schema_action"]  # type: ignore[assignment]
+    run_schema_action: Callable[..., str] = storage_runtime["run_schema_action"]  # type: ignore[assignment]
     postgres_dsn_for_schema: Callable[[str, str], str] = storage_runtime[
         "postgres_dsn_for_schema"
     ]  # type: ignore[assignment]
     schema = make_schema("stravia_server_e2e")
     run_schema_action("create", work_dir=work_dir, pg_url=pg_url, schema=schema)
+    run_schema_action("prepare_legacy", work_dir=work_dir, pg_url=pg_url, schema=schema)
 
     try:
         postgres_dsn = postgres_dsn_for_schema(pg_url, schema)
@@ -165,8 +276,34 @@ def test_server_boots_postgres_with_migrations(
                 )
                 assert status == 200, f"PostgreSQL proxy request failed: {body}"
                 assert body["choices"][0]["message"]["content"] == "ok"
+
+                deadline = time.time() + 10.0
+                roots = 0
+                while time.time() < deadline:
+                    status, body = http_request(
+                        "GET",
+                        f"{admin_base}/api/v1/observations/interactions?limit=10",
+                        headers=headers,
+                    )
+                    assert status == 200, body
+                    roots = int(body["data"]["root_total"])
+                    if roots:
+                        break
+                    time.sleep(0.1)
+                assert roots == 1
+                status, _ = http_request(
+                    "GET", f"{admin_base}/api/v1/logs", headers=headers
+                )
+                assert status == 404
             finally:
                 stop_stravia_server(proc, logs)
+
+        schema_report = run_schema_action(
+            "inspect_observation", work_dir=work_dir, pg_url=pg_url, schema=schema
+        )
+        assert "observation_tables=7" in schema_report
+        assert "legacy_tables=0" in schema_report
+        assert "observation_indexes=4" in schema_report
 
         reconnect_port = find_free_port()
         reconnect_base = f"http://127.0.0.1:{reconnect_port}"

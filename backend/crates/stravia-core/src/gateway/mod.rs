@@ -1,9 +1,7 @@
-#[cfg(debug_assertions)]
-use crate::wire_capture;
 use crate::{
-    admin, admission, agent, config, db, generation_chain, history_marker, hook, logging, media,
-    migrations, model_turn, protocol, provider_catalog, proxy, router, storage, turn_chain,
-    web_access, web_search,
+    admin, admission, agent, config, db, generation_chain, history_marker, hook,
+    interaction_observation, media, migrations, model_turn, protocol, provider_catalog, proxy,
+    router, storage, turn_chain, web_access, web_search,
 };
 
 mod builder;
@@ -27,14 +25,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use sqlx::{Pool, Postgres, SqlitePool};
-use tokio::sync::mpsc;
 
 use crate::auth::types::AuthSession;
 use crate::hook::{Hook, HookRuntime, PlatformTool, PlatformToolRegistry};
 use crate::mcp::{McpTool, McpToolRegistry};
 use crate::router::health::HealthRegistry;
 use config::{GatewayConfig, SqlStorageConfig, StorageBackendKind};
-use logging::LogEntry;
 use storage::sql::config::SqlBackendConfig;
 use storage::{DynStorage, PostgresStorage, SqliteStorage};
 
@@ -76,9 +72,7 @@ pub struct Gateway {
     pub(crate) cache_affinity: router::cache_affinity::CacheAffinity,
     pub(crate) route_policy_state: router::RoutePolicyState,
     pub ollama_capability_cache: Arc<tokio::sync::RwLock<HashMap<String, CapabilityCacheEntry>>>,
-    pub log_tx: mpsc::Sender<LogEntry>,
-    #[cfg(debug_assertions)]
-    pub(crate) wire_capture: Option<wire_capture::WireCapture>,
+    pub(crate) observation: interaction_observation::InteractionObservation,
     pub(crate) auth_sessions: Arc<tokio::sync::RwLock<HashMap<String, AuthSession>>>,
     pub(crate) agent_definitions: agent::AgentDefinitionRegistry,
     pub(crate) artifact_store: Option<Arc<dyn agent::ArtifactStore>>,
@@ -126,9 +120,7 @@ impl Gateway {
             cache_affinity: self.cache_affinity.clone(),
             route_policy_state: self.route_policy_state.clone(),
             ollama_capability_cache: Arc::clone(&self.ollama_capability_cache),
-            log_tx: self.log_tx.clone(),
-            #[cfg(debug_assertions)]
-            wire_capture: self.wire_capture.clone(),
+            observation: self.observation.clone(),
             auth_sessions: Arc::clone(&self.auth_sessions),
             agent_definitions: self.agent_definitions.clone(),
             artifact_store: self.artifact_store.clone(),
@@ -181,6 +173,7 @@ impl Drop for Gateway {
     fn drop(&mut self) {
         if self.lifecycle_owner && self.lifecycle.release_owner() {
             self.lifecycle.abort_tasks();
+            self.observation.stop_background();
         }
     }
 }

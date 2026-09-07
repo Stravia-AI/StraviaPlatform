@@ -31,6 +31,8 @@ pub(super) struct CompletionContext {
     logical_model: String,
     principal: Principal,
     generation_chain: Option<GenerationChainCompletion>,
+    model_turn_id: String,
+    observer: crate::interaction_observation::RunObserver,
     client_output_commit: ClientOutputCommit,
 }
 
@@ -41,6 +43,8 @@ impl CompletionContext {
         ingress: crate::protocol::ids::ProtocolId,
         target: &TargetIdentity,
         egress: crate::protocol::ids::ProtocolId,
+        model_turn_id: String,
+        observer: crate::interaction_observation::RunObserver,
     ) -> Self {
         let owns_response_identity = ingress == OPEN_RESPONSES_2026_04_24;
         let logical_model = generation.write.as_ref().map_or_else(
@@ -62,6 +66,8 @@ impl CompletionContext {
             logical_model,
             principal: generation.principal,
             generation_chain,
+            model_turn_id,
+            observer,
             client_output_commit: ClientOutputCommit::Pending,
         }
     }
@@ -342,6 +348,8 @@ pub(super) async fn prepare_platform_markers(
             owner_id,
             execution_deadline_unix_ms,
             execution,
+            observer: Some(context.observer.clone()),
+            model_turn_id: context.model_turn_id.clone(),
         });
         prepared.push(marker);
     }
@@ -454,9 +462,36 @@ pub(super) async fn complete_canonical_response(
             return CompletionOutcome::Failed(CompletionFailure::hook(error, commit));
         }
     }
+    let observer = request_context
+        .extensions
+        .get::<crate::interaction_observation::RunObserver>()
+        .expect("admitted Inference Run observer");
+    observer.record_debug(|| crate::interaction_observation::RunEvent::Checkpoint {
+        stage: "response_after_hook".into(),
+        model_turn_id: Some(context.model_turn_id.clone()),
+        attempt_id: None,
+        payload: super::checkpoint_payload(&observer, &response),
+    });
     let classified = run.classify_tool_calls(&response);
     let has_platform_calls = !classified.platform.is_empty();
     let has_client_calls = !classified.client.is_empty();
+    for call in &classified.client {
+        observer.record(
+            crate::interaction_observation::RunEvent::ClientToolHandoff {
+                tool_id: call.id.clone(),
+                name: call.name.clone(),
+            },
+        );
+    }
+    if has_client_calls {
+        if let Some(mut terminal) = request_context
+            .extensions
+            .get::<super::super::RunTerminalContext>()
+        {
+            terminal.waiting_client = true;
+            request_context.extensions.insert(terminal);
+        }
+    }
     let canonical_response = response.clone();
     let mut started_executions = Vec::new();
     let mut prepared_platform = Vec::new();
@@ -500,6 +535,12 @@ pub(super) async fn complete_canonical_response(
     if let Err(error) = projection.project_staged(&mut response, &platform).await {
         return CompletionOutcome::Failed(CompletionFailure::hook(error, commit));
     }
+    observer.record_debug(|| crate::interaction_observation::RunEvent::Checkpoint {
+        stage: "client_projection_event".into(),
+        model_turn_id: Some(context.model_turn_id.clone()),
+        attempt_id: None,
+        payload: super::checkpoint_payload(&observer, &response),
+    });
     if has_platform_calls && !has_client_calls {
         return CompletionOutcome::PlatformOnly(Box::new(PlatformOnlyContinuation {
             projected_response: response,

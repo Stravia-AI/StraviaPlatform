@@ -50,6 +50,36 @@ def _decode_body(raw: bytes) -> Any:
         return text
 
 
+def http_bytes(
+    method: str,
+    url: str,
+    payload: Any | None = None,
+    headers: dict[str, str] | None = None,
+    timeout: float = 15.0,
+) -> tuple[int, dict[str, str], bytes]:
+    """Make an HTTP request without interpreting its response body."""
+    hdrs: dict[str, str] = dict(headers or {})
+    data: bytes | None = None
+    if payload is not None:
+        hdrs.setdefault("content-type", "application/json")
+        data = json.dumps(payload).encode("utf-8")
+
+    request = Request(url=url, method=method, data=data, headers=hdrs)
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            return (
+                int(response.status),
+                {key.lower(): value for key, value in response.headers.items()},
+                response.read(),
+            )
+    except HTTPError as error:
+        return (
+            int(error.code),
+            {key.lower(): value for key, value in error.headers.items()},
+            error.read(),
+        )
+
+
 def http_request(
     method: str,
     url: str,
@@ -58,18 +88,8 @@ def http_request(
     timeout: float = 15.0,
 ) -> tuple[int, Any]:
     """Make an HTTP request and return (status_code, decoded_body)."""
-    hdrs: dict[str, str] = dict(headers or {})
-    data: bytes | None = None
-    if payload is not None:
-        hdrs.setdefault("content-type", "application/json")
-        data = json.dumps(payload).encode("utf-8")
-
-    req = Request(url=url, method=method, data=data, headers=hdrs)
-    try:
-        with urlopen(req, timeout=timeout) as resp:
-            return int(resp.status), _decode_body(resp.read())
-    except HTTPError as e:
-        return int(e.code), _decode_body(e.read())
+    status, _, body = http_bytes(method, url, payload, headers, timeout)
+    return status, _decode_body(body)
 
 
 class WebSession:
@@ -254,9 +274,11 @@ def stop_stravia_server(
 
 
 class _MinimalMockHandler(BaseHTTPRequestHandler):
-    """Single-endpoint OpenAI /v1/chat/completions happy-path mock."""
+    """Deterministic OpenAI upstream with a few externally-triggered scenarios."""
 
     protocol_version = "HTTP/1.1"
+    _attempts: dict[str, int] = {}
+    _attempts_lock = threading.Lock()
 
     def log_message(self, fmt: str, *args: Any) -> None:  # noqa: D401
         return
@@ -276,6 +298,19 @@ class _MinimalMockHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
         self.wfile.flush()
 
+    def _write_sse(self, payloads: list[dict[str, Any]]) -> None:
+        body = b"".join(
+            b"data: " + json.dumps(payload).encode("utf-8") + b"\n\n"
+            for payload in payloads
+        ) + b"data: [DONE]\n\n"
+        self.send_response(200)
+        self.send_header("content-type", "text/event-stream")
+        self.send_header("content-length", str(len(body)))
+        self.send_header("connection", "close")
+        self.end_headers()
+        self.wfile.write(body)
+        self.wfile.flush()
+
     def do_POST(self) -> None:  # noqa: N802
         body = self._read_body()
         path = self.path.split("?", 1)[0]
@@ -283,19 +318,108 @@ class _MinimalMockHandler(BaseHTTPRequestHandler):
             self._write_json(404, {"error": f"unknown path: {path}"})
             return
         model = str(body.get("model", "mock"))
+        messages = body.get("messages", [])
+        scenario = json.dumps(messages, sort_keys=True, separators=(",", ":"))
+
+        if "observation-visible-credential" in scenario and body.get("stream") is True:
+            sentinel = "VISIBLE_RESPONSE_SECRET_7c91"
+            fragments = [
+                "retain-visible-business-output Authorization: Bear",
+                f"er {sentinel} callback=https://user:",
+                f"{sentinel}@example.test/cb?signature=",
+                f'{sentinel} metadata={{"api_',
+                f'key":"{sentinel}"}} form=name=Ada&access_',
+                f"token={sentinel}",
+            ]
+            if "observation-visible-credential-fragmented" not in scenario:
+                fragments = ["".join(fragments)]
+            payloads = [
+                {
+                    "id": "chatcmpl-visible-redaction",
+                    "object": "chat.completion.chunk",
+                    "model": model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"content": fragment},
+                            "finish_reason": None,
+                        }
+                    ],
+                }
+                for fragment in fragments
+            ]
+            payloads.append(
+                {
+                    "id": "chatcmpl-visible-redaction",
+                    "object": "chat.completion.chunk",
+                    "model": model,
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+                }
+            )
+            self._write_sse(payloads)
+            return
+
+        if "observation-delay" in scenario:
+            time.sleep(3.0)
+
+        if "observation-root-retry" in scenario:
+            with self._attempts_lock:
+                attempt = self._attempts.get(scenario, 0)
+                self._attempts[scenario] = attempt + 1
+            if attempt == 0:
+                self._write_json(
+                    503,
+                    {"error": {"type": "upstream_unavailable", "message": "retry"}},
+                )
+                return
+
+        tool_results = sum(
+            1 for message in messages if isinstance(message, dict) and message.get("role") == "tool"
+        )
+        tool_loop = "observation-tool-loop" in scenario
+        branch = "observation-branch" in scenario
+        if (tool_loop and tool_results < 3) or (branch and tool_results == 0):
+            call_id = f"call-observation-{tool_results + 1}"
+            message: dict[str, Any] = {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": "local_probe",
+                            "arguments": json.dumps({"round": tool_results + 1}),
+                        },
+                    }
+                ],
+            }
+            finish_reason = "tool_calls"
+        else:
+            content = f"mock-ok-{tool_results}"
+            if "observation-visible-credential" in scenario:
+                sentinel = "VISIBLE_RESPONSE_SECRET_7c91"
+                content = (
+                    "retain-visible-business-output "
+                    f"Authorization: Bearer {sentinel} "
+                    f"callback=https://user:{sentinel}@example.test/cb?signature={sentinel} "
+                    f'metadata={{"api_key":"{sentinel}"}} '
+                    f"form=name=Ada&access_token={sentinel}"
+                )
+            message = {"role": "assistant", "content": content}
+            finish_reason = "stop"
+
         self._write_json(
             200,
             {
-                "id": "chatcmpl-mock",
+                "id": f"chatcmpl-mock-{tool_results}",
                 "object": "chat.completion",
                 "model": model,
                 "choices": [
-                    {
-                        "index": 0,
-                        "message": {"role": "assistant", "content": "mock-ok"},
-                        "finish_reason": "stop",
-                    }
+                    {"index": 0, "message": message, "finish_reason": finish_reason}
                 ],
+                # Deliberately omit cache/reasoning dimensions: they must remain unknown.
                 "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
             },
         )

@@ -909,7 +909,7 @@ async fn response_history_survives_gateway_restart_with_sqlite() {
         ..Default::default()
     };
     let owner = principal("owner");
-    let (gateway, _logs) = crate::Gateway::new(config.clone())
+    let gateway = crate::Gateway::new(config.clone())
         .await
         .expect("first Gateway");
     let mut response = AiResponse::new("upstream", "model");
@@ -927,7 +927,7 @@ async fn response_history_survives_gateway_restart_with_sqlite() {
     write.persist().await.expect("persist response");
     drop(gateway);
 
-    let (gateway, _logs) = crate::Gateway::new(config)
+    let gateway = crate::Gateway::new(config)
         .await
         .expect("restarted Gateway");
     let mut continuation = responses_request(vec![user_message("follow-up")]);

@@ -21,6 +21,10 @@ impl GenerationChainWrite {
         self.parent.root_id.as_deref().unwrap_or(&self.id)
     }
 
+    pub(crate) fn parent_id(&self) -> Option<&str> {
+        self.parent.parent_id.as_deref()
+    }
+
     pub(crate) fn inherited_media_turns(&self) -> &[(usize, Vec<String>)] {
         &self.parent.media_turn_messages
     }

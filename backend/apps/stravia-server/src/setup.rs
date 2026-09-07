@@ -12,11 +12,11 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use stravia_core::Gateway;
 use stravia_core::admin::identity::{AdminAuth, AuthError};
 use stravia_core::config::{
     GatewayConfig, GatewayStorageConfig, SqlStorageConfig, StorageBackendKind,
 };
-use stravia_core::{Gateway, logging};
 use tokio::sync::{Mutex, RwLock};
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -108,14 +108,13 @@ pub async fn prepare_server_app(startup: ServerStartupConfig) -> anyhow::Result<
             })?;
             let auth = AdminAuth::new(storage);
             if auth.has_admin().await.map_err(auth_to_anyhow)? {
-                let (gateway, log_rx) = Gateway::new(gateway_config).await.map_err(|_| {
+                let gateway = Gateway::new(gateway_config).await.map_err(|_| {
                     anyhow::anyhow!(
                         "configured Gateway could not start ({})",
                         startup.config_path.display()
                     )
                 })?;
                 let auth = AdminAuth::new(gateway.storage.clone());
-                spawn_log_collector(&gateway, log_rx);
                 let app = normal_app(gateway, auth, &startup);
                 return Ok(PreparedServerApp {
                     app,
@@ -440,7 +439,7 @@ async fn complete_setup(
     *runtime.setup_token.lock().await = None;
     *runtime.current.write().await = unavailable_router(&runtime);
 
-    let (gateway, log_rx) = match Gateway::new(gateway_config).await {
+    let gateway = match Gateway::new(gateway_config).await {
         Ok(value) => value,
         Err(error) => {
             tracing::warn!(error = %redacted_database_error(&error), "gateway initialization failed");
@@ -451,7 +450,6 @@ async fn complete_setup(
         }
     };
     let auth = AdminAuth::new(gateway.storage.clone());
-    spawn_log_collector(&gateway, log_rx);
     let normal = normal_app(gateway, auth, &runtime.startup);
     *runtime.current.write().await = normal;
     clear_setup_cookie(
@@ -598,16 +596,6 @@ fn normal_app(gateway: Gateway, auth: AdminAuth, startup: &ServerStartupConfig) 
             serve_embedded_webui: startup.serve_embedded_webui,
         },
     )
-}
-
-fn spawn_log_collector(
-    gateway: &Gateway,
-    log_rx: tokio::sync::mpsc::Receiver<stravia_core::logging::LogEntry>,
-) {
-    let storage = gateway.storage.clone();
-    tokio::spawn(async move {
-        logging::run_collector(log_rx, storage).await;
-    });
 }
 
 fn map_setup_auth_error(error: AuthError) -> Response {

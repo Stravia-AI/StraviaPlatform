@@ -275,6 +275,7 @@ Observation、Rejected Request、Debug manifest 与 Trace 文件跟随 `log_rete
 - credential header（含 Authorization、API key、Cookie、Set-Cookie、Proxy Authorization）值永久替换为 `***`；
 - URL userinfo 与 key/token/signature/credential 类 query 值永久替换为 `***`；
 - JSON/form 等结构化 body 中明确的 key/token/secret/password/credential 字段递归替换为 `***`；
+- Debug 识别协议凭据字段与单条应用消息内的完整凭据模式，不承诺拼接多条消息后再识别业务文本中的凭据；这类跨消息内容仍需按敏感数据处理；
 - 其他 prompt、工具参数、工具结果和业务内容在 Debug Trace 中保留，因此开启确认必须明确敏感风险；
 - redaction 在写入前完成；原始凭据不得先落临时文件、数据库或异步队列；
 - Trace event 与 Bundle manifest 记录发生过哪些类别的 redaction，但不记录原值。
@@ -342,7 +343,7 @@ GET    /api/v1/observations/debug-bundles/{ticket}
 Interaction forest 查询参数：
 
 - `anchor_at`：页面打开时固定的 Unix 毫秒时间；
-- `window_index`：0 表示 `[anchor-24h, anchor]`，1 表示 `[anchor-48h, anchor-24h)`，依此类推；
+- `window_index`：0 为实时最新页，下界固定为 `anchor-24h`，持续接收 anchor 之后的新活动；1 表示 `[anchor-48h, anchor-24h)`，后续历史页依此类推；
 - `cursor` / `limit`：同一时间页内按根链游标分批加载；
 - `provider`、`model`、`api_key`、`status`：匹配任一 Interaction/Run 后返回完整根 DAG；
 - 每个节点带 `matched`，前端对非命中节点降噪而不删除。
@@ -381,7 +382,7 @@ SSE 通过普通 `fetch` 携带 Admin Bearer header，并由 `eventsource-parser
 
 ### 10.3 时间页与迁移
 
-页面打开时固定 `anchor_at`。窗口边界不随 wall clock 漂移；手动刷新才重置 anchor。
+页面打开时固定 `anchor_at`。历史窗口边界与已打开历史页的成员不随 wall clock 漂移；手动刷新才重置 anchor。最新页是实时窗口：下界固定为 `anchor_at-24h`，不以 anchor 限制后续活动，因此长时间打开时可覆盖超过 24 小时。Interaction Chains 与 Rejected Requests 使用相同时间窗语义。
 
 根链若因新活动跨入更新的时间页：
 

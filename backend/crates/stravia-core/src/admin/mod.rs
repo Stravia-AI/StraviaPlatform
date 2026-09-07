@@ -36,6 +36,13 @@ pub mod updates;
 mod web_access;
 mod web_search;
 
+pub use crate::interaction_observation::{
+    BundleRequest, BundleResourceKind, BundleStream, ClearHistoryResult, ConfirmedUsage,
+    DebugState, DownloadTicket, ForestPage, ForestQuery, ForestRoot, InteractionDetail,
+    InteractionSummary, ObservationEvent, ObservationStream, ObservationUpdate, RejectionDetail,
+    RejectionPage, RejectionQuery, RejectionSummary, RunDetail, TraceManifest,
+};
+
 pub use media::{
     EligibleMediaModel, MediaUnderstandingConfigError, MediaUnderstandingConfigUpdate,
     MediaUnderstandingConfigView, MediaUnderstandingState,

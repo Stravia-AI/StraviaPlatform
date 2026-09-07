@@ -14,6 +14,7 @@ embed-webui = ["dep:rust-embed"]
 stravia-core = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 axum = { workspace = true, features = ["http1", "json", "original-uri", "query", "tokio"] }
+futures = { workspace = true }
 tower-http = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

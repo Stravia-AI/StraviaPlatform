@@ -101,6 +101,7 @@ def build_harness(work_dir: Path) -> None:
         # 链接冲突,且会重复编译另一套主版本依赖。
         reqwest = {{ version = "0.13", default-features = false, features = ["json"] }}
         serde_json = "1"
+        sha2 = "0.10"
         sqlx = {{ version = "0.9", default-features = false, features = ["runtime-tokio", "postgres"] }}
         tokio = {{ version = "1", features = ["macros", "rt-multi-thread", "time"] }}
         """
@@ -115,13 +116,14 @@ def build_harness(work_dir: Path) -> None:
         use stravia_core::admin::identity::AdminAuth;
         use stravia_core::config::{GatewayConfig, SqlStorageConfig, StorageBackendKind};
         use stravia_core::db::models::{
-            CreateApiKey, CreateProvider, CreateRoute, CreateTarget, LogQuery, ProviderCredentialInput,
+            CreateApiKey, CreateProvider, CreateRoute, CreateTarget, ProviderCredentialInput,
             ProviderSourceInput, PutRoute, UpdateRoute,
         };
         use stravia_core::provider_models::CreateManualProviderModel;
-        use stravia_core::{logging, Gateway};
+        use stravia_core::Gateway;
         use stravia_server::{AdminMode, HttpAppConfig, build_http_app, start_http_server, standalone_local_origins};
         use reqwest::StatusCode;
+        use sha2::{Digest, Sha384};
         use sqlx::postgres::PgPoolOptions;
 
         #[tokio::main]
@@ -146,6 +148,68 @@ def build_harness(work_dir: Path) -> None:
                         )))
                         .execute(&pool)
                         .await?;
+                    }
+                    "prepare_legacy" => {
+                        sqlx::raw_sql(sqlx::AssertSqlSafe(format!("SET search_path TO {schema}")))
+                            .execute(&pool)
+                            .await?;
+                        sqlx::raw_sql(
+                            "CREATE TABLE _sqlx_migrations (version BIGINT PRIMARY KEY, description TEXT NOT NULL, installed_on TIMESTAMPTZ NOT NULL DEFAULT now(), success BOOLEAN NOT NULL, checksum BYTEA NOT NULL, execution_time BIGINT NOT NULL)",
+                        )
+                        .execute(&pool)
+                        .await?;
+                        let migration_dir = PathBuf::from(
+                            env::var("STRAVIA_STORAGE_MIGRATIONS").context("STRAVIA_STORAGE_MIGRATIONS")?,
+                        );
+                        let mut migrations = std::fs::read_dir(migration_dir)?
+                            .collect::<Result<Vec<_>, _>>()?;
+                        migrations.sort_by_key(|entry| entry.file_name());
+                        for entry in migrations {
+                            let name = entry.file_name().to_string_lossy().into_owned();
+                            let Some((version, description)) = name.strip_suffix(".sql").and_then(|name| name.split_once('_')) else { continue; };
+                            let version: i64 = version.parse()?;
+                            if version >= 34 { continue; }
+                            let sql = std::fs::read_to_string(entry.path())?;
+                            // SQL 仅来自测试指定的仓库迁移文件，不插入请求或配置数据。
+                            sqlx::raw_sql(sqlx::AssertSqlSafe(sql.as_str()))
+                                .execute(&pool)
+                                .await?;
+                            sqlx::query("INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) VALUES ($1, $2, TRUE, $3, 0)")
+                                .bind(version)
+                                .bind(description.replace('_', " "))
+                                .bind(Sha384::digest(sql.as_bytes()).to_vec())
+                                .execute(&pool)
+                                .await?;
+                        }
+                        sqlx::query("INSERT INTO request_logs (id, created_at, client_request_body) VALUES ($1, $2, $3)")
+                            .bind("legacy-log-must-not-survive")
+                            .bind(1_i64)
+                            .bind(r#"{"secret":"legacy"}"#)
+                            .execute(&pool)
+                            .await?;
+                    }
+                    "inspect_observation" => {
+                        let tables: i64 = sqlx::query_scalar(
+                            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = $1 AND table_name IN ('interaction_observations', 'inference_run_observations', 'model_turn_observations', 'target_attempt_observations', 'observation_events', 'rejected_request_observations', 'debug_trace_manifests')",
+                        )
+                        .bind(&schema)
+                        .fetch_one(&pool)
+                        .await?;
+                        let legacy: i64 = sqlx::query_scalar(
+                            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = $1 AND table_name = 'request_logs'",
+                        )
+                        .bind(&schema)
+                        .fetch_one(&pool)
+                        .await?;
+                        let indexes: i64 = sqlx::query_scalar(
+                            "SELECT COUNT(*) FROM pg_indexes WHERE schemaname = $1 AND indexname IN ('interaction_observations_window_idx', 'model_turns_analytics_idx', 'target_attempts_analytics_idx', 'observation_events_expiry_idx')",
+                        )
+                        .bind(&schema)
+                        .fetch_one(&pool)
+                        .await?;
+                        println!("observation_tables={tables}");
+                        println!("legacy_tables={legacy}");
+                        println!("observation_indexes={indexes}");
                     }
                     other => anyhow::bail!("unknown schema action: {other}"),
                 }
@@ -195,10 +259,7 @@ def build_harness(work_dir: Path) -> None:
                 other => anyhow::bail!("unknown backend: {other}"),
             }
 
-            let (gw, log_rx) = Gateway::new(config).await?;
-            let storage = gw.storage.clone();
-            tokio::spawn(async move { logging::run_collector(log_rx, storage).await });
-
+            let gw = Gateway::new(config).await?;
             let admin = gw.admin();
             let provider = admin.create_provider(CreateProvider {
                 name: Some(format!("{backend}-e2e-provider")),
@@ -317,16 +378,22 @@ def build_harness(work_dir: Path) -> None:
             let body: serde_json::Value = ok.json().await?;
             ensure!(body["choices"][0]["message"]["content"].as_str() == Some("ok"), "content mismatch");
 
-            let mut logs_total = 0i64;
+            let mut observation_roots = 0i64;
             let mut stats_requests = 0i64;
             for _ in 0..20 {
-                let logs = admin.query_logs(LogQuery { limit: Some(10), offset: Some(0), ..Default::default() }).await?;
+                let forest = client
+                    .get(format!("http://127.0.0.1:{server_port}/api/v1/observations/interactions?limit=10"))
+                    .bearer_auth(&native_session.access_token)
+                    .send()
+                    .await?;
+                ensure!(forest.status() == StatusCode::OK, "Observation forest should 200");
+                let forest: serde_json::Value = forest.json().await?;
+                observation_roots = forest["data"]["root_total"].as_i64().unwrap_or(0);
                 let stats = admin.get_stats_overview(None).await?;
-                logs_total = logs.total;
                 stats_requests = stats.total_requests;
-                if logs_total >= 1 && stats_requests >= 1 {
+                if observation_roots >= 1 && stats_requests >= 1 {
                     println!("backend={backend}");
-                    println!("logs_total={logs_total}");
+                    println!("observation_roots={observation_roots}");
                     println!("stats_total_requests={stats_requests}");
                     println!("proxy_status_ok=200");
                     println!("proxy_status_no_key=401");
@@ -338,7 +405,7 @@ def build_harness(work_dir: Path) -> None:
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
             server.shutdown().await?;
-            anyhow::bail!("log/stat timeout: logs={logs_total} requests={stats_requests}");
+            anyhow::bail!("observation/stat timeout: roots={observation_roots} requests={stats_requests}");
         }
         """
     ).strip() + "\n"
@@ -389,11 +456,14 @@ def postgres_dsn_for_schema(pg_url: str, schema: str) -> str:
     return f"{pg_url}{separator}{search_path}"
 
 
-def run_schema_action(action: str, *, work_dir: Path, pg_url: str, schema: str) -> None:
+def run_schema_action(action: str, *, work_dir: Path, pg_url: str, schema: str) -> str:
     env = os.environ.copy()
     env["STRAVIA_STORAGE_SCHEMA_ACTION"] = action
     env["STRAVIA_STORAGE_PG_URL"] = pg_url
     env["STRAVIA_STORAGE_PG_SCHEMA"] = schema
+    env["STRAVIA_STORAGE_MIGRATIONS"] = str(
+        REPO_ROOT / "backend" / "crates" / "stravia-core" / "migrations" / "postgres"
+    )
 
     proc = subprocess.run(
         ["cargo", "run", "--quiet", "--manifest-path", str(work_dir / "Cargo.toml")],
@@ -407,6 +477,7 @@ def run_schema_action(action: str, *, work_dir: Path, pg_url: str, schema: str) 
         raise RuntimeError(
             f"schema action={action} failed\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
         )
+    return proc.stdout
 
 
 @pytest.fixture(scope="module")

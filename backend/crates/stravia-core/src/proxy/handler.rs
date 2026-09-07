@@ -110,7 +110,7 @@ mod tests {
             data_dir: data_dir.path().to_path_buf(),
             ..Default::default()
         };
-        let (gateway, _logs) = Gateway::new(config).await.expect("gateway init");
+        let gateway = Gateway::new(config).await.expect("gateway init");
         let provider = gateway
             .admin()
             .create_provider(CreateProvider {
@@ -379,7 +379,7 @@ mod tests {
             data_dir: data_dir.path().to_path_buf(),
             ..Default::default()
         };
-        let (gateway, _logs) = crate::Gateway::builder(config)
+        let gateway = crate::Gateway::builder(config)
             .storage(storage)
             .build()
             .await

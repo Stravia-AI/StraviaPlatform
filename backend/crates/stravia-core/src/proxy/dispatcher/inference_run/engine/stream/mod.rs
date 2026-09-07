@@ -5,7 +5,6 @@
 use std::collections::HashSet;
 use std::convert::Infallible;
 use std::sync::Arc;
-use std::time::Instant;
 
 use axum::http::HeaderMap;
 use futures::StreamExt;
@@ -18,8 +17,8 @@ use super::delivery::LiveStreamRequest;
 use super::{
     ClientOutputCommit, ClientProjectionSession, CompletionContext, CompletionFailure,
     CompletionInput, CompletionOutcome, DeliveryAdapter, DeliveryProgress, EarlyPlatformExecution,
-    FollowupModelTurn, LogBuilder, PhaseTracker, ProjectedDeltaBatch, ProjectionDelivery,
-    PublishedPlatformExecutions, RequestExtras, RoundOutcome, StreamResponseAccumulator,
+    FollowupModelTurn, PhaseTracker, ProjectedDeltaBatch, ProjectionDelivery,
+    PublishedPlatformExecutions, RoundOutcome, StreamResponseAccumulator,
     acquire_followup_model_turn, ai_response_to_deltas, buffered_response,
     complete_canonical_response, error_response, hook_failure_response, live_response,
     prepare_platform_markers, render_completion_failure,
@@ -69,10 +68,6 @@ pub(super) struct ModelTurnStreamInput {
     pub(super) generation: super::GenerationChainRun,
     pub(super) inference_run: crate::hook::InferenceRun,
     pub(super) phase: PhaseTracker,
-    pub(super) start: Instant,
-    pub(super) turn_started: Instant,
-    pub(super) request_extras: RequestExtras,
-    pub(super) log: LogBuilder,
     pub(super) projection: ClientProjectionSession,
 }
 
@@ -84,8 +79,26 @@ enum ProjectedDeliveryFailure {
 async fn deliver_projected(
     delivery: &mut DeliveryAdapter,
     projection: &mut ClientProjectionSession,
+    observer: &crate::interaction_observation::RunObserver,
+    model_turn_id: &str,
+    observe_delivery: bool,
     batch: ProjectedDeltaBatch,
 ) -> Result<Vec<String>, ProjectedDeliveryFailure> {
+    let debug_payload = if observe_delivery && observer.debug_enabled() {
+        super::checkpoint_payload(observer, batch.deltas())
+    } else {
+        serde_json::Value::Null
+    };
+    let visible_text = if observe_delivery {
+        batch
+            .deltas()
+            .iter()
+            .filter_map(super::visible_delta_text)
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     let progress = delivery.send_deltas(batch.deltas()).await;
     let outcome = if progress == DeliveryProgress::Sent {
         ProjectionDelivery::Sent
@@ -97,6 +110,23 @@ async fn deliver_projected(
         .await
         .map_err(ProjectedDeliveryFailure::Marker)?;
     if progress == DeliveryProgress::Sent {
+        if observe_delivery {
+            observer.record_debug(|| crate::interaction_observation::RunEvent::Checkpoint {
+                stage: "client_projection_event".into(),
+                model_turn_id: Some(model_turn_id.to_owned()),
+                attempt_id: None,
+                payload: debug_payload,
+            });
+            for text in visible_text {
+                if !text.is_empty() {
+                    observer.record(
+                        crate::interaction_observation::RunEvent::ClientVisibleContentDelta {
+                            text,
+                        },
+                    );
+                }
+            }
+        }
         Ok(published)
     } else {
         Err(ProjectedDeliveryFailure::Delivery(progress))
@@ -115,10 +145,6 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
         generation,
         mut inference_run,
         mut phase,
-        start,
-        mut turn_started,
-        request_extras,
-        log,
         projection,
     } = input;
     let egress = turn.route.egress;
@@ -129,7 +155,6 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
     let (commit_tx, commit_rx) = tokio::sync::oneshot::channel();
     let (terminal_delivery_tx, terminal_delivery_rx) = tokio::sync::oneshot::channel();
     let cancellation = request_context.cancellation.clone();
-    let redact_payloads = request.meta.media_routing.is_some();
     let fixed_media_plan = request.meta.media_routing.clone();
 
     tokio::spawn(async move {
@@ -141,9 +166,15 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
             preflight: preflight_tx,
             terminal_delivery: terminal_delivery_rx,
             commit: commit_rx,
-            capture_payload: true,
         });
         delivery.set_response_profile(&request, previous_response_id.as_deref());
+        let observer = request_context
+            .extensions
+            .get::<crate::interaction_observation::RunObserver>()
+            .expect("admitted Inference Run observer");
+        let generation_committed = super::generation_commit_flag(&request_context);
+        let observe_delivery =
+            !crate::proxy::dispatcher::is_websocket_delivery_deferred(&request_context);
         let mut projection = projection;
         'model_legs: loop {
             let carrier_facts = super::thinking_carrier_facts(
@@ -152,13 +183,14 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                 turn.reasoning_encrypted_content_requested,
             );
             projection.begin_model_leg(carrier_facts, inference_run.exposed_tool_names());
-            let attempt_trace = turn.transport.clone();
             let mut completion_context = CompletionContext::from_model_turn(
                 gateway.clone(),
                 generation.clone(),
                 ingress,
                 &turn.target,
                 turn.route.egress,
+                turn.model_turn_id.clone(),
+                observer.clone(),
             );
             let mut output = turn.output;
             let buffer_terminal_hooks = inference_run.requires_terminal_buffering();
@@ -169,7 +201,6 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
             let mut upstream_response_id = None;
             let mut aborted = false;
             let mut committed_failure_delivered = false;
-            let mut final_client_status = None;
             let mut cancelled = false;
             let mut receiver_closed = false;
             let mut protocol_failed = false;
@@ -260,7 +291,15 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                             };
                             for batch in projected_batches {
                                 let has_visible = !batch.is_empty();
-                                match deliver_projected(&mut delivery, &mut projection, batch).await
+                                match deliver_projected(
+                                    &mut delivery,
+                                    &mut projection,
+                                    &observer,
+                                    &turn.model_turn_id,
+                                    observe_delivery,
+                                    batch,
+                                )
+                                .await
                                 {
                                     Ok(_) => leg_client_output_committed |= has_visible,
                                     Err(ProjectedDeliveryFailure::Delivery(progress)) => {
@@ -353,8 +392,15 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                                 let mut published_references = Vec::new();
                                 for marker in &markers {
                                     let batch = projection.project_platform_marker(marker.marker());
-                                    match deliver_projected(&mut delivery, &mut projection, batch)
-                                        .await
+                                    match deliver_projected(
+                                        &mut delivery,
+                                        &mut projection,
+                                        &observer,
+                                        &turn.model_turn_id,
+                                        observe_delivery,
+                                        batch,
+                                    )
+                                    .await
                                     {
                                         Ok(references) => {
                                             leg_client_output_committed = true;
@@ -431,8 +477,15 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                             Ok(batches) => {
                                 for batch in batches {
                                     let has_visible = !batch.is_empty();
-                                    match deliver_projected(&mut delivery, &mut projection, batch)
-                                        .await
+                                    match deliver_projected(
+                                        &mut delivery,
+                                        &mut projection,
+                                        &observer,
+                                        &turn.model_turn_id,
+                                        observe_delivery,
+                                        batch,
+                                    )
+                                    .await
                                     {
                                         Ok(_) => leg_client_output_committed |= has_visible,
                                         Err(ProjectedDeliveryFailure::Delivery(progress)) => {
@@ -499,38 +552,6 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                     "Model Turn ended without a completion",
                 )));
             }
-            let leg_egress = turn.route.egress;
-            let stream_metrics = attempt_trace.stream_metrics();
-            let mut model_turn_log = Some(
-                log.clone()
-                    .model_turn(&turn.route, &turn.target)
-                    .status(200)
-                    .usage(response.usage.clone())
-                    .upstream_protocol(&leg_egress.to_string())
-                    .upstream_url(&attempt_trace.upstream_url)
-                    .with_upstream_request(
-                        attempt_trace.request_headers.clone(),
-                        attempt_trace.request_body.clone(),
-                    )
-                    .with_upstream_response(
-                        200,
-                        attempt_trace
-                            .response_headers
-                            .lock()
-                            .expect("response headers")
-                            .clone(),
-                        (!redact_payloads).then(|| {
-                            String::from_utf8_lossy(
-                                &attempt_trace.response_body.lock().expect("response body"),
-                            )
-                            .into_owned()
-                        }),
-                        None,
-                    )
-                    .stream_metrics(stream_metrics.chunks_count, stream_metrics.first_chunk_ms)
-                    .model_turn_completed(turn_started),
-            );
-
             let mut pending_generation_chain = None;
             let mut background_executions = Vec::new();
             let mut started_executions = Vec::new();
@@ -556,15 +577,17 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                 .await
                 {
                     CompletionOutcome::PlatformOnly(continuation) => {
-                        model_turn_log
-                            .take()
-                            .expect("current Model Turn log")
-                            .without_client_exchange()
-                            .emit();
                         let marker_delivery = projection.take_staged_delivery();
                         if !marker_delivery.is_empty() {
-                            match deliver_projected(&mut delivery, &mut projection, marker_delivery)
-                                .await
+                            match deliver_projected(
+                                &mut delivery,
+                                &mut projection,
+                                &observer,
+                                &turn.model_turn_id,
+                                observe_delivery,
+                                marker_delivery,
+                            )
+                            .await
                             {
                                 Ok(references) => {
                                     let mut published = request_context
@@ -616,7 +639,6 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                         if !aborted {
                             match acquire_followup_model_turn(
                                 executor.as_ref(),
-                                &gateway,
                                 &headers,
                                 &mut request,
                                 ingress,
@@ -627,33 +649,17 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                                 completion_context.principal(),
                                 &generation,
                                 fixed_media_plan.as_ref(),
-                                start,
-                                &request_extras,
                             )
                             .await
                             {
-                                Ok(FollowupModelTurn::Turn(next_turn, next_turn_started)) => {
+                                Ok(FollowupModelTurn::Turn(next_turn)) => {
                                     turn = next_turn;
-                                    turn_started = next_turn_started;
                                     continue 'model_legs;
                                 }
                                 Ok(FollowupModelTurn::HookResponse {
                                     response: hook_response,
                                     pending_generation_chain: hook_generation_chain,
                                 }) => {
-                                    model_turn_log = Some(
-                                        LogBuilder::from_dispatch(
-                                            &gateway,
-                                            &ingress.to_string(),
-                                            &request.model,
-                                            request.reasoning.level,
-                                            request_context.auth_subject.as_ref(),
-                                            start,
-                                        )
-                                        .stream_flag(true)
-                                        .status(200)
-                                        .with_req_extras(&request_extras),
-                                    );
                                     response = hook_response;
                                     pending_generation_chain = hook_generation_chain;
                                     let hook_marker_delivery = projection.take_staged_delivery();
@@ -719,20 +725,6 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                                     }
                                 }
                                 Ok(FollowupModelTurn::StreamError(error)) => {
-                                    final_client_status = error.status_code;
-                                    model_turn_log = Some(
-                                        LogBuilder::from_dispatch(
-                                            &gateway,
-                                            &ingress.to_string(),
-                                            &request.model,
-                                            request.reasoning.level,
-                                            request_context.auth_subject.as_ref(),
-                                            start,
-                                        )
-                                        .stream_flag(true)
-                                        .status(error.status_code.unwrap_or(500))
-                                        .with_req_extras(&request_extras),
-                                    );
                                     let error = [AiStreamDelta::StreamError { error }];
                                     if delivery.send_deltas(&error).await == DeliveryProgress::Sent
                                         && delivery.finish_stream("failed".into()).await
@@ -793,7 +785,16 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                 if let Some(marker_delivery) = staged_delivery.take()
                     && !marker_delivery.is_empty()
                 {
-                    match deliver_projected(&mut delivery, &mut projection, marker_delivery).await {
+                    match deliver_projected(
+                        &mut delivery,
+                        &mut projection,
+                        &observer,
+                        &turn.model_turn_id,
+                        observe_delivery,
+                        marker_delivery,
+                    )
+                    .await
+                    {
                         Ok(references) => {
                             let mut published = request_context
                                 .extensions
@@ -819,7 +820,16 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                 if !aborted && !cancelled && !receiver_closed && !protocol_failed {
                     let suffix = projection.complete_live_model_leg();
                     if !suffix.is_empty() {
-                        match deliver_projected(&mut delivery, &mut projection, suffix).await {
+                        match deliver_projected(
+                            &mut delivery,
+                            &mut projection,
+                            &observer,
+                            &turn.model_turn_id,
+                            observe_delivery,
+                            suffix,
+                        )
+                        .await
+                        {
                             Ok(_) => {}
                             Err(ProjectedDeliveryFailure::Delivery(progress)) => match progress {
                                 DeliveryProgress::Cancelled => cancelled = true,
@@ -974,7 +984,10 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                     pending_generation_chain.take()
                 {
                     match pending.persist().await {
-                        Ok(()) => true,
+                        Ok(()) => {
+                            generation_committed.store(true, std::sync::atomic::Ordering::Release);
+                            true
+                        }
                         Err(error) => {
                             tracing::error!(
                                 "failed to commit Generation Chain node after terminal delivery: {error}"
@@ -989,17 +1002,6 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
             }
             if let Some(mut phase) = owned_phase.take() {
                 phase.finish();
-            }
-            let client_response_body = if redact_payloads {
-                None
-            } else {
-                delivery.captured_body()
-            };
-            if let Some(model_turn_log) = model_turn_log.take() {
-                model_turn_log
-                    .status(final_client_status.unwrap_or(if aborted { 500 } else { 200 }))
-                    .with_client_response(None, client_response_body)
-                    .emit();
             }
             break 'model_legs;
         }

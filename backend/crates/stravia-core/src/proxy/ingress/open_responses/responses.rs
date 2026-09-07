@@ -12,7 +12,8 @@ use crate::protocol::ids::OPEN_RESPONSES_2026_04_24;
 use crate::protocol::ir::RawEnvelope;
 use crate::protocol::transform::ProtocolTransform;
 use crate::proxy::context::RequestContext;
-use crate::proxy::dispatcher::{dispatch_pipeline, log_decode_error};
+use crate::proxy::dispatcher::dispatch_pipeline;
+use crate::proxy::ingress::observation;
 use crate::proxy::security::{ClientCredential, Security};
 
 pub async fn handler(
@@ -21,22 +22,53 @@ pub async fn handler(
     headers: HeaderMap,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
-    let Json(body) = match body {
-        Ok(body) => body,
-        Err(rejection) => return json_rejection(rejection),
+    ctx.ingress_protocol = OPEN_RESPONSES_2026_04_24;
+    let body = match body {
+        Ok(Json(body)) => body,
+        Err(rejection) => {
+            let observer = observation::begin(
+                &gw,
+                &ctx,
+                "POST",
+                "/v1/responses",
+                OPEN_RESPONSES_2026_04_24,
+            );
+            return observation::reject(
+                observer,
+                "decode",
+                "invalid_json",
+                json_rejection(rejection),
+            );
+        }
     };
+    let observer = observation::begin(
+        &gw,
+        &ctx,
+        "POST",
+        "/v1/responses",
+        OPEN_RESPONSES_2026_04_24,
+    );
     if !has_unambiguous_bearer(&headers) {
-        return authentication_error();
-    }
-    if body.get("background").and_then(Value::as_bool) == Some(true) {
-        return protocol_error(
-            StatusCode::BAD_REQUEST,
-            "unsupported_feature",
-            Some("background"),
-            "Background responses are not supported.",
+        return observation::reject(
+            observer,
+            "authentication",
+            "unauthorized",
+            authentication_error(),
         );
     }
-    ctx.ingress_protocol = OPEN_RESPONSES_2026_04_24;
+    if body.get("background").and_then(Value::as_bool) == Some(true) {
+        return observation::reject(
+            observer,
+            "protocol",
+            "unsupported_feature",
+            protocol_error(
+                StatusCode::BAD_REQUEST,
+                "unsupported_feature",
+                Some("background"),
+                "Background responses are not supported.",
+            ),
+        );
+    }
     let flat_headers: std::collections::HashMap<String, String> = headers
         .iter()
         .filter_map(|(k, v)| {
@@ -51,18 +83,23 @@ pub async fn handler(
         .expect("registered ingress adapter");
     let request = match pair.decode_request(body) {
         Ok(request) => request,
-        Err(error) => {
-            let _ = log_decode_error(&gw, &envelope, OPEN_RESPONSES_2026_04_24, error);
-            return protocol_error(
-                StatusCode::BAD_REQUEST,
+        Err(_) => {
+            return observation::reject(
+                observer,
+                "decode",
                 "invalid_request",
-                None,
-                "Request body is not a compatible Responses request.",
+                protocol_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request",
+                    None,
+                    "Request body is not a compatible Responses request.",
+                ),
             );
         }
     };
     let response = dispatch_pipeline(
         gw,
+        observer,
         headers,
         envelope,
         request,

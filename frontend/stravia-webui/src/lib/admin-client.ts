@@ -22,8 +22,16 @@ import type {
   CreateProvider,
   CreateWebProvider,
   GatewayStatus,
-  LogPage,
-  LogQuery,
+  ForestPage,
+  ForestQuery,
+  InteractionDetail,
+  RejectionPage,
+  RejectionQuery,
+  RejectionDetail,
+  DebugState,
+  ClearHistoryResult,
+  DownloadTicket,
+  BundleResourceKind,
   Route,
   ImageCapabilityDrift,
   ModelCapabilities,
@@ -263,19 +271,45 @@ function mapRequest(command: string, args?: Record<string, unknown>): RequestMap
       return { method: 'PUT', path: `/api-keys/${args?.id}`, body: args?.input as Record<string, unknown> }
     case 'deleteApiKey':
       return { method: 'DELETE', path: `/api-keys/${args?.id}` }
-    case 'queryLogs': {
-      const query = args?.query as LogQuery | undefined
+    case 'queryObservationForest':
+    case 'queryObservationRejections': {
       const params = new URLSearchParams()
-      for (const [key, value] of Object.entries(query ?? {})) {
+      for (const [key, value] of Object.entries((args?.query as ForestQuery | RejectionQuery | undefined) ?? {})) {
         if (value != null && value !== '') params.set(key, String(value))
       }
       const suffix = params.size > 0 ? `?${params}` : ''
-      return { method: 'GET', path: `/logs${suffix}` }
+      const resource = command === 'queryObservationForest' ? 'interactions' : 'rejections'
+      return { method: 'GET', path: `/observations/${resource}${suffix}` }
     }
-    case 'getLog':
-      return { method: 'GET', path: `/logs/${args?.id}` }
-    case 'clearLogs':
-      return { method: 'DELETE', path: '/logs' }
+    case 'getObservationInteraction': {
+      const params = new URLSearchParams()
+      const query = (args?.query as ForestQuery | undefined) ?? {}
+      for (const key of ['provider', 'model', 'api_key', 'status'] as const) {
+        if (query[key]) params.set(key, String(query[key]))
+      }
+      const suffix = params.size > 0 ? `?${params}` : ''
+      return { method: 'GET', path: `/observations/interactions/${encodeURIComponent(String(args?.id))}${suffix}` }
+    }
+    case 'getObservationRejection':
+      return { method: 'GET', path: `/observations/rejections/${encodeURIComponent(String(args?.id))}` }
+    case 'getObservationDebug':
+      return { method: 'GET', path: '/observations/debug' }
+    case 'setObservationDebug':
+      return {
+        method: 'PUT',
+        path: '/observations/debug',
+        body: { enabled: args?.enabled, confirmed: args?.enabled === true },
+      }
+    case 'clearObservationHistory':
+      return { method: 'DELETE', path: '/observations/history' }
+    case 'issueObservationBundleTicket': {
+      const resource = args?.kind === 'rejected_request' ? 'rejections' : 'interactions'
+      return {
+        method: 'POST',
+        path: `/observations/${resource}/${encodeURIComponent(String(args?.id))}/debug-bundle-tickets`,
+        body: args?.throughSequence == null ? {} : { through_sequence: args.throughSequence },
+      }
+    }
     case 'getStatsOverview':
       return { method: 'GET', path: statsPath('/stats/overview', args?.hours) }
     case 'getStatsHourly':
@@ -451,10 +485,17 @@ export const admin = {
     update: (id: string, input: UpdateApiKey) => request<ApiKey>('updateApiKey', { id, input }),
     delete: (id: string) => request<void>('deleteApiKey', { id }),
   },
-  logs: {
-    query: (query: LogQuery) => request<LogPage>('queryLogs', { query }),
-    get: (id: string) => request<LogPage['items'][number]>('getLog', { id }),
-    clear: () => request<void>('clearLogs'),
+  observations: {
+    forest: (query: ForestQuery) => request<ForestPage>('queryObservationForest', { query }),
+    interaction: (id: string, query?: ForestQuery) =>
+      request<InteractionDetail>('getObservationInteraction', { id, query }),
+    rejections: (query: RejectionQuery) => request<RejectionPage>('queryObservationRejections', { query }),
+    rejection: (id: string) => request<RejectionDetail>('getObservationRejection', { id }),
+    debug: () => request<DebugState>('getObservationDebug'),
+    setDebug: (enabled: boolean) => request<DebugState>('setObservationDebug', { enabled }),
+    clearHistory: () => request<ClearHistoryResult>('clearObservationHistory'),
+    issueBundleTicket: (kind: BundleResourceKind, id: string, throughSequence?: number) =>
+      request<DownloadTicket>('issueObservationBundleTicket', { kind, id, throughSequence }),
   },
   stats: {
     overview: (hours?: number) => request<StatsOverview>('getStatsOverview', { hours }),

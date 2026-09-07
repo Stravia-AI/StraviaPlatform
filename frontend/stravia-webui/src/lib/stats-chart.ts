@@ -35,7 +35,7 @@ export function buildLatencyChart(
     points.push({
       bucket: formatBucket(row.hour),
       firstToken: row.avg_first_token_ms == null ? null : row.avg_first_token_ms / 1000,
-      duration: row.avg_duration_ms / 1000,
+      duration: row.avg_duration_ms == null ? null : row.avg_duration_ms / 1000,
     })
     previousHour = Number.isFinite(hour) ? hour : undefined
   }

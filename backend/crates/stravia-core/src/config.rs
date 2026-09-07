@@ -66,9 +66,6 @@ pub struct GatewayConfig {
     /// `model_cache` when a change is detected. Set to `Duration::ZERO` to
     /// disable (default for desktop / single-process deployments).
     pub config_poll_interval: Duration,
-    #[cfg(debug_assertions)]
-    /// Debug-only directory for redacted-header, full-body protocol wire captures.
-    pub wire_capture_dir: Option<PathBuf>,
 }
 
 impl Default for GatewayConfig {
@@ -80,8 +77,6 @@ impl Default for GatewayConfig {
             storage: GatewayStorageConfig::default(),
             product_update_download_supported: false,
             config_poll_interval: Duration::ZERO,
-            #[cfg(debug_assertions)]
-            wire_capture_dir: None,
         }
     }
 }

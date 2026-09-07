@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 
 import pytest
 
@@ -26,6 +27,12 @@ from tests.e2e.proxy.conftest import (
 )
 
 INGRESS_PROTOCOLS = list(PROTOCOLS)
+OBSERVED_INGRESS_PROTOCOL = {
+    "openai-chat": "openai-compatible/chat-completions/v1",
+    "open-responses": "open-responses/responses/2026-04-24",
+    "anthropic-messages": "anthropic-messages/messages/2023-06-01",
+    "google-content": "google-gemini/generate-content/v1beta",
+}
 
 # Real LLMs tokenise the anchor (e.g. ``STRAVIA_PROBE_BASIC_STREAM``) into
 # ``NY`` / ``RO`` / ``_PRO`` / ... fragments emitted across many SSE frames.
@@ -131,7 +138,7 @@ def _request_headers(ingress: str, api_key: str) -> dict[str, str]:
 @pytest.mark.parametrize("ingress_protocol", INGRESS_PROTOCOLS)
 @pytest.mark.parametrize("replay_model", ALL_REPLAY_MODELS)
 def test_protocol_matrix(
-    stravia_proxy_base: tuple[str, str],
+    stravia_proxy_base: dict[str, object],
     scenario_metadata: dict[str, dict],
     ingress_protocol: str,
     replay_model: str,
@@ -148,10 +155,12 @@ def test_protocol_matrix(
     anchor: str = meta["anchor"]
     expected = meta["expected_fields"].get(ingress_protocol, [])
 
-    proxy_base, api_key = stravia_proxy_base
+    proxy_base = str(stravia_proxy_base["base"])
+    api_key = str(stravia_proxy_base["api_key"])
     url = _build_request_url(proxy_base, ingress_protocol, replay_model, stream)
     body = _build_request_body(ingress_protocol, replay_model, stream)
 
+    request_started_at = int(time.time() * 1000)
     status, raw = http_request(
         "POST",
         url,
@@ -186,6 +195,76 @@ def test_protocol_matrix(
             f"{ingress_protocol} <- {replay_model}: expected field "
             f"`{field}` missing from converted response (first 512 bytes: {text[:512]})"
         )
+
+    route_ids = stravia_proxy_base["route_ids"]
+    assert isinstance(route_ids, dict)
+    route_id = str(route_ids[replay_model])
+    admin_headers = stravia_proxy_base["admin_headers"]
+    assert isinstance(admin_headers, dict)
+    deadline = time.time() + 10.0
+    observed: dict | None = None
+    while time.time() < deadline:
+        query_status, forest = http_request(
+            "GET",
+            f"{proxy_base}/api/v1/observations/interactions?model={route_id}&limit=100",
+            headers=admin_headers,
+        )
+        assert query_status == 200, forest
+        interactions = [
+            interaction
+            for root in forest["data"]["roots"]
+            for interaction in root["interactions"]
+            if interaction["first_route_id"] == route_id
+            and interaction["started_at"] >= request_started_at
+        ]
+        if interactions:
+            latest = max(interactions, key=lambda item: item["last_event_sequence"])
+            detail_status, detail = http_request(
+                "GET",
+                f"{proxy_base}/api/v1/observations/interactions/{latest['id']}",
+                headers=admin_headers,
+            )
+            assert detail_status == 200, detail
+            candidate = detail["data"]
+            if (
+                candidate["runs"]
+                and candidate["runs"][-1]["ingress_protocol"]
+                == OBSERVED_INGRESS_PROTOCOL[ingress_protocol]
+                and candidate["runs"][-1]["status"] != "running"
+                and candidate["runs"][-1]["debug_events"]
+            ):
+                observed = candidate
+                break
+        time.sleep(0.1)
+    assert observed is not None, f"Observation not persisted for {ingress_protocol} <- {replay_model}"
+    run = observed["runs"][-1]
+    assert run["ingress_protocol"] == OBSERVED_INGRESS_PROTOCOL[ingress_protocol]
+    sequences = [event["sequence"] for event in run["events"]]
+    assert sequences == sorted(sequences)
+    kinds = [event["kind"] for event in run["events"]]
+    assert kinds.index("target_attempt_started") < kinds.index("target_attempt_finished")
+    assert kinds.index("target_attempt_finished") < kinds.index("run_finished")
+    assert run["client_output_committed"] is True
+
+    trace = run["debug_events"]
+    directions = {event.get("direction") for event in trace if isinstance(event, dict)}
+    assert {
+        "client_to_platform",
+        "upstream_request",
+        "upstream_response",
+        "platform_to_client",
+    } <= directions
+    stages = {event.get("stage") for event in trace if isinstance(event, dict)}
+    assert {
+        "decoded_request",
+        "restored_request",
+        "effective_model_request",
+        "canonical_request",
+        "canonical_terminal_response",
+        "response_after_hook",
+        "client_projection_event",
+        "delivery_terminal",
+    } <= stages
 
 
 # ---------------------------------------------------------------------------

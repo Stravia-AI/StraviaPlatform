@@ -98,16 +98,6 @@ struct Args {
         global = true
     )]
     config_poll_interval: u64,
-
-    #[cfg(debug_assertions)]
-    #[arg(
-        long,
-        env = "STRAVIA_WIRE_CAPTURE_DIR",
-        help = "Diagnostic JSONL directory for client/upstream wire payloads; headers are redacted but bodies may contain sensitive content",
-        help_heading = "Advanced",
-        global = true
-    )]
-    wire_capture_dir: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -196,8 +186,6 @@ fn base_gateway_config(args: &Args, data_dir: PathBuf) -> GatewayConfig {
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned),
         config_poll_interval: Duration::from_secs(args.config_poll_interval),
-        #[cfg(debug_assertions)]
-        wire_capture_dir: args.wire_capture_dir.clone(),
         ..Default::default()
     }
 }

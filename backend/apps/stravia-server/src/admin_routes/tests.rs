@@ -7,7 +7,7 @@ use tower::ServiceExt;
 #[tokio::test]
 async fn status_reports_the_running_server_version() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
-    let (gateway, _logs) = Gateway::new(GatewayConfig {
+    let gateway = Gateway::new(GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -27,7 +27,7 @@ async fn status_reports_the_running_server_version() -> anyhow::Result<()> {
 #[tokio::test]
 async fn update_routes_expose_instance_state_and_exact_skip_version() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
-    let (gateway, _logs) = Gateway::new(GatewayConfig {
+    let gateway = Gateway::new(GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -82,7 +82,7 @@ async fn update_routes_expose_instance_state_and_exact_skip_version() -> anyhow:
     );
 
     let other_data_dir = tempfile::tempdir()?;
-    let (other_gateway, _logs) = Gateway::new(GatewayConfig {
+    let other_gateway = Gateway::new(GatewayConfig {
         data_dir: other_data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -117,7 +117,7 @@ async fn update_routes_expose_instance_state_and_exact_skip_version() -> anyhow:
 #[tokio::test]
 async fn provider_allowance_routes_share_the_core_contract() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
-    let (gateway, _logs) = Gateway::new(GatewayConfig {
+    let gateway = Gateway::new(GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -148,7 +148,7 @@ async fn provider_allowance_routes_share_the_core_contract() -> anyhow::Result<(
 
 async fn automatic_callback_failure_body(locale: &str) -> anyhow::Result<String> {
     let data_dir = tempfile::tempdir()?;
-    let (gateway, _logs) = Gateway::new(GatewayConfig {
+    let gateway = Gateway::new(GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -206,7 +206,7 @@ async fn automatic_callback_accepts_english_and_falls_back_for_an_invalid_locale
 #[tokio::test]
 async fn manual_oauth_init_exposes_the_effective_callback_contract() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
-    let (gateway, _logs) = Gateway::new(GatewayConfig {
+    let gateway = Gateway::new(GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -240,7 +240,7 @@ async fn manual_oauth_init_exposes_the_effective_callback_contract() -> anyhow::
 async fn general_provider_endpoint_rejects_oauth_channels_without_a_session() -> anyhow::Result<()>
 {
     let data_dir = tempfile::tempdir()?;
-    let (gateway, _logs) = Gateway::new(GatewayConfig {
+    let gateway = Gateway::new(GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -288,7 +288,7 @@ async fn general_provider_endpoint_rejects_oauth_channels_without_a_session() ->
 #[tokio::test]
 async fn terminal_manual_completion_releases_the_auto_listener() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
-    let (gateway, _logs) = Gateway::new(GatewayConfig {
+    let gateway = Gateway::new(GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -347,7 +347,7 @@ async fn terminal_manual_completion_releases_the_auto_listener() -> anyhow::Resu
 async fn automatic_callback_listener_is_loopback_only_and_returns_safe_html() -> anyhow::Result<()>
 {
     let data_dir = tempfile::tempdir()?;
-    let (gateway, _logs) = Gateway::new(GatewayConfig {
+    let gateway = Gateway::new(GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -423,7 +423,7 @@ async fn automatic_callback_listener_is_loopback_only_and_returns_safe_html() ->
 #[tokio::test]
 async fn automatic_callback_uses_the_requested_simplified_chinese_locale() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
-    let (gateway, _logs) = Gateway::new(GatewayConfig {
+    let gateway = Gateway::new(GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -467,7 +467,7 @@ async fn automatic_callback_uses_the_requested_simplified_chinese_locale() -> an
 #[tokio::test]
 async fn catalog_routes_replace_the_legacy_provider_presets_route() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
-    let (gateway, _logs) = Gateway::new(GatewayConfig {
+    let gateway = Gateway::new(GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -557,7 +557,7 @@ async fn catalog_routes_replace_the_legacy_provider_presets_route() -> anyhow::R
 #[tokio::test]
 async fn prepare_provider_model_uses_the_post_template_contract() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
-    let (gateway, _logs) = Gateway::new(GatewayConfig {
+    let gateway = Gateway::new(GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -643,7 +643,7 @@ async fn prepare_provider_model_uses_the_post_template_contract() -> anyhow::Res
 #[tokio::test]
 async fn web_search_routes_replace_the_legacy_web_research_routes() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
-    let (gateway, _logs) = Gateway::new(GatewayConfig {
+    let gateway = Gateway::new(GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -667,7 +667,7 @@ async fn web_search_routes_replace_the_legacy_web_research_routes() -> anyhow::R
 #[tokio::test]
 async fn provider_model_routes_support_slash_ids_and_exact_decimal_costs() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
-    let (gateway, _logs) = Gateway::new(GatewayConfig {
+    let gateway = Gateway::new(GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -740,7 +740,7 @@ async fn provider_model_routes_support_slash_ids_and_exact_decimal_costs() -> an
 #[tokio::test]
 async fn route_bind_endpoint_owns_one_click_target_creation() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
-    let (gateway, _logs) = Gateway::new(GatewayConfig {
+    let gateway = Gateway::new(GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
@@ -809,7 +809,7 @@ async fn route_bind_endpoint_owns_one_click_target_creation() -> anyhow::Result<
 async fn web_access_admin_routes_persist_masked_providers_and_atomic_priority() -> anyhow::Result<()>
 {
     let data_dir = tempfile::tempdir()?;
-    let (gateway, _logs) = Gateway::new(GatewayConfig {
+    let gateway = Gateway::new(GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })

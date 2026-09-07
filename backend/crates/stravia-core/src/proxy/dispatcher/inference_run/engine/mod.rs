@@ -16,7 +16,6 @@ mod completion;
 mod delivery;
 mod errors;
 mod followup;
-mod log;
 mod projection;
 mod stream;
 mod util;
@@ -26,15 +25,13 @@ use self::completion::*;
 use self::delivery::{
     BufferedDeliveryProgress, DeliveryAdapter, DeliveryProgress, after_body_delivery,
 };
-pub(super) use self::errors::hook_failure_response;
 use self::errors::*;
+pub(super) use self::errors::{error_response, hook_failure_response};
 use self::followup::{FollowupModelTurn, acquire_followup_model_turn};
-use self::log::*;
 use self::projection::*;
 use self::util::{client_session_id, forwarded_client_headers};
 use super::{Phase, PhaseTracker, RunInput};
 use std::sync::Arc;
-use std::time::Instant;
 
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -45,19 +42,18 @@ use crate::agent::{CanonicalEvent, ModelTurn, ModelTurnExecutor, TurnInput};
 #[cfg(test)]
 use crate::db::models::Provider;
 use crate::error::{AccessDenial, AuthFailure, GatewayError};
+use crate::interaction_observation::{IngressObserver, RunEvent, RunStart};
 use crate::model_turn::StreamResponseAccumulator;
 #[cfg(test)]
 use crate::protocol::ids::Protocol;
 use crate::protocol::ids::ProtocolId;
-use crate::protocol::ir::Usage;
 use crate::protocol::ir::request::MediaRoutingMode;
-use crate::protocol::ir::{AiRequest, AiResponse, RawEnvelope};
+use crate::protocol::ir::{AiRequest, AiResponse};
 #[cfg(test)]
 use crate::provider::VendorRegistry;
 #[cfg(test)]
 use crate::provider::vendor::Vendor;
 use crate::proxy::context::RequestContext;
-use crate::proxy::observability::{LogExtras, send_log};
 use crate::proxy::security::{ClientCredential, Security};
 
 #[cfg(test)]
@@ -154,6 +150,84 @@ pub(super) fn live_response(response: Response) -> RoundOutcome {
     }
 }
 
+fn reject_before_admission(
+    observer: &mut Option<IngressObserver>,
+    stage: &str,
+    code: &str,
+    response: Response,
+) -> Response {
+    if let Some(observer) = observer.take() {
+        return crate::proxy::ingress::observation::reject(observer, stage, code, response);
+    }
+    response
+}
+
+trait ObservationRecorder {
+    fn record_event(&self, event: RunEvent);
+}
+
+impl ObservationRecorder for IngressObserver {
+    fn record_event(&self, event: RunEvent) {
+        self.record(event);
+    }
+}
+
+impl ObservationRecorder for crate::interaction_observation::RunObserver {
+    fn record_event(&self, event: RunEvent) {
+        self.record(event);
+    }
+}
+
+fn checkpoint_payload<R: ObservationRecorder, T: serde::Serialize + ?Sized>(
+    recorder: &R,
+    value: &T,
+) -> serde_json::Value {
+    serde_json::to_value(value).unwrap_or_else(|error| {
+        recorder.record_event(RunEvent::ObservationGap {
+            reason: format!("checkpoint_serialization: {error}"),
+        });
+        serde_json::json!({ "unavailable": "checkpoint_serialization" })
+    })
+}
+
+fn generation_commit_flag(
+    request_context: &RequestContext,
+) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+    request_context
+        .extensions
+        .get::<super::RunTerminalContext>()
+        .expect("Inference Run terminal context")
+        .generation_committed
+}
+
+fn stage_visible_response(request_context: &RequestContext, response: &AiResponse) {
+    let Some(mut terminal) = request_context
+        .extensions
+        .get::<super::RunTerminalContext>()
+    else {
+        return;
+    };
+    terminal.visible_text.extend(
+        response
+            .items
+            .iter()
+            .filter_map(|item| item.output_text_ref().or_else(|| item.refusal_ref()))
+            .filter(|text| !text.is_empty())
+            .map(ToOwned::to_owned),
+    );
+    request_context.extensions.insert(terminal);
+}
+
+fn visible_delta_text(delta: &crate::protocol::ir::AiStreamDelta) -> Option<&str> {
+    match delta {
+        crate::protocol::ir::AiStreamDelta::TextDelta(text)
+        | crate::protocol::ir::AiStreamDelta::TextDeltaWithMetadata { text, .. }
+        | crate::protocol::ir::AiStreamDelta::RefusalDelta(text)
+        | crate::protocol::ir::AiStreamDelta::RefusalDeltaWithIndex { text, .. } => Some(text),
+        _ => None,
+    }
+}
+
 fn enter_phase(phase: &mut PhaseTracker, next: Phase) -> Result<(), Box<Response>> {
     phase
         .transition(next)
@@ -185,7 +259,6 @@ struct DispatchContext<'a> {
     gw: Gateway,
     executor: Arc<dyn ModelTurnExecutor>,
     headers: HeaderMap,
-    envelope: RawEnvelope,
     request: &'a mut AiRequest,
     ingress: ProtocolId,
     ctx: &'a mut RequestContext,
@@ -204,8 +277,6 @@ struct SharedModelTurnInput<'a> {
     inference_run: &'a mut Option<crate::hook::InferenceRun>,
     phase: &'a mut PhaseTracker,
     generation: GenerationChainRun,
-    start: Instant,
-    request_extras: &'a RequestExtras,
     headers: &'a HeaderMap,
     projection: &'a mut Option<ClientProjectionSession>,
 }
@@ -278,11 +349,26 @@ pub(super) async fn orchestrate(
         gateway: gw,
         executor,
         headers,
-        envelope,
+        envelope: _,
         request,
         ingress,
         context: mut ctx,
     } = input;
+    let ingress_observer = ctx
+        .extensions
+        .take::<IngressObserver>()
+        .expect("Inference Run ingress observer");
+    ingress_observer.record_debug(|| RunEvent::Checkpoint {
+        stage: "decoded_request".into(),
+        model_turn_id: None,
+        attempt_id: None,
+        payload: request.debug_value().unwrap_or_else(|_| {
+            ingress_observer.record(RunEvent::ObservationGap {
+                reason: "decoded_request_serialization".into(),
+            });
+            serde_json::json!({ "unavailable": "decoded_request_serialization" })
+        }),
+    });
     let mut request = request;
     if let Some(session_id) = client_session_id(&headers, &request) {
         crate::generation_chain::set_generation_session_id(&mut request, session_id);
@@ -299,11 +385,17 @@ pub(super) async fn orchestrate(
     if let Some(crate::protocol::ir::ProtocolExt::OpenResponses(extension)) = request.ext.as_ref()
         && extension.background == Some(true)
     {
-        return parameter_error_response(
+        let response = parameter_error_response(
             StatusCode::BAD_REQUEST,
             "unsupported_feature",
             "background",
             "Responses background mode is not supported.",
+        );
+        return reject_before_admission(
+            &mut Some(ingress_observer),
+            "protocol",
+            "unsupported_feature",
+            response,
         );
     }
     let previous_response_id = match request.ext.as_ref() {
@@ -318,14 +410,22 @@ pub(super) async fn orchestrate(
         .await
     {
         Ok(principal) => principal,
-        Err(error) => return inference_access_error_response(error),
+        Err(error) => {
+            let response = inference_access_error_response(error);
+            return reject_before_admission(
+                &mut Some(ingress_observer),
+                "authentication",
+                "unauthorized",
+                response,
+            );
+        }
     };
     let concurrency_limit = authenticated_principal.concurrency_limit;
     let api_key_name = authenticated_principal.api_key_name;
     let principal = authenticated_principal.principal;
     ctx.auth_subject = Some(crate::proxy::context::AuthSubject {
         api_key_id: Some(principal.api_key_id().to_owned()),
-        label: Some(api_key_name),
+        label: Some(api_key_name.clone()),
     });
     let generation_chain_write = if matches!(request_kind, crate::hook::RequestKind::Generation) {
         match gw.generation_chains.begin(principal.clone(), request).await {
@@ -339,16 +439,18 @@ pub(super) async fn orchestrate(
                         root_id,
                     );
                 }
-                #[cfg(debug_assertions)]
-                if let Some(capture) = &gw.wire_capture {
-                    capture.bind_chain(&ctx.request_id, write.root_id());
-                }
                 request = write.request().clone();
                 Some(write)
             }
             Err(error) => {
                 let code = error.to_string();
-                return coded_error_response(StatusCode::BAD_REQUEST, &code, &code);
+                let response = coded_error_response(StatusCode::BAD_REQUEST, &code, &code);
+                return reject_before_admission(
+                    &mut Some(ingress_observer),
+                    "protocol",
+                    &code,
+                    response,
+                );
             }
         }
     } else {
@@ -364,13 +466,25 @@ pub(super) async fn orchestrate(
     {
         Ok(resolution) => resolution,
         Err(error) => {
-            return coded_error_response(
+            let response = coded_error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "history_marker_unavailable",
                 &error.to_string(),
             );
+            return reject_before_admission(
+                &mut Some(ingress_observer),
+                "restoration",
+                "history_marker_unavailable",
+                response,
+            );
         }
     };
+    ingress_observer.record_debug(|| RunEvent::Checkpoint {
+        stage: "restored_request".into(),
+        model_turn_id: None,
+        attempt_id: None,
+        payload: checkpoint_payload(&ingress_observer, &request),
+    });
     if marker_resolution.restored_protected_thinking_segments > 0 {
         request.meta.vendor.ingress.insert(
             "__stravia_opaque_context_required".into(),
@@ -382,7 +496,13 @@ pub(super) async fn orchestrate(
         tokio::select! {
             admission = gw.principal_admission.acquire_wait(&principal, concurrency_limit) => admission,
             _ = ctx.cancellation.cancelled() => {
-                return error_response(499, "request cancelled");
+                let response = error_response(499, "request cancelled");
+                return reject_before_admission(
+                    &mut Some(ingress_observer),
+                    "admission",
+                    "cancelled",
+                    response,
+                );
             }
         }
     } else {
@@ -391,12 +511,101 @@ pub(super) async fn orchestrate(
     };
     let admission = match admission {
         Ok(admission) => admission,
-        Err(error) => return inference_access_error_response(error),
+        Err(error) => {
+            let response = inference_access_error_response(error);
+            return reject_before_admission(
+                &mut Some(ingress_observer),
+                "admission",
+                "concurrency_limit",
+                response,
+            );
+        }
     };
     let inherited_media_turns = generation_chain_write
         .as_ref()
         .map(|write| write.inherited_media_turns().to_vec())
         .unwrap_or_default();
+    let generation_root_id = generation_chain_write
+        .as_ref()
+        .map(|write| write.root_id().to_owned());
+    let generation_parent_id = generation_chain_write
+        .as_ref()
+        .and_then(|write| write.parent_id().map(ToOwned::to_owned));
+    let generation_node_id = generation_chain_write
+        .as_ref()
+        .map(|write| write.id().to_owned());
+    let has_new_user = generation_chain_write.as_ref().map_or_else(
+        || {
+            request
+                .items
+                .iter()
+                .any(|item| item.role == crate::protocol::ir::Role::User)
+        },
+        |write| {
+            write
+                .request_delta()
+                .items
+                .iter()
+                .any(|item| item.role == crate::protocol::ir::Role::User)
+        },
+    );
+    let canonical_fingerprint =
+        match serde_json::to_value(&client_request).and_then(|mut canonical| {
+            canonical.sort_all_objects();
+            serde_json::to_vec(&canonical)
+        }) {
+            Ok(canonical) => crate::protocol::ir::canonical::hash_hex(
+                &crate::protocol::ir::canonical::hash_bytes(&canonical),
+            ),
+            Err(error) => {
+                ingress_observer.record(RunEvent::ObservationGap {
+                    reason: format!("canonical_fingerprint_serialization: {error}"),
+                });
+                format!("unavailable:{}", ctx.request_id)
+            }
+        };
+    let (route_id, model_display_name) = gw
+        .model_cache
+        .read()
+        .await
+        .models
+        .iter()
+        .find(|model| model.model_id == request.model)
+        .map(|model| {
+            (
+                model.id.clone(),
+                Some(model.effective_display_name().to_owned()),
+            )
+        })
+        .unwrap_or_else(|| (request.model.clone(), None));
+    let observer = ingress_observer.admit(RunStart {
+        id: ctx.request_id.clone(),
+        principal: principal.api_key_id().to_owned(),
+        api_key_id: Some(principal.api_key_id().to_owned()),
+        api_key_name: Some(api_key_name),
+        generation_root_id: generation_root_id.clone(),
+        generation_parent_id: generation_parent_id.clone(),
+        has_new_user,
+        canonical_fingerprint,
+        route_id,
+        model_display_name,
+        ingress_protocol: ingress.to_string(),
+    });
+    if let Some(root_id) = generation_root_id.clone() {
+        observer.record(RunEvent::GenerationAssociated {
+            root_id,
+            parent_id: generation_parent_id,
+            has_new_user,
+        });
+    }
+    ctx.extensions.insert(observer.clone());
+    ctx.extensions.insert(super::RunTerminalContext {
+        generation_node_id,
+        generation_root_id,
+        generation_committed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        waiting_client: false,
+        visible_text: Vec::new(),
+    });
     let mut generation = GenerationChainRun {
         principal: principal.clone(),
         write: generation_chain_write,
@@ -434,7 +643,6 @@ pub(super) async fn orchestrate(
         gw: gw.clone(),
         executor,
         headers,
-        envelope,
         request: &mut request,
         ingress,
         ctx: &mut ctx,
@@ -478,7 +686,6 @@ async fn dispatch_pipeline_inner(context: DispatchContext<'_>) -> Response {
         gw,
         executor,
         headers,
-        envelope,
         request,
         ingress,
         ctx,
@@ -487,14 +694,12 @@ async fn dispatch_pipeline_inner(context: DispatchContext<'_>) -> Response {
         generation,
         projection,
     } = context;
-    let start = Instant::now();
     let mut delivery = DeliveryState::Buffered;
     let response = Box::pin(dispatch_round(
         DispatchContext {
             gw: gw.clone(),
             executor,
             headers,
-            envelope,
             request: &mut *request,
             ingress,
             ctx: &mut *ctx,
@@ -503,7 +708,6 @@ async fn dispatch_pipeline_inner(context: DispatchContext<'_>) -> Response {
             generation: &mut *generation,
             projection: &mut *projection,
         },
-        start,
         &mut delivery,
     ))
     .await;
@@ -517,14 +721,12 @@ async fn dispatch_pipeline_inner(context: DispatchContext<'_>) -> Response {
 }
 async fn dispatch_round(
     context: DispatchContext<'_>,
-    start: Instant,
     delivery_state: &mut DeliveryState,
 ) -> Response {
     let DispatchContext {
         gw,
         executor,
         headers,
-        envelope,
         request,
         ingress,
         ctx,
@@ -538,29 +740,6 @@ async fn dispatch_round(
         if request.meta.media_routing.is_none() {
             request.meta.media_routing = fixed_media_plan.clone();
         }
-        // Derive logging strings from envelope.
-        let method_owned = envelope.method.clone();
-        let path_owned = envelope.path.clone();
-        let request_body_str = (!crate::media::contains_images(request)
-            && fixed_media_plan.is_none()
-            && request.meta.media_routing.is_none())
-        .then(|| {
-            envelope
-                .body
-                .as_ref()
-                .and_then(|body| serde_json::to_string(body).ok())
-        })
-        .flatten();
-        let request_headers_str =
-            crate::proxy::observability::header_map_to_redacted_json(&envelope.headers);
-        // Built early so it can be used by both pre-loop log entries and the per-target handlers.
-        let req_extras = RequestExtras {
-            method: method_owned.clone(),
-            path: path_owned.clone(),
-            headers: request_headers_str.clone(),
-            body: request_body_str.clone(),
-        };
-
         // Request hooks run before the route is selected so a hook may change the
         // model or synthesize a response. Authorization is applied to the resulting
         // model below.
@@ -615,10 +794,27 @@ async fn dispatch_round(
                         thinking_carrier_facts(ingress, ingress, false),
                         run.exposed_tool_names(),
                     );
+                    let observer = ctx
+                        .extensions
+                        .get::<crate::interaction_observation::RunObserver>()
+                        .expect("admitted Inference Run observer");
+                    observer.record_debug(|| RunEvent::Checkpoint {
+                        stage: "response_after_hook".into(),
+                        model_turn_id: None,
+                        attempt_id: None,
+                        payload: checkpoint_payload(&observer, &response),
+                    });
                     if let Err(error) = projection_session.project_staged(&mut response, &[]).await
                     {
                         return hook_failure_response(error);
                     }
+                    observer.record_debug(|| RunEvent::Checkpoint {
+                        stage: "client_projection_event".into(),
+                        model_turn_id: None,
+                        attempt_id: None,
+                        payload: checkpoint_payload(&observer, &response),
+                    });
+                    stage_visible_response(ctx, &response);
                     let marker_delivery = projection_session.take_staged_delivery();
                     let pending_generation_chain =
                         generation_chain.write.take().and_then(|mut write| {
@@ -632,18 +828,6 @@ async fn dispatch_round(
                             );
                             write.stage(&mut response, None).then_some(write)
                         });
-                    LogBuilder::from_dispatch(
-                        &gw,
-                        &ingress.to_string(),
-                        &request.model,
-                        request.reasoning.level,
-                        ctx.auth_subject.as_ref(),
-                        start,
-                    )
-                    .stream_flag(request.stream.enabled)
-                    .status(200)
-                    .with_req_extras(&req_extras)
-                    .emit();
                     if let Err(response) = enter_phase(phase, Phase::SemanticComplete) {
                         return *response;
                     }
@@ -658,6 +842,7 @@ async fn dispatch_round(
                     let mut projection = projection
                         .take()
                         .expect("delivered Hook Client Projection session");
+                    let generation_committed = generation_commit_flag(ctx);
                     return after_body_delivery(response, async move {
                         if let Err(error) = projection
                             .report_delivery(marker_delivery, ProjectionDelivery::Sent)
@@ -668,12 +853,14 @@ async fn dispatch_round(
                             );
                             return;
                         }
-                        if let Some(mut pending) = pending_generation_chain
-                            && let Err(error) = pending.persist().await
-                        {
-                            tracing::error!(
-                                "failed to commit delivered Hook Generation Chain node: {error}"
-                            );
+                        if let Some(mut pending) = pending_generation_chain {
+                            match pending.persist().await {
+                                Ok(()) => generation_committed
+                                    .store(true, std::sync::atomic::Ordering::Release),
+                                Err(error) => tracing::error!(
+                                    "failed to commit delivered Hook Generation Chain node: {error}"
+                                ),
+                            }
                         }
                     });
                 }
@@ -717,8 +904,6 @@ async fn dispatch_round(
             inference_run,
             phase,
             generation: generation_chain.clone(),
-            start,
-            request_extras: &req_extras,
             headers: &headers,
             projection,
         })
@@ -746,28 +931,38 @@ async fn dispatch_round(
 
 async fn acquire_turn(
     executor: &dyn ModelTurnExecutor,
-    gateway: &Gateway,
     headers: &HeaderMap,
     request: &AiRequest,
-    ingress: ProtocolId,
     request_context: &RequestContext,
     inference_run: &mut crate::hook::InferenceRun,
     principal: &crate::hook::Principal,
-    start: Instant,
-    request_extras: &RequestExtras,
-) -> Result<(ModelTurn, AiRequest, Instant), RoundOutcome> {
+) -> Result<(ModelTurn, AiRequest), RoundOutcome> {
     let make_input = |effective_request: AiRequest| {
-        let input = TurnInput::new(principal.clone(), effective_request).with_execution(
-            request_context.cancellation.clone(),
-            request_context.deadline.at(),
-        );
-        #[cfg(debug_assertions)]
-        let input = input.with_wire_capture_id(request_context.request_id.clone());
-        input.with_extra_headers(forwarded_client_headers(headers))
+        let observer = request_context
+            .extensions
+            .get::<crate::interaction_observation::RunObserver>()
+            .expect("admitted Inference Run observer");
+        observer.record_debug(|| RunEvent::Checkpoint {
+            stage: "effective_model_request".into(),
+            model_turn_id: None,
+            attempt_id: None,
+            payload: checkpoint_payload(&observer, &effective_request),
+        });
+        TurnInput::new(principal.clone(), effective_request)
+            .with_execution(
+                request_context.cancellation.clone(),
+                request_context.deadline.at(),
+            )
+            .with_observer(
+                request_context
+                    .extensions
+                    .get::<crate::interaction_observation::RunObserver>()
+                    .expect("admitted Inference Run observer"),
+            )
+            .with_extra_headers(forwarded_client_headers(headers))
     };
 
     let mut effective_request = request.clone();
-    let turn_started = Instant::now();
     let turn = match executor
         .execute(make_input(effective_request.clone()))
         .await
@@ -780,44 +975,16 @@ async fn acquire_turn(
             let original_tools = effective_request.tools.clone();
             inference_run.remove_exposed_tools(&mut effective_request);
             if effective_request.tools == original_tools {
-                return Err(model_turn_execute_failure(
-                    gateway,
-                    request,
-                    ingress,
-                    start,
-                    request_extras,
-                    request_context.auth_subject.as_ref(),
-                    error,
-                ));
+                return Err(model_turn_execute_failure(error));
             }
             executor
                 .execute(make_input(effective_request.clone()))
                 .await
-                .map_err(|error| {
-                    model_turn_execute_failure(
-                        gateway,
-                        request,
-                        ingress,
-                        start,
-                        request_extras,
-                        request_context.auth_subject.as_ref(),
-                        error,
-                    )
-                })?
+                .map_err(model_turn_execute_failure)?
         }
-        Err(error) => {
-            return Err(model_turn_execute_failure(
-                gateway,
-                request,
-                ingress,
-                start,
-                request_extras,
-                request_context.auth_subject.as_ref(),
-                error,
-            ));
-        }
+        Err(error) => return Err(model_turn_execute_failure(error)),
     };
-    Ok((turn, effective_request, turn_started))
+    Ok((turn, effective_request))
 }
 
 async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutcome {
@@ -830,22 +997,16 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
         inference_run,
         phase,
         generation,
-        start,
-        request_extras,
         headers,
         projection,
     } = input;
-    let (turn, effective_request, turn_started) = match acquire_turn(
+    let (turn, effective_request) = match acquire_turn(
         executor.as_ref(),
-        gateway,
         headers,
         request,
-        ingress,
         request_context,
         inference_run.as_mut().expect("buffered Inference Run"),
         &generation.principal,
-        start,
-        request_extras,
     )
     .await
     {
@@ -862,21 +1023,6 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
     }
 
     if request.stream.enabled {
-        let mut stream_request_extras = request_extras.clone();
-        if request.meta.media_routing.is_some() {
-            stream_request_extras.body = None;
-        }
-        let log = LogBuilder::from_dispatch(
-            gateway,
-            &ingress.to_string(),
-            &request.model,
-            request.reasoning.level,
-            request_context.auth_subject.as_ref(),
-            start,
-        )
-        .stream_flag(true)
-        .model_turn(&turn.route, &turn.target)
-        .with_req_extras(&stream_request_extras);
         return stream::handle_model_turn_stream(stream::ModelTurnStreamInput {
             turn,
             executor: Arc::clone(&executor),
@@ -888,10 +1034,6 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
             generation,
             inference_run: inference_run.take().expect("live Inference Run"),
             phase: std::mem::replace(phase, PhaseTracker::at(Phase::Finished)),
-            start,
-            turn_started,
-            request_extras: stream_request_extras,
-            log,
             projection: projection.take().expect("live Client Projection session"),
         })
         .await;
@@ -914,13 +1056,17 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
 
     let route = turn.route.clone();
     let streamed = turn.streamed;
-    let attempt_trace = turn.transport.clone();
     let completion_context = CompletionContext::from_model_turn(
         gateway.clone(),
         generation,
         ingress,
         &turn.target,
         turn.route.egress,
+        turn.model_turn_id.clone(),
+        request_context
+            .extensions
+            .get::<crate::interaction_observation::RunObserver>()
+            .expect("admitted Inference Run observer"),
     );
     let mut output = turn.output;
     let mut completed_response = None;
@@ -997,43 +1143,6 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
         response.stop_reason = completed_response.stop_reason;
     }
     let upstream_response_id = (!response.id.is_empty()).then(|| response.id.clone());
-    let stream_metrics = attempt_trace.stream_metrics();
-    let mut model_turn_log = Some(
-        LogBuilder::from_dispatch(
-            gateway,
-            &ingress.to_string(),
-            &request.model,
-            request.reasoning.level,
-            request_context.auth_subject.as_ref(),
-            turn_started,
-        )
-        .stream_flag(request.stream.enabled)
-        .model_turn(&route, &turn.target)
-        .status(200)
-        .usage(response.usage.clone())
-        .with_req_extras(request_extras)
-        .upstream_protocol(&route.egress.to_string())
-        .upstream_url(&attempt_trace.upstream_url)
-        .with_upstream_request(
-            attempt_trace.request_headers.clone(),
-            attempt_trace.request_body.clone(),
-        )
-        .with_upstream_response(
-            200,
-            attempt_trace
-                .response_headers
-                .lock()
-                .expect("response headers")
-                .clone(),
-            request.meta.media_routing.is_none().then(|| {
-                String::from_utf8_lossy(&attempt_trace.response_body.lock().expect("response body"))
-                    .into_owned()
-            }),
-            None,
-        )
-        .stream_metrics(stream_metrics.chunks_count, stream_metrics.first_chunk_ms)
-        .model_turn_completed(turn_started),
-    );
     let completed = match complete_canonical_response(
         &completion_context,
         CompletionInput {
@@ -1052,11 +1161,6 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
     .await
     {
         CompletionOutcome::PlatformOnly(continuation) => {
-            model_turn_log
-                .take()
-                .expect("current Model Turn log")
-                .without_client_exchange()
-                .emit();
             let marker_delivery = projection_session.take_staged_delivery();
             match projection_session
                 .report_delivery(marker_delivery, ProjectionDelivery::Sent)
@@ -1136,12 +1240,6 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
     if delivered.progress != BufferedDeliveryProgress::Prepared {
         return buffered_response(delivered.response);
     }
-    let client_response_body = request
-        .meta
-        .media_routing
-        .is_none()
-        .then(|| delivered.body.clone());
-
     if !marker_delivery.is_empty()
         || !background_executions.is_empty()
         || !started_executions.is_empty()
@@ -1149,6 +1247,7 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
     {
         let mut marker_context = completion_context.clone();
         let gateway = gateway.clone();
+        let generation_committed = generation_commit_flag(request_context);
         let request_context = request_context.clone();
         let mut projection_session = projection
             .take()
@@ -1197,61 +1296,20 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
                     );
                 }
             }
-            if let Some(write) = pending_generation_chain.as_mut()
-                && let Err(error) = write.persist().await
-            {
-                tracing::error!("failed to commit delivered Generation Chain node: {error}");
+            if let Some(write) = pending_generation_chain.as_mut() {
+                match write.persist().await {
+                    Ok(()) => {
+                        generation_committed.store(true, std::sync::atomic::Ordering::Release)
+                    }
+                    Err(error) => {
+                        tracing::error!("failed to commit delivered Generation Chain node: {error}")
+                    }
+                }
             }
         });
     }
-    model_turn_log
-        .take()
-        .expect("current Model Turn log")
-        .with_client_response(None, client_response_body)
-        .emit();
+    stage_visible_response(request_context, &prepared_response);
     buffered_completion(delivered.response)
-}
-
-/// Owned request HTTP metadata kept for log entries. Used by the non-stream
-/// and stream handlers (not the force-stream handler which omits request
-/// details from its log path).
-#[derive(Clone)]
-pub(super) struct RequestExtras {
-    method: String,
-    path: String,
-    headers: Option<String>,
-    body: Option<String>,
-}
-
-// Utility helpers (is_retryable, runtime_binding_headers, load_model_backends,
-// forwarded_client_headers) are in util.rs.
-
-pub(crate) fn log_decode_error(
-    gw: &Gateway,
-    envelope: &RawEnvelope,
-    ingress: ProtocolId,
-    err: impl std::fmt::Display,
-) -> Response {
-    let msg = format!("invalid request: {err}");
-    let request_body_str = envelope
-        .body
-        .as_ref()
-        .and_then(|b| serde_json::to_string(b).ok());
-    let request_headers_str = serde_json::to_string(&envelope.headers).ok();
-    let ingress_str = ingress.to_string();
-    LogBuilder::from_dispatch(gw, &ingress_str, "", None, None, Instant::now())
-        .status(400)
-        .with_req_extras(&RequestExtras {
-            method: envelope.method.clone(),
-            path: envelope.path.clone(),
-            headers: request_headers_str,
-            body: request_body_str,
-        })
-        .resp_body(Some(
-            serde_json::json!({ "error": { "message": msg.clone() } }).to_string(),
-        ))
-        .emit();
-    error_response(400, &msg)
 }
 
 // StreamResponseAccumulator and ensure_tool_index are in accumulator.rs.

@@ -21,11 +21,14 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@dagrejs/dagre": "3.1.1",
     "@tanstack/svelte-query": "^6.1.44",
     "@tanstack/svelte-table": "9.2.3",
     "@tauri-apps/api": "^2.11.1",
     "@tauri-apps/plugin-opener": "^2.5.4",
+    "@xyflow/svelte": "1.6.6",
     "class-variance-authority": "^0.7.1",
+    "eventsource-parser": "4.1.0",
     "layerchart": "^2.3.0"
   },
   "devDependencies": {

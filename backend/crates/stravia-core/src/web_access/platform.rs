@@ -205,7 +205,7 @@ mod tests {
     #[tokio::test]
     async fn internal_leaves_keep_bounded_search_and_fetch_contracts() {
         let directory = tempfile::tempdir().expect("temporary directory");
-        let (gateway, _logs) = crate::Gateway::new(crate::config::GatewayConfig {
+        let gateway = crate::Gateway::new(crate::config::GatewayConfig {
             data_dir: directory.path().to_path_buf(),
             ..Default::default()
         })
