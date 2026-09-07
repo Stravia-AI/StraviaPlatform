@@ -364,7 +364,9 @@ describe('Stravia desktop smoke', () => {
   it('captures a rejected request through native Request Records and clears retained diagnostics', async () => {
     const serverPort = (await browser.tauri.execute(({ core }) => core.invoke('get_server_port'))) as number
     await $('a[href="/logs"]').click()
+    await expect(browser).toHaveUrl(expect.stringContaining('/logs'))
     const debugSwitch = await $('[role="switch"][aria-label="Debug"]')
+    await expect(debugSwitch).toBeEnabled()
     await expect(debugSwitch).toHaveAttribute('aria-checked', 'false')
     await debugSwitch.click()
     await expect($('[role="alertdialog"]')).toBeDisplayed()

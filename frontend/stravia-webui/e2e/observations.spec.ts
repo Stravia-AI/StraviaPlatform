@@ -488,6 +488,13 @@ test.describe('Interaction Observation canvas', () => {
     await session.send('Input.dispatchTouchEvent', {
       type: 'touchMove',
       touchPoints: [
+        { x: centerX - 50, y: centerY, id: 0 },
+        { x: centerX + 50, y: centerY, id: 1 },
+      ],
+    })
+    await session.send('Input.dispatchTouchEvent', {
+      type: 'touchMove',
+      touchPoints: [
         { x: centerX - 75, y: centerY, id: 0 },
         { x: centerX + 75, y: centerY, id: 1 },
       ],

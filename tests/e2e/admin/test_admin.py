@@ -585,13 +585,19 @@ def test_proxy_request_updates_usage_analytics(admin_env: dict[str, str]) -> Non
                 ),
                 None,
             )
-            if attributed_usage is not None:
+            if (
+                attributed_usage is not None
+                and attributed_usage.get("total_input_tokens") is not None
+                and attributed_usage.get("total_output_tokens") is not None
+            ):
                 break
         time.sleep(0.3)
 
     assert attributed_usage is not None
     assert attributed_usage["api_key_name"] == "test-key-log"
     assert attributed_usage["request_count"] >= 1
+    assert attributed_usage["total_input_tokens"] is not None
+    assert attributed_usage["total_output_tokens"] is not None
     assert attributed_usage["total_input_tokens"] >= 3
     assert attributed_usage["total_output_tokens"] >= 2
     assert attributed_usage["cache_read_tokens"] is None

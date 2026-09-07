@@ -106,7 +106,9 @@ tasks:
 
   test:e2e:admin:
     desc: Run the Admin service E2E tests.
-    deps: [build:server]
+    # The development-origin E2E starts `cargo run`; prebuild that profile so a
+    # cold CI runner tests the server instead of timing out during compilation.
+    deps: [build:server, build:server:debug]
     env:
       STRAVIA_BINARY: '{{.ROOT_DIR}}/target/release/stravia-server{{if eq OS "windows"}}.exe{{end}}'
     cmds:
