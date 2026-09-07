@@ -199,10 +199,7 @@ impl GenerationChainStore {
             persisted.extend(
                 nodes
                     .into_iter()
-                    .map(|node| {
-                        serde_json::from_value::<PersistedResponseNode>(node.payload)
-                            .map(|payload| (node.id, payload))
-                    })
+                    .map(super::materialize::decode_response_node)
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(|_| "item_reference_not_found".to_string())?,
             );
@@ -245,10 +242,7 @@ impl GenerationChainStore {
                 persisted.extend(
                     nodes
                         .into_iter()
-                        .map(|node| {
-                            serde_json::from_value::<PersistedResponseNode>(node.payload)
-                                .map(|payload| (node.id, payload))
-                        })
+                        .map(super::materialize::decode_response_node)
                         .collect::<Result<Vec<_>, _>>()
                         .map_err(|_| not_found.to_string())?,
                 );
@@ -395,10 +389,7 @@ impl GenerationChainStore {
             .map_err(|_| not_found.to_string())?;
         let persisted = nodes
             .into_iter()
-            .map(|node| {
-                serde_json::from_value::<PersistedResponseNode>(node.payload)
-                    .map(|payload| (node.id, payload))
-            })
+            .map(super::materialize::decode_response_node)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| not_found.to_string())?;
         let root_id = persisted.first().map(|(id, _)| id.to_string());
@@ -668,6 +659,19 @@ impl GenerationChainStore {
         let effective_request = effective_request.unwrap_or_else(|| request_delta.clone());
         effective_state.refresh_request_semantics(&effective_request);
         effective_state.append_output(&response);
+        if let Some(proof) = effective_request
+            .meta
+            .redaction
+            .provider_proof()
+            .map_err(|_| {
+                TurnCommitError::Storage("reversible redaction semantic proof unavailable".into())
+            })?
+        {
+            effective_state.context_fingerprint =
+                crate::protocol::ir::canonical::hash_hex(&proof.context_hash);
+            effective_state.context_messages = proof.context_messages;
+            effective_state.canonical_controls_fingerprint = proof.controls_fingerprint;
+        }
         let mut client_request_delta = canonical_client_history_request(&request_delta);
         let mut client_items = parent.parent_client_items.clone();
         let parent_items = client_items.len();

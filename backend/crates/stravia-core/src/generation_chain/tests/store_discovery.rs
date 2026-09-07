@@ -834,6 +834,207 @@ async fn response_history_survives_adapter_reconstruction() {
 }
 
 #[tokio::test]
+async fn legacy_tool_meta_cannot_authorize_restored_encoded_payloads() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let gateway = crate::Gateway::new(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let owner = principal("legacy-tool-owner");
+    let key = crate::protocol::ir::TOOL_RESULT_CONTENT_KIND_META;
+    let business = serde_json::json!([
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "opaque"},
+         (key): "business-data"}
+    ])
+    .to_string();
+    // These are actual pre-reservation AiItems, including the old decoder's
+    // verbatim vendor extra field. Do not manufacture them with a fresh factory.
+    let legacy_item = serde_json::json!({
+        "role": "tool", "content": business, "tool_calls": null,
+        "tool_call_id": "legacy-call",
+        "meta": {(key): "content_blocks", "vendor-extra": { (key): "nested-business" }}
+    });
+    for version in 1..=4 {
+        let id = format!("resp_legacy_tool_{version}");
+        let mutation = match version {
+            3 => serde_json::json!({"type": "append", "items": [legacy_item]}),
+            4 => serde_json::json!({"type": "replace", "items": [legacy_item]}),
+            _ => serde_json::Value::Null,
+        };
+        let mut response = AiResponse::new("upstream", "model");
+        response.items = vec![serde_json::from_value(legacy_item.clone()).unwrap()];
+        gateway
+            .turn_chains
+            .commit(TurnCommit {
+                id: TurnNodeId::new(&id),
+                kind: TurnNodeKind::Response,
+                parent_id: None,
+                principal: owner.clone(),
+                payload_version: version,
+                payload: serde_json::json!({
+                    "client_delta": {"messages": [legacy_item], "system": null},
+                    "client_output": [legacy_item], "effective_input": [legacy_item],
+                    "effective_history_mutation": mutation, "effective_system": null,
+                    "effective_output": response, "upstream_response_id": null,
+                    "effective_state": GenerationChainState::default()
+                }),
+                idle_ttl: Duration::from_secs(60),
+                reusable_prefix: None,
+            })
+            .await
+            .unwrap();
+        let store = GenerationChainStore::from_turn_chain(
+            Arc::clone(&gateway.turn_chains),
+            Duration::from_secs(60),
+        );
+        let mut request = responses_request(Vec::new());
+        let Some(ProtocolExt::OpenResponses(ext)) = request.ext.as_mut() else {
+            unreachable!()
+        };
+        ext.previous_response_id = Some(id);
+        store
+            .materialize_parent(&owner, &mut request)
+            .await
+            .unwrap();
+        assert_eq!(request.items.len(), 2);
+        for item in &request.items {
+            assert_eq!(
+                item.meta.as_ref().unwrap()["vendor-extra"][key],
+                "nested-business"
+            );
+            let MessageContent::Text(text) = &item.content else {
+                panic!("legacy tool text")
+            };
+            assert_eq!(text, &business);
+        }
+        for _ in 0..2 {
+            crate::hook::ContextSnapshot::from_request(
+                &request,
+                crate::hook::ContextCompleteness::Full,
+            )
+            .write_to_request(&mut request);
+        }
+        gateway
+            .storage
+            .settings()
+            .set("reversible_redaction_enabled", "false")
+            .await
+            .unwrap();
+        let before = serde_json::to_value(&request.items).unwrap();
+        gateway
+            .redaction
+            .protect(&owner, &mut request)
+            .await
+            .unwrap();
+        assert_eq!(serde_json::to_value(&request.items).unwrap(), before);
+        gateway
+            .storage
+            .settings()
+            .set("reversible_redaction_enabled", "true")
+            .await
+            .unwrap();
+        assert!(matches!(
+            gateway.redaction.protect(&owner, &mut request).await,
+            Err(crate::reversible_redaction::RedactionError::AmbiguousToolResult)
+        ));
+    }
+}
+
+#[tokio::test]
+async fn persisted_tool_text_semantics_keep_plain_secrets_and_media_distinct() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let gateway = crate::Gateway::new(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let owner = principal("fresh-tool-owner");
+    let secret = "ghp_8Dq7mP2vL9sX4aR6tK3nF5wH1jB0cYzUeIoG";
+    let encoded = serde_json::json!([
+        {"type": "text", "text": secret},
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": secret}}
+    ])
+    .to_string();
+    let plain = AiItem::function_call_output("plain", serde_json::Value::String(encoded.clone()));
+    let mut media = AiItem::function_call_output("media", serde_json::Value::String(encoded));
+    media.meta = Some(serde_json::json!({
+        (crate::protocol::ir::TOOL_RESULT_CONTENT_KIND_META): "content_blocks"
+    }));
+    let store = GenerationChainStore::from_turn_chain(
+        Arc::clone(&gateway.turn_chains),
+        Duration::from_secs(60),
+    );
+    store
+        .save(GenerationChainCommit {
+            principal: owner.clone(),
+            id: "resp_tool_semantics".into(),
+            parent: ActiveGenerationChain::default(),
+            request_delta: responses_request(vec![plain, media]),
+            effective_request: None,
+            response: AiResponse::new("upstream", "model"),
+            upstream_response_id: None,
+            effective_state: GenerationChainState::default(),
+        })
+        .await
+        .unwrap();
+    drop(store);
+    let reconstructed = GenerationChainStore::from_turn_chain(
+        Arc::clone(&gateway.turn_chains),
+        Duration::from_secs(60),
+    );
+    let mut request = responses_request(Vec::new());
+    let Some(ProtocolExt::OpenResponses(ext)) = request.ext.as_mut() else {
+        unreachable!()
+    };
+    ext.previous_response_id = Some("resp_tool_semantics".into());
+    reconstructed
+        .materialize_parent(&owner, &mut request)
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        crate::hook::ContextSnapshot::from_request(
+            &request,
+            crate::hook::ContextCompleteness::Full,
+        )
+        .write_to_request(&mut request);
+    }
+    gateway
+        .storage
+        .settings()
+        .set("reversible_redaction_enabled", "true")
+        .await
+        .unwrap();
+    gateway
+        .redaction
+        .protect(&owner, &mut request)
+        .await
+        .unwrap();
+    let payloads: Vec<serde_json::Value> = request
+        .items
+        .iter()
+        .map(|item| {
+            let MessageContent::Blocks(blocks) = &item.content else {
+                panic!("rebuilt tool result")
+            };
+            let ContentBlock::ToolResult {
+                content: serde_json::Value::String(text),
+                ..
+            } = &blocks[0]
+            else {
+                panic!("encoded tool payload")
+            };
+            serde_json::from_str(text).unwrap()
+        })
+        .collect();
+    assert!(!payloads[0].to_string().contains(secret));
+    assert_ne!(payloads[1][0]["text"], secret);
+    assert_eq!(payloads[1][1]["source"]["data"], secret);
+}
+
+#[tokio::test]
 async fn legacy_response_payload_keeps_target_continuation() {
     let turn_chain: Arc<dyn TurnChainStore> = Arc::new(crate::turn_chain::test_store().await);
     let owner = principal("owner");

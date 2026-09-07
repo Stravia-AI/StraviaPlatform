@@ -21,6 +21,7 @@ pub mod provider;
 pub mod provider_catalog;
 pub mod provider_models;
 pub mod proxy;
+pub(crate) mod reversible_redaction;
 pub mod router;
 pub mod storage;
 pub mod thinking;

@@ -31,9 +31,246 @@ impl AgentTool for EchoTool {
         &self,
         _context: AgentToolContext,
         input: Value,
-    ) -> Result<Value, super::super::AgentToolError> {
-        Ok(input)
+    ) -> Result<crate::agent::AgentToolOutput, super::super::AgentToolError> {
+        Ok(crate::agent::AgentToolOutput {
+            content: input,
+            content_kind: crate::protocol::ir::ToolResultContentKind::Json,
+        })
     }
+}
+
+struct BlockOutputTool(Vec<ContentBlock>);
+
+#[async_trait]
+impl crate::hook::PlatformTool for BlockOutputTool {
+    fn id(&self) -> ToolId {
+        ToolId::new("echo")
+    }
+
+    fn external_name(&self) -> &str {
+        "echo"
+    }
+
+    fn parameters(&self) -> Value {
+        serde_json::json!({"type": "object"})
+    }
+
+    async fn execute(
+        &self,
+        _arguments: Value,
+        _context: crate::hook::ToolExecutionContext,
+    ) -> Result<Value, crate::hook::PlatformToolError> {
+        Err(crate::hook::PlatformToolError::new("use typed output"))
+    }
+
+    async fn execute_blocks(
+        &self,
+        _arguments: Value,
+        _context: crate::hook::ToolExecutionContext,
+    ) -> Result<Vec<ContentBlock>, crate::hook::PlatformToolError> {
+        Ok(self.0.clone())
+    }
+}
+
+async fn platform_output_roundtrip(blocks: Vec<ContentBlock>) -> (AiRequest, PlatformToolResult) {
+    let tool = Arc::new(BlockOutputTool(blocks));
+    let registry = crate::hook::PlatformToolRegistry::new(vec![tool.clone()]).unwrap();
+    let ordinary = registry
+        .execute(
+            &ToolId::new("echo"),
+            "call-1".into(),
+            serde_json::json!({}),
+            crate::hook::ToolExecutionContext {
+                request_id: "request".into(),
+                run_id: "run".into(),
+                principal: Principal::new("owner"),
+                cancellation: CancellationToken::new(),
+                progress: None,
+            },
+        )
+        .await;
+    let mut tool_response = AiResponse::new("response-1", "model-1");
+    tool_response.extend_tool_calls(vec![ToolCall {
+        id: "call-1".into(),
+        name: "echo".into(),
+        arguments: "{}".into(),
+    }]);
+    tool_response.stop_reason = Some("tool_calls".into());
+    let mut final_response = AiResponse::new("response-2", "model-1");
+    final_response.push_output_text(r#"{"answer":"done"}"#);
+    let model = Arc::new(crate::agent::InMemoryModelTurnExecutor::scripted([
+        tool_response,
+        final_response,
+    ]));
+    let runner = AgentRunner::new(
+        enabled_registry().await,
+        model.clone(),
+        vec![Arc::new(crate::agent::PlatformToolAgentAdapter::new(
+            tool, 1,
+        ))],
+        Arc::new(crate::turn_chain::test_store().await),
+    )
+    .unwrap();
+    let events = runner
+        .run(AgentInput {
+            principal: Principal::new("owner"),
+            definition_id: AgentDefinitionId::new("research"),
+            parent_turn_id: None,
+            prompt: "question".into(),
+            artifacts: Vec::new(),
+            cancellation: CancellationToken::new(),
+        })
+        .collect::<Vec<_>>()
+        .await;
+    assert!(
+        matches!(events.last(), Some(AgentEvent::Completed(_))),
+        "{events:?}"
+    );
+    let mut requests = model.requests();
+    assert_eq!(requests.len(), 2);
+    (requests.remove(1), ordinary)
+}
+
+fn agent_tool_payload(request: &AiRequest) -> (&Value, Option<bool>) {
+    let message = request
+        .items
+        .iter()
+        .find(|item| item.role == Role::Tool)
+        .unwrap();
+    let MessageContent::Blocks(blocks) = &message.content else {
+        panic!("expected tool result blocks");
+    };
+    let ContentBlock::ToolResult {
+        content, is_error, ..
+    } = &blocks[0]
+    else {
+        panic!("expected tool result");
+    };
+    (content, *is_error)
+}
+
+#[tokio::test]
+async fn platform_agent_typed_media_preserves_opaque_secret_and_redacts_readable_text() {
+    const SECRET: &str = "ghp_8Dq7mP2vL9sX4aR6tK3nF5wH1jB0cYzUeIoG";
+    let (mut request, _) = platform_output_roundtrip(vec![
+        ContentBlock::Image {
+            source: MediaSource::Base64 {
+                media_type: "image/png".into(),
+                data: SECRET.into(),
+            },
+            detail: None,
+            cache_control: None,
+        },
+        ContentBlock::Text {
+            text: format!("credential: {SECRET}"),
+            cache_control: None,
+        },
+        ContentBlock::Document {
+            source: crate::protocol::ir::DocumentSource::Blocks {
+                content: vec![ContentBlock::Text {
+                    text: SECRET.into(),
+                    cache_control: None,
+                }],
+            },
+            title: None,
+            context: None,
+            cache_control: None,
+        },
+    ])
+    .await;
+    let directory = tempfile::tempdir().unwrap();
+    let gateway = crate::Gateway::builder(crate::config::GatewayConfig {
+        data_dir: directory.path().to_path_buf(),
+        ..Default::default()
+    })
+    .build()
+    .await
+    .unwrap();
+    gateway
+        .admin()
+        .set_setting(crate::reversible_redaction::SETTING_KEY, "true")
+        .await
+        .unwrap();
+    gateway
+        .redaction
+        .mappings
+        .intern(&Principal::new("owner"), &[SECRET.into()])
+        .await
+        .unwrap();
+    gateway
+        .redaction
+        .protect(&Principal::new("owner"), &mut request)
+        .await
+        .unwrap();
+    let (content, _) = agent_tool_payload(&request);
+    assert_eq!(content[0]["source"]["data"], SECRET);
+    let text = content[1]["text"].as_str().unwrap();
+    assert!(!text.contains(SECRET));
+    assert!(text.starts_with("credential: ~stravia-secret:"));
+    assert_eq!(
+        content[2]["source"]["content"][0]["text"],
+        text.strip_prefix("credential: ").unwrap()
+    );
+}
+
+#[tokio::test]
+async fn platform_agent_business_json_and_single_text_remain_readable_payloads() {
+    const SECRET: &str = "ghp_8Dq7mP2vL9sX4aR6tK3nF5wH1jB0cYzUeIoG";
+    let directory = tempfile::tempdir().unwrap();
+    let gateway = crate::Gateway::builder(crate::config::GatewayConfig {
+        data_dir: directory.path().to_path_buf(),
+        ..Default::default()
+    })
+    .build()
+    .await
+    .unwrap();
+    gateway
+        .admin()
+        .set_setting(crate::reversible_redaction::SETTING_KEY, "true")
+        .await
+        .unwrap();
+    let mappings = gateway
+        .redaction
+        .mappings
+        .intern(&Principal::new("owner"), &[SECRET.into()])
+        .await
+        .unwrap();
+    let json = serde_json::json!([{"type": "image", "source": {"data": SECRET}}]);
+    for (block, expected) in [
+        (ContentBlock::Unknown { raw: json.clone() }, json),
+        (
+            ContentBlock::Text {
+                text: SECRET.into(),
+                cache_control: None,
+            },
+            Value::String(SECRET.into()),
+        ),
+    ] {
+        let (mut request, _) = platform_output_roundtrip(vec![block]).await;
+        gateway
+            .redaction
+            .protect(&Principal::new("owner"), &mut request)
+            .await
+            .unwrap();
+        let protected: Value =
+            serde_json::from_str(&expected.to_string().replace(SECRET, &mappings[0].reference))
+                .unwrap();
+        assert_eq!(agent_tool_payload(&request), (&protected, Some(false)));
+    }
+}
+
+#[tokio::test]
+async fn platform_agent_serialization_failure_is_delivered_without_aborting_turn() {
+    let (request, ordinary) = platform_output_roundtrip(vec![ContentBlock::Image {
+        source: MediaSource::Url("https://example.test/image.png".into()),
+        detail: None,
+        cache_control: None,
+    }])
+    .await;
+    let (content, is_error) = agent_tool_payload(&request);
+    assert_eq!(is_error, Some(true));
+    assert_eq!(content["code"], "platform_tool_failed");
+    assert!(ordinary.is_error);
 }
 
 #[derive(Default)]

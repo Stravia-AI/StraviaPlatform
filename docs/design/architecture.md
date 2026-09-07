@@ -54,6 +54,10 @@ stravia/
 │           │   ├── accumulator.rs
 │           │   ├── support.rs
 │           │   └── tests.rs
+│           ├── reversible_redaction/ # 本地凭据检测、Principal 映射及 canonical 往返替换
+│           │   ├── detection.rs · detection/ # 固定 Betterleaks 规则与本地表达式编译器
+│           │   ├── store.rs           # SQLite/PostgreSQL 映射与有效期
+│           │   └── text.rs · stream.rs # 可读文本遍历与有界流式还原
 │           ├── generation_chain/ # Generation Chain Write deep module（crate-private）
 │           │   ├── mod.rs            # GenerationChain / Write interface
 │           │   ├── write.rs          # observe / stage / persist 状态机
@@ -239,7 +243,7 @@ hook · mcp · plugin · protocol · provider · provider_catalog · provider_mo
 router · storage · thinking · turn_chain · web_search
 ```
 
-crate-private 运行时 module：`generation_chain`、`interaction_observation`、`media`、`model_turn`、`web_access`；`admission` 保持 crate root private。Generation Chain 与 Interaction Observation 都不属于 Hook，且彼此保持独立：前者保存不可变交付历史，后者保存可丢失的可变诊断投影。
+crate-private 运行时 module：`generation_chain`、`interaction_observation`、`media`、`model_turn`、`reversible_redaction`、`web_access`；`admission` 保持 crate root private。Generation Chain 与 Interaction Observation 都不属于 Hook，且彼此保持独立：前者保存不可变交付历史，后者保存可丢失的可变诊断投影。
 
 **核心 API：**
 
@@ -314,11 +318,13 @@ inference_run::execute(RunInput)（一次性 crate-private interface）
     │    └─ 全部动作批次先校验，再原子应用；失败 fail-closed
     ├─ 以最终 `request.model` 查 Model，再由 Security::authorize_model 检查 binding
     └─ model_turn::execute(TurnInput)
+         ├─ 可逆脱敏：按 Principal 加载有效映射；开启时全请求检测、持久化、精确替换
          ├─ 按 RouteBinding 或 CapabilityGrant 授权
          ├─ 健康感知 Target iteration / negotiate() / Vendor / ProtocolPair
          ├─ ContinuationLookup 在锁定 Target 后准备上游前缀
          └─ Provider Transport（HTTP/SSE 或 Responses WebSocket）
               ├─ 两种 transport 均归一为 canonical AiResponse / AiStreamDelta
+              ├─ 按原始 Provider 视图记录引用与续接证明，再还原回答及工具参数
               └─ 仅 retryable provider 失败且尚无客户端可见输出时切换 Target
     │
     ▼
@@ -508,6 +514,24 @@ Debug 是单进程原子开关，每次进程启动为 off；启用必须确认�
 Trace segment 位于 data directory 下的托管 `observation-debug` 目录；每 Run 固定上限 64 MiB，全局 retained Trace 固定上限 2 GiB，容量压力不提前逐出未过期数据。Observation、Rejected Request、event、manifest 与 segment 共用 `log_retention_days`（默认 7 天）。定期清理与 Clear History 都保留 `running` / `waiting_client` Interaction，并报告 skipped active；manifest tombstone 与启动 reconciliation 保证 crash 后继续删除 orphan/残留托管目录。
 
 已认证 POST 可为 Interaction 或 Rejected Request 固定 through-sequence 的 snapshot，并签发 60 秒、单次使用、高熵 opaque ticket；普通 GET 消费 ticket 并流式生成 versioned ZIP，URL 不携带 Admin credential。manifest 记录 export time、through-sequence、resource status、每 Run capture state/bytes/reason 及整体 `complete|partial|none`；运行中导出只能是 point-in-time partial。过期、重放、跨资源或进程重启后的 ticket 统一失效。当前 realtime、Debug switch、Trace storage 与 ticket 都仅保证单 Gateway instance，不提供 cluster fanout、共享 Trace 或跨实例 ticket。
+
+### 4.11 可逆脱敏
+
+`reversible_redaction_enabled` 是高级功能中的实例级持久化开关，默认关闭；开启后适用于全部有效 API Key，不依赖 Transparent Injection。`model_turn::execute` 在每个真实模型回合处理 Hook、历史恢复和工具循环产生的当前 canonical 请求，因而普通 Inference Run、隐藏回合和 Agent Runner 共用同一保护边界。Target 重试与 failover 复用已经替换的请求，不另设协议旁路。工具权限、连接认证、Client Output Commit、Delivery 与 Generation Chain 的所有权保持不变。
+
+检测器内置 Betterleaks 提交 `95237cf8eb4d8e9f67409595b245e674832992cf` 的 462 条规则、上游词表及许可证。Rust 编译器启动检测时核对完整快照并编译本地正则、过滤表达式、熵与组合条件；token efficiency 使用内置 `cl100k_base`。模型文本没有受信文件路径，因此文件专属条件以空路径求值。`validate` 仅保留在原始快照中，不编译、不执行；运行时不下载规则或词表。先扫描全部可读文本、补齐新秘密映射，再统一执行最长优先的单次精确替换；工具 JSON 以解码后的字符串参加检测与替换，不改写协议标识、媒体或不透明载荷。
+
+SQL 映射以 Principal 为唯一访问边界，引用格式为 `~stravia-secret:<32 位随机小写十六进制>~`。同 Key 并发请求及重启后复用仍有效映射，其他 Key 的映射不参加匹配或还原。新映射可靠持久化后才能发往 Provider；未发布保留一小时。Inference Run 或 Agent Runner 成功消费完整 Model Turn 时发布本回合使用的引用，将有效期延长至至少七天；Generation Chain 写入按自身 TTL 延长仍有效的已发布引用，不缩短已有期限，也不复活过期行。清理复用既有历史维护任务，映射不随某一来源对话删除而级联消失。
+
+工具结果由生产者通过 `ToolResultContentKind` 明确声明为业务 JSON 或 content blocks，不根据业务字段 `type` 猜测。Platform Tool、Agent Tool adapter、Hook 重建和历史保存共同保留该语义；业务 JSON 遍历字符串值，content blocks 只遍历已知可读字段，媒体与不透明数据保持原样。`AgentToolOutput` 携带内容及语义，平台与 Agent 路径共用可失败的内容块转换，序列化失败作为工具错误交付而不是 panic。
+
+Anthropic 原先编码成 Tool Text 的数组保留原有字符串报文，通过内部标记区分普通文本与编码块。新 Generation Chain 写入 payload version 5；旧版本恢复时剥除该保留键，防止旧客户端 vendor meta 被提升为可信证明。内部语义不参与 canonical identity，也不发往 Provider。旧无语义的复合数组及编码数组在保护开启时拒绝出站；关闭保护或还原时原样保留，不猜测、不改写媒体。
+
+流式与完整响应使用同一份有效映射和单次替换语义。流式状态只暂存未完成的引用及 JSON 转义，按输出项、文本字段和工具调用分开；普通文本不等待 Model Turn 结束。Provider 视图中的引用及上下文指纹在还原前记录，用于续期和上游续接判断；客户端明文历史不被改写成占位符历史。开关切换造成 Provider 可见历史不等价时发送完整历史，不错误复用原前缀。
+
+恢复前将有效映射注册到 Run 级诊断保护集合，由 RunObserver 与其 TraceHandle 共享，不跨 Run 或 Principal 共享。恢复后的响应与工具参数进入持久化诊断队列前，按已知秘密精确替换为 `***`；流式可见文本使用增量匹配，仅保留未决前缀，不等待整轮结束。原始客户端入站载荷仍沿用既有永久脱敏策略，不能据此将诊断导出视为不含敏感信息。
+
+关闭开关停止检测和出站替换，但已有有效引用仍在回答、客户端工具参数及平台工具执行参数中还原。未知、过期与跨 Key 引用均原样保留，不暴露归属差异。检测、替换、映射访问或发布错误按既有 typed error / 流式失败流程终止，不发送绕过保护的明文，不提交失败的 Generation Chain。映射不提供数据库静态加密，也不阻止工具把还原后的秘密发给外部地址；既有认证、工具出站约束和诊断永久脱敏仍然适用。
 
 ---
 

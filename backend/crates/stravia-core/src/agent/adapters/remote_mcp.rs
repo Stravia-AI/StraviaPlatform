@@ -73,7 +73,7 @@ impl AgentTool for RemoteMcpAgentTool {
         &self,
         context: AgentToolContext,
         input: Value,
-    ) -> Result<Value, AgentToolError> {
+    ) -> Result<AgentToolOutput, AgentToolError> {
         let arguments = input.as_object().cloned().ok_or_else(|| {
             AgentToolError::new(
                 "invalid_mcp_arguments",
@@ -89,13 +89,22 @@ impl AgentTool for RemoteMcpAgentTool {
                 .await
                 .map_err(|error| AgentToolError::new("mcp_call_failed", error.to_string()))?;
             let _ = client.close().await;
-            let output = result
-                .structured_content
-                .unwrap_or_else(|| serde_json::to_value(result.content).unwrap_or(Value::Null));
+            let (output, content_kind) = match result.structured_content {
+                Some(content) => (content, ToolResultContentKind::Json),
+                None => (
+                    serde_json::to_value(result.content).map_err(|error| {
+                        AgentToolError::new("mcp_output_serialization_failed", error.to_string())
+                    })?,
+                    ToolResultContentKind::ContentBlocks,
+                ),
+            };
             if result.is_error.unwrap_or(false) {
                 Err(AgentToolError::new("mcp_tool_error", output.to_string()))
             } else {
-                Ok(output)
+                Ok(AgentToolOutput {
+                    content: output,
+                    content_kind,
+                })
             }
         };
         tokio::select! {
@@ -121,4 +130,140 @@ async fn connect_remote_mcp(
     ().serve(StreamableHttpClientTransport::from_config(config))
         .await
         .map_err(|error| AgentToolError::new("mcp_connect_failed", error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hook::Principal;
+    use crate::protocol::ir::{AiItem, AiRequest, ContentBlock, MessageContent, Role};
+    use axum::response::IntoResponse;
+
+    async fn mcp_reply(
+        axum::extract::State(output): axum::extract::State<Value>,
+        axum::Json(request): axum::Json<Value>,
+    ) -> axum::response::Response {
+        let result = match request["method"].as_str().unwrap() {
+            "initialize" => serde_json::json!({
+                "protocolVersion": request["params"]["protocolVersion"],
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "local-redaction-fixture", "version": "1"},
+            }),
+            "notifications/initialized" => return axum::http::StatusCode::ACCEPTED.into_response(),
+            "tools/list" => serde_json::json!({
+                "tools": [{"name": "payload", "inputSchema": {"type": "object"}}]
+            }),
+            "tools/call" => output,
+            method => panic!("unexpected MCP method: {method}"),
+        };
+        axum::Json(serde_json::json!({
+            "jsonrpc": "2.0", "id": request["id"], "result": result
+        }))
+        .into_response()
+    }
+
+    #[tokio::test]
+    async fn remote_mcp_content_preserves_media_and_protects_readable_resources() {
+        const SECRET: &str = "Q8n4Vk7sT2p9X5a3Lc6D0h1R";
+        let directory = tempfile::tempdir().unwrap();
+        let gateway = crate::Gateway::new(crate::config::GatewayConfig {
+            data_dir: directory.path().to_path_buf(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let owner = Principal::new("owner");
+        gateway
+            .admin()
+            .set_setting(crate::reversible_redaction::SETTING_KEY, "true")
+            .await
+            .unwrap();
+        let mappings = gateway
+            .redaction
+            .mappings
+            .intern(&owner, &[SECRET.into()])
+            .await
+            .unwrap();
+        for structured in [false, true] {
+            let mut output = serde_json::json!({"content": [
+                {"type": "text", "text": SECRET},
+                {"type": "image", "data": SECRET, "mimeType": "image/png"},
+                {"type": "audio", "data": SECRET, "mimeType": "audio/wav"},
+                {"type": "resource", "resource": {"uri": "memory://text", "text": SECRET}},
+                {"type": "resource", "resource": {"uri": "memory://blob", "blob": SECRET}},
+            ]});
+            if structured {
+                output["structuredContent"] = serde_json::json!({
+                    "type": "image", "data": SECRET,
+                    "resource": {"text": SECRET, "blob": SECRET},
+                });
+            }
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+            let router = axum::Router::new()
+                .route("/", axum::routing::post(mcp_reply))
+                .with_state(output);
+            let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+            let tools = discover_remote_mcp_tools(RemoteMcpToolSource {
+                namespace: "fixture".into(),
+                endpoint,
+                bearer_token: None,
+                version: 1,
+            })
+            .await
+            .unwrap();
+            let output = tools[0]
+                .execute(
+                    AgentToolContext {
+                        principal: owner.clone(),
+                        turn_id: AgentTurnId::agent(),
+                        cancellation: crate::proxy::context::CancellationToken::new(),
+                        deadline: std::time::Instant::now() + std::time::Duration::from_secs(10),
+                    },
+                    serde_json::json!({}),
+                )
+                .await
+                .unwrap();
+            let mut request = AiRequest::new(
+                "model",
+                vec![AiItem {
+                    role: Role::Tool,
+                    content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                        tool_use_id: "call-remote".into(),
+                        content: output.content,
+                        content_kind: Some(output.content_kind),
+                        is_error: Some(false),
+                        cache_control: None,
+                    }]),
+                    tool_calls: None,
+                    tool_call_id: Some("call-remote".into()),
+                    meta: None,
+                }],
+            );
+            gateway
+                .redaction
+                .protect(&owner, &mut request)
+                .await
+                .unwrap();
+            let MessageContent::Blocks(blocks) = &request.items[0].content else {
+                unreachable!()
+            };
+            let ContentBlock::ToolResult { content, .. } = &blocks[0] else {
+                unreachable!()
+            };
+            let reference = &mappings[0].reference;
+            if structured {
+                assert_eq!(content["data"], reference.as_str());
+                assert_eq!(content["resource"]["text"], reference.as_str());
+                assert_eq!(content["resource"]["blob"], reference.as_str());
+            } else {
+                assert_eq!(content[0]["text"], reference.as_str());
+                assert_eq!(content[1]["data"], SECRET);
+                assert_eq!(content[2]["data"], SECRET);
+                assert_eq!(content[3]["resource"]["text"], reference.as_str());
+                assert_eq!(content[4]["resource"]["blob"], SECRET);
+            }
+            server.abort();
+        }
+    }
 }

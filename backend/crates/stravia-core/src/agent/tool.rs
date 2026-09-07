@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 
 use super::{AgentTurnId, VersionedToolId};
 use crate::hook::Principal;
-use crate::protocol::ir::ToolSpec;
+use crate::protocol::ir::{ToolResultContentKind, ToolSpec};
 use crate::proxy::context::CancellationToken;
 
 #[derive(Clone)]
@@ -35,6 +35,15 @@ impl AgentToolError {
     }
 }
 
+/// A tool's value and its producer-declared interpretation. `Json` contains
+/// ordinary business data; `ContentBlocks` contains serialized content blocks.
+/// Adapters must preserve this distinction rather than infer it from JSON fields.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AgentToolOutput {
+    pub content: Value,
+    pub content_kind: ToolResultContentKind,
+}
+
 #[async_trait]
 pub trait AgentTool: Send + Sync {
     fn id(&self) -> VersionedToolId;
@@ -48,7 +57,7 @@ pub trait AgentTool: Send + Sync {
         &self,
         context: AgentToolContext,
         input: Value,
-    ) -> Result<Value, AgentToolError>;
+    ) -> Result<AgentToolOutput, AgentToolError>;
 }
 
 #[derive(Clone, Default)]

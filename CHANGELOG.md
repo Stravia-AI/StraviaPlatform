@@ -4,6 +4,7 @@
 
 ### Added
 
+- Advanced Features now includes default-off, instance-wide reversible credential redaction using bundled native Betterleaks rules, API Key-isolated persistent mappings, and transparent restoration in responses and tool arguments. Disabling protection retains restoration of existing valid references; restored secrets are permanently masked in response and tool-execution diagnostics.
 - Request Records now presents Connect Client Interactions as a live causal forest with a chronological inspector, Rejected Requests, and point-in-time Debug Bundle downloads.
 - Administrators can explicitly enable process-local Debug capture for newly admitted runs, with mandatory credential redaction, 64 MiB per-Run and 2 GiB retained limits, visible partial-capture reasons, and 60-second single-use bundle tickets.
 - Standalone servers now offer a one-time-token setup wizard and an interactive `recover-admin` command that resets the existing administrator and revokes prior sessions without rebuilding business data.
@@ -11,6 +12,7 @@
 ### Changed
 
 - The WebUI now shares shadcn-svelte feedback, progress, disclosure, navigation and pagination controls, with reusable secret inputs, request recovery, model filters and metric loading states. Mobile observation details use a modal Sheet while desktop details remain a resizable overlay; update notifications use the existing persistent toast surface without changing skip policy.
+- **Breaking (Rust API):** `AgentTool::execute` returns `AgentToolOutput` with explicit payload semantics instead of bare JSON. Tool-result semantics survive platform and Agent adapters, Hook reconstruction, and retained history. Generation Chain payload version 5 prevents legacy client metadata from impersonating trusted tool-text markers; ambiguous legacy tool arrays are rejected while reversible protection is enabled and left unchanged while it is off.
 - **Breaking:** Interaction Observation replaces legacy flat request logs and debug-build wire capture. Migration 34 removes old request-log rows instead of backfilling them; analytics and Route scheduling now read Confirmed Upstream Usage from Model Turn and Target attempt observations.
 - Debug defaults off after every process start, is snapshotted independently when each run is admitted, and retains Observation metadata and managed Trace segments for the configured request-record retention period (seven days by default).
 - The latest Request Records page continuously accepts new activity after its fixed anchor; historical 24-hour pages keep fixed boundaries and preserve already-open root membership until an explicit refresh or migration.

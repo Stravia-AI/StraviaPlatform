@@ -709,6 +709,8 @@ POST /v1/artifacts/uploads/{upload_id}/complete
 
 ## 12. Adapter 设计
 
+Agent Runner 的内部 `AgentTool::execute` 返回 `AgentToolOutput`，同时提供 `content` 和 `ToolResultContentKind`。MCP structured content 是业务 JSON；远程 MCP 没有 structured content 时保留原生 content blocks，只扫描文本和嵌入资源的文本，不扫描图片、音频及资源 blob。PlatformTool adapter 复用普通平台路径的转换，保留类型化文本与媒体块的语义。Runner 不根据业务 JSON 的 `type` 字段重新分类；可逆脱敏因而能保护可读文字而不改写媒体。内容块序列化失败作为工具错误进入后续回合，不导致执行任务 panic。这些内部字段不改变客户端或 Provider 的协议报文。
+
 ### 12.1 统一 tool contract
 
 所有 Definition 使用：

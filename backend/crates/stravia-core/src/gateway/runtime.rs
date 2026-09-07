@@ -166,6 +166,23 @@ impl Gateway {
         } else {
             agent::AgentDefinitionRegistry::default()
         };
+        let mappings: Arc<dyn crate::reversible_redaction::store::MappingStore> =
+            if let Some(pool) = history_sqlite_pool.as_ref() {
+                Arc::new(crate::reversible_redaction::store::SqlMappingStore::sqlite(
+                    pool.clone(),
+                ))
+            } else {
+                Arc::new(
+                    crate::reversible_redaction::store::SqlMappingStore::postgres(
+                        postgres_pool
+                            .as_ref()
+                            .expect("Gateway requires a SQL mapping store")
+                            .clone(),
+                    ),
+                )
+            };
+        let redaction =
+            crate::reversible_redaction::ReversibleRedaction::new(Arc::clone(&storage), mappings);
 
         let (artifact_store, media_derivatives): (
             Option<Arc<dyn agent::ArtifactStore>>,
@@ -204,7 +221,8 @@ impl Gateway {
             Duration::from_secs(7 * 24 * 60 * 60),
             artifact_store.clone(),
         )
-        .with_history_markers(Arc::clone(&history_markers));
+        .with_history_markers(Arc::clone(&history_markers))
+        .with_redaction_mappings(Arc::clone(&redaction.mappings));
         let allowance_samples = match storage_kind {
             RuntimeStorageKind::Memory => admin::provider_allowance::AllowanceSampleStore::memory(),
             RuntimeStorageKind::Sqlite => admin::provider_allowance::AllowanceSampleStore::sqlite(
@@ -255,6 +273,7 @@ impl Gateway {
             hook_runtime: HookRuntime::default(),
             mcp_registry: McpToolRegistry::default(),
             history_markers,
+            redaction,
             turn_chains,
             generation_chains,
             model_turn: model_turn::unreachable_executor(),
@@ -427,6 +446,7 @@ impl Gateway {
         {
             let turn_chains = Arc::clone(&gw.turn_chains);
             let history_markers = Arc::clone(&gw.history_markers);
+            let mappings = Arc::clone(&gw.redaction.mappings);
             let artifact_store = gw.artifact_store.clone();
             let observation = gw.observation.clone();
             let cancellation = gw.lifecycle.cancellation.clone();
@@ -460,6 +480,13 @@ impl Gateway {
                     };
                     if let Err(error) = marker_result {
                         tracing::warn!(error = ?error, "history marker ttl cleanup failed");
+                    }
+                    let mapping_result = tokio::select! {
+                        _ = cancellation.cancelled() => return,
+                        result = mappings.cleanup_expired() => result,
+                    };
+                    if mapping_result.is_err() {
+                        tracing::warn!("reversible redaction retention cleanup failed");
                     }
 
                     if let Some(artifact_store) = artifact_store.as_ref() {

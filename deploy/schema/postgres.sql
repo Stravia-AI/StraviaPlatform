@@ -1429,3 +1429,19 @@ CREATE INDEX observation_events_interaction_idx ON observation_events(interactio
 CREATE INDEX observation_events_run_idx ON observation_events(run_id, sequence);
 CREATE INDEX observation_events_rejection_idx ON observation_events(rejection_id, sequence);
 CREATE INDEX observation_events_expiry_idx ON observation_events(expires_at, sequence);
+
+CREATE TABLE reversible_redaction_mappings (
+    reference TEXT PRIMARY KEY NOT NULL,
+    principal TEXT NOT NULL,
+    secret TEXT NOT NULL,
+    published_at BIGINT,
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL,
+    expires_at BIGINT NOT NULL
+);
+
+CREATE INDEX idx_reversible_redaction_mappings_principal_expiry
+ON reversible_redaction_mappings(principal, expires_at);
+
+CREATE INDEX idx_reversible_redaction_mappings_expiry
+ON reversible_redaction_mappings(expires_at);

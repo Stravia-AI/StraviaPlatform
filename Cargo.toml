@@ -62,6 +62,7 @@ maud = "0.27.0"
 numbat = { version = "1.24.0", default-features = false, features = ["fetch-exchangerates"] }
 tempfile = "3"
 regex = "1.13.1"
+tiktoken-rs = "=0.12.0"
 scraper = { version = "0.27.0", default-features = false, features = ["errors"] }
 tower = { version = "0.5", features = ["util"] }
 clap = { version = "4", features = ["derive", "env"] }

@@ -5,6 +5,7 @@ fn server_tool_results_keep_the_anthropic_wire_discriminator() {
     let encoded = encode_content_block_for_anthropic(&ContentBlock::ServerToolResult {
         tool_use_id: "srv_123".into(),
         content: serde_json::json!([{"type": "text", "text": "result"}]),
+        content_kind: Some(crate::protocol::ir::ToolResultContentKind::ContentBlocks),
         server_type: Some("web_search_tool_result".into()),
         cache_control: None,
     });

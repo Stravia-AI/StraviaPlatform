@@ -6,6 +6,150 @@ use serde_json::Value;
 use super::types::{IngressStart, RejectedOutcome, RunEvent, RunOutcome};
 
 pub(crate) const REDACTED: &str = "***";
+
+// Shared only by a Run and its trace handles. Deliberately has no Debug implementation.
+#[derive(Clone, Default)]
+pub(crate) struct ProtectedSecrets(std::sync::Arc<std::sync::RwLock<Vec<ProtectedSecret>>>);
+
+struct ProtectedSecret {
+    raw: String,
+    json: String,
+    prefix: Vec<usize>,
+    slot: usize,
+}
+
+impl ProtectedSecret {
+    fn new(secret: &str, slot: usize) -> Self {
+        let raw = secret.to_owned();
+        let encoded = serde_json::to_string(secret).expect("string serialization");
+        let mut prefix = vec![0; raw.len()];
+        let bytes = raw.as_bytes();
+        let mut matched = 0;
+        for index in 1..bytes.len() {
+            while matched > 0 && bytes[index] != bytes[matched] {
+                matched = prefix[matched - 1];
+            }
+            if bytes[index] == bytes[matched] {
+                matched += 1;
+            }
+            prefix[index] = matched;
+        }
+        Self {
+            raw,
+            json: encoded[1..encoded.len() - 1].to_owned(),
+            prefix,
+            slot,
+        }
+    }
+}
+
+impl ProtectedSecrets {
+    pub(crate) fn register<'a>(&self, secrets: impl IntoIterator<Item = &'a str>) {
+        let mut values = self.0.write().expect("protected diagnostic text");
+        for secret in secrets {
+            if !secret.is_empty() && !values.iter().any(|value| value.raw == secret) {
+                let slot = values.len();
+                values.push(ProtectedSecret::new(secret, slot));
+            }
+        }
+        values.sort_unstable_by_key(|value| std::cmp::Reverse(value.raw.len()));
+    }
+
+    pub(crate) fn text(&self, text: &mut String) {
+        if self.0.read().expect("protected diagnostic text").is_empty() {
+            return;
+        }
+        self.text_inner(text, 0);
+    }
+
+    fn text_inner(&self, text: &mut String, depth: usize) {
+        if depth < 16 && text.contains('\\') {
+            if let Ok(mut value) = serde_json::from_str::<Value>(text) {
+                self.value_inner(&mut value, depth + 1);
+                *text = serde_json::to_string(&value).expect("diagnostic JSON serialization");
+            } else if text.starts_with("data:") {
+                *text = text
+                    .split_inclusive('\n')
+                    .map(|line| {
+                        if let Some(data) = line.strip_prefix("data:") {
+                            let mut data = data.trim_end_matches(['\r', '\n']).to_owned();
+                            self.text_inner(&mut data, depth + 1);
+                            format!(
+                                "data:{data}{}",
+                                &line[line.trim_end_matches(['\r', '\n']).len()..]
+                            )
+                        } else {
+                            line.to_owned()
+                        }
+                    })
+                    .collect();
+            }
+        }
+        let values = self.0.read().expect("protected diagnostic text");
+        for secret in values.iter() {
+            if text.contains(&secret.raw) {
+                *text = text.replace(&secret.raw, REDACTED);
+            }
+            // Wire and tool argument strings may contain another serialized JSON layer.
+            if secret.json != secret.raw && text.contains(&secret.json) {
+                *text = text.replace(&secret.json, REDACTED);
+            }
+        }
+    }
+
+    pub(crate) fn value(&self, value: &mut Value) {
+        if !self.0.read().expect("protected diagnostic text").is_empty() {
+            self.value_inner(value, 0);
+        }
+    }
+
+    fn value_inner(&self, value: &mut Value, depth: usize) {
+        match value {
+            Value::String(text) => self.text_inner(text, depth),
+            Value::Array(values) => values
+                .iter_mut()
+                .for_each(|value| self.value_inner(value, depth)),
+            Value::Object(values) => values
+                .values_mut()
+                .for_each(|value| self.value_inner(value, depth)),
+            _ => {}
+        }
+    }
+
+    pub(crate) fn event(&self, event: &mut RunEvent) {
+        match event {
+            RunEvent::ClientVisibleContentDelta { text } => self.text(text),
+            RunEvent::Checkpoint { payload, .. } => self.value(payload),
+            RunEvent::Wire {
+                direction,
+                payload,
+                headers,
+                url,
+                ..
+            } if direction != "client_to_platform" => {
+                self.value(payload);
+                self.value(headers);
+                if let Some(url) = url {
+                    self.text(url);
+                }
+            }
+            RunEvent::TargetAttemptStarted { upstream_url, .. } => self.text(upstream_url),
+            RunEvent::TargetAttemptFinished {
+                error_code: Some(reason),
+                ..
+            }
+            | RunEvent::DeliveryFinished {
+                reason: Some(reason),
+                ..
+            }
+            | RunEvent::ObservationGap { reason } => self.text(reason),
+            RunEvent::ModelTurnFinished { status, .. }
+            | RunEvent::PlatformToolFinished { status, .. } => self.text(status),
+            _ => {}
+        }
+    }
+}
+
 const VISIBLE_AMBIGUOUS_SUFFIX_BYTES: usize = 128;
 const VISIBLE_URL_AUTHORITY_BYTES: usize = 4096;
 
@@ -16,9 +160,104 @@ enum CredentialContinuation {
     UrlAuthority,
 }
 
+// Each byte advances each pattern once (amortized KMP). The deque retains only
+// an unfinished prefix; masking intervals merge overlaps without rescanning it.
+#[derive(Default)]
+struct ProtectedTextStream {
+    matched: Vec<usize>,
+    pending: std::collections::VecDeque<u8>,
+    masks: std::collections::VecDeque<(usize, usize)>,
+    offset: usize,
+    masking: bool,
+}
+
+impl ProtectedTextStream {
+    fn push(&mut self, text: &str, protected: &ProtectedSecrets) -> String {
+        let values = protected.0.read().expect("protected diagnostic text");
+        if values.is_empty() {
+            return text.to_owned();
+        }
+        self.matched.resize(values.len(), 0);
+        let mut output = Vec::with_capacity(text.len());
+        for character in text.chars() {
+            for &byte in character.encode_utf8(&mut [0; 4]).as_bytes() {
+                self.pending.push_back(byte);
+                let end = self.offset + self.pending.len();
+                let mut longest_match = 0;
+                for secret in values.iter() {
+                    let matched = &mut self.matched[secret.slot];
+                    let pattern = secret.raw.as_bytes();
+                    while *matched > 0 && pattern[*matched] != byte {
+                        *matched = secret.prefix[*matched - 1];
+                    }
+                    if pattern[*matched] == byte {
+                        *matched += 1;
+                    }
+                    if *matched == pattern.len() {
+                        longest_match = longest_match.max(pattern.len());
+                        *matched = secret.prefix[*matched - 1];
+                    }
+                }
+                if longest_match > 0 {
+                    let mut start = end - longest_match;
+                    while self
+                        .masks
+                        .back()
+                        .is_some_and(|&(_, previous_end)| previous_end >= start)
+                    {
+                        start = start.min(self.masks.pop_back().expect("overlapping mask").0);
+                    }
+                    self.masks.push_back((start, end));
+                }
+            }
+            let retained = self.matched.iter().copied().max().unwrap_or(0);
+            self.emit(self.pending.len() - retained, &mut output);
+        }
+        String::from_utf8(output).expect("whole diagnostic text characters")
+    }
+
+    fn emit(&mut self, count: usize, output: &mut Vec<u8>) {
+        for _ in 0..count {
+            while self
+                .masks
+                .front()
+                .is_some_and(|&(_, end)| end <= self.offset)
+            {
+                self.masks.pop_front();
+            }
+            let masked = self
+                .masks
+                .front()
+                .is_some_and(|&(start, _)| start <= self.offset);
+            let byte = self.pending.pop_front().expect("retained diagnostic byte");
+            if masked {
+                if !self.masking {
+                    output.extend_from_slice(REDACTED.as_bytes());
+                }
+            } else {
+                output.push(byte);
+            }
+            self.masking = masked;
+            self.offset += 1;
+        }
+    }
+
+    fn finish(&mut self) -> String {
+        let mut output = Vec::with_capacity(self.pending.len());
+        self.emit(self.pending.len(), &mut output);
+        self.matched.fill(0);
+        self.masks.clear();
+        self.masking = false;
+        self.offset = 0;
+        String::from_utf8(output).expect("whole diagnostic text characters")
+    }
+}
+
 pub(crate) struct VisibleTextRedactor {
     pending: String,
     continuation: Option<CredentialContinuation>,
+    protected: ProtectedSecrets,
+    protected_stream: ProtectedTextStream,
 }
 
 impl VisibleTextRedactor {
@@ -26,10 +265,20 @@ impl VisibleTextRedactor {
         Self {
             pending: String::new(),
             continuation: None,
+            protected: ProtectedSecrets::default(),
+            protected_stream: ProtectedTextStream::default(),
+        }
+    }
+
+    pub(crate) fn with_protected(protected: ProtectedSecrets) -> Self {
+        Self {
+            protected,
+            ..Self::new()
         }
     }
 
     pub(crate) fn push(&mut self, text: String) -> Option<String> {
+        let text = self.protected_stream.push(&text, &self.protected);
         let mut output = String::new();
         let remainder = self.consume_continuation(&text, &mut output);
         self.pending.push_str(remainder);
@@ -39,6 +288,9 @@ impl VisibleTextRedactor {
 
     pub(crate) fn finish(&mut self) -> Option<String> {
         let mut output = String::new();
+        let text = self.protected_stream.finish();
+        let remainder = self.consume_continuation(&text, &mut output);
+        self.pending.push_str(remainder);
         self.continuation = None;
         self.emit_safe(&mut output, true);
         (!output.is_empty()).then_some(output)
@@ -1068,6 +1320,71 @@ mod tests {
         assert!(text.contains("retain"));
         assert!(text.contains("name=Ada"));
         assert!(text.contains("finish"));
+    }
+
+    #[test]
+    fn mapped_visible_secret_is_held_across_real_fragments_without_losing_prose() {
+        let protected = ProtectedSecrets::default();
+        protected.register(["private-mapped-value"]);
+        let mut redactor = VisibleTextRedactor::with_protected(protected);
+        let mut observed = String::new();
+        for fragment in [
+            "ordinary-before pri",
+            "vate-mapped",
+            "-value ordinary-after",
+        ] {
+            if let Some(text) = redactor.push(fragment.to_owned()) {
+                observed.push_str(&text);
+            }
+            assert!(!observed.contains("private"));
+        }
+        if let Some(text) = redactor.finish() {
+            observed.push_str(&text);
+        }
+        assert_eq!(observed, "ordinary-before *** ordinary-after");
+    }
+
+    #[test]
+    fn mapped_long_periodic_prefix_hits_and_diverges_without_losing_text() {
+        let prefix = "ab".repeat(8192);
+        let secret = format!("{prefix}Z");
+        for terminal in ['Z', 'Y'] {
+            let protected = ProtectedSecrets::default();
+            protected.register([secret.as_str()]);
+            let mut redactor = VisibleTextRedactor::with_protected(protected);
+            let input = format!("ordinary-before {prefix}{prefix}{terminal} ordinary-after");
+            let mut observed = String::new();
+            for character in input.chars() {
+                if let Some(text) = redactor.push(character.to_string()) {
+                    observed.push_str(&text);
+                }
+            }
+            if let Some(text) = redactor.finish() {
+                observed.push_str(&text);
+            }
+            let expected = if terminal == 'Z' {
+                format!("ordinary-before {prefix}*** ordinary-after")
+            } else {
+                input
+            };
+            assert_eq!(observed, expected);
+        }
+    }
+
+    #[test]
+    fn mapped_nested_json_escapes_are_scrubbed_without_cross_run_state() {
+        let protected = ProtectedSecrets::default();
+        protected.register(["private\"mapped\nvalue"]);
+        let mut payload = serde_json::json!({
+            "arguments": "{\"value\":\"before private\\u0022mapped\\nvalue after\"}"
+        });
+        protected.value(&mut payload);
+        let arguments: Value =
+            serde_json::from_str(payload["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(arguments["value"], "before *** after");
+        let mut unrelated = "private\"mapped\nvalue".to_owned();
+        ProtectedSecrets::default().text(&mut unrelated);
+        assert_eq!(unrelated, "private\"mapped\nvalue");
     }
 
     #[test]

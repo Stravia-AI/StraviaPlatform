@@ -247,6 +247,7 @@ pub(super) fn apply_tool_result_actions(
         match action {
             HookAction::PatchToolResult(ToolResultPatch::SetContent(content)) => {
                 staged.content = content;
+                staged.content_kind = crate::protocol::ir::ToolResultContentKind::Json;
             }
             HookAction::PatchToolResult(ToolResultPatch::SetError(is_error)) => {
                 staged.is_error = is_error;

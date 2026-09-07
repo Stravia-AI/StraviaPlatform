@@ -273,7 +273,9 @@ fn decode_message(msg: OpenAIMessage) -> Result<AiItem> {
     // Put any per-message extra fields + refusal into meta.
     let mut meta_obj = serde_json::Map::new();
     for (k, v) in msg.extra {
-        meta_obj.insert(k, v);
+        if k != crate::protocol::ir::TOOL_RESULT_CONTENT_KIND_META {
+            meta_obj.insert(k, v);
+        }
     }
     if let Some(ref r) = msg.refusal {
         meta_obj.insert("refusal".to_string(), Value::String(r.clone()));
@@ -309,7 +311,8 @@ fn decode_message(msg: OpenAIMessage) -> Result<AiItem> {
         tool_calls,
         tool_call_id: msg.tool_call_id,
         meta,
-    })
+    }
+    .with_plain_tool_text_kind())
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

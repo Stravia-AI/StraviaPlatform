@@ -336,7 +336,7 @@ fn encode_content_block_for_gemini(b: &ContentBlock, call_names: &HashMap<&str, 
             part
         }
         ContentBlock::Unknown { raw } => raw.clone(),
-        other => serde_json::to_value(other).unwrap_or(Value::Null),
+        other => crate::protocol::codec::content_block_wire_value(other),
     }
 }
 

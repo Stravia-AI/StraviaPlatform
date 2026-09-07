@@ -398,6 +398,36 @@ describe('Stravia desktop smoke', () => {
     await expect($('.rejection-list')).not.toExist()
   })
 
+  it('persists reversible redaction changes through the native management interface', async () => {
+    await $('a[href="/reversible-redaction"]').click()
+    const toggle = () => $('#reversible-redaction-enabled')
+    const save = async () => {
+      await $('button=Save settings').click()
+      await toggle().waitForEnabled()
+      await expect($('button=Save settings')).toBeDisabled()
+    }
+    await toggle().waitForEnabled()
+    const original = await toggle().getAttribute('aria-checked')
+    const changed = original === 'true' ? 'false' : 'true'
+    try {
+      await toggle().click()
+      await expect(toggle()).toHaveAttribute('aria-checked', changed)
+      await save()
+      await $('a[href="/settings"]').click()
+      await $('a[href="/reversible-redaction"]').click()
+      await browser.refresh()
+      await toggle().waitForEnabled()
+      await expect(toggle()).toHaveAttribute('aria-checked', changed)
+    } finally {
+      await $('a[href="/reversible-redaction"]').click()
+      await toggle().waitForEnabled()
+      if ((await toggle().getAttribute('aria-checked')) !== original) {
+        await toggle().click()
+        await save()
+      }
+    }
+  })
+
   // 退出会关闭共享的原生会话，必须在所有页面交互验证之后执行。
   it('keeps the session in the tray and stops the listener on application exit', async () => {
     const serverPort = (await browser.tauri.execute(({ core }) => core.invoke('get_server_port'))) as number

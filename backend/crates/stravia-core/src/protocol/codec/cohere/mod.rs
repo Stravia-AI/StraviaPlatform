@@ -687,7 +687,8 @@ fn decode_messages(body: &Value) -> anyhow::Result<Vec<AiItem>> {
                     .and_then(Value::as_str)
                     .map(str::to_string),
                 meta: None,
-            })
+            }
+            .with_plain_tool_text_kind())
         })
         .collect()
 }

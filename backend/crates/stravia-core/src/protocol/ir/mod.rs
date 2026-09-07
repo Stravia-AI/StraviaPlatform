@@ -34,11 +34,12 @@ pub use error::{AiError, AiErrorKind};
 pub use ext::{AnthropicExt, GoogleExt, OpenAIChatExt, OpenResponsesExt, ProtocolExt};
 
 // ── Request ───────────────────────────────────────────────────────────────────
+pub(crate) use request::TOOL_RESULT_CONTENT_KIND_META;
 pub use request::{
     AiItem, AiItemAudience, AiItemProvenance, AiItemStatus, AiRequest, ContentBlock,
     DocumentSource, EmbeddingInput, EmbeddingRequest, GenerationConfig, MediaSource,
     MessageContent, ReasoningConfig, ReasoningEffort, RequestMetadata, ResponseFormat, Role,
-    SafetySettings, StreamConfig, ToolCall, ToolChoice, ToolSpec,
+    SafetySettings, StreamConfig, ToolCall, ToolChoice, ToolResultContentKind, ToolSpec,
 };
 
 // ── Response ──────────────────────────────────────────────────────────────────

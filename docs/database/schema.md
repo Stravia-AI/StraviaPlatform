@@ -16,6 +16,7 @@ interaction_observations ──1:N── inference_run_observations ──1:N─
 rejected_request_observations ──1:N── observation_events / debug_trace_manifests
 turn_chain_nodes (principal-scoped Response / Agent / Web Search DAG)
 history_markers (principal-scoped hidden history and Platform execution state)
+reversible_redaction_mappings (principal-scoped persistent secret placeholders)
 agent_definition_revisions ──1:1── agent_definition_configs
 artifacts ──1:0..1── artifact_uploads ──1:N── artifact_upload_parts
     └──1:0..1── media_derivatives ──1:1── artifacts (JPEG derivative)
@@ -483,6 +484,8 @@ Generation Chain（其 Responses 投影为 Response Chain）、Agent Turn 与 Se
 
 **索引**:`idx_turn_chain_parent`、`idx_turn_chain_principal_kind`、`idx_turn_chain_expiry`、`idx_turn_chain_reusable_prefix`(`principal, kind, prefix_namespace, prefix_fingerprint, prefix_item_count DESC, prefix_completed_at DESC, expires_at, id DESC`,仅索引非 NULL namespace)
 
+Generation Chain 的新 Response payload 使用版本 5，工具结果保存可选 `content_kind`（`json` 或 `content_blocks`），缺失值表示旧记录没有语义证明。普通 Tool Text 与此前编码成字符串的 content blocks 使用内部消息标记区分；读取版本 1–4 时仅从真实 `AiItem.meta` 移除该保留键，不改写业务 JSON 或无关元数据。旧记录仍可读取，但可逆脱敏开启时会拒绝无法明确解释的工具数组历史。Agent/Search payload 的版本规则不变；此调整不新增 SQL 列。
+
 ---
 
 ## history_markers
@@ -508,6 +511,30 @@ History Marker Store 的持久化事实源。每行只保存一个受保护 Thin
 | `expires_at` | BIGINT/INTEGER NOT NULL | — | pending 或 Generation Chain 引用保留期限 |
 
 **索引**：`idx_history_markers_principal_reference`、`idx_history_markers_execution`、`idx_history_markers_expiry`
+
+Platform terminal `segment_payload` 的工具结果保留同一 `content_kind` 语义，Hook 和隐藏历史重建不能把缺失值自动补为可信 JSON。业务 JSON 中同名字段只是业务数据，不作为内部语义标记。
+
+---
+
+## reversible_redaction_mappings
+
+Persistent reversible secret mappings, isolated solely by the API Key's authenticated Principal. References can be restored across conversations, branches and restarts. There are deliberately no conversation or Generation Chain foreign keys: deleting source history must not delete a still-live mapping. Plaintext is permitted within the existing local database security boundary and must never be included in diagnostics or storage errors.
+
+| Column | Type | Default | Description |
+|---|---|---|---|
+| `reference` | TEXT PK NOT NULL | — | Opaque `~stravia-secret:<32 lowercase UUID hex digits>~` placeholder; never rebound |
+| `principal` | TEXT NOT NULL | — | Existing `api-key:<API Key ID>` Principal identity; foreign Principal lookups reveal no mapping |
+| `secret` | TEXT NOT NULL | — | Exact secret plaintext, including multiline values |
+| `published_at` | BIGINT / INTEGER | NULL | First publication time, Unix milliseconds |
+| `created_at` | BIGINT / INTEGER NOT NULL | — | Creation time, Unix milliseconds |
+| `updated_at` | BIGINT / INTEGER NOT NULL | — | Last retention/publication update, Unix milliseconds |
+| `expires_at` | BIGINT / INTEGER NOT NULL | — | Exclusive validity boundary, Unix milliseconds |
+
+**Indexes**: `idx_reversible_redaction_mappings_principal_expiry` on `(principal, expires_at)` and `idx_reversible_redaction_mappings_expiry` on `expires_at`.
+
+Creation retains an unpublished mapping for one hour. Publication extends it to at least seven days; Generation Chain retention only extends still-live published mappings and never shortens their lifetime. Expired mappings neither participate in restoration or known-secret detection nor revive through publication or renewal. Cleanup deletes expired rows. Disabling new redaction does not delete mappings or prevent restoration of live references.
+
+Interning serializes lookup and insertion within a database transaction (SQLite `BEGIN IMMEDIATE`; PostgreSQL Principal-scoped advisory transaction lock). Concurrent requests therefore reuse the same live mapping for identical plaintext within one Principal. Expired rows are not reused, and a fresh UUID is allocated instead. Secret plaintext is not B-tree indexed, avoiding PostgreSQL index-size limits for long private keys; Principal and validity indexes bound the lookup scope.
 
 ---
 

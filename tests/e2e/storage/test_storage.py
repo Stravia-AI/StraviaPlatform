@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 import tempfile
 import time
@@ -19,6 +20,8 @@ from tests.common.helpers import (
     wait_for_setup_token,
     wait_until_ready,
 )
+from tests.e2e.admin.test_observations import _create_route, _proxy
+from tests.e2e.admin.test_reversible_redaction import REFERENCE, SECRET, echo_provider, set_enabled
 
 
 @pytest.mark.e2e
@@ -374,3 +377,79 @@ def test_postgres_legacy_upgrade_installs_observation_schema_and_reconnects(
                 stop_stravia_server(reconnect_proc, reconnect_logs)
     finally:
         run_schema_action("drop", work_dir=work_dir, pg_url=pg_url, schema=schema)
+
+
+@pytest.mark.e2e
+@pytest.mark.storage
+@pytest.mark.parametrize("backend", ["sqlite", "postgres"], ids=["sqlite", "postgres"])
+def test_redaction_reuses_and_restores_mappings_after_real_restart(
+    stravia_binary: Path, storage_runtime: dict[str, object], tmp_path: Path, backend: str,
+) -> None:
+    pg_url = storage_runtime["pg_url"]
+    if backend == "postgres" and not pg_url:
+        pytest.skip("postgres backend requires DB_URL")
+    run_schema_action: Callable[..., str] = storage_runtime["run_schema_action"]  # type: ignore[assignment]
+    schema = None
+    database = {"backend": "sqlite", "path": str(tmp_path / "gateway.db")}
+    if backend == "postgres":
+        make_schema: Callable[..., str] = storage_runtime["make_isolated_schema"]  # type: ignore[assignment]
+        dsn_for_schema: Callable[[str, str], str] = storage_runtime["postgres_dsn_for_schema"]  # type: ignore[assignment]
+        assert isinstance(pg_url, str)
+        schema = make_schema("stravia_redaction_restart")
+        run_schema_action(
+            "create", work_dir=storage_runtime["work_dir"], pg_url=pg_url, schema=schema,
+        )
+        database = {"backend": "postgres", "url": dsn_for_schema(pg_url, schema)}
+    process = None
+    logs: list[str] = []
+    port = find_free_port()
+    base = f"http://127.0.0.1:{port}"
+    args = ["--data-dir", str(tmp_path), "--host", "127.0.0.1", "--port", str(port)]
+    try:
+        with echo_provider() as (upstream, received):
+            process, logs = start_stravia_server(stravia_binary=stravia_binary, args=args)
+            wait_until_ready(f"{base}/api/v1/auth/state", timeout=30.0)
+            session = initialize_server(base, wait_for_setup_token(logs, process), database)
+            env = {"admin": base, "proxy": base, "mock": upstream, "auth": session.auth_headers()}
+            model = f"reversible-restart-{backend}"
+            _, key = _create_route(env, model)
+            set_enabled(env, True)
+            status, first = _proxy(env, key, model, [{"role": "user", "content": SECRET}])
+            assert status == 200, first
+            assert first["choices"][0]["message"]["content"] == SECRET
+            reference = REFERENCE.search(json.dumps(received[-1]["body"]))
+            assert reference is not None
+            reference = reference.group()
+            stop_stravia_server(process, logs)
+            process = None
+
+            process, logs = start_stravia_server(stravia_binary=stravia_binary, args=args)
+            wait_until_ready(f"{base}/api/v1/auth/state", timeout=30.0)
+            session = WebSession(base)
+            status, body = session.request(
+                "POST", "/api/v1/auth/login",
+                {"username": "admin", "password": "correct horse battery staple"},
+            )
+            assert status == 200, body
+            env["auth"] = session.auth_headers()
+            status, body = _proxy(env, key, model, [
+                {"role": "user", "content": SECRET},
+                first["choices"][0]["message"],
+                {"role": "user", "content": reference},
+            ])
+            assert status == 200, body
+            assert body["choices"][0]["message"]["content"] == SECRET
+            wire = json.dumps(received[-1]["body"])
+            assert SECRET not in wire
+            assert set(REFERENCE.findall(wire)) == {reference}
+            set_enabled(env, False)
+            status, body = _proxy(env, key, model, [{"role": "user", "content": reference}])
+            assert status == 200, body
+            assert body["choices"][0]["message"]["content"] == SECRET
+    finally:
+        if process is not None:
+            stop_stravia_server(process, logs)
+        if schema is not None:
+            run_schema_action(
+                "drop", work_dir=storage_runtime["work_dir"], pg_url=pg_url, schema=schema,
+            )

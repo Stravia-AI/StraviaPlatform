@@ -394,6 +394,7 @@ fn append_restored_platform_round(
         let ContentBlock::ToolResult {
             tool_use_id,
             content,
+            content_kind,
             is_error,
             cache_control,
         } = result
@@ -405,6 +406,7 @@ fn append_restored_platform_round(
             content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
                 tool_use_id: tool_use_id.clone(),
                 content,
+                content_kind,
                 is_error,
                 cache_control,
             }]),

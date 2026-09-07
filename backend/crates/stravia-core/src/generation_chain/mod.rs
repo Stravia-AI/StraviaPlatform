@@ -39,7 +39,8 @@ pub(crate) use store::{
     request_preserves_upstream_response,
 };
 
-const RESPONSE_PAYLOAD_VERSION: u32 = 4;
+// Version 5 reserves tool-result semantics metadata; earlier vendor meta is untrusted.
+const RESPONSE_PAYLOAD_VERSION: u32 = 5;
 const LEGACY_RESPONSE_PAYLOAD_VERSION: u32 = 1;
 const GENERATION_MATERIALIZATION_CACHE_BYTES: usize = 64 * 1024 * 1024;
 const GENERATION_SESSION_ID_META: &str = "__stravia_generation_session_id";
@@ -52,6 +53,7 @@ pub(crate) struct GenerationChain {
     store: GenerationChainStore,
     artifacts: Option<Arc<dyn crate::agent::ArtifactStore>>,
     history_markers: Option<Arc<dyn crate::history_marker::HistoryMarkerStore>>,
+    redaction_mappings: Option<Arc<dyn crate::reversible_redaction::store::MappingStore>>,
     ttl: Duration,
 }
 
@@ -95,6 +97,7 @@ pub(crate) enum PersistError {
     NotStaged,
     Store(TurnCommitError),
     HistoryMarker(crate::history_marker::HistoryMarkerError),
+    Redaction(crate::reversible_redaction::RedactionError),
 }
 
 impl std::fmt::Display for PersistError {
@@ -103,6 +106,7 @@ impl std::fmt::Display for PersistError {
             Self::NotStaged => formatter.write_str("generation chain write was not staged"),
             Self::Store(error) => write!(formatter, "{error}"),
             Self::HistoryMarker(error) => write!(formatter, "{error}"),
+            Self::Redaction(error) => write!(formatter, "{error}"),
         }
     }
 }
@@ -119,6 +123,7 @@ impl GenerationChain {
             store: GenerationChainStore::from_turn_chain(turn_chain, ttl),
             artifacts,
             history_markers: None,
+            redaction_mappings: None,
             ttl,
         }
     }
@@ -128,6 +133,14 @@ impl GenerationChain {
         history_markers: Arc<dyn crate::history_marker::HistoryMarkerStore>,
     ) -> Self {
         self.history_markers = Some(history_markers);
+        self
+    }
+
+    pub(crate) fn with_redaction_mappings(
+        mut self,
+        mappings: Arc<dyn crate::reversible_redaction::store::MappingStore>,
+    ) -> Self {
+        self.redaction_mappings = Some(mappings);
         self
     }
 

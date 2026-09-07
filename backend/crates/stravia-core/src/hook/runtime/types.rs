@@ -185,6 +185,7 @@ pub enum ResponsePatch {
 
 #[derive(Debug, Clone)]
 pub enum ToolResultPatch {
+    /// Replace the payload with business JSON, not serialized protocol content blocks.
     SetContent(serde_json::Value),
     SetError(bool),
     SetMetadata(serde_json::Map<String, serde_json::Value>),

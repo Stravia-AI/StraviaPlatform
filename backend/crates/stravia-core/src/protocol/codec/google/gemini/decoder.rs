@@ -375,6 +375,7 @@ fn decode_content(content: GoogleContent) -> Result<AiItem> {
                 blocks.push(ContentBlock::ToolResult {
                     tool_use_id,
                     content: function_response.response,
+                    content_kind: Some(crate::protocol::ir::ToolResultContentKind::Json),
                     is_error: None,
                     cache_control: None,
                 });

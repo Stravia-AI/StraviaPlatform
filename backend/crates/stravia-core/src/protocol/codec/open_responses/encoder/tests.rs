@@ -406,6 +406,7 @@ fn stringifies_structured_single_tool_results() {
             content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
                 tool_use_id: "call_1".into(),
                 content: serde_json::json!({"temperature": 21}),
+                content_kind: Some(crate::protocol::ir::ToolResultContentKind::Json),
                 is_error: None,
                 cache_control: None,
             }]),
@@ -431,6 +432,7 @@ fn stringifies_invalid_tool_result_content_arrays() {
         content: serde_json::json!([
             {"type": "tool_result", "content": {"temperature": 21}}
         ]),
+        content_kind: Some(crate::protocol::ir::ToolResultContentKind::Json),
         is_error: None,
         cache_control: None,
     }]))

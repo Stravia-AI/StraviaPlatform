@@ -355,9 +355,16 @@ fn decode_message(msg: AnthropicMessage) -> Result<Vec<AiItem>> {
                         ..
                     } => {
                         tc_id = Some(tool_use_id.clone());
+                        let content = content.unwrap_or(Value::Null);
+                        let content_kind = if content.is_string() || content.is_array() {
+                            crate::protocol::ir::ToolResultContentKind::ContentBlocks
+                        } else {
+                            crate::protocol::ir::ToolResultContentKind::Json
+                        };
                         content_blocks.push(ContentBlock::ToolResult {
                             tool_use_id,
-                            content: content.unwrap_or(Value::Null),
+                            content,
+                            content_kind: Some(content_kind),
                             is_error: None,
                             cache_control: cache_control.as_ref().map(map_cache_control),
                         });
@@ -447,6 +454,14 @@ fn decode_user_blocks(blocks: Vec<AnthropicContentBlock>) -> Result<Vec<AiItem>>
                 content,
                 ..
             } => {
+                let content_kind = if content.as_ref().is_some_and(Value::is_array) {
+                    "content_blocks"
+                } else {
+                    "json"
+                };
+                let meta = Some(serde_json::json!({
+                    (crate::protocol::ir::TOOL_RESULT_CONTENT_KIND_META): content_kind
+                }));
                 let tool_text = match content.unwrap_or(Value::Null) {
                     Value::String(s) => s,
                     Value::Null => String::new(),
@@ -457,7 +472,7 @@ fn decode_user_blocks(blocks: Vec<AnthropicContentBlock>) -> Result<Vec<AiItem>>
                     content: MessageContent::Text(tool_text),
                     tool_calls: None,
                     tool_call_id: Some(tool_use_id),
-                    meta: None,
+                    meta,
                 });
             }
             AnthropicContentBlock::Text {

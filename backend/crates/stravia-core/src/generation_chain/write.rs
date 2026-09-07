@@ -144,6 +144,20 @@ impl GenerationChainWrite {
 
     pub(crate) async fn persist(&mut self) -> Result<(), PersistError> {
         let mut staged = self.staged.clone().ok_or(PersistError::NotStaged)?;
+        if let Some(store) = &self.chain.redaction_mappings {
+            let references = self
+                .request
+                .meta
+                .redaction
+                .references()
+                .map_err(PersistError::Redaction)?;
+            if !references.is_empty() {
+                store
+                    .extend_retention(&self.principal, &references, self.chain.ttl)
+                    .await
+                    .map_err(PersistError::Redaction)?;
+            }
+        }
         if let Some(store) = &self.chain.history_markers {
             let mut parent_references =
                 crate::history_marker::history_marker_references(&self.parent.parent_client_items);

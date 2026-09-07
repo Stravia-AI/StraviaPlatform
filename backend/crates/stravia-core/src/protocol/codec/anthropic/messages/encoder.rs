@@ -517,6 +517,7 @@ fn encode_content_block_for_anthropic(b: &ContentBlock) -> Value {
             content,
             is_error,
             cache_control,
+            ..
         } => {
             let mut block = serde_json::json!({
                 "type": "tool_result",
@@ -554,6 +555,7 @@ fn encode_content_block_for_anthropic(b: &ContentBlock) -> Value {
             content,
             server_type,
             cache_control,
+            ..
         } => {
             let mut block = serde_json::json!({
                 "type": server_type.as_deref().unwrap_or("server_tool_result"),
@@ -566,7 +568,7 @@ fn encode_content_block_for_anthropic(b: &ContentBlock) -> Value {
             block
         }
         ContentBlock::Unknown { raw } => raw.clone(),
-        other => serde_json::to_value(other).unwrap_or(Value::Null),
+        other => crate::protocol::codec::content_block_wire_value(other),
     }
 }
 
