@@ -255,7 +255,26 @@ async fn disconnect_during_post_text_preview_persists_no_marker_or_generation_no
     release_upstream
         .send(())
         .expect("release upstream completion after disconnect");
-    wait_for_observed_run_finish(&mut events).await;
+    // 断流时 Run 与上游 Model Turn 独立收尾；两者结束后 Interaction 才进入终态。
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        let mut run_finished = false;
+        let mut model_turn_finished = false;
+        while !run_finished || !model_turn_finished {
+            if let crate::interaction_observation::ObservationUpdate::Event(event) = events
+                .next()
+                .await
+                .expect("Observation stream remains open")
+            {
+                match event.kind.as_str() {
+                    "run_finished" => run_finished = true,
+                    "model_turn_finished" => model_turn_finished = true,
+                    _ => {}
+                }
+            }
+        }
+    })
+    .await
+    .expect("disconnected Run and Model Turn should both finish");
     let forest = gateway
         .observation
         .query_forest(Default::default())
