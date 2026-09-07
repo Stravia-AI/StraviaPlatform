@@ -156,6 +156,15 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
     let (terminal_delivery_tx, terminal_delivery_rx) = tokio::sync::oneshot::channel();
     let cancellation = request_context.cancellation.clone();
     let fixed_media_plan = request.meta.media_routing.clone();
+    let observe_delivery =
+        !crate::proxy::dispatcher::is_websocket_delivery_deferred(&request_context);
+    let (completion_tx, completion_rx) = if observe_delivery {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        (Some(tx), Some(rx))
+    } else {
+        (None, None)
+    };
+    let extensions = request_context.extensions.clone();
 
     tokio::spawn(async move {
         let mut delivery = DeliveryAdapter::live_stream(LiveStreamRequest {
@@ -173,8 +182,6 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
             .get::<crate::interaction_observation::RunObserver>()
             .expect("admitted Inference Run observer");
         let generation_committed = super::generation_commit_flag(&request_context);
-        let observe_delivery =
-            !crate::proxy::dispatcher::is_websocket_delivery_deferred(&request_context);
         let mut projection = projection;
         'model_legs: loop {
             let carrier_facts = super::thinking_carrier_facts(
@@ -980,25 +987,27 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
             }
 
             if terminal_delivered {
-                let generation_committed = if let Some(mut pending) =
-                    pending_generation_chain.take()
-                {
+                if let Some(mut pending) = pending_generation_chain.take() {
                     match pending.persist().await {
                         Ok(()) => {
                             generation_committed.store(true, std::sync::atomic::Ordering::Release);
-                            true
                         }
                         Err(error) => {
                             tracing::error!(
                                 "failed to commit Generation Chain node after terminal delivery: {error}"
                             );
-                            false
                         }
                     }
-                } else {
-                    true
-                };
-                let _ = generation_committed;
+                }
+            }
+            if let Some(completion) = completion_tx {
+                let terminal = terminal_delivered.then(|| {
+                    request_context
+                        .extensions
+                        .get::<super::super::RunTerminalContext>()
+                        .expect("Inference Run terminal context")
+                });
+                let _ = completion.send(terminal);
             }
             if let Some(mut phase) = owned_phase.take() {
                 phase.finish();
@@ -1016,6 +1025,9 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                 "Model Turn stream ended before delivery",
             ));
         }
+    }
+    if let Some(completion) = completion_rx {
+        extensions.insert(super::super::StreamDeliveryCompletion(completion));
     }
     live_response(DeliveryAdapter::response_from_receiver(
         rx,

@@ -252,8 +252,11 @@ The authorization header is required only when the selected model route is prote
 # Development mode
 task dev:desktop
 
-# Production bundle
+# Production application bundle
 task build:desktop
+
+# Windows NSIS installer
+task build:desktop:installer
 ```
 
 Development builds keep server and desktop runtime state—including `gateway.db` and the desktop fixed-port store—under the repository-local, ignored `.stravia-dev/` directory. Release server builds use `~/.stravia`; release desktop builds continue to use the operating system application-data directory.

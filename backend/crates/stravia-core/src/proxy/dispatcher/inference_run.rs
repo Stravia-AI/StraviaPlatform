@@ -295,6 +295,10 @@ pub(super) struct RunTerminalContext {
     pub visible_text: Vec<String>,
 }
 
+pub(super) struct StreamDeliveryCompletion(
+    tokio::sync::oneshot::Receiver<Option<RunTerminalContext>>,
+);
+
 struct ObservedDeliveryStream {
     inner: Pin<Box<dyn Stream<Item = Result<bytes::Bytes, axum::Error>> + Send>>,
     observer: RunObserver,
@@ -302,32 +306,86 @@ struct ObservedDeliveryStream {
     transport: &'static str,
     status_code: u16,
     terminal: RunTerminalContext,
+    stream_completion: Option<StreamDeliveryCompletion>,
     committed: bool,
     finished: bool,
 }
 
 impl ObservedDeliveryStream {
-    fn finish(&mut self, delivery_status: &str, reason: Option<String>) {
+    fn finish(&mut self, delivery_status: &'static str, reason: Option<String>) {
         if self.finished {
             return;
         }
         self.finished = true;
-        self.observer.record_debug(|| RunEvent::Checkpoint {
+        let Some(mut completion) = self.stream_completion.take() else {
+            self.terminal.finish_http_delivery(
+                &self.observer,
+                self.status_code,
+                delivery_status,
+                reason,
+            );
+            return;
+        };
+        let observer = self.observer.clone();
+        let terminal = self.terminal.clone();
+        let status_code = self.status_code;
+        // HTTP body 的 Drop/EOF 可能早于生成链落盘；协议终态与落盘结果由生产任务裁决。
+        let finish = move |result: Result<Option<RunTerminalContext>, ()>| match result {
+            Ok(Some(terminal)) => {
+                terminal.finish_http_delivery(&observer, status_code, "delivered", None);
+            }
+            Ok(None) if delivery_status != "delivered" => {
+                terminal.finish_http_delivery(&observer, status_code, delivery_status, reason);
+            }
+            Ok(None) => terminal.finish_http_delivery(
+                &observer,
+                status_code,
+                "delivery_failed",
+                Some("stream_incomplete".into()),
+            ),
+            Err(()) => terminal.finish_http_delivery(
+                &observer,
+                status_code,
+                "delivery_failed",
+                Some("stream_task_aborted".into()),
+            ),
+        };
+        match completion.0.try_recv() {
+            Ok(result) => finish(Ok(result)),
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => finish(Err(())),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                tokio::spawn(async move {
+                    finish(completion.0.await.map_err(|_| ()));
+                });
+            }
+        }
+    }
+}
+
+impl RunTerminalContext {
+    fn finish_http_delivery(
+        &self,
+        observer: &RunObserver,
+        status_code: u16,
+        delivery_status: &str,
+        reason: Option<String>,
+    ) {
+        observer.record_debug(|| RunEvent::Checkpoint {
             stage: "delivery_terminal".into(),
             model_turn_id: None,
             attempt_id: None,
             payload: serde_json::json!({
                 "status": delivery_status,
                 "reason": reason.clone(),
-                "http_status": self.status_code,
+                "http_status": status_code,
             }),
         });
-        self.observer.record(RunEvent::DeliveryFinished {
+        observer.record(RunEvent::DeliveryFinished {
             status: delivery_status.to_owned(),
             reason: reason.clone(),
         });
         let status = if delivery_status == "delivered" {
-            if self.terminal.waiting_client {
+            if self.waiting_client {
                 "waiting_client"
             } else {
                 "completed"
@@ -338,22 +396,20 @@ impl ObservedDeliveryStream {
             "failed"
         };
         let delivered = delivery_status == "delivered";
-        self.observer.finish(RunOutcome {
+        observer.finish(RunOutcome {
             status: status.to_owned(),
             terminal_reason: reason,
             generation_node_id: (delivered
                 && self
-                    .terminal
                     .generation_committed
                     .load(std::sync::atomic::Ordering::Acquire))
-            .then(|| self.terminal.generation_node_id.clone())
+            .then(|| self.generation_node_id.clone())
             .flatten(),
             generation_root_id: (delivered
                 && self
-                    .terminal
                     .generation_committed
                     .load(std::sync::atomic::Ordering::Acquire))
-            .then(|| self.terminal.generation_root_id.clone())
+            .then(|| self.generation_root_id.clone())
             .flatten(),
         });
     }
@@ -423,6 +479,7 @@ fn wrap_observed_delivery(
     observer: RunObserver,
     protocol: String,
     terminal: RunTerminalContext,
+    stream_completion: Option<StreamDeliveryCompletion>,
 ) -> Response {
     let status_code = response.status().as_u16();
     observer.record_debug(|| {
@@ -467,6 +524,7 @@ fn wrap_observed_delivery(
         transport,
         status_code,
         terminal,
+        stream_completion,
         committed: false,
         finished: false,
     };
@@ -514,9 +572,13 @@ pub(super) async fn execute(input: RunInput) -> Response {
             });
             response
         }
-        (Some(observer), Some(terminal)) => {
-            wrap_observed_delivery(response, observer, protocol, terminal)
-        }
+        (Some(observer), Some(terminal)) => wrap_observed_delivery(
+            response,
+            observer,
+            protocol,
+            terminal,
+            extensions.take::<StreamDeliveryCompletion>(),
+        ),
         _ => response,
     }
 }

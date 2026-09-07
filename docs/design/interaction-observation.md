@@ -56,6 +56,8 @@
 
 等待客户端不使用猜测超时。它持续到合法续接到达、记录按保留期删除或用户清理历史；旧父节点发生合法晚到续接时，Interaction 可以重新进入活动状态。
 
+HTTP 流式响应以 Delivery 确认的协议终态为完成边界，而不是客户端是否继续读取到 body EOF。Observation 在流处理任务完成 Generation Chain 提交尝试后记录最终状态与已提交的节点关联；协议终态之后关闭读取不能覆盖成功结果，终态之前断线仍按中断记录。公开工具交付后的 `waiting_client` 使用流处理任务最终确定的状态。
+
 `prefers-reduced-motion: reduce` 下，`running` 使用静态绿色圆点，不播放呼吸动画。
 
 ### 3.3 用量口径

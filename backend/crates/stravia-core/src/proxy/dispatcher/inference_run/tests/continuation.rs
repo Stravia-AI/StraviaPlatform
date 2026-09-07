@@ -1,6 +1,111 @@
 use super::*;
 
 #[tokio::test]
+async fn responses_terminal_body_drop_preserves_observed_generation_chain() {
+    let (base_url, _, _) =
+        serve_responses_websocket_sequence(vec!["first answer", "second answer", "third answer"])
+            .await;
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let gateway = Gateway::new(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .expect("Gateway");
+    let model = "terminal-body-drop";
+    configure_route_with_protocol(&gateway, model, &[base_url], "openai", "openai-compatible")
+        .await;
+    let headers = authorized_headers(&gateway).await;
+    let authorization = headers.get(header::AUTHORIZATION).expect("authorization");
+    let router = crate::proxy::server::create_router(gateway.clone());
+    let mut events = gateway.observation.subscribe(0);
+    let mut input = Vec::new();
+    let mut previous_interaction = None;
+    let mut previous_response = None;
+
+    for prompt in ["first", "second", "third"] {
+        input.push(serde_json::json!({"role": "user", "content": prompt}));
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/v1/responses")
+                    .header("content-type", "application/json")
+                    .header(header::AUTHORIZATION, authorization.clone())
+                    .body(Body::from(
+                        serde_json::json!({
+                            "model": model,
+                            "stream": true,
+                            "input": input,
+                        })
+                        .to_string(),
+                    ))
+                    .expect("Responses request"),
+            )
+            .await
+            .expect("Responses response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut chunks = response.into_body().into_data_stream();
+        let mut wire = String::new();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !wire.contains("data: [DONE]\n\n") {
+                let chunk = chunks.next().await.expect("terminal frame").expect("chunk");
+                wire.push_str(std::str::from_utf8(&chunk).expect("SSE UTF-8"));
+            }
+        })
+        .await
+        .expect("response terminal arrives");
+        // 客户端收到协议终态即可结束读取，不保证再 poll 一次 HTTP EOF。
+        drop(chunks);
+        let completed = wire
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+            .find(|event| event["type"] == "response.completed")
+            .expect("completed response");
+        let response_id = completed["response"]["id"].as_str().expect("response ID");
+        wait_for_observed_run_finish(&mut events).await;
+        let forest = gateway
+            .observation
+            .query_forest(Default::default())
+            .await
+            .expect("observation forest");
+        let interaction = forest
+            .roots
+            .iter()
+            .flat_map(|root| &root.interactions)
+            .find(|interaction| {
+                interaction.parent_interaction_id == previous_interaction
+                    && interaction.visible_tail == format!("{prompt} answer")
+            })
+            .expect("new interaction linked to its parent");
+        assert_eq!(interaction.status, "completed");
+        let detail = gateway
+            .observation
+            .get_interaction(&interaction.id, Default::default())
+            .await
+            .expect("interaction query")
+            .expect("interaction");
+        assert_eq!(detail.runs.len(), 1);
+        assert_eq!(detail.runs[0].status, "completed");
+        assert_eq!(detail.runs[0].terminal_reason, None);
+        assert_eq!(
+            detail.runs[0].generation_node_id.as_deref(),
+            Some(response_id)
+        );
+        assert_eq!(detail.runs[0].generation_parent_id, previous_response);
+        previous_interaction = Some(interaction.id.clone());
+        previous_response = Some(response_id.to_owned());
+        input.extend(
+            completed["response"]["output"]
+                .as_array()
+                .expect("response output")
+                .iter()
+                .cloned(),
+        );
+    }
+}
+
+#[tokio::test]
 async fn anthropic_cache_breakpoint_on_reusable_history_keeps_target_continuation() {
     let (base_url, connections, requests) =
         serve_responses_websocket_sequence(vec!["first answer", "second answer"]).await;

@@ -326,7 +326,8 @@ impl DeliveryAdapter {
             return DeliveryProgress::ReceiverClosed;
         };
         tokio::select! {
-            _ = live.cancellation.cancelled() => DeliveryProgress::Cancelled,
+            // 已确认的协议终态不可被随后关闭 HTTP body 产生的取消信号推翻。
+            biased;
             result = terminal_delivery => {
                 if result.is_ok() {
                     DeliveryProgress::Sent
@@ -334,6 +335,7 @@ impl DeliveryAdapter {
                     DeliveryProgress::ReceiverClosed
                 }
             }
+            _ = live.cancellation.cancelled() => DeliveryProgress::Cancelled,
         }
     }
 }

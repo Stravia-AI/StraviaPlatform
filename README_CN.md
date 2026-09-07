@@ -252,8 +252,11 @@ curl http://127.0.0.1:23471/v1/chat/completions \
 # 开发模式
 task dev:desktop
 
-# 生产构建
+# 生产应用包
 task build:desktop
+
+# Windows NSIS 安装包
+task build:desktop:installer
 ```
 
 开发构建会把服务端和桌面端运行状态（包括 `gateway.db` 和桌面端固定端口配置）统一放在仓库根目录下已忽略的 `.stravia-dev/` 目录中。Release 服务端使用 `~/.stravia`；Release 桌面端仍使用操作系统的应用数据目录。

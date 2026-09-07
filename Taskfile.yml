@@ -63,6 +63,13 @@ tasks:
     cmds:
       - bunx @tauri-apps/cli@{{.TAURI_CLI_VERSION}} build {{if .BUNDLES}}--bundles {{.BUNDLES}}{{end}} {{if .RUST_TARGET}}--target {{.RUST_TARGET}}{{end}} -- --locked
 
+  build:desktop:installer:
+    desc: Build the Windows NSIS desktop installer for production.
+    cmds:
+      - task: build:desktop
+        vars:
+          BUNDLES: nsis
+
   build:desktop:e2e:
     desc: Build the Windows desktop WebDriver smoke-test binary.
     deps: [install:web]

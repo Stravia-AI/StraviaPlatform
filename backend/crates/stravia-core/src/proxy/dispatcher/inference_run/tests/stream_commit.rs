@@ -235,6 +235,7 @@ async fn disconnect_during_post_text_preview_persists_no_marker_or_generation_no
     .expect("gateway init");
     configure_route(&gateway, "cancel-post-text-preview", &[upstream_url]).await;
 
+    let mut events = gateway.observation.subscribe(0);
     let response = execute_stream(gateway.clone(), "cancel-post-text-preview").await;
     let mut chunks = response.into_body().into_data_stream();
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -254,7 +255,22 @@ async fn disconnect_during_post_text_preview_persists_no_marker_or_generation_no
     release_upstream
         .send(())
         .expect("release upstream completion after disconnect");
-    tokio::task::yield_now().await;
+    wait_for_observed_run_finish(&mut events).await;
+    let forest = gateway
+        .observation
+        .query_forest(Default::default())
+        .await
+        .expect("interrupted observation forest");
+    let interaction = &forest.roots[0].interactions[0];
+    assert_eq!(interaction.status, "interrupted");
+    let detail = gateway
+        .observation
+        .get_interaction(&interaction.id, Default::default())
+        .await
+        .expect("interrupted interaction query")
+        .expect("interrupted interaction");
+    assert_eq!(detail.runs[0].status, "cancelled");
+    assert_eq!(detail.runs[0].generation_node_id, None);
 
     let pool = gateway._sqlite_pool.as_ref().expect("Gateway SQLite pool");
     let marker_count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM history_markers")

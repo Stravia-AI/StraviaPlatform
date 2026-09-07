@@ -22,6 +22,7 @@
 
 ### Fixed
 
+- Completed HTTP streams no longer appear interrupted or lose their Request Records parent links when clients stop reading after the protocol terminal event; observation finalization now waits for the stream's delivery and Generation Chain commit result.
 - The Server development workflow now passes Vite's actual listening origin to the backend for setup and sign-in, including when Vite selects another port for concurrent workspaces.
 - Relative SQLite paths now resolve from the directory containing `server.toml` throughout setup, startup, and local recovery, keeping the default Debug database in the workspace's `.stravia-dev` directory instead of creating a database in the process working directory.
 
