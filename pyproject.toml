@@ -13,6 +13,11 @@ test = [
 [tool.uv]
 package = false
 
+[[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.org/simple"
+default = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests/e2e"]
 python_files = ["test_*.py"]
