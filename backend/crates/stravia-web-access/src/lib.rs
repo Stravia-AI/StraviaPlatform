@@ -2,6 +2,7 @@
 
 mod browser;
 pub mod fetch;
+pub mod http_client;
 pub mod local;
 mod outbound;
 pub mod remote;

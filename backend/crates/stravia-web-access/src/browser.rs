@@ -114,6 +114,7 @@ fn start_browser_worker(
     config: MoliLaunchConfig,
     profile_dir: &Path,
 ) -> Result<BrowserWorker, String> {
+    crate::http_client::initialize_transport().map_err(|error| error.to_string())?;
     fs::create_dir_all(&profile_dir)
         .map_err(|error| format!("Moli profile creation failed: {error}"))?;
 
@@ -214,8 +215,8 @@ fn browser_config(config: &MoliLaunchConfig, profile_dir: &Path) -> BrowserConfi
     let mut browser_config = BrowserConfig::default();
     browser_config.set_profile_dir(Some(profile_dir.to_owned()));
     let fetch = browser_config.fetch_mut();
-    fetch.set_http_proxy(config.proxy_server.clone());
-    fetch.set_http_no_proxy(config.no_proxy.clone());
+    fetch.set_http_proxy(Some(config.proxy_server.clone().unwrap_or_default()));
+    fetch.set_http_no_proxy(Some(config.no_proxy.clone().unwrap_or_default()));
     // Browser navigation can follow redirects and create subresource requests.
     // Enforce the egress policy inside Moli instead of validating only the URL
     // initially supplied by Stravia.
@@ -308,23 +309,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn browser_config_preserves_profile_proxy_and_egress_policy() {
-        let profile_dir = PathBuf::from("profile");
-        let config = browser_config(
-            &MoliLaunchConfig {
-                proxy_server: Some("http://proxy.test:8080".to_owned()),
-                no_proxy: Some("localhost,.corp.test".to_owned()),
-            },
-            &profile_dir,
-        );
-
-        assert_eq!(config.profile_dir(), Some(profile_dir.as_path()));
-        assert_eq!(config.fetch().http_proxy(), Some("http://proxy.test:8080"));
-        assert_eq!(config.fetch().http_no_proxy(), Some("localhost,.corp.test"));
-        assert!(config.fetch().block_private_networks());
-    }
-
     #[tokio::test]
     async fn worker_renders_and_cleans_up_on_its_owner_thread() {
         let runtime = BrowserRuntime::new(direct_config());
@@ -346,5 +330,58 @@ mod tests {
         assert!(rendered.html.contains("<html"));
         drop(runtime);
         assert!(!profile_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn worker_executes_javascript_and_blocks_private_network_fetches() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let proxy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        let html = format!(
+            r#"<html><body><script>
+            document.body.dataset.computed = String(6 * 7);
+            fetch("http://{addr}/private").then(
+                () => {{ document.body.id = "leaked"; }},
+                () => {{ document.body.id = "blocked"; }}
+            );
+            </script></body></html>"#
+        );
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = proxy.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                request.push(stream.read_u8().await.unwrap());
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{html}",
+                html.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        let runtime = BrowserRuntime::new(MoliLaunchConfig {
+            proxy_server: Some(format!("http://{proxy_addr}")),
+            no_proxy: None,
+        });
+        let rendered = runtime
+            .render(RenderRequest {
+                url: "http://93.184.216.34/javascript",
+                preflight_url: None,
+                ready_selector: "body#blocked",
+                timeout: Duration::from_secs(5),
+                request_guard: None,
+            })
+            .await
+            .expect("JavaScript should execute without private network access");
+        assert!(rendered.html.contains("data-computed=\"42\""));
+        assert!(rendered.html.contains("id=\"blocked\""));
+        server.await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), listener.accept())
+                .await
+                .is_err()
+        );
     }
 }

@@ -13,7 +13,7 @@ use extract::{ContentKind, HtmlExtract};
 use http::NetworkBackend;
 
 const MARKDOWN_CHARACTER_CAP: usize = 500_000;
-const DOWNLOAD_BYTE_CAP: usize = 10 * 1024 * 1024;
+pub(crate) const DOWNLOAD_BYTE_CAP: usize = 10 * 1024 * 1024;
 const MAX_REDIRECTS: usize = 10;
 const RENDER_TIMEOUT: Duration = Duration::from_secs(15);
 const LOW_QUALITY_LIMITATION: &str =

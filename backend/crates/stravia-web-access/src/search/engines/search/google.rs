@@ -1,11 +1,13 @@
 use std::time::Duration;
 
 use futures::future::join_all;
+use moli_fetch::{Request, RequestRedirectMode};
 use scraper::{ElementRef, Selector};
 use url::Url;
 
 use crate::{
     browser::RenderRequest,
+    http_client::HttpClient,
     search::{
         engines::{EngineResponse, RequestResponse, SearchQuery},
         parse::{parse_html_response_with_opts, ParseOpts, QueryMethod},
@@ -19,7 +21,7 @@ const GOOGLE_NO_RESULTS_MESSAGE: &str = "Your search did not match any documents
 const BROWSER_RENDER_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub async fn request(search: &SearchQuery) -> anyhow::Result<RequestResponse> {
-    Ok(search.http.get(search_url(search).as_str()).into())
+    Ok(Request::get(search_url(search).as_str())?.into())
 }
 
 pub(crate) fn requires_browser_render(body: &str) -> bool {
@@ -110,7 +112,7 @@ enum RedirectSlot {
 }
 
 async fn resolve_google_redirects(
-    client: &wreq::Client,
+    client: &HttpClient,
     mut response: EngineResponse,
 ) -> anyhow::Result<EngineResponse> {
     let mut redirects = response
@@ -155,22 +157,21 @@ fn is_google_goto_url(url: &str) -> bool {
     url.starts_with("https://www.google.com/goto?url=")
 }
 
-async fn resolve_google_redirect(client: &wreq::Client, url: &str) -> anyhow::Result<String> {
+async fn resolve_google_redirect(client: &HttpClient, url: &str) -> anyhow::Result<String> {
+    let request = Request::get(url)?.with_redirect_mode(RequestRedirectMode::Manual);
     let response = client
-        .get(url)
-        .redirect(wreq::redirect::Policy::none())
-        .send()
+        .fetch(request)
         .await
         .map_err(|error| anyhow::anyhow!("Google result redirect request failed: {error}"))?;
-    if !response.status().is_redirection() {
-        anyhow::bail!("Google result redirect returned HTTP {}", response.status());
+    if !(300..400).contains(&response.status) {
+        anyhow::bail!("Google result redirect returned HTTP {}", response.status);
     }
     let location = response
-        .headers()
-        .get(wreq::header::LOCATION)
-        .ok_or_else(|| anyhow::anyhow!("Google result redirect omitted Location"))?
-        .to_str()
-        .map_err(|error| anyhow::anyhow!("Google result redirect Location was invalid: {error}"))?;
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("location"))
+        .map(|(_, value)| value.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Google result redirect omitted Location"))?;
     let target = Url::parse(location)
         .map_err(|error| anyhow::anyhow!("Google result redirect target was invalid: {error}"))?;
     if !matches!(target.scheme(), "http" | "https") {
@@ -282,7 +283,10 @@ mod tests {
         clean_url, is_traffic_challenge, parse_response, requires_browser_render,
         resolve_google_redirect, search_url,
     };
-    use crate::search::engines::{AllowedDomain, SearchQuery};
+    use crate::{
+        outbound::direct_http_client,
+        search::engines::{AllowedDomain, SearchQuery},
+    };
 
     fn search_with_allowed_domain() -> SearchQuery {
         SearchQuery::for_test(
@@ -377,7 +381,7 @@ mod tests {
             }
         });
 
-        let client = wreq::Client::new();
+        let client = direct_http_client();
         let redirect = format!("http://{addr}/goto?url=opaque-token");
         let resolved = resolve_google_redirect(&client, &redirect).await.unwrap();
 
@@ -446,7 +450,7 @@ mod tests {
     }
 }
 
-pub fn request_autocomplete(query: &str, client: &wreq::Client) -> wreq::RequestBuilder {
+pub fn request_autocomplete(query: &str, _client: &HttpClient) -> anyhow::Result<Request> {
     let url = Url::parse_with_params(
         "https://suggestqueries.google.com/complete/search",
         &[
@@ -457,7 +461,7 @@ pub fn request_autocomplete(query: &str, client: &wreq::Client) -> wreq::Request
         ],
     )
     .unwrap();
-    client.get(url.as_str())
+    Request::get(url.as_str())
 }
 
 pub fn parse_autocomplete_response(body: &str) -> anyhow::Result<Vec<String>> {

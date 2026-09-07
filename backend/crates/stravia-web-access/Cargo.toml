@@ -18,10 +18,13 @@ chrono-tz = { workspace = true }
 dom_smoothie = { workspace = true }
 fend-core = { workspace = true }
 futures = { workspace = true }
-http-body-util = { workspace = true }
 htmd = { workspace = true }
 maud = { workspace = true }
 moli-core = { workspace = true }
+moli-fetch = { workspace = true }
+moli-cookie-jar = { workspace = true }
+moli-stealth-net = { workspace = true }
+parking_lot = { workspace = true }
 numbat = { workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }
@@ -31,13 +34,11 @@ scraper = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["net", "rt", "sync"] }
+tokio = { workspace = true, features = ["net", "rt", "sync", "time"] }
 toml = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
 urlencoding = { workspace = true }
-wreq = { workspace = true }
-wreq-util = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["io-util", "macros", "rt-multi-thread"] }

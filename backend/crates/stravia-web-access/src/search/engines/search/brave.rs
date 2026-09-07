@@ -1,3 +1,4 @@
+use moli_fetch::Request;
 use url::Url;
 
 use crate::search::{
@@ -5,8 +6,8 @@ use crate::search::{
     parse::{parse_html_response_with_opts, ParseOpts},
 };
 
-pub async fn request(search: &SearchQuery) -> RequestResponse {
-    search.http.get(search_url(search).as_str()).into()
+pub async fn request(search: &SearchQuery) -> anyhow::Result<RequestResponse> {
+    Ok(Request::get(search_url(search).as_str())?.into())
 }
 
 fn search_url(search: &SearchQuery) -> Url {

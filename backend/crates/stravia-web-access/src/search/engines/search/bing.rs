@@ -1,4 +1,5 @@
 use base64::Engine;
+use moli_fetch::Request;
 use rand::RngExt;
 use scraper::{ElementRef, Selector};
 use url::Url;
@@ -8,12 +9,13 @@ use crate::search::{
     parse::{parse_html_response_with_opts, ParseOpts, QueryMethod},
 };
 
-pub async fn request(search: &SearchQuery) -> wreq::RequestBuilder {
+pub async fn request(search: &SearchQuery) -> anyhow::Result<Request> {
     let cvid = generate_cvid();
-    search
-        .http
-        .get(search_url(search, &cvid).as_str())
-        .header("Cookie", &format!("SRCHHPGUSR=IG={}", cvid))
+    let mut request = Request::get(search_url(search, &cvid).as_str())?;
+    request
+        .request_headers
+        .push(("Cookie".to_owned(), format!("SRCHHPGUSR=IG={cvid}")));
+    Ok(request)
 }
 
 fn search_url(search: &SearchQuery, cvid: &str) -> Url {

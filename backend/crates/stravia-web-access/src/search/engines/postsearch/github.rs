@@ -1,17 +1,18 @@
 use maud::{html, PreEscaped};
+use moli_fetch::Request;
 use scraper::{Html, Selector};
 use url::Url;
 
 use crate::search::engines::{answer::regex, Response};
 
-pub async fn request(response: &Response) -> Option<wreq::RequestBuilder> {
+pub async fn request(response: &Response) -> anyhow::Result<Option<Request>> {
     for search_result in response.search_results.iter().take(8) {
         if regex!(r"^https:\/\/github\.com\/[\w-]+\/[\w.-]+$").is_match(&search_result.result.url) {
-            return Some(response.http.get(search_result.result.url.as_str()));
+            return Request::get(search_result.result.url.as_str()).map(Some);
         }
     }
 
-    None
+    Ok(None)
 }
 
 pub fn parse_response(body: &str) -> Option<PreEscaped<String>> {

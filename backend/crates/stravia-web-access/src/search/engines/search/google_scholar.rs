@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use moli_fetch::Request;
 use url::Url;
 
 use crate::{
@@ -14,16 +15,12 @@ const GOOGLE_SCHOLAR_HOME_URL: &str = "https://scholar.google.com/";
 const GOOGLE_SCHOLAR_RESULT_SELECTOR: &str = "div.gs_r";
 const BROWSER_RENDER_TIMEOUT: Duration = Duration::from_secs(10);
 
-pub async fn request(search: &SearchQuery) -> RequestResponse {
-    search.http.get(search_url(search).as_str()).into()
+pub async fn request(search: &SearchQuery) -> anyhow::Result<RequestResponse> {
+    Ok(Request::get(search_url(search).as_str())?.into())
 }
 
-pub(crate) fn requires_browser_render(status: wreq::StatusCode) -> bool {
-    status.is_redirection()
-        || matches!(
-            status,
-            wreq::StatusCode::FORBIDDEN | wreq::StatusCode::TOO_MANY_REQUESTS
-        )
+pub(crate) fn requires_browser_render(status: u16) -> bool {
+    (300..400).contains(&status) || matches!(status, 403 | 429)
 }
 
 pub(crate) async fn render_response(search: &SearchQuery) -> anyhow::Result<EngineResponse> {
@@ -79,10 +76,10 @@ mod tests {
 
     #[test]
     fn renders_google_scholar_after_http_blocking() {
-        assert!(requires_browser_render(wreq::StatusCode::FOUND));
-        assert!(requires_browser_render(wreq::StatusCode::FORBIDDEN));
-        assert!(requires_browser_render(wreq::StatusCode::TOO_MANY_REQUESTS));
-        assert!(!requires_browser_render(wreq::StatusCode::OK));
+        assert!(requires_browser_render(302));
+        assert!(requires_browser_render(403));
+        assert!(requires_browser_render(429));
+        assert!(!requires_browser_render(200));
     }
 
     #[test]

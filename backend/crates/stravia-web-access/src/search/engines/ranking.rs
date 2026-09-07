@@ -1,8 +1,11 @@
 use std::{collections::HashMap, sync::Arc};
 
-use crate::search::{
-    config::Config,
-    urls::{apply_url_replacements, get_url_weight},
+use crate::{
+    http_client::HttpClient,
+    search::{
+        config::Config,
+        urls::{apply_url_replacements, get_url_weight},
+    },
 };
 
 use super::{
@@ -13,7 +16,7 @@ use super::{
 pub fn merge_engine_responses(
     config: Arc<Config>,
     responses: HashMap<Engine, EngineResponse>,
-    http: wreq::Client,
+    http: HttpClient,
 ) -> Response {
     let mut search_results: Vec<SearchResult<EngineSearchResult>> = Vec::new();
     let mut featured_snippet: Option<FeaturedSnippet> = None;

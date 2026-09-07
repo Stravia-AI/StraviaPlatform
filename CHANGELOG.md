@@ -8,6 +8,7 @@
 
 ### Changed
 
+- The in-process Local Provider's Search and Fetch now share the `moli-stealth` native HTTP and browser stack, replacing `wreq` and removing all workspace `[patch.crates-io]` overrides while preserving proxy snapshots, cookie isolation, and fetch safety limits.
 - The WebUI now links service connection, visible model inventory actions, and client setup through lightweight task guidance, reuses eligible API Keys, and preserves selections when returning from resource management.
 - Model lists distinguish display names, client Model IDs, enabled state, and associated services; modified model drafts now warn before navigation without changing priority lanes or immediately applied destination settings.
 - Client setup distinguishes copied and written configuration from verified connections, and credential guidance no longer claims editable secrets are shown only once.

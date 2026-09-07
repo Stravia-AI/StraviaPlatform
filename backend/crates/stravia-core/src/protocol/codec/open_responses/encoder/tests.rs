@@ -398,14 +398,17 @@ fn rejects_canonical_json_object_for_dated_targets() {
 }
 
 #[test]
-fn stringifies_structured_single_tool_results() {
+fn encodes_non_media_tool_payload_as_json_text() {
+    let payload = serde_json::json!([
+        {"type": "tool_result", "content": {"temperature": 21}}
+    ]);
     let request = AiRequest::new(
         "gpt",
         vec![AiItem {
             role: Role::Tool,
             content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
                 tool_use_id: "call_1".into(),
-                content: serde_json::json!({"temperature": 21}),
+                content: payload.clone(),
                 is_error: None,
                 cache_control: None,
             }]),
@@ -418,28 +421,10 @@ fn stringifies_structured_single_tool_results() {
     let (body, _) = ResponsesEncoder
         .encode_request(&request)
         .expect("encode structured tool result");
-    assert_eq!(
-        body["input"][0]["output"],
-        serde_json::Value::String(r#"{"temperature":21}"#.into())
-    );
-}
-
-#[test]
-fn stringifies_invalid_tool_result_content_arrays() {
-    let output = encode_tool_output(&MessageContent::Blocks(vec![ContentBlock::ToolResult {
-        tool_use_id: "call_1".into(),
-        content: serde_json::json!([
-            {"type": "tool_result", "content": {"temperature": 21}}
-        ]),
-        is_error: None,
-        cache_control: None,
-    }]))
-    .expect("normalize invalid content array");
-
-    assert_eq!(
-        output,
-        Value::String(r#"[{"content":{"temperature":21},"type":"tool_result"}]"#.into())
-    );
+    let output = body["input"][0]["output"]
+        .as_str()
+        .expect("non-media tool output must be JSON text, not a native content array");
+    assert_eq!(serde_json::from_str::<Value>(output).unwrap(), payload);
 }
 
 #[test]

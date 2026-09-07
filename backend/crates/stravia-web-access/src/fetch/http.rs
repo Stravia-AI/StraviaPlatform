@@ -1,22 +1,19 @@
-use std::{
-    net::{IpAddr, SocketAddr},
-    time::Duration,
-};
+use std::{net::IpAddr, time::Duration};
 
-use http_body_util::BodyExt;
+use moli_fetch::{FetchConfig, Request};
 use url::{Host, Url};
-use wreq_util::Emulation;
 
 use super::{
     BackendFuture, FetchError, FetchErrorCode, HttpBackend, HttpResponse, DOWNLOAD_BYTE_CAP,
 };
+use crate::http_client::{HttpClient, ResponseTooLarge};
 use crate::outbound::{LocalWeb, ResolvedProxy};
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub(super) struct NetworkBackend {
     snapshot: ResolvedProxy,
-    proxied: wreq::Client,
+    proxied: HttpClient,
 }
 
 impl NetworkBackend {
@@ -69,21 +66,22 @@ impl HttpBackend for NetworkBackend {
                 .to_owned();
             let client = if self.pins_origin(url) {
                 let port = url.port_or_known_default().unwrap_or(80);
-                let socket_addresses = addresses
+                let pinned_addresses = addresses
                     .iter()
-                    .copied()
-                    .map(|address| SocketAddr::new(address, port))
-                    .collect::<Vec<_>>();
-                wreq::Client::builder()
-                    .emulation(Emulation::Firefox139)
-                    .timeout(HTTP_TIMEOUT)
-                    .redirect(wreq::redirect::Policy::none())
-                    .no_proxy()
-                    .resolve_to_addrs(hostname, socket_addresses)
-                    .build()
-                    .map_err(|error| {
-                        FetchError::unavailable(format!("HTTP client failed: {error}"))
-                    })?
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let mut config = FetchConfig::default();
+                config.set_request_timeout_ms(HTTP_TIMEOUT.as_millis() as u64);
+                config.set_http_proxy(Some(String::new()));
+                config.set_http_no_proxy(Some(String::new()));
+                config.set_network_blocking(true, Vec::new());
+                config.set_connection_limits(None, None, Some(DOWNLOAD_BYTE_CAP));
+                // 固定已验证的全部地址，避免验证与连接之间再次 DNS 解析。
+                config.set_http_host_resolve(vec![format!("{hostname}:{port}:{pinned_addresses}")]);
+                HttpClient::new(config.clone(), config, false).map_err(|error| {
+                    FetchError::unavailable(format!("HTTP client failed: {error}"))
+                })?
             } else {
                 self.proxied.clone()
             };
@@ -92,43 +90,31 @@ impl HttpBackend for NetworkBackend {
     }
 }
 
-async fn send_get(client: wreq::Client, url: &Url) -> Result<HttpResponse, FetchError> {
-    let mut response = client
-        .get(url.as_str())
-        .send()
-        .await
-        .map_err(|error| FetchError::unavailable(format!("HTTP request failed: {error}")))?;
-    if response
-        .content_length()
-        .is_some_and(|length| length > DOWNLOAD_BYTE_CAP as u64)
-    {
-        return Err(response_too_large());
-    }
-    let status = response.status().as_u16();
-    let content_type = response
-        .headers()
-        .get(wreq::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
-    let location = response
-        .headers()
-        .get(wreq::header::LOCATION)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
-    let mut body = Vec::new();
-    while let Some(frame) = response.frame().await {
-        let frame = frame
-            .map_err(|error| FetchError::unavailable(format!("response read failed: {error}")))?;
-        let Ok(chunk) = frame.into_data() else {
-            continue;
-        };
-        if body.len() + chunk.len() > DOWNLOAD_BYTE_CAP {
-            return Err(response_too_large());
+async fn send_get(client: HttpClient, url: &Url) -> Result<HttpResponse, FetchError> {
+    let request = Request::get(url.as_str())
+        .map_err(|_| FetchError::invalid_url(url.as_str()))?
+        .with_follow_redirects(false);
+    let response = client.fetch(request).await.map_err(|error| {
+        if error.downcast_ref::<ResponseTooLarge>().is_some() {
+            response_too_large()
+        } else {
+            FetchError::unavailable(format!("HTTP request failed: {error}"))
         }
-        body.extend_from_slice(&chunk);
-    }
+    })?;
+    let (head, body) = response.into_parts();
+    let header = |name: &str| {
+        head.headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.clone())
+    };
+    let content_type = header("content-type");
+    let location = header("location");
+    let body = body
+        .try_into_materialized_bytes()
+        .map_err(|_| FetchError::unavailable("HTTP response was not materialized"))?;
     Ok(HttpResponse {
-        status,
+        status: head.status,
         content_type,
         location,
         body,

@@ -2,7 +2,7 @@ use fend_core::SpanKind;
 use maud::{html, PreEscaped};
 use std::sync::{atomic::AtomicU32, atomic::Ordering, LazyLock};
 
-use crate::search::engines::EngineResponse;
+use crate::{http_client::HttpClient, search::engines::EngineResponse};
 
 use super::regex;
 
@@ -19,7 +19,7 @@ pub async fn request(query: &str) -> EngineResponse {
     })
 }
 
-pub fn request_autocomplete(query: &str, _client: &wreq::Client) -> Vec<String> {
+pub fn request_autocomplete(query: &str, _client: &HttpClient) -> anyhow::Result<Vec<String>> {
     let mut results = Vec::new();
 
     let query = clean_query(query);
@@ -28,7 +28,7 @@ pub fn request_autocomplete(query: &str, _client: &wreq::Client) -> Vec<String> 
         results.push(format!("= {result}"));
     }
 
-    results
+    Ok(results)
 }
 
 fn clean_query(query: &str) -> String {
