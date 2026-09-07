@@ -433,74 +433,81 @@ test.describe('Interaction Observation canvas', () => {
     await expect(migration).toHaveCount(0)
   })
 
-  test('uses a full-screen touch inspector, confirms every Debug enable, and honors reduced motion', async ({
-    page,
-  }) => {
-    await page.setViewportSize({ width: 390, height: 740 })
-    await page.emulateMedia({ reducedMotion: 'reduce' })
-    const fixture = await installObservationFixture(page)
-    await page.goto('/logs')
+  test.describe('touch input', () => {
+    test.use({ hasTouch: true })
 
-    const runningDot = node(page, 'Cinder', 'running').locator('[data-status="running"] .status-dot')
-    const waitingDot = node(page, 'Boreal', 'waiting_client').locator('[data-status="waiting_client"] .status-dot')
-    await expect(runningDot).toHaveCSS('animation-name', 'none')
-    await expect(waitingDot).toHaveCSS('animation-name', 'none')
+    test('uses a full-screen touch inspector, confirms every Debug enable, and honors reduced motion', async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width: 390, height: 740 })
+      await page.emulateMedia({ reducedMotion: 'reduce' })
+      const fixture = await installObservationFixture(page)
+      await page.goto('/logs')
 
-    await node(page, 'Cinder', 'running').click()
-    const inspector = page.getByRole('complementary', { name: 'Observation details' })
-    const inspectorBox = (await inspector.boundingBox())!
-    expect(inspectorBox.x).toBeLessThanOrEqual(1)
-    expect(inspectorBox.width).toBeGreaterThanOrEqual(389)
-    await expect(page.getByRole('slider', { name: 'Resize details inspector' })).toBeHidden()
-    await page.getByRole('button', { name: 'Close', exact: true }).click()
+      const runningDot = node(page, 'Cinder', 'running').locator('[data-status="running"] .status-dot')
+      const waitingDot = node(page, 'Boreal', 'waiting_client').locator('[data-status="waiting_client"] .status-dot')
+      await expect(runningDot).toHaveCSS('animation-name', 'none')
+      await expect(waitingDot).toHaveCSS('animation-name', 'none')
 
-    const debugSwitch = page.getByRole('switch', { name: 'Debug' })
-    await debugSwitch.click()
-    const confirmation = page.getByRole('alertdialog', { name: 'Enable Debug' })
-    await expect(confirmation).toContainText('Confirm every enable action.')
-    await confirmation.getByRole('button', { name: 'Cancel' }).click()
-    expect(fixture.debugWrites).toHaveLength(0)
+      await node(page, 'Cinder', 'running').click()
+      const inspector = page.getByRole('complementary', { name: 'Observation details' })
+      const inspectorBox = (await inspector.boundingBox())!
+      expect(inspectorBox.x).toBeLessThanOrEqual(1)
+      expect(inspectorBox.width).toBeGreaterThanOrEqual(389)
+      await expect(page.getByRole('slider', { name: 'Resize details inspector' })).toBeHidden()
+      await page.getByRole('button', { name: 'Close', exact: true }).click()
 
-    await debugSwitch.click()
-    await page.getByRole('alertdialog', { name: 'Enable Debug' }).getByRole('button', { name: 'Enable Debug' }).click()
-    await expect(debugSwitch).toBeChecked()
-    expect(fixture.debugWrites).toEqual([{ enabled: true, confirmed: true }])
-    await debugSwitch.click()
-    await expect(debugSwitch).not.toBeChecked()
-    expect(fixture.debugWrites.at(-1)).toEqual({ enabled: false, confirmed: false })
-    await debugSwitch.click()
-    await expect(page.getByRole('alertdialog', { name: 'Enable Debug' })).toBeVisible()
+      const debugSwitch = page.getByRole('switch', { name: 'Debug' })
+      await debugSwitch.click()
+      const confirmation = page.getByRole('alertdialog', { name: 'Enable Debug' })
+      await expect(confirmation).toContainText('Confirm every enable action.')
+      await confirmation.getByRole('button', { name: 'Cancel' }).click()
+      expect(fixture.debugWrites).toHaveLength(0)
 
-    await page.getByRole('alertdialog', { name: 'Enable Debug' }).getByRole('button', { name: 'Cancel' }).click()
-    const paneBox = (await page.locator('.svelte-flow__pane').boundingBox())!
-    const centerX = paneBox.x + paneBox.width / 2
-    const centerY = paneBox.y + paneBox.height / 2
-    const beforePinch = await viewportTransform(page)
-    const session = await page.context().newCDPSession(page)
-    await session.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 2 })
-    await session.send('Input.dispatchTouchEvent', {
-      type: 'touchStart',
-      touchPoints: [
-        { x: centerX - 25, y: centerY, id: 0 },
-        { x: centerX + 25, y: centerY, id: 1 },
-      ],
+      await debugSwitch.click()
+      await page
+        .getByRole('alertdialog', { name: 'Enable Debug' })
+        .getByRole('button', { name: 'Enable Debug' })
+        .click()
+      await expect(debugSwitch).toBeChecked()
+      expect(fixture.debugWrites).toEqual([{ enabled: true, confirmed: true }])
+      await debugSwitch.click()
+      await expect(debugSwitch).not.toBeChecked()
+      expect(fixture.debugWrites.at(-1)).toEqual({ enabled: false, confirmed: false })
+      await debugSwitch.click()
+      await expect(page.getByRole('alertdialog', { name: 'Enable Debug' })).toBeVisible()
+
+      await page.getByRole('alertdialog', { name: 'Enable Debug' }).getByRole('button', { name: 'Cancel' }).click()
+      const paneBox = (await page.locator('.svelte-flow__pane').boundingBox())!
+      const centerX = paneBox.x + paneBox.width / 2
+      const centerY = paneBox.y + paneBox.height / 2
+      const beforePinch = await viewportTransform(page)
+      const session = await page.context().newCDPSession(page)
+      await session.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 2 })
+      await session.send('Input.dispatchTouchEvent', {
+        type: 'touchStart',
+        touchPoints: [
+          { x: centerX - 25, y: centerY, id: 0 },
+          { x: centerX + 25, y: centerY, id: 1 },
+        ],
+      })
+      await session.send('Input.dispatchTouchEvent', {
+        type: 'touchMove',
+        touchPoints: [
+          { x: centerX - 50, y: centerY, id: 0 },
+          { x: centerX + 50, y: centerY, id: 1 },
+        ],
+      })
+      await session.send('Input.dispatchTouchEvent', {
+        type: 'touchMove',
+        touchPoints: [
+          { x: centerX - 75, y: centerY, id: 0 },
+          { x: centerX + 75, y: centerY, id: 1 },
+        ],
+      })
+      await session.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+      await expect.poll(async () => (await viewportTransform(page)).zoom).not.toBe(beforePinch.zoom)
+      await session.detach()
     })
-    await session.send('Input.dispatchTouchEvent', {
-      type: 'touchMove',
-      touchPoints: [
-        { x: centerX - 50, y: centerY, id: 0 },
-        { x: centerX + 50, y: centerY, id: 1 },
-      ],
-    })
-    await session.send('Input.dispatchTouchEvent', {
-      type: 'touchMove',
-      touchPoints: [
-        { x: centerX - 75, y: centerY, id: 0 },
-        { x: centerX + 75, y: centerY, id: 1 },
-      ],
-    })
-    await session.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
-    await expect.poll(async () => (await viewportTransform(page)).zoom).not.toBe(beforePinch.zoom)
-    await session.detach()
   })
 })
