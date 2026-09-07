@@ -180,6 +180,7 @@ _避免使用_：Thinking Text、Authoritative Thinking
 ## History Marker
 
 History Marker 是 Client Projection 中、归属于 Principal 的 opaque 历史引用，用于在原位置等待并恢复一个 Hidden History Segment。一个 Marker 只能引用一个 Platform Tool Execution（其 call 与 terminal result）或一个 authoritative Thinking block，禁止聚合多个工具执行或多个 block。新 Marker 默认以无签名 Thinking block 中仅供机器读取的 HTML comment 呈现；OpenAI-compatible 客户端收到首个 Text 后，所有 Thinking 与 Platform Marker 均改用 Text carrier，以保留它们与后续内容的顺序。Markdown renderer 通常隐藏该 comment，纯文本客户端可能直接显示它，这是 Text carrier 的显式协议行为；周边客户端历史可以独立修改，同一 Marker 在保留期内可以被重试和并发分支重复使用。
+其访问隔离边界仅为 Stravia API Key 对应的 Principal；同一 API Key 持有有效 Marker 引用时可跨对话或分支复用，不要求属于原历史或其后代，其他 API Key 不得解析。
 _避免使用_：占位文本、Platform Tool Call、Client History Token
 
 ## Reserved Thinking Marker
@@ -592,6 +593,26 @@ _避免使用_：Search Engine（当指 Web Provider）、Metasearch、引擎 Pr
 
 Local Web Outbound Proxy Mode 是 Local Web Provider 对 Internal Web Search、Static Extraction 与 Rendered Extraction（含页面子资源）的单一出站结果，由该记录的 `use_proxy` 与 Gateway `proxy_url` 派生：关闭则直连，开启则全部走 `proxy_url`。它不是独立的 Direct/System/Explicit 管理面选项，也不是操作系统 GUI、PAC 或 WinHTTP 代理。
 _避免使用_：System 代理档、独立 Local 代理 URL、wreq proxy、browser proxy、系统代理（未限定时）
+
+## 可逆脱敏（Reversible Redaction）
+
+可逆脱敏是 Stravia 将模型请求中检测到的凭据类秘密替换为占位符，并在 Provider 返回对应占位符时，在交付给请求方的回答文本、客户端工具调用参数及平台工具执行参数中还原原文的保护能力。保护对象以 Betterleaks 规则可检测的 API Key、访问令牌、私钥和连接串密码等凭据类秘密为限，不承诺发现所有秘密，也不包含个人敏感信息或业务机密的通用识别。
+_避免使用_：日志脱敏、永久脱敏、加密、通用敏感信息识别
+
+## 可逆脱敏映射
+
+可逆脱敏映射是归属于单个 Stravia API Key 对应 Principal 的凭据原文与替代占位符之间的持久化对应关系，可跨轮次及进程重启恢复，保留期、续期与过期清理规则与 History Marker 一致。同一 API Key 下相同秘密在映射有效期内复用同一占位符、过期后重新分配，持有有效占位符时可跨对话和分支还原且不要求历史祖先关系，不同 API Key 不共享占位符或映射。
+_避免使用_：实例级秘密字典、历史分支隔离、History Marker
+
+## 受保护模型文本
+
+受保护模型文本是可逆脱敏覆盖的全部模型请求可读文本，包括系统指令、用户消息、历史消息、工具调用参数与工具结果，以及平台内部追加的模型请求文本。它不包含图片、音频或二进制附件中的内容，也不包含上游连接必需的认证凭据或协议结构。
+_避免使用_：仅本次用户输入、整个 HTTP 请求脱敏、多模态秘密识别
+
+## 可逆脱敏总开关
+
+可逆脱敏总开关是实例管理员统一控制所有有效 API Key 的新模型请求是否自动检测并替换凭据类秘密的高级功能开关，默认关闭，开启后无 API Key 级豁免且不依赖客户端声明或模型调用工具。关闭后停止新增脱敏，但已有有效占位符仍在回答与所有工具调用参数中还原直至过期，不因关闭开关删除映射。
+_避免使用_：透明注入、API Key 脱敏授权、脱敏工具
 
 ## Advanced Capability
 
