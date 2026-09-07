@@ -330,21 +330,19 @@ async function deleteKey(): Promise<void> {
 {/key}
 
 <AlertDialog.Root bind:open={deleteOpen}>
-  <AlertDialog.Content
-    ><AlertDialog.Header
-      ><AlertDialog.Title
-        >{deleteTarget
-          ? m.api_keys_delete_named_key({ name: deleteTarget.name })
-          : m.api_keys_delete_api_key_question()}</AlertDialog.Title
-      ><AlertDialog.Description
-        >{deleteTarget
-          ? m.api_keys_delete_value_clients_using_lose_access_immediately({ name: deleteTarget.name })
-          : ''}</AlertDialog.Description
-      ></AlertDialog.Header
-    ><AlertDialog.Footer
-      ><AlertDialog.Cancel>{m.common_cancel()}</AlertDialog.Cancel><AlertDialog.Action
-        variant="destructive"
-        onclick={() => void deleteKey()}>{m.api_keys_delete_api_key_label()}</AlertDialog.Action
-      ></AlertDialog.Footer
-    ></AlertDialog.Content>
+  <AlertDialog.Content>
+    <AlertDialog.Header>
+      <AlertDialog.Title>
+        {deleteTarget ? m.api_keys_delete_named_key({ name: deleteTarget.name }) : m.api_keys_delete_api_key_question()}
+      </AlertDialog.Title>
+      <AlertDialog.Description>
+        {deleteTarget ? m.api_keys_delete_value_clients_using_lose_access_immediately({ name: deleteTarget.name }) : ''}
+      </AlertDialog.Description>
+    </AlertDialog.Header>
+    <AlertDialog.Footer>
+      <AlertDialog.Cancel>{m.common_cancel()}</AlertDialog.Cancel>
+      <AlertDialog.Action variant="destructive" onclick={() => void deleteKey()}
+        >{m.api_keys_delete_api_key_label()}</AlertDialog.Action>
+    </AlertDialog.Footer>
+  </AlertDialog.Content>
 </AlertDialog.Root>

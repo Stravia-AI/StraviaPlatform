@@ -32,10 +32,10 @@ let {
 </script>
 
 <Dialog.Root bind:open>
-  <Dialog.Content>
-    <Dialog.Header>
+  <Dialog.Layout>
+    {#snippet header()}
       <Dialog.Title>{m.provider_model_catalog_add_model_manually_label()}</Dialog.Title>
-    </Dialog.Header>
+    {/snippet}
     <Field.Field>
       <Field.Label for="manual-provider-model-search">{m.provider_model_catalog_search_model()}</Field.Label>
       <ModelCombobox
@@ -52,11 +52,11 @@ let {
         {onSelect}
         {onClear} />
     </Field.Field>
-    <Dialog.Footer>
+    {#snippet footer()}
       <Button variant="outline" onclick={() => (open = false)}>{m.common_cancel()}</Button>
       <Button onclick={onContinue} disabled={preparing || !templateId.trim()}>
         {#if preparing}<Spinner data-icon="inline-start" />{/if}{m.provider_model_catalog_continue()}
       </Button>
-    </Dialog.Footer>
-  </Dialog.Content>
+    {/snippet}
+  </Dialog.Layout>
 </Dialog.Root>

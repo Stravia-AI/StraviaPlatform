@@ -700,44 +700,43 @@ function formatBytes(value: number | undefined): string {
     ></Sheet.Content
   ></Sheet.Root>
 
-<AlertDialog.Root bind:open={debugConfirmOpen}
-  ><AlertDialog.Content
-    ><AlertDialog.Header
-      ><AlertDialog.Title>{m.observation_enable_debug()}</AlertDialog.Title><AlertDialog.Description
-        >{m.observation_debug_warning({
+<AlertDialog.Root bind:open={debugConfirmOpen}>
+  <AlertDialog.Content>
+    <AlertDialog.Header>
+      <AlertDialog.Title>{m.observation_enable_debug()}</AlertDialog.Title>
+      <AlertDialog.Description>
+        {m.observation_debug_warning({
           run_limit: formatBytes(debugQuery.data?.run_limit_bytes),
           total_limit: formatBytes(debugQuery.data?.total_limit_bytes),
           retention_days: debugQuery.data?.retention_days ?? 0,
-        })}</AlertDialog.Description
-      ></AlertDialog.Header>
+        })}
+      </AlertDialog.Description>
+    </AlertDialog.Header>
     <div class="rounded-md border p-3 text-sm">
       <p>{m.observation_debug_retained({ retained: formatBytes(debugQuery.data?.retained_bytes) })}</p>
       <p class="mt-1 text-muted-foreground">{m.observation_debug_disable_retains()}</p>
     </div>
-    <AlertDialog.Footer
-      ><AlertDialog.Cancel>{m.common_cancel()}</AlertDialog.Cancel><AlertDialog.Action
-        disabled={changingDebug}
-        onclick={() => void enableDebug()}
-        >{changingDebug ? m.observation_enabling() : m.observation_enable_debug()}</AlertDialog.Action
-      ></AlertDialog.Footer
-    ></AlertDialog.Content
-  ></AlertDialog.Root>
+    <AlertDialog.Footer>
+      <AlertDialog.Cancel>{m.common_cancel()}</AlertDialog.Cancel>
+      <AlertDialog.Action disabled={changingDebug} onclick={() => void enableDebug()}
+        >{changingDebug ? m.observation_enabling() : m.observation_enable_debug()}</AlertDialog.Action>
+    </AlertDialog.Footer>
+  </AlertDialog.Content>
+</AlertDialog.Root>
 
-<AlertDialog.Root bind:open={clearOpen}
-  ><AlertDialog.Content
-    ><AlertDialog.Header
-      ><AlertDialog.Title>{m.observation_clear_history()}</AlertDialog.Title><AlertDialog.Description
-        >{m.observation_clear_warning()}</AlertDialog.Description
-      ></AlertDialog.Header
-    ><AlertDialog.Footer
-      ><AlertDialog.Cancel>{m.common_cancel()}</AlertDialog.Cancel><AlertDialog.Action
-        variant="destructive"
-        disabled={clearing}
-        onclick={() => void clearHistory()}
-        >{clearing ? m.observation_clearing() : m.observation_clear_history()}</AlertDialog.Action
-      ></AlertDialog.Footer
-    ></AlertDialog.Content
-  ></AlertDialog.Root>
+<AlertDialog.Root bind:open={clearOpen}>
+  <AlertDialog.Content>
+    <AlertDialog.Header>
+      <AlertDialog.Title>{m.observation_clear_history()}</AlertDialog.Title>
+      <AlertDialog.Description>{m.observation_clear_warning()}</AlertDialog.Description>
+    </AlertDialog.Header>
+    <AlertDialog.Footer>
+      <AlertDialog.Cancel>{m.common_cancel()}</AlertDialog.Cancel>
+      <AlertDialog.Action variant="destructive" disabled={clearing} onclick={() => void clearHistory()}
+        >{clearing ? m.observation_clearing() : m.observation_clear_history()}</AlertDialog.Action>
+    </AlertDialog.Footer>
+  </AlertDialog.Content>
+</AlertDialog.Root>
 
 <style>
 .observation-page {

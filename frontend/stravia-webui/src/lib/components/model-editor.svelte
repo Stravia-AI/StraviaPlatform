@@ -840,18 +840,18 @@ async function saveModel(): Promise<void> {
             closeTargetEditor(false)
           }
         }}>
-        <Dialog.Content class="max-h-[90svh] overflow-y-auto sm:max-w-4xl">
-          {#if targetEditorTarget}
-            {@const target = targetEditorTarget}
-            {@const index = targetIndex(target)}
-            {@const summary = selectedSummary(target)}
+        {#if targetEditorTarget}
+          {@const target = targetEditorTarget}
+          {@const index = targetIndex(target)}
+          {@const summary = selectedSummary(target)}
+          <Dialog.Layout class="sm:max-w-4xl">
+            {#snippet header()}
+              <Dialog.Title id={`target-title-${target.key}`}>
+                {m.model_editor_edit_destination_value({ index: index + 1 })}
+              </Dialog.Title>
+              <Dialog.Description>{m.model_editor_target_dialog_help()}</Dialog.Description>
+            {/snippet}
             <div aria-labelledby={`target-title-${target.key}`}>
-              <Dialog.Header class="mb-4">
-                <Dialog.Title id={`target-title-${target.key}`}>
-                  {m.model_editor_edit_destination_value({ index: index + 1 })}
-                </Dialog.Title>
-                <Dialog.Description>{m.model_editor_target_dialog_help()}</Dialog.Description>
-              </Dialog.Header>
               <div class="mb-4 flex items-center justify-between gap-3 border-b pb-4">
                 <div class="flex items-center gap-2">
                   <Badge variant={target.enabled ? 'default' : 'secondary'}>
@@ -1063,18 +1063,18 @@ async function saveModel(): Promise<void> {
               {#if target.validationError}<p class="mt-3 text-sm text-warning" role="status">
                   {target.validationError}
                 </p>{/if}
-              <Dialog.Footer class="mt-5 border-t pt-4">
-                <Button type="button" variant="outline" onclick={() => closeTargetEditor(false)}>
-                  {m.common_cancel()}
-                </Button>
-                <Button
-                  type="button"
-                  disabled={target.enabled && !targetConfigured(target)}
-                  onclick={() => closeTargetEditor(true)}>{m.common_confirm()}</Button>
-              </Dialog.Footer>
             </div>
-          {/if}
-        </Dialog.Content>
+            {#snippet footer()}
+              <Button type="button" variant="outline" onclick={() => closeTargetEditor(false)}>
+                {m.common_cancel()}
+              </Button>
+              <Button
+                type="button"
+                disabled={target.enabled && !targetConfigured(target)}
+                onclick={() => closeTargetEditor(true)}>{m.common_confirm()}</Button>
+            {/snippet}
+          </Dialog.Layout>
+        {/if}
       </Dialog.Root>
     </section>
 

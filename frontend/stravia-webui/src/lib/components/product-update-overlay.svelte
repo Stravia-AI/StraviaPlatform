@@ -58,13 +58,13 @@ function handleInstallPrompt(open: boolean): void {
 </script>
 
 <Dialog.Root open={updates.state.installPromptOpen} onOpenChange={handleInstallPrompt}>
-  <Dialog.Content>
-    <Dialog.Header>
+  <Dialog.Layout>
+    {#snippet header()}
       <Dialog.Title>
         {m.settings_update_install_title({ version: updates.state.targetVersion ?? '' })}
       </Dialog.Title>
       <Dialog.Description>{m.settings_update_install_warning()}</Dialog.Description>
-    </Dialog.Header>
+    {/snippet}
     {#if updates.state.downloadedReleaseUrl}
       <button
         type="button"
@@ -78,11 +78,11 @@ function handleInstallPrompt(open: boolean): void {
         <Alert.Description>{m.settings_update_install_failed({ message: updates.state.error })}</Alert.Description>
       </Alert.Root>
     {/if}
-    <Dialog.Footer>
+    {#snippet footer()}
       <Button type="button" onclick={() => void updates.installDownloadedUpdate()}
         >{m.settings_update_install()}</Button>
-    </Dialog.Footer>
-  </Dialog.Content>
+    {/snippet}
+  </Dialog.Layout>
 </Dialog.Root>
 
 {#if showInstallingOverlay}

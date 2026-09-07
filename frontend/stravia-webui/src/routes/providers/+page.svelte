@@ -435,8 +435,8 @@ async function copyProvider(): Promise<void> {
 <ProviderEditor bind:open={editorOpen} {presets} onSaved={providerSaved} />
 
 <AlertDialog.Root bind:open={deleteOpen}>
+  {@const references = deleteTarget ? providerReferences(deleteTarget) : []}
   <AlertDialog.Content>
-    {@const references = deleteTarget ? providerReferences(deleteTarget) : []}
     <AlertDialog.Header>
       <AlertDialog.Title>
         {deleteTarget && providerDependenciesUnavailable
@@ -487,19 +487,20 @@ async function copyProvider(): Promise<void> {
 
 <AlertDialog.Root bind:open={copyOpen}>
   <AlertDialog.Content>
-    <AlertDialog.Header
-      ><AlertDialog.Title>{m.providers_duplicate_model_service()}</AlertDialog.Title><AlertDialog.Description
-        >{copyTarget
-          ? m.providers_create_disabled_copy_value_so_review_use({ name: copyTarget.name })
-          : ''}</AlertDialog.Description
-      ></AlertDialog.Header>
-    <Field.Field orientation="horizontal"
-      ><Checkbox id="append-model-targets" bind:checked={appendTargets} /><Field.Label for="append-model-targets"
-        >{m.providers_add_copy_same_models()}</Field.Label
-      ></Field.Field>
-    <AlertDialog.Footer
-      ><AlertDialog.Cancel>{m.common_cancel()}</AlertDialog.Cancel><AlertDialog.Action
-        onclick={() => void copyProvider()}>{m.providers_duplicate_service_short_action()}</AlertDialog.Action
-      ></AlertDialog.Footer>
+    <AlertDialog.Header>
+      <AlertDialog.Title>{m.providers_duplicate_model_service()}</AlertDialog.Title>
+      <AlertDialog.Description>
+        {copyTarget ? m.providers_create_disabled_copy_value_so_review_use({ name: copyTarget.name }) : ''}
+      </AlertDialog.Description>
+    </AlertDialog.Header>
+    <Field.Field orientation="horizontal">
+      <Checkbox id="append-model-targets" bind:checked={appendTargets} />
+      <Field.Label for="append-model-targets">{m.providers_add_copy_same_models()}</Field.Label>
+    </Field.Field>
+    <AlertDialog.Footer>
+      <AlertDialog.Cancel>{m.common_cancel()}</AlertDialog.Cancel>
+      <AlertDialog.Action onclick={() => void copyProvider()}
+        >{m.providers_duplicate_service_short_action()}</AlertDialog.Action>
+    </AlertDialog.Footer>
   </AlertDialog.Content>
 </AlertDialog.Root>
