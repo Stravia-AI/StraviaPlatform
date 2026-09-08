@@ -117,7 +117,7 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
                 result = async {
                     let trace = input.request.meta.redaction.clone();
                     let mappings = self.gateway.redaction
-                        .protect(&input.principal, &mut input.request).await?;
+                        .protect(&input.principal, &mut input.request, observer.as_ref()).await?;
                     if let Some(observer) = &observer {
                         observer.protect_secrets(mappings.iter().map(|mapping| mapping.secret.as_str()));
                     }

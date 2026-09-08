@@ -937,7 +937,7 @@ async fn legacy_tool_meta_cannot_authorize_restored_encoded_payloads() {
         let before = serde_json::to_value(&request.items).unwrap();
         gateway
             .redaction
-            .protect(&owner, &mut request)
+            .protect(&owner, &mut request, None)
             .await
             .unwrap();
         assert_eq!(serde_json::to_value(&request.items).unwrap(), before);
@@ -948,7 +948,7 @@ async fn legacy_tool_meta_cannot_authorize_restored_encoded_payloads() {
             .await
             .unwrap();
         assert!(matches!(
-            gateway.redaction.protect(&owner, &mut request).await,
+            gateway.redaction.protect(&owner, &mut request, None).await,
             Err(crate::reversible_redaction::RedactionError::AmbiguousToolResult)
         ));
     }
@@ -1021,7 +1021,7 @@ async fn persisted_tool_text_semantics_keep_plain_secrets_and_media_distinct() {
         .unwrap();
     gateway
         .redaction
-        .protect(&owner, &mut request)
+        .protect(&owner, &mut request, None)
         .await
         .unwrap();
     let payloads: Vec<serde_json::Value> = request

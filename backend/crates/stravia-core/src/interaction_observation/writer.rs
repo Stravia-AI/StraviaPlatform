@@ -54,17 +54,29 @@ pub(super) fn spawn(
     traces: super::trace::TraceManager,
     active_traces: Arc<Mutex<HashMap<String, super::trace::TraceHandle>>>,
     partial_trace_count: Arc<AtomicU64>,
+    unpersisted_gaps: Arc<Mutex<super::UnpersistedGaps>>,
 ) -> (mpsc::Sender<WriterCommand>, tokio::task::JoinHandle<()>) {
     let (tx, mut rx) = mpsc::channel(2048);
     let handle = tokio::spawn(async move {
         let mut grouping = GroupingIndex::default();
         let mut pending_text: HashMap<String, String> = HashMap::new();
+        let mut pending_gaps: HashMap<String, i64> = HashMap::new();
         let mut persisted_manifests: HashMap<String, TraceManifest> = HashMap::new();
         let mut interval = tokio::time::interval(Duration::from_millis(500));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
+            // 仅重试缺失标记，不重放发现，避免把诊断故障转化为重复计数或执行失败。
+            for (interaction_id, occurred_at) in std::mem::take(&mut pending_gaps) {
+                if expires(occurred_at, retention_days.load(Ordering::Acquire)) > now()
+                    && !matches!(store.mark_observation_gap(&interaction_id).await, Ok(true))
+                {
+                    pending_gaps.insert(interaction_id, occurred_at);
+                }
+            }
             let command = tokio::select! {
                 _ = interval.tick() => {
+                    unpersisted_gaps.lock().expect("observation gaps")
+                        .expire(now(), retention_days.load(Ordering::Acquire));
                     flush_text(&store, &grouping, &retention_days, &updates, &mut pending_text).await;
                     flush_active_manifests(
                         &store,
@@ -143,6 +155,10 @@ pub(super) fn spawn(
                             let _ = updates.send(ObservationUpdate::Event(event));
                         }
                         Err(error) => {
+                            unpersisted_gaps
+                                .lock()
+                                .expect("observation gaps")
+                                .record(&start.id, now);
                             tracing::warn!(run_id=%start.id, %error, "observation admission persistence failed")
                         }
                     }
@@ -201,6 +217,11 @@ pub(super) fn spawn(
                             }
                             Ok(None) => {}
                             Err(error) => {
+                                unpersisted_gaps
+                                    .lock()
+                                    .expect("observation gaps")
+                                    .record(&run_id, at);
+                                pending_gaps.insert(interaction.to_owned(), at);
                                 if let Some(trace) = trace {
                                     trace.mark_observation_gap();
                                 }
@@ -272,6 +293,11 @@ pub(super) fn spawn(
                                     }
                                     Ok(None) => {}
                                     Err(error) => {
+                                        unpersisted_gaps
+                                            .lock()
+                                            .expect("observation gaps")
+                                            .record(run_id, at);
+                                        pending_gaps.insert(interaction.to_owned(), at);
                                         tracing::warn!(%run_id,%error,"observation gap persistence failed")
                                     }
                                 }

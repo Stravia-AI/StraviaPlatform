@@ -57,8 +57,42 @@ pub(crate) struct RunOutcome {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct CredentialDiscovery {
+    pub rule_ids: Vec<String>,
+    pub source_types: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CredentialDiscoveryQuery {
+    pub cursor: Option<String>,
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredentialDiscoverySummary {
+    pub interaction_id: String,
+    pub api_key_name: Option<String>,
+    pub discovered_at: i64,
+    pub new_credential_count: i64,
+    pub rule_ids: Vec<String>,
+    pub source_types: Vec<String>,
+    pub status: String,
+    pub observation_gap: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredentialDiscoveryPage {
+    pub items: Vec<CredentialDiscoverySummary>,
+    pub next_cursor: Option<String>,
+    pub observation_gap: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum RunEvent {
+    CredentialMappingsCreated {
+        discoveries: Vec<CredentialDiscovery>,
+    },
     GenerationAssociated {
         root_id: String,
         parent_id: Option<String>,

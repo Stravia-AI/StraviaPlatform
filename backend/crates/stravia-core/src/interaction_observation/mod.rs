@@ -46,8 +46,42 @@ struct Inner {
     bundles: BundleService,
     active_traces: Arc<Mutex<HashMap<String, TraceHandle>>>,
     partial_trace_count: Arc<AtomicU64>,
+    unpersisted_gaps: Arc<Mutex<UnpersistedGaps>>,
     ephemeral_root: Option<PathBuf>,
     stopped: AtomicBool,
+}
+
+#[derive(Default)]
+struct UnpersistedGaps {
+    generation: u64,
+    runs: HashMap<String, (i64, u64)>,
+}
+
+impl UnpersistedGaps {
+    fn record(&mut self, run_id: &str, occurred_at: i64) {
+        self.generation += 1;
+        self.runs
+            .insert(run_id.to_owned(), (occurred_at, self.generation));
+    }
+
+    fn visible(&self, now: i64, retention_days: u32) -> bool {
+        self.runs
+            .values()
+            .any(|(at, _)| writer::expires(*at, retention_days) > now)
+    }
+
+    fn expire(&mut self, now: i64, retention_days: u32) {
+        self.runs
+            .retain(|_, (at, _)| writer::expires(*at, retention_days) > now);
+    }
+
+    fn clear_removed(&mut self, covered: &HashMap<String, (i64, u64)>, removed: &[String]) {
+        for run_id in removed {
+            if self.runs.get(run_id) == covered.get(run_id) {
+                self.runs.remove(run_id);
+            }
+        }
+    }
 }
 
 impl InteractionObservation {
@@ -92,6 +126,7 @@ impl InteractionObservation {
         let (_, partial_count) = store.debug_manifest_counts().await.unwrap_or((0, 0));
         let active_traces = Arc::new(Mutex::new(HashMap::new()));
         let partial_trace_count = Arc::new(AtomicU64::new(partial_count));
+        let unpersisted_gaps = Arc::new(Mutex::new(UnpersistedGaps::default()));
         let (writer, task) = writer::spawn(
             store.clone(),
             Arc::clone(&retention_days),
@@ -99,6 +134,7 @@ impl InteractionObservation {
             traces.clone(),
             Arc::clone(&active_traces),
             Arc::clone(&partial_trace_count),
+            Arc::clone(&unpersisted_gaps),
         );
         Self {
             inner: Arc::new(Inner {
@@ -112,6 +148,7 @@ impl InteractionObservation {
                 bundles: BundleService::default(),
                 active_traces,
                 partial_trace_count,
+                unpersisted_gaps,
                 ephemeral_root,
                 stopped: AtomicBool::new(false),
             }),
@@ -231,7 +268,20 @@ impl InteractionObservation {
         Ok(self.debug_state())
     }
     pub(crate) async fn clear_history(&self) -> anyhow::Result<ClearHistoryResult> {
+        let covered = self
+            .inner
+            .unpersisted_gaps
+            .lock()
+            .expect("observation gaps")
+            .runs
+            .clone();
         self.flush().await?;
+        let mut known_runs = Vec::new();
+        for run_id in covered.keys() {
+            if self.inner.store.contains_gap_run(run_id).await? {
+                known_runs.push(run_id.clone());
+            }
+        }
         let result = self.inner.store.mark_clear_tombstones().await?;
         let (_, tomb) = self.inner.store.manifest_ids().await?;
         let mut deleted = Vec::new();
@@ -243,6 +293,18 @@ impl InteractionObservation {
         }
         self.inner.store.delete_manifests(&deleted).await?;
         self.inner.store.purge_clear_rows().await?;
+        let mut removed = Vec::new();
+        for run_id in known_runs {
+            if !self.inner.store.contains_gap_run(&run_id).await? {
+                removed.push(run_id);
+            }
+        }
+        // Missing admission ownership is not proof that cleanup covered the loss.
+        self.inner
+            .unpersisted_gaps
+            .lock()
+            .expect("observation gaps")
+            .clear_removed(&covered, &removed);
         let (_, partial) = self
             .inner
             .store
@@ -269,6 +331,11 @@ impl InteractionObservation {
         }
         self.inner.store.delete_manifests(&deleted).await?;
         self.inner.store.purge_expired_rows(now).await?;
+        self.inner
+            .unpersisted_gaps
+            .lock()
+            .expect("observation gaps")
+            .expire(now, self.inner.retention_days.load(Ordering::Acquire));
         let (_, partial) = self
             .inner
             .store
@@ -673,7 +740,13 @@ impl IngressObserver {
             })
             .is_err()
         {
-            inner.gap.store(true, Ordering::Release)
+            inner.gap.store(true, Ordering::Release);
+            self.observation
+                .inner
+                .unpersisted_gaps
+                .lock()
+                .expect("observation gaps")
+                .record(&inner.run_id, writer::now());
         }
         drop(ingress);
         RunObserver { inner }
@@ -824,7 +897,13 @@ impl RunObserver {
             })
             .is_err()
         {
-            self.inner.gap.store(true, Ordering::Release)
+            self.inner.gap.store(true, Ordering::Release);
+            let observation = &self.inner.observation.inner;
+            observation
+                .unpersisted_gaps
+                .lock()
+                .expect("observation gaps")
+                .record(&self.inner.run_id, writer::now());
         }
     }
     pub(crate) fn finish(&self, mut outcome: RunOutcome) {
@@ -848,6 +927,13 @@ impl RunObserver {
                 if let WriterCommand::Finish { outcome, .. } = error.into_inner() {
                     *self.inner.pending_finish.lock().expect("terminal state") = Some(outcome);
                     self.inner.gap.store(true, Ordering::Release);
+                    self.inner
+                        .observation
+                        .inner
+                        .unpersisted_gaps
+                        .lock()
+                        .expect("observation gaps")
+                        .record(&self.inner.run_id, writer::now());
                 }
             }
         }
@@ -1192,6 +1278,300 @@ pub(super) fn record_trace_at(
 #[cfg(test)]
 mod snapshot_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn discoveries_group_by_latest_discovery_and_survive_restart() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(directory.path().join("observations.sqlite"))
+            .create_if_missing(true)
+            .foreign_keys(true);
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options.clone())
+            .await?;
+        sqlx::raw_sql(include_str!(
+            "../../migrations/sqlite/0034_interaction_observation.sql"
+        ))
+        .execute(&pool)
+        .await?;
+        let now = chrono::Utc::now().timestamp_millis();
+        for (id, status, last_active, gap) in [
+            ("first", "failed", now + 100, false),
+            ("second", "interrupted", now + 200, false),
+            ("missing", "completed", now, true),
+        ] {
+            sqlx::query("INSERT INTO interaction_observations(id,principal,api_key_name,root_id,root_run_id,first_route_id,status,started_at,last_active_at,observation_gap,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
+                .bind(id).bind("api-key:test").bind("测试 API Key").bind(id).bind(id)
+                .bind("test-route").bind(status).bind(now - 100).bind(last_active)
+                .bind(gap).bind(now + 86_400_000).execute(&pool).await?;
+        }
+        let discovery = |rules: &[&str], sources: &[&str]| {
+            serde_json::json!({
+                "kind": "credential_mappings_created",
+                "discoveries": [{"rule_ids": rules, "source_types": sources}]
+            })
+            .to_string()
+        };
+        for (sequence, interaction, time, payload) in [
+            (
+                1,
+                Some("first"),
+                now - 30,
+                discovery(&["rule-a"], &["user_message"]),
+            ),
+            (
+                2,
+                Some("second"),
+                now - 20,
+                discovery(&["rule-b"], &["tool_result"]),
+            ),
+            (
+                3,
+                Some("first"),
+                now - 10,
+                discovery(&["rule-a", "rule-c"], &["tool_result"]),
+            ),
+            (
+                4,
+                None,
+                now,
+                discovery(&["internal-rule"], &["system_history"]),
+            ),
+        ] {
+            sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,kind,payload,expires_at) VALUES (?,?,?,'credential_mappings_created',?,?)")
+                .bind(sequence).bind(time).bind(interaction).bind(payload)
+                .bind(now + 86_400_000).execute(&pool).await?;
+        }
+        pool.close().await;
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await?;
+        let store = store::ObservationStore::Sqlite(pool.clone());
+        let first = store
+            .credential_discoveries(CredentialDiscoveryQuery {
+                cursor: None,
+                limit: Some(1),
+            })
+            .await?;
+        assert!(first.observation_gap);
+        assert_eq!(first.items.len(), 1);
+        let item = &first.items[0];
+        assert_eq!(item.interaction_id, "first");
+        assert_eq!(item.discovered_at, now - 10);
+        assert_eq!(item.new_credential_count, 2);
+        assert_eq!(item.rule_ids, ["rule-a", "rule-c"]);
+        assert_eq!(item.source_types, ["tool_result", "user_message"]);
+        assert_eq!(item.status, "failed");
+        assert!(!item.observation_gap);
+        let second = store
+            .credential_discoveries(CredentialDiscoveryQuery {
+                cursor: first.next_cursor,
+                limit: Some(1),
+            })
+            .await?;
+        assert_eq!(second.items.len(), 1);
+        assert_eq!(second.items[0].interaction_id, "second");
+        assert_eq!(second.items[0].status, "interrupted");
+        assert!(second.next_cursor.is_none());
+        assert!(
+            store
+                .credential_discoveries(CredentialDiscoveryQuery {
+                    cursor: Some("invalid".into()),
+                    limit: None,
+                })
+                .await
+                .is_err()
+        );
+        sqlx::query("UPDATE observation_events SET expires_at=0")
+            .execute(&pool)
+            .await?;
+        let empty = store
+            .credential_discoveries(CredentialDiscoveryQuery::default())
+            .await?;
+        assert!(empty.items.is_empty());
+        assert!(empty.observation_gap);
+        sqlx::query("UPDATE interaction_observations SET expires_at=0")
+            .execute(&pool)
+            .await?;
+        let expired = store
+            .credential_discoveries(CredentialDiscoveryQuery::default())
+            .await?;
+        assert!(expired.items.is_empty());
+        assert!(!expired.observation_gap);
+        pool.close().await;
+        assert!(
+            store
+                .credential_discoveries(CredentialDiscoveryQuery::default())
+                .await
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn undurable_gaps_follow_current_retention_and_clear_generations() {
+        let day = 86_400_000;
+        let mut gaps = UnpersistedGaps::default();
+        gaps.record("completed", day);
+        assert!(!gaps.visible(3 * day, 1));
+        assert!(gaps.visible(3 * day, 7));
+        assert!(!gaps.visible(3 * day, 0));
+
+        let covered = gaps.runs.clone();
+        // Even a loss in the same millisecond must survive the in-flight clear.
+        gaps.record("completed", day);
+        gaps.clear_removed(&covered, &["completed".into()]);
+        assert!(gaps.visible(day, 1));
+        let covered = gaps.runs.clone();
+        gaps.clear_removed(&covered, &["completed".into()]);
+        assert!(!gaps.visible(day, 1));
+
+        let covered = gaps.runs.clone();
+        gaps.record("new-admission", day);
+        gaps.clear_removed(&covered, &[]);
+        assert!(gaps.visible(day, 1));
+    }
+
+    #[tokio::test]
+    async fn clearing_gaps_preserves_active_discoveries_and_unknown_admissions()
+    -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        sqlx::raw_sql(include_str!(
+            "../../migrations/sqlite/0034_interaction_observation.sql"
+        ))
+        .execute(&pool)
+        .await?;
+        let observation = InteractionObservation::new(
+            Some(pool.clone()),
+            None,
+            directory.path().to_path_buf(),
+            1,
+            true,
+        )
+        .await;
+        let make_run = |id: &str| {
+            observation
+                .observe_ingress(IngressStart {
+                    id: format!("ingress-{id}"),
+                    method: "POST".into(),
+                    path: "/responses".into(),
+                    protocol: "responses".into(),
+                })
+                .admit(RunStart {
+                    id: id.into(),
+                    principal: "api-key:test".into(),
+                    api_key_id: None,
+                    api_key_name: Some("test".into()),
+                    generation_root_id: None,
+                    generation_parent_id: None,
+                    has_new_user: true,
+                    canonical_fingerprint: id.into(),
+                    route_id: "test-route".into(),
+                    model_display_name: None,
+                    ingress_protocol: "responses".into(),
+                })
+        };
+        let active = make_run("active");
+        let completed = make_run("completed");
+        active.record(RunEvent::CredentialMappingsCreated {
+            discoveries: vec![CredentialDiscovery {
+                rule_ids: vec!["rule".into()],
+                source_types: vec!["user_message".into()],
+            }],
+        });
+        completed.finish(RunOutcome {
+            status: "completed".into(),
+            terminal_reason: None,
+            generation_node_id: None,
+            generation_root_id: None,
+        });
+        observation.flush().await?;
+        {
+            let mut gaps = observation
+                .inner
+                .unpersisted_gaps
+                .lock()
+                .expect("observation gaps");
+            gaps.record("completed", writer::now());
+        }
+        observation.clear_history().await?;
+        let page = observation
+            .credential_discoveries(CredentialDiscoveryQuery::default())
+            .await?;
+        assert!(!page.observation_gap);
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].status, "running");
+        assert_eq!(page.items[0].new_credential_count, 1);
+        let active_interaction = page.items[0].interaction_id.clone();
+        observation
+            .inner
+            .unpersisted_gaps
+            .lock()
+            .expect("observation gaps")
+            .record("active", writer::now());
+        observation.clear_history().await?;
+        let page = observation
+            .credential_discoveries(CredentialDiscoveryQuery::default())
+            .await?;
+        assert!(page.observation_gap);
+        assert_eq!(page.items[0].interaction_id, active_interaction);
+        assert_eq!(page.items[0].new_credential_count, 1);
+
+        active.finish(RunOutcome {
+            status: "completed".into(),
+            terminal_reason: None,
+            generation_node_id: None,
+            generation_root_id: None,
+        });
+        observation.clear_history().await?;
+        assert!(
+            !observation
+                .credential_discoveries(CredentialDiscoveryQuery::default())
+                .await?
+                .observation_gap
+        );
+        let mut clearing = Box::pin(observation.clear_history());
+        // The single-threaded runtime cannot consume the writer barrier in this poll.
+        assert!(futures::poll!(clearing.as_mut()).is_pending());
+        observation
+            .inner
+            .unpersisted_gaps
+            .lock()
+            .expect("observation gaps")
+            .record("lost-admission", writer::now());
+        clearing.await?;
+        assert!(
+            observation
+                .credential_discoveries(CredentialDiscoveryQuery::default())
+                .await?
+                .observation_gap
+        );
+        observation.clear_history().await?;
+        assert!(
+            observation
+                .credential_discoveries(CredentialDiscoveryQuery::default())
+                .await?
+                .observation_gap
+        );
+        observation.set_retention_days(0).await?;
+        assert!(
+            !observation
+                .credential_discoveries(CredentialDiscoveryQuery::default())
+                .await?
+                .observation_gap
+        );
+        drop(active);
+        drop(completed);
+        observation.shutdown().await;
+        pool.close().await;
+        Ok(())
+    }
 
     #[test]
     fn snapshot_status_keeps_detached_work_active_and_consumes_parent_handoff() {

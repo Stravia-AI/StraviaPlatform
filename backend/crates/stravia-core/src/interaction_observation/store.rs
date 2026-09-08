@@ -233,6 +233,27 @@ impl ObservationStore {
         }
     }
 
+    // 缺失标记不依赖事件插入或 Debug Trace，事件表写入故障时仍可保留诊断不完整状态。
+    pub async fn mark_observation_gap(&self, interaction_id: &str) -> anyhow::Result<bool> {
+        let affected = match self {
+            Self::Sqlite(pool) => {
+                sqlx::query("UPDATE interaction_observations SET observation_gap=1 WHERE id=?")
+                    .bind(interaction_id)
+                    .execute(pool)
+                    .await?
+                    .rows_affected()
+            }
+            Self::Postgres(pool) => {
+                sqlx::query("UPDATE interaction_observations SET observation_gap=TRUE WHERE id=$1")
+                    .bind(interaction_id)
+                    .execute(pool)
+                    .await?
+                    .rows_affected()
+            }
+        };
+        Ok(affected != 0)
+    }
+
     pub async fn persist_run_event(
         &self,
         interaction_id: &str,
@@ -241,6 +262,10 @@ impl ObservationStore {
         now: i64,
         expires_at: i64,
     ) -> anyhow::Result<Option<ObservationEvent>> {
+        if matches!(run_event, RunEvent::CredentialMappingsCreated { discoveries } if discoveries.is_empty())
+        {
+            return Ok(None);
+        }
         let payload = match run_event {
             RunEvent::Checkpoint {
                 stage,

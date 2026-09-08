@@ -21,6 +21,7 @@ use crate::storage::traits::ProviderTestResult;
 
 mod api_keys;
 mod auth_data;
+mod credential_protection;
 mod extensions;
 pub mod identity;
 mod media;
@@ -38,9 +39,13 @@ mod web_search;
 
 pub use crate::interaction_observation::{
     BundleRequest, BundleResourceKind, BundleStream, ClearHistoryResult, ConfirmedUsage,
-    DebugState, DownloadTicket, ForestPage, ForestQuery, ForestRoot, InteractionDetail,
-    InteractionSummary, ObservationEvent, ObservationStream, ObservationUpdate, RejectionDetail,
-    RejectionPage, RejectionQuery, RejectionSummary, RunDetail, TraceManifest,
+    CredentialDiscoveryPage, CredentialDiscoveryQuery, CredentialDiscoverySummary, DebugState,
+    DownloadTicket, ForestPage, ForestQuery, ForestRoot, InteractionDetail, InteractionSummary,
+    ObservationEvent, ObservationStream, ObservationUpdate, RejectionDetail, RejectionPage,
+    RejectionQuery, RejectionSummary, RunDetail, TraceManifest,
+};
+pub use crate::reversible_redaction::{
+    CredentialMatch, CredentialRule, CredentialRuleCatalog, CredentialRuleComponent,
 };
 
 pub use media::{

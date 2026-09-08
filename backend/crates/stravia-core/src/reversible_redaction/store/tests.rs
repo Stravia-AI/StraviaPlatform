@@ -37,13 +37,30 @@ async fn assert_store_contract(store: &SqlMappingStore) -> (Principal, String, S
         store.intern(&owner, &secrets),
         second.intern(&owner, &secrets)
     );
-    let first = left.unwrap().remove(0);
-    let concurrent = right.unwrap().remove(0);
+    let mut left = left.unwrap();
+    let mut right = right.unwrap();
+    assert_eq!(
+        left.created.len() + right.created.len(),
+        1,
+        "only the transaction that created the shared mapping may claim discovery"
+    );
+    let first = left.mappings.remove(0);
+    let concurrent = right.mappings.remove(0);
+    assert!(
+        store
+            .intern(&owner, &secrets)
+            .await
+            .unwrap()
+            .created
+            .is_empty()
+    );
     assert_eq!(first.reference, concurrent.reference);
     assert_eq!(first.secret, secrets[0]);
     assert_eq!(first.expires_at, concurrent.expires_at);
     assert!(store.active(&other).await.unwrap().is_empty());
-    let foreign = store.intern(&other, &secrets).await.unwrap().remove(0);
+    let mut foreign = store.intern(&other, &secrets).await.unwrap();
+    assert_eq!(foreign.created.len(), 1);
+    let foreign = foreign.mappings.remove(0);
     assert_ne!(first.reference, foreign.reference);
 
     let references = vec![first.reference.clone()];
@@ -97,7 +114,13 @@ async fn assert_store_contract(store: &SqlMappingStore) -> (Principal, String, S
         .await
         .unwrap();
     assert!(store.active(&owner).await.unwrap().is_empty());
-    let replacement = store.intern(&owner, &secrets).await.unwrap().remove(0);
+    let mut replacement = store.intern(&owner, &secrets).await.unwrap();
+    assert_eq!(
+        replacement.created.len(),
+        1,
+        "expired mappings permit a new discovery"
+    );
+    let replacement = replacement.mappings.remove(0);
     assert_ne!(replacement.reference, first.reference);
     assert_eq!(replacement.secret, secrets[0]);
     assert_eq!(store.cleanup_expired().await.unwrap(), 1);

@@ -17,6 +17,12 @@ pub(crate) struct Mapping {
     pub expires_at: i64,
 }
 
+// 新建下标只在事务成功提交后返回；调用者不能用扫描前状态推断创建归属。
+pub(crate) struct InternedMappings {
+    pub mappings: Vec<Mapping>,
+    pub created: Vec<usize>,
+}
+
 #[async_trait]
 pub(crate) trait MappingStore: Send + Sync {
     async fn active(&self, principal: &Principal) -> Result<Vec<Mapping>, RedactionError>;
@@ -24,7 +30,7 @@ pub(crate) trait MappingStore: Send + Sync {
         &self,
         principal: &Principal,
         secrets: &[String],
-    ) -> Result<Vec<Mapping>, RedactionError>;
+    ) -> Result<InternedMappings, RedactionError>;
     async fn publish(
         &self,
         principal: &Principal,
@@ -164,12 +170,16 @@ impl MappingStore for SqlMappingStore {
         &self,
         principal: &Principal,
         secrets: &[String],
-    ) -> Result<Vec<Mapping>, RedactionError> {
+    ) -> Result<InternedMappings, RedactionError> {
         if secrets.is_empty() {
-            return Ok(Vec::new());
+            return Ok(InternedMappings {
+                mappings: Vec::new(),
+                created: Vec::new(),
+            });
         }
         let principal = principal.continuation_key();
         let mut mappings = Vec::with_capacity(secrets.len());
+        let mut created = Vec::new();
         // Serialize lookup-and-insert across processes, not just this store instance.
         // Secrets can be arbitrarily long (e.g. private keys), so do not B-tree index them.
         match self {
@@ -194,6 +204,7 @@ impl MappingStore for SqlMappingStore {
                     let mapping = match existing {
                         Some(mapping) => mapping,
                         None => {
+                            created.push(mappings.len());
                             let reference =
                                 format!("~stravia-secret:{}~", uuid::Uuid::new_v4().simple());
                             sqlx::query(
@@ -236,6 +247,7 @@ impl MappingStore for SqlMappingStore {
                     let mapping = match existing {
                         Some(mapping) => mapping,
                         None => {
+                            created.push(mappings.len());
                             let reference =
                                 format!("~stravia-secret:{}~", uuid::Uuid::new_v4().simple());
                             sqlx::query(
@@ -257,7 +269,7 @@ impl MappingStore for SqlMappingStore {
                 transaction.commit().await.map_err(storage)?;
             }
         }
-        Ok(mappings)
+        Ok(InternedMappings { mappings, created })
     }
 
     async fn publish(

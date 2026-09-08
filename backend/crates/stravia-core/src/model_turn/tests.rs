@@ -996,15 +996,24 @@ async fn execute_capability_grant_does_not_require_route_binding() {
     assert!(!captured.lock().expect("captured grant").is_empty());
 }
 
-// The real MappingStore seam holds publication after the database has committed.
-// Cancellation is deliberately not evidence that a mapping was never published.
+// The real MappingStore seam can hold intern or publication acknowledgements
+// after the database commits. Cancellation is not evidence that commit failed.
 struct HeldPublicationStore {
     inner: Arc<dyn crate::reversible_redaction::store::MappingStore>,
     entered: tokio::sync::Notify,
     release: tokio::sync::Notify,
     fail: bool,
+    expire_intern: bool,
+    held_intern: Option<Arc<HeldInternAcknowledgement>>,
     starts: AtomicUsize,
     cancel_on_release: Mutex<Option<CancellationToken>>,
+}
+
+#[derive(Default)]
+struct HeldInternAcknowledgement {
+    committed: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    acknowledged: tokio::sync::Notify,
 }
 
 #[async_trait::async_trait]
@@ -1024,10 +1033,21 @@ impl crate::reversible_redaction::store::MappingStore for HeldPublicationStore {
         principal: &Principal,
         secrets: &[String],
     ) -> Result<
-        Vec<crate::reversible_redaction::store::Mapping>,
+        crate::reversible_redaction::store::InternedMappings,
         crate::reversible_redaction::RedactionError,
     > {
-        self.inner.intern(principal, secrets).await
+        let mut result = self.inner.intern(principal, secrets).await?;
+        if let Some(held) = &self.held_intern {
+            held.committed.notify_one();
+            held.release.notified().await;
+            held.acknowledged.notify_one();
+        }
+        if self.expire_intern {
+            for mapping in &mut result.mappings {
+                mapping.expires_at = 0;
+            }
+        }
+        Ok(result)
     }
 
     async fn publish(
@@ -1068,6 +1088,290 @@ impl crate::reversible_redaction::store::MappingStore for HeldPublicationStore {
     }
 }
 
+fn credential_observer(
+    gateway: &Gateway,
+    principal: &Principal,
+) -> crate::interaction_observation::RunObserver {
+    let id = uuid::Uuid::new_v4().to_string();
+    gateway
+        .observation
+        .observe_ingress(crate::interaction_observation::IngressStart {
+            id: id.clone(),
+            method: "POST".into(),
+            path: "/v1/chat/completions".into(),
+            protocol: "openai-compatible".into(),
+        })
+        .admit(crate::interaction_observation::RunStart {
+            id,
+            principal: principal.continuation_key(),
+            api_key_id: None,
+            api_key_name: Some("Discovery test".into()),
+            generation_root_id: None,
+            generation_parent_id: None,
+            has_new_user: true,
+            canonical_fingerprint: uuid::Uuid::new_v4().to_string(),
+            route_id: "discovery-model".into(),
+            model_display_name: None,
+            ingress_protocol: "openai-compatible".into(),
+        })
+}
+
+#[tokio::test]
+async fn committed_discovery_survives_dropped_protection_before_intern_acknowledgement() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut gateway = Gateway::new(GatewayConfig {
+        data_dir: directory.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    gateway
+        .storage
+        .settings()
+        .set("reversible_redaction_enabled", "true")
+        .await
+        .unwrap();
+    let principal = Principal::new("cancelled-discovery-owner");
+    let held = Arc::new(HeldInternAcknowledgement::default());
+    let store = Arc::new(HeldPublicationStore {
+        inner: gateway.redaction.mappings.clone(),
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+        fail: false,
+        expire_intern: false,
+        held_intern: Some(held.clone()),
+        starts: AtomicUsize::new(0),
+        cancel_on_release: Mutex::new(None),
+    });
+    gateway.redaction = crate::reversible_redaction::ReversibleRedaction::new(
+        gateway.storage.clone(),
+        store.clone(),
+    );
+    let observer = credential_observer(&gateway, &principal);
+    let mut request = AiRequest::new("discovery-model", Vec::new());
+    request.instructions = Some("api_key = \"Q8n4Vk7sT2p9X5a3Lc6D0h1R\"".into());
+    let protection = {
+        let redaction = gateway.redaction.clone();
+        let principal = principal.clone();
+        let observer = observer.clone();
+        let mut request = request.clone();
+        tokio::spawn(async move {
+            redaction
+                .protect(&principal, &mut request, Some(&observer))
+                .await
+        })
+    };
+    held.committed.notified().await;
+    assert_eq!(store.inner.active(&principal).await.unwrap().len(), 1);
+    protection.abort();
+    assert!(matches!(protection.await, Err(error) if error.is_cancelled()));
+    observer.finish(crate::interaction_observation::RunOutcome {
+        status: "cancelled".into(),
+        terminal_reason: Some("cancelled".into()),
+        generation_node_id: None,
+        generation_root_id: None,
+    });
+    // Terminal delivery must not wait for the held mapping acknowledgement.
+    let before_ack = gateway
+        .observation
+        .credential_discoveries(Default::default())
+        .await
+        .unwrap();
+    assert!(before_ack.items.is_empty());
+    let forest = gateway
+        .observation
+        .query_forest(Default::default())
+        .await
+        .unwrap();
+    let interaction = &forest.roots[0].interactions[0];
+    let detail = gateway
+        .observation
+        .get_interaction(&interaction.id, Default::default())
+        .await
+        .unwrap()
+        .unwrap();
+    let terminal = detail.runs[0]
+        .events
+        .iter()
+        .find(|event| event.kind == "run_finished")
+        .expect("cancellation is observable before the mapping acknowledgement");
+    assert_eq!(terminal.payload["status"], "cancelled");
+    held.release.notify_one();
+    // This current-thread test cannot resume between acknowledgement and the
+    // synchronous event emission. On the old implementation the cancelled
+    // intern never acknowledges; the bounded wait then exposes the missing row.
+    let _ = tokio::time::timeout(Duration::from_secs(1), held.acknowledged.notified()).await;
+    let page = gateway
+        .observation
+        .credential_discoveries(Default::default())
+        .await
+        .unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].new_credential_count, 1);
+    assert_eq!(page.items[0].status, "interrupted");
+    assert_eq!(page.items[0].source_types, ["system_or_history"]);
+    let encoded = serde_json::to_string(&page).unwrap();
+    assert!(!encoded.contains("Q8n4Vk7sT2p9X5a3Lc6D0h1R"));
+    assert!(!encoded.contains("~stravia-secret:"));
+    let reused_observer = credential_observer(&gateway, &principal);
+    held.release.notify_one();
+    gateway
+        .redaction
+        .protect(&principal, &mut request, Some(&reused_observer))
+        .await
+        .unwrap();
+    let reused = gateway
+        .observation
+        .credential_discoveries(Default::default())
+        .await
+        .unwrap();
+    assert_eq!(reused.items.len(), 1);
+    assert_eq!(reused.items[0].new_credential_count, 1);
+    assert_eq!(reused.items[0].status, "interrupted");
+    assert_eq!(store.starts.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn committed_discovery_survives_replacement_failure_but_failed_intern_creates_none() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut gateway = Gateway::new(GatewayConfig {
+        data_dir: directory.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    gateway
+        .storage
+        .settings()
+        .set("reversible_redaction_enabled", "true")
+        .await
+        .unwrap();
+    let principal = Principal::new("discovery-owner");
+    let store = Arc::new(HeldPublicationStore {
+        inner: gateway.redaction.mappings.clone(),
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+        fail: false,
+        expire_intern: true,
+        held_intern: None,
+        starts: AtomicUsize::new(0),
+        cancel_on_release: Mutex::new(None),
+    });
+    gateway.redaction = crate::reversible_redaction::ReversibleRedaction::new(
+        gateway.storage.clone(),
+        store.clone(),
+    );
+    let observer = credential_observer(&gateway, &principal);
+    let mut request = AiRequest::new("discovery-model", Vec::new());
+    request.instructions = Some("api_key = \"Q8n4Vk7sT2p9X5a3Lc6D0h1R\"".into());
+    assert!(matches!(
+        gateway
+            .redaction
+            .protect(&principal, &mut request, Some(&observer))
+            .await,
+        Err(crate::reversible_redaction::RedactionError::InvalidText)
+    ));
+    observer.finish(crate::interaction_observation::RunOutcome {
+        status: "failed".into(),
+        terminal_reason: Some("reversible_redaction_failed".into()),
+        generation_node_id: None,
+        generation_root_id: None,
+    });
+    drop(observer);
+    let page = gateway
+        .observation
+        .credential_discoveries(Default::default())
+        .await
+        .unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].new_credential_count, 1);
+    assert_eq!(page.items[0].status, "interrupted");
+    assert_eq!(store.inner.active(&principal).await.unwrap().len(), 1);
+    let encoded = serde_json::to_string(&page).unwrap();
+    assert!(!encoded.contains("Q8n4Vk7sT2p9X5a3Lc6D0h1R"));
+    assert!(!encoded.contains("~stravia-secret:"));
+
+    let pool = gateway._sqlite_pool.as_ref().unwrap();
+    sqlx::query("CREATE TRIGGER reject_discovery_mapping BEFORE INSERT ON reversible_redaction_mappings BEGIN SELECT RAISE(FAIL, 'injected mapping failure'); END").execute(pool).await.unwrap();
+    let other = Principal::new("discovery-other");
+    let observer = credential_observer(&gateway, &other);
+    let mut request = AiRequest::new("discovery-model", Vec::new());
+    request.instructions = Some("api_key = \"Q8n4Vk7sT2p9X5a3Lc6D0h1R\"".into());
+    assert!(matches!(
+        gateway
+            .redaction
+            .protect(&other, &mut request, Some(&observer))
+            .await,
+        Err(crate::reversible_redaction::RedactionError::Storage)
+    ));
+    drop(observer);
+    assert!(store.inner.active(&other).await.unwrap().is_empty());
+    assert_eq!(
+        gateway
+            .observation
+            .credential_discoveries(Default::default())
+            .await
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn discovery_event_write_failure_does_not_change_protection_and_reports_gap() {
+    let directory = tempfile::tempdir().unwrap();
+    let gateway = Gateway::new(GatewayConfig {
+        data_dir: directory.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    gateway
+        .storage
+        .settings()
+        .set("reversible_redaction_enabled", "true")
+        .await
+        .unwrap();
+    let principal = Principal::new("discovery-gap-owner");
+    let observer = credential_observer(&gateway, &principal);
+    gateway
+        .observation
+        .credential_discoveries(Default::default())
+        .await
+        .unwrap();
+    sqlx::query("CREATE TRIGGER reject_discovery_event BEFORE INSERT ON observation_events WHEN NEW.kind = 'credential_mappings_created' BEGIN SELECT RAISE(FAIL, 'injected observation failure'); END").execute(gateway._sqlite_pool.as_ref().unwrap()).await.unwrap();
+    let mut request = AiRequest::new("discovery-model", Vec::new());
+    request.instructions = Some("api_key = \"Q8n4Vk7sT2p9X5a3Lc6D0h1R\"".into());
+    let mappings = gateway
+        .redaction
+        .protect(&principal, &mut request, Some(&observer))
+        .await
+        .unwrap();
+    assert_eq!(mappings.len(), 1);
+    assert!(
+        !request
+            .instructions
+            .as_deref()
+            .unwrap()
+            .contains("Q8n4Vk7sT2p9X5a3Lc6D0h1R")
+    );
+    observer.finish(crate::interaction_observation::RunOutcome {
+        status: "completed".into(),
+        terminal_reason: None,
+        generation_node_id: None,
+        generation_root_id: None,
+    });
+    drop(observer);
+    let page = gateway
+        .observation
+        .credential_discoveries(Default::default())
+        .await
+        .unwrap();
+    assert!(page.items.is_empty());
+    assert!(page.observation_gap);
+}
+
 async fn held_publication_turn(
     fail: bool,
     late_reference: bool,
@@ -1088,6 +1392,8 @@ async fn held_publication_turn(
         entered: tokio::sync::Notify::new(),
         release: tokio::sync::Notify::new(),
         fail,
+        expire_intern: false,
+        held_intern: None,
         starts: AtomicUsize::new(0),
         cancel_on_release: Mutex::new(None),
     });
@@ -1103,8 +1409,18 @@ async fn held_publication_turn(
             .intern(&principal, &["synthetic-secret".into()])
             .await
             .unwrap()
+            .mappings
             .remove(0);
-        request.instructions = Some(mapping.reference);
+        gateway
+            .storage
+            .settings()
+            .set("reversible_redaction_enabled", "true")
+            .await
+            .unwrap();
+        request.instructions = Some(format!(
+            "{}\napi_key = \"Q8n4Vk7sT2p9X5a3Lc6D0h1R\"",
+            mapping.reference
+        ));
         pending_expiry = mapping.expires_at;
     }
     let mut related = request.clone();
@@ -1152,12 +1468,13 @@ async fn held_publication_turn(
             .intern(&principal, &["related-secret".into()])
             .await
             .unwrap()
+            .mappings
             .remove(0);
         pending_expiry = mapping.expires_at;
         related.instructions = Some(mapping.reference);
         gateway
             .redaction
-            .protect(&principal, &mut related)
+            .protect(&principal, &mut related, None)
             .await
             .unwrap();
     }
@@ -1267,6 +1584,15 @@ async fn canonical_completion_cancellation_interrupts_publication_without_revoki
     assert!(store.inner.active(&principal).await.unwrap()[0].expires_at > pending_expiry);
     drop(turn);
     assert_publication_observation(&gateway, "cancelled").await;
+    let discoveries = gateway
+        .observation
+        .credential_discoveries(Default::default())
+        .await
+        .unwrap();
+    assert_eq!(discoveries.items.len(), 1);
+    assert_eq!(discoveries.items[0].new_credential_count, 1);
+    assert_eq!(discoveries.items[0].source_types, ["system_or_history"]);
+    assert_ne!(discoveries.items[0].status, "completed");
 }
 
 #[tokio::test]

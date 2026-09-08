@@ -277,6 +277,16 @@ test.describe('Interaction Observation canvas', () => {
     await prepareApp(page)
   })
 
+  test('a credential discovery link opens its exact observation outside the loaded root batch', async ({ page }) => {
+    await installObservationFixture(page, true)
+    await page.goto('/logs?interaction=interaction-ember')
+    const inspector = page.getByRole('complementary', { name: 'Observation details' })
+    await expect(inspector.getByRole('heading', { name: 'Ember', exact: true })).toBeVisible()
+    await expect(inspector.getByRole('heading', { name: 'Atlas', exact: true })).toHaveCount(0)
+    await page.getByRole('button', { name: 'Close', exact: true }).click()
+    await expect(inspector).toBeHidden()
+  })
+
   test('downloads the bundle as a file without entering the application router', async ({ page }) => {
     await installObservationFixture(page)
     await page.route('**/api/v1/observations/interactions/interaction-atlas/debug-bundle-tickets', (route) =>

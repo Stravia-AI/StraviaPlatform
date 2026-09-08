@@ -199,7 +199,7 @@ async fn platform_agent_typed_media_preserves_opaque_secret_and_redacts_readable
         .unwrap();
     gateway
         .redaction
-        .protect(&Principal::new("owner"), &mut request)
+        .protect(&Principal::new("owner"), &mut request, None)
         .await
         .unwrap();
     let (content, _) = agent_tool_payload(&request);
@@ -249,12 +249,15 @@ async fn platform_agent_business_json_and_single_text_remain_readable_payloads()
         let (mut request, _) = platform_output_roundtrip(vec![block]).await;
         gateway
             .redaction
-            .protect(&Principal::new("owner"), &mut request)
+            .protect(&Principal::new("owner"), &mut request, None)
             .await
             .unwrap();
-        let protected: Value =
-            serde_json::from_str(&expected.to_string().replace(SECRET, &mappings[0].reference))
-                .unwrap();
+        let protected: Value = serde_json::from_str(
+            &expected
+                .to_string()
+                .replace(SECRET, &mappings.mappings[0].reference),
+        )
+        .unwrap();
         assert_eq!(agent_tool_payload(&request), (&protected, Some(false)));
     }
 }

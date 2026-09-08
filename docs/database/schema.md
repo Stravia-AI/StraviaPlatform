@@ -430,6 +430,10 @@ Exactly one of `run_id` and `rejection_id` is non-NULL. Large Debug payloads are
 
 **索引**：`observation_events_interaction_idx`、`observation_events_run_idx`、`observation_events_rejection_idx`、`observation_events_expiry_idx`
 
+Credential discoveries use the ordinary `credential_mappings_created` event kind with payload `{"discoveries":[{"rule_ids":[...],"source_types":[...]}]}`. Each element represents one actually created mapping, not one occurrence or rule match. No secret value, recoverable placeholder, fingerprint, or message excerpt is stored in this metadata. Summaries aggregate retained events by `interaction_id` and order by the latest discovery time; mapping reuse, renewal, and restoration do not produce discovery events.
+
+Migration `0036_credential_discovery_coverage` introduces no new tables or columns. It sets `interaction_observations.observation_gap` for retained pre-feature rows on both backends because they lack discovery metadata; it does not reconstruct discoveries from mapping storage or historical content. Discovery events follow the existing Observation retention and cascade boundaries. Clearing them does not alter `reversible_redaction_mappings` or make valid reuse a new discovery.
+
 ### Usage statistics and retention
 
 `UsageStatsStore` computes overview, hourly, model, provider, API-key, and Route-scheduling projections directly from `model_turn_observations` and `target_attempt_observations`; there is no separate `usage_stats` table. Provider-reported values are counted once per attempt, and a dimension remains NULL when any applicable attempt is unknown. Route scheduling uses 24-hour token totals and one-hour attempt success/latency from Target attempts; a failed refresh returns the last successful in-process snapshot marked stale.

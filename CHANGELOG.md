@@ -4,6 +4,7 @@
 
 ### Added
 
+- Credential Protection now provides the live read-only rule catalog, interaction-grouped discoveries of actually new mappings, and a local matching tester with Unicode-aware positions. The tester does not save input, contact providers, query saved secrets, or change protection state. Discovery summaries remain secret-free, retain failed or cancelled activity, and distinguish incomplete observations.
 - Advanced Features now includes default-off, instance-wide reversible credential redaction using bundled native Betterleaks rules, API Key-isolated persistent mappings, and transparent restoration in responses and tool arguments. Disabling protection retains restoration of existing valid references; restored secrets are permanently masked in response and tool-execution diagnostics.
 - Request Records now presents Connect Client Interactions as a live causal forest with a chronological inspector, Rejected Requests, and point-in-time Debug Bundle downloads.
 - Administrators can explicitly enable process-local Debug capture for newly admitted runs, with mandatory credential redaction, 64 MiB per-Run and 2 GiB retained limits, visible partial-capture reasons, and 60-second single-use bundle tickets.
@@ -11,6 +12,7 @@
 
 ### Changed
 
+- The former Reversible Redaction page and sidebar entry are named Credential Protection; the existing route, setting key, explicit save, and restoration behavior remain unchanged. Retained pre-feature observations are marked incomplete rather than backfilled with invented discovery history.
 - **Breaking (Rust API):** `Vendor` and `VendorExtension` replace separate `auth_headers` and `build_url` hooks with purpose-aware `construct_request`, which owns the URL and default authentication for inference and Models requests. Existing OAuth bindings and specialized inference signing remain authoritative.
 - Generation Chain writes require an explicit final Model Leg Target or Hook source instead of recovering provenance from response metadata; history still commits only after complete client delivery.
 - The WebUI now shares shadcn-svelte feedback, progress, disclosure, navigation and pagination controls, with reusable secret inputs, request recovery, model filters and metric loading states. Mobile observation details use a modal Sheet while desktop details remain a resizable overlay; update notifications use the existing persistent toast surface without changing skip policy.

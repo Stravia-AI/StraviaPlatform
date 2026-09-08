@@ -3,8 +3,13 @@ pub(crate) mod store;
 mod stream;
 mod text;
 
+pub use detection::{
+    CredentialMatch, CredentialRule, CredentialRuleCatalog, CredentialRuleComponent,
+};
+pub(crate) use detection::{rule_catalog, test_text};
+
 use std::collections::{BTreeSet, VecDeque};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -133,6 +138,7 @@ impl ReversibleRedaction {
         &self,
         principal: &Principal,
         request: &mut AiRequest,
+        observer: Option<&crate::interaction_observation::RunObserver>,
     ) -> Result<Vec<Mapping>, RedactionError> {
         let enabled = match self.storage.settings().get(SETTING_KEY).await {
             Ok(None) => false,
@@ -142,21 +148,62 @@ impl ReversibleRedaction {
         };
         let mut mappings = self.mappings.active(principal).await?;
         if enabled {
-            let texts = text::request_texts(request, true)?;
-            let secrets = tokio::task::spawn_blocking(move || {
-                static DETECTOR: OnceLock<Result<detection::Detector, RedactionError>> =
-                    OnceLock::new();
-                let detector = DETECTOR
-                    .get_or_init(detection::Detector::new)
-                    .as_ref()
-                    .map_err(|error| *error)?;
-                detector.detect(&texts.iter().map(String::as_str).collect::<Vec<_>>())
-            })
-            .await
-            .map_err(|_| RedactionError::Detection)??;
-            if !secrets.is_empty() {
-                let discovered = self.mappings.intern(principal, &secrets).await?;
-                for mapping in discovered {
+            let (texts, sources) = text::request_texts(request, true)?;
+            let detected = detection::detect(texts).await?;
+            if !detected.is_empty() {
+                let (secrets, findings): (Vec<_>, Vec<_>) = detected
+                    .into_iter()
+                    .map(|credential| (credential.secret, credential.findings))
+                    .unzip();
+                let store = self.mappings.clone();
+                let principal = principal.clone();
+                let observer = observer.cloned();
+                // 提交与发现投递属于同一任务；调用方取消只放弃等待，不能中断提交确认。
+                // 任务只完成待发布预留，沿用原保留期；不执行 Provider 调用或发布。
+                let discovered = tokio::spawn(async move {
+                    let discovered = store.intern(&principal, &secrets).await?;
+                    // 创建归属由映射事务裁决；后续替换失败也不能抹去已提交的发现。
+                    if let Some(observer) = observer {
+                        observer.protect_secrets(
+                            discovered
+                                .mappings
+                                .iter()
+                                .map(|mapping| mapping.secret.as_str()),
+                        );
+                        let discoveries = discovered
+                            .created
+                            .iter()
+                            .map(|&index| {
+                                let findings = &findings[index];
+                                crate::interaction_observation::CredentialDiscovery {
+                                    rule_ids: findings
+                                        .iter()
+                                        .map(|finding| finding.rule_id.clone())
+                                        .collect::<BTreeSet<_>>()
+                                        .into_iter()
+                                        .collect(),
+                                    source_types: findings
+                                        .iter()
+                                        .map(|finding| sources[finding.source_index].to_owned())
+                                        .collect::<BTreeSet<_>>()
+                                        .into_iter()
+                                        .collect(),
+                                }
+                            })
+                            .collect::<Vec<_>>();
+                        if !discoveries.is_empty() {
+                            observer.record(
+                                crate::interaction_observation::RunEvent::CredentialMappingsCreated {
+                                    discoveries,
+                                },
+                            );
+                        }
+                    }
+                    Ok::<_, RedactionError>(discovered)
+                })
+                .await
+                .map_err(|_| RedactionError::Storage)??;
+                for mapping in discovered.mappings {
                     if !mappings
                         .iter()
                         .any(|existing| existing.reference == mapping.reference)
@@ -169,7 +216,7 @@ impl ReversibleRedaction {
             request.meta.redaction.record(references)?;
         }
         if !mappings.is_empty() {
-            let texts = text::request_texts(request, enabled)?;
+            let (texts, _) = text::request_texts(request, enabled)?;
             request.meta.redaction.record(
                 mappings
                     .iter()

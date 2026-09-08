@@ -101,6 +101,10 @@ export function localizeBackendErrorMessage(error: unknown, locale: Locale = get
       return m.setup_error_config_save({}, options)
     case 'gateway_unavailable':
       return m.setup_error_gateway({}, options)
+    case 'credential_rules_unavailable':
+      return m.credential_protection_catalog_failed({}, options)
+    case 'credential_test_failed':
+      return m.credential_protection_tester_failed({}, options)
     case 'PROVIDER_NAME_CONFLICT':
       return m.backend_error_provider_name_conflict({ name }, options)
     case 'ROUTE_ID_CONFLICT':

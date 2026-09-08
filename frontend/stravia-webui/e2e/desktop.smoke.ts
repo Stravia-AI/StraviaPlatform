@@ -82,6 +82,41 @@ async function unusedPort(): Promise<number> {
 }
 
 describe('Stravia desktop smoke', () => {
+  it('tests credential rules through the actual desktop page while protection is disabled', async () => {
+    await browser.execute(() => {
+      localStorage.setItem('stravia-locale', 'en-US')
+      localStorage.setItem('stravia-sidebar-state', 'expanded')
+    })
+    const port = (await browser.tauri.execute(({ core }) => core.invoke('get_server_port'))) as number
+    await adminRequest(port, '/settings/reversible_redaction_enabled', {
+      method: 'PUT',
+      body: JSON.stringify({ value: 'false' }),
+    })
+    const before = await adminRequest(port, '/reversible-redaction/discoveries')
+    await browser.refresh()
+    await browser.tauri.switchWindow('main')
+    await $('a[href="/reversible-redaction"]').click()
+    await expect($('//h1[normalize-space()="Credential Protection"]')).toBeDisplayed()
+    await expect($('#reversible-redaction-enabled')).toHaveAttribute('aria-checked', 'false')
+
+    const sample = 'ghp_9Er8nQ3wM0tY5bS7uL4oG6xI2kC1dZaVfJpH'
+    await $('#credential-test-input').setValue(`配置😀\n${sample}`)
+    await $('button=Test matching').click()
+    const result = await $('//button[.//span[contains(text(), "Line 2, column 1")]]')
+    await expect(result).toBeDisplayed()
+    await result.click()
+    expect(
+      await browser.execute(() => {
+        const input = document.getElementById('credential-test-input') as HTMLTextAreaElement
+        return input.value.slice(input.selectionStart, input.selectionEnd)
+      }),
+    ).toBe(sample)
+    expect(await adminRequest(port, '/settings/reversible_redaction_enabled')).toBe('false')
+    expect(await adminRequest(port, '/reversible-redaction/discoveries')).toEqual(before)
+    await $('button=Clear input and results').click()
+    await expect($('#credential-test-input')).toHaveValue('')
+  })
+
   it('boots the native shell with the WebDriver bridge', async () => {
     await browser.execute(() => {
       localStorage.setItem('stravia-locale', 'en-US')

@@ -7,6 +7,10 @@ import type { Locale } from '$lib/paraglide/runtime.js'
 import type { UpdateStatus } from '$lib/product-update'
 import type {
   ApiKey,
+  CredentialRuleCatalog,
+  CredentialMatch,
+  CredentialDiscoveryQuery,
+  CredentialDiscoveryPage,
   ProviderModelDetail,
   PreparedProviderModel,
   ProviderModelList,
@@ -326,6 +330,17 @@ function mapRequest(command: string, args?: Record<string, unknown>): RequestMap
       return { method: 'POST', path: '/provider-allowances/refresh' }
     case 'refreshProviderAllowance':
       return { method: 'POST', path: `/provider-allowances/${encodeURIComponent(String(args?.providerId))}/refresh` }
+    case 'getCredentialRules':
+      return { method: 'GET', path: '/reversible-redaction/rules' }
+    case 'testCredentialText':
+      return { method: 'POST', path: '/reversible-redaction/test', body: { text: args?.text } }
+    case 'getCredentialDiscoveries': {
+      const params = new URLSearchParams()
+      const query = (args?.query as CredentialDiscoveryQuery | undefined) ?? {}
+      if (query.cursor) params.set('cursor', query.cursor)
+      if (query.limit != null) params.set('limit', String(query.limit))
+      return { method: 'GET', path: `/reversible-redaction/discoveries${params.size ? `?${params}` : ''}` }
+    }
     case 'getSetting':
       return { method: 'GET', path: `/settings/${args?.key}` }
     case 'setSetting':
@@ -387,6 +402,12 @@ function parseJson(value: string): unknown {
 }
 
 export const admin = {
+  credentialProtection: {
+    rules: () => request<CredentialRuleCatalog>('getCredentialRules'),
+    discoveries: (query: CredentialDiscoveryQuery = {}) =>
+      request<CredentialDiscoveryPage>('getCredentialDiscoveries', { query }),
+    test: (text: string) => request<{ matches: CredentialMatch[] }>('testCredentialText', { text }),
+  },
   connectClients: {
     preview: (input: ConnectClientApplyRequest) => request<ConnectClientApplyPlan>('previewConnectClient', { input }),
   },

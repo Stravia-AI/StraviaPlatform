@@ -215,7 +215,11 @@ fn tool_result(
 ) -> Result<(), RedactionError> {
     match result_kind(value, kind, reject_ambiguous)? {
         Some(ToolResultContentKind::Json) => json_values(value, None, visit),
-        Some(ToolResultContentKind::ContentBlocks) => write_surface::wire_text(value, visit),
+        Some(ToolResultContentKind::ContentBlocks) => {
+            write_surface::wire_text(value, "tool_result", &mut |text, context, _| {
+                visit(text, context)
+            })
+        }
         None => Ok(()),
     }
 }
@@ -245,27 +249,38 @@ macro_rules! readable_surface {
     ($module:ident, $json:ident, $arguments:ident, $result:ident, $encoded:ident, $iter:ident, $get:ident, $values:ident, $slice:ident, $($qualifier:tt)*) => {
         mod $module {
             use super::*;
-            use super::{$json as json_values, $arguments as arguments_text, $result as tool_result, $encoded as encoded_tool_result};
-            type Visitor<'a> = dyn FnMut(& $($qualifier)* String, Option<&str>) -> Result<(), RedactionError> + 'a;
-pub(super) fn schema(value: & $($qualifier)* Value, visit: &mut Visitor<'_>) -> Result<(), RedactionError> {
+            fn json_values(value: & $($qualifier)* Value, context: Option<&str>, location: &'static str, visit: &mut Visitor<'_>) -> Result<(), RedactionError> {
+    super::$json(value, context, &mut |text, context| visit(text, context, location))
+}
+fn arguments_text(value: & $($qualifier)* String, _source: &'static str, visit: &mut Visitor<'_>) -> Result<(), RedactionError> {
+    super::$arguments(value, &mut |text, context| visit(text, context, "tool_arguments"))
+}
+fn tool_result(value: & $($qualifier)* Value, kind: Option<ToolResultContentKind>, reject: bool, _source: &'static str, visit: &mut Visitor<'_>) -> Result<(), RedactionError> {
+    super::$result(value, kind, reject, &mut |text, context| visit(text, context, "tool_result"))
+}
+fn encoded_tool_result(value: & $($qualifier)* String, kind: ToolResultContentKind, _source: &'static str, visit: &mut Visitor<'_>) -> Result<(), RedactionError> {
+    super::$encoded(value, kind, &mut |text, context| visit(text, context, "tool_result"))
+}
+            type Visitor<'a> = dyn FnMut(& $($qualifier)* String, Option<&str>, &'static str) -> Result<(), RedactionError> + 'a;
+pub(super) fn schema(value: & $($qualifier)* Value, location: &'static str, visit: &mut Visitor<'_>) -> Result<(), RedactionError> {
     match value {
         Value::Object(values) => for (key, value) in values {
             match key.as_str() {
-                "description" | "title" | "$comment" | "default" | "examples" | "example" | "const" | "enum" => json_values(value, Some(key), visit)?,
-                "properties" | "patternProperties" | "$defs" | "definitions" | "dependentSchemas" => if let Value::Object(entries) = value { for entry in entries.$values() { schema(entry, visit)?; } },
-                _ => if value.is_object() || value.is_array() { schema(value, visit)?; },
+                "description" | "title" | "$comment" | "default" | "examples" | "example" | "const" | "enum" => json_values(value, Some(key), location, visit)?,
+                "properties" | "patternProperties" | "$defs" | "definitions" | "dependentSchemas" => if let Value::Object(entries) = value { for entry in entries.$values() { schema(entry, location, visit)?; } },
+                _ => if value.is_object() || value.is_array() { schema(value, location, visit)?; },
             }
         },
-        Value::Array(values) => for value in values { schema(value, visit)?; },
+        Value::Array(values) => for value in values { schema(value, location, visit)?; },
         _ => {}
     }
     Ok(())
 }
 
 
-pub(super) fn wire_text(value: & $($qualifier)* Value, visit: &mut Visitor<'_>) -> Result<(), RedactionError> {
+pub(super) fn wire_text(value: & $($qualifier)* Value, location: &'static str, visit: &mut Visitor<'_>) -> Result<(), RedactionError> {
     match value {
-        Value::Array(values) => for value in values { wire_text(value, visit)?; },
+        Value::Array(values) => for value in values { wire_text(value, location, visit)?; },
         Value::Object(values) => {
             let kind = values.get("type").and_then(Value::as_str).unwrap_or("");
             if matches!(kind, "image" | "image_url" | "input_image" | "audio" | "input_audio" | "video" | "file" | "input_file" | "redacted_thinking") { return Ok(()); }
@@ -273,55 +288,61 @@ pub(super) fn wire_text(value: & $($qualifier)* Value, visit: &mut Visitor<'_>) 
             let search = kind == "search_result";
             let embedded_resource = kind == "resource";
             let tool_input = matches!(kind, "tool_use" | "server_tool_use");
-            if search && let Some(Value::String(source)) = values.$get("source") { visit(source, None)?; }
+            let location = if tool_input { "tool_arguments" } else if matches!(kind, "tool_result" | "server_tool_result" | "codeExecutionResult") { "tool_result" } else { match values.get("role").and_then(Value::as_str) { Some("user") => "user_message", Some("tool") => "tool_result", Some("assistant" | "system" | "developer") => "system_or_history", _ => location } };
+            if search && let Some(Value::String(source)) = values.$get("source") { visit(source, None, location)?; }
             if document && let Some(source) = values.$get("source") {
                 match source.get("type").and_then(Value::as_str) {
-                    Some("text" | "plain_text") => if let Some(Value::String(data)) = source.$get("data") { visit(data, None)?; },
-                    Some("content" | "blocks") => if let Some(content) = source.$get("content") { wire_text(content, visit)?; },
+                    Some("text" | "plain_text") => if let Some(Value::String(data)) = source.$get("data") { visit(data, None, location)?; },
+                    Some("content" | "blocks") => if let Some(content) = source.$get("content") { wire_text(content, location, visit)?; },
                     _ => {}
                 }
             }
             for (key, value) in values {
                 match key.as_str() {
-                    "text" | "refusal" | "thinking" | "cited_text" | "title" | "description" | "code" | "stdout" | "stderr" | "query" | "queries" | "prompt" => json_values(value, Some(key), visit)?,
-                    "arguments" => if let Value::String(arguments) = value { arguments_text(arguments, visit)?; } else { json_values(value, None, visit)?; },
-                    "input" if tool_input => json_values(value, None, visit)?,
-                    "input" | "output" | "variables" | "json" => json_values(value, None, visit)?,
-                    "functionCall" => if let Some(arguments) = value.$get("args") { json_values(arguments, None, visit)?; },
-                    "functionResponse" => if let Some(result) = value.$get("response") { json_values(result, None, visit)?; },
-                    "resource" if embedded_resource => if let Some(Value::String(text)) = value.$get("text") { visit(text, None)?; },
-                    "format" | "json_schema" | "parts" | "functionDeclarations" | "executableCode" | "codeExecutionResult" | "citations" => wire_text(value, visit)?,
-                    "content" | "summary" | "results" | "context" => if let Value::String(text) = value { visit(text, Some(key))?; } else { wire_text(value, visit)?; },
-                    "schema" | "parameters" | "input_schema" | "responseSchema" | "responseJsonSchema" => schema(value, visit)?,
+                    "text" | "refusal" | "thinking" | "cited_text" | "title" | "description" | "code" | "stdout" | "stderr" | "query" | "queries" | "prompt" => json_values(value, Some(key), location, visit)?,
+                    "arguments" => if let Value::String(arguments) = value { arguments_text(arguments, location, visit)?; } else { json_values(value, None, "tool_arguments", visit)?; },
+                    "input" if tool_input => json_values(value, None, location, visit)?,
+                    "input" | "output" | "variables" | "json" => json_values(value, None, location, visit)?,
+                    "functionCall" => if let Some(arguments) = value.$get("args") { json_values(arguments, None, "tool_arguments", visit)?; },
+                    "functionResponse" => if let Some(result) = value.$get("response") { json_values(result, None, "tool_result", visit)?; },
+                    "resource" if embedded_resource => if let Some(Value::String(text)) = value.$get("text") { visit(text, None, location)?; },
+                    "format" | "json_schema" | "parts" | "functionDeclarations" | "executableCode" | "codeExecutionResult" | "citations" => wire_text(value, location, visit)?,
+                    "content" | "summary" | "results" | "context" => if let Value::String(text) = value { visit(text, Some(key), location)?; } else { wire_text(value, location, visit)?; },
+                    "schema" | "parameters" | "input_schema" | "responseSchema" | "responseJsonSchema" => schema(value, location, visit)?,
                     _ => {}
                 }
             }
         },
-        Value::String(text) => visit(text, None)?,
+        Value::String(text) => visit(text, None, location)?,
         _ => {}
     }
     Ok(())
 }
 
 
-pub(super) fn blocks(blocks: & $($qualifier)* [ContentBlock], reject_ambiguous: bool, visit: &mut Visitor<'_>) -> Result<(), RedactionError> {
+pub(super) fn blocks(blocks: & $($qualifier)* [ContentBlock], reject_ambiguous: bool, location: &'static str, visit: &mut Visitor<'_>) -> Result<(), RedactionError> {
     for block in blocks {
+        let location = match block {
+            ContentBlock::ToolUse { .. } | ContentBlock::ServerToolUse { .. } => "tool_arguments",
+            ContentBlock::ToolResult { .. } | ContentBlock::ServerToolResult { .. } | ContentBlock::CodeExecutionResult { .. } => "tool_result",
+            _ => location,
+        };
         match block {
-            ContentBlock::Text { text, .. } => visit(text, None)?,
-            ContentBlock::Thinking { thinking, .. } => visit(thinking, None)?,
-            ContentBlock::Reasoning { summary, content, .. } => for text in summary.$iter().chain(content) { visit(text, None)?; },
-            ContentBlock::ToolUse { input, .. } | ContentBlock::ServerToolUse { input, .. } => json_values(input, None, visit)?,
-            ContentBlock::ToolResult { content, content_kind, .. } | ContentBlock::ServerToolResult { content, content_kind, .. } => tool_result(content, *content_kind, reject_ambiguous, visit)?,
+            ContentBlock::Text { text, .. } => visit(text, None, location)?,
+            ContentBlock::Thinking { thinking, .. } => visit(thinking, None, location)?,
+            ContentBlock::Reasoning { summary, content, .. } => for text in summary.$iter().chain(content) { visit(text, None, location)?; },
+            ContentBlock::ToolUse { input, .. } | ContentBlock::ServerToolUse { input, .. } => json_values(input, None, location, visit)?,
+            ContentBlock::ToolResult { content, content_kind, .. } | ContentBlock::ServerToolResult { content, content_kind, .. } => tool_result(content, *content_kind, reject_ambiguous, location, visit)?,
             ContentBlock::Document { source, title, context, .. } => {
-                for text in title.$iter().chain(context) { visit(text, None)?; }
-                match source { DocumentSource::PlainText { data } => visit(data, None)?, DocumentSource::Blocks { content } => self::blocks(content, reject_ambiguous, visit)?, _ => {} }
+                for text in title.$iter().chain(context) { visit(text, None, location)?; }
+                match source { DocumentSource::PlainText { data } => visit(data, None, location)?, DocumentSource::Blocks { content } => self::blocks(content, reject_ambiguous, location, visit)?, _ => {} }
             }
-            ContentBlock::SearchResult { content, title, source, .. } => { visit(title, None)?; visit(source, None)?; self::blocks(content, reject_ambiguous, visit)?; }
-            ContentBlock::Citation { cited_text, .. } => visit(cited_text, None)?,
-            ContentBlock::ExecutableCode { code, .. } => visit(code, None)?,
-            ContentBlock::CodeExecutionResult { stdout, stderr, .. } => { visit(stdout, None)?; visit(stderr, None)?; }
-            ContentBlock::Refusal { refusal } => visit(refusal, None)?,
-            ContentBlock::Unknown { raw } => wire_text(raw, visit)?,
+            ContentBlock::SearchResult { content, title, source, .. } => { visit(title, None, location)?; visit(source, None, location)?; self::blocks(content, reject_ambiguous, location, visit)?; }
+            ContentBlock::Citation { cited_text, .. } => visit(cited_text, None, location)?,
+            ContentBlock::ExecutableCode { code, .. } => visit(code, None, location)?,
+            ContentBlock::CodeExecutionResult { stdout, stderr, .. } => { visit(stdout, None, location)?; visit(stderr, None, location)?; }
+            ContentBlock::Refusal { refusal } => visit(refusal, None, location)?,
+            ContentBlock::Unknown { raw } => wire_text(raw, location, visit)?,
             ContentBlock::Image { .. } | ContentBlock::Audio { .. } | ContentBlock::File { .. } | ContentBlock::Video { .. } | ContentBlock::RedactedThinking { .. } | ContentBlock::ContainerUpload { .. } => {}
         }
     }
@@ -329,7 +350,12 @@ pub(super) fn blocks(blocks: & $($qualifier)* [ContentBlock], reject_ambiguous: 
 }
 
 
-pub(super) fn item_text(item: & $($qualifier)* AiItem, reject_ambiguous: bool, visit: &mut Visitor<'_>) -> Result<(), RedactionError> {
+pub(super) fn item_text(item: & $($qualifier)* AiItem, reject_ambiguous: bool, _location: &'static str, visit: &mut Visitor<'_>) -> Result<(), RedactionError> {
+    let location = match item.role {
+        crate::protocol::ir::Role::User => "user_message",
+        crate::protocol::ir::Role::Tool => "tool_result",
+        _ => "system_or_history",
+    };
     let encoded_kind = if item.role == crate::protocol::ir::Role::Tool {
         item.meta.as_ref().and_then(|meta| meta.get(TOOL_RESULT_CONTENT_KIND_META))
         .map(|kind| serde_json::from_value::<ToolResultContentKind>(kind.clone()).map_err(|_| RedactionError::InvalidText))
@@ -337,65 +363,66 @@ pub(super) fn item_text(item: & $($qualifier)* AiItem, reject_ambiguous: bool, v
     } else { None };
     match & $($qualifier)* item.content {
         MessageContent::Text(text) if item.role == crate::protocol::ir::Role::Tool => match encoded_kind {
-            Some(ToolResultContentKind::ContentBlocks) => encoded_tool_result(text, ToolResultContentKind::ContentBlocks, visit)?,
-            Some(ToolResultContentKind::Json) => visit(text, None)?,
+            Some(ToolResultContentKind::ContentBlocks) => encoded_tool_result(text, ToolResultContentKind::ContentBlocks, location, visit)?,
+            Some(ToolResultContentKind::Json) => visit(text, None, location)?,
             None if encoded_compound_array(text) => if reject_ambiguous { return Err(RedactionError::AmbiguousToolResult); },
-            None => visit(text, None)?,
+            None => visit(text, None, location)?,
         },
-        MessageContent::Text(text) => visit(text, None)?,
+        MessageContent::Text(text) => visit(text, None, location)?,
         MessageContent::Blocks(content) if item.role == crate::protocol::ir::Role::Tool => for block in content {
             if let (Some(kind), ContentBlock::ToolResult { content: Value::String(text), .. }
                 | ContentBlock::ServerToolResult { content: Value::String(text), .. }) = (encoded_kind, & $($qualifier)* *block) {
                 match kind {
-                    ToolResultContentKind::ContentBlocks => encoded_tool_result(text, kind, visit)?,
-                    ToolResultContentKind::Json => visit(text, None)?,
+                    ToolResultContentKind::ContentBlocks => encoded_tool_result(text, kind, location, visit)?,
+                    ToolResultContentKind::Json => visit(text, None, location)?,
                 }
             } else if let ContentBlock::Unknown { raw } = block {
                 if content_result_type(raw.get("type").and_then(Value::as_str)) {
                     if reject_ambiguous { return Err(RedactionError::AmbiguousToolResult); }
                     continue;
                 }
-                tool_result(raw, None, reject_ambiguous, visit)?;
+                tool_result(raw, None, reject_ambiguous, location, visit)?;
             }
-            else { blocks(std::slice::$slice(block), reject_ambiguous, visit)?; }
+            else { blocks(std::slice::$slice(block), reject_ambiguous, location, visit)?; }
         },
-        MessageContent::Blocks(content) => blocks(content, reject_ambiguous, visit)?,
+        MessageContent::Blocks(content) => blocks(content, reject_ambiguous, location, visit)?,
     }
-    if let Some(calls) = & $($qualifier)* item.tool_calls { for call in calls { arguments_text(& $($qualifier)* call.arguments, visit)?; } }
+    if let Some(calls) = & $($qualifier)* item.tool_calls { for call in calls { arguments_text(& $($qualifier)* call.arguments, location, visit)?; } }
     Ok(())
 }
 
 
-pub(super) fn request(request: & $($qualifier)* AiRequest, reject_ambiguous: bool, visit: &mut Visitor<'_>) -> Result<(), RedactionError> {
-    if let Some(text) = & $($qualifier)* request.instructions { visit(text, None)?; }
-    for item in & $($qualifier)* request.items { item_text(item, reject_ambiguous, visit)?; }
-    if let Some(embedding) = & $($qualifier)* request.embedding { match & $($qualifier)* embedding.input { EmbeddingInput::Text(text) => visit(text, None)?, EmbeddingInput::Texts(texts) => for text in texts { visit(text, None)?; }, _ => {} } }
-    if let Some(tools) = & $($qualifier)* request.tools { for tool in tools { if let Some(text) = & $($qualifier)* tool.description { visit(text, None)?; } schema(& $($qualifier)* tool.parameters, visit)?; } }
-    if let Some(ResponseFormat::JsonSchema { schema: value, .. }) = & $($qualifier)* request.response_format { schema(value, visit)?; }
+pub(super) fn request(request: & $($qualifier)* AiRequest, reject_ambiguous: bool, location: &'static str, visit: &mut Visitor<'_>) -> Result<(), RedactionError> {
+    if let Some(text) = & $($qualifier)* request.instructions { visit(text, None, "system_or_history")?; }
+    for item in & $($qualifier)* request.items { item_text(item, reject_ambiguous, location, visit)?; }
+    if let Some(embedding) = & $($qualifier)* request.embedding { match & $($qualifier)* embedding.input { EmbeddingInput::Text(text) => visit(text, None, location)?, EmbeddingInput::Texts(texts) => for text in texts { visit(text, None, location)?; }, _ => {} } }
+    if let Some(tools) = & $($qualifier)* request.tools { for tool in tools { if let Some(text) = & $($qualifier)* tool.description { visit(text, None, location)?; } schema(& $($qualifier)* tool.parameters, location, visit)?; } }
+    if let Some(ResponseFormat::JsonSchema { schema: value, .. }) = & $($qualifier)* request.response_format { schema(value, location, visit)?; }
     // Encoders prefer these fidelity-preserving copies over canonical fields.
     // Select only model-readable carriers, never the arbitrary vendor bag:
     // authentication, identities, media and opaque signatures must stay intact.
     for (key, value) in & $($qualifier)* request.meta.vendor.ingress {
         match key.as_str() {
-            "__anthropic_raw_messages" | "__anthropic_raw_system" | "__anthropic_raw_tools"
-            | "__google_raw_system_instruction" | "__google_raw_tools" | "__google_generation_config"
-            | "prediction" | "response_format" => wire_text(value, visit)?,
+            "__anthropic_raw_system" | "__google_raw_system_instruction" => wire_text(value, "system_or_history", visit)?,
+            "__anthropic_raw_messages" | "__anthropic_raw_tools"
+            | "__google_raw_tools" | "__google_generation_config"
+            | "prediction" | "response_format" => wire_text(value, location, visit)?,
             _ => {}
         }
     }
     if let Some(ext) = & $($qualifier)* request.ext {
         match ext {
-            ProtocolExt::OpenAiChat(ext) => if let Some(value) = & $($qualifier)* ext.prediction { wire_text(value, visit)?; },
+            ProtocolExt::OpenAiChat(ext) => if let Some(value) = & $($qualifier)* ext.prediction { wire_text(value, location, visit)?; },
             ProtocolExt::OpenResponses(ext) => {
-                if let Some(value) = & $($qualifier)* ext.text { wire_text(value, visit)?; }
-                for value in & $($qualifier)* ext.passthrough_tools { wire_text(value, visit)?; }
-                for (key, value) in & $($qualifier)* ext.passthrough_body { if matches!(key.as_str(), "prompt" | "context") { wire_text(value, visit)?; } }
+                if let Some(value) = & $($qualifier)* ext.text { wire_text(value, location, visit)?; }
+                for value in & $($qualifier)* ext.passthrough_tools { wire_text(value, location, visit)?; }
+                for (key, value) in & $($qualifier)* ext.passthrough_body { if matches!(key.as_str(), "prompt" | "context") { wire_text(value, location, visit)?; } }
             }
             ProtocolExt::Anthropic(ext) => {
-                if let Some(value) = & $($qualifier)* ext.output_config { if let Some(format) = value.$get("format") { wire_text(format, visit)?; } }
-                if let Some(tools) = & $($qualifier)* ext.server_tools { for tool in tools { wire_text(tool, visit)?; } }
+                if let Some(value) = & $($qualifier)* ext.output_config { if let Some(format) = value.$get("format") { wire_text(format, location, visit)?; } }
+                if let Some(tools) = & $($qualifier)* ext.server_tools { for tool in tools { wire_text(tool, location, visit)?; } }
             }
-            ProtocolExt::Google(ext) => if let Some(value) = & $($qualifier)* ext.response_json_schema { schema(value, visit)?; },
+            ProtocolExt::Google(ext) => if let Some(value) = & $($qualifier)* ext.response_json_schema { schema(value, location, visit)?; },
         }
     }
     Ok(())
@@ -505,7 +532,11 @@ fn read_tool_result(
         |text: &String, context: Option<&str>| append_context(&mut readable, text, context);
     match result_kind(value, kind, reject_ambiguous)? {
         Some(ToolResultContentKind::Json) => read_json_values(value, None, &mut collect)?,
-        Some(ToolResultContentKind::ContentBlocks) => read_surface::wire_text(value, &mut collect)?,
+        Some(ToolResultContentKind::ContentBlocks) => {
+            read_surface::wire_text(value, "tool_result", &mut |text, context, _| {
+                collect(text, context)
+            })?
+        }
         None => {}
     }
     if !readable.is_empty() {
@@ -526,19 +557,26 @@ fn read_encoded_tool_result(
 pub fn request_texts(
     value: &AiRequest,
     reject_ambiguous: bool,
-) -> Result<Vec<String>, RedactionError> {
+) -> Result<(Vec<String>, Vec<&'static str>), RedactionError> {
     let mut texts = Vec::new();
-    read_surface::request(value, reject_ambiguous, &mut |text, context| {
-        if let Some(key) = context {
-            let mut readable = String::new();
-            append_context(&mut readable, text, Some(key))?;
-            texts.push(readable);
-        } else {
-            texts.push(text.clone());
-        }
-        Ok(())
-    })?;
-    Ok(texts)
+    let mut sources = Vec::new();
+    read_surface::request(
+        value,
+        reject_ambiguous,
+        "other_text",
+        &mut |text, context, source| {
+            sources.push(source);
+            if let Some(key) = context {
+                let mut readable = String::new();
+                append_context(&mut readable, text, Some(key))?;
+                texts.push(readable);
+            } else {
+                texts.push(text.clone());
+            }
+            Ok(())
+        },
+    )?;
+    Ok((texts, sources))
 }
 
 pub fn redact_request(
@@ -546,7 +584,7 @@ pub fn redact_request(
     mappings: &[Mapping],
 ) -> Result<Vec<String>, RedactionError> {
     let mut used = BTreeSet::new();
-    write_surface::request(value, true, &mut |text, _| {
+    write_surface::request(value, true, "other_text", &mut |text, _, _| {
         *text = replace(text, mappings, false, &mut used);
         Ok(())
     })?;
@@ -564,7 +602,7 @@ pub(super) fn restore_item(
     mappings: &[Mapping],
     used: &mut BTreeSet<String>,
 ) -> Result<(), RedactionError> {
-    write_surface::item_text(item, false, &mut |text, _| {
+    write_surface::item_text(item, false, "other_text", &mut |text, _, _| {
         *text = replace(text, mappings, true, used);
         Ok(())
     })
@@ -594,7 +632,7 @@ pub(super) fn restore_unknown(
         return Ok(false);
     }
     let mut changed = false;
-    write_surface::wire_text(&mut value, &mut |text, _| {
+    write_surface::wire_text(&mut value, "other_text", &mut |text, _, _| {
         let restored = replace(text, mappings, true, used);
         changed |= restored != *text;
         *text = restored;

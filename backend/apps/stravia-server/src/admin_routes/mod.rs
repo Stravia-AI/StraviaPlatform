@@ -210,6 +210,12 @@ fn create_router_inner(gateway: Gateway, auth: Option<AdminHttpState>) -> Router
             get(list_api_keys_handler).post(create_api_key_handler),
         )
         .route("/api-keys/{id}", api_keys_item)
+        .route("/reversible-redaction/rules", get(credential_rules))
+        .route("/reversible-redaction/test", post(test_credentials))
+        .route(
+            "/reversible-redaction/discoveries",
+            get(credential_discoveries),
+        )
         .route("/observations/interactions", get(interaction_forest))
         .route("/observations/interactions/{id}", get(interaction_detail))
         .route("/observations/rejections", get(rejection_list))
@@ -303,6 +309,7 @@ async fn readyz_handler(State(gw): State<Gateway>) -> impl IntoResponse {
 }
 
 mod api_keys;
+mod credential_protection;
 mod models;
 mod observations;
 mod providers;
@@ -313,6 +320,7 @@ mod updates;
 mod web;
 
 use api_keys::*;
+use credential_protection::*;
 use models::*;
 use observations::*;
 use providers::*;

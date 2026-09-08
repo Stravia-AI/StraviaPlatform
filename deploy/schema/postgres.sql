@@ -1445,3 +1445,6 @@ ON reversible_redaction_mappings(principal, expires_at);
 
 CREATE INDEX idx_reversible_redaction_mappings_expiry
 ON reversible_redaction_mappings(expires_at);
+
+-- 旧观察没有新增凭据元数据；标记缺失而不从秘密表或历史正文补造发现。
+UPDATE interaction_observations SET observation_gap = TRUE;

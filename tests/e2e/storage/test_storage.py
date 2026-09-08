@@ -385,6 +385,9 @@ def test_postgres_legacy_upgrade_installs_observation_schema_and_reconnects(
 def test_redaction_reuses_and_restores_mappings_after_real_restart(
     stravia_binary: Path, storage_runtime: dict[str, object], tmp_path: Path, backend: str,
 ) -> None:
+    from tests.e2e.admin.test_credential_protection import key_discoveries
+    from tests.e2e.admin.test_observations import _wait_for
+
     pg_url = storage_runtime["pg_url"]
     if backend == "postgres" and not pg_url:
         pytest.skip("postgres backend requires DB_URL")
@@ -420,6 +423,12 @@ def test_redaction_reuses_and_restores_mappings_after_real_restart(
             reference = REFERENCE.search(json.dumps(received[-1]["body"]))
             assert reference is not None
             reference = reference.group()
+            initial = _wait_for(
+                "persisted credential discovery before restart",
+                lambda: key_discoveries(env, f"{model}-key"),
+            )
+            assert len(initial) == 1 and initial[0]["new_credential_count"] == 1
+            assert "github-pat" in initial[0]["rule_ids"]
             stop_stravia_server(process, logs)
             process = None
 
@@ -432,6 +441,12 @@ def test_redaction_reuses_and_restores_mappings_after_real_restart(
             )
             assert status == 200, body
             env["auth"] = session.auth_headers()
+            restored = key_discoveries(env, f"{model}-key")
+            assert len(restored) == 1
+            assert restored[0]["interaction_id"] == initial[0]["interaction_id"]
+            assert restored[0]["new_credential_count"] == 1
+            assert SECRET not in json.dumps(restored)
+            assert reference not in json.dumps(restored)
             status, body = _proxy(env, key, model, [
                 {"role": "user", "content": SECRET},
                 first["choices"][0]["message"],
@@ -442,6 +457,15 @@ def test_redaction_reuses_and_restores_mappings_after_real_restart(
             wire = json.dumps(received[-1]["body"])
             assert SECRET not in wire
             assert set(REFERENCE.findall(wire)) == {reference}
+            assert sum(row["new_credential_count"] for row in key_discoveries(env, f"{model}-key")) == 1
+            status, cleared = http_request("DELETE", f"{base}/api/v1/observations/history", headers=env["auth"])
+            assert status == 200, cleared
+            assert key_discoveries(env, f"{model}-key") == []
+            status, reused = _proxy(env, key, model, [{"role": "user", "content": SECRET}])
+            assert status == 200, reused
+            assert reused["choices"][0]["message"]["content"] == SECRET
+            assert set(REFERENCE.findall(json.dumps(received[-1]["body"]))) == {reference}
+            assert key_discoveries(env, f"{model}-key") == []
             set_enabled(env, False)
             status, body = _proxy(env, key, model, [{"role": "user", "content": reference}])
             assert status == 200, body

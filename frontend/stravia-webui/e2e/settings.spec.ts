@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test'
 
-import type { MediaUnderstandingConfigView } from '../src/lib/types'
+import type { CredentialRuleCatalog, MediaUnderstandingConfigView } from '../src/lib/types'
 import { prepareApp } from './prepare-app'
 
 test.beforeEach(async ({ page }) => {
@@ -311,3 +311,243 @@ for (const locale of ['en-US', 'zh-CN']) {
     await expect(updates).not.toContainText(technicalMessage)
   })
 }
+
+const credentialCatalog: CredentialRuleCatalog = {
+  prefilter: 'contains(text, "test_")',
+  filter: 'len(secret) > 8',
+  rules: Array.from({ length: 35 }, (_, index) => ({
+    id: `fixture-rule-${index}`,
+    name: `Fixture credential ${index}`,
+    target: 'Fixture API credentials',
+    description: 'Detects test-only API credentials with local context.',
+    regex: 'test_[A-Za-z0-9]+',
+    path: null,
+    secret_group: 0,
+    keywords: ['test_'],
+    filter: 'secret != "test_example"',
+    components: [{ id: 'fixture-context', within: 2, optional: false }],
+    skip_report: false,
+    specificity: 10,
+    confidence: 'high',
+  })),
+}
+
+for (const locale of ['en-US', 'zh-CN']) {
+  test(`credential protection browsing and manual testing work without enabling protection (${locale})`, async ({
+    page,
+  }) => {
+    const zh = locale === 'zh-CN'
+    await page.addInitScript((value) => localStorage.setItem('stravia-locale', value), locale)
+    const submitted: string[] = []
+    const cursors: Array<string | null> = []
+    await page.route('**/api/v1/reversible-redaction/**', async (route) => {
+      const url = new URL(route.request().url())
+      if (url.pathname.endsWith('/rules')) {
+        await route.fulfill({ json: { data: credentialCatalog } })
+      } else if (url.pathname.endsWith('/discoveries')) {
+        const cursor = url.searchParams.get('cursor')
+        cursors.push(cursor)
+        await route.fulfill({
+          json: {
+            data: {
+              items: [
+                {
+                  interaction_id: cursor ? 'interaction-second' : 'interaction-atlas',
+                  api_key_name: cursor ? 'Second fixture key' : 'Fixture key',
+                  discovered_at: 1_788_854_400_000,
+                  new_credential_count: 2,
+                  rule_ids: ['fixture-rule-0'],
+                  source_types: ['user_message', 'tool_arguments'],
+                  status: 'failed',
+                  observation_gap: false,
+                },
+              ],
+              next_cursor: cursor ? null : 'next-fixture',
+              observation_gap: false,
+            },
+          },
+        })
+      } else {
+        expect(route.request().method()).toBe('POST')
+        expect(url.search).toBe('')
+        const { text } = route.request().postDataJSON() as { text: string }
+        submitted.push(text)
+        const start = text.indexOf('test_credential')
+        await route.fulfill({
+          json: {
+            data: {
+              matches:
+                start < 0
+                  ? []
+                  : [
+                      {
+                        rule_id: 'fixture-rule-0',
+                        start,
+                        end: start + 15,
+                        start_line: 2,
+                        start_column: 3,
+                        end_line: 2,
+                        end_column: 18,
+                      },
+                    ],
+            },
+          },
+        })
+      }
+    })
+    await page.goto('/reversible-redaction')
+    await expect(page.getByRole('heading', { level: 1, name: zh ? '凭据保护' : 'Credential Protection' })).toBeVisible()
+    await expect(page.locator('a[href="/reversible-redaction"]')).toContainText(
+      zh ? '凭据保护' : 'Credential Protection',
+    )
+    await expect(page.getByRole('switch')).not.toBeChecked()
+    const search = page.getByRole('searchbox')
+    await expect(page.getByRole('button', { name: /Fixture credential 34/ })).toHaveCount(0)
+    await page.getByRole('button', { name: zh ? '显示更多规则' : 'Show more rules', exact: true }).click()
+    await expect(page.getByRole('button', { name: /Fixture credential 34/ })).toBeVisible()
+    await search.fill('fixture-rule-34')
+    const rule = page.getByRole('button', { name: /Fixture credential 34/ })
+    await rule.focus()
+    await page.keyboard.press('Enter')
+    await expect(page.getByText('ID: fixture-rule-34', { exact: true })).toBeVisible()
+    await expect(page.getByText('test_[A-Za-z0-9]+', { exact: true })).toBeVisible()
+    await expect(page.locator('pre').filter({ hasText: 'fixture-context' })).toContainText('"within": 2')
+    await search.fill('')
+    await page.getByRole('button', { name: /Fixture key/ }).click()
+    await expect(page.getByText(zh ? '请求状态' : 'Request status', { exact: true })).toBeVisible()
+    await expect(page.getByText(zh ? '失败' : 'Failed', { exact: true })).toBeVisible()
+    await expect(
+      page.getByRole('link', { name: zh ? '查看关联请求记录' : 'Open request observation' }),
+    ).toHaveAttribute('href', '/logs?interaction=interaction-atlas')
+    await page.getByRole('button', { name: zh ? '加载更多发现' : 'Load more discoveries' }).click()
+    await expect(page.getByRole('button', { name: /Second fixture key/ })).toBeVisible()
+    expect(cursors).toEqual([null, 'next-fixture'])
+    const input = page.getByRole('textbox', { name: zh ? '待测文本' : 'Text to test' })
+    const text = '说明😀\n前缀test_credential 后文'
+    await input.fill(text)
+    expect(submitted).toEqual([])
+    await page.getByRole('button', { name: zh ? '测试匹配' : 'Test matching', exact: true }).click()
+    await expect(page.getByRole('status').filter({ hasText: zh ? '命中 1 处' : '1 matches' })).toBeVisible()
+    expect(submitted).toEqual([text])
+    const result = page.getByRole('button', { name: /Fixture credential 0.*(?:Line|第)/ })
+    await result.focus()
+    await page.keyboard.press('Enter')
+    expect(
+      await input.evaluate((element: HTMLTextAreaElement) =>
+        element.value.slice(element.selectionStart, element.selectionEnd),
+      ),
+    ).toBe('test_credential')
+    await input.fill('ordinary test text')
+    await expect(result).toHaveCount(0)
+    await page.getByRole('button', { name: zh ? '测试匹配' : 'Test matching', exact: true }).click()
+    await expect(
+      page.getByRole('status').filter({ hasText: zh ? '未匹配到现有规则' : 'No existing rule matched' }),
+    ).toBeVisible()
+    await page.getByRole('button', { name: zh ? '清空输入与结果' : 'Clear input and results' }).click()
+    await expect(input).toHaveValue('')
+    await expect(
+      page.getByRole('status').filter({ hasText: zh ? '未匹配到现有规则' : 'No existing rule matched' }),
+    ).toHaveCount(0)
+    await page.setViewportSize({ width: 500, height: 900 })
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  })
+}
+
+test('credential protection distinguishes failed saves, unavailable observations and failed tests', async ({
+  page,
+}) => {
+  let saved = 'false'
+  let rejectSave = true
+  let saveAttempts = 0
+  let unavailable = true
+  let rejectTest = true
+  await page.route('**/api/v1/settings/reversible_redaction_enabled', async (route) => {
+    if (route.request().method() === 'PUT') {
+      saveAttempts++
+      if (rejectSave) {
+        await route.fulfill({ status: 503, json: { error: 'Fixture save unavailable' } })
+        return
+      }
+      saved = route.request().postDataJSON().value
+    }
+    await route.fulfill({ json: { data: saved } })
+  })
+  await page.route('**/api/v1/reversible-redaction/**', async (route) => {
+    const path = new URL(route.request().url()).pathname
+    if (path.endsWith('/test')) {
+      await route.fulfill(
+        rejectTest ? { status: 503, json: { error: 'Fixture detector failure' } } : { json: { data: { matches: [] } } },
+      )
+    } else if (unavailable) {
+      await route.fulfill({ status: 503, json: { error: 'Fixture observation unavailable' } })
+    } else if (path.endsWith('/rules')) {
+      await route.fulfill({ json: { data: credentialCatalog } })
+    } else {
+      await route.fulfill({ json: { data: { items: [], next_cursor: null, observation_gap: true } } })
+    }
+  })
+  await page.goto('/reversible-redaction')
+  const toggle = page.getByRole('switch')
+  await toggle.click()
+  expect(saveAttempts).toBe(0)
+  await page.getByRole('button', { name: 'Save settings', exact: true }).click()
+  await expect(page.getByRole('alert').filter({ hasText: 'Fixture save unavailable' })).toBeVisible()
+  await expect(page.getByRole('status').filter({ hasText: 'Saved policy: Disabled' })).toBeVisible()
+  rejectSave = false
+  await page.getByRole('button', { name: 'Save settings', exact: true }).click()
+  await expect(page.getByRole('status').filter({ hasText: 'Saved policy: Enabled' })).toBeVisible()
+  expect(saved).toBe('true')
+  const catalog = page.getByRole('region', { name: 'Current rules' })
+  const timeline = page.getByRole('region', { name: 'Recent discoveries' })
+  await expect(catalog.getByRole('alert')).toContainText('Rules could not be loaded.', { timeout: 15_000 })
+  await expect(timeline.getByRole('alert')).toContainText('Discovery observations are unavailable.')
+  await expect(timeline.getByText('No new credential discoveries in the available observations.')).toHaveCount(0)
+  unavailable = false
+  await catalog.getByRole('button', { name: 'Retry', exact: true }).click()
+  await timeline.getByRole('button', { name: 'Retry', exact: true }).click()
+  await expect(timeline.getByRole('alert')).toContainText('Observation data is incomplete.')
+  await expect(timeline.getByText('No new credential discoveries in the available observations.')).toHaveCount(0)
+  await expect(catalog.getByRole('searchbox')).toBeVisible()
+  await page.getByRole('textbox', { name: 'Text to test', exact: true }).fill('test_credential')
+  await page.getByRole('button', { name: 'Test matching', exact: true }).click()
+  await expect(page.getByRole('alert').filter({ hasText: 'Matching test failed.' })).toBeVisible()
+  await expect(page.getByRole('status').filter({ hasText: 'No existing rule matched' })).toHaveCount(0)
+  rejectTest = false
+  await page.getByRole('button', { name: 'Test matching', exact: true }).click()
+  await expect(page.getByRole('status').filter({ hasText: 'No existing rule matched' })).toBeVisible()
+})
+
+test('credential protection separates setting load failure from empty rules and observations', async ({ page }) => {
+  let settingsUnavailable = true
+  await page.route('**/api/v1/settings/reversible_redaction_enabled', async (route) => {
+    await route.fulfill(
+      settingsUnavailable
+        ? { status: 503, json: { error: 'Fixture settings unavailable' } }
+        : { json: { data: 'false' } },
+    )
+  })
+  await page.route('**/api/v1/reversible-redaction/**', async (route) => {
+    const rules = new URL(route.request().url()).pathname.endsWith('/rules')
+    await route.fulfill({
+      json: {
+        data: rules
+          ? { rules: [], prefilter: '', filter: '' }
+          : { items: [], next_cursor: null, observation_gap: false },
+      },
+    })
+  })
+  await page.goto('/reversible-redaction')
+  await expect(
+    page.getByRole('alert').filter({ hasText: 'Credential protection settings could not be loaded.' }),
+  ).toBeVisible({ timeout: 15_000 })
+  await expect(page.getByRole('switch')).toBeDisabled()
+  await expect(page.getByRole('button', { name: 'Save settings', exact: true })).toBeDisabled()
+  await expect(page.getByText('No rules are bundled with this instance.', { exact: true })).toBeVisible()
+  await expect(
+    page.getByText('No new credential discoveries in the available observations.', { exact: true }),
+  ).toBeVisible()
+  settingsUnavailable = false
+  await page.getByRole('button', { name: 'Retry', exact: true }).click()
+  await expect(page.getByRole('switch')).toBeEnabled()
+  await expect(page.getByRole('switch')).not.toBeChecked()
+})

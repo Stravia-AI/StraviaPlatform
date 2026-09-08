@@ -1,6 +1,7 @@
 <script lang="ts">
 import * as m from '$lib/paraglide/messages.js'
 import { onMount, tick } from 'svelte'
+import { page } from '$app/state'
 import { SvelteSet } from 'svelte/reactivity'
 import { createQuery, useQueryClient } from '@tanstack/svelte-query'
 import { SvelteFlowProvider } from '@xyflow/svelte'
@@ -125,6 +126,32 @@ const selectedMigrated = $derived(
 onMount(() => {
   void loadForest(true)
   return () => stream?.close()
+})
+
+$effect(() => {
+  const id = page.url.searchParams.get('interaction')
+  if (!id) return
+  let active = true
+  followPaused = true
+  detailLoading = true
+  void admin.observations
+    .interaction(id)
+    .then((detail) => {
+      if (!active) return
+      selectedInteraction = detail.interaction
+      selectedRejection = undefined
+      interactionDetail = detail
+      rejectionDetail = undefined
+    })
+    .catch((error: unknown) => {
+      if (active) toast.error(localizeBackendErrorMessage(error))
+    })
+    .finally(() => {
+      if (active) detailLoading = false
+    })
+  return () => {
+    active = false
+  }
 })
 
 function applyPage(page: ForestPage, replace: boolean): void {

@@ -183,7 +183,8 @@ mod tests {
             .mappings
             .intern(&owner, &[SECRET.into()])
             .await
-            .unwrap();
+            .unwrap()
+            .mappings;
         for structured in [false, true] {
             let mut output = serde_json::json!({"content": [
                 {"type": "text", "text": SECRET},
@@ -242,7 +243,7 @@ mod tests {
             );
             gateway
                 .redaction
-                .protect(&owner, &mut request)
+                .protect(&owner, &mut request, None)
                 .await
                 .unwrap();
             let MessageContent::Blocks(blocks) = &request.items[0].content else {

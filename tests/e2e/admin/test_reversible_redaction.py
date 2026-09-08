@@ -180,6 +180,9 @@ def test_reversible_redaction_plaintext_roundtrip(admin_env: dict[str, Any]) -> 
 @pytest.mark.e2e
 @pytest.mark.admin
 def test_redaction_dictionary_isolation_concurrency_and_switches(admin_env: dict[str, Any]) -> None:
+    from tests.e2e.admin.test_credential_protection import key_discoveries
+    from tests.e2e.admin.test_observations import _wait_for
+
     with echo_provider() as (url, received):
         env = {**admin_env, "mock": url}
         model = "reversible-isolation"
@@ -242,6 +245,12 @@ def test_redaction_dictionary_isolation_concurrency_and_switches(admin_env: dict
             assert received[-1]["body"]["messages"][-1]["content"] == reference
             unknown = "~stravia-secret:00000000000000000000000000000000~"
             assert send(first_key, unknown) == unknown
+            for key_name in [f"{model}-key", "isolated-second-key"]:
+                rows = _wait_for("isolated first mapping discovery", lambda: key_discoveries(env, key_name))
+                assert len(rows) == 1
+                assert rows[0]["new_credential_count"] == 1
+                assert secret not in json.dumps(rows)
+                assert REFERENCE.search(json.dumps(rows)) is None
         finally:
             set_enabled(env, False)
 
@@ -252,10 +261,13 @@ def test_redaction_dictionary_isolation_concurrency_and_switches(admin_env: dict
 def test_redaction_storage_failures_never_bypass_protection(
     admin_env: dict[str, Any], failure: str,
 ) -> None:
+    from tests.e2e.admin.test_credential_protection import key_discoveries
+    from tests.e2e.admin.test_observations import _route_interactions, _wait_for
+
     with echo_provider() as (url, received):
         env = {**admin_env, "mock": url}
         model = f"reversible-failure-{failure}"
-        _, key = _create_route(env, model)
+        route, key = _create_route(env, model)
         committed_before = mapping_sql(env, "SELECT COUNT(*) FROM turn_chain_nodes")
         published_before = mapping_sql(env, "SELECT COUNT(*) FROM history_markers WHERE published_at IS NOT NULL")
         set_enabled(env, failure != "read")
@@ -301,6 +313,19 @@ def test_redaction_storage_failures_never_bypass_protection(
                 assert "injected" not in json.dumps(body)
                 assert SECRET not in json.dumps(body)
             assert len(received) == (1 if failure.startswith("publish") else 0)
+            _wait_for(
+                "failed protection interaction",
+                lambda: [row for row in _route_interactions(env, route) if row["status"] == "interrupted"],
+            )
+            rows = key_discoveries(env, f"{model}-key")
+            if failure.startswith("publish"):
+                assert len(rows) == 1
+                assert rows[0]["new_credential_count"] == 1
+                assert rows[0]["status"] == "interrupted"
+                assert SECRET not in json.dumps(rows)
+                assert REFERENCE.search(json.dumps(rows)) is None
+            else:
+                assert rows == []
             if failure.startswith("publish"):
                 wire = json.dumps(received[0]["body"])
                 assert SECRET not in wire
@@ -326,6 +351,9 @@ def test_redaction_storage_failures_never_bypass_protection(
 @pytest.mark.e2e
 @pytest.mark.admin
 def test_expired_reference_stays_literal_and_is_not_revived(admin_env: dict[str, Any]) -> None:
+    from tests.e2e.admin.test_credential_protection import key_discoveries
+    from tests.e2e.admin.test_observations import _wait_for
+
     with echo_provider() as (url, received):
         env = {**admin_env, "mock": url}
         model = "reversible-expiry"
@@ -355,6 +383,13 @@ def test_expired_reference_stays_literal_and_is_not_revived(admin_env: dict[str,
             assert body["choices"][0]["message"]["content"] == SECRET
             replacement = REFERENCE.search(json.dumps(received[-1]["body"]))
             assert replacement is not None and replacement.group() != reference
+            rows = _wait_for(
+                "expired mapping recreated discovery",
+                lambda: (lambda values: values if sum(row["new_credential_count"] for row in values) == 2 else None)(
+                    key_discoveries(env, f"{model}-key")
+                ),
+            )
+            assert sum(row["new_credential_count"] for row in rows) == 2
         finally:
             set_enabled(env, False)
 
@@ -648,6 +683,8 @@ def test_redaction_covers_system_history_and_client_tool_result(admin_env: dict[
 def test_bundled_rules_apply_composites_filters_and_multiline_secrets(
     admin_env: dict[str, Any],
 ) -> None:
+    from tests.e2e.admin.test_credential_protection import detect_text
+
     client_id = "AIK_CLIENT_e7fb9d1bb335069c097c2a02"
     # 使用可辨识的合成值覆盖熵与组合规则，避免将完整凭据格式写入 Git。
     client_secret = "AIK_SECRET_" + "0123456789abcdef" * 4
@@ -666,7 +703,16 @@ def test_bundled_rules_apply_composites_filters_and_multiline_secrets(
                 status, body = _proxy(env, key, model, [{"role": "user", "content": text}])
                 assert status == 200, body
                 assert body["choices"][0]["message"]["content"] == text
-                return received[-1]["body"]["messages"][-1]["content"]
+                protected = received[-1]["body"]["messages"][-1]["content"]
+                matches = detect_text(env, text)
+                encoded = text.encode("utf-16-le")
+                matched = {
+                    encoded[item["start"] * 2:item["end"] * 2].decode("utf-16-le")
+                    for item in matches
+                }
+                assert bool(matched) == bool(REFERENCE.search(protected))
+                assert all(value not in protected for value in matched)
+                return protected
 
             generic_secret = "Q8n4Vk7sT2p9X5a3Lc6D0h1R"
             following_line = "\nimport { x } from 'pkg'"

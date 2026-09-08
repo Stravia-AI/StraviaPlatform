@@ -81,7 +81,9 @@ const POSTGRES_SCHEMA_SQL: &str = concat!(
     "\n",
     include_str!("../../stravia-core/migrations/postgres/0034_interaction_observation.sql"),
     "\n",
-    include_str!("../../stravia-core/migrations/postgres/0035_reversible_redaction.sql")
+    include_str!("../../stravia-core/migrations/postgres/0035_reversible_redaction.sql"),
+    "\n",
+    include_str!("../../stravia-core/migrations/postgres/0036_credential_discovery_coverage.sql")
 );
 const POSTGRES_SCHEMA_HEADER: &str = "\
 -- Stravia AI Gateway - PostgreSQL Final Schema
