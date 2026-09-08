@@ -116,6 +116,27 @@ def _forest(env: dict[str, Any], **query: object) -> dict[str, Any]:
     return body["data"]
 
 
+@pytest.mark.e2e
+@pytest.mark.admin
+@pytest.mark.parametrize("resource", ["interactions", "rejections"])
+@pytest.mark.parametrize("bounds", [
+    {"start_at": 1_000},
+    {"end_at": 2_000},
+    {"start_at": 2_000, "end_at": 1_000},
+    {"start_at": 1_000, "end_at": 1_000},
+    {"start_at": 1_000, "end_at": 86_401_001},
+])
+def test_observation_explicit_range_rejects_invalid_bounds(
+    admin_env: dict[str, Any], resource: str, bounds: dict[str, int],
+) -> None:
+    status, body = http_request(
+        "GET",
+        f"{admin_env['admin']}/api/v1/observations/{resource}?{urlencode(bounds)}",
+        headers=admin_env["auth"],
+    )
+    assert status == 400, body
+
+
 def _wait_for(description: str, probe: Callable[[], Any], timeout: float = 10.0) -> Any:
     deadline = time.time() + timeout
     last: Any = None
@@ -277,6 +298,21 @@ def test_observation_resources_require_admin_and_rejections_invent_no_principal(
     assert "principal" not in rejected
     assert "interaction_id" not in rejected
     assert "generation_root_id" not in rejected
+    occurred_at = rejected["occurred_at"]
+    for start, end, included in (
+        (occurred_at, occurred_at + 1, True),
+        (occurred_at - 1, occurred_at, False),
+        (occurred_at + 1, occurred_at + 2, False),
+        (occurred_at, occurred_at + 86_400_000, True),
+    ):
+        params = urlencode({"start_at": start, "end_at": end, "anchor_at": 0, "window_index": 9})
+        range_status, range_body = http_request(
+            "GET",
+            f"{admin_env['admin']}/api/v1/observations/rejections?{params}",
+            headers=admin_env["auth"],
+        )
+        assert range_status == 200, range_body
+        assert (rejected["id"] in {item["id"] for item in range_body["data"]["items"]}) is included
     status, body = http_request(
         "GET",
         f"{admin_env['admin']}/api/v1/observations/rejections/{rejected['id']}",
@@ -1299,8 +1335,11 @@ def test_root_batches_filters_and_fixed_anchor_reload_preserve_complete_context(
     assert status == 200, child
 
     filtered = _wait_for(
-        "whole filtered root",
-        lambda: (lambda page: page if page["root_total"] == 1 else None)(
+        "completed filtered root",
+        lambda: (lambda page: page if page["root_total"] == 1 and all(
+            item["status"] == "completed"
+            for root in page["roots"] for item in root["interactions"]
+        ) else None)(
             _forest(admin_env, anchor_at=old_anchor, model=child_route, limit=10)
         ),
     )
@@ -1310,9 +1349,30 @@ def test_root_batches_filters_and_fixed_anchor_reload_preserve_complete_context(
     assert [item["first_route_id"] for item in context] == [parent_route, child_route]
     assert [item["matched"] for item in context] == [False, True]
     assert context[1]["parent_interaction_id"] == context[0]["id"]
+    last_active_at = max(item["last_active_at"] for item in context)
+    for start, end, included in (
+        (last_active_at, last_active_at + 1, True),
+        (last_active_at - 1, last_active_at, False),
+        (last_active_at + 1, last_active_at + 2, False),
+        (last_active_at, last_active_at + 86_400_000, True),
+    ):
+        bounded = _forest(
+            admin_env, start_at=start, end_at=end,
+            anchor_at=0, window_index=9, model=child_route,
+        )
+        assert bounded["window_start"] == start
+        assert bounded["window_end"] == end
+        assert bounded["root_total"] == int(included)
+        if included:
+            assert {item["id"] for item in bounded["roots"][0]["interactions"]} == {
+                item["id"] for item in context
+            }
+            assert [item["matched"] for item in bounded["roots"][0]["interactions"]] == [False, True]
+        else:
+            assert bounded["roots"] == []
     status, detail_body = http_request(
         "GET",
-        f"{admin_env['admin']}/api/v1/observations/interactions/{context[1]['id']}?model={child_route}",
+        f"{admin_env['admin']}/api/v1/observations/interactions/{context[1]['id']}?model={child_route}&start_at=0&end_at=1",
         headers=admin_env["auth"],
     )
     assert status == 200, detail_body

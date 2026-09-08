@@ -15,9 +15,20 @@ interface Props {
   onclose: () => void
   onbundle: () => void
   onlatest?: () => void
+  portalTarget?: HTMLElement
 }
 
-let { interaction, rejection, loading = false, width, onwidthchange, onclose, onbundle, onlatest }: Props = $props()
+let {
+  interaction,
+  rejection,
+  loading = false,
+  width,
+  onwidthchange,
+  onclose,
+  onbundle,
+  onlatest,
+  portalTarget,
+}: Props = $props()
 const mobile = new MediaQuery('(max-width: 767px)', false)
 const previousFocus = typeof document === 'undefined' ? null : document.activeElement
 let activeTab = $state('timeline')
@@ -96,6 +107,7 @@ function resizeWithKeyboard(event: KeyboardEvent): void {
       if (!open) onclose()
     }}>
     <Sheet.Content
+      portalProps={{ to: portalTarget }}
       side="right"
       class="w-full! max-w-none! gap-0"
       showCloseButton={false}

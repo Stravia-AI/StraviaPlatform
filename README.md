@@ -138,7 +138,7 @@ The SvelteKit WebUI manages:
 - Providers, authentication, model discovery, and connectivity checks
 - Virtual models and their upstream backends
 - API keys with generated or custom editable secrets, model bindings, expiration, Principal Concurrency Limit, and execution permissions
-- Request Records as a live Interaction forest with causal branches, Rejected Requests, a chronological inspector, and Confirmed Upstream Usage statistics; the latest page keeps receiving new activity, while historical 24-hour pages retain fixed boundaries and open-page membership
+- Request Records as a fullscreen-capable live Interaction forest with causal branches, Rejected Requests, a chronological inspector, and Confirmed Upstream Usage statistics; rolling live presets cover 5, 10, or 30 minutes and 1, 4, 12, or 24 hours, while precise local date/time ranges keep fixed boundaries and span at most 24 hours. Time filters select whole roots by their latest activity and retain the complete causal context; enter or exit fullscreen from the toolbar, or press Esc to exit
 - Provider-reported quotas, request allowances, and balances in an **Allowance overview** matrix with filters, a reset timeline, and current-window exhaustion forecasts backed by 30-minute samples; live reads retain three-minute caching, per-provider refresh, and the last successful result when a refresh fails
 - Runtime settings
 - Ready-to-copy integration examples for SDKs and coding tools

@@ -106,6 +106,7 @@ async function installObservationFixture(
   holdRemainingRoots = false,
   captureDebug = false,
 ): Promise<ObservationFixture> {
+  await page.clock.setFixedTime(startedAt + 300_000)
   let releaseRemainingRoots!: () => void
   const remainingRootsReady = new Promise<void>((resolve) => {
     releaseRemainingRoots = resolve
@@ -212,28 +213,28 @@ async function installObservationFixture(
 
     if (path === '/observations/interactions') {
       forestRequests.push(url)
-      const anchor = Number(url.searchParams.get('anchor_at'))
-      const windowIndex = Number(url.searchParams.get('window_index') ?? 0)
+      const start = Number(url.searchParams.get('start_at'))
+      const end = Number(url.searchParams.get('end_at'))
       const status = url.searchParams.get('status')
       const cursor = url.searchParams.get('cursor')
       if (cursor) await remainingRootsReady
-      const pageRoots = status
-        ? [rootFor(atlas.id, status)]
-        : windowIndex > 0
-          ? [rootFor(atlas.id)]
-          : cursor === 'remaining-roots'
-            ? roots.slice(1).map((root) => rootFor(root.interactions[0].id))
-            : [rootFor(atlas.id)]
+      const matchingRoots = roots.filter((root) => {
+        const latest = Math.max(...root.interactions.map((item) => item.last_active_at))
+        return latest >= start && latest < end && (!status || root.interactions.some((item) => item.status === status))
+      })
+      const pageRoots = (cursor === 'remaining-roots' ? matchingRoots.slice(1) : matchingRoots.slice(0, 1)).map(
+        (root) => rootFor(root.interactions[0].id, status),
+      )
       await route.fulfill({
         json: {
           data: {
-            anchor_at: anchor,
-            window_index: windowIndex,
-            window_start: anchor - (windowIndex + 1) * DAY,
-            window_end: anchor - windowIndex * DAY,
+            anchor_at: end,
+            window_index: 0,
+            window_start: start,
+            window_end: end,
             roots: pageRoots,
-            root_total: status || windowIndex > 0 ? 1 : 3,
-            next_cursor: !status && windowIndex === 0 && !cursor ? 'remaining-roots' : null,
+            root_total: matchingRoots.length,
+            next_cursor: matchingRoots.length > 1 && !cursor ? 'remaining-roots' : null,
             snapshot_sequence: snapshotSequence,
           },
         },
@@ -403,9 +404,7 @@ test.describe('Interaction Observation canvas', () => {
     await expect.poll(async () => (await viewportTransform(page)).x).not.toBe(afterZoom.x)
   })
 
-  test('preserves causal roots through filters and anchored history while live activity pauses and resumes follow', async ({
-    page,
-  }) => {
+  test('preserves causal roots through filters while live activity pauses and resumes follow', async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 800 })
     const fixture = await installObservationFixture(page)
     await page.goto('/logs')
@@ -414,7 +413,7 @@ test.describe('Interaction Observation canvas', () => {
     await page.getByRole('button', { name: 'Close', exact: true }).click()
     fixture.emit({
       sequence: 11,
-      occurred_at: startedAt + 300_000,
+      occurred_at: startedAt + 299_000,
       interaction_id: 'interaction-cinder',
       run_id: 'run-interaction-cinder',
       rejection_id: null,
@@ -437,27 +436,113 @@ test.describe('Interaction Observation canvas', () => {
     await expect(node(page, 'Boreal', 'waiting_client').locator('article')).toHaveCSS('opacity', '0.42')
     await expect(node(page, 'Cinder', 'running').locator('article')).toHaveCSS('opacity', '0.42')
 
-    const firstAnchor = fixture.forestRequests[0].searchParams.get('anchor_at')
-    await page.getByRole('button', { name: 'Older' }).click()
-    await expect.poll(() => fixture.forestRequests.at(-1)?.searchParams.get('window_index')).toBe('1')
-    expect(fixture.forestRequests.at(-1)?.searchParams.get('anchor_at')).toBe(firstAnchor)
+    expect(
+      fixture.forestRequests.every((url) => url.searchParams.has('start_at') && url.searchParams.has('end_at')),
+    ).toBe(true)
+  })
 
+  test('fullscreen preserves the selected interaction and exits by button or Escape', async ({ page }) => {
+    await installObservationFixture(page)
+    await page.goto('/logs')
     await node(page, 'Atlas', 'completed').click()
-    const historicalRequest = fixture.forestRequests.at(-1)!
-    fixture.emit({
-      sequence: 12,
-      occurred_at: Number(historicalRequest.searchParams.get('anchor_at')),
-      interaction_id: 'interaction-atlas',
-      run_id: 'run-interaction-atlas',
-      rejection_id: null,
-      kind: 'interaction_updated',
-      payload: { status: 'completed' },
-    })
-    const migration = page.getByRole('button', { name: 'This chain moved to a newer time page · Open latest' })
-    await expect(migration).toBeVisible({ timeout: 5_000 })
-    await migration.click()
-    await expect.poll(() => fixture.forestRequests.at(-1)?.searchParams.get('window_index')).toBe('0')
-    await expect(migration).toHaveCount(0)
+    const inspector = page.getByRole('complementary', { name: 'Observation details' })
+    await page.getByRole('button', { name: 'Enter fullscreen', exact: true }).click()
+    await expect(inspector.getByRole('heading', { name: 'Atlas', exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Choose date and time range', exact: true }).click()
+    const rangeDialog = page.getByRole('dialog', { name: 'Date and time range', exact: true })
+    await expect(rangeDialog.getByLabel('Start time', { exact: true })).toBeVisible()
+    await rangeDialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+    await page.getByRole('button', { name: 'Exit fullscreen', exact: true }).click()
+    await expect(page.getByRole('button', { name: 'Enter fullscreen', exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Enter fullscreen', exact: true }).click()
+    await expect(page.getByRole('button', { name: 'Exit fullscreen', exact: true })).toBeVisible()
+    await page.keyboard.press('Escape')
+    await expect(page.getByRole('button', { name: 'Enter fullscreen', exact: true })).toBeVisible()
+    await expect(inspector.getByRole('heading', { name: 'Atlas', exact: true })).toBeVisible()
+    await inspector.getByRole('button', { name: 'Close', exact: true }).click()
+    await page.setViewportSize({ width: 390, height: 740 })
+    await page.getByRole('button', { name: 'Enter fullscreen', exact: true }).click()
+    await expect(page.getByRole('button', { name: 'Exit fullscreen', exact: true })).toBeVisible()
+    await node(page, 'Atlas', 'completed').focus()
+    await node(page, 'Atlas', 'completed').press('Enter')
+    const mobileInspector = page.getByRole('dialog', { name: 'Observation details' })
+    await expect(mobileInspector.getByRole('heading', { name: 'Atlas', exact: true })).toBeVisible()
+    await mobileInspector.getByRole('button', { name: 'Close', exact: true }).click()
+    await page.getByRole('button', { name: 'Exit fullscreen', exact: true }).click()
+  })
+
+  test('presets send bounded durations and custom local ranges reject more than 24 hours', async ({ page }) => {
+    const fixture = await installObservationFixture(page)
+    await page.goto('/logs')
+    const presets = [
+      ['5 minutes', 300_000],
+      ['10 minutes', 600_000],
+      ['30 minutes', 1_800_000],
+      ['1 hour', 3_600_000],
+      ['4 hours', 14_400_000],
+      ['12 hours', 43_200_000],
+      ['24 hours', DAY],
+    ] as const
+    for (const [label, duration] of presets) {
+      await page.getByRole('button', { name: 'Time window', exact: true }).click()
+      await page.getByRole('option', { name: label, exact: true }).click()
+      await expect
+        .poll(() => {
+          const params = fixture.forestRequests.at(-1)?.searchParams
+          return Number(params?.get('end_at')) - Number(params?.get('start_at'))
+        })
+        .toBe(duration)
+    }
+    await page.getByRole('button', { name: 'Choose date and time range', exact: true }).click()
+    const dialog = page.getByRole('dialog', { name: 'Date and time range', exact: true })
+    const start = '2026-09-06T08:00'
+    const end = '2026-09-07T08:00'
+    await dialog.getByLabel('Start time', { exact: true }).fill(start)
+    await dialog.getByLabel('End time', { exact: true }).fill('2026-09-07T08:01')
+    await expect(dialog.getByRole('button', { name: 'Apply', exact: true })).toBeDisabled()
+    await dialog.getByLabel('End time', { exact: true }).fill(end)
+    await dialog.getByRole('button', { name: 'Apply', exact: true }).click()
+    await expect(dialog).toBeHidden()
+    const expected = await page.evaluate(
+      ([start, end]) => [new Date(start).getTime(), new Date(end).getTime()],
+      [start, end],
+    )
+    await expect
+      .poll(() => {
+        const params = fixture.forestRequests.at(-1)?.searchParams
+        return [Number(params?.get('start_at')), Number(params?.get('end_at'))]
+      })
+      .toEqual(expected)
+  })
+
+  test('live presets expire old roots while an applied custom range stays fixed', async ({ page }) => {
+    const fixture = await installObservationFixture(page)
+    await page.goto('/logs')
+    await page.getByRole('button', { name: 'Time window', exact: true }).click()
+    await page.getByRole('option', { name: '5 minutes', exact: true }).click()
+    await expect(node(page, 'Atlas', 'completed')).toBeVisible()
+    await page.evaluate((now) => (Date.now = () => now), startedAt + 900_000)
+    await expect(node(page, 'Atlas', 'completed')).toHaveCount(0)
+    await expect
+      .poll(() => {
+        const params = fixture.forestRequests.at(-1)?.searchParams
+        return Number(params?.get('end_at')) - Number(params?.get('start_at'))
+      })
+      .toBe(300_000)
+
+    await page.getByRole('button', { name: 'Choose date and time range', exact: true }).click()
+    const dialog = page.getByRole('dialog', { name: 'Date and time range', exact: true })
+    await dialog.getByRole('button', { name: 'Apply', exact: true }).click()
+    await expect(dialog).toBeHidden()
+    const fixed = fixture.forestRequests.at(-1)!.searchParams
+    await page.evaluate((now) => (Date.now = () => now), startedAt + DAY * 2)
+    await page.getByRole('button', { name: 'Refresh and anchor a new current window' }).click()
+    await expect
+      .poll(() => {
+        const params = fixture.forestRequests.at(-1)!.searchParams
+        return [params.get('start_at'), params.get('end_at')]
+      })
+      .toEqual([fixed.get('start_at'), fixed.get('end_at')])
   })
 
   test('retains the selected observation and detail tab across mobile and desktop layouts', async ({ page }) => {
@@ -548,6 +633,7 @@ test.describe('Interaction Observation canvas', () => {
       await expect(page.getByRole('alertdialog', { name: 'Enable Debug' })).toBeVisible()
 
       await page.getByRole('alertdialog', { name: 'Enable Debug' }).getByRole('button', { name: 'Cancel' }).click()
+      await page.locator('.svelte-flow__pane').scrollIntoViewIfNeeded()
       const paneBox = (await page.locator('.svelte-flow__pane').boundingBox())!
       const centerX = paneBox.x + paneBox.width / 2
       const centerY = paneBox.y + paneBox.height / 2

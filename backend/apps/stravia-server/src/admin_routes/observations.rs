@@ -10,7 +10,8 @@ use futures::StreamExt;
 use serde::Deserialize;
 use stravia_core::Gateway;
 use stravia_core::admin::{
-    BundleRequest, BundleResourceKind, ForestQuery, ObservationUpdate, RejectionQuery,
+    BundleRequest, BundleResourceKind, ForestQuery, ObservationQueryError, ObservationUpdate,
+    RejectionQuery,
 };
 
 #[derive(Debug, Deserialize)]
@@ -37,7 +38,7 @@ pub(super) async fn interaction_forest(
 ) -> Response {
     match gateway.admin().observation_forest(query).await {
         Ok(data) => Json(serde_json::json!({ "data": data })).into_response(),
-        Err(_) => observation_unavailable(),
+        Err(error) => observation_query_error(error),
     }
 }
 
@@ -49,7 +50,7 @@ pub(super) async fn interaction_detail(
     match gateway.admin().observation_interaction(&id, filters).await {
         Ok(Some(data)) => Json(serde_json::json!({ "data": data })).into_response(),
         Ok(None) => not_found(),
-        Err(_) => observation_unavailable(),
+        Err(error) => observation_query_error(error),
     }
 }
 
@@ -59,7 +60,7 @@ pub(super) async fn rejection_list(
 ) -> Response {
     match gateway.admin().observation_rejections(query).await {
         Ok(data) => Json(serde_json::json!({ "data": data })).into_response(),
-        Err(_) => observation_unavailable(),
+        Err(error) => observation_query_error(error),
     }
 }
 
@@ -238,6 +239,20 @@ fn bundle_unavailable() -> Response {
         })),
     )
         .into_response()
+}
+
+fn observation_query_error(error: anyhow::Error) -> Response {
+    if let Some(error) = error.downcast_ref::<ObservationQueryError>() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": error.to_string(),
+                "code": "invalid_observation_window",
+            })),
+        )
+            .into_response();
+    }
+    observation_unavailable()
 }
 
 fn observation_unavailable() -> Response {

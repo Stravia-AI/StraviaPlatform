@@ -17,6 +17,8 @@ export interface ObservationEvent {
 }
 
 export interface ForestQuery {
+  start_at?: number
+  end_at?: number
   anchor_at?: number
   window_index?: number
   cursor?: string
@@ -106,6 +108,8 @@ export interface InteractionDetail {
 }
 
 export interface RejectionQuery {
+  start_at?: number
+  end_at?: number
   anchor_at?: number
   window_index?: number
   cursor?: string

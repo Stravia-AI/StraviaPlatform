@@ -194,8 +194,18 @@ pub enum ObservationUpdate {
     ResetRequired { snapshot_sequence: i64 },
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum ObservationQueryError {
+    #[error("observation window requires both start_at and end_at")]
+    IncompleteWindow,
+    #[error("observation window must have end_at after start_at and span at most 24 hours")]
+    InvalidWindow,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ForestQuery {
+    pub start_at: Option<i64>,
+    pub end_at: Option<i64>,
     pub anchor_at: Option<i64>,
     pub window_index: Option<u32>,
     pub cursor: Option<String>,
@@ -286,6 +296,8 @@ pub struct InteractionDetail {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RejectionQuery {
+    pub start_at: Option<i64>,
+    pub end_at: Option<i64>,
     pub anchor_at: Option<i64>,
     pub window_index: Option<u32>,
     pub cursor: Option<String>,

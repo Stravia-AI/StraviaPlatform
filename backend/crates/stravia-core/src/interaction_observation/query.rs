@@ -10,6 +10,51 @@ const MAX_LIMIT: u32 = 200;
 const INTERACTION_SELECT: &str = "SELECT i.id,i.root_id,i.parent_interaction_id,i.generation_root_id,i.first_route_id,i.first_model_display_name,i.status,i.started_at,i.last_active_at,i.visible_tail,i.input_tokens,i.output_tokens,i.cache_read_tokens,i.cache_write_tokens,i.reasoning_tokens,i.observation_gap,i.last_event_sequence,CASE WHEN SUM(CASE WHEN r.debug_enabled THEN 1 ELSE 0 END)=0 THEN 'none' WHEN SUM(CASE WHEN r.debug_enabled THEN 1 ELSE 0 END)=COUNT(*) AND COUNT(m.trace_id)=COUNT(*) AND SUM(CASE WHEN m.status='complete' THEN 1 ELSE 0 END)=COUNT(*) THEN 'complete' ELSE 'partial' END debug_status FROM interaction_observations i JOIN inference_run_observations r ON r.interaction_id=i.id LEFT JOIN debug_trace_manifests m ON m.run_id=r.id ";
 const RUN_SELECT: &str = "SELECT r.id,r.parent_run_id,r.generation_node_id,r.generation_parent_id,r.route_id,r.model_display_name,r.ingress_protocol,r.status,r.terminal_reason,r.user_interrupted,r.debug_enabled,r.client_output_committed,r.started_at,r.finished_at,CASE WHEN COUNT(a.id)=COUNT(a.input_tokens) THEN SUM(a.input_tokens) END input_tokens,CASE WHEN COUNT(a.id)=COUNT(a.output_tokens) THEN SUM(a.output_tokens) END output_tokens,CASE WHEN COUNT(a.id)=COUNT(a.cache_read_tokens) THEN SUM(a.cache_read_tokens) END cache_read_tokens,CASE WHEN COUNT(a.id)=COUNT(a.cache_write_tokens) THEN SUM(a.cache_write_tokens) END cache_write_tokens,CASE WHEN COUNT(a.id)=COUNT(a.reasoning_tokens) THEN SUM(a.reasoning_tokens) END reasoning_tokens FROM inference_run_observations r LEFT JOIN target_attempt_observations a ON a.run_id=r.id WHERE r.interaction_id=";
 
+struct QueryWindow {
+    anchor: i64,
+    index: u32,
+    start: i64,
+    end: i64,
+    bounded_end: bool,
+}
+
+fn query_window(
+    start_at: Option<i64>,
+    end_at: Option<i64>,
+    anchor_at: Option<i64>,
+    window_index: Option<u32>,
+) -> anyhow::Result<QueryWindow> {
+    match (start_at, end_at) {
+        (Some(start), Some(end)) => {
+            let duration = end.checked_sub(start);
+            anyhow::ensure!(
+                duration.is_some_and(|duration| duration > 0 && duration <= DAY_MS),
+                ObservationQueryError::InvalidWindow
+            );
+            Ok(QueryWindow {
+                anchor: end,
+                index: 0,
+                start,
+                end,
+                bounded_end: true,
+            })
+        }
+        (None, None) => {
+            let anchor = anchor_at.unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+            let index = window_index.unwrap_or(0);
+            let end = anchor.saturating_sub(i64::from(index).saturating_mul(DAY_MS));
+            Ok(QueryWindow {
+                anchor,
+                index,
+                start: end.saturating_sub(DAY_MS),
+                end,
+                bounded_end: index > 0,
+            })
+        }
+        _ => Err(ObservationQueryError::IncompleteWindow.into()),
+    }
+}
+
 #[derive(FromRow, Clone)]
 struct InteractionRow {
     id: String,
@@ -245,17 +290,20 @@ impl ObservationStore {
     }
 
     pub async fn query_forest(&self, q: ForestQuery) -> anyhow::Result<ForestPage> {
+        let QueryWindow {
+            anchor,
+            index,
+            start,
+            end,
+            bounded_end,
+        } = query_window(q.start_at, q.end_at, q.anchor_at, q.window_index)?;
         let snapshot_sequence = self.max_sequence().await?;
-        let anchor = q
-            .anchor_at
-            .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
-        let index = q.window_index.unwrap_or(0);
-        let end = anchor.saturating_sub(i64::from(index).saturating_mul(DAY_MS));
-        let start = end.saturating_sub(DAY_MS);
         let limit = q.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT) as i64;
         let (root_total, root_rows) = match self {
-            Self::Sqlite(p) => forest_roots_sqlite(p, &q, start, end, index, limit).await?,
-            Self::Postgres(p) => forest_roots_postgres(p, &q, start, end, index, limit).await?,
+            Self::Sqlite(p) => forest_roots_sqlite(p, &q, start, end, bounded_end, limit).await?,
+            Self::Postgres(p) => {
+                forest_roots_postgres(p, &q, start, end, bounded_end, limit).await?
+            }
         };
         let root_ids: Vec<String> = root_rows
             .iter()
@@ -314,6 +362,12 @@ impl ObservationStore {
         id: &str,
         filters: ForestQuery,
     ) -> anyhow::Result<Option<InteractionDetail>> {
+        query_window(
+            filters.start_at,
+            filters.end_at,
+            filters.anchor_at,
+            filters.window_index,
+        )?;
         let snapshot_sequence = self.max_sequence().await?;
         let Some(selected_row) = (match self {
             Self::Sqlite(p) => interaction_sqlite(p, id).await?,
@@ -399,17 +453,17 @@ impl ObservationStore {
     }
 
     pub async fn query_rejections(&self, q: RejectionQuery) -> anyhow::Result<RejectionPage> {
+        let QueryWindow {
+            start,
+            end,
+            bounded_end,
+            ..
+        } = query_window(q.start_at, q.end_at, q.anchor_at, q.window_index)?;
         let snapshot_sequence = self.max_sequence().await?;
-        let anchor = q
-            .anchor_at
-            .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
-        let index = q.window_index.unwrap_or(0);
-        let end = anchor - i64::from(index) * DAY_MS;
-        let start = end - DAY_MS;
         let limit = q.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT) as i64;
         let (total, mut rows) = match self {
-            Self::Sqlite(p) => rejections_sqlite(p, &q, start, end, index, limit).await?,
-            Self::Postgres(p) => rejections_postgres(p, &q, start, end, index, limit).await?,
+            Self::Sqlite(p) => rejections_sqlite(p, &q, start, end, bounded_end, limit).await?,
+            Self::Postgres(p) => rejections_postgres(p, &q, start, end, bounded_end, limit).await?,
         };
         let next_cursor =
             (rows.len() > limit as usize).then(|| rows[limit as usize - 1].id.clone());
@@ -558,7 +612,7 @@ async fn forest_roots_sqlite(
     q: &ForestQuery,
     start: i64,
     end: i64,
-    index: u32,
+    bounded_end: bool,
     limit: i64,
 ) -> anyhow::Result<(i64, Vec<(String, i64)>)> {
     let mut base = QueryBuilder::<sqlx::Sqlite>::new(
@@ -567,7 +621,7 @@ async fn forest_roots_sqlite(
     add_root_filters_sqlite(&mut base, q);
     base.push(" GROUP BY i.root_id HAVING MAX(i.last_active_at)>=")
         .push_bind(start);
-    if index > 0 {
+    if bounded_end {
         base.push(" AND MAX(i.last_active_at)<").push_bind(end);
     }
     base.push(") matched_roots");
@@ -581,7 +635,7 @@ async fn forest_roots_sqlite(
     }
     page.push(" GROUP BY i.root_id HAVING MAX(i.last_active_at)>=")
         .push_bind(start);
-    if index > 0 {
+    if bounded_end {
         page.push(" AND MAX(i.last_active_at)<").push_bind(end);
     }
     page.push(" ORDER BY i.root_id LIMIT ").push_bind(limit + 1);
@@ -592,7 +646,7 @@ async fn forest_roots_postgres(
     q: &ForestQuery,
     start: i64,
     end: i64,
-    index: u32,
+    bounded_end: bool,
     limit: i64,
 ) -> anyhow::Result<(i64, Vec<(String, i64)>)> {
     let mut base = QueryBuilder::<sqlx::Postgres>::new(
@@ -601,7 +655,7 @@ async fn forest_roots_postgres(
     add_root_filters_postgres(&mut base, q);
     base.push(" GROUP BY i.root_id HAVING MAX(i.last_active_at)>=")
         .push_bind(start);
-    if index > 0 {
+    if bounded_end {
         base.push(" AND MAX(i.last_active_at)<").push_bind(end);
     }
     base.push(") matched_roots");
@@ -615,7 +669,7 @@ async fn forest_roots_postgres(
     }
     page.push(" GROUP BY i.root_id HAVING MAX(i.last_active_at)>=")
         .push_bind(start);
-    if index > 0 {
+    if bounded_end {
         page.push(" AND MAX(i.last_active_at)<").push_bind(end);
     }
     page.push(" ORDER BY i.root_id LIMIT ").push_bind(limit + 1);
@@ -723,10 +777,10 @@ async fn rejections_sqlite(
     q: &RejectionQuery,
     start: i64,
     end: i64,
-    index: u32,
+    bounded_end: bool,
     limit: i64,
 ) -> anyhow::Result<(i64, Vec<RejectionRow>)> {
-    let total: i64 = if index == 0 {
+    let total: i64 = if !bounded_end {
         sqlx::query_scalar(
             "SELECT COUNT(*) FROM rejected_request_observations WHERE occurred_at>=?",
         )
@@ -738,7 +792,7 @@ async fn rejections_sqlite(
     };
     let mut b = QueryBuilder::<sqlx::Sqlite>::new(REJECTION_SELECT);
     b.push("WHERE r.occurred_at>=").push_bind(start);
-    if index > 0 {
+    if bounded_end {
         b.push(" AND r.occurred_at<").push_bind(end);
     }
     if let Some(c) = &q.cursor {
@@ -752,10 +806,10 @@ async fn rejections_postgres(
     q: &RejectionQuery,
     start: i64,
     end: i64,
-    index: u32,
+    bounded_end: bool,
     limit: i64,
 ) -> anyhow::Result<(i64, Vec<RejectionRow>)> {
-    let total: i64 = if index == 0 {
+    let total: i64 = if !bounded_end {
         sqlx::query_scalar(
             "SELECT COUNT(*) FROM rejected_request_observations WHERE occurred_at>=$1",
         )
@@ -767,7 +821,7 @@ async fn rejections_postgres(
     };
     let mut b = QueryBuilder::<sqlx::Postgres>::new(REJECTION_SELECT);
     b.push("WHERE r.occurred_at>=").push_bind(start);
-    if index > 0 {
+    if bounded_end {
         b.push(" AND r.occurred_at<").push_bind(end);
     }
     if let Some(c) = &q.cursor {

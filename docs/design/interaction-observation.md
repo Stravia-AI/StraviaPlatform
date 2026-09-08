@@ -165,6 +165,8 @@ Debug Run 额外写入以下稳定语义阶段：
 
 Observation writer 为持久化事件分配递增 `event_sequence`。事件及受影响摘要在同一数据库事务内提交后才广播；SSE event ID 等于 sequence。
 
+SQLite 的 Run admission 使用 `BEGIN IMMEDIATE`，在读取父 Run 状态前取得写锁，使父分支中断与子 Interaction 入库保持原子性，避免并发写入导致读事务升级失败。
+
 页面先查询快照并取得 `snapshot_sequence`，再从该 sequence 订阅，避免查询与订阅之间丢事件。重连携带最后确认的 sequence：
 
 - cursor 仍在保留范围内：补发缺失事件；
@@ -355,8 +357,8 @@ GET    /api/v1/observations/debug-bundles/{ticket}
 
 Interaction forest 查询参数：
 
-- `anchor_at`：页面打开时固定的 Unix 毫秒时间；
-- `window_index`：0 为实时最新页，下界固定为 `anchor-24h`，持续接收 anchor 之后的新活动；1 表示 `[anchor-48h, anchor-24h)`，后续历史页依此类推；
+- `start_at` / `end_at`：Unix 毫秒时间，必须同时提供，且 `0 < end_at - start_at <= 86400000`；按 `[start_at, end_at)` 查询，包含起点、不含终点，显式边界优先于旧参数；Interaction forest 与 Rejected Requests 使用相同约束；
+- `anchor_at` / `window_index`：仅为现有 API 调用者保留的旧窗口参数；未提供显式边界时，0 为下界固定在 `anchor-24h`、无上界的实时页，后续历史页按 24 小时分段。WebUI 始终发送显式边界，包括实时预设；
 - `cursor` / `limit`：同一时间页内按根链游标分批加载；
 - `provider`、`model`、`api_key`、`status`：匹配任一 Interaction/Run 后返回完整根 DAG；
 - 每个节点带 `matched`，前端对非命中节点降噪而不删除。
@@ -374,7 +376,7 @@ SSE 通过普通 `fetch` 携带 Admin Bearer header，并由 `eventsource-parser
 - `交互链路`：默认页签，Interaction forest 无限画布；
 - `拒绝的请求`：独立时间列表与详情，不伪造画布节点。
 
-页面 header 包含实时状态、当前 24h 窗口、筛选、Debug switch 和“清除历史记录”。普通 CSV 导出删除。Debug Bundle 按选中的 Interaction/Rejected Request 提供。
+页面 header 包含实时状态、时间预设、精确日期时间范围、全屏切换、筛选、Debug switch 和“清除历史记录”。全屏保留当前筛选、选中节点及检查器，支持工具栏退出和 Esc 退出。普通 CSV 导出删除。Debug Bundle 按选中的 Interaction/Rejected Request 提供。
 
 ### 10.2 画布
 
@@ -395,7 +397,7 @@ SSE 通过普通 `fetch` 携带 Admin Bearer header，并由 `eventsource-parser
 
 ### 10.3 时间页与迁移
 
-页面打开时固定 `anchor_at`。历史窗口边界与已打开历史页的成员不随 wall clock 漂移；手动刷新才重置 anchor。最新页是实时窗口：下界固定为 `anchor_at-24h`，不以 anchor 限制后续活动，因此长时间打开时可覆盖超过 24 小时。Interaction Chains 与 Rejected Requests 使用相同时间窗语义。
+实时预设包括 5、10、30 分钟以及 1、4、12、24 小时；前端随当前时间推进起止边界并发送显式 `[start_at, end_at)`，窗口宽度始终保持所选时长，不会因长时间打开而扩大。自定义范围通过本地日期时间输入转换为 Unix 毫秒，应用后保持固定边界，起点必须早于终点且跨度不得超过 24 小时；恰好 24 小时有效，超限不能应用。Interaction Chains 与 Rejected Requests 使用相同时间窗语义。时间边界只决定根链成员资格，不截断返回的因果上下文，也不限制详情中的完整 DAG。
 
 根链若因新活动跨入更新的时间页：
 
@@ -420,7 +422,7 @@ SSE 通过普通 `fetch` 携带 Admin Bearer header，并由 `eventsource-parser
 
 ### 10.5 实时跟随
 
-进入第 0 时间页时，默认聚焦最新活动或正在执行的节点。用户一旦平移、缩放或选择旧节点，自动跟随暂停；视口外有活动时显示“有新活动 · 跟随”。点击后恢复并聚焦当前最新的真实执行节点。
+选择实时预设时，默认聚焦最新活动或正在执行的节点。用户一旦平移、缩放或选择旧节点，自动跟随暂停；视口外有活动时显示“有新活动 · 跟随”。点击后恢复并聚焦当前最新的真实执行节点。
 
 ### 10.6 右侧检查器
 

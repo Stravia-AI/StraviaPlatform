@@ -6,6 +6,9 @@ import { SvelteSet } from 'svelte/reactivity'
 import { createQuery, useQueryClient } from '@tanstack/svelte-query'
 import { SvelteFlowProvider } from '@xyflow/svelte'
 import BugIcon from '@lucide/svelte/icons/bug'
+import CalendarRangeIcon from '@lucide/svelte/icons/calendar-range'
+import MaximizeIcon from '@lucide/svelte/icons/maximize'
+import MinimizeIcon from '@lucide/svelte/icons/minimize'
 import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw'
 import SlidersHorizontalIcon from '@lucide/svelte/icons/sliders-horizontal'
 import Trash2Icon from '@lucide/svelte/icons/trash-2'
@@ -34,24 +37,37 @@ import * as Alert from '$lib/components/ui/alert'
 import * as AlertDialog from '$lib/components/ui/alert-dialog'
 import { Badge } from '$lib/components/ui/badge'
 import { Button } from '$lib/components/ui/button'
+import * as Dialog from '$lib/components/ui/dialog'
 import * as Empty from '$lib/components/ui/empty'
 import * as Field from '$lib/components/ui/field'
+import { Input } from '$lib/components/ui/input'
 import * as Select from '$lib/components/ui/select'
 import * as Sheet from '$lib/components/ui/sheet'
 import { Switch } from '$lib/components/ui/switch'
 import * as Tabs from '$lib/components/ui/tabs'
 
 const batchSize = 12
+const maxWindowMs = 86_400_000
+const presetMinutes = [5, 10, 30, 60, 240, 720, 1440]
 const queryClient = useQueryClient()
 let activeTab = $state('interactions')
 let anchorAt = $state(Date.now())
 let windowIndex = $state(0)
+let durationMs = $state(maxWindowMs)
+let customRange = $state(false)
+let rangeOpen = $state(false)
+let draftStart = $state('')
+let draftEnd = $state('')
+let workspace = $state<HTMLElement>()
+let fullscreenButton = $state<HTMLButtonElement | null>(null)
+let fullscreen = $state(false)
+let rangeVersion = 0
 let roots = $state.raw<ForestRoot[]>([])
 let rootTotal = $state(0)
 let nextCursor = $state<string | null>()
 let snapshotSequence = $state(0)
-let windowStart = $state(0)
-let windowEnd = $state(0)
+let windowStart = $state(Date.now() - maxWindowMs)
+let windowEnd = $state(Date.now())
 let loading = $state(true)
 let loadingMore = $state(false)
 let rootBatchRequest: Promise<void> | undefined
@@ -109,14 +125,23 @@ const selectedPath = $derived.by(() => {
   return path
 })
 const currentQuery = $derived<ForestQuery>({
-  anchor_at: anchorAt,
-  window_index: windowIndex,
+  start_at: windowStart,
+  end_at: windowEnd,
   limit: batchSize,
   provider: providerFilter === 'all' ? undefined : providerFilter,
   model: modelFilter === 'all' ? undefined : modelFilter,
   api_key: apiKeyFilter === 'all' ? undefined : apiKeyFilter,
   status: statusFilter === 'all' ? undefined : statusFilter,
 })
+const liveWindow = $derived(!customRange && windowIndex === 0)
+const draftStartMs = $derived(new Date(draftStart).getTime())
+const draftEndMs = $derived(new Date(draftEnd).getTime())
+const validDraftRange = $derived(
+  Number.isFinite(draftStartMs) &&
+    Number.isFinite(draftEndMs) &&
+    draftEndMs > draftStartMs &&
+    draftEndMs - draftStartMs <= maxWindowMs,
+)
 const selectedMigrated = $derived(
   selectedInteraction
     ? roots.find((root) => root.interactions.some((item) => item.id === selectedInteraction?.id))?.id
@@ -124,9 +149,107 @@ const selectedMigrated = $derived(
 )
 
 onMount(() => {
+  updateLiveBounds()
   void loadForest(true)
-  return () => stream?.close()
+  const clock = setInterval(() => {
+    if (!liveWindow) return
+    updateLiveBounds()
+    // 到期时重新查询完整结果与计数，不只过滤已经加载的节点。
+    if (!loading && !loadingMore && roots.some((root) => root.last_active_at < windowStart)) {
+      void loadForest(true)
+    }
+    if (activeTab === 'rejections' && !rejectionLoading && rejections.some((item) => item.occurred_at < windowStart)) {
+      void loadRejections()
+    }
+  }, 1000)
+  return () => {
+    clearInterval(clock)
+    stream?.close()
+    if (fullscreen && document.fullscreenElement === workspace) {
+      void document.exitFullscreen().catch((error: unknown) => toast.error(localizeBackendErrorMessage(error)))
+    }
+  }
 })
+
+$effect(() => {
+  if (!fullscreen) return
+  const overflow = document.body.style.overflow
+  document.body.style.overflow = 'hidden'
+  return () => {
+    document.body.style.overflow = overflow
+  }
+})
+
+function durationLabel(minutes: number): string {
+  if (minutes < 60) return m.observation_window_minutes({ count: minutes })
+  return minutes === 60 ? m.observation_window_hour() : m.observation_window_hours({ count: minutes / 60 })
+}
+
+function localDateTime(timestamp: number): string {
+  const date = new Date(timestamp)
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+}
+
+function openRange(): void {
+  draftStart = localDateTime(windowStart)
+  draftEnd = localDateTime(windowEnd)
+  rangeOpen = true
+}
+
+function updateLiveBounds(): void {
+  if (!liveWindow) return
+  windowEnd = Date.now()
+  windowStart = windowEnd - durationMs
+}
+
+async function reloadWindow(): Promise<void> {
+  rangeVersion += 1
+  closeInspector()
+  migratedRoots = new Set()
+  followPaused = !liveWindow
+  hasNewActivity = false
+  rejections = []
+  rejectionCursor = undefined
+  await Promise.all([loadForest(true), activeTab === 'rejections' ? loadRejections() : Promise.resolve()])
+}
+
+async function choosePreset(value: string): Promise<void> {
+  const minutes = Number(value)
+  if (!presetMinutes.includes(minutes)) return
+  durationMs = minutes * 60_000
+  customRange = false
+  anchorAt = Date.now()
+  windowIndex = 0
+  updateLiveBounds()
+  await reloadWindow()
+}
+
+async function applyRange(): Promise<void> {
+  if (!validDraftRange) return
+  windowStart = draftStartMs
+  windowEnd = draftEndMs
+  durationMs = windowEnd - windowStart
+  customRange = true
+  windowIndex = 0
+  rangeOpen = false
+  await reloadWindow()
+}
+
+async function toggleFullscreen(): Promise<void> {
+  try {
+    if (fullscreen) {
+      if (document.fullscreenElement === workspace) await document.exitFullscreen()
+      fullscreen = false
+      fullscreenButton?.focus()
+    } else if (workspace) {
+      if (document.fullscreenEnabled) await workspace.requestFullscreen()
+      fullscreen = true
+    }
+  } catch (error) {
+    toast.error(localizeBackendErrorMessage(error))
+  }
+}
 
 $effect(() => {
   const id = page.url.searchParams.get('interaction')
@@ -161,8 +284,6 @@ function applyPage(page: ForestPage, replace: boolean): void {
   rootTotal = page.root_total
   nextCursor = page.next_cursor
   snapshotSequence = page.snapshot_sequence
-  windowStart = page.window_start
-  windowEnd = page.window_end
   if (replace) stream?.setCursor(page.snapshot_sequence)
   if (!stream) {
     stream = subscribeToObservations(
@@ -174,6 +295,7 @@ function applyPage(page: ForestPage, replace: boolean): void {
 }
 
 async function loadForest(replace: boolean): Promise<void> {
+  const version = rangeVersion
   if (replace) {
     loading = true
     loadError = undefined
@@ -183,24 +305,28 @@ async function loadForest(replace: boolean): Promise<void> {
       ...currentQuery,
       cursor: replace ? undefined : (nextCursor ?? undefined),
     })
+    if (version !== rangeVersion) return
     applyPage(page, replace)
     loadError = undefined
-    if (replace && windowIndex === 0 && !followPaused) {
+    if (replace && liveWindow && !followPaused) {
       await tick()
       await canvas?.focusLatest()
     }
   } catch (error) {
-    loadError = error
+    if (version === rangeVersion) loadError = error
   } finally {
-    loading = false
-    loadingMore = false
+    if (version === rangeVersion) {
+      loading = false
+      loadingMore = false
+    }
   }
 }
 
 async function reloadForFilters(): Promise<void> {
+  rangeVersion += 1
   selectedInteraction = undefined
   interactionDetail = undefined
-  followPaused = false
+  followPaused = !liveWindow
   hasNewActivity = false
   migratedRoots = new Set()
   await loadForest(true)
@@ -270,14 +396,17 @@ function closeInspector(): void {
 }
 
 async function handleObservationUpdate(update: import('$lib/types').ObservationStreamUpdate): Promise<void> {
+  const version = rangeVersion
+  updateLiveBounds()
   if (update.type === 'reset_required') {
-    await loadForest(true)
+    await Promise.all([loadForest(true), activeTab === 'rejections' ? loadRejections() : Promise.resolve()])
     if (loadError) throw loadError
     return
   }
   snapshotSequence = Math.max(snapshotSequence, update.event.sequence)
+  if (liveWindow && activeTab === 'rejections' && update.event.rejection_id) await loadRejections()
   if (followPaused) hasNewActivity = true
-  if (windowIndex > 0 && update.event.interaction_id && update.event.occurred_at >= windowEnd) {
+  if (!liveWindow && update.event.interaction_id && update.event.occurred_at >= windowEnd) {
     const root = roots.find((item) =>
       item.interactions.some((interaction) => interaction.id === update.event.interaction_id),
     )
@@ -291,6 +420,7 @@ async function handleObservationUpdate(update: import('$lib/types').ObservationS
     if (known && known.last_event_sequence >= update.event.sequence && !inspectorNeedsEvent) return
     try {
       const detail = await admin.observations.interaction(update.event.interaction_id, currentQuery)
+      if (version !== rangeVersion) return
       if (detail.root.interactions.some((item) => item.matched)) {
         roots = roots.map((root) => (root.id === detail.root.id ? detail.root : root))
       } else {
@@ -306,9 +436,11 @@ async function handleObservationUpdate(update: import('$lib/types').ObservationS
       loadError = error
       throw error
     }
-  } else if (windowIndex === 0 && update.event.interaction_id) {
+  } else if (liveWindow && update.event.interaction_id) {
     try {
       const detail = await admin.observations.interaction(update.event.interaction_id, currentQuery)
+      if (version !== rangeVersion) return
+      if (detail.root.last_active_at < windowStart || detail.root.last_active_at >= windowEnd) return
       const existingIndex = roots.findIndex((root) => root.id === detail.root.id)
       if (existingIndex >= 0) roots = roots.map((root) => (root.id === detail.root.id ? detail.root : root))
       else if (detail.root.interactions.some((interaction) => interaction.matched)) {
@@ -321,28 +453,34 @@ async function handleObservationUpdate(update: import('$lib/types').ObservationS
       throw error
     }
   }
-  if (!followPaused && windowIndex === 0) {
+  if (!followPaused && liveWindow) {
     await tick()
     await canvas?.focusLatest()
   }
 }
 
 async function changeWindow(delta: number): Promise<void> {
-  windowIndex = Math.max(0, windowIndex + delta)
-  closeInspector()
-  migratedRoots = new Set()
-  followPaused = windowIndex !== 0
-  hasNewActivity = false
-  await loadForest(true)
+  if (customRange) {
+    windowStart -= delta * durationMs
+    windowEnd -= delta * durationMs
+  } else {
+    if (liveWindow) anchorAt = windowEnd
+    windowIndex = Math.max(0, windowIndex + delta)
+    windowEnd = anchorAt - windowIndex * durationMs
+    windowStart = windowEnd - durationMs
+    updateLiveBounds()
+  }
+  await reloadWindow()
 }
 
 async function refreshAnchor(focusId?: string): Promise<void> {
-  anchorAt = Date.now()
-  windowIndex = 0
-  migratedRoots = new Set()
-  followPaused = false
-  hasNewActivity = false
-  await loadForest(true)
+  if (focusId || !customRange) {
+    customRange = false
+    anchorAt = Date.now()
+    windowIndex = 0
+    updateLiveBounds()
+  }
+  await reloadWindow()
   if (focusId) {
     const interaction = interactions.find((item) => item.id === focusId)
     if (interaction) await selectInteraction(interaction)
@@ -350,21 +488,23 @@ async function refreshAnchor(focusId?: string): Promise<void> {
 }
 
 async function loadRejections(replace = true): Promise<void> {
+  const version = rangeVersion
   rejectionLoading = true
   try {
     const page = await admin.observations.rejections({
-      anchor_at: anchorAt,
-      window_index: windowIndex,
+      start_at: windowStart,
+      end_at: windowEnd,
       limit: 30,
       cursor: replace ? undefined : (rejectionCursor ?? undefined),
     })
+    if (version !== rangeVersion) return
     rejections = replace ? page.items : [...rejections, ...page.items]
     rejectionTotal = page.total
     rejectionCursor = page.next_cursor
   } catch (error) {
-    toast.error(localizeBackendErrorMessage(error))
+    if (version === rangeVersion) toast.error(localizeBackendErrorMessage(error))
   } finally {
-    rejectionLoading = false
+    if (version === rangeVersion) rejectionLoading = false
   }
 }
 
@@ -442,6 +582,18 @@ function formatBytes(value: number | undefined): string {
 
 <svelte:head><title>{m.common_request_history()} · Stravia</title></svelte:head>
 
+<svelte:document
+  onfullscreenchange={() => {
+    fullscreen = document.fullscreenElement === workspace
+    if (!fullscreen) fullscreenButton?.focus()
+  }} />
+<svelte:window
+  onkeydown={(event) => {
+    if (event.key === 'Escape' && fullscreen && !rangeOpen && !event.defaultPrevented) {
+      void toggleFullscreen()
+    }
+  }} />
+
 {#snippet liveMeta()}
   <StatusIndicator
     compact
@@ -491,7 +643,10 @@ function formatBytes(value: number | undefined): string {
     </Alert.Root>
   {/if}
 
-  <section class="observation-workspace" aria-labelledby="observation-workspace-title">
+  <section
+    bind:this={workspace}
+    class={['observation-workspace', { 'workspace-fullscreen': fullscreen }]}
+    aria-labelledby="observation-workspace-title">
     <h2 id="observation-workspace-title" class="sr-only">{m.observation_interaction_chains()}</h2>
     <div class="workspace-toolbar">
       <Tabs.Root value={activeTab} onValueChange={(value) => void tabChanged(value)}>
@@ -501,18 +656,52 @@ function formatBytes(value: number | undefined): string {
           ></Tabs.List>
       </Tabs.Root>
       <div class="window-controls">
-        <Button variant="ghost" size="sm" onclick={() => void changeWindow(1)}>{m.observation_older_window()}</Button>
-        <span class="font-technical text-xs text-muted-foreground"
-          >{windowStart
-            ? `${formatLogTime(windowStart)} — ${windowIndex === 0 ? m.observation_live() : formatLogTime(windowEnd)}`
-            : m.observation_loading_window()}</span>
-        <Button variant="ghost" size="sm" disabled={windowIndex === 0} onclick={() => void changeWindow(-1)}
+        <Select.Root
+          type="single"
+          value={customRange ? '' : String(durationMs / 60_000)}
+          onValueChange={(value) => void choosePreset(value)}>
+          <Select.Trigger aria-label={m.observation_time_window()} class="w-28">
+            {customRange ? m.observation_custom_range() : durationLabel(durationMs / 60_000)}
+          </Select.Trigger>
+          <Select.Content portalProps={{ to: fullscreen ? workspace : undefined }}>
+            <Select.Group>
+              {#each presetMinutes as minutes (minutes)}
+                <Select.Item value={String(minutes)} label={durationLabel(minutes)}>
+                  {durationLabel(minutes)}
+                </Select.Item>
+              {/each}
+            </Select.Group>
+          </Select.Content>
+        </Select.Root>
+        <Button variant="ghost" size="sm" disabled={loading} onclick={() => void changeWindow(1)}
+          >{m.observation_older_window()}</Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          class="range-picker"
+          aria-label={m.observation_choose_range()}
+          onclick={openRange}>
+          <CalendarRangeIcon data-icon="inline-start" />
+          <span class="range-label">
+            {formatLogTime(windowStart)} — {liveWindow ? m.observation_live() : formatLogTime(windowEnd)}
+          </span>
+        </Button>
+        <Button variant="ghost" size="sm" disabled={liveWindow || loading} onclick={() => void changeWindow(-1)}
           >{m.observation_newer_window()}</Button>
         <Button
           variant="ghost"
           size="icon-sm"
           aria-label={m.observation_refresh_anchor()}
           onclick={() => void refreshAnchor()}><RefreshCwIcon /></Button>
+        <Button
+          bind:ref={fullscreenButton}
+          variant="ghost"
+          size="icon-sm"
+          aria-label={fullscreen ? m.observation_exit_fullscreen() : m.observation_enter_fullscreen()}
+          title={fullscreen ? m.observation_exit_fullscreen() : m.observation_enter_fullscreen()}
+          onclick={() => void toggleFullscreen()}>
+          {#if fullscreen}<MinimizeIcon />{:else}<MaximizeIcon />{/if}
+        </Button>
       </div>
     </div>
 
@@ -574,6 +763,7 @@ function formatBytes(value: number | undefined): string {
         {/if}
         {#if selectedInteraction}
           <ObservationInspector
+            portalTarget={fullscreen ? workspace : undefined}
             interaction={interactionDetail}
             loading={detailLoading}
             width={inspectorWidth}
@@ -624,6 +814,7 @@ function formatBytes(value: number | undefined): string {
               >{rejectionLoading ? m.observation_loading_more() : m.observation_load_more()}</Button>
           </div>{/if}
         {#if selectedRejection}<ObservationInspector
+            portalTarget={fullscreen ? workspace : undefined}
             rejection={rejectionDetail}
             loading={detailLoading}
             width={inspectorWidth}
@@ -634,6 +825,53 @@ function formatBytes(value: number | undefined): string {
     {/if}
   </section>
 </div>
+
+<Dialog.Root bind:open={rangeOpen}>
+  <Dialog.Content portalProps={{ to: fullscreen ? workspace : undefined }}>
+    <Dialog.Header>
+      <Dialog.Title>{m.observation_date_time_range()}</Dialog.Title>
+      <Dialog.Description>{m.observation_range_help()}</Dialog.Description>
+    </Dialog.Header>
+    <form
+      class="flex flex-col gap-4"
+      onsubmit={(event) => {
+        event.preventDefault()
+        void applyRange()
+      }}>
+      <Field.FieldGroup>
+        <Field.Field data-invalid={!validDraftRange || undefined}>
+          <Field.FieldLabel for="observation-start">{m.observation_start_time()}</Field.FieldLabel>
+          <Input
+            id="observation-start"
+            type="datetime-local"
+            step="1"
+            required
+            bind:value={draftStart}
+            aria-invalid={!validDraftRange}
+            aria-describedby="observation-range-help" />
+        </Field.Field>
+        <Field.Field data-invalid={!validDraftRange || undefined}>
+          <Field.FieldLabel for="observation-end">{m.observation_end_time()}</Field.FieldLabel>
+          <Input
+            id="observation-end"
+            type="datetime-local"
+            step="1"
+            required
+            bind:value={draftEnd}
+            aria-invalid={!validDraftRange}
+            aria-describedby="observation-range-help" />
+        </Field.Field>
+      </Field.FieldGroup>
+      <p id="observation-range-help" class="text-sm text-muted-foreground" role="status">
+        {validDraftRange ? m.observation_range_local_time() : m.observation_range_invalid()}
+      </p>
+      <Dialog.Footer>
+        <Button variant="outline" onclick={() => (rangeOpen = false)}>{m.common_cancel()}</Button>
+        <Button type="submit" disabled={!validDraftRange}>{m.observation_apply_range()}</Button>
+      </Dialog.Footer>
+    </form>
+  </Dialog.Content>
+</Dialog.Root>
 
 <Sheet.Root bind:open={filterOpen}
   ><Sheet.Content side="right" class="w-full! max-w-none! sm:max-w-sm!" closeLabel={m.observation_close_filters()}
@@ -783,13 +1021,44 @@ function formatBytes(value: number | undefined): string {
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
+  flex-wrap: wrap;
   border-bottom: 1px solid var(--border);
   padding: 0.55rem 0.75rem;
 }
 .window-controls {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 0.3rem;
+}
+.range-label {
+  font-family: var(--font-technical);
+  font-size: 0.7rem;
+}
+.observation-workspace.workspace-fullscreen,
+.observation-workspace:fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100dvh;
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+}
+.workspace-fullscreen .canvas-stage,
+.observation-workspace:fullscreen .canvas-stage {
+  flex: 1;
+  height: auto;
+  min-height: 0;
+}
+.workspace-fullscreen .rejections-view,
+.observation-workspace:fullscreen .rejections-view {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 .canvas-stage {
   position: relative;
@@ -860,10 +1129,10 @@ function formatBytes(value: number | undefined): string {
   }
   .window-controls {
     justify-content: space-between;
-    overflow-x: auto;
   }
-  .window-controls > span {
-    min-width: max-content;
+  .window-controls :global(.range-picker) {
+    order: 1;
+    width: 100%;
   }
   .canvas-stage {
     height: 70svh;

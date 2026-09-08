@@ -1,5 +1,5 @@
 use serde_json::Value;
-use sqlx::{PgPool, Row, SqlitePool};
+use sqlx::{Connection, PgPool, Row, SqlitePool};
 
 use super::types::{
     ConfirmedUsage, IngressStart, ObservationEvent, RejectedOutcome, RunEvent, RunOutcome,
@@ -35,7 +35,9 @@ impl ObservationStore {
     pub async fn admit(&self, admission: Admission<'_>) -> anyhow::Result<ObservationEvent> {
         match self {
             Self::Sqlite(pool) => {
-                let mut tx = pool.begin().await?;
+                // 先取得写锁，避免读取父状态后升级事务因并发写入而丢失子 Interaction。
+                let mut connection = pool.acquire().await?;
+                let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
                 if let Some(parent) = admission.parent_interaction_id {
                     interrupt_predecessors_sqlite(&mut tx, parent, admission.now).await?;
                 }
@@ -1060,4 +1062,101 @@ async fn load_events_postgres(pool: &PgPool, after: i64) -> anyhow::Result<Vec<O
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::interaction_observation::types::ForestQuery;
+
+    #[tokio::test]
+    async fn child_admission_waits_for_a_concurrent_sqlite_writer() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let pool = crate::db::init_pool(directory.path()).await?;
+        crate::migrations::migrate_sqlite(&pool).await?;
+        let store = ObservationStore::Sqlite(pool.clone());
+        let start = |id: &str| RunStart {
+            id: id.into(),
+            principal: "test-principal".into(),
+            api_key_id: None,
+            api_key_name: None,
+            generation_root_id: Some("root".into()),
+            generation_parent_id: None,
+            has_new_user: true,
+            canonical_fingerprint: id.into(),
+            route_id: "test-route".into(),
+            model_display_name: None,
+            ingress_protocol: "responses".into(),
+        };
+        store
+            .admit(Admission {
+                start: &start("parent-run"),
+                interaction_id: "parent",
+                parent_run_id: None,
+                parent_interaction_id: None,
+                debug_enabled: false,
+                inferred_retry: false,
+                now: 1,
+                expires_at: i64::MAX,
+            })
+            .await?;
+
+        let mut writer = pool.acquire().await?;
+        let writer_tx = writer.begin_with("BEGIN IMMEDIATE").await?;
+        let child_store = store.clone();
+        let child_start = start("child-run");
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let mut admission = tokio::spawn(async move {
+            started_tx.send(()).expect("signal admission start");
+            child_store
+                .admit(Admission {
+                    start: &child_start,
+                    interaction_id: "child",
+                    parent_run_id: Some("parent-run"),
+                    parent_interaction_id: Some("parent"),
+                    debug_enabled: false,
+                    inferred_retry: false,
+                    now: 2,
+                    expires_at: i64::MAX,
+                })
+                .await
+        });
+        started_rx.await?;
+        let pending = tokio::time::timeout(Duration::from_millis(250), &mut admission).await;
+        writer_tx.commit().await?;
+        drop(writer);
+        assert!(
+            pending.is_err(),
+            "child admission must wait for the writer, not lose its observation: {pending:?}"
+        );
+        admission.await??;
+
+        let child = store
+            .get_interaction("child", ForestQuery::default())
+            .await?
+            .expect("persisted child Interaction");
+        assert_eq!(
+            child.interaction.parent_interaction_id.as_deref(),
+            Some("parent")
+        );
+        assert_eq!(
+            child
+                .root
+                .interactions
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            ["parent", "child"]
+        );
+        assert_eq!(child.runs[0].parent_run_id.as_deref(), Some("parent-run"));
+        let parent = store
+            .get_interaction("parent", ForestQuery::default())
+            .await?
+            .expect("persisted parent Interaction");
+        assert!(parent.runs[0].user_interrupted);
+        pool.close().await;
+        Ok(())
+    }
 }

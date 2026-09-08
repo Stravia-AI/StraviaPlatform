@@ -1455,5 +1455,20 @@
   "observation_zoom_in": "Zoom in",
   "observation_zoom_out": "Zoom out",
   "observation_user_interrupted": "Superseded by new user input",
-  "observation_download_event": "Download event"
+  "observation_download_event": "Download event",
+  "observation_enter_fullscreen": "Enter fullscreen",
+  "observation_exit_fullscreen": "Exit fullscreen",
+  "observation_time_window": "Time window",
+  "observation_window_minutes": "{count} minutes",
+  "observation_window_hour": "1 hour",
+  "observation_window_hours": "{count} hours",
+  "observation_custom_range": "Custom",
+  "observation_choose_range": "Choose date and time range",
+  "observation_date_time_range": "Date and time range",
+  "observation_range_help": "Choose exact start and end times, up to 24 hours apart.",
+  "observation_start_time": "Start time",
+  "observation_end_time": "End time",
+  "observation_range_local_time": "Times use your local time zone. The end time is exclusive.",
+  "observation_range_invalid": "Enter valid times. End time must be after start time, with a range of at most 24 hours.",
+  "observation_apply_range": "Apply"
 }

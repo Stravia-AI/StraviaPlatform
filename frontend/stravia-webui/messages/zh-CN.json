@@ -1452,5 +1452,20 @@
   "observation_zoom_out": "缩小",
   "observation_user_interrupted": "已被新的用户输入取代",
   "observation_download_event": "下载事件",
-  "observation_node_keyboard_help": "按 Enter 或空格查看此交互，按 Escape 关闭详情。"
+  "observation_node_keyboard_help": "按 Enter 或空格查看此交互，按 Escape 关闭详情。",
+  "observation_enter_fullscreen": "进入全屏",
+  "observation_exit_fullscreen": "退出全屏",
+  "observation_time_window": "时间范围",
+  "observation_window_minutes": "{count}分钟",
+  "observation_window_hour": "1小时",
+  "observation_window_hours": "{count}小时",
+  "observation_custom_range": "自定义",
+  "observation_choose_range": "选择日期和时间范围",
+  "observation_date_time_range": "日期和时间范围",
+  "observation_range_help": "选择精确的开始和结束时间，最大跨度为24小时。",
+  "observation_start_time": "开始时间",
+  "observation_end_time": "结束时间",
+  "observation_range_local_time": "使用本地时区，不包含结束时刻。",
+  "observation_range_invalid": "请输入有效时间，结束时间须晚于开始时间，且跨度不能超过24小时。",
+  "observation_apply_range": "应用"
 }

@@ -41,8 +41,8 @@ pub use crate::interaction_observation::{
     BundleRequest, BundleResourceKind, BundleStream, ClearHistoryResult, ConfirmedUsage,
     CredentialDiscoveryPage, CredentialDiscoveryQuery, CredentialDiscoverySummary, DebugState,
     DownloadTicket, ForestPage, ForestQuery, ForestRoot, InteractionDetail, InteractionSummary,
-    ObservationEvent, ObservationStream, ObservationUpdate, RejectionDetail, RejectionPage,
-    RejectionQuery, RejectionSummary, RunDetail, TraceManifest,
+    ObservationEvent, ObservationQueryError, ObservationStream, ObservationUpdate, RejectionDetail,
+    RejectionPage, RejectionQuery, RejectionSummary, RunDetail, TraceManifest,
 };
 pub use crate::reversible_redaction::{
     CredentialMatch, CredentialRule, CredentialRuleCatalog, CredentialRuleComponent,
