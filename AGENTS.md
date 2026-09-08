@@ -74,6 +74,7 @@ Run the narrowest relevant check first, then expand according to risk:
 
 ## Change conventions
 
+- Before designing, implementing, modifying, or reviewing frontend UI, read the root `DESIGN.md` in full and follow its design, interaction, and verification requirements.
 - Make the smallest coherent change that fixes the root cause. Do not mix unrelated cleanup into feature or bug-fix work.
 - Follow the existing naming, error handling, module layout, and test patterns in the affected subsystem.
 - Keep errors explicit. Do not swallow failures or hide them with sleeps, reduced timeouts, blind retries, or input-specific exceptions.
