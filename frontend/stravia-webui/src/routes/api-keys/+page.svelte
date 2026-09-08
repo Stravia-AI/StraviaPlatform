@@ -250,14 +250,7 @@ async function deleteKey(): Promise<void> {
     actions={apiKeys.length > 0 ? createKeyAction : undefined} />
 
   <section class="route-section" aria-labelledby="api-key-table-title">
-    <div class="route-section-header">
-      <div>
-        <h2 id="api-key-table-title" class="route-section-title">{m.api_keys_client_credentials()}</h2>
-        <p class="route-section-description">
-          {m.api_keys_secrets_stay_masked_here_shown_only_once_creation()}
-        </p>
-      </div>
-    </div>
+    <h2 id="api-key-table-title" class="sr-only">{m.api_keys_client_credentials()}</h2>
 
     {#if apiKeysQuery.isError || modelsQuery.isError}
       <RequestFailure

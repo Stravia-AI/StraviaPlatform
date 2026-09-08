@@ -327,16 +327,7 @@ async function copyProvider(): Promise<void> {
     actions={providers.length > 0 ? providerPageActions : undefined} />
 
   <section class="route-section" aria-labelledby="provider-table-title">
-    <div class="route-section-header">
-      <div>
-        <h2 id="provider-table-title" class="route-section-title">
-          {m.providers_connected_services()}
-        </h2>
-        <p class="route-section-description">
-          {m.providers_catalog_summary()}
-        </p>
-      </div>
-    </div>
+    <h2 id="provider-table-title" class="sr-only">{m.providers_connected_services()}</h2>
 
     {#if providersQuery.isPending}
       <div class="flex flex-col gap-0 border-y" aria-label={m.providers_loading_model_services()}>

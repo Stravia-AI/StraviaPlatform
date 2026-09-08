@@ -60,20 +60,6 @@ test('settings fields align in wide containers and stack in narrow containers', 
   await expect(page.getByRole('spinbutton', { name: 'Retention period (days)', exact: true })).toBeVisible()
 })
 
-test('web search and media understanding use the settings content width', async ({ page }) => {
-  await page.setViewportSize({ width: 1600, height: 900 })
-
-  await page.goto('/settings')
-  const settingsWidth = (await page.locator('.route-page').boundingBox())?.width
-  expect(settingsWidth).toBeGreaterThan(0)
-
-  await page.goto('/web-search')
-  expect((await page.locator('.route-page').boundingBox())?.width).toBe(settingsWidth)
-
-  await page.goto('/media-understanding')
-  expect((await page.locator('.route-page').boundingBox())?.width).toBe(settingsWidth)
-})
-
 test('advanced features keep separate media and web search surfaces', async ({ page }) => {
   const searchConfig = {
     revision: 3,
@@ -129,14 +115,11 @@ test('advanced features keep separate media and web search surfaces', async ({ p
   await expect(navigation.getByRole('link', { name: 'Web search' })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Media understanding', exact: true })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Understanding model' })).toBeVisible()
-  await expect(page.getByText('Available', { exact: true })).toBeVisible()
   await expect(page.locator('#media-model')).toHaveText('Multimodal model')
   await page.locator('#media-model').click()
   await expect(page.getByText('multimodal-model', { exact: true })).toBeVisible()
   await page.getByRole('option', { name: 'Multimodal model' }).click()
   await expect(page.locator('#media-thinking-level')).toHaveText('high')
-  await expect(page.getByRole('heading', { name: 'Supported images and limits' })).toHaveCount(0)
-  await expect(page.getByRole('heading', { name: 'Image processing' })).toHaveCount(0)
 
   await navigation.getByRole('link', { name: 'Web search' }).click()
   await expect(page).toHaveURL(/\/web-search$/)
@@ -162,6 +145,228 @@ test('advanced features keep separate media and web search surfaces', async ({ p
   await expect(page.getByText('search-model', { exact: true })).toBeVisible()
   await page.getByRole('option', { name: 'Search model' }).click()
   await expect(localTurns).toHaveValue('9')
+})
+
+test('media settings can repair an unavailable binding and preserve the draft after a failed save', async ({
+  page,
+}) => {
+  let rejectSave = true
+  let config: MediaUnderstandingConfigView = {
+    enabled: true,
+    model_id: 'media-fixture',
+    thinking_level: 'high',
+    state: 'unavailable',
+    eligible_models: [
+      {
+        id: 'media-fixture',
+        model_id: 'vision-fixture',
+        display_name: 'Fixture vision',
+        supported_thinking_levels: ['medium'],
+      },
+    ],
+  }
+  const submitted: unknown[] = []
+  await page.route('**/api/v1/media-understanding', async (route) => {
+    if (route.request().method() === 'PUT') {
+      const input = route.request().postDataJSON()
+      submitted.push(input)
+      if (rejectSave) {
+        await route.fulfill({ status: 503, json: { error: 'Fixture media save unavailable' } })
+        return
+      }
+      config = { ...config, ...input, state: 'available' }
+    }
+    await route.fulfill({ json: { data: config } })
+  })
+  await page.goto('/media-understanding')
+  await expect(page.locator('#media-thinking-level')).toHaveText('medium')
+  const save = page.getByRole('button', { name: 'Save settings', exact: true })
+  const unsaved = page.getByRole('status').filter({ hasText: 'Unsaved changes' })
+  await expect(unsaved).toBeVisible()
+  await expect(save).toBeEnabled()
+  await save.click()
+  await expect(page.getByRole('alert').filter({ hasText: 'Fixture media save unavailable' })).toBeVisible()
+  await expect(page.locator('#media-model')).toHaveText('Fixture vision')
+  await expect(page.locator('#media-thinking-level')).toHaveText('medium')
+  await expect(unsaved).toBeVisible()
+  rejectSave = false
+  await save.click()
+  await expect(unsaved).toHaveCount(0)
+  await expect(save).toBeDisabled()
+  expect(submitted).toEqual([
+    { enabled: true, model_id: 'media-fixture', thinking_level: 'medium' },
+    { enabled: true, model_id: 'media-fixture', thinking_level: 'medium' },
+  ])
+})
+
+test('media activation saves only confirmed configuration without discarding the model draft', async ({ page }) => {
+  let config: MediaUnderstandingConfigView = {
+    enabled: true,
+    model_id: 'media-fixture',
+    thinking_level: 'high',
+    state: 'available',
+    eligible_models: [
+      {
+        id: 'media-fixture',
+        model_id: 'vision-fixture',
+        display_name: 'Fixture vision',
+        supported_thinking_levels: ['medium', 'high'],
+      },
+    ],
+  }
+  const submitted: unknown[] = []
+  await page.route('**/api/v1/media-understanding', async (route) => {
+    if (route.request().method() === 'PUT') {
+      const input = route.request().postDataJSON()
+      submitted.push(input)
+      config = { ...config, ...input }
+    }
+    await route.fulfill({ json: { data: config } })
+  })
+  await page.goto('/media-understanding')
+  await page.locator('#media-thinking-level').click()
+  await page.getByRole('option', { name: 'medium', exact: true }).click()
+  const unsaved = page.getByRole('status').filter({ hasText: 'Unsaved changes' })
+  await expect(unsaved).toBeVisible()
+  const toggle = page.getByRole('switch')
+  await toggle.click()
+  await expect(toggle).not.toBeChecked()
+  await expect(toggle).toBeEnabled()
+  expect(submitted).toEqual([{ enabled: false, model_id: 'media-fixture', thinking_level: 'high' }])
+  await expect(page.locator('#media-thinking-level')).toHaveText('medium')
+  await expect(unsaved).toBeVisible()
+  await page.getByRole('button', { name: 'Save settings', exact: true }).click()
+  await expect(unsaved).toHaveCount(0)
+  expect(submitted).toEqual([
+    { enabled: false, model_id: 'media-fixture', thinking_level: 'high' },
+    { enabled: false, model_id: 'media-fixture', thinking_level: 'medium' },
+  ])
+  await page.reload()
+  await expect(toggle).not.toBeChecked()
+  await expect(page.locator('#media-thinking-level')).toHaveText('medium')
+})
+
+test('search activation saves only confirmed configuration without discarding the limits draft', async ({ page }) => {
+  let config = {
+    revision: 3,
+    enabled: true,
+    backend: { kind: 'local', model_id: 'model-search' },
+    max_turns: 6,
+    total_time_seconds: 180,
+    updated_at: '2026-08-17T00:00:00Z',
+    limits: { min_turns: 1, max_turns: 20, min_total_time_seconds: 30, max_total_time_seconds: 900 },
+  }
+  const submitted: unknown[] = []
+  await page.route('**/api/v1/web-search/config', async (route) => {
+    if (route.request().method() === 'PUT') {
+      const input = route.request().postDataJSON()
+      submitted.push(input)
+      config = { ...config, ...input, revision: config.revision + 1 }
+    }
+    await route.fulfill({ json: { data: config } })
+  })
+  await page.route('**/api/v1/web-search/eligible-models', (route) =>
+    route.fulfill({ json: { data: [{ id: 'model-search', model_id: 'search-model', display_name: 'Search model' }] } }),
+  )
+  await page.goto('/web-search')
+  await page.getByRole('button', { name: 'Advanced', exact: true }).click()
+  const turns = page.locator('#search-max-turns')
+  await turns.fill('9')
+  const unsaved = page.getByRole('status').filter({ hasText: 'Unsaved changes' })
+  await expect(unsaved).toBeVisible()
+  const toggle = page.getByRole('switch', { name: 'Enable web search', exact: true })
+  await toggle.click()
+  await expect(toggle).not.toBeChecked()
+  await expect(toggle).toBeEnabled()
+  expect(submitted).toEqual([
+    {
+      revision: 3,
+      enabled: false,
+      backend: { kind: 'local', model_id: 'model-search' },
+      max_turns: 6,
+      total_time_seconds: 180,
+      updated_at: '2026-08-17T00:00:00Z',
+    },
+  ])
+  await expect(turns).toHaveValue('9')
+  await expect(unsaved).toBeVisible()
+  await page.getByRole('button', { name: 'Save settings', exact: true }).click()
+  await expect(unsaved).toHaveCount(0)
+  expect(submitted).toHaveLength(2)
+  expect(submitted[1]).toMatchObject({ revision: 4, enabled: false, max_turns: 9 })
+  await page.reload()
+  await expect(toggle).not.toBeChecked()
+  await page.getByRole('button', { name: 'Advanced', exact: true }).click()
+  await expect(turns).toHaveValue('9')
+})
+
+test('unloaded settings stay non-editable until a failed baseline is recovered', async ({ page }) => {
+  let unavailable = true
+  await page.route('**/api/v1/settings/proxy_enabled', async (route) => {
+    await route.fulfill(
+      unavailable ? { status: 503, json: { error: 'Fixture settings unavailable' } } : { json: { data: 'true' } },
+    )
+  })
+  await page.goto('/settings')
+  await expect(page.getByRole('alert').filter({ hasText: 'Fixture settings unavailable' })).toBeVisible()
+  await expect(page.locator('#proxy-enabled')).toHaveCount(0)
+  await expect(page.locator('#proxy-url')).toHaveCount(0)
+  await expect(page.locator('#log-retention')).toBeVisible()
+  unavailable = false
+  await page.getByRole('button', { name: 'Retry', exact: true }).click()
+  await expect(page.locator('#proxy-enabled')).toBeChecked()
+  await expect(page.locator('#proxy-url')).toBeVisible()
+})
+
+test('immediate web access failures preserve saved state and independent search drafts', async ({ page }) => {
+  let rejectSave = true
+  let saved = { enabled: true, search_provider_ids: [], fetch_provider_ids: [] }
+  await page.route('**/api/v1/web-search/config', (route) =>
+    route.fulfill({
+      json: {
+        data: {
+          revision: 1,
+          enabled: false,
+          backend: { kind: 'local', model_id: null },
+          max_turns: 6,
+          total_time_seconds: 180,
+          updated_at: '2026-09-01T00:00:00Z',
+          limits: { min_turns: 1, max_turns: 20, min_total_time_seconds: 30, max_total_time_seconds: 900 },
+        },
+      },
+    }),
+  )
+  await page.route('**/api/v1/web-access/settings', async (route) => {
+    if (route.request().method() === 'PUT') {
+      if (rejectSave) {
+        await route.fulfill({ status: 503, json: { error: 'Fixture web access save unavailable' } })
+        return
+      }
+      saved = route.request().postDataJSON()
+    }
+    await route.fulfill({ json: { data: saved } })
+  })
+  await page.goto('/web-search')
+  const searchSwitch = page.getByRole('switch', { name: 'Enable web search', exact: true })
+  const immediateSwitch = page.getByRole('switch', { name: 'Enable web search and page access', exact: true })
+  await expect(searchSwitch).toBeDisabled()
+  await page.getByRole('button', { name: 'Advanced', exact: true }).click()
+  const draftTurns = page.locator('#search-max-turns')
+  await draftTurns.fill('9')
+  await expect(immediateSwitch).toBeChecked()
+  await immediateSwitch.click()
+  await expect(page.getByRole('alert').filter({ hasText: 'Fixture web access save unavailable' })).toBeVisible()
+  await expect(immediateSwitch).toBeChecked()
+  await expect(draftTurns).toHaveValue('9')
+  await expect(searchSwitch).not.toBeChecked()
+  await expect(page.getByRole('status').filter({ hasText: 'Unsaved changes' })).toBeVisible()
+  rejectSave = false
+  await immediateSwitch.click()
+  await expect(immediateSwitch).not.toBeChecked()
+  await expect(draftTurns).toHaveValue('9')
+  await expect(searchSwitch).not.toBeChecked()
+  await expect(page.getByRole('status').filter({ hasText: 'Unsaved changes' })).toBeVisible()
+  expect(saved.enabled).toBe(false)
 })
 
 test('server update notification skips one version without hiding Settings or exposing download', async ({ page }) => {
@@ -433,7 +638,7 @@ for (const locale of ['en-US', 'zh-CN']) {
       zh ? '凭据保护' : 'Credential Protection',
     )
     await expect(page.getByRole('switch')).not.toBeChecked()
-    const tabBar = page.locator('.workspace-tabs')
+    const tabBar = page.getByRole('tablist')
     await expect.poll(() => tabBar.evaluate((element) => element.scrollHeight <= element.clientHeight)).toBe(true)
     const search = page.locator('#credential-rule-search')
     await expect(page.getByRole('textbox', { name: zh ? '待测文本' : 'Text to test' })).toHaveCount(0)
@@ -531,11 +736,16 @@ test('credential protection distinguishes failed saves, unavailable observations
   let saved = 'false'
   let rejectSave = true
   let saveAttempts = 0
+  let releaseSave!: () => void
+  const pendingSave = new Promise<void>((resolve) => {
+    releaseSave = resolve
+  })
   let unavailable = true
   let rejectTest = true
   await page.route('**/api/v1/settings/reversible_redaction_enabled', async (route) => {
     if (route.request().method() === 'PUT') {
       saveAttempts++
+      if (saveAttempts === 1) await pendingSave
       if (rejectSave) {
         await route.fulfill({ status: 503, json: { error: 'Fixture save unavailable' } })
         return
@@ -560,19 +770,27 @@ test('credential protection distinguishes failed saves, unavailable observations
   })
   await page.goto('/reversible-redaction')
   const toggle = page.getByRole('switch')
-  const unsaved = page.getByRole('status').filter({ hasText: 'Unsaved changes' })
-  await expect(unsaved).toHaveCount(0)
+  await expect(toggle).not.toBeChecked()
   await toggle.click()
-  await expect(unsaved).toBeVisible()
-  expect(saveAttempts).toBe(0)
-  await page.getByRole('button', { name: 'Save settings', exact: true }).click()
-  await expect(page.getByRole('alert').filter({ hasText: 'Fixture save unavailable' })).toBeVisible()
-  await expect(unsaved).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Save settings', exact: true })).toBeEnabled()
+  await expect.poll(() => saveAttempts).toBe(1)
+  await expect(toggle).toBeDisabled()
+  await expect(toggle).not.toBeChecked()
+  await toggle.click({ force: true })
+  expect(saveAttempts).toBe(1)
+  releaseSave()
+  const saveError = page.getByRole('alert').filter({ hasText: 'Fixture save unavailable' })
+  await expect(saveError).toBeVisible()
+  await expect(toggle).not.toBeChecked()
+  await expect(toggle).toBeEnabled()
+  await page.getByRole('tab', { name: 'Matching test', exact: true }).click()
+  await expect(saveError).toBeVisible()
+  await page.getByRole('tab', { name: /Current rules/ }).click()
   rejectSave = false
-  await page.getByRole('button', { name: 'Save settings', exact: true }).click()
-  await expect(unsaved).toHaveCount(0)
-  await expect(page.getByRole('button', { name: 'Save settings', exact: true })).toBeDisabled()
+  await toggle.click()
+  await expect(toggle).toBeChecked()
+  await expect(toggle).toBeEnabled()
+  await expect(saveError).toHaveCount(0)
+  expect(saveAttempts).toBe(2)
   expect(saved).toBe('true')
   const catalog = page.getByRole('region', { name: 'Current rules' })
   const timeline = page.getByRole('region', { name: 'Recent discoveries' })
@@ -594,6 +812,9 @@ test('credential protection distinguishes failed saves, unavailable observations
   rejectTest = false
   await page.getByRole('button', { name: 'Test matching', exact: true }).click()
   await expect(page.getByRole('status').filter({ hasText: 'No existing rule matched' })).toBeVisible()
+  await page.reload()
+  await expect(toggle).toBeChecked()
+  expect(saveAttempts).toBe(2)
 })
 
 test('credential protection separates setting load failure from empty rules and observations', async ({ page }) => {
@@ -620,7 +841,6 @@ test('credential protection separates setting load failure from empty rules and 
     page.getByRole('alert').filter({ hasText: 'Credential protection settings could not be loaded.' }),
   ).toBeVisible({ timeout: 15_000 })
   await expect(page.getByRole('switch')).toBeDisabled()
-  await expect(page.getByRole('button', { name: 'Save settings', exact: true })).toBeDisabled()
   await expect(page.getByText('No rules are bundled with this instance.', { exact: true })).toBeVisible()
   await page.getByRole('tab', { name: 'Hit records', exact: true }).click()
   await expect(

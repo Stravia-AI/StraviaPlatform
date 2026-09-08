@@ -4,7 +4,7 @@ import type { Snippet } from 'svelte'
 interface Props {
   eyebrow: string
   title: string
-  description: string
+  description?: string
   actions?: Snippet
   meta?: Snippet
 }
@@ -22,7 +22,9 @@ let { eyebrow, title, description, actions, meta }: Props = $props()
       class="font-structural text-[1.625rem] leading-[1.15] font-semibold tracking-[-0.025em] text-balance sm:text-[1.875rem]">
       {title}
     </h1>
-    <p class="mt-2 max-w-3xl text-sm leading-[1.5] text-pretty text-muted-foreground">{description}</p>
+    {#if description}
+      <p class="mt-2 max-w-3xl text-sm leading-[1.5] text-pretty text-muted-foreground">{description}</p>
+    {/if}
   </div>
   {#if actions}
     <div class="flex shrink-0 flex-wrap items-center gap-2">{@render actions()}</div>

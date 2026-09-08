@@ -338,7 +338,7 @@ async function saveProvider(): Promise<void> {
               : m.provider_editor_configuration_help()}
           </Sheet.Description>
           <Tabs.Root value={step} onValueChange={changeStep} class="mt-3">
-            <Tabs.List class="grid w-full max-w-72 grid-cols-2" aria-label={m.provider_editor_connection_setup_steps()}>
+            <Tabs.List aria-label={m.provider_editor_connection_setup_steps()}>
               <Tabs.Trigger value="select">
                 {m.provider_editor_choose_service()}
               </Tabs.Trigger>

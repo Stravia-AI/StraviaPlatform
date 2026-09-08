@@ -176,7 +176,7 @@ function downloadRecord(value: unknown, index: number): void {
     ><Empty.Header><Empty.Title>{m.observation_details_unavailable()}</Empty.Title></Empty.Header></Empty.Root>
 {:else}
   <Tabs.Root class="flex min-h-0 flex-1 flex-col" bind:value={activeTab}>
-    <div class="flex items-center justify-between gap-3 border-b px-4 py-2">
+    <div class="flex flex-wrap items-center justify-between gap-3 border-b px-4 py-2">
       <Tabs.List>
         <Tabs.Trigger value="timeline">{m.observation_timeline()}</Tabs.Trigger>
         <Tabs.Trigger value="debug" disabled={!hasDebug}>{m.observation_debug_records()}</Tabs.Trigger>

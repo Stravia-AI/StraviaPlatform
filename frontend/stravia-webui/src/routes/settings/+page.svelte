@@ -13,11 +13,13 @@ import DesktopPortSettings from '$lib/components/desktop-port-settings.svelte'
 import LanguageSelector from '$lib/components/language-selector.svelte'
 import PageHeader from '$lib/components/page-header.svelte'
 import ProductUpdateSettings from '$lib/components/product-update-settings.svelte'
+import RequestFailure from '$lib/components/request-failure.svelte'
 import { Button } from '$lib/components/ui/button'
 import * as Field from '$lib/components/ui/field'
 import { Input } from '$lib/components/ui/input'
 import * as Select from '$lib/components/ui/select'
 import { Spinner } from '$lib/components/ui/spinner'
+import { Skeleton } from '$lib/components/ui/skeleton'
 import { Switch } from '$lib/components/ui/switch'
 
 const queryClient = useQueryClient()
@@ -49,6 +51,14 @@ let confirmPassword = $state('')
 let savingCredentials = $state(false)
 let credentialsError = $state('')
 
+const proxyReady = $derived.by(() => {
+  // 每个查询都需要跟踪 data，不能让前一个未就绪的字段短路后续订阅。
+  const enabled = proxyEnabledQuery.data
+  const url = proxyUrlQuery.data
+  const bypass = proxyBypassQuery.data
+  return enabled !== undefined && url !== undefined && bypass !== undefined
+})
+const retentionReady = $derived(retentionQuery.data !== undefined)
 const retentionBaseline = $derived((retentionQuery.data ?? '7').trim())
 const retention = $derived(editedRetention ?? retentionBaseline)
 const retentionDirty = $derived(editedRetention != null && retention.trim() !== retentionBaseline)
@@ -171,15 +181,14 @@ function retrySettings(): void {
   <PageHeader eyebrow={m.common_system_label()} title={m.settings_settings()} description={m.settings_page_summary()} />
 
   {#if settingsError}
-    <div class="border-y py-4">
-      <p class="text-sm font-medium text-destructive">
-        {m.settings_some_settings_not_loaded()}
-      </p>
-      <p class="mt-1 text-sm text-muted-foreground">
-        {localizeBackendErrorMessage(settingsError)}
-      </p>
-      <Button class="mt-3" variant="outline" onclick={retrySettings}>{m.common_retry()}</Button>
-    </div>
+    <RequestFailure
+      title={m.settings_some_settings_not_loaded()}
+      message={localizeBackendErrorMessage(settingsError)}
+      retry={retrySettings}
+      retrying={retentionQuery.isFetching ||
+        proxyEnabledQuery.isFetching ||
+        proxyUrlQuery.isFetching ||
+        proxyBypassQuery.isFetching} />
   {/if}
 
   <div class="min-w-0">
@@ -227,35 +236,41 @@ function retrySettings(): void {
           </p>
         </div>
       </div>
-      <Field.FieldGroup>
-        <Field.Field orientation="horizontal"
-          ><div class="flex-1">
-            <Field.FieldLabel for="proxy-enabled">{m.settings_outbound_proxy()}</Field.FieldLabel>
+      {#if proxyReady}
+        <Field.FieldGroup>
+          <Field.Field orientation="horizontal"
+            ><div class="flex-1">
+              <Field.FieldLabel for="proxy-enabled">{m.settings_outbound_proxy()}</Field.FieldLabel>
+            </div>
+            <Switch
+              id="proxy-enabled"
+              checked={proxy.enabled}
+              onCheckedChange={(enabled) => (proxyDraft = { ...proxy, enabled })}
+              disabled={savingProxy} /></Field.Field>
+          <Field.Field size="fill"
+            ><Field.FieldLabel for="proxy-url">{m.settings_proxy_url()}</Field.FieldLabel><Input
+              id="proxy-url"
+              class="font-technical"
+              value={proxy.url}
+              oninput={(event) => (proxyDraft = { ...proxy, url: event.currentTarget.value })}
+              placeholder="http://127.0.0.1:7890" /></Field.Field>
+          <Field.Field
+            ><Field.FieldLabel for="proxy-bypass">{m.settings_bypass_hosts_optional()}</Field.FieldLabel><Input
+              id="proxy-bypass"
+              value={proxy.bypass}
+              oninput={(event) => (proxyDraft = { ...proxy, bypass: event.currentTarget.value })}
+              placeholder="localhost,127.0.0.1,.internal" /></Field.Field>
+          <div class="field-actions">
+            <Button disabled={!proxyDirty || savingProxy} onclick={() => void saveProxy()}
+              >{#if savingProxy}<Spinner data-icon="inline-start" />{:else}<SaveIcon
+                  data-icon="inline-start" />{/if}{m.settings_save_proxy()}</Button>
           </div>
-          <Switch
-            id="proxy-enabled"
-            checked={proxy.enabled}
-            onCheckedChange={(enabled) => (proxyDraft = { ...proxy, enabled })}
-            disabled={savingProxy} /></Field.Field>
-        <Field.Field size="fill"
-          ><Field.FieldLabel for="proxy-url">{m.settings_proxy_url()}</Field.FieldLabel><Input
-            id="proxy-url"
-            class="font-technical"
-            value={proxy.url}
-            oninput={(event) => (proxyDraft = { ...proxy, url: event.currentTarget.value })}
-            placeholder="http://127.0.0.1:7890" /></Field.Field>
-        <Field.Field
-          ><Field.FieldLabel for="proxy-bypass">{m.settings_bypass_hosts_optional()}</Field.FieldLabel><Input
-            id="proxy-bypass"
-            value={proxy.bypass}
-            oninput={(event) => (proxyDraft = { ...proxy, bypass: event.currentTarget.value })}
-            placeholder="localhost,127.0.0.1,.internal" /></Field.Field>
-        <div class="field-actions">
-          <Button disabled={!proxyDirty || savingProxy} onclick={() => void saveProxy()}
-            >{#if savingProxy}<Spinner data-icon="inline-start" />{:else}<SaveIcon
-                data-icon="inline-start" />{/if}{m.settings_save_proxy()}</Button>
+        </Field.FieldGroup>
+      {:else if proxyEnabledQuery.isPending || proxyUrlQuery.isPending || proxyBypassQuery.isPending}
+        <div class="flex flex-col gap-4" aria-busy="true">
+          <Skeleton class="h-10" /><Skeleton class="h-10" /><Skeleton class="h-10" />
         </div>
-      </Field.FieldGroup>
+      {/if}
     </section>
 
     <section id="logs" class="route-section scroll-mt-20 pb-8" aria-labelledby="logs-title">
@@ -267,23 +282,27 @@ function retrySettings(): void {
           </p>
         </div>
       </div>
-      <Field.FieldGroup>
-        <Field.Field size="number"
-          ><Field.FieldLabel for="log-retention" hint={m.settings_automatically_deletes_older_request_history()}
-            >{m.settings_retention_period_days()}</Field.FieldLabel
-          ><Input
-            id="log-retention"
-            type="number"
-            min="1"
-            max="365"
-            value={retention}
-            oninput={(event) => (editedRetention = event.currentTarget.value)} /></Field.Field>
-        <div class="field-actions">
-          <Button disabled={!retentionDirty || savingRetention} onclick={() => void saveRetention()}
-            >{#if savingRetention}<Spinner data-icon="inline-start" />{:else}<SaveIcon
-                data-icon="inline-start" />{/if}{m.settings_save_request_history()}</Button>
-        </div>
-      </Field.FieldGroup>
+      {#if retentionReady}
+        <Field.FieldGroup>
+          <Field.Field size="number"
+            ><Field.FieldLabel for="log-retention" hint={m.settings_automatically_deletes_older_request_history()}
+              >{m.settings_retention_period_days()}</Field.FieldLabel
+            ><Input
+              id="log-retention"
+              type="number"
+              min="1"
+              max="365"
+              value={retention}
+              oninput={(event) => (editedRetention = event.currentTarget.value)} /></Field.Field>
+          <div class="field-actions">
+            <Button disabled={!retentionDirty || savingRetention} onclick={() => void saveRetention()}
+              >{#if savingRetention}<Spinner data-icon="inline-start" />{:else}<SaveIcon
+                  data-icon="inline-start" />{/if}{m.settings_save_request_history()}</Button>
+          </div>
+        </Field.FieldGroup>
+      {:else if retentionQuery.isPending}
+        <Skeleton class="h-10" aria-busy="true" />
+      {/if}
     </section>
 
     {#if authStateQuery.data?.mode === 'server' || authStateQuery.data?.mode === 'unavailable'}

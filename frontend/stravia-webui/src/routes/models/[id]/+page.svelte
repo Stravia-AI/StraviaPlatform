@@ -7,6 +7,8 @@ import { admin } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
 import { effectiveModelDisplayName } from '$lib/logical-model'
 import ModelEditor from '$lib/components/model-editor.svelte'
+import PageHeader from '$lib/components/page-header.svelte'
+import RequestFailure from '$lib/components/request-failure.svelte'
 import { Button } from '$lib/components/ui/button'
 import { Spinner } from '$lib/components/ui/spinner'
 
@@ -25,12 +27,18 @@ const model = $derived(routeQuery.data)
 {#if providersQuery.isPending || routeQuery.isPending}
   <div class="grid min-h-72 place-items-center"><Spinner /></div>
 {:else if providersQuery.isError || routeQuery.isError}
-  <p class="text-sm text-destructive">
-    {localizeBackendErrorMessage(providersQuery.error ?? routeQuery.error)}
-  </p>
+  <div class="route-page">
+    <PageHeader eyebrow={m.common_setup()} title={m.common_model()} />
+    <RequestFailure
+      title={m.models_models_not_loaded()}
+      message={localizeBackendErrorMessage(providersQuery.error ?? routeQuery.error)}
+      retry={() => Promise.all([providersQuery.refetch(), routeQuery.refetch()])}
+      retrying={providersQuery.isFetching || routeQuery.isFetching} />
+    <Button href="/models" variant="outline">{m.models_back_models()}</Button>
+  </div>
 {:else if !model}
   <div class="route-page">
-    <h1 class="text-2xl font-semibold">{m.models_model_not_found()}</h1>
+    <PageHeader eyebrow={m.common_setup()} title={m.models_model_not_found()} />
     <Button href="/models" variant="outline">{m.models_back_models()}</Button>
   </div>
 {:else}

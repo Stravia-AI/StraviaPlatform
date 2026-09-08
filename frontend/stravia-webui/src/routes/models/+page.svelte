@@ -269,14 +269,7 @@ async function deleteModel(): Promise<void> {
     actions={models.length > 0 ? addModelAction : undefined} />
 
   <section class="route-section" aria-labelledby="model-route-table-title">
-    <div class="route-section-header">
-      <div>
-        <h2 id="model-route-table-title" class="route-section-title">{m.models_configured_models()}</h2>
-        <p class="route-section-description">
-          {m.models_split_traffic_across_services_try_them_order_one()}
-        </p>
-      </div>
-    </div>
+    <h2 id="model-route-table-title" class="sr-only">{m.models_configured_models()}</h2>
 
     {#if modelsQuery.isError || providersQuery.isError}
       <RequestFailure

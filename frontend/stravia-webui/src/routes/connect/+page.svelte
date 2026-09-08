@@ -261,7 +261,7 @@ function cliModelName(modelId: string): string | undefined {
     {/if}
 
     <Tabs.Root bind:value={tab}>
-      <Tabs.List class="grid w-full max-w-72 grid-cols-2" aria-label={m.connect_setup_format()}>
+      <Tabs.List aria-label={m.connect_setup_format()}>
         <Tabs.Trigger value="cli"
           ><TerminalSquareIcon data-icon="inline-start" />{m.connect_clients_label()}</Tabs.Trigger>
         <Tabs.Trigger value="code"><Code2Icon data-icon="inline-start" />{m.connect_code()}</Tabs.Trigger>
@@ -536,7 +536,7 @@ function cliModelName(modelId: string): string | undefined {
                 ><ClipboardCopyIcon data-icon="inline-start" />{m.common_copy()}</Button>
             </div>
             <Tabs.Root bind:value={codeLanguage}>
-              <Tabs.List class="grid w-full max-w-72 grid-cols-3" aria-label={m.connect_code_language()}>
+              <Tabs.List aria-label={m.connect_code_language()}>
                 {#each ['python', 'typescript', 'curl'] as language (language)}<Tabs.Trigger value={language}
                     >{language === 'typescript'
                       ? 'TypeScript'

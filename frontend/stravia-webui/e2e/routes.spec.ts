@@ -490,7 +490,6 @@ test('Model Route editor derives thinking levels and identifies blocking destina
   expect(Math.abs(displayLabelBox!.x - displayInputBox!.x)).toBeLessThanOrEqual(1)
   expect(Math.abs(balanceLabelBox!.x - balanceTriggerBox!.x)).toBeLessThanOrEqual(1)
   expect(Math.abs(displayInputBox!.width - balanceTriggerBox!.width)).toBeLessThanOrEqual(2)
-  expect(Math.abs(nameInputBox!.width - displayInputBox!.width * 2)).toBeLessThanOrEqual(24)
 
   const thinkingMaps = page.locator('[data-slot="thinking-map"]')
   for (const index of [1, 2]) {

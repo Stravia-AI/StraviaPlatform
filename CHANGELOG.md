@@ -12,12 +12,14 @@
 
 ### Changed
 
-- Credential Protection uses roomier rule rows and removes the persistent saved-policy strip. Settings feedback appears only for loading, unsaved changes, or failures.
+- Advanced Features save enable/disable switches immediately, without a separate save click. Media and search configuration drafts retain explicit submission and are not submitted or cleared by capability toggles. Failed immediate updates retain the saved state with local feedback.
+- Local workspace tabs and model-service detail links share one segmented visual treatment and wrap on narrow screens. Form controls use consistent radii, input actions retain 40px hit areas, and resource lists omit redundant section introductions.
+- Credential Protection uses roomier rule rows and removes the persistent saved-policy strip. Settings feedback appears only for loading, saving, or failures.
 - Credential rule browsing now shows names and meaningful matching conditions without repeated IDs or targets. The inspector replaces raw condition JSON with keyword chips, exclusions, path restrictions, component requirements, and collapsible rule parameters; rule IDs remain searchable.
 - Credential Protection now opens on a searchable, sortable rule table with pagination and a rule inspector. Hit records and matching tests have separate tabs; wide-screen testing places input beside results. Redundant implementation explanations are removed, while protection details and actionable failure feedback remain available.
 - Shared data tables use compact headers with a subtle opaque background, aligned labels, and subdued inactive sort indicators that highlight on hover or keyboard focus. Active sorting remains prominent. Vertical scrollbars start below sticky headers, including grouped headers and filter rows.
 - **Breaking (Rust API):** `preview_connect_client_apply` now accepts only the configuration input; directory environments remain exclusive to Desktop write planning.
-- The former Reversible Redaction page and sidebar entry are named Credential Protection; the existing route, setting key, explicit save, and restoration behavior remain unchanged. Retained pre-feature observations are marked incomplete rather than backfilled with invented discovery history.
+- The former Reversible Redaction page and sidebar entry are named Credential Protection; the existing route, setting key, and restoration behavior remain unchanged. Retained pre-feature observations are marked incomplete rather than backfilled with invented discovery history.
 - **Breaking (Rust API):** `Vendor` and `VendorExtension` replace separate `auth_headers` and `build_url` hooks with purpose-aware `construct_request`, which owns the URL and default authentication for inference and Models requests. Existing OAuth bindings and specialized inference signing remain authoritative.
 - Generation Chain writes require an explicit final Model Leg Target or Hook source instead of recovering provenance from response metadata; history still commits only after complete client delivery.
 - The WebUI now shares shadcn-svelte feedback, progress, disclosure, navigation and pagination controls, with reusable secret inputs, request recovery, model filters and metric loading states. Mobile observation details use a modal Sheet while desktop details remain a resizable overlay; update notifications use the existing persistent toast surface without changing skip policy.
@@ -34,6 +36,8 @@
 
 ### Fixed
 
+- Immediate Web Access switches retain their saved values after failed updates without clearing independent search drafts. Dark-theme switches show the active primary color instead of an overridden inactive track.
+- Settings wait for real configuration before offering editable proxy and retention controls. Resource-detail load failures provide consistent retry and return actions instead of appearing as missing resources.
 - Credential Protection uses the shared segmented Tabs style with a rule-count badge instead of a full-width underline. Its tab bar wraps on narrow screens without internal scrollbars or clipped labels.
 - API-key-only connections now support unauthenticated services: an empty key no longer blocks model discovery or inference, and upstream requests omit default authentication. Supplied keys, required channel and structured credentials, and Stravia client authentication retain their existing behavior.
 - Standalone server client-configuration previews no longer require `HOME`, `USERPROFILE`, or client-directory environment variables, including on NixOS services. Portable paths are used directly without rewriting serialized configuration; Desktop local-path validation remains unchanged.

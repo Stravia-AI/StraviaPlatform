@@ -413,7 +413,7 @@ function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
     {#if snapshot.models.length > 0}
       <Collapsible.Root class="mt-1.5">
         <Collapsible.Trigger
-          class="inline-flex min-h-8 items-center gap-1"
+          class="inline-flex min-h-10 items-center gap-1"
           aria-label={m.allowances_show_model_allowances({ provider: snapshot.provider_name })}>
           {m.allowances_model_allowances()}<ChevronDownIcon class="size-3.5" />
         </Collapsible.Trigger>

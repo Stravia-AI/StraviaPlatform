@@ -13,6 +13,7 @@ import { localizeBackendErrorMessage } from '$lib/backend-error'
 import { effectiveModelDisplayName, logicalModelSecondaryId } from '$lib/logical-model'
 import type { Provider, ProviderModelSyncSummary } from '$lib/types'
 import PageHeader from '$lib/components/page-header.svelte'
+import RequestFailure from '$lib/components/request-failure.svelte'
 import ProviderConnectionView from '$lib/components/provider-connection-view.svelte'
 import ProviderMark from '$lib/components/provider-mark.svelte'
 import ProviderModelCatalog from '$lib/components/provider-model-catalog.svelte'
@@ -21,6 +22,7 @@ import TechnicalValue from '$lib/components/technical-value.svelte'
 import { Badge } from '$lib/components/ui/badge'
 import { Button } from '$lib/components/ui/button'
 import { Spinner } from '$lib/components/ui/spinner'
+import { tabsListVariants, tabsTriggerVariants } from '$lib/components/ui/tabs'
 
 const providerId = $derived(page.params.id ?? '')
 type ProviderDetailView = 'connection' | 'models' | 'routes'
@@ -82,6 +84,17 @@ async function syncModels(): Promise<ProviderModelSyncSummary | undefined> {
 
 {#if providersQuery.isPending}
   <div class="grid min-h-72 place-items-center"><Spinner /></div>
+{:else if providersQuery.isError && !provider}
+  <div class="route-page">
+    <PageHeader eyebrow={m.common_setup()} title={m.common_model_service_details()} />
+    <RequestFailure
+      title={m.providers_model_services_not_loaded()}
+      message={localizeBackendErrorMessage(providersQuery.error)}
+      retry={() => providersQuery.refetch()}
+      retrying={providersQuery.isFetching} />
+    <Button href="/providers" variant="outline"
+      ><ArrowLeftIcon data-icon="inline-start" />{m.providers_back_model_services()}</Button>
+  </div>
 {:else if !provider}
   <div class="route-page">
     <PageHeader
@@ -117,11 +130,11 @@ async function syncModels(): Promise<ProviderModelSyncSummary | undefined> {
       {/snippet}
     </PageHeader>
 
-    <nav class="flex flex-wrap gap-2" aria-label={m.common_model_service_details()}>
+    <nav class={tabsListVariants()} data-variant="default" aria-label={m.common_model_service_details()}>
       {#each [{ id: 'connection', label: m.provider_detail_tab_connection }, { id: 'models', label: m.provider_detail_tab_models }, { id: 'routes', label: m.provider_detail_tab_routes }] as item (item.id)}
         <a
-          class="inline-flex min-h-10 items-center rounded-md px-3 text-sm font-medium hover:bg-muted"
-          class:bg-muted={view === item.id}
+          class={tabsTriggerVariants()}
+          data-state={view === item.id ? 'active' : 'inactive'}
           aria-current={view === item.id ? 'page' : undefined}
           href={resolve(`/providers/${encodeURIComponent(providerId)}?view=${encodeURIComponent(item.id)}`)}
           >{item.label()}</a>

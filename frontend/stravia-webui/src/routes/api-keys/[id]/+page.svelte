@@ -8,6 +8,8 @@ import { createQuery } from '@tanstack/svelte-query'
 import { admin } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
 import ApiKeyEditor from '$lib/components/api-key-editor.svelte'
+import PageHeader from '$lib/components/page-header.svelte'
+import RequestFailure from '$lib/components/request-failure.svelte'
 import { Button } from '$lib/components/ui/button'
 import { Spinner } from '$lib/components/ui/spinner'
 
@@ -31,12 +33,18 @@ async function returnToApiKeys(): Promise<void> {
 {#if apiKeysQuery.isPending || modelsQuery.isPending}
   <div class="grid min-h-72 place-items-center"><Spinner /></div>
 {:else if apiKeysQuery.isError || modelsQuery.isError}
-  <p class="text-sm text-destructive">
-    {localizeBackendErrorMessage(apiKeysQuery.error ?? modelsQuery.error)}
-  </p>
+  <div class="route-page">
+    <PageHeader eyebrow={m.common_setup()} title={m.common_api_key()} />
+    <RequestFailure
+      title={m.api_keys_api_keys_not_loaded()}
+      message={localizeBackendErrorMessage(apiKeysQuery.error ?? modelsQuery.error)}
+      retry={() => Promise.all([apiKeysQuery.refetch(), modelsQuery.refetch()])}
+      retrying={apiKeysQuery.isFetching || modelsQuery.isFetching} />
+    <Button href="/api-keys" variant="outline">{m.api_keys_back_api_keys()}</Button>
+  </div>
 {:else if !apiKey}
   <div class="route-page">
-    <h1 class="text-2xl font-semibold">{m.api_keys_api_key_not_found()}</h1>
+    <PageHeader eyebrow={m.common_setup()} title={m.api_keys_api_key_not_found()} />
     <Button href="/api-keys" variant="outline">{m.api_keys_back_api_keys()}</Button>
   </div>
 {:else}

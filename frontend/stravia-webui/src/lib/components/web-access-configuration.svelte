@@ -18,6 +18,7 @@ import type {
   WebProvider,
   WebProviderKind,
 } from '$lib/types'
+import * as Alert from '$lib/components/ui/alert'
 import * as AlertDialog from '$lib/components/ui/alert-dialog'
 import * as Empty from '$lib/components/ui/empty'
 import SecretInput from '$lib/components/secret-input.svelte'
@@ -41,8 +42,10 @@ let editorKind = $state<WebProviderKind>('exa')
 let editorSecret = $state('')
 let editorUseProxy = $state(false)
 let savingEditor = $state(false)
+let editorError = $state('')
 let actingProviderId = $state<string>()
 let savingSettings = $state(false)
+let settingsError = $state('')
 let deleteTarget = $state<WebProvider>()
 let deleteOpen = $state(false)
 
@@ -85,6 +88,7 @@ function openCreate(): void {
   editorSecret = ''
   editorUseProxy = false
   editorLocalEngines = defaultLocalEngines()
+  editorError = ''
   editorOpen = true
 }
 
@@ -95,6 +99,7 @@ function openEdit(provider: WebProvider): void {
   editorSecret = ''
   editorUseProxy = provider.use_proxy
   editorLocalEngines = { ...defaultLocalEngines(), ...(provider.local_engines ?? {}) }
+  editorError = ''
   editorOpen = true
 }
 
@@ -107,15 +112,18 @@ async function refreshWebAccess(): Promise<void> {
 
 async function saveEditor(): Promise<void> {
   if (!editorName.trim()) {
-    toast.error(m.web_access_configuration_service_name_required())
+    editorError = m.web_access_configuration_service_name_required()
+    toast.error(editorError)
     return
   }
   if (!editingProvider && editorKind !== 'local' && !editorSecret.trim()) {
-    toast.error(m.web_access_configuration_api_key_required())
+    editorError = m.web_access_configuration_api_key_required()
+    toast.error(editorError)
     return
   }
 
   savingEditor = true
+  editorError = ''
   try {
     if (editingProvider) {
       await admin.webAccess.providers.update(
@@ -140,7 +148,8 @@ async function saveEditor(): Promise<void> {
     editorOpen = false
     toast.success(m.web_access_configuration_search_service_saved())
   } catch (error) {
-    toast.error(localizeBackendErrorMessage(error))
+    editorError = localizeBackendErrorMessage(error)
+    toast.error(editorError)
   } finally {
     savingEditor = false
   }
@@ -148,11 +157,13 @@ async function saveEditor(): Promise<void> {
 
 async function saveSettings(next: WebAccessSettings): Promise<void> {
   savingSettings = true
+  settingsError = ''
   try {
-    await admin.webAccess.settings.update(next)
-    await queryClient.invalidateQueries({ queryKey: ['web-access-settings'] })
+    const saved = await admin.webAccess.settings.update(next)
+    queryClient.setQueryData(['web-access-settings'], saved)
   } catch (error) {
-    toast.error(localizeBackendErrorMessage(error))
+    settingsError = localizeBackendErrorMessage(error)
+    toast.error(settingsError)
   } finally {
     savingSettings = false
   }
@@ -218,12 +229,26 @@ async function deleteProvider(): Promise<void> {
         {m.web_access_configuration_feature_summary()}
       </p>
     </div>
-    <Switch
-      checked={settings.enabled}
-      disabled={settingsUnavailable || savingSettings}
-      aria-label={m.web_access_configuration_enable_web_search_page_access()}
-      onCheckedChange={(checked) => void saveSettings({ ...settings, enabled: checked })} />
+    {#if settingsQuery.data}
+      <div class="flex items-center gap-3" aria-busy={savingSettings}>
+        {#if savingSettings}<Spinner aria-hidden="true" />{/if}
+        <Switch
+          bind:checked={() => settings.enabled, (checked) => void saveSettings({ ...settings, enabled: checked })}
+          disabled={settingsUnavailable || savingSettings}
+          aria-label={m.web_access_configuration_enable_web_search_page_access()}
+          aria-describedby="web-access-save-behavior" />
+      </div>
+    {/if}
   </div>
+  <p id="web-access-save-behavior" class="mb-3 text-sm text-muted-foreground">
+    {m.web_access_configuration_immediate()}
+  </p>
+  {#if settingsQuery.isPending}<p class="text-sm text-muted-foreground" role="status">
+      {m.common_settings_loading()}
+    </p>{/if}
+  {#if settingsError}<Alert.Root variant="destructive"
+      ><Alert.Description>{settingsError}</Alert.Description></Alert.Root
+    >{/if}
   {#if settingsQuery.isError}
     <RequestFailure
       title={m.web_access_configuration_web_search_settings_not_loaded()}
@@ -242,7 +267,9 @@ async function deleteProvider(): Promise<void> {
       </p>
     </div>
     <div class="flex items-center gap-3">
-      <span class="font-technical text-xs text-muted-foreground tabular-nums">{webProviders.length}</span>
+      {#if providersQuery.data}<span class="font-technical text-xs text-muted-foreground tabular-nums"
+          >{webProviders.length}</span
+        >{/if}
       <Button size="sm" onclick={openCreate}>
         <PlusIcon data-icon="inline-start" />{m.common_connect_service()}
       </Button>
@@ -282,7 +309,6 @@ async function deleteProvider(): Promise<void> {
             <div class="flex flex-wrap items-center gap-2">
               <p class="font-medium">{provider.name}</p>
               <Badge variant="secondary">{kindLabel(provider.kind)}</Badge>
-              <Badge variant="outline">{m.web_access_configuration_search()}</Badge>
               {#if supportsFetch(provider)}<Badge variant="outline">{m.web_access_read_pages_label()}</Badge>{/if}
             </div>
             <p class="mt-1 text-sm text-muted-foreground">
@@ -328,62 +354,63 @@ async function deleteProvider(): Promise<void> {
   {/if}
 </section>
 
-<div class="grid gap-8 lg:grid-cols-2">
-  {#each ['search', 'fetch'] as capability (capability)}
-    {@const isSearch = capability === 'search'}
-    {@const ids = isSearch ? settings.search_provider_ids : settings.fetch_provider_ids}
-    {@const candidates = webProviders.filter((provider) => isSearch || supportsFetch(provider))}
-    <section class="route-section" aria-labelledby={`${capability}-priority-title`}>
-      <div class="route-section-header">
-        <div>
-          <h2 id={`${capability}-priority-title`} class="route-section-title">
-            {isSearch ? m.web_access_configuration_web_search() : m.web_access_page_access_label()}
-          </h2>
-          <p class="route-section-description">
-            {m.web_access_configuration_enabled_services_tried_top_bottom()}
-          </p>
-        </div>
-      </div>
-      <div class="divide-y border-y">
-        {#each candidates as provider (provider.id)}
-          {@const enabled = ids.includes(provider.id)}
-          {@const orderIndex = ids.indexOf(provider.id)}
-          <div class="flex min-h-14 items-center gap-3 py-2">
-            <Switch
-              checked={enabled}
-              disabled={settingsUnavailable || savingSettings}
-              aria-label={m.web_access_use_provider_for_capability({
-                provider: provider.name,
-                capability: isSearch ? m.web_access_configuration_web_search() : m.web_access_page_access_label(),
-              })}
-              onCheckedChange={() => toggleCapability(provider, isSearch ? 'search' : 'fetch')} />
-            <span class="min-w-0 flex-1 truncate text-sm font-medium">{provider.name}</span>
-            {#if enabled}
-              <span class="font-technical text-xs text-muted-foreground tabular-nums">{orderIndex + 1}</span>
-              <Button
-                size="icon-sm"
-                variant="ghost"
-                disabled={settingsUnavailable || savingSettings || orderIndex === 0}
-                aria-label={m.web_access_configuration_move_value_up({ name: provider.name })}
-                onclick={() => moveProvider(provider.id, isSearch ? 'search' : 'fetch', -1)}><ArrowUpIcon /></Button>
-              <Button
-                size="icon-sm"
-                variant="ghost"
-                disabled={settingsUnavailable || savingSettings || orderIndex === ids.length - 1}
-                aria-label={m.web_access_configuration_move_value_down({ name: provider.name })}
-                onclick={() => moveProvider(provider.id, isSearch ? 'search' : 'fetch', 1)}><ArrowDownIcon /></Button>
-            {/if}
+{#if settingsQuery.data && providersQuery.data}
+  <div class="grid gap-6 lg:grid-cols-2">
+    {#each ['search', 'fetch'] as capability (capability)}
+      {@const isSearch = capability === 'search'}
+      {@const ids = isSearch ? settings.search_provider_ids : settings.fetch_provider_ids}
+      {@const candidates = webProviders.filter((provider) => isSearch || supportsFetch(provider))}
+      <section class="route-section" aria-labelledby={`${capability}-priority-title`}>
+        <div class="route-section-header">
+          <div>
+            <h2 id={`${capability}-priority-title`} class="route-section-title">
+              {isSearch ? m.web_access_configuration_web_search() : m.web_access_page_access_label()}
+            </h2>
+            <p class="route-section-description">
+              {m.web_access_configuration_enabled_services_tried_top_bottom()}
+            </p>
           </div>
-        {/each}
-        {#if candidates.length === 0}
-          <p class="py-5 text-sm text-muted-foreground">
-            {m.web_access_configuration_no_compatible_services()}
-          </p>
-        {/if}
-      </div>
-    </section>
-  {/each}
-</div>
+        </div>
+        <div class="divide-y border-y">
+          {#each candidates as provider (provider.id)}
+            {@const enabled = ids.includes(provider.id)}
+            {@const orderIndex = ids.indexOf(provider.id)}
+            <div class="flex min-h-14 items-center gap-3 py-2">
+              <Switch
+                bind:checked={() => enabled, () => toggleCapability(provider, isSearch ? 'search' : 'fetch')}
+                disabled={settingsUnavailable || savingSettings}
+                aria-label={m.web_access_use_provider_for_capability({
+                  provider: provider.name,
+                  capability: isSearch ? m.web_access_configuration_web_search() : m.web_access_page_access_label(),
+                })} />
+              <span class="min-w-0 flex-1 truncate text-sm font-medium">{provider.name}</span>
+              {#if enabled}
+                <span class="font-technical text-xs text-muted-foreground tabular-nums">{orderIndex + 1}</span>
+                <Button
+                  size="icon-sm"
+                  variant="ghost"
+                  disabled={settingsUnavailable || savingSettings || orderIndex === 0}
+                  aria-label={m.web_access_configuration_move_value_up({ name: provider.name })}
+                  onclick={() => moveProvider(provider.id, isSearch ? 'search' : 'fetch', -1)}><ArrowUpIcon /></Button>
+                <Button
+                  size="icon-sm"
+                  variant="ghost"
+                  disabled={settingsUnavailable || savingSettings || orderIndex === ids.length - 1}
+                  aria-label={m.web_access_configuration_move_value_down({ name: provider.name })}
+                  onclick={() => moveProvider(provider.id, isSearch ? 'search' : 'fetch', 1)}><ArrowDownIcon /></Button>
+              {/if}
+            </div>
+          {/each}
+          {#if candidates.length === 0}
+            <p class="py-5 text-sm text-muted-foreground">
+              {m.web_access_configuration_no_compatible_services()}
+            </p>
+          {/if}
+        </div>
+      </section>
+    {/each}
+  </div>
+{/if}
 
 <Sheet.Root bind:open={editorOpen}>
   <Sheet.Content side="right" class="route-overlay-content w-full! gap-0 overflow-hidden p-0">
@@ -404,11 +431,11 @@ async function deleteProvider(): Promise<void> {
         <Field.Group>
           <Field.Field size="name">
             <Field.Label for="web-provider-name">{m.common_name()}</Field.Label>
-            <Input id="web-provider-name" bind:value={editorName} required />
+            <Input id="web-provider-name" bind:value={editorName} disabled={savingEditor} required />
           </Field.Field>
           <Field.Field size="select">
             <Field.Label for="web-provider-kind">{m.web_access_configuration_service()}</Field.Label>
-            <Select.Root type="single" bind:value={editorKind} disabled={Boolean(editingProvider)}>
+            <Select.Root type="single" bind:value={editorKind} disabled={savingEditor || Boolean(editingProvider)}>
               <Select.Trigger id="web-provider-kind" class="w-full">{kindLabel(editorKind)}</Select.Trigger>
               <Select.Content
                 ><Select.Group>
@@ -417,7 +444,7 @@ async function deleteProvider(): Promise<void> {
                 </Select.Group></Select.Content>
             </Select.Root>
           </Field.Field>
-          <Field.Field orientation="horizontal" class="rounded-md border p-3">
+          <Field.Field orientation="horizontal">
             <div>
               <Field.Label
                 for="web-provider-use-proxy"
@@ -425,6 +452,7 @@ async function deleteProvider(): Promise<void> {
             </div>
             <Switch
               id="web-provider-use-proxy"
+              disabled={savingEditor}
               checked={editorUseProxy}
               onCheckedChange={(checked) => (editorUseProxy = checked)} />
           </Field.Field>
@@ -436,6 +464,7 @@ async function deleteProvider(): Promise<void> {
                   <div class="flex min-h-12 items-center justify-between gap-4 px-3">
                     <span class="text-sm font-medium">{engine.label}</span>
                     <Switch
+                      disabled={savingEditor}
                       checked={editorLocalEngines[engine.id].enabled}
                       aria-label={engine.label}
                       onCheckedChange={(checked) => (editorLocalEngines[engine.id].enabled = checked)} />
@@ -448,6 +477,7 @@ async function deleteProvider(): Promise<void> {
               <Field.Label for="web-provider-secret">{m.common_api_key()}</Field.Label>
               <SecretInput
                 id="web-provider-secret"
+                disabled={savingEditor}
                 resetKey={`${editorOpen}:${editingProvider?.id ?? 'new'}:${editorKind}`}
                 autocomplete="new-password"
                 bind:value={editorSecret}
@@ -455,10 +485,13 @@ async function deleteProvider(): Promise<void> {
             </Field.Field>
           {/if}
         </Field.Group>
+        {#if editorError}<Alert.Root variant="destructive"
+            ><Alert.Description>{editorError}</Alert.Description></Alert.Root
+          >{/if}
       </div>
       <Sheet.Footer class="route-overlay-footer">
         <Sheet.Close type="button" class={buttonVariants({ variant: 'outline' })}>{m.common_cancel()}</Sheet.Close>
-        <Button type="submit" disabled={savingEditor}>
+        <Button type="submit" disabled={savingEditor} aria-busy={savingEditor}>
           {#if savingEditor}<Spinner data-icon="inline-start" />{/if}{m.web_access_configuration_save_service()}
         </Button>
       </Sheet.Footer>

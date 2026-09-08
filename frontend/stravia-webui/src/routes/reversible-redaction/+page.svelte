@@ -17,7 +17,6 @@ import { Button } from '$lib/components/ui/button'
 import * as Empty from '$lib/components/ui/empty'
 import * as Field from '$lib/components/ui/field'
 import { renderSnippet } from '@tanstack/svelte-table'
-import ShieldCheckIcon from '@lucide/svelte/icons/shield-check'
 import ListFilterIcon from '@lucide/svelte/icons/list-filter'
 import HistoryIcon from '@lucide/svelte/icons/history'
 import ScanTextIcon from '@lucide/svelte/icons/scan-text'
@@ -41,12 +40,9 @@ const rulesQuery = createQuery(() => ({
   queryKey: ['credential-protection-rules'],
   queryFn: admin.credentialProtection.rules,
 }))
-let draft = $state<boolean>()
 let saving = $state(false)
 let saveError = $state('')
 const storedEnabled = $derived(settingQuery.data === 'true')
-const enabled = $derived(draft ?? storedEnabled)
-const canSave = $derived(settingQuery.isSuccess && !saving && enabled !== storedEnabled)
 let tab = $state('rules')
 let ruleOpen = $state(false)
 let detailsOpen = $state(false)
@@ -103,15 +99,14 @@ onMount(() => {
   void loadDiscoveries(false)
 })
 
-async function save(): Promise<void> {
-  if (!canSave) return
+async function setEnabled(enabled: boolean): Promise<void> {
+  if (!settingQuery.isSuccess || saving || enabled === storedEnabled) return
   const value = enabled ? 'true' : 'false'
   saving = true
   saveError = ''
   try {
     await admin.settings.set(settingKey, value)
     queryClient.setQueryData(queryKey, value)
-    draft = undefined
     toast.success(m.reversible_redaction_saved())
   } catch (error) {
     saveError = localizeBackendErrorMessage(error)
@@ -255,42 +250,35 @@ function selectMatch(match: CredentialMatch): void {
     description={m.credential_protection_workspace_summary()}
     actions={pageActions} />
 
-  <section class="protection-control" aria-labelledby="redaction-setting-title">
-    <div class="protection-control-main">
-      <div class="protection-emblem" data-enabled={settingQuery.isSuccess && storedEnabled}>
-        <ShieldCheckIcon aria-hidden="true" />
-      </div>
-      <div class="flex min-w-0 flex-1 flex-col gap-1">
-        <label id="redaction-setting-title" for="reversible-redaction-enabled" class="font-medium">
-          {m.reversible_redaction_enable()}
-        </label>
-        <p id="redaction-setting-description" class="text-sm text-muted-foreground">
+  <section class="route-section" aria-labelledby="redaction-setting-title">
+    <div class="route-section-header">
+      <div class="min-w-0 flex-1 basis-64">
+        <h2 id="redaction-setting-title" class="route-section-title">{m.reversible_redaction_enable()}</h2>
+        <p id="redaction-setting-description" class="route-section-description">
           {m.credential_protection_scope_brief()}
         </p>
+        <p id="redaction-setting-immediate" class="route-section-description">{m.common_settings_immediate()}</p>
       </div>
-      <Switch
-        id="reversible-redaction-enabled"
-        checked={enabled}
-        onCheckedChange={(checked) => {
-          draft = checked
-        }}
-        disabled={!settingQuery.isSuccess || saving}
-        aria-describedby="redaction-setting-description" />
-      <Button disabled={!canSave} aria-busy={saving} onclick={() => void save()}>
-        {#if saving}<Spinner data-icon="inline-start" />{/if}{m.common_save_settings()}
-      </Button>
+      <div class="flex shrink-0 items-center gap-3">
+        {#if saving}<Spinner />{/if}
+        <Switch
+          id="reversible-redaction-enabled"
+          bind:checked={() => storedEnabled, (checked) => void setEnabled(checked)}
+          disabled={!settingQuery.isSuccess || saving}
+          aria-busy={saving}
+          aria-labelledby="redaction-setting-title"
+          aria-describedby="redaction-setting-description redaction-setting-immediate" />
+      </div>
     </div>
-    {#if !settingQuery.isSuccess || enabled !== storedEnabled || saveError}
-      <div class="protection-feedback">
+    {#if !settingQuery.isSuccess || saveError}
+      <div class="flex flex-col gap-3">
         {#if settingQuery.isPending}
-          <p class="text-sm text-muted-foreground" role="status">{m.reversible_redaction_loading()}</p>
+          <p class="text-sm text-muted-foreground" role="status">{m.common_settings_loading()}</p>
         {:else if settingQuery.isError}
           <Alert.Root variant="destructive"
             ><Alert.Description>{m.reversible_redaction_load_failed()}</Alert.Description></Alert.Root>
           <Button class="self-start" variant="outline" onclick={() => void settingQuery.refetch()}
             >{m.common_retry()}</Button>
-        {:else if enabled !== storedEnabled}
-          <p class="text-sm text-muted-foreground" role="status">{m.credential_protection_unsaved()}</p>
         {/if}
         {#if saveError}<Alert.Root variant="destructive"><Alert.Description>{saveError}</Alert.Description></Alert.Root
           >{/if}
@@ -299,20 +287,14 @@ function selectMatch(match: CredentialMatch): void {
   </section>
 
   <Tabs.Root bind:value={tab} class="min-w-0 gap-0">
-    <div class="workspace-tabs">
-      <Tabs.List
-        class="group-data-horizontal/tabs:h-auto min-h-10 flex-wrap justify-start gap-y-2"
-        aria-label={m.reversible_redaction_title()}>
-        <Tabs.Trigger value="rules" class="h-10 flex-none"
-          ><ListFilterIcon />{m.credential_protection_catalog_title()}
-          {#if rulesQuery.isSuccess}<Badge variant="secondary">{formatNumber(rules.length)}</Badge>{/if}
-        </Tabs.Trigger>
-        <Tabs.Trigger value="records" class="h-10 flex-none"
-          ><HistoryIcon />{m.credential_protection_records_tab()}</Tabs.Trigger>
-        <Tabs.Trigger value="test" class="h-10 flex-none"
-          ><ScanTextIcon />{m.credential_protection_test_tab()}</Tabs.Trigger>
-      </Tabs.List>
-    </div>
+    <Tabs.List aria-label={m.reversible_redaction_title()}>
+      <Tabs.Trigger value="rules"
+        ><ListFilterIcon />{m.credential_protection_catalog_title()}
+        {#if rulesQuery.isSuccess}<Badge variant="secondary">{formatNumber(rules.length)}</Badge>{/if}
+      </Tabs.Trigger>
+      <Tabs.Trigger value="records"><HistoryIcon />{m.credential_protection_records_tab()}</Tabs.Trigger>
+      <Tabs.Trigger value="test"><ScanTextIcon />{m.credential_protection_test_tab()}</Tabs.Trigger>
+    </Tabs.List>
 
     <Tabs.Content value="rules" class="min-w-0">
       <section class="workspace-panel" aria-labelledby="credential-rules-title">
@@ -363,12 +345,12 @@ function selectMatch(match: CredentialMatch): void {
 
     <Tabs.Content value="records" class="min-w-0">
       <section class="workspace-panel" aria-labelledby="credential-discoveries-title">
-        <div class="panel-heading">
+        <div class="route-section-header">
           <div>
-            <h2 id="credential-discoveries-title" class="route-section-title">
+            <h2 id="credential-discoveries-title" class="sr-only">
               {m.credential_protection_discoveries_title()}
             </h2>
-            <p class="mt-1 text-sm text-muted-foreground">{m.credential_protection_records_brief()}</p>
+            <p class="route-section-description">{m.credential_protection_records_brief()}</p>
           </div>
           <Button variant="outline" size="sm" disabled={discoveriesLoading} onclick={() => void loadDiscoveries(false)}>
             <RefreshCwIcon data-icon="inline-start" />{m.credential_protection_discoveries_refresh()}
@@ -468,12 +450,7 @@ function selectMatch(match: CredentialMatch): void {
 
     <Tabs.Content value="test" class="min-w-0">
       <section class="workspace-panel" aria-labelledby="credential-tester-title">
-        <div class="panel-heading">
-          <div>
-            <h2 id="credential-tester-title" class="route-section-title">{m.credential_protection_tester_title()}</h2>
-            <p class="mt-1 text-sm text-muted-foreground">{m.credential_protection_test_brief()}</p>
-          </div>
-        </div>
+        <h2 id="credential-tester-title" class="sr-only">{m.credential_protection_tester_title()}</h2>
         <div class="test-workspace">
           <div class="test-input-pane">
             <form
@@ -731,53 +708,9 @@ function selectMatch(match: CredentialMatch): void {
   margin-inline: auto;
   width: 100%;
 }
-.protection-control {
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--card);
-}
-.protection-control-main {
-  display: flex;
-  align-items: center;
-  gap: 1rem;
-  padding: 1rem 1.25rem;
-}
-.protection-emblem {
-  display: grid;
-  place-items: center;
-  width: 2.75rem;
-  height: 2.75rem;
-  flex: none;
-  border-radius: var(--radius);
-  background: var(--muted);
-  color: var(--muted-foreground);
-}
-.protection-emblem[data-enabled='true'] {
-  background: color-mix(in oklch, var(--success) 12%, var(--card));
-  color: var(--success);
-}
-.protection-feedback {
-  border-top: 1px solid var(--border);
-  padding: 0.5rem 1.25rem;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.75rem;
-}
-.workspace-tabs {
-  display: flex;
-  padding-block: 0.25rem;
-}
 .workspace-panel {
   min-width: 0;
   padding-top: 1.5rem;
-}
-.panel-heading {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 1rem;
-  margin-bottom: 1.25rem;
 }
 .rule-link {
   display: flex;
@@ -841,12 +774,12 @@ function selectMatch(match: CredentialMatch): void {
   background: var(--card);
 }
 .test-input-pane {
-  padding: 1.25rem;
+  padding: 1rem;
   min-width: 0;
 }
 .test-results-pane {
   min-width: 0;
-  padding: 1.25rem;
+  padding: 1rem;
   border-left: 1px solid var(--border);
   background: color-mix(in oklch, var(--muted) 35%, var(--card));
 }
@@ -861,29 +794,6 @@ function selectMatch(match: CredentialMatch): void {
   .test-results-pane {
     border-left: 0;
     border-top: 1px solid var(--border);
-  }
-  .protection-control-main {
-    flex-wrap: wrap;
-  }
-  .protection-control-main > :global([data-slot='button']) {
-    margin-left: auto;
-  }
-  .protection-emblem {
-    display: none;
-  }
-  .panel-heading {
-    align-items: flex-start;
-    flex-wrap: wrap;
-  }
-}
-@container route-page (max-width: 32rem) {
-  .protection-control-main {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-  }
-  .protection-control-main > :global([data-slot='button']) {
-    grid-column: 1 / -1;
-    width: 100%;
   }
 }
 </style>
