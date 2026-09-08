@@ -108,6 +108,9 @@ impl Vendor for CloudflareAiGatewayVendor {
     ) -> anyhow::Result<crate::provider::vendor_ext::ConstructedRequest> {
         use crate::provider::vendor_ext::{ConstructedRequest, RequestPurpose};
         let url = match purpose {
+            RequestPurpose::Compact { .. } => {
+                anyhow::bail!("Vendor does not support standalone compaction")
+            }
             RequestPurpose::Models { endpoint } => endpoint.to_string(),
             RequestPurpose::Inference {
                 base_url,

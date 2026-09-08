@@ -125,7 +125,7 @@ tasks:
     desc: Run the SQLite storage E2E tests.
     deps: [build:server:debug]
     cmds:
-      - uv run --locked --group test python -m pytest tests/e2e/storage/test_storage.py -q -m storage -k sqlite
+      - uv run --locked --group test python -m pytest tests/e2e/storage -q -m storage -k sqlite
 
   test:e2e:storage:postgres:
     desc: Run the PostgreSQL storage E2E tests.
@@ -133,7 +133,7 @@ tasks:
       vars: [DB_URL]
     deps: [build:server:debug]
     cmds:
-      - uv run --locked --group test python -m pytest tests/e2e/storage/test_storage.py -q -m storage -k postgres
+      - uv run --locked --group test python -m pytest tests/e2e/storage -q -m storage -k postgres
 
   test:e2e:web:
     desc: Run Chromium WebUI E2E tests.

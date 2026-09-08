@@ -782,6 +782,12 @@ impl AgentRunner {
             };
             match event.map_err(|error| AgentRunError::new(error.code, error.message))? {
                 CanonicalEvent::Delta(_) => {}
+                CanonicalEvent::Compacted(_) => {
+                    return Err(AgentRunError::new(
+                        "unexpected_compaction_result",
+                        "Agent generation received a standalone compaction result",
+                    ));
+                }
                 CanonicalEvent::Completed(response) => {
                     return Ok(*response);
                 }

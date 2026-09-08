@@ -1,5 +1,5 @@
 use serde_json::Value;
-use sqlx::{PgPool, Row, SqlitePool};
+use sqlx::{Connection, PgPool, Row, SqlitePool};
 
 use super::types::{
     ConfirmedUsage, IngressStart, ObservationEvent, RejectedOutcome, RunEvent, RunOutcome,
@@ -32,10 +32,27 @@ impl ObservationStore {
         }
     }
 
+    pub(super) async fn tail_candidates(
+        &self,
+        principal: &str,
+        excluding: &str,
+        now: i64,
+    ) -> anyhow::Result<Vec<(String, String)>> {
+        let limit = (super::tail::MAX_CANDIDATES + 1) as i64;
+        Ok(match self {
+            Self::Sqlite(pool) => sqlx::query_as("SELECT r.id,r.interaction_id FROM inference_run_observations r JOIN interaction_observations i ON i.id=r.interaction_id WHERE i.principal=? AND r.id<>? AND r.generation_node_id IS NOT NULL AND r.expires_at>? AND i.expires_at>? LIMIT ?")
+                .bind(principal).bind(excluding).bind(now).bind(now).bind(limit).fetch_all(pool).await?,
+            Self::Postgres(pool) => sqlx::query_as("SELECT r.id,r.interaction_id FROM inference_run_observations r JOIN interaction_observations i ON i.id=r.interaction_id WHERE i.principal=$1 AND r.id<>$2 AND r.generation_node_id IS NOT NULL AND r.expires_at>$3 AND i.expires_at>$3 LIMIT $4")
+                .bind(principal).bind(excluding).bind(now).bind(limit).fetch_all(pool).await?,
+        })
+    }
+
     pub async fn admit(&self, admission: Admission<'_>) -> anyhow::Result<ObservationEvent> {
         match self {
             Self::Sqlite(pool) => {
-                let mut tx = pool.begin().await?;
+                // Parent interruption reads before writing; reserve the writer before taking a WAL snapshot.
+                let mut connection = pool.acquire().await?;
+                let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
                 if let Some(parent) = admission.parent_interaction_id {
                     interrupt_predecessors_sqlite(&mut tx, parent, admission.now).await?;
                 }
@@ -241,7 +258,7 @@ impl ObservationStore {
         now: i64,
         expires_at: i64,
     ) -> anyhow::Result<Option<ObservationEvent>> {
-        let payload = match run_event {
+        let mut payload = match run_event {
             RunEvent::Checkpoint {
                 stage,
                 model_turn_id,
@@ -264,6 +281,27 @@ impl ObservationStore {
             }
             _ => serde_json::to_value(run_event)?,
         };
+        if let RunEvent::NativeCompactionAssociated {
+            source_generation_id,
+            source_operation_id,
+            ..
+        } = run_event
+        {
+            let source = if let Some(generation) = source_generation_id {
+                self.generation_parent(generation).await?
+            } else if let Some(operation) = source_operation_id {
+                match self {
+                    Self::Sqlite(pool) => sqlx::query_as("SELECT e.interaction_id,e.run_id FROM observation_events e JOIN inference_run_observations r ON r.id=e.run_id WHERE e.kind='compaction_operation' AND json_extract(e.payload,'$.operation_id')=? AND r.expires_at>? ORDER BY e.sequence LIMIT 1").bind(operation).bind(now).fetch_optional(pool).await?,
+                    Self::Postgres(pool) => sqlx::query_as("SELECT e.interaction_id,e.run_id FROM observation_events e JOIN inference_run_observations r ON r.id=e.run_id WHERE e.kind='compaction_operation' AND e.payload->>'operation_id'=$1 AND r.expires_at>$2 ORDER BY e.sequence LIMIT 1").bind(operation).bind(now).fetch_optional(pool).await?,
+                }
+            } else {
+                None
+            };
+            if let Some((interaction, run)) = source {
+                payload["source_interaction_id"] = Value::String(interaction);
+                payload["source_run_id"] = Value::String(run);
+            }
+        }
         let kind = payload
             .get("kind")
             .and_then(Value::as_str)

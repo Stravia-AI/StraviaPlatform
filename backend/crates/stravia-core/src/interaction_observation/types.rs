@@ -57,8 +57,51 @@ pub(crate) struct RunOutcome {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CompactionMode {
+    Standalone,
+    Inline,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CompactionPhase {
+    Started,
+    Registered,
+    Published,
+    DeliveryUnconfirmed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum RunEvent {
+    CompactionOperation {
+        operation_id: String,
+        model_turn_id: String,
+        attempt_id: Option<String>,
+        mode: CompactionMode,
+        phase: CompactionPhase,
+        source_generation_id: Option<String>,
+        source_operation_id: Option<String>,
+        registration_id: Option<String>,
+        duration_ms: Option<i64>,
+        error_code: Option<String>,
+    },
+    NativeCompactionAssociated {
+        source_generation_id: Option<String>,
+        source_operation_id: Option<String>,
+        registration_id: String,
+    },
+    RetainedTailAssociated {
+        source_run_id: Option<String>,
+        source_interaction_id: Option<String>,
+        status: String,
+        matched_units: usize,
+        matched_bytes: usize,
+        input_start: Option<usize>,
+        candidate_count: usize,
+    },
     GenerationAssociated {
         root_id: String,
         parent_id: Option<String>,
@@ -174,6 +217,9 @@ pub struct ForestQuery {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InteractionSummary {
+    /// Durable diagnostic/native metadata, never an execution parent override.
+    #[serde(default)]
+    pub context_events: Vec<ObservationEvent>,
     pub id: String,
     pub root_id: String,
     pub parent_interaction_id: Option<String>,

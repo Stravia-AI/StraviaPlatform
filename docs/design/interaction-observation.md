@@ -77,6 +77,29 @@ Observation 写入、SSE、Debug 分段文件、容量统计或导出失败不�
 
 ## 4. 模块与 seam
 
+### 原生压缩与保留尾部关联
+
+`compaction_operation` 保存 standalone/inline、所属 Model Turn、来源、登记 ID、阶段、耗时与错误分类；所选 Target/Provider 沿用 Target attempt，usage 仅沿用每 attempt 一次的 `usage_confirmed`。Standalone 是真实操作，不落空 Generation；回放旧 state 不再登记压缩操作。
+
+`native_compaction_associated` 表示原生状态跨越已登记边界，`retained_tail_associated` 仅表示客户端幸存上下文的诊断推断。两者与既有确定 Generation 关系在 `context_events`、forest/detail、SSE、详情及画布中分开；推断不改变父边、Target Continuation、有效输入或新 User 的 Interaction 分组。来源卡片已清理时不从核心存储复活。
+
+尾部索引只接收实际收到的规范化 client-shaped 输入和已交付公开输出。指纹仅筛选候选，完整语义再次核验；匹配旧历史后缀与新请求任意连续区间。只有顶层 leading system/developer 可排除，内部差异不能删除后拼接。完整工具 ID、参数、结果、角色、媒体与控制保持语义身份。
+
+隔离样本校准采用至少两个完整语义单元、256 canonical UTF-8 bytes、64 assistant UTF-8 bytes，并额外要求完整 User/Assistant 交互或闭合工具关系。短应答样本为 193/3 bytes，泛化短交互 220/30 bytes；具体英文任务 587/240 bytes、具体中文任务 567/213 bytes 达到长度门槛。长度达标不能替代唯一性、角色和工具闭合。
+
+校准原文如下；只校准长度门槛，不将文本内容当成运行时特例。
+
+|样本|User|Assistant|
+|---|---|---|
+|短应答|Please continue.|OK.|
+|泛化短交互|Can you help me?|Yes, I can help you with that.|
+|具体英文任务|Inspect the importer failure: invoice INV-2048 has a duplicated ledger entry after the retry. Preserve its original external reference and identify the transaction boundary.|The importer committed the ledger row before recording the external reference. Move both writes into the same database transaction, and keep the unique external reference constraint so a repeated invoice cannot create a second ledger entry.|
+|具体中文任务|请检查订单导入失败的原因：订单编号为订单二零四八，重试后出现了重复的账目记录。请保留原始外部引用，并找出事务边界的问题。|导入器在记录外部引用之前提交了账目行。应该把这两个写入放进同一个数据库事务，并保留外部引用的唯一约束，以防止重复提交的订单创建第二条账目记录。|
+
+重现时分别构造纯文本 User、Assistant `AiItem`，累加 `canonical::item_value` 返回的各个语义单元经 `serde_json::to_vec` 编码后的字节数。纯文本 User 单元包含 `role`、单元素 `content` 数组及值为 null 的 `tool_calls`、`tool_call_id`、`artifact_references`；Assistant 单元包含 `role` 和单个文本 `content` 对象。第二个数值是 Assistant 原文的 UTF-8 长度，中文不转义为 ASCII。资源预算用于限制候选集合、序列化和核验成本，不是从这些小样本推断出的性能保证；截断搜索必须保持未关联。
+
+每窗口最多 512 单元/512 KiB，进程索引最多 128 候选/16 MiB，单次最多 65,536 单元检查和 8 MiB 内容核验。超过资源预算返回 `resource_limit`；保留候选未完整索引（包括冷启动）返回 `index_unavailable`；多个来源成立返回 `ambiguous`。这些情况不影响正常推理。敏感比对内容只在易失索引中保存，隐藏 reasoning/native state 使用不匹配边界；持久 Observation 只保存来源与匹配元数据。核心原生登记的重启保证与诊断索引可用性不是同一承诺。
+
 `stravia-core` 新增 crate-private 深模块 `interaction_observation/`。外部 seam 保持小：
 
 ```text

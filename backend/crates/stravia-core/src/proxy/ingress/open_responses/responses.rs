@@ -112,6 +112,7 @@ pub async fn handler(
 
 pub async fn compact(
     State(gw): State<Gateway>,
+    mut ctx: axum::extract::Extension<RequestContext>,
     headers: HeaderMap,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
@@ -130,12 +131,67 @@ pub async fn compact(
             message,
         );
     }
-    protocol_error(
-        StatusCode::BAD_REQUEST,
-        "unsupported_feature",
-        Some("compact"),
-        "Response compaction is not supported.",
+    ctx.ingress_protocol = OPEN_RESPONSES_2026_04_24;
+    ctx.extensions
+        .insert(crate::model_turn::ModelTurnPurpose::Compact);
+    ctx.extensions
+        .insert(crate::model_turn::CompactRequestRequirements {
+            codex_controls: [
+                "tools",
+                "parallel_tool_calls",
+                "reasoning",
+                "service_tier",
+                "text",
+                "access_programs",
+            ]
+            .iter()
+            .any(|field| body.get(*field).is_some()),
+        });
+    let observer = observation::begin(
+        &gw,
+        &ctx,
+        "POST",
+        "/v1/responses/compact",
+        OPEN_RESPONSES_2026_04_24,
+    );
+    let envelope = RawEnvelope::new(
+        Some(body.clone()),
+        std::collections::HashMap::new(),
+        "POST",
+        "/v1/responses/compact",
+    );
+    let pair = ProtocolTransform::global()
+        .bind(OPEN_RESPONSES_2026_04_24, OPEN_RESPONSES_2026_04_24)
+        .expect("registered Responses adapter");
+    let request = match pair.decode_request(body) {
+        Ok(request) => request,
+        Err(error) => {
+            return observation::reject(
+                observer,
+                "decode",
+                "invalid_request",
+                protocol_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request",
+                    None,
+                    error.to_string(),
+                ),
+            );
+        }
+    };
+    normalize_error_response(
+        dispatch_pipeline(
+            gw,
+            observer,
+            headers,
+            envelope,
+            request,
+            OPEN_RESPONSES_2026_04_24,
+            ctx.0,
+        )
+        .await,
     )
+    .await
 }
 
 fn validate_compact_request(body: &Value) -> Result<(), (&'static str, String)> {
@@ -145,6 +201,14 @@ fn validate_compact_request(body: &Value) -> Result<(), (&'static str, String)> 
         "previous_response_id",
         "instructions",
         "prompt_cache_key",
+        "prompt_cache_options",
+        "prompt_cache_retention",
+        "tools",
+        "parallel_tool_calls",
+        "reasoning",
+        "service_tier",
+        "text",
+        "access_programs",
     ];
     let object = body
         .as_object()
@@ -377,6 +441,14 @@ pub(super) async fn normalize_error_response(response: Response) -> Response {
             "item_reference_not_found" => Some("item_reference_not_found"),
             "web_search_unavailable" => Some("web_search_unavailable"),
             "response_in_progress" => Some("response_in_progress"),
+            "compaction_unsupported" => Some("compaction_unsupported"),
+            "compaction_target_mismatch" => Some("compaction_target_mismatch"),
+            "compaction_conflict" => Some("compaction_conflict"),
+            "compaction_unavailable" => Some("compaction_unavailable"),
+            "compaction_storage_failed" => Some("compaction_storage_failed"),
+            "invalid_compaction_state" => Some("invalid_compaction_state"),
+            "invalid_compaction_threshold" => Some("invalid_compaction_threshold"),
+            "invalid_compaction_response" => Some("invalid_compaction_response"),
             _ => None,
         });
     let code = existing_code.unwrap_or(match status {

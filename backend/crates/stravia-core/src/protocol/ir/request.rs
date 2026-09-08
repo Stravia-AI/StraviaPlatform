@@ -37,7 +37,7 @@ pub enum MediaSource {
     /// Inline base64-encoded data.
     Base64 { media_type: String, data: String },
     /// A URL pointing to the media.
-    Url(String),
+    Url(#[serde(with = "url_source")] String),
     /// A provider-side file reference.
     FileId {
         file_id: String,
@@ -58,11 +58,30 @@ pub enum DocumentSource {
     PlainText {
         data: String,
     },
-    Url(String),
+    Url(#[serde(with = "url_source")] String),
     /// Content already stored as content blocks.
     Blocks {
         content: Vec<ContentBlock>,
     },
+}
+
+// Internally tagged variants require an object payload, not a bare URL string.
+mod url_source {
+    use serde::{Deserialize, Deserializer, Serializer, ser::SerializeStruct};
+
+    pub fn serialize<S: Serializer>(url: &str, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut value = serializer.serialize_struct("UrlSource", 1)?;
+        value.serialize_field("url", url)?;
+        value.end()
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+        #[derive(Deserialize)]
+        struct UrlSource {
+            url: String,
+        }
+        Ok(UrlSource::deserialize(deserializer)?.url)
+    }
 }
 
 // ── Content blocks ────────────────────────────────────────────────────────────
@@ -124,6 +143,12 @@ pub enum ContentBlock {
         #[serde(skip_serializing_if = "Option::is_none")]
         encrypted_content: Option<String>,
     },
+    /// Native Responses opaque context state, distinct from protected reasoning.
+    Compaction {
+        encrypted_content: String,
+    },
+    /// Codex remote-v2 request control at its position in the input window.
+    CompactionTrigger {},
     /// Redacted thinking block (Anthropic `RedactedThinkingBlockParam`).
     RedactedThinking {
         data: String,
@@ -340,6 +365,16 @@ impl AiItemStatus {
 }
 
 impl AiItem {
+    pub fn is_compaction(&self) -> bool {
+        matches!(&self.content, MessageContent::Blocks(blocks)
+            if matches!(blocks.as_slice(), [ContentBlock::Compaction { .. }]))
+    }
+
+    pub fn is_compaction_trigger(&self) -> bool {
+        matches!(&self.content, MessageContent::Blocks(blocks)
+            if matches!(blocks.as_slice(), [ContentBlock::CompactionTrigger {}]))
+    }
+
     pub fn id_ref(&self) -> Option<&str> {
         self.meta
             .as_ref()?
@@ -1043,5 +1078,23 @@ impl AiRequest {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DocumentSource, MediaSource};
+
+    #[test]
+    fn media_and_document_urls_survive_ir_serialization() {
+        let url = "https://example.invalid/retained-reference";
+        let media = serde_json::to_value(MediaSource::Url(url.into())).expect("serialize media");
+        let restored: MediaSource = serde_json::from_value(media).expect("restore media");
+        assert!(matches!(restored, MediaSource::Url(value) if value == url));
+
+        let document =
+            serde_json::to_value(DocumentSource::Url(url.into())).expect("serialize document");
+        let restored: DocumentSource = serde_json::from_value(document).expect("restore document");
+        assert!(matches!(restored, DocumentSource::Url(value) if value == url));
     }
 }

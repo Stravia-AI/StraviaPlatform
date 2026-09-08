@@ -57,6 +57,9 @@ fn construct_google_request(
 ) -> anyhow::Result<crate::provider::vendor_ext::ConstructedRequest> {
     use crate::provider::vendor_ext::{ConstructedRequest, RequestPurpose};
     let mut url = match purpose {
+        RequestPurpose::Compact { .. } => {
+            anyhow::bail!("Vendor does not support standalone compaction")
+        }
         RequestPurpose::Models { endpoint } => {
             let url = reqwest::Url::parse(endpoint)?;
             let official_native = url.scheme() == "https"

@@ -251,6 +251,19 @@ impl ReversibleRedaction {
                             Err(error) => Err(error.into()),
                         }
                     }
+                    Some(Ok(CanonicalEvent::Compacted(mut response))) => {
+                        let result = (|| {
+                            state.trace.record(text::restore_compaction(
+                                &mut response,
+                                &state.mappings,
+                            )?)?;
+                            state
+                                .pending
+                                .push_back(Ok(CanonicalEvent::Compacted(response)));
+                            Ok::<_, RedactionError>(())
+                        })();
+                        result.map_err(Into::into)
+                    }
                     Some(Ok(CanonicalEvent::Completed(mut response))) => {
                         let result = (|| {
                             state.trace.observe_provider_response(&response)?;

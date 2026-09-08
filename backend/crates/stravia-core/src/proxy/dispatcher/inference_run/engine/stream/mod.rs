@@ -465,6 +465,15 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                         completed_response = Some(*response);
                         break;
                     }
+                    Ok(CanonicalEvent::Compacted(_)) => {
+                        aborted = true;
+                        preflight_failure = Some(super::model_turn_error_outcome(
+                            crate::model_turn::ModelTurnError::new(
+                                "unexpected_compaction_terminal",
+                                "Generation received a standalone compact result",
+                            ),
+                        ));
+                    }
                     Err(error) => {
                         aborted = true;
                         preflight_failure = Some(super::model_turn_error_outcome(error));
@@ -654,7 +663,6 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                                 hook_leg.run_mut(),
                                 &mut projection,
                                 &mut phase,
-                                completion_context.principal(),
                                 &generation,
                                 fixed_media_plan.as_ref(),
                             )
@@ -988,6 +996,13 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
             }
 
             if terminal_delivered {
+                if let Some(mut terminal) = request_context
+                    .extensions
+                    .get::<super::super::RunTerminalContext>()
+                {
+                    terminal.client_output = response.items.clone();
+                    request_context.extensions.insert(terminal);
+                }
                 if let Some(mut pending) = pending_generation_chain.take() {
                     match pending.persist().await {
                         Ok(()) => {

@@ -268,7 +268,7 @@ pub(super) fn wire_text(value: & $($qualifier)* Value, visit: &mut Visitor<'_>) 
         Value::Array(values) => for value in values { wire_text(value, visit)?; },
         Value::Object(values) => {
             let kind = values.get("type").and_then(Value::as_str).unwrap_or("");
-            if matches!(kind, "image" | "image_url" | "input_image" | "audio" | "input_audio" | "video" | "file" | "input_file" | "redacted_thinking") { return Ok(()); }
+            if matches!(kind, "image" | "image_url" | "input_image" | "audio" | "input_audio" | "video" | "file" | "input_file" | "redacted_thinking" | "compaction" | "compaction_trigger") { return Ok(()); }
             let document = kind == "document";
             let search = kind == "search_result";
             let embedded_resource = kind == "resource";
@@ -322,7 +322,7 @@ pub(super) fn blocks(blocks: & $($qualifier)* [ContentBlock], reject_ambiguous: 
             ContentBlock::CodeExecutionResult { stdout, stderr, .. } => { visit(stdout, None)?; visit(stderr, None)?; }
             ContentBlock::Refusal { refusal } => visit(refusal, None)?,
             ContentBlock::Unknown { raw } => wire_text(raw, visit)?,
-            ContentBlock::Image { .. } | ContentBlock::Audio { .. } | ContentBlock::File { .. } | ContentBlock::Video { .. } | ContentBlock::RedactedThinking { .. } | ContentBlock::ContainerUpload { .. } => {}
+            ContentBlock::Image { .. } | ContentBlock::Audio { .. } | ContentBlock::File { .. } | ContentBlock::Video { .. } | ContentBlock::RedactedThinking { .. } | ContentBlock::Compaction { .. } | ContentBlock::CompactionTrigger {} | ContentBlock::ContainerUpload { .. } => {}
         }
     }
     Ok(())
@@ -604,6 +604,25 @@ pub(super) fn restore_unknown(
         *raw = serde_json::to_string(&value).map_err(|_| RedactionError::InvalidText)?;
     }
     Ok(true)
+}
+
+pub(super) fn restore_compaction(
+    value: &mut crate::protocol::ir::NativeCompactionResponse,
+    mappings: &[Mapping],
+) -> Result<Vec<String>, RedactionError> {
+    let mut used = BTreeSet::new();
+    for item in &mut value.items {
+        restore_item(item, mappings, &mut used)?;
+    }
+    if let Some(output) = value.wire.get_mut("output").and_then(Value::as_array_mut) {
+        for item in output {
+            write_surface::wire_text(item, &mut |text, _| {
+                *text = replace(text, mappings, true, &mut used);
+                Ok(())
+            })?;
+        }
+    }
+    Ok(used.into_iter().collect())
 }
 
 pub fn restore_response(

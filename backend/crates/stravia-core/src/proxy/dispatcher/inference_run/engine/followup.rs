@@ -42,7 +42,6 @@ pub(super) async fn acquire_followup_model_turn(
     inference_run: &mut crate::hook::InferenceRun,
     projection: &mut ClientProjectionSession,
     phase: &mut PhaseTracker,
-    principal: &crate::hook::Principal,
     generation: &GenerationChainRun,
     fixed_media_plan: Option<&crate::protocol::ir::request::MediaRoutingPlan>,
 ) -> Result<FollowupModelTurn, RoundOutcome> {
@@ -158,7 +157,7 @@ pub(super) async fn acquire_followup_model_turn(
         request,
         request_context,
         inference_run,
-        principal,
+        generation,
     )
     .await?;
     *request = effective_request;

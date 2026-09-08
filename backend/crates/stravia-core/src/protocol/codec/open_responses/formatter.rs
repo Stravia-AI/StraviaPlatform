@@ -19,6 +19,10 @@ impl ResponsesResponseFormatter {
         let mut output: Vec<Value> = Vec::new();
 
         for item in &resp.items {
+            if let Some(native) = super::native_compaction_item(item) {
+                output.push(native);
+                continue;
+            }
             if item.role == Role::Assistant
                 && item.tool_calls.is_none()
                 && let Some(content) = wire_message_content(item)
@@ -33,9 +37,11 @@ impl ResponsesResponseFormatter {
                 if let Some(phase) = item.meta.as_ref().and_then(|meta| meta.get("phase")) {
                     message["phase"] = phase.clone();
                 }
+                super::encoder::insert_item_metadata(&mut message, item, true);
                 output.push(message);
                 continue;
             }
+            let output_start = output.len();
             if let Some((summary, content, signature)) = item.reasoning_ref() {
                 let mut reasoning = serde_json::json!({
                     "type": "reasoning",
@@ -103,6 +109,9 @@ impl ResponsesResponseFormatter {
                     output.len(),
                     item.id_ref(),
                 ));
+            }
+            if output.len() > output_start {
+                super::encoder::insert_item_metadata(&mut output[output_start], item, false);
             }
         }
 

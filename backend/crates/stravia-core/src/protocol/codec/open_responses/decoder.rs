@@ -276,6 +276,33 @@ fn optional_u32(obj: &serde_json::Map<String, Value>, field: &str) -> Result<Opt
 }
 
 fn validate_field_types(obj: &serde_json::Map<String, Value>) -> Result<()> {
+    if let Some(control) = obj
+        .get("context_management")
+        .filter(|value| !value.is_null())
+    {
+        let controls = control
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("context_management must be an array or null"))?;
+        for control in controls {
+            let object = control
+                .as_object()
+                .ok_or_else(|| anyhow::anyhow!("context_management entry must be an object"))?;
+            if object
+                .get("type")
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty)
+            {
+                anyhow::bail!("context_management entry requires a type");
+            }
+            if object.get("type").and_then(Value::as_str) == Some("compaction")
+                && object
+                    .get("compact_threshold")
+                    .is_some_and(|value| value.as_i64().is_none_or(|threshold| threshold <= 0))
+            {
+                anyhow::bail!("compact_threshold must be a positive integer");
+            }
+        }
+    }
     for field in ["stream", "background", "store", "parallel_tool_calls"] {
         if let Some(value) = obj.get(field)
             && !value.is_null()
@@ -473,7 +500,38 @@ fn is_item_reference(item: &Value) -> bool {
     }
 }
 
-fn set_input_graph_metadata(item: &mut AiItem, wire: &Value) {
+pub(super) fn set_input_graph_metadata(item: &mut AiItem, wire: &Value) {
+    if !item.is_compaction() && !item.is_compaction_trigger() {
+        let extras: serde_json::Map<String, Value> = wire
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter(|(key, _)| {
+                !matches!(
+                    key.as_str(),
+                    "type"
+                        | "id"
+                        | "status"
+                        | "role"
+                        | "content"
+                        | "summary"
+                        | "encrypted_content"
+                        | "call_id"
+                        | "name"
+                        | "arguments"
+                        | "output"
+                        | "phase"
+                )
+            })
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        if !extras.is_empty() {
+            let meta = item.meta.get_or_insert_with(|| serde_json::json!({}));
+            if let Some(meta) = meta.as_object_mut() {
+                meta.insert("__open_responses_item_fields".into(), Value::Object(extras));
+            }
+        }
+    }
     let id = wire
         .get("id")
         .and_then(Value::as_str)
@@ -510,6 +568,37 @@ pub(crate) fn decode_input_item(item: &Value) -> Result<Option<AiItem>> {
         .ok_or_else(|| anyhow::anyhow!("input item must be an object"))?;
 
     match item_type {
+        "compaction" | "compaction_trigger" => {
+            let block = if item_type == "compaction" {
+                let encrypted_content = item
+                    .get("encrypted_content")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("compaction requires non-empty encrypted_content")
+                    })?;
+                ContentBlock::Compaction {
+                    encrypted_content: encrypted_content.to_owned(),
+                }
+            } else {
+                ContentBlock::CompactionTrigger {}
+            };
+            if item
+                .get("id")
+                .is_some_and(|id| !id.is_null() && id.as_str().is_none_or(str::is_empty))
+            {
+                anyhow::bail!("native compaction item id must be a non-empty string or null");
+            }
+            let mut canonical = AiItem {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![block]),
+                tool_calls: None,
+                tool_call_id: None,
+                meta: Some(serde_json::json!({"__open_responses_item": item})),
+            };
+            set_input_graph_metadata(&mut canonical, item);
+            Ok(Some(canonical))
+        }
         "item_reference" => {
             let id = item
                 .get("id")

@@ -52,6 +52,55 @@ pub(super) fn validate_extension_item(
     Ok(())
 }
 
+/// Render only typed native controls/state through the controlled same-protocol bag.
+/// Canonical state wins over the stored wire snapshot, preventing stale ciphertext replay.
+pub(crate) fn native_compaction_item(
+    item: &crate::protocol::ir::AiItem,
+) -> Option<serde_json::Value> {
+    use crate::protocol::ir::{ContentBlock, MessageContent};
+    let MessageContent::Blocks(blocks) = &item.content else {
+        return None;
+    };
+    let (kind, encrypted_content) = match blocks.as_slice() {
+        [ContentBlock::Compaction { encrypted_content }] => ("compaction", Some(encrypted_content)),
+        [ContentBlock::CompactionTrigger {}] => ("compaction_trigger", None),
+        _ => return None,
+    };
+    let mut wire = item
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get("__open_responses_item"))
+        .and_then(serde_json::Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    wire.insert("type".into(), kind.into());
+    if let Some(encrypted_content) = encrypted_content {
+        wire.insert("encrypted_content".into(), encrypted_content.clone().into());
+    }
+    if let Some(id) = item.id_ref() {
+        wire.insert("id".into(), id.into());
+    }
+    Some(serde_json::Value::Object(wire))
+}
+
+/// OpenAI server-side compaction permits dropping input/output before the latest
+/// newly emitted state (https://developers.openai.com/api/docs/guides/compaction).
+/// Callers supply registration receipts: replayed input and standalone windows
+/// must never activate this rule merely because they contain encrypted content.
+pub(crate) fn inline_compaction_boundary(
+    items: &[crate::protocol::ir::AiItem],
+    fresh_states: &[crate::protocol::ir::AiItem],
+) -> Option<usize> {
+    items.iter().rposition(|item| {
+        item.is_compaction()
+            && native_compaction_item(item).is_some_and(|wire| {
+                fresh_states
+                    .iter()
+                    .any(|state| native_compaction_item(state).as_ref() == Some(&wire))
+            })
+    })
+}
+
 fn is_namespaced_extension(value: &str) -> bool {
     value.contains(':')
 }

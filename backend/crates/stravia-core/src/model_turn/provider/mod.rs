@@ -415,6 +415,15 @@ impl ProviderAdapter {
             .await
     }
 
+    pub(crate) async fn build_compact_request(
+        &self,
+        request: &mut AiRequest,
+    ) -> Result<OutboundRequest, GatewayError> {
+        self.vendor
+            .build_compact_request(request, &self.provider_context())
+            .await
+    }
+
     async fn refresh_auth_on_unauthorized(
         &self,
         outbound: &mut OutboundRequest,

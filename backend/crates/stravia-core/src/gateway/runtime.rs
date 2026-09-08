@@ -216,13 +216,24 @@ impl Gateway {
         } else {
             (None, None)
         };
+        let compaction = if let Some(pool) = history_sqlite_pool.as_ref() {
+            crate::compaction::Compaction::sqlite(pool.clone())
+        } else {
+            crate::compaction::Compaction::postgres(
+                postgres_pool
+                    .as_ref()
+                    .expect("Gateway requires a SQL history store")
+                    .clone(),
+            )
+        };
         let generation_chains = generation_chain::GenerationChain::from_turn_chain(
             Arc::clone(&turn_chains),
             Duration::from_secs(7 * 24 * 60 * 60),
             artifact_store.clone(),
         )
         .with_history_markers(Arc::clone(&history_markers))
-        .with_redaction_mappings(Arc::clone(&redaction.mappings));
+        .with_redaction_mappings(Arc::clone(&redaction.mappings))
+        .with_compaction(compaction.clone());
         let allowance_samples = match storage_kind {
             RuntimeStorageKind::Memory => admin::provider_allowance::AllowanceSampleStore::memory(),
             RuntimeStorageKind::Sqlite => admin::provider_allowance::AllowanceSampleStore::sqlite(
@@ -276,6 +287,7 @@ impl Gateway {
             redaction,
             turn_chains,
             generation_chains,
+            compaction,
             model_turn: model_turn::unreachable_executor(),
             web_access_run_snapshots: web_access::WebAccessRunSnapshotStore::default(),
             web_search_runner_state: Arc::new(tokio::sync::RwLock::new(None)),
@@ -445,6 +457,7 @@ impl Gateway {
 
         {
             let turn_chains = Arc::clone(&gw.turn_chains);
+            let compaction = gw.compaction.clone();
             let history_markers = Arc::clone(&gw.history_markers);
             let mappings = Arc::clone(&gw.redaction.mappings);
             let artifact_store = gw.artifact_store.clone();
@@ -466,6 +479,13 @@ impl Gateway {
                         tracing::warn!("observation retention cleanup incomplete");
                     }
 
+                    let compaction_result = tokio::select! {
+                        _ = cancellation.cancelled() => return,
+                        result = compaction.cleanup_expired() => result,
+                    };
+                    if compaction_result.is_err() {
+                        tracing::warn!("native compaction retention cleanup failed");
+                    }
                     let turn_result = tokio::select! {
                         _ = cancellation.cancelled() => return,
                         result = turn_chains.sweep_expired() => result,

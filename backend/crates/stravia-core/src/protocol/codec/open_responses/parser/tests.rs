@@ -56,6 +56,132 @@ fn sse_data(data: &str) -> String {
     format!("data: {data}\n\n")
 }
 #[test]
+fn standalone_compact_window_replays_native_identity_without_generation_coercion() {
+    let native = serde_json::json!({
+        "type": "compaction", "id": "cmp_original", "encrypted_content": "opaque-state",
+        "created_at": 1730000000, "rolling_state": {"version": 2, "scope": "account"}
+    });
+    let wire = serde_json::json!({
+        "id": "cmp_response", "object": "response.compaction", "created_at": 1730000001,
+        "output": [
+            {"type": "message", "role": "user", "content": "retained", "retained_context": {"scope": "window"}},
+            native.clone(),
+            {"type": "function_call", "call_id": "call_1", "name": "read", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "call_1", "output": "done"}
+        ],
+        "rolling_window": {"boundary": "provider-owned"}
+    });
+    let compact = parse_compaction_response(&wire).unwrap();
+    assert_eq!(compact.wire, wire);
+    assert!(compact.usage.is_none());
+    assert!(
+        ResponsesResponseParser
+            .parse_response(wire.clone())
+            .is_err()
+    );
+    let request = super::super::decoder::ResponsesDecoder
+        .decode_request(serde_json::json!({
+            "model": "codex", "input": wire["output"],
+            "context_management": []
+        }))
+        .unwrap();
+    let (replay, _) = super::super::encoder::ResponsesEncoder
+        .encode_request(&request)
+        .unwrap();
+    assert_eq!(
+        replay["input"][0]["retained_context"],
+        wire["output"][0]["retained_context"]
+    );
+    assert_eq!(replay["input"][1], native);
+    assert_eq!(replay["input"][2]["call_id"], "call_1");
+    assert_eq!(replay["input"][3]["output"], "done");
+    assert_eq!(replay["context_management"], serde_json::json!([]));
+}
+
+#[test]
+fn codex_native_trigger_is_a_control_not_thinking_or_unknown() {
+    let request = super::super::decoder::ResponsesDecoder
+        .decode_request(serde_json::json!({
+            "model": "codex", "input": [{"type": "compaction_trigger"}],
+            "context_management": null
+        }))
+        .unwrap();
+    assert!(request.items[0].is_compaction_trigger());
+    assert!(request.items[0].thinking_ref().is_none());
+    assert!(request.items[0].unknown_ref().is_none());
+    let (replay, _) = super::super::encoder::ResponsesEncoder
+        .encode_request(&request)
+        .unwrap();
+    assert_eq!(
+        replay["input"],
+        serde_json::json!([{"type": "compaction_trigger"}])
+    );
+    assert!(
+        replay
+            .as_object()
+            .unwrap()
+            .contains_key("context_management")
+    );
+    assert!(replay["context_management"].is_null());
+    assert!(
+        super::super::decoder::ResponsesDecoder
+            .decode_request(serde_json::json!({
+                "model": "codex", "input": [{"type": "unregistered_native_state"}]
+            }))
+            .is_err()
+    );
+}
+
+#[test]
+fn native_stream_publishes_state_only_as_complete_typed_item() {
+    let native = serde_json::json!({"type": "compaction", "encrypted_content": "opaque", "rolling": {"v": 2}});
+    let mut parser = ResponsesStreamParser::new();
+    parser.parse_chunk(&sse_event("response.created", &serde_json::json!({
+        "type": "response.created", "response": {"id": "r", "model": "codex", "status": "in_progress"}
+    }).to_string())).unwrap();
+    let added = parser
+        .parse_chunk(&sse_event(
+            "response.output_item.added",
+            &serde_json::json!({
+                "type": "response.output_item.added", "output_index": 0,
+                "item": {"type": "compaction"}
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    assert!(!added.iter().any(|delta| matches!(
+        delta,
+        AiStreamDelta::Unknown { .. } | AiStreamDelta::ItemDone { .. }
+    )));
+    let done = parser
+        .parse_chunk(&sse_event(
+            "response.output_item.done",
+            &serde_json::json!({
+                "type": "response.output_item.done", "output_index": 0, "item": native.clone()
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let item = done
+        .iter()
+        .find_map(|delta| match delta {
+            AiStreamDelta::ItemDone { item, .. } => Some(item),
+            _ => None,
+        })
+        .unwrap();
+    let mut response = AiResponse::new("r", "codex");
+    response.items.push(item.clone());
+    assert_eq!(
+        super::super::formatter::ResponsesResponseFormatter.format_response(&response)["output"][0],
+        native
+    );
+    let altered = serde_json::json!({"type": "compaction", "encrypted_content": "changed"});
+    assert!(parser.parse_chunk(&sse_event("response.completed", &serde_json::json!({
+        "type": "response.completed", "response": {"id": "r", "model": "codex", "status": "completed", "output": [altered]}
+    }).to_string())).is_err());
+}
+
+#[test]
 fn stream_rejects_partial_response_resource_snapshots() {
     let error = ResponsesStreamParser::new()
             .parse_chunk(

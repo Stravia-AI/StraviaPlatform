@@ -188,6 +188,9 @@ impl WebSocketRunDelivery {
         }
         self.record_wire_text(text);
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
+            if self.terminal.has_pending_inline_publications() {
+                self.terminal.receive_native_event(&self.observer, &value);
+            }
             if let Some(visible) = value
                 .get("delta")
                 .and_then(serde_json::Value::as_str)
@@ -246,6 +249,8 @@ impl WebSocketRunDelivery {
             reason: reason.clone(),
         });
         let delivered = status == "delivered";
+        self.terminal
+            .finish_delivery_associations(&self.observer, delivered);
         self.observer.finish(RunOutcome {
             status: if delivered {
                 if self.terminal.waiting_client {
@@ -293,6 +298,11 @@ pub(super) struct RunTerminalContext {
     pub generation_committed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub waiting_client: bool,
     pub visible_text: Vec<String>,
+    pub client_input: std::sync::Arc<Vec<crate::protocol::ir::AiItem>>,
+    pub client_output: Vec<crate::protocol::ir::AiItem>,
+    pub compaction: crate::compaction::Compaction,
+    pub principal: crate::hook::Principal,
+    pub compaction_records: crate::model_turn::CompactionPublications,
 }
 
 pub(super) struct StreamDeliveryCompletion(
@@ -307,11 +317,50 @@ struct ObservedDeliveryStream {
     status_code: u16,
     terminal: RunTerminalContext,
     stream_completion: Option<StreamDeliveryCompletion>,
+    unary_native_items: Vec<serde_json::Value>,
     committed: bool,
     finished: bool,
 }
 
 impl ObservedDeliveryStream {
+    fn receive_body_chunk(&mut self, bytes: &[u8]) {
+        if self.status_code >= 400 || !self.terminal.has_pending_inline_publications() {
+            return;
+        }
+        let Ok(text) = std::str::from_utf8(bytes) else {
+            return;
+        };
+        if self.transport != "sse" {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
+                self.unary_native_items
+                    .extend(native_delivery_items(&value));
+            }
+            return;
+        }
+        // DeliveryAdapter emits complete SseEvent frames, including for buffered
+        // delivery. Inspect those existing boundaries, never accumulate a turn or
+        // parse ordinary deltas. Only a complete frame returned to the HTTP body
+        // consumer constitutes the existing HTTP delivery receipt.
+        for frame in text.split_inclusive("\n\n") {
+            if !frame.ends_with("\n\n")
+                || !(frame.starts_with("event: response.output_item.added\n")
+                    || frame.starts_with("event: response.output_item.done\n")
+                    || frame.starts_with("event: response.completed\n")
+                    || frame.starts_with("event: response.incomplete\n")
+                    || frame.starts_with("event: response.failed\n"))
+            {
+                continue;
+            }
+            for data in frame.lines().filter_map(|line| line.strip_prefix("data: ")) {
+                if data.contains("\"compaction\"")
+                    && let Ok(value) = serde_json::from_str::<serde_json::Value>(data)
+                {
+                    self.terminal.receive_native_event(&self.observer, &value);
+                }
+            }
+        }
+    }
+
     fn finish(&mut self, delivery_status: &'static str, reason: Option<String>) {
         if self.finished {
             return;
@@ -362,7 +411,170 @@ impl ObservedDeliveryStream {
     }
 }
 
+fn native_delivery_items(value: &serde_json::Value) -> Vec<serde_json::Value> {
+    let native = |item: &&serde_json::Value| {
+        item.get("type").and_then(serde_json::Value::as_str) == Some("compaction")
+    };
+    match value.get("type").and_then(serde_json::Value::as_str) {
+        Some("response.output_item.added" | "response.output_item.done") => value
+            .get("item")
+            .filter(native)
+            .cloned()
+            .into_iter()
+            .collect(),
+        Some("response.completed" | "response.incomplete" | "response.failed") => value
+            .pointer("/response/output")
+            .and_then(serde_json::Value::as_array)
+            .map(|items| items.iter().filter(native).cloned().collect())
+            .unwrap_or_default(),
+        None => value
+            .get("output")
+            .and_then(serde_json::Value::as_array)
+            .map(|items| items.iter().filter(native).cloned().collect())
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+fn compaction_delivery_event(
+    record: &crate::model_turn::CompactionPublication,
+    phase: crate::interaction_observation::CompactionPhase,
+    error_code: Option<String>,
+) -> RunEvent {
+    RunEvent::CompactionOperation {
+        operation_id: record.operation_id.clone(),
+        model_turn_id: record.model_turn_id.clone(),
+        attempt_id: None,
+        mode: record.mode.clone(),
+        phase,
+        source_generation_id: record.source_generation_id.clone(),
+        source_operation_id: None,
+        registration_id: Some(record.record_id.clone()),
+        duration_ms: None,
+        error_code,
+    }
+}
+
 impl RunTerminalContext {
+    fn has_pending_inline_publications(&self) -> bool {
+        self.compaction_records
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .any(|record| {
+                record.receipt == crate::model_turn::CompactionReceipt::Pending
+                    && matches!(
+                        record.mode,
+                        crate::interaction_observation::CompactionMode::Inline
+                    )
+            })
+    }
+
+    fn receive_native_items(
+        &self,
+        items: &[serde_json::Value],
+        standalone_window_delivered: bool,
+    ) -> Vec<crate::model_turn::CompactionPublication> {
+        let mut records = self
+            .compaction_records
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        records
+            .iter_mut()
+            .filter_map(|record| {
+                if record.receipt != crate::model_turn::CompactionReceipt::Pending {
+                    return None;
+                }
+                let received = match record.mode {
+                    crate::interaction_observation::CompactionMode::Standalone => {
+                        standalone_window_delivered
+                    }
+                    crate::interaction_observation::CompactionMode::Inline => {
+                        crate::protocol::codec::open_responses::native_compaction_item(
+                            &record.state,
+                        )
+                        .is_some_and(|state| items.contains(&state))
+                    }
+                };
+                if !received {
+                    return None;
+                }
+                record.receipt = crate::model_turn::CompactionReceipt::Delivered;
+                Some(record.clone())
+            })
+            .collect()
+    }
+
+    fn confirm_native_receipts(
+        &self,
+        observer: &RunObserver,
+        records: Vec<crate::model_turn::CompactionPublication>,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        if records.is_empty() {
+            return None;
+        }
+        // Publication is a delivery fact, independent of the enclosing Generation.
+        for record in &records {
+            observer.record(compaction_delivery_event(
+                record,
+                crate::interaction_observation::CompactionPhase::Published,
+                None,
+            ));
+        }
+        let compaction = self.compaction.clone();
+        let principal = self.principal.clone();
+        let observer = observer.clone();
+        Some(tokio::spawn(async move {
+            let ids = records
+                .iter()
+                .map(|record| record.record_id.clone())
+                .collect::<Vec<_>>();
+            if let Err(error) = compaction.confirm_delivery(&principal, &ids).await {
+                for record in &records {
+                    observer.record(compaction_delivery_event(
+                        record,
+                        crate::interaction_observation::CompactionPhase::DeliveryUnconfirmed,
+                        Some(error.code().to_owned()),
+                    ));
+                }
+                tracing::warn!(
+                    code = error.code(),
+                    "Compaction delivery confirmation failed; durable registration remains pending"
+                );
+            }
+        }))
+    }
+
+    fn receive_native_event(&self, observer: &RunObserver, value: &serde_json::Value) {
+        let items = native_delivery_items(value);
+        let receipts = self.receive_native_items(&items, false);
+        let _ = self.confirm_native_receipts(observer, receipts);
+    }
+
+    fn finish_delivery_associations(&self, observer: &RunObserver, delivered: bool) {
+        if delivered
+            && self
+                .generation_committed
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
+            observer.observe_client_completion(&self.client_input, &self.client_output);
+        }
+        let records = self
+            .compaction_records
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for record in records
+            .iter()
+            .filter(|record| record.receipt == crate::model_turn::CompactionReceipt::Pending)
+        {
+            observer.record(compaction_delivery_event(
+                record,
+                crate::interaction_observation::CompactionPhase::DeliveryUnconfirmed,
+                None,
+            ));
+        }
+    }
+
     fn finish_http_delivery(
         &self,
         observer: &RunObserver,
@@ -396,6 +608,7 @@ impl RunTerminalContext {
             "failed"
         };
         let delivered = delivery_status == "delivered";
+        self.finish_delivery_associations(observer, delivered && status_code < 400);
         observer.finish(RunOutcome {
             status: status.to_owned(),
             terminal_reason: reason,
@@ -424,6 +637,7 @@ impl Stream for ObservedDeliveryStream {
     ) -> Poll<Option<Self::Item>> {
         match self.inner.as_mut().poll_next(context) {
             Poll::Ready(Some(Ok(bytes))) => {
+                self.receive_body_chunk(&bytes);
                 if !self.committed && self.status_code < 400 {
                     self.committed = true;
                     self.observer.record(RunEvent::ClientOutputCommitted);
@@ -454,6 +668,14 @@ impl Stream for ObservedDeliveryStream {
             }
             Poll::Ready(None) => {
                 if self.status_code < 400 {
+                    if self.transport == "http" {
+                        let receipts = self
+                            .terminal
+                            .receive_native_items(&self.unary_native_items, true);
+                        let _ = self
+                            .terminal
+                            .confirm_native_receipts(&self.observer, receipts);
+                    }
                     self.finish("delivered", None);
                 } else {
                     let reason = format!("http_status_{}", self.status_code);
@@ -525,6 +747,7 @@ fn wrap_observed_delivery(
         status_code,
         terminal,
         stream_completion,
+        unary_native_items: Vec::new(),
         committed: false,
         finished: false,
     };
@@ -587,5 +810,7 @@ pub(crate) fn decode_error_response(error: impl std::fmt::Display) -> Response {
     engine::error_response(400, &error.to_string())
 }
 
+#[cfg(test)]
+mod delivery_tests;
 #[cfg(test)]
 mod tests;

@@ -100,6 +100,9 @@ impl Vendor for GoogleVertexAnthropicVendor {
     ) -> anyhow::Result<crate::provider::vendor_ext::ConstructedRequest> {
         use crate::provider::vendor_ext::{ConstructedRequest, RequestPurpose};
         let url = match purpose {
+            RequestPurpose::Compact { .. } => {
+                anyhow::bail!("Vendor does not support standalone compaction")
+            }
             RequestPurpose::Models { .. } => {
                 return crate::provider::common::openai_compat::construct_openai_request(
                     ctx, purpose,

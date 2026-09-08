@@ -86,6 +86,7 @@ pub struct Gateway {
     pub(crate) redaction: crate::reversible_redaction::ReversibleRedaction,
     pub(crate) turn_chains: Arc<dyn turn_chain::TurnChainStore>,
     pub(crate) generation_chains: generation_chain::GenerationChain,
+    pub(crate) compaction: crate::compaction::Compaction,
     pub(crate) model_turn: Arc<dyn model_turn::ModelTurnExecutor>,
     pub(crate) web_access_run_snapshots: web_access::WebAccessRunSnapshotStore,
     pub(crate) web_search_runner_state:
@@ -134,6 +135,7 @@ impl Gateway {
             redaction: self.redaction.clone(),
             turn_chains: Arc::clone(&self.turn_chains),
             generation_chains: self.generation_chains.clone(),
+            compaction: self.compaction.clone(),
             model_turn: Arc::clone(&self.model_turn),
             web_access_run_snapshots: self.web_access_run_snapshots.clone(),
             web_search_runner_state: Arc::clone(&self.web_search_runner_state),

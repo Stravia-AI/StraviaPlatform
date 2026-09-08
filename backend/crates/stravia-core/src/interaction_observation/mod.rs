@@ -5,6 +5,7 @@ pub(crate) mod redaction;
 mod retention;
 pub(crate) mod scope;
 mod store;
+mod tail;
 mod trace;
 mod types;
 mod writer;
@@ -227,10 +228,12 @@ impl InteractionObservation {
     pub(crate) async fn set_retention_days(&self, days: u32) -> anyhow::Result<DebugState> {
         self.inner.store.update_retention(days).await?;
         self.inner.retention_days.store(days, Ordering::Release);
+        let _ = self.inner.writer.send(WriterCommand::ClearTail).await;
         self.sweep().await?;
         Ok(self.debug_state())
     }
     pub(crate) async fn clear_history(&self) -> anyhow::Result<ClearHistoryResult> {
+        let _ = self.inner.writer.send(WriterCommand::ClearTail).await;
         self.flush().await?;
         let result = self.inner.store.mark_clear_tombstones().await?;
         let (_, tomb) = self.inner.store.manifest_ids().await?;
@@ -242,7 +245,7 @@ impl InteractionObservation {
             }
         }
         self.inner.store.delete_manifests(&deleted).await?;
-        self.inner.store.purge_clear_rows().await?;
+        self.purge_history(None).await?;
         let (_, partial) = self
             .inner
             .store
@@ -268,7 +271,7 @@ impl InteractionObservation {
             }
         }
         self.inner.store.delete_manifests(&deleted).await?;
-        self.inner.store.purge_expired_rows(now).await?;
+        self.purge_history(Some(now)).await?;
         let (_, partial) = self
             .inner
             .store
@@ -527,6 +530,21 @@ impl InteractionObservation {
             .map_err(anyhow::Error::new)?
             .stream)
     }
+    async fn purge_history(&self, expired_before: Option<i64>) -> anyhow::Result<()> {
+        let (done, receiver) = oneshot::channel();
+        self.inner
+            .writer
+            .send(WriterCommand::Purge {
+                expired_before,
+                done,
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!("observation writer unavailable"))?;
+        receiver
+            .await
+            .map_err(|_| anyhow::anyhow!("observation writer unavailable"))?
+    }
+
     async fn flush(&self) -> anyhow::Result<()> {
         let (sender, receiver) = oneshot::channel();
         self.inner
@@ -650,6 +668,7 @@ impl IngressObserver {
         let inner = Arc::new(RunObserverInner {
             observation: self.observation.clone(),
             run_id: start.id.clone(),
+            principal: start.principal.clone(),
             debug_enabled,
             trace: self.trace.take(),
             terminal: AtomicBool::new(false),
@@ -729,6 +748,7 @@ pub(crate) struct RunObserver {
 struct RunObserverInner {
     observation: InteractionObservation,
     run_id: String,
+    principal: String,
     debug_enabled: bool,
     trace: Option<TraceHandle>,
     terminal: AtomicBool,
@@ -739,6 +759,40 @@ struct RunObserverInner {
     protected: redaction::ProtectedSecrets,
 }
 impl RunObserver {
+    /// Diagnostic-only: pass the received normalized window, never materialized history.
+    pub(crate) fn observe_client_input(&self, input: &[crate::protocol::ir::AiItem]) {
+        self.send_tail(tail::Window::capture(input), false);
+    }
+    /// Call only after successful delivery and Generation commit, with client-visible output.
+    pub(crate) fn observe_client_completion(
+        &self,
+        input: &[crate::protocol::ir::AiItem],
+        output: &[crate::protocol::ir::AiItem],
+    ) {
+        let window = tail::Window::capture(input).and_then(|mut window| {
+            window
+                .append(tail::Window::capture(output)?)
+                .then_some(window)
+        });
+        self.send_tail(window, true);
+    }
+    fn send_tail(&self, window: Option<tail::Window>, completed: bool) {
+        if self
+            .inner
+            .observation
+            .inner
+            .writer
+            .try_send(WriterCommand::Tail {
+                run_id: self.inner.run_id.clone(),
+                principal: self.inner.principal.clone(),
+                window,
+                completed,
+            })
+            .is_err()
+        {
+            self.inner.gap.store(true, Ordering::Release);
+        }
+    }
     pub(crate) fn protect_secrets<'a>(&self, secrets: impl IntoIterator<Item = &'a str>) {
         self.inner.protected.register(secrets);
     }

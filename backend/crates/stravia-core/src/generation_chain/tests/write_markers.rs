@@ -1,6 +1,414 @@
 use super::*;
 
 #[tokio::test]
+async fn completed_inline_window_is_the_parent_after_cold_restore() {
+    let durable = Arc::new(crate::turn_chain::test_store().await);
+    let chain =
+        GenerationChain::from_turn_chain(durable.clone(), DEFAULT_GENERATION_CHAIN_TTL, None);
+    let owner = principal("inline-owner");
+    let state =
+        crate::protocol::codec::open_responses::decoder::decode_input_item(&serde_json::json!({
+            "type": "compaction", "id": "native-inline-state", "encrypted_content": "opaque-inline"
+        }))
+        .unwrap()
+        .unwrap();
+    let mut source = chain
+        .begin(
+            owner.clone(),
+            responses_request(vec![user_message("removed-history")]),
+        )
+        .await
+        .unwrap();
+    let mut effective = source.request().clone();
+    effective
+        .items
+        .push(user_message("effective-only-source-history"));
+    source.observe_effective(effective);
+    let mut source_response = AiResponse::new("source-response", "model");
+    source_response.items = vec![AiItem::output_text("source answer")];
+    source_response.items[0].set_graph_metadata(
+        Some(
+            crate::protocol::codec::open_responses::formatter::gateway_item_id(
+                "msg",
+                source.id(),
+                0,
+            ),
+        ),
+        Some(AiItemStatus::Completed),
+        AiItemProvenance::Provider,
+        AiItemAudience::Client,
+    );
+    assert!(source.stage(&mut source_response, &generation_source(), None));
+    source.persist().await.unwrap();
+    let mut full_history = vec![user_message("removed-history")];
+    full_history.extend(source_response.items);
+    let ordinary = chain
+        .begin(owner.clone(), responses_request(full_history.clone()))
+        .await
+        .unwrap();
+    assert_eq!(ordinary.parent_id(), None);
+    let mut first_request = responses_request(full_history.clone());
+    // Exercise source-only adoption even when a trigger or new input follows the prefix.
+    first_request.instructions = Some("Prepare the native compacted window".into());
+    if let Some(ProtocolExt::OpenResponses(extension)) = first_request.ext.as_mut() {
+        extension.passthrough_body.insert(
+            "context_management".into(),
+            serde_json::json!([{"type": "compaction", "compact_threshold": 2000}]),
+        );
+    }
+    let mut below_threshold = chain
+        .begin_native_compaction(owner.clone(), first_request.clone())
+        .await
+        .unwrap();
+    assert_eq!(below_threshold.parent_id(), Some(source.id()));
+    assert!(below_threshold.request_delta().items.is_empty());
+    let mut ordinary_response = AiResponse::new("below-threshold", "model");
+    ordinary_response.items = vec![AiItem::output_text("ordinary answer")];
+    assert!(below_threshold.stage(&mut ordinary_response, &generation_source(), None));
+    below_threshold.persist().await.unwrap();
+    let cold_chain =
+        GenerationChain::from_turn_chain(durable.clone(), DEFAULT_GENERATION_CHAIN_TTL, None);
+    let mut continuation = responses_request(vec![user_message("after ordinary answer")]);
+    crate::model_turn::stamp_previous_response_id(&mut continuation, below_threshold.id());
+    let continued = cold_chain.begin(owner.clone(), continuation).await.unwrap();
+    let mut expected = full_history;
+    expected.extend(ordinary_response.items);
+    expected.push(user_message("after ordinary answer"));
+    assert_eq!(
+        history_context_fingerprint(&continued.request().items),
+        history_context_fingerprint(&expected)
+    );
+    let trigger = crate::protocol::codec::open_responses::decoder::decode_input_item(
+        &serde_json::json!({"type": "compaction_trigger"}),
+    )
+    .unwrap()
+    .unwrap();
+    first_request.items.push(trigger.clone());
+    let mut write = chain
+        .begin_native_compaction(owner.clone(), first_request.clone())
+        .await
+        .unwrap();
+    assert_eq!(write.parent_id(), Some(source.id()));
+    assert_eq!(write.root_id(), source.root_id());
+    assert_eq!(
+        history_context_fingerprint(&write.request_delta().items),
+        history_context_fingerprint(std::slice::from_ref(&trigger))
+    );
+    assert_eq!(
+        history_context_fingerprint(&write.request().items),
+        history_context_fingerprint(&first_request.items)
+    );
+    let mut new_input = first_request;
+    new_input.items.push(user_message("new after source"));
+    let with_new_input = chain
+        .begin_native_compaction(owner.clone(), new_input)
+        .await
+        .unwrap();
+    assert_eq!(with_new_input.parent_id(), Some(source.id()));
+    assert_eq!(
+        history_context_fingerprint(&with_new_input.request_delta().items),
+        history_context_fingerprint(&[trigger, user_message("new after source")])
+    );
+    write.parent.fresh_inline_states.push(state.clone());
+    let mut response = AiResponse::new("inline-response", "model");
+    response.items = vec![state.clone(), AiItem::output_text("inline answer")];
+    response.items[1].set_graph_metadata(
+        Some(
+            crate::protocol::codec::open_responses::formatter::gateway_item_id(
+                "msg",
+                write.id(),
+                1,
+            ),
+        ),
+        Some(AiItemStatus::Completed),
+        AiItemProvenance::Provider,
+        AiItemAudience::Client,
+    );
+    assert!(write.stage(&mut response, &generation_source(), None));
+    write.persist().await.unwrap();
+    let inline_id = write.id().to_owned();
+    for cold in [false, true] {
+        let chain = if cold {
+            GenerationChain::from_turn_chain(durable.clone(), DEFAULT_GENERATION_CHAIN_TTL, None)
+        } else {
+            chain.clone()
+        };
+        let mut items = response.items.clone();
+        items.push(user_message("next user"));
+        let mut next_request = responses_request(items);
+        next_request.instructions = write.request().instructions.clone();
+        let mut next = chain.begin(owner.clone(), next_request).await.unwrap();
+        assert_eq!(next.parent_id(), Some(inline_id.as_str()));
+        assert_eq!(
+            history_context_fingerprint(&next.request_delta().items),
+            history_context_fingerprint(&[user_message("next user")])
+        );
+        assert!(
+            !next
+                .request()
+                .items
+                .iter()
+                .any(
+                    |item| history_context_fingerprint(std::slice::from_ref(item))
+                        == history_context_fingerprint(&[user_message("removed-history")])
+                )
+        );
+        assert_eq!(
+            next.request().items.first().unwrap().id_ref(),
+            Some("native-inline-state")
+        );
+        let mut answer = AiResponse::new("next-response", "model");
+        answer.items = vec![AiItem::output_text("next answer")];
+        answer.items[0].set_graph_metadata(
+            Some(
+                crate::protocol::codec::open_responses::formatter::gateway_item_id(
+                    "msg",
+                    next.id(),
+                    0,
+                ),
+            ),
+            Some(AiItemStatus::Completed),
+            AiItemProvenance::Provider,
+            AiItemAudience::Client,
+        );
+        assert!(next.stage(&mut answer, &generation_source(), None));
+        next.persist().await.unwrap();
+        let mut continuation = response.items.clone();
+        continuation.push(user_message("next user"));
+        continuation.extend(answer.items);
+        continuation.push(user_message("third user"));
+        let mut third_request = responses_request(continuation);
+        third_request.instructions = write.request().instructions.clone();
+        let third = chain.begin(owner.clone(), third_request).await.unwrap();
+        assert_eq!(third.parent_id(), Some(next.id()));
+        assert_eq!(
+            history_context_fingerprint(&third.request_delta().items),
+            history_context_fingerprint(&[user_message("third user")])
+        );
+    }
+}
+
+#[tokio::test]
+async fn native_compaction_source_keeps_reference_and_artifact_resolution() {
+    let directory = tempfile::tempdir().unwrap();
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    crate::migrations::migrate_sqlite(&pool).await.unwrap();
+    let artifacts = Arc::new(crate::agent::LocalArtifactStore::sqlite(
+        pool.clone(),
+        directory.path().join("artifacts"),
+    ));
+    let owner = principal("native-artifact-owner");
+    let artifact = artifacts
+        .create_ready_bytes(
+            &owner,
+            "image/png",
+            bytes::Bytes::from_static(b"image"),
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+    let chain = GenerationChain::from_turn_chain(
+        Arc::new(crate::turn_chain::SqlTurnChainStore::sqlite(pool)),
+        DEFAULT_GENERATION_CHAIN_TTL,
+        Some(artifacts),
+    );
+    let original = user_message("source question");
+    let mut source = chain
+        .begin(owner.clone(), responses_request(vec![original.clone()]))
+        .await
+        .unwrap();
+    let item_id =
+        crate::protocol::codec::open_responses::formatter::gateway_item_id("msg", source.id(), 0);
+    let mut answer = AiResponse::new("source-answer", "model");
+    answer.items = vec![AiItem::output_text("saved answer")];
+    answer.items[0].set_graph_metadata(
+        Some(item_id.clone()),
+        Some(AiItemStatus::Completed),
+        AiItemProvenance::Provider,
+        AiItemAudience::Client,
+    );
+    assert!(source.stage(&mut answer, &generation_source(), None));
+    source.persist().await.unwrap();
+    let decode = crate::protocol::codec::open_responses::decoder::decode_input_item;
+    let reference = decode(&serde_json::json!({"type":"item_reference","id":item_id}))
+        .unwrap()
+        .unwrap();
+    let mut image = user_message("");
+    image.content = MessageContent::Blocks(vec![ContentBlock::Image {
+        source: MediaSource::FileId {
+            file_id: format!("stravia-artifact:{}", artifact.id.as_str()),
+            detail: None,
+        },
+        detail: None,
+        cache_control: None,
+    }]);
+    let mut items = vec![original];
+    items.extend(answer.items);
+    items.extend([reference, image]);
+    let mut request = responses_request(items);
+    request.instructions = Some("new compact instructions".into());
+    let write = chain.begin_native_compaction(owner, request).await.unwrap();
+    assert_eq!(write.parent_id(), Some(source.id()));
+    assert_eq!(write.request().items[2].content.to_text(), "saved answer");
+    assert!(matches!(
+        &write.request().items[3].content,
+        MessageContent::Blocks(blocks) if matches!(
+            &blocks[0],
+            ContentBlock::Image { source: MediaSource::Base64 { media_type, data }, .. }
+                if media_type == "image/png" && data == "aW1hZ2U="
+        )
+    ));
+}
+
+#[tokio::test]
+async fn recompaction_excludes_source_prefix_and_native_window_from_new_user_delta() {
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    crate::migrations::migrate_sqlite(&pool).await.unwrap();
+    let compaction = crate::compaction::Compaction::sqlite(pool.clone());
+    let chain = GenerationChain::from_turn_chain(
+        Arc::new(crate::turn_chain::SqlTurnChainStore::sqlite(pool)),
+        DEFAULT_GENERATION_CHAIN_TTL,
+        None,
+    )
+    .with_compaction(compaction.clone());
+    let owner = principal("recompaction-owner");
+    let original = user_message("already delivered user");
+    let mut source = chain
+        .begin(owner.clone(), responses_request(vec![original.clone()]))
+        .await
+        .unwrap();
+    let mut answer = AiResponse::new("source-answer", "model");
+    answer.items = vec![AiItem::output_text("already delivered answer")];
+    answer.items[0].set_graph_metadata(
+        Some(
+            crate::protocol::codec::open_responses::formatter::gateway_item_id(
+                "msg",
+                source.id(),
+                0,
+            ),
+        ),
+        Some(AiItemStatus::Completed),
+        AiItemProvenance::Provider,
+        AiItemAudience::Client,
+    );
+    assert!(source.stage(&mut answer, &generation_source(), None));
+    source.persist().await.unwrap();
+    let state = crate::protocol::codec::open_responses::decoder::decode_input_item(
+        &serde_json::json!({"type":"compaction","id":"same-source-state","encrypted_content":"opaque"}),
+    ).unwrap().unwrap();
+    compaction
+        .register(
+            &owner,
+            crate::compaction::CompactionRegistration {
+                source_generation_id: Some(source.id().to_owned()),
+                source_record_ids: Vec::new(),
+                operation_id: "first-boundary".into(),
+                target: crate::compaction::CompactionTarget {
+                    target_key: "local-target".into(),
+                    namespace: "local-account".into(),
+                    model: "model".into(),
+                    protocol: OPEN_RESPONSES_2026_04_24.to_string(),
+                },
+                window: vec![state.clone()],
+                state_items: vec![state.clone()],
+            },
+        )
+        .await
+        .unwrap();
+    let trigger = crate::protocol::codec::open_responses::decoder::decode_input_item(
+        &serde_json::json!({"type":"compaction_trigger"}),
+    )
+    .unwrap()
+    .unwrap();
+    let mut items = vec![original];
+    items.extend(answer.items);
+    items.extend([state, trigger.clone()]);
+    let mut request = responses_request(items.clone());
+    request.instructions = Some("New compact instructions".into());
+    let write = chain
+        .begin_native_compaction(owner.clone(), request.clone())
+        .await
+        .unwrap();
+    assert_eq!(write.parent_id(), Some(source.id()));
+    assert_eq!(
+        history_context_fingerprint(&write.request().items),
+        history_context_fingerprint(&items)
+    );
+    assert_eq!(
+        history_context_fingerprint(&write.request_delta().items),
+        history_context_fingerprint(std::slice::from_ref(&trigger))
+    );
+    let prepared = chain.prepare_compaction(owner, request).await.unwrap();
+    assert_eq!(prepared.parent_id.as_deref(), Some(source.id()));
+    assert!(!prepared.has_new_user);
+}
+
+#[tokio::test]
+async fn native_window_excludes_only_verified_items_from_new_input() {
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    crate::migrations::migrate_sqlite(&pool).await.unwrap();
+    let compaction = crate::compaction::Compaction::sqlite(pool);
+    let owner = principal("leading-user");
+    let state =
+        crate::protocol::codec::open_responses::decoder::decode_input_item(&serde_json::json!({
+            "type": "compaction", "encrypted_content": "leading-boundary"
+        }))
+        .unwrap()
+        .unwrap();
+    let window = vec![user_message("retained old user"), state];
+    compaction
+        .register(
+            &owner,
+            crate::compaction::CompactionRegistration {
+                source_generation_id: None,
+                source_record_ids: Vec::new(),
+                operation_id: "leading-boundary".into(),
+                target: crate::compaction::CompactionTarget {
+                    target_key: "local-target".into(),
+                    namespace: "local-account".into(),
+                    model: "model".into(),
+                    protocol: OPEN_RESPONSES_2026_04_24.to_string(),
+                },
+                state_items: vec![window[1].clone()],
+                window: window.clone(),
+            },
+        )
+        .await
+        .unwrap();
+    let chain = generation_chain().await.with_compaction(compaction);
+    let mut items = vec![user_message("unverified leading user")];
+    items.extend(window);
+    items.push(user_message("new trailing user"));
+    let write = chain
+        .begin(owner, responses_request(items.clone()))
+        .await
+        .unwrap();
+    assert_eq!(
+        history_context_fingerprint(&write.request().items),
+        history_context_fingerprint(&items)
+    );
+    assert_eq!(
+        history_context_fingerprint(&write.request_delta().items),
+        history_context_fingerprint(&[
+            user_message("unverified leading user"),
+            user_message("new trailing user")
+        ])
+    );
+}
+
+#[tokio::test]
 async fn observe_effective_preserves_marker_without_repeating_public_tool_call() {
     let chain = generation_chain().await;
     let owner = principal("owner");

@@ -53,7 +53,11 @@ pub(super) fn materialize_generation_nodes(
     for node in nodes {
         let node_version = node.payload_version;
         let (_, mut persisted) = decode_response_node(node)?;
-        client_items.extend(persisted.client_delta.messages.clone());
+        match persisted.client_history_mutation {
+            Some(EffectiveHistoryMutation::Append { items }) => client_items.extend(items),
+            Some(EffectiveHistoryMutation::Replace { items }) => client_items = items,
+            None => client_items.extend(persisted.client_delta.messages.clone()),
+        }
         match persisted.effective_history_mutation {
             Some(EffectiveHistoryMutation::Append { items }) => effective_items.extend(items),
             Some(EffectiveHistoryMutation::Replace { items }) => effective_items = items,

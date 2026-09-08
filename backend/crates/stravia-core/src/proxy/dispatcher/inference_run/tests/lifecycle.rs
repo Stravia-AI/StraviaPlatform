@@ -704,6 +704,8 @@ async fn catalog_provider_without_dedicated_vendor_adapter_reaches_upstream() {
     gateway
         .admin()
         .create_model(CreateRoute {
+            compaction_enabled: false,
+            compaction_threshold: None,
             model_id: "gpt-5.4".into(),
             display_name: None,
             balance: None,
@@ -919,6 +921,8 @@ async fn unrepresentable_thinking_control_is_a_typed_422_before_upstream() {
         .storage
         .routes()
         .put(crate::db::models::PutRoute {
+            compaction_enabled: route.compaction_enabled,
+            compaction_threshold: route.compaction_threshold,
             id: Some(route.id.clone()),
             model_id: route.model_id.clone(),
             display_name: route.display_name.clone(),

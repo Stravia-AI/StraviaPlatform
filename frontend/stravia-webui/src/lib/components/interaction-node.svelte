@@ -13,6 +13,23 @@ let { data, selected }: NodeProps<InteractionNode> = $props()
 const interaction = $derived(data.interaction)
 const title = $derived(interaction.first_model_display_name?.trim() || interaction.first_route_id)
 const statusLabel = $derived(observationStatusLabel(interaction.status))
+const contextLabel = $derived.by(() => {
+  const events = interaction.context_events ?? []
+  if (events.some((event) => event.kind === 'compaction_operation')) return m.observation_compaction_operation()
+  if (events.some((event) => event.kind === 'native_compaction_associated')) return m.observation_ancestry_native()
+  if (
+    events.some(
+      (event) =>
+        event.kind === 'retained_tail_associated' &&
+        event.payload &&
+        typeof event.payload === 'object' &&
+        'status' in event.payload &&
+        event.payload.status === 'inferred',
+    )
+  )
+    return m.observation_ancestry_inferred()
+  return ''
+})
 const usage = $derived([
   [m.observation_usage_input(), interaction.usage.input_tokens],
   [m.observation_usage_output(), interaction.usage.output_tokens],
@@ -56,7 +73,10 @@ const usage = $derived([
   </div>
 
   <p class={['tail-preview', !interaction.visible_tail && 'text-muted-foreground']}>
-    {interaction.visible_tail || m.observation_no_visible_output()}
+    {#if contextLabel}<strong>{contextLabel}</strong>{#if interaction.visible_tail}
+        ·
+      {/if}{/if}
+    {interaction.visible_tail || (contextLabel ? '' : m.observation_no_visible_output())}
   </p>
 
   <footer class="flex items-center justify-between gap-2">

@@ -83,6 +83,8 @@ async fn protected_responses_router_with_hook(
         .expect("Provider Model");
     let model = admin
         .create_model(CreateRoute {
+            compaction_enabled: false,
+            compaction_threshold: None,
             model_id: "auth-model".into(),
             display_name: None,
             balance: None,
@@ -399,41 +401,7 @@ async fn responses_compact_preserves_authorization_failures_before_parsing_the_b
 }
 
 #[tokio::test]
-async fn responses_compact_is_an_explicit_unsupported_feature() {
-    let (router, token) = protected_responses_router().await;
-    let response = router
-        .oneshot(
-            Request::post("/v1/responses/compact")
-                .header("content-type", "application/json")
-                .header("authorization", format!("Bearer {token}"))
-                .body(Body::from(r#"{"model":"auth-model","input":"hello"}"#))
-                .expect("compact request"),
-        )
-        .await
-        .expect("compact response");
-
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let body: serde_json::Value = serde_json::from_slice(
-        &to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("compact response body"),
-    )
-    .expect("compact JSON");
-    assert_eq!(
-        body,
-        serde_json::json!({
-            "error": {
-                "type": "invalid_request",
-                "code": "unsupported_feature",
-                "param": "compact",
-                "message": "Response compaction is not supported."
-            }
-        })
-    );
-}
-
-#[tokio::test]
-async fn responses_compact_validates_its_dated_request_schema_before_rejecting_support() {
+async fn responses_compact_rejects_streaming_transport_control() {
     let (router, token) = protected_responses_router().await;
     let response = router
         .oneshot(
@@ -441,7 +409,7 @@ async fn responses_compact_validates_its_dated_request_schema_before_rejecting_s
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(
-                    r#"{"model":"auth-model","input":"hello","tools":[]}"#,
+                    r#"{"model":"auth-model","input":"hello","stream":true}"#,
                 ))
                 .expect("malformed compact request"),
         )
@@ -457,38 +425,6 @@ async fn responses_compact_validates_its_dated_request_schema_before_rejecting_s
     .expect("compact JSON");
     assert_eq!(body["error"]["code"], "invalid_request");
     assert_eq!(body["error"]["param"], "body");
-    assert!(
-        body["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("unknown compact request field 'tools'"))
-    );
-}
-
-#[tokio::test]
-async fn responses_compact_accepts_dated_compaction_input_before_rejecting_support() {
-    let (router, token) = protected_responses_router().await;
-    let response = router
-            .oneshot(
-                Request::post("/v1/responses/compact")
-                    .header("content-type", "application/json")
-                    .header("authorization", format!("Bearer {token}"))
-                    .body(Body::from(
-                        r#"{"model":"auth-model","input":[{"type":"compaction","id":"cmp_1","encrypted_content":"opaque"}]}"#,
-                    ))
-                    .expect("compact request"),
-            )
-            .await
-            .expect("compact response");
-    let body: serde_json::Value = serde_json::from_slice(
-        &to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("compact response body"),
-    )
-    .expect("compact JSON");
-
-    assert_eq!(body["error"]["type"], "invalid_request");
-    assert_eq!(body["error"]["code"], "unsupported_feature");
-    assert_eq!(body["error"]["param"], "compact");
 }
 
 #[tokio::test]
@@ -650,6 +586,8 @@ async fn responses_native_web_search_is_concealed_when_search_is_unavailable() {
         .expect("Provider Model");
     let model = admin
         .create_model(CreateRoute {
+            compaction_enabled: false,
+            compaction_threshold: None,
             model_id: "web-search-test".into(),
             display_name: None,
             balance: None,

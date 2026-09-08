@@ -51,6 +51,24 @@ pub async fn build_request<V>(
 where
     V: crate::provider::vendor::Vendor,
 {
+    build_request_for_purpose(
+        vendor,
+        req,
+        ctx,
+        crate::model_turn::ModelTurnPurpose::Generation,
+    )
+    .await
+}
+
+pub(crate) async fn build_request_for_purpose<V>(
+    vendor: &V,
+    req: &mut crate::protocol::ir::AiRequest,
+    ctx: &crate::provider::vendor::ProviderCtx<'_>,
+    purpose: crate::model_turn::ModelTurnPurpose,
+) -> Result<crate::provider::outbound::OutboundRequest, GatewayError>
+where
+    V: crate::provider::vendor::Vendor,
+{
     req.model = ctx.actual_model.to_string();
 
     let vendor_ctx = ctx.to_vendor_ctx();
@@ -91,6 +109,46 @@ where
         .await
         .map_err(GatewayError::internal)?;
 
+    if purpose == crate::model_turn::ModelTurnPurpose::Compact {
+        // Compact has its own unary schema; generation defaults are not legal controls.
+        if let Some(object) = body.as_object_mut() {
+            let codex = ctx.provider.channel.as_deref() == Some("codex");
+            object.retain(|key, _| {
+                matches!(
+                    key.as_str(),
+                    "model"
+                        | "input"
+                        | "instructions"
+                        | "previous_response_id"
+                        | "prompt_cache_key"
+                        | "prompt_cache_options"
+                        | "prompt_cache_retention"
+                ) || codex
+                    && matches!(
+                        key.as_str(),
+                        "tools"
+                            | "parallel_tool_calls"
+                            | "reasoning"
+                            | "service_tier"
+                            | "text"
+                            | "access_programs"
+                    )
+            });
+        }
+    }
+    let request_purpose = if purpose == crate::model_turn::ModelTurnPurpose::Compact {
+        crate::provider::vendor_ext::RequestPurpose::Compact {
+            base_url: ctx.egress_base_url,
+            actual_model: ctx.actual_model,
+        }
+    } else {
+        crate::provider::vendor_ext::RequestPurpose::Inference {
+            protocol: ctx.protocol,
+            base_url: ctx.egress_base_url,
+            path: &egress_path,
+            actual_model: ctx.actual_model,
+        }
+    };
     let constructed = extension
         .construct_request(
             &crate::provider::vendor_ext::RequestContext {
@@ -99,12 +157,7 @@ where
                 credential: ctx.credential,
                 disable_default_auth: ctx.disable_default_auth,
             },
-            crate::provider::vendor_ext::RequestPurpose::Inference {
-                protocol: ctx.protocol,
-                base_url: ctx.egress_base_url,
-                path: &egress_path,
-                actual_model: ctx.actual_model,
-            },
+            request_purpose,
         )
         .map_err(GatewayError::internal)?;
     let url = constructed.url;

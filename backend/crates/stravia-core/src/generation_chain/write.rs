@@ -25,6 +25,31 @@ impl GenerationChainWrite {
         self.parent.parent_id.as_deref()
     }
 
+    pub(crate) fn crosses_compaction_boundary(&self) -> bool {
+        self.parent.replacement_client_items.is_some()
+    }
+
+    pub(crate) fn record_inline_publications(
+        &mut self,
+        publications: &[crate::model_turn::CompactionPublication],
+    ) {
+        for publication in publications.iter().filter(|publication| {
+            matches!(
+                publication.mode,
+                crate::interaction_observation::CompactionMode::Inline
+            )
+        }) {
+            self.parent
+                .fresh_inline_states
+                .push(publication.state.clone());
+            self.parent
+                .compaction_record_ids
+                .push(publication.record_id.clone());
+        }
+        self.parent.compaction_record_ids.sort();
+        self.parent.compaction_record_ids.dedup();
+    }
+
     pub(crate) fn inherited_media_turns(&self) -> &[(usize, Vec<String>)] {
         &self.parent.media_turn_messages
     }
@@ -141,6 +166,12 @@ impl GenerationChainWrite {
 
     pub(crate) async fn persist(&mut self) -> Result<(), PersistError> {
         let mut staged = self.staged.clone().ok_or(PersistError::NotStaged)?;
+        if let Some(compaction) = &self.chain.compaction {
+            compaction
+                .extend_retention(&self.principal, &self.parent.compaction_record_ids)
+                .await
+                .map_err(PersistError::Compaction)?;
+        }
         if let Some(store) = &self.chain.redaction_mappings {
             let references = self
                 .request

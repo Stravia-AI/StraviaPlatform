@@ -274,3 +274,6 @@ async fn protocol_not_found() -> Response {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod compaction_tests;

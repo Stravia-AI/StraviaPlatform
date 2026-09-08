@@ -816,6 +816,8 @@ fn content_block_name(block: &ContentBlock) -> &'static str {
         ContentBlock::Video { .. } => "video",
         ContentBlock::Thinking { .. } => "thinking",
         ContentBlock::Reasoning { .. } => "reasoning",
+        ContentBlock::Compaction { .. } => "compaction",
+        ContentBlock::CompactionTrigger {} => "compaction_trigger",
         ContentBlock::RedactedThinking { .. } => "redacted_thinking",
         ContentBlock::ToolUse { .. } => "tool_use",
         ContentBlock::ToolResult { .. } => "tool_result",

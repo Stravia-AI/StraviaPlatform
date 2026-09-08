@@ -260,8 +260,23 @@ async fn serve(
         .clone();
     let (mut sink, mut source) = socket.split();
     let (outgoing, mut outgoing_rx) = mpsc::channel::<OutgoingMessage>(OUTGOING_QUEUE_CAPACITY);
+    let terminal_started = Arc::new(AtomicBool::new(false));
+    let writer_terminal_started = terminal_started.clone();
+    let run_finished = Arc::new(tokio::sync::Notify::new());
     let writer = tokio::spawn(async move {
         while let Some(message) = outgoing_rx.recv().await {
+            if let Message::Text(text) = &message.message
+                && serde_json::from_str::<Value>(text)
+                    .ok()
+                    .is_some_and(|event| {
+                        matches!(
+                            event.get("type").and_then(Value::as_str),
+                            Some("response.completed" | "response.failed" | "response.incomplete")
+                        )
+                    })
+            {
+                writer_terminal_started.store(true, Ordering::Release);
+            }
             if sink.send(message.message).await.is_err() {
                 break;
             }
@@ -357,6 +372,17 @@ async fn serve(
                         });
                         continue;
                     }
+                    // A terminal frame may reach the client before delivery bookkeeping
+                    // finishes. Serialize that handoff, but still reject overlapping turns.
+                    loop {
+                        let finished = run_finished.notified();
+                        if !in_flight.load(Ordering::Acquire)
+                            || !terminal_started.load(Ordering::Acquire)
+                        {
+                            break;
+                        }
+                        finished.await;
+                    }
                     if in_flight.swap(true, Ordering::AcqRel) {
                         if send_error(
                             &outgoing,
@@ -388,6 +414,7 @@ async fn serve(
                         });
                         continue;
                     }
+                    terminal_started.store(false, Ordering::Release);
                     let Some(object) = event.as_object_mut() else {
                         in_flight.store(false, Ordering::Release);
                         if send_error(
@@ -427,6 +454,7 @@ async fn serve(
                     let headers = headers.clone();
                     let outgoing = outgoing.clone();
                     let in_flight = in_flight.clone();
+                    let run_finished = run_finished.clone();
                     let cancellation_slot = cancellation.clone();
                     let active_observer = active_observer.clone();
                     request_context.extensions.insert(ingress);
@@ -481,6 +509,7 @@ async fn serve(
                         *active_observer.lock().expect("active observer lock") = None;
                         *delivery_slot.lock().expect("delivery slot lock") = None;
                         in_flight.store(false, Ordering::Release);
+                        run_finished.notify_waiters();
                     });
                 }
                 Message::Ping(payload) => {

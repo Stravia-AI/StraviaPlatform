@@ -20,6 +20,9 @@ pub fn construct_openai_request(
     use crate::provider::vendor_ext::{ConstructedRequest, RequestPurpose};
     let url = match purpose {
         RequestPurpose::Inference { base_url, path, .. } => openai_endpoint(base_url, path),
+        RequestPurpose::Compact { base_url, .. } => {
+            openai_endpoint(base_url, "/v1/responses/compact")
+        }
         RequestPurpose::Models { endpoint } => endpoint.to_string(),
     };
     let mut headers = HeaderMap::new();

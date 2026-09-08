@@ -596,6 +596,8 @@ mod tests {
             .await?;
         admin
             .create_model(CreateRoute {
+                compaction_enabled: false,
+                compaction_threshold: None,
                 model_id: "durable-route".into(),
                 display_name: None,
                 balance: Some("traffic_equalization".into()),

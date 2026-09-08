@@ -232,6 +232,21 @@ Generation Materialization Cache 是 Gateway 进程内、按字节上限淘汰�
 
 Automatic Parent Discovery 是在调用方未显式给出父节点时，为 Generation Chain 选择父节点的规则。它只在同一 Principal 内比较严格 canonical 历史前缀，选择最长且仍留下新 input item 的候选；任何语义差异或无候选都创建新根。它不从连接、网络属性或模糊文本推断父节点。
 
+## Native Compaction Boundary
+
+Native Compaction Boundary 是由 Provider 原生压缩状态证明、与已确认来源关联的不可变上下文替换点；后续执行使用压缩窗口，而不是重新继承来源的旧窗口。它不是 Generation、History Marker 或以上游 response ID 为依据的 Target Continuation。
+_避免使用_：摘要文本匹配、Thinking History Marker、可变 Session head
+
+## Native Automatic Window
+
+Native Automatic Window 是 Route 上默认关闭的原生压缩策略，由支持该能力的 Target 根据实际渲染的当前输入窗口判断是否触发；客户端显式原生控制优先。其阈值不是模型容量、累计用量预算或本地 token 估算。
+_避免使用_：上下文容量、累计 token 限额、平台本地摘要
+
+## Retained Tail Association
+
+Retained Tail Association 是 Interaction Observation 对幸存完整连续交互与唯一历史候选的精确匹配所作的诊断推断；它不证明发生过压缩，也不建立执行父边或恢复历史。缺少、歧义或不完整的证据保持未关联。
+_避免使用_：Automatic Parent Discovery、Generation Chain parent、确认压缩
+
 ## Upstream Store Hint
 
 Upstream Store Hint 是 Open Responses `store` 传达给 Target 的上游状态保留偏好。它只约束 Provider 是否可保存或续接其自身状态，不约束 Stravia 对 Generation Chain 的持久化。

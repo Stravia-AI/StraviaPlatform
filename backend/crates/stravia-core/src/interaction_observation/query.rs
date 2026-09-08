@@ -8,7 +8,8 @@ const DAY_MS: i64 = 86_400_000;
 const DEFAULT_LIMIT: u32 = 50;
 const MAX_LIMIT: u32 = 200;
 const INTERACTION_SELECT: &str = "SELECT i.id,i.root_id,i.parent_interaction_id,i.generation_root_id,i.first_route_id,i.first_model_display_name,i.status,i.started_at,i.last_active_at,i.visible_tail,i.input_tokens,i.output_tokens,i.cache_read_tokens,i.cache_write_tokens,i.reasoning_tokens,i.observation_gap,i.last_event_sequence,CASE WHEN SUM(CASE WHEN r.debug_enabled THEN 1 ELSE 0 END)=0 THEN 'none' WHEN SUM(CASE WHEN r.debug_enabled THEN 1 ELSE 0 END)=COUNT(*) AND COUNT(m.trace_id)=COUNT(*) AND SUM(CASE WHEN m.status='complete' THEN 1 ELSE 0 END)=COUNT(*) THEN 'complete' ELSE 'partial' END debug_status FROM interaction_observations i JOIN inference_run_observations r ON r.interaction_id=i.id LEFT JOIN debug_trace_manifests m ON m.run_id=r.id ";
-const RUN_SELECT: &str = "SELECT r.id,r.parent_run_id,r.generation_node_id,r.generation_parent_id,r.route_id,r.model_display_name,r.ingress_protocol,r.status,r.terminal_reason,r.user_interrupted,r.debug_enabled,r.client_output_committed,r.started_at,r.finished_at,CASE WHEN COUNT(a.id)=COUNT(a.input_tokens) THEN SUM(a.input_tokens) END input_tokens,CASE WHEN COUNT(a.id)=COUNT(a.output_tokens) THEN SUM(a.output_tokens) END output_tokens,CASE WHEN COUNT(a.id)=COUNT(a.cache_read_tokens) THEN SUM(a.cache_read_tokens) END cache_read_tokens,CASE WHEN COUNT(a.id)=COUNT(a.cache_write_tokens) THEN SUM(a.cache_write_tokens) END cache_write_tokens,CASE WHEN COUNT(a.id)=COUNT(a.reasoning_tokens) THEN SUM(a.reasoning_tokens) END reasoning_tokens FROM inference_run_observations r LEFT JOIN target_attempt_observations a ON a.run_id=r.id WHERE r.interaction_id=";
+// PostgreSQL promotes SUM(BIGINT) to NUMERIC; keep the public usage contract i64.
+const RUN_SELECT: &str = "SELECT r.id,r.parent_run_id,r.generation_node_id,r.generation_parent_id,r.route_id,r.model_display_name,r.ingress_protocol,r.status,r.terminal_reason,r.user_interrupted,r.debug_enabled,r.client_output_committed,r.started_at,r.finished_at,CASE WHEN COUNT(a.id)=COUNT(a.input_tokens) THEN CAST(SUM(a.input_tokens) AS BIGINT) END input_tokens,CASE WHEN COUNT(a.id)=COUNT(a.output_tokens) THEN CAST(SUM(a.output_tokens) AS BIGINT) END output_tokens,CASE WHEN COUNT(a.id)=COUNT(a.cache_read_tokens) THEN CAST(SUM(a.cache_read_tokens) AS BIGINT) END cache_read_tokens,CASE WHEN COUNT(a.id)=COUNT(a.cache_write_tokens) THEN CAST(SUM(a.cache_write_tokens) AS BIGINT) END cache_write_tokens,CASE WHEN COUNT(a.id)=COUNT(a.reasoning_tokens) THEN CAST(SUM(a.reasoning_tokens) AS BIGINT) END reasoning_tokens FROM inference_run_observations r LEFT JOIN target_attempt_observations a ON a.run_id=r.id WHERE r.interaction_id=";
 
 #[derive(FromRow, Clone)]
 struct InteractionRow {
@@ -76,6 +77,17 @@ struct ManifestRow {
 }
 
 impl ObservationStore {
+    async fn context_events(
+        &self,
+        interaction: &str,
+        through: i64,
+    ) -> anyhow::Result<Vec<ObservationEvent>> {
+        match self {
+            Self::Sqlite(pool) => map_sqlite_events(sqlx::query("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload FROM observation_events WHERE interaction_id=? AND sequence<=? AND kind IN ('compaction_operation','native_compaction_associated','retained_tail_associated') ORDER BY sequence").bind(interaction).bind(through).fetch_all(pool).await?),
+            Self::Postgres(pool) => map_postgres_events(sqlx::query("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload::text FROM observation_events WHERE interaction_id=$1 AND sequence<=$2 AND kind IN ('compaction_operation','native_compaction_associated','retained_tail_associated') ORDER BY sequence").bind(interaction).bind(through).fetch_all(pool).await?),
+        }
+    }
+
     pub async fn query_forest(&self, q: ForestQuery) -> anyhow::Result<ForestPage> {
         let snapshot_sequence = self.max_sequence().await?;
         let anchor = q
@@ -102,7 +114,7 @@ impl ObservationStore {
             Self::Sqlite(p) => matching_in_roots_sqlite(p, &q, &root_ids).await?,
             Self::Postgres(p) => matching_in_roots_postgres(p, &q, &root_ids).await?,
         };
-        let roots = root_rows
+        let mut roots: Vec<ForestRoot> = root_rows
             .iter()
             .take(limit as usize)
             .map(|(id, last)| {
@@ -127,6 +139,13 @@ impl ObservationStore {
                 }
             })
             .collect();
+        for root in &mut roots {
+            for interaction in &mut root.interactions {
+                interaction.context_events = self
+                    .context_events(&interaction.id, snapshot_sequence)
+                    .await?;
+            }
+        }
         let next_cursor =
             (root_rows.len() > limit as usize).then(|| root_rows[limit as usize - 1].0.clone());
         Ok(ForestPage {
@@ -200,7 +219,8 @@ impl ObservationStore {
                 debug_events: Vec::new(),
             });
         }
-        let selected = summary(selected_row.clone(), matched.contains(id));
+        let mut selected = summary(selected_row.clone(), matched.contains(id));
+        selected.context_events = self.context_events(id, snapshot_sequence).await?;
         let mut root_interactions: Vec<_> = root_rows
             .into_iter()
             .map(|row| {
@@ -208,6 +228,11 @@ impl ObservationStore {
                 summary(row, hit)
             })
             .collect();
+        for interaction in &mut root_interactions {
+            interaction.context_events = self
+                .context_events(&interaction.id, snapshot_sequence)
+                .await?;
+        }
         root_interactions.sort_by(|a, b| {
             a.started_at
                 .cmp(&b.started_at)
@@ -631,6 +656,7 @@ fn manifest(r: ManifestRow) -> TraceManifest {
 }
 fn summary(r: InteractionRow, matched: bool) -> InteractionSummary {
     InteractionSummary {
+        context_events: Vec::new(),
         id: r.id,
         root_id: r.root_id,
         parent_interaction_id: r.parent_interaction_id,

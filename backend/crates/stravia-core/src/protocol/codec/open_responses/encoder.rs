@@ -28,6 +28,10 @@ impl ResponsesEncoder {
         let mut input: Vec<Value> = Vec::new();
 
         for item in &req.items {
+            if let Some(native) = super::native_compaction_item(item) {
+                input.push(native);
+                continue;
+            }
             if let Some(reference_id) = item
                 .meta
                 .as_ref()
@@ -415,10 +419,24 @@ fn validate_target_thinking_control(req: &AiRequest) -> anyhow::Result<()> {
     }
 }
 
-fn insert_item_metadata(encoded: &mut Value, item: &crate::protocol::ir::AiItem, status: bool) {
+pub(super) fn insert_item_metadata(
+    encoded: &mut Value,
+    item: &crate::protocol::ir::AiItem,
+    status: bool,
+) {
     let object = encoded
         .as_object_mut()
         .expect("encoded Open Responses item is an object");
+    if let Some(fields) = item
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get("__open_responses_item_fields"))
+        .and_then(Value::as_object)
+    {
+        for (field, value) in fields {
+            object.entry(field.clone()).or_insert_with(|| value.clone());
+        }
+    }
     if let Some(id) = item.id_ref() {
         object.insert("id".into(), Value::String(id.to_owned()));
     }
@@ -881,6 +899,8 @@ fn content_block_kind(block: &ContentBlock) -> &'static str {
         ContentBlock::Video { .. } => "video",
         ContentBlock::Thinking { .. } => "thinking",
         ContentBlock::Reasoning { .. } => "reasoning",
+        ContentBlock::Compaction { .. } => "compaction",
+        ContentBlock::CompactionTrigger {} => "compaction_trigger",
         ContentBlock::RedactedThinking { .. } => "redacted_thinking",
         ContentBlock::ToolUse { .. } => "tool_use",
         ContentBlock::ToolResult { .. } => "tool_result",

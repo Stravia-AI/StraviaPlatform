@@ -459,7 +459,7 @@ test('Model Route editor derives thinking levels and identifies blocking destina
   await page.goto('/models')
   await page.locator('main').getByRole('link').filter({ hasText: 'thinking-route' }).click()
   await expect(page.getByRole('button', { name: 'Advanced', exact: true })).toHaveCount(0)
-  const enabledSwitch = page.getByRole('switch', { name: 'Enable' })
+  const enabledSwitch = page.getByRole('switch', { name: 'Enabled', exact: true })
   await expect(enabledSwitch).toBeChecked()
   const enabledControl = page.locator('[data-slot="model-enabled-control"]')
   const [switchBox, controlBox] = await Promise.all([enabledSwitch.boundingBox(), enabledControl.boundingBox()])

@@ -1,4 +1,6 @@
 export interface Route {
+  compaction_enabled: boolean
+  compaction_threshold: number | null
   id: string
   model_id: string
   display_name?: string | null
@@ -46,6 +48,8 @@ export interface ThinkingLevelMapping {
 }
 
 export interface CreateRoute {
+  compaction_enabled?: boolean
+  compaction_threshold?: number | null
   model_id: string
   display_name?: string | null
   balance?: RouteSelectionStrategy
@@ -71,6 +75,8 @@ export interface UnbindRouteInput {
 }
 
 export interface UpdateRoute {
+  compaction_enabled?: boolean
+  compaction_threshold?: number | null
   model_id?: string
   display_name?: string | null
   balance?: RouteSelectionStrategy

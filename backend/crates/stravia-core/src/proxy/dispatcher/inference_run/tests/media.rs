@@ -48,6 +48,8 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
         .expect("parent Provider Model");
     let parent_model = admin
         .create_model(CreateRoute {
+            compaction_enabled: false,
+            compaction_threshold: None,
             model_id: "text-parent".into(),
             display_name: None,
             balance: None,
@@ -89,6 +91,8 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
         .expect("Media Provider Model");
     let media_model = admin
         .create_model(CreateRoute {
+            compaction_enabled: false,
+            compaction_threshold: None,
             model_id: "media-vision".into(),
             display_name: None,
             balance: None,
@@ -302,6 +306,8 @@ async fn mixed_media_route_prefers_native_targets_and_rejects_targets_without_to
     let mixed_model = gateway
         .admin()
         .create_model(CreateRoute {
+            compaction_enabled: false,
+            compaction_threshold: None,
             model_id: "mixed-media".into(),
             display_name: None,
             balance: Some("traffic_equalization".into()),
@@ -335,6 +341,8 @@ async fn mixed_media_route_prefers_native_targets_and_rejects_targets_without_to
     let unsupported_model = gateway
         .admin()
         .create_model(CreateRoute {
+            compaction_enabled: false,
+            compaction_threshold: None,
             model_id: "unsupported-media".into(),
             display_name: None,
             balance: None,

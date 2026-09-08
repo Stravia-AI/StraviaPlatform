@@ -291,6 +291,8 @@ async fn gateway_with_captured_text(
     add_test_provider_model(&gateway, &provider.id).await;
     let model = admin
         .create_model(CreateRoute {
+            compaction_enabled: false,
+            compaction_threshold: None,
             model_id: model_name.into(),
             display_name: None,
             balance: None,
@@ -305,6 +307,8 @@ async fn gateway_with_captured_text(
     } else {
         let other_model = admin
             .create_model(CreateRoute {
+                compaction_enabled: false,
+                compaction_threshold: None,
                 model_id: format!("{model_name}-other"),
                 display_name: None,
                 balance: None,
@@ -454,6 +458,8 @@ async fn execute_fails_over_before_canonical_output_and_returns_the_locked_targe
     }
     let model = admin
         .create_model(CreateRoute {
+            compaction_enabled: false,
+            compaction_threshold: None,
             model_id: "failover-model".into(),
             display_name: None,
             balance: Some("traffic_equalization".into()),
@@ -548,6 +554,8 @@ async fn http_continuation_not_retained_by_zdr_replays_full_request_once() {
     add_test_provider_model(&gateway, &provider.id).await;
     let model = admin
         .create_model(CreateRoute {
+            compaction_enabled: false,
+            compaction_threshold: None,
             model_id: "zdr-model".into(),
             display_name: None,
             balance: None,
@@ -644,6 +652,8 @@ async fn request_scoped_http_errors_do_not_quarantine_the_target() {
     add_test_provider_model(&gateway, &provider.id).await;
     let model = admin
         .create_model(CreateRoute {
+            compaction_enabled: false,
+            compaction_threshold: None,
             model_id: "request-error-model".into(),
             display_name: None,
             balance: None,
@@ -726,6 +736,8 @@ async fn execute_rejects_tools_when_no_target_declares_function_tool_support() {
     add_test_provider_model(&gateway, &provider.id).await;
     let model = admin
         .create_model(CreateRoute {
+            compaction_enabled: false,
+            compaction_threshold: None,
             model_id: "no-tools-model".into(),
             display_name: None,
             balance: None,
@@ -822,6 +834,8 @@ async fn execute_does_not_fail_over_after_the_first_canonical_delta() {
     }
     let model = admin
         .create_model(CreateRoute {
+            compaction_enabled: false,
+            compaction_threshold: None,
             model_id: "stream-lock-model".into(),
             display_name: None,
             balance: Some("traffic_equalization".into()),
@@ -1182,7 +1196,7 @@ async fn consume_until_publication(turn: &mut ModelTurn, store: &HeldPublication
                 CanonicalEvent::Delta(AiStreamDelta::TextDelta(delta))
                 | CanonicalEvent::Delta(AiStreamDelta::TextDeltaWithMetadata { text: delta, .. }) => text.push_str(&delta),
                 CanonicalEvent::Delta(_) => {},
-                CanonicalEvent::Completed(_) => panic!("success escaped pending publication"),
+                CanonicalEvent::Completed(_) | CanonicalEvent::Compacted(_) => panic!("success escaped pending publication"),
             }
         }
     }
@@ -1204,7 +1218,9 @@ async fn canonical_completion_publishes_after_trailing_output_and_is_permanently
         CanonicalEvent::Completed(response) => {
             assert_eq!(response.output_text(), "answer ~stravia-secret:")
         }
-        CanonicalEvent::Delta(_) => panic!("all deltas must precede publication"),
+        CanonicalEvent::Delta(_) | CanonicalEvent::Compacted(_) => {
+            panic!("expected generation completion")
+        }
     }
     assert_eq!(store.starts.load(Ordering::SeqCst), 1);
     cancellation.cancel();
@@ -1357,6 +1373,198 @@ async fn cancellation_in_publications_final_poll_preempts_completed() {
     drop(turn);
     assert_publication_observation(&gateway, "cancelled").await;
     assert!(store.inner.active(&principal).await.unwrap()[0].expires_at > pending_expiry);
+}
+
+#[tokio::test]
+async fn codex_native_compaction_uses_unary_and_replayable_responses_websocket() {
+    use axum::{
+        Json, Router,
+        extract::ws::{Message, WebSocketUpgrade},
+        response::IntoResponse,
+        routing::{get, post},
+    };
+    use serde_json::{Value, json};
+    async fn compact(Json(body): Json<Value>) -> axum::response::Response {
+        if body.get("stream").is_some() || body.get("input").and_then(Value::as_array).is_none() {
+            return axum::http::StatusCode::BAD_REQUEST.into_response();
+        }
+        Json(json!({"id":"compact-unary","object":"response.compaction","created_at":17,
+            "output":[{"type":"message","role":"user","content":[{"type":"input_text","text":"retained"}]},
+                {"type":"compaction","id":"compact-state-unary","encrypted_content":"unary-state","rolling_identity":{"version":2}}],
+            "usage":{"input_tokens":9,"output_tokens":2,"total_tokens":11,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}})).into_response()
+    }
+    async fn responses(upgrade: WebSocketUpgrade) -> axum::response::Response {
+        upgrade.on_upgrade(|mut socket| async move {
+            let state = json!({"type":"compaction","id":"inline-state","encrypted_content":"inline-cipher","rolling_identity":{"version":3}});
+            while let Some(Ok(Message::Text(text))) = socket.recv().await {
+                let request: Value = serde_json::from_str(&text).expect("native request");
+                let input = request["input"].as_array().expect("native input");
+                let triggered = input.iter().any(|item| item["type"] == "compaction_trigger");
+                let replayed = input.iter().any(|item| item == &state);
+                if !triggered && !replayed {
+                    socket.send(Message::Text(json!({"type":"error","error":{"type":"invalid_request_error","code":"invalid_state","message":"native state was changed"}}).to_string().into())).await.unwrap();
+                    continue;
+                }
+                let output = if triggered { vec![state.clone()] } else { vec![json!({"type":"message","id":"reply","role":"assistant","status":"completed","content":[{"type":"output_text","text":"native replay accepted","annotations":[]}]})] };
+                let response_id = if triggered { "trigger-response" } else { "replay-response" };
+                let created = crate::protocol::codec::open_responses::formatter::response_resource_snapshot(
+                    response_id, "upstream-model", "in_progress", Vec::new(),
+                    Value::Null, Value::Null, Value::Null,
+                );
+                socket.send(Message::Text(json!({"type":"response.created","response":created}).to_string().into())).await.unwrap();
+                for (index, item) in output.iter().enumerate() {
+                    socket.send(Message::Text(json!({"type":"response.output_item.added","output_index":index,"item":item}).to_string().into())).await.unwrap();
+                    socket.send(Message::Text(json!({"type":"response.output_item.done","output_index":index,"item":item}).to_string().into())).await.unwrap();
+                }
+                let completed = crate::protocol::codec::open_responses::formatter::response_resource_snapshot(
+                    response_id, "upstream-model", "completed", output,
+                    Value::Null, Value::Null,
+                    json!({"input_tokens":3,"output_tokens":1,"total_tokens":4,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}),
+                );
+                socket.send(Message::Text(json!({"type":"response.completed","response":completed}).to_string().into())).await.unwrap();
+            }
+        }).into_response()
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = Router::new()
+        .route("/responses", get(responses))
+        .route("/responses/compact", post(compact));
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let gateway = Gateway::new(GatewayConfig {
+        data_dir: directory.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let provider = gateway
+        .admin()
+        .create_provider(CreateProvider {
+            name: Some("local Codex".into()),
+            source: ProviderSourceInput::Custom {
+                vendor: Some("openai".into()),
+                protocol: "open-responses".into(),
+                base_url: format!("http://{address}"),
+                models_source: None,
+                static_models: None,
+            },
+            credential: ProviderCredentialInput::ApiKey {
+                value: "isolated-provider-key".into(),
+            },
+            use_proxy: false,
+        })
+        .await
+        .unwrap();
+    gateway
+        .storage
+        .providers()
+        .update(
+            &provider.id,
+            crate::db::models::UpdateProvider {
+                channel: Some("codex".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    add_test_provider_model(&gateway, &provider.id).await;
+    let route = gateway
+        .admin()
+        .create_model(CreateRoute {
+            model_id: "compact-codex".into(),
+            display_name: None,
+            balance: None,
+            target_provider: provider.id.clone(),
+            target_model: "upstream-model".into(),
+            targets: Vec::new(),
+            compaction_enabled: false,
+            compaction_threshold: None,
+        })
+        .await
+        .unwrap();
+    let key = gateway
+        .admin()
+        .create_api_key(crate::db::models::CreateApiKey {
+            key: None,
+            name: "native compact".into(),
+            concurrency_limit: None,
+            expires_at: None,
+            mcp_access_enabled: false,
+            transparent_injection_enabled: false,
+            inject_web_search: false,
+            inject_media_understanding: false,
+            model_ids: vec![route.id],
+        })
+        .await
+        .unwrap();
+    let principal = Principal::new(key.id);
+    let pair = crate::protocol::transform::ProtocolTransform::global()
+        .bind(OPEN_RESPONSES_2026_04_24, OPEN_RESPONSES_2026_04_24)
+        .unwrap();
+    let request = pair
+        .decode_request(
+            json!({"model":"compact-codex","input":[{"role":"user","content":"compact this"}]}),
+        )
+        .unwrap();
+    let mut input = TurnInput::new(principal.clone(), request);
+    input.purpose = ModelTurnPurpose::Compact;
+    let mut turn = gateway
+        .model_turn
+        .execute(input)
+        .await
+        .expect("standalone uses HTTP unary despite Codex stream-only generation");
+    let CanonicalEvent::Compacted(result) = turn.output.next().await.unwrap().unwrap() else {
+        panic!("native compact terminal required")
+    };
+    assert_eq!(result.wire["id"], "compact-unary");
+    assert_eq!(result.wire["output"][0]["content"][0]["text"], "retained");
+    assert_eq!(
+        result.wire["output"][1]["rolling_identity"],
+        json!({"version":2})
+    );
+    let trigger = pair.decode_request(json!({"model":"compact-codex","input":[{"role":"user","content":"remote v2"},{"type":"compaction_trigger"}]})).unwrap();
+    let mut triggered = gateway
+        .model_turn
+        .execute(TurnInput::new(principal.clone(), trigger))
+        .await
+        .unwrap();
+    let mut native = None;
+    while let Some(event) = triggered.output.next().await {
+        match event.unwrap() {
+            CanonicalEvent::Delta(AiStreamDelta::ItemDone { item, .. }) if item.is_compaction() => {
+                assert!(
+                    gateway
+                        .compaction
+                        .resolve(&principal, std::slice::from_ref(&item))
+                        .await
+                        .unwrap()
+                        .is_some(),
+                    "complete state is durable before delivery"
+                );
+                native = crate::protocol::codec::open_responses::native_compaction_item(&item);
+            }
+            CanonicalEvent::Completed(_) => break,
+            _ => {}
+        }
+    }
+    let replay = pair.decode_request(json!({"model":"compact-codex","input":[native.expect("native triggered state"),{"role":"user","content":"continue"}]})).unwrap();
+    let mut continued = gateway
+        .model_turn
+        .execute(TurnInput::new(principal, replay))
+        .await
+        .unwrap();
+    let mut accepted = false;
+    while let Some(event) = continued.output.next().await {
+        if let CanonicalEvent::Completed(response) = event.unwrap() {
+            accepted = response.output_text() == "native replay accepted";
+            break;
+        }
+    }
+    assert!(accepted);
+    server.abort();
 }
 
 #[tokio::test]

@@ -15,6 +15,7 @@ interaction_observations ──1:N── inference_run_observations ──1:N─
     └──1:N── debug_trace_manifests (managed Trace files)
 rejected_request_observations ──1:N── observation_events / debug_trace_manifests
 turn_chain_nodes (principal-scoped Response / Agent / Web Search DAG)
+native_compactions ──1:N── native_compaction_states / native_compaction_sources
 history_markers (principal-scoped hidden history and Platform execution state)
 reversible_redaction_mappings (principal-scoped persistent secret placeholders)
 agent_definition_revisions ──1:1── agent_definition_configs
@@ -67,6 +68,8 @@ Route 记录。`model_id` 保存客户端请求使用的 Route ID，`display_nam
 | `model_id` | TEXT NOT NULL | — | Route ID；客户端模型 ID，精确且大小写敏感匹配 |
 | `display_name` | TEXT NULL | `NULL` | 可选展示名称；空值由应用层回退为 `model_id` |
 | `balance` | TEXT | `'traffic_equalization'` | Route Scheduling Strategy：`traffic_equalization` 或 `latency_preference`；管理接口对旧值做写入归一化，读取只返回新值 |
+| `compaction_enabled` | BOOLEAN / INTEGER NOT NULL | `false` / `0` | 原生自动压缩策略开关；不禁止客户端主动压缩 |
+| `compaction_threshold` | BIGINT / INTEGER NULL | `NULL` | 当前输入窗口的正整数 token 触发阈值；不是模型上下文容量或累计 usage |
 | `is_enabled` | INTEGER | `1` | 是否启用 |
 | `priority` | INTEGER | `0` | 优先级（预留） |
 | `created_at` | TEXT | `datetime('now')` | 创建时间 |
@@ -487,6 +490,45 @@ Generation Chain（其 Responses 投影为 Response Chain）、Agent Turn 与 Se
 Generation Chain 的新 Response payload 使用版本 5，工具结果保存可选 `content_kind`（`json` 或 `content_blocks`），缺失值表示旧记录没有语义证明。普通 Tool Text 与此前编码成字符串的 content blocks 使用内部消息标记区分；读取版本 1–4 时仅从真实 `AiItem.meta` 移除该保留键，不改写业务 JSON 或无关元数据。旧记录仍可读取，但可逆脱敏开启时会拒绝无法明确解释的工具数组历史。Agent/Search payload 的版本规则不变；此调整不新增 SQL 列。
 
 ---
+
+## native_compactions
+
+原生压缩的受保护核心记录，不属于 Observation。登记事务完成后即可解析，交付确认不作为第二次开启解析的开关；默认 pending 保留一小时，确认交付或合法引用后至少保留七天。引用与分支延长必要前序记录和 Generation 祖先；过期记录不被回传复活。
+
+| Column | Type | Default | Description |
+|---|---|---|---|
+| `id` | TEXT PK | — | 平台内部不可变登记 ID，不改写原生 compaction ID |
+| `principal` | TEXT NOT NULL | — | API Key 对应的隔离身份 |
+| `source_generation_id` | TEXT FK | NULL | 已确认来源，引用 `turn_chain_nodes.id`，ON DELETE RESTRICT |
+| `operation_id` | TEXT NOT NULL | — | 产生状态的操作 ID，不是 upstream response ID |
+| `payload` | TEXT NOT NULL | — | 原生完整窗口、Target/账号配置 namespace、模型/协议及前序来源；SQLite 校验 JSON |
+| `created_at` | BIGINT / INTEGER NOT NULL | — | 登记时间，Unix 毫秒 |
+| `delivered_at` | BIGINT / INTEGER | NULL | 已确认交付时间 |
+| `referenced_at` | BIGINT / INTEGER | NULL | 首次合法引用时间 |
+| `expires_at` | BIGINT / INTEGER NOT NULL | — | 保留期，Unix 毫秒 |
+
+**索引**：`idx_native_compactions_expiry`。普通诊断与错误不复制 `payload`。
+
+### native_compaction_states
+
+| Column | Type | Description |
+|---|---|---|
+| `record_id` | TEXT FK NOT NULL | 登记 ID，ON DELETE CASCADE |
+| `principal` | TEXT NOT NULL | 查询隔离身份 |
+| `native_identity` | TEXT NULL | Provider 原生状态 ID，可缺省 |
+| `fingerprint` | TEXT NOT NULL | 完整原生状态的稳定精确指纹 |
+| `state_payload` | TEXT NOT NULL | 用于内容核验的完整原生状态；SQLite 校验 JSON |
+
+主键 `(record_id, fingerprint)`；分别按 `(principal, fingerprint)`、`(principal, native_identity)` 建索引。索引不设跨登记唯一性：同 ID 不同内容、同状态不同来源不能互相覆盖，解析时显式处理冲突/歧义。
+
+### native_compaction_sources
+
+| Column | Type | Description |
+|---|---|---|
+| `record_id` | TEXT FK NOT NULL | 新登记，ON DELETE CASCADE |
+| `source_id` | TEXT FK NOT NULL | 不可变前序压缩登记，ON DELETE RESTRICT |
+
+主键 `(record_id, source_id)`；禁止自引用，`idx_native_compaction_source` 索引前序来源。新记录只引用已存在且同 Principal 的有效记录，形成不可变边界图。
 
 ## history_markers
 

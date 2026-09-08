@@ -29,6 +29,15 @@ pub(super) struct GroupingIndex {
 }
 
 impl GroupingIndex {
+    pub fn forget_interactions(&mut self, interactions: &[String]) {
+        let removed: std::collections::HashSet<_> =
+            interactions.iter().map(String::as_str).collect();
+        self.runs
+            .retain(|_, run| !removed.contains(run.interaction_id.as_str()));
+        self.generation_nodes
+            .retain(|_, (interaction, _)| !removed.contains(interaction.as_str()));
+    }
+
     pub fn assign(&mut self, start: &RunStart, now: i64) -> GroupAssignment {
         let explicit_parent = start
             .generation_parent_id

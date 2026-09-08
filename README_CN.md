@@ -57,7 +57,13 @@ Open Responses 推理正文使用当前客户端采用的 rolling `response.reas
 
 OpenAI direct 与 Codex OAuth 的生成 Target 会为 Chat Completions、Open Responses、Anthropic Messages 和 Gemini 请求使用上游 Responses WebSocket，不受客户端是否流式影响；Embeddings 仍只使用 HTTP。Hook 与协议可表示性检查完成后，Stravia 可从最长且严格等价的 canonical item 前缀续接；Principal、精确 Target、Provider 账号与配置、resolved model、instructions、tools、reasoning、response format 和请求控制必须全部一致。任一条件不匹配都会发送完整有效历史，不会削弱请求语义。
 
-`POST /v1/responses` 以 Open Responses 2026-04-24 作为 canonical baseline，同时接受结构安全的 rolling additive 字段和 hosted tool 声明。同协议 Target 保留这层 compatibility envelope；跨协议 Target 可以省略 advisory 字段和未被强制选择的 hosted tools，但绝不省略内容或硬约束。`POST /v1/responses/compact` 已被识别，但固定返回 `unsupported_feature`；后台执行仍不支持。
+`POST /v1/responses` 以 Open Responses 2026-04-24 作为 canonical baseline，同时接受结构安全的 rolling additive 字段和 hosted tool 声明。同协议 Target 保留这层 compatibility envelope；跨协议 Target 可以省略 advisory 字段和未被强制选择的 hosted tools，但绝不省略内容或硬约束。后台执行仍不支持。
+
+原生压缩使用兼容的 OpenAI/Codex Target：`POST /v1/responses/compact` 是独立的 HTTP unary 操作，返回包含 retained items 与 opaque state 的完整下一窗口；后续必须完整回放该窗口，不能自行裁剪或改写。Responses 同时承载原生 compaction item、Codex 内嵌触发项，以及受支持的服务端 `context_management` 控制。这些属于协议硬要求，不支持的 Target 不能静默丢弃；compact 操作不是空 Generation。
+
+Route 的**原生自动压缩**默认关闭。配置正整数输入 token 阈值后，由兼容 Target 按当前实际渲染窗口触发压缩；它不是累计用量预算，也不是模型容量设置。客户端显式控制优先，包括显式空集合与 null。关闭 Route 策略不会禁止客户端主动压缩。已知模型限额与输出余量约束阈值；未知限额保持未知，上游准入错误真实返回。
+
+已登记的原生状态在保留期内可跨重启恢复已知来源，但不会恢复已移除的历史；Target、账号与配置 generation、模型及协议必须保持兼容。监控区分已确认生成关系、原生桥接与保留尾部推断关联；推断关联不改变推理，也不启用 Target Continuation。清理监控历史不删除有效原生状态映射；普通监控不包含 opaque payload，未报告的压缩用量保持 unknown。
 
 ### 提供商与模型路由
 

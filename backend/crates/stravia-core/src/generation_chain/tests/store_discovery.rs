@@ -1074,6 +1074,8 @@ async fn legacy_response_payload_keeps_target_continuation() {
                     system: root.instructions.clone(),
                 },
                 client_output: None,
+                client_history_mutation: None,
+                compaction_record_ids: Vec::new(),
                 effective_history_mutation: None,
                 effective_system: root.instructions.clone(),
                 effective_output: response,

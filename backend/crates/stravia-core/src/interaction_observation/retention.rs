@@ -2,6 +2,7 @@ use super::{
     store::ObservationStore,
     types::{ClearHistoryResult, TraceManifest},
 };
+use sqlx::Connection;
 use std::collections::HashSet;
 
 impl ObservationStore {
@@ -114,28 +115,30 @@ impl ObservationStore {
             }
         }
     }
-    pub async fn purge_expired_rows(&self, now: i64) -> anyhow::Result<()> {
+    pub async fn purge_expired_rows(&self, now: i64) -> anyhow::Result<Vec<String>> {
         match self {
             Self::Sqlite(p) => {
                 let mut tx = p.begin().await?;
                 sqlx::query("DELETE FROM rejected_request_observations WHERE expires_at<=? AND NOT EXISTS (SELECT 1 FROM debug_trace_manifests m WHERE m.rejection_id=rejected_request_observations.id)").bind(now).execute(&mut *tx).await?;
-                sqlx::query("DELETE FROM interaction_observations WHERE expires_at<=? AND status<>'running' AND NOT EXISTS (SELECT 1 FROM inference_run_observations r JOIN debug_trace_manifests m ON m.run_id=r.id WHERE r.interaction_id=interaction_observations.id)").bind(now).execute(&mut *tx).await?;
-                tx.commit().await?
+                let deleted = sqlx::query_scalar("DELETE FROM interaction_observations WHERE expires_at<=? AND status<>'running' AND NOT EXISTS (SELECT 1 FROM inference_run_observations r JOIN debug_trace_manifests m ON m.run_id=r.id WHERE r.interaction_id=interaction_observations.id) RETURNING id").bind(now).fetch_all(&mut *tx).await?;
+                tx.commit().await?;
+                Ok(deleted)
             }
             Self::Postgres(p) => {
                 let mut tx = p.begin().await?;
                 sqlx::query("DELETE FROM rejected_request_observations WHERE expires_at<=$1 AND NOT EXISTS (SELECT 1 FROM debug_trace_manifests m WHERE m.rejection_id=rejected_request_observations.id)").bind(now).execute(&mut *tx).await?;
-                sqlx::query("DELETE FROM interaction_observations WHERE expires_at<=$1 AND status<>'running' AND NOT EXISTS (SELECT 1 FROM inference_run_observations r JOIN debug_trace_manifests m ON m.run_id=r.id WHERE r.interaction_id=interaction_observations.id)").bind(now).execute(&mut *tx).await?;
-                tx.commit().await?
+                let deleted = sqlx::query_scalar("DELETE FROM interaction_observations WHERE expires_at<=$1 AND status<>'running' AND NOT EXISTS (SELECT 1 FROM inference_run_observations r JOIN debug_trace_manifests m ON m.run_id=r.id WHERE r.interaction_id=interaction_observations.id) RETURNING id").bind(now).fetch_all(&mut *tx).await?;
+                tx.commit().await?;
+                Ok(deleted)
             }
         }
-        Ok(())
     }
 
     pub async fn mark_clear_tombstones(&self) -> anyhow::Result<ClearHistoryResult> {
         match self {
             Self::Sqlite(p) => {
-                let mut tx = p.begin().await?;
+                let mut connection = p.acquire().await?;
+                let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
                 let skipped:i64=sqlx::query_scalar("SELECT COUNT(*) FROM interaction_observations WHERE status IN ('running','waiting_client')").fetch_one(&mut *tx).await?;
                 let interactions:i64=sqlx::query_scalar("SELECT COUNT(*) FROM interaction_observations WHERE status NOT IN ('running','waiting_client')").fetch_one(&mut *tx).await?;
                 let rejected: i64 =
@@ -168,22 +171,23 @@ impl ObservationStore {
             }
         }
     }
-    pub async fn purge_clear_rows(&self) -> anyhow::Result<()> {
+    pub async fn purge_clear_rows(&self) -> anyhow::Result<Vec<String>> {
         match self {
             Self::Sqlite(p) => {
                 let mut tx = p.begin().await?;
                 sqlx::query("DELETE FROM rejected_request_observations WHERE NOT EXISTS (SELECT 1 FROM debug_trace_manifests m WHERE m.rejection_id=rejected_request_observations.id)").execute(&mut *tx).await?;
-                sqlx::query("DELETE FROM interaction_observations WHERE status NOT IN ('running','waiting_client') AND NOT EXISTS (SELECT 1 FROM inference_run_observations r JOIN debug_trace_manifests m ON m.run_id=r.id WHERE r.interaction_id=interaction_observations.id)").execute(&mut *tx).await?;
-                tx.commit().await?
+                let deleted = sqlx::query_scalar("DELETE FROM interaction_observations WHERE status NOT IN ('running','waiting_client') AND NOT EXISTS (SELECT 1 FROM inference_run_observations r JOIN debug_trace_manifests m ON m.run_id=r.id WHERE r.interaction_id=interaction_observations.id) RETURNING id").fetch_all(&mut *tx).await?;
+                tx.commit().await?;
+                Ok(deleted)
             }
             Self::Postgres(p) => {
                 let mut tx = p.begin().await?;
                 sqlx::query("DELETE FROM rejected_request_observations WHERE NOT EXISTS (SELECT 1 FROM debug_trace_manifests m WHERE m.rejection_id=rejected_request_observations.id)").execute(&mut *tx).await?;
-                sqlx::query("DELETE FROM interaction_observations WHERE status NOT IN ('running','waiting_client') AND NOT EXISTS (SELECT 1 FROM inference_run_observations r JOIN debug_trace_manifests m ON m.run_id=r.id WHERE r.interaction_id=interaction_observations.id)").execute(&mut *tx).await?;
-                tx.commit().await?
+                let deleted = sqlx::query_scalar("DELETE FROM interaction_observations WHERE status NOT IN ('running','waiting_client') AND NOT EXISTS (SELECT 1 FROM inference_run_observations r JOIN debug_trace_manifests m ON m.run_id=r.id WHERE r.interaction_id=interaction_observations.id) RETURNING id").fetch_all(&mut *tx).await?;
+                tx.commit().await?;
+                Ok(deleted)
             }
         }
-        Ok(())
     }
     pub async fn debug_manifest_counts(&self) -> anyhow::Result<(u64, u64)> {
         let (bytes,partial):(i64,i64)=match self{Self::Sqlite(p)=>sqlx::query_as("SELECT COALESCE(SUM(bytes_written),0),COALESCE(SUM(CASE WHEN status='partial' AND completed_at IS NOT NULL THEN 1 ELSE 0 END),0) FROM debug_trace_manifests WHERE tombstoned=0").fetch_one(p).await?,Self::Postgres(p)=>sqlx::query_as("SELECT COALESCE(SUM(bytes_written),0),COALESCE(SUM(CASE WHEN status='partial' AND completed_at IS NOT NULL THEN 1 ELSE 0 END),0) FROM debug_trace_manifests WHERE tombstoned=FALSE").fetch_one(p).await?};
