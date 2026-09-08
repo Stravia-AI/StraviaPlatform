@@ -1,34 +1,13 @@
-use std::{
-    fmt,
-    sync::{mpsc, Arc, LazyLock},
-    thread::{self, JoinHandle},
-    time::Duration,
-};
+use std::{fmt, net::SocketAddr, sync::Arc, time::Duration};
 
 use anyhow::{bail, Context, Result};
-use moli_cookie_jar::{advance_cookie_request_context, new_shared_browser_cookie_store};
-use moli_fetch::{
-    FetchCancelHandle, FetchClient, FetchClientHandle, FetchConfig, NetworkResponseExtraInfo,
-    RawResponse, RedirectInfo, Request, RequestCredentialsMode,
-};
-use moli_stealth_net::TransportFingerprint;
-use parking_lot::Mutex;
+use http_body_util::BodyExt;
 use url::Url;
+use wreq::{header, Client, Method, Request, Response};
+
+use crate::outbound::ResolvedProxy;
 
 const MAX_REDIRECTS: usize = 10;
-
-static TRANSPORT_INITIALIZATION: LazyLock<std::result::Result<(), String>> = LazyLock::new(|| {
-    moli_stealth_net::initialize_process_fingerprint(TransportFingerprint::chrome())
-        .map_err(|error| error.to_string())
-});
-
-/// 初始化进程级 Chrome 传输指纹；浏览器和纯 HTTP 客户端必须在创建首个传输前共用此入口。
-pub(crate) fn initialize_transport() -> Result<()> {
-    TRANSPORT_INITIALIZATION
-        .clone()
-        .map_err(anyhow::Error::msg)
-        .context("failed to initialize Moli Chrome transport fingerprint")
-}
 
 #[derive(Debug, thiserror::Error)]
 #[error("response exceeded configured limit of {limit} bytes for {url}")]
@@ -39,210 +18,229 @@ pub struct ResponseTooLarge {
 }
 
 #[derive(Clone)]
-/// 使用 Moli 原生请求模型的并发 HTTP 客户端；克隆共享 Cookie 与传输生命周期。
+/// 原生 wreq 请求传输；克隆共享连接池、搜索 Cookie 和构造期出站快照。
 pub struct HttpClient {
     inner: Arc<HttpClientInner>,
 }
 
 struct HttpClientInner {
-    http: FetchClientHandle,
-    https: FetchClientHandle,
-    http_response_limit: Option<usize>,
-    https_response_limit: Option<usize>,
-    http_timeout_ms: u64,
-    https_timeout_ms: u64,
-    native_redirects: bool,
+    direct: Client,
+    http: Client,
+    https: Client,
+    snapshot: ResolvedProxy,
+    timeout: Duration,
+    response_limit: Option<usize>,
     cookies: bool,
-    shutdown: mpsc::Sender<()>,
-    owner_thread: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl HttpClient {
-    /// 快照 HTTP/HTTPS 配置，并在专属线程创建 Moli owner。
-    ///
-    /// `cookies` 为 false 时禁止发送和保存请求 Cookie；配置中的响应上限在流式读取时执行。
-    /// 指纹初始化或 owner 线程启动失败会返回错误。最后一个克隆释放时同步关闭并回收 owner。
-    pub fn new(
-        mut http_config: FetchConfig,
-        mut https_config: FetchConfig,
+    pub(crate) fn new(
+        snapshot: ResolvedProxy,
+        timeout: Duration,
         cookies: bool,
+        response_limit: Option<usize>,
     ) -> Result<Self> {
-        initialize_transport()?;
+        Self::build(snapshot, timeout, cookies, response_limit, None)
+    }
 
-        let native_redirects = http_config == https_config;
-        if !cookies {
-            remove_default_cookie_header(&mut http_config);
-            remove_default_cookie_header(&mut https_config);
+    /// 固定策略层已验证的全部地址，不允许连接时再次解析目标域名。
+    pub(crate) fn pinned(
+        hostname: &str,
+        addresses: Vec<SocketAddr>,
+        timeout: Duration,
+        response_limit: usize,
+    ) -> Result<Self> {
+        if addresses.is_empty()
+            || addresses
+                .iter()
+                .any(|address| !crate::fetch::policy::is_public_ip(address.ip()))
+        {
+            bail!("direct HTTP requires public pinned addresses");
         }
-        let http_response_limit = http_config.http_max_response_size();
-        let https_response_limit = https_config.http_max_response_size();
-        let http_timeout_ms = http_config.request_timeout_ms();
-        let https_timeout_ms = https_config.request_timeout_ms();
-        // 上游的实体大小错误目前只有字符串；关闭其上限，由本层流式读取产生可 downcast 的错误。
-        http_config.set_connection_limits(
-            http_config.http_max_concurrent(),
-            http_config.http_max_host_open(),
-            None,
-        );
-        https_config.set_connection_limits(
-            https_config.http_max_concurrent(),
-            https_config.http_max_host_open(),
-            None,
-        );
+        Self::build(
+            ResolvedProxy::direct(),
+            timeout,
+            false,
+            Some(response_limit),
+            Some((hostname, addresses)),
+        )
+    }
 
-        let reuse_owner = http_config == https_config;
-        let (shutdown_tx, shutdown_rx) = mpsc::channel();
-        let (initialized_tx, initialized_rx) = mpsc::sync_channel(1);
-        let owner_thread = thread::Builder::new()
-            .name("stravia-moli-http-owner".to_owned())
-            .spawn(move || {
-                let cookie_store = new_shared_browser_cookie_store();
-                let http_owner = FetchClient::new(&http_config, Arc::clone(&cookie_store));
-                let http = http_owner.handle();
-                let https_owner = (!reuse_owner)
-                    .then(|| FetchClient::new(&https_config, Arc::clone(&cookie_store)));
-                let https = https_owner
-                    .as_ref()
-                    .map_or_else(|| http.clone(), FetchClient::handle);
-                if initialized_tx.send((http, https)).is_err() {
-                    return;
-                }
-                let _ = shutdown_rx.recv();
-                drop(https_owner);
-                drop(http_owner);
-            })
-            .context("failed to spawn Moli HTTP owner thread")?;
-
-        let (http, https) = match initialized_rx.recv() {
-            Ok(handles) => handles,
-            Err(_) => {
-                let panicked = owner_thread.join().is_err();
-                bail!(if panicked {
-                    "Moli HTTP owner thread panicked during initialization"
-                } else {
-                    "Moli HTTP owner thread exited during initialization"
-                });
+    fn build(
+        snapshot: ResolvedProxy,
+        timeout: Duration,
+        cookies: bool,
+        response_limit: Option<usize>,
+        pin: Option<(&str, Vec<SocketAddr>)>,
+    ) -> Result<Self> {
+        let jar = Arc::new(wreq::cookie::Jar::default());
+        let make_client = |proxy: Option<&Url>| -> Result<Client> {
+            let mut builder = Client::builder()
+                .emulation(wreq_util::Profile::Chrome149)
+                .no_proxy()
+                .retry(wreq::retry::Policy::never())
+                .redirect(wreq::redirect::Policy::none())
+                .timeout(timeout);
+            if cookies {
+                builder = builder.cookie_provider(Arc::clone(&jar));
             }
+            if let Some(proxy) = proxy {
+                if !proxy.username().is_empty() || proxy.password().is_some() {
+                    bail!("proxy URL must not include credentials");
+                }
+                builder = builder.proxy(wreq::Proxy::all(proxy.as_str())?);
+            }
+            if let Some((hostname, addresses)) = &pin {
+                builder = builder.resolve_to_addrs((*hostname).to_owned(), addresses.clone());
+            }
+            Ok(builder.build()?)
         };
-
+        let direct = make_client(None)?;
+        let http = snapshot
+            .http
+            .as_ref()
+            .map_or_else(|| Ok(direct.clone()), |proxy| make_client(Some(proxy)))?;
+        let https = snapshot
+            .https
+            .as_ref()
+            .map_or_else(|| Ok(direct.clone()), |proxy| make_client(Some(proxy)))?;
         Ok(Self {
             inner: Arc::new(HttpClientInner {
+                direct,
                 http,
                 https,
-                http_response_limit,
-                https_response_limit,
-                http_timeout_ms,
-                https_timeout_ms,
-                native_redirects,
+                snapshot,
+                timeout,
+                response_limit,
                 cookies,
-                shutdown: shutdown_tx,
-                owner_thread: Mutex::new(Some(owner_thread)),
             }),
         })
     }
 
-    /// 在 Tokio runtime 中执行请求，返回含 HTTP 错误状态的原始响应，不自动将 4xx/5xx 转成错误。
-    ///
-    /// 构造期超时覆盖完整重定向链；原生 Request 的单请求 override 不能放宽此客户端总预算。
-    /// URL、传输、重定向、超时和正文大小错误会显式返回；取消 future 会取消尚未完成的传输。
-    pub async fn fetch(&self, request: Request) -> Result<RawResponse> {
-        let timeout_ms = match request.url.scheme() {
-            "http" => self.inner.http_timeout_ms,
-            "https" => self.inner.https_timeout_ms,
-            scheme => bail!("Moli HTTP client does not support URL scheme `{scheme}`"),
-        };
-        if timeout_ms == 0 {
-            return self.fetch_inner(request).await;
-        }
-        tokio::time::timeout(Duration::from_millis(timeout_ms), self.fetch_inner(request))
+    /// 总预算覆盖重定向、响应头和解压后正文；取消 future 会直接丢弃在途传输。
+    /// 原生响应保留状态、最终 URI 和响应头，已读尽的正文由元组第二项唯一持有。
+    pub async fn fetch(&self, request: Request) -> Result<(Response, Vec<u8>)> {
+        self.fetch_with_redirects(request, true).await
+    }
+
+    /// 只执行当前跳，供 Fetch 策略逐跳检查目标和 Google 结果跳转使用。
+    pub async fn fetch_once(&self, request: Request) -> Result<(Response, Vec<u8>)> {
+        self.fetch_with_redirects(request, false).await
+    }
+
+    async fn fetch_with_redirects(
+        &self,
+        request: Request,
+        follow: bool,
+    ) -> Result<(Response, Vec<u8>)> {
+        tokio::time::timeout(self.inner.timeout, self.fetch_inner(request, follow))
             .await
-            .map_err(|_| anyhow::Error::new(moli_stealth_net::TransportError::Timeout))?
+            .context("HTTP request timed out")?
     }
 
-    async fn fetch_inner(&self, mut request: Request) -> Result<RawResponse> {
-        if !self.inner.cookies {
-            request.credentials_mode = RequestCredentialsMode::Omit;
-            request
-                .request_headers
-                .retain(|(name, _)| !name.eq_ignore_ascii_case("cookie"));
-        }
-        if !request.follow_redirects || self.inner.native_redirects {
-            return self.fetch_once(request).await;
-        }
-
-        let initial_url = request.url.clone();
-        let mut redirects = Vec::new();
-        request.follow_redirects = false;
-
-        for redirect_count in 0..=MAX_REDIRECTS {
-            let response = self.fetch_once(request.clone()).await?;
-            let Some(next_url) = redirect_target(&response)? else {
-                return finish_redirect_chain(response, redirects);
+    async fn fetch_inner(&self, mut request: Request, follow: bool) -> Result<(Response, Vec<u8>)> {
+        // 请求只携带 HTTP 语义，不能覆盖出站代理、Cookie、解压或超时策略。
+        request.extensions_mut().clear();
+        for count in 0..=MAX_REDIRECTS {
+            let from = Url::parse(&request.uri().to_string())?;
+            if !matches!(from.scheme(), "http" | "https")
+                || !from.username().is_empty()
+                || from.password().is_some()
+            {
+                bail!("HTTP transport requires an HTTP(S) URL without credentials");
+            }
+            if !self.inner.cookies {
+                request.headers_mut().remove(header::COOKIE);
+            }
+            let next_request = if follow { request.try_clone() } else { None };
+            let client = if self.inner.snapshot.pins_origin(&from) {
+                &self.inner.direct
+            } else if from.scheme() == "https" {
+                &self.inner.https
+            } else {
+                &self.inner.http
             };
-            if redirect_count == MAX_REDIRECTS {
-                bail!("redirect limit exceeded for {}", response.final_url);
-            }
-
-            let from_url = response.final_url.clone();
-            let status = response.status;
-            let next_request_extra_info = response.network_request_extra_info().cloned();
-            if let Some(last) = redirects.last_mut() {
-                last.request_extra_info = next_request_extra_info.clone();
-            }
-            redirects.push(redirect_info(&response, next_url.clone()));
-
-            request.cookie_context = advance_cookie_request_context(
-                request.cookie_context.clone(),
-                &initial_url,
-                &next_url,
-            );
-            request.apply_redirect_status(status);
-            sanitize_redirect_request(&mut request, &from_url, &next_url, self.inner.cookies);
-            request.url = next_url;
-        }
-
-        unreachable!("bounded redirect loop always returns")
-    }
-
-    async fn fetch_once(&self, request: Request) -> Result<RawResponse> {
-        let (handle, response_limit) = match request.url.scheme() {
-            "http" => (&self.inner.http, self.inner.http_response_limit),
-            "https" => (&self.inner.https, self.inner.https_response_limit),
-            scheme => bail!("Moli HTTP client does not support URL scheme `{scheme}`"),
-        };
-        let cancel = FetchCancelHandle::new();
-        let mut cancel_on_drop = CancelOnDrop(Some(cancel.clone()));
-        let mut response = handle.fetch_raw_stream_with_cancel(request, cancel).await?;
-
-        if let Some(limit) = response_limit {
-            if declared_content_length(&response.headers).is_some_and(|length| length > limit) {
-                return Err(ResponseTooLarge {
-                    limit,
-                    url: response.final_url.clone(),
+            // 禁止调用方覆盖逐跳重定向策略；每跳必须重新选择对应协议的代理。
+            let outgoing = wreq::RequestBuilder::from_parts(client.clone(), request)
+                .redirect(wreq::redirect::Policy::none())
+                .build()?;
+            let mut response = client.execute(outgoing).await?;
+            let target =
+                if follow && matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
+                    response
+                        .headers()
+                        .get(header::LOCATION)
+                        .map(|value| -> Result<Url> { Ok(from.join(value.to_str()?.trim())?) })
+                        .transpose()?
+                } else {
+                    None
+                };
+            if let Some(to) = target {
+                if count == MAX_REDIRECTS {
+                    bail!("redirect limit exceeded for {from}");
                 }
-                .into());
-            }
-        }
-
-        let mut body = Vec::new();
-        while let Some(chunk) = response.next_chunk().await {
-            if let Some(limit) = response_limit {
-                if body.len().saturating_add(chunk.len()) > limit {
-                    return Err(ResponseTooLarge {
-                        limit,
-                        url: response.final_url.clone(),
+                request = next_request.context("redirect requires a replayable request body")?;
+                let status = response.status().as_u16();
+                if (matches!(status, 301 | 302) && request.method() == Method::POST)
+                    || (status == 303
+                        && request.method() != Method::GET
+                        && request.method() != Method::HEAD)
+                {
+                    *request.method_mut() = Method::GET;
+                    *request.body_mut() = None;
+                    for name in [
+                        header::CONTENT_LENGTH,
+                        header::CONTENT_TYPE,
+                        header::CONTENT_ENCODING,
+                        header::CONTENT_LANGUAGE,
+                        header::CONTENT_LOCATION,
+                        header::TRANSFER_ENCODING,
+                    ] {
+                        request.headers_mut().remove(name);
                     }
-                    .into());
+                }
+                if from.origin() != to.origin() {
+                    for name in [
+                        header::AUTHORIZATION,
+                        header::COOKIE,
+                        header::PROXY_AUTHORIZATION,
+                        header::HOST,
+                    ] {
+                        request.headers_mut().remove(name);
+                    }
+                }
+                if from.scheme() == "https" && to.scheme() == "http" {
+                    request.headers_mut().remove(header::REFERER);
+                }
+                *request.uri_mut() = to.as_str().parse()?;
+                // 未读取的重定向正文不得占用连接池或后台继续下载。
+                response.forbid_recycle();
+                continue;
+            }
+            let mut body = Vec::new();
+            if let Some(limit) = self.inner.response_limit {
+                if response
+                    .content_length()
+                    .is_some_and(|length| length > limit as u64)
+                {
+                    response.forbid_recycle();
+                    return Err(ResponseTooLarge { limit, url: from }.into());
                 }
             }
-            body.extend_from_slice(&chunk);
+            while let Some(frame) = response.frame().await {
+                if let Ok(data) = frame?.into_data() {
+                    if let Some(limit) = self.inner.response_limit {
+                        if body.len().saturating_add(data.len()) > limit {
+                            response.forbid_recycle();
+                            return Err(ResponseTooLarge { limit, url: from }.into());
+                        }
+                    }
+                    body.extend_from_slice(&data);
+                }
+            }
+            return Ok((response, body));
         }
-        response.finish().await?;
-        cancel_on_drop.0 = None;
-
-        let extra_info = response.network_request_extra_info().cloned();
-        let head = response.head();
-        Ok(RawResponse::from_head_and_body(head, body).with_network_request_extra_info(extra_info))
+        unreachable!("bounded redirect loop always returns")
     }
 }
 
@@ -253,138 +251,6 @@ impl fmt::Debug for HttpClient {
             .field("cookies", &self.inner.cookies)
             .finish_non_exhaustive()
     }
-}
-
-impl Drop for HttpClientInner {
-    fn drop(&mut self) {
-        let _ = self.shutdown.send(());
-        if let Some(thread) = self.owner_thread.get_mut().take() {
-            let _ = thread.join();
-        }
-    }
-}
-
-struct CancelOnDrop(Option<FetchCancelHandle>);
-
-impl Drop for CancelOnDrop {
-    fn drop(&mut self) {
-        if let Some(cancel) = self.0.take() {
-            cancel.cancel();
-        }
-    }
-}
-
-fn redirect_target(response: &RawResponse) -> Result<Option<Url>> {
-    if !matches!(response.status, 301 | 302 | 303 | 307 | 308) {
-        return Ok(None);
-    }
-    let Some(location) = response
-        .headers
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("location"))
-        .map(|(_, value)| value.trim())
-    else {
-        return Ok(None);
-    };
-    let next = response
-        .final_url
-        .join(location)
-        .or_else(|_| Url::parse(location))
-        .with_context(|| {
-            format!(
-                "failed to resolve redirect location `{location}` from {}",
-                response.final_url
-            )
-        })?;
-    if !matches!(next.scheme(), "http" | "https") {
-        bail!("network transport only supports HTTP(S) URLs: {next}");
-    }
-    Ok(Some(next))
-}
-
-fn sanitize_redirect_request(request: &mut Request, from: &Url, to: &Url, cookies: bool) {
-    let cross_origin = !same_origin(from, to);
-    let https_downgrade = from.scheme() == "https" && to.scheme() == "http";
-    request.request_headers.retain(|(name, _)| {
-        if !cookies && name.eq_ignore_ascii_case("cookie") {
-            return false;
-        }
-        if cross_origin
-            && ["authorization", "cookie", "proxy-authorization"]
-                .iter()
-                .any(|sensitive| name.eq_ignore_ascii_case(sensitive))
-        {
-            return false;
-        }
-        !(https_downgrade && name.eq_ignore_ascii_case("referer"))
-    });
-    if cross_origin {
-        request.set_auth(None);
-    }
-}
-
-fn same_origin(left: &Url, right: &Url) -> bool {
-    left.scheme() == right.scheme()
-        && left.host_str() == right.host_str()
-        && left.port_or_known_default() == right.port_or_known_default()
-}
-
-fn remove_default_cookie_header(config: &mut FetchConfig) {
-    let headers = config
-        .default_request_headers()
-        .iter()
-        .filter(|(name, _)| !name.eq_ignore_ascii_case("cookie"))
-        .cloned()
-        .collect();
-    config.set_default_request_headers(headers);
-}
-
-fn declared_content_length(headers: &[(String, String)]) -> Option<usize> {
-    headers
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-        .and_then(|(_, value)| value.trim().parse().ok())
-}
-
-fn redirect_info(response: &RawResponse, to_url: Url) -> RedirectInfo {
-    let request_extra_info = response.network_request_extra_info().cloned();
-    let has_extra = request_extra_info.is_some() && !response.from_cache;
-    RedirectInfo {
-        from_url: response.final_url.clone(),
-        to_url,
-        status: response.status,
-        headers: response.headers.clone(),
-        network_extra_info_available: has_extra,
-        request_extra_info: None,
-        response_extra_info: request_extra_info.map(|request_extra_info| {
-            NetworkResponseExtraInfo {
-                request_extra_info,
-                status: response.status,
-                headers: response.headers.clone(),
-                cookie_set_reports: response.cookie_set_reports.clone(),
-            }
-        }),
-        redirect_has_extra_info: has_extra,
-        request_cookie_report: response.request_cookie_report.clone(),
-        cookie_set_reports: response.cookie_set_reports.clone(),
-        from_cache: response.from_cache,
-        negotiated_http_version: response.negotiated_http_version,
-    }
-}
-
-fn finish_redirect_chain(
-    response: RawResponse,
-    mut redirects: Vec<RedirectInfo>,
-) -> Result<RawResponse> {
-    let extra_info = response.network_request_extra_info().cloned();
-    if let Some(last) = redirects.last_mut() {
-        last.request_extra_info = extra_info.clone();
-    }
-    let (mut head, body) = response.into_parts();
-    head.redirected = !redirects.is_empty();
-    head.redirect_chain = redirects;
-    RawResponse::from_head_and_materialized_body(head, body)
-        .map(|response| response.with_network_request_extra_info(extra_info))
 }
 
 #[cfg(test)]
@@ -400,6 +266,7 @@ mod tests {
     };
 
     use parking_lot::{Condvar, Mutex};
+    use std::thread::{self, JoinHandle};
 
     use super::*;
 
@@ -512,11 +379,18 @@ mod tests {
         )
     }
 
-    fn config(limit: Option<usize>) -> FetchConfig {
-        let mut config = FetchConfig::default();
-        config.set_http_proxy(Some(String::new()));
-        config.set_connection_limits(None, None, limit);
-        config
+    fn client(limit: Option<usize>, cookies: bool) -> HttpClient {
+        HttpClient::new(
+            ResolvedProxy::direct(),
+            Duration::from_secs(5),
+            cookies,
+            limit,
+        )
+        .unwrap()
+    }
+
+    fn get(url: &str) -> Request {
+        Request::new(Method::GET, url.parse().unwrap())
     }
 
     #[tokio::test]
@@ -528,45 +402,40 @@ mod tests {
             Reply::EchoCookie,
             Reply::EchoCookie,
         ]);
-        let first = HttpClient::new(config(None), config(None), true).unwrap();
-        let second = HttpClient::new(config(None), config(None), true).unwrap();
+        let first = client(None, true);
+        let second = client(None, true);
         first
-            .fetch(Request::get(&format!("{}/set", server.base_url)).unwrap())
+            .fetch(get(&format!("{}/set", server.base_url)))
             .await
             .unwrap();
         let persisted = first
-            .fetch(Request::get(&format!("{}/echo", server.base_url)).unwrap())
+            .fetch(get(&format!("{}/echo", server.base_url)))
             .await
             .unwrap();
         let isolated = second
-            .fetch(Request::get(&format!("{}/echo", server.base_url)).unwrap())
+            .fetch(get(&format!("{}/echo", server.base_url)))
             .await
             .unwrap();
-        assert_eq!(persisted.body_bytes(), b"sid=one");
-        assert_eq!(isolated.body_bytes(), b"none");
+        assert_eq!(persisted.1, b"sid=one");
+        assert_eq!(isolated.1, b"none");
     }
 
     #[tokio::test]
-    async fn disabled_cookies_ignore_response_request_and_default_headers() {
+    async fn disabled_cookies_ignore_response_and_explicit_headers() {
         let server = spawn_server(vec![
             Reply::Fixed(
                 "HTTP/1.1 200 OK\r\nSet-Cookie: sid=one; Path=/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
             ),
             Reply::EchoCookie,
         ]);
-        let mut settings = config(None);
-        settings.push_default_request_header("Cookie", "default=secret");
-        let client = HttpClient::new(settings.clone(), settings, false).unwrap();
-        client
-            .fetch(Request::get(&server.base_url).unwrap())
-            .await
-            .unwrap();
-        let mut request = Request::get(&server.base_url).unwrap();
+        let client = client(None, false);
+        client.fetch(get(&server.base_url)).await.unwrap();
+        let mut request = get(&server.base_url);
         request
-            .request_headers
-            .push(("Cookie".into(), "explicit=secret".into()));
+            .headers_mut()
+            .insert(header::COOKIE, "explicit=secret".parse().unwrap());
         let response = client.fetch(request).await.unwrap();
-        assert_eq!(response.body_bytes(), b"none");
+        assert_eq!(response.1, b"none");
     }
 
     #[tokio::test]
@@ -582,47 +451,40 @@ mod tests {
                 "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nfinal",
             ),
         ]);
-        let client = HttpClient::new(config(None), config(None), true).unwrap();
+        let client = client(None, true);
         let manual = client
-            .fetch(
-                Request::get(&format!("{}/start", server.base_url))
-                    .unwrap()
-                    .with_follow_redirects(false),
-            )
+            .fetch_once(get(&format!("{}/start", server.base_url)))
             .await
             .unwrap();
-        assert_eq!(manual.status, 302);
-        assert!(!manual.redirected);
+        assert_eq!(manual.0.status(), 302);
 
         let followed = client
-            .fetch(Request::get(&format!("{}/start", server.base_url)).unwrap())
+            .fetch(get(&format!("{}/start", server.base_url)))
             .await
             .unwrap();
-        assert_eq!(followed.status, 200);
-        assert_eq!(followed.body_bytes(), b"final");
-        assert_eq!(followed.redirect_chain.len(), 1);
+        assert_eq!(followed.0.status(), 200);
+        assert_eq!(followed.1, b"final");
+        assert!(followed.0.uri().path().ends_with("/final"));
     }
 
     #[tokio::test]
-    async fn split_configuration_redirects_do_not_forward_cross_origin_credentials() {
+    async fn redirects_do_not_forward_cross_origin_credentials() {
         let destination = spawn_server(vec![Reply::EchoCredentials]);
         let origin = spawn_server(vec![Reply::Redirect(destination.base_url.clone())]);
-        let http = config(None);
-        let mut https = http.clone();
-        https.set_request_timeout_ms(http.request_timeout_ms() + 1);
-        let client = HttpClient::new(http, https, true).unwrap();
-        let mut request = Request::get(&origin.base_url).unwrap();
-        request.request_headers = vec![
-            ("Authorization".into(), "Bearer fixture".into()),
-            ("Cookie".into(), "explicit=fixture".into()),
-        ];
+        let client = client(None, true);
+        let mut request = get(&origin.base_url);
+        request
+            .headers_mut()
+            .insert(header::AUTHORIZATION, "Bearer fixture".parse().unwrap());
+        request
+            .headers_mut()
+            .insert(header::COOKIE, "explicit=fixture".parse().unwrap());
         let response = client.fetch(request).await.unwrap();
-        assert_eq!(response.body_bytes(), b"clean");
+        assert_eq!(response.1, b"clean");
         assert_eq!(
-            response.final_url.as_str(),
+            response.0.uri().to_string(),
             format!("{}/", destination.base_url)
         );
-        assert_eq!(response.redirect_chain.len(), 1);
     }
 
     #[tokio::test]
@@ -630,11 +492,8 @@ mod tests {
         let server = spawn_server(vec![Reply::Fixed(
             "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nlarge",
         )]);
-        let client = HttpClient::new(config(Some(4)), config(Some(4)), false).unwrap();
-        let error = client
-            .fetch(Request::get(&server.base_url).unwrap())
-            .await
-            .unwrap_err();
+        let client = client(Some(4), false);
+        let error = client.fetch(get(&server.base_url)).await.unwrap_err();
         let error = error.downcast_ref::<ResponseTooLarge>().unwrap();
         assert_eq!(error.limit, 4);
     }
@@ -644,11 +503,8 @@ mod tests {
         let server = spawn_server(vec![Reply::Fixed(
             "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n3\r\nabc\r\n3\r\ndef\r\n0\r\n\r\n",
         )]);
-        let client = HttpClient::new(config(Some(4)), config(Some(4)), false).unwrap();
-        let error = client
-            .fetch(Request::get(&server.base_url).unwrap())
-            .await
-            .unwrap_err();
+        let client = client(Some(4), false);
+        let error = client.fetch(get(&server.base_url)).await.unwrap_err();
         assert!(error.is::<ResponseTooLarge>());
     }
 
@@ -659,13 +515,13 @@ mod tests {
             Reply::Concurrent(Arc::clone(&gate)),
             Reply::Concurrent(gate),
         ]);
-        let client = HttpClient::new(config(None), config(None), false).unwrap();
+        let client = client(None, false);
         let clone = client.clone();
-        let first = client.fetch(Request::get(&format!("{}/one", server.base_url)).unwrap());
-        let second = clone.fetch(Request::get(&format!("{}/two", server.base_url)).unwrap());
+        let first = client.fetch(get(&format!("{}/one", server.base_url)));
+        let second = clone.fetch(get(&format!("{}/two", server.base_url)));
         let (first, second) = tokio::join!(first, second);
-        assert_eq!(first.unwrap().body_bytes(), b"parallel");
-        assert_eq!(second.unwrap().body_bytes(), b"parallel");
+        assert_eq!(first.unwrap().1, b"parallel");
+        assert_eq!(second.unwrap().1, b"parallel");
         drop(clone);
         drop(client);
     }

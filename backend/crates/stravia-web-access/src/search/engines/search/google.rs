@@ -1,9 +1,9 @@
-use std::time::Duration;
+use std::{sync::LazyLock, time::Duration};
 
 use futures::future::join_all;
-use moli_fetch::{Request, RequestRedirectMode};
-use scraper::{ElementRef, Selector};
+use scraper::{ElementRef, Html, Selector};
 use url::Url;
+use wreq::Request;
 
 use crate::{
     browser::RenderRequest,
@@ -21,13 +21,13 @@ const GOOGLE_NO_RESULTS_MESSAGE: &str = "Your search did not match any documents
 const BROWSER_RENDER_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub async fn request(search: &SearchQuery) -> anyhow::Result<RequestResponse> {
-    Ok(Request::get(search_url(search).as_str())?.into())
+    Ok(Request::new(wreq::Method::GET, (search_url(search).as_str()).parse()?).into())
 }
 
 pub(crate) fn requires_browser_render(body: &str) -> bool {
     body.contains("/httpservice/retry/enablejs")
+        && !body.contains(GOOGLE_NO_RESULTS_MESSAGE)
         && !contains_result_heading(body)
-        && !is_no_results_page(body)
 }
 
 pub(crate) async fn render_response(search: &SearchQuery) -> anyhow::Result<EngineResponse> {
@@ -89,20 +89,26 @@ fn search_url(search: &SearchQuery) -> Url {
 }
 
 fn is_traffic_challenge(body: &str) -> bool {
-    !contains_result_heading(body)
-        && !is_no_results_page(body)
-        && (body.contains("/sorry/")
-            || body.contains("unusual traffic")
-            || body.contains("detected unusual traffic")
-            || body.contains("g-recaptcha"))
+    (body.contains("/sorry/")
+        || body.contains("unusual traffic")
+        || body.contains("detected unusual traffic")
+        || body.contains("g-recaptcha"))
+        && !body.contains(GOOGLE_NO_RESULTS_MESSAGE)
+        && !contains_result_heading(body)
 }
 
 fn is_no_results_page(body: &str) -> bool {
-    !contains_result_heading(body) && body.contains(GOOGLE_NO_RESULTS_MESSAGE)
+    body.contains(GOOGLE_NO_RESULTS_MESSAGE) && !contains_result_heading(body)
 }
 
 fn contains_result_heading(body: &str) -> bool {
-    body.contains("<h3") || body.contains("<H3")
+    static RESULT_HEADING: LazyLock<Selector> =
+        LazyLock::new(|| Selector::parse("a[href] h3").expect("valid Google result selector"));
+    // 挑战页的脚本模板也包含 <h3；只有实际链接中的 DOM 标题才是搜索结果。
+    Html::parse_document(body)
+        .select(&RESULT_HEADING)
+        .next()
+        .is_some()
 }
 
 #[derive(Clone, Copy)]
@@ -158,20 +164,19 @@ fn is_google_goto_url(url: &str) -> bool {
 }
 
 async fn resolve_google_redirect(client: &HttpClient, url: &str) -> anyhow::Result<String> {
-    let request = Request::get(url)?.with_redirect_mode(RequestRedirectMode::Manual);
-    let response = client
-        .fetch(request)
+    let request = Request::new(wreq::Method::GET, (url).parse()?);
+    let (response, _) = client
+        .fetch_once(request)
         .await
         .map_err(|error| anyhow::anyhow!("Google result redirect request failed: {error}"))?;
-    if !(300..400).contains(&response.status) {
-        anyhow::bail!("Google result redirect returned HTTP {}", response.status);
+    if !response.status().is_redirection() {
+        anyhow::bail!("Google result redirect returned HTTP {}", response.status());
     }
     let location = response
-        .headers
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("location"))
-        .map(|(_, value)| value.as_str())
-        .ok_or_else(|| anyhow::anyhow!("Google result redirect omitted Location"))?;
+        .headers()
+        .get(wreq::header::LOCATION)
+        .ok_or_else(|| anyhow::anyhow!("Google result redirect omitted Location"))?
+        .to_str()?;
     let target = Url::parse(location)
         .map_err(|error| anyhow::anyhow!("Google result redirect target was invalid: {error}"))?;
     if !matches!(target.scheme(), "http" | "https") {
@@ -313,9 +318,18 @@ mod tests {
     }
 
     #[test]
+    fn script_heading_templates_do_not_suppress_browser_rendering() {
+        let body = r#"
+            <noscript><meta http-equiv="refresh" content="0;url=/httpservice/retry/enablejs"></noscript>
+            <script>const template = '<h3>Result</h3>';</script>
+        "#;
+        assert!(requires_browser_render(body));
+    }
+
+    #[test]
     fn does_not_render_normal_google_results() {
         assert!(!requires_browser_render(
-            r#"<div jscontroller="SC7lYd"><a href="https://example.com"><h3>Result</h3></a></div>"#,
+            r#"<noscript>/httpservice/retry/enablejs</noscript><div jscontroller="SC7lYd"><a href="https://example.com"><h3>Result</h3></a></div>"#,
         ));
     }
 
@@ -461,7 +475,7 @@ pub fn request_autocomplete(query: &str, _client: &HttpClient) -> anyhow::Result
         ],
     )
     .unwrap();
-    Request::get(url.as_str())
+    Ok(Request::new(wreq::Method::GET, url.as_str().parse()?))
 }
 
 pub fn parse_autocomplete_response(body: &str) -> anyhow::Result<Vec<String>> {

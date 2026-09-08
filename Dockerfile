@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 ARG BUN_VERSION=1.4.0
-ARG RUST_VERSION=1.97.1
+ARG RUST_VERSION=1.98.1
 
 FROM oven/bun:${BUN_VERSION}-debian AS web-builder
 WORKDIR /src
@@ -35,15 +35,23 @@ RUN --mount=type=cache,id=stravia-cargo-registry,target=/usr/local/cargo/registr
     && strip /out/stravia-server \
     && install -d -m 0750 /out/data
 
-FROM gcr.io/distroless/cc-debian12:debug-nonroot AS runtime
+FROM debian:bookworm-slim AS runtime
 
 LABEL org.opencontainers.image.source="https://github.com/Stravia-AI/StraviaPlatform" \
       org.opencontainers.image.licenses="AGPL-3.0-only"
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates chromium chromium-sandbox curl fonts-liberation \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 65532 nonroot \
+    && useradd --uid 65532 --gid nonroot --create-home --shell /usr/sbin/nologin nonroot
 
 COPY --from=rust-builder /out/stravia-server /usr/local/bin/stravia-server
 COPY --from=rust-builder --chown=nonroot:nonroot --chmod=0750 /out/data /data
 
 ENV HOME=/home/nonroot \
+    STRAVIA_CHROME_PATH=/usr/bin/chromium \
     STRAVIA_HOST=0.0.0.0 \
     STRAVIA_PORT=23471 \
     STRAVIA_DATA_DIR=/data
@@ -52,6 +60,6 @@ USER nonroot:nonroot
 EXPOSE 23471
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-    CMD ["/busybox/sh", "-c", "/busybox/wget --spider --quiet -T 2 \"http://127.0.0.1:${STRAVIA_PORT}/healthz\""]
+    CMD ["sh", "-c", "curl --fail --silent --output /dev/null --max-time 2 \"http://127.0.0.1:${STRAVIA_PORT}/healthz\""]
 
 ENTRYPOINT ["/usr/local/bin/stravia-server"]

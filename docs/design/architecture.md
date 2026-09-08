@@ -228,6 +228,14 @@ graph TD
     httpREST --> serverApp
 ```
 
+**Local Web Access 运行边界：**
+
+`stravia-web-access` 的 HTTP Search/Fetch 使用 `wreq` 与 `wreq-util`，浏览器回退使用 Rust 直接控制的真实 headless Chrome/Chromium，不依赖 Moli 或 Node/Bun sidecar。`LocalWeb` 固定代理配置快照；HTTP Search 的 Cookie jar、无 Cookie 的 HTTP Fetch 客户端和浏览器 profile 分离，不跨运行时共享。Chrome 按需启动，`STRAVIA_CHROME_PATH` 可覆盖本机发现；运行时显式持有 browser context，使会话 Cookie 不随临时标签页关闭而丢失。最后一个运行时所有者释放时回收进程与临时 profile。
+
+浏览器保留沙箱和端到端 TLS，通过本地出口代理执行公共地址校验、直连 DNS 地址固定及上游代理转发；页面、重定向、iframe 和 worker 不能绕过出口。显式上游代理保留远端 DNS 语义与 `NO_PROXY` 快照，不进行 TLS 中间人解密。Fetch 继续限制下载与渲染结果大小，并保留超时、取消与静态提取回退契约。
+
+隐身实现固定移植 OMP commit `daf07999c2fee9b22edc7bf8fea1fb6272e0df5e` 的全部 14 个脚本与 bootstrap，并保留 MIT 声明。CDP 在恢复 target 前配置 UA；页面脚本注入主世界，内部求值默认使用按需获取的隔离世界，不启用 `Runtime.enable` 或自动追加 source URL。导航跟随 frame 当前文档的生命周期事件，而非固定等待首次 `Page.navigate` 返回的 loader；JS 跳转更换文档后重新获取隔离世界并绑定 DOM 就绪等待。Google 的静态响应按真实链接标题 DOM 判断是否需要浏览器回退，不把脚本里的 HTML 模板当成结果。固定语言、核心数等指纹值以及上游 worker 包装范围仍有局限，不构成“不可检测”的承诺。
+
 **stravia-core 顶层 `pub mod`（lib.rs，共 20 个）：**
 
 ```

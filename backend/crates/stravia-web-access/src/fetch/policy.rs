@@ -4,7 +4,7 @@ use url::{Host, Url};
 
 use super::FetchError;
 
-pub(super) fn validate_url(value: &str) -> Result<Url, FetchError> {
+pub(crate) fn validate_url(value: &str) -> Result<Url, FetchError> {
     let url = Url::parse(value).map_err(|_| FetchError::invalid_url(value))?;
     if !matches!(url.scheme(), "http" | "https")
         || url.host_str().is_none()
@@ -36,7 +36,7 @@ pub(super) fn validate_url(value: &str) -> Result<Url, FetchError> {
     Ok(url)
 }
 
-pub(super) fn is_public_ip(address: IpAddr) -> bool {
+pub(crate) fn is_public_ip(address: IpAddr) -> bool {
     match address {
         IpAddr::V4(address) => is_public_ipv4(address),
         IpAddr::V6(address) => is_public_ipv6(address),

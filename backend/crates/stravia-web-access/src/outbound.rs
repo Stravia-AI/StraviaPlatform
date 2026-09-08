@@ -1,6 +1,5 @@
 use std::{sync::Arc, time::Duration};
 
-use moli_fetch::FetchConfig;
 use url::Url;
 
 use crate::browser::BrowserRuntime;
@@ -47,7 +46,7 @@ pub(crate) struct ResolvedProxy {
 }
 
 impl ResolvedProxy {
-    fn direct() -> Self {
+    pub(crate) fn direct() -> Self {
         Self {
             http: None,
             https: None,
@@ -55,27 +54,18 @@ impl ResolvedProxy {
         }
     }
 
-    fn is_direct(&self) -> bool {
-        self.http.is_none() && self.https.is_none()
-    }
-
     pub(crate) fn pins_origin(&self, url: &Url) -> bool {
-        if self.is_direct() {
+        if (if url.scheme() == "https" {
+            &self.https
+        } else {
+            &self.http
+        })
+        .is_none()
+        {
             return true;
         }
         url.host_str()
             .is_some_and(|host| self.no_proxy.contains(host))
-    }
-
-    fn moli_proxy_server(&self) -> Option<String> {
-        self.https
-            .as_ref()
-            .or(self.http.as_ref())
-            .map(chrome_proxy_uri)
-    }
-
-    fn moli_no_proxy(&self) -> Option<String> {
-        (!self.no_proxy.entries.is_empty()).then(|| self.no_proxy.entries.join(","))
     }
 }
 
@@ -119,7 +109,9 @@ impl LocalWeb {
         let snapshot = resolve_mode(mode, env)?;
         let http = build_http_client(&snapshot, SEARCH_TIMEOUT, true)?;
         let fetch_proxied = build_http_client(&snapshot, FETCH_TIMEOUT, false)?;
-        let browser = BrowserRuntime::new(moli_launch_config(&snapshot));
+        let browser = BrowserRuntime::new(crate::browser::ChromeLaunchConfig {
+            proxy: snapshot.clone(),
+        });
         Ok(Self {
             inner: Arc::new(LocalWebInner {
                 snapshot,
@@ -130,7 +122,7 @@ impl LocalWeb {
         })
     }
 
-    /// 返回共享搜索 Cookie 与构造期出站快照的 Moli HTTP 客户端克隆。
+    /// 返回共享搜索 Cookie 与构造期出站快照的 wreq HTTP 客户端克隆。
     pub fn http_client(&self) -> HttpClient {
         self.inner.http.clone()
     }
@@ -263,22 +255,11 @@ fn parse_proxy_url(value: &str) -> Result<Url, LocalWebError> {
 }
 
 fn normalize_socks(mut url: Url) -> Url {
-    // Moli 的 socks5 会本机解析；统一远端 DNS，保持 Local Web 的代理出站约束。
+    // SOCKS5 的默认模式 会本机解析；统一远端 DNS，保持 Local Web 的代理出站约束。
     if url.scheme() == "socks5" {
         let _ = url.set_scheme("socks5h");
     }
     url
-}
-
-fn chrome_proxy_uri(url: &Url) -> String {
-    url.as_str().trim_end_matches('/').to_string()
-}
-
-fn moli_launch_config(snapshot: &ResolvedProxy) -> crate::browser::MoliLaunchConfig {
-    crate::browser::MoliLaunchConfig {
-        proxy_server: snapshot.moli_proxy_server(),
-        no_proxy: snapshot.moli_no_proxy(),
-    }
 }
 
 fn build_http_client(
@@ -286,22 +267,12 @@ fn build_http_client(
     timeout: Duration,
     cookies: bool,
 ) -> Result<HttpClient, LocalWebError> {
-    let config = |proxy: Option<&Url>| {
-        let mut config = FetchConfig::default();
-        config.set_request_timeout_ms(timeout.as_millis() as u64);
-        // 空值显式关闭 Moli 的环境回退，保证所有请求使用构造期出站快照。
-        config.set_http_proxy(Some(proxy.map(chrome_proxy_uri).unwrap_or_default()));
-        config.set_http_no_proxy(Some(snapshot.moli_no_proxy().unwrap_or_default()));
-        if !cookies {
-            config.set_connection_limits(None, None, Some(crate::fetch::DOWNLOAD_BYTE_CAP));
-        }
-        config
-    };
-    // 搜狗微信跟踪跳转需要共享搜索 Cookie；Fetch 使用独立、禁用 Cookie 的客户端。
+    // 搜索共享 Cookie；Fetch 使用独立、禁用 Cookie 且限制正文大小的客户端。
     HttpClient::new(
-        config(snapshot.http.as_ref()),
-        config(snapshot.https.as_ref()),
+        snapshot.clone(),
+        timeout,
         cookies,
+        (!cookies).then_some(crate::fetch::DOWNLOAD_BYTE_CAP),
     )
     .map_err(|error| LocalWebError::invalid_proxy(format!("HTTP client failed: {error}")))
 }
@@ -318,7 +289,9 @@ pub(crate) fn direct_http_client() -> HttpClient {
 
 #[cfg(test)]
 pub(crate) fn direct_browser() -> BrowserRuntime {
-    BrowserRuntime::new(moli_launch_config(&ResolvedProxy::direct()))
+    BrowserRuntime::new(crate::browser::ChromeLaunchConfig {
+        proxy: ResolvedProxy::direct(),
+    })
 }
 
 pub fn parse_cli_proxy(value: &str) -> Result<OutboundProxyMode, LocalWebError> {
@@ -350,12 +323,8 @@ mod tests {
             env(&[]),
         )
         .unwrap();
-        assert_eq!(
-            snapshot.moli_proxy_server().as_deref(),
-            Some("http://127.0.0.1:7890")
-        );
         assert!(!snapshot.pins_origin(&Url::parse("https://example.com/").unwrap()));
-        assert_eq!(snapshot.moli_no_proxy(), None);
+        assert!(!snapshot.pins_origin(&Url::parse("http://example.com/").unwrap()));
     }
 
     #[test]
@@ -393,24 +362,27 @@ mod tests {
             snapshot.http.as_ref().map(Url::as_str),
             Some("http://http-proxy:8080/")
         );
-        assert_eq!(
-            snapshot.moli_proxy_server().as_deref(),
-            Some("http://https-proxy:8080")
-        );
-        assert_eq!(
-            snapshot.moli_no_proxy().as_deref(),
-            Some("localhost,.corp.example")
-        );
         assert!(snapshot.pins_origin(&Url::parse("https://app.corp.example/").unwrap()));
+        assert!(!snapshot.pins_origin(&Url::parse("https://example.com/").unwrap()));
+        assert!(!snapshot.pins_origin(&Url::parse("http://example.com/").unwrap()));
+    }
+
+    #[test]
+    fn missing_scheme_proxy_requires_direct_origin_pinning() {
+        let snapshot = resolve_mode(
+            OutboundProxyMode::System,
+            env(&[("HTTPS_PROXY", "http://https-proxy:8080")]),
+        )
+        .unwrap();
+        assert!(snapshot.pins_origin(&Url::parse("http://example.com/").unwrap()));
         assert!(!snapshot.pins_origin(&Url::parse("https://example.com/").unwrap()));
     }
 
     #[test]
     fn empty_system_env_is_direct() {
         let snapshot = resolve_mode(OutboundProxyMode::System, env(&[])).unwrap();
-        assert!(snapshot.is_direct());
+        assert!(snapshot.pins_origin(&Url::parse("http://example.com/").unwrap()));
         assert!(snapshot.pins_origin(&Url::parse("https://example.com/").unwrap()));
-        assert_eq!(snapshot.moli_proxy_server(), None);
     }
 
     #[test]
@@ -469,9 +441,12 @@ mod tests {
                 .unwrap();
         });
         let web = LocalWeb::new(OutboundProxyMode::Explicit(format!("socks5://{addr}"))).unwrap();
-        let request = moli_fetch::Request::get("http://stravia-origin.invalid/").unwrap();
+        let request = wreq::Request::new(
+            wreq::Method::GET,
+            "http://stravia-origin.invalid/".parse().unwrap(),
+        );
         let response = web.http_client().fetch(request).await.unwrap();
-        assert_eq!(response.body_bytes(), b"remote-dns");
+        assert_eq!(response.1, b"remote-dns");
         server.await.unwrap();
     }
 
@@ -518,14 +493,14 @@ mod tests {
             .http_client();
         let url = format!("http://127.0.0.1:{}/search", addr.port());
         let first = client
-            .fetch(moli_fetch::Request::get(&url).unwrap())
+            .fetch(wreq::Request::new(wreq::Method::GET, url.parse().unwrap()))
             .await
             .unwrap();
-        assert_eq!(first.body_bytes(), b"no-cookie");
+        assert_eq!(first.1, b"no-cookie");
         let second = client
-            .fetch(moli_fetch::Request::get(&url).unwrap())
+            .fetch(wreq::Request::new(wreq::Method::GET, url.parse().unwrap()))
             .await
             .unwrap();
-        assert_eq!(second.body_bytes(), b"with-cookie");
+        assert_eq!(second.1, b"with-cookie");
     }
 }

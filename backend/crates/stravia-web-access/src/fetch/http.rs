@@ -1,7 +1,7 @@
 use std::{net::IpAddr, time::Duration};
 
-use moli_fetch::{FetchConfig, Request};
 use url::{Host, Url};
+use wreq::{Method, Request};
 
 use super::{
     BackendFuture, FetchError, FetchErrorCode, HttpBackend, HttpResponse, DOWNLOAD_BYTE_CAP,
@@ -66,22 +66,17 @@ impl HttpBackend for NetworkBackend {
                 .to_owned();
             let client = if self.pins_origin(url) {
                 let port = url.port_or_known_default().unwrap_or(80);
-                let pinned_addresses = addresses
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(",");
-                let mut config = FetchConfig::default();
-                config.set_request_timeout_ms(HTTP_TIMEOUT.as_millis() as u64);
-                config.set_http_proxy(Some(String::new()));
-                config.set_http_no_proxy(Some(String::new()));
-                config.set_network_blocking(true, Vec::new());
-                config.set_connection_limits(None, None, Some(DOWNLOAD_BYTE_CAP));
                 // 固定已验证的全部地址，避免验证与连接之间再次 DNS 解析。
-                config.set_http_host_resolve(vec![format!("{hostname}:{port}:{pinned_addresses}")]);
-                HttpClient::new(config.clone(), config, false).map_err(|error| {
-                    FetchError::unavailable(format!("HTTP client failed: {error}"))
-                })?
+                HttpClient::pinned(
+                    &hostname,
+                    addresses
+                        .iter()
+                        .map(|address| std::net::SocketAddr::new(*address, port))
+                        .collect(),
+                    HTTP_TIMEOUT,
+                    DOWNLOAD_BYTE_CAP,
+                )
+                .map_err(|error| FetchError::unavailable(format!("HTTP client failed: {error}")))?
             } else {
                 self.proxied.clone()
             };
@@ -91,30 +86,30 @@ impl HttpBackend for NetworkBackend {
 }
 
 async fn send_get(client: HttpClient, url: &Url) -> Result<HttpResponse, FetchError> {
-    let request = Request::get(url.as_str())
-        .map_err(|_| FetchError::invalid_url(url.as_str()))?
-        .with_follow_redirects(false);
-    let response = client.fetch(request).await.map_err(|error| {
+    let request = Request::new(
+        Method::GET,
+        url.as_str()
+            .parse()
+            .map_err(|_| FetchError::invalid_url(url.as_str()))?,
+    );
+    let (response, body) = client.fetch_once(request).await.map_err(|error| {
         if error.downcast_ref::<ResponseTooLarge>().is_some() {
             response_too_large()
         } else {
             FetchError::unavailable(format!("HTTP request failed: {error}"))
         }
     })?;
-    let (head, body) = response.into_parts();
     let header = |name: &str| {
-        head.headers
-            .iter()
-            .find(|(key, _)| key.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.clone())
+        response
+            .headers()
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
     };
     let content_type = header("content-type");
     let location = header("location");
-    let body = body
-        .try_into_materialized_bytes()
-        .map_err(|_| FetchError::unavailable("HTTP response was not materialized"))?;
     Ok(HttpResponse {
-        status: head.status,
+        status: response.status().as_u16(),
         content_type,
         location,
         body,

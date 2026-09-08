@@ -1,5 +1,5 @@
-use moli_fetch::Request;
 use url::Url;
+use wreq::Request;
 
 use crate::search::{
     engines::{EngineResponse, RequestResponse, SearchQuery},
@@ -7,7 +7,7 @@ use crate::search::{
 };
 
 pub async fn request(search: &SearchQuery) -> anyhow::Result<RequestResponse> {
-    Ok(Request::get(search_url(search).as_str())?.into())
+    Ok(Request::new(wreq::Method::GET, (search_url(search).as_str()).parse()?).into())
 }
 
 fn search_url(search: &SearchQuery) -> Url {

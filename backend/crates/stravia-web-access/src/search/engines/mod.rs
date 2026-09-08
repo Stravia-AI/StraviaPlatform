@@ -10,11 +10,11 @@ use std::{
 
 use futures::future::join_all;
 use maud::PreEscaped;
-use moli_fetch::{RawResponse, Request, ResponseHead};
 use serde::{Deserialize, Deserializer, Serialize};
 use tokio::sync::mpsc;
 use tracing::{error, info};
 use url::{Host, Url};
+use wreq::Request;
 
 #[cfg(test)]
 use crate::outbound::{direct_browser, direct_http_client};
@@ -302,20 +302,16 @@ impl From<Vec<String>> for RequestAutocompleteResponse {
 }
 
 pub struct HttpResponse {
-    pub res: ResponseHead,
+    pub res: wreq::Response,
     pub body: String,
     pub config: Arc<Config>,
 }
 
 impl HttpResponse {
-    fn new(response: RawResponse, config: Arc<Config>) -> anyhow::Result<Self> {
-        let (res, body) = response.into_parts();
-        let bytes = body
-            .try_into_materialized_bytes()
-            .map_err(|_| anyhow::anyhow!("search response was not materialized"))?;
+    fn new((res, bytes): (wreq::Response, Vec<u8>), config: Arc<Config>) -> Self {
         let body = String::from_utf8(bytes)
             .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned());
-        Ok(Self { res, body, config })
+        Self { res, body, config }
     }
 }
 
@@ -419,7 +415,7 @@ async fn make_request(
 
     send_engine_progress_update(engine, EngineProgressUpdate::Parsing);
 
-    HttpResponse::new(res, query.config.clone())
+    Ok(HttpResponse::new(res, query.config.clone()))
 }
 
 async fn make_requests(
@@ -464,7 +460,7 @@ async fn make_requests(
                     let response = match match engine {
                         Engine::GoogleScholar
                             if search::google_scholar::requires_browser_render(
-                                http_response.res.status,
+                                http_response.res.status().as_u16(),
                             ) =>
                         {
                             search::google_scholar::render_response(query).await
@@ -536,7 +532,7 @@ async fn make_requests(
                 postsearch_requests.push(async move {
                     let response = match http.fetch(request).await {
                         Ok(res) => {
-                            let http_response = HttpResponse::new(res, query.config.clone())?;
+                            let http_response = HttpResponse::new(res, query.config.clone());
                             engine.postsearch_parse_response(&http_response)
                         }
                         Err(e) => {
@@ -615,7 +611,7 @@ pub async fn autocomplete(
                 let response = match request {
                     RequestAutocompleteResponse::Http(request) => {
                         let res = client.fetch(*request).await?;
-                        let body = String::from_utf8_lossy(res.body_bytes());
+                        let body = String::from_utf8_lossy(&res.1);
                         engine.parse_autocomplete_response(&body)?
                     }
                     RequestAutocompleteResponse::Instant(response) => response,
@@ -885,6 +881,16 @@ mod tests {
             "https://docs.example.com/rust"
         );
         assert!(response.featured_snippet.is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "hits live Google; uses the system proxy snapshot"]
+    async fn live_google_returns_parsable_destination_urls() {
+        let web = LocalWeb::new(OutboundProxyMode::System).expect("local web runtime");
+        let results = live_engine_results(&web, Engine::Google)
+            .await
+            .expect("Google must return titles and parsable destination URLs");
+        eprintln!("google: {} results, first={}", results.len(), results[0].0);
     }
 
     #[tokio::test]

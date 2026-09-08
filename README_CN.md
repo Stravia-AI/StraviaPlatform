@@ -93,7 +93,9 @@ Route Builder 使用独立页面。选择 Provider 后会自动加载其可用 P
 
 在 WebUI 中配置一个 Search Backend。Local Search 使用有界 Agent 编排有序的内部 Web Access Search/Fetch 来源：自动创建的进程内 Local Provider、Exa 或智谱。每个 Web Provider 都可独立选择是否使用 Gateway 代理。Codex Agentic Search 固定到一个精确且兼容的 Codex OAuth Responses Provider/model，不使用 Local budget。Local 与 Codex 之间不做 fallback。
 
-进程内 Local Provider 的 Search 与 Fetch 统一使用 [moli-stealth](https://github.com/Stravia-AI/moli-stealth)：HTTP 请求由 `moli-fetch` 和 `moli-stealth-net` 执行，动态页面由嵌入式 `moli-core` 运行时渲染。两条路径共用 Chrome 传输指纹与所选 Gateway 代理，browser profile 保持隔离。依赖图不再需要 `[patch.crates-io]` 覆盖、`wreq` 或 curl。
+进程内 Local Provider 的 Search 与 Fetch 使用 `wreq` 和 `wreq-util` 提供 Chrome 风格的 HTTP 传输。动态页面由真实 Chrome/Chromium 渲染，按需以 headless 模式启动，Rust 直接通过 CDP 控制；不再需要 Moli 运行时或 Node/Bun sidecar。请在宿主机安装 Chrome/Chromium，或通过 `STRAVIA_CHROME_PATH` 指定可执行文件。Stravia 不会自动下载浏览器。
+
+渲染器移植了 [OMP 的浏览器补丁](https://github.com/can1357/oh-my-pi/tree/daf07999c2fee9b22edc7bf8fea1fb6272e0df5e/packages/coding-agent/src/tools/puppeteer)，包括全部 14 个隐身脚本、UA metadata、不启用 `Runtime.enable` 的隔离世界求值，以及不注入 source URL 的求值路径。这些措施用于减少指纹暴露，不保证绕过反爬检测。HTTP 与浏览器路径保留所选 Gateway 代理快照、独立的 Cookie/profile 归属和 Fetch 安全限制。浏览器流量经过校验出口代理，不进行 TLS 中间人解密；证书校验与 Chrome 沙箱保持启用。
 
 平台联网搜索总开关统一控制所有有效 API Key 的显式访问。每个 Key 分别控制 MCP 访问和透明注入；透明注入只把所选且已启用的能力加入兼容请求，不限制显式调用或 MCP。MCP 客户端连接 `POST /mcp`，通过 `Authorization: Bearer <key>` 认证，并且只在 MCP 权限与平台能力都开启时发现 `web_search`。OpenAI Responses 的原生 web-search 声明与隐藏 tool continuation 使用同一个 Search contract。
 
@@ -155,10 +157,12 @@ sha256sum path/to/downloaded-asset
 
 ### 环境要求
 
-- Rust `1.97.1`
+- Rust `1.98.1`
 - Bun `1.4.0`
 - [Task](https://taskfile.dev/) `3.52.0`
 - Python E2E 测试需要 uv `0.11.28`
+- 原生 HTTP 依赖需要 CMake 和 Clang/libclang；Windows 构建还需要 NASM
+- 动态 Local Search/Fetch 和 `task test:browser` 需要 Chrome/Chromium
 - 构建桌面应用时需要 Tauri 对应平台依赖
 
 ### 运行独立服务端
@@ -189,7 +193,7 @@ nix run .
 nix run github:Stravia-AI/StraviaPlatform/vX.Y.Z
 ```
 
-flake 支持 `x86_64-linux` 和 `aarch64-linux`，会把内嵌 WebUI 与 Server 构建为一个 package，并将公开的 `stravia-platform` Cachix cache 配置为 substituter。
+flake 支持 `x86_64-linux` 和 `aarch64-linux`，会把内嵌 WebUI 与 Server 构建为一个 package，附带用于动态 Local Search/Fetch 的 Chromium，并将公开的 `stravia-platform` Cachix cache 配置为 substituter。显式设置 `STRAVIA_CHROME_PATH` 可覆盖附带的浏览器路径。
 
 在 NixOS 中，可以从 flake 导入 service module：
 
@@ -227,6 +231,8 @@ docker run --rm \
 ```
 
 如需从当前 checkout 构建，请运行 `docker build --tag stravia-server:local .`，并把最后的镜像名替换为 `stravia-server:local`。镜像内嵌生产 WebUI，在容器内监听 `0.0.0.0:23471`，以非 root 用户运行，并把 `server.toml` 和 SQLite 数据持久化到 `/data`。请在仅发布到回环地址的端口前放置 HTTPS 反向代理，并将 `STRAVIA_PUBLIC_ORIGIN` 设为完全一致的外部 origin；管理 Cookie 使用 Secure，非安全管理请求必须具有相同 origin 和 Stravia 的 CSRF header。不得通过 HTTP 直接暴露容器端口。内置健康检查会请求 `GET /healthz`；完成设置且 Gateway 成功启动前，就绪探针仍返回未就绪。
+
+镜像附带 Chromium。动态渲染要求宿主机和容器策略允许 Chrome 沙箱及其 Linux namespace；启动被拒绝时，Stravia 不会退回 `--no-sandbox`。
 
 创建名为 `my-model` 的虚拟模型后，可以通过任意受支持协议调用：
 
@@ -348,9 +354,12 @@ tests/e2e/                         Python 后端 E2E 套件与协议录制样本
 | `task dev:desktop`       | 以开发模式启动 Tauri 桌面应用                        |
 | `task check`             | 运行 WebUI 检查、ESLint、Rust 格式和 Cargo 检查      |
 | `task test`              | 运行 WebUI 和受支持的 Rust 单元测试                  |
+| `task test:browser`      | 使用本地夹具运行真实 headless Chrome 回归            |
 | `task test:e2e:web`      | 运行 Chromium WebUI E2E 测试                         |
 | `task test:e2e:desktop`  | 运行 Windows Tauri/WebView2 冒烟测试                 |
 | `DB_URL=… task test:e2e` | 运行完整 Proxy、Admin、SQLite 和 PostgreSQL E2E 套件 |
+
+如需单独验证 Google，请运行 `cargo test --locked -p stravia-web-access live_google_returns_parsable_destination_urls -- --ignored --nocapture`。该检查通过系统代理快照访问 Google，验证真实结果标题与目标 URL，不属于默认测试套件。
 
 后端 Python 测试使用 `pyproject.toml` 中锁定的 `test` 依赖组，Task 通过 `uv run --locked` 执行。
 Debug 服务端构建不会内嵌或提供 WebUI 资源。`task dev:server` 会同时启动 Vite 开发服务器和后端；Release 服务端构建仍会内嵌 WebUI。
@@ -367,4 +376,4 @@ Debug 服务端构建不会内嵌或提供 WebUI 资源。`task dev:server` 会�
 ## 许可证
 
 Stravia 采用 [GNU Affero General Public License v3.0 only](LICENSE)（`AGPL-3.0-only`）许可。
-单独许可的组件和资源继续适用其各自许可证文件中的条款，包括采用 `CC0-1.0` 的 `stravia-web-access` crate，以及采用各自许可证的内置字体。
+单独许可的组件和资源继续适用各自条款。`stravia-web-access` 的原有代码采用 `CC0-1.0`；随附的 OMP 隐身脚本采用 [MIT](backend/crates/stravia-web-access/src/browser/stealth/LICENSE)，许可声明也包含在编译后的注入脚本中。内置字体采用各自许可证。

@@ -109,6 +109,11 @@ tasks:
     cmds:
       - uv run --locked --group test python -m pytest tests/e2e/proxy -q -m proxy
 
+  test:browser:
+    desc: Run the real headless Chrome Web Access regression tests.
+    cmds:
+      - cargo test --locked -p stravia-web-access browser::tests -- --ignored
+
   test:e2e:admin:
     desc: Run the Admin service E2E tests.
     deps: [build:server]

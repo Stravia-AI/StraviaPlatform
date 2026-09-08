@@ -1,6 +1,6 @@
 mod extract;
 mod http;
-mod policy;
+pub(crate) mod policy;
 
 use std::{future::Future, net::IpAddr, pin::Pin, time::Duration};
 

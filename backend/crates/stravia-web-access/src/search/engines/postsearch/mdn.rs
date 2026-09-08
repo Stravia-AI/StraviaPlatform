@@ -1,8 +1,8 @@
 use maud::{html, PreEscaped};
-use moli_fetch::Request;
 use scraper::{Html, Selector};
 use serde::Deserialize;
 use tracing::error;
+use wreq::Request;
 
 use crate::search::engines::{Engine, HttpResponse, Response};
 
@@ -18,7 +18,10 @@ pub async fn request(response: &Response) -> anyhow::Result<Option<Request>> {
             .url
             .starts_with("https://developer.mozilla.org/en-US/docs/Web")
         {
-            return Request::get(search_result.result.url.as_str()).map(Some);
+            return Ok(Some(Request::new(
+                wreq::Method::GET,
+                search_result.result.url.parse()?,
+            )));
         }
     }
 
@@ -37,7 +40,7 @@ pub fn parse_response(
         }
     };
 
-    let url = res.final_url.clone();
+    let url = url::Url::parse(&res.uri().to_string()).ok()?;
 
     let dom = Html::parse_document(body);
 

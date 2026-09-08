@@ -104,7 +104,7 @@ macro_rules! engine_postsearch_requests {
     ($($engine:ident => $module:ident::$engine_id:ident::$request:ident, $parse_response:ident),* $(,)?) => {
         impl Engine {
             #[must_use]
-            pub async fn postsearch_request(&self, response: &Response) -> anyhow::Result<Option<moli_fetch::Request>> {
+            pub async fn postsearch_request(&self, response: &Response) -> anyhow::Result<Option<wreq::Request>> {
                 match self {
                     $(
                         Engine::$engine => $module::$engine_id::$request(response).await,

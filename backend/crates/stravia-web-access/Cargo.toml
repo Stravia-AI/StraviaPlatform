@@ -3,7 +3,7 @@ name = "stravia-web-access"
 version.workspace = true
 edition = "2021"
 rust-version.workspace = true
-license = "CC0-1.0"
+license = "CC0-1.0 AND MIT"
 description = "Web Access adapter implementations for Local, Exa, and Zhipu providers"
 publish = false
 
@@ -18,23 +18,26 @@ chrono-tz = { workspace = true }
 dom_smoothie = { workspace = true }
 fend-core = { workspace = true }
 futures = { workspace = true }
+http-body-util = { workspace = true }
 htmd = { workspace = true }
 maud = { workspace = true }
-moli-core = { workspace = true }
-moli-fetch = { workspace = true }
-moli-cookie-jar = { workspace = true }
-moli-stealth-net = { workspace = true }
+wreq = { workspace = true }
+wreq-util = { workspace = true }
 parking_lot = { workspace = true }
 numbat = { workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }
 reqwest = { workspace = true, features = ["http2", "rustls"] }
+reqwest-websocket = { workspace = true }
+rustls-platform-verifier = { workspace = true }
 rmcp = { workspace = true, features = ["client", "transport-streamable-http-client-reqwest"] }
 scraper = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["net", "rt", "sync", "time"] }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["net", "rt", "sync", "time", "process", "io-util", "macros", "fs"] }
+tokio-rustls = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }

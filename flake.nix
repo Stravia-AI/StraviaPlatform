@@ -153,12 +153,18 @@
             nativeBuildInputs = [
               pkgs.cmake
               pkgs.git
+              pkgs.makeWrapper
               pkgs.rustPlatform.bindgenHook
             ];
 
             preBuild = ''
               mkdir -p frontend/stravia-webui/dist
               cp -R ${webui}/. frontend/stravia-webui/dist/
+            '';
+
+            postInstall = ''
+              wrapProgram "$out/bin/stravia-server" \
+                --set-default STRAVIA_CHROME_PATH "${pkgs.chromium}/bin/chromium"
             '';
 
             meta = {

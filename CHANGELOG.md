@@ -8,7 +8,8 @@
 
 ### Changed
 
-- The in-process Local Provider's Search and Fetch now share the `moli-stealth` native HTTP and browser stack, replacing `wreq` and removing all workspace `[patch.crates-io]` overrides while preserving proxy snapshots, cookie isolation, and fetch safety limits.
+- The in-process Local Provider's Search and Fetch now use `wreq` for HTTP and real headless Chrome/Chromium over native Rust CDP for dynamic pages, replacing Moli while preserving proxy snapshots, cookie isolation, and fetch safety limits. The renderer includes all 14 OMP stealth scripts and its applicable CDP fingerprint mitigations without disabling Chrome's sandbox. Docker and Nix packages include Chromium; other installations can set `STRAVIA_CHROME_PATH`.
+- The pinned Rust toolchain and minimum workspace Rust version are now `1.98.1`.
 - The WebUI now links service connection, visible model inventory actions, and client setup through lightweight task guidance, reuses eligible API Keys, and preserves selections when returning from resource management.
 - Model lists distinguish display names, client Model IDs, enabled state, and associated services; modified model drafts now warn before navigation without changing priority lanes or immediately applied destination settings.
 - Client setup distinguishes copied and written configuration from verified connections, and credential guidance no longer claims editable secrets are shown only once.
@@ -18,6 +19,7 @@
 
 ### Fixed
 
+- Google Local Search now recognizes JavaScript gates containing result-heading templates and follows browser-side navigation without waiting on a superseded document. Browser sessions also retain cookies across temporary tabs within the same runtime.
 - The Server development workflow now passes Vite's actual listening origin to the backend for setup and sign-in, including when Vite selects another port for concurrent workspaces.
 - Relative SQLite paths now resolve from the directory containing `server.toml` throughout setup, startup, and local recovery, keeping the default Debug database in the workspace's `.stravia-dev` directory instead of creating a database in the process working directory.
 

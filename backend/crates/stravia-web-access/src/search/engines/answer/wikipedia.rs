@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
 use maud::html;
-use moli_fetch::Request;
 use serde::Deserialize;
 use url::Url;
+use wreq::Request;
 
 use crate::search::engines::{EngineResponse, RequestResponse, SearchQuery};
 
@@ -39,7 +39,7 @@ pub async fn request(search: &SearchQuery) -> anyhow::Result<RequestResponse> {
         ],
     )
     .unwrap();
-    Ok(Request::get(url.as_str())?.into())
+    Ok(Request::new(wreq::Method::GET, (url.as_str()).parse()?).into())
 }
 
 #[derive(Debug, Deserialize)]

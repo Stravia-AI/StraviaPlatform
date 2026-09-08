@@ -1,7 +1,7 @@
 use std::time::Duration;
 
-use moli_fetch::Request;
 use url::Url;
+use wreq::Request;
 
 use crate::{
     browser::RenderRequest,
@@ -16,7 +16,7 @@ const GOOGLE_SCHOLAR_RESULT_SELECTOR: &str = "div.gs_r";
 const BROWSER_RENDER_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub async fn request(search: &SearchQuery) -> anyhow::Result<RequestResponse> {
-    Ok(Request::get(search_url(search).as_str())?.into())
+    Ok(Request::new(wreq::Method::GET, (search_url(search).as_str()).parse()?).into())
 }
 
 pub(crate) fn requires_browser_render(status: u16) -> bool {

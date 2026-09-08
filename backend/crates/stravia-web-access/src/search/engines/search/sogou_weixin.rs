@@ -1,10 +1,10 @@
 use std::{sync::LazyLock, time::Duration};
 
 use futures::future::join_all;
-use moli_fetch::Request;
 use regex::Regex;
 use scraper::{ElementRef, Selector};
 use url::Url;
+use wreq::Request;
 
 use crate::{
     browser::RenderRequest,
@@ -27,9 +27,9 @@ static WECHAT_REDIRECT_URL_PARTS: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 pub async fn request(search: &SearchQuery) -> anyhow::Result<RequestResponse> {
-    let request = Request::get(search_url(search).as_str())?;
+    let request = Request::new(wreq::Method::GET, (search_url(search).as_str()).parse()?);
     let response = search.http.fetch(request).await?;
-    let body = String::from_utf8_lossy(response.body_bytes());
+    let body = String::from_utf8_lossy(&response.1);
     if requires_browser_render(&body) {
         return Ok(RequestResponse::Instant(Box::new(
             render_response(search).await?,
@@ -131,12 +131,12 @@ async fn resolve_article_url(
     client: HttpClient,
 ) -> anyhow::Result<EngineSearchResult> {
     // 依赖搜索 client 的 cookie jar，把结果页的 SNUID 带到这次 /link 请求。
-    let mut request = Request::get(&result.url)?;
+    let mut request = Request::new(wreq::Method::GET, (&result.url).parse()?);
     request
-        .request_headers
-        .push(("Referer".to_owned(), SOGOU_WECHAT_SEARCH_URL.to_owned()));
+        .headers_mut()
+        .insert(wreq::header::REFERER, SOGOU_WECHAT_SEARCH_URL.parse()?);
     let response = client.fetch(request).await?;
-    let redirect_page = String::from_utf8_lossy(response.body_bytes());
+    let redirect_page = String::from_utf8_lossy(&response.1);
     let url = extract_wechat_article_url(&redirect_page).ok_or_else(|| {
         anyhow::anyhow!("Sogou WeChat redirect did not contain a direct article URL")
     })?;
