@@ -24,7 +24,6 @@ use crate::provider::registry::{VendorRegistration, VendorScope};
 use crate::provider::vendor::{
     ProviderCtx, Vendor, resolve_base_url, validate_declared_credentials,
 };
-use crate::provider::vendor_ext::VendorCtx;
 
 const CREDENTIAL_FIELDS: &[CredentialFieldDef] = &[
     CredentialFieldDef {
@@ -128,18 +127,35 @@ impl Vendor for AmazonBedrockVendor {
         })
     }
 
-    fn auth_headers(&self, ctx: &VendorCtx<'_>) -> HeaderMap {
-        let mut headers = HeaderMap::new();
-        if let Some(api_key) = credential(ctx.provider, "apiKey")
-            && let Ok(value) = HeaderValue::from_str(&format!("Bearer {api_key}"))
-        {
-            headers.insert(AUTHORIZATION, value);
-        }
-        headers
-    }
-
-    fn build_url(&self, _ctx: &VendorCtx<'_>, base_url: &str, path: &str) -> String {
-        format!("{}{}", base_url.trim_end_matches('/'), path)
+    fn construct_request(
+        &self,
+        ctx: &crate::provider::vendor_ext::RequestContext<'_>,
+        purpose: crate::provider::vendor_ext::RequestPurpose<'_>,
+    ) -> anyhow::Result<crate::provider::vendor_ext::ConstructedRequest> {
+        use crate::provider::vendor_ext::{ConstructedRequest, RequestPurpose};
+        let url = match purpose {
+            RequestPurpose::Models { endpoint } => endpoint.to_string(),
+            RequestPurpose::Inference {
+                base_url,
+                path,
+                protocol: _,
+                actual_model: _,
+            } => {
+                format!("{}{}", base_url.trim_end_matches('/'), path)
+            }
+        };
+        let headers = if ctx.disable_default_auth {
+            reqwest::header::HeaderMap::new()
+        } else {
+            let mut headers = HeaderMap::new();
+            if let Some(api_key) = credential(ctx.provider, "apiKey")
+                && let Ok(value) = HeaderValue::from_str(&format!("Bearer {api_key}"))
+            {
+                headers.insert(AUTHORIZATION, value);
+            }
+            headers
+        };
+        ConstructedRequest::new(ctx, purpose, url, headers)
     }
 
     fn vendor_id(&self) -> &'static str {
@@ -155,7 +171,7 @@ impl Vendor for AmazonBedrockVendor {
         ctx: &ProviderCtx<'_>,
     ) -> Result<OutboundRequest, GatewayError> {
         let mut outbound = pipeline::build_request(self, req, ctx).await?;
-        if credential(ctx.provider, "apiKey").is_none() {
+        if !ctx.disable_default_auth && credential(ctx.provider, "apiKey").is_none() {
             sign_bedrock_request(&mut outbound, ctx.provider).map_err(|error| {
                 GatewayError::provider_unavailable("amazon-bedrock", error.to_string())
             })?;

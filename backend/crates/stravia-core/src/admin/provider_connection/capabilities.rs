@@ -1,31 +1,5 @@
 use super::*;
 
-fn provider_get_request(
-    gateway: &crate::Gateway,
-    provider: &Provider,
-    runtime: &crate::admin::ResolvedProviderRuntime,
-    endpoint: &str,
-) -> anyhow::Result<reqwest::RequestBuilder> {
-    let mut headers = if runtime.binding.disable_default_auth {
-        HeaderMap::new()
-    } else {
-        build_model_headers(
-            &provider.protocol,
-            provider.vendor.as_deref(),
-            &runtime.access_token,
-        )?
-    };
-    headers.extend(runtime_binding_headers(&runtime.binding)?);
-
-    let mut endpoint = reqwest::Url::parse(endpoint)?;
-    if provider.protocol == "gemini" && !runtime.binding.disable_default_auth {
-        endpoint
-            .query_pairs_mut()
-            .append_pair("key", &runtime.access_token);
-    }
-    Ok(gateway.http_client.get(endpoint).headers(headers))
-}
-
 impl AdminService {
     async fn catalog_models_for_provider(
         &self,
@@ -69,7 +43,13 @@ impl AdminService {
             .clone()
             .or_else(|| resolve_models_endpoint(&provider))
         {
-            let request = provider_get_request(&self.gw, &provider, &runtime, &endpoint)?;
+            let constructed = construct_models_request(&provider, &runtime, &endpoint)?;
+            let request = self
+                .gw
+                .http_client_for_provider(provider.use_proxy)
+                .await?
+                .get(constructed.url)
+                .headers(constructed.headers);
 
             if let Ok(resp) = request.send().await
                 && resp.status().is_success()
@@ -179,7 +159,13 @@ impl AdminService {
         model: &str,
     ) -> anyhow::Result<ModelCapabilities> {
         let runtime = self.resolve_provider_runtime(provider).await?;
-        let request = provider_get_request(&self.gw, provider, &runtime, url)?
+        let constructed = construct_models_request(provider, &runtime, url)?;
+        let request = self
+            .gw
+            .http_client_for_provider(provider.use_proxy)
+            .await?
+            .get(constructed.url)
+            .headers(constructed.headers)
             .timeout(Duration::from_secs(10));
 
         let resp = request
@@ -215,6 +201,78 @@ impl AdminService {
         }
         let json: Value = resp.json().await.unwrap_or_default();
         Ok(parse_ollama_capability(&json, model))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::db::models::{CreateProvider, ProviderCredentialInput, ProviderSourceInput};
+    use axum::{Router, http::StatusCode, routing::get};
+
+    #[tokio::test]
+    async fn model_query_falls_back_after_upstream_failure_but_not_proxy_setup_failure()
+    -> anyhow::Result<()> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route(
+                    "/models",
+                    get(move |headers: axum::http::HeaderMap| {
+                        let sent = sent.clone();
+                        async move {
+                            sent.send(headers).unwrap();
+                            StatusCode::BAD_GATEWAY
+                        }
+                    }),
+                ),
+            )
+            .await
+        });
+        let data_dir = tempfile::tempdir()?;
+        let gateway = crate::Gateway::new(crate::GatewayConfig {
+            data_dir: data_dir.path().to_path_buf(),
+            ..crate::GatewayConfig::default()
+        })
+        .await?;
+        let admin = gateway.admin();
+        admin.set_setting("proxy_enabled", "true").await?;
+        admin.set_setting("proxy_url", "").await?;
+        let input = |use_proxy| CreateProvider {
+            name: Some(format!("Inventory {use_proxy}")),
+            source: ProviderSourceInput::Custom {
+                vendor: None,
+                protocol: "openai-compatible".into(),
+                base_url: format!("http://{address}"),
+                models_source: Some(format!("http://{address}/models")),
+                static_models: Some("fallback-model".into()),
+            },
+            credential: ProviderCredentialInput::ApiKey {
+                value: "synthetic-key".into(),
+            },
+            use_proxy,
+        };
+        let direct = admin.create_provider(input(false)).await?;
+        let proxied = admin.create_provider(input(true)).await?;
+        assert_eq!(
+            admin.get_provider_models(&direct.id).await?,
+            ["fallback-model"]
+        );
+        let headers = received.try_recv()?;
+        assert_eq!(headers["authorization"], "Bearer synthetic-key");
+        let error = admin
+            .get_provider_models(&proxied.id)
+            .await
+            .expect_err("invalid proxy must not become a static-list success");
+        assert!(error.to_string().contains("proxy_url"));
+        assert!(matches!(
+            received.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        server.abort();
+        Ok(())
     }
 }
 

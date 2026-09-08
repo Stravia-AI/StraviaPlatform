@@ -418,18 +418,68 @@ async fn hidden_round_request_hook_response_is_delivered_impl() {
             .unwrap_or_else(|poisoned| poisoned.into_inner()),
         vec![1]
     );
-    let generation_payload = sqlx::query_scalar::<_, String>(
-        "SELECT payload FROM turn_chain_nodes WHERE kind = 'response' ORDER BY created_at DESC LIMIT 1",
-    )
-    .fetch_one(gateway._sqlite_pool.as_ref().expect("Gateway SQLite pool"))
-    .await.expect("hidden-round Hook Generation Chain payload");
-    assert!(
-        generation_payload.contains(crate::history_marker::HISTORY_MARKER_PREFIX),
-        "{generation_payload}"
+    let chunks = body
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+        .collect::<Vec<_>>();
+    let visible = chunks
+        .iter()
+        .filter_map(|chunk| chunk["choices"][0]["delta"]["content"].as_str())
+        .collect::<String>();
+    let reasoning = chunks
+        .iter()
+        .filter_map(|chunk| chunk["choices"][0]["delta"]["reasoning_content"].as_str())
+        .collect::<String>();
+    assert_eq!(visible, "hook completed hidden round");
+    assert_eq!(
+        reasoning
+            .matches(crate::history_marker::HISTORY_MARKER_PREFIX)
+            .count(),
+        1
     );
+    let request = crate::protocol::transform::ProtocolTransform::global()
+        .bind(
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            OPEN_RESPONSES_2026_04_24,
+        )
+        .expect("Chat protocol")
+        .decode_request(serde_json::json!({
+            "model": "hook-followup",
+            "messages": [
+                {"role": "user", "content": "test"},
+                {"role": "assistant", "content": visible, "reasoning_content": reasoning},
+                {"role": "user", "content": "follow-up"}
+            ]
+        }))
+        .expect("client continuation");
+    let headers = authorized_headers(&gateway).await;
+    let principal = crate::proxy::security::Security::new(gateway.storage.auth())
+        .required_principal(
+            &crate::proxy::security::ClientCredential::from_inference_headers(&headers),
+        )
+        .await
+        .expect("Principal");
+    let continuation = gateway
+        .generation_chains
+        .begin(principal.clone(), request)
+        .await
+        .expect("continue delivered Hook response");
     assert!(
-        generation_payload.contains("hook completed hidden round"),
-        "{generation_payload}"
+        continuation.parent_id().is_some(),
+        "delivered Hook response remains discoverable"
+    );
+    assert_eq!(
+        continuation.request_delta().items[0].content.to_text(),
+        "follow-up"
+    );
+    assert_eq!(
+        gateway
+            .generation_chains
+            .continuation_lookup()
+            .preferred_target(&principal, continuation.request())
+            .await,
+        None,
     );
 }
 

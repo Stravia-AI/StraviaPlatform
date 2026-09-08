@@ -67,6 +67,7 @@ Interaction 卡片、详情与用量分析共享 `Confirmed Upstream Usage`：
 - 汇总所有 Inference Run、隐藏 Model Turn、重试和 Target failover 中上游明确报告的 usage；
 - input、output、cache read、cache write、reasoning 等字段分别累计，不把 cache 重复加进 total；
 - 每个实际上游 attempt 的 usage 最多记一次；
+- Target attempt 成功与明确报告的 usage 不因随后还原或映射发布失败而改写；Model Turn 的唯一终态由内部完成 gate 记录，只有发布完成且未被取消或超时抢占才记成功；
 - 上游尚未报告或永不报告时保持 `unknown`，不显示为零，不用本地 tokenizer 估算；
 - 收到新的上游 usage 后更新持久化投影并推送 SSE。
 

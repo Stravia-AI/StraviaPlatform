@@ -192,7 +192,7 @@ async fn serve_zdr_then_responses_stream() -> (String, Arc<Mutex<Vec<serde_json:
     (format!("http://{address}/v1"), captured)
 }
 
-async fn serve_openai_capture() -> (String, Arc<Mutex<Vec<u8>>>) {
+async fn serve_openai_capture_text(text: &'static str) -> (String, Arc<Mutex<Vec<u8>>>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind capturing provider");
@@ -215,7 +215,7 @@ async fn serve_openai_capture() -> (String, Arc<Mutex<Vec<u8>>>) {
             "model": "upstream-model",
             "choices": [{
                 "index": 0,
-                "message": {"role": "assistant", "content": "ok"},
+                "message": {"role": "assistant", "content": text},
                 "finish_reason": "stop"
             }],
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
@@ -249,7 +249,20 @@ async fn gateway_with_captured_model(
     Arc<Mutex<Vec<u8>>>,
     crate::db::models::ApiKeyWithBindings,
 ) {
-    let (base_url, captured) = serve_openai_capture().await;
+    gateway_with_captured_text(model_name, bind_key, "ok").await
+}
+
+async fn gateway_with_captured_text(
+    model_name: &str,
+    bind_key: bool,
+    text: &'static str,
+) -> (
+    tempfile::TempDir,
+    crate::Gateway,
+    Arc<Mutex<Vec<u8>>>,
+    crate::db::models::ApiKeyWithBindings,
+) {
+    let (base_url, captured) = serve_openai_capture_text(text).await;
     let data_dir = tempfile::tempdir().expect("temporary data directory");
     let gateway = Gateway::new(GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
@@ -854,7 +867,8 @@ async fn execute_does_not_fail_over_after_the_first_canonical_delta() {
         .await
         .expect("streaming Model Turn locks the first Target");
     assert_eq!(turn.route.provider_id, providers[0].id);
-    let events = turn.output.collect::<Vec<_>>().await;
+    let mut output = turn.output;
+    let events = output.by_ref().collect::<Vec<_>>().await;
 
     assert!(events.iter().any(
             |event| matches!(event, Ok(CanonicalEvent::Delta(AiStreamDelta::TextDelta(text))) if text == "partial")
@@ -863,6 +877,14 @@ async fn execute_does_not_fail_over_after_the_first_canonical_delta() {
         events.last(),
         Some(Err(ModelTurnError { code, .. })) if code == "upstream_stream_error"
     ));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Ok(CanonicalEvent::Completed(_))))
+    );
+    for _ in 0..3 {
+        assert!(output.next().await.is_none());
+    }
     assert_eq!(partial_calls.load(Ordering::SeqCst), 1);
     assert_eq!(fallback_calls.load(Ordering::SeqCst), 0);
 }
@@ -972,4 +994,382 @@ async fn execute_capability_grant_does_not_require_route_binding() {
     let _ = turn.output.collect::<Vec<_>>().await;
 
     assert!(!captured.lock().expect("captured grant").is_empty());
+}
+
+// The real MappingStore seam holds publication after the database has committed.
+// Cancellation is deliberately not evidence that a mapping was never published.
+struct HeldPublicationStore {
+    inner: Arc<dyn crate::reversible_redaction::store::MappingStore>,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    fail: bool,
+    starts: AtomicUsize,
+    cancel_on_release: Mutex<Option<CancellationToken>>,
+}
+
+#[async_trait::async_trait]
+impl crate::reversible_redaction::store::MappingStore for HeldPublicationStore {
+    async fn active(
+        &self,
+        principal: &Principal,
+    ) -> Result<
+        Vec<crate::reversible_redaction::store::Mapping>,
+        crate::reversible_redaction::RedactionError,
+    > {
+        self.inner.active(principal).await
+    }
+
+    async fn intern(
+        &self,
+        principal: &Principal,
+        secrets: &[String],
+    ) -> Result<
+        Vec<crate::reversible_redaction::store::Mapping>,
+        crate::reversible_redaction::RedactionError,
+    > {
+        self.inner.intern(principal, secrets).await
+    }
+
+    async fn publish(
+        &self,
+        principal: &Principal,
+        references: &[String],
+        retention: Duration,
+    ) -> Result<(), crate::reversible_redaction::RedactionError> {
+        self.starts.fetch_add(1, Ordering::SeqCst);
+        if !self.fail {
+            self.inner.publish(principal, references, retention).await?;
+        }
+        self.entered.notify_one();
+        self.release.notified().await;
+        if let Some(cancellation) = self.cancel_on_release.lock().unwrap().take() {
+            cancellation.cancel();
+        }
+        if self.fail {
+            Err(crate::reversible_redaction::RedactionError::Storage)
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn extend_retention(
+        &self,
+        principal: &Principal,
+        references: &[String],
+        retention: Duration,
+    ) -> Result<(), crate::reversible_redaction::RedactionError> {
+        self.inner
+            .extend_retention(principal, references, retention)
+            .await
+    }
+
+    async fn cleanup_expired(&self) -> Result<u64, crate::reversible_redaction::RedactionError> {
+        self.inner.cleanup_expired().await
+    }
+}
+
+async fn held_publication_turn(
+    fail: bool,
+    late_reference: bool,
+) -> (
+    tempfile::TempDir,
+    Gateway,
+    ModelTurn,
+    Arc<HeldPublicationStore>,
+    Principal,
+    CancellationToken,
+    i64,
+) {
+    let (directory, mut gateway, _, key) =
+        gateway_with_captured_text("publication-model", true, "answer ~stravia-secret:").await;
+    let principal = Principal::new(key.id);
+    let store = Arc::new(HeldPublicationStore {
+        inner: gateway.redaction.mappings.clone(),
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+        fail,
+        starts: AtomicUsize::new(0),
+        cancel_on_release: Mutex::new(None),
+    });
+    gateway.redaction = crate::reversible_redaction::ReversibleRedaction::new(
+        gateway.storage.clone(),
+        store.clone(),
+    );
+    let mut request = AiRequest::new("publication-model", Vec::new());
+    let mut pending_expiry = 0;
+    if !late_reference {
+        let mapping = store
+            .inner
+            .intern(&principal, &["synthetic-secret".into()])
+            .await
+            .unwrap()
+            .remove(0);
+        request.instructions = Some(mapping.reference);
+        pending_expiry = mapping.expires_at;
+    }
+    let mut related = request.clone();
+    let cancellation = CancellationToken::new();
+    let executor =
+        LiveModelTurnExecutor::new(gateway.clone(), continuation::ScriptedContinuation::miss());
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let observer = gateway
+        .observation
+        .observe_ingress(crate::interaction_observation::IngressStart {
+            id: run_id.clone(),
+            method: "POST".into(),
+            path: "/v1/chat/completions".into(),
+            protocol: "openai-compatible".into(),
+        })
+        .admit(crate::interaction_observation::RunStart {
+            id: run_id,
+            principal: principal.continuation_key(),
+            api_key_id: None,
+            api_key_name: None,
+            generation_root_id: None,
+            generation_parent_id: None,
+            has_new_user: true,
+            canonical_fingerprint: "publication-fixture".into(),
+            route_id: "publication-model".into(),
+            model_display_name: None,
+            ingress_protocol: "openai-compatible".into(),
+        });
+    let turn = executor
+        .execute(
+            TurnInput::new(principal.clone(), request)
+                .with_observer(observer)
+                .with_execution(
+                    cancellation.clone(),
+                    Instant::now() + Duration::from_secs(300),
+                ),
+        )
+        .await
+        .expect("upstream completed before local publication");
+    if late_reference {
+        // The returned turn captured no local mappings. A related turn now adds a
+        // valid reference to its shared trace through normal request protection.
+        let mapping = store
+            .inner
+            .intern(&principal, &["related-secret".into()])
+            .await
+            .unwrap()
+            .remove(0);
+        pending_expiry = mapping.expires_at;
+        related.instructions = Some(mapping.reference);
+        gateway
+            .redaction
+            .protect(&principal, &mut related)
+            .await
+            .unwrap();
+    }
+    (
+        directory,
+        gateway,
+        turn,
+        store,
+        principal,
+        cancellation,
+        pending_expiry,
+    )
+}
+
+async fn consume_until_publication(turn: &mut ModelTurn, store: &HeldPublicationStore) -> String {
+    let mut text = String::new();
+    loop {
+        tokio::select! {
+            biased;
+            _ = store.entered.notified() => return text,
+            event = turn.output.next() => match event.expect("publication remains pending").expect("delta") {
+                CanonicalEvent::Delta(AiStreamDelta::TextDelta(delta))
+                | CanonicalEvent::Delta(AiStreamDelta::TextDeltaWithMetadata { text: delta, .. }) => text.push_str(&delta),
+                CanonicalEvent::Delta(_) => {},
+                CanonicalEvent::Completed(_) => panic!("success escaped pending publication"),
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn canonical_completion_publishes_after_trailing_output_and_is_permanently_terminal() {
+    let (_directory, gateway, mut turn, store, principal, cancellation, pending_expiry) =
+        held_publication_turn(false, false).await;
+    assert_eq!(
+        consume_until_publication(&mut turn, &store).await,
+        "answer ~stravia-secret:"
+    );
+    // The select above dropped a pending next() future. Publication must survive
+    // that pause and resume rather than issuing a second write.
+    assert!(store.inner.active(&principal).await.unwrap()[0].expires_at > pending_expiry);
+    store.release.notify_one();
+    match turn.output.next().await.unwrap().unwrap() {
+        CanonicalEvent::Completed(response) => {
+            assert_eq!(response.output_text(), "answer ~stravia-secret:")
+        }
+        CanonicalEvent::Delta(_) => panic!("all deltas must precede publication"),
+    }
+    assert_eq!(store.starts.load(Ordering::SeqCst), 1);
+    cancellation.cancel();
+    for _ in 0..3 {
+        assert!(turn.output.next().await.is_none());
+    }
+    drop(turn);
+    assert_publication_observation(&gateway, "completed").await;
+}
+
+#[tokio::test]
+async fn canonical_completion_publishes_current_shared_trace_with_empty_local_mappings() {
+    let (_directory, _gateway, mut turn, store, principal, _, pending_expiry) =
+        held_publication_turn(false, true).await;
+    assert_eq!(
+        consume_until_publication(&mut turn, &store).await,
+        "answer ~stravia-secret:"
+    );
+    assert!(store.inner.active(&principal).await.unwrap()[0].expires_at > pending_expiry);
+    store.release.notify_one();
+    assert!(matches!(
+        turn.output.next().await,
+        Some(Ok(CanonicalEvent::Completed(_)))
+    ));
+    assert!(turn.output.next().await.is_none());
+}
+
+#[tokio::test]
+async fn canonical_completion_reports_publication_failure_without_success_or_upstream_replay() {
+    let (_directory, gateway, mut turn, store, _, _, _) = held_publication_turn(true, false).await;
+    assert_eq!(
+        consume_until_publication(&mut turn, &store).await,
+        "answer ~stravia-secret:"
+    );
+    store.release.notify_one();
+    assert_eq!(
+        turn.output.next().await.unwrap().unwrap_err().code,
+        "reversible_redaction_failed"
+    );
+    for _ in 0..3 {
+        assert!(turn.output.next().await.is_none());
+    }
+    drop(turn);
+    assert_publication_observation(&gateway, "reversible_redaction_failed").await;
+}
+
+#[tokio::test]
+async fn canonical_completion_cancellation_interrupts_publication_without_revoking_committed_mappings()
+ {
+    let (_directory, gateway, mut turn, store, principal, cancellation, pending_expiry) =
+        held_publication_turn(false, false).await;
+    consume_until_publication(&mut turn, &store).await;
+    cancellation.cancel();
+    // Do not release publication: cancellation must independently wake the gate.
+    assert_eq!(
+        turn.output.next().await.unwrap().unwrap_err().code,
+        "cancelled"
+    );
+    assert!(turn.output.next().await.is_none());
+    assert!(store.inner.active(&principal).await.unwrap()[0].expires_at > pending_expiry);
+    drop(turn);
+    assert_publication_observation(&gateway, "cancelled").await;
+}
+
+#[tokio::test]
+async fn canonical_completion_deadline_interrupts_publication() {
+    let (_directory, _gateway, mut turn, store, _, _, _) =
+        held_publication_turn(false, false).await;
+    consume_until_publication(&mut turn, &store).await;
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(301)).await;
+    assert_eq!(
+        turn.output.next().await.unwrap().unwrap_err().code,
+        "deadline_exceeded"
+    );
+    assert!(turn.output.next().await.is_none());
+    tokio::time::resume();
+}
+
+async fn assert_publication_observation(gateway: &Gateway, status: &str) {
+    use crate::interaction_observation::ForestQuery;
+
+    // Detail queries synchronize the existing asynchronous observation writer.
+    gateway
+        .observation
+        .get_interaction("absent", ForestQuery::default())
+        .await
+        .unwrap();
+    let forest = gateway
+        .observation
+        .query_forest(ForestQuery::default())
+        .await
+        .unwrap();
+    let interaction = &forest.roots[0].interactions[0];
+    let detail = gateway
+        .observation
+        .get_interaction(&interaction.id, ForestQuery::default())
+        .await
+        .unwrap()
+        .unwrap();
+    let run = &detail.runs[0];
+    let terminals = run
+        .events
+        .iter()
+        .filter(|event| event.kind == "model_turn_finished")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        terminals.len(),
+        1,
+        "one owner records the Model Turn result"
+    );
+    assert_eq!(terminals[0].payload["status"], status);
+    let attempts = run
+        .events
+        .iter()
+        .filter(|event| event.kind == "target_attempt_finished")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        attempts.len(),
+        1,
+        "local publication never retries an upstream attempt"
+    );
+    assert_eq!(attempts[0].payload["status"], "completed");
+    assert_eq!(run.usage.input_tokens, Some(1));
+    assert_eq!(run.usage.output_tokens, Some(1));
+}
+
+#[tokio::test]
+async fn dropping_pending_canonical_publication_records_cancelled_once() {
+    let (_directory, gateway, mut turn, store, principal, _, pending_expiry) =
+        held_publication_turn(false, false).await;
+    consume_until_publication(&mut turn, &store).await;
+    drop(turn);
+    assert_publication_observation(&gateway, "cancelled").await;
+    assert!(store.inner.active(&principal).await.unwrap()[0].expires_at > pending_expiry);
+}
+
+#[tokio::test]
+async fn cancellation_in_publications_final_poll_preempts_completed() {
+    let (_directory, gateway, mut turn, store, principal, cancellation, pending_expiry) =
+        held_publication_turn(false, false).await;
+    consume_until_publication(&mut turn, &store).await;
+    *store.cancel_on_release.lock().unwrap() = Some(cancellation);
+    store.release.notify_one();
+    assert_eq!(
+        turn.output.next().await.unwrap().unwrap_err().code,
+        "cancelled"
+    );
+    assert!(turn.output.next().await.is_none());
+    drop(turn);
+    assert_publication_observation(&gateway, "cancelled").await;
+    assert!(store.inner.active(&principal).await.unwrap()[0].expires_at > pending_expiry);
+}
+
+#[tokio::test]
+async fn observation_writer_failure_does_not_change_canonical_publication_success() {
+    let (_directory, gateway, mut turn, store, principal, _, pending_expiry) =
+        held_publication_turn(false, false).await;
+    consume_until_publication(&mut turn, &store).await;
+    gateway.observation.shutdown().await;
+    store.release.notify_one();
+    assert!(matches!(
+        turn.output.next().await,
+        Some(Ok(CanonicalEvent::Completed(_)))
+    ));
+    assert!(turn.output.next().await.is_none());
+    assert!(store.inner.active(&principal).await.unwrap()[0].expires_at > pending_expiry);
 }

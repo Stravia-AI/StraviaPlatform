@@ -183,7 +183,7 @@ async fn observe_effective_persists_marker_at_ordered_projection_atom() {
     let id = write.id().to_owned();
     let mut response = AiResponse::new("upstream", "model");
     response.push_output_text("answer");
-    assert!(write.stage(&mut response, None));
+    assert!(write.stage(&mut response, &generation_source(), None));
     write.persist().await.expect("persist generation");
 
     let materialized = chain
@@ -297,7 +297,7 @@ async fn persisted_unavailable_marker_text_does_not_poison_a_continuation() {
     let root_id = root.id().to_owned();
     let mut root_response = AiResponse::new("upstream", "model");
     root_response.push_output_text("first answer");
-    assert!(root.stage(&mut root_response, None));
+    assert!(root.stage(&mut root_response, &generation_source(), None));
     root.persist()
         .await
         .expect("persist unavailable marker as inert client text");
@@ -313,7 +313,7 @@ async fn persisted_unavailable_marker_text_does_not_poison_a_continuation() {
         .expect("begin continuation");
     let mut response = AiResponse::new("upstream", "model");
     response.push_output_text("second answer");
-    assert!(continuation.stage(&mut response, None));
+    assert!(continuation.stage(&mut response, &generation_source(), None));
 
     continuation
         .persist()
@@ -373,7 +373,7 @@ async fn write_materializes_an_explicit_parent_before_observation() {
     assert_eq!(root.root_id(), root_id);
     let mut response = AiResponse::new("upstream", "model");
     response.push_output_text("answer");
-    root.stage(&mut response, None);
+    root.stage(&mut response, &generation_source(), None);
     root.persist().await.expect("persist root");
 
     let mut continuation = responses_request(vec![user_message("follow-up")]);
@@ -433,7 +433,7 @@ async fn dropping_a_staged_write_does_not_persist_a_node() {
         .expect("begin write");
     let id = TurnNodeId::new(write.id().to_owned());
     let mut dropped = AiResponse::new("upstream", "model");
-    write.stage(&mut dropped, None);
+    write.stage(&mut dropped, &generation_source(), None);
     drop(write);
 
     assert!(
@@ -458,10 +458,10 @@ async fn a_later_stage_replaces_the_unpersisted_response() {
     let id = write.id().to_owned();
     let mut intermediate = AiResponse::new("upstream", "model");
     intermediate.push_output_text("intermediate");
-    write.stage(&mut intermediate, None);
+    write.stage(&mut intermediate, &generation_source(), None);
     let mut final_response = AiResponse::new("upstream", "model");
     final_response.push_output_text("final");
-    write.stage(&mut final_response, None);
+    write.stage(&mut final_response, &generation_source(), None);
     write.persist().await.expect("persist final response");
 
     let mut continuation = responses_request(vec![user_message("follow-up")]);
@@ -497,7 +497,7 @@ async fn observe_effective_persists_rewritten_history() {
     write.observe_effective(effective);
     let mut response = AiResponse::new("upstream", "model");
     response.push_output_text("answer");
-    write.stage(&mut response, None);
+    write.stage(&mut response, &generation_source(), None);
     write.persist().await.expect("persist response");
     drop(chain);
     let chain = GenerationChain::from_turn_chain(backend, Duration::from_secs(60), None);
@@ -535,7 +535,7 @@ async fn automatic_parent_discovery_writes_only_a_nonempty_branch_delta() {
     let mut root_response = AiResponse::new("upstream", "model");
     root_response.push_output_text("answer");
     let answer = root_response.items[0].clone();
-    root.stage(&mut root_response, None);
+    root.stage(&mut root_response, &generation_source(), None);
     root.persist().await.expect("persist root");
 
     let mut branch = chain
@@ -548,7 +548,7 @@ async fn automatic_parent_discovery_writes_only_a_nonempty_branch_delta() {
     let branch_id = TurnNodeId::new(branch.id().to_owned());
     let mut branch_response = AiResponse::new("upstream", "model");
     branch_response.push_output_text("continued");
-    branch.stage(&mut branch_response, None);
+    branch.stage(&mut branch_response, &generation_source(), None);
     branch.persist().await.expect("persist branch");
 
     let nodes = backend
@@ -571,7 +571,7 @@ async fn an_identical_full_request_creates_a_new_root() {
     let mut first_response = AiResponse::new("upstream", "model");
     first_response.push_output_text("answer");
     let answer = first_response.items[0].clone();
-    first.stage(&mut first_response, None);
+    first.stage(&mut first_response, &generation_source(), None);
     first.persist().await.expect("persist first write");
 
     let mut retry = chain
@@ -580,7 +580,7 @@ async fn an_identical_full_request_creates_a_new_root() {
         .expect("begin identical retry");
     let retry_id = TurnNodeId::new(retry.id().to_owned());
     let mut retry_response = AiResponse::new("upstream", "model");
-    retry.stage(&mut retry_response, None);
+    retry.stage(&mut retry_response, &generation_source(), None);
     retry.persist().await.expect("persist retry");
 
     let nodes = backend
@@ -606,7 +606,7 @@ async fn begin_does_not_resolve_a_parent_across_principals() {
         .expect("begin owner write");
     let owner_id = owner_write.id().to_owned();
     let mut owner_response = AiResponse::new("upstream", "model");
-    owner_write.stage(&mut owner_response, None);
+    owner_write.stage(&mut owner_response, &generation_source(), None);
     owner_write.persist().await.expect("persist owner write");
 
     let mut request = responses_request(vec![user_message("guess")]);
@@ -641,7 +641,7 @@ async fn completed_and_incomplete_writes_can_both_be_parents() {
             "__open_responses_terminal".into(),
             serde_json::json!({ "status": status }),
         );
-        root.stage(&mut response, None);
+        root.stage(&mut response, &generation_source(), None);
         root.persist().await.expect("persist terminal response");
 
         let mut request = responses_request(vec![user_message("follow-up")]);
@@ -671,7 +671,7 @@ async fn write_stage_rejects_failed_terminals() {
         "__open_responses_terminal".into(),
         serde_json::json!({ "status": "failed" }),
     );
-    assert!(!write.stage(&mut response, None));
+    assert!(!write.stage(&mut response, &generation_source(), None));
     assert!(matches!(
         write.persist().await,
         Err(PersistError::NotStaged)
@@ -696,7 +696,7 @@ async fn write_stage_rejects_unprojected_post_text_thinking() {
         AiItem::thinking("authoritative reasoning", None),
     ];
 
-    assert!(!write.stage(&mut response, None));
+    assert!(!write.stage(&mut response, &generation_source(), None));
     assert!(matches!(
         write.persist().await,
         Err(PersistError::NotStaged)

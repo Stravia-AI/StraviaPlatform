@@ -14,7 +14,7 @@ use crate::provider::metadata::{
 use crate::provider::outbound::OutboundRequest;
 use crate::provider::registry::{ExtensionRegistration, VendorRegistration, VendorScope};
 use crate::provider::vendor::{ProviderCtx, Vendor};
-use crate::provider::vendor_ext::{VendorCtx, VendorExtension};
+use crate::provider::vendor_ext::VendorExtension;
 
 const METADATA: VendorMetadata = VendorMetadata {
     id: "google",
@@ -51,6 +51,44 @@ const METADATA: VendorMetadata = VendorMetadata {
     }],
 };
 
+fn construct_google_request(
+    ctx: &crate::provider::vendor_ext::RequestContext<'_>,
+    purpose: crate::provider::vendor_ext::RequestPurpose<'_>,
+) -> anyhow::Result<crate::provider::vendor_ext::ConstructedRequest> {
+    use crate::provider::vendor_ext::{ConstructedRequest, RequestPurpose};
+    let mut url = match purpose {
+        RequestPurpose::Models { endpoint } => {
+            let url = reqwest::Url::parse(endpoint)?;
+            let official_native = url.scheme() == "https"
+                && url.host_str() == Some("generativelanguage.googleapis.com")
+                && url.port_or_known_default() == Some(443)
+                && url.path() == "/v1beta/models";
+            // The native fallback is derived from the saved base URL, not from
+            // an arbitrary custom endpoint's path. Custom sources keep Models
+            // Bearer auth unless they name the known Google-owned endpoint.
+            let derived_native = ctx.provider.effective_models_source().is_none()
+                && endpoint.strip_prefix(ctx.provider.base_url.trim_end_matches('/'))
+                    == Some("/v1beta/models");
+            if !official_native && !derived_native {
+                return crate::provider::common::openai_compat::construct_openai_request(
+                    ctx, purpose,
+                );
+            }
+            url
+        }
+        RequestPurpose::Inference { protocol, .. }
+            if protocol.protocol == crate::protocol::ids::Protocol::OpenAICompatible =>
+        {
+            return crate::provider::common::openai_compat::construct_openai_request(ctx, purpose);
+        }
+        RequestPurpose::Inference { .. } => reqwest::Url::parse(&purpose.endpoint())?,
+    };
+    if !ctx.disable_default_auth {
+        url.query_pairs_mut().append_pair("key", ctx.api_key);
+    }
+    ConstructedRequest::new(ctx, purpose, url.into(), reqwest::header::HeaderMap::new())
+}
+
 pub struct GoogleVendor;
 
 #[async_trait]
@@ -63,13 +101,12 @@ impl Vendor for GoogleVendor {
     fn metadata(&self) -> Option<&'static VendorMetadata> {
         Some(&METADATA)
     }
-    fn build_url(&self, ctx: &VendorCtx<'_>, base_url: &str, path: &str) -> String {
-        let url = format!("{}{path}", base_url.trim_end_matches('/'));
-        if url.contains('?') {
-            format!("{url}&key={}", ctx.api_key)
-        } else {
-            format!("{url}?key={}", ctx.api_key)
-        }
+    fn construct_request(
+        &self,
+        ctx: &crate::provider::vendor_ext::RequestContext<'_>,
+        purpose: crate::provider::vendor_ext::RequestPurpose<'_>,
+    ) -> anyhow::Result<crate::provider::vendor_ext::ConstructedRequest> {
+        construct_google_request(ctx, purpose)
     }
     fn vendor_id(&self) -> &'static str {
         "google"
@@ -118,13 +155,12 @@ impl VendorExtension for GoogleFamilyExt {
     fn metadata(&self) -> Option<&'static VendorMetadata> {
         None
     }
-    fn build_url(&self, ctx: &VendorCtx<'_>, base_url: &str, path: &str) -> String {
-        let url = format!("{}{path}", base_url.trim_end_matches('/'));
-        if url.contains('?') {
-            format!("{url}&key={}", ctx.api_key)
-        } else {
-            format!("{url}?key={}", ctx.api_key)
-        }
+    fn construct_request(
+        &self,
+        ctx: &crate::provider::vendor_ext::RequestContext<'_>,
+        purpose: crate::provider::vendor_ext::RequestPurpose<'_>,
+    ) -> anyhow::Result<crate::provider::vendor_ext::ConstructedRequest> {
+        construct_google_request(ctx, purpose)
     }
 }
 

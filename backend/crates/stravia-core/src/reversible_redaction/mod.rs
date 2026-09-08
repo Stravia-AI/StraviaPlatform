@@ -124,36 +124,9 @@ pub(crate) struct ReversibleRedaction {
     pub(crate) mappings: Arc<dyn MappingStore>,
 }
 
-pub(crate) struct RedactionPublication {
-    redaction: ReversibleRedaction,
-    principal: Principal,
-    trace: RedactionTrace,
-}
-
-impl RedactionPublication {
-    pub(crate) async fn publish(&self) -> Result<(), ModelTurnError> {
-        self.redaction
-            .publish(&self.principal, &self.trace)
-            .await
-            .map_err(Into::into)
-    }
-}
-
 impl ReversibleRedaction {
     pub(crate) fn new(storage: DynStorage, mappings: Arc<dyn MappingStore>) -> Self {
         Self { storage, mappings }
-    }
-
-    pub(crate) fn publication(
-        &self,
-        principal: Principal,
-        trace: RedactionTrace,
-    ) -> RedactionPublication {
-        RedactionPublication {
-            redaction: self.clone(),
-            principal,
-            trace,
-        }
     }
 
     pub(crate) async fn protect(

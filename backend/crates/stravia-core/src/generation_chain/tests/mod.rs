@@ -11,6 +11,15 @@ fn principal(id: &str) -> Principal {
     Principal::new(id)
 }
 
+fn generation_source() -> GenerationSource {
+    GenerationSource::Target {
+        namespace: "provider:model".into(),
+        protocol: OPEN_RESPONSES_2026_04_24,
+        actual_model: "model".into(),
+        selected_target_key: "provider:model".into(),
+    }
+}
+
 async fn generation_store() -> GenerationChainStore {
     GenerationChainStore::from_turn_chain(
         Arc::new(crate::turn_chain::test_store().await),

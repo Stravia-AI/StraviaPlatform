@@ -116,7 +116,6 @@ pub struct TargetIdentity {
 
 pub struct ModelTurn {
     pub(crate) model_turn_id: String,
-    pub(crate) redaction_publication: Option<crate::reversible_redaction::RedactionPublication>,
     pub route: RouteContext,
     pub target: TargetIdentity,
     pub output: CanonicalEventStream,
@@ -135,7 +134,6 @@ impl ModelTurn {
         let events = events.into_iter().collect::<Vec<_>>();
         Self {
             model_turn_id: uuid::Uuid::new_v4().to_string(),
-            redaction_publication: None,
             target: TargetIdentity {
                 actual_model: request.model.clone(),
                 provider_id: route.provider_id.clone(),

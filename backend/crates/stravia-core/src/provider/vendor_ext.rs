@@ -30,6 +30,68 @@ pub struct VendorCtx<'a> {
     pub credential: Option<&'a StoredCredential>,
 }
 
+/// Request facts that exist only for inference or only for model discovery.
+#[derive(Clone, Copy)]
+pub enum RequestPurpose<'a> {
+    Inference {
+        protocol: ProtocolId,
+        base_url: &'a str,
+        path: &'a str,
+        actual_model: &'a str,
+    },
+    Models {
+        endpoint: &'a str,
+    },
+}
+
+impl RequestPurpose<'_> {
+    pub(crate) fn endpoint(self) -> String {
+        match self {
+            Self::Inference { base_url, path, .. } => {
+                format!("{}{}", base_url.trim_end_matches('/'), path)
+            }
+            Self::Models { endpoint } => endpoint.to_string(),
+        }
+    }
+}
+
+/// Resolved credentials; discovery never fabricates inference model context.
+pub struct RequestContext<'a> {
+    pub provider: &'a Provider,
+    pub api_key: &'a str,
+    pub credential: Option<&'a StoredCredential>,
+    pub disable_default_auth: bool,
+}
+
+pub struct ConstructedRequest {
+    pub url: String,
+    pub headers: HeaderMap,
+}
+
+impl ConstructedRequest {
+    /// Apply the shared default-auth policy before callers merge explicit headers.
+    pub(crate) fn new(
+        ctx: &RequestContext<'_>,
+        purpose: RequestPurpose<'_>,
+        url: String,
+        mut headers: HeaderMap,
+    ) -> anyhow::Result<Self> {
+        reqwest::Url::parse(&url)?;
+        if ctx.disable_default_auth {
+            headers.clear();
+        } else if matches!(purpose, RequestPurpose::Inference { protocol, .. } if protocol.protocol == crate::protocol::ids::Protocol::AnthropicMessages)
+            && !headers.contains_key("x-api-key")
+        {
+            headers.remove(reqwest::header::AUTHORIZATION);
+            headers.insert(
+                "x-api-key",
+                reqwest::header::HeaderValue::from_str(ctx.api_key)?,
+            );
+        }
+        Ok(Self { url, headers })
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ResolvedTargetCapabilities {
     pub stream_only: bool,
@@ -83,12 +145,17 @@ pub trait VendorExtension: Send + Sync + 'static {
         Ok(())
     }
 
-    fn auth_headers(&self, _ctx: &VendorCtx<'_>) -> HeaderMap {
-        HeaderMap::new()
-    }
-
-    fn build_url(&self, _ctx: &VendorCtx<'_>, base_url: &str, path: &str) -> String {
-        format!("{}{}", base_url.trim_end_matches('/'), path)
+    fn construct_request(
+        &self,
+        ctx: &crate::provider::vendor_ext::RequestContext<'_>,
+        purpose: crate::provider::vendor_ext::RequestPurpose<'_>,
+    ) -> anyhow::Result<crate::provider::vendor_ext::ConstructedRequest> {
+        crate::provider::vendor_ext::ConstructedRequest::new(
+            ctx,
+            purpose,
+            purpose.endpoint(),
+            HeaderMap::new(),
+        )
     }
 
     async fn pre_encode(&self, _ctx: &VendorCtx<'_>, _req: &mut AiRequest) -> anyhow::Result<()> {
@@ -191,11 +258,12 @@ impl<T: crate::provider::vendor::Vendor> VendorExtension for T {
     fn retain_responses_websocket_event(&self, ctx: &VendorCtx<'_>, event: &Value) -> bool {
         crate::provider::vendor::Vendor::retain_responses_websocket_event(self, ctx, event)
     }
-    fn auth_headers(&self, ctx: &VendorCtx<'_>) -> HeaderMap {
-        crate::provider::vendor::Vendor::auth_headers(self, ctx)
-    }
-    fn build_url(&self, ctx: &VendorCtx<'_>, base_url: &str, path: &str) -> String {
-        crate::provider::vendor::Vendor::build_url(self, ctx, base_url, path)
+    fn construct_request(
+        &self,
+        ctx: &crate::provider::vendor_ext::RequestContext<'_>,
+        purpose: crate::provider::vendor_ext::RequestPurpose<'_>,
+    ) -> anyhow::Result<crate::provider::vendor_ext::ConstructedRequest> {
+        crate::provider::vendor::Vendor::construct_request(self, ctx, purpose)
     }
     async fn pre_encode(&self, ctx: &VendorCtx<'_>, req: &mut AiRequest) -> anyhow::Result<()> {
         crate::provider::vendor::Vendor::pre_encode(self, ctx, req).await
@@ -282,11 +350,12 @@ impl VendorExtension for VendorAsExt {
     ) -> anyhow::Result<()> {
         self.0.normalize_responses_websocket_event(ctx, event)
     }
-    fn auth_headers(&self, ctx: &VendorCtx<'_>) -> HeaderMap {
-        self.0.auth_headers(ctx)
-    }
-    fn build_url(&self, ctx: &VendorCtx<'_>, base_url: &str, path: &str) -> String {
-        self.0.build_url(ctx, base_url, path)
+    fn construct_request(
+        &self,
+        ctx: &crate::provider::vendor_ext::RequestContext<'_>,
+        purpose: crate::provider::vendor_ext::RequestPurpose<'_>,
+    ) -> anyhow::Result<crate::provider::vendor_ext::ConstructedRequest> {
+        self.0.construct_request(ctx, purpose)
     }
     // All async hooks use VendorExtension defaults (Ok(())).
     // VendorAsExt is only used for admin-path sync lookups.

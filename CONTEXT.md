@@ -109,7 +109,7 @@ Inference Run 是处理一次客户端生成请求直到一个响应完整交付
 
 ## Model Turn
 
-Model Turn 是一次完整的规范化模型交互。一次 Model Turn 可以包含同一逻辑模型路由内的上游重试，但不包含平台工具执行；工具结果引发的下一次模型交互属于新的 Model Turn。
+Model Turn 是一次完整的规范化模型交互，可以包含同一逻辑模型路由内的上游重试，但不包含平台工具执行；工具结果引发的下一次模型交互属于新的 Model Turn。其成功终态表示该轮规范化输出与所需可逆脱敏映射发布均已完成，不再有后续输出或失败，也不表示客户端已完整收到响应。
 
 ## Effective Model Request
 
@@ -220,7 +220,7 @@ _避免使用_：Client History（当作独立事实源）；把客户端可见�
 
 ## Generation Chain Write
 
-Generation Chain Write 是一次尚未落盘的 Generation Chain 节点写入尝试，由进行中的 Inference Run 持有；完整交付后才成为节点，失败或中止则丢弃。Write 拥有节点合法性（仅 `completed` 或 `incomplete` 可落盘，并在 stage 时写入 ingress 协议形态与 Target 身份）；effective request 在观察时必须已是恢复给出的 client-shaped 对照，Write 不回锚 History Marker。Inference Run 只在完整交付后提交，不解释投影或终态合法性。它不是 Model Turn、Agent Turn、Search Turn、Media Understanding Turn，也不是已持久化的 Generation Chain 节点。
+Generation Chain Write 是一次尚未落盘的 Generation Chain 节点写入尝试，由进行中的 Inference Run 持有；完整交付后才成为节点，失败或中止则丢弃。Write 拥有节点合法性（仅 `completed` 或 `incomplete` 可落盘，并在 stage 时写入 ingress 协议形态与明确来源）；来源是产出该响应的实际 Target 或合法 Hook 合成来源，缺失来源不能由默认 Target 身份代替。effective request 在观察时必须已是恢复给出的 client-shaped 对照，Write 不回锚 History Marker。Inference Run 只在完整交付后提交，不解释投影或终态合法性。它不是 Model Turn、Agent Turn、Search Turn、Media Understanding Turn，也不是已持久化的 Generation Chain 节点。
 _避免使用_：GenerationChainTurn、GenerationChainDraft、Session
 
 ## Generation Materialization Cache
@@ -492,7 +492,7 @@ _避免使用_：7 日均用量、Usage Forecast
 
 ## Vendor
 
-Vendor 是按 npm 包标识的上游运行时适配器；同一 npm 的多个 Provider Catalog Entry 共用它。它拥有 Adapter Credentials 校验、base URL 组装、鉴权与供应商 headers，不拥有 wire codec，也不执行 npm 包。
+Vendor 是按 npm 包标识的上游运行时适配器；同一 npm 的多个 Provider Catalog Entry 共用它。它拥有 Adapter Credentials 校验、base URL 组装、供应商 headers，以及分别面向推理与模型探测的请求构造和鉴权约定，不拥有 wire codec、模型来源选择或发现失败后的回退，也不执行 npm 包；自定义模型探测地址在没有内置端点或 OAuth binding 明确约定时继承该 Vendor 的模型探测认证约定，不按任意 URL 猜测，也不自动轮试认证方式。
 _避免使用_：SDK、Provider Adapter
 
 ## Adapter Credentials
@@ -601,7 +601,7 @@ _避免使用_：日志脱敏、永久脱敏、加密、通用敏感信息识别
 
 ## 可逆脱敏映射
 
-可逆脱敏映射是归属于单个 Stravia API Key 对应 Principal 的凭据原文与替代占位符之间的持久化对应关系，可跨轮次及进程重启恢复，保留期、续期与过期清理规则与 History Marker 一致。同一 API Key 下相同秘密在映射有效期内复用同一占位符、过期后重新分配，持有有效占位符时可跨对话和分支还原且不要求历史祖先关系，不同 API Key 不共享占位符或映射。
+可逆脱敏映射是归属于单个 Stravia API Key 对应 Principal 的凭据原文与替代占位符之间的持久化对应关系，可跨轮次及进程重启恢复，保留期、续期与过期清理规则与 History Marker 一致。同一 API Key 下相同秘密在映射有效期内复用同一占位符、过期后重新分配，持有有效占位符时可跨对话和分支还原且不要求历史祖先关系，不同 API Key 不共享占位符或映射；请求取消不撤销已发布的映射，也不证明并发进行的发布尚未生效。
 _避免使用_：实例级秘密字典、历史分支隔离、History Marker
 
 ## 受保护模型文本

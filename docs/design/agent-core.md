@@ -236,6 +236,8 @@ Run 可包含多个 Model Turns 和 AgentTool calls。失败、取消、stream d
 
 `ModelTurn` 是一次完整、transport-neutral 的 model request/response。普通 Target retry 仍属于同一个 ModelTurn；AgentRunner 的下一次模型调用才是新的 ModelTurn。
 
+Runner 消费 canonical stream，并在唯一 `Completed` 后立即停止。该终态保证还原和所需可逆脱敏映射发布已经成功，不等待 EOF，也不要求提交 Agent Turn；ephemeral execution 同样遵循此契约。发布期间取消或 deadline 可抢占成功，已发布映射不回滚。Model Turn 成功与后续 Agent / 客户端交付及历史提交保持分离。
+
 ### 5.6 Artifact
 
 `Artifact` 是不可变、principal-scoped 的媒体或大对象。公共 `ArtifactId` 是随机 opaque ID；内容 hash 仅用于内部去重，不作为外部身份。

@@ -16,8 +16,6 @@
 //! }
 //! ```
 
-use reqwest::header::HeaderMap;
-
 use crate::error::GatewayError;
 fn resolve_channel_extension<'a, V>(
     vendor: &'a V,
@@ -44,8 +42,7 @@ where
 
 /// Standard `build_request` pipeline:
 /// `pre_request → normalize_tool_results → pre_encode →
-///  openai_compatible_thinking → codec_encode → post_encode → auth_headers →
-///  build_url`.
+///  openai_compatible_thinking → codec_encode → post_encode → construct_request`.
 pub async fn build_request<V>(
     vendor: &V,
     req: &mut crate::protocol::ir::AiRequest,
@@ -94,43 +91,25 @@ where
         .await
         .map_err(GatewayError::internal)?;
 
-    // 7. auth headers
-    //
-    // OAuth drivers (codex, claude-code) stash their Bearer + provider-
-    // specific headers in `RuntimeBinding.extra_headers` and ask the
-    // dispatcher to skip the vendor's default `auth_headers` via
-    // `ctx.disable_default_auth`. Skipping unconditionally would break
-    // every API-key path; gating here keeps the OAuth invariant
-    // ("no leaked empty x-api-key") in a single seam shared by every
-    // openai-compatible adapter.
-    let mut headers = if ctx.disable_default_auth {
-        HeaderMap::new()
-    } else {
-        extension.auth_headers(&vendor_ctx)
-    };
-    // Anthropic-protocol upstreams require `x-api-key` instead of
-    // `Authorization: Bearer`. Most OpenAI-compatible vendors blindly emit
-    // Bearer; rewrite here so any vendor with a declared anthropic endpoint
-    // works out of the box.
-    //
-    // Skipped under `disable_default_auth`: when an OAuth driver owns auth
-    // (claude-code uses `Bearer <oauth_token>` + `anthropic-beta=
-    // oauth-2025-04-20`), `ctx.api_key` is the OAuth Bearer token, NOT a
-    // real Anthropic API key. Rewriting it here would forward the Bearer
-    // as a fake `x-api-key` and break the OAuth handshake.
-    if !ctx.disable_default_auth
-        && ctx.protocol.protocol == crate::protocol::ids::Protocol::AnthropicMessages
-        && !headers.contains_key("x-api-key")
-    {
-        headers.remove(reqwest::header::AUTHORIZATION);
-        if let Ok(v) = reqwest::header::HeaderValue::from_str(ctx.api_key) {
-            headers.insert("x-api-key", v);
-        }
-    }
+    let constructed = extension
+        .construct_request(
+            &crate::provider::vendor_ext::RequestContext {
+                provider: ctx.provider,
+                api_key: ctx.api_key,
+                credential: ctx.credential,
+                disable_default_auth: ctx.disable_default_auth,
+            },
+            crate::provider::vendor_ext::RequestPurpose::Inference {
+                protocol: ctx.protocol,
+                base_url: ctx.egress_base_url,
+                path: &egress_path,
+                actual_model: ctx.actual_model,
+            },
+        )
+        .map_err(GatewayError::internal)?;
+    let url = constructed.url;
+    let mut headers = constructed.headers;
     headers.extend(extra_headers);
-
-    // 8. build URL
-    let url = extension.build_url(&vendor_ctx, ctx.egress_base_url, &egress_path);
 
     Ok(crate::provider::outbound::OutboundRequest { url, headers, body })
 }
@@ -316,10 +295,9 @@ fn resolve_channel_override(
 #[cfg(test)]
 mod tests {
     //! Tests cover the `disable_default_auth` gate inside `build_request`.
-    //! When `ProviderCtx.disable_default_auth` is set, the vendor's default
-    //! `auth_headers` AND the Anthropic-egress `Authorization → x-api-key`
-    //! rewrite MUST be suppressed. Both directions are pinned so a future
-    //! refactor that flips a gate fails loudly.
+    //! When `ProviderCtx.disable_default_auth` is set, request construction
+    //! suppresses default credentials, including the Anthropic-egress
+    //! `Authorization → x-api-key` rewrite, while preserving explicit headers.
     use super::*;
     use crate::Gateway;
     use crate::GatewayConfig;
@@ -335,14 +313,14 @@ mod tests {
     use crate::provider::outbound::OutboundRequest;
     use crate::provider::registry::VendorScope;
     use crate::provider::vendor::{ProviderCtx, Vendor};
-    use crate::provider::vendor_ext::VendorCtx;
+
     use async_trait::async_trait;
-    use reqwest::header::HeaderMap as ExtHeaderMap;
+
     use serde_json::Value;
     use uuid::Uuid;
 
     /// Stand-in vendor: injects `x-api-key: <ctx.api_key>`, mirroring
-    /// how `AnthropicVendor::auth_headers` behaves.
+    /// how `AnthropicVendor::construct_request` behaves.
     struct FakeApiKeyVendor;
 
     #[async_trait]
@@ -352,15 +330,16 @@ mod tests {
                 vendor_id: "fake-test",
             }
         }
-        fn auth_headers(&self, ctx: &VendorCtx<'_>) -> ExtHeaderMap {
-            let mut h = ExtHeaderMap::new();
-            if !ctx.api_key.is_empty() {
-                h.insert(
-                    "x-api-key",
-                    reqwest::header::HeaderValue::from_str(ctx.api_key).unwrap(),
-                );
-            }
-            h
+        fn construct_request(
+            &self,
+            ctx: &crate::provider::vendor_ext::RequestContext<'_>,
+            purpose: crate::provider::vendor_ext::RequestPurpose<'_>,
+        ) -> anyhow::Result<crate::provider::vendor_ext::ConstructedRequest> {
+            crate::provider::vendor::Vendor::construct_request(
+                &crate::provider::anthropic::AnthropicVendor,
+                ctx,
+                purpose,
+            )
         }
         fn vendor_id(&self) -> &'static str {
             "fake-test"
@@ -398,16 +377,16 @@ mod tests {
                 vendor_id: "fake-bearer",
             }
         }
-        fn auth_headers(&self, ctx: &VendorCtx<'_>) -> ExtHeaderMap {
-            let mut h = ExtHeaderMap::new();
-            if !ctx.api_key.is_empty() {
-                h.insert(
-                    reqwest::header::AUTHORIZATION,
-                    reqwest::header::HeaderValue::from_str(&format!("Bearer {}", ctx.api_key))
-                        .unwrap(),
-                );
-            }
-            h
+        fn construct_request(
+            &self,
+            ctx: &crate::provider::vendor_ext::RequestContext<'_>,
+            purpose: crate::provider::vendor_ext::RequestPurpose<'_>,
+        ) -> anyhow::Result<crate::provider::vendor_ext::ConstructedRequest> {
+            crate::provider::vendor::Vendor::construct_request(
+                &crate::provider::openai::OpenAiVendor,
+                ctx,
+                purpose,
+            )
         }
         fn vendor_id(&self) -> &'static str {
             "fake-bearer"

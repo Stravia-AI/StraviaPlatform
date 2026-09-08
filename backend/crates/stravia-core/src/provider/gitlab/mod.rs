@@ -12,7 +12,7 @@ use crate::error::GatewayError;
 use crate::protocol::ids::{OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1, ProtocolId};
 use crate::protocol::ir::{AiRequest, AiResponse};
 use crate::provider::common::{
-    openai_compat::{openai_build_url, openai_map_error},
+    openai_compat::{openai_endpoint, openai_map_error},
     pipeline,
 };
 use crate::provider::inbound::InboundResponse;
@@ -23,7 +23,6 @@ use crate::provider::metadata::{
 use crate::provider::outbound::OutboundRequest;
 use crate::provider::registry::{VendorRegistration, VendorScope};
 use crate::provider::vendor::{ProviderCtx, Vendor};
-use crate::provider::vendor_ext::VendorCtx;
 
 const DEFAULT_INSTANCE_URL: &str = "https://gitlab.com";
 const DEFAULT_GATEWAY_URL: &str = "https://cloud.gitlab.com";
@@ -100,8 +99,27 @@ impl Vendor for GitLabVendor {
     fn metadata(&self) -> Option<&'static VendorMetadata> {
         Some(&METADATA)
     }
-    fn build_url(&self, ctx: &VendorCtx<'_>, _base_url: &str, path: &str) -> String {
-        openai_build_url(&gitlab_openai_proxy_url(ctx.provider), path)
+    fn construct_request(
+        &self,
+        ctx: &crate::provider::vendor_ext::RequestContext<'_>,
+        purpose: crate::provider::vendor_ext::RequestPurpose<'_>,
+    ) -> anyhow::Result<crate::provider::vendor_ext::ConstructedRequest> {
+        use crate::provider::vendor_ext::{ConstructedRequest, RequestPurpose};
+        let url = match purpose {
+            RequestPurpose::Models { .. } => {
+                return crate::provider::common::openai_compat::construct_openai_request(
+                    ctx, purpose,
+                );
+            }
+            RequestPurpose::Inference {
+                base_url: _,
+                path,
+                protocol: _,
+                actual_model: _,
+            } => openai_endpoint(&gitlab_openai_proxy_url(ctx.provider), path),
+        };
+        let headers = reqwest::header::HeaderMap::new();
+        ConstructedRequest::new(ctx, purpose, url, headers)
     }
     fn vendor_id(&self) -> &'static str {
         "gitlab"
@@ -116,10 +134,13 @@ impl Vendor for GitLabVendor {
         ctx: &ProviderCtx<'_>,
     ) -> Result<OutboundRequest, GatewayError> {
         let mut outbound = pipeline::build_request(self, request, ctx).await?;
-        let access = direct_access_token(ctx)
-            .await
-            .map_err(|error| GatewayError::provider_unavailable("gitlab", error.to_string()))?;
-        apply_direct_access_headers(&mut outbound.headers, &access)?;
+        if !ctx.disable_default_auth {
+            let access = direct_access_token(ctx)
+                .await
+                .map_err(|error| GatewayError::provider_unavailable("gitlab", error.to_string()))?;
+            apply_direct_access_headers(&mut outbound.headers, &access)?;
+        }
+
         Ok(outbound)
     }
 
@@ -128,6 +149,9 @@ impl Vendor for GitLabVendor {
         ctx: &ProviderCtx<'_>,
         outbound: &mut OutboundRequest,
     ) -> Result<bool, GatewayError> {
+        if ctx.disable_default_auth {
+            return Ok(false);
+        }
         let (previous, fresh) = refresh_direct_access_token(ctx)
             .await
             .map_err(|error| GatewayError::provider_unavailable("gitlab", error.to_string()))?;

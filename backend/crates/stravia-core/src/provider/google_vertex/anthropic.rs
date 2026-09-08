@@ -17,7 +17,6 @@ use crate::provider::metadata::{
 use crate::provider::outbound::OutboundRequest;
 use crate::provider::registry::{VendorRegistration, VendorScope};
 use crate::provider::vendor::{ProviderCtx, Vendor};
-use crate::provider::vendor_ext::VendorCtx;
 
 use super::{expand_vertex_base_url, vertex_access_token};
 
@@ -94,8 +93,27 @@ impl Vendor for GoogleVertexAnthropicVendor {
         Some(&METADATA)
     }
 
-    fn build_url(&self, ctx: &VendorCtx<'_>, base_url: &str, _path: &str) -> String {
-        vertex_anthropic_url(base_url, ctx.actual_model, false)
+    fn construct_request(
+        &self,
+        ctx: &crate::provider::vendor_ext::RequestContext<'_>,
+        purpose: crate::provider::vendor_ext::RequestPurpose<'_>,
+    ) -> anyhow::Result<crate::provider::vendor_ext::ConstructedRequest> {
+        use crate::provider::vendor_ext::{ConstructedRequest, RequestPurpose};
+        let url = match purpose {
+            RequestPurpose::Models { .. } => {
+                return crate::provider::common::openai_compat::construct_openai_request(
+                    ctx, purpose,
+                );
+            }
+            RequestPurpose::Inference {
+                base_url,
+                path: _,
+                protocol: _,
+                actual_model,
+            } => vertex_anthropic_url(base_url, actual_model, false),
+        };
+        let headers = reqwest::header::HeaderMap::new();
+        ConstructedRequest::new(ctx, purpose, url, headers)
     }
 
     fn vendor_id(&self) -> &'static str {
@@ -111,24 +129,27 @@ impl Vendor for GoogleVertexAnthropicVendor {
         ctx: &ProviderCtx<'_>,
     ) -> Result<OutboundRequest, GatewayError> {
         let mut outbound = pipeline::build_request(self, request, ctx).await?;
-        let access_token = vertex_access_token(ctx.api_key).await.map_err(|source| {
-            GatewayError::provider_unavailable(
-                "google-vertex-anthropic",
-                format!("failed to fetch Vertex access token: {source}"),
-            )
-        })?;
         outbound.url = vertex_anthropic_url(
             ctx.egress_base_url,
             ctx.actual_model,
             request.stream.enabled,
         );
-        let authorization =
-            HeaderValue::from_str(&format!("Bearer {access_token}")).map_err(|source| {
-                GatewayError::Internal {
-                    source: anyhow!(source).context("build Vertex Anthropic authorization header"),
-                }
+        if !ctx.disable_default_auth {
+            let access_token = vertex_access_token(ctx.api_key).await.map_err(|source| {
+                GatewayError::provider_unavailable(
+                    "google-vertex-anthropic",
+                    format!("failed to fetch Vertex access token: {source}"),
+                )
             })?;
-        outbound.headers.insert(AUTHORIZATION, authorization);
+            let authorization =
+                HeaderValue::from_str(&format!("Bearer {access_token}")).map_err(|source| {
+                    GatewayError::Internal {
+                        source: anyhow!(source)
+                            .context("build Vertex Anthropic authorization header"),
+                    }
+                })?;
+            outbound.headers.insert(AUTHORIZATION, authorization);
+        }
         Ok(outbound)
     }
 

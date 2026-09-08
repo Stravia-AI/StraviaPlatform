@@ -819,14 +819,15 @@ async fn dispatch_round(
                     let pending_generation_chain =
                         generation_chain.write.take().and_then(|mut write| {
                             write.observe_effective(request.clone());
-                            crate::generation_chain::mark_generation_target(
-                                &mut response,
-                                "hook",
-                                ingress,
-                                &request.model,
-                                "",
-                            );
-                            write.stage(&mut response, None).then_some(write)
+                            write
+                                .stage(
+                                    &mut response,
+                                    &crate::generation_chain::GenerationSource::Hook {
+                                        protocol: ingress,
+                                    },
+                                    None,
+                                )
+                                .then_some(write)
                         });
                     if let Err(response) = enter_phase(phase, Phase::SemanticComplete) {
                         return *response;
@@ -1097,6 +1098,7 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
                 }
                 Ok(CanonicalEvent::Completed(completed)) => {
                     completed_response = Some(*completed);
+                    break;
                 }
                 Err(error) => return model_turn_error_outcome(error),
             }
@@ -1119,6 +1121,7 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
                 Ok(CanonicalEvent::Delta(_)) => {}
                 Ok(CanonicalEvent::Completed(completed)) => {
                     completed_response = Some(*completed);
+                    break;
                 }
                 Err(error) => return model_turn_error_outcome(error),
             }
@@ -1130,11 +1133,6 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
             "Model Turn ended without a completion",
         ));
     };
-    if let Some(publication) = turn.redaction_publication.as_ref()
-        && let Err(error) = publication.publish().await
-    {
-        return model_turn_error_outcome(error);
-    }
     let mut response = streamed_response
         .map(StreamResponseAccumulator::into_ai_response)
         .unwrap_or_else(|| completed_response.clone());

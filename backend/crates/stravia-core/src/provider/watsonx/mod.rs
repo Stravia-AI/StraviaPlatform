@@ -101,12 +101,33 @@ impl Vendor for WatsonxVendor {
         Some(&METADATA)
     }
 
-    fn build_url(&self, ctx: &VendorCtx<'_>, base_url: &str, _path: &str) -> String {
-        let base = watsonx_base_url(ctx.provider, base_url);
-        format!(
-            "{base}/ml/v1/text/chat?version={}",
-            watsonx_api_version(ctx.provider)
-        )
+    fn construct_request(
+        &self,
+        ctx: &crate::provider::vendor_ext::RequestContext<'_>,
+        purpose: crate::provider::vendor_ext::RequestPurpose<'_>,
+    ) -> anyhow::Result<crate::provider::vendor_ext::ConstructedRequest> {
+        use crate::provider::vendor_ext::{ConstructedRequest, RequestPurpose};
+        let url = match purpose {
+            RequestPurpose::Models { .. } => {
+                return crate::provider::common::openai_compat::construct_openai_request(
+                    ctx, purpose,
+                );
+            }
+            RequestPurpose::Inference {
+                base_url,
+                path: _,
+                protocol: _,
+                actual_model: _,
+            } => {
+                let base = watsonx_base_url(ctx.provider, base_url);
+                format!(
+                    "{base}/ml/v1/text/chat?version={}",
+                    watsonx_api_version(ctx.provider)
+                )
+            }
+        };
+        let headers = reqwest::header::HeaderMap::new();
+        ConstructedRequest::new(ctx, purpose, url, headers)
     }
 
     async fn post_encode(
@@ -151,12 +172,6 @@ impl Vendor for WatsonxVendor {
         ctx: &ProviderCtx<'_>,
     ) -> Result<OutboundRequest, GatewayError> {
         let mut outbound = pipeline::build_request(self, request, ctx).await?;
-        let api_key = credential(ctx.provider, "apiKey").ok_or_else(|| {
-            GatewayError::provider_unavailable("watsonx", "IBM Cloud API key is required")
-        })?;
-        let token = iam_token(ctx, &api_key)
-            .await
-            .map_err(|error| GatewayError::provider_unavailable("watsonx", error.to_string()))?;
         let endpoint = if request.stream.enabled {
             "chat_stream"
         } else {
@@ -167,11 +182,19 @@ impl Vendor for WatsonxVendor {
             watsonx_base_url(ctx.provider, ctx.egress_base_url),
             watsonx_api_version(ctx.provider)
         );
-        outbound.headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {token}"))
-                .map_err(|error| GatewayError::internal(error.into()))?,
-        );
+        if !ctx.disable_default_auth {
+            let api_key = credential(ctx.provider, "apiKey").ok_or_else(|| {
+                GatewayError::provider_unavailable("watsonx", "IBM Cloud API key is required")
+            })?;
+            let token = iam_token(ctx, &api_key).await.map_err(|error| {
+                GatewayError::provider_unavailable("watsonx", error.to_string())
+            })?;
+            outbound.headers.insert(
+                AUTHORIZATION,
+                HeaderValue::from_str(&format!("Bearer {token}"))
+                    .map_err(|error| GatewayError::internal(error.into()))?,
+            );
+        }
         Ok(outbound)
     }
 

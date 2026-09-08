@@ -1,7 +1,7 @@
 //! Custom vendor preset — user-defined "Bring Your Own Endpoint".
 
 use async_trait::async_trait;
-use reqwest::header::HeaderMap;
+
 use serde_json::Value;
 
 use crate::error::GatewayError;
@@ -14,7 +14,6 @@ use crate::provider::metadata::{AuthMode, CapabilitiesSource, ChannelDef, Label,
 use crate::provider::outbound::OutboundRequest;
 use crate::provider::registry::{VendorRegistration, VendorScope};
 use crate::provider::vendor::{ProviderCtx, Vendor};
-use crate::provider::vendor_ext::VendorCtx;
 
 const METADATA: VendorMetadata = VendorMetadata {
     id: "custom",
@@ -54,11 +53,12 @@ impl Vendor for CustomVendor {
     fn metadata(&self) -> Option<&'static VendorMetadata> {
         Some(&METADATA)
     }
-    fn auth_headers(&self, ctx: &VendorCtx<'_>) -> HeaderMap {
-        GenericOpenAICompatibleAdapter.auth_headers(ctx)
-    }
-    fn build_url(&self, ctx: &VendorCtx<'_>, base_url: &str, path: &str) -> String {
-        GenericOpenAICompatibleAdapter.build_url(ctx, base_url, path)
+    fn construct_request(
+        &self,
+        ctx: &crate::provider::vendor_ext::RequestContext<'_>,
+        purpose: crate::provider::vendor_ext::RequestPurpose<'_>,
+    ) -> anyhow::Result<crate::provider::vendor_ext::ConstructedRequest> {
+        GenericOpenAICompatibleAdapter.construct_request(ctx, purpose)
     }
     fn vendor_id(&self) -> &'static str {
         "custom"

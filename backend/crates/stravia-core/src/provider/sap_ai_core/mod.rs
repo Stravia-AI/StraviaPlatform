@@ -26,7 +26,6 @@ use crate::provider::metadata::{
 use crate::provider::outbound::OutboundRequest;
 use crate::provider::registry::{VendorRegistration, VendorScope};
 use crate::provider::vendor::{ProviderCtx, Vendor, resolve_base_url};
-use crate::provider::vendor_ext::VendorCtx;
 
 const CREDENTIAL_FIELDS: &[CredentialFieldDef] = &[
     CredentialFieldDef {
@@ -126,9 +125,25 @@ impl Vendor for SapAiCoreVendor {
                 .to_string()
         })
     }
-    fn build_url(&self, ctx: &VendorCtx<'_>, _base_url: &str, path: &str) -> String {
-        let path = path.strip_prefix("/v1").unwrap_or(path);
-        format!("{}{}", ctx.provider.base_url.trim_end_matches('/'), path)
+    fn construct_request(
+        &self,
+        ctx: &crate::provider::vendor_ext::RequestContext<'_>,
+        purpose: crate::provider::vendor_ext::RequestPurpose<'_>,
+    ) -> anyhow::Result<crate::provider::vendor_ext::ConstructedRequest> {
+        use crate::provider::vendor_ext::{ConstructedRequest, RequestPurpose};
+        let url = match purpose {
+            RequestPurpose::Models { .. } => {
+                return crate::provider::common::openai_compat::construct_openai_request(
+                    ctx, purpose,
+                );
+            }
+            RequestPurpose::Inference { path, .. } => {
+                let path = path.strip_prefix("/v1").unwrap_or(path);
+                format!("{}{}", ctx.provider.base_url.trim_end_matches('/'), path)
+            }
+        };
+        let headers = reqwest::header::HeaderMap::new();
+        ConstructedRequest::new(ctx, purpose, url, headers)
     }
     fn vendor_id(&self) -> &'static str {
         "sap-ai-core"
@@ -143,14 +158,16 @@ impl Vendor for SapAiCoreVendor {
         ctx: &ProviderCtx<'_>,
     ) -> Result<OutboundRequest, GatewayError> {
         let mut outbound = pipeline::build_request(self, request, ctx).await?;
-        let token = oauth_token(ctx).await.map_err(|error| {
-            GatewayError::provider_unavailable("sap-ai-core", error.to_string())
-        })?;
-        outbound.headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {token}"))
-                .map_err(|error| GatewayError::internal(error.into()))?,
-        );
+        if !ctx.disable_default_auth {
+            let token = oauth_token(ctx).await.map_err(|error| {
+                GatewayError::provider_unavailable("sap-ai-core", error.to_string())
+            })?;
+            outbound.headers.insert(
+                AUTHORIZATION,
+                HeaderValue::from_str(&format!("Bearer {token}"))
+                    .map_err(|error| GatewayError::internal(error.into()))?,
+            );
+        }
         if let Some(resource_group) = credential(ctx.provider, "resourceGroup") {
             outbound.headers.insert(
                 "AI-Resource-Group",

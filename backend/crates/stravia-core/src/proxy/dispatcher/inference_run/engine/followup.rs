@@ -98,17 +98,14 @@ pub(super) async fn acquire_followup_model_turn(
             }
             let pending_generation_chain = generation.write.clone().and_then(|mut write| {
                 write.observe_effective(request.clone());
-                crate::generation_chain::mark_generation_target(
-                    &mut response,
-                    "hook",
-                    ingress,
-                    &request.model,
-                    "",
-                );
                 let mut staged_response = response.clone();
                 apply_hidden_rounds(request_context, &mut staged_response);
                 response.usage = staged_response.usage.clone();
-                let staged = write.stage(&mut staged_response, None);
+                let staged = write.stage(
+                    &mut staged_response,
+                    &crate::generation_chain::GenerationSource::Hook { protocol: ingress },
+                    None,
+                );
                 response.vendor = staged_response.vendor;
                 staged.then_some(write)
             });

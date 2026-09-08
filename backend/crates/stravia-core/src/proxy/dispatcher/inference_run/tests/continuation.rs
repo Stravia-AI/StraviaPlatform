@@ -1,5 +1,114 @@
 use super::*;
 
+struct ChangingTargetExecutor(AtomicUsize);
+
+#[async_trait]
+impl crate::model_turn::ModelTurnExecutor for ChangingTargetExecutor {
+    async fn execute(
+        &self,
+        input: crate::model_turn::TurnInput,
+    ) -> Result<crate::model_turn::ModelTurn, crate::model_turn::ModelTurnError> {
+        let first = self.0.fetch_add(1, Ordering::SeqCst) == 0;
+        let target = if first {
+            "first-target"
+        } else {
+            "final-target"
+        };
+        let mut response = AiResponse::new(target, "upstream-model");
+        if first {
+            response.extend_tool_calls(vec![crate::protocol::ir::ToolCall {
+                id: "platform-call".into(),
+                name: "stravia__ordered_tool".into(),
+                arguments: r#"{"index":1}"#.into(),
+            }]);
+            response.stop_reason = Some("tool_calls".into());
+        } else {
+            response.push_output_text("final Target answer");
+            response.stop_reason = Some("stop".into());
+        }
+        Ok(crate::model_turn::ModelTurn::in_memory(
+            crate::hook::RouteContext {
+                model_id: input.request.model.clone(),
+                provider_id: target.into(),
+                target_id: target.into(),
+                egress: OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            },
+            input.request,
+            [Ok(crate::model_turn::CanonicalEvent::Completed(Box::new(
+                response,
+            )))],
+        ))
+    }
+}
+
+#[tokio::test]
+async fn delivered_hidden_round_continuation_prefers_the_final_model_legs_target() {
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let (hook, _) = ExposeOrderedToolHook::counting();
+    let gateway = Gateway::builder(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .hook(Arc::new(hook))
+    .platform_tool(Arc::new(OrderedTool {
+        calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+    }))
+    .build()
+    .await
+    .expect("Gateway");
+    let headers = authorized_headers(&gateway).await;
+    let principal = crate::proxy::security::Security::new(gateway.storage.auth())
+        .required_principal(
+            &crate::proxy::security::ClientCredential::from_inference_headers(&headers),
+        )
+        .await
+        .expect("Principal");
+    let mut request = AiRequest::new("changing-target-route", Vec::new());
+    request.ext = Some(crate::protocol::ir::ProtocolExt::OpenResponses(
+        Default::default(),
+    ));
+    let response = execute(RunInput {
+        gateway: gateway.clone(),
+        executor: Arc::new(ChangingTargetExecutor(AtomicUsize::new(0))),
+        headers,
+        envelope: RawEnvelope::new(
+            Some(serde_json::json!({"model": "changing-target-route"})),
+            HashMap::new(),
+            "POST",
+            "/v1/responses",
+        ),
+        request,
+        ingress: OPEN_RESPONSES_2026_04_24,
+        context: RequestContext::new(
+            OPEN_RESPONSES_2026_04_24,
+            std::time::Duration::from_secs(30),
+        ),
+    })
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("full delivery");
+    let response: serde_json::Value = serde_json::from_slice(&body).expect("response");
+    assert!(String::from_utf8_lossy(&body).contains("final Target answer"));
+    let mut continuation = AiRequest::new("changing-target-route", Vec::new());
+    continuation.ext = Some(crate::protocol::ir::ProtocolExt::OpenResponses(
+        crate::protocol::ir::OpenResponsesExt {
+            previous_response_id: Some(response["id"].as_str().expect("response identity").into()),
+            ..Default::default()
+        },
+    ));
+    assert_eq!(
+        gateway
+            .generation_chains
+            .continuation_lookup()
+            .preferred_target(&principal, &continuation)
+            .await
+            .as_deref(),
+        Some("final-target"),
+    );
+}
+
 #[tokio::test]
 async fn responses_terminal_body_drop_preserves_observed_generation_chain() {
     let (base_url, _, _) =

@@ -91,6 +91,11 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
                 }
             }
         }
+        let mut terminal = Some(ModelTurnTerminal {
+            observer: observer.clone(),
+            model_turn_id: model_turn_id.clone(),
+            finished: false,
+        });
         let result = if input.cancellation.is_cancelled() {
             Err(ModelTurnError::new("cancelled", "Model Turn cancelled"))
         } else if Instant::now() >= input.deadline {
@@ -103,6 +108,12 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
             let cancellation = input.cancellation.clone();
             tokio::select! {
                 biased;
+                _ = cancellation.cancelled() => {
+                    Err(ModelTurnError::new("cancelled", "Model Turn cancelled"))
+                }
+                _ = tokio::time::sleep_until(deadline) => {
+                    Err(ModelTurnError::new("deadline_exceeded", "Model Turn deadline exceeded"))
+                }
                 result = async {
                     let trace = input.request.meta.redaction.clone();
                     let mappings = self.gateway.redaction
@@ -110,31 +121,113 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
                     if let Some(observer) = &observer {
                         observer.protect_secrets(mappings.iter().map(|mapping| mapping.secret.as_str()));
                     }
-                    let publication = self.gateway.redaction
-                        .publication(input.principal.clone(), trace.clone());
+                    let principal = input.principal.clone();
                     let mut turn = execute_inner(self.clone(), input, model_turn_id.clone()).await?;
-                    turn.output = self.gateway.redaction.restore_stream(turn.output, mappings, trace);
-                    turn.redaction_publication = Some(publication);
+                    turn.output = self.gateway.redaction.restore_stream(turn.output, mappings, trace.clone());
+                    turn.output = completion_stream(
+                        turn.output,
+                        self.gateway.redaction.clone(),
+                        principal,
+                        trace,
+                        cancellation.clone(),
+                        deadline,
+                        terminal.take().expect("Model Turn terminal owner"),
+                    );
                     Ok::<_, ModelTurnError>(turn)
                 } => result,
-                _ = cancellation.cancelled() => {
-                    Err(ModelTurnError::new("cancelled", "Model Turn cancelled"))
-                }
-                _ = tokio::time::sleep_until(deadline) => {
-                    Err(ModelTurnError::new("deadline_exceeded", "Model Turn deadline exceeded"))
-                }
             }
         };
-        if let Err(error) = &result
-            && let Some(observer) = observer
-        {
-            observer.record(RunEvent::ModelTurnFinished {
-                model_turn_id,
-                status: error.code.clone(),
-            });
+        if let Err(error) = &result {
+            terminal
+                .as_mut()
+                .expect("Model Turn terminal owner")
+                .finish(&error.code);
         }
         result
     }
+}
+
+struct ModelTurnTerminal {
+    observer: Option<crate::interaction_observation::RunObserver>,
+    model_turn_id: String,
+    finished: bool,
+}
+
+impl ModelTurnTerminal {
+    fn finish(&mut self, status: &str) {
+        if self.finished {
+            return;
+        }
+        self.finished = true;
+        if let Some(observer) = &self.observer {
+            observer.record(RunEvent::ModelTurnFinished {
+                model_turn_id: self.model_turn_id.clone(),
+                status: status.to_owned(),
+            });
+        }
+    }
+}
+
+impl Drop for ModelTurnTerminal {
+    fn drop(&mut self) {
+        self.finish("cancelled");
+    }
+}
+
+fn completion_stream(
+    output: super::CanonicalEventStream,
+    redaction: crate::reversible_redaction::ReversibleRedaction,
+    principal: crate::hook::Principal,
+    trace: crate::reversible_redaction::RedactionTrace,
+    cancellation: crate::proxy::context::CancellationToken,
+    deadline: tokio::time::Instant,
+    terminal: ModelTurnTerminal,
+) -> super::CanonicalEventStream {
+    use futures::StreamExt;
+
+    // Unfold retains its pending future in the stream, not in the caller's next()
+    // future. Pausing consumption cannot restart a publication already in flight.
+    let state = (output, redaction, principal, trace, cancellation, terminal);
+    Box::pin(stream::unfold(state, move |mut state| async move {
+        let (output, redaction, principal, trace, cancellation, terminal) = &mut state;
+        if terminal.finished {
+            return None;
+        }
+        let result = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => Err(ModelTurnError::new("cancelled", "Model Turn cancelled")),
+            _ = tokio::time::sleep_until(deadline) => Err(ModelTurnError::new("deadline_exceeded", "Model Turn deadline exceeded")),
+            result = async {
+                match output.next().await {
+                    Some(Ok(CanonicalEvent::Completed(response))) => {
+                        // restore_stream has already yielded every trailing delta.
+                        // Read the shared trace here, not when the turn was constructed.
+                        redaction.publish(principal, trace).await?;
+                        Ok(CanonicalEvent::Completed(response))
+                    }
+                    Some(result) => result,
+                    None => Err(ModelTurnError::new("model_stream_incomplete", "Model Turn stream ended before completion")),
+                }
+            } => result,
+        };
+        // The publication future may have made cancellation/deadline ready during
+        // its final poll. Success is still provisional until this last decision.
+        let result = if cancellation.is_cancelled() {
+            Err(ModelTurnError::new("cancelled", "Model Turn cancelled"))
+        } else if tokio::time::Instant::now() >= deadline {
+            Err(ModelTurnError::new("deadline_exceeded", "Model Turn deadline exceeded"))
+        } else {
+            result
+        };
+        match &result {
+            Ok(CanonicalEvent::Completed(_)) => terminal.finish("completed"),
+            Err(error) => terminal.finish(&error.code),
+            Ok(CanonicalEvent::Delta(AiStreamDelta::StreamError { .. })) => terminal.finish("failed"),
+            Ok(CanonicalEvent::Delta(AiStreamDelta::UnexpectedEof)) => terminal.finish("model_stream_incomplete"),
+            Ok(CanonicalEvent::Delta(_)) => {}
+        }
+        Some((result, state))
+    }).fuse())
 }
 
 async fn execute_inner(
@@ -1029,7 +1122,6 @@ async fn begin_attempt(
         for delta in &canonical_deltas {
             call.attempt.checkpoint("canonical_delta", delta);
         }
-        call.attempt.model_turn_finished("completed");
         let mut events = canonical_deltas
             .into_iter()
             .map(CanonicalEvent::Delta)
@@ -1038,7 +1130,6 @@ async fn begin_attempt(
         events.push(Ok(CanonicalEvent::Completed(Box::new(response))));
         return Ok(ModelTurn {
             model_turn_id: prepared.model_turn_id,
-            redaction_publication: None,
             route: prepared.route,
             target: target_identity,
             output: Box::pin(stream::iter(events)),
@@ -1181,7 +1272,6 @@ async fn begin_attempt(
                 Some("consumer_disconnected".into()),
                 None,
             );
-            provider_stream.attempt().model_turn_finished("interrupted");
             return;
         }
         if terminal_error {
@@ -1191,7 +1281,6 @@ async fn begin_attempt(
                 Some("upstream_stream_error".into()),
                 first_token_ms,
             );
-            provider_stream.attempt().model_turn_finished("failed");
             return;
         }
         loop {
@@ -1199,13 +1288,11 @@ async fn begin_attempt(
                 biased;
                 _ = cancellation.cancelled() => {
                     provider_stream.attempt().finish("cancelled", None, Some("cancelled".into()), None);
-                    provider_stream.attempt().model_turn_finished("cancelled");
                     let _ = tx.send(Err(ModelTurnError::new("cancelled", "Model Turn cancelled"))).await;
                     return;
                 }
                 _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
                     provider_stream.attempt().finish("failed", None, Some("deadline_exceeded".into()), None);
-                    provider_stream.attempt().model_turn_finished("deadline_exceeded");
                     let _ = tx.send(Err(ModelTurnError::new("deadline_exceeded", "Model Turn deadline exceeded"))).await;
                     return;
                 }
@@ -1233,7 +1320,6 @@ async fn begin_attempt(
                             Some("consumer_disconnected".into()),
                             None,
                         );
-                        provider_stream.attempt().model_turn_finished("interrupted");
                         return;
                     }
                     if terminal_error {
@@ -1243,7 +1329,6 @@ async fn begin_attempt(
                             Some("upstream_stream_error".into()),
                             None,
                         );
-                        provider_stream.attempt().model_turn_finished("failed");
                         return;
                     }
                 }
@@ -1259,9 +1344,6 @@ async fn begin_attempt(
                         Some(failure.error.code.clone()),
                         None,
                     );
-                    provider_stream
-                        .attempt()
-                        .model_turn_finished(&failure.error.code);
                     let _ = tx.send(Err(failure.error)).await;
                     return;
                 }
@@ -1284,7 +1366,6 @@ async fn begin_attempt(
                         Some("consumer_disconnected".into()),
                         None,
                     );
-                    provider_stream.attempt().model_turn_finished("interrupted");
                     return;
                 }
                 if terminal_error {
@@ -1294,7 +1375,6 @@ async fn begin_attempt(
                         Some("upstream_stream_error".into()),
                         None,
                     );
-                    provider_stream.attempt().model_turn_finished("failed");
                     return;
                 }
             }
@@ -1306,9 +1386,6 @@ async fn begin_attempt(
                     Some(failure.error.code.clone()),
                     None,
                 );
-                provider_stream
-                    .attempt()
-                    .model_turn_finished(&failure.error.code);
                 let _ = tx.send(Err(failure.error)).await;
                 return;
             }
@@ -1333,7 +1410,6 @@ async fn begin_attempt(
             None,
             first_token_ms,
         );
-        provider_stream.attempt().model_turn_finished("completed");
         let _ = tx
             .send(Ok(CanonicalEvent::Completed(Box::new(response))))
             .await;
@@ -1341,7 +1417,6 @@ async fn begin_attempt(
 
     Ok(ModelTurn {
         model_turn_id: prepared.model_turn_id,
-        redaction_publication: None,
         route: prepared.route,
         target: target_identity,
         output: Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)),

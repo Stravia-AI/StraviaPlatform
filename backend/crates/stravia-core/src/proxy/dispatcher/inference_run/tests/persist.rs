@@ -1,6 +1,74 @@
 use super::*;
 
 #[tokio::test]
+async fn delivered_root_hook_response_is_continuable_without_a_target() {
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let gateway = Gateway::builder(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .hook(Arc::new(RuntimeShortCircuitHook))
+    .build()
+    .await
+    .expect("Gateway");
+    let headers = authorized_headers(&gateway).await;
+    let principal = crate::proxy::security::Security::new(gateway.storage.auth())
+        .required_principal(
+            &crate::proxy::security::ClientCredential::from_inference_headers(&headers),
+        )
+        .await
+        .expect("Principal");
+    let mut request = AiRequest::new("__lifecycle_short_circuit__", Vec::new());
+    request.ext = Some(crate::protocol::ir::ProtocolExt::OpenResponses(
+        Default::default(),
+    ));
+    let response = execute_request_with_headers(
+        gateway.clone(),
+        headers.clone(),
+        request,
+        OPEN_RESPONSES_2026_04_24,
+        "/v1/responses",
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("delivered root");
+    let root: serde_json::Value = serde_json::from_slice(&body).expect("root response");
+    let root_id = root["id"].as_str().expect("root identity").to_owned();
+    let mut continuation = AiRequest::new("__lifecycle_short_circuit__", Vec::new());
+    continuation.ext = Some(crate::protocol::ir::ProtocolExt::OpenResponses(
+        crate::protocol::ir::OpenResponsesExt {
+            previous_response_id: Some(root_id.clone()),
+            ..Default::default()
+        },
+    ));
+    assert_eq!(
+        gateway
+            .generation_chains
+            .continuation_lookup()
+            .preferred_target(&principal, &continuation)
+            .await,
+        None,
+    );
+    let response = execute_request_with_headers(
+        gateway,
+        headers,
+        continuation,
+        OPEN_RESPONSES_2026_04_24,
+        "/v1/responses",
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("delivered continuation");
+    let continued: serde_json::Value = serde_json::from_slice(&body).expect("continued response");
+    assert_ne!(continued["id"].as_str(), Some(root_id.as_str()));
+    assert!(String::from_utf8_lossy(&body).contains("handled by lifecycle Hook"));
+}
+
+#[tokio::test]
 async fn cancelled_run_stops_before_provider_io() {
     let (base_url, provider_calls) =
         serve_openai_response(200, openai_response("must not be called")).await;

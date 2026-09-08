@@ -87,7 +87,7 @@ pub struct ProviderCtx<'a> {
     pub actual_model: &'a str,
     pub credential: Option<&'a StoredCredential>,
     pub gw: &'a Gateway,
-    /// When `true`, the vendor's default `auth_headers` and the Anthropic
+    /// When `true`, the vendor's default credentials and the Anthropic
     /// Bearer→x-api-key rewrite are suppressed.  Set by OAuth drivers that
     /// inject their own credentials via `RuntimeBinding.extra_headers`.
     pub disable_default_auth: bool,
@@ -176,12 +176,17 @@ pub trait Vendor: Send + Sync + 'static {
 
     // ── Extension hooks ───────────────────────────────────────────────────────
 
-    fn auth_headers(&self, _ctx: &VendorCtx<'_>) -> HeaderMap {
-        HeaderMap::new()
-    }
-
-    fn build_url(&self, _ctx: &VendorCtx<'_>, base_url: &str, path: &str) -> String {
-        format!("{}{}", base_url.trim_end_matches('/'), path)
+    fn construct_request(
+        &self,
+        ctx: &crate::provider::vendor_ext::RequestContext<'_>,
+        purpose: crate::provider::vendor_ext::RequestPurpose<'_>,
+    ) -> anyhow::Result<crate::provider::vendor_ext::ConstructedRequest> {
+        crate::provider::vendor_ext::ConstructedRequest::new(
+            ctx,
+            purpose,
+            purpose.endpoint(),
+            HeaderMap::new(),
+        )
     }
 
     async fn pre_encode(&self, _ctx: &VendorCtx<'_>, _req: &mut AiRequest) -> anyhow::Result<()> {

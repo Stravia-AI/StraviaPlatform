@@ -11,6 +11,8 @@
 
 ### Changed
 
+- **Breaking (Rust API):** `Vendor` and `VendorExtension` replace separate `auth_headers` and `build_url` hooks with purpose-aware `construct_request`, which owns the URL and default authentication for inference and Models requests. Existing OAuth bindings and specialized inference signing remain authoritative.
+- Generation Chain writes require an explicit final Model Leg Target or Hook source instead of recovering provenance from response metadata; history still commits only after complete client delivery.
 - The WebUI now shares shadcn-svelte feedback, progress, disclosure, navigation and pagination controls, with reusable secret inputs, request recovery, model filters and metric loading states. Mobile observation details use a modal Sheet while desktop details remain a resizable overlay; update notifications use the existing persistent toast surface without changing skip policy.
 - **Breaking (Rust API):** `AgentTool::execute` returns `AgentToolOutput` with explicit payload semantics instead of bare JSON. Tool-result semantics survive platform and Agent adapters, Hook reconstruction, and retained history. Generation Chain payload version 5 prevents legacy client metadata from impersonating trusted tool-text markers; ambiguous legacy tool arrays are rejected while reversible protection is enabled and left unchanged while it is off.
 - **Breaking:** Interaction Observation replaces legacy flat request logs and debug-build wire capture. Migration 34 removes old request-log rows instead of backfilling them; analytics and Route scheduling now read Confirmed Upstream Usage from Model Turn and Target attempt observations.
@@ -25,6 +27,8 @@
 
 ### Fixed
 
+- Model discovery now follows the Provider's saved proxy choice, reports invalid proxy configuration without bypassing it, and consistently applies Vendor Models authentication across protocol aliases. Native Gemini query credentials are URL-encoded; custom Models endpoints retain their declared authentication and selected URL.
+- Model Turns complete restoration and required mapping publication before their unique successful terminal event, including ephemeral Agent execution. Cancellation and deadlines interrupt pending publication without revoking committed mappings; later stream events cannot reverse completion or falsify confirmed upstream usage.
 - Model ID suggestions no longer select a catalog entry during input-method composition, preserving the administrator's display-name draft. Observation canvas selection updates retain measured node dimensions so returning from mobile details does not hide the originating node or lose focus.
 - Completed HTTP streams no longer appear interrupted or lose their Request Records parent links when clients stop reading after the protocol terminal event; observation finalization now waits for the stream's delivery and Generation Chain commit result.
 - The Server development workflow now passes Vite's actual listening origin to the backend for setup and sign-in, including when Vite selects another port for concurrent workspaces.

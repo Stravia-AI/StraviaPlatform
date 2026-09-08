@@ -96,6 +96,7 @@ impl GenerationChainWrite {
     pub(crate) fn stage(
         &mut self,
         response: &mut AiResponse,
+        source: &GenerationSource,
         upstream_response_id: Option<String>,
     ) -> bool {
         if !generation_node_is_legal(response)
@@ -113,27 +114,23 @@ impl GenerationChainWrite {
             &mut self.request,
             self.parent.parent_id.as_deref(),
         );
-        let target = staged_target(&response);
-        response
-            .vendor
-            .egress
-            .remove("__stravia_generation_chain_target");
-        let mut effective_state = GenerationChainState::from_request(
-            &self.request,
-            target
-                .as_ref()
-                .map_or("", |target| target.namespace.as_str()),
-            target
-                .as_ref()
-                .map_or(crate::protocol::ids::OPEN_RESPONSES_2026_04_24, |target| {
-                    target.protocol
-                }),
-        );
-        if let Some(target) = target {
-            effective_state = effective_state
-                .with_provider_model(&target.actual_model)
-                .with_selected_target_key(&target.selected_target_key);
-        }
+        let (effective_state, upstream_response_id) = match source {
+            GenerationSource::Target {
+                namespace,
+                protocol,
+                actual_model,
+                selected_target_key,
+            } => (
+                GenerationChainState::from_request(&self.request, namespace, *protocol)
+                    .with_provider_model(actual_model)
+                    .with_selected_target_key(selected_target_key),
+                upstream_response_id,
+            ),
+            GenerationSource::Hook { protocol } => (
+                GenerationChainState::from_request(&self.request, "hook", *protocol),
+                None,
+            ),
+        };
         self.staged = Some(StagedGeneration {
             response: response.clone(),
             upstream_response_id,
@@ -276,30 +273,4 @@ fn media_turn_id(segment: &crate::history_marker::HiddenHistorySegment) -> Optio
         .get("turn_id")?
         .as_str()
         .filter(|turn_id| turn_id.starts_with("aturn_"))
-}
-
-struct StagedTarget {
-    namespace: String,
-    protocol: ProtocolId,
-    actual_model: String,
-    selected_target_key: String,
-}
-
-fn staged_target(response: &AiResponse) -> Option<StagedTarget> {
-    let target = response
-        .vendor
-        .egress
-        .get("__stravia_generation_chain_target")?
-        .as_object()?;
-    let protocol = target.get("protocol")?.as_str()?;
-    Some(StagedTarget {
-        namespace: target.get("namespace")?.as_str()?.to_owned(),
-        protocol: crate::protocol::registry::ProtocolRegistry::global().resolve_alias(protocol)?,
-        actual_model: target.get("actual_model")?.as_str()?.to_owned(),
-        selected_target_key: target
-            .get("selected_target_key")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .to_owned(),
-    })
 }

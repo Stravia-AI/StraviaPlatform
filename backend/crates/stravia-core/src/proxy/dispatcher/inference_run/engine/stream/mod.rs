@@ -462,14 +462,8 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                         }
                     }
                     Ok(CanonicalEvent::Completed(response)) => {
-                        if let Some(publication) = turn.redaction_publication.as_ref()
-                            && let Err(error) = publication.publish().await
-                        {
-                            aborted = true;
-                            preflight_failure = Some(super::model_turn_error_outcome(error));
-                        } else {
-                            completed_response = Some(*response);
-                        }
+                        completed_response = Some(*response);
+                        break;
                     }
                     Err(error) => {
                         aborted = true;

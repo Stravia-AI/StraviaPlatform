@@ -2,8 +2,14 @@ from __future__ import annotations
 
 import subprocess
 import tempfile
+import json
+import threading
 import time
+from contextlib import contextmanager
+from http.client import HTTPConnection
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 from pathlib import Path
 from typing import Any
@@ -17,6 +23,199 @@ from tests.common.helpers import (
     stop_stravia_server,
     wait_until_ready,
 )
+
+@contextmanager
+def _model_probe_endpoint(*, forward: bool = False):
+    received: list[dict[str, Any]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_args: Any) -> None:
+            pass
+
+        def do_GET(self) -> None:
+            received.append({"path": self.path, "headers": {key.lower(): value for key, value in self.headers.items()}})
+            selected = urlsplit(self.path)
+            if forward:
+                assert selected.hostname == "127.0.0.1", "proxy must remain local"
+                connection = HTTPConnection(selected.hostname, selected.port, timeout=10)
+                try:
+                    connection.request(
+                        "GET", selected.path + ("?" + selected.query if selected.query else ""),
+                        headers=dict(self.headers),
+                    )
+                    upstream = connection.getresponse()
+                    status, body = upstream.status, upstream.read()
+                finally:
+                    connection.close()
+            else:
+                status = 503 if selected.path == "/failure" else 200
+                body = json.dumps({"data": [{"id": "probe-model"}]}).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}", received
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def _create_probe_provider(env: dict[str, Any], name: str, endpoint: str | None, **source: Any) -> str:
+    status, body = http_request(
+        "POST", f"{env['admin']}/api/v1/providers",
+        payload={
+            "name": name,
+            "source": {
+                "type": "custom", "vendor": "custom", "protocol": "openai",
+                "base_url": env["mock"], "models_source": endpoint, **source,
+            },
+            "credential": {"type": "api_key", "value": "synthetic&key=part+/%?#"},
+            "use_proxy": True,
+        },
+        headers=env["auth"],
+    )
+    assert status == 200, body
+    return body["data"]["id"]
+
+
+@pytest.mark.e2e
+@pytest.mark.admin
+def test_model_discovery_uses_saved_proxy_and_preserves_direct_access(admin_env: dict[str, Any]) -> None:
+    settings = {}
+    for key in ("proxy_enabled", "proxy_url"):
+        status, body = http_request(
+            "GET", f"{admin_env['admin']}/api/v1/settings/{key}", headers=admin_env["auth"],
+        )
+        assert status == 200, body
+        settings[key] = body["data"] or ""
+
+    def set_setting(key: str, value: str) -> None:
+        status, body = http_request(
+            "PUT", f"{admin_env['admin']}/api/v1/settings/{key}",
+            payload={"value": value}, headers=admin_env["auth"],
+        )
+        assert status == 200, body
+
+    with _model_probe_endpoint() as (origin, upstream), _model_probe_endpoint(forward=True) as (proxy, forwarded):
+        endpoint = f"{origin}/selected/models?region=east%2Bwest&limit=2"
+        provider = _create_probe_provider(admin_env, "probe-network-route", endpoint)
+        provider_url = f"{admin_env['admin']}/api/v1/providers/{provider}"
+        try:
+            set_setting("proxy_url", proxy)
+            set_setting("proxy_enabled", "true")
+            status, body = http_request("GET", f"{provider_url}/test-models", headers=admin_env["auth"])
+            assert status == 200 and body["data"] == ["probe-model"], body
+            assert forwarded[0]["path"] == endpoint
+            assert upstream[0]["path"] == "/selected/models?region=east%2Bwest&limit=2"
+            assert upstream[0]["headers"]["authorization"] == "Bearer synthetic&key=part+/%?#"
+
+            status, body = http_request(
+                "POST", f"{provider_url}/models/sync", payload={}, headers=admin_env["auth"],
+            )
+            assert status == 200, body
+            assert len(forwarded) == 2 and len(upstream) == 2
+
+            status, body = http_request(
+                "PUT", provider_url, payload={"use_proxy": False}, headers=admin_env["auth"],
+            )
+            assert status == 200, body
+            set_setting("proxy_url", "")
+            status, body = http_request("GET", f"{provider_url}/test-models", headers=admin_env["auth"])
+            assert status == 200 and body["data"] == ["probe-model"], body
+            assert len(forwarded) == 2 and len(upstream) == 3
+
+            status, body = http_request(
+                "PUT", provider_url, payload={"use_proxy": True}, headers=admin_env["auth"],
+            )
+            assert status == 200, body
+            for method, path in (("GET", "test-models"), ("POST", "models/sync")):
+                status, body = http_request(
+                    method, f"{provider_url}/{path}",
+                    payload={} if method == "POST" else None, headers=admin_env["auth"],
+                )
+                assert status == (200 if method == "GET" else 400), body
+                assert "error" in body and "data" not in body, body
+            assert len(upstream) == 3 and len(forwarded) == 2
+        finally:
+            for key, value in settings.items():
+                set_setting(key, value)
+
+
+@pytest.mark.e2e
+@pytest.mark.admin
+@pytest.mark.parametrize("protocol", ["gemini", "google-gemini/generate-content/v1beta"])
+def test_google_models_uses_declared_models_auth_not_inference_auth(
+    admin_env: dict[str, Any], protocol: str,
+) -> None:
+    with _model_probe_endpoint() as (origin, received):
+        endpoint = f"{origin}/custom/inventory?key=endpoint-owned%2Bvalue&region=east"
+        provider = _create_probe_provider(
+            admin_env, f"google-models-{protocol}", endpoint, vendor="google", protocol=protocol,
+        )
+        provider_url = f"{admin_env['admin']}/api/v1/providers/{provider}"
+        for method, path in (("GET", "test-models"), ("POST", "models/sync")):
+            status, body = http_request(
+                method, f"{provider_url}/{path}",
+                payload={} if method == "POST" else None, headers=admin_env["auth"],
+            )
+            assert status == 200, body
+        assert len(received) == 2
+        for request in received:
+            assert request["path"] == "/custom/inventory?key=endpoint-owned%2Bvalue&region=east"
+            assert request["headers"]["authorization"] == "Bearer synthetic&key=part+/%?#"
+            assert "x-goog-api-key" not in request["headers"]
+
+
+@pytest.mark.e2e
+@pytest.mark.admin
+def test_native_google_model_discovery_encodes_query_credentials(admin_env: dict[str, Any]) -> None:
+    with _model_probe_endpoint() as (origin, received):
+        provider = _create_probe_provider(
+            admin_env, "native-google-models", None,
+            vendor=None, protocol="google-gemini", base_url=origin,
+        )
+        provider_url = f"{admin_env['admin']}/api/v1/providers/{provider}"
+        for method, path in (("GET", "test-models"), ("POST", "models/sync")):
+            status, body = http_request(
+                method, f"{provider_url}/{path}",
+                payload={} if method == "POST" else None, headers=admin_env["auth"],
+            )
+            assert status == 200, body
+        assert len(received) == 2
+        for request in received:
+            assert request["path"] == "/v1beta/models?key=synthetic%26key%3Dpart%2B%2F%25%3F%23"
+            assert "authorization" not in request["headers"]
+
+
+@pytest.mark.e2e
+@pytest.mark.admin
+def test_failed_model_sync_keeps_saved_inventory(admin_env: dict[str, Any]) -> None:
+    with _model_probe_endpoint() as (origin, received):
+        provider = _create_probe_provider(admin_env, "failed-probe-inventory", f"{origin}/models")
+        provider_url = f"{admin_env['admin']}/api/v1/providers/{provider}"
+        status, body = http_request(
+            "POST", f"{provider_url}/models/sync", payload={}, headers=admin_env["auth"],
+        )
+        assert status == 200, body
+        status, body = http_request(
+            "PUT", provider_url, payload={"models_source": f"{origin}/failure"}, headers=admin_env["auth"],
+        )
+        assert status == 200, body
+        status, body = http_request(
+            "POST", f"{provider_url}/models/sync", payload={}, headers=admin_env["auth"],
+        )
+        assert status >= 400, body
+        assert received[-1]["path"] == "/failure"
+        status, body = http_request("GET", f"{provider_url}/models", headers=admin_env["auth"])
+        assert status == 200, body
+        assert [model["id"] for model in body["data"]["models"]] == ["probe-model"]
 
 
 @pytest.mark.e2e

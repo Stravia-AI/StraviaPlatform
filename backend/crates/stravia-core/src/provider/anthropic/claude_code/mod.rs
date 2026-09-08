@@ -9,7 +9,7 @@
 use reqwest::header::HeaderMap;
 
 use crate::provider::registry::{ExtensionRegistration, VendorScope};
-use crate::provider::vendor_ext::{VendorCtx, VendorExtension};
+use crate::provider::vendor_ext::VendorExtension;
 
 pub struct AnthropicClaudeCodeChannel;
 
@@ -21,16 +21,18 @@ impl VendorExtension for AnthropicClaudeCodeChannel {
         }
     }
 
-    // OAuth credentials live in `RuntimeBinding.extra_headers`. Returning
-    // an empty map here is defense-in-depth for the `VendorRegistry`
-    // three-tier `Channel → Vendor → Family` resolution path (used by
-    // admin-side flows), where this channel extension can be the seam
-    // that would otherwise fall back to `AnthropicVendor.auth_headers`'s
-    // `x-api-key`. The proxy pipeline resolves the vendor by `vendor_id`
-    // and the gate lives in `provider::common::pipeline::build_request`
-    // (`if ctx.disable_default_auth { HeaderMap::new() }`).
-    fn auth_headers(&self, _ctx: &VendorCtx<'_>) -> HeaderMap {
-        HeaderMap::new()
+    fn construct_request(
+        &self,
+        _ctx: &crate::provider::vendor_ext::RequestContext<'_>,
+        purpose: crate::provider::vendor_ext::RequestPurpose<'_>,
+    ) -> anyhow::Result<crate::provider::vendor_ext::ConstructedRequest> {
+        // The runtime binding is the sole credential owner for this channel.
+        let url = purpose.endpoint();
+        reqwest::Url::parse(&url)?;
+        Ok(crate::provider::vendor_ext::ConstructedRequest {
+            url,
+            headers: HeaderMap::new(),
+        })
     }
 }
 

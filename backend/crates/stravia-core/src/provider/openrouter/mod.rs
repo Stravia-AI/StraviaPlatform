@@ -1,15 +1,13 @@
 //! OpenRouter vendor (OpenAI-compatible aggregator).
 
 use async_trait::async_trait;
-use reqwest::header::{HeaderMap, HeaderValue};
+use reqwest::header::HeaderValue;
 use serde_json::Value;
 
 use crate::error::GatewayError;
 use crate::protocol::ids::ProtocolId;
 use crate::protocol::ir::{AiRequest, AiResponse};
-use crate::provider::common::openai_compat::{
-    openai_bearer_auth_headers, openai_build_url, openai_map_error,
-};
+use crate::provider::common::openai_compat::openai_map_error;
 use crate::provider::common::pipeline;
 use crate::provider::inbound::InboundResponse;
 use crate::provider::metadata::{
@@ -19,7 +17,6 @@ use crate::provider::metadata::{
 use crate::provider::outbound::OutboundRequest;
 use crate::provider::registry::{VendorRegistration, VendorScope};
 use crate::provider::vendor::{ProviderCtx, Vendor};
-use crate::provider::vendor_ext::VendorCtx;
 
 const CREDENTIAL_FIELDS: &[CredentialFieldDef] = &[
     CredentialFieldDef {
@@ -92,8 +89,14 @@ impl Vendor for OpenrouterVendor {
     fn metadata(&self) -> Option<&'static VendorMetadata> {
         Some(&METADATA)
     }
-    fn auth_headers(&self, ctx: &VendorCtx<'_>) -> HeaderMap {
-        let mut headers = openai_bearer_auth_headers(ctx);
+    fn construct_request(
+        &self,
+        ctx: &crate::provider::vendor_ext::RequestContext<'_>,
+        purpose: crate::provider::vendor_ext::RequestPurpose<'_>,
+    ) -> anyhow::Result<crate::provider::vendor_ext::ConstructedRequest> {
+        let mut request =
+            crate::provider::common::openai_compat::construct_openai_request(ctx, purpose)?;
+        let headers = &mut request.headers;
         if let Some(value) = ctx.provider.adapter_credential("httpReferer")
             && let Ok(value) = HeaderValue::from_str(&value)
         {
@@ -104,10 +107,7 @@ impl Vendor for OpenrouterVendor {
         {
             headers.insert("X-Title", value);
         }
-        headers
-    }
-    fn build_url(&self, _ctx: &VendorCtx<'_>, base_url: &str, path: &str) -> String {
-        openai_build_url(base_url, path)
+        Ok(request)
     }
     fn vendor_id(&self) -> &'static str {
         "openrouter"

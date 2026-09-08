@@ -145,7 +145,7 @@ impl VendorRegistry {
     /// Three-tier resolution: Channel → Vendor → ProtocolDefault.
     ///
     /// Returns `Arc<dyn VendorExtension>` for use by admin and auth paths
-    /// that only need sync hooks (`auth_headers`, `build_url`, `metadata`).
+    /// that need purpose-aware request construction and metadata.
     ///
     /// Tier 3 uses the protocol's canonical default vendor (`protocol_default_vendor`)
     /// to look up a vendor-scoped extension that serves as a fallback when the

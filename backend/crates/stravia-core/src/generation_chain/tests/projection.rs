@@ -13,14 +13,7 @@ async fn generation_parent_prefers_its_target_without_native_continuation() {
         .expect("begin root");
     let mut response = AiResponse::new("response", "model");
     response.items = vec![AiItem::output_text("answer")];
-    mark_generation_target(
-        &mut response,
-        "provider:model",
-        OPEN_RESPONSES_2026_04_24,
-        "model",
-        "provider:model",
-    );
-    root.stage(&mut response, None);
+    root.stage(&mut response, &generation_source(), None);
     root.persist().await.expect("persist root");
 
     let mut continuation = responses_request(vec![user_message("follow-up")]);
@@ -36,6 +29,85 @@ async fn generation_parent_prefers_its_target_without_native_continuation() {
             .await
             .as_deref(),
         Some("provider:model")
+    );
+}
+
+#[tokio::test]
+async fn hook_completion_does_not_reuse_an_earlier_target_or_upstream_response() {
+    let chain = generation_chain().await;
+    let owner = principal("owner");
+    let mut write = chain
+        .begin(
+            owner.clone(),
+            responses_request(vec![user_message("question")]),
+        )
+        .await
+        .expect("begin root");
+    let mut intermediate = AiResponse::new("upstream", "model");
+    intermediate.push_output_text("hidden answer");
+    assert!(write.stage(
+        &mut intermediate,
+        &generation_source(),
+        Some("upstream-response".into()),
+    ));
+    let mut response = AiResponse::new("hook-response", "model");
+    response.push_output_text("Hook answer");
+    assert!(write.stage(
+        &mut response,
+        &GenerationSource::Hook {
+            protocol: OPEN_RESPONSES_2026_04_24
+        },
+        None,
+    ));
+    write.persist().await.expect("persist Hook completion");
+
+    let mut request = responses_request(vec![user_message("follow-up")]);
+    let Some(ProtocolExt::OpenResponses(extension)) = request.ext.as_mut() else {
+        panic!("Open Responses extension");
+    };
+    extension.previous_response_id = Some(write.id().to_owned());
+    let resumed = chain
+        .begin(owner.clone(), request)
+        .await
+        .expect("Hook parent");
+    assert_eq!(
+        resumed
+            .request()
+            .items
+            .iter()
+            .map(|item| item.content.to_text())
+            .collect::<Vec<_>>(),
+        ["question", "Hook answer", "follow-up"],
+    );
+    let lookup = chain.continuation_lookup();
+    assert_eq!(
+        lookup.preferred_target(&owner, resumed.request()).await,
+        None
+    );
+    let mut continued = resumed.request().clone();
+    assert_eq!(
+        lookup
+            .prepare(
+                &owner,
+                crate::model_turn::ContinuationTarget {
+                    namespace: "provider:model",
+                    protocol: OPEN_RESPONSES_2026_04_24,
+                    actual_model: "model",
+                    logical_model: "model",
+                    allow_ephemeral_response: true,
+                },
+                &mut continued,
+            )
+            .await,
+        None,
+    );
+    assert_eq!(
+        continued
+            .items
+            .iter()
+            .map(|item| item.content.to_text())
+            .collect::<Vec<_>>(),
+        ["question", "Hook answer", "follow-up"],
     );
 }
 
@@ -65,7 +137,11 @@ async fn chat_reasoning_prefix_restores_encrypted_effective_history() {
         ),
         AiItem::output_text("answer"),
     ];
-    root.stage(&mut response, Some("upstream-response".into()));
+    root.stage(
+        &mut response,
+        &generation_source(),
+        Some("upstream-response".into()),
+    );
     root.persist().await.expect("persist root");
 
     let resumed = chain
@@ -93,7 +169,7 @@ async fn chat_reasoning_prefix_restores_encrypted_effective_history() {
             .prepare(
                 &owner,
                 crate::model_turn::ContinuationTarget {
-                    namespace: "",
+                    namespace: "provider:model",
                     protocol: OPEN_RESPONSES_2026_04_24,
                     actual_model: "model",
                     logical_model: "model",
@@ -211,7 +287,11 @@ async fn native_responses_replay_uses_whitelisted_provider_context_for_continuat
     ];
     let mut response = AiResponse::new("upstream", "model");
     response.items = response_items;
-    root.stage(&mut response, Some("upstream-response".into()));
+    root.stage(
+        &mut response,
+        &generation_source(),
+        Some("upstream-response".into()),
+    );
     root.persist().await.expect("persist root");
 
     let mut distractor_request = responses_request(vec![user_message("title question")]);
@@ -240,6 +320,7 @@ async fn native_responses_replay_uses_whitelisted_provider_context_for_continuat
     ];
     distractor.stage(
         &mut distractor_response,
+        &generation_source(),
         Some("title-upstream-response".into()),
     );
     distractor
@@ -294,7 +375,7 @@ async fn native_responses_replay_uses_whitelisted_provider_context_for_continuat
             .prepare(
                 &owner,
                 crate::model_turn::ContinuationTarget {
-                    namespace: "",
+                    namespace: "provider:model",
                     protocol: OPEN_RESPONSES_2026_04_24,
                     actual_model: "model",
                     logical_model: "model",
@@ -348,7 +429,11 @@ async fn encrypted_reasoning_replay_omits_gateway_projected_item_id() {
             ),
         AiItem::output_text("answer"),
     ];
-    root.stage(&mut response, Some("upstream-response".into()));
+    root.stage(
+        &mut response,
+        &generation_source(),
+        Some("upstream-response".into()),
+    );
     root.persist().await.expect("persist root");
 
     let mut continuation = responses_request(vec![user_message("follow-up")]);
@@ -417,7 +502,11 @@ async fn automatic_parent_matches_anthropic_opaque_reasoning_replay() {
             arguments: "{\"value\":1}".into(),
         }),
     ];
-    root.stage(&mut response, Some("upstream-response".into()));
+    root.stage(
+        &mut response,
+        &generation_source(),
+        Some("upstream-response".into()),
+    );
     root.persist().await.expect("persist root");
     let root_id = root.id().to_owned();
 
@@ -490,7 +579,11 @@ async fn automatic_parent_matches_gemini_reasoning_and_tool_id_replay() {
             arguments: "{\"value\":1}".into(),
         }),
     ];
-    root.stage(&mut response, Some("upstream-response".into()));
+    root.stage(
+        &mut response,
+        &generation_source(),
+        Some("upstream-response".into()),
+    );
     root.persist().await.expect("persist root");
     let root_id = root.id().to_owned();
 
@@ -563,7 +656,11 @@ async fn automatic_parent_matches_gemini_reasoning_and_tool_id_replay() {
             arguments: "{\"value\":2}".into(),
         }),
     ];
-    resumed.stage(&mut second_response, Some("upstream-response-2".into()));
+    resumed.stage(
+        &mut second_response,
+        &generation_source(),
+        Some("upstream-response-2".into()),
+    );
     resumed.persist().await.expect("persist second turn");
     let second_id = resumed.id().to_owned();
 
@@ -657,7 +754,11 @@ async fn automatic_parent_matches_anthropic_output_replayed_as_responses_items()
             arguments: "{\"value\":1}".into(),
         }),
     ];
-    root.stage(&mut response, Some("upstream-response".into()));
+    root.stage(
+        &mut response,
+        &generation_source(),
+        Some("upstream-response".into()),
+    );
     root.persist().await.expect("persist Anthropic root");
     let root_id = root.id().to_owned();
 

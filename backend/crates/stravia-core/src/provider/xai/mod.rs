@@ -1,15 +1,13 @@
 //! xAI vendor — direct API plus the Grok Build OAuth channel.
 
 use async_trait::async_trait;
-use reqwest::header::HeaderMap;
+
 use serde_json::Value;
 
 use crate::error::GatewayError;
 use crate::protocol::ids::ProtocolId;
 use crate::protocol::ir::{AiRequest, AiResponse};
-use crate::provider::common::openai_compat::{
-    openai_bearer_auth_headers, openai_build_url, openai_map_error,
-};
+use crate::provider::common::openai_compat::openai_map_error;
 use crate::provider::common::pipeline;
 use crate::provider::inbound::InboundResponse;
 use crate::provider::metadata::{
@@ -19,7 +17,6 @@ use crate::provider::metadata::{
 use crate::provider::outbound::OutboundRequest;
 use crate::provider::registry::{VendorRegistration, VendorScope};
 use crate::provider::vendor::{ProviderCtx, Vendor};
-use crate::provider::vendor_ext::VendorCtx;
 
 const METADATA: VendorMetadata = VendorMetadata {
     id: "xai",
@@ -91,11 +88,12 @@ impl Vendor for XaiVendor {
     fn metadata(&self) -> Option<&'static VendorMetadata> {
         Some(&METADATA)
     }
-    fn auth_headers(&self, ctx: &VendorCtx<'_>) -> HeaderMap {
-        openai_bearer_auth_headers(ctx)
-    }
-    fn build_url(&self, _ctx: &VendorCtx<'_>, base_url: &str, path: &str) -> String {
-        openai_build_url(base_url, path)
+    fn construct_request(
+        &self,
+        ctx: &crate::provider::vendor_ext::RequestContext<'_>,
+        purpose: crate::provider::vendor_ext::RequestPurpose<'_>,
+    ) -> anyhow::Result<crate::provider::vendor_ext::ConstructedRequest> {
+        crate::provider::common::openai_compat::construct_openai_request(ctx, purpose)
     }
     fn vendor_id(&self) -> &'static str {
         "xai"
@@ -155,6 +153,7 @@ inventory::submit! { VendorRegistration { make: || Box::new(XaiVendor) } }
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::vendor_ext::VendorCtx;
 
     #[test]
     fn grok_channel_uses_oauth_responses_upstream() {
@@ -200,7 +199,23 @@ mod tests {
             credential: None,
         };
         assert_eq!(
-            XaiVendor.build_url(&ctx, "https://cli-chat-proxy.grok.com/v1", "/v1/responses",),
+            Vendor::construct_request(
+                &XaiVendor,
+                &crate::provider::vendor_ext::RequestContext {
+                    provider: ctx.provider,
+                    api_key: ctx.api_key,
+                    credential: ctx.credential,
+                    disable_default_auth: false
+                },
+                crate::provider::vendor_ext::RequestPurpose::Inference {
+                    protocol: ctx.protocol_id,
+                    base_url: "https://cli-chat-proxy.grok.com/v1",
+                    path: "/v1/responses",
+                    actual_model: ctx.actual_model
+                },
+            )
+            .unwrap()
+            .url,
             "https://cli-chat-proxy.grok.com/v1/responses"
         );
     }

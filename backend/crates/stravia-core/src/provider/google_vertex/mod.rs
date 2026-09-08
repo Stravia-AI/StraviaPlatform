@@ -32,7 +32,6 @@ use crate::provider::metadata::{
 use crate::provider::outbound::OutboundRequest;
 use crate::provider::registry::{VendorRegistration, VendorScope};
 use crate::provider::vendor::{ProviderCtx, Vendor};
-use crate::provider::vendor_ext::VendorCtx;
 
 const GOOGLE_CLOUD_PLATFORM_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
 const PROJECT_PLACEHOLDERS: &[&str] = &["{project}", "{project_id}", "${PROJECT_ID}"];
@@ -140,20 +139,35 @@ impl Vendor for VertexVendor {
         Some(&METADATA)
     }
 
-    fn build_url(&self, ctx: &VendorCtx<'_>, base_url: &str, path: &str) -> String {
-        vertex_build_url(ctx, base_url, path)
-    }
-
-    fn auth_headers(&self, ctx: &VendorCtx<'_>) -> HeaderMap {
-        let mut headers = HeaderMap::new();
-        let token = ctx.api_key.trim();
-        if token.is_empty() || looks_like_service_account_json(token) {
-            return headers;
-        }
-        if let Ok(value) = HeaderValue::from_str(&format!("Bearer {token}")) {
-            headers.insert(AUTHORIZATION, value);
-        }
-        headers
+    fn construct_request(
+        &self,
+        ctx: &crate::provider::vendor_ext::RequestContext<'_>,
+        purpose: crate::provider::vendor_ext::RequestPurpose<'_>,
+    ) -> anyhow::Result<crate::provider::vendor_ext::ConstructedRequest> {
+        use crate::provider::vendor_ext::{ConstructedRequest, RequestPurpose};
+        let url = match purpose {
+            RequestPurpose::Models { endpoint } => endpoint.to_string(),
+            RequestPurpose::Inference {
+                base_url,
+                path,
+                protocol,
+                actual_model: _,
+            } => vertex_endpoint(ctx, protocol, base_url, path),
+        };
+        let headers = if ctx.disable_default_auth {
+            reqwest::header::HeaderMap::new()
+        } else {
+            let mut headers = HeaderMap::new();
+            let token = ctx.api_key.trim();
+            if !token.is_empty()
+                && !looks_like_service_account_json(token)
+                && let Ok(value) = HeaderValue::from_str(&format!("Bearer {token}"))
+            {
+                headers.insert(AUTHORIZATION, value);
+            }
+            headers
+        };
+        ConstructedRequest::new(ctx, purpose, url, headers)
     }
 
     fn vendor_id(&self) -> &'static str {
@@ -174,18 +188,21 @@ impl Vendor for VertexVendor {
         ctx: &ProviderCtx<'_>,
     ) -> Result<OutboundRequest, GatewayError> {
         let mut outbound = pipeline::build_request(self, req, ctx).await?;
-        let token = vertex_access_token(ctx.api_key).await.map_err(|source| {
-            GatewayError::provider_unavailable(
-                "google-vertex",
-                format!("failed to fetch Vertex access token: {source}"),
-            )
-        })?;
-        let value = HeaderValue::from_str(&format!("Bearer {token}")).map_err(|source| {
-            GatewayError::Internal {
-                source: anyhow!(source).context("build Vertex authorization header"),
-            }
-        })?;
-        outbound.headers.insert(AUTHORIZATION, value);
+        if !ctx.disable_default_auth {
+            let token = vertex_access_token(ctx.api_key).await.map_err(|source| {
+                GatewayError::provider_unavailable(
+                    "google-vertex",
+                    format!("failed to fetch Vertex access token: {source}"),
+                )
+            })?;
+            let value = HeaderValue::from_str(&format!("Bearer {token}")).map_err(|source| {
+                GatewayError::Internal {
+                    source: anyhow!(source).context("build Vertex authorization header"),
+                }
+            })?;
+            outbound.headers.insert(AUTHORIZATION, value);
+        }
+
         Ok(outbound)
     }
 
@@ -249,9 +266,14 @@ pub fn expand_vertex_base_url(base_url: &str, service_account_json: &str) -> Str
     out
 }
 
-fn vertex_build_url(ctx: &VendorCtx<'_>, base_url: &str, path: &str) -> String {
+fn vertex_endpoint(
+    ctx: &crate::provider::vendor_ext::RequestContext<'_>,
+    protocol: ProtocolId,
+    base_url: &str,
+    path: &str,
+) -> String {
     let base = expand_vertex_base_url(base_url, ctx.api_key);
-    match ctx.protocol_id.protocol {
+    match protocol.protocol {
         Protocol::GoogleGemini => vertex_google_generate_url(&base, path),
         Protocol::OpenAICompatible => vertex_openai_url(&base, path),
         _ => format!("{}{}", base.trim_end_matches('/'), path),
@@ -332,6 +354,7 @@ fn secret_hash(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::vendor_ext::VendorCtx;
 
     #[test]
     fn extracts_project_id_from_service_account_json() {
@@ -379,7 +402,20 @@ mod tests {
             credential: None,
         };
 
-        let headers = VertexVendor.auth_headers(&ctx);
+        let headers = Vendor::construct_request(
+            &VertexVendor,
+            &crate::provider::vendor_ext::RequestContext {
+                provider: ctx.provider,
+                api_key: ctx.api_key,
+                credential: ctx.credential,
+                disable_default_auth: false,
+            },
+            crate::provider::vendor_ext::RequestPurpose::Models {
+                endpoint: "https://aiplatform.googleapis.com/models",
+            },
+        )
+        .unwrap()
+        .headers;
 
         assert_eq!(
             headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()),

@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
-use crate::provider::common::openai_compat::{openai_bearer_auth_headers, openai_build_url};
+use crate::provider::common::openai_compat::openai_endpoint;
 use crate::provider::registry::{ExtensionRegistration, VendorScope};
 use crate::provider::vendor_ext::{
     ResolvedTargetCapabilities, ResponsesWebSocketConnectionMetadata, VendorCtx, VendorExtension,
@@ -42,7 +42,7 @@ pub(crate) fn forwarded_client_headers(headers: &HeaderMap) -> HeaderMap {
     forwarded
 }
 
-fn codex_build_url(base_url: &str, path: &str) -> String {
+fn codex_endpoint(base_url: &str, path: &str) -> String {
     // ChatGPT's Codex backend exposes `/responses`, not the public
     // Platform API's `/v1/responses` route emitted by the shared codec.
     let path = if path.starts_with("/v1/") {
@@ -50,7 +50,7 @@ fn codex_build_url(base_url: &str, path: &str) -> String {
     } else {
         path
     };
-    openai_build_url(base_url, path)
+    openai_endpoint(base_url, path)
 }
 
 fn codex_routing_hint(body: &serde_json::Value) -> anyhow::Result<HeaderValue> {
@@ -193,11 +193,19 @@ impl VendorExtension for OpenAiCodexChannel {
                     || event_type.starts_with("responsesapi.")
             })
     }
-    fn auth_headers(&self, ctx: &VendorCtx<'_>) -> HeaderMap {
-        openai_bearer_auth_headers(ctx)
-    }
-    fn build_url(&self, _ctx: &VendorCtx<'_>, base_url: &str, path: &str) -> String {
-        codex_build_url(base_url, path)
+    fn construct_request(
+        &self,
+        ctx: &crate::provider::vendor_ext::RequestContext<'_>,
+        purpose: crate::provider::vendor_ext::RequestPurpose<'_>,
+    ) -> anyhow::Result<crate::provider::vendor_ext::ConstructedRequest> {
+        let mut request =
+            crate::provider::common::openai_compat::construct_openai_request(ctx, purpose)?;
+        if let crate::provider::vendor_ext::RequestPurpose::Inference { base_url, path, .. } =
+            purpose
+        {
+            request.url = codex_endpoint(base_url, path);
+        }
+        Ok(request)
     }
 }
 
@@ -244,7 +252,7 @@ mod tests {
     #[test]
     fn codex_backend_omits_public_api_version_prefix() {
         assert_eq!(
-            codex_build_url("https://chatgpt.com/backend-api/codex", "/v1/responses"),
+            codex_endpoint("https://chatgpt.com/backend-api/codex", "/v1/responses"),
             "https://chatgpt.com/backend-api/codex/responses"
         );
     }

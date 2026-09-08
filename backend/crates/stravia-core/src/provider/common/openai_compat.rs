@@ -1,38 +1,35 @@
 //! OpenAI-compatible adapter primitives shared by every OpenAI-family vendor.
 //!
 //! This module provides auth / URL helpers and a zero-size generic adapter.
-//! The 7-step request/response pipeline lives in [`super::pipeline`].
+//! The request/response pipeline lives in [`super::pipeline`].
 //!
-//! # Usage
-//!
-//! ```rust,ignore
-//! use crate::provider::common::openai_compat::{openai_bearer_auth_headers, openai_build_url};
-//!
-//! impl VendorExtension for MyVendor {
-//!     fn auth_headers(&self, ctx: &VendorCtx<'_>) -> HeaderMap {
-//!         openai_bearer_auth_headers(ctx)
-//!     }
-//!     fn build_url(&self, _ctx: &VendorCtx<'_>, base_url: &str, path: &str) -> String {
-//!         openai_build_url(base_url, path)
-//!     }
-//! }
-//! ```
+//! Request construction owns both inference and Models authentication.
 
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::Value;
 
 use crate::error::GatewayError;
-use crate::provider::vendor_ext::VendorCtx;
 
 // ── Free-function auth / URL primitives ──────────────────────────────────────
 
-/// Produces a standard `Authorization: Bearer <key>` header map.
-pub fn openai_bearer_auth_headers(ctx: &VendorCtx<'_>) -> HeaderMap {
-    let mut h = HeaderMap::new();
-    if let Ok(value) = HeaderValue::from_str(&format!("Bearer {}", ctx.api_key)) {
-        h.insert("Authorization", value);
+/// Construct the declared OpenAI-compatible request for either purpose.
+pub fn construct_openai_request(
+    ctx: &crate::provider::vendor_ext::RequestContext<'_>,
+    purpose: crate::provider::vendor_ext::RequestPurpose<'_>,
+) -> anyhow::Result<crate::provider::vendor_ext::ConstructedRequest> {
+    use crate::provider::vendor_ext::{ConstructedRequest, RequestPurpose};
+    let url = match purpose {
+        RequestPurpose::Inference { base_url, path, .. } => openai_endpoint(base_url, path),
+        RequestPurpose::Models { endpoint } => endpoint.to_string(),
+    };
+    let mut headers = HeaderMap::new();
+    if !ctx.disable_default_auth {
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {}", ctx.api_key))?,
+        );
     }
-    h
+    ConstructedRequest::new(ctx, purpose, url, headers)
 }
 
 /// Builds an upstream URL.
@@ -42,7 +39,7 @@ pub fn openai_bearer_auth_headers(ctx: &VendorCtx<'_>) -> HeaderMap {
 /// `path` is stripped to avoid double-versioning. Other non-root paths
 /// (e.g. `/api/anthropic`) are left alone so that the encoder-emitted
 /// `/v1/messages` is preserved.
-pub fn openai_build_url(base_url: &str, path: &str) -> String {
+pub fn openai_endpoint(base_url: &str, path: &str) -> String {
     let base = base_url.trim_end_matches('/');
     let adjusted = if base_ends_with_version_segment(base) && path.starts_with("/v1/") {
         &path[3..]
@@ -109,11 +106,12 @@ pub fn openai_map_error(vendor_id: &str, status: u16, body: Value) -> GatewayErr
 pub struct GenericOpenAICompatibleAdapter;
 
 impl GenericOpenAICompatibleAdapter {
-    pub fn auth_headers(&self, ctx: &VendorCtx<'_>) -> HeaderMap {
-        openai_bearer_auth_headers(ctx)
-    }
-    pub fn build_url(&self, _ctx: &VendorCtx<'_>, base_url: &str, path: &str) -> String {
-        openai_build_url(base_url, path)
+    pub fn construct_request(
+        &self,
+        ctx: &crate::provider::vendor_ext::RequestContext<'_>,
+        purpose: crate::provider::vendor_ext::RequestPurpose<'_>,
+    ) -> anyhow::Result<crate::provider::vendor_ext::ConstructedRequest> {
+        construct_openai_request(ctx, purpose)
     }
 }
 
@@ -146,20 +144,12 @@ macro_rules! openai_compat_vendor {
                 Some(&$metadata)
             }
 
-            fn auth_headers(
+            fn construct_request(
                 &self,
-                ctx: &$crate::provider::vendor_ext::VendorCtx<'_>,
-            ) -> reqwest::header::HeaderMap {
-                $crate::provider::common::openai_compat::openai_bearer_auth_headers(ctx)
-            }
-
-            fn build_url(
-                &self,
-                _ctx: &$crate::provider::vendor_ext::VendorCtx<'_>,
-                base_url: &str,
-                path: &str,
-            ) -> String {
-                $crate::provider::common::openai_compat::openai_build_url(base_url, path)
+                ctx: &$crate::provider::vendor_ext::RequestContext<'_>,
+                purpose: $crate::provider::vendor_ext::RequestPurpose<'_>,
+            ) -> anyhow::Result<$crate::provider::vendor_ext::ConstructedRequest> {
+                $crate::provider::common::openai_compat::construct_openai_request(ctx, purpose)
             }
 
             fn vendor_id(&self) -> &'static str {
@@ -259,7 +249,7 @@ macro_rules! standard_openai_vendor {
 
 #[cfg(test)]
 mod tests {
-    //! Tests cover URL building (`openai_build_url` / `base_ends_with_version_segment`)
+    //! Tests cover URL building (`openai_endpoint` / `base_ends_with_version_segment`)
     //! — versioned vs non-versioned bases.
     //!
     //! Pipeline auth-gate tests live in `provider::common::pipeline::tests`.
@@ -302,44 +292,44 @@ mod tests {
     }
 
     #[test]
-    fn build_url_strips_v1_for_versioned_base() {
+    fn endpoint_strips_v1_for_versioned_base() {
         assert_eq!(
-            openai_build_url("https://api.openai.com/v1", "/v1/chat/completions"),
+            openai_endpoint("https://api.openai.com/v1", "/v1/chat/completions"),
             "https://api.openai.com/v1/chat/completions"
         );
         assert_eq!(
-            openai_build_url(
+            openai_endpoint(
                 "https://open.bigmodel.cn/api/coding/paas/v4",
                 "/v1/chat/completions"
             ),
             "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"
         );
         assert_eq!(
-            openai_build_url("https://api.deepseek.com/v1/", "/v1/chat/completions"),
+            openai_endpoint("https://api.deepseek.com/v1/", "/v1/chat/completions"),
             "https://api.deepseek.com/v1/chat/completions"
         );
     }
 
     #[test]
-    fn build_url_preserves_v1_for_anthropic_base() {
+    fn endpoint_preserves_v1_for_anthropic_base() {
         assert_eq!(
-            openai_build_url("https://open.bigmodel.cn/api/anthropic", "/v1/messages"),
+            openai_endpoint("https://open.bigmodel.cn/api/anthropic", "/v1/messages"),
             "https://open.bigmodel.cn/api/anthropic/v1/messages"
         );
         assert_eq!(
-            openai_build_url("https://api.deepseek.com/anthropic", "/v1/messages"),
+            openai_endpoint("https://api.deepseek.com/anthropic", "/v1/messages"),
             "https://api.deepseek.com/anthropic/v1/messages"
         );
     }
 
     #[test]
-    fn build_url_passthrough_when_no_version_prefix() {
+    fn endpoint_passthrough_when_no_version_prefix() {
         assert_eq!(
-            openai_build_url("https://api.example.com", "/v1/chat/completions"),
+            openai_endpoint("https://api.example.com", "/v1/chat/completions"),
             "https://api.example.com/v1/chat/completions"
         );
         assert_eq!(
-            openai_build_url("https://api.example.com/", "/v1/chat/completions"),
+            openai_endpoint("https://api.example.com/", "/v1/chat/completions"),
             "https://api.example.com/v1/chat/completions"
         );
     }

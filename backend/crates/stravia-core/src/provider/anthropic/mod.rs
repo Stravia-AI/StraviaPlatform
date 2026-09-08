@@ -17,7 +17,7 @@ use crate::provider::metadata::{
 use crate::provider::outbound::OutboundRequest;
 use crate::provider::registry::{ExtensionRegistration, VendorRegistration, VendorScope};
 use crate::provider::vendor::{ProviderCtx, Vendor};
-use crate::provider::vendor_ext::{VendorCtx, VendorExtension};
+use crate::provider::vendor_ext::VendorExtension;
 
 const METADATA: VendorMetadata = VendorMetadata {
     id: "anthropic",
@@ -97,13 +97,22 @@ impl Vendor for AnthropicVendor {
     fn metadata(&self) -> Option<&'static VendorMetadata> {
         Some(&METADATA)
     }
-    fn auth_headers(&self, ctx: &VendorCtx<'_>) -> HeaderMap {
-        let mut h = HeaderMap::new();
-        if let Ok(v) = HeaderValue::from_str(ctx.api_key) {
-            h.insert("x-api-key", v);
+    fn construct_request(
+        &self,
+        ctx: &crate::provider::vendor_ext::RequestContext<'_>,
+        purpose: crate::provider::vendor_ext::RequestPurpose<'_>,
+    ) -> anyhow::Result<crate::provider::vendor_ext::ConstructedRequest> {
+        let mut headers = HeaderMap::new();
+        if !ctx.disable_default_auth {
+            headers.insert("x-api-key", HeaderValue::from_str(ctx.api_key)?);
         }
-        h.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
-        h
+        headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+        crate::provider::vendor_ext::ConstructedRequest::new(
+            ctx,
+            purpose,
+            purpose.endpoint(),
+            headers,
+        )
     }
     fn vendor_id(&self) -> &'static str {
         "anthropic"
@@ -152,13 +161,22 @@ impl VendorExtension for AnthropicFamilyExt {
     fn metadata(&self) -> Option<&'static VendorMetadata> {
         None
     }
-    fn auth_headers(&self, ctx: &VendorCtx<'_>) -> HeaderMap {
-        let mut h = HeaderMap::new();
-        if let Ok(v) = HeaderValue::from_str(ctx.api_key) {
-            h.insert("x-api-key", v);
+    fn construct_request(
+        &self,
+        ctx: &crate::provider::vendor_ext::RequestContext<'_>,
+        purpose: crate::provider::vendor_ext::RequestPurpose<'_>,
+    ) -> anyhow::Result<crate::provider::vendor_ext::ConstructedRequest> {
+        let mut headers = HeaderMap::new();
+        if !ctx.disable_default_auth {
+            headers.insert("x-api-key", HeaderValue::from_str(ctx.api_key)?);
         }
-        h.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
-        h
+        headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+        crate::provider::vendor_ext::ConstructedRequest::new(
+            ctx,
+            purpose,
+            purpose.endpoint(),
+            headers,
+        )
     }
 }
 

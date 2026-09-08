@@ -73,7 +73,6 @@ impl ProviderModelDiscovery for HttpProviderModelDiscovery {
             .resolve_provider_runtime(&provider)
             .await
             .map_err(|error| RouteModelDiscoveryError::setup(provider_id, error))?;
-        let credential = runtime.access_token.clone();
         if let Some(static_list) = runtime.binding.static_models_override.as_deref() {
             let models = static_list
                 .iter()
@@ -99,38 +98,17 @@ impl ProviderModelDiscovery for HttpProviderModelDiscovery {
                 provider_id: provider_id.to_string(),
             })?;
 
-        let mut headers = if runtime.binding.disable_default_auth {
-            HeaderMap::new()
-        } else {
-            build_model_headers(&provider.protocol, provider.vendor.as_deref(), &credential)
-                .map_err(|error| RouteModelDiscoveryError::setup(provider_id, error))?
-        };
-        headers.extend(
-            runtime_binding_headers(&runtime.binding)
-                .map_err(|error| RouteModelDiscoveryError::setup(provider_id, error))?,
-        );
-        let mut request = admin
+        let constructed = construct_models_request(&provider, &runtime, &endpoint)
+            .map_err(|error| RouteModelDiscoveryError::setup(provider_id, error))?;
+        let client = admin
             .gw
-            .http_client
-            .get(&endpoint)
-            .headers(headers)
+            .http_client_for_provider(provider.use_proxy)
+            .await
+            .map_err(|error| RouteModelDiscoveryError::setup(provider_id, error))?;
+        let request = client
+            .get(constructed.url)
+            .headers(constructed.headers)
             .timeout(Duration::from_secs(10));
-        if provider.protocol == "gemini" && !runtime.binding.disable_default_auth {
-            let separator = if endpoint.contains('?') { '&' } else { '?' };
-            let mut headers =
-                build_model_headers(&provider.protocol, provider.vendor.as_deref(), &credential)
-                    .map_err(|error| RouteModelDiscoveryError::setup(provider_id, error))?;
-            headers.extend(
-                runtime_binding_headers(&runtime.binding)
-                    .map_err(|error| RouteModelDiscoveryError::setup(provider_id, error))?,
-            );
-            request = admin
-                .gw
-                .http_client
-                .get(format!("{endpoint}{separator}key={credential}"))
-                .headers(headers)
-                .timeout(Duration::from_secs(10));
-        }
 
         let response = request.send().await.map_err(|error| {
             RouteModelDiscoveryError::DiscoveryRequestFailed {

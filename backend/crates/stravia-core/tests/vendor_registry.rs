@@ -1,9 +1,6 @@
-//! PR2A acceptance: VendorRegistry resolves (channel → vendor → family)
-//! correctly, every registered extension produces auth/url output that
-//! matches the legacy `ProviderAdapter` surface, and `list_metadata()`
-//! is field-equivalent to `assets/providers.json` for the three
-//! vendors migrated in PR2A (`openai`, `ollama`, plus the OpenAI/codex
-//! channel).
+//! Vendor registry resolution and purpose-aware request behavior.
+//! Non-general inference routes and Models credential contracts share the
+//! same public construction interface.
 
 use stravia_core::auth::types::StoredCredential;
 use stravia_core::db::models::Provider;
@@ -106,7 +103,7 @@ fn vertex_vendor_is_registered_with_native_and_openai_channels() {
 }
 
 #[test]
-fn vertex_build_url_rewrites_google_generate_content_to_vertex_resource() {
+fn vertex_inference_endpoint_rewrites_google_generate_content_to_vertex_resource() {
     let reg = VendorRegistry::global();
     let mut p = make_provider(Some("google-vertex"), None);
     p.protocol = "google-gemini".into();
@@ -124,11 +121,23 @@ fn vertex_build_url_rewrites_google_generate_content_to_vertex_resource() {
         None,
     );
 
-    let url = ext.build_url(
-        &ctx,
-        &p.base_url,
-        "/v1beta/models/gemini-2.5-flash:generateContent",
-    );
+    let url = ext
+        .construct_request(
+            &stravia_core::provider::vendor_ext::RequestContext {
+                provider: (&ctx).provider,
+                api_key: (&ctx).api_key,
+                credential: (&ctx).credential,
+                disable_default_auth: false,
+            },
+            stravia_core::provider::vendor_ext::RequestPurpose::Inference {
+                protocol: (&ctx).protocol_id,
+                base_url: &p.base_url,
+                path: "/v1beta/models/gemini-2.5-flash:generateContent",
+                actual_model: (&ctx).actual_model,
+            },
+        )
+        .unwrap()
+        .url;
 
     assert_eq!(
         url,
@@ -137,7 +146,7 @@ fn vertex_build_url_rewrites_google_generate_content_to_vertex_resource() {
 }
 
 #[test]
-fn vertex_build_url_rewrites_openai_compat_path_without_double_version() {
+fn vertex_inference_endpoint_rewrites_openai_compat_path_without_double_version() {
     let reg = VendorRegistry::global();
     let mut p = make_provider(Some("google-vertex"), None);
     p.protocol = "openai-compatible".into();
@@ -155,7 +164,23 @@ fn vertex_build_url_rewrites_openai_compat_path_without_double_version() {
         None,
     );
 
-    let url = ext.build_url(&ctx, &p.base_url, "/v1/chat/completions");
+    let url = ext
+        .construct_request(
+            &stravia_core::provider::vendor_ext::RequestContext {
+                provider: (&ctx).provider,
+                api_key: (&ctx).api_key,
+                credential: (&ctx).credential,
+                disable_default_auth: false,
+            },
+            stravia_core::provider::vendor_ext::RequestPurpose::Inference {
+                protocol: (&ctx).protocol_id,
+                base_url: &p.base_url,
+                path: "/v1/chat/completions",
+                actual_model: (&ctx).actual_model,
+            },
+        )
+        .unwrap()
+        .url;
 
     assert_eq!(
         url,
@@ -228,7 +253,7 @@ fn ollama_vendor_resolves_even_without_channel() {
     ));
 }
 
-// ── 2. auth_headers / build_url legacy parity ─────────────────────────────
+// ── 2. Purpose-aware request behavior ─────────────────────────────
 
 #[test]
 fn openai_family_default_emits_bearer() {
@@ -237,13 +262,20 @@ fn openai_family_default_emits_bearer() {
     let ext = reg
         .resolve(&p, OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1)
         .unwrap();
-    let h = ext.auth_headers(&ctx(
-        &p,
-        OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
-        "sk-abc",
-        "gpt-4",
-        None,
-    ));
+    let h = ext
+        .construct_request(
+            &stravia_core::provider::vendor_ext::RequestContext {
+                provider: &p,
+                api_key: "sk-abc",
+                credential: None,
+                disable_default_auth: false,
+            },
+            stravia_core::provider::vendor_ext::RequestPurpose::Models {
+                endpoint: "https://upstream.test/models",
+            },
+        )
+        .unwrap()
+        .headers;
     assert_eq!(h.get("Authorization").unwrap(), "Bearer sk-abc");
 }
 
@@ -252,13 +284,20 @@ fn anthropic_family_default_emits_x_api_key_and_version() {
     let reg = VendorRegistry::global();
     let p = make_provider(None, None);
     let ext = reg.resolve(&p, ANTHROPIC_MESSAGES_2023_06_01).unwrap();
-    let h = ext.auth_headers(&ctx(
-        &p,
-        ANTHROPIC_MESSAGES_2023_06_01,
-        "sk-ant",
-        "claude",
-        None,
-    ));
+    let h = ext
+        .construct_request(
+            &stravia_core::provider::vendor_ext::RequestContext {
+                provider: &p,
+                api_key: "sk-ant",
+                credential: None,
+                disable_default_auth: false,
+            },
+            stravia_core::provider::vendor_ext::RequestPurpose::Models {
+                endpoint: "https://upstream.test/models",
+            },
+        )
+        .unwrap()
+        .headers;
     assert_eq!(h.get("x-api-key").unwrap(), "sk-ant");
     assert_eq!(h.get("anthropic-version").unwrap(), "2023-06-01");
 }
@@ -278,21 +317,45 @@ fn google_family_default_appends_key_query_param() {
         None,
     );
 
-    let url1 = ext.build_url(
-        &c,
-        "https://generativelanguage.googleapis.com",
-        "/v1beta/models",
-    );
+    let url1 = ext
+        .construct_request(
+            &stravia_core::provider::vendor_ext::RequestContext {
+                provider: (&c).provider,
+                api_key: (&c).api_key,
+                credential: (&c).credential,
+                disable_default_auth: false,
+            },
+            stravia_core::provider::vendor_ext::RequestPurpose::Inference {
+                protocol: (&c).protocol_id,
+                base_url: "https://generativelanguage.googleapis.com",
+                path: "/v1beta/models",
+                actual_model: (&c).actual_model,
+            },
+        )
+        .unwrap()
+        .url;
     assert_eq!(
         url1,
         "https://generativelanguage.googleapis.com/v1beta/models?key=AIzaXYZ"
     );
 
-    let url2 = ext.build_url(
-        &c,
-        "https://generativelanguage.googleapis.com/v1beta",
-        "/models?alt=sse",
-    );
+    let url2 = ext
+        .construct_request(
+            &stravia_core::provider::vendor_ext::RequestContext {
+                provider: (&c).provider,
+                api_key: (&c).api_key,
+                credential: (&c).credential,
+                disable_default_auth: false,
+            },
+            stravia_core::provider::vendor_ext::RequestPurpose::Inference {
+                protocol: (&c).protocol_id,
+                base_url: "https://generativelanguage.googleapis.com/v1beta",
+                path: "/models?alt=sse",
+                actual_model: (&c).actual_model,
+            },
+        )
+        .unwrap()
+        .url;
     assert_eq!(
         url2,
         "https://generativelanguage.googleapis.com/v1beta/models?alt=sse&key=AIzaXYZ"
@@ -308,11 +371,176 @@ fn openai_compat_strips_v1_when_base_already_has_path() {
         .unwrap();
     let c = ctx(&p, OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1, "k", "m", None);
 
-    let stripped = ext.build_url(&c, "https://api.deepseek.com/v1", "/v1/chat/completions");
+    let stripped = ext
+        .construct_request(
+            &stravia_core::provider::vendor_ext::RequestContext {
+                provider: (&c).provider,
+                api_key: (&c).api_key,
+                credential: (&c).credential,
+                disable_default_auth: false,
+            },
+            stravia_core::provider::vendor_ext::RequestPurpose::Inference {
+                protocol: (&c).protocol_id,
+                base_url: "https://api.deepseek.com/v1",
+                path: "/v1/chat/completions",
+                actual_model: (&c).actual_model,
+            },
+        )
+        .unwrap()
+        .url;
     assert_eq!(stripped, "https://api.deepseek.com/v1/chat/completions");
 
-    let preserved = ext.build_url(&c, "https://api.openai.com", "/v1/chat/completions");
+    let preserved = ext
+        .construct_request(
+            &stravia_core::provider::vendor_ext::RequestContext {
+                provider: (&c).provider,
+                api_key: (&c).api_key,
+                credential: (&c).credential,
+                disable_default_auth: false,
+            },
+            stravia_core::provider::vendor_ext::RequestPurpose::Inference {
+                protocol: (&c).protocol_id,
+                base_url: "https://api.openai.com",
+                path: "/v1/chat/completions",
+                actual_model: (&c).actual_model,
+            },
+        )
+        .unwrap()
+        .url;
     assert_eq!(preserved, "https://api.openai.com/v1/chat/completions");
+}
+
+#[test]
+fn google_purpose_owns_credential_carrier_and_suppression() {
+    use stravia_core::provider::vendor_ext::{RequestContext, RequestPurpose};
+    let p = make_provider(Some("google"), None);
+    let vendor = VendorRegistry::global()
+        .resolve(&p, GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA)
+        .unwrap();
+    let secret = "synthetic &+?#=/%";
+    let mut credentials = RequestContext {
+        provider: &p,
+        api_key: secret,
+        credential: None,
+        disable_default_auth: false,
+    };
+    let inference = RequestPurpose::Inference {
+        protocol: GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+        base_url: "https://upstream.test",
+        path: "/v1beta/models/actual-model:generateContent?alt=sse",
+        actual_model: "actual-model",
+    };
+    let request = vendor.construct_request(&credentials, inference).unwrap();
+    let url = reqwest::Url::parse(&request.url).unwrap();
+    assert_eq!(url.path(), "/v1beta/models/actual-model:generateContent");
+    assert_eq!(
+        url.query_pairs().into_owned().collect::<Vec<_>>(),
+        [
+            ("alt".to_string(), "sse".to_string()),
+            ("key".to_string(), secret.to_string())
+        ]
+    );
+    assert!(!request.headers.contains_key("authorization"));
+
+    let endpoint = "https://models-proxy.test/custom/inventory?region=a%2Fb&cursor=next";
+    let models = RequestPurpose::Models { endpoint };
+    let request = vendor.construct_request(&credentials, models).unwrap();
+    assert_eq!(request.url, endpoint);
+    assert_eq!(
+        request.headers["authorization"].to_str().unwrap(),
+        format!("Bearer {secret}")
+    );
+
+    credentials.disable_default_auth = true;
+    let request = vendor.construct_request(&credentials, inference).unwrap();
+    assert_eq!(
+        reqwest::Url::parse(&request.url).unwrap().query(),
+        Some("alt=sse")
+    );
+    let request = vendor.construct_request(&credentials, models).unwrap();
+    assert_eq!(request.url, endpoint);
+    assert!(!request.headers.contains_key("authorization"));
+}
+
+#[test]
+fn google_known_native_models_auth_does_not_classify_custom_proxy_paths() {
+    use stravia_core::provider::{RequestContext, RequestPurpose};
+    let mut provider = make_provider(Some("google"), None);
+    provider.models_source = Some("https://custom.test/v1beta/models".into());
+    let vendor = VendorRegistry::global()
+        .resolve(&provider, GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA)
+        .unwrap();
+    let mut context = RequestContext {
+        provider: &provider,
+        api_key: "synthetic&+?key",
+        credential: None,
+        disable_default_auth: false,
+    };
+    let native = RequestPurpose::Models {
+        endpoint: "https://generativelanguage.googleapis.com/v1beta/models?pageSize=2",
+    };
+    let request = vendor.construct_request(&context, native).unwrap();
+    assert_eq!(
+        reqwest::Url::parse(&request.url)
+            .unwrap()
+            .query_pairs()
+            .into_owned()
+            .collect::<Vec<_>>(),
+        [
+            ("pageSize".into(), "2".into()),
+            ("key".into(), "synthetic&+?key".into())
+        ],
+    );
+    assert!(!request.headers.contains_key("authorization"));
+    let custom = vendor
+        .construct_request(
+            &context,
+            RequestPurpose::Models {
+                endpoint: provider.models_source.as_deref().unwrap(),
+            },
+        )
+        .unwrap();
+    assert_eq!(custom.url, "https://custom.test/v1beta/models");
+    assert_eq!(custom.headers["authorization"], "Bearer synthetic&+?key");
+    context.disable_default_auth = true;
+    let suppressed = vendor.construct_request(&context, native).unwrap();
+    assert_eq!(
+        suppressed.url,
+        "https://generativelanguage.googleapis.com/v1beta/models?pageSize=2"
+    );
+    assert!(!suppressed.headers.contains_key("authorization"));
+}
+
+#[test]
+fn models_endpoint_does_not_apply_inference_deployment_or_channel_routes() {
+    use stravia_core::provider::vendor_ext::{RequestContext, RequestPurpose};
+    let endpoint = "https://inventory.test/selected/path?version=kept&next=a%2Fb";
+    for (vendor, channel) in [
+        ("azure", None),
+        ("google-vertex", None),
+        ("openai", Some("codex")),
+        ("cloudflare-ai-gateway", None),
+    ] {
+        let p = make_provider(Some(vendor), channel);
+        let extension = VendorRegistry::global()
+            .resolve(&p, OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1)
+            .unwrap();
+        let request = extension
+            .construct_request(
+                &RequestContext {
+                    provider: &p,
+                    api_key: "synthetic-key",
+                    credential: None,
+                    disable_default_auth: false,
+                },
+                RequestPurpose::Models { endpoint },
+            )
+            .unwrap();
+        assert_eq!(
+            request.url, endpoint,
+            "{vendor} must preserve the selected inventory endpoint"
+        );
+    }
 }
 
 // ── 3. Registered metadata matches the complete Vendor roster ────────────────

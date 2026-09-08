@@ -322,10 +322,13 @@ inference_run::execute(RunInput)（一次性 crate-private interface）
          ├─ 按 RouteBinding 或 CapabilityGrant 授权
          ├─ 健康感知 Target iteration / negotiate() / Vendor / ProtocolPair
          ├─ ContinuationLookup 在锁定 Target 后准备上游前缀
-         └─ Provider Transport（HTTP/SSE 或 Responses WebSocket）
+         ├─ Provider Transport（HTTP/SSE 或 Responses WebSocket）
               ├─ 两种 transport 均归一为 canonical AiResponse / AiStreamDelta
               ├─ 按原始 Provider 视图记录引用与续接证明，再还原回答及工具参数
               └─ 仅 retryable provider 失败且尚无客户端可见输出时切换 Target
+         └─ 内部终态 gate：还原尾部 delta → 当前共享引用发布 → 唯一 Completed
+              ├─ 取消 / deadline 可抢占读取和发布等待，已发布映射不回滚
+              └─ gate 拥有 Model Turn 终态观测，上游 attempt / usage 保持独立真实
     │
     ▼
 Inference Run module（同一 run 持有 HookRuntime run state 与跨 round 状态）
@@ -346,6 +349,7 @@ Inference Run module（同一 run 持有 HookRuntime run state 与跨 round 状�
     ├─ HookLegGuard：每条 stream leg 在结束、取消、error 或 drop 时恰好 close 一次
     ├─ Client Output Commit：commit 前可返回完整错误；commit 后失败只终止当前 stream
     └─ ClaimLease / DeliveryLeaseStream：
+         ├─ Generation Chain stage 必须提供当前 Model Leg 的 Target 或明确 Hook 来源
          ├─ 新 Generation Chain 仅在完整客户端 delivery 后保存；Tool Continuation 遵循其 delivery 完成契约
          └─ 被 claim 的 Tool Continuation 仅在客户端 delivery 完成后 complete，否则 release
     │
@@ -521,7 +525,7 @@ Trace segment 位于 data directory 下的托管 `observation-debug` 目录；�
 
 检测器内置 Betterleaks 提交 `95237cf8eb4d8e9f67409595b245e674832992cf` 的 462 条规则、上游词表及许可证。Rust 编译器启动检测时核对完整快照并编译本地正则、过滤表达式、熵与组合条件；token efficiency 使用内置 `cl100k_base`。模型文本没有受信文件路径，因此文件专属条件以空路径求值。`validate` 仅保留在原始快照中，不编译、不执行；运行时不下载规则或词表。先扫描全部可读文本、补齐新秘密映射，再统一执行最长优先的单次精确替换；工具 JSON 以解码后的字符串参加检测与替换，不改写协议标识、媒体或不透明载荷。
 
-SQL 映射以 Principal 为唯一访问边界，引用格式为 `~stravia-secret:<32 位随机小写十六进制>~`。同 Key 并发请求及重启后复用仍有效映射，其他 Key 的映射不参加匹配或还原。新映射可靠持久化后才能发往 Provider；未发布保留一小时。Inference Run 或 Agent Runner 成功消费完整 Model Turn 时发布本回合使用的引用，将有效期延长至至少七天；Generation Chain 写入按自身 TTL 延长仍有效的已发布引用，不缩短已有期限，也不复活过期行。清理复用既有历史维护任务，映射不随某一来源对话删除而级联消失。
+SQL 映射以 Principal 为唯一访问边界，引用格式为 `~stravia-secret:<32 位随机小写十六进制>~`。同 Key 并发请求及重启后复用仍有效映射，其他 Key 的映射不参加匹配或还原。新映射可靠持久化后才能发往 Provider；未发布保留一小时。Model Turn 内部 gate 在还原器尾部 delta 已交出后读取共享 trace 当前引用并发布，将有效期延长至至少七天，然后才交出唯一 `Completed`；无本地映射或不提交 Agent Turn 也不绕过发布。取消与 deadline 可抢占发布等待，但不保证数据库尚未提交，也不撤销已发布映射。Generation Chain 写入按自身 TTL 延长仍有效的已发布引用，不缩短已有期限，也不复活过期行。清理复用既有历史维护任务，映射不随某一来源对话删除而级联消失。
 
 工具结果由生产者通过 `ToolResultContentKind` 明确声明为业务 JSON 或 content blocks，不根据业务字段 `type` 猜测。Platform Tool、Agent Tool adapter、Hook 重建和历史保存共同保留该语义；业务 JSON 遍历字符串值，content blocks 只遍历已知可读字段，媒体与不透明数据保持原样。`AgentToolOutput` 携带内容及语义，平台与 Agent 路径共用可失败的内容块转换，序列化失败作为工具错误交付而不是 panic。
 
@@ -631,9 +635,9 @@ pub trait Vendor: Send + Sync + 'static {
     fn supported_protocols(&self) -> &'static [ProtocolId];
     fn metadata(&self) -> &'static VendorMetadata;
 
-    // Auth / URL
-    fn auth_headers(&self, ctx: &VendorCtx) -> HeaderMap;
-    fn build_url(&self, ctx: &VendorCtx, base_url: &str, path: &str) -> String;
+    // 推理与 Models 的共同认证 / URL 构造契约
+    fn construct_request(&self, ctx: &RequestContext, purpose: RequestPurpose)
+        -> anyhow::Result<ConstructedRequest>;
 
     // 编解码 hook（可选，默认 no-op）
     async fn pre_request(&self, ctx, req: &mut AiRequest, gw: &Gateway);
@@ -659,8 +663,12 @@ pub trait Vendor: Send + Sync + 'static {
 }
 ```
 
-**7 步 build_request pipeline**（`provider/common/pipeline.rs`）：
-`pre_request` → `normalize_tool_results` → `pre_encode` → `codec_encode` → `post_encode` → `auth_headers` → `build_url`
+**build_request pipeline**（`provider/common/pipeline.rs`）：
+`pre_request` → `normalize_tool_results` → `pre_encode` → `codec_encode` → `post_encode` → `construct_request`。codec / post-encode headers 覆盖构造默认值，明确 runtime binding headers 保持最终覆盖优先级。
+
+`RequestPurpose::Inference` 携带实际 egress 协议、base URL、codec 相对路径与实际模型；`Models` 只携带调用方选定的完整端点，不执行推理模型或 deployment 路径改写。`RequestContext` 携带解析后的凭据与默认认证抑制，构造返回最终 URL 和 headers。认证抑制同时覆盖默认 header 和 query 凭据；协议别名经 ProtocolRegistry，凭据 query 使用结构化编码。已知 Models 约定优先，自定义端点继承所解析 Vendor 的 Models 约定，不猜任意 URL。
+
+Provider 查询与 Route 同步分别拥有来源优先级、发送、解析、原有超时及错误；查询保留原有静态回退，同步失败明确报错。两者都用 `http_client_for_provider(use_proxy)` 遵循既有全局出站策略，不另选代理或在配置失败后绕过。Provider write 与 Route bind 仍为独立 module。
 
 **ProviderCtx**（`provider/vendor.rs`）：
 
@@ -679,7 +687,7 @@ pub struct ProviderCtx<'a> {
 
 ### 6.2 VendorExtension（channel / family ext）
 
-`VendorExtension`（`provider/vendor_ext.rs`）仍存在，包含 9 个 hook（auth_headers / build_url / pre_encode / post_encode / pre_parse / post_parse / on_stream_raw_chunk / on_stream_delta / pre_request）。
+`VendorExtension`（`provider/vendor_ext.rs`）保留用途化 `construct_request`、编解码与流式 hook，以及 Target capability / Responses WebSocket 契约；不再暴露分离认证与 URL 钩子。
 
 **关系：**
 - `Vendor` 通过 blanket `impl<T: Vendor> VendorExtension for T` 自动实现 `VendorExtension`
@@ -698,7 +706,7 @@ inventory::submit! { ExtensionRegistration { make: || Box::new(XxxChannel) } }
 
 ### 6.3 共用 helpers（provider/common/openai_compat.rs）
 
-所有 OpenAI 兼容厂商共用：`openai_bearer_auth_headers`、`openai_build_url`、`openai_map_error`、`openai_build_request`、`openai_parse_response`、`GenericOpenAICompatibleAdapter`。
+OpenAI 兼容厂商复用 `construct_openai_request`、`openai_map_error`、`openai_build_request`、`openai_parse_response` 和 `GenericOpenAICompatibleAdapter`；用途化构造内部统一处理 Bearer 与路径规则。
 
 ### 6.4 厂商列表
 

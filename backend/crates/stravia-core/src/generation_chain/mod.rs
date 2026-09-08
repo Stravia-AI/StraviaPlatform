@@ -31,8 +31,7 @@ use project::*;
 use store::*;
 
 pub(crate) use project::{
-    generation_node_is_completed, generation_session_fingerprint, mark_generation_target,
-    set_generation_session_id,
+    generation_node_is_completed, generation_session_fingerprint, set_generation_session_id,
 };
 pub(crate) use store::{
     hydrate_response_artifact_references, request_has_item_references,
@@ -66,6 +65,19 @@ pub(crate) struct GenerationChainWrite {
     request: AiRequest,
     id: String,
     staged: Option<StagedGeneration>,
+}
+
+#[derive(Clone)]
+pub(crate) enum GenerationSource {
+    Target {
+        namespace: String,
+        protocol: ProtocolId,
+        actual_model: String,
+        selected_target_key: String,
+    },
+    Hook {
+        protocol: ProtocolId,
+    },
 }
 
 #[derive(Clone)]

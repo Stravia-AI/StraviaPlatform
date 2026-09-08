@@ -3,15 +3,13 @@
 pub mod codex;
 
 use async_trait::async_trait;
-use reqwest::header::HeaderMap;
+
 use serde_json::Value;
 
 use crate::error::GatewayError;
 use crate::protocol::ids::ProtocolId;
 use crate::protocol::ir::{AiRequest, AiResponse};
-use crate::provider::common::openai_compat::{
-    openai_bearer_auth_headers, openai_build_url, openai_map_error,
-};
+use crate::provider::common::openai_compat::openai_map_error;
 use crate::provider::common::pipeline;
 use crate::provider::inbound::InboundResponse;
 use crate::provider::metadata::{
@@ -162,11 +160,12 @@ impl Vendor for OpenAiVendor {
     fn retain_responses_websocket_event(&self, _ctx: &VendorCtx<'_>, event: &Value) -> bool {
         retain_openai_responses_websocket_event(event)
     }
-    fn auth_headers(&self, ctx: &VendorCtx<'_>) -> HeaderMap {
-        openai_bearer_auth_headers(ctx)
-    }
-    fn build_url(&self, _ctx: &VendorCtx<'_>, base_url: &str, path: &str) -> String {
-        openai_build_url(base_url, path)
+    fn construct_request(
+        &self,
+        ctx: &crate::provider::vendor_ext::RequestContext<'_>,
+        purpose: crate::provider::vendor_ext::RequestPurpose<'_>,
+    ) -> anyhow::Result<crate::provider::vendor_ext::ConstructedRequest> {
+        crate::provider::common::openai_compat::construct_openai_request(ctx, purpose)
     }
     fn vendor_id(&self) -> &'static str {
         "openai"
@@ -217,11 +216,12 @@ impl VendorExtension for OpenAIFamilyExt {
     fn metadata(&self) -> Option<&'static VendorMetadata> {
         None
     }
-    fn auth_headers(&self, ctx: &VendorCtx<'_>) -> HeaderMap {
-        openai_bearer_auth_headers(ctx)
-    }
-    fn build_url(&self, _ctx: &VendorCtx<'_>, base_url: &str, path: &str) -> String {
-        openai_build_url(base_url, path)
+    fn construct_request(
+        &self,
+        ctx: &crate::provider::vendor_ext::RequestContext<'_>,
+        purpose: crate::provider::vendor_ext::RequestPurpose<'_>,
+    ) -> anyhow::Result<crate::provider::vendor_ext::ConstructedRequest> {
+        crate::provider::common::openai_compat::construct_openai_request(ctx, purpose)
     }
 }
 

@@ -18,7 +18,6 @@ use crate::provider::metadata::{
 use crate::provider::outbound::OutboundRequest;
 use crate::provider::registry::{VendorRegistration, VendorScope};
 use crate::provider::vendor::{ProviderCtx, Vendor, resolve_base_url};
-use crate::provider::vendor_ext::VendorCtx;
 
 const CREDENTIAL_FIELDS: &[CredentialFieldDef] = &[
     CredentialFieldDef {
@@ -102,18 +101,33 @@ impl Vendor for CloudflareAiGatewayVendor {
         })
     }
 
-    fn auth_headers(&self, ctx: &VendorCtx<'_>) -> HeaderMap {
-        let mut headers = HeaderMap::new();
-        if let Some(token) = ctx.provider.adapter_credential("apiToken")
-            && let Ok(value) = HeaderValue::from_str(&format!("Bearer {token}"))
-        {
-            headers.insert("cf-aig-authorization", value);
-        }
-        headers
-    }
-
-    fn build_url(&self, _ctx: &VendorCtx<'_>, base_url: &str, _path: &str) -> String {
-        base_url.trim_end_matches('/').into()
+    fn construct_request(
+        &self,
+        ctx: &crate::provider::vendor_ext::RequestContext<'_>,
+        purpose: crate::provider::vendor_ext::RequestPurpose<'_>,
+    ) -> anyhow::Result<crate::provider::vendor_ext::ConstructedRequest> {
+        use crate::provider::vendor_ext::{ConstructedRequest, RequestPurpose};
+        let url = match purpose {
+            RequestPurpose::Models { endpoint } => endpoint.to_string(),
+            RequestPurpose::Inference {
+                base_url,
+                path: _,
+                protocol: _,
+                actual_model: _,
+            } => base_url.trim_end_matches('/').into(),
+        };
+        let headers = if ctx.disable_default_auth {
+            reqwest::header::HeaderMap::new()
+        } else {
+            let mut headers = HeaderMap::new();
+            if let Some(token) = ctx.provider.adapter_credential("apiToken")
+                && let Ok(value) = HeaderValue::from_str(&format!("Bearer {token}"))
+            {
+                headers.insert("cf-aig-authorization", value);
+            }
+            headers
+        };
+        ConstructedRequest::new(ctx, purpose, url, headers)
     }
 
     fn vendor_id(&self) -> &'static str {

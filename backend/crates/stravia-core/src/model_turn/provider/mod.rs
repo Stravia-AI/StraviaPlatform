@@ -246,15 +246,6 @@ impl AttemptObservation {
         }
     }
 
-    pub(crate) fn model_turn_finished(&self, status: &str) {
-        if let Some(observer) = &self.observer {
-            observer.record(RunEvent::ModelTurnFinished {
-                model_turn_id: self.model_turn_id.clone(),
-                status: status.to_owned(),
-            });
-        }
-    }
-
     pub(crate) fn confirm_usage(&self, usage: &crate::protocol::ir::Usage) {
         if self.usage_confirmed.swap(true, Ordering::AcqRel) {
             return;

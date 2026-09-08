@@ -383,7 +383,11 @@ async fn automatic_parent_matches_a_combined_assistant_turn() {
         tool_call_id: None,
         meta: None,
     };
-    root.stage(&mut response, Some("upstream-response".into()));
+    root.stage(
+        &mut response,
+        &generation_source(),
+        Some("upstream-response".into()),
+    );
     root.persist().await.expect("persist root");
     let root_id = root.id().to_owned();
 
@@ -423,7 +427,11 @@ async fn matching_prefix_prefers_ephemeral_upstream_continuation_when_transport_
         .expect("begin root");
     let mut response = AiResponse::new("upstream", "model");
     response.push_output_text("answer");
-    root.stage(&mut response, Some("upstream-response".into()));
+    root.stage(
+        &mut response,
+        &generation_source(),
+        Some("upstream-response".into()),
+    );
     root.persist().await.expect("persist root");
 
     let mut resumed_request = responses_request(vec![
@@ -447,7 +455,7 @@ async fn matching_prefix_prefers_ephemeral_upstream_continuation_when_transport_
             .prepare(
                 &owner,
                 crate::model_turn::ContinuationTarget {
-                    namespace: "",
+                    namespace: "provider:model",
                     protocol: OPEN_RESPONSES_2026_04_24,
                     actual_model: "model",
                     logical_model: "model",
@@ -465,7 +473,7 @@ async fn matching_prefix_prefers_ephemeral_upstream_continuation_when_transport_
             .prepare(
                 &owner,
                 crate::model_turn::ContinuationTarget {
-                    namespace: "",
+                    namespace: "provider:model",
                     protocol: OPEN_RESPONSES_2026_04_24,
                     actual_model: "model",
                     logical_model: "model",
@@ -517,7 +525,11 @@ async fn stable_session_does_not_link_semantically_changed_history() {
         .expect("begin root");
     let mut response = AiResponse::new("upstream", "model");
     response.push_output_text("first answer");
-    root.stage(&mut response, Some("upstream-response".into()));
+    root.stage(
+        &mut response,
+        &generation_source(),
+        Some("upstream-response".into()),
+    );
     root.persist().await.expect("persist root");
     let mut resumed_request = responses_request(vec![
         user_message("first"),
@@ -1124,7 +1136,7 @@ async fn response_history_survives_gateway_restart_with_sqlite() {
         .await
         .expect("begin response");
     let response_id = write.id().to_owned();
-    write.stage(&mut response, None);
+    write.stage(&mut response, &generation_source(), None);
     write.persist().await.expect("persist response");
     drop(gateway);
 

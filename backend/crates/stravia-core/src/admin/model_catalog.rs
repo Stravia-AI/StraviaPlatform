@@ -9,9 +9,11 @@ pub(super) fn resolve_models_endpoint(provider: &Provider) -> Option<String> {
     }
 
     let base = provider.base_url.trim_end_matches('/');
-    match provider.protocol.as_str() {
-        "openai" | "openai-compatible" | "openai-compat" | "open-responses" | "anthropic"
-        | "anthropic-messages" | "anthropic-msgs" => {
+    use crate::protocol::ids::Protocol;
+    match crate::protocol::registry::ProtocolRegistry::global()
+        .parse_protocol(&provider.protocol)?
+    {
+        Protocol::OpenAICompatible | Protocol::OpenResponses | Protocol::AnthropicMessages => {
             let has_base_path = reqwest::Url::parse(base)
                 .ok()
                 .map(|url| {
@@ -25,7 +27,7 @@ pub(super) fn resolve_models_endpoint(provider: &Provider) -> Option<String> {
                 Some(format!("{base}/v1/models"))
             }
         }
-        "gemini" | "google-gemini" | "google-genai" => Some(format!("{base}/v1beta/models")),
+        Protocol::GoogleGemini => Some(format!("{base}/v1beta/models")),
         _ => None,
     }
 }
@@ -41,36 +43,30 @@ pub(super) fn runtime_binding_headers(binding: &RuntimeBinding) -> anyhow::Resul
     Ok(headers)
 }
 
-pub(super) fn build_model_headers(
-    protocol: &str,
-    vendor: Option<&str>,
-    api_key: &str,
-) -> anyhow::Result<HeaderMap> {
-    let mut headers = HeaderMap::new();
-    let is_google_vendor = vendor
-        .map(str::trim)
-        .is_some_and(|value| value.eq_ignore_ascii_case("google"));
-    match protocol {
-        "anthropic" => {
-            headers.insert("x-api-key", HeaderValue::from_str(api_key)?);
-            headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
-        }
-        "gemini" => {
-            if is_google_vendor {
-                headers.insert(
-                    AUTHORIZATION,
-                    HeaderValue::from_str(&format!("Bearer {api_key}"))?,
-                );
-            }
-        }
-        _ => {
-            headers.insert(
-                AUTHORIZATION,
-                HeaderValue::from_str(&format!("Bearer {api_key}"))?,
-            );
-        }
-    }
-    Ok(headers)
+pub(super) fn construct_models_request(
+    provider: &Provider,
+    runtime: &ResolvedProviderRuntime,
+    endpoint: &str,
+) -> anyhow::Result<crate::provider::vendor_ext::ConstructedRequest> {
+    use crate::provider::vendor_ext::{RequestContext, RequestPurpose};
+    let protocol = crate::protocol::ProviderProtocols::parse_protocol_key(&provider.protocol)
+        .ok_or_else(|| anyhow::anyhow!("Unknown Provider protocol: {}", provider.protocol))?;
+    let vendor = crate::provider::registry::VendorRegistry::global()
+        .resolve(provider, protocol)
+        .ok_or_else(|| anyhow::anyhow!("No Vendor for Provider protocol: {}", provider.protocol))?;
+    let mut request = vendor.construct_request(
+        &RequestContext {
+            provider,
+            api_key: &runtime.access_token,
+            credential: None,
+            disable_default_auth: runtime.binding.disable_default_auth,
+        },
+        RequestPurpose::Models { endpoint },
+    )?;
+    request
+        .headers
+        .extend(runtime_binding_headers(&runtime.binding)?);
+    Ok(request)
 }
 
 pub(super) fn extract_models_from_response(

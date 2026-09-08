@@ -15,7 +15,7 @@ use crate::protocol::ids::{
 };
 use crate::protocol::ir::{AiRequest, AiResponse};
 use crate::provider::common::{
-    openai_compat::{openai_build_url, openai_map_error},
+    openai_compat::{openai_endpoint, openai_map_error},
     pipeline,
 };
 use crate::provider::inbound::InboundResponse;
@@ -26,7 +26,6 @@ use crate::provider::metadata::{
 use crate::provider::outbound::OutboundRequest;
 use crate::provider::registry::{VendorRegistration, VendorScope};
 use crate::provider::vendor::{ProviderCtx, Vendor, resolve_base_url};
-use crate::provider::vendor_ext::VendorCtx;
 
 const CREDENTIAL_FIELDS: &[CredentialFieldDef] = &[
     CredentialFieldDef {
@@ -104,16 +103,31 @@ impl Vendor for AzureVendor {
         })
     }
 
-    fn auth_headers(&self, ctx: &VendorCtx<'_>) -> HeaderMap {
-        let mut headers = HeaderMap::new();
-        if let Ok(value) = HeaderValue::from_str(ctx.api_key.trim()) {
-            headers.insert("api-key", value);
-        }
-        headers
-    }
-
-    fn build_url(&self, ctx: &VendorCtx<'_>, base_url: &str, path: &str) -> String {
-        azure_request_url(base_url, path, &azure_api_version(ctx.provider))
+    fn construct_request(
+        &self,
+        ctx: &crate::provider::vendor_ext::RequestContext<'_>,
+        purpose: crate::provider::vendor_ext::RequestPurpose<'_>,
+    ) -> anyhow::Result<crate::provider::vendor_ext::ConstructedRequest> {
+        use crate::provider::vendor_ext::{ConstructedRequest, RequestPurpose};
+        let url = match purpose {
+            RequestPurpose::Models { endpoint } => endpoint.to_string(),
+            RequestPurpose::Inference {
+                base_url,
+                path,
+                protocol: _,
+                actual_model: _,
+            } => azure_request_url(base_url, path, &azure_api_version(ctx.provider)),
+        };
+        let headers = if ctx.disable_default_auth {
+            reqwest::header::HeaderMap::new()
+        } else {
+            let mut headers = HeaderMap::new();
+            if let Ok(value) = HeaderValue::from_str(ctx.api_key.trim()) {
+                headers.insert("api-key", value);
+            }
+            headers
+        };
+        ConstructedRequest::new(ctx, purpose, url, headers)
     }
 
     fn vendor_id(&self) -> &'static str {
@@ -166,7 +180,7 @@ fn azure_api_version(provider: &crate::db::models::Provider) -> String {
 }
 
 fn azure_request_url(base_url: &str, path: &str, api_version: &str) -> String {
-    let url = openai_build_url(base_url, path);
+    let url = openai_endpoint(base_url, path);
     let Ok(mut url) = Url::parse(&url) else {
         return url;
     };

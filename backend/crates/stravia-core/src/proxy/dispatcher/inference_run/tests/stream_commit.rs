@@ -1,5 +1,90 @@
 use super::*;
 
+struct CompletedThenErrorExecutor {
+    streamed: bool,
+}
+
+#[async_trait::async_trait]
+impl crate::model_turn::ModelTurnExecutor for CompletedThenErrorExecutor {
+    async fn execute(
+        &self,
+        input: crate::model_turn::TurnInput,
+    ) -> Result<crate::model_turn::ModelTurn, crate::model_turn::ModelTurnError> {
+        use crate::model_turn::{CanonicalEvent, ModelTurn, ModelTurnError};
+        let mut response = AiResponse::new("completed-upstream", &input.request.model);
+        response.push_output_text("completed answer");
+        response.stop_reason = Some("stop".into());
+        let mut turn = ModelTurn::in_memory(
+            crate::hook::RouteContext {
+                model_id: input.request.model.clone(),
+                provider_id: "completed-provider".into(),
+                target_id: "completed-target".into(),
+                egress: OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            },
+            input.request,
+            [
+                Ok(CanonicalEvent::Delta(
+                    crate::protocol::ir::AiStreamDelta::TextDelta("completed answer".into()),
+                )),
+                Ok(CanonicalEvent::Completed(Box::new(response))),
+                Err(ModelTurnError::new(
+                    "late_error",
+                    "must not reinterpret completion",
+                )),
+            ],
+        );
+        turn.streamed = self.streamed;
+        Ok(turn)
+    }
+}
+
+#[tokio::test]
+async fn delivery_stops_reading_at_completed_for_buffered_and_live_turns() {
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let gateway = Gateway::new(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .expect("Gateway");
+    let headers = authorized_headers(&gateway).await;
+    for (streamed, live) in [(false, false), (true, false), (true, true)] {
+        let mut request = AiRequest::new("completed-route", Vec::new());
+        request.stream.enabled = live;
+        let response = execute(RunInput {
+            gateway: gateway.clone(),
+            executor: Arc::new(CompletedThenErrorExecutor { streamed }),
+            headers: headers.clone(),
+            envelope: RawEnvelope::new(
+                Some(serde_json::json!({"model": "completed-route", "stream": live})),
+                HashMap::new(),
+                "POST",
+                "/v1/chat/completions",
+            ),
+            request,
+            ingress: OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            context: RequestContext::new(
+                OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+                std::time::Duration::from_secs(30),
+            ),
+        })
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("complete body");
+        let body = String::from_utf8_lossy(&body);
+        assert!(body.contains("completed answer"), "{body}");
+        assert!(
+            !body.contains("late_error") && !body.contains("stream_mid_error"),
+            "{body}"
+        );
+        if live {
+            assert!(body.contains("[DONE]"), "{body}");
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum ThinkingMarkerFailure {
     Persist,

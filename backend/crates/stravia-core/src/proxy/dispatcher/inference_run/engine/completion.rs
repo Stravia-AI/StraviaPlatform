@@ -16,10 +16,7 @@ use super::{ClientProjectionSession, Phase, PhaseTracker};
 #[derive(Clone)]
 struct GenerationChainCompletion {
     write: crate::generation_chain::GenerationChainWrite,
-    target_namespace: String,
-    target_protocol: crate::protocol::ids::ProtocolId,
-    actual_model: String,
-    selected_target_key: String,
+    source: crate::generation_chain::GenerationSource,
     owns_response_identity: bool,
     response_continuation_available: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
@@ -53,10 +50,12 @@ impl CompletionContext {
         );
         let generation_chain = generation.write.map(|write| GenerationChainCompletion {
             write,
-            target_namespace: target.namespace.clone(),
-            target_protocol: egress,
-            actual_model: target.actual_model.clone(),
-            selected_target_key: target.target_id.clone(),
+            source: crate::generation_chain::GenerationSource::Target {
+                namespace: target.namespace.clone(),
+                protocol: egress,
+                actual_model: target.actual_model.clone(),
+                selected_target_key: target.target_id.clone(),
+            },
             owns_response_identity,
             response_continuation_available: target.response_continuation_available.clone(),
         });
@@ -565,28 +564,25 @@ pub(super) async fn complete_canonical_response(
     let reusable_upstream_id = generation_chain
         .as_ref()
         .is_some_and(|chain| {
-            chain.target_protocol == OPEN_RESPONSES_2026_04_24
-                && upstream_response_is_available(
-                    chain.write.request(),
-                    &chain.response_continuation_available,
-                )
-                && crate::generation_chain::generation_node_is_completed(&response)
+            matches!(
+                chain.source,
+                crate::generation_chain::GenerationSource::Target {
+                    protocol: OPEN_RESPONSES_2026_04_24,
+                    ..
+                }
+            ) && upstream_response_is_available(
+                chain.write.request(),
+                &chain.response_continuation_available,
+            ) && crate::generation_chain::generation_node_is_completed(&response)
                 && response_preserves_upstream(&upstream_response, &response)
         })
         .then_some(upstream_response_id)
         .flatten();
 
     let pending_generation_chain = generation_chain.take().and_then(|mut chain| {
-        crate::generation_chain::mark_generation_target(
-            &mut response,
-            &chain.target_namespace,
-            chain.target_protocol,
-            &chain.actual_model,
-            &chain.selected_target_key,
-        );
         chain
             .write
-            .stage(&mut response, reusable_upstream_id)
+            .stage(&mut response, &chain.source, reusable_upstream_id)
             .then_some(chain.write)
     });
     CompletionOutcome::Ready(Box::new(CompletionLease {

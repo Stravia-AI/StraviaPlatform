@@ -69,4 +69,6 @@ pub use registry::{
 };
 pub use vendor::ProviderCtx;
 pub use vendor::Vendor;
-pub use vendor_ext::{VendorCtx, VendorExtension};
+pub use vendor_ext::{
+    ConstructedRequest, RequestContext, RequestPurpose, VendorCtx, VendorExtension,
+};
