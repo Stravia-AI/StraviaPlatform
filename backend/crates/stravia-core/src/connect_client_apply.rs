@@ -85,9 +85,45 @@ pub struct ConnectClientApplyError {
     pub path: Option<String>,
 }
 
+enum ConfigPaths<'a> {
+    Local(&'a BTreeMap<String, String>),
+    Portable,
+}
+
+impl ConfigPaths<'_> {
+    fn resolve<const N: usize>(
+        &self,
+        portable: [&str; N],
+        local: impl FnOnce(&BTreeMap<String, String>) -> Result<[PathBuf; N], ConnectClientApplyError>,
+    ) -> Result<[PathBuf; N], ConnectClientApplyError> {
+        match self {
+            Self::Local(environment) => local(environment),
+            Self::Portable => Ok(portable.map(PathBuf::from)),
+        }
+    }
+}
+
+/// Plans incremental writes using the Desktop user's directory environment and existing files.
 pub fn plan_connect_client_apply(
     input: &ConnectClientApplyInput,
     environment: &BTreeMap<String, String>,
+    existing_files: &BTreeMap<PathBuf, Vec<u8>>,
+) -> Result<ConnectClientApplyPlan, ConnectClientApplyError> {
+    plan_client_config(input, ConfigPaths::Local(environment), existing_files)
+}
+
+/// Generates a copyable patch with portable paths, without resolving local directories.
+pub fn preview_connect_client_apply(
+    input: &ConnectClientApplyInput,
+) -> Result<ConnectClientApplyPlan, ConnectClientApplyError> {
+    let mut plan = plan_client_config(input, ConfigPaths::Portable, &BTreeMap::new())?;
+    plan.files.clear();
+    Ok(plan)
+}
+
+fn plan_client_config(
+    input: &ConnectClientApplyInput,
+    paths: ConfigPaths<'_>,
     existing_files: &BTreeMap<PathBuf, Vec<u8>>,
 ) -> Result<ConnectClientApplyPlan, ConnectClientApplyError> {
     if input.models.is_empty() {
@@ -99,59 +135,30 @@ pub fn plan_connect_client_apply(
     }
 
     match input.tool {
-        ConnectClientId::CodexCli => plan_codex(input, environment, existing_files),
-        ConnectClientId::ClaudeCode => plan_claude(input, environment, existing_files),
-        ConnectClientId::Opencode => plan_opencode(input, environment, existing_files),
-        ConnectClientId::Openclaw => plan_openclaw(input, environment, existing_files),
-        ConnectClientId::HermesAgent => plan_hermes(input, environment, existing_files),
-        ConnectClientId::Trae => plan_trae(input, environment, existing_files),
-        ConnectClientId::Workbuddy => plan_workbuddy(input, environment, existing_files),
-        ConnectClientId::Zcode => plan_zcode(input, environment, existing_files),
-        ConnectClientId::DeepseekHarness => {
-            plan_deepseek_harness(input, environment, existing_files)
-        }
-        ConnectClientId::Pi => plan_pi(input, environment, existing_files),
-        ConnectClientId::Omp => plan_omp(input, environment, existing_files),
+        ConnectClientId::CodexCli => plan_codex(input, &paths, existing_files),
+        ConnectClientId::ClaudeCode => plan_claude(input, &paths, existing_files),
+        ConnectClientId::Opencode => plan_opencode(input, &paths, existing_files),
+        ConnectClientId::Openclaw => plan_openclaw(input, &paths, existing_files),
+        ConnectClientId::HermesAgent => plan_hermes(input, &paths, existing_files),
+        ConnectClientId::Trae => plan_trae(input, &paths, existing_files),
+        ConnectClientId::Workbuddy => plan_workbuddy(input, &paths, existing_files),
+        ConnectClientId::Zcode => plan_zcode(input, &paths, existing_files),
+        ConnectClientId::DeepseekHarness => plan_deepseek_harness(input, &paths, existing_files),
+        ConnectClientId::Pi => plan_pi(input, &paths, existing_files),
+        ConnectClientId::Omp => plan_omp(input, &paths, existing_files),
     }
-}
-
-pub fn preview_connect_client_apply(
-    input: &ConnectClientApplyInput,
-    environment: &BTreeMap<String, String>,
-) -> Result<ConnectClientApplyPlan, ConnectClientApplyError> {
-    let mut plan = plan_connect_client_apply(input, environment, &BTreeMap::new())?;
-    let portable_paths = match input.tool {
-        ConnectClientId::CodexCli => vec!["~/.codex/config.toml", "~/.codex/stravia-models.json"],
-        ConnectClientId::ClaudeCode => vec!["~/.claude/settings.json"],
-        ConnectClientId::Opencode => vec!["~/.config/opencode/opencode.json"],
-        ConnectClientId::Openclaw => vec!["~/.openclaw/openclaw.json"],
-        ConnectClientId::HermesAgent => vec!["~/.hermes/.env", "~/.hermes/config.yaml"],
-        ConnectClientId::Trae => vec!["~/.config/trae/trae_config.yaml"],
-        ConnectClientId::Workbuddy => vec!["~/.workbuddy/models.json"],
-        ConnectClientId::Zcode => vec!["~/.zcode/v2/config.json"],
-        ConnectClientId::DeepseekHarness => {
-            vec!["$DSH_HOME/settings.yaml", "$DSH_HOME/.credentials.yaml"]
-        }
-        ConnectClientId::Pi => vec!["~/.pi/agent/models.json"],
-        ConnectClientId::Omp => vec!["~/.omp/agent/models.yml"],
-    };
-    debug_assert_eq!(plan.paths.len(), portable_paths.len());
-    for (absolute, portable) in plan.paths.iter().zip(&portable_paths) {
-        plan.preview = plan.preview.replace(absolute, portable);
-    }
-    plan.paths = portable_paths.into_iter().map(str::to_owned).collect();
-    plan.files.clear();
-    Ok(plan)
 }
 
 fn plan_opencode(
     input: &ConnectClientApplyInput,
-    environment: &BTreeMap<String, String>,
+    paths: &ConfigPaths<'_>,
     existing_files: &BTreeMap<PathBuf, Vec<u8>>,
 ) -> Result<ConnectClientApplyPlan, ConnectClientApplyError> {
-    let path = xdg_config_root(environment)?
-        .join("opencode")
-        .join("opencode.json");
+    let [path] = paths.resolve(["~/.config/opencode/opencode.json"], |environment| {
+        Ok([xdg_config_root(environment)?
+            .join("opencode")
+            .join("opencode.json")])
+    })?;
     let mut document = parse_json(&path, existing_files.get(&path), false)?;
     let provider = json!({
         "npm": "@ai-sdk/open-responses",
@@ -177,11 +184,16 @@ fn plan_opencode(
 
 fn plan_openclaw(
     input: &ConnectClientApplyInput,
-    environment: &BTreeMap<String, String>,
+    paths: &ConfigPaths<'_>,
     existing_files: &BTreeMap<PathBuf, Vec<u8>>,
 ) -> Result<ConnectClientApplyPlan, ConnectClientApplyError> {
-    let root = configured_root(environment, "OPENCLAW_STATE_DIR", ".openclaw")?;
-    let path = root.join("openclaw.json");
+    let [path] =
+        paths.resolve(["~/.openclaw/openclaw.json"], |environment| {
+            Ok([
+                configured_root(environment, "OPENCLAW_STATE_DIR", ".openclaw")?
+                    .join("openclaw.json"),
+            ])
+        })?;
     let mut document = parse_json(&path, existing_files.get(&path), true)?;
     let provider = json!({
         "baseUrl": format!("{}/v1", input.host.trim_end_matches('/')),
@@ -215,12 +227,14 @@ fn plan_openclaw(
 
 fn plan_hermes(
     input: &ConnectClientApplyInput,
-    environment: &BTreeMap<String, String>,
+    paths: &ConfigPaths<'_>,
     existing_files: &BTreeMap<PathBuf, Vec<u8>>,
 ) -> Result<ConnectClientApplyPlan, ConnectClientApplyError> {
-    let root = configured_root(environment, "HERMES_HOME", ".hermes")?;
-    let config_path = root.join("config.yaml");
-    let environment_path = root.join(".env");
+    let [config_path, environment_path] =
+        paths.resolve(["~/.hermes/config.yaml", "~/.hermes/.env"], |environment| {
+            let root = configured_root(environment, "HERMES_HOME", ".hermes")?;
+            Ok([root.join("config.yaml"), root.join(".env")])
+        })?;
     let mut document = parse_yaml(&config_path, existing_files.get(&config_path))?;
     let model_entries = JsonMap::from_iter(input.models.iter().map(|model| {
         let mut value = JsonMap::from_iter([(
@@ -269,7 +283,11 @@ fn plan_hermes(
         environment_path.display().to_string(),
         config_path.display().to_string(),
     ];
-    let root = root.display().to_string();
+    let root = config_path
+        .parent()
+        .expect("global config path has a parent")
+        .display()
+        .to_string();
     Ok(ConnectClientApplyPlan {
         preview: format!(
             "# {}\nSTRAVIA_API_KEY={}\n\n# {}\n{}",
@@ -296,12 +314,14 @@ fn plan_hermes(
 
 fn plan_trae(
     input: &ConnectClientApplyInput,
-    environment: &BTreeMap<String, String>,
+    paths: &ConfigPaths<'_>,
     existing_files: &BTreeMap<PathBuf, Vec<u8>>,
 ) -> Result<ConnectClientApplyPlan, ConnectClientApplyError> {
-    let path = xdg_config_root(environment)?
-        .join("trae")
-        .join("trae_config.yaml");
+    let [path] = paths.resolve(["~/.config/trae/trae_config.yaml"], |environment| {
+        Ok([xdg_config_root(environment)?
+            .join("trae")
+            .join("trae_config.yaml")])
+    })?;
     let mut document = parse_yaml(&path, existing_files.get(&path))?;
     let provider = json!({
         "provider": "openai",
@@ -323,12 +343,14 @@ fn plan_trae(
 
 fn plan_workbuddy(
     input: &ConnectClientApplyInput,
-    environment: &BTreeMap<String, String>,
+    paths: &ConfigPaths<'_>,
     existing_files: &BTreeMap<PathBuf, Vec<u8>>,
 ) -> Result<ConnectClientApplyPlan, ConnectClientApplyError> {
-    let path = user_home(environment)?
-        .join(".workbuddy")
-        .join("models.json");
+    let [path] = paths.resolve(["~/.workbuddy/models.json"], |environment| {
+        Ok([user_home(environment)?
+            .join(".workbuddy")
+            .join("models.json")])
+    })?;
     let mut models = match existing_files.get(&path) {
         None => Vec::new(),
         Some(bytes) => {
@@ -350,13 +372,15 @@ fn plan_workbuddy(
 
 fn plan_zcode(
     input: &ConnectClientApplyInput,
-    environment: &BTreeMap<String, String>,
+    paths: &ConfigPaths<'_>,
     existing_files: &BTreeMap<PathBuf, Vec<u8>>,
 ) -> Result<ConnectClientApplyPlan, ConnectClientApplyError> {
-    let path = user_home(environment)?
-        .join(".zcode")
-        .join("v2")
-        .join("config.json");
+    let [path] = paths.resolve(["~/.zcode/v2/config.json"], |environment| {
+        Ok([user_home(environment)?
+            .join(".zcode")
+            .join("v2")
+            .join("config.json")])
+    })?;
     let mut document = parse_json(&path, existing_files.get(&path), false)?;
     let provider = json!({
         "name": "Stravia",
@@ -384,12 +408,16 @@ fn plan_zcode(
 
 fn plan_deepseek_harness(
     input: &ConnectClientApplyInput,
-    environment: &BTreeMap<String, String>,
+    paths: &ConfigPaths<'_>,
     existing_files: &BTreeMap<PathBuf, Vec<u8>>,
 ) -> Result<ConnectClientApplyPlan, ConnectClientApplyError> {
-    let root = configured_root(environment, "DSH_HOME", ".dsh")?;
-    let path = root.join("settings.yaml");
-    let credentials_path = root.join(".credentials.yaml");
+    let [path, credentials_path] = paths.resolve(
+        ["$DSH_HOME/settings.yaml", "$DSH_HOME/.credentials.yaml"],
+        |environment| {
+            let root = configured_root(environment, "DSH_HOME", ".dsh")?;
+            Ok([root.join("settings.yaml"), root.join(".credentials.yaml")])
+        },
+    )?;
     let mut document = parse_yaml(&path, existing_files.get(&path))?;
     let mut credentials = parse_yaml(&credentials_path, existing_files.get(&credentials_path))?;
     let provider = json!({
@@ -436,7 +464,11 @@ fn plan_deepseek_harness(
         path.display().to_string(),
         credentials_path.display().to_string(),
     ];
-    let root = root.display().to_string();
+    let root = path
+        .parent()
+        .expect("global config path has a parent")
+        .display()
+        .to_string();
     Ok(ConnectClientApplyPlan {
         preview: format!(
             "# {}\n{}\n# {}\n{}",
@@ -463,16 +495,18 @@ fn plan_deepseek_harness(
 
 fn plan_pi(
     input: &ConnectClientApplyInput,
-    environment: &BTreeMap<String, String>,
+    paths: &ConfigPaths<'_>,
     existing_files: &BTreeMap<PathBuf, Vec<u8>>,
 ) -> Result<ConnectClientApplyPlan, ConnectClientApplyError> {
-    let root = environment
-        .get("PI_CODING_AGENT_DIR")
-        .filter(|value| !value.trim().is_empty())
-        .map(PathBuf::from)
-        .unwrap_or(user_home(environment)?.join(".pi").join("agent"));
-    let root = require_absolute_root(root, "PI_CODING_AGENT_DIR")?;
-    let path = root.join("models.json");
+    let [path] = paths.resolve(["~/.pi/agent/models.json"], |environment| {
+        let root = environment
+            .get("PI_CODING_AGENT_DIR")
+            .filter(|value| !value.trim().is_empty())
+            .map(PathBuf::from)
+            .unwrap_or(user_home(environment)?.join(".pi").join("agent"));
+        let root = require_absolute_root(root, "PI_CODING_AGENT_DIR")?;
+        Ok([root.join("models.json")])
+    })?;
     let mut document = parse_json(&path, existing_files.get(&path), false)?;
     let provider = responses_provider(input, "baseUrl");
     upsert_json_path(
@@ -490,11 +524,15 @@ fn plan_pi(
 
 fn plan_omp(
     input: &ConnectClientApplyInput,
-    environment: &BTreeMap<String, String>,
+    paths: &ConfigPaths<'_>,
     existing_files: &BTreeMap<PathBuf, Vec<u8>>,
 ) -> Result<ConnectClientApplyPlan, ConnectClientApplyError> {
-    let root = user_home(environment)?.join(".omp").join("agent");
-    let path = root.join("models.yml");
+    let [path] = paths.resolve(["~/.omp/agent/models.yml"], |environment| {
+        Ok([user_home(environment)?
+            .join(".omp")
+            .join("agent")
+            .join("models.yml")])
+    })?;
     let mut document = parse_yaml(&path, existing_files.get(&path))?;
     let provider = responses_provider(input, "baseUrl");
     upsert_json_path(
@@ -512,11 +550,12 @@ fn plan_omp(
 
 fn plan_claude(
     input: &ConnectClientApplyInput,
-    environment: &BTreeMap<String, String>,
+    paths: &ConfigPaths<'_>,
     existing_files: &BTreeMap<PathBuf, Vec<u8>>,
 ) -> Result<ConnectClientApplyPlan, ConnectClientApplyError> {
-    let root = configured_root(environment, "CLAUDE_CONFIG_DIR", ".claude")?;
-    let path = root.join("settings.json");
+    let [path] = paths.resolve(["~/.claude/settings.json"], |environment| {
+        Ok([configured_root(environment, "CLAUDE_CONFIG_DIR", ".claude")?.join("settings.json")])
+    })?;
     let mappings = input.mappings.as_ref().ok_or_else(|| {
         error(
             "invalid_input",
@@ -597,12 +636,16 @@ fn plan_claude(
 
 fn plan_codex(
     input: &ConnectClientApplyInput,
-    environment: &BTreeMap<String, String>,
+    paths: &ConfigPaths<'_>,
     existing_files: &BTreeMap<PathBuf, Vec<u8>>,
 ) -> Result<ConnectClientApplyPlan, ConnectClientApplyError> {
-    let root = configured_root(environment, "CODEX_HOME", ".codex")?;
-    let config_path = root.join("config.toml");
-    let catalog_path = root.join("stravia-models.json");
+    let [config_path, catalog_path] = paths.resolve(
+        ["~/.codex/config.toml", "~/.codex/stravia-models.json"],
+        |environment| {
+            let root = configured_root(environment, "CODEX_HOME", ".codex")?;
+            Ok([root.join("config.toml"), root.join("stravia-models.json")])
+        },
+    )?;
     let mut document = parse_toml(&config_path, existing_files.get(&config_path))?;
     let catalog_pointer = catalog_path.display().to_string();
     let provider = TomlValue::Table(TomlTable::from_iter([
@@ -666,6 +709,11 @@ fn plan_codex(
         config_path.display().to_string(),
         catalog_path.display().to_string(),
     ];
+    let root = config_path
+        .parent()
+        .expect("global config path has a parent")
+        .display()
+        .to_string();
     Ok(ConnectClientApplyPlan {
         preview: format!(
             "# {}\n{}\n# {}\n{}",
@@ -675,12 +723,12 @@ fn plan_codex(
             PlannedConnectClientFile {
                 path: paths[0].clone(),
                 bytes: config_bytes,
-                root: root.display().to_string(),
+                root: root.clone(),
             },
             PlannedConnectClientFile {
                 path: paths[1].clone(),
                 bytes: catalog_bytes,
-                root: root.display().to_string(),
+                root,
             },
         ],
         paths,
@@ -1789,29 +1837,41 @@ name = "Other"
     }
 
     #[test]
-    fn portable_preview_uses_the_same_planner_payload_without_machine_paths() {
-        let temporary = tempfile::tempdir().expect("temporary directory");
-        let environment = environment(temporary.path());
-        let input = standard_input(ConnectClientId::CodexCli);
-        let native =
-            plan_connect_client_apply(&input, &environment, &BTreeMap::new()).expect("native plan");
-        let portable =
-            preview_connect_client_apply(&input, &environment).expect("portable preview");
-        let expected = native
-            .preview
-            .replace(&native.paths[0], "~/.codex/config.toml")
-            .replace(&native.paths[1], "~/.codex/stravia-models.json");
-
-        assert_eq!(portable.preview, expected);
+    fn omp_preview_does_not_require_a_server_home_directory() {
+        let input = standard_input(ConnectClientId::Omp);
+        let plan = preview_connect_client_apply(&input)
+            .expect("server preview must not resolve a local home directory");
+        assert_eq!(plan.paths, ["~/.omp/agent/models.yml"]);
+        let document: serde_json::Value = serde_saphyr::from_str(&plan.preview).expect("OMP YAML");
         assert_eq!(
-            portable.paths,
-            ["~/.codex/config.toml", "~/.codex/stravia-models.json"]
+            document["providers"]["stravia"]["models"][0]["id"],
+            "route-one"
         );
-        assert!(portable.files.is_empty());
-        assert!(
-            !portable
-                .preview
-                .contains(&temporary.path().display().to_string())
+        assert!(plan.files.is_empty());
+        let error = plan_connect_client_apply(&input, &BTreeMap::new(), &BTreeMap::new())
+            .expect_err("Desktop writes still require a real home directory");
+        assert_eq!(error.code, "global_path_unavailable");
+    }
+
+    #[test]
+    fn codex_preview_references_its_portable_catalog() {
+        let input = standard_input(ConnectClientId::CodexCli);
+        let plan = preview_connect_client_apply(&input).expect("portable preview");
+        let (config, catalog) = plan
+            .preview
+            .split_once("# ~/.codex/stravia-models.json\n")
+            .expect("copyable catalog section");
+        let config: TomlValue = toml::from_str(config).expect("Codex TOML");
+        let catalog: serde_json::Value = serde_json::from_str(catalog).expect("Codex catalog");
+        assert_eq!(
+            config["model_catalog_json"].as_str(),
+            Some("~/.codex/stravia-models.json")
         );
+        assert_eq!(
+            config["model_providers"]["stravia"]["experimental_bearer_token"].as_str(),
+            Some(input.api_key.as_str())
+        );
+        assert_eq!(catalog["models"][0]["slug"], "route-one");
+        assert_eq!(catalog["models"][1]["slug"], "route-two");
     }
 }

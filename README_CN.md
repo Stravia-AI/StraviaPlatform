@@ -89,6 +89,8 @@ WebUI 统一使用共享控件呈现请求恢复、敏感输入显隐、加载�
 
 接入客户端页面会根据所选 API 密钥有权使用的 Route 生成 Stravia provider 增量补丁。默认复用已启用、未过期且有权访问已启用模型的密钥：只有一个候选时自动选中，多个候选时由用户选择。缺少资源时可进入其既有编辑器，通过「继续接入」保留本次页面任务中仍有效的选择，不存储 secret 或流程进度。Stravia Desktop 以写入 Connect Client 全局配置为主操作，并保留复制；独立 server 只提供复制。成功反馈仅确认复制或写入，不声称客户端已连接，接入流程也不会自动发送验证请求。Apply 不选择当前/默认模型，也不写入融合 provider 与 model 的键。Claude Code 是唯一例外：必须选择并合并默认、Haiku、Sonnet 和 Opus 四套模型映射，但不会改动 `effortLevel` 或 `autoCompactWindow`。
 
+独立 server 的配置预览使用可移植的客户端路径，不依赖服务器的 `HOME`、`USERPROFILE` 或客户端目录环境变量。只有 Desktop 在读取和写入客户端配置时才解析本机目录。
+
 Route Builder 使用独立页面。选择 Provider 后会自动加载其可用 Provider Model；如需绑定清单外的 upstream model ID，必须显式进入未经验证的自定义分支。已启用 Target 按优先级从上到下分层，已禁用的备用 Target 保留在右侧坞中；详情弹窗用秒编辑 First Token Timeout 与 Target Cooldown，并编辑 Target Retry Budget 和 Thinking Level Map，不暴露 Priority 整数。Route 可选择同层 Target 使用 Traffic Equalization 或 Latency Preference。删除 Provider 时会在同一事务内移除其 Target、删除由此变空的 Route，并保留仍有其他 Target 的 Route。
 
 ### 联网搜索与 MCP

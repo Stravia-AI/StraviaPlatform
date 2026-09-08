@@ -12,6 +12,7 @@
 
 ### Changed
 
+- **Breaking (Rust API):** `preview_connect_client_apply` now accepts only the configuration input; directory environments remain exclusive to Desktop write planning.
 - The former Reversible Redaction page and sidebar entry are named Credential Protection; the existing route, setting key, explicit save, and restoration behavior remain unchanged. Retained pre-feature observations are marked incomplete rather than backfilled with invented discovery history.
 - **Breaking (Rust API):** `Vendor` and `VendorExtension` replace separate `auth_headers` and `build_url` hooks with purpose-aware `construct_request`, which owns the URL and default authentication for inference and Models requests. Existing OAuth bindings and specialized inference signing remain authoritative.
 - Generation Chain writes require an explicit final Model Leg Target or Hook source instead of recovering provenance from response metadata; history still commits only after complete client delivery.
@@ -29,6 +30,7 @@
 
 ### Fixed
 
+- Standalone server client-configuration previews no longer require `HOME`, `USERPROFILE`, or client-directory environment variables, including on NixOS services. Portable paths are used directly without rewriting serialized configuration; Desktop local-path validation remains unchanged.
 - Model discovery now follows the Provider's saved proxy choice, reports invalid proxy configuration without bypassing it, and consistently applies Vendor Models authentication across protocol aliases. Native Gemini query credentials are URL-encoded; custom Models endpoints retain their declared authentication and selected URL.
 - Model Turns complete restoration and required mapping publication before their unique successful terminal event, including ephemeral Agent execution. Cancellation and deadlines interrupt pending publication without revoking committed mappings; later stream events cannot reverse completion or falsify confirmed upstream usage.
 - Model ID suggestions no longer select a catalog entry during input-method composition, preserving the administrator's display-name draft. Observation canvas selection updates retain measured node dimensions so returning from mobile details does not hide the originating node or lose focus.

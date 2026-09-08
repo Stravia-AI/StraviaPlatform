@@ -531,6 +531,8 @@ const table = createTable({
     return manualPagination || !paginator
   },
   autoResetPageIndex: false,
+  // 数据刷新不能覆盖调用方或用户选择的展开状态。
+  autoResetExpanded: false,
   get manualGrouping() {
     return manualGrouping
   },

@@ -193,6 +193,27 @@ test('keeps multiple model allowances open and distinguishes unknown utilization
   ).not.toHaveAttribute('aria-valuenow')
 })
 
+test('keeps allowance details visible when refresh replaces provider snapshots', async ({ page }) => {
+  const snapshots = structuredClone([freshSnapshot, staleSnapshot])
+  const posts = await mockAllowances(page, snapshots)
+  await page.goto('/allowances')
+  const matrix = page.getByRole('table', { name: 'Allowance matrix' })
+  await expect(matrix.getByText('Weekly window')).toHaveCount(2)
+  await expect(matrix.getByText('0 USD')).toBeVisible()
+
+  snapshots[0].allowances[1].remaining!.value = 12
+  await page.getByRole('button', { name: 'Refresh all' }).click()
+  await expect.poll(() => posts).toContain('/api/v1/provider-allowances/refresh')
+  await expect(matrix.getByText('12 USD')).toBeVisible()
+  await expect(matrix.getByText('Weekly window')).toHaveCount(2)
+
+  snapshots[0].allowances[1].remaining!.value = 24
+  await matrix.getByRole('button', { name: 'Refresh Alpha account' }).click()
+  await expect.poll(() => posts).toContain('/api/v1/provider-allowances/provider-alpha/refresh')
+  await expect(matrix.getByText('24 USD')).toBeVisible()
+  await expect(matrix.getByText('Weekly window')).toHaveCount(2)
+})
+
 test('does not treat an exhausted allowance without a reset date as exhausted', async ({ page }) => {
   await mockAllowances(page, [freshSnapshot])
   await page.goto('/allowances')
