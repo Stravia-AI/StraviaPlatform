@@ -19,6 +19,7 @@ import {
   type Updater,
 } from '@tanstack/svelte-table'
 import { onMount, type Snippet } from 'svelte'
+import { ScrollArea } from 'bits-ui'
 import ArrowDownIcon from '@lucide/svelte/icons/arrow-down'
 import ArrowLeftToLineIcon from '@lucide/svelte/icons/arrow-left-to-line'
 import ArrowRightToLineIcon from '@lucide/svelte/icons/arrow-right-to-line'
@@ -303,7 +304,9 @@ let {
 }: Props = $props()
 
 let rootElement: HTMLDivElement
-let viewportElement: HTMLDivElement
+let viewportElement = $state<HTMLDivElement>(null!)
+let headerElement = $state<HTMLTableSectionElement>(null!)
+let headerBlockHeight = $state(0)
 let selectionAnchorId: string | undefined
 let draggedColumnId: string | undefined
 let draggedRowId: string | undefined
@@ -578,7 +581,6 @@ const showToolbar = $derived(
     (filterDisplay !== 'none' && hasConfiguredColumnFilters),
   ),
 )
-const headerHeight = $derived(size === 'small' ? 32 : size === 'large' ? 48 : 40)
 const rowHeight = $derived(size === 'small' ? 32 : size === 'large' ? 48 : 40)
 const skeletonKeys = $derived(Array.from({ length: loadingRows }, (_, index) => `skeleton-${index}`))
 const rowRegions = $derived.by(() => {
@@ -647,9 +649,9 @@ function alignClass(column: Column<typeof dataTableFeatures, TData, unknown>): s
 }
 
 function sizeClass(section: 'head' | 'cell'): string {
-  if (size === 'small') return section === 'head' ? 'h-8 px-2 py-1' : 'px-2 py-1'
-  if (size === 'large') return section === 'head' ? 'h-12 px-3 py-3' : 'px-3 py-3'
-  return section === 'head' ? 'h-10 px-2' : 'p-2'
+  if (size === 'small') return section === 'head' ? 'h-10 px-2 py-0' : 'px-2 py-1'
+  if (size === 'large') return section === 'head' ? 'h-12 px-3 py-1' : 'px-3 py-3'
+  return section === 'head' ? 'h-11 px-2 py-0.5' : 'p-2'
 }
 
 function columnInlineStyle(
@@ -660,7 +662,11 @@ function columnInlineStyle(
   if (resizableColumns || column.getIsPinned()) declarations.push(`width:${column.getSize()}px`)
   const pinned = column.getIsPinned()
   if (pinned) {
-    declarations.push('position:sticky', 'background:var(--background)', `z-index:${header ? 30 : 10}`)
+    declarations.push(
+      'position:sticky',
+      `background:var(--${header ? 'data-table-header-background' : 'background'})`,
+      `z-index:${header ? 30 : 10}`,
+    )
     if (pinned === 'start') {
       declarations.push(`inset-inline-start:${column.getStart('start')}px`)
       if (column.getIsLastColumn('start')) declarations.push('box-shadow:1px 0 0 var(--border)')
@@ -672,24 +678,9 @@ function columnInlineStyle(
   return declarations.length > 0 ? declarations.join(';') : undefined
 }
 
-function headerInlineStyle(
-  column: Column<typeof dataTableFeatures, TData, unknown>,
-  headerRowIndex: number,
-): string | undefined {
-  const declarations = columnInlineStyle(column, true)?.split(';') ?? []
-  if (stickyHeader)
-    declarations.push(
-      'position:sticky',
-      `top:${headerRowIndex * headerHeight}px`,
-      'z-index:20',
-      'background:var(--background)',
-    )
-  return declarations.length > 0 ? declarations.join(';') : undefined
-}
-
 function pinnedRowStyle(item: RenderedRow): string | undefined {
   if (item.region === 'center') return undefined
-  const headerOffset = headerGroups.length * headerHeight + (filterDisplay === 'row' ? headerHeight : 0)
+  const headerOffset = stickyHeader ? headerBlockHeight : 0
   if (item.region === 'top') {
     return `position:sticky;top:${headerOffset + item.regionIndex * rowHeight}px;z-index:5;background:var(--background)`
   }
@@ -1031,13 +1022,22 @@ export function reset(): void {
 
 onMount(() => {
   let resizeObserver: ResizeObserver | undefined
+  if (stickyHeader || virtualScrollEnabled) {
+    resizeObserver = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.target === headerElement) headerBlockHeight = headerElement.getBoundingClientRect().height
+        if (entry.target === viewportElement) virtualViewportHeight = viewportElement.clientHeight
+      }
+    })
+  }
+  if (stickyHeader) {
+    headerBlockHeight = headerElement.getBoundingClientRect().height
+    resizeObserver?.observe(headerElement)
+  }
   if (virtualScrollEnabled && viewportElement) {
     virtualScrollTop = viewportElement.scrollTop
     virtualViewportHeight = viewportElement.clientHeight
-    resizeObserver = new ResizeObserver(([entry]) => {
-      if (entry) virtualViewportHeight = entry.contentRect.height
-    })
-    resizeObserver.observe(viewportElement)
+    resizeObserver?.observe(viewportElement)
   }
   if (stateKey) {
     try {
@@ -1375,14 +1375,8 @@ $effect(() => {
 <div
   bind:this={rootElement}
   data-slot="data-table"
-  class={cn(
-    'flex min-w-0 flex-col gap-3',
-    scrollHeight &&
-      !virtualScrollEnabled &&
-      '[&_[data-slot=table-container]]:max-h-[var(--data-table-scroll-height)] [&_[data-slot=table-container]]:overflow-auto',
-    className,
-  )}
-  style:--data-table-scroll-height={scrollHeight}>
+  class={cn('flex min-w-0 flex-col gap-3', className)}
+  style="--data-table-header-background:color-mix(in oklab,var(--muted) 45%,var(--background))">
   {#if showToolbar}
     <div class="flex flex-wrap items-center gap-2" data-slot="data-table-toolbar">
       {#if toolbar}{@render toolbar(table)}{/if}
@@ -1427,276 +1421,305 @@ $effect(() => {
     {@render paginatorControls()}
   {/if}
 
-  <div
-    bind:this={viewportElement}
-    class={cn(
-      'relative min-w-0 overflow-hidden rounded-md border border-border/60',
-      virtualScrollEnabled && 'overflow-auto',
-    )}
-    data-slot="data-table-viewport"
-    style:max-height={virtualScrollEnabled ? scrollHeight : undefined}
-    onscroll={handleViewportScroll}>
-    <Table.Root
-      aria-label={ariaLabel}
-      aria-busy={loading}
-      class={cn(
-        showGridlines &&
-          'border-collapse [&_[data-slot=table-cell]]:border-border/50 [&_[data-slot=table-head]]:border-border/50',
-        tableClass,
-      )}>
-      {#if caption}<Table.Caption>{caption}</Table.Caption>{/if}
-      <Table.Header>
-        {#each headerGroups as headerGroup, headerRowIndex (headerGroup.id)}
-          <Table.Row class="border-border/50 hover:bg-transparent">
-            {#if headerRowIndex === 0}
-              {#if reorderableRows}
-                <Table.Head rowspan={controlRowSpan} class={cn('w-10', sizeClass('head'), showGridlines && 'border-e')}>
-                  <span class="sr-only">{resolvedLabels.reorderRow(0)}</span>
-                </Table.Head>
+  <ScrollArea.Root
+    type="auto"
+    class="relative min-w-0 overflow-hidden rounded-md border border-border/60"
+    data-slot="data-table-viewport">
+    <ScrollArea.Viewport
+      bind:ref={viewportElement}
+      class="w-full rounded-[inherit] [&_[data-slot=table-container]]:overflow-visible"
+      style={scrollHeight ? `max-height:${scrollHeight}` : undefined}
+      onscroll={handleViewportScroll}>
+      <Table.Root
+        aria-label={ariaLabel}
+        aria-busy={loading}
+        class={cn(
+          showGridlines &&
+            'border-collapse [&_[data-slot=table-cell]]:border-border/50 [&_[data-slot=table-head]]:border-border/50',
+          tableClass,
+        )}>
+        {#if caption}<Table.Caption>{caption}</Table.Caption>{/if}
+        <Table.Header
+          bind:ref={headerElement}
+          class={cn(
+            'bg-[var(--data-table-header-background)] shadow-[0_1px_0_var(--border)] [&_[data-slot=table-head]]:bg-[var(--data-table-header-background)] [&_[data-slot=table-head]]:text-[0.8rem] [&_[data-slot=table-head]]:text-muted-foreground',
+            stickyHeader && 'sticky top-0 z-20',
+          )}>
+          {#each headerGroups as headerGroup, headerRowIndex (headerGroup.id)}
+            <Table.Row class="border-border/50 hover:bg-transparent">
+              {#if headerRowIndex === 0}
+                {#if reorderableRows}
+                  <Table.Head
+                    rowspan={controlRowSpan}
+                    class={cn('w-10', sizeClass('head'), showGridlines && 'border-e')}>
+                    <span class="sr-only">{resolvedLabels.reorderRow(0)}</span>
+                  </Table.Head>
+                {/if}
+                {#if hasSelectionControl}
+                  <Table.Head
+                    rowspan={controlRowSpan}
+                    class={cn('w-10', sizeClass('head'), showGridlines && 'border-e')}>
+                    <Checkbox
+                      aria-label={resolvedLabels.selectAllRows}
+                      indeterminate={table.getIsSomePageRowsSelected() && !table.getIsAllPageRowsSelected()}
+                      bind:checked={
+                        () => table.getIsAllPageRowsSelected(),
+                        (value) => table.toggleAllPageRowsSelected(Boolean(value))
+                      } />
+                  </Table.Head>
+                {/if}
+                {#if hasExpansionControl}
+                  <Table.Head
+                    rowspan={controlRowSpan}
+                    class={cn('w-10', sizeClass('head'), showGridlines && 'border-e')} />
+                {/if}
+                {#if hasEditControl}
+                  <Table.Head
+                    rowspan={controlRowSpan}
+                    class={cn('w-20', sizeClass('head'), showGridlines && 'border-e')}>
+                    <span class="sr-only">{resolvedLabels.editRow(0)}</span>
+                  </Table.Head>
+                {/if}
               {/if}
-              {#if hasSelectionControl}
-                <Table.Head rowspan={controlRowSpan} class={cn('w-10', sizeClass('head'), showGridlines && 'border-e')}>
-                  <Checkbox
-                    aria-label={resolvedLabels.selectAllRows}
-                    indeterminate={table.getIsSomePageRowsSelected() && !table.getIsAllPageRowsSelected()}
-                    bind:checked={
-                      () => table.getIsAllPageRowsSelected(), (value) => table.toggleAllPageRowsSelected(Boolean(value))
-                    } />
-                </Table.Head>
-              {/if}
-              {#if hasExpansionControl}
+              {#each headerGroup.headers as header (header.id)}
                 <Table.Head
-                  rowspan={controlRowSpan}
-                  class={cn('w-10', sizeClass('head'), showGridlines && 'border-e')} />
-              {/if}
-              {#if hasEditControl}
-                <Table.Head rowspan={controlRowSpan} class={cn('w-20', sizeClass('head'), showGridlines && 'border-e')}>
-                  <span class="sr-only">{resolvedLabels.editRow(0)}</span>
-                </Table.Head>
-              {/if}
-            {/if}
-            {#each headerGroup.headers as header (header.id)}
-              <Table.Head
-                colspan={header.colSpan}
-                rowspan={header.rowSpan}
-                draggable={reorderableColumns && header.column.columns.length === 0}
-                aria-sort={header.column.getIsSorted() === 'asc'
-                  ? 'ascending'
-                  : header.column.getIsSorted() === 'desc'
-                    ? 'descending'
-                    : header.column.getCanSort()
-                      ? 'none'
-                      : undefined}
-                aria-label={reorderableColumns ? resolvedLabels.reorderColumn(columnLabel(header.column)) : undefined}
-                style={headerInlineStyle(header.column, headerRowIndex)}
-                class={cn(
-                  'relative',
-                  sizeClass('head'),
-                  showGridlines && 'border-e last:border-e-0',
-                  alignClass(header.column),
-                  header.column.columnDef.meta?.headerClass,
-                  reorderableColumns && header.column.columns.length === 0 && 'cursor-grab active:cursor-grabbing',
-                )}
-                ondragstart={reorderableColumns ? () => (draggedColumnId = header.column.id) : undefined}
-                ondragover={reorderableColumns ? (event) => event.preventDefault() : undefined}
-                ondrop={reorderableColumns ? () => handleColumnDrop(header.column.id) : undefined}>
-                {#if !header.isPlaceholder}
-                  {@const filter = header.column.columnDef.meta?.filter}
-                  <div
-                    class={cn(
-                      'flex min-w-0 items-center gap-1',
-                      header.column.columnDef.meta?.align === 'end' ? 'justify-end' : 'justify-between',
-                    )}>
-                    {#if header.column.getCanSort()}
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        class={cn('-mx-2 min-w-0', header.column.columnDef.meta?.align === 'end' && 'ms-auto')}
-                        aria-label={sortAriaLabel(header.column)}
-                        onclick={header.column.getToggleSortingHandler()}>
-                        <FlexRender {header} />
-                        {#if header.column.getIsSorted() === 'asc'}
-                          <ArrowUpIcon data-icon="inline-end" />
-                        {:else if header.column.getIsSorted() === 'desc'}
-                          <ArrowDownIcon data-icon="inline-end" />
-                        {:else}
-                          <ArrowUpDownIcon data-icon="inline-end" />
-                        {/if}
-                        {#if sortMode === 'multiple' && header.column.getSortIndex() >= 0}
-                          <span class="font-technical text-[0.65rem] text-muted-foreground"
-                            >{header.column.getSortIndex() + 1}</span>
-                        {/if}
-                      </Button>
-                    {:else}
-                      <FlexRender {header} />
-                    {/if}
-                    {#if filterDisplay === 'menu' && filter && header.column.columns.length === 0}
-                      <FilterMenu
-                        column={header.column}
-                        {filter}
-                        draft={filterDraft}
-                        labels={resolvedLabels}
-                        columnName={columnLabel(header.column)}
-                        open={openFilterColumnId === header.column.id}
-                        {allFilterValue}
-                        selectOptions={selectFilterOptions(header.column)}
-                        textMatchModes={textFilterMatchModes(filter)}
-                        onOpenChange={(open) => setFilterMenuOpen(header.column, filter, open)}
-                        onUpdateOperator={updateFilterOperator}
-                        onUpdateConstraint={updateFilterConstraint}
-                        onAddConstraint={() => addFilterConstraint(filter)}
-                        onRemoveConstraint={removeFilterConstraint}
-                        onUpdateNumber={updateDraftNumberFilter}
-                        onClear={() => clearColumnFilter(header.column)}
-                        onApply={() => applyColumnFilter(header.column)} />
-                    {/if}
-                  </div>
-                  {#if resizableColumns && header.column.getCanResize()}
-                    <button
-                      type="button"
-                      aria-label={resolvedLabels.resizeColumn(columnLabel(header.column))}
+                  colspan={header.colSpan}
+                  rowspan={header.rowSpan}
+                  draggable={reorderableColumns && header.column.columns.length === 0}
+                  aria-sort={header.column.getIsSorted() === 'asc'
+                    ? 'ascending'
+                    : header.column.getIsSorted() === 'desc'
+                      ? 'descending'
+                      : header.column.getCanSort()
+                        ? 'none'
+                        : undefined}
+                  aria-label={reorderableColumns ? resolvedLabels.reorderColumn(columnLabel(header.column)) : undefined}
+                  style={columnInlineStyle(header.column, true)}
+                  class={cn(
+                    'relative',
+                    sizeClass('head'),
+                    showGridlines && 'border-e last:border-e-0',
+                    alignClass(header.column),
+                    header.column.columnDef.meta?.headerClass,
+                    reorderableColumns && header.column.columns.length === 0 && 'cursor-grab active:cursor-grabbing',
+                  )}
+                  ondragstart={reorderableColumns ? () => (draggedColumnId = header.column.id) : undefined}
+                  ondragover={reorderableColumns ? (event) => event.preventDefault() : undefined}
+                  ondrop={reorderableColumns ? () => handleColumnDrop(header.column.id) : undefined}>
+                  {#if !header.isPlaceholder}
+                    {@const filter = header.column.columnDef.meta?.filter}
+                    <div
                       class={cn(
-                        'absolute inset-y-0 w-2 cursor-col-resize touch-none select-none outline-none after:absolute after:inset-y-1 after:start-1/2 after:w-px after:bg-transparent hover:after:bg-border/80 focus-visible:after:w-0.5 focus-visible:after:bg-ring',
-                        header.column.id === visibleLeafColumns[visibleLeafColumns.length - 1]?.id
-                          ? 'end-0 after:hidden'
-                          : '-end-1',
-                        header.column.getIsResizing() && 'after:w-0.5 after:bg-ring',
-                      )}
-                      onmousedown={header.getResizeHandler()}
-                      ontouchstart={header.getResizeHandler()}
-                      onkeydown={(event) => resizeColumnByKeyboard(event, header.column)}
-                      ondblclick={() => header.column.resetSize()}></button>
+                        'flex min-w-0 items-center gap-1',
+                        header.column.columnDef.meta?.align === 'end' ? 'justify-end' : 'justify-between',
+                      )}>
+                      {#if header.column.getCanSort()}
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          class={cn(
+                            'group/sort -mx-2 min-w-0 gap-1.5 px-2 text-inherit',
+                            header.column.getIsSorted() && 'text-foreground',
+                            header.column.columnDef.meta?.align === 'end' && 'ms-auto',
+                          )}
+                          aria-label={sortAriaLabel(header.column)}
+                          onclick={header.column.getToggleSortingHandler()}>
+                          <FlexRender {header} />
+                          {#if header.column.getIsSorted() === 'asc'}
+                            <ArrowUpIcon data-icon="inline-end" />
+                          {:else if header.column.getIsSorted() === 'desc'}
+                            <ArrowDownIcon data-icon="inline-end" />
+                          {:else}
+                            <ArrowUpDownIcon
+                              data-icon="inline-end"
+                              class="opacity-40 transition-opacity group-hover/sort:opacity-100 group-focus-visible/sort:opacity-100" />
+                          {/if}
+                          {#if sortMode === 'multiple' && header.column.getSortIndex() >= 0}
+                            <span class="font-technical text-[0.65rem] text-muted-foreground"
+                              >{header.column.getSortIndex() + 1}</span>
+                          {/if}
+                        </Button>
+                      {:else}
+                        <FlexRender {header} />
+                      {/if}
+                      {#if filterDisplay === 'menu' && filter && header.column.columns.length === 0}
+                        <FilterMenu
+                          column={header.column}
+                          {filter}
+                          draft={filterDraft}
+                          labels={resolvedLabels}
+                          columnName={columnLabel(header.column)}
+                          open={openFilterColumnId === header.column.id}
+                          {allFilterValue}
+                          selectOptions={selectFilterOptions(header.column)}
+                          textMatchModes={textFilterMatchModes(filter)}
+                          onOpenChange={(open) => setFilterMenuOpen(header.column, filter, open)}
+                          onUpdateOperator={updateFilterOperator}
+                          onUpdateConstraint={updateFilterConstraint}
+                          onAddConstraint={() => addFilterConstraint(filter)}
+                          onRemoveConstraint={removeFilterConstraint}
+                          onUpdateNumber={updateDraftNumberFilter}
+                          onClear={() => clearColumnFilter(header.column)}
+                          onApply={() => applyColumnFilter(header.column)} />
+                      {/if}
+                    </div>
+                    {#if resizableColumns && header.column.getCanResize()}
+                      <button
+                        type="button"
+                        aria-label={resolvedLabels.resizeColumn(columnLabel(header.column))}
+                        class={cn(
+                          'absolute inset-y-0 w-2 cursor-col-resize touch-none select-none outline-none after:absolute after:inset-y-1 after:start-1/2 after:w-px after:bg-transparent hover:after:bg-border/80 focus-visible:after:w-0.5 focus-visible:after:bg-ring',
+                          header.column.id === visibleLeafColumns[visibleLeafColumns.length - 1]?.id
+                            ? 'end-0 after:hidden'
+                            : '-end-1',
+                          header.column.getIsResizing() && 'after:w-0.5 after:bg-ring',
+                        )}
+                        onmousedown={header.getResizeHandler()}
+                        ontouchstart={header.getResizeHandler()}
+                        onkeydown={(event) => resizeColumnByKeyboard(event, header.column)}
+                        ondblclick={() => header.column.resetSize()}></button>
+                    {/if}
                   {/if}
-                {/if}
-              </Table.Head>
-            {/each}
-          </Table.Row>
-        {/each}
-        {#if filterDisplay === 'row'}
-          <Table.Row class="border-border/50 hover:bg-transparent">
-            {#each visibleLeafColumns as column (column.id)}
-              {@const filter = column.columnDef.meta?.filter}
-              <Table.Head
-                style={headerInlineStyle(column, headerGroups.length)}
-                class={cn(sizeClass('head'), showGridlines && 'border-e last:border-e-0')}>
-                {#if filter?.variant === 'text'}
-                  <Input
-                    class="h-8 min-w-28"
-                    value={String(column.getFilterValue() ?? '')}
-                    placeholder={filter.placeholder ?? columnLabel(column)}
-                    aria-label={filter.placeholder ?? columnLabel(column)}
-                    oninput={(event) => column.setFilterValue(event.currentTarget.value || undefined)} />
-                {:else if filter?.variant === 'select'}
-                  <Select.Root
-                    type="single"
-                    bind:value={
-                      () => String(column.getFilterValue() ?? allFilterValue),
-                      (value) => column.setFilterValue(value === allFilterValue ? undefined : value)
-                    }>
-                    <Select.Trigger class="h-8 min-w-28">
-                      {filter.options?.find((option) => option.value === column.getFilterValue())?.label ??
-                        (column.getFilterValue() == null
-                          ? (filter.allLabel ?? resolvedLabels.allValues)
-                          : String(column.getFilterValue()))}
-                    </Select.Trigger>
-                    <Select.Content>
-                      <Select.Group>
-                        <Select.Item value={allFilterValue} label={filter.allLabel ?? resolvedLabels.allValues}>
-                          {filter.allLabel ?? resolvedLabels.allValues}
-                        </Select.Item>
-                        {#each selectFilterOptions(column) as option (option.value)}
-                          <Select.Item value={option.value} label={option.label}>{option.label}</Select.Item>
-                        {/each}
-                      </Select.Group>
-                    </Select.Content>
-                  </Select.Root>
-                {:else if filter?.variant === 'number-range'}
-                  {@const range =
-                    (column.getFilterValue() as [number | undefined, number | undefined] | undefined) ?? []}
-                  <div class="flex min-w-48 gap-1">
+                </Table.Head>
+              {/each}
+            </Table.Row>
+          {/each}
+          {#if filterDisplay === 'row'}
+            <Table.Row class="border-border/50 hover:bg-transparent">
+              {#each visibleLeafColumns as column (column.id)}
+                {@const filter = column.columnDef.meta?.filter}
+                <Table.Head
+                  style={columnInlineStyle(column, true)}
+                  class={cn(sizeClass('head'), showGridlines && 'border-e last:border-e-0')}>
+                  {#if filter?.variant === 'text'}
                     <Input
-                      class="h-8 min-w-20"
-                      type="number"
-                      value={range[0] ?? ''}
-                      placeholder={filter.minPlaceholder ?? resolvedLabels.minimum}
-                      aria-label={filter.minPlaceholder ?? resolvedLabels.minimum}
-                      oninput={(event) => updateNumberFilter(column, 0, event.currentTarget.value)} />
-                    <Input
-                      class="h-8 min-w-20"
-                      type="number"
-                      value={range[1] ?? ''}
-                      placeholder={filter.maxPlaceholder ?? resolvedLabels.maximum}
-                      aria-label={filter.maxPlaceholder ?? resolvedLabels.maximum}
-                      oninput={(event) => updateNumberFilter(column, 1, event.currentTarget.value)} />
-                  </div>
-                {:else if filter?.variant === 'custom'}
-                  {@render filter.content(column.getFilterValue(), (value) => column.setFilterValue(value))}
-                {/if}
-              </Table.Head>
+                      class="h-8 min-w-28"
+                      value={String(column.getFilterValue() ?? '')}
+                      placeholder={filter.placeholder ?? columnLabel(column)}
+                      aria-label={filter.placeholder ?? columnLabel(column)}
+                      oninput={(event) => column.setFilterValue(event.currentTarget.value || undefined)} />
+                  {:else if filter?.variant === 'select'}
+                    <Select.Root
+                      type="single"
+                      bind:value={
+                        () => String(column.getFilterValue() ?? allFilterValue),
+                        (value) => column.setFilterValue(value === allFilterValue ? undefined : value)
+                      }>
+                      <Select.Trigger class="h-8 min-w-28">
+                        {filter.options?.find((option) => option.value === column.getFilterValue())?.label ??
+                          (column.getFilterValue() == null
+                            ? (filter.allLabel ?? resolvedLabels.allValues)
+                            : String(column.getFilterValue()))}
+                      </Select.Trigger>
+                      <Select.Content>
+                        <Select.Group>
+                          <Select.Item value={allFilterValue} label={filter.allLabel ?? resolvedLabels.allValues}>
+                            {filter.allLabel ?? resolvedLabels.allValues}
+                          </Select.Item>
+                          {#each selectFilterOptions(column) as option (option.value)}
+                            <Select.Item value={option.value} label={option.label}>{option.label}</Select.Item>
+                          {/each}
+                        </Select.Group>
+                      </Select.Content>
+                    </Select.Root>
+                  {:else if filter?.variant === 'number-range'}
+                    {@const range =
+                      (column.getFilterValue() as [number | undefined, number | undefined] | undefined) ?? []}
+                    <div class="flex min-w-48 gap-1">
+                      <Input
+                        class="h-8 min-w-20"
+                        type="number"
+                        value={range[0] ?? ''}
+                        placeholder={filter.minPlaceholder ?? resolvedLabels.minimum}
+                        aria-label={filter.minPlaceholder ?? resolvedLabels.minimum}
+                        oninput={(event) => updateNumberFilter(column, 0, event.currentTarget.value)} />
+                      <Input
+                        class="h-8 min-w-20"
+                        type="number"
+                        value={range[1] ?? ''}
+                        placeholder={filter.maxPlaceholder ?? resolvedLabels.maximum}
+                        aria-label={filter.maxPlaceholder ?? resolvedLabels.maximum}
+                        oninput={(event) => updateNumberFilter(column, 1, event.currentTarget.value)} />
+                    </div>
+                  {:else if filter?.variant === 'custom'}
+                    {@render filter.content(column.getFilterValue(), (value) => column.setFilterValue(value))}
+                  {/if}
+                </Table.Head>
+              {/each}
+            </Table.Row>
+          {/if}
+        </Table.Header>
+        <Table.Body>
+          {#if loading && renderedRows.length === 0}
+            {#each skeletonKeys as key (key)}
+              <Table.Row class="hover:bg-transparent">
+                {#each Array(renderedColumnCount) as _, columnIndex (`${key}-column-${columnIndex}`)}
+                  <Table.Cell class={sizeClass('cell')}><Skeleton class="h-5 w-full" /></Table.Cell>
+                {/each}
+              </Table.Row>
             {/each}
-          </Table.Row>
-        {/if}
-      </Table.Header>
-      <Table.Body>
-        {#if loading && renderedRows.length === 0}
-          {#each skeletonKeys as key (key)}
+          {:else if renderedRows.length > 0}
+            {#each rowRegions.top as item (`top:${item.row.id}`)}
+              {@render dataRow(item, item.rowIndex)}
+            {/each}
+            {#if virtualTopPadding > 0}
+              <Table.Row class="border-0 hover:bg-transparent" aria-hidden="true">
+                <Table.Cell colspan={renderedColumnCount} class="p-0" style={`height:${virtualTopPadding}px`} />
+              </Table.Row>
+            {/if}
+            {#each visibleCenterRows as item (`center:${item.row.id}`)}
+              {@render dataRow(item, item.rowIndex)}
+            {/each}
+            {#if virtualBottomPadding > 0}
+              <Table.Row class="border-0 hover:bg-transparent" aria-hidden="true">
+                <Table.Cell colspan={renderedColumnCount} class="p-0" style={`height:${virtualBottomPadding}px`} />
+              </Table.Row>
+            {/if}
+            {#each rowRegions.bottom as item (`bottom:${item.row.id}`)}
+              {@render dataRow(item, item.rowIndex)}
+            {/each}
+          {:else}
             <Table.Row class="hover:bg-transparent">
-              {#each Array(renderedColumnCount) as _, columnIndex (`${key}-column-${columnIndex}`)}
-                <Table.Cell class={sizeClass('cell')}><Skeleton class="h-5 w-full" /></Table.Cell>
-              {/each}
-            </Table.Row>
-          {/each}
-        {:else if renderedRows.length > 0}
-          {#each rowRegions.top as item (`top:${item.row.id}`)}
-            {@render dataRow(item, item.rowIndex)}
-          {/each}
-          {#if virtualTopPadding > 0}
-            <Table.Row class="border-0 hover:bg-transparent" aria-hidden="true">
-              <Table.Cell colspan={renderedColumnCount} class="p-0" style={`height:${virtualTopPadding}px`} />
+              <Table.Cell colspan={renderedColumnCount} class="h-32 whitespace-normal p-0 text-center">
+                {#if empty}
+                  {@render empty()}
+                {:else}
+                  <Empty.Root class="py-8">
+                    <Empty.Header><Empty.Title>{resolvedLabels.noResults}</Empty.Title></Empty.Header>
+                  </Empty.Root>
+                {/if}
+              </Table.Cell>
             </Table.Row>
           {/if}
-          {#each visibleCenterRows as item (`center:${item.row.id}`)}
-            {@render dataRow(item, item.rowIndex)}
-          {/each}
-          {#if virtualBottomPadding > 0}
-            <Table.Row class="border-0 hover:bg-transparent" aria-hidden="true">
-              <Table.Cell colspan={renderedColumnCount} class="p-0" style={`height:${virtualBottomPadding}px`} />
-            </Table.Row>
-          {/if}
-          {#each rowRegions.bottom as item (`bottom:${item.row.id}`)}
-            {@render dataRow(item, item.rowIndex)}
-          {/each}
-        {:else}
-          <Table.Row class="hover:bg-transparent">
-            <Table.Cell colspan={renderedColumnCount} class="h-32 whitespace-normal p-0 text-center">
-              {#if empty}
-                {@render empty()}
-              {:else}
-                <Empty.Root class="py-8">
-                  <Empty.Header><Empty.Title>{resolvedLabels.noResults}</Empty.Title></Empty.Header>
-                </Empty.Root>
-              {/if}
-            </Table.Cell>
-          </Table.Row>
+        </Table.Body>
+        {#if showColumnFooters}
+          <Table.Footer>
+            {#each table.getFooterGroups() as footerGroup (footerGroup.id)}
+              <Table.Row>
+                {#each Array(controlColumnCount) as _, index (`footer-control-${footerGroup.id}-${index}`)}
+                  <Table.Cell />
+                {/each}
+                {#each footerGroup.headers as footerHeader (footerHeader.id)}
+                  <Table.Cell colspan={footerHeader.colSpan} style={columnInlineStyle(footerHeader.column)}>
+                    {#if !footerHeader.isPlaceholder}<FlexRender footer={footerHeader} />{/if}
+                  </Table.Cell>
+                {/each}
+              </Table.Row>
+            {/each}
+          </Table.Footer>
         {/if}
-      </Table.Body>
-      {#if showColumnFooters}
-        <Table.Footer>
-          {#each table.getFooterGroups() as footerGroup (footerGroup.id)}
-            <Table.Row>
-              {#each Array(controlColumnCount) as _, index (`footer-control-${footerGroup.id}-${index}`)}
-                <Table.Cell />
-              {/each}
-              {#each footerGroup.headers as footerHeader (footerHeader.id)}
-                <Table.Cell colspan={footerHeader.colSpan} style={columnInlineStyle(footerHeader.column)}>
-                  {#if !footerHeader.isPlaceholder}<FlexRender footer={footerHeader} />{/if}
-                </Table.Cell>
-              {/each}
-            </Table.Row>
-          {/each}
-        </Table.Footer>
-      {/if}
-    </Table.Root>
+      </Table.Root>
+    </ScrollArea.Viewport>
+    <ScrollArea.Scrollbar
+      orientation="vertical"
+      class="z-30 flex w-2.5 touch-none select-none p-0.5"
+      style={stickyHeader ? `margin-top:${headerBlockHeight}px` : undefined}>
+      <ScrollArea.Thumb class="relative flex-1 rounded-full bg-muted-foreground/40 hover:bg-muted-foreground/70" />
+    </ScrollArea.Scrollbar>
+    <ScrollArea.Scrollbar orientation="horizontal" class="z-30 flex h-2.5 touch-none select-none p-0.5">
+      <ScrollArea.Thumb class="relative flex-1 rounded-full bg-muted-foreground/40 hover:bg-muted-foreground/70" />
+    </ScrollArea.Scrollbar>
+    <ScrollArea.Corner />
     {#if loading}
       <div
         class="absolute inset-0 z-40 grid place-items-center bg-background/70"
@@ -1713,7 +1736,7 @@ $effect(() => {
         {/if}
       </div>
     {/if}
-  </div>
+  </ScrollArea.Root>
 
   {#if (paginator && (paginatorPosition === 'bottom' || paginatorPosition === 'both')) || selectionMode === 'multiple' || footer}
     <div class="flex flex-wrap items-center gap-3" data-slot="data-table-footer">

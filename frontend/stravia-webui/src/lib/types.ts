@@ -17,7 +17,7 @@ export interface CredentialRule {
   secret_group: number
   keywords: string[]
   filter: string
-  components: { id: string; within: number; optional: boolean }[]
+  components: { id: string; within: string; optional: boolean }[]
   skip_report: boolean
   specificity: number
   confidence: string

@@ -1,7 +1,7 @@
-<h1 align="center">Stravia AI Gateway</h1>
+<h1 align="center">Stravia</h1>
 
 <p align="center">
-  A local, self-hostable gateway for routing OpenAI, Anthropic, and Gemini clients to the model providers you choose.
+  A local, self-hostable AI access and execution platform that unifies model protocols, runs platform tools and built-in agents, and centrally manages access, history, and usage.
 </p>
 
 <p align="center">
@@ -12,7 +12,11 @@
 
 ## Overview
 
-Stravia runs between AI clients and upstream model providers. Clients keep speaking the protocol they already support; Stravia resolves a virtual model, selects an upstream backend, translates the request and response when necessary, and records the result locally.
+Stravia connects AI clients, model providers, and platform-owned capabilities. Clients keep speaking the protocol they already support; Stravia resolves a virtual model, selects an upstream backend, and translates requests and responses when necessary.
+
+Beyond routing, Stravia executes platform-owned tools and feeds their results back into subsequent model turns. Its bounded Agent Runner powers local agentic Web Search and is also used by Media Understanding. These capabilities are available through compatible model requests and MCP, with shared identity, access controls, history, usage accounting, and diagnostics.
+
+Agent behavior is defined and versioned by the platform implementation. Administrators configure supported capability settings and model bindings; Stravia is not a user-defined agent or visual workflow builder.
 
 ```text
 Claude Code · Codex CLI · Gemini CLI · OpenCode · SDKs
@@ -22,6 +26,8 @@ Claude Code · Codex CLI · Gemini CLI · OpenCode · SDKs
                 ├─ OpenAI-compatible API
                 ├─ Anthropic Messages API
                 ├─ Gemini GenerateContent API
+                ├─ MCP tools
+                ├─ Platform tools and built-in agent execution
                 ├─ Admin API
                 └─ WebUI
                             │
@@ -31,10 +37,20 @@ Claude Code · Codex CLI · Gemini CLI · OpenCode · SDKs
 
 The same Rust core powers two deployment modes:
 
-- **Desktop:** a Tauri application for a local, managed gateway.
-- **Server:** a standalone binary that serves the proxy API, Admin API, health probes, and an embedded WebUI from one listener.
+- **Desktop:** a Tauri application that runs the platform locally with an integrated management interface.
+- **Server:** a standalone binary that runs the same platform capabilities and serves the proxy API, MCP, Admin API, health probes, and an embedded WebUI from one listener.
 
 ## Current Capabilities
+
+### Platform tools and built-in agent execution
+
+- **Platform-owned tool execution:** expose tools to compatible model requests, execute platform tool calls inside Stravia, and continue model turns with their results. Client-owned tool calls remain the client's responsibility.
+- **Bounded agent loops:** coordinate model and tool turns with time, turn, token, and tool budgets, controlled tool concurrency, cancellation, and validated outputs.
+- **Built-in capabilities:** `web_search` returns a source-backed Search Report; `understand_media` returns a validated Media Report for supported images. Both support explicit continuation and branching through `previous_turn_id`.
+- **MCP and transparent injection:** expose enabled capabilities to MCP clients, or inject selected capabilities into compatible model requests according to configuration.
+- **Execution management:** associate requests and nested executions with the calling Principal, enforce access and concurrency limits, and track history, confirmed upstream usage, and diagnostics.
+
+Local Web Search uses a model–tool loop; current Media Understanding reuses the Agent Runner without its own tool calls. The capability sections below describe their supported inputs, configuration, and limits.
 
 ### Protocol gateway
 
@@ -115,9 +131,9 @@ Enable the platform capability, select a logical Model, and choose its Thinking 
 
 In **Advanced Features → Credential Protection**, enable instance-wide credential text protection and explicitly save changes. It is **off by default** and applies to every valid Stravia API Key, with no per-key exemption, MCP tool, or Transparent Injection option. Server and Desktop use the same core setting and behavior; clients keep their existing protocols and plaintext view.
 
-The page lists the running version's complete read-only rule catalog, with searchable names and expandable matching expressions, local filters, and combination conditions. Recent discoveries group newly created protection mappings by client interaction and link to the corresponding request observation. Reusing a valid mapping or restoring a placeholder does not count as a new discovery; recreating an expired mapping does. API Keys remain isolated, concurrent creation counts only once, and a discovery can remain visible even when its request fails or is cancelled. Summaries show rules, source categories, counts, and request status without secret values, placeholders, or message excerpts. Observations can be incomplete and follow request-history retention; they are not a security audit guarantee.
+The page opens on **Current rules**, a searchable, sortable, paginated table of the running version's complete read-only catalog. Each row shows the rule name, keywords, and any path, combination, or component-only conditions instead of repeating names and IDs. Rule IDs remain searchable without being displayed. The side panel separates keywords, matching expressions, exclusions, path restrictions, and required or optional component matches; extraction, priority, confidence, and rule role are available under **Rule parameters**. **Hit records** groups newly created protection mappings by client interaction and links to the corresponding request observation. Reusing a valid mapping or restoring a placeholder does not count as a new discovery; recreating an expired mapping does. API Keys remain isolated, concurrent creation counts only once, and a discovery can remain visible even when its request fails or is cancelled. Summaries show rules, source categories, counts, and request status without secret values, placeholders, or message excerpts. Observations can be incomplete and follow request-history retention; they are not a security audit guarantee.
 
-The matching tester at the end of the page accepts a single key or contextual text, including multiline input. It sends submitted text only to your Stravia instance, uses the same local detector even when protection is off, and returns matching rules and input positions. It does not persist input, include it in diagnostics, contact a provider or validation service, search saved credentials, create mappings or observations, or change settings. **No existing rule matched** is not a guarantee that content is safe or a credential is invalid.
+The **Matching test** tab places input and results side by side on wide screens and stacks them on mobile. It accepts a single key or contextual text, including multiline input; selecting a result highlights its original text. It sends submitted text only to your Stravia instance, uses the same local detector even when protection is off, and returns matching rules and input positions. It does not persist input, include it in diagnostics, contact a provider or validation service, search saved credentials, create mappings or observations, or change settings. **No existing rule matched** is not a guarantee that content is safe or a credential is invalid.
 
 Before each model request, Stravia locally replaces detected credentials in system instructions, user and historical messages, tool arguments, tool results, and platform-internal requests with opaque placeholders. Bundled Betterleaks rules update with Stravia releases; runtime rule downloads and online credential validation are never performed. Valid known secrets for the same API Key are also replaced by exact text, including all occurrences elsewhere in a request that first identifies a secret. Surrounding non-secret text, protocol structure, and necessary upstream connection authentication remain unchanged.
 

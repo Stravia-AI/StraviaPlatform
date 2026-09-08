@@ -4,9 +4,13 @@
 
 This file applies to the entire repository. Keep project-wide guidance here; put subsystem-specific guidance in a closer `AGENTS.md` only when that subtree needs different commands or conventions.
 
-Stravia is a local AI protocol gateway implemented as a Rust workspace with these main components:
+Stravia is a local, self-hostable AI access and execution platform implemented as a Rust workspace. It combines a multi-provider protocol gateway with platform-owned tool execution, bounded built-in agent loops, and centralized access, history, usage, and diagnostic management. The gateway is its client-facing entry point, not the full product scope.
 
-- `stravia-core`: transport-agnostic gateway, protocol, provider, storage, and administration logic.
+Platform Tools run inside Stravia and can feed results into subsequent model turns rather than returning every tool call to the client. Built-in capabilities include Web Search and Media Understanding, exposed through compatible model requests and MCP. Agent Definitions are program-owned and versioned; this is not a user-defined agent or visual workflow builder.
+
+The main components are:
+
+- `stravia-core`: transport-agnostic gateway, protocol, provider, platform tool and agent execution, capability, storage, and administration logic.
 - `stravia-server`: standalone HTTP server.
 - `stravia-desktop`: Tauri desktop shell around the same core behavior.
 - `stravia-webui`: SvelteKit management interface used by the server and desktop app.
@@ -15,7 +19,7 @@ Stravia is a local AI protocol gateway implemented as a Rust workspace with thes
 
 | Path | Responsibility |
 |---|---|
-| `backend/crates/stravia-core/` | Core gateway, protocol conversion, providers, storage, and admin services. |
+| `backend/crates/stravia-core/` | Core gateway, protocol conversion, providers, platform tools, agent execution, built-in capabilities, storage, and admin services. |
 | `backend/crates/stravia-devtools/` | Development CLI, including `stravia-tools`. |
 | `backend/apps/stravia-server/` | Standalone server binary and HTTP transport. |
 | `backend/apps/stravia-desktop/` | Tauri desktop application and desktop integration. |
