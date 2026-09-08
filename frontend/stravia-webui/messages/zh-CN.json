@@ -1,4 +1,12 @@
 {
+  "web_access_browser_path": "浏览器可执行文件",
+  "web_access_browser_path_placeholder": "未检测到 Chrome 或 Chromium",
+  "web_access_browser_path_help": "填写运行 Stravia 的机器上的可执行文件绝对路径。留空则使用环境变量或自动检测。",
+  "web_access_browser_browse": "浏览",
+  "web_access_browser_choose": "选择 Chrome 或 Chromium 可执行文件",
+  "web_access_browser_load_failed": "无法加载浏览器配置。",
+  "web_access_browser_saved_service_failed": "浏览器路径已保存，但服务设置保存失败：{error}",
+  "web_access_browser_required": "请先在 Local 服务编辑窗口中配置 Chrome 或 Chromium 可执行文件，再开启 Local 搜索或网页读取。",
   "model_editor_discard_unsaved_changes": "放弃未保存的更改？",
   "model_editor_unsaved_changes_warning": "未保存的模型草稿将被放弃；已立即生效的请求目标设置仍会保留。",
   "model_editor_keep_editing": "继续编辑",

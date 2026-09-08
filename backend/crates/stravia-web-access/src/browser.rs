@@ -1,5 +1,5 @@
 use anyhow::Context;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::{Mutex, Notify};
 
@@ -9,10 +9,12 @@ mod process;
 mod stealth;
 
 use cdp::Cdp;
+pub use process::{resolve_browser_executable, validate_browser_executable};
 
 #[derive(Debug, Clone)]
 pub(crate) struct ChromeLaunchConfig {
     pub proxy: crate::outbound::ResolvedProxy,
+    pub browser_path: Option<std::path::PathBuf>,
 }
 
 #[derive(Clone)]
@@ -70,6 +72,11 @@ impl BrowserRuntime {
                 browser: Mutex::new(None),
             }),
         }
+    }
+
+    pub(crate) async fn require_available(&self) -> anyhow::Result<()> {
+        resolve_browser_executable(self.inner.config.browser_path.as_deref()).await?;
+        Ok(())
     }
 
     async fn browser(&self) -> anyhow::Result<Arc<Chrome>> {
@@ -144,7 +151,7 @@ fn auto_attach() -> Value {
 impl Chrome {
     async fn launch(config: ChromeLaunchConfig) -> anyhow::Result<Self> {
         let proxy = egress::EgressProxy::start(config.proxy).await?;
-        let process = process::Process::launch(proxy).await?;
+        let process = process::Process::launch(proxy, config.browser_path.as_deref()).await?;
         let (cdp, mut receiver) = Cdp::connect(&process.endpoint).await?;
         let version = cdp.call(None, "Browser.getVersion", json!({})).await?;
         let ua = stealth::user_agent_override(
@@ -682,6 +689,11 @@ mod tests {
             });
             Self {
                 config: ChromeLaunchConfig {
+                    browser_path: Some(
+                        process::resolve_browser_executable(None)
+                            .await
+                            .expect("installed Chrome/Chromium"),
+                    ),
                     proxy: crate::outbound::ResolvedProxy {
                         http: Some(proxy.clone()),
                         https: Some(proxy),
@@ -774,14 +786,18 @@ mod tests {
                 .await
                 .is_err()
         );
-        assert!(runtime
-            .render(request("file:///etc/passwd", "body"))
-            .await
-            .is_err());
-        assert!(runtime
-            .render(request("http://127.0.0.1/", "body"))
-            .await
-            .is_err());
+        assert!(
+            runtime
+                .render(request("file:///etc/passwd", "body"))
+                .await
+                .is_err()
+        );
+        assert!(
+            runtime
+                .render(request("http://127.0.0.1/", "body"))
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -862,19 +878,23 @@ mod tests {
             .await
             .unwrap();
         assert!(!stack.as_str().unwrap().contains("pptr:"));
-        assert!(!stack
-            .as_str()
-            .unwrap()
-            .contains("__puppeteer_evaluation_script__"));
+        assert!(
+            !stack
+                .as_str()
+                .unwrap()
+                .contains("__puppeteer_evaluation_script__")
+        );
         page.close().await.unwrap();
         let mut timeout = request("http://93.184.216.34/wait", "#never");
         timeout.timeout = Duration::from_millis(300);
-        assert!(runtime
-            .render(timeout)
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("timed out"));
+        assert!(
+            runtime
+                .render(timeout)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("timed out")
+        );
         wait_for_no_pages(&browser).await;
         let clone = runtime.clone();
         let pending = tokio::spawn(async move {

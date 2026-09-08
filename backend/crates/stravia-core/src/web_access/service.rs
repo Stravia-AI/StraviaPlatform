@@ -67,6 +67,13 @@ impl WebAccessService {
         }
     }
 
+    /// 检查此网关的 Local Search/Fetch 浏览器前置条件，不启动浏览器或发起网络请求。
+    pub async fn local_browser_available(&self) -> bool {
+        stravia_web_access::resolve_browser_executable(self.browser_path_snapshot().as_deref())
+            .await
+            .is_ok()
+    }
+
     pub async fn settings(&self) -> anyhow::Result<WebAccessSettings> {
         let Some(store) = self.gateway.storage.web_providers() else {
             return Ok(WebAccessSettings::default());
@@ -182,7 +189,8 @@ impl WebAccessService {
 
     async fn test_provider_inner(&self, provider: WebProvider) -> Result<(), WebAccessError> {
         let proxy_url = self.proxy_url_snapshot().await?;
-        let adapter = self.adapter(&provider, proxy_url.as_deref())?;
+        let browser_path = self.browser_path_snapshot();
+        let adapter = self.adapter(&provider, proxy_url.as_deref(), browser_path.as_deref())?;
         if adapter.supports_search() {
             adapter
                 .search(&SearchRequest {
@@ -246,10 +254,34 @@ impl WebAccessService {
         records: &std::collections::HashMap<String, WebProvider>,
     ) -> Result<WebAccessEngine, WebAccessError> {
         let proxy_url = self.proxy_url_snapshot().await?;
-        let search =
-            self.ordered_adapters(&settings.search_provider_ids, records, proxy_url.as_deref());
-        let fetch =
-            self.ordered_adapters(&settings.fetch_provider_ids, records, proxy_url.as_deref());
+        let uses_local = settings
+            .search_provider_ids
+            .iter()
+            .chain(&settings.fetch_provider_ids)
+            .any(|id| {
+                records
+                    .get(id)
+                    .is_some_and(|provider| provider.kind == "local")
+            });
+        let browser_path = if uses_local {
+            stravia_web_access::resolve_browser_executable(self.browser_path_snapshot().as_deref())
+                .await
+                .ok()
+        } else {
+            None
+        };
+        let search = self.ordered_adapters(
+            &settings.search_provider_ids,
+            records,
+            proxy_url.as_deref(),
+            browser_path.as_deref(),
+        );
+        let fetch = self.ordered_adapters(
+            &settings.fetch_provider_ids,
+            records,
+            proxy_url.as_deref(),
+            browser_path.as_deref(),
+        );
         Ok(WebAccessEngine::new(search, fetch))
     }
     fn ordered_adapters(
@@ -257,13 +289,17 @@ impl WebAccessService {
         ids: &[String],
         records: &std::collections::HashMap<String, WebProvider>,
         proxy_url: Option<&str>,
+        browser_path: Option<&std::path::Path>,
     ) -> Vec<Arc<dyn WebProviderAdapter>> {
         let mut adapters = Vec::with_capacity(ids.len());
         for id in ids {
             let Some(provider) = records.get(id) else {
                 continue;
             };
-            match self.adapter(provider, proxy_url) {
+            if provider.kind == "local" && browser_path.is_none() {
+                continue;
+            }
+            match self.adapter(provider, proxy_url, browser_path) {
                 Ok(adapter) => adapters.push(adapter),
                 Err(error) => adapters.push(Arc::new(UnavailableAdapter {
                     id: provider.id.clone(),
@@ -280,10 +316,19 @@ impl WebAccessService {
         adapters
     }
 
+    fn browser_path_snapshot(&self) -> Option<std::path::PathBuf> {
+        self.gateway
+            .browser_path
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
     fn adapter(
         &self,
         provider: &WebProvider,
         proxy_url: Option<&str>,
+        browser_path: Option<&std::path::Path>,
     ) -> Result<Arc<dyn WebProviderAdapter>, WebAccessError> {
         let outbound = if provider.use_proxy {
             stravia_web_access::OutboundProxyMode::Explicit(
@@ -296,7 +341,7 @@ impl WebAccessService {
         } else {
             stravia_web_access::OutboundProxyMode::Direct
         };
-        self.adapter_factory.build(provider, outbound)
+        self.adapter_factory.build(provider, outbound, browser_path)
     }
 }
 
@@ -305,6 +350,7 @@ pub(super) trait AdapterFactory: Send + Sync {
         &self,
         provider: &WebProvider,
         outbound: stravia_web_access::OutboundProxyMode,
+        browser_path: Option<&std::path::Path>,
     ) -> Result<Arc<dyn WebProviderAdapter>, WebAccessError>;
 }
 
@@ -315,6 +361,7 @@ impl AdapterFactory for ProductionAdapterFactory {
         &self,
         provider: &WebProvider,
         outbound: stravia_web_access::OutboundProxyMode,
+        browser_path: Option<&std::path::Path>,
     ) -> Result<Arc<dyn WebProviderAdapter>, WebAccessError> {
         match provider.kind.as_str() {
             "local" => {
@@ -336,6 +383,7 @@ impl AdapterFactory for ProductionAdapterFactory {
                     provider.id.clone(),
                     outbound,
                     engines,
+                    browser_path.map(std::path::Path::to_owned),
                 )
                 .map_err(provider_failure)
             }

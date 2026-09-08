@@ -24,6 +24,7 @@
     "@tanstack/svelte-query": "^6.1.44",
     "@tanstack/svelte-table": "9.2.3",
     "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-dialog": "^2",
     "@tauri-apps/plugin-opener": "^2.5.4",
     "class-variance-authority": "^0.7.1",
     "layerchart": "^2.3.0"

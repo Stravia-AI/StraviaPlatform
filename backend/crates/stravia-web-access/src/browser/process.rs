@@ -22,18 +22,58 @@ impl Drop for Process {
     }
 }
 
-async fn executable() -> anyhow::Result<PathBuf> {
-    if let Some(path) = env::var_os("STRAVIA_CHROME_PATH") {
-        let path = PathBuf::from(path);
+/// 检查手动指定的绝对路径是否为可执行文件，不启动程序，也不验证浏览器版本。
+/// 文件不存在、不可访问、不是普通文件或不符合平台可执行条件时返回错误。
+pub async fn validate_browser_executable(path: &std::path::Path) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        path.is_absolute(),
+        "browser executable path must be absolute"
+    );
+    let metadata = tokio::fs::metadata(path)
+        .await
+        .with_context(|| format!("cannot access browser executable: {}", path.display()))?;
+    anyhow::ensure!(metadata.is_file(), "browser executable path is not a file");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
         anyhow::ensure!(
-            tokio::fs::metadata(&path).await?.is_file(),
-            "STRAVIA_CHROME_PATH is not a file"
+            metadata.permissions().mode() & 0o111 != 0,
+            "browser file is not executable"
         );
+    }
+    #[cfg(windows)]
+    anyhow::ensure!(
+        path.extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("exe")),
+        "browser executable must be an .exe file"
+    );
+    Ok(())
+}
+
+/// 按手动路径、环境变量、本机安装位置的顺序解析浏览器，不启动或下载程序。
+/// 显式路径无效时返回错误，不回退；环境变量中的相对路径仍按工作目录解释。
+pub async fn resolve_browser_executable(
+    manual_path: Option<&std::path::Path>,
+) -> anyhow::Result<PathBuf> {
+    if let Some(path) = manual_path {
+        validate_browser_executable(path).await?;
+        return Ok(path.to_owned());
+    }
+    if let Some(path) = env::var_os("STRAVIA_CHROME_PATH") {
+        let path = std::path::absolute(path)?;
+        validate_browser_executable(&path)
+            .await
+            .context("invalid STRAVIA_CHROME_PATH")?;
         return Ok(path);
     }
     let mut candidates = Vec::new();
     if cfg!(target_os = "windows") {
-        for root in ["PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"] {
+        for root in [
+            "ProgramW6432",
+            "PROGRAMFILES",
+            "PROGRAMFILES(X86)",
+            "LOCALAPPDATA",
+        ] {
             if let Some(root) = env::var_os(root) {
                 for relative in [
                     "Google/Chrome/Application/chrome.exe",
@@ -45,7 +85,17 @@ async fn executable() -> anyhow::Result<PathBuf> {
         }
     } else if cfg!(target_os = "macos") {
         candidates.extend(["/Applications/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing", "/Applications/Chromium.app/Contents/MacOS/Chromium", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"].map(PathBuf::from));
-    } else if let Some(path) = env::var_os("PATH") {
+        if let Some(home) = env::var_os("HOME") {
+            for relative in [
+                "Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                "Applications/Chromium.app/Contents/MacOS/Chromium",
+                "Applications/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+            ] {
+                candidates.push(PathBuf::from(&home).join(relative));
+            }
+        }
+    } else {
+        let path = env::var_os("PATH").unwrap_or_default();
         for root in env::split_paths(&path) {
             for name in [
                 "google-chrome-stable",
@@ -57,11 +107,24 @@ async fn executable() -> anyhow::Result<PathBuf> {
             }
         }
     }
+    if cfg!(target_os = "linux") {
+        candidates.extend(
+            [
+                "/usr/bin/google-chrome",
+                "/usr/bin/chromium",
+                "/usr/bin/chromium-browser",
+                "/snap/bin/chromium",
+            ]
+            .map(PathBuf::from),
+        );
+    }
     for candidate in candidates {
-        if tokio::fs::metadata(&candidate)
-            .await
-            .is_ok_and(|meta| meta.is_file())
-        {
+        let candidate = if candidate.is_absolute() {
+            candidate
+        } else {
+            std::path::absolute(candidate)?
+        };
+        if validate_browser_executable(&candidate).await.is_ok() {
             return Ok(candidate);
         }
     }
@@ -70,9 +133,38 @@ async fn executable() -> anyhow::Result<PathBuf> {
     )
 }
 
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    async fn invalid_explicit_browser_never_falls_back() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("removed-chrome.exe");
+        let error = super::resolve_browser_executable(Some(&missing))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::NotFound
+        );
+        assert!(
+            super::resolve_browser_executable(Some(directory.path()))
+                .await
+                .is_err()
+        );
+        assert!(
+            super::resolve_browser_executable(Some(std::path::Path::new("chrome.exe")))
+                .await
+                .is_err()
+        );
+    }
+}
+
 impl Process {
-    pub(super) async fn launch(proxy: EgressProxy) -> anyhow::Result<Self> {
-        let executable = executable().await?;
+    pub(super) async fn launch(
+        proxy: EgressProxy,
+        browser_path: Option<&std::path::Path>,
+    ) -> anyhow::Result<Self> {
+        let executable = resolve_browser_executable(browser_path).await?;
         let profile = tokio::task::spawn_blocking(|| {
             tempfile::Builder::new().prefix("stravia-chrome-").tempdir()
         })

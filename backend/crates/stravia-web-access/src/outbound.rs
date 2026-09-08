@@ -99,18 +99,21 @@ impl NoProxyList {
 
 impl LocalWeb {
     pub fn new(mode: OutboundProxyMode) -> Result<Self, LocalWebError> {
-        Self::from_env(mode, |key| std::env::var(key).ok())
+        Self::with_browser_path(mode, None)
     }
 
-    fn from_env(
+    /// 创建固定出站代理与浏览器路径快照的运行时；`None` 使用环境变量或本机检测。
+    /// 此处只校验代理配置；每次本地搜索或抓取前校验浏览器路径，不启动浏览器。
+    pub fn with_browser_path(
         mode: OutboundProxyMode,
-        env: impl Fn(&str) -> Option<String>,
+        browser_path: Option<std::path::PathBuf>,
     ) -> Result<Self, LocalWebError> {
-        let snapshot = resolve_mode(mode, env)?;
+        let snapshot = resolve_mode(mode, |key| std::env::var(key).ok())?;
         let http = build_http_client(&snapshot, SEARCH_TIMEOUT, true)?;
         let fetch_proxied = build_http_client(&snapshot, FETCH_TIMEOUT, false)?;
         let browser = BrowserRuntime::new(crate::browser::ChromeLaunchConfig {
             proxy: snapshot.clone(),
+            browser_path,
         });
         Ok(Self {
             inner: Arc::new(LocalWebInner {
@@ -163,6 +166,7 @@ impl LocalWeb {
         mut query: crate::search::engines::SearchQuery,
         progress_tx: tokio::sync::mpsc::UnboundedSender<crate::search::engines::ProgressUpdate>,
     ) -> anyhow::Result<()> {
+        self.inner.browser.require_available().await?;
         query.http = self.http_client();
         query.browser = self.browser();
         crate::search::engines::search(&query, progress_tx).await
@@ -173,6 +177,7 @@ impl LocalWeb {
         config: &crate::search::config::Config,
         query: &str,
     ) -> anyhow::Result<Vec<String>> {
+        self.inner.browser.require_available().await?;
         crate::search::engines::autocomplete(config, query, &self.inner.http).await
     }
 }
@@ -291,6 +296,7 @@ pub(crate) fn direct_http_client() -> HttpClient {
 pub(crate) fn direct_browser() -> BrowserRuntime {
     BrowserRuntime::new(crate::browser::ChromeLaunchConfig {
         proxy: ResolvedProxy::direct(),
+        browser_path: None,
     })
 }
 
@@ -329,16 +335,20 @@ mod tests {
 
     #[test]
     fn explicit_rejects_userinfo_and_socks4() {
-        assert!(resolve_mode(
-            OutboundProxyMode::Explicit("http://user:pass@127.0.0.1:7890".into()),
-            env(&[]),
-        )
-        .is_err());
-        assert!(resolve_mode(
-            OutboundProxyMode::Explicit("socks4://127.0.0.1:1080".into()),
-            env(&[]),
-        )
-        .is_err());
+        assert!(
+            resolve_mode(
+                OutboundProxyMode::Explicit("http://user:pass@127.0.0.1:7890".into()),
+                env(&[]),
+            )
+            .is_err()
+        );
+        assert!(
+            resolve_mode(
+                OutboundProxyMode::Explicit("socks4://127.0.0.1:1080".into()),
+                env(&[]),
+            )
+            .is_err()
+        );
         assert!(resolve_mode(OutboundProxyMode::Explicit("not a url".into()), env(&[]),).is_err());
     }
 
@@ -376,6 +386,68 @@ mod tests {
         .unwrap();
         assert!(snapshot.pins_origin(&Url::parse("http://example.com/").unwrap()));
         assert!(!snapshot.pins_origin(&Url::parse("https://example.com/").unwrap()));
+    }
+
+    #[tokio::test]
+    async fn removed_browser_rejects_local_execution_before_network() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("chrome.exe");
+        std::fs::write(&path, b"metadata fixture; never execute").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let web = LocalWeb::with_browser_path(
+            OutboundProxyMode::Explicit(format!("http://{}", listener.local_addr().unwrap())),
+            Some(path.clone()),
+        )
+        .unwrap();
+        let adapter = crate::local::build_local_adapter(
+            "local".into(),
+            OutboundProxyMode::Explicit(format!("http://{}", listener.local_addr().unwrap())),
+            [(
+                "google".into(),
+                crate::local::LocalSearchEngineSetting { enabled: true },
+            )]
+            .into_iter()
+            .collect(),
+            Some(path.clone()),
+        )
+        .unwrap();
+        std::fs::remove_file(path).unwrap();
+        let search = crate::SearchRequest {
+            query: "Stravia".into(),
+            max_results: 1,
+            allowed_domains: vec![],
+            blocked_domains: vec![],
+        };
+        assert!(adapter.search(&search).await.is_err());
+        let fetch = adapter
+            .fetch(&crate::FetchRequest {
+                urls: vec!["https://example.com/".into()],
+                max_characters: 100,
+            })
+            .await
+            .unwrap();
+        assert_eq!(fetch.result[0].status, crate::FetchStatus::Error);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(web.search(web.search_query("Stravia"), tx).await.is_err());
+        assert_eq!(
+            web.fetch("https://example.com/").await.unwrap_err().code(),
+            crate::fetch::FetchErrorCode::Unavailable
+        );
+        assert!(
+            web.autocomplete(&crate::search::config::Config::default(), "Stravia")
+                .await
+                .is_err()
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), listener.accept())
+                .await
+                .is_err()
+        );
     }
 
     #[test]

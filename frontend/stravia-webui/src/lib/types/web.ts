@@ -37,6 +37,14 @@ export interface UpdateWebProvider {
   local_engines?: LocalSearchEngineConfigs
 }
 
+export interface WebAccessBrowserState {
+  configuredPath: string | null
+  resolvedPath: string | null
+  source: 'manual' | 'environment' | 'automatic'
+  available: boolean
+  error: string | null
+}
+
 export interface WebAccessSettings {
   enabled: boolean
   search_provider_ids: string[]

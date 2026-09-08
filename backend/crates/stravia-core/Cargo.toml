@@ -45,9 +45,9 @@ inventory = { workspace = true }
 gcp_auth = { workspace = true }
 aws-credential-types = { workspace = true }
 aws-sigv4 = { workspace = true }
+tempfile = { workspace = true }
 
 [dev-dependencies]
-tempfile = { workspace = true }
 tower = { workspace = true }
 jsonschema = { version = "0.51.0", default-features = false }
 

@@ -3,11 +3,12 @@ import * as m from '$lib/paraglide/messages.js'
 import { createQuery, useQueryClient } from '@tanstack/svelte-query'
 import ArrowDownIcon from '@lucide/svelte/icons/arrow-down'
 import ArrowUpIcon from '@lucide/svelte/icons/arrow-up'
+import FolderOpenIcon from '@lucide/svelte/icons/folder-open'
 import Globe2Icon from '@lucide/svelte/icons/globe-2'
 import PlusIcon from '@lucide/svelte/icons/plus'
 import { toast } from 'svelte-sonner'
 
-import { admin } from '$lib/admin-client'
+import { admin, isTauri } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
 import { formatDuration } from '$lib/format'
 import type {
@@ -31,6 +32,8 @@ const queryClient = useQueryClient()
 const providersQuery = createQuery(() => ({ queryKey: ['web-providers'], queryFn: admin.webAccess.providers.list }))
 const settingsQuery = createQuery(() => ({ queryKey: ['web-access-settings'], queryFn: admin.webAccess.settings.get }))
 
+const browserQuery = createQuery(() => ({ queryKey: ['web-access-browser'], queryFn: admin.webAccess.browser.get }))
+
 let editorOpen = $state(false)
 let editingProvider = $state<WebProvider>()
 let editorName = $state('')
@@ -38,6 +41,9 @@ let editorKind = $state<WebProviderKind>('exa')
 let editorSecret = $state('')
 let editorUseProxy = $state(false)
 let savingEditor = $state(false)
+let choosingBrowser = $state(false)
+let browserPathDraft = $state<string>()
+let browserPathError = $state<string>()
 let actingProviderId = $state<string>()
 let savingSettings = $state(false)
 let deleteTarget = $state<WebProvider>()
@@ -48,6 +54,29 @@ const settings = $derived<WebAccessSettings>(
   settingsQuery.data ?? { enabled: false, search_provider_ids: [], fetch_provider_ids: [] },
 )
 const settingsUnavailable = $derived(settingsQuery.isPending || settingsQuery.isError)
+const localBrowserAvailable = $derived(
+  browserQuery.isSuccess && !browserQuery.isFetching && browserQuery.data.available,
+)
+const browserPath = $derived(
+  browserPathDraft ?? browserQuery.data?.configuredPath ?? browserQuery.data?.resolvedPath ?? '',
+)
+const browserInputError = $derived(
+  browserPathError ?? (browserPathDraft === undefined ? browserQuery.data?.error : undefined),
+)
+const browserInputBusy = $derived(savingEditor || choosingBrowser || browserQuery.isFetching)
+const localSelected = $derived(
+  webProviders.some(
+    (provider) =>
+      provider.kind === 'local' &&
+      (settings.search_provider_ids.includes(provider.id) || settings.fetch_provider_ids.includes(provider.id)),
+  ),
+)
+const globalEnableBlocked = $derived(
+  !settings.enabled &&
+    ((localSelected && !localBrowserAvailable) ||
+      ((providersQuery.isPending || providersQuery.isError) &&
+        (settings.search_provider_ids.length > 0 || settings.fetch_provider_ids.length > 0))),
+)
 
 function kindLabel(kind: WebProviderKind): string {
   return ({ local: 'Local', exa: 'Exa', zhipu: 'Zhipu' } as const)[kind]
@@ -65,10 +94,7 @@ const localEngineOptions: ReadonlyArray<{ id: LocalSearchEngineId; label: string
 
 function defaultLocalEngines(): LocalSearchEngineConfigs {
   return Object.fromEntries(
-    localEngineOptions.map(({ id }) => [
-      id,
-      { enabled: ['google', 'bing', 'brave', 'baidu'].includes(id) },
-    ]),
+    localEngineOptions.map(({ id }) => [id, { enabled: ['google', 'bing', 'brave', 'baidu'].includes(id) }]),
   ) as LocalSearchEngineConfigs
 }
 
@@ -94,11 +120,31 @@ function openEdit(provider: WebProvider): void {
   editorKind = provider.kind
   editorSecret = ''
   editorUseProxy = provider.use_proxy
-  editorLocalEngines = {
-    ...defaultLocalEngines(),
-    ...(provider.local_engines ?? {}),
-  }
+  editorLocalEngines = { ...defaultLocalEngines(), ...(provider.local_engines ?? {}) }
+  browserPathDraft = undefined
+  browserPathError = undefined
   editorOpen = true
+  if (provider.kind === 'local') void browserQuery.refetch()
+}
+
+async function chooseBrowser(): Promise<void> {
+  if (!isTauri || browserInputBusy) return
+  choosingBrowser = true
+  browserPathError = undefined
+  try {
+    const { open } = await import('@tauri-apps/plugin-dialog')
+    const selected = await open({
+      title: m.web_access_browser_choose(),
+      multiple: false,
+      directory: false,
+      defaultPath: browserPath || undefined,
+    })
+    if (selected !== null) browserPathDraft = selected
+  } catch (error) {
+    browserPathError = localizeBackendErrorMessage(error)
+  } finally {
+    choosingBrowser = false
+  }
 }
 
 async function refreshWebAccess(): Promise<void> {
@@ -109,6 +155,8 @@ async function refreshWebAccess(): Promise<void> {
 }
 
 async function saveEditor(): Promise<void> {
+  if (savingEditor || choosingBrowser) return
+  if (editorKind === 'local' && (browserQuery.isFetching || !browserQuery.isSuccess)) return
   if (!editorName.trim()) {
     toast.error(m.web_access_configuration_service_name_required())
     return
@@ -119,16 +167,29 @@ async function saveEditor(): Promise<void> {
   }
 
   savingEditor = true
+  let browserSaved = false
   try {
+    if (
+      editorKind === 'local' &&
+      browserPathDraft !== undefined &&
+      browserPath.trim() !== (browserQuery.data?.configuredPath ?? browserQuery.data?.resolvedPath ?? '')
+    ) {
+      try {
+        const next = await admin.webAccess.browser.set(browserPath.trim() || null)
+        queryClient.setQueryData(['web-access-browser'], next)
+        browserPathDraft = undefined
+        browserPathError = undefined
+        browserSaved = true
+      } catch (error) {
+        browserPathError = localizeBackendErrorMessage(error)
+        throw error
+      }
+    }
     if (editingProvider) {
       await admin.webAccess.providers.update(
         editingProvider.id,
         editorKind === 'local'
-          ? {
-              name: editorName.trim(),
-              use_proxy: editorUseProxy,
-              local_engines: editorLocalEngines,
-            }
+          ? { name: editorName.trim(), use_proxy: editorUseProxy, local_engines: editorLocalEngines }
           : {
               name: editorName.trim(),
               use_proxy: editorUseProxy,
@@ -147,13 +208,25 @@ async function saveEditor(): Promise<void> {
     editorOpen = false
     toast.success(m.web_access_configuration_search_service_saved())
   } catch (error) {
-    toast.error(localizeBackendErrorMessage(error))
+    const message = localizeBackendErrorMessage(error)
+    toast.error(browserSaved ? m.web_access_browser_saved_service_failed({ error: message }) : message)
   } finally {
     savingEditor = false
   }
 }
 
 async function saveSettings(next: WebAccessSettings): Promise<void> {
+  if (settingsUnavailable || savingSettings) return
+  const addsLocal = webProviders.some(
+    (provider) =>
+      provider.kind === 'local' &&
+      ((!settings.search_provider_ids.includes(provider.id) && next.search_provider_ids.includes(provider.id)) ||
+        (!settings.fetch_provider_ids.includes(provider.id) && next.fetch_provider_ids.includes(provider.id))),
+  )
+  if ((!settings.enabled && next.enabled && globalEnableBlocked) || (addsLocal && !localBrowserAvailable)) {
+    toast.error(m.web_access_browser_required())
+    return
+  }
   savingSettings = true
   try {
     await admin.webAccess.settings.update(next)
@@ -226,8 +299,9 @@ async function deleteProvider(): Promise<void> {
       </p>
     </div>
     <Switch
+      id="web-access-enabled"
       checked={settings.enabled}
-      disabled={settingsUnavailable || savingSettings}
+      disabled={settingsUnavailable || savingSettings || globalEnableBlocked}
       aria-label={m.web_access_configuration_enable_web_search_page_access()}
       onCheckedChange={(checked) => void saveSettings({ ...settings, enabled: checked })} />
   </div>
@@ -355,8 +429,11 @@ async function deleteProvider(): Promise<void> {
           {@const orderIndex = ids.indexOf(provider.id)}
           <div class="flex min-h-14 items-center gap-3 py-2">
             <Switch
+              id={`web-access-${capability}-${provider.id}`}
               checked={enabled}
-              disabled={settingsUnavailable || savingSettings}
+              disabled={settingsUnavailable ||
+                savingSettings ||
+                (provider.kind === 'local' && !enabled && !localBrowserAvailable)}
               aria-label={m.web_access_use_provider_for_capability({
                 provider: provider.name,
                 capability: isSearch ? m.web_access_configuration_web_search() : m.web_access_page_access_label(),
@@ -433,6 +510,52 @@ async function deleteProvider(): Promise<void> {
               onCheckedChange={(checked) => (editorUseProxy = checked)} />
           </div>
           {#if editorKind === 'local'}
+            <Field.Field size="fill" data-invalid={Boolean(browserInputError)} data-disabled={browserInputBusy}>
+              <Field.Label for="web-provider-browser-path">{m.web_access_browser_path()}</Field.Label>
+              <div class="flex items-center gap-2">
+                <Input
+                  id="web-provider-browser-path"
+                  value={browserPath}
+                  disabled={browserInputBusy || !browserQuery.isSuccess}
+                  placeholder={m.web_access_browser_path_placeholder()}
+                  autocomplete="off"
+                  spellcheck={false}
+                  aria-invalid={Boolean(browserInputError)}
+                  aria-describedby={browserInputError
+                    ? 'web-provider-browser-help web-provider-browser-error'
+                    : 'web-provider-browser-help'}
+                  oninput={(event) => {
+                    browserPathDraft = event.currentTarget.value
+                    browserPathError = undefined
+                  }} />
+                {#if isTauri}
+                  <Button
+                    id="web-provider-browser-choose"
+                    type="button"
+                    variant="outline"
+                    disabled={browserInputBusy || !browserQuery.isSuccess}
+                    onclick={() => void chooseBrowser()}>
+                    {#if choosingBrowser}<Spinner data-icon="inline-start" />{:else}<FolderOpenIcon
+                        data-icon="inline-start" />{/if}
+                    {m.web_access_browser_browse()}
+                  </Button>
+                {/if}
+              </div>
+              <Field.Description id="web-provider-browser-help">{m.web_access_browser_path_help()}</Field.Description>
+              {#if browserInputError}
+                <Field.Error id="web-provider-browser-error">{browserInputError}</Field.Error>
+              {/if}
+              {#if browserQuery.isError}
+                <Field.Error>{m.web_access_browser_load_failed()}</Field.Error>
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={browserInputBusy}
+                  onclick={() => void browserQuery.refetch()}>
+                  {m.common_retry()}
+                </Button>
+              {/if}
+            </Field.Field>
             <Field.Field size="fill">
               <Field.Label>{m.web_access_configuration_local_search_engines()}</Field.Label>
               <div class="divide-y rounded-md border">
@@ -462,7 +585,11 @@ async function deleteProvider(): Promise<void> {
       </div>
       <Sheet.Footer class="route-overlay-footer">
         <Sheet.Close type="button" class={buttonVariants({ variant: 'outline' })}>{m.common_cancel()}</Sheet.Close>
-        <Button type="submit" disabled={savingEditor}>
+        <Button
+          type="submit"
+          disabled={savingEditor ||
+            choosingBrowser ||
+            (editorKind === 'local' && (browserQuery.isFetching || !browserQuery.isSuccess))}>
           {#if savingEditor}<Spinner data-icon="inline-start" />{/if}{m.web_access_configuration_save_service()}
         </Button>
       </Sheet.Footer>

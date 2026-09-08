@@ -806,6 +806,128 @@ async fn route_bind_endpoint_owns_one_click_target_creation() -> anyhow::Result<
 }
 
 #[tokio::test]
+async fn web_access_http_cannot_enable_local_without_browser() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let (gateway, _logs) = Gateway::new(GatewayConfig {
+        data_dir: directory.path().to_owned(),
+        ..Default::default()
+    })
+    .await?;
+    gateway.set_browser_path(Some(directory.path().join("missing-chrome.exe")));
+    let local = gateway
+        .admin()
+        .list_web_providers()
+        .await?
+        .into_iter()
+        .find(|provider| provider.kind == "local")
+        .unwrap();
+    let empty = stravia_core::db::models::WebAccessSettings {
+        enabled: false,
+        search_provider_ids: vec![],
+        fetch_provider_ids: vec![],
+    };
+    gateway
+        .admin()
+        .update_web_access_settings(empty.clone())
+        .await?;
+    let app = create_unprotected_router(gateway.clone());
+    let status = app
+        .clone()
+        .oneshot(Request::get("/api/v1/web-access/browser").body(Body::empty())?)
+        .await?;
+    assert_eq!(status.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(status.into_body(), usize::MAX).await?)?;
+    assert_eq!(body["data"]["available"], false);
+    assert_eq!(body["data"]["source"], "manual");
+    assert_eq!(body["data"]["resolvedPath"], serde_json::Value::Null);
+    assert_eq!(
+        body["data"]["configuredPath"],
+        directory
+            .path()
+            .join("missing-chrome.exe")
+            .to_string_lossy()
+            .as_ref()
+    );
+    assert!(body["data"]["error"].as_str().is_some());
+    let invalid = app
+        .clone()
+        .oneshot(
+            Request::put("/api/v1/web-access/browser")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"path":"relative-chrome.exe"}"#))?,
+        )
+        .await?;
+    let invalid_body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(invalid.into_body(), usize::MAX).await?)?;
+    assert!(invalid_body["error"].is_string());
+    assert_eq!(
+        gateway
+            .admin()
+            .get_web_access_browser()
+            .await
+            .configured_path,
+        Some(
+            directory
+                .path()
+                .join("missing-chrome.exe")
+                .to_string_lossy()
+                .into_owned()
+        )
+    );
+    for search in [true, false] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::put("/api/v1/web-access/settings")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&serde_json::json!({
+                        "enabled": true,
+                        "search_provider_ids": if search { vec![local.id.clone()] } else { vec![] },
+                        "fetch_provider_ids": if search { vec![] } else { vec![local.id.clone()] }
+                    }))?))?,
+            )
+            .await?;
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await?)?;
+        let error: serde_json::Value =
+            serde_json::from_str(body["error"].as_str().expect("admin error envelope"))?;
+        assert_eq!(error["code"], "WEB_ACCESS_BROWSER_REQUIRED");
+        assert_eq!(gateway.admin().get_web_access_settings().await?, empty);
+    }
+    let executable = std::env::current_exe()?.to_string_lossy().into_owned();
+    for path in [Some(executable), None] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::put("/api/v1/web-access/browser")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(
+                        &serde_json::json!({ "path": path }),
+                    )?))?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await?)?;
+        assert_eq!(body["data"]["configuredPath"], serde_json::json!(path));
+        assert_eq!(
+            gateway
+                .admin()
+                .get_web_access_browser()
+                .await
+                .configured_path,
+            path
+        );
+        if path.is_some() {
+            assert_eq!(body["data"]["available"], true);
+            assert_eq!(body["data"]["resolvedPath"], serde_json::json!(path));
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn web_access_admin_routes_persist_masked_providers_and_atomic_priority() -> anyhow::Result<()>
 {
     let data_dir = tempfile::tempdir()?;

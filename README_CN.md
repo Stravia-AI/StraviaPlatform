@@ -93,7 +93,9 @@ Route Builder 使用独立页面。选择 Provider 后会自动加载其可用 P
 
 在 WebUI 中配置一个 Search Backend。Local Search 使用有界 Agent 编排有序的内部 Web Access Search/Fetch 来源：自动创建的进程内 Local Provider、Exa 或智谱。每个 Web Provider 都可独立选择是否使用 Gateway 代理。Codex Agentic Search 固定到一个精确且兼容的 Codex OAuth Responses Provider/model，不使用 Local budget。Local 与 Codex 之间不做 fallback。
 
-进程内 Local Provider 的 Search 与 Fetch 使用 `wreq` 和 `wreq-util` 提供 Chrome 风格的 HTTP 传输。动态页面由真实 Chrome/Chromium 渲染，按需以 headless 模式启动，Rust 直接通过 CDP 控制；不再需要 Moli 运行时或 Node/Bun sidecar。请在宿主机安装 Chrome/Chromium，或通过 `STRAVIA_CHROME_PATH` 指定可执行文件。Stravia 不会自动下载浏览器。
+进程内 Local Provider 的 Search 与 Fetch 使用 `wreq` 和 `wreq-util` 提供 Chrome 风格的 HTTP 传输。动态页面由真实 Chrome/Chromium 渲染，按需以 headless 模式启动，Rust 直接通过 CDP 控制；不再需要 Moli 运行时或 Node/Bun sidecar。桌面端与服务端都必须能解析到 Chrome/Chromium 可执行文件，才能开启 Local Search 或 Fetch，包括普通 HTTP 访问。请在运行 Stravia 的机器上安装浏览器后重新打开 Local 服务编辑窗口以刷新检测，或通过 `STRAVIA_CHROME_PATH` 指定可执行文件后重启 Stravia。没有浏览器时，界面禁止开启 Local，管理 API 返回 `WEB_ACCESS_BROWSER_REQUIRED` 且不保存此次更改。已保存的 Local 选择仍可关闭，但运行时不可用；远程 Exa 与智谱服务不受影响。Stravia 不会自动下载浏览器。
+
+在 **联网搜索 → 搜索服务 → Local → 编辑** 中，**浏览器可执行文件** 输入框会填入当前配置或检测到的路径。桌面端可点击 **浏览** 打开操作系统文件选择窗口；服务端可手填或修改服务器上的路径。选择文件只修改草稿，点击 **保存服务** 才生效；清空输入框并保存则移除手动覆盖。请填写可执行文件的绝对路径，macOS 使用 `.app` 包内的可执行文件。设置仅保存在当前实例本机，不进入共享数据库，重启后仍然有效。优先级为手动路径、`STRAVIA_CHROME_PATH`、自动检测；未修改自动带入的路径时，保存服务不会将其固定为手动路径。显式路径无效时不会回退到其他浏览器。保存后无需重启，对后续网页访问请求生效，正在进行的请求保留原选择。检查路径不会启动浏览器，桌面端也不捆绑浏览器。
 
 渲染器移植了 [OMP 的浏览器补丁](https://github.com/can1357/oh-my-pi/tree/daf07999c2fee9b22edc7bf8fea1fb6272e0df5e/packages/coding-agent/src/tools/puppeteer)，包括全部 14 个隐身脚本、UA metadata、不启用 `Runtime.enable` 的隔离世界求值，以及不注入 source URL 的求值路径。这些措施用于减少指纹暴露，不保证绕过反爬检测。HTTP 与浏览器路径保留所选 Gateway 代理快照、独立的 Cookie/profile 归属和 Fetch 安全限制。浏览器流量经过校验出口代理，不进行 TLS 中间人解密；证书校验与 Chrome 沙箱保持启用。
 

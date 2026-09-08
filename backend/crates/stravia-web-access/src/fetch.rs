@@ -82,6 +82,10 @@ pub(crate) async fn fetch_with_runtime(
     web: &LocalWeb,
     value: &str,
 ) -> Result<FetchedPage, FetchError> {
+    web.browser()
+        .require_available()
+        .await
+        .map_err(|error| FetchError::unavailable(error.to_string()))?;
     fetch_with(
         value,
         &NetworkBackend::from_local_web(web),
@@ -357,8 +361,8 @@ mod tests {
         collections::VecDeque,
         net::{IpAddr, Ipv4Addr},
         sync::{
-            atomic::{AtomicUsize, Ordering},
             Mutex,
+            atomic::{AtomicUsize, Ordering},
         },
     };
 
@@ -524,9 +528,10 @@ mod tests {
         assert_eq!(page.title.as_deref(), Some("Fallback title"));
         assert_eq!(page.extraction_path, ExtractionPath::Static);
         assert!(page.markdown.contains("Local Web Fetch"));
-        assert!(page
-            .markdown
-            .contains("[Source](https://example.com/source)"));
+        assert!(
+            page.markdown
+                .contains("[Source](https://example.com/source)")
+        );
         assert!(!page.markdown.contains("Products Pricing"));
         assert_eq!(backend.renders.load(Ordering::Relaxed), 0);
     }

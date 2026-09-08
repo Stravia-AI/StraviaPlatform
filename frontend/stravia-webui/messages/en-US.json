@@ -1,4 +1,12 @@
 {
+  "web_access_browser_path": "Browser executable",
+  "web_access_browser_path_placeholder": "No Chrome or Chromium detected",
+  "web_access_browser_path_help": "Use an absolute executable path on the machine running Stravia. Leave blank to use the environment setting or automatic detection.",
+  "web_access_browser_browse": "Browse",
+  "web_access_browser_choose": "Select Chrome or Chromium executable",
+  "web_access_browser_load_failed": "Browser configuration could not be loaded.",
+  "web_access_browser_saved_service_failed": "The browser path was saved, but the service settings could not be saved: {error}",
+  "web_access_browser_required": "Configure a Chrome or Chromium executable in the Local service editor before enabling Local Search or Fetch.",
   "model_editor_discard_unsaved_changes": "Discard unsaved changes?",
   "model_editor_unsaved_changes_warning": "Your unsaved model draft will be discarded. Destination settings that were applied immediately remain saved.",
   "model_editor_keep_editing": "Keep editing",

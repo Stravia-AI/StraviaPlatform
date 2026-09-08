@@ -232,6 +232,12 @@ graph TD
 
 `stravia-web-access` 的 HTTP Search/Fetch 使用 `wreq` 与 `wreq-util`，浏览器回退使用 Rust 直接控制的真实 headless Chrome/Chromium，不依赖 Moli 或 Node/Bun sidecar。`LocalWeb` 固定代理配置快照；HTTP Search 的 Cookie jar、无 Cookie 的 HTTP Fetch 客户端和浏览器 profile 分离，不跨运行时共享。Chrome 按需启动，`STRAVIA_CHROME_PATH` 可覆盖本机发现；运行时显式持有 browser context，使会话 Cookie 不随临时标签页关闭而丢失。最后一个运行时所有者释放时回收进程与临时 profile。
 
+Desktop 与 Server 在 Local 服务编辑窗口中共用浏览器路径输入框，自动带入配置或检测到的路径；重新打开编辑窗口会重新检测。Desktop 通过 Tauri 官方 dialog 插件打开系统文件选择窗口，仅授予本地 main WebView `dialog:allow-open`，选择结果只修改草稿；Server 手填服务器本机路径。保存服务时先保存实际修改过的路径；若后续服务设置保存失败，界面明确报告路径已保存。清空路径并保存恢复环境变量或自动检测；未修改自动带入的路径不会被固定为手动覆盖。
+
+Core 在 Gateway 创建时读取运行目录下的 `web-access-browser.json`，不进入共享数据库；新文件不存在时一次性将原 `desktop-browser.json` 改名迁移。路径经校验、原子持久化后才激活到 Gateway 及其克隆；持久化、激活与写入锁位于同一个阻塞任务，调用方取消不会导致磁盘与运行时脱节。经过认证的 `GET /api/v1/web-access/browser` 返回 `configuredPath`、`resolvedPath`、`source`、`available` 与 `error`，路径仅供管理端展示；`PUT` 接受 `{path: string|null}`，无效路径或持久化失败不改变原选择。Web Access 在创建包含 Local 来源的执行引擎时捕获解析后的有效路径，传递至 `LocalWeb` 和浏览器启动配置；已有请求保留原选择。解析优先级为手动覆盖、`STRAVIA_CHROME_PATH`、系统安装位置；显式路径无效时不回退。检查只读取配置和文件元数据，不启动浏览器；设置损坏或浏览器卸载不会阻止应用启动。界面保存路径无需重启，更改环境变量则需要重启进程。Desktop 不捆绑或下载浏览器。
+
+Core 统一约束 Desktop 与 Server 的 Local Search/Fetch：新增 Local 能力选择，或重新开启含 Local 来源的 Web Access 时，必须能够解析到浏览器，否则返回 `WEB_ACCESS_BROWSER_REQUIRED` 且不写入设置。关闭、移除或保持既有 Local 选择不要求浏览器。WebUI 据浏览器配置接口的可用性限制开启操作，最终校验仍在 Core。缺少浏览器时，执行引擎排除已保存的 Local 来源，保留远程来源；Local Search 的来源校验使用相同可用性约束。`LocalWeb` 在每次 Search、Fetch 或 autocomplete 进入网络路径前再次检查浏览器，已创建的运行时也不能在可执行文件被移除后退回无浏览器 HTTP 访问。浏览器恢复后可重新启用，远程 Exa 与 Zhipu 不受此限制。
+
 浏览器保留沙箱和端到端 TLS，通过本地出口代理执行公共地址校验、直连 DNS 地址固定及上游代理转发；页面、重定向、iframe 和 worker 不能绕过出口。显式上游代理保留远端 DNS 语义与 `NO_PROXY` 快照，不进行 TLS 中间人解密。Fetch 继续限制下载与渲染结果大小，并保留超时、取消与静态提取回退契约。
 
 隐身实现固定移植 OMP commit `daf07999c2fee9b22edc7bf8fea1fb6272e0df5e` 的全部 14 个脚本与 bootstrap，并保留 MIT 声明。CDP 在恢复 target 前配置 UA；页面脚本注入主世界，内部求值默认使用按需获取的隔离世界，不启用 `Runtime.enable` 或自动追加 source URL。导航跟随 frame 当前文档的生命周期事件，而非固定等待首次 `Page.navigate` 返回的 loader；JS 跳转更换文档后重新获取隔离世界并绑定 DOM 就绪等待。Google 的静态响应按真实链接标题 DOM 判断是否需要浏览器回退，不把脚本里的 HTML 模板当成结果。固定语言、核心数等指纹值以及上游 worker 包装范围仍有局限，不构成“不可检测”的承诺。
