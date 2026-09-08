@@ -2,7 +2,7 @@ use maud::{html, PreEscaped};
 use scraper::{Html, Selector};
 use serde::Deserialize;
 use tracing::error;
-use url::Url;
+use wreq::Request;
 
 use crate::search::engines::{Engine, HttpResponse, Response};
 
@@ -11,18 +11,21 @@ pub struct MdnConfig {
     pub max_sections: usize,
 }
 
-pub async fn request(response: &Response) -> Option<wreq::RequestBuilder> {
+pub async fn request(response: &Response) -> anyhow::Result<Option<Request>> {
     for search_result in response.search_results.iter().take(8) {
         if search_result
             .result
             .url
             .starts_with("https://developer.mozilla.org/en-US/docs/Web")
         {
-            return Some(response.http.get(search_result.result.url.as_str()));
+            return Ok(Some(Request::new(
+                wreq::Method::GET,
+                search_result.result.url.parse()?,
+            )));
         }
     }
 
-    None
+    Ok(None)
 }
 
 pub fn parse_response(
@@ -37,7 +40,7 @@ pub fn parse_response(
         }
     };
 
-    let url = Url::parse(&res.uri().to_string()).ok()?;
+    let url = url::Url::parse(&res.uri().to_string()).ok()?;
 
     let dom = Html::parse_document(body);
 

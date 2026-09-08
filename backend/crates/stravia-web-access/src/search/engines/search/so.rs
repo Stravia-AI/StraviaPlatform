@@ -4,9 +4,11 @@ use futures::future::join_all;
 use regex::Regex;
 use scraper::{ElementRef, Selector};
 use url::Url;
+use wreq::Request;
 
 use crate::{
     browser::RenderRequest,
+    http_client::HttpClient,
     search::{
         engines::{EngineResponse, EngineSearchResult, RequestResponse, SearchQuery},
         parse::{parse_html_response_with_opts, ParseOpts, QueryMethod},
@@ -25,8 +27,9 @@ static LOCATION_REPLACE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 pub async fn request(search: &SearchQuery) -> anyhow::Result<RequestResponse> {
-    let response = search.http.get(search_url(search).as_str()).send().await?;
-    let body = response.text().await?;
+    let request = Request::new(wreq::Method::GET, (search_url(search).as_str()).parse()?);
+    let response = search.http.fetch(request).await?;
+    let body = String::from_utf8_lossy(&response.1);
     let parsed = if requires_browser_render(&body) {
         render_response(search).await?
     } else {
@@ -99,7 +102,7 @@ fn source_url(el: &ElementRef) -> anyhow::Result<String> {
         .to_string())
 }
 
-async fn resolve_link_urls(mut response: EngineResponse, client: &wreq::Client) -> EngineResponse {
+async fn resolve_link_urls(mut response: EngineResponse, client: &HttpClient) -> EngineResponse {
     let results = join_all(
         response
             .search_results
@@ -123,7 +126,7 @@ async fn resolve_link_urls(mut response: EngineResponse, client: &wreq::Client) 
 
 async fn resolve_link_url(
     mut result: EngineSearchResult,
-    client: wreq::Client,
+    client: HttpClient,
 ) -> anyhow::Result<EngineSearchResult> {
     let url = Url::parse(&result.url)?;
     if is_360_ai_url(&url) {
@@ -134,12 +137,12 @@ async fn resolve_link_url(
     }
 
     // 不解密 m= 令牌；读 /link 返回页里的 location.replace，和搜狗微信同一类。
-    let response = client
-        .get(url.as_str())
-        .header("Referer", SO_SEARCH_URL)
-        .send()
-        .await?;
-    let body = response.text().await?;
+    let mut request = Request::new(wreq::Method::GET, (url.as_str()).parse()?);
+    request
+        .headers_mut()
+        .insert(wreq::header::REFERER, SO_SEARCH_URL.parse()?);
+    let response = client.fetch(request).await?;
+    let body = String::from_utf8_lossy(&response.1);
     result.url = extract_so_link_destination(&body)
         .ok_or_else(|| anyhow::anyhow!("360 /link did not contain a destination URL"))?;
     Ok(result)

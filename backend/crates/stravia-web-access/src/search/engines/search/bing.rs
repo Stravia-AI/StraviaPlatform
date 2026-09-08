@@ -2,18 +2,24 @@ use base64::Engine;
 use rand::RngExt;
 use scraper::{ElementRef, Selector};
 use url::Url;
+use wreq::Request;
 
 use crate::search::{
     engines::{EngineResponse, SearchQuery},
     parse::{parse_html_response_with_opts, ParseOpts, QueryMethod},
 };
 
-pub async fn request(search: &SearchQuery) -> wreq::RequestBuilder {
+pub async fn request(search: &SearchQuery) -> anyhow::Result<Request> {
     let cvid = generate_cvid();
-    search
-        .http
-        .get(search_url(search, &cvid).as_str())
-        .header("Cookie", &format!("SRCHHPGUSR=IG={}", cvid))
+    let mut request = Request::new(
+        wreq::Method::GET,
+        (search_url(search, &cvid).as_str()).parse()?,
+    );
+    request.headers_mut().insert(
+        wreq::header::COOKIE,
+        format!("SRCHHPGUSR=IG={cvid}").parse()?,
+    );
+    Ok(request)
 }
 
 fn search_url(search: &SearchQuery, cvid: &str) -> Url {

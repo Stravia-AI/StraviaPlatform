@@ -247,6 +247,8 @@ impl Gateway {
             Arc::clone(&storage),
             config.product_update_download_supported,
         )?);
+        let (browser_preferences, browser_path) =
+            admin::browser::BrowserPreferences::load(&config.data_dir);
         let mut gw = Self {
             config,
             storage,
@@ -278,6 +280,8 @@ impl Gateway {
             generation_chains,
             model_turn: model_turn::unreachable_executor(),
             web_access_run_snapshots: web_access::WebAccessRunSnapshotStore::default(),
+            browser_path: Arc::new(std::sync::RwLock::new(browser_path)),
+            browser_preferences: Arc::new(browser_preferences),
             web_search_runner_state: Arc::new(tokio::sync::RwLock::new(None)),
             web_search_config_lock: Arc::new(tokio::sync::Mutex::new(())),
             update_service,
@@ -507,6 +511,15 @@ impl Gateway {
 
     pub fn admin(&self) -> admin::AdminService {
         admin::AdminService::new(self.clone())
+    }
+
+    /// 设置此网关及其克隆后续 Local Web 访问使用的浏览器路径，已有访问保留原快照。
+    /// `None` 恢复环境变量或本机检测；此方法不校验路径、不启动浏览器，也不持久化设置。
+    pub fn set_browser_path(&self, path: Option<std::path::PathBuf>) {
+        *self
+            .browser_path
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = path;
     }
 
     pub fn web_access(&self) -> web_access::WebAccessService {

@@ -398,31 +398,38 @@ fn rejects_canonical_json_object_for_dated_targets() {
 }
 
 #[test]
-fn stringifies_structured_single_tool_results() {
-    let request = AiRequest::new(
-        "gpt",
-        vec![AiItem {
-            role: Role::Tool,
-            content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
-                tool_use_id: "call_1".into(),
-                content: serde_json::json!({"temperature": 21}),
-                content_kind: Some(crate::protocol::ir::ToolResultContentKind::Json),
-                is_error: None,
-                cache_control: None,
-            }]),
-            tool_calls: None,
-            tool_call_id: Some("call_1".into()),
-            meta: None,
-        }],
-    );
+fn encodes_non_media_tool_payload_as_json_text() {
+    for payload in [
+        serde_json::json!({"temperature": 21}),
+        serde_json::json!([
+            {"type": "tool_result", "content": {"temperature": 21}}
+        ]),
+    ] {
+        let request = AiRequest::new(
+            "gpt",
+            vec![AiItem {
+                role: Role::Tool,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                    tool_use_id: "call_1".into(),
+                    content: payload.clone(),
+                    content_kind: Some(crate::protocol::ir::ToolResultContentKind::Json),
+                    is_error: None,
+                    cache_control: None,
+                }]),
+                tool_calls: None,
+                tool_call_id: Some("call_1".into()),
+                meta: None,
+            }],
+        );
 
-    let (body, _) = ResponsesEncoder
-        .encode_request(&request)
-        .expect("encode structured tool result");
-    assert_eq!(
-        body["input"][0]["output"],
-        serde_json::Value::String(r#"{"temperature":21}"#.into())
-    );
+        let (body, _) = ResponsesEncoder
+            .encode_request(&request)
+            .expect("encode structured tool result");
+        let output = body["input"][0]["output"]
+            .as_str()
+            .expect("non-media tool output must be JSON text, not a native content array");
+        assert_eq!(serde_json::from_str::<Value>(output).unwrap(), payload);
+    }
 }
 
 #[test]

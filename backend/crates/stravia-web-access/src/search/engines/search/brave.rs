@@ -1,12 +1,13 @@
 use url::Url;
+use wreq::Request;
 
 use crate::search::{
     engines::{EngineResponse, RequestResponse, SearchQuery},
     parse::{parse_html_response_with_opts, ParseOpts},
 };
 
-pub async fn request(search: &SearchQuery) -> RequestResponse {
-    search.http.get(search_url(search).as_str()).into()
+pub async fn request(search: &SearchQuery) -> anyhow::Result<RequestResponse> {
+    Ok(Request::new(wreq::Method::GET, (search_url(search).as_str()).parse()?).into())
 }
 
 fn search_url(search: &SearchQuery) -> Url {

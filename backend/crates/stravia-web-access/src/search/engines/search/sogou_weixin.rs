@@ -4,9 +4,11 @@ use futures::future::join_all;
 use regex::Regex;
 use scraper::{ElementRef, Selector};
 use url::Url;
+use wreq::Request;
 
 use crate::{
     browser::RenderRequest,
+    http_client::HttpClient,
     search::{
         engines::{EngineResponse, EngineSearchResult, RequestResponse, SearchQuery},
         parse::{parse_html_response_with_opts, ParseOpts, QueryMethod},
@@ -25,8 +27,9 @@ static WECHAT_REDIRECT_URL_PARTS: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 pub async fn request(search: &SearchQuery) -> anyhow::Result<RequestResponse> {
-    let response = search.http.get(search_url(search).as_str()).send().await?;
-    let body = response.text().await?;
+    let request = Request::new(wreq::Method::GET, (search_url(search).as_str()).parse()?);
+    let response = search.http.fetch(request).await?;
+    let body = String::from_utf8_lossy(&response.1);
     if requires_browser_render(&body) {
         return Ok(RequestResponse::Instant(Box::new(
             render_response(search).await?,
@@ -101,10 +104,7 @@ fn tracking_url(el: &ElementRef) -> anyhow::Result<String> {
     Ok(Url::parse(href).or_else(|_| origin.join(href))?.to_string())
 }
 
-async fn resolve_article_urls(
-    mut response: EngineResponse,
-    client: &wreq::Client,
-) -> EngineResponse {
+async fn resolve_article_urls(mut response: EngineResponse, client: &HttpClient) -> EngineResponse {
     let results = join_all(
         response
             .search_results
@@ -128,15 +128,15 @@ async fn resolve_article_urls(
 
 async fn resolve_article_url(
     mut result: EngineSearchResult,
-    client: wreq::Client,
+    client: HttpClient,
 ) -> anyhow::Result<EngineSearchResult> {
     // 依赖搜索 client 的 cookie jar，把结果页的 SNUID 带到这次 /link 请求。
-    let response = client
-        .get(&result.url)
-        .header("Referer", SOGOU_WECHAT_SEARCH_URL)
-        .send()
-        .await?;
-    let redirect_page = response.text().await?;
+    let mut request = Request::new(wreq::Method::GET, (&result.url).parse()?);
+    request
+        .headers_mut()
+        .insert(wreq::header::REFERER, SOGOU_WECHAT_SEARCH_URL.parse()?);
+    let response = client.fetch(request).await?;
+    let redirect_page = String::from_utf8_lossy(&response.1);
     let url = extract_wechat_article_url(&redirect_page).ok_or_else(|| {
         anyhow::anyhow!("Sogou WeChat redirect did not contain a direct article URL")
     })?;

@@ -10,7 +10,7 @@ use numbat::{
 };
 use tracing::debug;
 
-use crate::search::engines::EngineResponse;
+use crate::{http_client::HttpClient, search::engines::EngineResponse};
 
 pub async fn request(query: &str) -> EngineResponse {
     let query = clean_query(query);
@@ -29,7 +29,7 @@ pub async fn request(query: &str) -> EngineResponse {
     })
 }
 
-pub fn request_autocomplete(query: &str, _client: &wreq::Client) -> Vec<String> {
+pub fn request_autocomplete(query: &str, _client: &HttpClient) -> anyhow::Result<Vec<String>> {
     let mut results = Vec::new();
 
     let query = clean_query(query);
@@ -38,7 +38,7 @@ pub fn request_autocomplete(query: &str, _client: &wreq::Client) -> Vec<String> 
         results.push(format!("= {result}"));
     }
 
-    results
+    Ok(results)
 }
 
 fn clean_query(query: &str) -> String {

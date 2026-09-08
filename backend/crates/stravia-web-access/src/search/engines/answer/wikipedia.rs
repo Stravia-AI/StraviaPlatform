@@ -3,17 +3,18 @@ use std::collections::HashMap;
 use maud::html;
 use serde::Deserialize;
 use url::Url;
+use wreq::Request;
 
 use crate::search::engines::{EngineResponse, RequestResponse, SearchQuery};
 
 use super::colorpicker;
 
-pub async fn request(search: &SearchQuery) -> RequestResponse {
+pub async fn request(search: &SearchQuery) -> anyhow::Result<RequestResponse> {
     let mut query: &str = search;
     if !colorpicker::MatchedColorModel::new(query).is_empty() {
         // "color picker" is a wikipedia article but we only want to show the
         // actual color picker answer
-        return RequestResponse::None;
+        return Ok(RequestResponse::None);
     }
 
     // adding "wikipedia" to the start or end of your query is common when you
@@ -38,7 +39,7 @@ pub async fn request(search: &SearchQuery) -> RequestResponse {
         ],
     )
     .unwrap();
-    search.http.get(url.as_str()).into()
+    Ok(Request::new(wreq::Method::GET, (url.as_str()).parse()?).into())
 }
 
 #[derive(Debug, Deserialize)]

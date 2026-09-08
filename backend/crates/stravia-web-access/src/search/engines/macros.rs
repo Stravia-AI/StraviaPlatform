@@ -77,12 +77,12 @@ macro_rules! engine_autocomplete_requests {
     ($($engine:ident => $module:ident::$engine_id:ident::$request:ident, $parse_response:ident),* $(,)?) => {
         impl Engine {
             #[must_use]
-            pub fn request_autocomplete(&self, query: &str, client: &wreq::Client) -> Option<RequestAutocompleteResponse> {
+            pub fn request_autocomplete(&self, query: &str, client: &HttpClient) -> anyhow::Result<Option<RequestAutocompleteResponse>> {
                 match self {
                     $(
-                        Engine::$engine => Some($module::$engine_id::$request(query, client).into()),
+                        Engine::$engine => Ok(Some($module::$engine_id::$request(query, client)?.into())),
                     )*
-                    _ => None,
+                    _ => Ok(None),
                 }
             }
 
@@ -104,12 +104,12 @@ macro_rules! engine_postsearch_requests {
     ($($engine:ident => $module:ident::$engine_id:ident::$request:ident, $parse_response:ident),* $(,)?) => {
         impl Engine {
             #[must_use]
-            pub async fn postsearch_request(&self, response: &Response) -> Option<wreq::RequestBuilder> {
+            pub async fn postsearch_request(&self, response: &Response) -> anyhow::Result<Option<wreq::Request>> {
                 match self {
                     $(
                         Engine::$engine => $module::$engine_id::$request(response).await,
                     )*
-                    _ => None,
+                    _ => Ok(None),
                 }
             }
 

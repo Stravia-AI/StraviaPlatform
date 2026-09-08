@@ -155,7 +155,27 @@ impl AdminService {
     ) -> anyhow::Result<WebAccessSettings> {
         ensure_unique_ids(&settings.search_provider_ids, "Search")?;
         ensure_unique_ids(&settings.fetch_provider_ids, "Fetch")?;
-        self.web_provider_store()?.save_settings(&settings).await?;
+        let store = self.web_provider_store()?;
+        let current = store.load_settings().await?;
+        let providers = store.list().await?;
+        let requires_browser = providers
+            .iter()
+            .filter(|provider| provider.kind == "local")
+            .any(|provider| {
+                let search = settings.search_provider_ids.contains(&provider.id);
+                let fetch = settings.fetch_provider_ids.contains(&provider.id);
+                (search && !current.search_provider_ids.contains(&provider.id))
+                    || (fetch && !current.fetch_provider_ids.contains(&provider.id))
+                    || (!current.enabled && settings.enabled && (search || fetch))
+            });
+        if requires_browser && !self.gw.web_access().local_browser_available().await {
+            return Err(coded_error(
+                "WEB_ACCESS_BROWSER_REQUIRED",
+                "Local Search and Fetch require Chrome/Chromium on the machine running Stravia; configure its executable in the Local service editor, or set STRAVIA_CHROME_PATH and restart Stravia",
+                serde_json::json!({}),
+            ));
+        }
+        store.save_settings(&settings).await?;
         self.bump_config_epoch().await?;
         Ok(settings)
     }
@@ -322,6 +342,103 @@ mod tests {
                 fetch: true,
             })
         );
+    }
+
+    #[tokio::test]
+    async fn missing_browser_blocks_local_additions_but_allows_cleanup_and_remote() {
+        let directory = tempfile::tempdir().unwrap();
+        let gateway = crate::Gateway::new(crate::config::GatewayConfig {
+            data_dir: directory.path().to_owned(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        gateway.set_browser_path(Some(directory.path().join("missing-chrome.exe")));
+        let admin = gateway.admin();
+        let local = admin
+            .list_web_providers()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|provider| provider.kind == "local")
+            .unwrap();
+        let store = gateway.storage.web_providers().unwrap();
+        let empty = WebAccessSettings {
+            enabled: false,
+            search_provider_ids: vec![],
+            fetch_provider_ids: vec![],
+        };
+        store.save_settings(&empty).await.unwrap();
+        for enabled in [false, true] {
+            for search in [false, true] {
+                let requested = WebAccessSettings {
+                    enabled,
+                    search_provider_ids: if search {
+                        vec![local.id.clone()]
+                    } else {
+                        vec![]
+                    },
+                    fetch_provider_ids: if search {
+                        vec![]
+                    } else {
+                        vec![local.id.clone()]
+                    },
+                };
+                let error = admin
+                    .update_web_access_settings(requested)
+                    .await
+                    .unwrap_err();
+                assert!(error.to_string().contains("WEB_ACCESS_BROWSER_REQUIRED"));
+                assert_eq!(admin.get_web_access_settings().await.unwrap(), empty);
+            }
+        }
+        let stale = WebAccessSettings {
+            enabled: true,
+            search_provider_ids: vec![local.id.clone()],
+            fetch_provider_ids: vec![local.id.clone()],
+        };
+        store.save_settings(&stale).await.unwrap();
+        let disabled = admin
+            .update_web_access_settings(WebAccessSettings {
+                enabled: false,
+                ..stale.clone()
+            })
+            .await
+            .unwrap();
+        assert!(
+            admin
+                .update_web_access_settings(stale)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("WEB_ACCESS_BROWSER_REQUIRED")
+        );
+        assert_eq!(admin.get_web_access_settings().await.unwrap(), disabled);
+        admin.update_web_access_settings(empty).await.unwrap();
+        let remote = admin
+            .create_web_provider(CreateWebProvider {
+                name: "Remote".into(),
+                kind: "exa".into(),
+                api_key: Some("secret".into()),
+                use_proxy: false,
+                local_engines: None,
+            })
+            .await
+            .unwrap();
+        let remote_settings = WebAccessSettings {
+            enabled: true,
+            search_provider_ids: vec![remote.id.clone()],
+            fetch_provider_ids: vec![remote.id],
+        };
+        assert_eq!(
+            admin
+                .update_web_access_settings(remote_settings.clone())
+                .await
+                .unwrap(),
+            remote_settings
+        );
+        let probe = admin.test_web_provider(&local.id).await.unwrap();
+        assert!(!probe.success);
     }
 
     #[tokio::test]

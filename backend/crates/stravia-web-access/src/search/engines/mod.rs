@@ -9,16 +9,16 @@ use std::{
 };
 
 use futures::future::join_all;
-use http_body_util::BodyExt;
 use maud::PreEscaped;
 use serde::{Deserialize, Deserializer, Serialize};
 use tokio::sync::mpsc;
 use tracing::{error, info};
 use url::{Host, Url};
+use wreq::Request;
 
-use crate::browser::BrowserRuntime;
 #[cfg(test)]
 use crate::outbound::{direct_browser, direct_http_client};
+use crate::{browser::BrowserRuntime, http_client::HttpClient};
 
 mod macros;
 mod ranking;
@@ -116,7 +116,7 @@ pub struct SearchQuery {
     /// The config is part of the query so it's possible to make a query with a
     /// custom config.
     pub config: Arc<Config>,
-    pub http: wreq::Client,
+    pub http: HttpClient,
     pub(crate) browser: BrowserRuntime,
 }
 
@@ -247,11 +247,11 @@ impl Deref for SearchQuery {
 
 pub enum RequestResponse {
     None,
-    Http(Box<wreq::RequestBuilder>),
+    Http(Box<Request>),
     Instant(Box<EngineResponse>),
 }
-impl From<wreq::RequestBuilder> for RequestResponse {
-    fn from(req: wreq::RequestBuilder) -> Self {
+impl From<Request> for RequestResponse {
+    fn from(req: Request) -> Self {
         Self::Http(Box::new(req))
     }
 }
@@ -260,9 +260,14 @@ trait IntoRequestResponseResult {
     fn into_request_response_result(self) -> anyhow::Result<RequestResponse>;
 }
 
-impl IntoRequestResponseResult for wreq::RequestBuilder {
+impl IntoRequestResponseResult for Request {
     fn into_request_response_result(self) -> anyhow::Result<RequestResponse> {
         Ok(RequestResponse::Http(Box::new(self)))
+    }
+}
+impl IntoRequestResponseResult for anyhow::Result<Request> {
+    fn into_request_response_result(self) -> anyhow::Result<RequestResponse> {
+        self.map(Into::into)
     }
 }
 impl IntoRequestResponseResult for EngineResponse {
@@ -282,11 +287,11 @@ impl IntoRequestResponseResult for anyhow::Result<RequestResponse> {
 }
 
 pub enum RequestAutocompleteResponse {
-    Http(Box<wreq::RequestBuilder>),
+    Http(Box<Request>),
     Instant(Vec<String>),
 }
-impl From<wreq::RequestBuilder> for RequestAutocompleteResponse {
-    fn from(req: wreq::RequestBuilder) -> Self {
+impl From<Request> for RequestAutocompleteResponse {
+    fn from(req: Request) -> Self {
         Self::Http(Box::new(req))
     }
 }
@@ -302,15 +307,17 @@ pub struct HttpResponse {
     pub config: Arc<Config>,
 }
 
-impl<'a> From<&'a HttpResponse> for &'a str {
-    fn from(res: &'a HttpResponse) -> Self {
-        &res.body
+impl HttpResponse {
+    fn new((res, bytes): (wreq::Response, Vec<u8>), config: Arc<Config>) -> Self {
+        let body = String::from_utf8(bytes)
+            .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned());
+        Self { res, body, config }
     }
 }
 
-impl From<HttpResponse> for wreq::Response {
-    fn from(res: HttpResponse) -> Self {
-        res.res
+impl<'a> From<&'a HttpResponse> for &'a str {
+    fn from(res: &'a HttpResponse) -> Self {
+        &res.body
     }
 }
 
@@ -395,33 +402,20 @@ impl ProgressUpdate {
 }
 
 async fn make_request(
-    request: wreq::RequestBuilder,
+    request: Request,
     engine: Engine,
     query: &SearchQuery,
     send_engine_progress_update: impl Fn(Engine, EngineProgressUpdate),
 ) -> anyhow::Result<HttpResponse> {
     send_engine_progress_update(engine, EngineProgressUpdate::Requesting);
 
-    let mut res = request.send().await?;
+    let res = query.http.fetch(request).await?;
 
     send_engine_progress_update(engine, EngineProgressUpdate::Downloading);
 
-    let mut body_bytes = Vec::new();
-    while let Some(frame) = res.frame().await {
-        if let Ok(chunk) = frame?.into_data() {
-            body_bytes.extend_from_slice(&chunk);
-        }
-    }
-    let body = String::from_utf8_lossy(&body_bytes).to_string();
-
     send_engine_progress_update(engine, EngineProgressUpdate::Parsing);
 
-    let http_response = HttpResponse {
-        res,
-        body,
-        config: query.config.clone(),
-    };
-    Ok(http_response)
+    Ok(HttpResponse::new(res, query.config.clone()))
 }
 
 async fn make_requests(
@@ -464,6 +458,13 @@ async fn make_requests(
                         };
 
                     let response = match match engine {
+                        Engine::GoogleScholar
+                            if search::google_scholar::requires_browser_render(
+                                http_response.res.status().as_u16(),
+                            ) =>
+                        {
+                            search::google_scholar::render_response(query).await
+                        }
                         Engine::Google
                             if search::google::requires_browser_render(&http_response.body) =>
                         {
@@ -526,23 +527,12 @@ async fn make_requests(
                 continue;
             }
 
-            if let Some(request) = engine.postsearch_request(&response).await {
+            if let Some(request) = engine.postsearch_request(&response).await? {
+                let http = response.http.clone();
                 postsearch_requests.push(async move {
-                    let response = match request.send().await {
-                        Ok(mut res) => {
-                            let mut body_bytes = Vec::new();
-                            while let Some(frame) = res.frame().await {
-                                if let Ok(chunk) = frame?.into_data() {
-                                    body_bytes.extend_from_slice(&chunk);
-                                }
-                            }
-                            let body = String::from_utf8_lossy(&body_bytes).to_string();
-
-                            let http_response = HttpResponse {
-                                res,
-                                body,
-                                config: query.config.clone(),
-                            };
+                    let response = match http.fetch(request).await {
+                        Ok(res) => {
+                            let http_response = HttpResponse::new(res, query.config.clone());
                             engine.postsearch_parse_response(&http_response)
                         }
                         Err(e) => {
@@ -607,7 +597,7 @@ pub async fn search(
 pub async fn autocomplete(
     config: &Config,
     query: &str,
-    client: &wreq::Client,
+    client: &HttpClient,
 ) -> anyhow::Result<Vec<String>> {
     let mut requests = Vec::new();
     for &engine in Engine::all() {
@@ -616,12 +606,12 @@ pub async fn autocomplete(
             continue;
         }
 
-        if let Some(request) = engine.request_autocomplete(query, client) {
+        if let Some(request) = engine.request_autocomplete(query, client)? {
             requests.push(async move {
                 let response = match request {
                     RequestAutocompleteResponse::Http(request) => {
-                        let res = request.send().await?;
-                        let body = res.text().await?;
+                        let res = client.fetch(*request).await?;
+                        let body = String::from_utf8_lossy(&res.1);
                         engine.parse_autocomplete_response(&body)?
                     }
                     RequestAutocompleteResponse::Instant(response) => response,
@@ -655,7 +645,7 @@ pub struct Response {
     #[serde(skip)]
     pub config: Arc<Config>,
     #[serde(skip)]
-    pub http: wreq::Client,
+    pub http: HttpClient,
 }
 
 impl fmt::Debug for Response {
@@ -891,6 +881,16 @@ mod tests {
             "https://docs.example.com/rust"
         );
         assert!(response.featured_snippet.is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "hits live Google; uses the system proxy snapshot"]
+    async fn live_google_returns_parsable_destination_urls() {
+        let web = LocalWeb::new(OutboundProxyMode::System).expect("local web runtime");
+        let results = live_engine_results(&web, Engine::Google)
+            .await
+            .expect("Google must return titles and parsable destination URLs");
+        eprintln!("google: {} results, first={}", results.len(), results[0].0);
     }
 
     #[tokio::test]

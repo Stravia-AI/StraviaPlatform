@@ -1,25 +1,28 @@
 use maud::{html, PreEscaped};
 use scraper::{Html, Selector};
-use url::Url;
+use wreq::Request;
 
 use crate::search::engines::{HttpResponse, Response};
 
-pub async fn request(response: &Response) -> Option<wreq::RequestBuilder> {
+pub async fn request(response: &Response) -> anyhow::Result<Option<Request>> {
     for search_result in response.search_results.iter().take(8) {
         if search_result
             .result
             .url
             .starts_with("https://minecraft.wiki/w/")
         {
-            return Some(response.http.get(search_result.result.url.as_str()));
+            return Ok(Some(Request::new(
+                wreq::Method::GET,
+                search_result.result.url.parse()?,
+            )));
         }
     }
 
-    None
+    Ok(None)
 }
 
 pub fn parse_response(HttpResponse { res, body, .. }: &HttpResponse) -> Option<PreEscaped<String>> {
-    let url = Url::parse(&res.uri().to_string()).ok()?;
+    let url = url::Url::parse(&res.uri().to_string()).ok()?;
 
     let dom = Html::parse_document(body);
 

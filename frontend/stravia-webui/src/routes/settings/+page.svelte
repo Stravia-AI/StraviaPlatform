@@ -225,7 +225,9 @@ function retrySettings(): void {
       </Field.FieldGroup>
     </section>
 
-    {#if isTauri}<DesktopPortSettings />{/if}
+    {#if isTauri}
+      <DesktopPortSettings />
+    {/if}
 
     <section id="proxy" class="route-section scroll-mt-20 pb-8" aria-labelledby="proxy-title">
       <div class="route-section-header">

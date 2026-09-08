@@ -1,6 +1,6 @@
 mod extract;
 mod http;
-mod policy;
+pub(crate) mod policy;
 
 use std::{future::Future, net::IpAddr, pin::Pin, time::Duration};
 
@@ -13,7 +13,7 @@ use extract::{ContentKind, HtmlExtract};
 use http::NetworkBackend;
 
 const MARKDOWN_CHARACTER_CAP: usize = 500_000;
-const DOWNLOAD_BYTE_CAP: usize = 10 * 1024 * 1024;
+pub(crate) const DOWNLOAD_BYTE_CAP: usize = 10 * 1024 * 1024;
 const MAX_REDIRECTS: usize = 10;
 const RENDER_TIMEOUT: Duration = Duration::from_secs(15);
 const LOW_QUALITY_LIMITATION: &str =
@@ -82,6 +82,10 @@ pub(crate) async fn fetch_with_runtime(
     web: &LocalWeb,
     value: &str,
 ) -> Result<FetchedPage, FetchError> {
+    web.browser()
+        .require_available()
+        .await
+        .map_err(|error| FetchError::unavailable(error.to_string()))?;
     fetch_with(
         value,
         &NetworkBackend::from_local_web(web),

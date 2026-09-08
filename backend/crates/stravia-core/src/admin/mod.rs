@@ -20,6 +20,8 @@ use crate::provider::{VendorRegistry, google_vertex};
 use crate::storage::traits::ProviderTestResult;
 
 mod api_keys;
+pub(crate) mod browser;
+pub use browser::{BrowserSettings, BrowserSettingsUpdate, BrowserSource};
 mod auth_data;
 mod credential_protection;
 mod extensions;

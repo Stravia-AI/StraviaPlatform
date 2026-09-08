@@ -196,6 +196,7 @@ impl AdapterFactory for FakeAdapterFactory {
         &self,
         provider: &WebProvider,
         outbound: stravia_web_access::OutboundProxyMode,
+        _browser_path: Option<&std::path::Path>,
     ) -> Result<Arc<dyn WebProviderAdapter>, WebAccessError> {
         self.outbounds
             .lock()
@@ -247,6 +248,8 @@ async fn configured_local_adapter_observes_proxy_snapshot_empty_success_and_fail
     })
     .await
     .expect("gateway");
+    // Only fake or remote adapters execute in these tests; this path is metadata-only.
+    gateway.set_browser_path(Some(std::env::current_exe().expect("test executable")));
     let admin = gateway.admin();
     let key = admin
         .create_api_key(crate::db::models::CreateApiKey {
@@ -556,6 +559,85 @@ async fn search_strictly_filters_allowed_and_blocked_subdomains() {
     assert_eq!(response.results[0].url, "https://guide.docs.rs/start");
 }
 #[tokio::test]
+async fn missing_browser_excludes_stale_local_runtime_but_preserves_remote() {
+    let directory = tempfile::tempdir().unwrap();
+    let gateway = crate::Gateway::new(crate::config::GatewayConfig {
+        data_dir: directory.path().to_owned(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    gateway.set_browser_path(Some(directory.path().join("missing-chrome.exe")));
+    let service = gateway.web_access();
+    assert!(!service.local_browser_available().await);
+    let store = gateway.storage.web_providers().unwrap();
+    let local = store
+        .list()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|provider| provider.kind == "local")
+        .unwrap();
+    let settings = WebAccessSettings {
+        enabled: true,
+        search_provider_ids: vec![local.id.clone()],
+        fetch_provider_ids: vec![local.id.clone()],
+    };
+    store.save_settings(&settings).await.unwrap();
+    let remote = gateway
+        .admin()
+        .create_web_provider(crate::db::models::CreateWebProvider {
+            name: "Remote".into(),
+            kind: "exa".into(),
+            api_key: Some("secret".into()),
+            use_proxy: false,
+            local_engines: None,
+        })
+        .await
+        .unwrap();
+    let key = gateway
+        .admin()
+        .create_api_key(crate::db::models::CreateApiKey {
+            key: None,
+            name: "Web key".into(),
+            concurrency_limit: None,
+            expires_at: None,
+            mcp_access_enabled: false,
+            transparent_injection_enabled: true,
+            inject_web_search: true,
+            model_ids: vec![],
+            inject_media_understanding: false,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        service
+            .capture_run_snapshot("missing-local", &key.id)
+            .await
+            .unwrap(),
+        WebAccessAvailability::default()
+    );
+    assert!(service.run_snapshot("missing-local", &key.id).is_err());
+    assert_eq!(store.load_settings().await.unwrap(), settings);
+    let remote_settings = WebAccessSettings {
+        search_provider_ids: vec![local.id.clone(), remote.id.clone()],
+        fetch_provider_ids: vec![local.id, remote.id],
+        ..settings
+    };
+    store.save_settings(&remote_settings).await.unwrap();
+    assert_eq!(
+        service
+            .capture_run_snapshot("remote-fallback", &key.id)
+            .await
+            .unwrap(),
+        WebAccessAvailability {
+            search: true,
+            fetch: true
+        }
+    );
+}
+
+#[tokio::test]
 async fn configuration_changes_do_not_replace_an_inference_run_snapshot() {
     let data_dir = tempfile::tempdir().expect("temp data dir");
     let gateway = crate::Gateway::new(crate::config::GatewayConfig {
@@ -744,6 +826,8 @@ async fn configured_local_fetch_retries_only_failed_urls_on_zhipu() {
     })
     .await
     .expect("gateway");
+    // Only fake or remote adapters execute in these tests; this path is metadata-only.
+    gateway.set_browser_path(Some(std::env::current_exe().expect("test executable")));
     let admin = gateway.admin();
     let key = admin
         .create_api_key(crate::db::models::CreateApiKey {

@@ -43,7 +43,7 @@ The main components are:
 
 ## Setup and commands
 
-The pinned toolchains are Rust `1.97.1` (`rust-toolchain.toml`) and Bun `1.4.0` (`package.json`). Python E2E dependencies are locked in `uv.lock`.
+The pinned toolchains are Rust `1.98.1` (`rust-toolchain.toml`) and Bun `1.4.0` (`package.json`). Python E2E dependencies are locked in `uv.lock`.
 
 Use `Taskfile.yml` entry points for repository workflows:
 
