@@ -278,6 +278,17 @@ pub trait Vendor: Send + Sync + 'static {
         ctx: &ProviderCtx<'_>,
     ) -> Result<OutboundRequest, GatewayError>;
 
+    /// Build the independently verified standalone native compact request.
+    async fn build_compact_request(
+        &self,
+        _req: &mut AiRequest,
+        _ctx: &ProviderCtx<'_>,
+    ) -> Result<OutboundRequest, GatewayError> {
+        Err(GatewayError::internal(anyhow::anyhow!(
+            "Vendor does not support standalone compaction"
+        )))
+    }
+
     /// Parse a non-streaming upstream response.
     async fn parse_response(
         &self,

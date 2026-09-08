@@ -43,7 +43,9 @@ pub use request::{
 };
 
 // ── Response ──────────────────────────────────────────────────────────────────
-pub use response::{AiResponse, EmbeddingData, EmbeddingOutput, EmbeddingVector};
+pub use response::{
+    AiResponse, EmbeddingData, EmbeddingOutput, EmbeddingVector, NativeCompactionResponse,
+};
 
 // ── Schema ────────────────────────────────────────────────────────────────────
 pub use schema::SchemaObject;

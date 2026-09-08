@@ -139,6 +139,8 @@ impl Vendor for OpenAiVendor {
     fn target_capabilities(&self, protocol: ProtocolId) -> ResolvedTargetCapabilities {
         ResolvedTargetCapabilities {
             responses_websocket: protocol == crate::protocol::ids::OPEN_RESPONSES_2026_04_24,
+            standalone_compaction: protocol == crate::protocol::ids::OPEN_RESPONSES_2026_04_24,
+            server_side_compaction: protocol == crate::protocol::ids::OPEN_RESPONSES_2026_04_24,
             ..Default::default()
         }
     }
@@ -188,6 +190,19 @@ impl Vendor for OpenAiVendor {
         ctx: &ProviderCtx<'_>,
     ) -> Result<OutboundRequest, GatewayError> {
         pipeline::build_request(self, req, ctx).await
+    }
+    async fn build_compact_request(
+        &self,
+        req: &mut AiRequest,
+        ctx: &ProviderCtx<'_>,
+    ) -> Result<OutboundRequest, GatewayError> {
+        pipeline::build_request_for_purpose(
+            self,
+            req,
+            ctx,
+            crate::model_turn::ModelTurnPurpose::Compact,
+        )
+        .await
     }
     async fn parse_response(
         &self,

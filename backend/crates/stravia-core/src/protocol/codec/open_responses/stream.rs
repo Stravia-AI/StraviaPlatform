@@ -16,7 +16,7 @@ struct PendingFunctionCall {
     status: Option<AiItemStatus>,
 }
 
-struct PendingUnknownItem {
+struct PendingOutputItem {
     output_index: usize,
     item: serde_json::Value,
     done: bool,
@@ -60,8 +60,9 @@ pub struct ResponsesStreamFormatter {
     reasoning_output_index: Option<usize>,
     tool_index_map: HashMap<usize, usize>,
     tool_calls: Vec<PendingFunctionCall>,
-    unknown_items: Vec<PendingUnknownItem>,
+    standalone_items: Vec<PendingOutputItem>,
     completed_message_content: HashMap<usize, Vec<serde_json::Value>>,
+    completed_item_fields: HashMap<usize, serde_json::Map<String, serde_json::Value>>,
     indexed_reasoning: BTreeMap<usize, PendingIndexedReasoning>,
     indexed_messages: BTreeMap<usize, PendingIndexedMessage>,
     indexed_function_outputs: BTreeMap<usize, serde_json::Value>,
@@ -101,8 +102,9 @@ impl ResponsesStreamFormatter {
             reasoning_output_index: None,
             tool_index_map: HashMap::new(),
             tool_calls: Vec::new(),
-            unknown_items: Vec::new(),
+            standalone_items: Vec::new(),
             completed_message_content: HashMap::new(),
+            completed_item_fields: HashMap::new(),
             indexed_reasoning: BTreeMap::new(),
             indexed_messages: BTreeMap::new(),
             indexed_function_outputs: BTreeMap::new(),
@@ -158,6 +160,35 @@ impl ResponsesStreamFormatter {
             else {
                 continue;
             };
+            let output_index = object
+                .get("output_index")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|index| usize::try_from(index).ok());
+            if let Some(fields) =
+                output_index.and_then(|index| self.completed_item_fields.get(&index))
+                && let Some(item) = object
+                    .get_mut("item")
+                    .and_then(serde_json::Value::as_object_mut)
+            {
+                for (field, value) in fields {
+                    item.entry(field.clone()).or_insert_with(|| value.clone());
+                }
+            }
+            if let Some(output) = object
+                .get_mut("response")
+                .and_then(|response| response.get_mut("output"))
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                for (index, item) in output.iter_mut().enumerate() {
+                    if let Some(fields) = self.completed_item_fields.get(&index)
+                        && let Some(item) = item.as_object_mut()
+                    {
+                        for (field, value) in fields {
+                            item.entry(field.clone()).or_insert_with(|| value.clone());
+                        }
+                    }
+                }
+            }
             object.insert(
                 "sequence_number".into(),
                 serde_json::Value::from(self.next_sequence_number),
@@ -972,7 +1003,7 @@ impl ResponsesStreamFormatter {
                 .to_string(),
             ));
         }
-        for unknown in &self.unknown_items {
+        for unknown in &self.standalone_items {
             if unknown.done {
                 continue;
             }
@@ -1206,7 +1237,7 @@ impl ResponsesStreamFormatter {
         for (output_index, item) in &self.indexed_function_outputs {
             indexed_output.push((*output_index, item.clone()));
         }
-        for unknown in &self.unknown_items {
+        for unknown in &self.standalone_items {
             indexed_output.push((unknown.output_index, unknown.item.clone()));
         }
         indexed_output.sort_by_key(|(output_index, _)| *output_index);
@@ -1439,6 +1470,13 @@ impl ResponsesStreamFormatter {
                         .as_object_mut()
                         .and_then(|object| object.remove("__open_responses_event"))
                     {
+                        // Only this recognized metadata event uses the raw rolling channel.
+                        // Resumable state must arrive through registered typed ItemDone.
+                        if event.get("type").and_then(serde_json::Value::as_str)
+                            != Some("response.output_text.annotation.added")
+                        {
+                            continue;
+                        }
                         if event.get("type").and_then(serde_json::Value::as_str)
                             == Some("response.output_text.annotation.added")
                         {
@@ -1505,7 +1543,7 @@ impl ResponsesStreamFormatter {
                                 )),
                             );
                         }
-                        self.unknown_items.push(PendingUnknownItem {
+                        self.standalone_items.push(PendingOutputItem {
                             output_index,
                             item: item.clone(),
                             done: false,
@@ -1524,6 +1562,35 @@ impl ResponsesStreamFormatter {
                     }
                 }
                 AiStreamDelta::ItemDone { index, item } => {
+                    if let Some(fields) = item
+                        .meta
+                        .as_ref()
+                        .and_then(|meta| meta.get("__open_responses_item_fields"))
+                        .and_then(serde_json::Value::as_object)
+                    {
+                        self.completed_item_fields.insert(*index, fields.clone());
+                    }
+                    if let Some(native) = super::native_compaction_item(item) {
+                        self.ensure_started(&mut events);
+                        self.next_output_index = self.next_output_index.max(*index + 1);
+                        for event in ["response.output_item.added", "response.output_item.done"] {
+                            events.push(SseEvent::new(
+                                Some(event),
+                                serde_json::json!({
+                                    "type": event,
+                                    "output_index": index,
+                                    "item": native,
+                                })
+                                .to_string(),
+                            ));
+                        }
+                        self.standalone_items.push(PendingOutputItem {
+                            output_index: *index,
+                            item: native,
+                            done: true,
+                        });
+                        continue;
+                    }
                     if let Some(content) = item
                         .meta
                         .as_ref()

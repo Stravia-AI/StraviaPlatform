@@ -8,7 +8,11 @@ import XIcon from '@lucide/svelte/icons/x'
 import { toast } from 'svelte-sonner'
 
 import { formatDuration, formatLogTime, formatTokenCount } from '$lib/format'
-import { observationDebugStatusLabel, observationStatusLabel } from '$lib/observation-labels'
+import {
+  observationContextStatusLabel,
+  observationDebugStatusLabel,
+  observationStatusLabel,
+} from '$lib/observation-labels'
 import type { InteractionDetail, ObservationEvent, RejectionDetail, RunDetail } from '$lib/types'
 import { Badge } from '$lib/components/ui/badge'
 import { Button } from '$lib/components/ui/button'
@@ -89,6 +93,10 @@ function eventTree(events: ObservationEvent[]): TimelineNode[] {
 const timelines = $derived(new Map(orderedRuns.map((run) => [run.id, eventTree(run.events)])))
 
 function eventTitle(kind: string): string {
+  if (kind === 'compaction_operation') return m.observation_compaction_operation()
+  if (kind === 'native_compaction_associated') return m.observation_ancestry_native()
+  if (kind === 'retained_tail_associated') return m.observation_retained_tail()
+  if (kind === 'generation_associated') return m.observation_ancestry_confirmed()
   return kind
     .split('_')
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
@@ -132,6 +140,7 @@ function downloadRecord(value: unknown, index: number): void {
 {#snippet timeline(nodes: TimelineNode[])}
   <ol class="event-list">
     {#each nodes as node (node.event.sequence)}
+      {@const contextStatus = observationContextStatusLabel(node.event.kind, node.event.payload)}
       <li>
         <span class="event-mark" aria-hidden="true"></span>
         <div class="min-w-0 flex-1">
@@ -139,6 +148,12 @@ function downloadRecord(value: unknown, index: number): void {
             <strong>{eventTitle(node.event.kind)}</strong><time class="font-technical text-[11px] text-muted-foreground"
               >{formatLogTime(node.event.occurred_at)}</time>
           </div>
+          {#if contextStatus}<Badge variant="outline">{contextStatus}</Badge>{/if}
+          {#if node.event.kind === 'retained_tail_associated'}
+            <p class="text-xs text-muted-foreground">{m.observation_diagnostic_only()}</p>
+          {:else if node.event.kind === 'compaction_operation'}
+            <p class="text-xs text-muted-foreground">{m.observation_compaction_unknown_usage()}</p>
+          {/if}
           {#if node.event.payload != null}<pre>{JSON.stringify(node.event.payload, null, 2)}</pre>{/if}
           {#if node.children.length}{@render timeline(node.children)}{/if}
         </div>

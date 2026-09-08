@@ -38,6 +38,7 @@
 
 ### Fixed
 
+- Inference execution keeps its full asynchronous run state off caller frames, preventing Windows stack overflow when native compaction and credential diagnostics are combined.
 - Immediate Web Access switches retain their saved values after failed updates without clearing independent search drafts. Dark-theme switches show the active primary color instead of an overridden inactive track.
 - Settings wait for real configuration before offering editable proxy and retention controls. Resource-detail load failures provide consistent retry and return actions instead of appearing as missing resources.
 - Credential Protection uses the shared segmented Tabs style with a rule-count badge instead of a full-width underline. Its tab bar wraps on narrow screens without internal scrollbars or clipped labels.

@@ -59,6 +59,7 @@ function interaction(
     observation_gap: false,
     matched: true,
     last_event_sequence: 10,
+    context_events: [],
   }
 }
 

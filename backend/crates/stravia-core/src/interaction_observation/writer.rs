@@ -16,6 +16,17 @@ use super::{
 };
 
 pub(super) enum WriterCommand {
+    ClearTail,
+    Purge {
+        expired_before: Option<i64>,
+        done: oneshot::Sender<anyhow::Result<()>>,
+    },
+    Tail {
+        run_id: String,
+        principal: String,
+        window: Option<super::tail::Window>,
+        completed: bool,
+    },
     Admit {
         start: RunStart,
         debug_enabled: bool,
@@ -59,6 +70,7 @@ pub(super) fn spawn(
     let (tx, mut rx) = mpsc::channel(2048);
     let handle = tokio::spawn(async move {
         let mut grouping = GroupingIndex::default();
+        let mut tail = super::tail::TailIndex::default();
         let mut pending_text: HashMap<String, String> = HashMap::new();
         let mut pending_gaps: HashMap<String, i64> = HashMap::new();
         let mut persisted_manifests: HashMap<String, TraceManifest> = HashMap::new();
@@ -77,6 +89,7 @@ pub(super) fn spawn(
                 _ = interval.tick() => {
                     unpersisted_gaps.lock().expect("observation gaps")
                         .expire(now(), retention_days.load(Ordering::Acquire));
+                    tail.sweep(now());
                     flush_text(&store, &grouping, &retention_days, &updates, &mut pending_text).await;
                     flush_active_manifests(
                         &store,
@@ -91,7 +104,66 @@ pub(super) fn spawn(
                 },
                 command = rx.recv() => command,
             };
+            tail.sweep(now());
             match command {
+                Some(WriterCommand::ClearTail) => tail = super::tail::TailIndex::default(),
+                Some(WriterCommand::Purge {
+                    expired_before,
+                    done,
+                }) => {
+                    // Delete and invalidate grouping in the same writer turn, before another admission.
+                    let result = match expired_before {
+                        Some(at) => store.purge_expired_rows(at).await,
+                        None => store.purge_clear_rows().await,
+                    }
+                    .map(|removed| {
+                        grouping.forget_interactions(&removed);
+                        pending_gaps.retain(|interaction, _| !removed.contains(interaction));
+                        pending_text.retain(|run, _| grouping.interaction_for_run(run).is_some());
+                        persisted_manifests
+                            .retain(|run, _| grouping.interaction_for_run(run).is_some());
+                        if expired_before.is_none() {
+                            tail = super::tail::TailIndex::default();
+                        }
+                    });
+                    let _ = done.send(result);
+                }
+                Some(WriterCommand::Tail {
+                    run_id,
+                    principal,
+                    window,
+                    completed,
+                }) => {
+                    let at = now();
+                    let expiry = expires(at, retention_days.load(Ordering::Relaxed));
+                    if completed {
+                        if let Some(window) = window {
+                            tail.insert(run_id, window, expiry);
+                        }
+                        continue;
+                    }
+                    let Some(interaction) = grouping.interaction_for_run(&run_id) else {
+                        continue;
+                    };
+                    let event = match store.tail_candidates(&principal, &run_id, at).await {
+                        Ok(candidates) => tail.associate(window.as_ref(), &candidates),
+                        Err(_) => RunEvent::ObservationGap {
+                            reason: "tail_index_unavailable".into(),
+                        },
+                    };
+                    match store
+                        .persist_run_event(interaction, &run_id, &event, at, expiry)
+                        .await
+                    {
+                        Ok(Some(event)) => {
+                            let _ = updates.send(ObservationUpdate::Event(event));
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            tracing::warn!(%run_id, %error, "tail observation persistence failed")
+                        }
+                    }
+                }
                 Some(WriterCommand::Admit {
                     start,
                     debug_enabled,

@@ -15,7 +15,7 @@ impl SqliteRouteStore {
             ""
         };
         let sql = format!(
-            "SELECT id, model_id, display_name, COALESCE(balance, 'traffic_equalization') AS balance, \
+            "SELECT id, model_id, display_name, compaction_enabled, compaction_threshold, COALESCE(balance, 'traffic_equalization') AS balance, \
              COALESCE((SELECT provider_id FROM model_backends WHERE model_id = models.id AND enabled = 1 ORDER BY priority DESC, created_at ASC LIMIT 1), '') AS target_provider, \
              COALESCE((SELECT model FROM model_backends WHERE model_id = models.id AND enabled = 1 ORDER BY priority DESC, created_at ASC LIMIT 1), '') AS target_model, \
              COALESCE(is_enabled, 1) AS is_enabled, created_at \
@@ -42,7 +42,7 @@ impl SqliteRouteStore {
 
     async fn load_route(&self, route_id: &str) -> anyhow::Result<Option<Route>> {
         let route = sqlx::query_as::<_, Route>(
-            "SELECT id, model_id, display_name, COALESCE(balance, 'traffic_equalization') AS balance, \
+            "SELECT id, model_id, display_name, compaction_enabled, compaction_threshold, COALESCE(balance, 'traffic_equalization') AS balance, \
              COALESCE((SELECT provider_id FROM model_backends WHERE model_id = models.id AND enabled = 1 ORDER BY priority DESC, created_at ASC LIMIT 1), '') AS target_provider, \
              COALESCE((SELECT model FROM model_backends WHERE model_id = models.id AND enabled = 1 ORDER BY priority DESC, created_at ASC LIMIT 1), '') AS target_model, \
              COALESCE(is_enabled, 1) AS is_enabled, created_at \
@@ -97,12 +97,14 @@ impl RouteStore for SqliteRouteStore {
 
         if route.id.is_some() {
             let updated = sqlx::query(
-                "UPDATE models SET model_id = ?, display_name = ?, balance = ?, is_enabled = ? WHERE id = ?",
+                "UPDATE models SET model_id = ?, display_name = ?, balance = ?, is_enabled = ?, compaction_enabled = ?, compaction_threshold = ? WHERE id = ?",
             )
             .bind(route.model_id.trim())
             .bind(route.display_name.as_deref())
             .bind(route.selection_strategy.trim())
             .bind(route.is_enabled)
+            .bind(route.compaction_enabled)
+            .bind(route.compaction_threshold)
             .bind(&route_storage_id)
             .execute(&mut *tx)
             .await?;
@@ -111,13 +113,15 @@ impl RouteStore for SqliteRouteStore {
             }
         } else {
             sqlx::query(
-                "INSERT INTO models (id, model_id, display_name, balance, is_enabled) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO models (id, model_id, display_name, balance, is_enabled, compaction_enabled, compaction_threshold) VALUES (?, ?, ?, ?, ?, ?, ?)",
             )
                 .bind(&route_storage_id)
                 .bind(route.model_id.trim())
                 .bind(route.display_name.as_deref())
                 .bind(route.selection_strategy.trim())
                 .bind(route.is_enabled)
+            .bind(route.compaction_enabled)
+            .bind(route.compaction_threshold)
                 .execute(&mut *tx)
                 .await?;
         }
@@ -232,6 +236,8 @@ mod tests {
         let store = SqliteRouteStore { pool };
         let route = store
             .put(PutRoute {
+                compaction_enabled: false,
+                compaction_threshold: None,
                 id: None,
                 model_id: "atomic-route".into(),
                 display_name: None,
@@ -244,6 +250,8 @@ mod tests {
 
         let failed = store
             .put(PutRoute {
+                compaction_enabled: false,
+                compaction_threshold: None,
                 id: Some(route.id),
                 model_id: "atomic-route".into(),
                 display_name: None,
@@ -294,6 +302,8 @@ mod tests {
             started_tx.send(()).expect("signal Route put start");
             store
                 .put(PutRoute {
+                    compaction_enabled: false,
+                    compaction_threshold: None,
                     id: None,
                     model_id: "concurrent-route".into(),
                     display_name: None,

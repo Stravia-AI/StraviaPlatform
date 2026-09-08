@@ -2,6 +2,7 @@ pub mod admin;
 mod admission;
 pub mod agent;
 pub mod auth;
+mod compaction;
 pub mod config;
 pub mod connect_client_apply;
 pub mod db;

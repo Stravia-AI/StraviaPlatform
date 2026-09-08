@@ -15,6 +15,7 @@ interaction_observations ──1:N── inference_run_observations ──1:N─
     └──1:N── debug_trace_manifests (managed Trace files)
 rejected_request_observations ──1:N── observation_events / debug_trace_manifests
 turn_chain_nodes (principal-scoped Response / Agent / Web Search DAG)
+native_compactions ──1:N── native_compaction_states / native_compaction_sources
 history_markers (principal-scoped hidden history and Platform execution state)
 reversible_redaction_mappings (principal-scoped persistent secret placeholders)
 agent_definition_revisions ──1:1── agent_definition_configs
@@ -67,6 +68,8 @@ Route 记录。`model_id` 保存客户端请求使用的 Route ID，`display_nam
 | `model_id` | TEXT NOT NULL | — | Route ID；客户端模型 ID，精确且大小写敏感匹配 |
 | `display_name` | TEXT NULL | `NULL` | 可选展示名称；空值由应用层回退为 `model_id` |
 | `balance` | TEXT | `'traffic_equalization'` | Route Scheduling Strategy：`traffic_equalization` 或 `latency_preference`；管理接口对旧值做写入归一化，读取只返回新值 |
+| `compaction_enabled` | BOOLEAN / INTEGER NOT NULL | `false` / `0` | 原生自动压缩策略开关；不禁止客户端主动压缩 |
+| `compaction_threshold` | BIGINT / INTEGER NULL | `NULL` | 当前输入窗口的正整数 token 触发阈值；不是模型上下文容量或累计 usage |
 | `is_enabled` | INTEGER | `1` | 是否启用 |
 | `priority` | INTEGER | `0` | 优先级（预留） |
 | `created_at` | TEXT | `datetime('now')` | 创建时间 |
@@ -492,6 +495,45 @@ Generation Chain 的新 Response payload 使用版本 5，工具结果保存可�
 
 ---
 
+## native_compactions
+
+原生压缩的受保护核心记录，不属于 Observation。登记事务完成后即可解析，交付确认不作为第二次开启解析的开关；默认 pending 保留一小时，确认交付或合法引用后至少保留七天。引用与分支延长必要前序记录和 Generation 祖先；过期记录不被回传复活。
+
+| Column | Type | Default | Description |
+|---|---|---|---|
+| `id` | TEXT PK | — | 平台内部不可变登记 ID，不改写原生 compaction ID |
+| `principal` | TEXT NOT NULL | — | API Key 对应的隔离身份 |
+| `source_generation_id` | TEXT FK | NULL | 已确认来源，引用 `turn_chain_nodes.id`，ON DELETE RESTRICT |
+| `operation_id` | TEXT NOT NULL | — | 产生状态的操作 ID，不是 upstream response ID |
+| `payload` | TEXT NOT NULL | — | 原生完整窗口、Target/账号配置 namespace、模型/协议及前序来源；SQLite 校验 JSON |
+| `created_at` | BIGINT / INTEGER NOT NULL | — | 登记时间，Unix 毫秒 |
+| `delivered_at` | BIGINT / INTEGER | NULL | 已确认交付时间 |
+| `referenced_at` | BIGINT / INTEGER | NULL | 首次合法引用时间 |
+| `expires_at` | BIGINT / INTEGER NOT NULL | — | 保留期，Unix 毫秒 |
+
+**索引**：`idx_native_compactions_expiry`。普通诊断与错误不复制 `payload`。
+
+### native_compaction_states
+
+| Column | Type | Description |
+|---|---|---|
+| `record_id` | TEXT FK NOT NULL | 登记 ID，ON DELETE CASCADE |
+| `principal` | TEXT NOT NULL | 查询隔离身份 |
+| `native_identity` | TEXT NULL | Provider 原生状态 ID，可缺省 |
+| `fingerprint` | TEXT NOT NULL | 完整原生状态的稳定精确指纹 |
+| `state_payload` | TEXT NOT NULL | 用于内容核验的完整原生状态；SQLite 校验 JSON |
+
+主键 `(record_id, fingerprint)`；分别按 `(principal, fingerprint)`、`(principal, native_identity)` 建索引。索引不设跨登记唯一性：同 ID 不同内容、同状态不同来源不能互相覆盖，解析时显式处理冲突/歧义。
+
+### native_compaction_sources
+
+| Column | Type | Description |
+|---|---|---|
+| `record_id` | TEXT FK NOT NULL | 新登记，ON DELETE CASCADE |
+| `source_id` | TEXT FK NOT NULL | 不可变前序压缩登记，ON DELETE RESTRICT |
+
+主键 `(record_id, source_id)`；禁止自引用，`idx_native_compaction_source` 索引前序来源。新记录只引用已存在且同 Principal 的有效记录，形成不可变边界图。
+
 ## history_markers
 
 History Marker Store 的持久化事实源。每行只保存一个受保护 Thinking block，或一个 Platform Tool Execution 的完整 call 与 terminal result；`principal + reference` 解析不依赖周边历史。Platform execution 通过条件更新从 `pending` 原子进入 `running`；失效 lease 转为 `interrupted`，绝对 deadline 到期转为 `failed`，均不会被其他 Gateway 自动接管。
@@ -680,6 +722,8 @@ Interaction Observation migration 34 是 clean cutover：SQLite 与 PostgreSQL �
 Allowance Samples migration 29 新增 `provider_allowance_samples`。样本随 Provider 删除而级联删除；应用按 14 天 TTL 清理，预报只读取当前重置窗口内且语义一致的样本。
 
 Route Display Name migration 30 把 `models.name` 原值逐字节迁移为 `models.model_id`，新增 nullable `display_name`，并把 `idx_models_route_id` 移到 `model_id`。迁移不会从 Canonical Model 目录推断历史展示名称，也不会改写 Target 或 API Key 的内部 Route 主键绑定。
+
+`0036_credential_discovery_coverage` 保持既有版本与内容不变。`0037_route_native_compaction` 为 `models` 新增缺省关闭的 `compaction_enabled` 与 nullable 正整数 `compaction_threshold`，启用时必须提供阈值。`0038_native_compaction` 新增 `native_compactions`、`native_compaction_states` 和 `native_compaction_sources`，引用既有 `turn_chain_nodes`；不从 Observation 或历史内容回填压缩记录。两个后端按上述顺序应用迁移。
 
 SQLite 与 PostgreSQL 必须保持 API Key 字段默认值、Turn kind、settings identity、唯一约束和 Artifact 外键等价。
 

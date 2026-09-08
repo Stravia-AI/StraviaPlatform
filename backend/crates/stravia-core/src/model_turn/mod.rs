@@ -35,7 +35,41 @@ pub enum ModelTurnAuthorization {
     CapabilityGrant,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ModelTurnPurpose {
+    #[default]
+    Generation,
+    Compact,
+}
+
+#[derive(Clone, Copy, Default)]
+pub(crate) struct CompactRequestRequirements {
+    pub codex_controls: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct CompactionPublication {
+    pub record_id: String,
+    pub operation_id: String,
+    pub model_turn_id: String,
+    pub mode: crate::interaction_observation::CompactionMode,
+    pub source_generation_id: Option<String>,
+    pub state: crate::protocol::ir::AiItem,
+    pub receipt: CompactionReceipt,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum CompactionReceipt {
+    #[default]
+    Pending,
+    Delivered,
+}
+
+pub(crate) type CompactionPublications = Arc<std::sync::Mutex<Vec<CompactionPublication>>>;
+
 pub struct TurnInput {
+    pub purpose: ModelTurnPurpose,
+    pub(crate) compact_requirements: CompactRequestRequirements,
     pub principal: Principal,
     pub request: AiRequest,
     pub authorization: ModelTurnAuthorization,
@@ -43,11 +77,15 @@ pub struct TurnInput {
     pub cancellation: CancellationToken,
     pub deadline: Instant,
     pub(crate) observer: Option<RunObserver>,
+    pub(crate) compaction_records: CompactionPublications,
+    pub(crate) compaction_source_generation_id: Option<String>,
 }
 
 impl TurnInput {
     pub fn new(principal: Principal, request: AiRequest) -> Self {
         Self {
+            purpose: ModelTurnPurpose::Generation,
+            compact_requirements: CompactRequestRequirements::default(),
             principal,
             request,
             authorization: ModelTurnAuthorization::RouteBinding,
@@ -55,6 +93,8 @@ impl TurnInput {
             cancellation: CancellationToken::new(),
             deadline: Instant::now() + Duration::from_secs(300),
             observer: None,
+            compaction_records: Arc::default(),
+            compaction_source_generation_id: None,
         }
     }
 
@@ -84,6 +124,7 @@ impl TurnInput {
 pub enum CanonicalEvent {
     Delta(AiStreamDelta),
     Completed(Box<AiResponse>),
+    Compacted(Box<crate::protocol::ir::NativeCompactionResponse>),
 }
 
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]

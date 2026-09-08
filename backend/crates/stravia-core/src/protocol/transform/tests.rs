@@ -34,6 +34,48 @@ use crate::protocol::ir::{
 };
 
 #[test]
+fn native_compaction_controls_and_state_cannot_be_lossily_converted() {
+    let outbound = ProtocolTransform::global()
+        .bind(
+            OPEN_RESPONSES_2026_04_24,
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+        )
+        .unwrap();
+    for body in [
+        json!({"model":"codex","input":[{"type":"compaction","id":"cmp_1","encrypted_content":"opaque"}]}),
+        json!({"model":"codex","input":[{"type":"compaction_trigger"}]}),
+        json!({"model":"codex","input":"hello","context_management":[]}),
+        json!({"model":"codex","input":"hello","context_management":null}),
+    ] {
+        let request = outbound.decode_request(body).unwrap();
+        assert!(matches!(
+            outbound.encode_request(&request),
+            Err(TransformError::Unrepresentable { .. })
+        ));
+    }
+    let inbound = ProtocolTransform::global()
+        .bind(
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            OPEN_RESPONSES_2026_04_24,
+        )
+        .unwrap();
+    let response = inbound
+        .decode_response(dated_response(
+            "r",
+            "completed",
+            json!([
+                {"type":"compaction","id":"cmp_1","encrypted_content":"opaque"}
+            ]),
+            Value::Null,
+        ))
+        .unwrap();
+    assert!(matches!(
+        inbound.encode_response(&response),
+        Err(TransformError::Unrepresentable { .. })
+    ));
+}
+
+#[test]
 fn thinking_carrier_facts_stay_behind_the_bound_protocol_pair() {
     let responses = ProtocolTransform::global()
         .bind(

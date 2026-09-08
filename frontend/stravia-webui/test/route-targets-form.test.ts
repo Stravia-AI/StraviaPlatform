@@ -17,6 +17,8 @@ import type { Route } from '../src/lib/types'
 
 function routeWithTargets(): Route {
   return {
+    compaction_enabled: false,
+    compaction_threshold: null,
     id: 'route-id',
     model_id: 'route',
     display_name: null,

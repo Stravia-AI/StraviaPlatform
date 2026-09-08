@@ -651,6 +651,13 @@ fn request_loss_paths(pair: ProtocolPair, request: &AiRequest) -> Vec<String> {
             );
         }
         Some(ProtocolExt::OpenResponses(extension)) => {
+            push_if(
+                &mut lost,
+                extension
+                    .passthrough_body
+                    .contains_key("context_management"),
+                "context_management",
+            );
             push_if(&mut lost, extension.background == Some(true), "background");
             push_if(
                 &mut lost,
@@ -748,6 +755,15 @@ fn request_loss_paths(pair: ProtocolPair, request: &AiRequest) -> Vec<String> {
     }
 
     for (message_index, message) in request.items.iter().enumerate() {
+        if message
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("__open_responses_item_fields"))
+            .and_then(Value::as_object)
+            .is_some_and(|fields| !fields.is_empty())
+        {
+            lost.push(format!("messages[{message_index}].native_item_fields"));
+        }
         let crate::protocol::ir::MessageContent::Blocks(blocks) = &message.content else {
             continue;
         };
@@ -918,6 +934,9 @@ fn request_block_representable(
 }
 
 fn open_responses_output_item_representable(item: &crate::protocol::ir::AiItem) -> bool {
+    if item.is_compaction() || item.is_compaction_trigger() {
+        return true;
+    }
     if let Some(raw) = item.unknown_ref() {
         return raw
             .get("type")
@@ -997,6 +1016,15 @@ fn response_loss_paths(pair: ProtocolPair, response: &AiResponse) -> Vec<String>
     }
     if pair.ingress.protocol != Protocol::OpenResponses {
         for (index, item) in response.items.iter().enumerate() {
+            if item
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("__open_responses_item_fields"))
+                .and_then(Value::as_object)
+                .is_some_and(|fields| !fields.is_empty())
+            {
+                lost.push(format!("items[{index}].native_item_fields"));
+            }
             if matches!(
                 &item.content,
                 crate::protocol::ir::MessageContent::Blocks(blocks)
@@ -1042,7 +1070,9 @@ fn response_loss_paths(pair: ProtocolPair, response: &AiResponse) -> Vec<String>
                     lost.push(format!("items[{index}].logprobs"));
                 }
             }
-            if item.function_call_output_ref().is_some()
+            if item.is_compaction()
+                || item.is_compaction_trigger()
+                || item.function_call_output_ref().is_some()
                 || item.has_search_result()
                 || item.unknown_ref().is_some()
             {
@@ -1065,6 +1095,14 @@ fn stream_loss_paths(pair: ProtocolPair, deltas: &[AiStreamDelta]) -> Vec<String
     let mut lost = Vec::new();
     for (index, delta) in deltas.iter().enumerate() {
         match delta {
+            AiStreamDelta::ItemDone { item, .. }
+                if pair.ingress.protocol != Protocol::OpenResponses
+                    && (item.is_compaction() || item.is_compaction_trigger()
+                        || item.meta.as_ref().and_then(|meta| meta.get("__open_responses_item_fields"))
+                            .and_then(Value::as_object).is_some_and(|fields| !fields.is_empty())) =>
+            {
+                lost.push(format!("deltas[{index}].native_compaction"));
+            }
             AiStreamDelta::ThinkingSignature(_)
                 if !matches!(
                     pair.ingress.protocol,

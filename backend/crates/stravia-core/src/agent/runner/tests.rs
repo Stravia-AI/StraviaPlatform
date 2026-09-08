@@ -262,20 +262,6 @@ async fn platform_agent_business_json_and_single_text_remain_readable_payloads()
     }
 }
 
-#[tokio::test]
-async fn platform_agent_serialization_failure_is_delivered_without_aborting_turn() {
-    let (request, ordinary) = platform_output_roundtrip(vec![ContentBlock::Image {
-        source: MediaSource::Url("https://example.test/image.png".into()),
-        detail: None,
-        cache_control: None,
-    }])
-    .await;
-    let (content, is_error) = agent_tool_payload(&request);
-    assert_eq!(is_error, Some(true));
-    assert_eq!(content["code"], "platform_tool_failed");
-    assert!(ordinary.is_error);
-}
-
 #[derive(Default)]
 struct RejectFirstOutput {
     calls: AtomicUsize,

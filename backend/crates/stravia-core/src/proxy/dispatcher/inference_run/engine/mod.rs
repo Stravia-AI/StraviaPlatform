@@ -207,6 +207,7 @@ fn stage_visible_response(request_context: &RequestContext, response: &AiRespons
     else {
         return;
     };
+    terminal.client_output = response.items.clone();
     terminal.visible_text.extend(
         response
             .items
@@ -253,6 +254,7 @@ pub(super) struct GenerationChainRun {
     write: Option<crate::generation_chain::GenerationChainWrite>,
     client_request: AiRequest,
     previous_response_id: Option<String>,
+    compaction_source_generation_id: Option<String>,
 }
 
 struct DispatchContext<'a> {
@@ -427,29 +429,111 @@ pub(super) async fn orchestrate(
         api_key_id: Some(principal.api_key_id().to_owned()),
         label: Some(api_key_name.clone()),
     });
-    let generation_chain_write = if matches!(request_kind, crate::hook::RequestKind::Generation) {
-        match gw.generation_chains.begin(principal.clone(), request).await {
-            Ok(mut write) => {
-                if crate::generation_chain::generation_session_fingerprint(write.request())
-                    .is_none()
-                {
-                    let root_id = write.root_id().to_owned();
-                    crate::generation_chain::set_generation_session_id(
-                        write.request_mut(),
-                        root_id,
+    let compact = ctx.extensions.get::<crate::model_turn::ModelTurnPurpose>()
+        == Some(crate::model_turn::ModelTurnPurpose::Compact);
+    let generation_chain_write =
+        if !compact && matches!(request_kind, crate::hook::RequestKind::Generation) {
+            let automatic_enabled = {
+                let cache = gw.model_cache.read().await;
+                cache
+                    .match_model(&request.model)
+                    .or_else(|| cache.models.iter().find(|model| model.id == request.model))
+                    .is_some_and(|route| route.compaction_enabled)
+            };
+            let controls =
+                crate::compaction::NativeCompactionControls::classify(&request, automatic_enabled);
+            let begin = if controls.requested() {
+                gw.generation_chains
+                    .begin_native_compaction(principal.clone(), request)
+                    .await
+            } else {
+                gw.generation_chains.begin(principal.clone(), request).await
+            };
+            match begin {
+                Ok(mut write) => {
+                    if crate::generation_chain::generation_session_fingerprint(write.request())
+                        .is_none()
+                    {
+                        let root_id = write.root_id().to_owned();
+                        crate::generation_chain::set_generation_session_id(
+                            write.request_mut(),
+                            root_id,
+                        );
+                    }
+                    request = write.request().clone();
+                    Some(write)
+                }
+                Err(error) => {
+                    let code = error.to_string();
+                    let response = coded_error_response(StatusCode::BAD_REQUEST, &code, &code);
+                    return reject_before_admission(
+                        &mut Some(ingress_observer),
+                        "protocol",
+                        &code,
+                        response,
                     );
                 }
-                request = write.request().clone();
-                Some(write)
             }
+        } else {
+            None
+        };
+    let (compact_parent_id, compact_root_id, compact_has_new_user) = if compact {
+        let prepared = match gw
+            .generation_chains
+            .prepare_compaction(principal.clone(), request)
+            .await
+        {
+            Ok(prepared) => prepared,
             Err(error) => {
                 let code = error.to_string();
-                let response = coded_error_response(StatusCode::BAD_REQUEST, &code, &code);
                 return reject_before_admission(
                     &mut Some(ingress_observer),
                     "protocol",
                     &code,
-                    response,
+                    coded_error_response(StatusCode::BAD_REQUEST, &code, &code),
+                );
+            }
+        };
+        request = prepared.request;
+        (
+            prepared.parent_id,
+            prepared.root_id,
+            Some(prepared.has_new_user),
+        )
+    } else {
+        (None, None, None)
+    };
+    let compaction_source_generation_id = if compact && compact_parent_id.is_some() {
+        compact_parent_id.clone()
+    } else if !compact
+        && generation_chain_write
+            .as_ref()
+            .and_then(|write| write.parent_id())
+            .is_some()
+    {
+        generation_chain_write
+            .as_ref()
+            .and_then(|write| write.parent_id())
+            .map(str::to_owned)
+    } else if compact
+        || (ingress == crate::protocol::ids::OPEN_RESPONSES_2026_04_24
+            && client_request.items.iter().any(|item| {
+                item.role == crate::protocol::ir::Role::Assistant || item.is_compaction()
+            }))
+    {
+        match gw
+            .generation_chains
+            .compaction_source(&principal, &client_request)
+            .await
+        {
+            Ok(source) => source,
+            Err(error) => {
+                let code = error.to_string();
+                return reject_before_admission(
+                    &mut Some(ingress_observer),
+                    "protocol",
+                    &code,
+                    coded_error_response(StatusCode::BAD_REQUEST, &code, &code),
                 );
             }
         }
@@ -527,28 +611,32 @@ pub(super) async fn orchestrate(
         .unwrap_or_default();
     let generation_root_id = generation_chain_write
         .as_ref()
-        .map(|write| write.root_id().to_owned());
+        .map(|write| write.root_id().to_owned())
+        .or(compact_root_id);
     let generation_parent_id = generation_chain_write
         .as_ref()
-        .and_then(|write| write.parent_id().map(ToOwned::to_owned));
+        .and_then(|write| write.parent_id().map(ToOwned::to_owned))
+        .or(compact_parent_id);
     let generation_node_id = generation_chain_write
         .as_ref()
         .map(|write| write.id().to_owned());
-    let has_new_user = generation_chain_write.as_ref().map_or_else(
-        || {
-            request
-                .items
-                .iter()
-                .any(|item| item.role == crate::protocol::ir::Role::User)
-        },
-        |write| {
-            write
-                .request_delta()
-                .items
-                .iter()
-                .any(|item| item.role == crate::protocol::ir::Role::User)
-        },
-    );
+    let has_new_user = compact_has_new_user.unwrap_or_else(|| {
+        generation_chain_write.as_ref().map_or_else(
+            || {
+                request
+                    .items
+                    .iter()
+                    .any(|item| item.role == crate::protocol::ir::Role::User)
+            },
+            |write| {
+                write
+                    .request_delta()
+                    .items
+                    .iter()
+                    .any(|item| item.role == crate::protocol::ir::Role::User)
+            },
+        )
+    });
     let canonical_fingerprint =
         match serde_json::to_value(&client_request).and_then(|mut canonical| {
             canonical.sort_all_objects();
@@ -598,19 +686,108 @@ pub(super) async fn orchestrate(
             has_new_user,
         });
     }
+    if (compact
+        || generation_chain_write
+            .as_ref()
+            .is_some_and(|write| write.crosses_compaction_boundary()))
+        && client_request
+            .items
+            .iter()
+            .any(crate::protocol::ir::AiItem::is_compaction)
+    {
+        match gw
+            .compaction
+            .resolve(&principal, &client_request.items)
+            .await
+        {
+            Ok(Some(source)) => {
+                for registration_id in source.record_ids {
+                    observer.record(RunEvent::NativeCompactionAssociated {
+                        source_generation_id: source.source_generation_id.clone(),
+                        source_operation_id: Some(source.operation_id.clone()),
+                        registration_id,
+                    });
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                return coded_error_response(
+                    StatusCode::BAD_REQUEST,
+                    error.code(),
+                    &error.to_string(),
+                );
+            }
+        }
+    }
     ctx.extensions.insert(observer.clone());
+    let compaction_records = crate::model_turn::CompactionPublications::default();
     ctx.extensions.insert(super::RunTerminalContext {
         generation_node_id,
         generation_root_id,
         generation_committed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         waiting_client: false,
         visible_text: Vec::new(),
+        client_input: Arc::new(client_request.items.clone()),
+        client_output: Vec::new(),
+        compaction: gw.compaction.clone(),
+        principal: principal.clone(),
+        compaction_records: compaction_records.clone(),
     });
+    if generation_chain_write
+        .as_ref()
+        .is_none_or(|write| write.parent_id().is_none())
+        && !client_request
+            .items
+            .iter()
+            .any(crate::protocol::ir::AiItem::is_compaction)
+    {
+        observer.observe_client_input(&client_request.items);
+    }
+    ctx.extensions.insert(compaction_records.clone());
+    if compact {
+        let mut turn_input = TurnInput::new(principal.clone(), request)
+            .with_execution(ctx.cancellation.clone(), ctx.deadline.at())
+            .with_observer(observer.clone())
+            .with_extra_headers(forwarded_client_headers(&headers));
+        turn_input.purpose = crate::model_turn::ModelTurnPurpose::Compact;
+        turn_input.compact_requirements = ctx
+            .extensions
+            .get::<crate::model_turn::CompactRequestRequirements>()
+            .unwrap_or_default();
+        turn_input.compaction_records = compaction_records.clone();
+        turn_input.compaction_source_generation_id = compaction_source_generation_id;
+        let mut turn = match executor.execute(turn_input).await {
+            Ok(turn) => turn,
+            Err(error) => {
+                return coded_error_response(StatusCode::BAD_REQUEST, &error.code, &error.message);
+            }
+        };
+        let response = match turn.output.next().await {
+            Some(Ok(CanonicalEvent::Compacted(response))) => {
+                axum::Json(response.wire).into_response()
+            }
+            Some(Err(error)) => {
+                return coded_error_response(StatusCode::BAD_GATEWAY, &error.code, &error.message);
+            }
+            _ => {
+                return coded_error_response(
+                    StatusCode::BAD_GATEWAY,
+                    "invalid_compaction_response",
+                    "Compact operation ended without a native result",
+                );
+            }
+        };
+        phase.finish();
+        let (delivery_admission, background_admission) = split_admission(admission);
+        drop(background_admission);
+        return wrap_delivery(response, delivery_admission);
+    }
     let mut generation = GenerationChainRun {
         principal: principal.clone(),
         write: generation_chain_write,
         client_request,
         previous_response_id: previous_response_id.clone(),
+        compaction_source_generation_id,
     };
     let session_context = crate::hook::SessionContext {
         request_id: ctx.request_id.clone(),
@@ -936,7 +1113,7 @@ async fn acquire_turn(
     request: &AiRequest,
     request_context: &RequestContext,
     inference_run: &mut crate::hook::InferenceRun,
-    principal: &crate::hook::Principal,
+    generation: &GenerationChainRun,
 ) -> Result<(ModelTurn, AiRequest), RoundOutcome> {
     let make_input = |effective_request: AiRequest| {
         let observer = request_context
@@ -949,7 +1126,7 @@ async fn acquire_turn(
             attempt_id: None,
             payload: checkpoint_payload(&observer, &effective_request),
         });
-        TurnInput::new(principal.clone(), effective_request)
+        let mut input = TurnInput::new(generation.principal.clone(), effective_request)
             .with_execution(
                 request_context.cancellation.clone(),
                 request_context.deadline.at(),
@@ -960,7 +1137,13 @@ async fn acquire_turn(
                     .get::<crate::interaction_observation::RunObserver>()
                     .expect("admitted Inference Run observer"),
             )
-            .with_extra_headers(forwarded_client_headers(headers))
+            .with_extra_headers(forwarded_client_headers(headers));
+        input.compaction_records = request_context
+            .extensions
+            .get::<crate::model_turn::CompactionPublications>()
+            .unwrap_or_default();
+        input.compaction_source_generation_id = generation.compaction_source_generation_id.clone();
+        input
     };
 
     let mut effective_request = request.clone();
@@ -1007,7 +1190,7 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
         request,
         request_context,
         inference_run.as_mut().expect("buffered Inference Run"),
-        &generation.principal,
+        &generation,
     )
     .await
     {
@@ -1100,6 +1283,12 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
                     completed_response = Some(*completed);
                     break;
                 }
+                Ok(CanonicalEvent::Compacted(_)) => {
+                    return model_turn_error_outcome(crate::model_turn::ModelTurnError::new(
+                        "unexpected_compaction_terminal",
+                        "Generation received a standalone compact result",
+                    ));
+                }
                 Err(error) => return model_turn_error_outcome(error),
             }
         }
@@ -1122,6 +1311,12 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
                 Ok(CanonicalEvent::Completed(completed)) => {
                     completed_response = Some(*completed);
                     break;
+                }
+                Ok(CanonicalEvent::Compacted(_)) => {
+                    return model_turn_error_outcome(crate::model_turn::ModelTurnError::new(
+                        "unexpected_compaction_terminal",
+                        "Generation received a standalone compact result",
+                    ));
                 }
                 Err(error) => return model_turn_error_outcome(error),
             }

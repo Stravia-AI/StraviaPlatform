@@ -39,7 +39,7 @@ pub(crate) use store::{
 };
 
 // Version 5 reserves tool-result semantics metadata; earlier vendor meta is untrusted.
-const RESPONSE_PAYLOAD_VERSION: u32 = 5;
+const RESPONSE_PAYLOAD_VERSION: u32 = 6;
 const LEGACY_RESPONSE_PAYLOAD_VERSION: u32 = 1;
 const GENERATION_MATERIALIZATION_CACHE_BYTES: usize = 64 * 1024 * 1024;
 const GENERATION_SESSION_ID_META: &str = "__stravia_generation_session_id";
@@ -53,6 +53,7 @@ pub(crate) struct GenerationChain {
     artifacts: Option<Arc<dyn crate::agent::ArtifactStore>>,
     history_markers: Option<Arc<dyn crate::history_marker::HistoryMarkerStore>>,
     redaction_mappings: Option<Arc<dyn crate::reversible_redaction::store::MappingStore>>,
+    compaction: Option<crate::compaction::Compaction>,
     ttl: Duration,
 }
 
@@ -91,6 +92,9 @@ struct StagedGeneration {
 pub(crate) enum BeginError {
     PreviousResponseNotFound,
     ItemReferenceNotFound,
+    CompactionConflict,
+    CompactionUnavailable,
+    CompactionStorageFailed,
 }
 
 impl std::fmt::Display for BeginError {
@@ -98,6 +102,9 @@ impl std::fmt::Display for BeginError {
         formatter.write_str(match self {
             Self::PreviousResponseNotFound => "previous_response_not_found",
             Self::ItemReferenceNotFound => "item_reference_not_found",
+            Self::CompactionConflict => "compaction_conflict",
+            Self::CompactionUnavailable => "compaction_unavailable",
+            Self::CompactionStorageFailed => "compaction_storage_failed",
         })
     }
 }
@@ -110,6 +117,7 @@ pub(crate) enum PersistError {
     Store(TurnCommitError),
     HistoryMarker(crate::history_marker::HistoryMarkerError),
     Redaction(crate::reversible_redaction::RedactionError),
+    Compaction(crate::compaction::CompactionError),
 }
 
 impl std::fmt::Display for PersistError {
@@ -119,11 +127,19 @@ impl std::fmt::Display for PersistError {
             Self::Store(error) => write!(formatter, "{error}"),
             Self::HistoryMarker(error) => write!(formatter, "{error}"),
             Self::Redaction(error) => write!(formatter, "{error}"),
+            Self::Compaction(error) => write!(formatter, "{error}"),
         }
     }
 }
 
 impl std::error::Error for PersistError {}
+
+pub(crate) struct PreparedCompactionInput {
+    pub request: AiRequest,
+    pub parent_id: Option<String>,
+    pub root_id: Option<String>,
+    pub has_new_user: bool,
+}
 
 impl GenerationChain {
     pub(crate) fn from_turn_chain(
@@ -136,6 +152,7 @@ impl GenerationChain {
             artifacts,
             history_markers: None,
             redaction_mappings: None,
+            compaction: None,
             ttl,
         }
     }
@@ -156,12 +173,152 @@ impl GenerationChain {
         self
     }
 
+    pub(crate) fn with_compaction(mut self, compaction: crate::compaction::Compaction) -> Self {
+        self.compaction = Some(compaction);
+        self
+    }
+
+    pub(crate) async fn prepare_compaction(
+        &self,
+        principal: Principal,
+        request: AiRequest,
+    ) -> Result<PreparedCompactionInput, BeginError> {
+        // 只复用引用和来源准备，不 stage/persist，也不公开临时 Generation identity。
+        let write = self.begin_native_compaction(principal, request).await?;
+        let has_new_user = write
+            .request_delta
+            .items
+            .iter()
+            .any(|item| item.role == crate::protocol::ir::Role::User);
+        let parent_id = write.parent.parent_id;
+        let root_id = if parent_id.is_some() {
+            write.parent.root_id
+        } else {
+            None
+        };
+        Ok(PreparedCompactionInput {
+            request: write.request,
+            parent_id,
+            root_id,
+            has_new_user,
+        })
+    }
+
+    async fn compaction_source_prefix(
+        &self,
+        principal: &Principal,
+        request: &AiRequest,
+    ) -> Result<Option<(usize, String)>, BeginError> {
+        let canonical = canonical_client_history_request(request);
+        let identity = self
+            .store
+            .compaction_source_from_items(principal, request)
+            .await?;
+        if identity
+            .as_ref()
+            .is_some_and(|(count, _)| *count == canonical.items.len())
+        {
+            return Ok(identity);
+        }
+        let leading_controls = request.items.len() - canonical.items.len();
+        let mut probe = request.clone();
+        let strict = self
+            .store
+            .discover_prefix(principal, &mut probe, true)
+            .await
+            .map_err(|_| BeginError::CompactionUnavailable)?
+            .and_then(|prefix| {
+                prefix
+                    .active
+                    .parent_id
+                    .map(|id| (prefix.matched_items - leading_controls, id))
+            });
+        Ok(match (identity, strict) {
+            (Some(identity), Some(strict)) if strict.0 > identity.0 => Some(strict),
+            (Some(identity), _) => Some(identity),
+            (None, strict) => strict,
+        })
+    }
+
+    pub(crate) async fn compaction_source(
+        &self,
+        principal: &Principal,
+        request: &AiRequest,
+    ) -> Result<Option<String>, BeginError> {
+        let mut request = request.clone();
+        request.items.retain(|item| !item.is_compaction_trigger());
+        let native = self.resolve_compaction(principal, &request).await?;
+        let explicit = crate::model_turn::parent_id_from_request(&request);
+        let source_prefix = self.compaction_source_prefix(principal, &request).await?;
+        let parent = explicit
+            .or_else(|| source_prefix.map(|(_, id)| id))
+            .or_else(|| {
+                native
+                    .as_ref()
+                    .and_then(|native| native.source_generation_id.clone())
+            });
+        if let Some(parent) = parent.as_deref() {
+            self.store
+                .source_parent(principal, parent)
+                .await
+                .map_err(|_| BeginError::PreviousResponseNotFound)?;
+            if let Some(source) = native
+                .as_ref()
+                .and_then(|native| native.source_generation_id.as_deref())
+            {
+                self.require_ancestor(principal, parent, source).await?;
+            }
+        }
+        Ok(parent)
+    }
+
+    async fn resolve_compaction(
+        &self,
+        principal: &Principal,
+        request: &AiRequest,
+    ) -> Result<Option<crate::compaction::ResolvedCompaction>, BeginError> {
+        let Some(compaction) = &self.compaction else {
+            return Ok(None);
+        };
+        compaction
+            .resolve(principal, &request.items)
+            .await
+            .map_err(|error| match error {
+                crate::compaction::CompactionError::Conflict
+                | crate::compaction::CompactionError::Invalid => BeginError::CompactionConflict,
+                crate::compaction::CompactionError::Unavailable => {
+                    BeginError::CompactionUnavailable
+                }
+                crate::compaction::CompactionError::Storage => BeginError::CompactionStorageFailed,
+            })
+    }
+
+    async fn require_ancestor(
+        &self,
+        principal: &Principal,
+        parent: &str,
+        source: &str,
+    ) -> Result<(), BeginError> {
+        let nodes = self
+            .store
+            .turn_chain
+            .materialize(principal, TurnNodeKind::Response, &TurnNodeId::new(parent))
+            .await
+            .map_err(|_| BeginError::CompactionUnavailable)?;
+        if nodes.iter().any(|node| node.id.as_str() == source) {
+            Ok(())
+        } else {
+            Err(BeginError::CompactionConflict)
+        }
+    }
+
     pub(crate) async fn begin(
         &self,
         principal: Principal,
         mut request: AiRequest,
     ) -> Result<GenerationChainWrite, BeginError> {
         let mut request_delta = request.clone();
+        let native = self.resolve_compaction(&principal, &request).await?;
         let has_explicit_parent = matches!(
             request.ext.as_ref(),
             Some(ProtocolExt::OpenResponses(extension))
@@ -177,7 +334,63 @@ impl GenerationChain {
                 .map_err(|_| BeginError::ItemReferenceNotFound)?;
         }
 
-        let parent = if has_explicit_parent {
+        let mut parent = if let Some(native) = native.as_ref() {
+            let matched_start = request
+                .items
+                .windows(native.window.len())
+                .position(|window| items_equal(window, &native.window))
+                .ok_or(BeginError::CompactionConflict)?;
+            let native_range = matched_start..matched_start + native.window.len();
+            let explicit = crate::model_turn::parent_id_from_request(&request);
+            let mut discovered_request = request.clone();
+            crate::model_turn::clear_previous_response_id(&mut discovered_request);
+            let discovered = self
+                .store
+                .discover_parent(&principal, &mut discovered_request)
+                .await
+                .map_err(|_| BeginError::CompactionUnavailable)?
+                .filter(|prefix| prefix.matched_items >= native_range.end);
+            if let Some(discovered) = discovered {
+                let parent_id = discovered
+                    .active
+                    .parent_id
+                    .as_deref()
+                    .ok_or(BeginError::CompactionConflict)?;
+                if explicit.as_deref().is_some_and(|id| id != parent_id) {
+                    return Err(BeginError::CompactionConflict);
+                }
+                if let Some(source) = native.source_generation_id.as_deref() {
+                    self.require_ancestor(&principal, parent_id, source).await?;
+                }
+                request_delta.items = request_delta.items[discovered.matched_items..].to_vec();
+                request = discovered_request;
+                let mut active = discovered.active;
+                active.compaction_input_range = Some(native_range);
+                active
+            } else {
+                if explicit
+                    .as_deref()
+                    .is_some_and(|id| Some(id) != native.source_generation_id.as_deref())
+                {
+                    return Err(BeginError::CompactionConflict);
+                }
+                let mut parent = match native.source_generation_id.as_deref() {
+                    Some(id) => self
+                        .store
+                        .source_parent(&principal, id)
+                        .await
+                        .map_err(|_| BeginError::CompactionUnavailable)?,
+                    None => ActiveGenerationChain::default(),
+                };
+                parent.replace_effective_history = true;
+                parent.replacement_client_items =
+                    Some(canonical_client_history_request(&request).items);
+                parent.compaction_input_range = Some(native_range.clone());
+                request_delta.items.drain(native_range);
+                crate::model_turn::clear_previous_response_id(&mut request);
+                parent
+            }
+        } else if has_explicit_parent {
             self.store
                 .materialize_parent(&principal, &mut request)
                 .await
@@ -199,6 +412,11 @@ impl GenerationChain {
                 Ok(None) | Err(_) => ActiveGenerationChain::default(),
             }
         };
+        if let Some(native) = native {
+            parent.compaction_record_ids.extend(native.record_ids);
+            parent.compaction_record_ids.sort();
+            parent.compaction_record_ids.dedup();
+        }
 
         hydrate_response_artifact_references(&principal, &mut request, self.artifacts.as_deref())
             .await
@@ -216,6 +434,112 @@ impl GenerationChain {
             id: self.store.allocate_id(),
             staged: None,
         })
+    }
+
+    pub(crate) async fn begin_native_compaction(
+        &self,
+        principal: Principal,
+        request: AiRequest,
+    ) -> Result<GenerationChainWrite, BeginError> {
+        let explicit_parent = crate::model_turn::parent_id_from_request(&request).is_some();
+        if explicit_parent {
+            return self.begin(principal, request).await;
+        }
+
+        // Native controls authorize a new operation, not replay of the source's effective
+        // history or settings. Independently verified client history supplies only ancestry.
+        let triggers = request
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| item.is_compaction_trigger())
+            .map(|(index, item)| (index, item.clone()))
+            .collect::<Vec<_>>();
+        let mut source_request = request.clone();
+        source_request
+            .items
+            .retain(|item| !item.is_compaction_trigger());
+        let client_request = canonical_client_history_request(&source_request);
+        let leading_controls = source_request.items.len() - client_request.items.len();
+        let source_prefix = self
+            .compaction_source_prefix(&principal, &source_request)
+            .await?;
+        let mut write = self.begin(principal, request).await?;
+        let Some((matched_items, source_id)) = source_prefix else {
+            return Ok(write);
+        };
+        if let Some(boundary_source) = write.parent.parent_id.as_deref() {
+            if boundary_source == source_id && write.parent.replacement_client_items.is_none() {
+                return Ok(write);
+            }
+            if boundary_source != source_id {
+                self.require_ancestor(&write.principal, &source_id, boundary_source)
+                    .await?;
+            }
+        }
+        for (index, item) in triggers {
+            source_request.items.insert(index, item);
+        }
+        write.request = source_request;
+        let mut parent = self
+            .store
+            .source_parent(&write.principal, &source_id)
+            .await
+            .map_err(|_| BeginError::CompactionUnavailable)?;
+        parent.replace_effective_history = true;
+        parent.replacement_client_items = Some(client_request.items);
+        parent.compaction_input_range = write.parent.compaction_input_range.clone();
+        parent
+            .compaction_record_ids
+            .extend(std::mem::take(&mut write.parent.compaction_record_ids));
+        parent.compaction_record_ids.sort();
+        parent.compaction_record_ids.dedup();
+
+        // Count only non-trigger items: the trigger and every unproven input remain new.
+        let mut position = 0;
+        write.request_delta.items = write
+            .request
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| {
+                let old_source = if item.is_compaction_trigger() {
+                    false
+                } else {
+                    let old =
+                        (leading_controls..leading_controls + matched_items).contains(&position);
+                    position += 1;
+                    old
+                };
+                let old_window = parent
+                    .compaction_input_range
+                    .as_ref()
+                    .is_some_and(|range| range.contains(&index));
+                (!old_source && !old_window).then(|| item.clone())
+            })
+            .collect();
+        if request_has_item_references(&write.request) {
+            let ingress = ProtocolTransform::inferred_ingress(&write.request)
+                .ok_or(BeginError::ItemReferenceNotFound)?;
+            self.store
+                .resolve_available_item_references(
+                    &write.principal,
+                    &mut write.request.items,
+                    ingress,
+                )
+                .await
+                .map_err(|_| BeginError::ItemReferenceNotFound)?;
+        }
+        hydrate_response_artifact_references(
+            &write.principal,
+            &mut write.request,
+            self.artifacts.as_deref(),
+        )
+        .await
+        .map_err(|_| BeginError::ItemReferenceNotFound)?;
+        crate::model_turn::stamp_previous_response_id(&mut write.request, &source_id);
+        write.parent = parent;
+        Ok(write)
     }
 
     pub(crate) fn continuation_lookup(&self) -> Arc<dyn crate::model_turn::ContinuationLookup> {
@@ -389,6 +713,10 @@ struct ActiveGenerationChain {
     parent_effective_items: Vec<AiItem>,
     parent_client_items: Vec<AiItem>,
     replace_effective_history: bool,
+    replacement_client_items: Option<Vec<AiItem>>,
+    compaction_input_range: Option<std::ops::Range<usize>>,
+    fresh_inline_states: Vec<AiItem>,
+    compaction_record_ids: Vec<String>,
 }
 #[derive(Clone, Debug)]
 struct DiscoveredGenerationPrefix {
@@ -557,6 +885,10 @@ struct PersistedResponseNode {
     client_delta: RequestDelta,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     client_output: Option<Vec<AiItem>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    client_history_mutation: Option<EffectiveHistoryMutation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    compaction_record_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     effective_history_mutation: Option<EffectiveHistoryMutation>,
     effective_system: Option<String>,

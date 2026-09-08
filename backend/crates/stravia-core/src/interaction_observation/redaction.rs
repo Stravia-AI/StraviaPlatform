@@ -134,7 +134,11 @@ impl ProtectedSecrets {
                 }
             }
             RunEvent::TargetAttemptStarted { upstream_url, .. } => self.text(upstream_url),
-            RunEvent::TargetAttemptFinished {
+            RunEvent::CompactionOperation {
+                error_code: Some(reason),
+                ..
+            }
+            | RunEvent::TargetAttemptFinished {
                 error_code: Some(reason),
                 ..
             }
@@ -537,7 +541,8 @@ pub(crate) fn redact_run_event(event: &mut RunEvent) -> RedactionReport {
             *upstream_url = redacted;
             report.merge(url_report);
         }
-        RunEvent::TargetAttemptFinished { error_code, .. } => {
+        RunEvent::CompactionOperation { error_code, .. }
+        | RunEvent::TargetAttemptFinished { error_code, .. } => {
             if let Some(error) = error_code {
                 redact_string(error, &mut report);
             }

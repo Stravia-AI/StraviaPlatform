@@ -299,6 +299,8 @@ impl RouteStore for MemoryStorage {
             })
             .collect::<Vec<_>>();
         let mut route = Route {
+            compaction_enabled: input.compaction_enabled,
+            compaction_threshold: input.compaction_threshold,
             id: storage_id.clone(),
             model_id: input.model_id,
             display_name: input.display_name,
@@ -766,6 +768,8 @@ mod tests {
         let storage = MemoryStorage::new(Vec::new(), Vec::new(), Vec::new());
         let route = storage
             .put(PutRoute {
+                compaction_enabled: false,
+                compaction_threshold: None,
                 id: None,
                 model_id: "CaseRoute".into(),
                 display_name: None,
@@ -800,6 +804,8 @@ mod tests {
 
         let updated = storage
             .put(PutRoute {
+                compaction_enabled: false,
+                compaction_threshold: None,
                 id: Some(route.id),
                 model_id: "CaseRoute".into(),
                 display_name: None,
@@ -819,6 +825,8 @@ mod tests {
             MemoryStorage::new(vec![provider("p1"), provider("p2")], Vec::new(), Vec::new());
         storage
             .put(PutRoute {
+                compaction_enabled: false,
+                compaction_threshold: None,
                 id: None,
                 model_id: "empty-after-delete".into(),
                 display_name: None,
@@ -830,6 +838,8 @@ mod tests {
             .expect("put disposable Route");
         storage
             .put(PutRoute {
+                compaction_enabled: false,
+                compaction_threshold: None,
                 id: None,
                 model_id: "survives-delete".into(),
                 display_name: None,

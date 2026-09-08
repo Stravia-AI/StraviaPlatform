@@ -36,6 +36,7 @@ export interface InteractionNodeData extends Record<string, unknown> {
 }
 
 export interface InteractionSummary {
+  context_events: ObservationEvent[]
   id: string
   root_id: string
   parent_interaction_id: string | null

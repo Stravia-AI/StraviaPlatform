@@ -405,6 +405,8 @@ async fn media_test_app() -> (TestApp, crate::agent::ArtifactId, Arc<AtomicUsize
     let model = gateway
         .admin()
         .create_model(crate::db::models::CreateRoute {
+            compaction_enabled: false,
+            compaction_threshold: None,
             model_id: "mcp-vision".into(),
             display_name: None,
             balance: None,

@@ -32,6 +32,15 @@ pub struct EmbeddingOutput {
     pub extensions: serde_json::Map<String, Value>,
 }
 
+/// A native compact result is a replacement context window, not a generation.
+/// `wire` is authoritative for delivery, including identity, time and rolling fields.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NativeCompactionResponse {
+    pub wire: Value,
+    pub items: Vec<AiItem>,
+    pub usage: Option<Usage>,
+}
+
 // ── AiResponse ────────────────────────────────────────────────────────────────
 
 /// Unified egress IR produced by all codec response parsers and the accumulator.

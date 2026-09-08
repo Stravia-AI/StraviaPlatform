@@ -1,6 +1,7 @@
 <script lang="ts">
 import * as m from '$lib/paraglide/messages.js'
 import { onMount, tick, untrack } from 'svelte'
+import { SvelteSet } from 'svelte/reactivity'
 import ChevronDownIcon from '@lucide/svelte/icons/chevron-down'
 import CrosshairIcon from '@lucide/svelte/icons/crosshair'
 import LocateFixedIcon from '@lucide/svelte/icons/locate-fixed'
@@ -101,27 +102,57 @@ let nodes = $derived.by<FlowInteractionNode[]>(() =>
     })),
   ),
 )
-let edges = $derived.by<Edge[]>(() =>
-  roots.flatMap((root) =>
-    root.interactions.flatMap((interaction) =>
-      interaction.parent_interaction_id &&
-      root.interactions.some((candidate) => candidate.id === interaction.parent_interaction_id)
-        ? [
-            {
-              id: `${interaction.parent_interaction_id}-${interaction.id}`,
-              source: interaction.parent_interaction_id,
-              target: interaction.id,
-              type: 'smoothstep',
-              animated: false,
-              selectable: false,
-              focusable: false,
-              style: `stroke: ${selectedPath.has(interaction.parent_interaction_id) && selectedPath.has(interaction.id) ? 'var(--primary)' : 'var(--border)'}; stroke-width: ${selectedPath.has(interaction.parent_interaction_id) && selectedPath.has(interaction.id) ? 2 : 1.25}`,
-            },
-          ]
-        : [],
-    ),
-  ),
-)
+let edges = $derived.by<Edge[]>(() => {
+  const interactions = roots.flatMap((root) => root.interactions)
+  const visible = new Set(interactions.map((interaction) => interaction.id))
+  const result: Edge[] = []
+  for (const interaction of interactions) {
+    const parent = interaction.parent_interaction_id
+    const nativeParent = (interaction.context_events ?? []).some(
+      (event) =>
+        event.kind === 'native_compaction_associated' &&
+        event.payload &&
+        typeof event.payload === 'object' &&
+        'source_interaction_id' in event.payload &&
+        event.payload.source_interaction_id === parent,
+    )
+    if (parent && visible.has(parent) && !nativeParent) {
+      result.push({
+        id: `confirmed-${parent}-${interaction.id}`,
+        source: parent,
+        target: interaction.id,
+        type: 'smoothstep',
+        label: m.observation_ancestry_confirmed(),
+        selectable: false,
+        focusable: false,
+        style: `stroke: ${selectedPath.has(parent) && selectedPath.has(interaction.id) ? 'var(--primary)' : 'var(--border)'}; stroke-width: 1.5`,
+      })
+    }
+    const seen = new SvelteSet<string>()
+    for (const event of interaction.context_events ?? []) {
+      if (!event.payload || typeof event.payload !== 'object') continue
+      const payload = event.payload as Record<string, unknown>
+      const native = event.kind === 'native_compaction_associated'
+      if (!native && !(event.kind === 'retained_tail_associated' && payload.status === 'inferred')) continue
+      const source = payload.source_interaction_id
+      if (typeof source !== 'string' || source === interaction.id || !visible.has(source)) continue
+      const id = `${native ? 'native' : 'inferred'}-${source}-${interaction.id}`
+      if (seen.has(id)) continue
+      seen.add(id)
+      result.push({
+        id,
+        source,
+        target: interaction.id,
+        type: 'smoothstep',
+        label: native ? m.observation_ancestry_native() : m.observation_ancestry_inferred(),
+        selectable: false,
+        focusable: false,
+        style: `stroke: var(--muted-foreground); stroke-width: 1.5; stroke-dasharray: ${native ? '3 3' : '8 5'}`,
+      })
+    }
+  }
+  return result
+})
 
 async function waitForRenderedLayout(): Promise<void> {
   await tick()

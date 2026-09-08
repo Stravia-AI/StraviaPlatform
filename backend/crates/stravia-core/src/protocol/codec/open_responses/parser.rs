@@ -352,6 +352,55 @@ fn strip_provider_function_output_schemas(tools: &mut Value) {
     }
 }
 
+/// Decode the standalone compact resource without spoofing a generation response.
+pub(crate) fn parse_compaction_response(
+    resp: &Value,
+) -> Result<crate::protocol::ir::NativeCompactionResponse> {
+    let object = resp
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("compact response must be an object"))?;
+    if object.get("object").and_then(Value::as_str) != Some("response.compaction") {
+        anyhow::bail!("compact response object must be response.compaction");
+    }
+    required_non_empty_output_string(object, "id", "response.compaction")?;
+    if object.get("created_at").and_then(Value::as_i64).is_none() {
+        anyhow::bail!("compact response requires created_at");
+    }
+    let output = object
+        .get("output")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("compact response requires an output window"))?;
+    let mut items = Vec::with_capacity(output.len());
+    for wire in output {
+        if wire.get("type").and_then(Value::as_str) == Some("compaction_trigger") {
+            anyhow::bail!("compact window cannot contain a request compaction trigger");
+        }
+        let mut item = super::decoder::decode_input_item(wire)?
+            .ok_or_else(|| anyhow::anyhow!("compact window contains an empty item"))?;
+        super::decoder::set_input_graph_metadata(&mut item, wire);
+        item.set_graph_metadata(
+            wire.get("id").and_then(Value::as_str).map(str::to_owned),
+            None,
+            AiItemProvenance::Provider,
+            AiItemAudience::Client,
+        );
+        items.push(item);
+    }
+    if !items.iter().any(AiItem::is_compaction) {
+        anyhow::bail!("compact window contains no native compaction state");
+    }
+    let usage = if resp.get("usage").is_some_and(|value| !value.is_null()) {
+        Some(parse_dated_usage(resp)?)
+    } else {
+        None
+    };
+    Ok(crate::protocol::ir::NativeCompactionResponse {
+        wire: resp.clone(),
+        items,
+        usage,
+    })
+}
+
 pub struct ResponsesResponseParser;
 
 impl ResponsesResponseParser {
@@ -378,7 +427,8 @@ impl ResponsesResponseParser {
 
         let mut saw_tool_call = false;
         let mut items = Vec::new();
-        let with_wire_metadata = |canonical: AiItem, wire: &Value| {
+        let with_wire_metadata = |mut canonical: AiItem, wire: &Value| {
+            super::decoder::set_input_graph_metadata(&mut canonical, wire);
             let status = match wire.get("status").and_then(Value::as_str) {
                 Some("in_progress") => Some(AiItemStatus::InProgress),
                 Some("completed") => Some(AiItemStatus::Completed),
@@ -485,7 +535,7 @@ impl ResponsesResponseParser {
                             item,
                         ));
                     }
-                    "function_call_output" => {
+                    "compaction" | "compaction_trigger" | "function_call_output" => {
                         let canonical =
                             crate::protocol::codec::open_responses::decoder::decode_input_item(
                                 item,
@@ -600,6 +650,7 @@ pub struct ResponsesStreamParser {
     started_tool_call_indexes: HashSet<usize>,
     streamed_tool_call_argument_indexes: HashSet<usize>,
     streamed_unknown_item_indexes: HashSet<usize>,
+    completed_native_items: HashMap<usize, Value>,
     open_items: HashMap<usize, (String, String)>,
     open_content_parts: HashMap<(usize, usize), String>,
     streamed_text: HashMap<(usize, usize), String>,
@@ -625,6 +676,7 @@ impl ResponsesStreamParser {
             started_tool_call_indexes: HashSet::new(),
             streamed_tool_call_argument_indexes: HashSet::new(),
             streamed_unknown_item_indexes: HashSet::new(),
+            completed_native_items: HashMap::new(),
             open_items: HashMap::new(),
             open_content_parts: HashMap::new(),
             streamed_text: HashMap::new(),
@@ -1077,7 +1129,12 @@ impl ResponsesStreamParser {
                 }
                 if !matches!(
                     item_type,
-                    "message" | "function_call" | "function_call_output" | "reasoning"
+                    "message"
+                        | "function_call"
+                        | "function_call_output"
+                        | "reasoning"
+                        | "compaction"
+                        | "compaction_trigger"
                 ) && !super::is_registered_extension_item(item_type)
                 {
                     anyhow::bail!("unsupported Open Responses output item type: {item_type}");
@@ -1087,6 +1144,9 @@ impl ResponsesStreamParser {
                     .or_else(|| item.get("call_id"))
                     .and_then(Value::as_str)
                     .filter(|value| !value.is_empty())
+                    .or_else(|| {
+                        matches!(item_type, "compaction" | "compaction_trigger").then_some("")
+                    })
                     .ok_or_else(|| anyhow::anyhow!("output item id is missing"))?
                     .to_owned();
 
@@ -1138,6 +1198,9 @@ impl ResponsesStreamParser {
                         anyhow::anyhow!("completed output item has no canonical representation")
                     })?;
                     self.append_missing_completed_semantics(index, &canonical, deltas)?;
+                    if canonical.is_compaction() || canonical.is_compaction_trigger() {
+                        self.completed_native_items.insert(index, item.clone());
+                    }
                     deltas.push(AiStreamDelta::ItemDone {
                         index,
                         item: canonical,
@@ -1203,6 +1266,34 @@ impl ResponsesStreamParser {
                     anyhow::bail!("{event} response status does not match the event");
                 }
                 let response = payload.get("response").expect("validated response");
+                let output = response
+                    .get("output")
+                    .and_then(Value::as_array)
+                    .expect("validated output");
+                for (index, previous) in &self.completed_native_items {
+                    if output.get(*index) != Some(previous) {
+                        anyhow::bail!(
+                            "terminal native compaction state differs from the completed item"
+                        );
+                    }
+                }
+                for (index, wire) in output.iter().enumerate() {
+                    if matches!(
+                        wire.get("type").and_then(Value::as_str),
+                        Some("compaction" | "compaction_trigger")
+                    ) && !self.completed_native_items.contains_key(&index)
+                    {
+                        let mut item = super::decoder::decode_input_item(wire)?
+                            .ok_or_else(|| anyhow::anyhow!("terminal native item is empty"))?;
+                        item.set_graph_metadata(
+                            wire.get("id").and_then(Value::as_str).map(str::to_owned),
+                            None,
+                            AiItemProvenance::Provider,
+                            AiItemAudience::Client,
+                        );
+                        deltas.push(AiStreamDelta::ItemDone { index, item });
+                    }
+                }
                 let usage = parse_dated_usage(response)?;
                 if usage.required_components_known {
                     deltas.push(AiStreamDelta::Usage(usage));

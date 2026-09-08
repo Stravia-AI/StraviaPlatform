@@ -72,6 +72,8 @@ let form = $state({
   displayName: initialModel?.display_name ?? '',
   balance: initialModel?.balance ?? 'traffic_equalization',
   enabled: initialModel?.is_enabled ?? true,
+  compactionEnabled: initialModel?.compaction_enabled ?? false,
+  compactionThreshold: initialModel?.compaction_threshold ?? undefined,
 })
 let targets = $state<RouteTargetForm[]>(
   untrack(() => createRouteTargetForms(initialModel, initialProviderId, initialModelId)),
@@ -512,6 +514,8 @@ async function saveModel(): Promise<void> {
       model_id: form.modelId.trim(),
       display_name: form.displayName.trim(),
       balance: form.balance,
+      compaction_enabled: form.compactionEnabled,
+      compaction_threshold: form.compactionThreshold ?? null,
       target_provider: firstTarget.provider_id,
       target_model: firstTarget.model,
       targets: cleanTargets,
@@ -649,6 +653,47 @@ async function saveModel(): Promise<void> {
             </Select.Content>
           </Select.Root>
         </Field.Field>
+      </Field.Group>
+    </section>
+
+    <section class="route-section" aria-labelledby="route-compaction-title">
+      <div class="route-section-header">
+        <div>
+          <h2 id="route-compaction-title" class="route-section-title">{m.model_editor_compaction_title()}</h2>
+          <p class="route-section-description">{m.model_editor_compaction_scope()}</p>
+        </div>
+      </div>
+      <Field.Group>
+        <Field.Field orientation="horizontal">
+          <Switch id="route-compaction-enabled" bind:checked={form.compactionEnabled} />
+          <Field.Content>
+            <Field.Label for="route-compaction-enabled">{m.model_editor_compaction_enable()}</Field.Label>
+            <Field.Description>{m.model_editor_compaction_priority()}</Field.Description>
+          </Field.Content>
+        </Field.Field>
+        <Field.Field data-disabled={!form.compactionEnabled}>
+          <Field.Label for="route-compaction-threshold">{m.model_editor_compaction_threshold()}</Field.Label>
+          <Input
+            id="route-compaction-threshold"
+            type="number"
+            min={1}
+            step={1}
+            required={form.compactionEnabled}
+            disabled={!form.compactionEnabled}
+            bind:value={form.compactionThreshold} />
+          <Field.Description>{m.model_editor_compaction_threshold_help()}</Field.Description>
+        </Field.Field>
+        <Field.Description>{m.model_editor_compaction_capacity_help()}</Field.Description>
+        {#each targets.filter((target) => target.enabled) as target (target.key)}
+          {@const specification = selectedSummary(target)?.specification}
+          <p class="text-sm text-muted-foreground">
+            <span class="font-technical">{target.model || m.model_editor_model_id_placeholder()}</span>
+            · {m.model_editor_compaction_capacity({
+              context: specification?.limit?.context?.toLocaleString() ?? m.model_editor_compaction_unknown(),
+              output: specification?.limit?.output?.toLocaleString() ?? m.model_editor_compaction_unknown(),
+            })}
+          </p>
+        {/each}
       </Field.Group>
     </section>
 

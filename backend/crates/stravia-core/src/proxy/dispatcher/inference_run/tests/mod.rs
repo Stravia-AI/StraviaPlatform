@@ -1264,6 +1264,8 @@ async fn configure_route_with_protocol(
     gateway
         .admin()
         .create_model(CreateRoute {
+            compaction_enabled: false,
+            compaction_threshold: None,
             model_id: model.into(),
             display_name: None,
             balance: Some("traffic_equalization".into()),

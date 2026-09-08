@@ -55,7 +55,23 @@ impl LiveModelTurnExecutor {
 impl ModelTurnExecutor for LiveModelTurnExecutor {
     async fn execute(&self, mut input: TurnInput) -> Result<ModelTurn, ModelTurnError> {
         let model_turn_id = uuid::Uuid::new_v4().to_string();
+        let operation_started = Instant::now();
+        let standalone = input.purpose == super::ModelTurnPurpose::Compact;
         let observer = input.observer.clone();
+        if standalone && let Some(observer) = &observer {
+            observer.record(RunEvent::CompactionOperation {
+                operation_id: model_turn_id.clone(),
+                model_turn_id: model_turn_id.clone(),
+                attempt_id: None,
+                mode: crate::interaction_observation::CompactionMode::Standalone,
+                phase: crate::interaction_observation::CompactionPhase::Started,
+                source_generation_id: None,
+                source_operation_id: None,
+                registration_id: None,
+                duration_ms: None,
+                error_code: None,
+            });
+        }
         if let Some(observer) = &observer {
             let (route_id, model_display_name) = self
                 .gateway
@@ -94,6 +110,8 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
         let mut terminal = Some(ModelTurnTerminal {
             observer: observer.clone(),
             model_turn_id: model_turn_id.clone(),
+            standalone,
+            operation_started,
             finished: false,
         });
         let result = if input.cancellation.is_cancelled() {
@@ -116,14 +134,25 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
                 }
                 result = async {
                     let trace = input.request.meta.redaction.clone();
+                    let principal = input.principal.clone();
+                    let source_generation_id = input.compaction_source_generation_id.clone();
+                    let incoming_states = input.request.items.iter().filter_map(crate::protocol::codec::open_responses::native_compaction_item).collect::<Vec<_>>();
+                    let source = self.gateway.compaction.resolve(&principal, &input.request.items).await
+                        .map_err(|error| ModelTurnError::new(error.code(), error.to_string()))?;
                     let mappings = self.gateway.redaction
                         .protect(&input.principal, &mut input.request, observer.as_ref()).await?;
                     if let Some(observer) = &observer {
                         observer.protect_secrets(mappings.iter().map(|mapping| mapping.secret.as_str()));
                     }
-                    let principal = input.principal.clone();
+                    let registrations = input.compaction_records.clone();
                     let mut turn = execute_inner(self.clone(), input, model_turn_id.clone()).await?;
                     turn.output = self.gateway.redaction.restore_stream(turn.output, mappings, trace.clone());
+                    turn.output = register_compaction_stream(
+                        turn.output, self.gateway.compaction.clone(), principal.clone(),
+                        crate::compaction::CompactionTarget { target_key: turn.target.target_id.clone(), namespace: turn.target.namespace.clone(), model: turn.target.actual_model.clone(), protocol: turn.route.egress.to_string() },
+                        source_generation_id, source.map(|source| source.record_ids).unwrap_or_default(),
+                        model_turn_id.clone(), registrations, observer.clone(), incoming_states, operation_started,
+                    );
                     turn.output = completion_stream(
                         turn.output,
                         self.gateway.redaction.clone(),
@@ -147,9 +176,177 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
     }
 }
 
+fn register_compaction_stream(
+    output: super::CanonicalEventStream,
+    compaction: crate::compaction::Compaction,
+    principal: crate::hook::Principal,
+    target: crate::compaction::CompactionTarget,
+    source_generation_id: Option<String>,
+    source_record_ids: Vec<String>,
+    model_turn_id: String,
+    registrations: super::CompactionPublications,
+    observer: Option<crate::interaction_observation::RunObserver>,
+    incoming_states: Vec<serde_json::Value>,
+    operation_started: Instant,
+) -> super::CanonicalEventStream {
+    use crate::interaction_observation::{CompactionMode, CompactionPhase};
+    use crate::protocol::codec::open_responses::native_compaction_item;
+    use futures::StreamExt;
+    let state = (
+        output,
+        compaction,
+        principal,
+        target,
+        source_generation_id,
+        source_record_ids,
+        model_turn_id,
+        registrations,
+        observer,
+        incoming_states,
+        false,
+    );
+    Box::pin(stream::unfold(state, move |mut state| async move {
+        let (
+            output,
+            compaction,
+            principal,
+            target,
+            source_generation_id,
+            source_record_ids,
+            model_turn_id,
+            registrations,
+            observer,
+            seen,
+            failed,
+        ) = &mut state;
+        if *failed {
+            return None;
+        }
+        let mut event = output.next().await?;
+        let unseen = |item: &&crate::protocol::ir::AiItem| {
+            item.is_compaction()
+                && native_compaction_item(item).is_some_and(|wire| !seen.contains(&wire))
+        };
+        let (items, window, mode) = match &event {
+            Ok(CanonicalEvent::Delta(AiStreamDelta::ItemDone { item, .. })) if unseen(&item) => {
+                (vec![item.clone()], Vec::new(), CompactionMode::Inline)
+            }
+            Ok(CanonicalEvent::Compacted(response)) => (
+                response.items.iter().filter(unseen).cloned().collect(),
+                response.items.clone(),
+                CompactionMode::Standalone,
+            ),
+            Ok(CanonicalEvent::Completed(response)) => (
+                response.items.iter().filter(unseen).cloned().collect(),
+                Vec::new(),
+                CompactionMode::Inline,
+            ),
+            _ => (Vec::new(), Vec::new(), CompactionMode::Inline),
+        };
+        let groups = if matches!(mode, CompactionMode::Standalone) {
+            if items.is_empty() {
+                Vec::new()
+            } else {
+                vec![(items, window)]
+            }
+        } else {
+            items
+                .into_iter()
+                .map(|item| (vec![item.clone()], vec![item]))
+                .collect()
+        };
+        for (state_items, window) in groups {
+            let operation_id = if matches!(mode, CompactionMode::Standalone) {
+                model_turn_id.clone()
+            } else {
+                uuid::Uuid::new_v4().to_string()
+            };
+            let operation_event =
+                |phase, registration_id, error_code| RunEvent::CompactionOperation {
+                    operation_id: operation_id.clone(),
+                    model_turn_id: model_turn_id.clone(),
+                    attempt_id: None,
+                    mode: mode.clone(),
+                    phase,
+                    source_generation_id: source_generation_id.clone(),
+                    source_operation_id: None,
+                    registration_id,
+                    duration_ms: matches!(mode, CompactionMode::Standalone)
+                        .then(|| operation_started.elapsed().as_millis() as i64),
+                    error_code,
+                };
+            if matches!(mode, CompactionMode::Inline)
+                && let Some(observer) = observer
+            {
+                observer.record(operation_event(CompactionPhase::Started, None, None));
+            }
+            let native_states = state_items
+                .iter()
+                .filter_map(native_compaction_item)
+                .collect::<Vec<_>>();
+            let publication_state = state_items[0].clone();
+            let result = compaction
+                .register(
+                    principal,
+                    crate::compaction::CompactionRegistration {
+                        source_generation_id: source_generation_id.clone(),
+                        source_record_ids: source_record_ids.clone(),
+                        operation_id: operation_id.clone(),
+                        target: target.clone(),
+                        window,
+                        state_items,
+                    },
+                )
+                .await;
+            match result {
+                Ok(record) => {
+                    registrations
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(super::CompactionPublication {
+                            record_id: record.id.clone(),
+                            operation_id: operation_id.clone(),
+                            model_turn_id: model_turn_id.clone(),
+                            mode: mode.clone(),
+                            source_generation_id: source_generation_id.clone(),
+                            state: publication_state,
+                            receipt: super::CompactionReceipt::Pending,
+                        });
+                    seen.extend(native_states);
+                    if let Some(observer) = observer {
+                        observer.record(operation_event(
+                            CompactionPhase::Registered,
+                            Some(record.id.clone()),
+                            None,
+                        ));
+                    }
+                    // Each subsequent state is a new immutable boundary descending from this one.
+                    source_record_ids.clear();
+                    source_record_ids.push(record.id);
+                }
+                Err(error) => {
+                    if let Some(observer) = observer {
+                        observer.record(operation_event(
+                            CompactionPhase::Failed,
+                            None,
+                            Some(error.code().to_owned()),
+                        ));
+                    }
+                    event = Err(ModelTurnError::new(error.code(), error.to_string()));
+                    *failed = true;
+                    break;
+                }
+            }
+        }
+        Some((event, state))
+    }))
+}
+
 struct ModelTurnTerminal {
     observer: Option<crate::interaction_observation::RunObserver>,
     model_turn_id: String,
+    standalone: bool,
+    operation_started: Instant,
     finished: bool,
 }
 
@@ -164,6 +361,20 @@ impl ModelTurnTerminal {
                 model_turn_id: self.model_turn_id.clone(),
                 status: status.to_owned(),
             });
+            if self.standalone && status != "completed" {
+                observer.record(RunEvent::CompactionOperation {
+                    operation_id: self.model_turn_id.clone(),
+                    model_turn_id: self.model_turn_id.clone(),
+                    attempt_id: None,
+                    mode: crate::interaction_observation::CompactionMode::Standalone,
+                    phase: crate::interaction_observation::CompactionPhase::Failed,
+                    source_generation_id: None,
+                    source_operation_id: None,
+                    registration_id: None,
+                    duration_ms: Some(self.operation_started.elapsed().as_millis() as i64),
+                    error_code: Some(status.to_owned()),
+                });
+            }
         }
     }
 }
@@ -205,6 +416,10 @@ fn completion_stream(
                         redaction.publish(principal, trace).await?;
                         Ok(CanonicalEvent::Completed(response))
                     }
+                    Some(Ok(CanonicalEvent::Compacted(response))) => {
+                        redaction.publish(principal, trace).await?;
+                        Ok(CanonicalEvent::Compacted(response))
+                    }
                     Some(result) => result,
                     None => Err(ModelTurnError::new("model_stream_incomplete", "Model Turn stream ended before completion")),
                 }
@@ -220,7 +435,7 @@ fn completion_stream(
             result
         };
         match &result {
-            Ok(CanonicalEvent::Completed(_)) => terminal.finish("completed"),
+            Ok(CanonicalEvent::Completed(_) | CanonicalEvent::Compacted(_)) => terminal.finish("completed"),
             Err(error) => terminal.finish(&error.code),
             Ok(CanonicalEvent::Delta(AiStreamDelta::StreamError { .. })) => terminal.finish("failed"),
             Ok(CanonicalEvent::Delta(AiStreamDelta::UnexpectedEof)) => terminal.finish("model_stream_incomplete"),
@@ -351,6 +566,7 @@ async fn execute_inner(
             let result =
                 match prepare_attempt(&executor, &route, &target, &input, &model_turn_id).await {
                     Ok(prepared) => {
+                        let native_compaction_requested = prepared.native_compaction_requested;
                         let attempt = begin_attempt(
                             gateway,
                             &route,
@@ -361,7 +577,7 @@ async fn execute_inner(
                             gateway.route_policy_state.clone(),
                             attempt_context.clone(),
                         );
-                        if target.first_token_timeout_ms == 0 {
+                        let result = if target.first_token_timeout_ms == 0 {
                             attempt.await
                         } else {
                             match tokio::time::timeout(
@@ -379,6 +595,13 @@ async fn execute_inner(
                                     None,
                                 )),
                             }
+                        };
+                        if native_compaction_requested {
+                            result.map_err(|failure| {
+                                AttemptFailure::terminal(failure.error.code, failure.error.message)
+                            })
+                        } else {
+                            result
                         }
                     }
                     Err(failure) => Err(failure),
@@ -490,6 +713,7 @@ struct PreparedAttempt {
     provider_call: ProviderCall,
     reasoning_encrypted_content_requested: bool,
     force_stream: bool,
+    native_compaction_requested: bool,
     actual_model: String,
     namespace: String,
 }
@@ -611,11 +835,12 @@ async fn prepare_attempt(
         .as_ref()
         .and_then(|model| model.metadata.tool_call)
         .unwrap_or(false);
-    if input
-        .request
-        .tools
-        .as_ref()
-        .is_some_and(|tools| !tools.is_empty())
+    if input.purpose != super::ModelTurnPurpose::Compact
+        && input
+            .request
+            .tools
+            .as_ref()
+            .is_some_and(|tools| !tools.is_empty())
         && !supports_tools
     {
         return Err(AttemptFailure::ineligible(
@@ -778,8 +1003,127 @@ async fn prepare_attempt(
         .resolve(&provider, egress)
         .map(|adapter| adapter.target_capabilities(egress))
         .unwrap_or_default();
-    let websocket_enabled = openai_generation_target && target_capabilities.responses_websocket;
+    let compact = input.purpose == super::ModelTurnPurpose::Compact;
     let mut provider_request = input.request.clone();
+    let controls = crate::compaction::NativeCompactionControls::classify(
+        &provider_request,
+        !compact && route.compaction_enabled,
+    );
+    if (compact || controls.requested()) && !openai_generation_target
+        || compact
+            && (!target_capabilities.standalone_compaction
+                || input.compact_requirements.codex_controls
+                    && provider.channel.as_deref() != Some("codex"))
+        || controls.trigger && !target_capabilities.compaction_trigger
+        || (controls.automatic || controls.active_control)
+            && !target_capabilities.server_side_compaction
+        || provider_request
+            .items
+            .iter()
+            .any(crate::protocol::ir::AiItem::is_compaction)
+            && egress != OPEN_RESPONSES_2026_04_24
+    {
+        return Err(AttemptFailure::ineligible(
+            "compaction_unsupported",
+            "Target does not support the requested native compaction contract",
+        ));
+    }
+    if controls.automatic {
+        let threshold = route
+            .compaction_threshold
+            .filter(|threshold| *threshold > 0)
+            .ok_or_else(|| {
+                AttemptFailure::terminal(
+                    "invalid_compaction_threshold",
+                    "Automatic compaction requires a positive threshold",
+                )
+            })?;
+        if provider_request.ext.is_none() {
+            provider_request.ext = Some(crate::protocol::ir::ProtocolExt::OpenResponses(
+                Default::default(),
+            ));
+        }
+        if let Some(crate::protocol::ir::ProtocolExt::OpenResponses(ext)) =
+            &mut provider_request.ext
+        {
+            ext.passthrough_body.insert(
+                "context_management".into(),
+                serde_json::json!([{ "type": "compaction", "compact_threshold": threshold }]),
+            );
+        } else {
+            return Err(AttemptFailure::ineligible(
+                "compaction_unsupported",
+                "Automatic compaction requires native Responses context controls",
+            ));
+        }
+    }
+    if let Some(crate::protocol::ir::ProtocolExt::OpenResponses(ext)) = &provider_request.ext
+        && let Some(controls) = ext
+            .passthrough_body
+            .get("context_management")
+            .and_then(serde_json::Value::as_array)
+    {
+        for control in controls {
+            if let Some(threshold) = control.get("compact_threshold") {
+                let threshold = threshold
+                    .as_u64()
+                    .filter(|value| *value > 0)
+                    .ok_or_else(|| {
+                        AttemptFailure::terminal(
+                            "invalid_compaction_threshold",
+                            "Compaction threshold must be a positive integer",
+                        )
+                    })?;
+                let limit = provider_model
+                    .as_ref()
+                    .and_then(|model| model.metadata.limit.as_ref());
+                let reserve = provider_request
+                    .generation
+                    .max_tokens
+                    .map(u64::from)
+                    .or_else(|| limit.and_then(|limit| limit.output));
+                if limit
+                    .and_then(|limit| limit.input)
+                    .filter(|window| *window > 0)
+                    .is_some_and(|window| threshold >= window)
+                    || limit
+                        .and_then(|limit| limit.context)
+                        .filter(|window| *window > 0)
+                        .is_some_and(|window| {
+                            threshold >= window
+                                || reserve.is_some_and(|reserve| {
+                                    threshold.saturating_add(reserve) > window
+                                })
+                        })
+                {
+                    return Err(AttemptFailure::ineligible(
+                        "invalid_compaction_threshold",
+                        "Compaction threshold exceeds the model context window with output reserve",
+                    ));
+                }
+            }
+        }
+    }
+    let binding = crate::compaction::CompactionTarget {
+        target_key: target_key.clone(),
+        namespace: target_namespace.clone(),
+        model: actual_model.clone(),
+        protocol: egress.to_string(),
+    };
+    if let Some(resolved) = gateway
+        .compaction
+        .resolve(&input.principal, &input.request.items)
+        .await
+        .map_err(|error| AttemptFailure::terminal(error.code(), error.to_string()))?
+        && resolved.target != binding
+    {
+        return Err(AttemptFailure::ineligible(
+            "compaction_target_mismatch",
+            "Native compaction state is not compatible with this Target binding",
+        ));
+    }
+    let websocket_enabled =
+        !compact && openai_generation_target && target_capabilities.responses_websocket;
     if let Some(level) = provider_request.reasoning.level {
         let Some(control) = crate::thinking::mapping_control(&target.thinking_level_map, level)
         else {
@@ -804,10 +1148,14 @@ async fn prepare_attempt(
     provider_request.model.clone_from(&route.model_id);
     let mut full_provider_request = provider_request.clone();
     crate::model_turn::clear_previous_response_id(&mut full_provider_request);
-    let mut full_outbound = adapter
-        .build_request(&mut full_provider_request)
-        .await
-        .map_err(|error| AttemptFailure::terminal(error.stable_code(), error.to_string()))?;
+    let mut full_outbound = if compact {
+        adapter
+            .build_compact_request(&mut full_provider_request)
+            .await
+    } else {
+        adapter.build_request(&mut full_provider_request).await
+    }
+    .map_err(|error| AttemptFailure::terminal(error.stable_code(), error.to_string()))?;
     if egress == OPEN_RESPONSES_2026_04_24
         && let serde_json::Value::Object(profile) =
             crate::protocol::codec::open_responses::encoder::effective_response_profile_from_request(
@@ -830,20 +1178,24 @@ async fn prepare_attempt(
             .get("store")
             .and_then(serde_json::Value::as_bool)
             == Some(false);
-    let continued_id = executor
-        .continuation
-        .prepare(
-            &input.principal,
-            ContinuationTarget {
-                namespace: &target_namespace,
-                protocol: egress,
-                actual_model: &actual_model,
-                logical_model: &input.request.model,
-                allow_ephemeral_response: websocket_enabled && require_affinity,
-            },
-            &mut provider_request,
-        )
-        .await;
+    let continued_id = if compact {
+        None
+    } else {
+        executor
+            .continuation
+            .prepare(
+                &input.principal,
+                ContinuationTarget {
+                    namespace: &target_namespace,
+                    protocol: egress,
+                    actual_model: &actual_model,
+                    logical_model: &input.request.model,
+                    allow_ephemeral_response: websocket_enabled && require_affinity,
+                },
+                &mut provider_request,
+            )
+            .await
+    };
     let mut outbound = if let Some(previous_response_id) = continued_id.as_ref() {
         let mut outbound = adapter
             .build_request(&mut provider_request)
@@ -925,9 +1277,11 @@ async fn prepare_attempt(
         },
         provider_call,
         reasoning_encrypted_content_requested,
-        force_stream: input.request.stream.enabled
-            || websocket_enabled
-            || target_capabilities.stream_only,
+        force_stream: !compact
+            && (input.request.stream.enabled
+                || websocket_enabled
+                || target_capabilities.stream_only),
+        native_compaction_requested: compact || controls.requested(),
         actual_model,
         namespace: target_namespace,
     })
@@ -1043,6 +1397,48 @@ async fn begin_attempt(
             false,
         )),
     };
+
+    if input.purpose == super::ModelTurnPurpose::Compact {
+        let (raw, status, _headers, attempt) = prepared
+            .provider_call
+            .call_compact()
+            .await
+            .map_err(|error| {
+                AttemptFailure::terminal("upstream_execution_uncertain", error.to_string())
+            })?;
+        if status >= 400 {
+            attempt.finish("failed", Some(status), Some("upstream_error".into()), None);
+            return Err(AttemptFailure::terminal(
+                "upstream_error",
+                format!("upstream returned HTTP {status}"),
+            ));
+        }
+        let response =
+            crate::protocol::codec::open_responses::parser::parse_compaction_response(&raw)
+                .map_err(|error| {
+                    AttemptFailure::terminal("invalid_compaction_response", error.to_string())
+                })?;
+        if let Some(usage) = &response.usage {
+            attempt.confirm_usage(usage);
+        }
+        attempt.finish(
+            "completed",
+            Some(status),
+            None,
+            Some(attempt_started.elapsed().as_millis() as i64),
+        );
+        record_success(gateway, target, &route_policy_state, &attempt_context);
+        return Ok(ModelTurn {
+            model_turn_id: prepared.model_turn_id,
+            route: prepared.route,
+            target: target_identity,
+            output: Box::pin(stream::once(async move {
+                Ok(CanonicalEvent::Compacted(Box::new(response)))
+            })),
+            reasoning_encrypted_content_requested: false,
+            streamed: false,
+        });
+    }
 
     if !prepared.force_stream {
         let call = prepared

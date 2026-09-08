@@ -41,13 +41,25 @@ pub(crate) fn history_unit_count(items: &[AiItem]) -> usize {
 }
 
 fn history_item_values(item: &AiItem) -> Vec<serde_json::Value> {
-    if item.role == super::Role::Assistant {
-        return assistant_history_values(item);
+    if let Some(native) = crate::protocol::codec::open_responses::native_compaction_item(item) {
+        return vec![serde_json::json!({"role": item.role, "native_compaction": native})];
     }
-    if let Some(values) = tool_output_history_values(item) {
-        return values;
+    let values = if item.role == super::Role::Assistant {
+        assistant_history_values(item)
+    } else if let Some(values) = tool_output_history_values(item) {
+        values
+    } else {
+        vec![history_item_value(item)]
+    };
+    if let Some(fields) = item
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get("__open_responses_item_fields"))
+        .filter(|fields| fields.as_object().is_some_and(|fields| !fields.is_empty()))
+    {
+        return vec![serde_json::json!({"items": values, "native_item_fields": fields})];
     }
-    vec![history_item_value(item)]
+    values
 }
 
 fn history_values(items: &[AiItem]) -> Vec<serde_json::Value> {
@@ -364,6 +376,8 @@ fn history_protocol_controls_value(extension: Option<&ProtocolExt>) -> serde_jso
                 "web_search_options": &extension.web_search_options,
             }
         }),
+        // Compaction policy governs the next request, not the identity of
+        // delivered history. Target Continuation still checks it separately.
         Some(ProtocolExt::OpenResponses(extension)) => serde_json::json!({
             "open_responses": {
                 "max_tool_calls": extension.max_tool_calls,
@@ -411,7 +425,8 @@ fn cache_protocol_controls_value(extension: Option<&ProtocolExt>) -> serde_json:
                 "web_search_options": &extension.web_search_options,
             }
         }),
-        Some(ProtocolExt::OpenResponses(extension)) => serde_json::json!({
+        Some(ProtocolExt::OpenResponses(extension)) => {
+            let mut controls = serde_json::json!({
             "open_responses": {
                 "prompt_cache_key": &extension.prompt_cache_key,
                 "truncation": &extension.truncation,
@@ -419,7 +434,13 @@ fn cache_protocol_controls_value(extension: Option<&ProtocolExt>) -> serde_json:
                 "native_web_search": &extension.native_web_search,
                 "tool_choice_ext": &extension.tool_choice_ext,
             }
-        }),
+            });
+            if let Some(control) = extension.passthrough_body.get("context_management") {
+                controls["open_responses"]["context_management"] =
+                    serde_json::json!({"present": true, "value": control});
+            }
+            controls
+        }
         Some(ProtocolExt::Anthropic(extension)) => serde_json::json!({
             "anthropic": {
                 "container": &extension.container,
@@ -513,6 +534,10 @@ fn history_content_block_value(block: &ContentBlock) -> serde_json::Value {
             "content": content,
             "encrypted_content": encrypted_content,
         }),
+        ContentBlock::Compaction { encrypted_content } => serde_json::json!({
+            "type": "compaction", "encrypted_content": encrypted_content,
+        }),
+        ContentBlock::CompactionTrigger {} => serde_json::json!({"type": "compaction_trigger"}),
         ContentBlock::RedactedThinking { data } => serde_json::json!({
             "type": "redacted_thinking",
             "data": data,

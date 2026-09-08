@@ -39,6 +39,10 @@ pub enum RequestPurpose<'a> {
         path: &'a str,
         actual_model: &'a str,
     },
+    Compact {
+        base_url: &'a str,
+        actual_model: &'a str,
+    },
     Models {
         endpoint: &'a str,
     },
@@ -49,6 +53,12 @@ impl RequestPurpose<'_> {
         match self {
             Self::Inference { base_url, path, .. } => {
                 format!("{}{}", base_url.trim_end_matches('/'), path)
+            }
+            Self::Compact { base_url, .. } => {
+                crate::provider::common::openai_compat::openai_endpoint(
+                    base_url,
+                    "/v1/responses/compact",
+                )
             }
             Self::Models { endpoint } => endpoint.to_string(),
         }
@@ -96,6 +106,9 @@ impl ConstructedRequest {
 pub struct ResolvedTargetCapabilities {
     pub stream_only: bool,
     pub responses_websocket: bool,
+    pub standalone_compaction: bool,
+    pub compaction_trigger: bool,
+    pub server_side_compaction: bool,
 }
 
 #[derive(Debug, Clone, Copy)]

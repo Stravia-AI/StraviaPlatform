@@ -85,6 +85,9 @@ impl VendorExtension for OpenAiCodexChannel {
         ResolvedTargetCapabilities {
             stream_only: true,
             responses_websocket: protocol == crate::protocol::ids::OPEN_RESPONSES_2026_04_24,
+            compaction_trigger: protocol == crate::protocol::ids::OPEN_RESPONSES_2026_04_24,
+            standalone_compaction: protocol == crate::protocol::ids::OPEN_RESPONSES_2026_04_24,
+            ..Default::default()
         }
     }
     async fn pre_encode(
@@ -200,10 +203,14 @@ impl VendorExtension for OpenAiCodexChannel {
     ) -> anyhow::Result<crate::provider::vendor_ext::ConstructedRequest> {
         let mut request =
             crate::provider::common::openai_compat::construct_openai_request(ctx, purpose)?;
-        if let crate::provider::vendor_ext::RequestPurpose::Inference { base_url, path, .. } =
-            purpose
-        {
-            request.url = codex_endpoint(base_url, path);
+        match purpose {
+            crate::provider::vendor_ext::RequestPurpose::Inference { base_url, path, .. } => {
+                request.url = codex_endpoint(base_url, path)
+            }
+            crate::provider::vendor_ext::RequestPurpose::Compact { base_url, .. } => {
+                request.url = codex_endpoint(base_url, "/v1/responses/compact")
+            }
+            crate::provider::vendor_ext::RequestPurpose::Models { .. } => {}
         }
         Ok(request)
     }

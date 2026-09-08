@@ -147,6 +147,31 @@ impl PlatformOnlyContinuation {
             .await
             .map_err(|error| CompletionFailure::hook(error, context.client_output_commit))?;
         append_restored_platform_round(request, &self.canonical_response, terminal);
+        if let Some(publications) = request_context
+            .extensions
+            .get::<crate::model_turn::CompactionPublications>()
+        {
+            let states = publications
+                .lock()
+                .expect("compaction publication lock")
+                .iter()
+                .filter(|publication| {
+                    publication.model_turn_id == context.model_turn_id
+                        && matches!(
+                            publication.mode,
+                            crate::interaction_observation::CompactionMode::Inline
+                        )
+                })
+                .map(|publication| publication.state.clone())
+                .collect::<Vec<_>>();
+            if let Some(start) = crate::protocol::codec::open_responses::inline_compaction_boundary(
+                &request.items,
+                &states,
+            ) {
+                request.items.drain(..start);
+                crate::model_turn::clear_previous_response_id(request);
+            }
+        }
         run.next_round();
         phase
             .transition(Phase::HiddenRound)
@@ -560,6 +585,14 @@ pub(super) async fn complete_canonical_response(
     let mut generation_chain = context.generation_chain.clone();
     if let Some(chain) = generation_chain.as_mut() {
         run.remove_exposed_tools(chain.write.request_mut());
+        if let Some(publications) = request_context
+            .extensions
+            .get::<crate::model_turn::CompactionPublications>()
+        {
+            chain.write.record_inline_publications(
+                &publications.lock().expect("compaction publication lock"),
+            );
+        }
     }
     let reusable_upstream_id = generation_chain
         .as_ref()
@@ -629,6 +662,9 @@ fn fill_canonical_defaults(context: &CompletionContext, response: &mut AiRespons
         response.model.clone_from(&context.logical_model);
         let terminal_item_status = response_item_default_status(response);
         for (index, item) in response.items.iter_mut().enumerate() {
+            if item.is_compaction() || item.is_compaction_trigger() {
+                continue;
+            }
             let prefix = if item.thinking_ref().is_some() || item.reasoning_ref().is_some() {
                 "rs"
             } else if item.function_call_ref().is_some() {
@@ -704,7 +740,8 @@ fn record_hidden_round(context: &RequestContext, response: &AiResponse) {
 }
 
 fn retain_hidden_round_item(item: &crate::protocol::ir::AiItem) -> bool {
-    item.output_text_ref().is_some()
+    item.is_compaction()
+        || item.output_text_ref().is_some()
         || item.thinking_ref().is_some()
         || item.reasoning_ref().is_some()
 }

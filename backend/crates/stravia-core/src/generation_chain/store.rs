@@ -2,7 +2,7 @@ use super::*;
 
 #[derive(Clone)]
 pub(super) struct GenerationChainStore {
-    turn_chain: Arc<dyn TurnChainStore>,
+    pub(super) turn_chain: Arc<dyn TurnChainStore>,
     ttl: Duration,
     materializations: Arc<Mutex<GenerationMaterializationCache>>,
 }
@@ -259,16 +259,29 @@ impl GenerationChainStore {
         principal: &Principal,
         request: &mut AiRequest,
     ) -> Result<Option<DiscoveredGenerationPrefix>, String> {
+        self.discover_prefix(principal, request, false).await
+    }
+
+    pub(super) async fn discover_prefix(
+        &self,
+        principal: &Principal,
+        request: &mut AiRequest,
+        allow_complete_window: bool,
+    ) -> Result<Option<DiscoveredGenerationPrefix>, String> {
         let client_request = canonical_client_history_request(request);
         let leading_control_items = request.items.len() - client_request.items.len();
-        if client_request.items.len() < 2 {
+        let limit = client_request
+            .items
+            .len()
+            .saturating_sub(usize::from(!allow_complete_window));
+        if limit == 0 {
             return Ok(None);
         }
         let state = ClientHistoryState::from_request(&client_request, &client_request.items);
-        let mut context_fingerprints = Vec::with_capacity(client_request.items.len() - 1);
+        let mut context_fingerprints = Vec::with_capacity(limit);
         let mut context = crate::protocol::ir::canonical::history_context_hash(&[]);
         let mut semantic_units = 0usize;
-        for item in &client_request.items[..client_request.items.len() - 1] {
+        for item in &client_request.items[..limit] {
             context = crate::protocol::ir::canonical::append_history_context_hash(&context, item);
             semantic_units +=
                 crate::protocol::ir::canonical::history_unit_count(std::slice::from_ref(item));
@@ -319,7 +332,7 @@ impl GenerationChainStore {
             else {
                 continue;
             };
-            if matched_items >= client_request.items.len() {
+            if matched_items > limit {
                 continue;
             }
             let materialized = self
@@ -362,6 +375,87 @@ impl GenerationChainStore {
         Ok(None)
     }
 
+    pub(super) async fn compaction_source_from_items(
+        &self,
+        principal: &Principal,
+        request: &AiRequest,
+    ) -> Result<Option<(usize, String)>, BeginError> {
+        let request = canonical_client_history_request(request);
+        let mut seen = std::collections::HashSet::new();
+        let mut source: Option<(usize, String)> = None;
+        for (position, item) in request.items.iter().enumerate().rev() {
+            let Some(id) = item.id_ref().and_then(
+                crate::protocol::codec::open_responses::formatter::response_id_from_gateway_item_id,
+            ) else {
+                continue;
+            };
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            let chain = match self
+                .turn_chain
+                .materialize_with_expiry(principal, TurnNodeKind::Response, &TurnNodeId::new(&id))
+                .await
+            {
+                Ok(chain) => chain,
+                Err(crate::turn_chain::TurnUnavailable::Unavailable) => continue,
+                Err(crate::turn_chain::TurnUnavailable::Storage(_)) => {
+                    return Err(BeginError::CompactionStorageFailed);
+                }
+            };
+            let materialized = materialize_generation_nodes(chain.nodes, chain.expires_at)
+                .map_err(|_| BeginError::CompactionUnavailable)?;
+            let count = materialized.client_items.len();
+            // Compact instructions govern a new operation. A gateway-owned output identity
+            // plus its complete client prefix proves the source without reusing its controls.
+            if position < count
+                && count <= request.items.len()
+                && materialized.client_items[position].id_ref() == item.id_ref()
+                && items_equal(&materialized.client_items, &request.items[..count])
+            {
+                if source
+                    .as_ref()
+                    .is_some_and(|(best, other)| count == *best && id != *other)
+                {
+                    return Err(BeginError::CompactionConflict);
+                }
+                if source.as_ref().is_none_or(|(best, _)| count > *best) {
+                    source = Some((count, id));
+                }
+            }
+        }
+        Ok(source)
+    }
+
+    pub(super) async fn source_parent(
+        &self,
+        principal: &Principal,
+        parent_id: &str,
+    ) -> Result<ActiveGenerationChain, String> {
+        let nodes = self
+            .turn_chain
+            .materialize(
+                principal,
+                TurnNodeKind::Response,
+                &TurnNodeId::new(parent_id),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let root_id = nodes.first().map(|node| node.id.to_string());
+        let mut compaction_record_ids = Vec::new();
+        for node in nodes {
+            compaction_record_ids.extend(decode_response_node(node)?.1.compaction_record_ids);
+        }
+        compaction_record_ids.sort();
+        compaction_record_ids.dedup();
+        Ok(ActiveGenerationChain {
+            root_id,
+            parent_id: Some(parent_id.to_owned()),
+            compaction_record_ids,
+            ..ActiveGenerationChain::default()
+        })
+    }
+
     async fn materialize_parent_id(
         &self,
         principal: &Principal,
@@ -393,6 +487,12 @@ impl GenerationChainStore {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| not_found.to_string())?;
         let root_id = persisted.first().map(|(id, _)| id.to_string());
+        let mut compaction_record_ids = persisted
+            .iter()
+            .flat_map(|(_, node)| node.compaction_record_ids.iter().cloned())
+            .collect::<Vec<_>>();
+        compaction_record_ids.sort();
+        compaction_record_ids.dedup();
         resolve_item_references(
             &mut new_messages,
             &persisted,
@@ -423,6 +523,10 @@ impl GenerationChainStore {
             parent_effective_items: materialized.effective_items,
             parent_client_items: materialized.client_items,
             replace_effective_history: false,
+            replacement_client_items: None,
+            compaction_input_range: None,
+            fresh_inline_states: Vec::new(),
+            compaction_record_ids,
         })
     }
 
@@ -656,16 +760,44 @@ impl GenerationChainStore {
             upstream_response_id,
             mut effective_state,
         } = commit;
-        let effective_request = effective_request.unwrap_or_else(|| request_delta.clone());
+        let mut response = response;
+        let mut effective_request = effective_request.unwrap_or_else(|| request_delta.clone());
+        let fresh_states = &parent.fresh_inline_states;
+        let inline_boundary = crate::protocol::codec::open_responses::inline_compaction_boundary;
+        let client_response =
+            inline_boundary(&response.items, fresh_states).map(|_| response.clone());
+        let mut effective_inline = false;
+        // Hidden rounds also appear in the projected response. Prefer their real
+        // position in the effective request so completed platform work survives.
+        if let Some(output_start) = inline_boundary(&response.items, fresh_states) {
+            let state = std::slice::from_ref(&response.items[output_start]);
+            if let Some(input_start) = inline_boundary(&effective_request.items, state) {
+                effective_request.items.drain(..input_start);
+                response.items.drain(..=output_start);
+            } else {
+                effective_request.items.clear();
+                response.items.drain(..output_start);
+            }
+            effective_inline = true;
+        } else if let Some(input_start) = inline_boundary(&effective_request.items, fresh_states) {
+            effective_request.items.drain(..input_start);
+            effective_inline = true;
+        }
+        effective_state.context_fingerprint = history_context_fingerprint(&effective_request.items);
+        effective_state.context_messages = effective_request.items.len();
         effective_state.refresh_request_semantics(&effective_request);
         effective_state.append_output(&response);
-        if let Some(proof) = effective_request
-            .meta
-            .redaction
-            .provider_proof()
-            .map_err(|_| {
-                TurnCommitError::Storage("reversible redaction semantic proof unavailable".into())
-            })?
+        if !effective_inline
+            && let Some(proof) =
+                effective_request
+                    .meta
+                    .redaction
+                    .provider_proof()
+                    .map_err(|_| {
+                        TurnCommitError::Storage(
+                            "reversible redaction semantic proof unavailable".into(),
+                        )
+                    })?
         {
             effective_state.context_fingerprint =
                 crate::protocol::ir::canonical::hash_hex(&proof.context_hash);
@@ -673,18 +805,39 @@ impl GenerationChainStore {
             effective_state.canonical_controls_fingerprint = proof.controls_fingerprint;
         }
         let mut client_request_delta = canonical_client_history_request(&request_delta);
-        let mut client_items = parent.parent_client_items.clone();
+        let mut client_items = parent
+            .replacement_client_items
+            .clone()
+            .unwrap_or_else(|| parent.parent_client_items.clone());
         let parent_items = client_items.len();
-        client_items.extend(client_request_delta.items.clone());
-        let client_output = project_client_output(
+        if parent.replacement_client_items.is_none() {
+            client_items.extend(client_request_delta.items.clone());
+        }
+        let mut client_output = project_client_output(
             ProtocolTransform::inferred_ingress(&request_delta),
-            &response,
+            client_response.as_ref().unwrap_or(&response),
             &mut client_items,
         )?;
-        client_request_delta.items = client_items[parent_items..].to_vec();
+        let client_inline = if let Some(start) = inline_boundary(&client_output, fresh_states) {
+            client_items.clear();
+            client_output.drain(..start);
+            true
+        } else if let Some(start) = inline_boundary(&client_items, fresh_states) {
+            client_items.drain(..start);
+            true
+        } else {
+            false
+        };
+        let client_history_mutation = (client_inline || parent.replacement_client_items.is_some())
+            .then(|| EffectiveHistoryMutation::Replace {
+                items: client_items.clone(),
+            });
+        if client_history_mutation.is_none() {
+            client_request_delta.items = client_items[parent_items..].to_vec();
+        }
         client_items.extend(client_output.clone());
         let client_history = ClientHistoryState::from_request(&client_request_delta, &client_items);
-        let effective_history_mutation = if parent.replace_effective_history {
+        let effective_history_mutation = if effective_inline || parent.replace_effective_history {
             EffectiveHistoryMutation::Replace {
                 items: effective_request.items.clone(),
             }
@@ -722,6 +875,8 @@ impl GenerationChainStore {
                 system: client_request_delta.instructions,
             },
             client_output: Some(client_output),
+            client_history_mutation,
+            compaction_record_ids: parent.compaction_record_ids.clone(),
             effective_history_mutation: Some(effective_history_mutation),
             effective_system,
             effective_input: Vec::new(),

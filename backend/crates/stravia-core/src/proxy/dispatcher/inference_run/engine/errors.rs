@@ -132,6 +132,11 @@ pub(super) fn model_turn_error_outcome(error: crate::agent::ModelTurnError) -> R
         | "web_search_unsupported"
         | "input_modality_unsupported"
         | "thinking_level_unsupported"
+        | "compaction_unsupported"
+        | "compaction_target_mismatch"
+        | "invalid_compaction_threshold"
+        | "invalid_compaction_state"
+        | "compaction_conflict"
         | "protected_context_unrepresentable" => StatusCode::BAD_REQUEST,
         "protocol_lossy_rejected" | "STRAVIA_PROTOCOL_LOSSY_REJECTED" => {
             StatusCode::UNPROCESSABLE_ENTITY
