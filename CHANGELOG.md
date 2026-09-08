@@ -30,6 +30,7 @@
 
 ### Fixed
 
+- API-key-only connections now support unauthenticated services: an empty key no longer blocks model discovery or inference, and upstream requests omit default authentication. Supplied keys, required channel and structured credentials, and Stravia client authentication retain their existing behavior.
 - Standalone server client-configuration previews no longer require `HOME`, `USERPROFILE`, or client-directory environment variables, including on NixOS services. Portable paths are used directly without rewriting serialized configuration; Desktop local-path validation remains unchanged.
 - Model discovery now follows the Provider's saved proxy choice, reports invalid proxy configuration without bypassing it, and consistently applies Vendor Models authentication across protocol aliases. Native Gemini query credentials are URL-encoded; custom Models endpoints retain their declared authentication and selected URL.
 - Model Turns complete restoration and required mapping publication before their unique successful terminal event, including ephemeral Agent execution. Cancellation and deadlines interrupt pending publication without revoking committed mappings; later stream events cannot reverse completion or falsify confirmed upstream usage.

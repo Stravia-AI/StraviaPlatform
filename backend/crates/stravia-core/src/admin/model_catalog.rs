@@ -181,7 +181,9 @@ pub(super) fn preset_capabilities_source(provider: &Provider) -> CapabilitiesSou
         .unwrap_or(CapabilitiesSource::Auto)
 }
 
-fn preset_channel(provider: &Provider) -> Option<&'static crate::provider::metadata::ChannelDef> {
+pub(super) fn preset_channel(
+    provider: &Provider,
+) -> Option<&'static crate::provider::metadata::ChannelDef> {
     let preset_key = provider.preset_key.as_deref()?;
     let registry = VendorRegistry::global();
     let meta = provider

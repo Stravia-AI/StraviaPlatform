@@ -56,6 +56,36 @@ def _model_probe_endpoint(*, forward: bool = False):
             self.end_headers()
             self.wfile.write(body)
 
+        def do_POST(self) -> None:
+            request = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+            received.append({
+                "path": self.path,
+                "headers": {key.lower(): value for key, value in self.headers.items()},
+                "body": request,
+            })
+            response = {
+                "id": "chatcmpl-auth-probe", "object": "chat.completion", "created": 1,
+                "model": "probe-model",
+                "choices": [{
+                    "index": 0, "message": {"role": "assistant", "content": "local auth probe succeeded"},
+                    "finish_reason": "stop",
+                }],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7},
+            }
+            if request.get("stream"):
+                response["object"] = "chat.completion.chunk"
+                response["choices"][0]["delta"] = response["choices"][0].pop("message")
+                body = b"data: " + json.dumps(response).encode() + b"\n\ndata: [DONE]\n\n"
+                content_type = "text/event-stream"
+            else:
+                body = json.dumps(response).encode()
+                content_type = "application/json"
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -67,7 +97,10 @@ def _model_probe_endpoint(*, forward: bool = False):
         thread.join()
 
 
-def _create_probe_provider(env: dict[str, Any], name: str, endpoint: str | None, **source: Any) -> str:
+def _create_probe_provider(
+    env: dict[str, Any], name: str, endpoint: str | None, *,
+    credential: dict[str, Any] | None = None, use_proxy: bool = True, **source: Any,
+) -> str:
     status, body = http_request(
         "POST", f"{env['admin']}/api/v1/providers",
         payload={
@@ -76,13 +109,88 @@ def _create_probe_provider(env: dict[str, Any], name: str, endpoint: str | None,
                 "type": "custom", "vendor": "custom", "protocol": "openai",
                 "base_url": env["mock"], "models_source": endpoint, **source,
             },
-            "credential": {"type": "api_key", "value": "synthetic&key=part+/%?#"},
-            "use_proxy": True,
+            "credential": credential if credential is not None else {
+                "type": "api_key", "value": "synthetic&key=part+/%?#",
+            },
+            "use_proxy": use_proxy,
         },
         headers=env["auth"],
     )
     assert status == 200, body
     return body["data"]["id"]
+
+
+@pytest.mark.e2e
+@pytest.mark.admin
+def test_optional_api_key_provider_discovers_and_infers_without_upstream_auth(
+    admin_env: dict[str, Any],
+) -> None:
+    with _model_probe_endpoint() as (origin, received):
+        provider = _create_probe_provider(
+            admin_env, "optional-key-provider", f"{origin}/models",
+            credential={"type": "none"}, use_proxy=False, base_url=origin,
+        )
+        provider_url = f"{admin_env['admin']}/api/v1/providers/{provider}"
+
+        def assert_upstream_auth(request: dict[str, Any], upstream_key: str | None) -> None:
+            headers = request["headers"]
+            assert "x-api-key" not in headers, request
+            if upstream_key is None:
+                assert "authorization" not in headers, request
+            else:
+                assert headers.get("authorization") == f"Bearer {upstream_key}", request
+
+        def discover(upstream_key: str | None) -> None:
+            for method, path in (("GET", "test-models"), ("POST", "models/sync")):
+                before = len(received)
+                status, body = http_request(
+                    method, f"{provider_url}/{path}",
+                    payload={} if method == "POST" else None, headers=admin_env["auth"],
+                )
+                assert status == 200 and "error" not in body, body
+                if method == "GET":
+                    assert body["data"] == ["probe-model"], body
+                assert len(received) == before + 1, received
+                assert received[-1]["path"] == "/models", received[-1]
+                assert_upstream_auth(received[-1], upstream_key)
+            status, body = http_request("GET", f"{provider_url}/models", headers=admin_env["auth"])
+            assert status == 200, body
+            assert [model["id"] for model in body["data"]["models"]] == ["probe-model"], body
+
+        discover(None)
+        route = _create_model(
+            admin_env, provider, "optional-key-route", target_model="probe-model",
+        )
+        api_key = _create_api_key(admin_env, route, "optional-key-client")
+
+        def infer(upstream_key: str | None) -> None:
+            before = len(received)
+            status, body = http_request(
+                "POST", f"{admin_env['proxy']}/v1/chat/completions",
+                payload={
+                    "model": "optional-key-route", "stream": False,
+                    "messages": [{"role": "user", "content": "verify local upstream authentication"}],
+                },
+                headers={"authorization": f"Bearer {api_key['key']}"},
+            )
+            assert status == 200, body
+            assert body["choices"][0]["message"]["content"] == "local auth probe succeeded", body
+            assert body["choices"][0]["finish_reason"] == "stop", body
+            assert len(received) == before + 1, received
+            request = received[-1]
+            assert request["path"] == "/v1/chat/completions", request
+            assert request["body"]["model"] == "probe-model", request
+            assert_upstream_auth(request, upstream_key)
+            assert all(api_key["key"] not in value for value in request["headers"].values()), request
+
+        infer(None)
+        upstream_key = "local-upstream-auth-probe-key"
+        status, body = http_request(
+            "PUT", provider_url, payload={"api_key": upstream_key}, headers=admin_env["auth"],
+        )
+        assert status == 200, body
+        discover(upstream_key)
+        infer(upstream_key)
 
 
 @pytest.mark.e2e
@@ -294,11 +402,13 @@ def _create_model(
     provider_id: str,
     model_id: str,
     display_name: str | None = None,
+    *,
+    target_model: str = "gpt-4o-mini",
 ) -> str:
     payload: dict[str, Any] = {
         "model_id": model_id,
         "target_provider": provider_id,
-        "target_model": "gpt-4o-mini",
+        "target_model": target_model,
     }
     if display_name is not None:
         payload["display_name"] = display_name

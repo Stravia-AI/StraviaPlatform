@@ -83,12 +83,31 @@ impl AdminService {
                 });
             }
             let api_key = provider.effective_api_key();
-            if api_key.is_empty() {
-                anyhow::bail!("provider api key is empty");
+            let disable_default_auth = api_key.is_empty();
+            if disable_default_auth {
+                let requires_adapter_fields = provider
+                    .vendor
+                    .as_deref()
+                    .or(provider.preset_key.as_deref())
+                    .and_then(|vendor| VendorRegistry::global().metadata(vendor))
+                    .is_some_and(|metadata| {
+                        metadata
+                            .credential_fields
+                            .iter()
+                            .any(|field| field.key != "apiKey")
+                    });
+                let requires_channel_auth = preset_channel(provider)
+                    .is_some_and(|channel| channel.auth_mode != crate::provider::AuthMode::ApiKey);
+                if requires_adapter_fields || requires_channel_auth {
+                    anyhow::bail!("provider api key is empty");
+                }
             }
             return Ok(ResolvedProviderRuntime {
                 access_token: api_key,
-                binding: RuntimeBinding::default(),
+                binding: RuntimeBinding {
+                    disable_default_auth,
+                    ..RuntimeBinding::default()
+                },
             });
         }
 

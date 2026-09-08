@@ -26,6 +26,8 @@ status: accepted
 
 Google 自有原生 `models.list` 端点及从保存 base URL 自动选择的原生列表继续使用编码后的 API Key query；自定义代理端点不能仅因路径看似原生就改变 Models Bearer 约定。默认认证抑制同样覆盖这条 query 分支。
 
+仅使用 API Key 的普通连接允许空凭据，包括自定义端点及目录中的 OptionalApiKey 通道。运行时将空密钥解析为 `disable_default_auth`，模型发现与推理沿用同一默认认证抑制机制，不产生空 Bearer 或默认 query key。填写密钥时保留原认证行为；OAuth、Setup Token、Vertex 与包含额外凭据字段的 Adapter 仍执行原有凭据校验，不能把缺失必需凭据解释为无认证请求。该规则不改变客户端访问 Stravia 的认证要求。
+
 已知内置端点和 OAuth binding 使用其明确约定。没有额外端点语义的自定义 `models_source` 继承该 Vendor 明确声明的模型探测认证约定；不根据任意 URL 猜测，不自动轮试多种认证，不新增持久化认证配置字段。自定义端点不符合该约定时，沿用所属入口的既有查询回退或同步报错语义。
 
 ## 明确保留的职责

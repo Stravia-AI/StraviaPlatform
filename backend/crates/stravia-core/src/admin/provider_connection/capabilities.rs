@@ -210,6 +210,158 @@ mod tests {
     use axum::{Router, http::StatusCode, routing::get};
 
     #[tokio::test]
+    async fn custom_and_optional_catalog_models_allow_requests_without_authorization()
+    -> anyhow::Result<()> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let endpoint = format!("http://{address}/models");
+        let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route(
+                    "/models",
+                    get(move |headers: axum::http::HeaderMap| {
+                        let sent = sent.clone();
+                        async move {
+                            sent.send(headers).unwrap();
+                            axum::Json(serde_json::json!({
+                                "data": [{"id": "local-discovered-model"}]
+                            }))
+                        }
+                    }),
+                ),
+            )
+            .await
+        });
+        let data_dir = tempfile::tempdir()?;
+        let gateway = crate::Gateway::new(crate::GatewayConfig {
+            data_dir: data_dir.path().to_path_buf(),
+            ..crate::GatewayConfig::default()
+        })
+        .await?;
+        let admin = gateway.admin();
+        let custom = admin
+            .create_provider(CreateProvider {
+                name: Some("Unauthenticated local models".into()),
+                source: ProviderSourceInput::Custom {
+                    vendor: None,
+                    protocol: "openai-compatible".into(),
+                    base_url: format!("http://{address}"),
+                    models_source: Some(endpoint.clone()),
+                    static_models: Some("fallback-must-not-mask-http".into()),
+                },
+                credential: ProviderCredentialInput::ApiKey {
+                    value: String::new(),
+                },
+                use_proxy: false,
+            })
+            .await?;
+        let custom_result = admin.get_provider_models(&custom.id).await;
+
+        let catalog = admin.catalog_choices().await;
+        let openai = catalog
+            .providers
+            .iter()
+            .find(|provider| provider.id == "openai")
+            .expect("OpenAI Catalog Entry");
+        let channel = openai
+            .channels
+            .iter()
+            .find(|channel| {
+                channel.auth_mode == crate::provider_catalog::CatalogAuthMode::OptionalApiKey
+            })
+            .expect("OpenAI optional API key channel");
+        let catalog_provider = admin
+            .create_provider(CreateProvider {
+                name: Some("Unauthenticated catalog models".into()),
+                source: ProviderSourceInput::Catalog {
+                    provider_id: openai.id.clone(),
+                    channel_id: channel.id.clone(),
+                    fingerprint: channel.fingerprint.clone(),
+                    base_url_override: Some(format!("http://{address}")),
+                },
+                credential: ProviderCredentialInput::None,
+                use_proxy: false,
+            })
+            .await?;
+        let catalog_provider = admin.get_provider(&catalog_provider.id).await?;
+        // Catalog inventory bypasses HTTP, so exercise its persisted runtime and
+        // the same Models request constructor against the local server directly.
+        let catalog_result = async {
+            let runtime = admin.resolve_provider_runtime(&catalog_provider).await?;
+            let request = super::construct_models_request(&catalog_provider, &runtime, &endpoint)?;
+            let response = gateway
+                .http_client_for_provider(false)
+                .await?
+                .get(request.url)
+                .headers(request.headers)
+                .send()
+                .await?
+                .error_for_status()?
+                .json::<serde_json::Value>()
+                .await?;
+            anyhow::Ok(response)
+        }
+        .await;
+        server.abort();
+
+        assert_eq!(custom_result?, ["local-discovered-model"]);
+        assert_eq!(catalog_result?["data"][0]["id"], "local-discovered-model");
+        for _ in 0..2 {
+            let headers = received.try_recv()?;
+            assert!(!headers.contains_key(axum::http::header::AUTHORIZATION));
+            assert!(!headers.contains_key("api-key"));
+            assert!(!headers.contains_key("x-api-key"));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn required_auth_providers_reject_empty_credentials_without_a_session()
+    -> anyhow::Result<()> {
+        let data_dir = tempfile::tempdir()?;
+        let gateway = crate::Gateway::new(crate::GatewayConfig {
+            data_dir: data_dir.path().to_path_buf(),
+            ..crate::GatewayConfig::default()
+        })
+        .await?;
+        let admin = gateway.admin();
+        let template = admin
+            .create_provider(CreateProvider {
+                name: Some("Empty credential boundary".into()),
+                source: ProviderSourceInput::Custom {
+                    vendor: None,
+                    protocol: "openai-compatible".into(),
+                    base_url: "http://127.0.0.1:9".into(),
+                    models_source: None,
+                    static_models: None,
+                },
+                credential: ProviderCredentialInput::None,
+                use_proxy: false,
+            })
+            .await?;
+
+        for (vendor, channel, auth_mode) in [
+            ("anthropic", "claude-code", "apikey"),
+            ("openai", "codex", "oauth"),
+            ("google-vertex", "default", "apikey"),
+            ("azure", "default", "apikey"),
+        ] {
+            let mut provider = template.clone();
+            provider.vendor = Some(vendor.into());
+            provider.preset_key = Some(vendor.into());
+            provider.channel = Some(channel.into());
+            provider.auth_mode = auth_mode.into();
+            assert!(
+                admin.resolve_provider_runtime(&provider).await.is_err(),
+                "{vendor}/{channel} must reject empty credentials"
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn model_query_falls_back_after_upstream_failure_but_not_proxy_setup_failure()
     -> anyhow::Result<()> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;

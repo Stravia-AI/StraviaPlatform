@@ -73,6 +73,8 @@ OpenAI direct 与 Codex OAuth 的生成 Target 会为 Chat Completions、Open Re
 
 添加提供商时，先选择完整的提供商/通道选项。API Key 与 OAuth 通道是独立选项，创建后不能互相转换。Codex 与 Claude Code OAuth 在桌面端和通过回环地址访问的 WebUI 中会自动接收回调；远程 WebUI 则会在浏览器登录后要求粘贴完整 callback URL。等待授权期间，三种环境都支持手动粘贴完整 callback URL，即使自动监听正常运行也可使用。Grok OAuth 使用 xAI device authorization flow：WebUI 打开验证页面，在需要时显示 user code，并轮询直到授权完成，无需填写 callback URL。
 
+接入无需认证的服务时，创建仅使用 API Key 的连接（包括自定义 OpenAI 兼容端点）可以将密钥留空。模型发现和推理会省略默认认证，不发送空的 Bearer token；填写密钥后仍正常发送。OAuth、Setup Token、Vertex 及结构化 Adapter Credentials 的凭据要求保持不变。客户端访问 Stravia 仍须使用有效的 Stravia API Key。
+
 Codex Provider Model 同步使用当前上游客户端契约，因此同步后可以发现新加入版本门禁的模型。生成请求会携带 Codex 后端要求的模型与可选 service tier 路由提示。
 
 模型探测遵循 Provider 已保存的代理选择及既有全局出站代理设置；关闭该 Provider 的代理选择时，探测保持直连。已启用的代理配置无效时明确报错，不会悄悄绕过代理。模型列表端点采用 Vendor 的 Models 认证约定，可以与推理不同；自定义端点继承该约定，无需新增设置，也不会自动试探认证方式。Provider Model 同步失败时保留已保存的模型清单。
