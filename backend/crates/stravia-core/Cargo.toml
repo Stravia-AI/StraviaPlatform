@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Core library for Stravia AI Gateway — protocol conversion, proxy, admin API"
+description = "Core library for Stravia Agent infra — model access, tool execution, built-in agents, and administration"
 
 [dependencies]
 stravia-runtime-contract = { workspace = true }

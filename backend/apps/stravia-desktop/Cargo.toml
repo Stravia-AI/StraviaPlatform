@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Stravia AI Gateway — Desktop Application"
+description = "Stravia Agent infra — Desktop Application"
 
 [features]
 desktop-e2e = ["dep:tauri-plugin-wdio", "dep:tauri-plugin-wdio-webdriver"]

@@ -24,7 +24,7 @@ pub(crate) struct DesktopTray {
 impl DesktopTray {
     pub(crate) fn sync_port(&self, port: u16) -> tauri::Result<()> {
         self.tray
-            .set_tooltip(Some(format!("Stravia AI Gateway — :{port}")))?;
+            .set_tooltip(Some(format!("Stravia Agent infra — :{port}")))?;
         self.copy_url
             .set_text(format!("Copy Proxy URL (:{port})"))?;
         Ok(())
@@ -216,7 +216,7 @@ fn setup_tray(
 
     let tray = TrayIconBuilder::new()
         .icon(app.default_window_icon().unwrap().clone())
-        .tooltip(format!("Stravia AI Gateway — :{server_port}"))
+        .tooltip(format!("Stravia Agent infra — :{server_port}"))
         .menu(&menu)
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click {

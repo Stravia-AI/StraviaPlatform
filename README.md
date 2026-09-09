@@ -1,7 +1,7 @@
 <h1 align="center">Stravia</h1>
 
 <p align="center">
-  A local, self-hostable AI access and execution platform that unifies model protocols, runs platform tools and built-in agents, and centrally manages access, history, and usage.
+  Local, self-hostable Agent infra — model access, tool execution, and built-in agent runtime with shared access controls, history, and observability.
 </p>
 
 <p align="center">
@@ -12,9 +12,11 @@
 
 ## Overview
 
-Stravia connects AI clients, model providers, and platform-owned capabilities. Clients keep speaking the protocol they already support; Stravia resolves a virtual model, selects an upstream backend, and translates requests and responses when necessary.
+Stravia is **Agent infra (agent infrastructure)** for developers using AI coding clients or building agent-powered applications. It brings model access, platform-owned tool execution, and bounded built-in agent loops into one locally deployable system.
 
-Beyond routing, Stravia executes platform-owned tools and feeds their results back into subsequent model turns. Its bounded Agent Runner powers local agentic Web Search and is also used by Media Understanding. These capabilities are available through compatible model requests and MCP, with shared identity, access controls, history, usage accounting, and diagnostics.
+The protocol gateway is its model-access layer, not the whole product. Clients keep speaking the protocol they already support; Stravia resolves a virtual model, selects an upstream backend, and translates requests and responses when necessary.
+
+The execution layer runs platform-owned tools and feeds their results back into subsequent model turns. Its bounded Agent Runner powers local agentic Web Search and is also used by Media Understanding. These capabilities are available through compatible model requests and MCP. Shared identity, access controls, history, usage accounting, and diagnostics let developers manage model access and platform execution together.
 
 Agent behavior is defined and versioned by the platform implementation. Administrators configure supported capability settings and model bindings; Stravia is not a user-defined agent or visual workflow builder.
 

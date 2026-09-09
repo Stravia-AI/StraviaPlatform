@@ -1,18 +1,24 @@
-# Stravia AI Gateway — 架构设计
+# Stravia Agent infra — 架构设计
 
 ---
 
 ## 1. 产品定位与部署形态
 
-Stravia 是一个 **AI 协议网关（AI Gateway）**：在 AI 客户端工具与模型提供商之间做实时协议转换与统一调度。任意使用 OpenAI / Anthropic / Gemini SDK 的客户端无需改代码，仅修改 `base_url` 即可路由到任意 LLM Provider。既可作为**桌面应用**本地零部署运行，也可作为**独立服务端**自托管或团队共享，管理与配置保持私有可控。
+Stravia 定位为本地运行、可自托管的 **Agent infra（智能体基础设施）**，面向使用 AI 编程客户端或构建智能体应用的开发者，提供模型接入、平台工具与内置 Agent 执行，以及统一的访问控制、历史、用量统计和诊断。
+
+协议网关是模型接入层：兼容的客户端可沿用受支持的 OpenAI / Anthropic / Gemini 协议，配置 Stravia 端点、API Key 与 Model ID，由平台完成上游选路和可表示的协议转换。执行层在平台内运行工具并推进有界模型循环，通过兼容模型请求与 MCP 暴露联网搜索、多模态理解等能力。Agent Definition 由程序定义并进行版本管理；管理员配置受支持的能力设置和模型绑定，不创建或改写 Agent 行为。
+
+Stravia 可作为**桌面应用**在本地运行，也可作为**独立服务端**自托管，管理与配置由部署者控制。自托管不代表请求数据始终留在本机：模型调用和外部工具访问仍会发送至配置的上游服务。
 
 ```
 Claude Code · Codex CLI · Gemini CLI · OpenCode
      OpenAI SDK · Anthropic SDK · Gemini SDK
               Any HTTP API Client
                       ↓
-              Stravia AI Gateway
+              Stravia Agent infra
             (localhost:23471)
+       模型接入 · 工具与内置 Agent 执行
+       访问控制 · 历史 · 用量与诊断
                       ↓
     OpenAI · Anthropic · Google · DeepSeek
     MiniMax · xAI · Zhipu · Ollama · ...
@@ -22,10 +28,10 @@ Claude Code · Codex CLI · Gemini CLI · OpenCode
 
 | 形态 | 实现 | 适用场景 |
 |---|---|---|
-| Desktop | Tauri v2 桌面应用（macOS / Windows / Linux） | 个人开发者，零部署，数据不离开本机 |
+| Desktop | Tauri v2 桌面应用，当前发布 Windows / Linux 安装包 | 个人开发者，本地运行与集成管理 |
 | Server | 独立 Rust 二进制，始终启动 Proxy、Admin API 与内嵌 WebUI | 自托管、团队共享 |
 
-核心原则：`stravia-core` 不绑定 HTTP listener，只保留 Gateway 业务能力、AdminService 和 Proxy 路由处理。独立 Server 与 Desktop 复用 `stravia-server` 的 HTTP application；WebUI 通过 HTTP REST 调用管理 API，Desktop IPC 提供本地 Server 端口发现与原生管理会话凭据。
+核心原则：`stravia-core` 不绑定 HTTP listener，拥有模型接入、平台工具与内置 Agent 执行、存储和管理业务逻辑。独立 Server 与 Desktop 复用 `stravia-server` 的 HTTP application；WebUI 通过 HTTP REST 调用管理 API，Desktop IPC 提供本地 Server 端口发现与原生管理会话凭据。
 
 ---
 

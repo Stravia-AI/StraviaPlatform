@@ -1,5 +1,5 @@
 {
-  description = "Stravia AI protocol gateway";
+  description = "Stravia Agent infra";
 
   nixConfig = {
     extra-substituters = [
@@ -168,7 +168,7 @@
             '';
 
             meta = {
-              description = "Local AI protocol gateway";
+              description = "Local, self-hostable Agent infra";
               homepage = "https://github.com/Stravia-AI/StraviaPlatform";
               license = lib.licenses.agpl3Only;
               mainProgram = "stravia-server";

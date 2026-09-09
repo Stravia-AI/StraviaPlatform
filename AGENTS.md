@@ -4,7 +4,7 @@
 
 This file applies to the entire repository. Keep project-wide guidance here; put subsystem-specific guidance in a closer `AGENTS.md` only when that subtree needs different commands or conventions.
 
-Stravia is a local, self-hostable AI access and execution platform implemented as a Rust workspace. It combines a multi-provider protocol gateway with platform-owned tool execution, bounded built-in agent loops, and centralized access, history, usage, and diagnostic management. The gateway is its client-facing entry point, not the full product scope.
+Stravia is local, self-hostable Agent infra (agent infrastructure) implemented as a Rust workspace. It provides model access, platform-owned tool execution, bounded built-in agent loops, and shared access controls, history, usage accounting, and observability for agent-powered applications. The protocol gateway is its model-access layer, not the full product scope.
 
 Platform Tools run inside Stravia and can feed results into subsequent model turns rather than returning every tool call to the client. Built-in capabilities include Web Search and Media Understanding, exposed through compatible model requests and MCP. Agent Definitions are program-owned and versioned; this is not a user-defined agent or visual workflow builder.
 

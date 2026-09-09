@@ -1,4 +1,4 @@
-//! Internal Representation (IR) for the Stravia AI Gateway.
+//! Internal Representation (IR) for Stravia Agent infra.
 //!
 //! # Design principles
 //!
