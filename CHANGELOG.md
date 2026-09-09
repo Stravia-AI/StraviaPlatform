@@ -12,6 +12,7 @@
 
 ### Changed
 
+- Web Access admission, Local Fetch, and browser outbound checks now share static URL and IP rules in `stravia-web-access`. Adapter checks now also reject hosts that become non-public IPs after trailing dots are removed, matching existing core admission. DNS responsibilities, proxy snapshots, redirect checks, and address pinning remain unchanged.
 - Advanced Features save enable/disable switches immediately, without a separate save click. Media and search configuration drafts retain explicit submission and are not submitted or cleared by capability toggles. Failed immediate updates retain the saved state with local feedback.
 - Local workspace tabs and model-service detail links share one segmented visual treatment and wrap on narrow screens. Form controls use consistent radii, input actions retain 40px hit areas, and resource lists omit redundant section introductions.
 - Credential Protection uses roomier rule rows and removes the persistent saved-policy strip. Settings feedback appears only for loading, saving, or failures.

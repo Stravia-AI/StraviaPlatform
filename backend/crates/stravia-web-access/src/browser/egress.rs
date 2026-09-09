@@ -17,10 +17,7 @@ use tokio::{
 use tokio_rustls::{rustls, TlsConnector};
 use url::Url;
 
-use crate::{
-    fetch::policy::{is_public_ip, validate_url},
-    outbound::ResolvedProxy,
-};
+use crate::{address_policy::is_public_ip, fetch::policy::validate_url, outbound::ResolvedProxy};
 
 const HEAD_LIMIT: usize = 32 * 1024;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
@@ -656,6 +653,8 @@ mod tests {
         let proxy = EgressProxy::start(snapshot(None, false)).await.unwrap();
         for request in [
             "GET http://127.0.0.1/ HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+            "GET http://127.0.0.1../ HTTP/1.1\r\nHost: 127.0.0.1..\r\n\r\n",
+            "CONNECT 192.168.1.1..:443 HTTP/1.1\r\nHost: 192.168.1.1..:443\r\n\r\n",
             "CONNECT localhost:443 HTTP/1.1\r\nHost: localhost:443\r\n\r\n",
             "GET http://example.com/ HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
             "GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nContent-Length: 1\r\nTransfer-Encoding: chunked\r\n\r\n",

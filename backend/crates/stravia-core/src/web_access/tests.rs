@@ -54,7 +54,12 @@ async fn fetch_contract_rejects_local_and_reserved_network_targets() {
         "http://localhost/",
         "http://service.local/",
         "http://127.0.0.1/",
+        "http://127.0.0.1../",
         "http://192.168.1.1/",
+        "http://192.168.1.1../",
+        "http://LOCALHOST../",
+        "http://service.local../",
+        "http://home.arpa../",
         "http://198.18.0.1/",
         "http://[::ffff:127.0.0.1]/",
         "http://[::192.168.1.1]/",
@@ -109,6 +114,11 @@ async fn fetch_contract_rejects_local_and_reserved_network_targets() {
         );
     }
     for url in [
+        "https://[2001:1::1]/",
+        "https://[2001:1::2]/",
+        "https://[2001:1::3]/",
+        "https://[2001:3::1]/",
+        "https://[2001:4:112::1]/",
         "https://[2001:20::1]/",
         "https://[2001:2f:ffff::1]/",
         "https://[2001:30::1]/",
@@ -136,6 +146,35 @@ async fn fetch_contract_rejects_local_and_reserved_network_targets() {
             ..
         })
     ));
+}
+
+#[tokio::test]
+async fn fetch_contract_preserves_unicode_trimming_and_input_error_codes() {
+    let normalized = validate_fetch_request(FetchRequest {
+        urls: vec!["\u{2003}https://8.8.8.8/\u{3000}".into()],
+        max_characters: 1_000,
+    })
+    .await
+    .expect("Unicode whitespace should be trimmed before URL validation");
+    assert_eq!(normalized.urls, ["https://8.8.8.8/"]);
+
+    for url in ["http://[", "ftp://8.8.8.8/", "https://user:pass@8.8.8.8/"] {
+        let result = validate_fetch_request(FetchRequest {
+            urls: vec![url.into()],
+            max_characters: 1_000,
+        })
+        .await;
+        assert!(
+            matches!(
+                result,
+                Err(WebAccessError {
+                    code: WebAccessErrorCode::InvalidInput,
+                    ..
+                })
+            ),
+            "parse failures and static policy rejections must be invalid_input: {url}: {result:?}"
+        );
+    }
 }
 
 #[test]

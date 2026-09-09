@@ -135,6 +135,8 @@ Route Builder 使用独立页面。选择 Provider 后会自动加载其可用 P
 
 联网搜索与 Web Access 配置属于部署本地状态，不参与配置导出/导入。Search Turn 只保留 Report 元数据与引用 URL，不保存抓取的网页正文或内部 Agent transcript。
 
+Local Fetch 和浏览器出站检查会拒绝去除主机尾随点后成为非公网 IP 的 URL，例如 `http://127.0.0.1../`，与 Web Access 准入保持一致。无需配置迁移，代理选择和 DNS 职责分工不变。
+
 ### Media Understanding
 
 Media Understanding 公开一个用于静态 JPEG、PNG 与 WebP 图片的 `understand_media` 能力。若父 Route 存在支持图片的 Target，Stravia 会原样发送图片；否则，支持工具的父 Model 可调用已配置的隐藏视觉 Model，并获得包含 source ArtifactId 与可分支 `turn_id` 的强校验 Media Report。原生视觉 Route 失败后不会 fallback 到隐藏 Model。

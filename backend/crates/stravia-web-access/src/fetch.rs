@@ -208,7 +208,7 @@ async fn get_with_redirects(
     http: &impl HttpBackend,
 ) -> Result<(Url, HttpResponse), FetchError> {
     for redirect_count in 0..=MAX_REDIRECTS {
-        policy::validate_url(url.as_str())?;
+        policy::validate_parsed_url(&url)?;
         let addresses = if http.pins_origin(&url) {
             resolve_public_addresses(&url, http).await?
         } else {
@@ -228,7 +228,7 @@ async fn get_with_redirects(
         url = url
             .join(location)
             .map_err(|_| FetchError::invalid_url(location))?;
-        policy::validate_url(url.as_str())?;
+        policy::validate_parsed_url(&url)?;
     }
     unreachable!("redirect loop returns within its bound")
 }
@@ -246,7 +246,7 @@ async fn resolve_public_addresses(
     }
     if addresses
         .iter()
-        .any(|address| !policy::is_public_ip(*address))
+        .any(|address| !crate::address_policy::is_public_ip(*address))
     {
         return Err(FetchError::invalid_url(url.as_str()));
     }
@@ -457,6 +457,8 @@ mod tests {
             "http://home.arpa/",
             "http://127.0.0.1/",
             "http://192.168.1.1/",
+            "http://127.0.0.1../",
+            "http://192.168.1.1../",
             "http://[::1]/",
             "http://[2002:a00:100::1]/",
             "http://[3fff::1]/",
@@ -469,19 +471,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_a_hostname_when_any_dns_answer_is_non_public() {
-        struct MixedDnsBackend(AtomicUsize);
-        impl HttpBackend for MixedDnsBackend {
+    async fn rejects_unusable_dns_answers_before_http() {
+        struct DnsBackend(Mutex<Option<Result<Vec<IpAddr>, FetchError>>>);
+        impl HttpBackend for DnsBackend {
             fn resolve<'a>(
                 &'a self,
                 _url: &'a Url,
             ) -> BackendFuture<'a, Result<Vec<IpAddr>, FetchError>> {
-                Box::pin(async {
-                    Ok(vec![
-                        IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
-                        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
-                    ])
-                })
+                Box::pin(async move { self.0.lock().expect("stub DNS lock").take().unwrap() })
             }
 
             fn get<'a>(
@@ -489,26 +486,75 @@ mod tests {
                 _url: &'a Url,
                 _addresses: &'a [IpAddr],
             ) -> BackendFuture<'a, Result<HttpResponse, FetchError>> {
-                self.0.fetch_add(1, Ordering::Relaxed);
-                Box::pin(async { unreachable!("mixed DNS answers must stop before HTTP") })
+                Box::pin(async { unreachable!("unusable DNS answers must stop before HTTP") })
             }
         }
-        impl RenderBackend for MixedDnsBackend {
-            fn render<'a>(
-                &'a self,
-                _url: &'a Url,
-            ) -> BackendFuture<'a, Result<RenderedResponse, FetchError>> {
-                Box::pin(async { unreachable!("mixed DNS answers must stop before rendering") })
-            }
+        let renderer = StubBackend::default();
+        for (answers, code) in [
+            (
+                Ok(vec![
+                    IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
+                    IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                ]),
+                FetchErrorCode::InvalidUrl,
+            ),
+            (Ok(Vec::new()), FetchErrorCode::Unavailable),
+            (
+                Err(FetchError::unavailable("stub DNS lookup failed")),
+                FetchErrorCode::Unavailable,
+            ),
+        ] {
+            let backend = DnsBackend(Mutex::new(Some(answers)));
+            let error = fetch_with("https://example.com/article", &backend, &renderer)
+                .await
+                .unwrap_err();
+
+            assert_eq!(error.code(), code);
+            assert_eq!(renderer.renders.load(Ordering::Relaxed), 0);
         }
-        let backend = MixedDnsBackend(AtomicUsize::new(0));
+    }
+
+    #[tokio::test]
+    async fn rejects_trailing_dot_redirect_before_second_request() {
+        for location in ["http://127.0.0.1../", "http://192.168.1.1../"] {
+            let backend = StubBackend::default();
+            *backend.responses.lock().expect("stub response lock") =
+                VecDeque::from([HttpResponse {
+                    status: 302,
+                    content_type: None,
+                    location: Some(location.into()),
+                    body: Vec::new(),
+                }]);
+
+            let error = fetch_with("https://example.com/article", &backend, &backend)
+                .await
+                .unwrap_err();
+
+            assert_eq!(error.code(), FetchErrorCode::InvalidUrl, "{location}");
+            assert_eq!(backend.requests.load(Ordering::Relaxed), 1, "{location}");
+            assert_eq!(backend.renders.load(Ordering::Relaxed), 0, "{location}");
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_non_public_rendered_final_url() {
+        let backend = StubBackend::response(
+            "text/html",
+            "<html><body><main>Please enable JavaScript to continue to the requested article.</main></body></html>",
+        );
+        *backend.rendered.lock().expect("stub renderer lock") = Some(Ok(RenderedResponse {
+            final_url: "http://127.0.0.1/".into(),
+            html: "<html><body><main>Private content must not be returned.</main></body></html>"
+                .into(),
+        }));
 
         let error = fetch_with("https://example.com/article", &backend, &backend)
             .await
             .unwrap_err();
 
         assert_eq!(error.code(), FetchErrorCode::InvalidUrl);
-        assert_eq!(backend.0.load(Ordering::Relaxed), 0);
+        assert_eq!(backend.requests.load(Ordering::Relaxed), 1);
+        assert_eq!(backend.renders.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]

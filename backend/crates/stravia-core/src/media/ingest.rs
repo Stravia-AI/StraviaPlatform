@@ -298,7 +298,7 @@ async fn download_public_https(
         if addresses.is_empty()
             || addresses
                 .iter()
-                .any(|address| !crate::web_access::is_public_ip(address.ip()))
+                .any(|address| !stravia_web_access::address_policy::is_public_ip(address.ip()))
         {
             return Err(url_error());
         }
@@ -316,7 +316,7 @@ async fn download_public_https(
             response = client.get(url.clone()).send() => response.map_err(|_| download_error())?,
         };
         let connected = response.remote_addr().ok_or_else(download_error)?;
-        if !crate::web_access::is_public_ip(connected.ip())
+        if !stravia_web_access::address_policy::is_public_ip(connected.ip())
             || !addresses
                 .iter()
                 .any(|address| address.ip() == connected.ip())

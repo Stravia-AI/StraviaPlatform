@@ -1,5 +1,5 @@
-use super::ssrf::is_public_ip;
 use super::*;
+use stravia_web_access::address_policy::{allows_url, is_public_ip};
 
 pub(super) fn validate_search_request(
     mut request: SearchRequest,
@@ -126,11 +126,7 @@ pub(super) async fn validate_fetch_request(
         *value = value.trim().to_string();
         let parsed = reqwest::Url::parse(value)
             .map_err(|_| WebAccessError::invalid(format!("invalid URL: {value}")))?;
-        if !matches!(parsed.scheme(), "http" | "https")
-            || parsed.host_str().is_none()
-            || !parsed.username().is_empty()
-            || parsed.password().is_some()
-        {
+        if !allows_url(&parsed) {
             return Err(WebAccessError::invalid(format!(
                 "URL must be public HTTP(S): {value}"
             )));
@@ -140,32 +136,11 @@ pub(super) async fn validate_fetch_request(
             .expect("host checked above")
             .trim_end_matches('.')
             .to_ascii_lowercase();
-        if hostname.is_empty() {
-            return Err(WebAccessError::invalid(format!(
-                "URL must be public HTTP(S): {value}"
-            )));
-        }
-        if hostname == "localhost"
-            || hostname.ends_with(".localhost")
-            || hostname.ends_with(".local")
-            || hostname == "home.arpa"
-            || hostname.ends_with(".home.arpa")
-        {
-            return Err(WebAccessError::invalid(format!(
-                "URL must be public HTTP(S): {value}"
-            )));
-        }
-
         let ip_literal = hostname
             .strip_prefix('[')
             .and_then(|hostname| hostname.strip_suffix(']'))
             .unwrap_or(&hostname);
-        if let Ok(address) = ip_literal.parse::<std::net::IpAddr>() {
-            if !is_public_ip(address) {
-                return Err(WebAccessError::invalid(format!(
-                    "URL must be public HTTP(S): {value}"
-                )));
-            }
+        if ip_literal.parse::<std::net::IpAddr>().is_ok() {
             continue;
         }
 

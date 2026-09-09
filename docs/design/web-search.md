@@ -133,6 +133,18 @@ SQLite 与 PostgreSQL migration `0018_advanced_capabilities_web_search.sql`：
 
 ## 7. 安全与日志
 
+### Web Access 静态规则与执行检查
+
+`stravia-web-access::address_policy` 是 Web Access IP 分类与 HTTP(S) URL 静态规则的唯一所有者。`is_public_ip(IpAddr)` 分类一个地址；`allows_url(&Url)` 接受已解析 URL，只返回静态允许或拒绝，不分配、不重新解析 URL、不执行 DNS。域名静态通过不代表实际目的地址安全。
+
+core 保留输入修整、错误映射、准入与异步解析调度；adapter 保留解析错误映射、每次重定向、已取得的全部 DNS 地址检查、连接地址固定和代理 DNS 分工。fetch 经代理时仍不新增本地 origin DNS；其他原有入口的解析检查也不删除。浏览器导航、子资源和最终 URL 检查继续执行；`about:`、`blob:`、`data:` 的处理仍由 browser adapter 路径拥有，不进入共享 HTTP(S) 规则。
+
+迁移前发现 `http://127.0.0.1../`、`http://192.168.1.1../` 的实际差异：core 去除尾随点后按 IP 拒绝，adapter 原先按域名静态接受。经维护者明确授权，共享规则采用 core 的既有拒绝语义；这是 adapter 静态接受范围的一项收紧，不是完全行为等价的重构，也不构成已证明的 SSRF 绕过结论。core 的 Unicode `trim()` 与 adapter 原始输入解析差异保留。
+
+维护时先运行共享分类和现有 fetch/browser 执行测试，再运行受影响 crate 检查与仓库工作流。分类测试不能替代混合/空/失败 DNS、私网重定向、代理不解析 origin、socket 出口与真实浏览器子资源的行为验证。有限输入的迁移前后比较不是所有地址和 URL 的形式化等价证明。
+
+### Search Source 与日志
+
 - URL normalization 和 DNS 检查拒绝 localhost、私网、非 HTTP(S) 和解析到非公网地址的 source；
 - Local 网页内容是不可信数据，不得作为指令执行；
 - progress event 只包含 call ID、phase 和 ordinal；不包含 query、URL、报告、usage 或凭据；

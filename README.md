@@ -135,6 +135,8 @@ The platform Web Search switch controls explicit access for every valid API key.
 
 Web Search and Web Access configuration are deployment-local and are not included in configuration export/import. Search Turns retain report metadata and cited URLs, not fetched page bodies or internal Agent transcripts.
 
+Local Fetch and browser outbound checks reject URLs whose host becomes a non-public IP after trailing dots are removed, such as `http://127.0.0.1../`, matching Web Access admission. This requires no configuration migration and does not change proxy selection or DNS responsibilities.
+
 ### Media Understanding
 
 Media Understanding exposes one `understand_media` capability for static JPEG, PNG, and WebP images. If a parent route has an image-capable Target, Stravia sends the original image natively. Otherwise, a tool-capable parent Model can call the configured hidden visual Model and receive a validated Media Report with source Artifact IDs and a branchable `turn_id`. Stravia does not fall back from a failed native-vision route to the hidden Model.

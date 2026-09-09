@@ -206,7 +206,7 @@ pub(crate) fn normalize_public_url(value: &str) -> Result<String, WebSearchError
         || (!host.contains('.') && host.parse::<IpAddr>().is_err())
         || host
             .parse::<IpAddr>()
-            .is_ok_and(|address| !crate::web_access::is_public_ip(address))
+            .is_ok_and(|address| !stravia_web_access::address_policy::is_public_ip(address))
     {
         return Err(WebSearchError::new(
             "invalid_source_url",
@@ -240,7 +240,7 @@ async fn validate_public_dns(value: &str) -> Result<(), WebSearchError> {
     let mut resolved_any = false;
     for address in addresses {
         resolved_any = true;
-        if !crate::web_access::is_public_ip(address.ip()) {
+        if !stravia_web_access::address_policy::is_public_ip(address.ip()) {
             return Err(WebSearchError::new(
                 "invalid_source_url",
                 "Search Source hostname resolves to a non-public address",

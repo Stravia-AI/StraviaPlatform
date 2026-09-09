@@ -53,7 +53,7 @@ impl HttpClient {
         if addresses.is_empty()
             || addresses
                 .iter()
-                .any(|address| !crate::fetch::policy::is_public_ip(address.ip()))
+                .any(|address| !crate::address_policy::is_public_ip(address.ip()))
         {
             bail!("direct HTTP requires public pinned addresses");
         }

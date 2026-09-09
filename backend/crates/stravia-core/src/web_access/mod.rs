@@ -27,7 +27,6 @@ pub use types::*;
 mod engine;
 mod policy;
 mod service;
-mod ssrf;
 
 #[cfg(test)]
 use engine::{AdapterSuccess, ProviderFailure, ProviderUsage, WebAccessEngine, WebProviderAdapter};
@@ -38,7 +37,6 @@ use policy::{validate_fetch_request, validate_search_request};
 use service::WebAccessAvailability;
 pub(crate) use service::WebAccessRunSnapshotStore;
 pub use service::WebAccessService;
-pub(crate) use ssrf::is_public_ip;
 
 #[cfg(test)]
 mod tests;

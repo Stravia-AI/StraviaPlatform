@@ -1,5 +1,6 @@
 //! Local、Exa 与 Zhipu Web Provider 的 Web Access 适配器实现。
 
+pub mod address_policy;
 mod browser;
 pub mod fetch;
 pub mod http_client;
