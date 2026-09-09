@@ -708,19 +708,24 @@ async function saveModel(): Promise<void> {
                       {@const summary = selectedSummary(target)}
                       <div
                         draggable="true"
-                        role="group"
+                        role="button"
+                        tabindex="0"
+                        aria-label={m.model_editor_edit_destination_value({ index: targetIndex(target) + 1 })}
                         data-slot="target-card"
                         data-enabled="true"
-                        class="group flex min-h-20 min-w-60 flex-1 cursor-grab flex-col items-start rounded-lg bg-card p-3 text-left shadow-xs ring-1 ring-border transition-[box-shadow,transform] hover:-translate-y-0.5 hover:shadow-sm active:cursor-grabbing motion-reduce:transform-none motion-reduce:transition-none"
+                        class="group flex min-h-20 min-w-60 flex-1 cursor-grab select-none flex-col items-start rounded-lg bg-card p-3 text-left shadow-xs ring-1 ring-border transition-[box-shadow,transform] hover:-translate-y-0.5 hover:shadow-sm focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 active:cursor-grabbing motion-reduce:transform-none motion-reduce:transition-none"
+                        onclick={() => editTarget(target)}
+                        onkeydown={(event) => {
+                          if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) {
+                            event.preventDefault()
+                            editTarget(target)
+                          }
+                        }}
                         ondragstart={(event) => startTargetDrag(event, target)}
                         ondragend={() => (draggedTargetKey = '')}
                         ondragover={(event) => event.preventDefault()}
                         ondrop={(event) => dropOnLane(event, lane.priority, target.key)}>
-                        <button
-                          type="button"
-                          class="flex w-full min-w-0 items-center gap-2 rounded-md text-left outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
-                          aria-label={m.model_editor_edit_destination_value({ index: targetIndex(target) + 1 })}
-                          onclick={() => editTarget(target)}>
+                        <div class="flex w-full min-w-0 items-center gap-2 text-left">
                           <GripVerticalIcon class="size-4 shrink-0 text-muted-foreground" />
                           <span class="truncate font-medium">
                             {providers.find((provider) => provider.id === target.providerId)?.name ?? target.providerId}
@@ -729,7 +734,7 @@ async function saveModel(): Promise<void> {
                             {target.model}
                           </span>
                           <span class="size-2 shrink-0 rounded-full bg-emerald-500" aria-hidden="true"></span>
-                        </button>
+                        </div>
                         <div class="mt-auto flex flex-wrap gap-1.5 pl-6 pt-2">
                           {#if target.persisted && summary && !summary.available}
                             <Badge variant="destructive">{m.model_editor_model_no_longer_available()}</Badge>
@@ -782,16 +787,21 @@ async function saveModel(): Promise<void> {
               {@const summary = selectedSummary(target)}
               <div class="relative">
                 <div
-                  role="group"
+                  role="button"
+                  tabindex="0"
+                  aria-label={m.model_editor_edit_destination_value({ index: targetIndex(target) + 1 })}
                   draggable="true"
-                  class="group flex min-h-20 w-full cursor-grab flex-col items-start rounded-lg border bg-background p-3 pr-12 text-left shadow-xs transition-[border-color,box-shadow,transform] hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-sm focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 active:cursor-grabbing"
+                  class="group flex min-h-20 w-full cursor-grab select-none flex-col items-start rounded-lg border bg-background p-3 pr-12 text-left shadow-xs transition-[border-color,box-shadow,transform] hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-sm focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 active:cursor-grabbing"
+                  onclick={() => editTarget(target)}
+                  onkeydown={(event) => {
+                    if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) {
+                      event.preventDefault()
+                      editTarget(target)
+                    }
+                  }}
                   ondragstart={(event) => startTargetDrag(event, target)}
                   ondragend={() => (draggedTargetKey = '')}>
-                  <button
-                    type="button"
-                    class="flex w-full min-w-0 flex-col items-start rounded-md text-left outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
-                    aria-label={m.model_editor_edit_destination_value({ index: targetIndex(target) + 1 })}
-                    onclick={() => editTarget(target)}>
+                  <div class="flex w-full min-w-0 flex-col items-start text-left">
                     <span class="flex w-full min-w-0 items-center gap-2">
                       <GripVerticalIcon class="size-4 shrink-0 text-muted-foreground" />
                       <span class="truncate font-medium">
@@ -803,7 +813,7 @@ async function saveModel(): Promise<void> {
                     <span class="mt-1 w-full truncate pl-6 font-technical text-sm text-muted-foreground">
                       {target.model || m.model_editor_choose_model()}
                     </span>
-                  </button>
+                  </div>
                   <div class="mt-auto flex flex-wrap gap-1.5 pl-6 pt-2">
                     {#if target.persisted && summary && !summary.available}
                       <Badge variant="destructive">{m.model_editor_model_no_longer_available()}</Badge>

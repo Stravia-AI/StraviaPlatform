@@ -739,6 +739,13 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
   await expect(savedDestination).toContainText('gpt-available')
   await expect(page.getByRole('group', { name: 'Model specification' })).toContainText('1.05M')
 
+  await savedDestination.click({ position: { x: 4, y: 4 } })
+  await expect(page.getByRole('dialog')).toBeVisible()
+  await page.getByRole('button', { name: 'Confirm' }).click()
+  await savedDestination.getByRole('button', { name: /^Token limits:/ }).click()
+  await expect(page.getByRole('dialog')).toBeVisible()
+  await page.getByRole('button', { name: 'Confirm' }).click()
+
   await page.getByRole('button', { name: 'Add destination' }).click()
   await page.getByLabel('Destination 2 model service', { exact: true }).click()
   await page.getByRole('option', { name: 'Provider A' }).click()
@@ -749,9 +756,19 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
 
   await page
     .getByRole('button', { name: 'Edit destination 1' })
+    .getByRole('button', { name: /^Token limits:/ })
     .dragTo(page.locator('[data-slot="target-priority-connector"][data-position="empty"]'))
   await expect(page.getByLabel('Layer 1')).toBeVisible()
+  await expect(page.getByRole('dialog')).toHaveCount(0)
   await expect(page.getByLabel('Destination 1 priority')).toHaveCount(0)
+
+  await savedDestination.click({ position: { x: 4, y: 4 } })
+  await expect(page.getByRole('dialog')).toBeVisible()
+  await page.getByRole('button', { name: 'Confirm' }).click()
+  await savedDestination.focus()
+  await page.keyboard.press('Space')
+  await expect(page.getByRole('dialog')).toBeVisible()
+  await page.getByRole('button', { name: 'Confirm' }).click()
 
   await page.getByLabel('How requests are sent').click()
   await page.getByRole('option', { name: 'Latency preference' }).click()
