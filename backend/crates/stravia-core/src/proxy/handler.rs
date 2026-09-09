@@ -144,8 +144,6 @@ mod tests {
             .await
             .expect("Provider Model");
         let create_model = |model_id: &str, display_name: Option<&str>| CreateRoute {
-            compaction_enabled: false,
-            compaction_threshold: None,
             model_id: model_id.into(),
             display_name: display_name.map(ToOwned::to_owned),
             balance: Some("traffic_equalization".into()),
@@ -360,8 +358,6 @@ mod tests {
         let storage = std::sync::Arc::new(crate::storage::MemoryStorage::new(
             Vec::new(),
             vec![Route {
-                compaction_enabled: false,
-                compaction_threshold: None,
                 id: "model-id".into(),
                 model_id: "model".into(),
                 display_name: None,

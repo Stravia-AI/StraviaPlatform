@@ -62,8 +62,6 @@ impl RouteModule<'_> {
             .storage
             .routes()
             .put(PutRoute {
-                compaction_enabled: input.compaction_enabled,
-                compaction_threshold: input.compaction_threshold,
                 id: None,
                 model_id: route_id,
                 display_name,
@@ -101,10 +99,6 @@ impl RouteModule<'_> {
             .storage
             .routes()
             .put(PutRoute {
-                compaction_enabled: input
-                    .compaction_enabled
-                    .unwrap_or(current.compaction_enabled),
-                compaction_threshold: input.compaction_threshold.or(current.compaction_threshold),
                 id: Some(current.id),
                 model_id: next_route_id,
                 display_name,

@@ -85,9 +85,6 @@ impl VendorExtension for OpenAiCodexChannel {
         ResolvedTargetCapabilities {
             stream_only: true,
             responses_websocket: protocol == crate::protocol::ids::OPEN_RESPONSES_2026_04_24,
-            compaction_trigger: protocol == crate::protocol::ids::OPEN_RESPONSES_2026_04_24,
-            standalone_compaction: protocol == crate::protocol::ids::OPEN_RESPONSES_2026_04_24,
-            ..Default::default()
         }
     }
     async fn pre_encode(

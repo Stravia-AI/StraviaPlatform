@@ -227,8 +227,6 @@ async fn route_configuration_supports_three_targets_priorities_and_failure_defau
     };
     let route = admin
         .create_model(CreateRoute {
-            compaction_enabled: false,
-            compaction_threshold: None,
             model_id: "layered-route".into(),
             display_name: None,
             balance: None,
@@ -254,8 +252,6 @@ async fn route_configuration_supports_three_targets_priorities_and_failure_defau
     for valid in [-1, 100_001, i32::MIN, i32::MAX] {
         let route = admin
             .create_model(CreateRoute {
-                compaction_enabled: false,
-                compaction_threshold: None,
                 model_id: format!("signed-priority-{valid}"),
                 display_name: None,
                 balance: Some("traffic_equalization".into()),
@@ -268,8 +264,6 @@ async fn route_configuration_supports_three_targets_priorities_and_failure_defau
     }
     let invalid_strategy = admin
         .create_model(CreateRoute {
-            compaction_enabled: false,
-            compaction_threshold: None,
             model_id: "invalid-strategy".into(),
             display_name: None,
             balance: Some("weighted_random".into()),
@@ -314,8 +308,6 @@ async fn route_configuration_round_trips_disabled_targets_and_requires_one_enabl
 
     let route = admin
         .create_model(CreateRoute {
-            compaction_enabled: false,
-            compaction_threshold: None,
             model_id: "enabled-and-standby".into(),
             display_name: None,
             balance: None,
@@ -346,8 +338,6 @@ async fn route_configuration_round_trips_disabled_targets_and_requires_one_enabl
 
     let error = admin
         .create_model(CreateRoute {
-            compaction_enabled: false,
-            compaction_threshold: None,
             model_id: "all-disabled".into(),
             display_name: None,
             balance: None,
@@ -464,8 +454,6 @@ async fn route_display_name_is_optional_normalized_and_not_an_identity() -> anyh
     let (_data_dir, gateway, provider) = route_fixture().await?;
     let admin = gateway.admin();
     let create = |model_id: &str| CreateRoute {
-        compaction_enabled: false,
-        compaction_threshold: None,
         model_id: model_id.into(),
         display_name: Some("  Shared label  ".into()),
         balance: Some("priority".into()),
@@ -539,8 +527,6 @@ async fn unavailable_provider_model_cannot_be_bound_as_a_new_target() -> anyhow:
     assert!(error.to_string().contains("not available"));
     let change_error = admin
         .create_model(CreateRoute {
-            compaction_enabled: false,
-            compaction_threshold: None,
             model_id: "manual-route".into(),
             display_name: None,
             balance: None,
@@ -571,8 +557,6 @@ async fn missing_provider_model_cannot_be_added_as_a_new_target() -> anyhow::Res
 
     let error = admin
         .create_model(CreateRoute {
-            compaction_enabled: false,
-            compaction_threshold: None,
             model_id: "missing-model-route".into(),
             display_name: None,
             balance: None,
@@ -634,8 +618,6 @@ async fn route_generates_seven_rows_seeds_levels_and_resets_one_override() -> an
         .await?;
     let route = admin
         .create_model(CreateRoute {
-            compaction_enabled: false,
-            compaction_threshold: None,
             model_id: "thinking-route".into(),
             display_name: None,
             balance: None,
@@ -736,8 +718,6 @@ async fn open_responses_accepts_max_effort_map() -> anyhow::Result<()> {
 
     let route = admin
         .create_model(CreateRoute {
-            compaction_enabled: false,
-            compaction_threshold: None,
             model_id: "max-effort-route".into(),
             display_name: None,
             balance: None,
@@ -793,8 +773,6 @@ async fn create_openai_compatible_toggle_route(vendor: &str, model: &str) -> any
 
     admin
         .create_model(CreateRoute {
-            compaction_enabled: false,
-            compaction_threshold: None,
             model_id: model.into(),
             display_name: None,
             balance: None,
@@ -870,8 +848,6 @@ async fn gemini_accepts_generated_effort_maps() -> anyhow::Result<()> {
 
     let route = admin
         .create_model(CreateRoute {
-            compaction_enabled: false,
-            compaction_threshold: None,
             model_id: "gemini-thinking-route".into(),
             display_name: None,
             balance: None,
@@ -935,8 +911,6 @@ async fn supported_levels_are_the_intersection_of_all_targets() -> anyhow::Resul
 
     let route = admin
         .create_model(CreateRoute {
-            compaction_enabled: false,
-            compaction_threshold: None,
             model_id: "intersection-route".into(),
             display_name: None,
             balance: None,
@@ -1009,8 +983,6 @@ async fn regenerate_updates_derived_supported_levels() -> anyhow::Result<()> {
         .await?;
     let route = admin
         .create_model(CreateRoute {
-            compaction_enabled: false,
-            compaction_threshold: None,
             model_id: "toggle-route".into(),
             display_name: None,
             balance: None,
@@ -1062,8 +1034,6 @@ async fn refresh_regenerates_only_generated_rows() -> anyhow::Result<()> {
     let admin = gateway.admin();
     let route = admin
         .create_model(CreateRoute {
-            compaction_enabled: false,
-            compaction_threshold: None,
             model_id: "refresh-route".into(),
             display_name: None,
             balance: None,

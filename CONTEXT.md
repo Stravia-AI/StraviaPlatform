@@ -237,10 +237,10 @@ Automatic Parent Discovery 是在调用方未显式给出父节点时，为 Gene
 Native Compaction Boundary 是由 Provider 原生压缩状态证明、与已确认来源关联的不可变上下文替换点；后续执行使用压缩窗口，而不是重新继承来源的旧窗口。它不是 Generation、History Marker 或以上游 response ID 为依据的 Target Continuation。
 _避免使用_：摘要文本匹配、Thinking History Marker、可变 Session head
 
-## Native Automatic Window
+## Remote Compaction Request
 
-Native Automatic Window 是 Route 上默认关闭的原生压缩策略，由支持该能力的 Target 根据实际渲染的当前输入窗口判断是否触发；客户端显式原生控制优先。其阈值不是模型容量、累计用量预算或本地 token 估算。
-_避免使用_：上下文容量、累计 token 限额、平台本地摘要
+Remote Compaction Request 是客户端发起、由当前选中 Target 的上游执行的上下文压缩请求。能力未知时仍尝试转发，由上游裁决；协议无法承载时返回不支持，成功或错误直接返回客户端，不为完成压缩而重试或切换 Target。它不是平台主动压缩策略，没有平台配置或本地摘要。
+_避免使用_：Native Automatic Window、平台自动压缩、累计 token 限额
 
 ## Retained Tail Association
 
@@ -384,7 +384,7 @@ Cache Prefix Token Count 是 Target 在成功处理 Cache Prefix 后报告的 `p
 
 ## Target
 
-Target 是 Route 上一个已配置的上游目的地。只有已启用 Target 会被尝试；只有当前 Target 的上游失败被明确判定为可重试时，当前 Run 才会按 Route 的选择策略尝试下一个已启用 Target；Hook、Platform Tool、状态不变量错误与取消不会触发 Target 切换。
+Target 是 Route 上一个已配置的上游目的地。只有已启用 Target 会被尝试；普通生成请求只有当前 Target 的上游失败被明确判定为可重试时，当前 Run 才会按 Route 的选择策略尝试下一个已启用 Target；Remote Compaction Request、Hook、Platform Tool、状态不变量错误与取消不会触发 Target 切换。
 _避免使用_：调度泳池
 
 ## Enabled Target

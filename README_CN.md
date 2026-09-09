@@ -75,9 +75,9 @@ OpenAI direct 与 Codex OAuth 的生成 Target 会为 Chat Completions、Open Re
 
 `POST /v1/responses` 以 Open Responses 2026-04-24 作为 canonical baseline，同时接受结构安全的 rolling additive 字段和 hosted tool 声明。同协议 Target 保留这层 compatibility envelope；跨协议 Target 可以省略 advisory 字段和未被强制选择的 hosted tools，但绝不省略内容或硬约束。后台执行仍不支持。
 
-原生压缩使用兼容的 OpenAI/Codex Target：`POST /v1/responses/compact` 是独立的 HTTP unary 操作，返回包含 retained items 与 opaque state 的完整下一窗口；后续必须完整回放该窗口，不能自行裁剪或改写。Responses 同时承载原生 compaction item、Codex 内嵌触发项，以及受支持的服务端 `context_management` 控制。这些属于协议硬要求，不支持的 Target 不能静默丢弃；compact 操作不是空 Generation。
+客户端发起的远程压缩请求转发给正常路由选定的 Target。`POST /v1/responses/compact` 是独立的 HTTP unary 操作，返回包含 retained items 与 opaque state 的完整下一窗口；后续必须完整回放该窗口，不能自行裁剪或改写。Responses 同时承载原生 compaction item、内嵌触发项，以及客户端提交的 `context_management` 控制。这些属于协议硬要求：Target 协议无法承载时返回不支持，不能静默丢弃；compact 操作不是空 Generation。
 
-Route 的**原生自动压缩**默认关闭。配置正整数输入 token 阈值后，由兼容 Target 按当前实际渲染窗口触发压缩；它不是累计用量预算，也不是模型容量设置。客户端显式控制优先，包括显式空集合与 null。关闭 Route 策略不会禁止客户端主动压缩。已知模型限额与输出余量约束阈值；未知限额保持未知，上游准入错误真实返回。
+Stravia 不提供平台级压缩设置，不注入默认压缩控制，也不生成本地摘要。Target 压缩能力未知不阻止转发：由上游决定是否接受请求及客户端提交的阈值。成功或错误均返回客户端，不为完成压缩而重试或切换 Target。显式空集合与 null 仍由客户端控制。
 
 已登记的原生状态在保留期内可跨重启恢复已知来源，但不会恢复已移除的历史；Target、账号与配置 generation、模型及协议必须保持兼容。监控区分已确认生成关系、原生桥接与保留尾部推断关联；推断关联不改变推理，也不启用 Target Continuation。清理监控历史不删除有效原生状态映射；普通监控不包含 opaque payload，未报告的压缩用量保持 unknown。
 

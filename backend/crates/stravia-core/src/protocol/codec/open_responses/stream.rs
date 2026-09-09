@@ -68,6 +68,7 @@ pub struct ResponsesStreamFormatter {
     indexed_function_outputs: BTreeMap<usize, serde_json::Value>,
     pending_annotations: Vec<serde_json::Value>,
     response_profile: serde_json::Map<String, serde_json::Value>,
+    compaction_requested: bool,
 }
 
 impl Default for ResponsesStreamFormatter {
@@ -110,6 +111,7 @@ impl ResponsesStreamFormatter {
             indexed_function_outputs: BTreeMap::new(),
             pending_annotations: Vec::new(),
             response_profile: serde_json::Map::new(),
+            compaction_requested: false,
         }
     }
 
@@ -118,6 +120,8 @@ impl ResponsesStreamFormatter {
         request: &crate::protocol::ir::AiRequest,
         previous_response_id: Option<&str>,
     ) {
+        self.compaction_requested =
+            crate::compaction::NativeCompactionControls::classify(request).requested();
         if let serde_json::Value::Object(mut profile) =
             super::encoder::response_profile_from_request(request)
         {
@@ -1687,15 +1691,23 @@ impl ResponsesStreamFormatter {
                     }
                     self.usage.required_components_known = u.required_components_known;
                 }
-                AiStreamDelta::StreamError { error: _ } => {
+                AiStreamDelta::StreamError { error } => {
                     self.failed = true;
                     self.completed = true;
-                    let public_error = serde_json::json!({
-                        "type": "server_error",
-                        "code": "response_stream_failed",
-                        "message": "The response stream failed.",
-                        "param": null,
-                    });
+                    let public_error = error
+                        .raw
+                        .as_ref()
+                        .filter(|_| self.compaction_requested)
+                        .and_then(|raw| raw.pointer("/response/error").or_else(|| raw.get("error")))
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            serde_json::json!({
+                                "type": "server_error",
+                                "code": "response_stream_failed",
+                                "message": "The response stream failed.",
+                                "param": null,
+                            })
+                        });
                     events.push(SseEvent::new(
                         Some("error"),
                         serde_json::json!({

@@ -305,8 +305,6 @@ mod tests {
             .expect("text-only Provider Model");
         let model = admin
             .create_model(crate::db::models::CreateRoute {
-                compaction_enabled: false,
-                compaction_threshold: None,
                 model_id: "Visual Route".into(),
                 display_name: None,
                 balance: Some("traffic_equalization".into()),
@@ -318,8 +316,6 @@ mod tests {
             .expect("Model");
         let mixed_model = admin
             .create_model(crate::db::models::CreateRoute {
-                compaction_enabled: false,
-                compaction_threshold: None,
                 model_id: "Mixed Route".into(),
                 display_name: None,
                 balance: Some("traffic_equalization".into()),

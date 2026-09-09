@@ -1331,7 +1331,8 @@ impl ResponsesStreamParser {
                     let mut error = crate::protocol::ir::AiError::new(
                         crate::protocol::ir::AiErrorKind::StreamMidError,
                         message,
-                    );
+                    )
+                    .with_raw(serde_json::json!({ "error": error }));
                     if let Some(status) = status {
                         error = error.with_status(status);
                     }

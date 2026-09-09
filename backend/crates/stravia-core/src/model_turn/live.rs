@@ -559,6 +559,8 @@ async fn execute_inner(
         ));
     }
 
+    let native_compaction_requested = input.purpose == super::ModelTurnPurpose::Compact
+        || crate::compaction::NativeCompactionControls::classify(&input.request).requested();
     let mut last_error = None;
     while let Some(target) = attempts.next_healthy(&gateway.health_registry) {
         loop {
@@ -566,7 +568,6 @@ async fn execute_inner(
             let result =
                 match prepare_attempt(&executor, &route, &target, &input, &model_turn_id).await {
                     Ok(prepared) => {
-                        let native_compaction_requested = prepared.native_compaction_requested;
                         let attempt = begin_attempt(
                             gateway,
                             &route,
@@ -596,13 +597,7 @@ async fn execute_inner(
                                 )),
                             }
                         };
-                        if native_compaction_requested {
-                            result.map_err(|failure| {
-                                AttemptFailure::terminal(failure.error.code, failure.error.message)
-                            })
-                        } else {
-                            result
-                        }
+                        result
                     }
                     Err(failure) => Err(failure),
                 };
@@ -613,6 +608,9 @@ async fn execute_inner(
                 }
                 Err(failure) => failure,
             };
+            if native_compaction_requested {
+                return Err(failure.error);
+            }
             let Some(kind) = failure.kind.clone() else {
                 return Err(failure.error);
             };
@@ -713,7 +711,6 @@ struct PreparedAttempt {
     provider_call: ProviderCall,
     reasoning_encrypted_content_requested: bool,
     force_stream: bool,
-    native_compaction_requested: bool,
     actual_model: String,
     namespace: String,
 }
@@ -752,6 +749,26 @@ impl AttemptFailure {
             record_health,
             retry_after,
         }
+    }
+
+    fn with_upstream_body(
+        mut self,
+        passthrough: bool,
+        status: Option<u16>,
+        body: Option<serde_json::Value>,
+    ) -> Self {
+        if !passthrough {
+            return self;
+        }
+        self.error.upstream_status = status.filter(|status| *status >= 400);
+        if let Some(body) = &body {
+            let error = body.get("error").unwrap_or(body);
+            if let Some(message) = error.get("message").and_then(serde_json::Value::as_str) {
+                self.error.message = message.to_owned();
+            }
+        }
+        self.error.upstream_body = body;
+        self
     }
 
     fn terminal(code: impl Into<String>, message: impl Into<String>) -> Self {
@@ -1005,104 +1022,21 @@ async fn prepare_attempt(
         .unwrap_or_default();
     let compact = input.purpose == super::ModelTurnPurpose::Compact;
     let mut provider_request = input.request.clone();
-    let controls = crate::compaction::NativeCompactionControls::classify(
-        &provider_request,
-        !compact && route.compaction_enabled,
-    );
-    if (compact || controls.requested()) && !openai_generation_target
-        || compact
-            && (!target_capabilities.standalone_compaction
-                || input.compact_requirements.codex_controls
-                    && provider.channel.as_deref() != Some("codex"))
-        || controls.trigger && !target_capabilities.compaction_trigger
-        || (controls.automatic || controls.active_control)
-            && !target_capabilities.server_side_compaction
+    let controls = crate::compaction::NativeCompactionControls::classify(&provider_request);
+    // Capability booleans describe advertised support, not a negative guarantee.
+    // Unknown Responses targets must receive the client's native controls unchanged.
+    if (compact
+        || controls.requested()
         || provider_request
             .items
             .iter()
-            .any(crate::protocol::ir::AiItem::is_compaction)
-            && egress != OPEN_RESPONSES_2026_04_24
+            .any(crate::protocol::ir::AiItem::is_compaction))
+        && egress != OPEN_RESPONSES_2026_04_24
     {
-        return Err(AttemptFailure::ineligible(
+        return Err(AttemptFailure::terminal(
             "compaction_unsupported",
-            "Target does not support the requested native compaction contract",
+            "Target protocol cannot represent the requested native compaction contract",
         ));
-    }
-    if controls.automatic {
-        let threshold = route
-            .compaction_threshold
-            .filter(|threshold| *threshold > 0)
-            .ok_or_else(|| {
-                AttemptFailure::terminal(
-                    "invalid_compaction_threshold",
-                    "Automatic compaction requires a positive threshold",
-                )
-            })?;
-        if provider_request.ext.is_none() {
-            provider_request.ext = Some(crate::protocol::ir::ProtocolExt::OpenResponses(
-                Default::default(),
-            ));
-        }
-        if let Some(crate::protocol::ir::ProtocolExt::OpenResponses(ext)) =
-            &mut provider_request.ext
-        {
-            ext.passthrough_body.insert(
-                "context_management".into(),
-                serde_json::json!([{ "type": "compaction", "compact_threshold": threshold }]),
-            );
-        } else {
-            return Err(AttemptFailure::ineligible(
-                "compaction_unsupported",
-                "Automatic compaction requires native Responses context controls",
-            ));
-        }
-    }
-    if let Some(crate::protocol::ir::ProtocolExt::OpenResponses(ext)) = &provider_request.ext
-        && let Some(controls) = ext
-            .passthrough_body
-            .get("context_management")
-            .and_then(serde_json::Value::as_array)
-    {
-        for control in controls {
-            if let Some(threshold) = control.get("compact_threshold") {
-                let threshold = threshold
-                    .as_u64()
-                    .filter(|value| *value > 0)
-                    .ok_or_else(|| {
-                        AttemptFailure::terminal(
-                            "invalid_compaction_threshold",
-                            "Compaction threshold must be a positive integer",
-                        )
-                    })?;
-                let limit = provider_model
-                    .as_ref()
-                    .and_then(|model| model.metadata.limit.as_ref());
-                let reserve = provider_request
-                    .generation
-                    .max_tokens
-                    .map(u64::from)
-                    .or_else(|| limit.and_then(|limit| limit.output));
-                if limit
-                    .and_then(|limit| limit.input)
-                    .filter(|window| *window > 0)
-                    .is_some_and(|window| threshold >= window)
-                    || limit
-                        .and_then(|limit| limit.context)
-                        .filter(|window| *window > 0)
-                        .is_some_and(|window| {
-                            threshold >= window
-                                || reserve.is_some_and(|reserve| {
-                                    threshold.saturating_add(reserve) > window
-                                })
-                        })
-                {
-                    return Err(AttemptFailure::ineligible(
-                        "invalid_compaction_threshold",
-                        "Compaction threshold exceeds the model context window with output reserve",
-                    ));
-                }
-            }
-        }
     }
     let binding = crate::compaction::CompactionTarget {
         target_key: target_key.clone(),
@@ -1249,7 +1183,7 @@ async fn prepare_attempt(
     }
     let reasoning_encrypted_content_requested =
         requests_reasoning_encrypted_content(&outbound.body);
-    let provider_call = if websocket_enabled {
+    let mut provider_call = if websocket_enabled {
         adapter.bind_responses_websocket(ResponsesWebSocketBinding {
             client,
             outbound,
@@ -1267,6 +1201,9 @@ async fn prepare_attempt(
     } else {
         adapter.bind(client, outbound)
     };
+    if compact || controls.requested() {
+        provider_call.disable_retries();
+    }
     Ok(PreparedAttempt {
         model_turn_id: model_turn_id.to_owned(),
         route: RouteContext {
@@ -1281,7 +1218,6 @@ async fn prepare_attempt(
             && (input.request.stream.enabled
                 || websocket_enabled
                 || target_capabilities.stream_only),
-        native_compaction_requested: compact || controls.requested(),
         actual_model,
         namespace: target_namespace,
     })
@@ -1388,6 +1324,8 @@ async fn begin_attempt(
     route_policy_state: RoutePolicyState,
     attempt_context: RouteAttemptContext,
 ) -> Result<ModelTurn, AttemptFailure> {
+    let native_compaction_requested = input.purpose == super::ModelTurnPurpose::Compact
+        || crate::compaction::NativeCompactionControls::classify(&input.request).requested();
     let mut target_identity = TargetIdentity {
         actual_model: prepared.actual_model.clone(),
         provider_id: prepared.route.provider_id.clone(),
@@ -1404,14 +1342,25 @@ async fn begin_attempt(
             .call_compact()
             .await
             .map_err(|error| {
-                AttemptFailure::terminal("upstream_execution_uncertain", error.to_string())
+                if let Some(decode) =
+                    error.downcast_ref::<crate::proxy::client::UpstreamResponseDecodeError>()
+                {
+                    AttemptFailure::terminal(
+                        "upstream_error",
+                        String::from_utf8_lossy(&decode.body).into_owned(),
+                    )
+                    .with_upstream_body(true, Some(decode.status), None)
+                } else {
+                    AttemptFailure::terminal("upstream_execution_uncertain", error.to_string())
+                }
             })?;
         if status >= 400 {
             attempt.finish("failed", Some(status), Some("upstream_error".into()), None);
             return Err(AttemptFailure::terminal(
                 "upstream_error",
                 format!("upstream returned HTTP {status}"),
-            ));
+            )
+            .with_upstream_body(native_compaction_requested, Some(status), Some(raw)));
         }
         let response =
             crate::protocol::codec::open_responses::parser::parse_compaction_response(&raw)
@@ -1456,6 +1405,11 @@ async fn begin_attempt(
                         error.to_string(),
                         retry_after(&decode.headers),
                     )
+                    .with_upstream_body(
+                        native_compaction_requested,
+                        Some(decode.status),
+                        None,
+                    )
                 } else {
                     AttemptFailure::retryable("upstream_error", error.to_string())
                 }
@@ -1480,6 +1434,11 @@ async fn begin_attempt(
                 "upstream_error",
                 format!("upstream returned HTTP {}", call.status),
                 retry_after(&call.headers),
+            )
+            .with_upstream_body(
+                native_compaction_requested,
+                Some(call.status),
+                Some(call.raw),
             ));
         }
         let response = match call.canonical {
@@ -1557,7 +1516,8 @@ async fn begin_attempt(
                 "upstream_error",
                 format!("upstream returned HTTP {status}"),
                 retry_after,
-            ));
+            )
+            .with_upstream_body(native_compaction_requested, Some(status), body.ok()));
         }
         ProviderStreamResponse::Uncertain { message } => {
             return Err(AttemptFailure::terminal(
@@ -1627,8 +1587,17 @@ async fn begin_attempt(
             error.kind.clone(),
             error.status_code,
             "upstream_stream_error",
-            "upstream stream error",
+            if native_compaction_requested {
+                error.message.clone()
+            } else {
+                "upstream stream error".into()
+            },
             None,
+        )
+        .with_upstream_body(
+            native_compaction_requested,
+            error.status_code,
+            error.raw.clone(),
         ));
     }
 

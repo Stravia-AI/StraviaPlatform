@@ -87,7 +87,9 @@ const POSTGRES_SCHEMA_SQL: &str = concat!(
     "\n",
     include_str!("../../stravia-core/migrations/postgres/0037_route_native_compaction.sql"),
     "\n",
-    include_str!("../../stravia-core/migrations/postgres/0038_native_compaction.sql")
+    include_str!("../../stravia-core/migrations/postgres/0038_native_compaction.sql"),
+    "\n",
+    include_str!("../../stravia-core/migrations/postgres/0039_remove_route_compaction_policy.sql")
 );
 const POSTGRES_SCHEMA_HEADER: &str = "\
 -- Stravia AI Gateway - PostgreSQL Final Schema

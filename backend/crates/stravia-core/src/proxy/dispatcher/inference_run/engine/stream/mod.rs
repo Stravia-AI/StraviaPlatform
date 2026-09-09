@@ -243,10 +243,21 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                         });
                         if terminal_deltas_failed(&terminal) {
                             aborted = true;
-                            preflight_failure = Some(buffered_response(error_response(
-                                502,
-                                "upstream stream error",
-                            )));
+                            preflight_failure = terminal
+                                .iter()
+                                .find_map(|delta| {
+                                    if let AiStreamDelta::StreamError { error } = delta {
+                                        super::compaction_stream_error_outcome(&request, error)
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .or_else(|| {
+                                    Some(buffered_response(error_response(
+                                        502,
+                                        "upstream stream error",
+                                    )))
+                                });
                         }
                         terminal_deltas.extend(terminal);
                         let mut transformed =
@@ -966,12 +977,19 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
             let mut terminal_delivered = false;
             if aborted && !preflight_failed && !committed_failure_delivered {
                 if !cancelled && !receiver_closed && !protocol_failed {
-                    let error = [AiStreamDelta::StreamError {
+                    let native_error = crate::compaction::NativeCompactionControls::classify(&request)
+                        .requested()
+                        .then(|| terminal_deltas.iter().find(|delta| {
+                            matches!(delta, AiStreamDelta::StreamError { error } if error.raw.is_some())
+                        }))
+                        .flatten()
+                        .cloned();
+                    let error = [native_error.unwrap_or_else(|| AiStreamDelta::StreamError {
                         error: crate::protocol::ir::AiError::new(
                             crate::protocol::ir::AiErrorKind::StreamMidError,
                             "stream aborted",
                         ),
-                    }];
+                    })];
                     if delivery.send_deltas(&error).await == DeliveryProgress::Sent {
                         let _ = delivery.finish_stream("failed".into()).await;
                     }

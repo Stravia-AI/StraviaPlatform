@@ -123,6 +123,49 @@ pub(crate) fn hook_failure_response(error: impl std::fmt::Display) -> Response {
 }
 
 pub(super) fn model_turn_error_outcome(error: crate::agent::ModelTurnError) -> RoundOutcome {
+    buffered_response(model_turn_error_response(error))
+}
+
+pub(super) fn compaction_stream_error_outcome(
+    request: &crate::protocol::ir::AiRequest,
+    error: &crate::protocol::ir::AiError,
+) -> Option<RoundOutcome> {
+    if !crate::compaction::NativeCompactionControls::classify(request).requested() {
+        return None;
+    }
+    let raw = error.raw.as_ref()?;
+    let upstream = raw
+        .pointer("/response/error")
+        .or_else(|| raw.get("error"))?;
+    let mut failure =
+        crate::model_turn::ModelTurnError::new("upstream_stream_error", error.message.clone());
+    failure.upstream_status = error.status_code.filter(|status| *status >= 400);
+    failure.upstream_body = Some(serde_json::json!({ "error": upstream }));
+    Some(model_turn_error_outcome(failure))
+}
+
+pub(super) fn model_turn_error_response(error: crate::agent::ModelTurnError) -> Response {
+    if let Some(body) = error.upstream_body {
+        let status = error
+            .upstream_status
+            .and_then(|status| StatusCode::from_u16(status).ok())
+            .unwrap_or(StatusCode::BAD_GATEWAY);
+        let mut response = (status, axum::Json(body)).into_response();
+        response
+            .extensions_mut()
+            .insert(crate::model_turn::UpstreamErrorResponse);
+        return response;
+    }
+    if let Some(status) = error
+        .upstream_status
+        .and_then(|status| StatusCode::from_u16(status).ok())
+    {
+        let mut response = coded_error_response(status, &error.code, &error.message);
+        response
+            .extensions_mut()
+            .insert(crate::model_turn::UpstreamErrorResponse);
+        return response;
+    }
     let status = match error.code.as_str() {
         "cancelled" => StatusCode::from_u16(499).expect("valid cancellation status"),
         "deadline_exceeded" => StatusCode::GATEWAY_TIMEOUT,
@@ -134,7 +177,6 @@ pub(super) fn model_turn_error_outcome(error: crate::agent::ModelTurnError) -> R
         | "thinking_level_unsupported"
         | "compaction_unsupported"
         | "compaction_target_mismatch"
-        | "invalid_compaction_threshold"
         | "invalid_compaction_state"
         | "compaction_conflict"
         | "protected_context_unrepresentable" => StatusCode::BAD_REQUEST,
@@ -168,7 +210,7 @@ pub(super) fn model_turn_error_outcome(error: crate::agent::ModelTurnError) -> R
     } else {
         coded_error_response(status, &error.code, &error.message)
     };
-    buffered_response(response)
+    response
 }
 
 pub(super) fn model_turn_execute_failure(error: crate::agent::ModelTurnError) -> RoundOutcome {

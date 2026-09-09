@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use axum::{Json, Router, extract::State, routing::post};
+use axum::{Json, Router, extract::State, response::IntoResponse, routing::post};
 use futures::{SinkExt, StreamExt};
 use reqwest_websocket::Upgrade as _;
 use serde_json::{Value, json};
@@ -24,13 +24,16 @@ struct ProviderRequest {
 async fn responses(
     State(requests): State<mpsc::Sender<ProviderRequest>>,
     Json(body): Json<Value>,
-) -> impl axum::response::IntoResponse {
+) -> axum::response::Response {
     let (respond, response) = oneshot::channel();
     requests
         .send(ProviderRequest { body, respond })
         .await
         .unwrap();
     let response = response.await.expect("test supplies Provider response");
+    if response.get("error").is_some_and(Value::is_object) {
+        return (axum::http::StatusCode::SERVICE_UNAVAILABLE, Json(response)).into_response();
+    }
     let mut created = response.clone();
     created["status"] = json!("in_progress");
     created["output"] = json!([]);
@@ -54,7 +57,7 @@ async fn responses(
         "event: response.completed\ndata: {}\n\ndata: [DONE]\n\n",
         json!({"type":"response.completed","response":response})
     ));
-    ([("content-type", "text/event-stream")], frames)
+    ([("content-type", "text/event-stream")], frames).into_response()
 }
 
 fn completed(id: &str, output: Value) -> Value {
@@ -136,7 +139,7 @@ async fn registry_failure_gates_http_native_publication_and_standalone_compactio
         let provider = admin.create_provider(CreateProvider {
             name: Some("local publication fault Provider".into()),
             source: ProviderSourceInput::Custom {
-                vendor: Some("openai".into()), protocol: "open-responses".into(),
+                vendor: Some("custom".into()), protocol: "open-responses".into(),
                 base_url: format!("http://{provider_address}/v1"),
                 models_source: None, static_models: None,
             },
@@ -149,7 +152,6 @@ async fn registry_failure_gates_http_native_publication_and_standalone_compactio
         let route = admin.create_model(CreateRoute {
             model_id: "native-publication".into(), display_name: None, balance: None,
             target_provider: provider.id, target_model: "upstream-model".into(), targets: vec![],
-            compaction_enabled: true, compaction_threshold: Some(128),
         }).await.unwrap();
         let key = admin.create_api_key(CreateApiKey {
             key: None, name: "local publication client".into(), concurrency_limit: None,
@@ -165,7 +167,7 @@ async fn registry_failure_gates_http_native_publication_and_standalone_compactio
         let client = reqwest::Client::new();
         let sending = client.post(format!("http://{address}/v1/responses"))
             .bearer_auth(&key.token)
-            .json(&json!({"model":"native-publication","stream":true,"input":"publish public text before native state"}));
+            .json(&json!({"model":"native-publication","stream":true,"input":"publish public text before native state","context_management":[{"type":"compaction","compact_threshold":128}]}));
         let sending = tokio::spawn(async move { sending.send().await });
         let provider_request = received.recv().await.unwrap();
         assert_eq!(provider_request.body["stream"], true);
@@ -303,9 +305,9 @@ async fn inbound_responses_websocket_preserves_native_compaction_and_replays_cur
         .unwrap();
         let admin = gateway.admin();
         let provider = admin.create_provider(CreateProvider {
-            name: Some("local direct OpenAI".into()),
+            name: Some("local HTTP Responses provider".into()),
             source: ProviderSourceInput::Custom {
-                vendor: Some("openai".into()),
+                vendor: Some("custom".into()),
                 protocol: "open-responses".into(),
                 base_url: format!("http://{provider_address}/v1"),
                 models_source: None,
@@ -324,8 +326,6 @@ async fn inbound_responses_websocket_preserves_native_compaction_and_replays_cur
             target_provider: provider.id,
             target_model: "upstream-model".into(),
             targets: vec![],
-            compaction_enabled: true,
-            compaction_threshold: Some(128),
         }).await.unwrap();
         let key = admin.create_api_key(CreateApiKey {
             key: None,
@@ -351,7 +351,8 @@ async fn inbound_responses_websocket_preserves_native_compaction_and_replays_cur
         let removed = json!({"type":"message","role":"user","content":[{"type":"input_text","text":"history deliberately removed after compaction"}]});
         let retained = json!({"type":"message","role":"user","content":[{"type":"input_text","text":"retained current question"}]});
         socket.send(reqwest_websocket::Message::Text(json!({
-            "type":"response.create","model":"native-ws","input":[removed.clone(),retained.clone()]
+            "type":"response.create","model":"native-ws","input":[removed.clone(),retained.clone()],
+            "context_management":[{"type":"compaction","compact_threshold":128}]
         }).to_string())).await.unwrap();
         let first = received.recv().await.unwrap();
         assert_eq!(first.body["input"], json!([removed, retained.clone()]));
@@ -427,6 +428,28 @@ async fn inbound_responses_websocket_preserves_native_compaction_and_replays_cur
         let detail = admin.observation_interaction(&replay.id, ForestQuery::default()).await.unwrap().unwrap();
         assert!(detail.runs.iter().flat_map(|run| &run.events)
             .any(|event| event.kind == "native_compaction_associated"));
+        socket.send(reqwest_websocket::Message::Text(json!({
+            "type":"response.create","model":"native-ws","input":"return the upstream error",
+            "context_management":[{"type":"compaction","compact_threshold":128}]
+        }).to_string())).await.unwrap();
+        let rejected = received.recv().await.expect("client-requested compaction");
+        let upstream_error = json!({
+            "type":"provider_capacity_error","code":"compaction_unavailable",
+            "message":"Compaction capacity is exhausted.","param":"context_management",
+            "details":{"retryable":true}
+        });
+        rejected.respond.send(json!({"error":upstream_error})).unwrap();
+        loop {
+            let message = socket.next().await.expect("upstream error event").unwrap();
+            let reqwest_websocket::Message::Text(text) = message else { continue };
+            let event: Value = serde_json::from_str(&text).unwrap();
+            if event["type"] == "error" {
+                assert_eq!(event["status"], 503);
+                assert_eq!(event["error"], upstream_error);
+                break;
+            }
+            assert_ne!(event["type"], "response.completed", "{event}");
+        }
         socket.close(reqwest_websocket::CloseCode::Normal, None).await.unwrap();
         server.abort();
         provider_server.abort();

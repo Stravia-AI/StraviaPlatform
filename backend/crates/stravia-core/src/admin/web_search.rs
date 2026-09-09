@@ -578,8 +578,6 @@ mod tests {
             .expect("Provider Model");
         let model = admin
             .create_model(crate::db::models::CreateRoute {
-                compaction_enabled: false,
-                compaction_threshold: None,
                 model_id: "Search Model".into(),
                 display_name: None,
                 balance: Some("traffic_equalization".into()),

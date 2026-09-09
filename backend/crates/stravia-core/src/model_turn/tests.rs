@@ -90,15 +90,15 @@ async fn serve_incomplete_openai_stream() -> (String, Arc<AtomicUsize>) {
         let frame = format!(
             "data: {}\n\n",
             serde_json::json!({
-                "id": "chatcmpl-partial",
-                "object": "chat.completion.chunk",
-                "created": 1,
-                "model": "upstream-model",
-                "choices": [{
-                    "index": 0,
-                    "delta": {"role": "assistant", "content": "partial"},
-                    "finish_reason": null
-                }]
+                    "id": "chatcmpl-partial",
+                    "object": "chat.completion.chunk",
+                    "created": 1,
+                    "model": "upstream-model",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": "partial"},
+                        "finish_reason": null
+                    }]
             })
         );
         let response = format!(
@@ -136,7 +136,7 @@ async fn serve_zdr_then_responses_stream() -> (String, Arc<Mutex<Vec<serde_json:
                     serde_json::json!({
                         "code": "not-found",
                         "error": "Previous response cannot be used for this organization due to Zero Data Retention"
-                    })
+        })
                     .to_string(),
                 )
             } else {
@@ -291,8 +291,6 @@ async fn gateway_with_captured_text(
     add_test_provider_model(&gateway, &provider.id).await;
     let model = admin
         .create_model(CreateRoute {
-            compaction_enabled: false,
-            compaction_threshold: None,
             model_id: model_name.into(),
             display_name: None,
             balance: None,
@@ -307,8 +305,6 @@ async fn gateway_with_captured_text(
     } else {
         let other_model = admin
             .create_model(CreateRoute {
-                compaction_enabled: false,
-                compaction_threshold: None,
                 model_id: format!("{model_name}-other"),
                 display_name: None,
                 balance: None,
@@ -458,8 +454,6 @@ async fn execute_fails_over_before_canonical_output_and_returns_the_locked_targe
     }
     let model = admin
         .create_model(CreateRoute {
-            compaction_enabled: false,
-            compaction_threshold: None,
             model_id: "failover-model".into(),
             display_name: None,
             balance: Some("traffic_equalization".into()),
@@ -554,8 +548,6 @@ async fn http_continuation_not_retained_by_zdr_replays_full_request_once() {
     add_test_provider_model(&gateway, &provider.id).await;
     let model = admin
         .create_model(CreateRoute {
-            compaction_enabled: false,
-            compaction_threshold: None,
             model_id: "zdr-model".into(),
             display_name: None,
             balance: None,
@@ -652,8 +644,6 @@ async fn request_scoped_http_errors_do_not_quarantine_the_target() {
     add_test_provider_model(&gateway, &provider.id).await;
     let model = admin
         .create_model(CreateRoute {
-            compaction_enabled: false,
-            compaction_threshold: None,
             model_id: "request-error-model".into(),
             display_name: None,
             balance: None,
@@ -736,8 +726,6 @@ async fn execute_rejects_tools_when_no_target_declares_function_tool_support() {
     add_test_provider_model(&gateway, &provider.id).await;
     let model = admin
         .create_model(CreateRoute {
-            compaction_enabled: false,
-            compaction_threshold: None,
             model_id: "no-tools-model".into(),
             display_name: None,
             balance: None,
@@ -834,8 +822,6 @@ async fn execute_does_not_fail_over_after_the_first_canonical_delta() {
     }
     let model = admin
         .create_model(CreateRoute {
-            compaction_enabled: false,
-            compaction_threshold: None,
             model_id: "stream-lock-model".into(),
             display_name: None,
             balance: Some("traffic_equalization".into()),
@@ -1806,8 +1792,6 @@ async fn codex_native_compaction_uses_unary_and_replayable_responses_websocket()
             target_provider: provider.id.clone(),
             target_model: "upstream-model".into(),
             targets: Vec::new(),
-            compaction_enabled: false,
-            compaction_threshold: None,
         })
         .await
         .unwrap();

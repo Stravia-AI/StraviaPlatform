@@ -119,12 +119,6 @@ impl<'a> RouteModule<'a> {
         self.prepare_thinking_maps(&[], &mut targets).await?;
         self.ensure_thinking_controls_representable(&targets)
             .await?;
-        self.ensure_compaction_policy(
-            input.compaction_enabled,
-            input.compaction_threshold,
-            &targets,
-        )
-        .await?;
         input.targets = targets;
         self.create_record(input).await
     }
@@ -142,14 +136,6 @@ impl<'a> RouteModule<'a> {
             .await?;
         self.ensure_thinking_controls_representable(&targets)
             .await?;
-        self.ensure_compaction_policy(
-            input
-                .compaction_enabled
-                .unwrap_or(current.compaction_enabled),
-            input.compaction_threshold.or(current.compaction_threshold),
-            &targets,
-        )
-        .await?;
         input.targets = Some(
             targets
                 .iter()
@@ -167,96 +153,6 @@ impl<'a> RouteModule<'a> {
                 .collect(),
         );
         self.change_record(route_id, input).await
-    }
-
-    async fn ensure_compaction_policy(
-        &self,
-        enabled: bool,
-        threshold: Option<i64>,
-        targets: &[CreateTarget],
-    ) -> anyhow::Result<()> {
-        if threshold.is_some_and(|value| value <= 0) || (enabled && threshold.is_none()) {
-            return Err(coded_error(
-                "COMPACTION_THRESHOLD_INVALID",
-                "Native compaction requires a positive input token threshold",
-                serde_json::json!({}),
-            ));
-        }
-        if !enabled {
-            return Ok(());
-        }
-        let threshold = threshold.expect("enabled policy threshold validated") as u64;
-        let mut supported = false;
-        for target in targets.iter().filter(|target| target.enabled) {
-            let provider = self.admin.get_provider(target.provider_id.trim()).await?;
-            if provider.vendor.as_deref() != Some("openai")
-                || provider
-                    .preset_key
-                    .as_deref()
-                    .is_some_and(|preset| !preset.is_empty() && preset != "openai")
-            {
-                continue;
-            }
-            let protocol = crate::protocol::ids::OPEN_RESPONSES_2026_04_24;
-            let capabilities = crate::provider::VendorRegistry::global()
-                .resolve(&provider, protocol)
-                .map(|vendor| vendor.target_capabilities(protocol))
-                .unwrap_or_default();
-            if !provider.is_enabled || !capabilities.server_side_compaction {
-                continue;
-            }
-            supported = true;
-            let model = self
-                .admin
-                .gw
-                .storage
-                .provider_models()
-                .get(target.provider_id.trim(), target.model.trim())
-                .await?;
-            let limits = model
-                .and_then(|model| model.metadata.limit)
-                .unwrap_or_default();
-            if limits
-                .input
-                .filter(|value| *value > 0)
-                .is_some_and(|input| threshold >= input)
-            {
-                return Err(coded_error(
-                    "COMPACTION_THRESHOLD_EXCEEDS_WINDOW",
-                    "Compaction threshold must fit the model input window",
-                    serde_json::json!({
-                        "provider_id": target.provider_id,
-                        "model_id": target.model,
-                        "input_window": limits.input,
-                    }),
-                ));
-            }
-            if let Some(window) = limits.context.filter(|value| *value > 0) {
-                let reserve = limits.output.filter(|value| *value > 0);
-                let fits = threshold < window
-                    && reserve.is_none_or(|reserve| threshold <= window.saturating_sub(reserve));
-                if !fits {
-                    return Err(coded_error(
-                        "COMPACTION_THRESHOLD_EXCEEDS_WINDOW",
-                        "Compaction threshold must fit the model context window with its output reserve",
-                        serde_json::json!({
-                            "provider_id": target.provider_id,
-                            "model_id": target.model,
-                            "context_window": window,
-                            "output_reserve": reserve,
-                        }),
-                    ));
-                }
-            }
-        }
-        if !supported {
-            return Err(coded_error(
-                "COMPACTION_TARGET_UNSUPPORTED",
-                "Automatic native compaction requires an enabled Target with server-side compaction support",
-                serde_json::json!({}),
-            ));
-        }
-        Ok(())
     }
 
     async fn ensure_new_targets_available(
@@ -520,8 +416,6 @@ impl<'a> RouteModule<'a> {
         let Some(existing) = existing else {
             return self
                 .create(CreateRoute {
-                    compaction_enabled: false,
-                    compaction_threshold: None,
                     model_id: route_id,
                     display_name: provider_model.metadata.name,
                     balance: Some("traffic_equalization".into()),

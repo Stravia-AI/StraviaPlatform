@@ -433,15 +433,7 @@ pub(super) async fn orchestrate(
         == Some(crate::model_turn::ModelTurnPurpose::Compact);
     let generation_chain_write =
         if !compact && matches!(request_kind, crate::hook::RequestKind::Generation) {
-            let automatic_enabled = {
-                let cache = gw.model_cache.read().await;
-                cache
-                    .match_model(&request.model)
-                    .or_else(|| cache.models.iter().find(|model| model.id == request.model))
-                    .is_some_and(|route| route.compaction_enabled)
-            };
-            let controls =
-                crate::compaction::NativeCompactionControls::classify(&request, automatic_enabled);
+            let controls = crate::compaction::NativeCompactionControls::classify(&request);
             let begin = if controls.requested() {
                 gw.generation_chains
                     .begin_native_compaction(principal.clone(), request)
@@ -750,16 +742,12 @@ pub(super) async fn orchestrate(
             .with_observer(observer.clone())
             .with_extra_headers(forwarded_client_headers(&headers));
         turn_input.purpose = crate::model_turn::ModelTurnPurpose::Compact;
-        turn_input.compact_requirements = ctx
-            .extensions
-            .get::<crate::model_turn::CompactRequestRequirements>()
-            .unwrap_or_default();
         turn_input.compaction_records = compaction_records.clone();
         turn_input.compaction_source_generation_id = compaction_source_generation_id;
         let mut turn = match executor.execute(turn_input).await {
             Ok(turn) => turn,
             Err(error) => {
-                return coded_error_response(StatusCode::BAD_REQUEST, &error.code, &error.message);
+                return model_turn_error_response(error);
             }
         };
         let response = match turn.output.next().await {
@@ -767,7 +755,7 @@ pub(super) async fn orchestrate(
                 axum::Json(response.wire).into_response()
             }
             Some(Err(error)) => {
-                return coded_error_response(StatusCode::BAD_GATEWAY, &error.code, &error.message);
+                return model_turn_error_response(error);
             }
             _ => {
                 return coded_error_response(
@@ -1154,7 +1142,9 @@ async fn acquire_turn(
         Ok(turn) => turn,
         Err(error)
             if error.code == "tools_unsupported"
-                && !crate::web_search::native_web_search_requested(&effective_request) =>
+                && !crate::web_search::native_web_search_requested(&effective_request)
+                && !crate::compaction::NativeCompactionControls::classify(&effective_request)
+                    .requested() =>
         {
             let original_tools = effective_request.tools.clone();
             inference_run.remove_exposed_tools(&mut effective_request);
@@ -1265,6 +1255,11 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
         while let Some(event) = output.next().await {
             match event {
                 Ok(CanonicalEvent::Delta(delta)) => {
+                    if let crate::protocol::ir::AiStreamDelta::StreamError { error } = &delta
+                        && let Some(outcome) = compaction_stream_error_outcome(request, error)
+                    {
+                        return outcome;
+                    }
                     let (terminal, deltas) = stream::partition_terminal_deltas(vec![delta]);
                     terminal_deltas.extend(terminal);
                     let transformed =

@@ -109,7 +109,7 @@ tasks:
     desc: Run the proxy protocol matrix E2E tests.
     deps: [build:server:debug, build:devtools:debug]
     cmds:
-      - uv run --locked --group test python -m pytest tests/e2e/proxy -q -m proxy
+      - uv run --locked --default-index https://pypi.org/simple --group test python -m pytest tests/e2e/proxy -q -m proxy
 
   test:browser:
     desc: Run the real headless Chrome Web Access regression tests.
@@ -124,13 +124,13 @@ tasks:
     env:
       STRAVIA_BINARY: '{{.ROOT_DIR}}/target/release/stravia-server{{if eq OS "windows"}}.exe{{end}}'
     cmds:
-      - uv run --locked --group test python -m pytest tests/e2e/admin -q -m admin
+      - uv run --locked --default-index https://pypi.org/simple --group test python -m pytest tests/e2e/admin -q -m admin
 
   test:e2e:storage:sqlite:
     desc: Run the SQLite storage E2E tests.
     deps: [build:server:debug]
     cmds:
-      - uv run --locked --group test python -m pytest tests/e2e/storage -q -m storage -k sqlite
+      - uv run --locked --default-index https://pypi.org/simple --group test python -m pytest tests/e2e/storage -q -m storage -k sqlite
 
   test:e2e:storage:postgres:
     desc: Run the PostgreSQL storage E2E tests.
@@ -138,7 +138,7 @@ tasks:
       vars: [DB_URL]
     deps: [build:server:debug]
     cmds:
-      - uv run --locked --group test python -m pytest tests/e2e/storage -q -m storage -k postgres
+      - uv run --locked --default-index https://pypi.org/simple --group test python -m pytest tests/e2e/storage -q -m storage -k postgres
 
   test:e2e:web:
     desc: Run Chromium WebUI E2E tests.

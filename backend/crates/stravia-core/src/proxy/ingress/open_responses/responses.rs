@@ -134,19 +134,6 @@ pub async fn compact(
     ctx.ingress_protocol = OPEN_RESPONSES_2026_04_24;
     ctx.extensions
         .insert(crate::model_turn::ModelTurnPurpose::Compact);
-    ctx.extensions
-        .insert(crate::model_turn::CompactRequestRequirements {
-            codex_controls: [
-                "tools",
-                "parallel_tool_calls",
-                "reasoning",
-                "service_tier",
-                "text",
-                "access_programs",
-            ]
-            .iter()
-            .any(|field| body.get(*field).is_some()),
-        });
     let observer = observation::begin(
         &gw,
         &ctx,
@@ -163,7 +150,14 @@ pub async fn compact(
     let pair = ProtocolTransform::global()
         .bind(OPEN_RESPONSES_2026_04_24, OPEN_RESPONSES_2026_04_24)
         .expect("registered Responses adapter");
-    let request = match pair.decode_request(body) {
+    let explicit_fields = body
+        .as_object()
+        .expect("validated compact object")
+        .keys()
+        .cloned()
+        .map(Value::String)
+        .collect();
+    let mut request = match pair.decode_request(body) {
         Ok(request) => request,
         Err(error) => {
             return observation::reject(
@@ -179,6 +173,10 @@ pub async fn compact(
             );
         }
     };
+    request.meta.vendor.ingress.insert(
+        "__stravia_compact_fields".into(),
+        Value::Array(explicit_fields),
+    );
     normalize_error_response(
         dispatch_pipeline(
             gw,
@@ -413,7 +411,12 @@ pub(crate) fn protocol_error(
 
 pub(super) async fn normalize_error_response(response: Response) -> Response {
     let status = response.status();
-    if status.is_success() {
+    if status.is_success()
+        || response
+            .extensions()
+            .get::<crate::model_turn::UpstreamErrorResponse>()
+            .is_some()
+    {
         return response;
     }
     let (parts, body) = response.into_parts();
@@ -447,7 +450,6 @@ pub(super) async fn normalize_error_response(response: Response) -> Response {
             "compaction_unavailable" => Some("compaction_unavailable"),
             "compaction_storage_failed" => Some("compaction_storage_failed"),
             "invalid_compaction_state" => Some("invalid_compaction_state"),
-            "invalid_compaction_threshold" => Some("invalid_compaction_threshold"),
             "invalid_compaction_response" => Some("invalid_compaction_response"),
             _ => None,
         });

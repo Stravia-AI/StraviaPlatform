@@ -52,8 +52,6 @@ describe('Connect clients', () => {
       target_provider: 'provider-a',
       target_model: 'upstream-a',
       is_enabled: true,
-      compaction_enabled: false,
-      compaction_threshold: null,
       created_at: '2026-08-05T00:00:00Z',
       supported_thinking_levels: ['off', 'low', 'high'],
       context_window: 128_000,

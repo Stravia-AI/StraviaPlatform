@@ -669,6 +669,10 @@ async fn forward_response(
             Some(delivery.lock().expect("delivery lock").observer());
     }
     let status = response.status();
+    let upstream_error = response
+        .extensions()
+        .get::<crate::model_turn::UpstreamErrorResponse>()
+        .is_some();
     let mut stream = response.into_body().into_data_stream();
     let mut buffer = String::new();
     while let Some(chunk) = stream.next().await {
@@ -732,24 +736,32 @@ async fn forward_response(
             }
         }
     } else {
-        let message = serde_json::from_str::<Value>(&buffer)
-            .ok()
+        let decoded = serde_json::from_str::<Value>(&buffer).ok();
+        let message = decoded
+            .as_ref()
             .and_then(|body| {
                 body.pointer("/error/message")
                     .and_then(Value::as_str)
                     .map(str::to_owned)
             })
             .unwrap_or_else(|| format!("Request failed with HTTP status {status}."));
-        let code = serde_json::from_str::<Value>(&buffer)
-            .ok()
+        let code = decoded
+            .as_ref()
             .and_then(|body| {
                 body.pointer("/error/code")
                     .and_then(Value::as_str)
                     .map(str::to_owned)
             })
             .unwrap_or_else(|| "invalid_request".into());
-        let error_text = error_body(status.as_u16(), &code, &message).to_string();
-        if send_error(outgoing, status.as_u16(), &code, &message).await {
+        let event = if upstream_error
+            && let Some(error) = decoded.as_ref().and_then(|body| body.get("error"))
+        {
+            serde_json::json!({"type": "error", "status": status.as_u16(), "error": error})
+        } else {
+            error_body(status.as_u16(), &code, &message)
+        };
+        let error_text = event.to_string();
+        if send_error_text(outgoing, error_text.clone()).await {
             if let Some(observer) = rejection_observer.as_ref() {
                 observer.record_debug(|| {
                     ws_wire(
@@ -1003,10 +1015,14 @@ async fn send_error(
     message: &str,
 ) -> bool {
     let body = error_body(status, code, message);
+    send_error_text(outgoing, body.to_string()).await
+}
+
+async fn send_error_text(outgoing: &mpsc::Sender<OutgoingMessage>, text: String) -> bool {
     let (delivered, delivered_rx) = tokio::sync::oneshot::channel();
     outgoing
         .send(OutgoingMessage {
-            message: Message::Text(body.to_string().into()),
+            message: Message::Text(text.into()),
             delivered: Some(delivered),
         })
         .await

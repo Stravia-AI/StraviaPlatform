@@ -278,15 +278,18 @@ pub trait Vendor: Send + Sync + 'static {
         ctx: &ProviderCtx<'_>,
     ) -> Result<OutboundRequest, GatewayError>;
 
-    /// Build the independently verified standalone native compact request.
+    /// Build a standalone compact request using the configured vendor transport.
     async fn build_compact_request(
         &self,
-        _req: &mut AiRequest,
-        _ctx: &ProviderCtx<'_>,
+        req: &mut AiRequest,
+        ctx: &ProviderCtx<'_>,
     ) -> Result<OutboundRequest, GatewayError> {
-        Err(GatewayError::internal(anyhow::anyhow!(
-            "Vendor does not support standalone compaction"
-        )))
+        req.meta
+            .vendor
+            .ingress
+            .entry("__stravia_compact_fields".into())
+            .or_insert_with(|| Value::Array(Vec::new()));
+        self.build_request(req, ctx).await
     }
 
     /// Parse a non-streaming upstream response.

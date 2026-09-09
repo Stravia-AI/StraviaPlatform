@@ -293,8 +293,6 @@ def build_harness(work_dir: Path) -> None:
                 target_provider: provider.id.clone(),
                 target_model: "gpt-4o-mini".to_string(),
                 targets: vec![],
-                compaction_enabled: false,
-                compaction_threshold: None,
             }).await?;
 
             let api_key = admin.create_api_key(CreateApiKey {
@@ -329,8 +327,6 @@ def build_harness(work_dir: Path) -> None:
                 display_name: updated.display_name.clone(),
                 selection_strategy: "latency_preference".to_string(),
                 is_enabled: false,
-                compaction_enabled: false,
-                compaction_threshold: None,
                 targets: vec![CreateTarget {
                     provider_id: "missing-provider".to_string(),
                     model: "missing-model".to_string(),

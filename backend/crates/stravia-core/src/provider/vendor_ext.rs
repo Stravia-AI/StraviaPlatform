@@ -106,9 +106,6 @@ impl ConstructedRequest {
 pub struct ResolvedTargetCapabilities {
     pub stream_only: bool,
     pub responses_websocket: bool,
-    pub standalone_compaction: bool,
-    pub compaction_trigger: bool,
-    pub server_side_compaction: bool,
 }
 
 #[derive(Debug, Clone, Copy)]

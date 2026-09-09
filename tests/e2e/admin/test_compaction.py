@@ -48,6 +48,14 @@ def compaction_provider():
         def log_message(self, *_args):
             pass
 
+        def do_GET(self):
+            if self.path != "/release":
+                self.send_error(404)
+                return
+            release_streams.set()
+            self.send_response(204)
+            self.end_headers()
+
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers["content-length"])))
             with lock:
@@ -98,6 +106,15 @@ def compaction_provider():
                     status = 200
             else:
                 result, status = {"error": {"code": "unsupported_path"}}, 404
+            if body.get("instructions") == "reject-compaction":
+                result = {"error": {
+                    "code": "upstream_compaction_unavailable",
+                    "type": "provider_capacity_error",
+                    "message": "Compaction capacity is exhausted.",
+                    "param": "context_management",
+                    "details": {"retryable": True},
+                }}
+                status = 503
             if status == 200 and result.get("object") == "response" and (trigger or automatic):
                 result["output"] = compact_window + result["output"]
             streaming = body.get("stream") and status == 200 and result.get("object") == "response"
@@ -115,6 +132,13 @@ def compaction_provider():
                         ])
                     events.append({"type": "response.output_item.done", "output_index": index, "item": item})
                 events.append({"type": "response.completed", "response": result})
+                if body.get("instructions") in ("reject-stream-first", "reject-stream-after-text"):
+                    failure = {"type": "error", "error": {
+                        "code": "native_window_rejected", "type": "invalid_request_error",
+                        "message": "The upstream rejected the compacted window.",
+                        "param": "context_management", "details": {"window": "expired"},
+                    }}
+                    events = [failure] if body["instructions"] == "reject-stream-first" else events[:-1] + [failure]
                 if body.get("instructions") in ("abort-after-state", "pause-after-state"):
                     boundary = next(i for i, event in enumerate(events) if event["type"] == "response.output_item.done" and event["item"]["type"] == "compaction")
                     events = events[:boundary + 1]
@@ -123,11 +147,19 @@ def compaction_provider():
                 data = "".join(f"event: {event['type']}\ndata: {json.dumps(event)}\n\n" for event in events).encode()
             else:
                 data = json.dumps(result).encode()
+            if body.get("instructions") == "invalid-success":
+                data = b"upstream returned invalid JSON"
             self.send_response(status)
             self.send_header("content-type", "text/event-stream" if streaming else "application/json")
             paused = bool(streaming) and body.get("instructions") == "pause-after-state"
             self.send_header("content-length", str(len(data) + int(paused)))
             self.end_headers()
+            if streaming and body.get("instructions") == "reject-stream-after-text":
+                boundary = data.index(b"event: error\n")
+                self.wfile.write(data[:boundary])
+                self.wfile.flush()
+                release_streams.wait()
+                data = data[boundary:]
             self.wfile.write(data)
             self.wfile.flush()
             if paused:
@@ -145,9 +177,9 @@ def compaction_provider():
         thread.join()
 
 
-def _native_route(env: dict[str, Any], base_url: str, name: str) -> tuple[str, str]:
+def _native_route(env: dict[str, Any], base_url: str, name: str, *, vendor: str = "custom") -> tuple[str, str]:
     status, body = http_request("POST", f"{env['admin']}/api/v1/providers", payload={
-        "name": name, "source": {"type": "custom", "vendor": "openai", "protocol": "open-responses", "base_url": base_url},
+        "name": name, "source": {"type": "custom", "vendor": vendor, "protocol": "open-responses", "base_url": base_url},
         "credential": {"type": "api_key", "value": "local-test-credential"},
     }, headers=env["auth"])
     assert status == 200, body
@@ -338,28 +370,170 @@ def test_inline_sse_publishes_immediately_replayable_state(admin_env, compaction
 
 @pytest.mark.e2e
 @pytest.mark.admin
-def test_route_native_policy_has_one_owner_and_explicit_empty_controls_override(admin_env, compaction_provider):
+def test_client_compaction_threshold_is_decided_by_upstream(admin_env, compaction_provider):
+    model = "client-compaction-threshold"
+    _route, key = _native_route(admin_env, compaction_provider[0], model)
+    result = _success(
+        admin_env, key, model, [{"role": "user", "content": "upstream owns its window"}],
+        context_management=[{"type": "compaction", "compact_threshold": 100001}],
+    )
+    assert any(item["type"] == "compaction" for item in result["output"])
+
+
+def _fallback_target(env, model, fallback_model):
+    targets = []
+    for name, priority in [(model, 10), (fallback_model, 0)]:
+        status, body = http_request("GET", f"{env['admin']}/api/v1/models/{name}", headers=env["auth"])
+        assert status == 200, body
+        target = body["data"]["targets"][0]
+        targets.append({
+            "provider_id": target["provider_id"], "model": target["model"],
+            "priority": priority, "enabled": True,
+            "target_retry_budget": 1, "target_cooldown_ms": 0,
+        })
+    status, body = http_request("PUT", f"{env['admin']}/api/v1/models/{model}",
+                               payload={"targets": targets}, headers=env["auth"])
+    assert status == 200, body
+
+
+@pytest.mark.e2e
+@pytest.mark.admin
+@pytest.mark.parametrize("mode", ["standalone", "controls", "trigger"])
+def test_unknown_compaction_capability_is_forwarded(admin_env, compaction_provider, mode):
+    model = f"unknown-compaction-{mode}"
+    _route, key = _native_route(admin_env, compaction_provider[0], model, vendor="custom")
+    items = [{"role": "user", "content": "let the upstream decide"}]
+    extra = {}
+    if mode == "standalone":
+        extra = {"compact": True, "reasoning": {"effort": "low"}}
+    elif mode == "controls":
+        extra = {"context_management": [{"type": "compaction", "compact_threshold": 2000}]}
+    else:
+        items.append({"type": "compaction_trigger"})
+    result = _success(admin_env, key, model, items, **extra)
+    assert any(item["type"] == "compaction" for item in result["output"])
+    if mode == "standalone":
+        outbound = compaction_provider[2][0]
+        assert outbound["path"].endswith("/responses/compact")
+        assert outbound["body"]["reasoning"]["effort"] == "low"
+        assert "stream" not in outbound["body"]
+
+
+@pytest.mark.e2e
+@pytest.mark.admin
+@pytest.mark.parametrize("mode", ["standalone", "controls", "trigger"])
+def test_compaction_upstream_error_is_returned_without_retry_or_failover(admin_env, compaction_provider, mode):
+    model = f"compaction-error-{mode}"
+    _route, key = _native_route(admin_env, compaction_provider[0], model)
+    _native_route(admin_env, compaction_provider[0], f"{model}-fallback")
+    _fallback_target(admin_env, model, f"{model}-fallback")
+    items = [{"role": "user", "content": "do not retry this operation"}]
+    extra = {"instructions": "reject-compaction"}
+    if mode == "standalone":
+        extra["compact"] = True
+    elif mode == "controls":
+        extra["context_management"] = [{"type": "compaction", "compact_threshold": 2000}]
+    else:
+        items.append({"type": "compaction_trigger"})
+    status, result = _request(admin_env, key, model, items, **extra)
+    assert status == 503, result
+    assert result == {"error": {
+        "code": "upstream_compaction_unavailable", "type": "provider_capacity_error",
+        "message": "Compaction capacity is exhausted.", "param": "context_management",
+        "details": {"retryable": True},
+    }}
+    assert len(compaction_provider[2]) == 1, "neither the current nor fallback Target may retry compaction"
+
+
+@pytest.mark.e2e
+@pytest.mark.admin
+def test_unrepresentable_compaction_does_not_select_a_capable_fallback(admin_env, compaction_provider):
+    from tests.e2e.admin.test_observations import _create_route
+    model = "compaction-unrepresentable-first"
+    _route, key = _create_route(admin_env, model)
+    _native_route(admin_env, compaction_provider[0], f"{model}-fallback")
+    _fallback_target(admin_env, model, f"{model}-fallback")
+    status, result = _request(admin_env, key, model, [{"role": "user", "content": "stay on selected Target"}], compact=True)
+    assert status == 400, result
+    assert result["error"]["code"] == "compaction_unsupported"
+    assert compaction_provider[2] == []
+
+
+@pytest.mark.e2e
+@pytest.mark.admin
+@pytest.mark.parametrize("phase", ["first", "after-text"])
+def test_inline_compaction_stream_preserves_upstream_error(admin_env, compaction_provider, phase):
+    from urllib.error import HTTPError
+    model = f"compaction-stream-error-{phase}"
+    _route, key = _native_route(admin_env, compaction_provider[0], model, vendor="custom")
+    request = Request(f"{admin_env['proxy']}/v1/responses", data=json.dumps({
+        "model": model, "input": [{"role": "user", "content": "stream an upstream decision"}],
+        "context_management": [{"type": "compaction", "compact_threshold": 2000}],
+        "instructions": f"reject-stream-{phase}", "stream": True,
+    }).encode(), headers={"authorization": f"Bearer {key}", "content-type": "application/json"})
+    try:
+        response = urlopen(request, timeout=15)
+    except HTTPError as error:
+        response = error
+    with response:
+        if response.headers.get_content_type() == "application/json":
+            assert phase == "first", "after-text failure must occur after client output commit"
+            errors = [json.load(response)["error"]]
+        else:
+            events = []
+            for raw in response:
+                if not raw.startswith(b"data: ") or raw[6:].strip() == b"[DONE]":
+                    continue
+                event = json.loads(raw[6:])
+                events.append(event)
+                if phase == "after-text" and event.get("type") == "response.output_text.delta":
+                    status, _ = http_request("GET", f"{compaction_provider[0]}/release")
+                    assert status == 204
+            errors = [event["error"] for event in events if event.get("type") == "error"]
+            assert not any(event.get("type") == "response.completed" for event in events)
+            if phase == "after-text":
+                assert any(event.get("type") == "response.output_text.delta" for event in events)
+    assert errors == [{
+        "code": "native_window_rejected", "type": "invalid_request_error",
+        "message": "The upstream rejected the compacted window.",
+        "param": "context_management", "details": {"window": "expired"},
+    }]
+    assert len(compaction_provider[2]) == 1
+
+
+@pytest.mark.e2e
+@pytest.mark.admin
+@pytest.mark.parametrize("compact", [False, True], ids=["inline", "standalone"])
+def test_malformed_compaction_success_is_a_gateway_error(admin_env, compaction_provider, compact):
+    model = f"compaction-malformed-{compact}"
+    _route, key = _native_route(admin_env, compaction_provider[0], model)
+    extra = {} if compact else {"context_management": [{"type": "compaction", "compact_threshold": 2000}]}
+    status, result = _request(admin_env, key, model, [{"role": "user", "content": "validate the upstream result"}],
+                              compact=compact, instructions="invalid-success", **extra)
+    assert status == 502, result
+    assert "error" in result
+    assert len(compaction_provider[2]) == 1
+
+
+@pytest.mark.e2e
+@pytest.mark.admin
+def test_only_explicit_client_controls_request_compaction(admin_env, compaction_provider):
     model = "native-policy"
     route, key = _native_route(admin_env, compaction_provider[0], model)
     def response(label, **extra):
         return _success(admin_env, key, model, [{"role": "user", "content": label}], **extra)
     def has_state(result):
         return any(item["type"] == "compaction" for item in result["output"])
-    assert not has_state(response("default policy is off"))
-    for threshold in [4000, 8000]:
-        status, body = http_request("PUT", f"{admin_env['admin']}/api/v1/models/{model}", payload={"compaction_enabled": True, "compaction_threshold": threshold}, headers=admin_env["auth"])
-        assert status == 200, body
-        assert has_state(response(f"automatic policy {threshold}"))
-    assert not has_state(response("explicit empty disables injection", context_management=[]))
+    assert not has_state(response("no client compaction request"))
+    assert not has_state(response("explicit empty remains empty", context_management=[]))
     assert not has_state(response("explicit null remains null", context_management=None))
-    assert has_state(response("client override", context_management=[{"type": "compaction", "compact_threshold": 2000}]))
-    for invalid in [0, -1, 100001]:
-        status, body = http_request("PUT", f"{admin_env['admin']}/api/v1/models/{model}", payload={"compaction_enabled": True, "compaction_threshold": invalid}, headers=admin_env["auth"])
-        assert "error" in body and "COMPACTION_THRESHOLD" in str(body["error"]), body
-    status, body = http_request("PUT", f"{admin_env['admin']}/api/v1/models/{model}", payload={"compaction_enabled": False}, headers=admin_env["auth"])
+    assert has_state(response("client requested compaction", context_management=[{"type": "compaction", "compact_threshold": 2000}]))
+    assert not has_state(response("prior request does not establish a policy"))
+    status, body = http_request("GET", f"{admin_env['admin']}/api/v1/models/{model}", headers=admin_env["auth"])
     assert status == 200, body
-    assert not has_state(response("disabled again"))
-    _boundary(admin_env, key, model, "client compact remains enabled")
+    assert "compaction_enabled" not in body["data"]
+    assert "compaction_threshold" not in body["data"]
+    _boundary(admin_env, key, model, "client standalone compact needs no setting")
 
 
 @pytest.mark.e2e

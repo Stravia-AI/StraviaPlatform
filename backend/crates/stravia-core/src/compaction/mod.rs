@@ -21,28 +21,26 @@ const MAX_RESOLUTION_RECORDS: usize = 256;
 pub(crate) struct NativeCompactionControls {
     pub trigger: bool,
     pub active_control: bool,
-    pub automatic: bool,
 }
 
 impl NativeCompactionControls {
-    pub fn classify(request: &AiRequest, automatic_enabled: bool) -> Self {
+    pub fn classify(request: &AiRequest) -> Self {
         let trigger = request.items.iter().any(AiItem::is_compaction_trigger);
         let control = match &request.ext {
             Some(ProtocolExt::OpenResponses(ext)) => ext.passthrough_body.get("context_management"),
             _ => None,
         };
-        // An explicit null or empty array disables the Route default, not a trigger.
+        // Null and empty controls are inactive; an explicit trigger remains active.
         let active_control = control
             .is_some_and(|value| !value.is_null() && !value.as_array().is_some_and(Vec::is_empty));
         Self {
             trigger,
             active_control,
-            automatic: automatic_enabled && !trigger && control.is_none(),
         }
     }
 
     pub fn requested(&self) -> bool {
-        self.trigger || self.active_control || self.automatic
+        self.trigger || self.active_control
     }
 }
 

@@ -42,11 +42,6 @@ pub enum ModelTurnPurpose {
     Compact,
 }
 
-#[derive(Clone, Copy, Default)]
-pub(crate) struct CompactRequestRequirements {
-    pub codex_controls: bool,
-}
-
 #[derive(Clone)]
 pub(crate) struct CompactionPublication {
     pub record_id: String,
@@ -69,7 +64,6 @@ pub(crate) type CompactionPublications = Arc<std::sync::Mutex<Vec<CompactionPubl
 
 pub struct TurnInput {
     pub purpose: ModelTurnPurpose,
-    pub(crate) compact_requirements: CompactRequestRequirements,
     pub principal: Principal,
     pub request: AiRequest,
     pub authorization: ModelTurnAuthorization,
@@ -85,7 +79,6 @@ impl TurnInput {
     pub fn new(principal: Principal, request: AiRequest) -> Self {
         Self {
             purpose: ModelTurnPurpose::Generation,
-            compact_requirements: CompactRequestRequirements::default(),
             principal,
             request,
             authorization: ModelTurnAuthorization::RouteBinding,
@@ -127,11 +120,16 @@ pub enum CanonicalEvent {
     Compacted(Box<crate::protocol::ir::NativeCompactionResponse>),
 }
 
+#[derive(Clone)]
+pub(crate) struct UpstreamErrorResponse;
+
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 #[error("{message}")]
 pub struct ModelTurnError {
     pub code: String,
     pub message: String,
+    pub upstream_status: Option<u16>,
+    pub upstream_body: Option<serde_json::Value>,
 }
 
 impl ModelTurnError {
@@ -139,6 +137,8 @@ impl ModelTurnError {
         Self {
             code: code.into(),
             message: message.into(),
+            upstream_status: None,
+            upstream_body: None,
         }
     }
 }

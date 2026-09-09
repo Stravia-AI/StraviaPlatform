@@ -12,6 +12,7 @@
 
 ### Changed
 
+- **Breaking:** Remote context compaction is client-initiated passthrough, not a platform policy. Routes no longer expose `compaction_enabled` or `compaction_threshold`; migration 39 removes those columns while retaining native state records. Unknown Target capability is tried upstream, and compaction success or errors return without retries, Target switching, local summaries, or injected defaults.
 - Web Access admission, Local Fetch, and browser outbound checks now share static URL and IP rules in `stravia-web-access`. Adapter checks now also reject hosts that become non-public IPs after trailing dots are removed, matching existing core admission. DNS responsibilities, proxy snapshots, redirect checks, and address pinning remain unchanged.
 - Advanced Features save enable/disable switches immediately, without a separate save click. Media and search configuration drafts retain explicit submission and are not submitted or cleared by capability toggles. Failed immediate updates retain the saved state with local feedback.
 - Local workspace tabs and model-service detail links share one segmented visual treatment and wrap on narrow screens. Form controls use consistent radii, input actions retain 40px hit areas, and resource lists omit redundant section introductions.
@@ -39,6 +40,7 @@
 
 ### Fixed
 
+- Remote compaction retains upstream error details across HTTP, SSE, and client WebSocket delivery, including failures after visible output, without weakening ordinary generation error masking. Locked Python E2E workflows explicitly select the repository PyPI index, and the pinned Rust toolchain includes `rust-analyzer`.
 - Inference execution keeps its full asynchronous run state off caller frames, preventing Windows stack overflow when native compaction and credential diagnostics are combined.
 - Immediate Web Access switches retain their saved values after failed updates without clearing independent search drafts. Dark-theme switches show the active primary color instead of an overridden inactive track.
 - Settings wait for real configuration before offering editable proxy and retention controls. Resource-detail load failures provide consistent retry and return actions instead of appearing as missing resources.

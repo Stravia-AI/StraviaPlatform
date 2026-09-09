@@ -124,12 +124,6 @@ export function localizeBackendErrorMessage(error: unknown, locale: Locale = get
         { protocol: extractProtocol(payload.params) || 'openai', model: extractModel(payload.params) || '(unknown)' },
         options,
       )
-    case 'COMPACTION_THRESHOLD_INVALID':
-      return m.backend_error_compaction_threshold_invalid({}, options)
-    case 'COMPACTION_THRESHOLD_EXCEEDS_WINDOW':
-      return m.backend_error_compaction_threshold_exceeds_window({}, options)
-    case 'COMPACTION_TARGET_UNSUPPORTED':
-      return m.backend_error_compaction_target_unsupported({}, options)
     case 'THINKING_LEVEL_COVERAGE_REQUIRED':
       return m.backend_error_thinking_level_coverage(
         {

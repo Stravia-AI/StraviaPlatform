@@ -64,25 +64,15 @@ impl ProviderCall {
     pub(crate) async fn call_compact(
         &mut self,
     ) -> anyhow::Result<(Value, u16, HeaderMap, AttemptObservation)> {
-        let (mut raw, mut status, mut headers, mut attempt) =
-            self.call_non_stream_once(&self.outbound).await?;
-        if status == 401
-            && self
-                .adapter
-                .refresh_auth_on_unauthorized(&mut self.outbound)
-                .await?
-        {
-            attempt.finish("failed", Some(status), Some("unauthorized".into()), None);
-            (raw, status, headers, attempt) = self.call_non_stream_once(&self.outbound).await?;
-        }
-        Ok((raw, status, headers, attempt))
+        self.call_non_stream_once(&self.outbound).await
     }
 
     pub(crate) async fn call_non_stream(&mut self) -> anyhow::Result<ProviderUnaryResponse> {
         loop {
             let (mut raw, mut status, mut headers, mut attempt) =
                 self.call_non_stream_once(&self.outbound).await?;
-            if status == 401
+            if self.allow_retries
+                && status == 401
                 && self
                     .adapter
                     .refresh_auth_on_unauthorized(&mut self.outbound)
@@ -181,7 +171,8 @@ impl ProviderCall {
     ) -> anyhow::Result<ProviderStreamResponse> {
         loop {
             let (mut response, mut status, mut attempt) = self.call_stream_once(&outbound).await?;
-            if status == 401
+            if self.allow_retries
+                && status == 401
                 && self
                     .adapter
                     .refresh_auth_on_unauthorized(&mut outbound)

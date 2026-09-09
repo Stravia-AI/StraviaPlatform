@@ -51,13 +51,17 @@ pub async fn build_request<V>(
 where
     V: crate::provider::vendor::Vendor,
 {
-    build_request_for_purpose(
-        vendor,
-        req,
-        ctx,
-        crate::model_turn::ModelTurnPurpose::Generation,
-    )
-    .await
+    let purpose = if req
+        .meta
+        .vendor
+        .ingress
+        .contains_key("__stravia_compact_fields")
+    {
+        crate::model_turn::ModelTurnPurpose::Compact
+    } else {
+        crate::model_turn::ModelTurnPurpose::Generation
+    };
+    build_request_for_purpose(vendor, req, ctx, purpose).await
 }
 
 pub(crate) async fn build_request_for_purpose<V>(
@@ -110,29 +114,21 @@ where
         .map_err(GatewayError::internal)?;
 
     if purpose == crate::model_turn::ModelTurnPurpose::Compact {
-        // Compact has its own unary schema; generation defaults are not legal controls.
+        // 压缩只保留客户端显式控制；生成编码器补出的默认值不属于本次请求。
         if let Some(object) = body.as_object_mut() {
-            let codex = ctx.provider.channel.as_deref() == Some("codex");
+            let explicit = req
+                .meta
+                .vendor
+                .ingress
+                .get("__stravia_compact_fields")
+                .and_then(serde_json::Value::as_array);
             object.retain(|key, _| {
-                matches!(
-                    key.as_str(),
-                    "model"
-                        | "input"
-                        | "instructions"
-                        | "previous_response_id"
-                        | "prompt_cache_key"
-                        | "prompt_cache_options"
-                        | "prompt_cache_retention"
-                ) || codex
-                    && matches!(
-                        key.as_str(),
-                        "tools"
-                            | "parallel_tool_calls"
-                            | "reasoning"
-                            | "service_tier"
-                            | "text"
-                            | "access_programs"
-                    )
+                matches!(key.as_str(), "model" | "input" | "instructions")
+                    || explicit.is_some_and(|fields| {
+                        fields
+                            .iter()
+                            .any(|field| field.as_str() == Some(key.as_str()))
+                    })
             });
         }
     }

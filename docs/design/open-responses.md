@@ -5,7 +5,7 @@
 > 规范调研：[`Open Responses 开放标准研究`](../research/open-responses-standard.md)  
 > 规范快照：2026-04-24  
 > 范围：`stravia-core` canonical IR、protocol codecs、proxy ingress、Provider adapters、Response Chain、Server/Desktop transport、devtools 与协议文档  
-> 非目标：完整复制 OpenAI rolling Responses product semantics、`background` execution、response compaction、动态 extension plugins、旧协议身份兼容迁移
+> 非目标：完整复制 OpenAI rolling Responses product semantics、`background` execution、平台级自动上下文压缩、动态 extension plugins、旧协议身份兼容迁移
 
 ---
 
@@ -17,7 +17,7 @@ Stravia 将以 **Open Responses Protocol** 作为唯一 Responses-shaped canonic
 
 对外能力声明固定为：
 
-> Open Responses 2026-04-24 Stravia profile：支持 JSON HTTP、SSE 和 WebSocket；Ingress 接受结构安全的 rolling additive surface；`background` 与 `compact` 暂不支持；跨协议路径属于 compatibility-first、hard-semantics-gated conversion。
+> Open Responses 2026-04-24 Stravia profile：支持 JSON HTTP、SSE 和 WebSocket；Ingress 接受结构安全的 rolling additive surface；支持客户端远程压缩请求透传，`background` 暂不支持；跨协议路径属于 compatibility-first、hard-semantics-gated conversion。
 
 ---
 
@@ -36,7 +36,7 @@ Stravia 将以 **Open Responses Protocol** 作为唯一 Responses-shaped canonic
 
 - 不承诺实现 OpenAI rolling Responses API 的全部服务端语义；无法 canonicalize 的 additive surface 只做透传或兼容性省略。
 - 不提供第二个名为 OpenAI Responses 的协议身份。
-- 不实现 `POST /v1/responses/compact` 的实际 compaction。
+- 不在平台内执行 `POST /v1/responses/compact` 的压缩算法；实际压缩由所选 Target 的上游执行。
 - 不实现 `background=true`、retrieve、cancel 或轮询状态机。
 - 不提供动态 extension registry 或第三方运行时代码加载；未知 `owner:*` Namespaced Extension 不做隐式透传。
 - 不保证跨协议路径具有 Open Responses strict conformance。
@@ -417,9 +417,9 @@ Open Responses `2026-04-24` 定义 canonical baseline；Ingress 可以接受其 
 
 ## 11. Provider interaction 与失败边界
 
-同协议合法标准字段原样发送 upstream，不建立静态 per-field Provider capability matrix；具体 Target 是否支持由 upstream 决定。合法 request 得到 upstream 4xx 时，Stravia 规范化 error envelope 并返回，不切换 Target。
+同协议合法标准字段原样发送 upstream，不建立静态 per-field Provider capability matrix；具体 Target 是否支持由 upstream 决定。普通生成 request 得到 upstream 4xx 时，Stravia 规范化 error envelope 并返回，不切换 Target；客户端远程压缩保留上游 error envelope。
 
-Target failover 仅沿用现有可重试 transport/5xx policy。绝不因 schema、auth、quota、unsupported parameter 或其它 4xx 改投不同 Provider，以免重复副作用或改变语义。
+普通生成的 Target failover 仅沿用现有可重试 transport/5xx policy。绝不因 schema、auth、quota、unsupported parameter 或其它 4xx 改投不同 Provider，以免重复副作用或改变语义；客户端远程压缩不参与这些重试或切换。
 
 同协议 Target 出现以下情况时视为 provider protocol violation：
 
@@ -434,11 +434,11 @@ Target failover 仅沿用现有可重试 transport/5xx policy。绝不因 schema
 - stream commit 后：发送 `error` → `response.failed` → `[DONE]`；
 - 不猜测修复硬语义、不因该错误切换 Target；结构安全的 additive rolling 字段不属于 protocol violation。
 
-原始 Provider code/message/body 只进入受现有 redaction policy 管理的内部日志；客户端只看到稳定 Stravia error taxonomy。
+普通生成请求的原始 Provider code/message/body 只进入受现有 redaction policy 管理的内部日志；客户端只看到稳定 Stravia error taxonomy。客户端显式远程压缩是例外：保留上游错误的状态与原生 error 字段，HTTP、SSE 和 WebSocket 交付保持一致；平台内部、Hook 和投影错误仍使用既有屏蔽规则，不因请求包含压缩控制而暴露内部细节。
 
 ---
 
-## 12. Unsupported surfaces
+## 12. 扩展能力边界
 
 ### 12.1 Background
 
@@ -459,9 +459,9 @@ Target failover 仅沿用现有可重试 transport/5xx policy。绝不因 schema
 
 ### 12.2 Compact
 
-保留 `POST /v1/responses/compact` route，使客户端得到协议错误而不是 router 404。Request 先经过 auth、content type、JSON 和 schema validation；合法 compact request 返回 HTTP 400 `unsupported_feature`，`param=compact`。
+`POST /v1/responses/compact` 是独立 HTTP unary 操作。Request 经过既有认证与协议解码后，沿正常 Route 选择当前 Target；Responses 内嵌的 `compaction_trigger` 和客户端 `context_management` 同样属于远程压缩透传。平台不提供开关或触发阈值，不注入默认控制，不按目录容量限制客户端阈值。
 
-不调用 Provider compaction、不做本地摘要、不生成伪 compact resource。WebSocket compact continuation 同样不支持。
+Target 能力未知时仍尝试转发，由上游裁决；Target 协议无法承载请求时返回 `compaction_unsupported`。不为寻找压缩能力而跳过当前 Target，不因压缩失败而重试或切换 Target；上游成功和错误均返回客户端，不降级成普通生成或本地摘要。独立 compact 返回完整下一窗口及 opaque state，不形成空 Generation；后续回放保留既有 Principal 隔离、原生状态来源和 Target 绑定约束。WebSocket 上不新增独立 compact 操作。
 
 ---
 

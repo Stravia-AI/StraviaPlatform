@@ -37,6 +37,14 @@ pub(crate) struct ProviderCall {
     outbound: OutboundRequest,
     continuation_fallback: Option<OutboundRequest>,
     websocket: Option<ResponsesWebSocketCall>,
+    allow_retries: bool,
+}
+
+impl ProviderCall {
+    pub(crate) fn disable_retries(&mut self) {
+        self.allow_retries = false;
+        self.continuation_fallback = None;
+    }
 }
 
 pub(crate) struct ProviderUnaryResponse {
@@ -388,6 +396,7 @@ impl ProviderAdapter {
             outbound,
             continuation_fallback: None,
             websocket: None,
+            allow_retries: true,
         }
     }
 
@@ -403,6 +412,7 @@ impl ProviderAdapter {
             outbound,
             continuation_fallback: Some(full_outbound),
             websocket: None,
+            allow_retries: true,
         }
     }
 

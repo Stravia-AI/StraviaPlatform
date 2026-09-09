@@ -469,8 +469,6 @@ mod tests {
 
     fn protected_model() -> Route {
         Route {
-            compaction_enabled: false,
-            compaction_threshold: None,
             id: "protected-model-id".into(),
             model_id: "protected-model".into(),
             display_name: None,

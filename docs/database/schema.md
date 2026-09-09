@@ -68,8 +68,6 @@ Route 记录。`model_id` 保存客户端请求使用的 Route ID，`display_nam
 | `model_id` | TEXT NOT NULL | — | Route ID；客户端模型 ID，精确且大小写敏感匹配 |
 | `display_name` | TEXT NULL | `NULL` | 可选展示名称；空值由应用层回退为 `model_id` |
 | `balance` | TEXT | `'traffic_equalization'` | Route Scheduling Strategy：`traffic_equalization` 或 `latency_preference`；管理接口对旧值做写入归一化，读取只返回新值 |
-| `compaction_enabled` | BOOLEAN / INTEGER NOT NULL | `false` / `0` | 原生自动压缩策略开关；不禁止客户端主动压缩 |
-| `compaction_threshold` | BIGINT / INTEGER NULL | `NULL` | 当前输入窗口的正整数 token 触发阈值；不是模型上下文容量或累计 usage |
 | `is_enabled` | INTEGER | `1` | 是否启用 |
 | `priority` | INTEGER | `0` | 优先级（预留） |
 | `created_at` | TEXT | `datetime('now')` | 创建时间 |
@@ -723,7 +721,7 @@ Allowance Samples migration 29 新增 `provider_allowance_samples`。样本随 P
 
 Route Display Name migration 30 把 `models.name` 原值逐字节迁移为 `models.model_id`，新增 nullable `display_name`，并把 `idx_models_route_id` 移到 `model_id`。迁移不会从 Canonical Model 目录推断历史展示名称，也不会改写 Target 或 API Key 的内部 Route 主键绑定。
 
-`0036_credential_discovery_coverage` 保持既有版本与内容不变。`0037_route_native_compaction` 为 `models` 新增缺省关闭的 `compaction_enabled` 与 nullable 正整数 `compaction_threshold`，启用时必须提供阈值。`0038_native_compaction` 新增 `native_compactions`、`native_compaction_states` 和 `native_compaction_sources`，引用既有 `turn_chain_nodes`；不从 Observation 或历史内容回填压缩记录。两个后端按上述顺序应用迁移。
+`0036_credential_discovery_coverage`、`0037_route_native_compaction` 与 `0038_native_compaction` 保持既有版本、内容与校验和不变。`0037` 曾为 `models` 新增 `compaction_enabled` 与 `compaction_threshold`；`0039_remove_route_compaction_policy` 先删除带有交叉列 CHECK 约束的阈值列，再删除开关列，只移除这两项已废弃的 Route 策略设置，不删除 Route、Target 或原生压缩状态。客户端显式压缩控制直接透传至当前选中的 Target，平台不存储自动压缩策略。`0038` 创建的 `native_compactions`、`native_compaction_states` 和 `native_compaction_sources` 及其既有数据、`turn_chain_nodes` 引用保持不变；不从 Observation 或历史内容回填压缩记录。两个后端按版本顺序应用迁移；SQLite 使用与既有 DROP COLUMN 迁移相同的现代 SQLite 要求（3.35.0 或更新）。
 
 SQLite 与 PostgreSQL 必须保持 API Key 字段默认值、Turn kind、settings identity、唯一约束和 Artifact 外键等价。
 

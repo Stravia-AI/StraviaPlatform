@@ -119,10 +119,6 @@ pub struct UpsertOAuthCredential {
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct Route {
-    #[serde(default)]
-    pub compaction_enabled: bool,
-    #[serde(default)]
-    pub compaction_threshold: Option<i64>,
     pub id: String,
     pub model_id: String,
     pub display_name: Option<String>,
@@ -364,8 +360,6 @@ pub struct UpdateProvider {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateRoute {
-    pub compaction_enabled: Option<bool>,
-    pub compaction_threshold: Option<i64>,
     pub model_id: Option<String>,
     pub display_name: Option<String>,
     #[serde(rename = "balance", alias = "strategy")]
@@ -380,10 +374,6 @@ pub struct UpdateRoute {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateRoute {
-    #[serde(default)]
-    pub compaction_enabled: bool,
-    #[serde(default)]
-    pub compaction_threshold: Option<i64>,
     pub model_id: String,
     #[serde(default)]
     pub display_name: Option<String>,
@@ -428,8 +418,6 @@ pub struct UpsertTarget {
 
 #[derive(Debug, Clone)]
 pub struct PutRoute {
-    pub compaction_enabled: bool,
-    pub compaction_threshold: Option<i64>,
     pub id: Option<String>,
     pub model_id: String,
     pub display_name: Option<String>,

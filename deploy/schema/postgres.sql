@@ -1483,3 +1483,7 @@ CREATE TABLE native_compaction_sources (
     CHECK (record_id <> source_id)
 );
 CREATE INDEX idx_native_compaction_source ON native_compaction_sources(source_id);
+
+-- Drop the threshold first: its CHECK constraint references compaction_enabled.
+ALTER TABLE models DROP COLUMN compaction_threshold;
+ALTER TABLE models DROP COLUMN compaction_enabled;
