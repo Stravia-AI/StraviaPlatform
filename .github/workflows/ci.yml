@@ -53,7 +53,7 @@ jobs:
 
       - name: Install Linux system dependencies
         run: |
-          sudo rm -f /etc/apt/sources.list.d/google-chrome.list
+          sudo rm -f /etc/apt/sources.list.d/google-chrome*
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             pkg-config libssl-dev cmake clang libclang-dev golang python3 libfontconfig1-dev \
@@ -107,7 +107,7 @@ jobs:
 
       - name: Install Linux system dependencies
         run: |
-          sudo rm -f /etc/apt/sources.list.d/google-chrome.list
+          sudo rm -f /etc/apt/sources.list.d/google-chrome*
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends pkg-config libssl-dev cmake clang libclang-dev golang python3 libfontconfig1-dev
 
@@ -189,7 +189,7 @@ jobs:
 
       - name: Install Linux system dependencies
         run: |
-          sudo rm -f /etc/apt/sources.list.d/google-chrome.list
+          sudo rm -f /etc/apt/sources.list.d/google-chrome*
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends pkg-config libssl-dev cmake clang libclang-dev golang python3 libfontconfig1-dev
 
@@ -247,7 +247,7 @@ jobs:
 
       - name: Install Linux system dependencies
         run: |
-          sudo rm -f /etc/apt/sources.list.d/google-chrome.list
+          sudo rm -f /etc/apt/sources.list.d/google-chrome*
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends pkg-config libssl-dev cmake clang libclang-dev golang python3 libfontconfig1-dev
 
@@ -275,7 +275,7 @@ jobs:
 
       - name: Install Chromium
         run: |
-          sudo rm -f /etc/apt/sources.list.d/google-chrome.list
+          sudo rm -f /etc/apt/sources.list.d/google-chrome*
           bun run playwright:install:web -- --with-deps chromium
 
       - name: Run WebUI E2E tests

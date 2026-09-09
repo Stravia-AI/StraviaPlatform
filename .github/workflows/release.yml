@@ -248,7 +248,7 @@ jobs:
       - name: Install native HTTP build dependencies
         if: runner.os == 'Linux'
         run: |
-          sudo rm -f /etc/apt/sources.list.d/google-chrome.list
+          sudo rm -f /etc/apt/sources.list.d/google-chrome*
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends cmake clang libclang-dev golang python3 pkg-config libfontconfig1-dev
 
@@ -366,7 +366,7 @@ jobs:
       - name: Install Linux desktop dependencies
         if: runner.os == 'Linux'
         run: |
-          sudo rm -f /etc/apt/sources.list.d/google-chrome.list
+          sudo rm -f /etc/apt/sources.list.d/google-chrome*
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             xdg-utils cmake clang libclang-dev golang python3 libfontconfig1-dev \
