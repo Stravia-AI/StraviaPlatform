@@ -12,7 +12,9 @@ pub mod reasoning;
 pub mod tool_correlation;
 pub mod watsonx;
 
-use crate::protocol::ir::{ContentBlock, DocumentSource, MediaSource};
+use stravia_runtime_contract::protocol::ir::ContentBlock;
+use stravia_runtime_contract::protocol::ir::DocumentSource;
+use stravia_runtime_contract::protocol::ir::MediaSource;
 
 /// Preserve legacy fallback wire shapes without exposing persisted IR metadata.
 fn content_block_wire_value(block: &ContentBlock) -> serde_json::Value {

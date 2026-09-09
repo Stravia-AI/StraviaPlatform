@@ -3,7 +3,9 @@ use std::sync::Arc;
 use sqlx::sqlite::SqlitePoolOptions;
 
 use super::*;
-use crate::protocol::ir::{AiItem, AiRequest, MessageContent};
+use stravia_runtime_contract::protocol::ir::AiItem;
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::MessageContent;
 
 async fn sqlite_store() -> Arc<dyn HistoryMarkerStore> {
     let pool = SqlitePoolOptions::new()
@@ -81,7 +83,7 @@ async fn assert_store_contract(store: Arc<dyn HistoryMarkerStore>) {
     let segment = HiddenHistorySegment::Platform {
         call: call("call-1"),
         result: ContentBlock::ToolResult {
-            content_kind: Some(crate::protocol::ir::ToolResultContentKind::Json),
+            content_kind: Some(stravia_runtime_contract::protocol::ir::ToolResultContentKind::Json),
             tool_use_id: "call-1".into(),
             content: serde_json::json!({"answer": "stable"}),
             is_error: Some(false),
@@ -107,7 +109,9 @@ async fn assert_store_contract(store: Arc<dyn HistoryMarkerStore>) {
             HiddenHistorySegment::Platform {
                 call: call("call-1"),
                 result: ContentBlock::ToolResult {
-                    content_kind: Some(crate::protocol::ir::ToolResultContentKind::Json),
+                    content_kind: Some(
+                        stravia_runtime_contract::protocol::ir::ToolResultContentKind::Json,
+                    ),
                     tool_use_id: "call-1".into(),
                     content: serde_json::json!({"answer": "stable"}),
                     is_error: Some(false),
@@ -134,8 +138,8 @@ async fn assert_store_contract(store: Arc<dyn HistoryMarkerStore>) {
     // Identical array shapes can be JSON, typed blocks, or ambiguous legacy data.
     // Persisted semantics, not shape or Platform provenance, decide how to read them.
     for content_kind in [
-        Some(crate::protocol::ir::ToolResultContentKind::Json),
-        Some(crate::protocol::ir::ToolResultContentKind::ContentBlocks),
+        Some(stravia_runtime_contract::protocol::ir::ToolResultContentKind::Json),
+        Some(stravia_runtime_contract::protocol::ir::ToolResultContentKind::ContentBlocks),
         None,
     ] {
         let mut payload = serde_json::json!({
@@ -393,7 +397,9 @@ async fn sqlite_deadline_and_lost_lease_become_distinct_terminal_errors() {
                 HiddenHistorySegment::Platform {
                     call: call("interrupted"),
                     result: ContentBlock::ToolResult {
-                        content_kind: Some(crate::protocol::ir::ToolResultContentKind::Json),
+                        content_kind: Some(
+                            stravia_runtime_contract::protocol::ir::ToolResultContentKind::Json
+                        ),
                         tool_use_id: "interrupted".into(),
                         content: serde_json::json!("late"),
                         is_error: Some(false),
@@ -430,7 +436,7 @@ async fn sqlite_completed_marker_remains_immutable_after_its_execution_deadline(
     let segment = HiddenHistorySegment::Platform {
         call: call("completed"),
         result: ContentBlock::ToolResult {
-            content_kind: Some(crate::protocol::ir::ToolResultContentKind::Json),
+            content_kind: Some(stravia_runtime_contract::protocol::ir::ToolResultContentKind::Json),
             tool_use_id: "completed".into(),
             content: serde_json::json!("done"),
             is_error: Some(false),
@@ -712,7 +718,9 @@ async fn resolver_restores_projected_text_and_platform_segment_at_exact_marker_p
             HiddenHistorySegment::Platform {
                 call: call("call-ordered"),
                 result: ContentBlock::ToolResult {
-                    content_kind: Some(crate::protocol::ir::ToolResultContentKind::Json),
+                    content_kind: Some(
+                        stravia_runtime_contract::protocol::ir::ToolResultContentKind::Json,
+                    ),
                     tool_use_id: "call-ordered".into(),
                     content: serde_json::json!({"answer": "stable"}),
                     is_error: Some(false),

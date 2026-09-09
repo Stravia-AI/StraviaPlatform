@@ -4,10 +4,10 @@ use reqwest::header::{HeaderMap as ReqwestHeaderMap, HeaderValue as ReqwestHeade
 
 use crate::Gateway;
 use crate::db::models::{Provider, Route, Target};
-use crate::protocol::ids::Protocol;
-use crate::protocol::ir::AiResponse;
 use crate::provider::VendorRegistry;
 use crate::provider::vendor::Vendor;
+use stravia_runtime_contract::protocol::ids::Protocol;
+use stravia_runtime_contract::protocol::ir::AiResponse;
 
 pub(super) async fn load_route_targets(_gw: &Gateway, model: &Route) -> Vec<Target> {
     model.targets.clone()
@@ -63,8 +63,10 @@ pub(super) fn resolve_vendor_adapter(
         })
 }
 
-pub(crate) fn ai_response_to_deltas(resp: &AiResponse) -> Vec<crate::protocol::ir::AiStreamDelta> {
-    use crate::protocol::ir::AiStreamDelta;
+pub(crate) fn ai_response_to_deltas(
+    resp: &AiResponse,
+) -> Vec<stravia_runtime_contract::protocol::ir::AiStreamDelta> {
+    use stravia_runtime_contract::protocol::ir::AiStreamDelta;
     let mut deltas = Vec::new();
     let mut response_profile = serde_json::Map::new();
     for key in [

@@ -10,9 +10,9 @@ struct CredentialFileTool {
 }
 
 #[async_trait]
-impl crate::hook::PlatformTool for CredentialFileTool {
-    fn id(&self) -> crate::hook::ToolId {
-        crate::hook::ToolId::new("ordered-tool")
+impl stravia_runtime_contract::hook::PlatformTool for CredentialFileTool {
+    fn id(&self) -> stravia_runtime_contract::hook::ToolId {
+        stravia_runtime_contract::hook::ToolId::new("ordered-tool")
     }
 
     fn external_name(&self) -> &str {
@@ -30,14 +30,14 @@ impl crate::hook::PlatformTool for CredentialFileTool {
     async fn execute(
         &self,
         arguments: serde_json::Value,
-        _context: crate::hook::ToolExecutionContext,
-    ) -> Result<serde_json::Value, crate::hook::PlatformToolError> {
-        let value = arguments["value"]
-            .as_str()
-            .ok_or_else(|| crate::hook::PlatformToolError::new("missing credential"))?;
-        tokio::fs::write(&self.path, value)
-            .await
-            .map_err(|_| crate::hook::PlatformToolError::new("credential file unavailable"))?;
+        _context: stravia_runtime_contract::hook::ToolExecutionContext,
+    ) -> Result<serde_json::Value, stravia_runtime_contract::hook::PlatformToolError> {
+        let value = arguments["value"].as_str().ok_or_else(|| {
+            stravia_runtime_contract::hook::PlatformToolError::new("missing credential")
+        })?;
+        tokio::fs::write(&self.path, value).await.map_err(|_| {
+            stravia_runtime_contract::hook::PlatformToolError::new("credential file unavailable")
+        })?;
         Ok(if self.array_output {
             serde_json::json!([{"type": "text", "value": format!("{value} {TOOL_SECRET}")}])
         } else {
@@ -158,7 +158,7 @@ async fn platform_tool_roundtrip(websocket: bool, array_output: bool) {
     configure_route(&gateway, "redaction-platform", &[provider_url]).await;
     gateway
         .admin()
-        .set_setting(crate::reversible_redaction::SETTING_KEY, "true")
+        .set_setting(stravia_credential_protection::SETTING_KEY, "true")
         .await
         .unwrap();
     let headers = authorized_headers(&gateway).await;
@@ -389,7 +389,7 @@ async fn platform_tool_roundtrip(websocket: bool, array_output: bool) {
         assert_eq!(requests.lock().unwrap().len(), requests_before);
         gateway
             .admin()
-            .set_setting(crate::reversible_redaction::SETTING_KEY, "false")
+            .set_setting(stravia_credential_protection::SETTING_KEY, "false")
             .await
             .unwrap();
         let unprotected = client
@@ -409,7 +409,7 @@ async fn platform_tool_roundtrip(websocket: bool, array_output: bool) {
         let reference = references.find(&first_wire).unwrap().as_str();
         gateway
             .admin()
-            .set_setting(crate::reversible_redaction::SETTING_KEY, "false")
+            .set_setting(stravia_credential_protection::SETTING_KEY, "false")
             .await
             .unwrap();
         for (input, expected) in [(reference, SECRET), (UNKNOWN, UNKNOWN)] {
@@ -485,7 +485,7 @@ async fn redaction_continuation_reuses_only_equal_provider_visible_history() {
         gateway
             .admin()
             .set_setting(
-                crate::reversible_redaction::SETTING_KEY,
+                stravia_credential_protection::SETTING_KEY,
                 if first_enabled { "true" } else { "false" },
             )
             .await
@@ -510,7 +510,7 @@ async fn redaction_continuation_reuses_only_equal_provider_visible_history() {
         gateway
             .admin()
             .set_setting(
-                crate::reversible_redaction::SETTING_KEY,
+                stravia_credential_protection::SETTING_KEY,
                 if second_enabled { "true" } else { "false" },
             )
             .await

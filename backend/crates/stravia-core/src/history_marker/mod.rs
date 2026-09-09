@@ -6,8 +6,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::hook::Principal;
-use crate::protocol::ir::{ContentBlock, ToolCall};
+use stravia_runtime_contract::Principal;
+use stravia_runtime_contract::protocol::ir::ContentBlock;
+use stravia_runtime_contract::protocol::ir::ToolCall;
 
 pub use sql::SqlHistoryMarkerStore;
 #[cfg(test)]

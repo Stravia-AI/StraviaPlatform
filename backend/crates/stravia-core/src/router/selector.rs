@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::db::models::{RouteSelectionStrategy, Target};
-use crate::protocol::ir::{AiErrorKind, AiRequest, ProtocolExt};
+use stravia_runtime_contract::protocol::ir::AiErrorKind;
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::ProtocolExt;
 
 #[derive(Debug, Clone)]
 pub struct SelectedTarget {
@@ -771,7 +773,7 @@ mod tests {
             serde_json::Value::String("parent-a".into()),
         );
         request.ext = Some(ProtocolExt::OpenResponses(
-            crate::protocol::ir::OpenResponsesExt {
+            stravia_runtime_contract::protocol::ir::OpenResponsesExt {
                 prompt_cache_key: Some("cache-key".into()),
                 ..Default::default()
             },

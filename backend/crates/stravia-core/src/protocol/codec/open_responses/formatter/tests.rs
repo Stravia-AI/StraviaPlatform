@@ -1,5 +1,5 @@
 use super::*;
-use crate::protocol::ir::Usage;
+use stravia_runtime_contract::protocol::ir::Usage;
 
 #[test]
 fn formats_cache_write_tokens_when_known() {
@@ -25,11 +25,11 @@ fn formats_cache_write_tokens_when_known() {
 fn preserves_platform_owned_response_items() {
     let mut response = AiResponse::new("response-1", "model-1");
     response.items = vec![
-        crate::protocol::ir::AiItem::unknown(serde_json::json!({
+        stravia_runtime_contract::protocol::ir::AiItem::unknown(serde_json::json!({
             "type": "stravia:agent_result",
             "turn_id": "aturn_1",
         })),
-        crate::protocol::ir::AiItem::output_text("done"),
+        stravia_runtime_contract::protocol::ir::AiItem::output_text("done"),
     ];
 
     let formatted = ResponsesResponseFormatter.format_response(&response);
@@ -153,7 +153,7 @@ fn response_resource_preserves_failed_terminal_state_without_raw_provider_error(
 #[test]
 fn clears_text_metadata_when_canonical_text_changes() {
     let mut response = AiResponse::new("resp_gateway", "logical-model");
-    response.items = vec![crate::protocol::ir::AiItem {
+    response.items = vec![stravia_runtime_contract::protocol::ir::AiItem {
         role: Role::Assistant,
         content: MessageContent::Blocks(vec![ContentBlock::Text {
             text: "after".into(),
@@ -193,13 +193,18 @@ fn clears_text_metadata_when_canonical_text_changes() {
 fn preserves_canonical_item_order_without_collapsing_messages() {
     let mut response = AiResponse::new("resp_gateway", "logical-model");
     response.items = vec![
-        crate::protocol::ir::AiItem::output_text("answer"),
-        crate::protocol::ir::AiItem::function_call(crate::protocol::ir::ToolCall {
-            id: "call_1".into(),
-            name: "lookup".into(),
-            arguments: "{}".into(),
-        }),
-        crate::protocol::ir::AiItem::thinking("reasoning", Some("opaque".into())),
+        stravia_runtime_contract::protocol::ir::AiItem::output_text("answer"),
+        stravia_runtime_contract::protocol::ir::AiItem::function_call(
+            stravia_runtime_contract::protocol::ir::ToolCall {
+                id: "call_1".into(),
+                name: "lookup".into(),
+                arguments: "{}".into(),
+            },
+        ),
+        stravia_runtime_contract::protocol::ir::AiItem::thinking(
+            "reasoning",
+            Some("opaque".into()),
+        ),
     ];
 
     let formatted = ResponsesResponseFormatter.format_response(&response);
@@ -216,7 +221,7 @@ fn preserves_canonical_item_order_without_collapsing_messages() {
 #[test]
 fn encodes_function_output_arrays_with_dated_content_shapes() {
     let mut response = AiResponse::new("resp_gateway", "logical-model");
-    response.items = vec![crate::protocol::ir::AiItem {
+    response.items = vec![stravia_runtime_contract::protocol::ir::AiItem {
         role: Role::Tool,
         content: MessageContent::Blocks(vec![
             ContentBlock::Text {
@@ -224,7 +229,7 @@ fn encodes_function_output_arrays_with_dated_content_shapes() {
                 cache_control: None,
             },
             ContentBlock::Image {
-                source: crate::protocol::ir::MediaSource::Url(
+                source: stravia_runtime_contract::protocol::ir::MediaSource::Url(
                     "https://example.test/image.png".into(),
                 ),
                 detail: Some("high".into()),

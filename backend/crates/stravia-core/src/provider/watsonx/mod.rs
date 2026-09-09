@@ -9,8 +9,6 @@ use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde_json::Value;
 
 use crate::error::GatewayError;
-use crate::protocol::ids::{ProtocolId, WATSONX_TEXT_CHAT_V1};
-use crate::protocol::ir::{AiRequest, AiResponse};
 use crate::provider::common::{openai_compat::openai_map_error, pipeline};
 use crate::provider::inbound::InboundResponse;
 use crate::provider::metadata::{
@@ -21,6 +19,10 @@ use crate::provider::outbound::OutboundRequest;
 use crate::provider::registry::{VendorRegistration, VendorScope};
 use crate::provider::vendor::{ProviderCtx, Vendor};
 use crate::provider::vendor_ext::VendorCtx;
+use stravia_runtime_contract::protocol::ids::ProtocolId;
+use stravia_runtime_contract::protocol::ids::WATSONX_TEXT_CHAT_V1;
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::AiResponse;
 
 const DEFAULT_BASE_URL: &str = "https://us-south.ml.cloud.ibm.com";
 const DEFAULT_API_VERSION: &str = "2026-04-20";

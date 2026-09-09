@@ -1,8 +1,9 @@
 use super::RunEvent;
-use crate::protocol::ir::{AiItem, canonical};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
+use stravia_runtime_contract::protocol::ir::AiItem;
+use stravia_runtime_contract::protocol::ir::canonical;
 
 pub(super) const MAX_CANDIDATES: usize = 128;
 const MAX_UNITS: usize = 512;
@@ -49,7 +50,8 @@ impl Window {
         for item in items.iter().skip_while(|item| {
             matches!(
                 item.role,
-                crate::protocol::ir::Role::System | crate::protocol::ir::Role::Developer
+                stravia_runtime_contract::protocol::ir::Role::System
+                    | stravia_runtime_contract::protocol::ir::Role::Developer
             )
         }) {
             let Value::Array(values) = canonical::item_value(item) else {

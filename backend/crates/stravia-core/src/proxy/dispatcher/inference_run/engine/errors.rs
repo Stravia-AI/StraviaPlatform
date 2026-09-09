@@ -14,13 +14,15 @@ pub(super) fn render_completion_failure(
 }
 
 pub(super) fn render_hook_control(
-    control: crate::hook::HookControl,
+    control: stravia_runtime_contract::hook::HookControl,
     ingress: ProtocolId,
     is_stream: bool,
 ) -> Response {
     match control {
-        crate::hook::HookControl::Continue => error_response(500, "invalid hook control state"),
-        crate::hook::HookControl::Respond(response) => {
+        stravia_runtime_contract::hook::HookControl::Continue => {
+            error_response(500, "invalid hook control state")
+        }
+        stravia_runtime_contract::hook::HookControl::Respond(response) => {
             let mut delivery = if is_stream {
                 DeliveryAdapter::buffered_stream(ingress, ingress)
             } else {
@@ -30,7 +32,7 @@ pub(super) fn render_hook_control(
                 .deliver_canonical(&response, StatusCode::OK)
                 .response
         }
-        crate::hook::HookControl::Reject(rejection) => {
+        stravia_runtime_contract::hook::HookControl::Reject(rejection) => {
             let status =
                 StatusCode::from_u16(rejection.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (
@@ -44,7 +46,9 @@ pub(super) fn render_hook_control(
             )
                 .into_response()
         }
-        crate::hook::HookControl::StreamAbort { message } => error_response(500, &message),
+        stravia_runtime_contract::hook::HookControl::StreamAbort { message } => {
+            error_response(500, &message)
+        }
     }
 }
 
@@ -122,13 +126,15 @@ pub(crate) fn hook_failure_response(error: impl std::fmt::Display) -> Response {
     error_response(500, "hook_failed")
 }
 
-pub(super) fn model_turn_error_outcome(error: crate::agent::ModelTurnError) -> RoundOutcome {
+pub(super) fn model_turn_error_outcome(
+    error: stravia_runtime_contract::model_turn::ModelTurnError,
+) -> RoundOutcome {
     buffered_response(model_turn_error_response(error))
 }
 
 pub(super) fn compaction_stream_error_outcome(
-    request: &crate::protocol::ir::AiRequest,
-    error: &crate::protocol::ir::AiError,
+    request: &stravia_runtime_contract::protocol::ir::AiRequest,
+    error: &stravia_runtime_contract::protocol::ir::AiError,
 ) -> Option<RoundOutcome> {
     if !crate::compaction::NativeCompactionControls::classify(request).requested() {
         return None;
@@ -137,14 +143,18 @@ pub(super) fn compaction_stream_error_outcome(
     let upstream = raw
         .pointer("/response/error")
         .or_else(|| raw.get("error"))?;
-    let mut failure =
-        crate::model_turn::ModelTurnError::new("upstream_stream_error", error.message.clone());
+    let mut failure = stravia_runtime_contract::model_turn::ModelTurnError::new(
+        "upstream_stream_error",
+        error.message.clone(),
+    );
     failure.upstream_status = error.status_code.filter(|status| *status >= 400);
     failure.upstream_body = Some(serde_json::json!({ "error": upstream }));
     Some(model_turn_error_outcome(failure))
 }
 
-pub(super) fn model_turn_error_response(error: crate::agent::ModelTurnError) -> Response {
+pub(super) fn model_turn_error_response(
+    error: stravia_runtime_contract::model_turn::ModelTurnError,
+) -> Response {
     if let Some(body) = error.upstream_body {
         let status = error
             .upstream_status
@@ -213,6 +223,8 @@ pub(super) fn model_turn_error_response(error: crate::agent::ModelTurnError) -> 
     response
 }
 
-pub(super) fn model_turn_execute_failure(error: crate::agent::ModelTurnError) -> RoundOutcome {
+pub(super) fn model_turn_execute_failure(
+    error: stravia_runtime_contract::model_turn::ModelTurnError,
+) -> RoundOutcome {
     model_turn_error_outcome(error)
 }

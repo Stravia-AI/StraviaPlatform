@@ -99,10 +99,10 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
         .await
         .expect("Media Model");
     admin
-        .update_media_understanding_config(crate::admin::MediaUnderstandingConfigUpdate {
+        .update_media_understanding_config(stravia_media::admin::MediaUnderstandingConfigUpdate {
             enabled: true,
             model_id: Some(media_model.id),
-            thinking_level: Some(crate::thinking::ThinkingLevel::Medium),
+            thinking_level: Some(stravia_runtime_contract::thinking::ThinkingLevel::Medium),
         })
         .await
         .expect("enable Media Understanding");
@@ -122,15 +122,15 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
         .expect("API key");
     let mut request = AiRequest::new(
             "text-parent",
-            vec![crate::protocol::ir::AiItem {
-                role: crate::protocol::ir::Role::User,
-                content: crate::protocol::ir::MessageContent::Blocks(vec![
-                    crate::protocol::ir::ContentBlock::Text {
+            vec![stravia_runtime_contract::protocol::ir::AiItem {
+                role: stravia_runtime_contract::protocol::ir::Role::User,
+                content: stravia_runtime_contract::protocol::ir::MessageContent::Blocks(vec![
+                    stravia_runtime_contract::protocol::ir::ContentBlock::Text {
                         text: "What is in this image?".into(),
                         cache_control: None,
                     },
-                    crate::protocol::ir::ContentBlock::Image {
-                        source: crate::protocol::ir::MediaSource::Base64 {
+                    stravia_runtime_contract::protocol::ir::ContentBlock::Image {
+                        source: stravia_runtime_contract::protocol::ir::MediaSource::Base64 {
                             media_type: "image/png".into(),
                             data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=".into(),
                         },
@@ -173,14 +173,18 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
         .as_str()
         .expect("first assistant reasoning")
         .to_owned();
-    let mut second_user = crate::protocol::ir::AiItem::output_text("What is its subject?");
-    second_user.role = crate::protocol::ir::Role::User;
+    let mut second_user =
+        stravia_runtime_contract::protocol::ir::AiItem::output_text("What is its subject?");
+    second_user.role = stravia_runtime_contract::protocol::ir::Role::User;
     let second_request = AiRequest::new(
         "text-parent",
         vec![
             request.items[0].clone(),
-            crate::protocol::ir::AiItem::thinking(first_assistant_reasoning, None),
-            crate::protocol::ir::AiItem::output_text(first_assistant),
+            stravia_runtime_contract::protocol::ir::AiItem::thinking(
+                first_assistant_reasoning,
+                None,
+            ),
+            stravia_runtime_contract::protocol::ir::AiItem::output_text(first_assistant),
             second_user,
         ],
     );
@@ -210,39 +214,42 @@ struct ClearHiddenMediaPlanHook;
 
 struct ClearHiddenMediaPlanSession;
 
-impl crate::hook::Hook for ClearHiddenMediaPlanHook {
-    fn descriptor(&self) -> crate::hook::HookDescriptor {
-        crate::hook::HookDescriptor {
-            event_kinds: vec![crate::hook::EventKind::Request],
-            ..crate::hook::HookDescriptor::all("clear-hidden-media-plan")
+impl stravia_runtime_contract::hook::Hook for ClearHiddenMediaPlanHook {
+    fn descriptor(&self) -> stravia_runtime_contract::hook::HookDescriptor {
+        stravia_runtime_contract::hook::HookDescriptor {
+            event_kinds: vec![stravia_runtime_contract::hook::EventKind::Request],
+            ..stravia_runtime_contract::hook::HookDescriptor::all("clear-hidden-media-plan")
         }
     }
 
     fn create_session(
         &self,
-        _context: &crate::hook::SessionContext,
-    ) -> Box<dyn crate::hook::HookSession> {
+        _context: &stravia_runtime_contract::hook::SessionContext,
+    ) -> Box<dyn stravia_runtime_contract::hook::HookSession> {
         Box::new(ClearHiddenMediaPlanSession)
     }
 }
 
 #[async_trait]
-impl crate::hook::HookSession for ClearHiddenMediaPlanSession {
+impl stravia_runtime_contract::hook::HookSession for ClearHiddenMediaPlanSession {
     async fn handle(
         &mut self,
-        event: crate::hook::HookEvent<'_>,
-    ) -> Result<crate::hook::ActionBatch, String> {
-        let crate::hook::HookEvent::Request { current, round, .. } = event else {
-            return Ok(crate::hook::ActionBatch::default());
+        event: stravia_runtime_contract::hook::HookEvent<'_>,
+    ) -> Result<stravia_runtime_contract::hook::ActionBatch, String> {
+        let stravia_runtime_contract::hook::HookEvent::Request { current, round, .. } = event
+        else {
+            return Ok(stravia_runtime_contract::hook::ActionBatch::default());
         };
         if round == 0 {
-            return Ok(crate::hook::ActionBatch::default());
+            return Ok(stravia_runtime_contract::hook::ActionBatch::default());
         }
         let mut replacement = current.clone();
         replacement.meta.media_routing = None;
-        Ok(crate::hook::ActionBatch::one(
-            crate::hook::HookAction::PatchRequest(Box::new(
-                crate::hook::RequestPatch::ReplaceCanonical(Box::new(replacement)),
+        Ok(stravia_runtime_contract::hook::ActionBatch::one(
+            stravia_runtime_contract::hook::HookAction::PatchRequest(Box::new(
+                stravia_runtime_contract::hook::RequestPatch::ReplaceCanonical(Box::new(
+                    replacement,
+                )),
             )),
         ))
     }
@@ -363,11 +370,11 @@ async fn mixed_media_route_prefers_native_targets_and_rejects_targets_without_to
     let image_request = |model: &str| {
         let mut request = AiRequest::new(
             model,
-            vec![crate::protocol::ir::AiItem {
-                role: crate::protocol::ir::Role::User,
-                content: crate::protocol::ir::MessageContent::Blocks(vec![
-                    crate::protocol::ir::ContentBlock::Image {
-                        source: crate::protocol::ir::MediaSource::Base64 {
+            vec![stravia_runtime_contract::protocol::ir::AiItem {
+                role: stravia_runtime_contract::protocol::ir::Role::User,
+                content: stravia_runtime_contract::protocol::ir::MessageContent::Blocks(vec![
+                    stravia_runtime_contract::protocol::ir::ContentBlock::Image {
+                        source: stravia_runtime_contract::protocol::ir::MediaSource::Base64 {
                             media_type: "image/png".into(),
                             data: image_data.into(),
                         },

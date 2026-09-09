@@ -62,9 +62,9 @@ pub(super) fn item_reference_ids(items: &[AiItem]) -> impl Iterator<Item = &str>
     items.iter().filter_map(item_reference_id)
 }
 async fn read_response_artifact_image(
-    store: &dyn crate::agent::ArtifactStore,
+    store: &dyn stravia_runtime_contract::artifact::ArtifactStore,
     principal: &Principal,
-    artifact_id: &crate::agent::ArtifactId,
+    artifact_id: &stravia_runtime_contract::artifact::ArtifactId,
 ) -> Result<(bytes::Bytes, String), ()> {
     const MAX_RESPONSE_ARTIFACT_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
 
@@ -73,7 +73,7 @@ async fn read_response_artifact_image(
         return Err(());
     }
     let media_type = reader.artifact.mime_type;
-    let crate::agent::ArtifactSource::LocalPath(path) = reader.source else {
+    let stravia_runtime_contract::artifact::ArtifactSource::LocalPath(path) = reader.source else {
         return Err(());
     };
     let file = tokio::fs::File::open(path).await.map_err(|_| ())?;
@@ -93,7 +93,7 @@ async fn read_response_artifact_image(
 pub(crate) async fn hydrate_response_artifact_references(
     principal: &Principal,
     request: &mut AiRequest,
-    artifacts: Option<&dyn crate::agent::ArtifactStore>,
+    artifacts: Option<&dyn stravia_runtime_contract::artifact::ArtifactStore>,
 ) -> Result<(), String> {
     for message in &mut request.items {
         let MessageContent::Blocks(blocks) = &mut message.content else {
@@ -118,7 +118,7 @@ pub(crate) async fn hydrate_response_artifact_references(
             let (bytes, media_type) = read_response_artifact_image(
                 store,
                 principal,
-                &crate::agent::ArtifactId::new(artifact_id.clone()),
+                &stravia_runtime_contract::artifact::ArtifactId::new(artifact_id.clone()),
             )
             .await
             .map_err(|_| "item_reference_not_found".to_string())?;
@@ -156,7 +156,7 @@ pub(crate) async fn hydrate_response_artifact_references(
 
 pub(crate) fn request_preserves_upstream_response(request: &AiRequest) -> bool {
     match request.ext.as_ref() {
-        Some(crate::protocol::ir::ProtocolExt::OpenResponses(extension)) => {
+        Some(stravia_runtime_contract::protocol::ir::ProtocolExt::OpenResponses(extension)) => {
             extension.store.unwrap_or(true)
         }
         _ => true,
@@ -279,14 +279,19 @@ impl GenerationChainStore {
         }
         let state = ClientHistoryState::from_request(&client_request, &client_request.items);
         let mut context_fingerprints = Vec::with_capacity(limit);
-        let mut context = crate::protocol::ir::canonical::history_context_hash(&[]);
+        let mut context =
+            stravia_runtime_contract::protocol::ir::canonical::history_context_hash(&[]);
         let mut semantic_units = 0usize;
         for item in &client_request.items[..limit] {
-            context = crate::protocol::ir::canonical::append_history_context_hash(&context, item);
-            semantic_units +=
-                crate::protocol::ir::canonical::history_unit_count(std::slice::from_ref(item));
+            context =
+                stravia_runtime_contract::protocol::ir::canonical::append_history_context_hash(
+                    &context, item,
+                );
+            semantic_units += stravia_runtime_contract::protocol::ir::canonical::history_unit_count(
+                std::slice::from_ref(item),
+            );
             context_fingerprints.push((
-                crate::protocol::ir::canonical::hash_hex(&context),
+                stravia_runtime_contract::protocol::ir::canonical::hash_hex(&context),
                 u32::try_from(semantic_units).unwrap_or(u32::MAX),
             ));
         }
@@ -339,8 +344,9 @@ impl GenerationChainStore {
                 .materialize_generation(principal, &candidate.node_id)
                 .await?;
             let history_matches =
-                crate::protocol::ir::canonical::history_unit_count(&materialized.client_items)
-                    == matched_units
+                stravia_runtime_contract::protocol::ir::canonical::history_unit_count(
+                    &materialized.client_items,
+                ) == matched_units
                     && items_equal(
                         &materialized.client_items,
                         &client_request.items[..matched_items],
@@ -398,8 +404,8 @@ impl GenerationChainStore {
                 .await
             {
                 Ok(chain) => chain,
-                Err(crate::turn_chain::TurnUnavailable::Unavailable) => continue,
-                Err(crate::turn_chain::TurnUnavailable::Storage(_)) => {
+                Err(stravia_runtime_contract::turn_chain::TurnUnavailable::Unavailable) => continue,
+                Err(stravia_runtime_contract::turn_chain::TurnUnavailable::Storage(_)) => {
                     return Err(BeginError::CompactionStorageFailed);
                 }
             };
@@ -800,7 +806,7 @@ impl GenerationChainStore {
                     })?
         {
             effective_state.context_fingerprint =
-                crate::protocol::ir::canonical::hash_hex(&proof.context_hash);
+                stravia_runtime_contract::protocol::ir::canonical::hash_hex(&proof.context_hash);
             effective_state.context_messages = proof.context_messages;
             effective_state.canonical_controls_fingerprint = proof.controls_fingerprint;
         }
@@ -854,9 +860,9 @@ impl GenerationChainStore {
                 items: effective_request.items.clone(),
             }
         };
-        let item_count = u32::try_from(crate::protocol::ir::canonical::history_unit_count(
-            &client_items,
-        ))
+        let item_count = u32::try_from(
+            stravia_runtime_contract::protocol::ir::canonical::history_unit_count(&client_items),
+        )
         .map_err(|error| TurnCommitError::Storage(error.to_string()))?;
         let reusable_prefix = Some(ReusablePrefixMetadata {
             namespace: client_history.reusable_namespace(),

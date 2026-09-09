@@ -12,13 +12,14 @@ pub(crate) struct HistoryMarkerExecutionJob {
 pub(crate) struct StartedHistoryMarkerExecution {
     marker_reference: String,
     raw_result: tokio::sync::oneshot::Receiver<RawHistoryMarkerExecution>,
-    transformed_result: tokio::sync::oneshot::Sender<hook::PlatformToolResult>,
+    transformed_result:
+        tokio::sync::oneshot::Sender<stravia_runtime_contract::hook::PlatformToolResult>,
 }
 
 #[derive(Clone)]
 struct RawHistoryMarkerExecution {
-    call: protocol::ir::ToolCall,
-    result: hook::PlatformToolResult,
+    call: stravia_runtime_contract::protocol::ir::ToolCall,
+    result: stravia_runtime_contract::hook::PlatformToolResult,
 }
 
 impl Gateway {
@@ -49,10 +50,10 @@ impl Gateway {
             .execution_deadline_unix_ms
             .saturating_sub(chrono::Utc::now().timestamp_millis());
         let result = if remaining_ms <= 0 {
-            hook::PlatformToolResult {
-                tool_id: hook::ToolId::new("deadline"),
+            stravia_runtime_contract::hook::PlatformToolResult {
+                tool_id: stravia_runtime_contract::hook::ToolId::new("deadline"),
                 call_id: call.id.clone(),
-                content_kind: protocol::ir::ToolResultContentKind::Json,
+                content_kind: stravia_runtime_contract::protocol::ir::ToolResultContentKind::Json,
                 content: serde_json::Value::String(
                     "Platform tool execution reached its registered deadline.".into(),
                 ),
@@ -67,10 +68,11 @@ impl Gateway {
             .await
             {
                 Ok(result) => result,
-                Err(_) => hook::PlatformToolResult {
-                    tool_id: hook::ToolId::new("deadline"),
+                Err(_) => stravia_runtime_contract::hook::PlatformToolResult {
+                    tool_id: stravia_runtime_contract::hook::ToolId::new("deadline"),
                     call_id: call.id.clone(),
-                    content_kind: protocol::ir::ToolResultContentKind::Json,
+                    content_kind:
+                        stravia_runtime_contract::protocol::ir::ToolResultContentKind::Json,
                     content: serde_json::Value::String(
                         "Platform tool execution reached its registered deadline.".into(),
                     ),
@@ -111,11 +113,11 @@ impl Gateway {
 
     async fn persist_history_marker_result(
         store: &dyn history_marker::HistoryMarkerStore,
-        principal: &hook::Principal,
+        principal: &stravia_runtime_contract::Principal,
         marker_reference: &str,
         owner_id: &str,
         raw: RawHistoryMarkerExecution,
-        result: hook::PlatformToolResult,
+        result: stravia_runtime_contract::hook::PlatformToolResult,
     ) {
         let state = if result.is_error {
             history_marker::PlatformExecutionState::Failed
@@ -145,7 +147,7 @@ impl Gateway {
 
     pub(crate) fn start_history_marker_executions(
         &self,
-        principal: hook::Principal,
+        principal: stravia_runtime_contract::Principal,
         jobs: Vec<HistoryMarkerExecutionJob>,
     ) -> Vec<StartedHistoryMarkerExecution> {
         jobs.into_iter()
@@ -209,11 +211,11 @@ impl Gateway {
                 continue;
             };
             let hook_failure = match run.on_tool_result(&mut raw.result).await {
-                Ok(hook::HookControl::Continue) => None,
+                Ok(stravia_runtime_contract::hook::HookControl::Continue) => None,
                 Ok(
-                    hook::HookControl::Respond(_)
-                    | hook::HookControl::Reject(_)
-                    | hook::HookControl::StreamAbort { .. },
+                    stravia_runtime_contract::hook::HookControl::Respond(_)
+                    | stravia_runtime_contract::hook::HookControl::Reject(_)
+                    | stravia_runtime_contract::hook::HookControl::StreamAbort { .. },
                 ) => Some("ToolResult Hook attempted response control".to_owned()),
                 Err(error) => Some(error.to_string()),
             };
@@ -234,7 +236,7 @@ impl Gateway {
 
     pub(crate) async fn run_history_marker_executions(
         &self,
-        principal: hook::Principal,
+        principal: stravia_runtime_contract::Principal,
         jobs: Vec<HistoryMarkerExecutionJob>,
         run: &mut hook::InferenceRun,
     ) {

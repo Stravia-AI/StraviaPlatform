@@ -4,7 +4,7 @@ use super::*;
 
 #[derive(serde::Deserialize)]
 pub(super) struct ResetThinkingMappingInput {
-    level: stravia_core::thinking::ThinkingLevel,
+    level: stravia_runtime_contract::thinking::ThinkingLevel,
 }
 
 pub(super) async fn list_models_handler(State(gw): State<Gateway>) -> impl IntoResponse {

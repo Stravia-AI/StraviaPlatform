@@ -11,7 +11,7 @@ pub use negotiator::{
 };
 
 use crate::db::models::{Route, Target};
-use crate::protocol::ids::ProtocolId;
+use stravia_runtime_contract::protocol::ids::ProtocolId;
 
 // ── Plan ──────────────────────────────────────────────────────────────────────
 

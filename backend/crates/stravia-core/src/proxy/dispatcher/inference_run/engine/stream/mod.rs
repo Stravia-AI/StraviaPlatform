@@ -9,9 +9,13 @@ use std::sync::Arc;
 use axum::http::HeaderMap;
 use futures::StreamExt;
 
-use crate::agent::{CanonicalEvent, ModelTurn, ModelTurnExecutor};
-use crate::protocol::ir::{AiRequest, AiResponse, AiStreamDelta};
+use crate::agent::ModelTurn;
+use crate::agent::ModelTurnExecutor;
 use crate::proxy::context::RequestContext;
+use stravia_runtime_contract::model_turn::CanonicalEvent;
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::AiResponse;
+use stravia_runtime_contract::protocol::ir::AiStreamDelta;
 
 use super::delivery::LiveStreamRequest;
 use super::{
@@ -38,7 +42,9 @@ impl<'a> HookLegGuard<'a> {
         self.run
     }
 
-    pub(super) async fn close(&mut self) -> Result<Vec<AiStreamDelta>, crate::hook::HookError> {
+    pub(super) async fn close(
+        &mut self,
+    ) -> Result<Vec<AiStreamDelta>, stravia_runtime_contract::hook::HookError> {
         if self.closed {
             return Ok(Vec::new());
         }
@@ -62,7 +68,7 @@ pub(super) struct ModelTurnStreamInput {
     pub(super) executor: Arc<dyn ModelTurnExecutor>,
     pub(super) gateway: crate::Gateway,
     pub(super) headers: HeaderMap,
-    pub(super) ingress: crate::protocol::ids::ProtocolId,
+    pub(super) ingress: stravia_runtime_contract::protocol::ids::ProtocolId,
     pub(super) request_context: RequestContext,
     pub(super) request: AiRequest,
     pub(super) generation: super::GenerationChainRun,
@@ -373,7 +379,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                                 let platform_call = hook_leg
                                     .run_mut()
                                     .classify_tool_calls(&AiResponse {
-                                        items: vec![crate::protocol::ir::AiItem::function_call(
+                                        items: vec![stravia_runtime_contract::protocol::ir::AiItem::function_call(
                                             call,
                                         )],
                                         ..completion_context.empty_response()
@@ -384,7 +390,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                                     .expect("classified Platform Tool call");
                                 let execution = hook_leg.run_mut().detached_platform_execution(
                                     platform_call,
-                                    crate::proxy::context::CancellationToken::new(),
+                                    stravia_runtime_contract::CancellationToken::new(),
                                 );
                                 let (markers, jobs) = match prepare_platform_markers(
                                     &completion_context,
@@ -479,7 +485,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                     Ok(CanonicalEvent::Compacted(_)) => {
                         aborted = true;
                         preflight_failure = Some(super::model_turn_error_outcome(
-                            crate::model_turn::ModelTurnError::new(
+                            stravia_runtime_contract::model_turn::ModelTurnError::new(
                                 "unexpected_compaction_terminal",
                                 "Generation received a standalone compact result",
                             ),
@@ -985,8 +991,8 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                         .flatten()
                         .cloned();
                     let error = [native_error.unwrap_or_else(|| AiStreamDelta::StreamError {
-                        error: crate::protocol::ir::AiError::new(
-                            crate::protocol::ir::AiErrorKind::StreamMidError,
+                        error: stravia_runtime_contract::protocol::ir::AiError::new(
+                            stravia_runtime_contract::protocol::ir::AiErrorKind::StreamMidError,
                             "stream aborted",
                         ),
                     })];
@@ -1114,7 +1120,7 @@ pub(super) fn terminal_deltas_failed(deltas: &[AiStreamDelta]) -> bool {
 pub(super) fn transform_stream_deltas(
     inference_run: &mut crate::hook::InferenceRun,
     deltas: Vec<AiStreamDelta>,
-) -> Result<Vec<AiStreamDelta>, crate::hook::HookError> {
+) -> Result<Vec<AiStreamDelta>, stravia_runtime_contract::hook::HookError> {
     let mut transformed = Vec::new();
     for delta in deltas {
         transformed.extend(inference_run.transform_stream(delta)?);

@@ -5,17 +5,18 @@
 //! `override_model_in_body` is true: the encoder embeds the actual model name
 //! in the request body / URL path rather than a top-level `model` field.
 
-use crate::protocol::ids::{
-    EndpointCapabilities, GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA, ProtocolEndpoint,
-};
 use crate::protocol::registry::EndpointRegistration;
+use stravia_runtime_contract::protocol::ids::EndpointCapabilities;
+use stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA;
+use stravia_runtime_contract::protocol::ids::ProtocolEndpoint;
 
-use crate::protocol::ir::{AiRequest, AiResponse};
 use crate::protocol::transform::{
     ProtocolAdapter, TransformError, WireStreamDecoder, WireStreamEncoder,
 };
 use reqwest::header::HeaderMap;
 use serde_json::Value;
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::AiResponse;
 
 pub struct GoogleGenerateContentV1Beta;
 

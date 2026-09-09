@@ -9,9 +9,10 @@ use futures::Stream;
 
 use crate::Gateway;
 use crate::interaction_observation::{IngressStart, RunEvent, RunObserver, RunOutcome};
-use crate::protocol::ids::ProtocolId;
-use crate::protocol::ir::{AiRequest, RawEnvelope};
 use crate::proxy::context::RequestContext;
+use stravia_runtime_contract::protocol::ids::ProtocolId;
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::RawEnvelope;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Phase {
     Created,
@@ -222,7 +223,8 @@ impl WebSocketRunDelivery {
         self.observer.record_debug(|| RunEvent::Wire {
             direction: "platform_to_client".into(),
             transport: "websocket".into(),
-            protocol: crate::protocol::ids::OPEN_RESPONSES_2026_04_24.to_string(),
+            protocol: stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24
+                .to_string(),
             message_type: "text".into(),
             model_turn_id: None,
             attempt_id: None,
@@ -298,10 +300,10 @@ pub(super) struct RunTerminalContext {
     pub generation_committed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub waiting_client: bool,
     pub visible_text: Vec<String>,
-    pub client_input: std::sync::Arc<Vec<crate::protocol::ir::AiItem>>,
-    pub client_output: Vec<crate::protocol::ir::AiItem>,
+    pub client_input: std::sync::Arc<Vec<stravia_runtime_contract::protocol::ir::AiItem>>,
+    pub client_output: Vec<stravia_runtime_contract::protocol::ir::AiItem>,
     pub compaction: crate::compaction::Compaction,
-    pub principal: crate::hook::Principal,
+    pub principal: stravia_runtime_contract::Principal,
     pub compaction_records: crate::model_turn::CompactionPublications,
 }
 
@@ -490,7 +492,7 @@ impl RunTerminalContext {
                         standalone_window_delivered
                     }
                     crate::interaction_observation::CompactionMode::Inline => {
-                        crate::protocol::codec::open_responses::native_compaction_item(
+                        stravia_runtime_contract::protocol::ir::canonical::native_compaction_item(
                             &record.state,
                         )
                         .is_some_and(|state| items.contains(&state))

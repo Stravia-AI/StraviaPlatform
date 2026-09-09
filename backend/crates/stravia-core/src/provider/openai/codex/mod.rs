@@ -80,27 +80,30 @@ impl VendorExtension for OpenAiCodexChannel {
     }
     fn target_capabilities(
         &self,
-        protocol: crate::protocol::ids::ProtocolId,
+        protocol: stravia_runtime_contract::protocol::ids::ProtocolId,
     ) -> ResolvedTargetCapabilities {
         ResolvedTargetCapabilities {
             stream_only: true,
-            responses_websocket: protocol == crate::protocol::ids::OPEN_RESPONSES_2026_04_24,
+            responses_websocket: protocol
+                == stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24,
         }
     }
     async fn pre_encode(
         &self,
         _ctx: &VendorCtx<'_>,
-        request: &mut crate::protocol::ir::AiRequest,
+        request: &mut stravia_runtime_contract::protocol::ir::AiRequest,
     ) -> anyhow::Result<()> {
         for item in &mut request.items {
-            if item.role == crate::protocol::ir::Role::System {
-                item.role = crate::protocol::ir::Role::Developer;
+            if item.role == stravia_runtime_contract::protocol::ir::Role::System {
+                item.role = stravia_runtime_contract::protocol::ir::Role::Developer;
             }
         }
         let extension = request.ext.get_or_insert_with(|| {
-            crate::protocol::ir::ProtocolExt::OpenResponses(Default::default())
+            stravia_runtime_contract::protocol::ir::ProtocolExt::OpenResponses(Default::default())
         });
-        if let crate::protocol::ir::ProtocolExt::OpenResponses(extension) = extension {
+        if let stravia_runtime_contract::protocol::ir::ProtocolExt::OpenResponses(extension) =
+            extension
+        {
             extension.store = Some(false);
         }
         Ok(())
@@ -262,8 +265,9 @@ mod tests {
     }
     #[test]
     fn codex_target_declares_stream_only_execution() {
-        let capabilities =
-            OpenAiCodexChannel.target_capabilities(crate::protocol::ids::OPEN_RESPONSES_2026_04_24);
+        let capabilities = OpenAiCodexChannel.target_capabilities(
+            stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24,
+        );
 
         assert!(capabilities.stream_only);
         assert!(capabilities.responses_websocket);
@@ -271,7 +275,10 @@ mod tests {
     #[tokio::test]
     async fn codex_encodes_system_messages_as_developer_messages() {
         use crate::protocol::codec::open_responses::encoder::ResponsesEncoder;
-        use crate::protocol::ir::{AiItem, AiRequest, MessageContent, Role};
+        use stravia_runtime_contract::protocol::ir::AiItem;
+        use stravia_runtime_contract::protocol::ir::AiRequest;
+        use stravia_runtime_contract::protocol::ir::MessageContent;
+        use stravia_runtime_contract::protocol::ir::Role;
 
         let provider = crate::db::models::Provider {
             id: "provider".into(),
@@ -295,7 +302,7 @@ mod tests {
         };
         let context = VendorCtx {
             provider: &provider,
-            protocol_id: crate::protocol::ids::OPEN_RESPONSES_2026_04_24,
+            protocol_id: stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24,
             api_key: "token",
             actual_model: "gpt-test",
             credential: None,
@@ -363,7 +370,7 @@ mod tests {
         };
         let context = VendorCtx {
             provider: &provider,
-            protocol_id: crate::protocol::ids::OPEN_RESPONSES_2026_04_24,
+            protocol_id: stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24,
             api_key: "",
             actual_model: "gpt-5.4",
             credential: None,
@@ -413,23 +420,27 @@ mod tests {
         };
         let context = VendorCtx {
             provider: &provider,
-            protocol_id: crate::protocol::ids::OPEN_RESPONSES_2026_04_24,
+            protocol_id: stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24,
             api_key: "token",
             actual_model: "gpt-test",
             credential: None,
         };
-        let mut request = crate::protocol::ir::AiRequest::new("gpt-test", Vec::new());
-        request.ext = Some(crate::protocol::ir::ProtocolExt::OpenResponses(
-            crate::protocol::ir::OpenResponsesExt {
-                store: Some(true),
-                ..Default::default()
-            },
-        ));
+        let mut request =
+            stravia_runtime_contract::protocol::ir::AiRequest::new("gpt-test", Vec::new());
+        request.ext = Some(
+            stravia_runtime_contract::protocol::ir::ProtocolExt::OpenResponses(
+                stravia_runtime_contract::protocol::ir::OpenResponsesExt {
+                    store: Some(true),
+                    ..Default::default()
+                },
+            ),
+        );
         OpenAiCodexChannel
             .pre_encode(&context, &mut request)
             .await
             .expect("pre-encode");
-        let Some(crate::protocol::ir::ProtocolExt::OpenResponses(extension)) = request.ext.as_ref()
+        let Some(stravia_runtime_contract::protocol::ir::ProtocolExt::OpenResponses(extension)) =
+            request.ext.as_ref()
         else {
             panic!("Open Responses extension");
         };

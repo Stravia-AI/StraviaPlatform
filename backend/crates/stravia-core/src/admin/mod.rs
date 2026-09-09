@@ -46,19 +46,7 @@ pub use crate::interaction_observation::{
     ObservationEvent, ObservationQueryError, ObservationStream, ObservationUpdate, RejectionDetail,
     RejectionPage, RejectionQuery, RejectionSummary, RunDetail, TraceManifest,
 };
-pub use crate::reversible_redaction::{
-    CredentialMatch, CredentialRule, CredentialRuleCatalog, CredentialRuleComponent,
-};
-
-pub use media::{
-    EligibleMediaModel, MediaUnderstandingConfigError, MediaUnderstandingConfigUpdate,
-    MediaUnderstandingConfigView, MediaUnderstandingState,
-};
 pub use routes::{BindRouteInput, UnbindRouteInput};
-pub use web_search::{
-    CompatibleCodexModel, CompatibleCodexProvider, EligibleSearchModel, WebSearchConfigError,
-    WebSearchConfigView, WebSearchLimits,
-};
 
 use auth_data::*;
 use model_catalog::*;

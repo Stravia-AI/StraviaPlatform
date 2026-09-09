@@ -5,14 +5,18 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use futures::StreamExt;
 
-use crate::hook::Principal;
-use crate::proxy::context::CancellationToken;
-use crate::turn_chain::{
-    SqlTurnChainStore, TurnChainStore, TurnCommit, TurnCommitError, TurnNode, TurnNodeId,
-    TurnNodeKind, TurnUnavailable,
-};
+use crate::turn_chain::SqlTurnChainStore;
+use stravia_runtime_contract::CancellationToken;
+use stravia_runtime_contract::Principal;
+use stravia_runtime_contract::turn_chain::TurnChainStore;
+use stravia_runtime_contract::turn_chain::TurnCommit;
+use stravia_runtime_contract::turn_chain::TurnCommitError;
+use stravia_runtime_contract::turn_chain::TurnNode;
+use stravia_runtime_contract::turn_chain::TurnNodeId;
+use stravia_runtime_contract::turn_chain::TurnNodeKind;
+use stravia_runtime_contract::turn_chain::TurnUnavailable;
 
-use super::{
+use stravia_web_search::{
     BackendOutput, MemoryWebSearchConfigStore, SearchBackend, SearchBackendInput, SearchCompletion,
     SearchEvidence, SearchEvidenceSet, SearchReport, SearchReportValidator, SearchSource,
     SearchTurnId, WebSearchBackendDraft, WebSearchBackendKind, WebSearchConfig, WebSearchEvent,
@@ -52,7 +56,7 @@ async fn report_rejects_a_source_without_verified_evidence() {
 
 #[test]
 fn provenance_rejects_non_public_single_label_hosts() {
-    let error = super::validator::normalize_public_url("https://intranet/path")
+    let error = stravia_web_search::normalize_public_url("https://intranet/path")
         .expect_err("single-label host is not public");
 
     assert_eq!(error.code, "invalid_source_url");
@@ -79,7 +83,7 @@ async fn partial_report_accepts_a_localized_limitation() {
         .validate(
             &turn_id,
             SearchCompletion::Partial,
-            Some(super::SearchPartialCause::WorkingBudgetExhausted),
+            Some(stravia_web_search::SearchPartialCause::WorkingBudgetExhausted),
             report,
             &evidence,
         )
@@ -160,7 +164,10 @@ impl SearchBackend for CountingBackend {
         self.kind
     }
 
-    async fn run(&self, input: SearchBackendInput) -> Result<BackendOutput, super::WebSearchError> {
+    async fn run(
+        &self,
+        input: SearchBackendInput,
+    ) -> Result<BackendOutput, stravia_web_search::WebSearchError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.inputs.lock().expect("inputs").push(input.clone());
         tokio::time::sleep(self.delay).await;
@@ -216,7 +223,7 @@ async fn disabled_search_rejects_new_runs_without_calling_either_backend() {
         codex.clone(),
         Arc::new(SearchReportValidator),
         Duration::from_secs(7 * 24 * 60 * 60),
-        Arc::new(crate::web_search::AllowSearchRun),
+        Arc::new(stravia_web_search::AllowSearchRun),
     );
     let events = runner
         .run(WebSearchInput {
@@ -247,7 +254,7 @@ async fn runner_is_lazy_and_drop_cancels_the_request_owned_run() {
         backend.clone(),
         Arc::new(SearchReportValidator),
         Duration::from_secs(7 * 24 * 60 * 60),
-        Arc::new(crate::web_search::AllowSearchRun),
+        Arc::new(stravia_web_search::AllowSearchRun),
     );
     let cancellation = CancellationToken::new();
     let stream = runner.run(WebSearchInput {
@@ -277,7 +284,7 @@ async fn runner_emits_one_terminal_result_and_commits_the_search_turn() {
         Arc::new(CountingBackend::codex()),
         Arc::new(SearchReportValidator),
         Duration::from_secs(7 * 24 * 60 * 60),
-        Arc::new(crate::web_search::AllowSearchRun),
+        Arc::new(stravia_web_search::AllowSearchRun),
     );
     let mut stream = runner.run(WebSearchInput {
         principal: Principal::new("owner"),
@@ -304,7 +311,7 @@ async fn runner_emits_one_terminal_result_and_commits_the_search_turn() {
     let chain = turns
         .materialize(
             &Principal::new("owner"),
-            crate::turn_chain::TurnNodeKind::WebSearch,
+            stravia_runtime_contract::turn_chain::TurnNodeKind::WebSearch,
             &result.turn_id,
         )
         .await
@@ -328,7 +335,7 @@ async fn codex_uses_the_request_deadline_instead_of_saved_local_time_limit() {
         Arc::new(CountingBackend::delayed_codex(Duration::from_millis(20))),
         Arc::new(SearchReportValidator),
         Duration::from_secs(7 * 24 * 60 * 60),
-        Arc::new(crate::web_search::AllowSearchRun),
+        Arc::new(stravia_web_search::AllowSearchRun),
     );
 
     let result = completed(runner.run(WebSearchInput {
@@ -344,7 +351,9 @@ async fn codex_uses_the_request_deadline_instead_of_saved_local_time_limit() {
     assert_eq!(result.completion, SearchCompletion::Complete);
 }
 
-async fn completed(stream: super::WebSearchEventStream) -> super::WebSearchResult {
+async fn completed(
+    stream: stravia_web_search::WebSearchEventStream,
+) -> stravia_web_search::WebSearchResult {
     let events = stream.collect::<Vec<_>>().await;
     events
         .into_iter()
@@ -368,7 +377,7 @@ async fn continuation_uses_the_exact_parent_snapshot_and_supports_sibling_branch
         codex.clone(),
         Arc::new(SearchReportValidator),
         Duration::from_secs(7 * 24 * 60 * 60),
-        Arc::new(crate::web_search::AllowSearchRun),
+        Arc::new(stravia_web_search::AllowSearchRun),
     );
     let principal = Principal::new("owner");
     let root = completed(runner.run(WebSearchInput {
@@ -427,7 +436,7 @@ async fn continuation_uses_the_exact_parent_snapshot_and_supports_sibling_branch
         turns
             .materialize(
                 &principal,
-                crate::turn_chain::TurnNodeKind::WebSearch,
+                stravia_runtime_contract::turn_chain::TurnNodeKind::WebSearch,
                 &inherited.turn_id,
             )
             .await
@@ -439,7 +448,7 @@ async fn continuation_uses_the_exact_parent_snapshot_and_supports_sibling_branch
         turns
             .materialize(
                 &principal,
-                crate::turn_chain::TurnNodeKind::WebSearch,
+                stravia_runtime_contract::turn_chain::TurnNodeKind::WebSearch,
                 &replaced.turn_id,
             )
             .await
@@ -459,7 +468,7 @@ async fn continuation_is_principal_scoped_and_never_uses_an_implicit_latest_turn
         Arc::new(CountingBackend::codex()),
         Arc::new(SearchReportValidator),
         Duration::from_secs(7 * 24 * 60 * 60),
-        Arc::new(crate::web_search::AllowSearchRun),
+        Arc::new(stravia_web_search::AllowSearchRun),
     );
     let root = completed(runner.run(WebSearchInput {
         principal: Principal::new("owner"),
@@ -517,8 +526,8 @@ impl SearchBackend for FailingBackend {
     async fn run(
         &self,
         _input: SearchBackendInput,
-    ) -> Result<BackendOutput, super::WebSearchError> {
-        Err(super::WebSearchError::backend(
+    ) -> Result<BackendOutput, stravia_web_search::WebSearchError> {
+        Err(stravia_web_search::WebSearchError::backend(
             WebSearchBackendKind::Local,
             "context_overflow",
             "Search context exceeds the configured model limit",
@@ -536,7 +545,7 @@ async fn backend_failure_does_not_commit_a_search_turn() {
         Arc::new(CountingBackend::codex()),
         Arc::new(SearchReportValidator),
         Duration::from_secs(7 * 24 * 60 * 60),
-        Arc::new(crate::web_search::AllowSearchRun),
+        Arc::new(stravia_web_search::AllowSearchRun),
     );
     let principal = Principal::new("owner");
     let events = runner
@@ -571,7 +580,7 @@ async fn backend_failure_does_not_commit_a_search_turn() {
         turns
             .materialize(
                 &principal,
-                crate::turn_chain::TurnNodeKind::WebSearch,
+                stravia_runtime_contract::turn_chain::TurnNodeKind::WebSearch,
                 &turn_id
             )
             .await
@@ -590,7 +599,7 @@ impl SearchBackend for PendingBackend {
     async fn run(
         &self,
         _input: SearchBackendInput,
-    ) -> Result<BackendOutput, super::WebSearchError> {
+    ) -> Result<BackendOutput, stravia_web_search::WebSearchError> {
         futures::future::pending().await
     }
 }
@@ -600,16 +609,16 @@ struct RevokingAuthorizer {
 }
 
 #[async_trait]
-impl super::SearchRunAuthorizer for RevokingAuthorizer {
+impl stravia_web_search::SearchRunAuthorizer for RevokingAuthorizer {
     async fn authorize(
         &self,
         _principal: &Principal,
-        _binding: &super::ResolvedWebSearchBackend,
-    ) -> Result<(), super::WebSearchError> {
+        _binding: &stravia_web_search::ResolvedWebSearchBackend,
+    ) -> Result<(), stravia_web_search::WebSearchError> {
         if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
             Ok(())
         } else {
-            Err(super::WebSearchError::new(
+            Err(stravia_web_search::WebSearchError::new(
                 "authorization_failed",
                 "Web Search authorization failed",
             ))
@@ -687,7 +696,7 @@ async fn cancellation_while_committing_does_not_create_a_search_turn() {
         backend,
         Arc::new(SearchReportValidator),
         Duration::from_secs(7 * 24 * 60 * 60),
-        Arc::new(super::AllowSearchRun),
+        Arc::new(stravia_web_search::AllowSearchRun),
     );
     let cancellation = CancellationToken::new();
     let entered = turns.entered.notified();
@@ -729,7 +738,7 @@ async fn cancellation_while_committing_does_not_create_a_search_turn() {
 
 fn pending_runner(
     turns: Arc<SqlTurnChainStore>,
-    authorizer: Arc<dyn super::SearchRunAuthorizer>,
+    authorizer: Arc<dyn stravia_web_search::SearchRunAuthorizer>,
 ) -> WebSearchRunner {
     WebSearchRunner::new(
         Arc::new(MemoryWebSearchConfigStore::new(enabled_local_config())),
@@ -745,7 +754,7 @@ fn pending_runner(
 #[tokio::test]
 async fn explicit_cancellation_emits_one_failure_and_does_not_commit() {
     let turns = Arc::new(crate::turn_chain::test_store().await);
-    let runner = pending_runner(turns.clone(), Arc::new(super::AllowSearchRun));
+    let runner = pending_runner(turns.clone(), Arc::new(stravia_web_search::AllowSearchRun));
     let principal = Principal::new("owner");
     let cancellation = CancellationToken::new();
     let mut stream = runner.run(WebSearchInput {
@@ -778,7 +787,7 @@ async fn explicit_cancellation_emits_one_failure_and_does_not_commit() {
         turns
             .materialize(
                 &principal,
-                crate::turn_chain::TurnNodeKind::WebSearch,
+                stravia_runtime_contract::turn_chain::TurnNodeKind::WebSearch,
                 &turn_id
             )
             .await
@@ -789,7 +798,7 @@ async fn explicit_cancellation_emits_one_failure_and_does_not_commit() {
 #[tokio::test]
 async fn expired_deadline_emits_failure_without_committing() {
     let turns = Arc::new(crate::turn_chain::test_store().await);
-    let runner = pending_runner(turns.clone(), Arc::new(super::AllowSearchRun));
+    let runner = pending_runner(turns.clone(), Arc::new(stravia_web_search::AllowSearchRun));
     let principal = Principal::new("owner");
     let events = runner
         .run(WebSearchInput {
@@ -822,7 +831,7 @@ async fn expired_deadline_emits_failure_without_committing() {
         turns
             .materialize(
                 &principal,
-                crate::turn_chain::TurnNodeKind::WebSearch,
+                stravia_runtime_contract::turn_chain::TurnNodeKind::WebSearch,
                 turn_id
             )
             .await

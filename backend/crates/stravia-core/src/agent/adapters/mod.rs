@@ -23,15 +23,25 @@ use super::{
 };
 use crate::Gateway;
 use crate::hook::tool::blocks_to_value;
-use crate::hook::{
-    ActionBatch, EventKind, Hook, HookAction, HookDescriptor, HookEvent, HookSession, PlatformTool,
-    PlatformToolError, Principal, RequestKind, ResponsePatch, SessionContext, ToolExecutionContext,
-    ToolId,
-};
 use crate::mcp::{McpContext, McpTool, McpToolError, McpToolOutput};
-use crate::protocol::ir::ToolResultContentKind;
-use crate::proxy::context::CancellationToken;
 use crate::proxy::security::Security;
+use stravia_runtime_contract::CancellationToken;
+use stravia_runtime_contract::Principal;
+use stravia_runtime_contract::hook::ActionBatch;
+use stravia_runtime_contract::hook::EventKind;
+use stravia_runtime_contract::hook::Hook;
+use stravia_runtime_contract::hook::HookAction;
+use stravia_runtime_contract::hook::HookDescriptor;
+use stravia_runtime_contract::hook::HookEvent;
+use stravia_runtime_contract::hook::HookSession;
+use stravia_runtime_contract::hook::PlatformTool;
+use stravia_runtime_contract::hook::PlatformToolError;
+use stravia_runtime_contract::hook::RequestKind;
+use stravia_runtime_contract::hook::ResponsePatch;
+use stravia_runtime_contract::hook::SessionContext;
+use stravia_runtime_contract::hook::ToolExecutionContext;
+use stravia_runtime_contract::hook::ToolId;
+use stravia_runtime_contract::protocol::ir::ToolResultContentKind;
 
 pub struct PlatformToolAgentAdapter {
     tool: Arc<dyn PlatformTool>,

@@ -20,12 +20,8 @@ use super::{
 };
 use crate::Gateway;
 use crate::error::GatewayError;
-use crate::hook::RouteContext;
 use crate::interaction_observation::RunEvent;
 use crate::protocol::ProviderProtocols;
-use crate::protocol::ids::OPEN_RESPONSES_2026_04_24;
-use crate::protocol::ir::request::MediaRoutingMode;
-use crate::protocol::ir::{AiError, AiRequest, AiStreamDelta};
 use crate::provider::VendorRegistry;
 use crate::proxy::client::ProxyClient;
 use crate::proxy::context::RequestContext;
@@ -35,6 +31,12 @@ use crate::router::{
     AttemptFailureDisposition, RouteAttemptContext, RouteAttemptPolicy, RoutePolicyState,
     RouteSchedulingSnapshot, SelectedTarget, conversation_identity, selected_target_key,
 };
+use stravia_runtime_contract::hook::RouteContext;
+use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
+use stravia_runtime_contract::protocol::ir::AiError;
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::AiStreamDelta;
+use stravia_runtime_contract::protocol::ir::request::MediaRoutingMode;
 
 #[derive(Clone)]
 pub struct LiveModelTurnExecutor {
@@ -136,7 +138,7 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
                     let trace = input.request.meta.redaction.clone();
                     let principal = input.principal.clone();
                     let source_generation_id = input.compaction_source_generation_id.clone();
-                    let incoming_states = input.request.items.iter().filter_map(crate::protocol::codec::open_responses::native_compaction_item).collect::<Vec<_>>();
+                    let incoming_states = input.request.items.iter().filter_map(stravia_runtime_contract::protocol::ir::canonical::native_compaction_item).collect::<Vec<_>>();
                     let source = self.gateway.compaction.resolve(&principal, &input.request.items).await
                         .map_err(|error| ModelTurnError::new(error.code(), error.to_string()))?;
                     let mappings = self.gateway.redaction
@@ -179,7 +181,7 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
 fn register_compaction_stream(
     output: super::CanonicalEventStream,
     compaction: crate::compaction::Compaction,
-    principal: crate::hook::Principal,
+    principal: stravia_runtime_contract::Principal,
     target: crate::compaction::CompactionTarget,
     source_generation_id: Option<String>,
     source_record_ids: Vec<String>,
@@ -190,8 +192,8 @@ fn register_compaction_stream(
     operation_started: Instant,
 ) -> super::CanonicalEventStream {
     use crate::interaction_observation::{CompactionMode, CompactionPhase};
-    use crate::protocol::codec::open_responses::native_compaction_item;
     use futures::StreamExt;
+    use stravia_runtime_contract::protocol::ir::canonical::native_compaction_item;
     let state = (
         output,
         compaction,
@@ -223,7 +225,7 @@ fn register_compaction_stream(
             return None;
         }
         let mut event = output.next().await?;
-        let unseen = |item: &&crate::protocol::ir::AiItem| {
+        let unseen = |item: &&stravia_runtime_contract::protocol::ir::AiItem| {
             item.is_compaction()
                 && native_compaction_item(item).is_some_and(|wire| !seen.contains(&wire))
         };
@@ -388,9 +390,9 @@ impl Drop for ModelTurnTerminal {
 fn completion_stream(
     output: super::CanonicalEventStream,
     redaction: crate::reversible_redaction::ReversibleRedaction,
-    principal: crate::hook::Principal,
-    trace: crate::reversible_redaction::RedactionTrace,
-    cancellation: crate::proxy::context::CancellationToken,
+    principal: stravia_runtime_contract::Principal,
+    trace: stravia_runtime_contract::redaction::RedactionTrace,
+    cancellation: stravia_runtime_contract::CancellationToken,
     deadline: tokio::time::Instant,
     terminal: ModelTurnTerminal,
 ) -> super::CanonicalEventStream {
@@ -478,7 +480,7 @@ async fn execute_inner(
     }
 
     if input.authorization == ModelTurnAuthorization::CapabilityGrant
-        && crate::media::contains_images(&input.request)
+        && stravia_media::contains_images(&input.request)
         && !crate::media::model_is_image_capable(gateway, &route).await
     {
         return Err(ModelTurnError::new(
@@ -589,7 +591,7 @@ async fn execute_inner(
                             {
                                 Ok(result) => result,
                                 Err(_) => Err(AttemptFailure::upstream(
-                                    crate::protocol::ir::AiErrorKind::Timeout,
+                                    stravia_runtime_contract::protocol::ir::AiErrorKind::Timeout,
                                     None,
                                     "first_token_timeout",
                                     "Target did not produce a First Token before its timeout",
@@ -717,7 +719,7 @@ struct PreparedAttempt {
 
 struct AttemptFailure {
     error: ModelTurnError,
-    kind: Option<crate::protocol::ir::AiErrorKind>,
+    kind: Option<stravia_runtime_contract::protocol::ir::AiErrorKind>,
     record_health: bool,
     retry_after: Option<Duration>,
 }
@@ -726,14 +728,14 @@ impl AttemptFailure {
     fn retryable(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             error: ModelTurnError::new(code, message),
-            kind: Some(crate::protocol::ir::AiErrorKind::ServiceUnavailable),
+            kind: Some(stravia_runtime_contract::protocol::ir::AiErrorKind::ServiceUnavailable),
             record_health: true,
             retry_after: None,
         }
     }
 
     fn upstream(
-        kind: crate::protocol::ir::AiErrorKind,
+        kind: stravia_runtime_contract::protocol::ir::AiErrorKind,
         status: Option<u16>,
         code: impl Into<String>,
         message: impl Into<String>,
@@ -783,7 +785,7 @@ impl AttemptFailure {
     fn ineligible(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             error: ModelTurnError::new(code, message),
-            kind: Some(crate::protocol::ir::AiErrorKind::ModelNotAvailable),
+            kind: Some(stravia_runtime_contract::protocol::ir::AiErrorKind::ModelNotAvailable),
             record_health: false,
             retry_after: None,
         }
@@ -824,14 +826,14 @@ async fn prepare_attempt(
     };
 
     let metadata_required = input.request.meta.media_routing.is_some()
-        || crate::web_search::native_web_search_requested(&input.request)
+        || stravia_web_search::native_web_search_requested(&input.request)
         || input
             .request
             .tools
             .as_ref()
             .is_some_and(|tools| !tools.is_empty())
         || request_contains_video(&input.request)
-        || crate::media::contains_images(&input.request);
+        || stravia_media::contains_images(&input.request);
     let provider_model = gateway
         .storage
         .provider_models()
@@ -861,7 +863,7 @@ async fn prepare_attempt(
         && !supports_tools
     {
         return Err(AttemptFailure::ineligible(
-            if crate::web_search::native_web_search_requested(&input.request) {
+            if stravia_web_search::native_web_search_requested(&input.request) {
                 "web_search_unsupported"
             } else {
                 "tools_unsupported"
@@ -960,9 +962,9 @@ async fn prepare_attempt(
         .unwrap_or(false)
         && !matches!(
             egress,
-            crate::protocol::ids::OPEN_RESPONSES_2026_04_24
-                | crate::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01
-                | crate::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA
+            stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24
+                | stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01
+                | stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA
         )
     {
         return Err(AttemptFailure::ineligible(
@@ -1030,7 +1032,7 @@ async fn prepare_attempt(
         || provider_request
             .items
             .iter()
-            .any(crate::protocol::ir::AiItem::is_compaction))
+            .any(stravia_runtime_contract::protocol::ir::AiItem::is_compaction))
         && egress != OPEN_RESPONSES_2026_04_24
     {
         return Err(AttemptFailure::terminal(
@@ -1248,7 +1250,9 @@ mod tests {
         handle_terminal_stream_error, insert_default_prompt_cache_key,
         requests_reasoning_encrypted_content,
     };
-    use crate::protocol::ir::{AiError, AiErrorKind, AiStreamDelta};
+    use stravia_runtime_contract::protocol::ir::AiError;
+    use stravia_runtime_contract::protocol::ir::AiErrorKind;
+    use stravia_runtime_contract::protocol::ir::AiStreamDelta;
 
     #[test]
     fn session_cache_key_fills_only_missing_provider_value() {
@@ -1849,12 +1853,12 @@ fn handle_terminal_stream_error(
         |status| {
             matches!(
                 AiError::kind_from_status(status, None),
-                crate::protocol::ir::AiErrorKind::RateLimitError
-                    | crate::protocol::ir::AiErrorKind::QuotaExceeded
-                    | crate::protocol::ir::AiErrorKind::ServerError
-                    | crate::protocol::ir::AiErrorKind::ServiceUnavailable
-                    | crate::protocol::ir::AiErrorKind::Timeout
-                    | crate::protocol::ir::AiErrorKind::ModelNotAvailable
+                stravia_runtime_contract::protocol::ir::AiErrorKind::RateLimitError
+                    | stravia_runtime_contract::protocol::ir::AiErrorKind::QuotaExceeded
+                    | stravia_runtime_contract::protocol::ir::AiErrorKind::ServerError
+                    | stravia_runtime_contract::protocol::ir::AiErrorKind::ServiceUnavailable
+                    | stravia_runtime_contract::protocol::ir::AiErrorKind::Timeout
+                    | stravia_runtime_contract::protocol::ir::AiErrorKind::ModelNotAvailable
             )
         },
     );
@@ -1956,17 +1960,24 @@ fn target_namespace(
 
 fn namespace_fingerprint<T: serde::Serialize>(value: &T) -> String {
     let bytes = serde_json::to_vec(value).unwrap_or_default();
-    crate::protocol::ir::canonical::hash_hex(&crate::protocol::ir::canonical::hash_bytes(&bytes))
+    stravia_runtime_contract::protocol::ir::canonical::hash_hex(
+        &stravia_runtime_contract::protocol::ir::canonical::hash_bytes(&bytes),
+    )
 }
 
 fn request_contains_video(request: &AiRequest) -> bool {
     request.items.iter().any(|message| {
-        let crate::protocol::ir::MessageContent::Blocks(blocks) = &message.content else {
+        let stravia_runtime_contract::protocol::ir::MessageContent::Blocks(blocks) =
+            &message.content
+        else {
             return false;
         };
-        blocks
-            .iter()
-            .any(|block| matches!(block, crate::protocol::ir::ContentBlock::Video { .. }))
+        blocks.iter().any(|block| {
+            matches!(
+                block,
+                stravia_runtime_contract::protocol::ir::ContentBlock::Video { .. }
+            )
+        })
     })
 }
 

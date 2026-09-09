@@ -7,8 +7,6 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::error::GatewayError;
-use crate::protocol::ids::ProtocolId;
-use crate::protocol::ir::{AiRequest, AiResponse};
 use crate::provider::common::openai_compat::openai_map_error;
 use crate::provider::common::pipeline;
 use crate::provider::inbound::InboundResponse;
@@ -22,6 +20,9 @@ use crate::provider::vendor::{ProviderCtx, Vendor};
 use crate::provider::vendor_ext::{
     ResolvedTargetCapabilities, ResponsesWebSocketConnectionMetadata, VendorCtx, VendorExtension,
 };
+use stravia_runtime_contract::protocol::ids::ProtocolId;
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::AiResponse;
 
 const METADATA: VendorMetadata = VendorMetadata {
     id: "openai",
@@ -138,7 +139,8 @@ impl Vendor for OpenAiVendor {
     }
     fn target_capabilities(&self, protocol: ProtocolId) -> ResolvedTargetCapabilities {
         ResolvedTargetCapabilities {
-            responses_websocket: protocol == crate::protocol::ids::OPEN_RESPONSES_2026_04_24,
+            responses_websocket: protocol
+                == stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24,
             ..Default::default()
         }
     }
@@ -171,10 +173,9 @@ impl Vendor for OpenAiVendor {
         "openai"
     }
     fn supported_protocols(&self) -> &'static [ProtocolId] {
-        use crate::protocol::ids::{
-            OPEN_RESPONSES_2026_04_24, OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
-            OPENAI_COMPATIBLE_EMBEDDINGS_V1,
-        };
+        use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
+        use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
+        use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_EMBEDDINGS_V1;
         &[
             OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
             OPEN_RESPONSES_2026_04_24,

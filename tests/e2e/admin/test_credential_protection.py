@@ -51,7 +51,7 @@ def key_discoveries(env: dict[str, Any], key_name: str) -> list[dict[str, Any]]:
 @pytest.mark.e2e
 @pytest.mark.admin
 def test_catalog_tester_positions_and_read_only_boundary(admin_env: dict[str, Any], repo_root: Path) -> None:
-    snapshot = tomllib.loads((repo_root / "backend/crates/stravia-core/src/reversible_redaction/detection/betterleaks.toml").read_text(encoding="utf-8"))
+    snapshot = tomllib.loads((repo_root / "backend/crates/stravia-credential-protection/src/detection/betterleaks.toml").read_text(encoding="utf-8"))
     status, body = http_request("GET", f"{admin_env['admin']}{BASE}/rules", headers=admin_env["auth"])
     assert status == 200, body
     catalog = body["data"]

@@ -41,7 +41,7 @@ fn accepts_codex_rolling_request_extensions() {
 
     assert_eq!(
         request.reasoning.level,
-        Some(crate::thinking::ThinkingLevel::High)
+        Some(stravia_runtime_contract::thinking::ThinkingLevel::High)
     );
     assert_eq!(
         request
@@ -132,9 +132,9 @@ fn response_input_message_preserves_inline_images_in_stable_order() {
         }] if matches!(
             blocks.as_slice(),
             [
-                crate::protocol::ir::ContentBlock::Text { text, .. },
-                crate::protocol::ir::ContentBlock::Image {
-                    source: crate::protocol::ir::MediaSource::Base64 { media_type, data },
+                stravia_runtime_contract::protocol::ir::ContentBlock::Text { text, .. },
+                stravia_runtime_contract::protocol::ir::ContentBlock::Image {
+                    source: stravia_runtime_contract::protocol::ir::MediaSource::Base64 { media_type, data },
                     detail: Some(detail),
                     ..
                 }

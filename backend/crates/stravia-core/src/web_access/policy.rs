@@ -39,36 +39,7 @@ pub(super) fn validate_search_request(
     Ok(request)
 }
 
-pub(crate) fn normalize_domains(domains: Vec<String>) -> Result<Vec<String>, WebAccessError> {
-    let mut seen = HashSet::new();
-    let mut normalized = Vec::with_capacity(domains.len());
-    for domain in domains {
-        let candidate = domain.trim();
-        if candidate.is_empty()
-            || candidate.contains('/')
-            || candidate.contains('?')
-            || candidate.contains('#')
-            || candidate.contains('@')
-            || candidate.contains(':')
-        {
-            return Err(WebAccessError::invalid(format!(
-                "invalid domain filter: {domain}"
-            )));
-        }
-        let parsed = reqwest::Url::parse(&format!("https://{candidate}/"))
-            .map_err(|_| WebAccessError::invalid(format!("invalid domain filter: {domain}")))?;
-        let hostname = parsed
-            .host_str()
-            .ok_or_else(|| WebAccessError::invalid(format!("invalid domain filter: {domain}")))?
-            .trim_end_matches('.')
-            .to_ascii_lowercase();
-        if hostname.is_empty() || !seen.insert(hostname.clone()) {
-            continue;
-        }
-        normalized.push(hostname);
-    }
-    Ok(normalized)
-}
+use stravia_web_access_contract::normalize_domains;
 
 pub(super) fn apply_domain_filters(request: &SearchRequest, response: &mut SearchResponse) {
     response.results.retain(|result| {

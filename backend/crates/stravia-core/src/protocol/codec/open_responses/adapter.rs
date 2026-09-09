@@ -3,15 +3,18 @@
 //! Streaming requirements belong to the resolved Target, not this protocol
 //! adapter. Ordinary Open Responses targets support both buffered and streaming calls.
 
-use crate::protocol::ids::{EndpointCapabilities, OPEN_RESPONSES_2026_04_24, ProtocolEndpoint};
 use crate::protocol::registry::EndpointRegistration;
+use stravia_runtime_contract::protocol::ids::EndpointCapabilities;
+use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
+use stravia_runtime_contract::protocol::ids::ProtocolEndpoint;
 
-use crate::protocol::ir::{AiRequest, AiResponse};
 use crate::protocol::transform::{
     ProtocolAdapter, TransformError, WireStreamDecoder, WireStreamEncoder,
 };
 use reqwest::header::HeaderMap;
 use serde_json::Value;
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::AiResponse;
 
 pub struct OpenResponses20260424;
 

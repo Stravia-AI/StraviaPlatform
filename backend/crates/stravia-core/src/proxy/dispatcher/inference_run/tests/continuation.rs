@@ -7,7 +7,8 @@ impl crate::model_turn::ModelTurnExecutor for ChangingTargetExecutor {
     async fn execute(
         &self,
         input: crate::model_turn::TurnInput,
-    ) -> Result<crate::model_turn::ModelTurn, crate::model_turn::ModelTurnError> {
+    ) -> Result<crate::model_turn::ModelTurn, stravia_runtime_contract::model_turn::ModelTurnError>
+    {
         let first = self.0.fetch_add(1, Ordering::SeqCst) == 0;
         let target = if first {
             "first-target"
@@ -16,7 +17,7 @@ impl crate::model_turn::ModelTurnExecutor for ChangingTargetExecutor {
         };
         let mut response = AiResponse::new(target, "upstream-model");
         if first {
-            response.extend_tool_calls(vec![crate::protocol::ir::ToolCall {
+            response.extend_tool_calls(vec![stravia_runtime_contract::protocol::ir::ToolCall {
                 id: "platform-call".into(),
                 name: "stravia__ordered_tool".into(),
                 arguments: r#"{"index":1}"#.into(),
@@ -27,16 +28,16 @@ impl crate::model_turn::ModelTurnExecutor for ChangingTargetExecutor {
             response.stop_reason = Some("stop".into());
         }
         Ok(crate::model_turn::ModelTurn::in_memory(
-            crate::hook::RouteContext {
+            stravia_runtime_contract::hook::RouteContext {
                 model_id: input.request.model.clone(),
                 provider_id: target.into(),
                 target_id: target.into(),
                 egress: OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
             },
             input.request,
-            [Ok(crate::model_turn::CanonicalEvent::Completed(Box::new(
-                response,
-            )))],
+            [Ok(
+                stravia_runtime_contract::model_turn::CanonicalEvent::Completed(Box::new(response)),
+            )],
         ))
     }
 }
@@ -64,9 +65,9 @@ async fn delivered_hidden_round_continuation_prefers_the_final_model_legs_target
         .await
         .expect("Principal");
     let mut request = AiRequest::new("changing-target-route", Vec::new());
-    request.ext = Some(crate::protocol::ir::ProtocolExt::OpenResponses(
-        Default::default(),
-    ));
+    request.ext = Some(
+        stravia_runtime_contract::protocol::ir::ProtocolExt::OpenResponses(Default::default()),
+    );
     let response = execute(RunInput {
         gateway: gateway.clone(),
         executor: Arc::new(ChangingTargetExecutor(AtomicUsize::new(0))),
@@ -92,12 +93,16 @@ async fn delivered_hidden_round_continuation_prefers_the_final_model_legs_target
     let response: serde_json::Value = serde_json::from_slice(&body).expect("response");
     assert!(String::from_utf8_lossy(&body).contains("final Target answer"));
     let mut continuation = AiRequest::new("changing-target-route", Vec::new());
-    continuation.ext = Some(crate::protocol::ir::ProtocolExt::OpenResponses(
-        crate::protocol::ir::OpenResponsesExt {
-            previous_response_id: Some(response["id"].as_str().expect("response identity").into()),
-            ..Default::default()
-        },
-    ));
+    continuation.ext = Some(
+        stravia_runtime_contract::protocol::ir::ProtocolExt::OpenResponses(
+            stravia_runtime_contract::protocol::ir::OpenResponsesExt {
+                previous_response_id: Some(
+                    response["id"].as_str().expect("response identity").into(),
+                ),
+                ..Default::default()
+            },
+        ),
+    );
     assert_eq!(
         gateway
             .generation_chains
@@ -619,8 +624,8 @@ async fn chat_full_history_uses_upstream_websocket_and_longest_reusable_prefix()
     .await;
     let headers = authorized_headers(&gateway).await;
 
-    let mut first_user = crate::protocol::ir::AiItem::output_text("first");
-    first_user.role = crate::protocol::ir::Role::User;
+    let mut first_user = stravia_runtime_contract::protocol::ir::AiItem::output_text("first");
+    first_user.role = stravia_runtime_contract::protocol::ir::Role::User;
     let first_response = execute_non_stream_request_with_headers(
         gateway.clone(),
         headers.clone(),
@@ -647,13 +652,13 @@ async fn chat_full_history_uses_upstream_websocket_and_longest_reusable_prefix()
         serde_json::json!("first answer")
     );
 
-    let mut second_user = crate::protocol::ir::AiItem::output_text("second");
-    second_user.role = crate::protocol::ir::Role::User;
+    let mut second_user = stravia_runtime_contract::protocol::ir::AiItem::output_text("second");
+    second_user.role = stravia_runtime_contract::protocol::ir::Role::User;
     let second_request = AiRequest::new(
         "responses-websocket-route",
         vec![
             first_user.clone(),
-            crate::protocol::ir::AiItem::output_text("first answer"),
+            stravia_runtime_contract::protocol::ir::AiItem::output_text("first answer"),
             second_user.clone(),
         ],
     );
@@ -671,21 +676,23 @@ async fn chat_full_history_uses_upstream_websocket_and_longest_reusable_prefix()
         serde_json::json!("second answer")
     );
 
-    let mut third_user = crate::protocol::ir::AiItem::output_text("third");
-    third_user.role = crate::protocol::ir::Role::User;
+    let mut third_user = stravia_runtime_contract::protocol::ir::AiItem::output_text("third");
+    third_user.role = stravia_runtime_contract::protocol::ir::Role::User;
     let mut third_request = AiRequest::new(
         "responses-websocket-route",
         vec![
             first_user,
-            crate::protocol::ir::AiItem::output_text("first answer"),
+            stravia_runtime_contract::protocol::ir::AiItem::output_text("first answer"),
             second_user,
-            crate::protocol::ir::AiItem::output_text("second answer"),
+            stravia_runtime_contract::protocol::ir::AiItem::output_text("second answer"),
             third_user,
         ],
     );
-    third_request.ext = Some(crate::protocol::ir::ProtocolExt::Anthropic(
-        crate::protocol::ir::AnthropicExt::default(),
-    ));
+    third_request.ext = Some(
+        stravia_runtime_contract::protocol::ir::ProtocolExt::Anthropic(
+            stravia_runtime_contract::protocol::ir::AnthropicExt::default(),
+        ),
+    );
     let third_response = execute_request_with_headers(
         gateway,
         headers,
@@ -738,15 +745,17 @@ async fn store_false_chat_chain_generates_a_stable_prompt_cache_key() {
     .await;
     let headers = authorized_headers(&gateway).await;
 
-    let mut first_user = crate::protocol::ir::AiItem::output_text("first");
-    first_user.role = crate::protocol::ir::Role::User;
+    let mut first_user = stravia_runtime_contract::protocol::ir::AiItem::output_text("first");
+    first_user.role = stravia_runtime_contract::protocol::ir::Role::User;
     let mut first_request = AiRequest::new("store-false-cache-key", vec![first_user.clone()]);
-    first_request.ext = Some(crate::protocol::ir::ProtocolExt::OpenResponses(
-        crate::protocol::ir::OpenResponsesExt {
-            store: Some(false),
-            ..Default::default()
-        },
-    ));
+    first_request.ext = Some(
+        stravia_runtime_contract::protocol::ir::ProtocolExt::OpenResponses(
+            stravia_runtime_contract::protocol::ir::OpenResponsesExt {
+                store: Some(false),
+                ..Default::default()
+            },
+        ),
+    );
     let first_response =
         execute_non_stream_request_with_headers(gateway.clone(), headers.clone(), first_request)
             .await;
@@ -755,22 +764,24 @@ async fn store_false_chat_chain_generates_a_stable_prompt_cache_key() {
         .await
         .expect("first response body");
 
-    let mut second_user = crate::protocol::ir::AiItem::output_text("second");
-    second_user.role = crate::protocol::ir::Role::User;
+    let mut second_user = stravia_runtime_contract::protocol::ir::AiItem::output_text("second");
+    second_user.role = stravia_runtime_contract::protocol::ir::Role::User;
     let mut second_request = AiRequest::new(
         "store-false-cache-key",
         vec![
             first_user,
-            crate::protocol::ir::AiItem::output_text("first answer"),
+            stravia_runtime_contract::protocol::ir::AiItem::output_text("first answer"),
             second_user,
         ],
     );
-    second_request.ext = Some(crate::protocol::ir::ProtocolExt::OpenResponses(
-        crate::protocol::ir::OpenResponsesExt {
-            store: Some(false),
-            ..Default::default()
-        },
-    ));
+    second_request.ext = Some(
+        stravia_runtime_contract::protocol::ir::ProtocolExt::OpenResponses(
+            stravia_runtime_contract::protocol::ir::OpenResponsesExt {
+                store: Some(false),
+                ..Default::default()
+            },
+        ),
+    );
     let second_response =
         execute_non_stream_request_with_headers(gateway, headers, second_request).await;
     assert_eq!(second_response.status(), StatusCode::OK);
@@ -807,8 +818,8 @@ async fn missing_upstream_prefix_replays_full_history_once_on_the_same_socket() 
         .await;
     let headers = authorized_headers(&gateway).await;
 
-    let mut first_user = crate::protocol::ir::AiItem::output_text("first");
-    first_user.role = crate::protocol::ir::Role::User;
+    let mut first_user = stravia_runtime_contract::protocol::ir::AiItem::output_text("first");
+    first_user.role = stravia_runtime_contract::protocol::ir::Role::User;
     let first = execute_non_stream_request_with_headers(
         gateway.clone(),
         headers.clone(),
@@ -826,8 +837,8 @@ async fn missing_upstream_prefix_replays_full_history_once_on_the_same_socket() 
         .expect("first answer")
         .to_owned();
 
-    let mut second_user = crate::protocol::ir::AiItem::output_text("second");
-    second_user.role = crate::protocol::ir::Role::User;
+    let mut second_user = stravia_runtime_contract::protocol::ir::AiItem::output_text("second");
+    second_user.role = stravia_runtime_contract::protocol::ir::Role::User;
     let second = execute_non_stream_request_with_headers(
         gateway,
         headers,
@@ -835,7 +846,7 @@ async fn missing_upstream_prefix_replays_full_history_once_on_the_same_socket() 
             model,
             vec![
                 first_user,
-                crate::protocol::ir::AiItem::output_text(first_answer),
+                stravia_runtime_contract::protocol::ir::AiItem::output_text(first_answer),
                 second_user,
             ],
         ),
@@ -880,8 +891,8 @@ async fn missing_upstream_prefix_is_not_replayed_after_upstream_event() {
         .await;
     let headers = authorized_headers(&gateway).await;
 
-    let mut first_user = crate::protocol::ir::AiItem::output_text("first");
-    first_user.role = crate::protocol::ir::Role::User;
+    let mut first_user = stravia_runtime_contract::protocol::ir::AiItem::output_text("first");
+    first_user.role = stravia_runtime_contract::protocol::ir::Role::User;
     let first = execute_non_stream_request_with_headers(
         gateway.clone(),
         headers.clone(),
@@ -898,13 +909,13 @@ async fn missing_upstream_prefix_is_not_replayed_after_upstream_event() {
         .expect("first answer")
         .to_owned();
 
-    let mut second_user = crate::protocol::ir::AiItem::output_text("second");
-    second_user.role = crate::protocol::ir::Role::User;
+    let mut second_user = stravia_runtime_contract::protocol::ir::AiItem::output_text("second");
+    second_user.role = stravia_runtime_contract::protocol::ir::Role::User;
     let mut second_request = AiRequest::new(
         model,
         vec![
             first_user,
-            crate::protocol::ir::AiItem::output_text(first_answer),
+            stravia_runtime_contract::protocol::ir::AiItem::output_text(first_answer),
             second_user,
         ],
     );
@@ -983,8 +994,9 @@ async fn cache_affinity_prefers_the_target_that_processed_a_long_exact_prefix() 
         )
         .await
         .expect("authorized principal");
-    let mut prefix = crate::protocol::ir::AiItem::output_text("long cacheable prefix");
-    prefix.role = crate::protocol::ir::Role::User;
+    let mut prefix =
+        stravia_runtime_contract::protocol::ir::AiItem::output_text("long cacheable prefix");
+    prefix.role = stravia_runtime_contract::protocol::ir::Role::User;
     let first_turn = gateway
         .model_turn
         .execute(crate::agent::TurnInput::new(
@@ -997,8 +1009,8 @@ async fn cache_affinity_prefers_the_target_that_processed_a_long_exact_prefix() 
     let _ = first_turn.output.collect::<Vec<_>>().await;
 
     gateway.health_registry.record_success(&first_target);
-    let mut follow_up = crate::protocol::ir::AiItem::output_text("follow up");
-    follow_up.role = crate::protocol::ir::Role::User;
+    let mut follow_up = stravia_runtime_contract::protocol::ir::AiItem::output_text("follow up");
+    follow_up.role = stravia_runtime_contract::protocol::ir::Role::User;
     let second_turn = gateway
         .model_turn
         .execute(crate::agent::TurnInput::new(
@@ -1007,7 +1019,7 @@ async fn cache_affinity_prefers_the_target_that_processed_a_long_exact_prefix() 
                 model,
                 vec![
                     prefix,
-                    crate::protocol::ir::AiItem::output_text("first output"),
+                    stravia_runtime_contract::protocol::ir::AiItem::output_text("first output"),
                     follow_up,
                 ],
             ),
@@ -1018,7 +1030,7 @@ async fn cache_affinity_prefers_the_target_that_processed_a_long_exact_prefix() 
     let events = second_turn.output.collect::<Vec<_>>().await;
     assert!(matches!(
         events.last(),
-        Some(Ok(crate::agent::CanonicalEvent::Completed(response)))
+        Some(Ok(stravia_runtime_contract::model_turn::CanonicalEvent::Completed(response)))
             if response.output_text() == "continued output"
     ));
 

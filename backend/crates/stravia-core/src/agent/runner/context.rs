@@ -11,7 +11,7 @@ pub(super) struct ParentAgentSnapshot {
     pub(super) definition_id: AgentDefinitionId,
     pub(super) definition_revision: u32,
     pub(super) model_id: String,
-    pub(super) thinking_level: Option<crate::thinking::ThinkingLevel>,
+    pub(super) thinking_level: Option<stravia_runtime_contract::thinking::ThinkingLevel>,
 }
 
 impl AgentRunner {
@@ -251,8 +251,10 @@ impl AgentRunner {
             .payload
             .get("thinking_level")
             .map(|value| {
-                serde_json::from_value::<Option<crate::thinking::ThinkingLevel>>(value.clone())
-                    .map_err(|error| AgentRunError::new("parent_turn_invalid", error.to_string()))
+                serde_json::from_value::<Option<stravia_runtime_contract::thinking::ThinkingLevel>>(
+                    value.clone(),
+                )
+                .map_err(|error| AgentRunError::new("parent_turn_invalid", error.to_string()))
             })
             .transpose()?
             .flatten();

@@ -4,8 +4,9 @@ use uuid::Uuid;
 
 use super::formatter::{gateway_item_id, response_resource_snapshot};
 use crate::protocol::SseEvent;
-use crate::protocol::ir::usage::Usage;
-use crate::protocol::ir::{AiItemStatus, AiStreamDelta};
+use stravia_runtime_contract::protocol::ir::AiItemStatus;
+use stravia_runtime_contract::protocol::ir::AiStreamDelta;
+use stravia_runtime_contract::protocol::ir::usage::Usage;
 
 struct PendingFunctionCall {
     output_index: usize,
@@ -117,7 +118,7 @@ impl ResponsesStreamFormatter {
 
     pub(crate) fn set_response_profile_from_request(
         &mut self,
-        request: &crate::protocol::ir::AiRequest,
+        request: &stravia_runtime_contract::protocol::ir::AiRequest,
         previous_response_id: Option<&str>,
     ) {
         self.compaction_requested =
@@ -1647,7 +1648,8 @@ impl ResponsesStreamFormatter {
                             }),
                         );
                     }
-                    let is_message = item.role == crate::protocol::ir::Role::Assistant
+                    let is_message = item.role
+                        == stravia_runtime_contract::protocol::ir::Role::Assistant
                         && item.tool_calls.is_none()
                         && item.reasoning_ref().is_none()
                         && item.thinking_ref().is_none()

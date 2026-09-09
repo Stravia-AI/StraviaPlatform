@@ -13,9 +13,8 @@
 
 use stravia_core::db::models::Provider;
 use stravia_core::protocol::ProviderProtocols;
-use stravia_core::protocol::ids::{
-    OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1, OPENAI_COMPATIBLE_EMBEDDINGS_V1,
-};
+use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
+use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_EMBEDDINGS_V1;
 
 fn provider(protocol: &str) -> Provider {
     Provider {

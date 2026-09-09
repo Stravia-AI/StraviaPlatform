@@ -8,13 +8,24 @@
 use anyhow::Result;
 use serde_json::Value;
 
-use crate::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01;
-use crate::protocol::ir::DocumentSource as IrDocumentSource;
-use crate::protocol::ir::{
-    AiItem, AiRequest, AnthropicExt, CacheTtl, ContentBlock, GenerationConfig, MediaSource,
-    MessageContent, ProtocolExt, ReasoningConfig, ReasoningEffort, Role, StreamConfig, ToolCall,
-    ToolChoice, ToolSpec,
-};
+use stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01;
+use stravia_runtime_contract::protocol::ir::AiItem;
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::AnthropicExt;
+use stravia_runtime_contract::protocol::ir::CacheTtl;
+use stravia_runtime_contract::protocol::ir::ContentBlock;
+use stravia_runtime_contract::protocol::ir::DocumentSource as IrDocumentSource;
+use stravia_runtime_contract::protocol::ir::GenerationConfig;
+use stravia_runtime_contract::protocol::ir::MediaSource;
+use stravia_runtime_contract::protocol::ir::MessageContent;
+use stravia_runtime_contract::protocol::ir::ProtocolExt;
+use stravia_runtime_contract::protocol::ir::ReasoningConfig;
+use stravia_runtime_contract::protocol::ir::ReasoningEffort;
+use stravia_runtime_contract::protocol::ir::Role;
+use stravia_runtime_contract::protocol::ir::StreamConfig;
+use stravia_runtime_contract::protocol::ir::ToolCall;
+use stravia_runtime_contract::protocol::ir::ToolChoice;
+use stravia_runtime_contract::protocol::ir::ToolSpec;
 
 use super::types::{
     AnthropicContent, AnthropicContentBlock, AnthropicImageSource, AnthropicMessage,
@@ -169,10 +180,10 @@ impl AnthropicDecoder {
                     level: Some(if enabled {
                         thinking
                             .budget_tokens
-                            .map(crate::thinking::ThinkingLevel::from_budget)
-                            .unwrap_or(crate::thinking::ThinkingLevel::Medium)
+                            .map(stravia_runtime_contract::thinking::ThinkingLevel::from_budget)
+                            .unwrap_or(stravia_runtime_contract::thinking::ThinkingLevel::Medium)
                     } else {
-                        crate::thinking::ThinkingLevel::Off
+                        stravia_runtime_contract::thinking::ThinkingLevel::Off
                     }),
                     ..Default::default()
                 }
@@ -357,9 +368,9 @@ fn decode_message(msg: AnthropicMessage) -> Result<Vec<AiItem>> {
                         tc_id = Some(tool_use_id.clone());
                         let content = content.unwrap_or(Value::Null);
                         let content_kind = if content.is_string() || content.is_array() {
-                            crate::protocol::ir::ToolResultContentKind::ContentBlocks
+                            stravia_runtime_contract::protocol::ir::ToolResultContentKind::ContentBlocks
                         } else {
-                            crate::protocol::ir::ToolResultContentKind::Json
+                            stravia_runtime_contract::protocol::ir::ToolResultContentKind::Json
                         };
                         content_blocks.push(ContentBlock::ToolResult {
                             tool_use_id,
@@ -460,7 +471,7 @@ fn decode_user_blocks(blocks: Vec<AnthropicContentBlock>) -> Result<Vec<AiItem>>
                     "json"
                 };
                 let meta = Some(serde_json::json!({
-                    (crate::protocol::ir::TOOL_RESULT_CONTENT_KIND_META): content_kind
+                    (stravia_runtime_contract::protocol::ir::TOOL_RESULT_CONTENT_KIND_META): content_kind
                 }));
                 let tool_text = match content.unwrap_or(Value::Null) {
                     Value::String(s) => s,
@@ -570,9 +581,11 @@ fn decode_user_blocks(blocks: Vec<AnthropicContentBlock>) -> Result<Vec<AiItem>>
 
 // ── Type-mapping helpers ──────────────────────────────────────────────────────
 
-fn map_cache_control(_cc: &WireCacheControl) -> crate::protocol::ir::CacheControl {
+fn map_cache_control(
+    _cc: &WireCacheControl,
+) -> stravia_runtime_contract::protocol::ir::CacheControl {
     // Anthropic only has "ephemeral" TTL.
-    crate::protocol::ir::CacheControl {
+    stravia_runtime_contract::protocol::ir::CacheControl {
         ttl: CacheTtl::Ephemeral5m,
         breakpoint_priority: 0,
     }
@@ -647,15 +660,16 @@ fn parse_output_effort(output_config: Option<&Value>) -> Result<Option<String>> 
 }
 
 fn reasoning_from_effort(effort: &str, display: Option<String>) -> Result<ReasoningConfig> {
-    let level = crate::thinking::ThinkingLevel::from_wire(effort)?;
-    let effort =
-        ReasoningEffort::from_openai_str(if level == crate::thinking::ThinkingLevel::Off {
+    let level = stravia_runtime_contract::thinking::ThinkingLevel::from_wire(effort)?;
+    let effort = ReasoningEffort::from_openai_str(
+        if level == stravia_runtime_contract::thinking::ThinkingLevel::Off {
             "none"
         } else {
             level.as_str()
-        })?;
+        },
+    )?;
     Ok(ReasoningConfig {
-        enabled: level != crate::thinking::ThinkingLevel::Off,
+        enabled: level != stravia_runtime_contract::thinking::ThinkingLevel::Off,
         effort: Some(effort),
         display,
         level: Some(level),

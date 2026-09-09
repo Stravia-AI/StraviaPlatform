@@ -5,7 +5,8 @@ use reqwest::header::{
     HeaderValue as ReqwestHeaderValue,
 };
 
-use crate::protocol::ir::{AiRequest, ProtocolExt};
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::ProtocolExt;
 
 const SESSION_HEADER_PRIORITY: &[&str] = &[
     "x-session-id",
@@ -177,7 +178,7 @@ mod tests {
     fn client_session_falls_back_to_responses_prompt_cache_key() {
         let mut request = AiRequest::new("gpt", Vec::new());
         request.ext = Some(ProtocolExt::OpenResponses(
-            crate::protocol::ir::OpenResponsesExt {
+            stravia_runtime_contract::protocol::ir::OpenResponsesExt {
                 prompt_cache_key: Some("cache-session".into()),
                 ..Default::default()
             },

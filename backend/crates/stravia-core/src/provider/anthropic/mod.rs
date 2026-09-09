@@ -7,8 +7,6 @@ use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::Value;
 
 use crate::error::GatewayError;
-use crate::protocol::ids::ProtocolId;
-use crate::protocol::ir::{AiRequest, AiResponse};
 use crate::provider::common::pipeline;
 use crate::provider::inbound::InboundResponse;
 use crate::provider::metadata::{
@@ -18,6 +16,9 @@ use crate::provider::outbound::OutboundRequest;
 use crate::provider::registry::{ExtensionRegistration, VendorRegistration, VendorScope};
 use crate::provider::vendor::{ProviderCtx, Vendor};
 use crate::provider::vendor_ext::VendorExtension;
+use stravia_runtime_contract::protocol::ids::ProtocolId;
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::AiResponse;
 
 const METADATA: VendorMetadata = VendorMetadata {
     id: "anthropic",
@@ -118,7 +119,7 @@ impl Vendor for AnthropicVendor {
         "anthropic"
     }
     fn supported_protocols(&self) -> &'static [ProtocolId] {
-        use crate::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01;
+        use stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01;
         &[ANTHROPIC_MESSAGES_2023_06_01]
     }
 

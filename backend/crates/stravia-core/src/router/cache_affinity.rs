@@ -1,8 +1,10 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use crate::hook::Principal;
-use crate::protocol::ir::{self, AiRequest, Usage};
+use stravia_runtime_contract::Principal;
+use stravia_runtime_contract::protocol::ir;
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::Usage;
 
 pub(crate) const CACHE_AFFINITY_MIN_PROMPT_TOKENS: u32 = 20_000;
 const DEFAULT_CACHE_AFFINITY_CAPACITY: usize = 1_024;
@@ -138,10 +140,15 @@ fn namespace(principal: &Principal, route_id: &str, request: &AiRequest) -> Cach
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::ir::{
-        AiItem, AnthropicExt, ContentBlock, MessageContent, OpenResponsesExt, ProtocolExt, Role,
-        ToolCall, Usage,
-    };
+    use stravia_runtime_contract::protocol::ir::AiItem;
+    use stravia_runtime_contract::protocol::ir::AnthropicExt;
+    use stravia_runtime_contract::protocol::ir::ContentBlock;
+    use stravia_runtime_contract::protocol::ir::MessageContent;
+    use stravia_runtime_contract::protocol::ir::OpenResponsesExt;
+    use stravia_runtime_contract::protocol::ir::ProtocolExt;
+    use stravia_runtime_contract::protocol::ir::Role;
+    use stravia_runtime_contract::protocol::ir::ToolCall;
+    use stravia_runtime_contract::protocol::ir::Usage;
 
     fn request(items: &[&str]) -> AiRequest {
         AiRequest::new(

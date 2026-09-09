@@ -1,4 +1,5 @@
-use crate::protocol::ir::{AiItem, AiResponse};
+use stravia_runtime_contract::protocol::ir::AiItem;
+use stravia_runtime_contract::protocol::ir::AiResponse;
 
 pub fn normalize_response_reasoning(resp: &mut AiResponse) {
     if resp.reasoning_items().next().is_some() {

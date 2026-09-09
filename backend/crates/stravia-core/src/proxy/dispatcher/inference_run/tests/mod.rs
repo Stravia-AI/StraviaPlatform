@@ -20,12 +20,16 @@ use super::*;
 use crate::db::models::{
     CreateProvider, CreateRoute, CreateTarget, ProviderCredentialInput, ProviderSourceInput,
 };
-use crate::protocol::ids::{
-    ANTHROPIC_MESSAGES_2023_06_01, BEDROCK_CONVERSE_V1, COHERE_CHAT_V2, GATEWAY_LANGUAGE_MODEL_V4,
-    GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA, OPEN_RESPONSES_2026_04_24,
-    OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1, OPENAI_COMPATIBLE_EMBEDDINGS_V1, WATSONX_TEXT_CHAT_V1,
-};
-use crate::protocol::ir::AiResponse;
+use stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01;
+use stravia_runtime_contract::protocol::ids::BEDROCK_CONVERSE_V1;
+use stravia_runtime_contract::protocol::ids::COHERE_CHAT_V2;
+use stravia_runtime_contract::protocol::ids::GATEWAY_LANGUAGE_MODEL_V4;
+use stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA;
+use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
+use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
+use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_EMBEDDINGS_V1;
+use stravia_runtime_contract::protocol::ids::WATSONX_TEXT_CHAT_V1;
+use stravia_runtime_contract::protocol::ir::AiResponse;
 
 async fn wait_for_observed_run_finish(
     events: &mut crate::interaction_observation::ObservationStream,
@@ -64,37 +68,49 @@ async fn failing_parent_discovery_store() -> FailingParentDiscoveryStore {
 }
 
 #[async_trait]
-impl crate::turn_chain::TurnChainStore for FailingParentDiscoveryStore {
+impl stravia_runtime_contract::turn_chain::TurnChainStore for FailingParentDiscoveryStore {
     async fn materialize(
         &self,
-        principal: &crate::hook::Principal,
-        kind: crate::turn_chain::TurnNodeKind,
-        id: &crate::turn_chain::TurnNodeId,
-    ) -> Result<Vec<crate::turn_chain::TurnNode>, crate::turn_chain::TurnUnavailable> {
+        principal: &stravia_runtime_contract::Principal,
+        kind: stravia_runtime_contract::turn_chain::TurnNodeKind,
+        id: &stravia_runtime_contract::turn_chain::TurnNodeId,
+    ) -> Result<
+        Vec<stravia_runtime_contract::turn_chain::TurnNode>,
+        stravia_runtime_contract::turn_chain::TurnUnavailable,
+    > {
         self.inner.materialize(principal, kind, id).await
     }
 
     async fn commit(
         &self,
-        commit: crate::turn_chain::TurnCommit,
-    ) -> Result<crate::turn_chain::TurnNodeId, crate::turn_chain::TurnCommitError> {
+        commit: stravia_runtime_contract::turn_chain::TurnCommit,
+    ) -> Result<
+        stravia_runtime_contract::turn_chain::TurnNodeId,
+        stravia_runtime_contract::turn_chain::TurnCommitError,
+    > {
         self.inner.commit(commit).await
     }
 
     async fn find_reusable_prefixes(
         &self,
-        _principal: &crate::hook::Principal,
-        _kind: crate::turn_chain::TurnNodeKind,
-        _query: &crate::turn_chain::ReusablePrefixQuery,
-    ) -> Result<Vec<crate::turn_chain::ReusablePrefixCandidate>, crate::turn_chain::TurnUnavailable>
-    {
+        _principal: &stravia_runtime_contract::Principal,
+        _kind: stravia_runtime_contract::turn_chain::TurnNodeKind,
+        _query: &stravia_runtime_contract::turn_chain::ReusablePrefixQuery,
+    ) -> Result<
+        Vec<stravia_runtime_contract::turn_chain::ReusablePrefixCandidate>,
+        stravia_runtime_contract::turn_chain::TurnUnavailable,
+    > {
         self.discovery_attempts.fetch_add(1, Ordering::SeqCst);
-        Err(crate::turn_chain::TurnUnavailable::Storage(
-            "injected parent-discovery failure".into(),
-        ))
+        Err(
+            stravia_runtime_contract::turn_chain::TurnUnavailable::Storage(
+                "injected parent-discovery failure".into(),
+            ),
+        )
     }
 
-    async fn sweep_expired(&self) -> Result<u64, crate::turn_chain::TurnUnavailable> {
+    async fn sweep_expired(
+        &self,
+    ) -> Result<u64, stravia_runtime_contract::turn_chain::TurnUnavailable> {
         self.inner.sweep_expired().await
     }
 }
@@ -108,7 +124,7 @@ impl crate::provider::vendor::Vendor for NormalizingTestVendor {
     }
     fn target_capabilities(
         &self,
-        protocol: crate::protocol::ids::ProtocolId,
+        protocol: stravia_runtime_contract::protocol::ids::ProtocolId,
     ) -> crate::provider::vendor_ext::ResolvedTargetCapabilities {
         crate::provider::vendor_ext::ResolvedTargetCapabilities {
             stream_only: protocol == OPEN_RESPONSES_2026_04_24,
@@ -128,9 +144,9 @@ impl crate::provider::vendor::Vendor for NormalizingTestVendor {
     async fn on_stream_delta(
         &self,
         _context: &crate::provider::vendor_ext::VendorCtx<'_>,
-        delta: &mut crate::protocol::ir::AiStreamDelta,
+        delta: &mut stravia_runtime_contract::protocol::ir::AiStreamDelta,
     ) -> anyhow::Result<()> {
-        if let crate::protocol::ir::AiStreamDelta::TextDelta(content) = delta {
+        if let stravia_runtime_contract::protocol::ir::AiStreamDelta::TextDelta(content) = delta {
             content.insert_str(0, "normalized:");
         }
         Ok(())
@@ -140,7 +156,9 @@ impl crate::provider::vendor::Vendor for NormalizingTestVendor {
         "normalizing-test"
     }
 
-    fn supported_protocols(&self) -> &'static [crate::protocol::ids::ProtocolId] {
+    fn supported_protocols(
+        &self,
+    ) -> &'static [stravia_runtime_contract::protocol::ids::ProtocolId] {
         &[OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1]
     }
 
@@ -174,48 +192,50 @@ inventory::submit! {
 struct RuntimeShortCircuitHook;
 struct RuntimeShortCircuitSession;
 
-impl crate::hook::Hook for RuntimeShortCircuitHook {
-    fn descriptor(&self) -> crate::hook::HookDescriptor {
-        crate::hook::HookDescriptor {
-            event_kinds: vec![crate::hook::EventKind::Request],
-            ..crate::hook::HookDescriptor::all("lifecycle-short-circuit")
+impl stravia_runtime_contract::hook::Hook for RuntimeShortCircuitHook {
+    fn descriptor(&self) -> stravia_runtime_contract::hook::HookDescriptor {
+        stravia_runtime_contract::hook::HookDescriptor {
+            event_kinds: vec![stravia_runtime_contract::hook::EventKind::Request],
+            ..stravia_runtime_contract::hook::HookDescriptor::all("lifecycle-short-circuit")
         }
     }
 
     fn create_session(
         &self,
-        _context: &crate::hook::SessionContext,
-    ) -> Box<dyn crate::hook::HookSession> {
+        _context: &stravia_runtime_contract::hook::SessionContext,
+    ) -> Box<dyn stravia_runtime_contract::hook::HookSession> {
         Box::new(RuntimeShortCircuitSession)
     }
 }
 
 #[async_trait]
-impl crate::hook::HookSession for RuntimeShortCircuitSession {
+impl stravia_runtime_contract::hook::HookSession for RuntimeShortCircuitSession {
     async fn handle(
         &mut self,
-        event: crate::hook::HookEvent<'_>,
-    ) -> Result<crate::hook::ActionBatch, String> {
-        let crate::hook::HookEvent::Request { current, .. } = event else {
-            return Ok(crate::hook::ActionBatch::default());
+        event: stravia_runtime_contract::hook::HookEvent<'_>,
+    ) -> Result<stravia_runtime_contract::hook::ActionBatch, String> {
+        let stravia_runtime_contract::hook::HookEvent::Request { current, .. } = event else {
+            return Ok(stravia_runtime_contract::hook::ActionBatch::default());
         };
         if current.model == "__lifecycle_reject__" {
-            return Ok(crate::hook::ActionBatch::one(
-                crate::hook::HookAction::Reject(crate::hook::HookRejection {
-                    status: 451,
-                    code: "request_rejected".into(),
-                    message: "request rejected by lifecycle Hook".into(),
-                }),
+            return Ok(stravia_runtime_contract::hook::ActionBatch::one(
+                stravia_runtime_contract::hook::HookAction::Reject(
+                    stravia_runtime_contract::hook::HookRejection {
+                        status: 451,
+                        code: "request_rejected".into(),
+                        message: "request rejected by lifecycle Hook".into(),
+                    },
+                ),
             ));
         }
         if current.model == "__lifecycle_short_circuit__" {
             let mut response = AiResponse::new("response-hook", &current.model);
             response.push_output_text("handled by lifecycle Hook");
-            return Ok(crate::hook::ActionBatch::one(
-                crate::hook::HookAction::Respond(Box::new(response)),
+            return Ok(stravia_runtime_contract::hook::ActionBatch::one(
+                stravia_runtime_contract::hook::HookAction::Respond(Box::new(response)),
             ));
         }
-        Ok(crate::hook::ActionBatch::default())
+        Ok(stravia_runtime_contract::hook::ActionBatch::default())
     }
 }
 
@@ -229,18 +249,18 @@ struct BlockingRequestSession {
     release: Arc<tokio::sync::Notify>,
 }
 
-impl crate::hook::Hook for BlockingRequestHook {
-    fn descriptor(&self) -> crate::hook::HookDescriptor {
-        crate::hook::HookDescriptor {
-            event_kinds: vec![crate::hook::EventKind::Request],
-            ..crate::hook::HookDescriptor::all("block-request-for-admission")
+impl stravia_runtime_contract::hook::Hook for BlockingRequestHook {
+    fn descriptor(&self) -> stravia_runtime_contract::hook::HookDescriptor {
+        stravia_runtime_contract::hook::HookDescriptor {
+            event_kinds: vec![stravia_runtime_contract::hook::EventKind::Request],
+            ..stravia_runtime_contract::hook::HookDescriptor::all("block-request-for-admission")
         }
     }
 
     fn create_session(
         &self,
-        _context: &crate::hook::SessionContext,
-    ) -> Box<dyn crate::hook::HookSession> {
+        _context: &stravia_runtime_contract::hook::SessionContext,
+    ) -> Box<dyn stravia_runtime_contract::hook::HookSession> {
         Box::new(BlockingRequestSession {
             entered: Arc::clone(&self.entered),
             release: Arc::clone(&self.release),
@@ -249,20 +269,20 @@ impl crate::hook::Hook for BlockingRequestHook {
 }
 
 #[async_trait]
-impl crate::hook::HookSession for BlockingRequestSession {
+impl stravia_runtime_contract::hook::HookSession for BlockingRequestSession {
     async fn handle(
         &mut self,
-        event: crate::hook::HookEvent<'_>,
-    ) -> Result<crate::hook::ActionBatch, String> {
-        let crate::hook::HookEvent::Request { current, .. } = event else {
-            return Ok(crate::hook::ActionBatch::default());
+        event: stravia_runtime_contract::hook::HookEvent<'_>,
+    ) -> Result<stravia_runtime_contract::hook::ActionBatch, String> {
+        let stravia_runtime_contract::hook::HookEvent::Request { current, .. } = event else {
+            return Ok(stravia_runtime_contract::hook::ActionBatch::default());
         };
         self.entered.notify_one();
         self.release.notified().await;
         let mut response = AiResponse::new("admission-response", &current.model);
         response.push_output_text("request completed after admission");
-        Ok(crate::hook::ActionBatch::one(
-            crate::hook::HookAction::Respond(Box::new(response)),
+        Ok(stravia_runtime_contract::hook::ActionBatch::one(
+            stravia_runtime_contract::hook::HookAction::Respond(Box::new(response)),
         ))
     }
 }
@@ -275,18 +295,18 @@ struct RewriteModelSession {
     model: String,
 }
 
-impl crate::hook::Hook for RewriteModelHook {
-    fn descriptor(&self) -> crate::hook::HookDescriptor {
-        crate::hook::HookDescriptor {
-            event_kinds: vec![crate::hook::EventKind::Request],
-            ..crate::hook::HookDescriptor::all("rewrite-model-for-authorization")
+impl stravia_runtime_contract::hook::Hook for RewriteModelHook {
+    fn descriptor(&self) -> stravia_runtime_contract::hook::HookDescriptor {
+        stravia_runtime_contract::hook::HookDescriptor {
+            event_kinds: vec![stravia_runtime_contract::hook::EventKind::Request],
+            ..stravia_runtime_contract::hook::HookDescriptor::all("rewrite-model-for-authorization")
         }
     }
 
     fn create_session(
         &self,
-        _context: &crate::hook::SessionContext,
-    ) -> Box<dyn crate::hook::HookSession> {
+        _context: &stravia_runtime_contract::hook::SessionContext,
+    ) -> Box<dyn stravia_runtime_contract::hook::HookSession> {
         Box::new(RewriteModelSession {
             model: self.model.clone(),
         })
@@ -294,18 +314,21 @@ impl crate::hook::Hook for RewriteModelHook {
 }
 
 #[async_trait]
-impl crate::hook::HookSession for RewriteModelSession {
+impl stravia_runtime_contract::hook::HookSession for RewriteModelSession {
     async fn handle(
         &mut self,
-        event: crate::hook::HookEvent<'_>,
-    ) -> Result<crate::hook::ActionBatch, String> {
-        if !matches!(event, crate::hook::HookEvent::Request { .. }) {
-            return Ok(crate::hook::ActionBatch::default());
+        event: stravia_runtime_contract::hook::HookEvent<'_>,
+    ) -> Result<stravia_runtime_contract::hook::ActionBatch, String> {
+        if !matches!(
+            event,
+            stravia_runtime_contract::hook::HookEvent::Request { .. }
+        ) {
+            return Ok(stravia_runtime_contract::hook::ActionBatch::default());
         }
-        Ok(crate::hook::ActionBatch::one(
-            crate::hook::HookAction::PatchRequest(Box::new(crate::hook::RequestPatch::SetModel(
-                self.model.clone(),
-            ))),
+        Ok(stravia_runtime_contract::hook::ActionBatch::one(
+            stravia_runtime_contract::hook::HookAction::PatchRequest(Box::new(
+                stravia_runtime_contract::hook::RequestPatch::SetModel(self.model.clone()),
+            )),
         ))
     }
 }
@@ -318,18 +341,18 @@ struct PrependContextSession {
     observed: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
 }
 
-impl crate::hook::Hook for PrependContextHook {
-    fn descriptor(&self) -> crate::hook::HookDescriptor {
-        crate::hook::HookDescriptor {
-            event_kinds: vec![crate::hook::EventKind::Request],
-            ..crate::hook::HookDescriptor::all("prepend-context")
+impl stravia_runtime_contract::hook::Hook for PrependContextHook {
+    fn descriptor(&self) -> stravia_runtime_contract::hook::HookDescriptor {
+        stravia_runtime_contract::hook::HookDescriptor {
+            event_kinds: vec![stravia_runtime_contract::hook::EventKind::Request],
+            ..stravia_runtime_contract::hook::HookDescriptor::all("prepend-context")
         }
     }
 
     fn create_session(
         &self,
-        _context: &crate::hook::SessionContext,
-    ) -> Box<dyn crate::hook::HookSession> {
+        _context: &stravia_runtime_contract::hook::SessionContext,
+    ) -> Box<dyn stravia_runtime_contract::hook::HookSession> {
         Box::new(PrependContextSession {
             observed: self.observed.clone(),
         })
@@ -337,13 +360,13 @@ impl crate::hook::Hook for PrependContextHook {
 }
 
 #[async_trait]
-impl crate::hook::HookSession for PrependContextSession {
+impl stravia_runtime_contract::hook::HookSession for PrependContextSession {
     async fn handle(
         &mut self,
-        event: crate::hook::HookEvent<'_>,
-    ) -> Result<crate::hook::ActionBatch, String> {
-        let crate::hook::HookEvent::Request { current, .. } = event else {
-            return Ok(crate::hook::ActionBatch::default());
+        event: stravia_runtime_contract::hook::HookEvent<'_>,
+    ) -> Result<stravia_runtime_contract::hook::ActionBatch, String> {
+        let stravia_runtime_contract::hook::HookEvent::Request { current, .. } = event else {
+            return Ok(stravia_runtime_contract::hook::ActionBatch::default());
         };
         self.observed
             .lock()
@@ -356,12 +379,13 @@ impl crate::hook::HookSession for PrependContextSession {
                     .collect(),
             );
         let mut rewritten = current.clone();
-        let mut marker = crate::protocol::ir::AiItem::output_text("hook context");
-        marker.role = crate::protocol::ir::Role::User;
+        let mut marker =
+            stravia_runtime_contract::protocol::ir::AiItem::output_text("hook context");
+        marker.role = stravia_runtime_contract::protocol::ir::Role::User;
         rewritten.items.insert(0, marker);
-        Ok(crate::hook::ActionBatch::one(
-            crate::hook::HookAction::PatchRequest(Box::new(
-                crate::hook::RequestPatch::ReplaceCanonical(Box::new(rewritten)),
+        Ok(stravia_runtime_contract::hook::ActionBatch::one(
+            stravia_runtime_contract::hook::HookAction::PatchRequest(Box::new(
+                stravia_runtime_contract::hook::RequestPatch::ReplaceCanonical(Box::new(rewritten)),
             )),
         ))
     }
@@ -554,16 +578,16 @@ async fn platform_only_stream_continues_with_marker_impl() {
         })
         .collect::<String>();
     assert_eq!(assistant_text, "final answer");
-    let mut first_user = crate::protocol::ir::AiItem::output_text("test");
-    first_user.role = crate::protocol::ir::Role::User;
-    let mut second_user = crate::protocol::ir::AiItem::output_text("follow up");
-    second_user.role = crate::protocol::ir::Role::User;
+    let mut first_user = stravia_runtime_contract::protocol::ir::AiItem::output_text("test");
+    first_user.role = stravia_runtime_contract::protocol::ir::Role::User;
+    let mut second_user = stravia_runtime_contract::protocol::ir::AiItem::output_text("follow up");
+    second_user.role = stravia_runtime_contract::protocol::ir::Role::User;
     let mut second_request = AiRequest::new(
         "platform-only-stream",
         vec![
             first_user,
-            crate::protocol::ir::AiItem::thinking(assistant_reasoning, None),
-            crate::protocol::ir::AiItem::output_text(assistant_text),
+            stravia_runtime_contract::protocol::ir::AiItem::thinking(assistant_reasoning, None),
+            stravia_runtime_contract::protocol::ir::AiItem::output_text(assistant_text),
             second_user,
         ],
     );
@@ -1382,116 +1406,124 @@ impl ExposeOrderedToolHook {
     }
 }
 
-impl crate::hook::Hook for ExposeOrderedToolHook {
-    fn descriptor(&self) -> crate::hook::HookDescriptor {
-        crate::hook::HookDescriptor {
-            event_kinds: vec![crate::hook::EventKind::Request],
-            ..crate::hook::HookDescriptor::all("expose-ordered-tool")
+impl stravia_runtime_contract::hook::Hook for ExposeOrderedToolHook {
+    fn descriptor(&self) -> stravia_runtime_contract::hook::HookDescriptor {
+        stravia_runtime_contract::hook::HookDescriptor {
+            event_kinds: vec![stravia_runtime_contract::hook::EventKind::Request],
+            ..stravia_runtime_contract::hook::HookDescriptor::all("expose-ordered-tool")
         }
     }
 
     fn create_session(
         &self,
-        _context: &crate::hook::SessionContext,
-    ) -> Box<dyn crate::hook::HookSession> {
+        _context: &stravia_runtime_contract::hook::SessionContext,
+    ) -> Box<dyn stravia_runtime_contract::hook::HookSession> {
         Box::new(ExposeOrderedToolSession {
             request_rounds: self.request_rounds.clone(),
         })
     }
 }
 
-impl crate::hook::Hook for HiddenRoundRespondHook {
-    fn descriptor(&self) -> crate::hook::HookDescriptor {
-        crate::hook::HookDescriptor {
-            event_kinds: vec![crate::hook::EventKind::Request],
-            ..crate::hook::HookDescriptor::all("hidden-round-respond")
+impl stravia_runtime_contract::hook::Hook for HiddenRoundRespondHook {
+    fn descriptor(&self) -> stravia_runtime_contract::hook::HookDescriptor {
+        stravia_runtime_contract::hook::HookDescriptor {
+            event_kinds: vec![stravia_runtime_contract::hook::EventKind::Request],
+            ..stravia_runtime_contract::hook::HookDescriptor::all("hidden-round-respond")
         }
     }
 
     fn create_session(
         &self,
-        _context: &crate::hook::SessionContext,
-    ) -> Box<dyn crate::hook::HookSession> {
+        _context: &stravia_runtime_contract::hook::SessionContext,
+    ) -> Box<dyn stravia_runtime_contract::hook::HookSession> {
         Box::new(HiddenRoundRespondSession)
     }
 }
 
-impl crate::hook::Hook for HiddenRoundRejectHook {
-    fn descriptor(&self) -> crate::hook::HookDescriptor {
-        crate::hook::HookDescriptor {
-            event_kinds: vec![crate::hook::EventKind::Request],
-            ..crate::hook::HookDescriptor::all("hidden-round-reject")
+impl stravia_runtime_contract::hook::Hook for HiddenRoundRejectHook {
+    fn descriptor(&self) -> stravia_runtime_contract::hook::HookDescriptor {
+        stravia_runtime_contract::hook::HookDescriptor {
+            event_kinds: vec![stravia_runtime_contract::hook::EventKind::Request],
+            ..stravia_runtime_contract::hook::HookDescriptor::all("hidden-round-reject")
         }
     }
 
     fn create_session(
         &self,
-        _context: &crate::hook::SessionContext,
-    ) -> Box<dyn crate::hook::HookSession> {
+        _context: &stravia_runtime_contract::hook::SessionContext,
+    ) -> Box<dyn stravia_runtime_contract::hook::HookSession> {
         Box::new(HiddenRoundRejectSession)
     }
 }
 
 #[async_trait]
-impl crate::hook::HookSession for HiddenRoundRespondSession {
+impl stravia_runtime_contract::hook::HookSession for HiddenRoundRespondSession {
     async fn handle(
         &mut self,
-        event: crate::hook::HookEvent<'_>,
-    ) -> Result<crate::hook::ActionBatch, String> {
-        let crate::hook::HookEvent::Request { round, .. } = event else {
-            return Ok(crate::hook::ActionBatch::default());
+        event: stravia_runtime_contract::hook::HookEvent<'_>,
+    ) -> Result<stravia_runtime_contract::hook::ActionBatch, String> {
+        let stravia_runtime_contract::hook::HookEvent::Request { round, .. } = event else {
+            return Ok(stravia_runtime_contract::hook::ActionBatch::default());
         };
         if round == 0 {
-            return Ok(crate::hook::ActionBatch::one(
-                crate::hook::HookAction::ExposeTool(crate::hook::ToolId::new("ordered-tool")),
+            return Ok(stravia_runtime_contract::hook::ActionBatch::one(
+                stravia_runtime_contract::hook::HookAction::ExposeTool(
+                    stravia_runtime_contract::hook::ToolId::new("ordered-tool"),
+                ),
             ));
         }
         let mut response = AiResponse::new("hook-followup", "hook-model");
         response.push_output_text("hook completed hidden round");
-        Ok(crate::hook::ActionBatch::one(
-            crate::hook::HookAction::Respond(Box::new(response)),
+        Ok(stravia_runtime_contract::hook::ActionBatch::one(
+            stravia_runtime_contract::hook::HookAction::Respond(Box::new(response)),
         ))
     }
 }
 
 #[async_trait]
-impl crate::hook::HookSession for HiddenRoundRejectSession {
+impl stravia_runtime_contract::hook::HookSession for HiddenRoundRejectSession {
     async fn handle(
         &mut self,
-        event: crate::hook::HookEvent<'_>,
-    ) -> Result<crate::hook::ActionBatch, String> {
-        let crate::hook::HookEvent::Request { round, .. } = event else {
-            return Ok(crate::hook::ActionBatch::default());
+        event: stravia_runtime_contract::hook::HookEvent<'_>,
+    ) -> Result<stravia_runtime_contract::hook::ActionBatch, String> {
+        let stravia_runtime_contract::hook::HookEvent::Request { round, .. } = event else {
+            return Ok(stravia_runtime_contract::hook::ActionBatch::default());
         };
         let action = if round == 0 {
-            crate::hook::HookAction::ExposeTool(crate::hook::ToolId::new("ordered-tool"))
+            stravia_runtime_contract::hook::HookAction::ExposeTool(
+                stravia_runtime_contract::hook::ToolId::new("ordered-tool"),
+            )
         } else {
-            crate::hook::HookAction::Reject(crate::hook::HookRejection {
-                status: 403,
-                code: "hidden_round_denied".into(),
-                message: "hidden round rejected".into(),
-            })
+            stravia_runtime_contract::hook::HookAction::Reject(
+                stravia_runtime_contract::hook::HookRejection {
+                    status: 403,
+                    code: "hidden_round_denied".into(),
+                    message: "hidden round rejected".into(),
+                },
+            )
         };
-        Ok(crate::hook::ActionBatch::one(action))
+        Ok(stravia_runtime_contract::hook::ActionBatch::one(action))
     }
 }
 
 #[async_trait]
-impl crate::hook::HookSession for ExposeOrderedToolSession {
+impl stravia_runtime_contract::hook::HookSession for ExposeOrderedToolSession {
     async fn handle(
         &mut self,
-        event: crate::hook::HookEvent<'_>,
-    ) -> Result<crate::hook::ActionBatch, String> {
-        if let crate::hook::HookEvent::Request { round, .. } = event {
+        event: stravia_runtime_contract::hook::HookEvent<'_>,
+    ) -> Result<stravia_runtime_contract::hook::ActionBatch, String> {
+        if let stravia_runtime_contract::hook::HookEvent::Request { round, .. } = event {
             self.request_rounds
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(round);
-            Ok(crate::hook::ActionBatch::one(
-                crate::hook::HookAction::ExposeTool(crate::hook::ToolId::new("ordered-tool")),
+            Ok(stravia_runtime_contract::hook::ActionBatch::one(
+                stravia_runtime_contract::hook::HookAction::ExposeTool(
+                    stravia_runtime_contract::hook::ToolId::new("ordered-tool"),
+                ),
             ))
         } else {
-            Ok(crate::hook::ActionBatch::default())
+            Ok(stravia_runtime_contract::hook::ActionBatch::default())
         }
     }
 }
@@ -1505,9 +1537,9 @@ struct RetryingOrderedTool {
 }
 
 #[async_trait]
-impl crate::hook::PlatformTool for OrderedTool {
-    fn id(&self) -> crate::hook::ToolId {
-        crate::hook::ToolId::new("ordered-tool")
+impl stravia_runtime_contract::hook::PlatformTool for OrderedTool {
+    fn id(&self) -> stravia_runtime_contract::hook::ToolId {
+        stravia_runtime_contract::hook::ToolId::new("ordered-tool")
     }
 
     fn external_name(&self) -> &str {
@@ -1525,11 +1557,11 @@ impl crate::hook::PlatformTool for OrderedTool {
     async fn execute(
         &self,
         arguments: serde_json::Value,
-        _context: crate::hook::ToolExecutionContext,
-    ) -> Result<serde_json::Value, crate::hook::PlatformToolError> {
-        let index = arguments["index"]
-            .as_u64()
-            .ok_or_else(|| crate::hook::PlatformToolError::new("missing index"))?;
+        _context: stravia_runtime_contract::hook::ToolExecutionContext,
+    ) -> Result<serde_json::Value, stravia_runtime_contract::hook::PlatformToolError> {
+        let index = arguments["index"].as_u64().ok_or_else(|| {
+            stravia_runtime_contract::hook::PlatformToolError::new("missing index")
+        })?;
         self.calls
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -1539,9 +1571,9 @@ impl crate::hook::PlatformTool for OrderedTool {
 }
 
 #[async_trait]
-impl crate::hook::PlatformTool for RetryingOrderedTool {
-    fn id(&self) -> crate::hook::ToolId {
-        crate::hook::ToolId::new("ordered-tool")
+impl stravia_runtime_contract::hook::PlatformTool for RetryingOrderedTool {
+    fn id(&self) -> stravia_runtime_contract::hook::ToolId {
+        stravia_runtime_contract::hook::ToolId::new("ordered-tool")
     }
 
     fn external_name(&self) -> &str {
@@ -1559,17 +1591,19 @@ impl crate::hook::PlatformTool for RetryingOrderedTool {
     async fn execute(
         &self,
         arguments: serde_json::Value,
-        _context: crate::hook::ToolExecutionContext,
-    ) -> Result<serde_json::Value, crate::hook::PlatformToolError> {
-        let index = arguments["index"]
-            .as_u64()
-            .ok_or_else(|| crate::hook::PlatformToolError::new("missing index"))?;
+        _context: stravia_runtime_contract::hook::ToolExecutionContext,
+    ) -> Result<serde_json::Value, stravia_runtime_contract::hook::PlatformToolError> {
+        let index = arguments["index"].as_u64().ok_or_else(|| {
+            stravia_runtime_contract::hook::PlatformToolError::new("missing index")
+        })?;
         self.calls
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(index);
         if index == 1 {
-            return Err(crate::hook::PlatformToolError::new("first attempt failed"));
+            return Err(stravia_runtime_contract::hook::PlatformToolError::new(
+                "first attempt failed",
+            ));
         }
         Ok(serde_json::json!({ "index": index }))
     }
@@ -1600,34 +1634,39 @@ impl TestAccessMutation {
 struct ExposeAccessMutationHook(TestAccessMutation);
 struct ExposeAccessMutationSession(TestAccessMutation);
 
-impl crate::hook::Hook for ExposeAccessMutationHook {
-    fn descriptor(&self) -> crate::hook::HookDescriptor {
-        crate::hook::HookDescriptor {
-            event_kinds: vec![crate::hook::EventKind::Request],
-            ..crate::hook::HookDescriptor::all("expose-access-mutation-tool")
+impl stravia_runtime_contract::hook::Hook for ExposeAccessMutationHook {
+    fn descriptor(&self) -> stravia_runtime_contract::hook::HookDescriptor {
+        stravia_runtime_contract::hook::HookDescriptor {
+            event_kinds: vec![stravia_runtime_contract::hook::EventKind::Request],
+            ..stravia_runtime_contract::hook::HookDescriptor::all("expose-access-mutation-tool")
         }
     }
 
     fn create_session(
         &self,
-        _context: &crate::hook::SessionContext,
-    ) -> Box<dyn crate::hook::HookSession> {
+        _context: &stravia_runtime_contract::hook::SessionContext,
+    ) -> Box<dyn stravia_runtime_contract::hook::HookSession> {
         Box::new(ExposeAccessMutationSession(self.0))
     }
 }
 
 #[async_trait]
-impl crate::hook::HookSession for ExposeAccessMutationSession {
+impl stravia_runtime_contract::hook::HookSession for ExposeAccessMutationSession {
     async fn handle(
         &mut self,
-        event: crate::hook::HookEvent<'_>,
-    ) -> Result<crate::hook::ActionBatch, String> {
-        if matches!(event, crate::hook::HookEvent::Request { .. }) {
-            Ok(crate::hook::ActionBatch::one(
-                crate::hook::HookAction::ExposeTool(crate::hook::ToolId::new(self.0.tool_id())),
+        event: stravia_runtime_contract::hook::HookEvent<'_>,
+    ) -> Result<stravia_runtime_contract::hook::ActionBatch, String> {
+        if matches!(
+            event,
+            stravia_runtime_contract::hook::HookEvent::Request { .. }
+        ) {
+            Ok(stravia_runtime_contract::hook::ActionBatch::one(
+                stravia_runtime_contract::hook::HookAction::ExposeTool(
+                    stravia_runtime_contract::hook::ToolId::new(self.0.tool_id()),
+                ),
             ))
         } else {
-            Ok(crate::hook::ActionBatch::default())
+            Ok(stravia_runtime_contract::hook::ActionBatch::default())
         }
     }
 }
@@ -1638,9 +1677,9 @@ struct AccessMutationTool {
 }
 
 #[async_trait]
-impl crate::hook::PlatformTool for AccessMutationTool {
-    fn id(&self) -> crate::hook::ToolId {
-        crate::hook::ToolId::new(self.mutation.tool_id())
+impl stravia_runtime_contract::hook::PlatformTool for AccessMutationTool {
+    fn id(&self) -> stravia_runtime_contract::hook::ToolId {
+        stravia_runtime_contract::hook::ToolId::new(self.mutation.tool_id())
     }
 
     fn external_name(&self) -> &str {
@@ -1654,22 +1693,24 @@ impl crate::hook::PlatformTool for AccessMutationTool {
     async fn execute(
         &self,
         _arguments: serde_json::Value,
-        _context: crate::hook::ToolExecutionContext,
-    ) -> Result<serde_json::Value, crate::hook::PlatformToolError> {
-        let gateway = self
-            .access
-            .gateway()
-            .ok_or_else(|| crate::hook::PlatformToolError::new("missing test gateway"))?;
-        let key_id = self
-            .access
-            .key_id()
-            .ok_or_else(|| crate::hook::PlatformToolError::new("missing test key"))?;
+        _context: stravia_runtime_contract::hook::ToolExecutionContext,
+    ) -> Result<serde_json::Value, stravia_runtime_contract::hook::PlatformToolError> {
+        let gateway = self.access.gateway().ok_or_else(|| {
+            stravia_runtime_contract::hook::PlatformToolError::new("missing test gateway")
+        })?;
+        let key_id = self.access.key_id().ok_or_else(|| {
+            stravia_runtime_contract::hook::PlatformToolError::new("missing test key")
+        })?;
         let (is_enabled, model_ids) = match self.mutation {
             TestAccessMutation::DisableKey => (Some(false), None),
             TestAccessMutation::RevokeBinding => (
                 None,
                 Some(vec![self.access.replacement_model_id().ok_or_else(
-                    || crate::hook::PlatformToolError::new("missing replacement model"),
+                    || {
+                        stravia_runtime_contract::hook::PlatformToolError::new(
+                            "missing replacement model",
+                        )
+                    },
                 )?]),
             ),
         };
@@ -1691,7 +1732,9 @@ impl crate::hook::PlatformTool for AccessMutationTool {
                 },
             )
             .await
-            .map_err(|error| crate::hook::PlatformToolError::new(error.to_string()))?;
+            .map_err(|error| {
+                stravia_runtime_contract::hook::PlatformToolError::new(error.to_string())
+            })?;
         Ok(serde_json::json!({ "mutated": true }))
     }
 }
@@ -1712,21 +1755,21 @@ struct CountingStreamTransformer {
     expose_tool: bool,
 }
 
-impl crate::hook::Hook for CountingStreamToolHook {
-    fn descriptor(&self) -> crate::hook::HookDescriptor {
-        crate::hook::HookDescriptor {
+impl stravia_runtime_contract::hook::Hook for CountingStreamToolHook {
+    fn descriptor(&self) -> stravia_runtime_contract::hook::HookDescriptor {
+        stravia_runtime_contract::hook::HookDescriptor {
             event_kinds: vec![
-                crate::hook::EventKind::Request,
-                crate::hook::EventKind::Stream,
+                stravia_runtime_contract::hook::EventKind::Request,
+                stravia_runtime_contract::hook::EventKind::Stream,
             ],
-            ..crate::hook::HookDescriptor::all("count-stream-tool-legs")
+            ..stravia_runtime_contract::hook::HookDescriptor::all("count-stream-tool-legs")
         }
     }
 
     fn create_session(
         &self,
-        _context: &crate::hook::SessionContext,
-    ) -> Box<dyn crate::hook::HookSession> {
+        _context: &stravia_runtime_contract::hook::SessionContext,
+    ) -> Box<dyn stravia_runtime_contract::hook::HookSession> {
         Box::new(CountingStreamToolSession {
             transformer: CountingStreamTransformer {
                 begins: self.begins.clone(),
@@ -1738,26 +1781,35 @@ impl crate::hook::Hook for CountingStreamToolHook {
 }
 
 #[async_trait]
-impl crate::hook::HookSession for CountingStreamToolSession {
+impl stravia_runtime_contract::hook::HookSession for CountingStreamToolSession {
     async fn handle(
         &mut self,
-        event: crate::hook::HookEvent<'_>,
-    ) -> Result<crate::hook::ActionBatch, String> {
-        if self.transformer.expose_tool && matches!(event, crate::hook::HookEvent::Request { .. }) {
-            Ok(crate::hook::ActionBatch::one(
-                crate::hook::HookAction::ExposeTool(crate::hook::ToolId::new("ordered-tool")),
+        event: stravia_runtime_contract::hook::HookEvent<'_>,
+    ) -> Result<stravia_runtime_contract::hook::ActionBatch, String> {
+        if self.transformer.expose_tool
+            && matches!(
+                event,
+                stravia_runtime_contract::hook::HookEvent::Request { .. }
+            )
+        {
+            Ok(stravia_runtime_contract::hook::ActionBatch::one(
+                stravia_runtime_contract::hook::HookAction::ExposeTool(
+                    stravia_runtime_contract::hook::ToolId::new("ordered-tool"),
+                ),
             ))
         } else {
-            Ok(crate::hook::ActionBatch::default())
+            Ok(stravia_runtime_contract::hook::ActionBatch::default())
         }
     }
 
-    fn stream_transformer(&mut self) -> Option<&mut dyn crate::hook::StreamTransformer> {
+    fn stream_transformer(
+        &mut self,
+    ) -> Option<&mut dyn stravia_runtime_contract::hook::StreamTransformer> {
         Some(&mut self.transformer)
     }
 }
 
-impl crate::hook::StreamTransformer for CountingStreamTransformer {
+impl stravia_runtime_contract::hook::StreamTransformer for CountingStreamTransformer {
     fn begin(&mut self) -> Result<(), String> {
         self.begins.fetch_add(1, Ordering::SeqCst);
         Ok(())
@@ -1765,12 +1817,14 @@ impl crate::hook::StreamTransformer for CountingStreamTransformer {
 
     fn transform(
         &mut self,
-        _delta: &crate::protocol::ir::AiStreamDelta,
-    ) -> Result<crate::hook::StreamDirective, String> {
-        Ok(crate::hook::StreamDirective::Pass)
+        _delta: &stravia_runtime_contract::protocol::ir::AiStreamDelta,
+    ) -> Result<stravia_runtime_contract::hook::StreamDirective, String> {
+        Ok(stravia_runtime_contract::hook::StreamDirective::Pass)
     }
 
-    fn close(&mut self) -> Result<Vec<crate::protocol::ir::AiStreamDelta>, String> {
+    fn close(
+        &mut self,
+    ) -> Result<Vec<stravia_runtime_contract::protocol::ir::AiStreamDelta>, String> {
         self.closes.fetch_add(1, Ordering::SeqCst);
         Ok(Vec::new())
     }
@@ -2018,7 +2072,11 @@ async fn hidden_round_request_hook_rejection_is_delivered_impl() {
 }
 
 async fn mixed_tool_continuation_replays_impl() {
-    use crate::protocol::ir::{AiItem, MessageContent, Role, ToolCall, ToolSpec};
+    use stravia_runtime_contract::protocol::ir::AiItem;
+    use stravia_runtime_contract::protocol::ir::MessageContent;
+    use stravia_runtime_contract::protocol::ir::Role;
+    use stravia_runtime_contract::protocol::ir::ToolCall;
+    use stravia_runtime_contract::protocol::ir::ToolSpec;
 
     let mixed_tool_round = serde_json::json!({
         "id": "chatcmpl-mixed-tools",
@@ -3111,7 +3169,7 @@ fn openai_responses_tool_sse(content: &str, call_id: &str) -> String {
 
 fn openai_responses_protected_parallel_tools_sse(
     response_id: &str,
-    calls: &[crate::protocol::ir::ToolCall],
+    calls: &[stravia_runtime_contract::protocol::ir::ToolCall],
 ) -> String {
     let reasoning_in_progress = serde_json::json!({
         "id": "rs-protected-tools",
@@ -3713,9 +3771,9 @@ async fn execute_stream_with_timeout(
 ) -> Response {
     let mut request = AiRequest::new(
         model,
-        vec![crate::protocol::ir::AiItem {
-            role: crate::protocol::ir::Role::User,
-            content: crate::protocol::ir::MessageContent::Text("test".into()),
+        vec![stravia_runtime_contract::protocol::ir::AiItem {
+            role: stravia_runtime_contract::protocol::ir::Role::User,
+            content: stravia_runtime_contract::protocol::ir::MessageContent::Text("test".into()),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
@@ -3776,9 +3834,9 @@ async fn execute_protocol_request_with_session(
 ) -> Response {
     let mut request = AiRequest::new(
         model,
-        vec![crate::protocol::ir::AiItem {
-            role: crate::protocol::ir::Role::User,
-            content: crate::protocol::ir::MessageContent::Text("test".into()),
+        vec![stravia_runtime_contract::protocol::ir::AiItem {
+            role: stravia_runtime_contract::protocol::ir::Role::User,
+            content: stravia_runtime_contract::protocol::ir::MessageContent::Text("test".into()),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
@@ -3821,9 +3879,9 @@ async fn execute_protocol_request_with_timeout(
 ) -> Response {
     let mut request = AiRequest::new(
         model,
-        vec![crate::protocol::ir::AiItem {
-            role: crate::protocol::ir::Role::User,
-            content: crate::protocol::ir::MessageContent::Text("test".into()),
+        vec![stravia_runtime_contract::protocol::ir::AiItem {
+            role: stravia_runtime_contract::protocol::ir::Role::User,
+            content: stravia_runtime_contract::protocol::ir::MessageContent::Text("test".into()),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
@@ -3855,36 +3913,39 @@ async fn execute_protocol_request_with_timeout(
 struct RewriteUpstreamHook;
 struct RewriteUpstreamSession;
 
-impl crate::hook::Hook for RewriteUpstreamHook {
-    fn descriptor(&self) -> crate::hook::HookDescriptor {
-        crate::hook::HookDescriptor {
-            event_kinds: vec![crate::hook::EventKind::UpstreamResponse],
-            ..crate::hook::HookDescriptor::all("rewrite-stream-response")
+impl stravia_runtime_contract::hook::Hook for RewriteUpstreamHook {
+    fn descriptor(&self) -> stravia_runtime_contract::hook::HookDescriptor {
+        stravia_runtime_contract::hook::HookDescriptor {
+            event_kinds: vec![stravia_runtime_contract::hook::EventKind::UpstreamResponse],
+            ..stravia_runtime_contract::hook::HookDescriptor::all("rewrite-stream-response")
         }
     }
 
     fn create_session(
         &self,
-        _context: &crate::hook::SessionContext,
-    ) -> Box<dyn crate::hook::HookSession> {
+        _context: &stravia_runtime_contract::hook::SessionContext,
+    ) -> Box<dyn stravia_runtime_contract::hook::HookSession> {
         Box::new(RewriteUpstreamSession)
     }
 }
 
 #[async_trait]
-impl crate::hook::HookSession for RewriteUpstreamSession {
+impl stravia_runtime_contract::hook::HookSession for RewriteUpstreamSession {
     async fn handle(
         &mut self,
-        event: crate::hook::HookEvent<'_>,
-    ) -> Result<crate::hook::ActionBatch, String> {
-        if matches!(event, crate::hook::HookEvent::UpstreamResponse { .. }) {
-            Ok(crate::hook::ActionBatch::one(
-                crate::hook::HookAction::PatchResponse(crate::hook::ResponsePatch::SetContent(
-                    "rewritten".into(),
-                )),
+        event: stravia_runtime_contract::hook::HookEvent<'_>,
+    ) -> Result<stravia_runtime_contract::hook::ActionBatch, String> {
+        if matches!(
+            event,
+            stravia_runtime_contract::hook::HookEvent::UpstreamResponse { .. }
+        ) {
+            Ok(stravia_runtime_contract::hook::ActionBatch::one(
+                stravia_runtime_contract::hook::HookAction::PatchResponse(
+                    stravia_runtime_contract::hook::ResponsePatch::SetContent("rewritten".into()),
+                ),
             ))
         } else {
-            Ok(crate::hook::ActionBatch::default())
+            Ok(stravia_runtime_contract::hook::ActionBatch::default())
         }
     }
 }
@@ -3897,18 +3958,18 @@ struct ObserveUpstreamSession {
     responses: Arc<std::sync::Mutex<Vec<AiResponse>>>,
 }
 
-impl crate::hook::Hook for ObserveUpstreamHook {
-    fn descriptor(&self) -> crate::hook::HookDescriptor {
-        crate::hook::HookDescriptor {
-            event_kinds: vec![crate::hook::EventKind::UpstreamResponse],
-            ..crate::hook::HookDescriptor::all("observe-stream-response")
+impl stravia_runtime_contract::hook::Hook for ObserveUpstreamHook {
+    fn descriptor(&self) -> stravia_runtime_contract::hook::HookDescriptor {
+        stravia_runtime_contract::hook::HookDescriptor {
+            event_kinds: vec![stravia_runtime_contract::hook::EventKind::UpstreamResponse],
+            ..stravia_runtime_contract::hook::HookDescriptor::all("observe-stream-response")
         }
     }
 
     fn create_session(
         &self,
-        _context: &crate::hook::SessionContext,
-    ) -> Box<dyn crate::hook::HookSession> {
+        _context: &stravia_runtime_contract::hook::SessionContext,
+    ) -> Box<dyn stravia_runtime_contract::hook::HookSession> {
         Box::new(ObserveUpstreamSession {
             responses: self.responses.clone(),
         })
@@ -3916,18 +3977,19 @@ impl crate::hook::Hook for ObserveUpstreamHook {
 }
 
 #[async_trait]
-impl crate::hook::HookSession for ObserveUpstreamSession {
+impl stravia_runtime_contract::hook::HookSession for ObserveUpstreamSession {
     async fn handle(
         &mut self,
-        event: crate::hook::HookEvent<'_>,
-    ) -> Result<crate::hook::ActionBatch, String> {
-        if let crate::hook::HookEvent::UpstreamResponse { response, .. } = event {
+        event: stravia_runtime_contract::hook::HookEvent<'_>,
+    ) -> Result<stravia_runtime_contract::hook::ActionBatch, String> {
+        if let stravia_runtime_contract::hook::HookEvent::UpstreamResponse { response, .. } = event
+        {
             self.responses
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(response.clone());
         }
-        Ok(crate::hook::ActionBatch::default())
+        Ok(stravia_runtime_contract::hook::ActionBatch::default())
     }
 
     fn requires_terminal_buffering(&self) -> bool {
@@ -3938,38 +4000,43 @@ impl crate::hook::HookSession for ObserveUpstreamSession {
 struct RejectStreamHook;
 struct RejectStreamSession;
 
-impl crate::hook::Hook for RejectStreamHook {
-    fn descriptor(&self) -> crate::hook::HookDescriptor {
-        crate::hook::HookDescriptor {
-            event_kinds: vec![crate::hook::EventKind::UpstreamResponse],
-            ..crate::hook::HookDescriptor::all("reject-stream-response")
+impl stravia_runtime_contract::hook::Hook for RejectStreamHook {
+    fn descriptor(&self) -> stravia_runtime_contract::hook::HookDescriptor {
+        stravia_runtime_contract::hook::HookDescriptor {
+            event_kinds: vec![stravia_runtime_contract::hook::EventKind::UpstreamResponse],
+            ..stravia_runtime_contract::hook::HookDescriptor::all("reject-stream-response")
         }
     }
 
     fn create_session(
         &self,
-        _context: &crate::hook::SessionContext,
-    ) -> Box<dyn crate::hook::HookSession> {
+        _context: &stravia_runtime_contract::hook::SessionContext,
+    ) -> Box<dyn stravia_runtime_contract::hook::HookSession> {
         Box::new(RejectStreamSession)
     }
 }
 
 #[async_trait]
-impl crate::hook::HookSession for RejectStreamSession {
+impl stravia_runtime_contract::hook::HookSession for RejectStreamSession {
     async fn handle(
         &mut self,
-        event: crate::hook::HookEvent<'_>,
-    ) -> Result<crate::hook::ActionBatch, String> {
-        if matches!(event, crate::hook::HookEvent::UpstreamResponse { .. }) {
-            Ok(crate::hook::ActionBatch::one(
-                crate::hook::HookAction::Reject(crate::hook::HookRejection {
-                    status: 451,
-                    code: "stream_blocked".into(),
-                    message: "stream rejected by hook".into(),
-                }),
+        event: stravia_runtime_contract::hook::HookEvent<'_>,
+    ) -> Result<stravia_runtime_contract::hook::ActionBatch, String> {
+        if matches!(
+            event,
+            stravia_runtime_contract::hook::HookEvent::UpstreamResponse { .. }
+        ) {
+            Ok(stravia_runtime_contract::hook::ActionBatch::one(
+                stravia_runtime_contract::hook::HookAction::Reject(
+                    stravia_runtime_contract::hook::HookRejection {
+                        status: 451,
+                        code: "stream_blocked".into(),
+                        message: "stream rejected by hook".into(),
+                    },
+                ),
             ))
         } else {
-            Ok(crate::hook::ActionBatch::default())
+            Ok(stravia_runtime_contract::hook::ActionBatch::default())
         }
     }
 }
@@ -3977,36 +4044,39 @@ impl crate::hook::HookSession for RejectStreamSession {
 struct RespondStreamHook;
 struct RespondStreamSession;
 
-impl crate::hook::Hook for RespondStreamHook {
-    fn descriptor(&self) -> crate::hook::HookDescriptor {
-        crate::hook::HookDescriptor {
-            event_kinds: vec![crate::hook::EventKind::UpstreamResponse],
-            ..crate::hook::HookDescriptor::all("respond-stream-response")
+impl stravia_runtime_contract::hook::Hook for RespondStreamHook {
+    fn descriptor(&self) -> stravia_runtime_contract::hook::HookDescriptor {
+        stravia_runtime_contract::hook::HookDescriptor {
+            event_kinds: vec![stravia_runtime_contract::hook::EventKind::UpstreamResponse],
+            ..stravia_runtime_contract::hook::HookDescriptor::all("respond-stream-response")
         }
     }
 
     fn create_session(
         &self,
-        _context: &crate::hook::SessionContext,
-    ) -> Box<dyn crate::hook::HookSession> {
+        _context: &stravia_runtime_contract::hook::SessionContext,
+    ) -> Box<dyn stravia_runtime_contract::hook::HookSession> {
         Box::new(RespondStreamSession)
     }
 }
 
 #[async_trait]
-impl crate::hook::HookSession for RespondStreamSession {
+impl stravia_runtime_contract::hook::HookSession for RespondStreamSession {
     async fn handle(
         &mut self,
-        event: crate::hook::HookEvent<'_>,
-    ) -> Result<crate::hook::ActionBatch, String> {
-        if !matches!(event, crate::hook::HookEvent::UpstreamResponse { .. }) {
-            return Ok(crate::hook::ActionBatch::default());
+        event: stravia_runtime_contract::hook::HookEvent<'_>,
+    ) -> Result<stravia_runtime_contract::hook::ActionBatch, String> {
+        if !matches!(
+            event,
+            stravia_runtime_contract::hook::HookEvent::UpstreamResponse { .. }
+        ) {
+            return Ok(stravia_runtime_contract::hook::ActionBatch::default());
         }
         let mut response = AiResponse::new("hook-replacement", "provider-model");
         response.push_output_text("hook replacement");
         response.stop_reason = Some("stop".into());
-        Ok(crate::hook::ActionBatch::one(
-            crate::hook::HookAction::Respond(Box::new(response)),
+        Ok(stravia_runtime_contract::hook::ActionBatch::one(
+            stravia_runtime_contract::hook::HookAction::Respond(Box::new(response)),
         ))
     }
 }
@@ -4033,49 +4103,56 @@ impl PostCommitHookFailure {
 struct PostCommitFailureHook(PostCommitHookFailure);
 struct PostCommitFailureSession(PostCommitHookFailure);
 
-impl crate::hook::Hook for PostCommitFailureHook {
-    fn descriptor(&self) -> crate::hook::HookDescriptor {
-        crate::hook::HookDescriptor {
-            event_kinds: vec![crate::hook::EventKind::UpstreamResponse],
-            ..crate::hook::HookDescriptor::all(self.0.id())
+impl stravia_runtime_contract::hook::Hook for PostCommitFailureHook {
+    fn descriptor(&self) -> stravia_runtime_contract::hook::HookDescriptor {
+        stravia_runtime_contract::hook::HookDescriptor {
+            event_kinds: vec![stravia_runtime_contract::hook::EventKind::UpstreamResponse],
+            ..stravia_runtime_contract::hook::HookDescriptor::all(self.0.id())
         }
     }
 
     fn create_session(
         &self,
-        _context: &crate::hook::SessionContext,
-    ) -> Box<dyn crate::hook::HookSession> {
+        _context: &stravia_runtime_contract::hook::SessionContext,
+    ) -> Box<dyn stravia_runtime_contract::hook::HookSession> {
         Box::new(PostCommitFailureSession(self.0))
     }
 }
 
 #[async_trait]
-impl crate::hook::HookSession for PostCommitFailureSession {
+impl stravia_runtime_contract::hook::HookSession for PostCommitFailureSession {
     async fn handle(
         &mut self,
-        event: crate::hook::HookEvent<'_>,
-    ) -> Result<crate::hook::ActionBatch, String> {
-        if !matches!(event, crate::hook::HookEvent::UpstreamResponse { .. }) {
-            return Ok(crate::hook::ActionBatch::default());
+        event: stravia_runtime_contract::hook::HookEvent<'_>,
+    ) -> Result<stravia_runtime_contract::hook::ActionBatch, String> {
+        if !matches!(
+            event,
+            stravia_runtime_contract::hook::HookEvent::UpstreamResponse { .. }
+        ) {
+            return Ok(stravia_runtime_contract::hook::ActionBatch::default());
         }
         match self.0 {
-            PostCommitHookFailure::Reject => Ok(crate::hook::ActionBatch::one(
-                crate::hook::HookAction::Reject(crate::hook::HookRejection {
-                    status: 451,
-                    code: "late_reject".into(),
-                    message: "late rejection".into(),
-                }),
+            PostCommitHookFailure::Reject => Ok(stravia_runtime_contract::hook::ActionBatch::one(
+                stravia_runtime_contract::hook::HookAction::Reject(
+                    stravia_runtime_contract::hook::HookRejection {
+                        status: 451,
+                        code: "late_reject".into(),
+                        message: "late rejection".into(),
+                    },
+                ),
             )),
-            PostCommitHookFailure::Patch => Ok(crate::hook::ActionBatch::one(
-                crate::hook::HookAction::PatchResponse(crate::hook::ResponsePatch::SetContent(
-                    "must not replace committed output".into(),
-                )),
+            PostCommitHookFailure::Patch => Ok(stravia_runtime_contract::hook::ActionBatch::one(
+                stravia_runtime_contract::hook::HookAction::PatchResponse(
+                    stravia_runtime_contract::hook::ResponsePatch::SetContent(
+                        "must not replace committed output".into(),
+                    ),
+                ),
             )),
             PostCommitHookFailure::Respond => {
                 let mut response = AiResponse::new("late-response", "provider-model");
                 response.push_output_text("must not replace committed output");
-                Ok(crate::hook::ActionBatch::one(
-                    crate::hook::HookAction::Respond(Box::new(response)),
+                Ok(stravia_runtime_contract::hook::ActionBatch::one(
+                    stravia_runtime_contract::hook::HookAction::Respond(Box::new(response)),
                 ))
             }
             PostCommitHookFailure::Error => Err("late Hook error".into()),

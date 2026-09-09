@@ -12,6 +12,7 @@
 
 ### Changed
 
+- **Breaking (Rust API):** Media Understanding, Web Search, and Credential Protection now live in independent compile-time crates. Canonical IR, Hook, Agent, Artifact, and history contracts move to `stravia-runtime-contract`; Rust callers use the owning crate rather than old core re-exports. Core retains host adapters, authorization, execution, and delivery ownership. HTTP/MCP contracts, configuration keys, persisted formats, and credential restoration/publication semantics are unchanged.
 - **Breaking:** Remote context compaction is client-initiated passthrough, not a platform policy. Routes no longer expose `compaction_enabled` or `compaction_threshold`; migration 39 removes those columns while retaining native state records. Unknown Target capability is tried upstream, and compaction success or errors return without retries, Target switching, local summaries, or injected defaults.
 - Web Access admission, Local Fetch, and browser outbound checks now share static URL and IP rules in `stravia-web-access`. Adapter checks now also reject hosts that become non-public IPs after trailing dots are removed, matching existing core admission. DNS responsibilities, proxy snapshots, redirect checks, and address pinning remain unchanged.
 - Advanced Features save enable/disable switches immediately, without a separate save click. Media and search configuration drafts retain explicit submission and are not submitted or cleared by capability toggles. Failed immediate updates retain the saved state with local feedback.

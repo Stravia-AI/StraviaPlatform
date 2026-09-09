@@ -1,7 +1,7 @@
 use super::*;
 
 pub(super) fn decode_response_node(
-    node: crate::turn_chain::TurnNode,
+    node: stravia_runtime_contract::turn_chain::TurnNode,
 ) -> Result<(TurnNodeId, PersistedResponseNode), String> {
     if !(LEGACY_RESPONSE_PAYLOAD_VERSION..=RESPONSE_PAYLOAD_VERSION).contains(&node.payload_version)
     {
@@ -30,7 +30,7 @@ pub(super) fn decode_response_node(
                 .as_mut()
                 .and_then(serde_json::Value::as_object_mut)
             {
-                meta.remove(crate::protocol::ir::TOOL_RESULT_CONTENT_KIND_META);
+                meta.remove(stravia_runtime_contract::protocol::ir::TOOL_RESULT_CONTENT_KIND_META);
             }
         }
     }
@@ -38,7 +38,7 @@ pub(super) fn decode_response_node(
 }
 
 pub(super) fn materialize_generation_nodes(
-    nodes: Vec<crate::turn_chain::TurnNode>,
+    nodes: Vec<stravia_runtime_contract::turn_chain::TurnNode>,
     expires_at: std::time::Instant,
 ) -> Result<MaterializedGeneration, String> {
     let mut effective_items = Vec::new();

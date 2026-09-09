@@ -59,7 +59,7 @@ impl RouteModule<'_> {
                                     .cloned()
                                     .unwrap_or_else(|| crate::thinking::ThinkingLevelMapping {
                                         level,
-                                        control: crate::thinking::TargetThinkingControl::Hidden,
+                                        control: stravia_runtime_contract::thinking::TargetThinkingControl::Hidden,
                                         source: ThinkingMappingSource::Generated,
                                     })
                             }
@@ -111,11 +111,11 @@ impl RouteModule<'_> {
                     || registry
                         .parse_protocol(&provider.protocol)
                         .is_some_and(|protocol| {
-                            protocol == crate::protocol::ids::Protocol::OpenAICompatible
+                            protocol == stravia_runtime_contract::protocol::ids::Protocol::OpenAICompatible
                             && matches!(
                                 row.control,
-                                crate::thinking::TargetThinkingControl::Enabled
-                                    | crate::thinking::TargetThinkingControl::Disabled
+                                stravia_runtime_contract::thinking::TargetThinkingControl::Enabled
+                                    | stravia_runtime_contract::thinking::TargetThinkingControl::Disabled
                             )
                             && crate::provider::common::openai_compatible_thinking::supports_toggle(
                                 &provider,

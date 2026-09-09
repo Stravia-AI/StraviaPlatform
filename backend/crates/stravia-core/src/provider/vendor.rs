@@ -64,8 +64,6 @@ use crate::Gateway;
 use crate::auth::types::StoredCredential;
 use crate::db::models::Provider;
 use crate::error::GatewayError;
-use crate::protocol::ids::ProtocolId;
-use crate::protocol::ir::{AiRequest, AiResponse, AiStreamDelta};
 use crate::provider::inbound::InboundResponse;
 use crate::provider::metadata::VendorMetadata;
 use crate::provider::outbound::OutboundRequest;
@@ -73,6 +71,10 @@ use crate::provider::registry::VendorScope;
 use crate::provider::vendor_ext::{
     ResolvedTargetCapabilities, ResponsesWebSocketConnectionMetadata, VendorCtx,
 };
+use stravia_runtime_contract::protocol::ids::ProtocolId;
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::AiResponse;
+use stravia_runtime_contract::protocol::ir::AiStreamDelta;
 
 // ── ProviderCtx ──────────────────────────────────────────────────────────────
 

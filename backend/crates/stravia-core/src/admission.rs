@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use crate::error::GatewayError;
-use crate::hook::Principal;
+use stravia_runtime_contract::Principal;
 
 /// Gateway-local coordinator for Principal Concurrency Limit admission.
 ///
@@ -149,7 +149,7 @@ mod tests {
 
     use super::PrincipalAdmission;
     use crate::error::GatewayError;
-    use crate::hook::Principal;
+    use stravia_runtime_contract::Principal;
 
     #[test]
     fn configured_limit_wins_over_stale_authenticated_snapshot() {

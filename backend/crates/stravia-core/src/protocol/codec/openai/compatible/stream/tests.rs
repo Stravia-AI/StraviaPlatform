@@ -1,5 +1,6 @@
 use super::*;
-use crate::protocol::ir::{AiResponse, AiStreamDelta};
+use stravia_runtime_contract::protocol::ir::AiResponse;
+use stravia_runtime_contract::protocol::ir::AiStreamDelta;
 
 #[test]
 fn formatters_emit_cached_prompt_token_details() {
@@ -46,8 +47,8 @@ fn data_sse(json: &str) -> String {
 fn stream_formatter_encodes_canonical_stream_error() {
     let mut formatter = OpenAIStreamFormatter::new();
     let events = formatter.format_deltas(&[AiStreamDelta::StreamError {
-        error: crate::protocol::ir::AiError::new(
-            crate::protocol::ir::AiErrorKind::StreamMidError,
+        error: stravia_runtime_contract::protocol::ir::AiError::new(
+            stravia_runtime_contract::protocol::ir::AiErrorKind::StreamMidError,
             "stream aborted",
         ),
     }]);

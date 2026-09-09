@@ -4,8 +4,6 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::error::GatewayError;
-use crate::protocol::ids::ProtocolId;
-use crate::protocol::ir::{AiRequest, AiResponse};
 use crate::provider::common::pipeline;
 use crate::provider::inbound::InboundResponse;
 use crate::provider::metadata::{
@@ -15,6 +13,9 @@ use crate::provider::outbound::OutboundRequest;
 use crate::provider::registry::{ExtensionRegistration, VendorRegistration, VendorScope};
 use crate::provider::vendor::{ProviderCtx, Vendor};
 use crate::provider::vendor_ext::VendorExtension;
+use stravia_runtime_contract::protocol::ids::ProtocolId;
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::AiResponse;
 
 const METADATA: VendorMetadata = VendorMetadata {
     id: "google",
@@ -80,7 +81,8 @@ fn construct_google_request(
             url
         }
         RequestPurpose::Inference { protocol, .. }
-            if protocol.protocol == crate::protocol::ids::Protocol::OpenAICompatible =>
+            if protocol.protocol
+                == stravia_runtime_contract::protocol::ids::Protocol::OpenAICompatible =>
         {
             return crate::provider::common::openai_compat::construct_openai_request(ctx, purpose);
         }
@@ -115,7 +117,7 @@ impl Vendor for GoogleVendor {
         "google"
     }
     fn supported_protocols(&self) -> &'static [ProtocolId] {
-        use crate::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA;
+        use stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA;
         &[GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA]
     }
 

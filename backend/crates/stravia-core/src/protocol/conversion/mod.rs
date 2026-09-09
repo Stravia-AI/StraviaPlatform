@@ -13,19 +13,28 @@ use crate::protocol::codec::openai::compatible::encoder::OpenAIEncoder;
 use crate::protocol::codec::openai::compatible::stream::OpenAIStreamFormatter;
 use crate::protocol::codec::reasoning::normalize_response_reasoning;
 use crate::protocol::codec::tool_correlation::normalize_request_tool_results;
-use crate::protocol::ids::{
-    ANTHROPIC_MESSAGES_2023_06_01, BEDROCK_CONVERSE_V1, COHERE_CHAT_V2, GATEWAY_LANGUAGE_MODEL_V4,
-    GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA, OPEN_RESPONSES_2026_04_24,
-    OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1, WATSONX_TEXT_CHAT_V1,
-};
-use crate::protocol::ir::usage::Usage;
-use crate::protocol::ir::{
-    AiItem, AiRequest, AiResponse as IrAiResponse, AiStreamDelta as IrStreamDelta,
-    ContentBlock as IrContentBlock, MediaSource, MessageContent as IrMessageContent,
-    Role as IrRole, StreamConfig, ToolCall, ToolSpec,
-};
 use crate::protocol::transform::ProtocolTransform;
 use serde_json::{Value, json};
+use stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01;
+use stravia_runtime_contract::protocol::ids::BEDROCK_CONVERSE_V1;
+use stravia_runtime_contract::protocol::ids::COHERE_CHAT_V2;
+use stravia_runtime_contract::protocol::ids::GATEWAY_LANGUAGE_MODEL_V4;
+use stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA;
+use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
+use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
+use stravia_runtime_contract::protocol::ids::WATSONX_TEXT_CHAT_V1;
+use stravia_runtime_contract::protocol::ir::AiItem;
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::AiResponse as IrAiResponse;
+use stravia_runtime_contract::protocol::ir::AiStreamDelta as IrStreamDelta;
+use stravia_runtime_contract::protocol::ir::ContentBlock as IrContentBlock;
+use stravia_runtime_contract::protocol::ir::MediaSource;
+use stravia_runtime_contract::protocol::ir::MessageContent as IrMessageContent;
+use stravia_runtime_contract::protocol::ir::Role as IrRole;
+use stravia_runtime_contract::protocol::ir::StreamConfig;
+use stravia_runtime_contract::protocol::ir::ToolCall;
+use stravia_runtime_contract::protocol::ir::ToolSpec;
+use stravia_runtime_contract::protocol::ir::usage::Usage;
 
 fn responses_request(messages: Vec<AiItem>, stream: bool) -> AiRequest {
     let mut req = AiRequest::new("gpt-5.4", messages);

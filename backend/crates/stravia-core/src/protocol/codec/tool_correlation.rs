@@ -1,19 +1,22 @@
 use std::collections::VecDeque;
 
-use crate::protocol::ir::request::{
-    AiItem, AiRequest, ContentBlock, MessageContent, Role, ToolCall,
-};
+use stravia_runtime_contract::protocol::ir::request::AiItem;
+use stravia_runtime_contract::protocol::ir::request::AiRequest;
+use stravia_runtime_contract::protocol::ir::request::ContentBlock;
+use stravia_runtime_contract::protocol::ir::request::MessageContent;
+use stravia_runtime_contract::protocol::ir::request::Role;
+use stravia_runtime_contract::protocol::ir::request::ToolCall;
 
 pub fn normalize_request_tool_results(req: &mut AiRequest) {
     let inherits_tool_calls = matches!(
         req.ext.as_ref(),
-        Some(crate::protocol::ir::ProtocolExt::OpenResponses(extension))
+        Some(stravia_runtime_contract::protocol::ir::ProtocolExt::OpenResponses(extension))
             if extension.previous_response_id.is_some()
     ) || req
         .meta
         .vendor
         .ingress
-        .get(crate::protocol::ir::request::VERIFIED_HISTORY_REPLAY_META)
+        .get(stravia_runtime_contract::protocol::ir::request::VERIFIED_HISTORY_REPLAY_META)
         .and_then(serde_json::Value::as_bool)
         == Some(true);
     let mut pending_calls: VecDeque<(String, String)> = VecDeque::new();

@@ -2,10 +2,15 @@ use anyhow::Result;
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::protocol::ir::request::ToolCall;
-use crate::protocol::ir::usage::Usage;
-use crate::protocol::ir::{AiItem, AiResponse, AiStreamDelta, ContentBlock, MessageContent, Role};
 use crate::protocol::*;
+use stravia_runtime_contract::protocol::ir::AiItem;
+use stravia_runtime_contract::protocol::ir::AiResponse;
+use stravia_runtime_contract::protocol::ir::AiStreamDelta;
+use stravia_runtime_contract::protocol::ir::ContentBlock;
+use stravia_runtime_contract::protocol::ir::MessageContent;
+use stravia_runtime_contract::protocol::ir::Role;
+use stravia_runtime_contract::protocol::ir::request::ToolCall;
+use stravia_runtime_contract::protocol::ir::usage::Usage;
 
 // ── Non-streaming response parser ──
 

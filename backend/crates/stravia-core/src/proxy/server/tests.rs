@@ -34,7 +34,7 @@ async fn protected_responses_router_with_key_state(enabled: bool) -> (Router, St
 
 async fn protected_responses_router_with_hook(
     enabled: bool,
-    hook: Option<std::sync::Arc<dyn crate::hook::Hook>>,
+    hook: Option<std::sync::Arc<dyn stravia_runtime_contract::hook::Hook>>,
 ) -> (Router, String) {
     let data_dir = tempfile::tempdir().expect("temp data dir").keep();
     let config = GatewayConfig {
@@ -139,18 +139,18 @@ struct BlockingRequestSession {
     release: std::sync::Arc<tokio::sync::Notify>,
 }
 
-impl crate::hook::Hook for BlockingRequestHook {
-    fn descriptor(&self) -> crate::hook::HookDescriptor {
-        crate::hook::HookDescriptor {
-            event_kinds: vec![crate::hook::EventKind::Request],
-            ..crate::hook::HookDescriptor::all("block-websocket-request")
+impl stravia_runtime_contract::hook::Hook for BlockingRequestHook {
+    fn descriptor(&self) -> stravia_runtime_contract::hook::HookDescriptor {
+        stravia_runtime_contract::hook::HookDescriptor {
+            event_kinds: vec![stravia_runtime_contract::hook::EventKind::Request],
+            ..stravia_runtime_contract::hook::HookDescriptor::all("block-websocket-request")
         }
     }
 
     fn create_session(
         &self,
-        _context: &crate::hook::SessionContext,
-    ) -> Box<dyn crate::hook::HookSession> {
+        _context: &stravia_runtime_contract::hook::SessionContext,
+    ) -> Box<dyn stravia_runtime_contract::hook::HookSession> {
         Box::new(BlockingRequestSession {
             entered: std::sync::Arc::clone(&self.entered),
             release: std::sync::Arc::clone(&self.release),
@@ -159,16 +159,19 @@ impl crate::hook::Hook for BlockingRequestHook {
 }
 
 #[async_trait::async_trait]
-impl crate::hook::HookSession for BlockingRequestSession {
+impl stravia_runtime_contract::hook::HookSession for BlockingRequestSession {
     async fn handle(
         &mut self,
-        event: crate::hook::HookEvent<'_>,
-    ) -> Result<crate::hook::ActionBatch, String> {
-        if matches!(event, crate::hook::HookEvent::Request { .. }) {
+        event: stravia_runtime_contract::hook::HookEvent<'_>,
+    ) -> Result<stravia_runtime_contract::hook::ActionBatch, String> {
+        if matches!(
+            event,
+            stravia_runtime_contract::hook::HookEvent::Request { .. }
+        ) {
             self.entered.notify_one();
             self.release.notified().await;
         }
-        Ok(crate::hook::ActionBatch::default())
+        Ok(stravia_runtime_contract::hook::ActionBatch::default())
     }
 }
 
@@ -690,7 +693,7 @@ async fn artifact_upload_is_api_key_scoped_and_completes() {
         .await
         .expect("upload response");
     assert_eq!(response.status(), StatusCode::CREATED);
-    let upload: crate::agent::ArtifactUpload = serde_json::from_slice(
+    let upload: stravia_runtime_contract::artifact::ArtifactUpload = serde_json::from_slice(
         &to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("upload body"),
@@ -712,7 +715,7 @@ async fn artifact_upload_is_api_key_scoped_and_completes() {
         .await
         .expect("part response");
     assert_eq!(response.status(), StatusCode::OK);
-    let part: crate::agent::UploadedArtifactPart = serde_json::from_slice(
+    let part: stravia_runtime_contract::artifact::UploadedArtifactPart = serde_json::from_slice(
         &to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("part body"),

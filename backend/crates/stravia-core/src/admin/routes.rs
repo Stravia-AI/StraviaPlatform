@@ -4,7 +4,9 @@ use crate::provider_models::{
     ProviderModelPresence, ProviderModelSelectionPolicy, ProviderModelSourceKind,
     ProviderModelSyncSummary, normalize_model_id,
 };
-use crate::thinking::{ThinkingLevel, ThinkingMappingSource, generate_thinking_level_map};
+use crate::thinking::ThinkingMappingSource;
+use crate::thinking::generate_thinking_level_map;
+use stravia_runtime_contract::thinking::ThinkingLevel;
 
 mod model_discovery;
 mod model_records;

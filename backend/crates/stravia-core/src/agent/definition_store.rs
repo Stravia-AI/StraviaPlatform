@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use sqlx::{PgPool, SqlitePool};
 use tokio::sync::RwLock;
 
-use super::definition::{
+use stravia_runtime_contract::agent::{
     AgentDefinitionConfig, AgentDefinitionError, AgentDefinitionId, AgentDefinitionSpec,
 };
 
@@ -328,10 +328,10 @@ impl AgentDefinitionStore for SqlAgentDefinitionStore {
 
 fn decode_thinking_level(
     value: Option<String>,
-) -> Result<Option<crate::thinking::ThinkingLevel>, AgentDefinitionError> {
+) -> Result<Option<stravia_runtime_contract::thinking::ThinkingLevel>, AgentDefinitionError> {
     value
         .map(|value| {
-            crate::thinking::ThinkingLevel::from_wire(&value)
+            stravia_runtime_contract::thinking::ThinkingLevel::from_wire(&value)
                 .map_err(|error| AgentDefinitionError::Storage(error.to_string()))
         })
         .transpose()

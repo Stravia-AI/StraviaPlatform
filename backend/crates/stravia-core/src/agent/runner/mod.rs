@@ -1,38 +1,42 @@
 use std::collections::{HashMap, HashSet};
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use base64::Engine;
-use futures::{Stream, StreamExt, stream};
-use serde::{Deserialize, Serialize};
+use futures::{StreamExt, stream};
 use serde_json::Value;
 use tokio::sync::{Mutex, Semaphore, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 
 use super::tool::{AgentToolContext, AgentToolRegistry};
 use super::{
-    AgentDefinitionId, AgentDefinitionRegistry, AgentDefinitionSpec, AgentTool, ArtifactId,
-    ArtifactPolicy, ArtifactSource, ArtifactStore, CanonicalEvent, CapabilityModelAuthorization,
-    ModelTurnExecutor, TurnInput, VersionedToolId,
+    AgentDefinitionRegistry, AgentTool, CapabilityModelAuthorization, ModelTurnExecutor, TurnInput,
 };
-use crate::hook::{
-    ContextCompleteness, HookControl, HookRuntime, InferenceRun, PlatformToolResult, Principal,
-    RequestKind, SessionContext, ToolId, TransportKind,
-};
+use crate::hook::{HookRuntime, InferenceRun};
 use crate::model_turn::ModelTurnAuthorization;
-use crate::protocol::ir::{
+use stravia_runtime_contract::agent::{
+    AgentCompletion, AgentDefinitionId, AgentDefinitionSpec, AgentEvent, AgentEventStream,
+    AgentInput, AgentOutputValidationContext, AgentOutputValidator, AgentResult, AgentRunError,
+    AgentRunLimits, AgentTurnId, ArtifactPolicy, VersionedToolId,
+};
+use stravia_runtime_contract::artifact::{ArtifactId, ArtifactSource, ArtifactStore};
+use stravia_runtime_contract::hook::{
+    ContextCompleteness, HookControl, PlatformToolResult, RequestKind, SessionContext, ToolId,
+    TransportKind,
+};
+use stravia_runtime_contract::model_turn::CanonicalEvent;
+use stravia_runtime_contract::protocol::ir::{
     AiItem, AiRequest, AiResponse, ContentBlock, MediaSource, MessageContent, Role, ToolCall, Usage,
 };
-use crate::proxy::context::CancellationToken;
-use crate::turn_chain::{TurnChainStore, TurnCommit, TurnNodeId, TurnNodeKind};
+use stravia_runtime_contract::turn_chain::{TurnChainStore, TurnCommit, TurnNodeKind};
+use stravia_runtime_contract::{CancellationToken, Principal};
 
 mod context;
 mod tools;
 mod types;
-pub use types::*;
 use types::{AgentCommitPolicy, ResolvedAgentExecution, RunLimitStore};
+pub(crate) use types::{AgentRunGuard, AgentRunLifecycle, AgentToolAuthorizer};
 
 #[derive(Clone)]
 pub struct AgentRunner {

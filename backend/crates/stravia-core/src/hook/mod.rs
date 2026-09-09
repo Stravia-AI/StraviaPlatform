@@ -1,25 +1,9 @@
 mod runtime;
-pub mod stream;
 pub mod tool;
 
-pub mod context;
-
-pub use context::{
-    ContextCheckpoint, ContextCompleteness, ContextItem, ContextItemId, ContextPatchError,
-    ContextSnapshot, OpaqueContextRef, ReplaceContextSpan,
-};
-pub use runtime::{
-    ActionBatch, ClassifiedToolCalls, EventKind, Hook, HookAction, HookControl, HookDescriptor,
-    HookError, HookEvent, HookId, HookRejection, HookRuntime, HookSession, PlatformToolCall,
-    Principal, RequestKind, RequestPatch, ResponsePatch, RouteContext, SessionContext,
-    ToolResultPatch, TransportKind,
-};
-pub(crate) use runtime::{DetachedPlatformExecution, InferenceRun, ResponseHookOutcome};
-pub use stream::{StreamDirective, StreamTransformer};
-pub use tool::{
-    ExposedPlatformTool, PlatformTool, PlatformToolError, PlatformToolOutput, PlatformToolRegistry,
-    PlatformToolResult, ToolExecutionContext, ToolId, ToolProgress, ToolProgressSink,
-};
+pub use runtime::HookRuntime;
+pub(crate) use runtime::{DetachedPlatformExecution, InferenceRun};
+pub use tool::PlatformToolRegistry;
 
 pub(crate) fn is_secret_key(key: &str) -> bool {
     let normalized = key.to_ascii_lowercase().replace(['-', '.'], "_");

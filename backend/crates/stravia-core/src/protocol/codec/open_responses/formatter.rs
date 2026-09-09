@@ -1,10 +1,14 @@
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::protocol::ir::{
-    AiItem, AiItemAudience, AiItemProvenance, AiItemStatus, AiResponse, ContentBlock,
-    MessageContent, Role,
-};
+use stravia_runtime_contract::protocol::ir::AiItem;
+use stravia_runtime_contract::protocol::ir::AiItemAudience;
+use stravia_runtime_contract::protocol::ir::AiItemProvenance;
+use stravia_runtime_contract::protocol::ir::AiItemStatus;
+use stravia_runtime_contract::protocol::ir::AiResponse;
+use stravia_runtime_contract::protocol::ir::ContentBlock;
+use stravia_runtime_contract::protocol::ir::MessageContent;
+use stravia_runtime_contract::protocol::ir::Role;
 
 pub struct ResponsesResponseFormatter;
 
@@ -216,7 +220,9 @@ impl ResponsesResponseFormatter {
     }
 }
 
-fn wire_message_content(item: &crate::protocol::ir::AiItem) -> Option<Vec<Value>> {
+fn wire_message_content(
+    item: &stravia_runtime_contract::protocol::ir::AiItem,
+) -> Option<Vec<Value>> {
     let generated = match &item.content {
         MessageContent::Text(text) if text.is_empty() => return None,
         MessageContent::Text(text) => vec![serde_json::json!({

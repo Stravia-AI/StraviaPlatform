@@ -393,12 +393,18 @@ Set `--public-origin` to the trusted, externally reachable Gateway origin (for e
 
 ```text
 backend/crates/stravia-core/       Transport-independent gateway, protocols, providers, storage, and admin service
+backend/crates/stravia-runtime-contract/ Shared canonical IR, Hook, Agent, Artifact, and history contracts
+backend/crates/stravia-media/      Media Understanding implementation and configuration policy
+backend/crates/stravia-web-search/ Web Search backends, reports, tools, and configuration policy
+backend/crates/stravia-credential-protection/ Local credential detection, reversible protection, and mapping storage
 backend/crates/stravia-devtools/   Development and protocol-fixture tools
 backend/apps/stravia-server/       Standalone unified HTTP server
 backend/apps/stravia-desktop/      Tauri desktop shell
 frontend/stravia-webui/            SvelteKit management interface
 tests/e2e/                         Python backend E2E suites and recorded protocol fixtures
 ```
+
+The three capability crates are assembled at compile time by `stravia-core`; they depend on shared contracts, not on core. Core supplies the model, authorization, storage, and observation adapters. There is no dynamic loading or hot unloading, and HTTP/MCP contracts and persisted data formats are unchanged. Rust callers import shared types from `stravia-runtime-contract` and capability types from their owning crate.
 
 Common commands:
 

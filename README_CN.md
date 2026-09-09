@@ -393,12 +393,18 @@ idle_timeout_seconds = 300
 
 ```text
 backend/crates/stravia-core/       与传输层无关的网关、协议、提供商、存储和管理服务
+backend/crates/stravia-runtime-contract/ 共用 canonical IR、Hook、Agent、Artifact 与历史契约
+backend/crates/stravia-media/      媒体理解实现与配置策略
+backend/crates/stravia-web-search/ 搜索 Backend、报告、工具与配置策略
+backend/crates/stravia-credential-protection/ 本地凭据检测、可逆保护与映射存储
 backend/crates/stravia-devtools/   开发与协议 fixture 工具
 backend/apps/stravia-server/       独立统一 HTTP 服务端
 backend/apps/stravia-desktop/      Tauri 桌面外壳
 frontend/stravia-webui/            SvelteKit 管理界面
 tests/e2e/                         Python 后端 E2E 套件与协议录制样本
 ```
+
+三个能力 crate 由 `stravia-core` 在编译期装配，只依赖共享契约，不反向依赖 core。Core 提供模型执行、授权、存储和观测的 Host Adapter。不引入动态加载或热卸载，HTTP/MCP 契约及持久化数据格式不变。Rust 调用方从 `stravia-runtime-contract` 导入共享类型，从各能力所属 crate 导入能力类型。
 
 常用命令：
 

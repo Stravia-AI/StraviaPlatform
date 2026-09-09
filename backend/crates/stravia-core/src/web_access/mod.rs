@@ -13,7 +13,8 @@ type RuntimeConfig = (
     WebAccessApiKeyPermissions,
 );
 
-pub(crate) use platform::{WEB_FETCH_TOOL_ID, WEB_SEARCH_TOOL_ID, internal_platform_tools};
+pub(crate) use platform::internal_platform_tools;
+use stravia_web_access_contract::WebAccessError;
 
 mod types;
 pub use stravia_web_access_contract::{
@@ -30,7 +31,6 @@ mod service;
 
 #[cfg(test)]
 use engine::{AdapterSuccess, ProviderFailure, ProviderUsage, WebAccessEngine, WebProviderAdapter};
-pub(crate) use policy::normalize_domains;
 #[cfg(test)]
 use policy::{validate_fetch_request, validate_search_request};
 #[cfg(test)]

@@ -3,12 +3,17 @@ use std::collections::{HashMap, HashSet};
 use anyhow::Result;
 use serde_json::Value;
 
-use crate::protocol::ir::request::ToolCall;
-use crate::protocol::ir::usage::Usage;
-use crate::protocol::ir::{
-    AiItem, AiItemAudience, AiItemProvenance, AiItemStatus, AiResponse, AiStreamDelta,
-    ContentBlock, MessageContent, Role,
-};
+use stravia_runtime_contract::protocol::ir::AiItem;
+use stravia_runtime_contract::protocol::ir::AiItemAudience;
+use stravia_runtime_contract::protocol::ir::AiItemProvenance;
+use stravia_runtime_contract::protocol::ir::AiItemStatus;
+use stravia_runtime_contract::protocol::ir::AiResponse;
+use stravia_runtime_contract::protocol::ir::AiStreamDelta;
+use stravia_runtime_contract::protocol::ir::ContentBlock;
+use stravia_runtime_contract::protocol::ir::MessageContent;
+use stravia_runtime_contract::protocol::ir::Role;
+use stravia_runtime_contract::protocol::ir::request::ToolCall;
+use stravia_runtime_contract::protocol::ir::usage::Usage;
 
 pub(super) const DATED_EVENT_TYPES: &[&str] = &[
     "error",
@@ -355,7 +360,7 @@ fn strip_provider_function_output_schemas(tools: &mut Value) {
 /// Decode the standalone compact resource without spoofing a generation response.
 pub(crate) fn parse_compaction_response(
     resp: &Value,
-) -> Result<crate::protocol::ir::NativeCompactionResponse> {
+) -> Result<stravia_runtime_contract::protocol::ir::NativeCompactionResponse> {
     let object = resp
         .as_object()
         .ok_or_else(|| anyhow::anyhow!("compact response must be an object"))?;
@@ -394,11 +399,13 @@ pub(crate) fn parse_compaction_response(
     } else {
         None
     };
-    Ok(crate::protocol::ir::NativeCompactionResponse {
-        wire: resp.clone(),
-        items,
-        usage,
-    })
+    Ok(
+        stravia_runtime_contract::protocol::ir::NativeCompactionResponse {
+            wire: resp.clone(),
+            items,
+            usage,
+        },
+    )
 }
 
 pub struct ResponsesResponseParser;
@@ -832,7 +839,7 @@ impl ResponsesStreamParser {
     ) -> Result<()> {
         if item.role == Role::Assistant {
             match &item.content {
-                crate::protocol::ir::MessageContent::Text(text) => {
+                stravia_runtime_contract::protocol::ir::MessageContent::Text(text) => {
                     if let Some(text) =
                         take_missing_suffix(&mut self.streamed_text, output_index, 0, text)?
                     {
@@ -845,7 +852,7 @@ impl ResponsesStreamParser {
                         });
                     }
                 }
-                crate::protocol::ir::MessageContent::Blocks(blocks) => {
+                stravia_runtime_contract::protocol::ir::MessageContent::Blocks(blocks) => {
                     for (content_index, block) in blocks.iter().enumerate() {
                         match block {
                             ContentBlock::Text { text, .. } => {
@@ -1328,8 +1335,8 @@ impl ResponsesStreamParser {
                     .and_then(|value| u16::try_from(value).ok());
                 if !self.saw_error {
                     self.saw_error = true;
-                    let mut error = crate::protocol::ir::AiError::new(
-                        crate::protocol::ir::AiErrorKind::StreamMidError,
+                    let mut error = stravia_runtime_contract::protocol::ir::AiError::new(
+                        stravia_runtime_contract::protocol::ir::AiErrorKind::StreamMidError,
                         message,
                     )
                     .with_raw(serde_json::json!({ "error": error }));

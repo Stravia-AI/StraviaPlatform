@@ -17,9 +17,11 @@ use serde_json::Value;
 use crate::Gateway;
 use crate::auth::types::StoredCredential;
 use crate::db::models::Provider;
-use crate::protocol::ids::ProtocolId;
-use crate::protocol::ir::{AiRequest, AiResponse, AiStreamDelta};
 use crate::provider::registry::VendorScope;
+use stravia_runtime_contract::protocol::ids::ProtocolId;
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::AiResponse;
+use stravia_runtime_contract::protocol::ir::AiStreamDelta;
 
 /// Runtime context handed to every `VendorExtension` hook.
 pub struct VendorCtx<'a> {
@@ -89,7 +91,7 @@ impl ConstructedRequest {
         reqwest::Url::parse(&url)?;
         if ctx.disable_default_auth {
             headers.clear();
-        } else if matches!(purpose, RequestPurpose::Inference { protocol, .. } if protocol.protocol == crate::protocol::ids::Protocol::AnthropicMessages)
+        } else if matches!(purpose, RequestPurpose::Inference { protocol, .. } if protocol.protocol == stravia_runtime_contract::protocol::ids::Protocol::AnthropicMessages)
             && !headers.contains_key("x-api-key")
         {
             headers.remove(reqwest::header::AUTHORIZATION);

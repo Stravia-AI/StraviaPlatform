@@ -273,7 +273,7 @@ async fn native_responses_replay_uses_whitelisted_provider_context_for_continuat
             AiItemProvenance::Provider,
             AiItemAudience::Client,
         ),
-        AiItem::function_call(crate::protocol::ir::ToolCall {
+        AiItem::function_call(stravia_runtime_contract::protocol::ir::ToolCall {
             id: "call_1".into(),
             name: "lookup".into(),
             arguments: "{\"value\":1}".into(),
@@ -312,7 +312,7 @@ async fn native_responses_replay_uses_whitelisted_provider_context_for_continuat
             Some("title encrypted".into()),
         ),
         AiItem::output_text("title answer"),
-        AiItem::function_call(crate::protocol::ir::ToolCall {
+        AiItem::function_call(stravia_runtime_contract::protocol::ir::ToolCall {
             id: "title_call".into(),
             name: "lookup".into(),
             arguments: "{\"title\":true}".into(),
@@ -333,7 +333,7 @@ async fn native_responses_replay_uses_whitelisted_provider_context_for_continuat
             question.clone(),
             AiItem::reasoning(vec!["summary".into()], Vec::new(), Some(encrypted.into())),
             AiItem::output_text(text),
-            AiItem::function_call(crate::protocol::ir::ToolCall {
+            AiItem::function_call(stravia_runtime_contract::protocol::ir::ToolCall {
                 id: call_id.into(),
                 name: "lookup".into(),
                 arguments: arguments.into(),
@@ -488,7 +488,8 @@ async fn automatic_parent_matches_anthropic_opaque_reasoning_replay() {
     let question = user_message("question");
     let mut initial = responses_request(vec![question.clone()]);
     initial.instructions = Some("shared instructions".into());
-    initial.meta.source_protocol = Some(crate::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01);
+    initial.meta.source_protocol =
+        Some(stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01);
     let mut root = chain
         .begin(owner.clone(), initial)
         .await
@@ -496,7 +497,7 @@ async fn automatic_parent_matches_anthropic_opaque_reasoning_replay() {
     let mut response = AiResponse::new("upstream", "model");
     response.items = vec![
         AiItem::reasoning(Vec::new(), Vec::new(), Some("opaque".into())),
-        AiItem::function_call(crate::protocol::ir::ToolCall {
+        AiItem::function_call(stravia_runtime_contract::protocol::ir::ToolCall {
             id: "call_1".into(),
             name: "lookup".into(),
             arguments: "{\"value\":1}".into(),
@@ -522,18 +523,18 @@ async fn automatic_parent_matches_anthropic_opaque_reasoning_replay() {
         AiItem {
             role: Role::Assistant,
             content: MessageContent::Blocks(vec![
-                crate::protocol::ir::ContentBlock::Thinking {
+                stravia_runtime_contract::protocol::ir::ContentBlock::Thinking {
                     thinking: String::new(),
                     signature: Some("opaque".into()),
                 },
-                crate::protocol::ir::ContentBlock::ToolUse {
+                stravia_runtime_contract::protocol::ir::ContentBlock::ToolUse {
                     id: "call_1".into(),
                     name: "lookup".into(),
                     input: serde_json::json!({"value": 1}),
                     cache_control: None,
                 },
             ]),
-            tool_calls: Some(vec![crate::protocol::ir::ToolCall {
+            tool_calls: Some(vec![stravia_runtime_contract::protocol::ir::ToolCall {
                 id: "call_1".into(),
                 name: "lookup".into(),
                 arguments: "{\"value\":1}".into(),
@@ -544,7 +545,7 @@ async fn automatic_parent_matches_anthropic_opaque_reasoning_replay() {
         AiItem::function_call_output("call_1", serde_json::Value::String("result".into())),
     ]);
     resumed_request.meta.source_protocol =
-        Some(crate::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01);
+        Some(stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01);
     let resumed = chain
         .begin(owner, resumed_request)
         .await
@@ -565,7 +566,7 @@ async fn automatic_parent_matches_gemini_reasoning_and_tool_id_replay() {
     let question = user_message("question");
     let mut initial = responses_request(vec![question.clone()]);
     initial.meta.source_protocol =
-        Some(crate::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA);
+        Some(stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA);
     let mut root = chain
         .begin(owner.clone(), initial)
         .await
@@ -573,7 +574,7 @@ async fn automatic_parent_matches_gemini_reasoning_and_tool_id_replay() {
     let mut response = AiResponse::new("upstream", "model");
     response.items = vec![
         AiItem::reasoning(vec!["summary".into()], Vec::new(), Some("opaque".into())),
-        AiItem::function_call(crate::protocol::ir::ToolCall {
+        AiItem::function_call(stravia_runtime_contract::protocol::ir::ToolCall {
             id: "call_1".into(),
             name: "lookup".into(),
             arguments: "{\"value\":1}".into(),
@@ -592,18 +593,18 @@ async fn automatic_parent_matches_gemini_reasoning_and_tool_id_replay() {
         AiItem {
             role: Role::Assistant,
             content: MessageContent::Blocks(vec![
-                crate::protocol::ir::ContentBlock::Thinking {
+                stravia_runtime_contract::protocol::ir::ContentBlock::Thinking {
                     thinking: "summary".into(),
                     signature: Some("opaque".into()),
                 },
-                crate::protocol::ir::ContentBlock::ToolUse {
+                stravia_runtime_contract::protocol::ir::ContentBlock::ToolUse {
                     id: "call_client_random".into(),
                     name: "lookup".into(),
                     input: serde_json::json!({"value": 1}),
                     cache_control: None,
                 },
             ]),
-            tool_calls: Some(vec![crate::protocol::ir::ToolCall {
+            tool_calls: Some(vec![stravia_runtime_contract::protocol::ir::ToolCall {
                 id: "call_client_random".into(),
                 name: "lookup".into(),
                 arguments: "{\"value\":1}".into(),
@@ -613,20 +614,24 @@ async fn automatic_parent_matches_gemini_reasoning_and_tool_id_replay() {
         },
         AiItem {
             role: Role::Tool,
-            content: MessageContent::Blocks(vec![crate::protocol::ir::ContentBlock::ToolResult {
-                content_kind: Some(crate::protocol::ir::ToolResultContentKind::Json),
-                tool_use_id: "lookup".into(),
-                content: serde_json::Value::String("result".into()),
-                is_error: None,
-                cache_control: None,
-            }]),
+            content: MessageContent::Blocks(vec![
+                stravia_runtime_contract::protocol::ir::ContentBlock::ToolResult {
+                    content_kind: Some(
+                        stravia_runtime_contract::protocol::ir::ToolResultContentKind::Json,
+                    ),
+                    tool_use_id: "lookup".into(),
+                    content: serde_json::Value::String("result".into()),
+                    is_error: None,
+                    cache_control: None,
+                },
+            ]),
             tool_calls: None,
             tool_call_id: Some("lookup".into()),
             meta: None,
         },
     ]);
     resumed_request.meta.source_protocol =
-        Some(crate::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA);
+        Some(stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA);
     let mut resumed = chain
         .begin(owner, resumed_request)
         .await
@@ -650,7 +655,7 @@ async fn automatic_parent_matches_gemini_reasoning_and_tool_id_replay() {
             Vec::new(),
             Some("opaque-2".into()),
         ),
-        AiItem::function_call(crate::protocol::ir::ToolCall {
+        AiItem::function_call(stravia_runtime_contract::protocol::ir::ToolCall {
             id: "call_2".into(),
             name: "lookup".into(),
             arguments: "{\"value\":2}".into(),
@@ -667,18 +672,18 @@ async fn automatic_parent_matches_gemini_reasoning_and_tool_id_replay() {
     let assistant_turn = |thinking: &str, signature: &str, id: &str, value: i64| AiItem {
         role: Role::Assistant,
         content: MessageContent::Blocks(vec![
-            crate::protocol::ir::ContentBlock::Thinking {
+            stravia_runtime_contract::protocol::ir::ContentBlock::Thinking {
                 thinking: thinking.into(),
                 signature: Some(signature.into()),
             },
-            crate::protocol::ir::ContentBlock::ToolUse {
+            stravia_runtime_contract::protocol::ir::ContentBlock::ToolUse {
                 id: id.into(),
                 name: "lookup".into(),
                 input: serde_json::json!({"value": value}),
                 cache_control: None,
             },
         ]),
-        tool_calls: Some(vec![crate::protocol::ir::ToolCall {
+        tool_calls: Some(vec![stravia_runtime_contract::protocol::ir::ToolCall {
             id: id.into(),
             name: "lookup".into(),
             arguments: format!(r#"{{"value":{value}}}"#),
@@ -688,13 +693,17 @@ async fn automatic_parent_matches_gemini_reasoning_and_tool_id_replay() {
     };
     let tool_result = |value: &str| AiItem {
         role: Role::Tool,
-        content: MessageContent::Blocks(vec![crate::protocol::ir::ContentBlock::ToolResult {
-            content_kind: Some(crate::protocol::ir::ToolResultContentKind::Json),
-            tool_use_id: "lookup".into(),
-            content: serde_json::Value::String(value.into()),
-            is_error: None,
-            cache_control: None,
-        }]),
+        content: MessageContent::Blocks(vec![
+            stravia_runtime_contract::protocol::ir::ContentBlock::ToolResult {
+                content_kind: Some(
+                    stravia_runtime_contract::protocol::ir::ToolResultContentKind::Json,
+                ),
+                tool_use_id: "lookup".into(),
+                content: serde_json::Value::String(value.into()),
+                is_error: None,
+                cache_control: None,
+            },
+        ]),
         tool_calls: None,
         tool_call_id: Some("lookup".into()),
         meta: None,
@@ -707,7 +716,7 @@ async fn automatic_parent_matches_gemini_reasoning_and_tool_id_replay() {
         tool_result("result-2"),
     ]);
     third_request.meta.source_protocol =
-        Some(crate::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA);
+        Some(stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA);
     let third = chain
         .begin(principal("owner"), third_request)
         .await
@@ -735,7 +744,8 @@ async fn automatic_parent_matches_anthropic_output_replayed_as_responses_items()
     let owner = principal("owner");
     let question = user_message("question");
     let mut initial = responses_request(vec![question.clone()]);
-    initial.meta.source_protocol = Some(crate::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01);
+    initial.meta.source_protocol =
+        Some(stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01);
     let mut root = chain
         .begin(owner.clone(), initial)
         .await
@@ -748,7 +758,7 @@ async fn automatic_parent_matches_anthropic_output_replayed_as_responses_items()
             Some("opaque".into()),
         ),
         AiItem::output_text("answer"),
-        AiItem::function_call(crate::protocol::ir::ToolCall {
+        AiItem::function_call(stravia_runtime_contract::protocol::ir::ToolCall {
             id: "call_1".into(),
             name: "lookup".into(),
             arguments: "{\"value\":1}".into(),
@@ -770,7 +780,7 @@ async fn automatic_parent_matches_anthropic_output_replayed_as_responses_items()
             Some("opaque".into()),
         ),
         AiItem::output_text("answer"),
-        AiItem::function_call(crate::protocol::ir::ToolCall {
+        AiItem::function_call(stravia_runtime_contract::protocol::ir::ToolCall {
             id: "call_1".into(),
             name: "lookup".into(),
             arguments: "{\"value\":1}".into(),

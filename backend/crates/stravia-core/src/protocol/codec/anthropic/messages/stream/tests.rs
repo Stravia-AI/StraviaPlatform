@@ -1,6 +1,7 @@
 use super::*;
 use crate::protocol::codec::open_responses::parser::ResponsesStreamParser;
-use crate::protocol::ir::{AiResponse, AiStreamDelta};
+use stravia_runtime_contract::protocol::ir::AiResponse;
+use stravia_runtime_contract::protocol::ir::AiStreamDelta;
 
 fn make_sse_block(event: &str, data: &str) -> String {
     format!("event: {event}\ndata: {data}\n\n")
@@ -10,8 +11,8 @@ fn make_sse_block(event: &str, data: &str) -> String {
 fn stream_formatter_encodes_canonical_stream_error() {
     let mut formatter = AnthropicStreamFormatter::new();
     let events = formatter.format_deltas(&[AiStreamDelta::StreamError {
-        error: crate::protocol::ir::AiError::new(
-            crate::protocol::ir::AiErrorKind::StreamMidError,
+        error: stravia_runtime_contract::protocol::ir::AiError::new(
+            stravia_runtime_contract::protocol::ir::AiErrorKind::StreamMidError,
             "stream aborted",
         ),
     }]);

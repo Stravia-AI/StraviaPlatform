@@ -4,8 +4,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::hook::Principal;
 use crate::mcp::{McpContext, McpTool, McpToolError, McpToolOutput};
+use stravia_runtime_contract::Principal;
 
 pub(crate) fn tools(gateway: &crate::Gateway) -> Vec<Arc<dyn McpTool>> {
     vec![Arc::new(McpMediaUnderstanding {
@@ -20,28 +20,26 @@ struct McpMediaUnderstanding {
 #[async_trait]
 impl McpTool for McpMediaUnderstanding {
     fn name(&self) -> &str {
-        super::platform::MEDIA_TOOL_NAME
+        stravia_media::platform::MEDIA_TOOL_NAME
     }
 
     fn description(&self) -> Option<&str> {
-        Some(
-            "Understand static JPEG, PNG, or WebP Artifacts using OCR, description, comparison, or visual reasoning.",
-        )
+        Some(stravia_media::platform::MEDIA_TOOL_DESCRIPTION)
     }
 
     fn input_schema(&self) -> Value {
-        super::platform::input_schema()
+        stravia_media::platform::input_schema()
     }
 
     fn output_schema(&self) -> Option<Value> {
-        Some(super::platform::output_schema())
+        Some(stravia_media::platform::output_schema())
     }
     fn await_cancellation_cleanup(&self) -> bool {
         true
     }
 
     fn deadline(&self) -> Duration {
-        Duration::from_secs(120)
+        stravia_media::MEDIA_TOTAL_WALL_TIME
     }
 
     async fn available(&self, context: &McpContext) -> Result<bool, McpToolError> {
@@ -55,8 +53,8 @@ impl McpTool for McpMediaUnderstanding {
         if !key.is_some_and(|key| key.is_enabled && key.mcp_access_enabled) {
             return Ok(false);
         }
-        Ok(super::platform::is_available(
-            &self.gateway,
+        Ok(stravia_media::platform::is_available(
+            &super::runtime(&self.gateway),
             &Principal::new(context.api_key_id.clone()),
         )
         .await)
@@ -73,8 +71,8 @@ impl McpTool for McpMediaUnderstanding {
                 "Media MCP execution context is unavailable",
             )
         })?;
-        match super::platform::execute_until(
-            &self.gateway,
+        match stravia_media::platform::execute_until(
+            &super::runtime(&self.gateway),
             arguments,
             Principal::new(context.api_key_id.clone()),
             cancellation,
@@ -93,7 +91,7 @@ mod tests {
 
     #[test]
     fn mcp_media_schema_returns_full_report_contract() {
-        let schema = super::super::platform::output_schema();
+        let schema = stravia_media::platform::output_schema();
         assert_eq!(schema["additionalProperties"], false);
         assert!(schema["properties"]["report"].is_object());
         assert_eq!(schema["required"][0], "turn_id");

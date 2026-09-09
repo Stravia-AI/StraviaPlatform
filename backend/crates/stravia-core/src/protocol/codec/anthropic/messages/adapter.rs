@@ -3,15 +3,18 @@
 //! Wire version is the schema date `2023-06-01` (the `anthropic-version` header
 //! the API requires), not the URL prefix `v1`.
 
-use crate::protocol::ids::{ANTHROPIC_MESSAGES_2023_06_01, EndpointCapabilities, ProtocolEndpoint};
 use crate::protocol::registry::EndpointRegistration;
+use stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01;
+use stravia_runtime_contract::protocol::ids::EndpointCapabilities;
+use stravia_runtime_contract::protocol::ids::ProtocolEndpoint;
 
-use crate::protocol::ir::{AiRequest, AiResponse};
 use crate::protocol::transform::{
     ProtocolAdapter, TransformError, WireStreamDecoder, WireStreamEncoder,
 };
 use reqwest::header::HeaderMap;
 use serde_json::Value;
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::AiResponse;
 
 pub struct AnthropicMessages2023;
 

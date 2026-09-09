@@ -1,7 +1,7 @@
 use super::*;
 
 async fn run_provider_allowance_sampler<F, Fut>(
-    cancellation: proxy::context::CancellationToken,
+    cancellation: stravia_runtime_contract::CancellationToken,
     period: Duration,
     mut sample: F,
 ) where
@@ -137,7 +137,7 @@ impl Gateway {
             !matches!(storage_kind, RuntimeStorageKind::Memory),
         )
         .await;
-        let turn_chains: Arc<dyn turn_chain::TurnChainStore> =
+        let turn_chains: Arc<dyn stravia_runtime_contract::turn_chain::TurnChainStore> =
             if let Some(pool) = history_sqlite_pool.as_ref() {
                 Arc::new(turn_chain::SqlTurnChainStore::sqlite(pool.clone()))
             } else {
@@ -166,14 +166,14 @@ impl Gateway {
         } else {
             agent::AgentDefinitionRegistry::default()
         };
-        let mappings: Arc<dyn crate::reversible_redaction::store::MappingStore> =
+        let mappings: Arc<dyn stravia_credential_protection::store::MappingStore> =
             if let Some(pool) = history_sqlite_pool.as_ref() {
-                Arc::new(crate::reversible_redaction::store::SqlMappingStore::sqlite(
-                    pool.clone(),
-                ))
+                Arc::new(
+                    stravia_credential_protection::store::SqlMappingStore::sqlite(pool.clone()),
+                )
             } else {
                 Arc::new(
-                    crate::reversible_redaction::store::SqlMappingStore::postgres(
+                    stravia_credential_protection::store::SqlMappingStore::postgres(
                         postgres_pool
                             .as_ref()
                             .expect("Gateway requires a SQL mapping store")
@@ -185,19 +185,20 @@ impl Gateway {
             crate::reversible_redaction::ReversibleRedaction::new(Arc::clone(&storage), mappings);
 
         let (artifact_store, media_derivatives): (
-            Option<Arc<dyn agent::ArtifactStore>>,
-            Option<Arc<media::MediaDerivativeStore>>,
+            Option<Arc<dyn stravia_runtime_contract::artifact::ArtifactStore>>,
+            Option<Arc<stravia_media::MediaDerivativeStore>>,
         ) = if let Some(pool) = sqlite_pool.as_ref() {
             let local = Arc::new(agent::LocalArtifactStore::sqlite(
                 pool.clone(),
                 config.data_dir.join("artifacts"),
             ));
-            let artifacts: Arc<dyn agent::ArtifactStore> = local.clone();
+            let artifacts: Arc<dyn stravia_runtime_contract::artifact::ArtifactStore> =
+                local.clone();
             (
                 Some(artifacts),
-                Some(Arc::new(media::MediaDerivativeStore::sqlite(
+                Some(Arc::new(stravia_media::MediaDerivativeStore::sqlite(
                     pool.clone(),
-                    local,
+                    Arc::new(media::ArtifactHost(local)),
                 ))),
             )
         } else if let Some(pool) = postgres_pool.as_ref() {
@@ -205,12 +206,13 @@ impl Gateway {
                 pool.clone(),
                 config.data_dir.join("artifacts"),
             ));
-            let artifacts: Arc<dyn agent::ArtifactStore> = local.clone();
+            let artifacts: Arc<dyn stravia_runtime_contract::artifact::ArtifactStore> =
+                local.clone();
             (
                 Some(artifacts),
-                Some(Arc::new(media::MediaDerivativeStore::postgres(
+                Some(Arc::new(stravia_media::MediaDerivativeStore::postgres(
                     pool.clone(),
-                    local,
+                    Arc::new(media::ArtifactHost(local)),
                 ))),
             )
         } else {
@@ -280,7 +282,7 @@ impl Gateway {
             auth_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             agent_definitions,
             artifact_store,
-            media_run_snapshots: media::MediaRunSnapshotStore::default(),
+            media_run_snapshots: stravia_media::MediaRunSnapshotStore::default(),
             media_derivatives,
             media_understanding: Arc::new(tokio::sync::RwLock::new(None)),
             hook_runtime: HookRuntime::default(),
@@ -546,7 +548,7 @@ impl Gateway {
         web_access::WebAccessService::new(self.clone())
     }
 
-    pub async fn web_search_runner(&self) -> anyhow::Result<web_search::WebSearchRunner> {
+    pub async fn web_search_runner(&self) -> anyhow::Result<stravia_web_search::WebSearchRunner> {
         self.web_search_runner_state
             .read()
             .await
@@ -562,7 +564,9 @@ impl Gateway {
         &self.agent_definitions
     }
 
-    pub fn artifact_store(&self) -> Option<&Arc<dyn agent::ArtifactStore>> {
+    pub fn artifact_store(
+        &self,
+    ) -> Option<&Arc<dyn stravia_runtime_contract::artifact::ArtifactStore>> {
         self.artifact_store.as_ref()
     }
 
@@ -718,7 +722,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn provider_allowance_sampler_waits_thirty_minutes_and_stops_on_shutdown() {
-        let cancellation = proxy::context::CancellationToken::new();
+        let cancellation = stravia_runtime_contract::CancellationToken::new();
         let calls = Arc::new(AtomicUsize::new(0));
         let task_calls = Arc::clone(&calls);
         let task_cancellation = cancellation.clone();

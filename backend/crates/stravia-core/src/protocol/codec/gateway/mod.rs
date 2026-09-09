@@ -11,18 +11,27 @@ use anyhow::{Context, bail};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Map, Value, json};
 
-use crate::protocol::ids::{
-    EndpointCapabilities, GATEWAY_LANGUAGE_MODEL_V4, ProtocolEndpoint, StreamCaps,
-    VendorFieldPolicy,
-};
-use crate::protocol::ir::{
-    AiItem, AiRequest, AiResponse, AiStreamDelta, ContentBlock, MediaSource, MessageContent, Role,
-    ToolCall, ToolChoice, ToolSpec, Usage,
-};
 use crate::protocol::registry::EndpointRegistration;
 use crate::protocol::transform::{
     ProtocolAdapter, TransformError, WireStreamDecoder, WireStreamEncoder,
 };
+use stravia_runtime_contract::protocol::ids::EndpointCapabilities;
+use stravia_runtime_contract::protocol::ids::GATEWAY_LANGUAGE_MODEL_V4;
+use stravia_runtime_contract::protocol::ids::ProtocolEndpoint;
+use stravia_runtime_contract::protocol::ids::StreamCaps;
+use stravia_runtime_contract::protocol::ids::VendorFieldPolicy;
+use stravia_runtime_contract::protocol::ir::AiItem;
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::AiResponse;
+use stravia_runtime_contract::protocol::ir::AiStreamDelta;
+use stravia_runtime_contract::protocol::ir::ContentBlock;
+use stravia_runtime_contract::protocol::ir::MediaSource;
+use stravia_runtime_contract::protocol::ir::MessageContent;
+use stravia_runtime_contract::protocol::ir::Role;
+use stravia_runtime_contract::protocol::ir::ToolCall;
+use stravia_runtime_contract::protocol::ir::ToolChoice;
+use stravia_runtime_contract::protocol::ir::ToolSpec;
+use stravia_runtime_contract::protocol::ir::Usage;
 
 pub struct GatewayLanguageModelV4;
 
@@ -174,7 +183,9 @@ impl ProtocolAdapter for GatewayLanguageModelV4 {
                         .reasoning
                         .effort
                         .as_ref()
-                        .and_then(crate::protocol::ir::ReasoningEffort::as_openai_str)
+                        .and_then(
+                            stravia_runtime_contract::protocol::ir::ReasoningEffort::as_openai_str,
+                        )
                         .unwrap_or("provider-default")
                         .into(),
                 ),
@@ -380,7 +391,9 @@ fn decode_message(message: &Value) -> anyhow::Result<AiItem> {
                 blocks.push(ContentBlock::ToolResult {
                     tool_use_id: tool_call_id.clone().unwrap_or_default(),
                     content: Value::String(text),
-                    content_kind: Some(crate::protocol::ir::ToolResultContentKind::Json),
+                    content_kind: Some(
+                        stravia_runtime_contract::protocol::ir::ToolResultContentKind::Json,
+                    ),
                     is_error: None,
                     cache_control: None,
                 });
@@ -472,11 +485,11 @@ fn decode_gateway_tool_choice(value: &Value) -> anyhow::Result<ToolChoice> {
 
 fn decode_gateway_response_format(
     value: &Value,
-) -> anyhow::Result<crate::protocol::ir::ResponseFormat> {
+) -> anyhow::Result<stravia_runtime_contract::protocol::ir::ResponseFormat> {
     match value.get("type").and_then(Value::as_str) {
-        Some("text") => Ok(crate::protocol::ir::ResponseFormat::Text),
-        Some("json") if value.get("schema").is_some() => {
-            Ok(crate::protocol::ir::ResponseFormat::JsonSchema {
+        Some("text") => Ok(stravia_runtime_contract::protocol::ir::ResponseFormat::Text),
+        Some("json") if value.get("schema").is_some() => Ok(
+            stravia_runtime_contract::protocol::ir::ResponseFormat::JsonSchema {
                 schema: value.get("schema").cloned().unwrap_or(Value::Null),
                 name: value
                     .get("name")
@@ -484,9 +497,9 @@ fn decode_gateway_response_format(
                     .unwrap_or("response")
                     .to_string(),
                 strict: None,
-            })
-        }
-        Some("json") => Ok(crate::protocol::ir::ResponseFormat::JsonObject),
+            },
+        ),
+        Some("json") => Ok(stravia_runtime_contract::protocol::ir::ResponseFormat::JsonObject),
         Some(other) => bail!("unsupported Gateway response format `{other}`"),
         None => bail!("Gateway response format is missing type"),
     }
@@ -633,11 +646,17 @@ fn tool_names(request: &AiRequest) -> BTreeMap<String, String> {
         .collect()
 }
 
-fn encode_response_format(value: &crate::protocol::ir::ResponseFormat) -> anyhow::Result<Value> {
+fn encode_response_format(
+    value: &stravia_runtime_contract::protocol::ir::ResponseFormat,
+) -> anyhow::Result<Value> {
     match value {
-        crate::protocol::ir::ResponseFormat::Text => Ok(json!({"type": "text"})),
-        crate::protocol::ir::ResponseFormat::JsonObject => Ok(json!({"type": "json"})),
-        crate::protocol::ir::ResponseFormat::JsonSchema { schema, name, .. } => {
+        stravia_runtime_contract::protocol::ir::ResponseFormat::Text => Ok(json!({"type": "text"})),
+        stravia_runtime_contract::protocol::ir::ResponseFormat::JsonObject => {
+            Ok(json!({"type": "json"}))
+        }
+        stravia_runtime_contract::protocol::ir::ResponseFormat::JsonSchema {
+            schema, name, ..
+        } => {
             let mut result = Map::from_iter([
                 ("type".into(), Value::String("json".into())),
                 ("schema".into(), schema.clone()),

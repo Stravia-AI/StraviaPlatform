@@ -3,17 +3,19 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::hook::{
-    PlatformTool, PlatformToolError, PlatformToolOutput, Principal, ToolExecutionContext, ToolId,
-};
-use crate::protocol::ir::ContentBlock;
+use stravia_runtime_contract::Principal;
+use stravia_runtime_contract::hook::PlatformTool;
+use stravia_runtime_contract::hook::PlatformToolError;
+use stravia_runtime_contract::hook::PlatformToolOutput;
+use stravia_runtime_contract::hook::ToolExecutionContext;
+use stravia_runtime_contract::hook::ToolId;
+use stravia_runtime_contract::protocol::ir::ContentBlock;
 
 use super::{
     FetchRequest, SearchRequest, WEB_FETCH_NAME, WEB_SEARCH_NAME, WebAccessError, WebAccessService,
 };
 
-pub(crate) const WEB_SEARCH_TOOL_ID: &str = "web-access.search";
-pub(crate) const WEB_FETCH_TOOL_ID: &str = "web-access.fetch";
+use stravia_web_access_contract::{WEB_FETCH_TOOL_ID, WEB_SEARCH_TOOL_ID};
 
 pub(crate) fn internal_platform_tools(gateway: &crate::Gateway) -> Vec<Arc<dyn PlatformTool>> {
     let service = gateway.web_access();
@@ -224,11 +226,11 @@ mod tests {
         assert_eq!(tools[1].parameters()["properties"]["urls"]["maxItems"], 20);
         assert_ne!(
             tools[0].id().as_str(),
-            crate::web_search::PUBLIC_WEB_SEARCH_TOOL_ID
+            stravia_web_search::platform::PUBLIC_WEB_SEARCH_TOOL_ID
         );
         assert_ne!(
             tools[1].id().as_str(),
-            crate::web_search::PUBLIC_WEB_SEARCH_TOOL_ID
+            stravia_web_search::platform::PUBLIC_WEB_SEARCH_TOOL_ID
         );
     }
 }

@@ -15,8 +15,9 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 
 use crate::Gateway;
-use crate::protocol::ids::OPEN_RESPONSES_2026_04_24;
-use crate::proxy::context::{CancellationToken, RequestContext};
+use crate::proxy::context::RequestContext;
+use stravia_runtime_contract::CancellationToken;
+use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
 
 const MAX_MESSAGE_BYTES: usize = 100 * 1024 * 1024;
 const OUTGOING_QUEUE_CAPACITY: usize = 64;

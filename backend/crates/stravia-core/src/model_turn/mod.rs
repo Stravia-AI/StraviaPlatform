@@ -17,17 +17,18 @@ pub(crate) use continuation::{
 };
 pub(crate) use live::LiveModelTurnExecutor;
 
-use std::pin::Pin;
 use std::sync::{Arc, atomic::AtomicBool};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use futures::Stream;
 
-use crate::hook::{Principal, RouteContext};
 use crate::interaction_observation::RunObserver;
-use crate::protocol::ir::{AiRequest, AiResponse, AiStreamDelta};
-use crate::proxy::context::CancellationToken;
+use stravia_runtime_contract::CancellationToken;
+use stravia_runtime_contract::Principal;
+use stravia_runtime_contract::hook::RouteContext;
+use stravia_runtime_contract::protocol::ir::AiRequest;
+#[cfg(test)]
+use stravia_runtime_contract::protocol::ir::{AiResponse, AiStreamDelta};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelTurnAuthorization {
@@ -49,7 +50,7 @@ pub(crate) struct CompactionPublication {
     pub model_turn_id: String,
     pub mode: crate::interaction_observation::CompactionMode,
     pub source_generation_id: Option<String>,
-    pub state: crate::protocol::ir::AiItem,
+    pub state: stravia_runtime_contract::protocol::ir::AiItem,
     pub receipt: CompactionReceipt,
 }
 
@@ -113,38 +114,10 @@ impl TurnInput {
     }
 }
 
-#[derive(Debug, Clone)]
-pub enum CanonicalEvent {
-    Delta(AiStreamDelta),
-    Completed(Box<AiResponse>),
-    Compacted(Box<crate::protocol::ir::NativeCompactionResponse>),
-}
+use stravia_runtime_contract::model_turn::{CanonicalEvent, CanonicalEventStream, ModelTurnError};
 
 #[derive(Clone)]
 pub(crate) struct UpstreamErrorResponse;
-
-#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
-#[error("{message}")]
-pub struct ModelTurnError {
-    pub code: String,
-    pub message: String,
-    pub upstream_status: Option<u16>,
-    pub upstream_body: Option<serde_json::Value>,
-}
-
-impl ModelTurnError {
-    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
-            code: code.into(),
-            message: message.into(),
-            upstream_status: None,
-            upstream_body: None,
-        }
-    }
-}
-
-pub type CanonicalEventStream =
-    Pin<Box<dyn Stream<Item = Result<CanonicalEvent, ModelTurnError>> + Send>>;
 
 #[derive(Debug, Clone)]
 pub struct TargetIdentity {
@@ -212,7 +185,7 @@ pub(crate) fn unreachable_executor() -> Arc<dyn ModelTurnExecutor> {
 }
 
 #[cfg(test)]
-use crate::protocol::ids::OPEN_RESPONSES_2026_04_24;
+use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
 
 #[cfg(test)]
 #[derive(Clone)]

@@ -11,11 +11,12 @@ use futures::Stream;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::protocol::SseEvent;
-use crate::protocol::ids::Protocol;
-use crate::protocol::ids::ProtocolId;
-use crate::protocol::ir::{AiResponse, AiStreamDelta};
 use crate::protocol::transform::{ProtocolTransform, StreamEncodeStage, TransformError};
-use crate::proxy::context::CancellationToken;
+use stravia_runtime_contract::CancellationToken;
+use stravia_runtime_contract::protocol::ids::Protocol;
+use stravia_runtime_contract::protocol::ids::ProtocolId;
+use stravia_runtime_contract::protocol::ir::AiResponse;
+use stravia_runtime_contract::protocol::ir::AiStreamDelta;
 
 use super::RoundOutcome;
 
@@ -119,7 +120,7 @@ impl DeliveryAdapter {
 
     pub(super) fn set_response_profile(
         &mut self,
-        request: &crate::protocol::ir::AiRequest,
+        request: &stravia_runtime_contract::protocol::ir::AiRequest,
         previous_response_id: Option<&str>,
     ) {
         if let Self::Stream { encoder, .. } = self {
@@ -209,10 +210,11 @@ impl DeliveryAdapter {
         let events = match encoder.encode_deltas(deltas) {
             Ok(events) => events,
             Err(error) => {
-                let terminal_events = encoder.fail(crate::protocol::ir::AiError::new(
-                    crate::protocol::ir::AiErrorKind::StreamMidError,
-                    format!("STRAVIA_PROTOCOL_LOSSY_REJECTED: {error}"),
-                ));
+                let terminal_events =
+                    encoder.fail(stravia_runtime_contract::protocol::ir::AiError::new(
+                        stravia_runtime_contract::protocol::ir::AiErrorKind::StreamMidError,
+                        format!("STRAVIA_PROTOCOL_LOSSY_REJECTED: {error}"),
+                    ));
                 *failed = true;
                 for event in terminal_events {
                     let progress = send_event(
@@ -537,10 +539,10 @@ pub(super) fn streaming_response(body: Body) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::ids::{
-        ANTHROPIC_MESSAGES_2023_06_01, GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
-        OPEN_RESPONSES_2026_04_24, OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
-    };
+    use stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01;
+    use stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA;
+    use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
+    use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
 
     type DeliveryReceiver = tokio::sync::mpsc::Receiver<Result<String, Infallible>>;
     type DeliveryPreflight = tokio::sync::oneshot::Receiver<Result<(), RoundOutcome>>;

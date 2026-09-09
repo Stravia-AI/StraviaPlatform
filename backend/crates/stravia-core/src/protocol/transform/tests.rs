@@ -24,14 +24,19 @@ use super::{
     ProtocolTransform, ThinkingCarrierFacts, TransformError, request_loss_paths,
     response_loss_paths, stream_loss_paths,
 };
-use crate::protocol::ids::{
-    ANTHROPIC_MESSAGES_2023_06_01, GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
-    OPEN_RESPONSES_2026_04_24, OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
-};
-use crate::protocol::ir::{
-    AiItem, AiRequest, AiResponse, AiStreamDelta, ContentBlock, MediaSource, MessageContent, Role,
-    ToolCall,
-};
+use stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01;
+use stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA;
+use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
+use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
+use stravia_runtime_contract::protocol::ir::AiItem;
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::AiResponse;
+use stravia_runtime_contract::protocol::ir::AiStreamDelta;
+use stravia_runtime_contract::protocol::ir::ContentBlock;
+use stravia_runtime_contract::protocol::ir::MediaSource;
+use stravia_runtime_contract::protocol::ir::MessageContent;
+use stravia_runtime_contract::protocol::ir::Role;
+use stravia_runtime_contract::protocol::ir::ToolCall;
 
 #[test]
 fn native_compaction_controls_and_state_cannot_be_lossily_converted() {
@@ -190,9 +195,11 @@ fn same_protocol_stream_does_not_apply_cross_protocol_loss_policy() {
     let (_, mut encoder) = pair.stream().expect("stream adapter").into_parts();
 
     encoder
-        .encode_deltas(&[crate::protocol::ir::AiStreamDelta::Unknown {
-            raw: "event: provider_metadata".to_string(),
-        }])
+        .encode_deltas(&[
+            stravia_runtime_contract::protocol::ir::AiStreamDelta::Unknown {
+                raw: "event: provider_metadata".to_string(),
+            },
+        ])
         .expect("same-protocol stream must not apply cross-protocol loss policy");
 }
 
@@ -313,9 +320,11 @@ fn responses_to_chat_omits_advisory_include_fields() {
             "tool_choice": "auto"
         }))
         .expect("valid Responses request");
-    request.reasoning.target_control = Some(crate::thinking::TargetThinkingControl::Effort {
-        value: "high".into(),
-    });
+    request.reasoning.target_control = Some(
+        stravia_runtime_contract::thinking::TargetThinkingControl::Effort {
+            value: "high".into(),
+        },
+    );
 
     let encoded = pair
         .encode_request(&request)
@@ -1517,7 +1526,9 @@ fn open_responses_client_rejects_assistant_image_output() {
     response.items.push(AiItem {
         role: Role::Assistant,
         content: MessageContent::Blocks(vec![ContentBlock::Image {
-            source: crate::protocol::ir::MediaSource::Url("https://example.test/image.png".into()),
+            source: stravia_runtime_contract::protocol::ir::MediaSource::Url(
+                "https://example.test/image.png".into(),
+            ),
             detail: None,
             cache_control: None,
         }]),
@@ -1541,7 +1552,7 @@ fn open_responses_client_rejects_unrepresentable_tool_output_blocks() {
     response.items.push(AiItem {
         role: Role::Tool,
         content: MessageContent::Blocks(vec![ContentBlock::Audio {
-            source: crate::protocol::ir::MediaSource::Base64 {
+            source: stravia_runtime_contract::protocol::ir::MediaSource::Base64 {
                 media_type: "audio/wav".into(),
                 data: "aGk=".into(),
             },
@@ -1553,7 +1564,9 @@ fn open_responses_client_rejects_unrepresentable_tool_output_blocks() {
     response.items.push(AiItem {
         role: Role::Tool,
         content: MessageContent::Blocks(vec![ContentBlock::Image {
-            source: crate::protocol::ir::MediaSource::Url("https://example.test/image.png".into()),
+            source: stravia_runtime_contract::protocol::ir::MediaSource::Url(
+                "https://example.test/image.png".into(),
+            ),
             detail: Some("future".into()),
             cache_control: None,
         }]),

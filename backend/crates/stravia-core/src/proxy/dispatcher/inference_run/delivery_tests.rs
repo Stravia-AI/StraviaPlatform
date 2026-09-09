@@ -42,7 +42,7 @@ async fn delivered_native_state_survives_later_failure_but_unexposed_states_expi
             ingress_protocol: "open-responses/responses/2026-04-24".into(),
         });
     let compaction = Compaction::sqlite(pool.clone());
-    let principal = crate::hook::Principal::new("owner");
+    let principal = stravia_runtime_contract::Principal::new("owner");
     let publications = crate::model_turn::CompactionPublications::default();
     let mut states = Vec::new();
     for name in ["delivered", "incomplete", "altered", "unexposed"] {
@@ -99,7 +99,8 @@ async fn delivered_native_state_survives_later_failure_but_unexposed_states_expi
         compaction_records: publications,
     };
     let native = |index: usize| {
-        crate::protocol::codec::open_responses::native_compaction_item(&states[index]).unwrap()
+        stravia_runtime_contract::protocol::ir::canonical::native_compaction_item(&states[index])
+            .unwrap()
     };
     // This is the shared receipt interface used only after an HTTP complete
     // frame is polled or a WebSocket text write has been acknowledged.

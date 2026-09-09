@@ -14,6 +14,9 @@ anyhow = { workspace = true }
 axum = { workspace = true }
 listeners = { workspace = true }
 stravia-core = { workspace = true }
+stravia-runtime-contract = { workspace = true }
+stravia-media = { workspace = true }
+stravia-web-search = { workspace = true }
 stravia-server = { workspace = true }
 tauri = { workspace = true }
 tauri-plugin-autostart = { workspace = true }

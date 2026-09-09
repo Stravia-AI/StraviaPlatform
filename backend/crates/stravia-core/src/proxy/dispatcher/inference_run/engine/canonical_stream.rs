@@ -1,7 +1,9 @@
 use super::*;
 
-pub(super) fn ai_response_to_deltas(resp: &AiResponse) -> Vec<crate::protocol::ir::AiStreamDelta> {
-    use crate::protocol::ir::AiStreamDelta;
+pub(super) fn ai_response_to_deltas(
+    resp: &AiResponse,
+) -> Vec<stravia_runtime_contract::protocol::ir::AiStreamDelta> {
+    use stravia_runtime_contract::protocol::ir::AiStreamDelta;
     let mut deltas = Vec::new();
     let mut response_profile = serde_json::Map::new();
     for key in [
@@ -142,13 +144,13 @@ mod canonical_stream_tests {
         assert!(matches!(
             deltas.as_slice(),
             [
-                crate::protocol::ir::AiStreamDelta::MessageStart { .. },
-                crate::protocol::ir::AiStreamDelta::Usage(_),
-                crate::protocol::ir::AiStreamDelta::ResponseTerminal {
+                stravia_runtime_contract::protocol::ir::AiStreamDelta::MessageStart { .. },
+                stravia_runtime_contract::protocol::ir::AiStreamDelta::Usage(_),
+                stravia_runtime_contract::protocol::ir::AiStreamDelta::ResponseTerminal {
                     status,
                     incomplete_details: Some(details),
                 },
-                crate::protocol::ir::AiStreamDelta::Done { .. },
+                stravia_runtime_contract::protocol::ir::AiStreamDelta::Done { .. },
             ] if status == "incomplete"
                 && details["reason"] == "max_output_tokens"
         ));

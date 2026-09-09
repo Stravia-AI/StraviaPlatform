@@ -4,9 +4,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use async_trait::async_trait;
 
 use super::*;
-use crate::agent::{
-    AgentBudgets, AgentDefinitionConfig, AgentDefinitionSpec, AgentSlug, ArtifactPolicy,
-};
+use stravia_runtime_contract::agent::AgentBudgets;
+use stravia_runtime_contract::agent::AgentDefinitionConfig;
+use stravia_runtime_contract::agent::AgentDefinitionSpec;
+use stravia_runtime_contract::agent::AgentSlug;
+use stravia_runtime_contract::agent::ArtifactPolicy;
 
 struct EchoTool;
 
@@ -34,7 +36,7 @@ impl AgentTool for EchoTool {
     ) -> Result<crate::agent::AgentToolOutput, super::super::AgentToolError> {
         Ok(crate::agent::AgentToolOutput {
             content: input,
-            content_kind: crate::protocol::ir::ToolResultContentKind::Json,
+            content_kind: stravia_runtime_contract::protocol::ir::ToolResultContentKind::Json,
         })
     }
 }
@@ -42,7 +44,7 @@ impl AgentTool for EchoTool {
 struct BlockOutputTool(Vec<ContentBlock>);
 
 #[async_trait]
-impl crate::hook::PlatformTool for BlockOutputTool {
+impl stravia_runtime_contract::hook::PlatformTool for BlockOutputTool {
     fn id(&self) -> ToolId {
         ToolId::new("echo")
     }
@@ -58,16 +60,18 @@ impl crate::hook::PlatformTool for BlockOutputTool {
     async fn execute(
         &self,
         _arguments: Value,
-        _context: crate::hook::ToolExecutionContext,
-    ) -> Result<Value, crate::hook::PlatformToolError> {
-        Err(crate::hook::PlatformToolError::new("use typed output"))
+        _context: stravia_runtime_contract::hook::ToolExecutionContext,
+    ) -> Result<Value, stravia_runtime_contract::hook::PlatformToolError> {
+        Err(stravia_runtime_contract::hook::PlatformToolError::new(
+            "use typed output",
+        ))
     }
 
     async fn execute_blocks(
         &self,
         _arguments: Value,
-        _context: crate::hook::ToolExecutionContext,
-    ) -> Result<Vec<ContentBlock>, crate::hook::PlatformToolError> {
+        _context: stravia_runtime_contract::hook::ToolExecutionContext,
+    ) -> Result<Vec<ContentBlock>, stravia_runtime_contract::hook::PlatformToolError> {
         Ok(self.0.clone())
     }
 }
@@ -80,7 +84,7 @@ async fn platform_output_roundtrip(blocks: Vec<ContentBlock>) -> (AiRequest, Pla
             &ToolId::new("echo"),
             "call-1".into(),
             serde_json::json!({}),
-            crate::hook::ToolExecutionContext {
+            stravia_runtime_contract::hook::ToolExecutionContext {
                 request_id: "request".into(),
                 run_id: "run".into(),
                 principal: Principal::new("owner"),
@@ -166,7 +170,7 @@ async fn platform_agent_typed_media_preserves_opaque_secret_and_redacts_readable
             cache_control: None,
         },
         ContentBlock::Document {
-            source: crate::protocol::ir::DocumentSource::Blocks {
+            source: stravia_runtime_contract::protocol::ir::DocumentSource::Blocks {
                 content: vec![ContentBlock::Text {
                     text: SECRET.into(),
                     cache_control: None,
@@ -188,7 +192,7 @@ async fn platform_agent_typed_media_preserves_opaque_secret_and_redacts_readable
     .unwrap();
     gateway
         .admin()
-        .set_setting(crate::reversible_redaction::SETTING_KEY, "true")
+        .set_setting(stravia_credential_protection::SETTING_KEY, "true")
         .await
         .unwrap();
     gateway
@@ -226,7 +230,7 @@ async fn platform_agent_business_json_and_single_text_remain_readable_payloads()
     .unwrap();
     gateway
         .admin()
-        .set_setting(crate::reversible_redaction::SETTING_KEY, "true")
+        .set_setting(stravia_credential_protection::SETTING_KEY, "true")
         .await
         .unwrap();
     let mappings = gateway
@@ -343,9 +347,14 @@ impl ArtifactStore for ImageArtifactStore {
     async fn create_upload(
         &self,
         _principal: &Principal,
-        _request: crate::agent::ArtifactUploadRequest,
-    ) -> Result<crate::agent::ArtifactUpload, crate::agent::ArtifactError> {
-        Err(crate::agent::ArtifactError::Storage("not used".into()))
+        _request: stravia_runtime_contract::artifact::ArtifactUploadRequest,
+    ) -> Result<
+        stravia_runtime_contract::artifact::ArtifactUpload,
+        stravia_runtime_contract::artifact::ArtifactError,
+    > {
+        Err(stravia_runtime_contract::artifact::ArtifactError::Storage(
+            "not used".into(),
+        ))
     }
 
     async fn upload_part(
@@ -354,9 +363,14 @@ impl ArtifactStore for ImageArtifactStore {
         _upload_id: &str,
         _upload_token: &str,
         _part_number: u32,
-        _bytes: crate::agent::ArtifactByteStream,
-    ) -> Result<crate::agent::UploadedArtifactPart, crate::agent::ArtifactError> {
-        Err(crate::agent::ArtifactError::Storage("not used".into()))
+        _bytes: stravia_runtime_contract::artifact::ArtifactByteStream,
+    ) -> Result<
+        stravia_runtime_contract::artifact::UploadedArtifactPart,
+        stravia_runtime_contract::artifact::ArtifactError,
+    > {
+        Err(stravia_runtime_contract::artifact::ArtifactError::Storage(
+            "not used".into(),
+        ))
     }
 
     async fn complete_upload(
@@ -364,18 +378,26 @@ impl ArtifactStore for ImageArtifactStore {
         _principal: &Principal,
         _upload_id: &str,
         _upload_token: &str,
-        _parts: &[crate::agent::UploadedArtifactPart],
-    ) -> Result<crate::agent::ArtifactRef, crate::agent::ArtifactError> {
-        Err(crate::agent::ArtifactError::Storage("not used".into()))
+        _parts: &[stravia_runtime_contract::artifact::UploadedArtifactPart],
+    ) -> Result<
+        stravia_runtime_contract::artifact::ArtifactRef,
+        stravia_runtime_contract::artifact::ArtifactError,
+    > {
+        Err(stravia_runtime_contract::artifact::ArtifactError::Storage(
+            "not used".into(),
+        ))
     }
 
     async fn open(
         &self,
         _principal: &Principal,
         id: &ArtifactId,
-    ) -> Result<crate::agent::ArtifactReader, crate::agent::ArtifactError> {
-        Ok(crate::agent::ArtifactReader {
-            artifact: crate::agent::ArtifactRef {
+    ) -> Result<
+        stravia_runtime_contract::artifact::ArtifactReader,
+        stravia_runtime_contract::artifact::ArtifactError,
+    > {
+        Ok(stravia_runtime_contract::artifact::ArtifactReader {
+            artifact: stravia_runtime_contract::artifact::ArtifactRef {
                 id: id.clone(),
                 mime_type: "image/png".into(),
                 size: 3,
@@ -389,11 +411,13 @@ impl ArtifactStore for ImageArtifactStore {
         _principal: &Principal,
         _id: &ArtifactId,
         _retention: Duration,
-    ) -> Result<(), crate::agent::ArtifactError> {
+    ) -> Result<(), stravia_runtime_contract::artifact::ArtifactError> {
         Ok(())
     }
 
-    async fn sweep_expired(&self) -> Result<u64, crate::agent::ArtifactError> {
+    async fn sweep_expired(
+        &self,
+    ) -> Result<u64, stravia_runtime_contract::artifact::ArtifactError> {
         Ok(0)
     }
 }
@@ -431,7 +455,7 @@ fn definition() -> AgentDefinitionSpec {
             allowed_mime_types: vec!["image/png".into()],
         },
         repair_attempts: 1,
-        exposure: crate::agent::AgentDefinitionExposure::Public,
+        exposure: stravia_runtime_contract::agent::AgentDefinitionExposure::Public,
     }
 }
 
@@ -447,7 +471,7 @@ async fn enabled_registry() -> AgentDefinitionRegistry {
             AgentDefinitionConfig {
                 enabled: true,
                 model_id: Some("model-1".into()),
-                thinking_level: Some(crate::thinking::ThinkingLevel::Medium),
+                thinking_level: Some(stravia_runtime_contract::thinking::ThinkingLevel::Medium),
             },
         )
         .await
@@ -527,7 +551,7 @@ async fn runner_executes_tool_loop_commits_turn_and_emits_one_terminal_event() {
     let requests = model.requests();
     assert_eq!(requests.len(), 2);
     assert!(requests.iter().all(|request| {
-        request.reasoning.level == Some(crate::thinking::ThinkingLevel::Medium)
+        request.reasoning.level == Some(stravia_runtime_contract::thinking::ThinkingLevel::Medium)
     }));
     assert_eq!(
         request_session_fingerprint(&requests[0]),

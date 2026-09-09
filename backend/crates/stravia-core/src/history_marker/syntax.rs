@@ -1,6 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::protocol::ir::{AiItem, AiRequest, CacheControl, MessageContent, Role};
+use stravia_runtime_contract::protocol::ir::AiItem;
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::CacheControl;
+use stravia_runtime_contract::protocol::ir::MessageContent;
+use stravia_runtime_contract::protocol::ir::Role;
 
 use super::*;
 
@@ -409,14 +413,14 @@ pub fn history_marker_references(items: &[AiItem]) -> Vec<String> {
 
 fn mark_restored(
     mut item: AiItem,
-    provenance: crate::protocol::ir::AiItemProvenance,
+    provenance: stravia_runtime_contract::protocol::ir::AiItemProvenance,
     reference: &str,
 ) -> AiItem {
     item.set_graph_metadata(
         None,
         None,
         provenance,
-        crate::protocol::ir::AiItemAudience::Internal,
+        stravia_runtime_contract::protocol::ir::AiItemAudience::Internal,
     );
     item.meta
         .as_mut()
@@ -467,12 +471,12 @@ fn segment_items(
             };
             let call_item = mark_restored(
                 AiItem::function_call(call),
-                crate::protocol::ir::AiItemProvenance::Platform,
+                stravia_runtime_contract::protocol::ir::AiItemProvenance::Platform,
                 reference,
             );
             let result_item = mark_restored(
                 result_item,
-                crate::protocol::ir::AiItemProvenance::Platform,
+                stravia_runtime_contract::protocol::ir::AiItemProvenance::Platform,
                 reference,
             );
             (
@@ -504,7 +508,7 @@ fn segment_items(
             };
             let item = mark_restored(
                 item,
-                crate::protocol::ir::AiItemProvenance::Provider,
+                stravia_runtime_contract::protocol::ir::AiItemProvenance::Provider,
                 reference,
             );
             (
@@ -802,7 +806,7 @@ pub async fn resolve_request_markers(
         if legacy_duplicate_candidate
             .as_ref()
             .is_some_and(|candidate| {
-                crate::protocol::ir::canonical::history_items_equal(
+                stravia_runtime_contract::protocol::ir::canonical::history_items_equal(
                     std::slice::from_ref(candidate),
                     std::slice::from_ref(original),
                 )

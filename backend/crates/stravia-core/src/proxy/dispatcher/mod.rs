@@ -10,9 +10,10 @@ use axum::http::HeaderMap;
 use axum::response::Response;
 
 use crate::Gateway;
-use crate::protocol::ids::ProtocolId;
-use crate::protocol::ir::{AiRequest, RawEnvelope};
 use crate::proxy::context::RequestContext;
+use stravia_runtime_contract::protocol::ids::ProtocolId;
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::RawEnvelope;
 
 /// Execute one complete Inference Run for a normalized ingress request.
 pub(crate) async fn dispatch_pipeline(

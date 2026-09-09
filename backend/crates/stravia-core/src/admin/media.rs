@@ -1,196 +1,80 @@
-use serde::{Deserialize, Serialize};
-
-use crate::agent::{AgentDefinitionConfig, AgentDefinitionId};
-use crate::media::MEDIA_DEFINITION_ID;
-use crate::thinking::ThinkingLevel;
-
 use super::AdminService;
+use async_trait::async_trait;
+use std::sync::Arc;
+use stravia_media::MEDIA_DEFINITION_ID;
+use stravia_media::admin::{
+    EligibleMediaModel, MediaUnderstandingConfigError, MediaUnderstandingConfigUpdate,
+    MediaUnderstandingConfigView,
+};
+use stravia_media::admin::{MediaAdmin, MediaAdminHost, MediaAdminModel};
+use stravia_runtime_contract::agent::AgentDefinitionConfig;
+use stravia_runtime_contract::agent::AgentDefinitionId;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MediaUnderstandingConfigUpdate {
-    pub enabled: bool,
-    pub model_id: Option<String>,
-    pub thinking_level: Option<ThinkingLevel>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MediaUnderstandingState {
-    Disabled,
-    Unavailable,
-    Available,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct EligibleMediaModel {
-    pub id: String,
-    pub model_id: String,
-    pub display_name: String,
-    pub supported_thinking_levels: Vec<ThinkingLevel>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct MediaUnderstandingConfigView {
-    pub enabled: bool,
-    pub model_id: Option<String>,
-    pub thinking_level: Option<ThinkingLevel>,
-    pub state: MediaUnderstandingState,
-    pub eligible_models: Vec<EligibleMediaModel>,
-}
-
-#[derive(Debug, Clone, thiserror::Error, Serialize)]
-#[error("{message}")]
-pub struct MediaUnderstandingConfigError {
-    pub code: &'static str,
-    pub message: String,
-}
-
-impl MediaUnderstandingConfigError {
-    fn new(code: &'static str, message: impl Into<String>) -> Self {
-        Self {
-            code,
-            message: message.into(),
+struct AdminHost(AdminService);
+#[async_trait]
+impl MediaAdminHost for AdminHost {
+    fn storage_available(&self) -> bool {
+        self.0.gw.media_derivatives.is_some()
+    }
+    async fn config(&self) -> Result<AgentDefinitionConfig, ()> {
+        self.0
+            .gw
+            .agent_definitions
+            .get_current(&AgentDefinitionId::new(MEDIA_DEFINITION_ID))
+            .await
+            .map(|record| record.config)
+            .map_err(|_| ())
+    }
+    async fn patch_config(&self, config: AgentDefinitionConfig) -> Result<(), ()> {
+        self.0
+            .gw
+            .agent_definitions
+            .patch_config(&AgentDefinitionId::new(MEDIA_DEFINITION_ID), config)
+            .await
+            .map(|_| ())
+            .map_err(|_| ())
+    }
+    async fn models(&self) -> Result<Vec<MediaAdminModel>, ()> {
+        let mut result = Vec::new();
+        for model in self.0.list_models().await.map_err(|_| ())? {
+            let route = crate::media::route_metadata(&self.0.gw, &model).await;
+            let display_name = model.effective_display_name().to_string();
+            result.push(MediaAdminModel {
+                route,
+                view: EligibleMediaModel {
+                    id: model.id,
+                    model_id: model.model_id,
+                    display_name,
+                    supported_thinking_levels: model.supported_thinking_levels.0,
+                },
+            });
         }
+        Ok(result)
     }
 }
-
 impl AdminService {
     pub async fn get_media_understanding_config(
         &self,
     ) -> Result<MediaUnderstandingConfigView, MediaUnderstandingConfigError> {
-        let record = self.media_definition().await?;
-        let eligible_models = self.list_eligible_media_models().await?;
-        let state = if !record.config.enabled {
-            MediaUnderstandingState::Disabled
-        } else if self.gw.media_derivatives.is_none() {
-            MediaUnderstandingState::Unavailable
-        } else if record.config.model_id.as_ref().is_some_and(|id| {
-            eligible_models.iter().any(|model| {
-                &model.id == id
-                    && record
-                        .config
-                        .thinking_level
-                        .is_some_and(|level| model.supported_thinking_levels.contains(&level))
-            })
-        }) {
-            MediaUnderstandingState::Available
-        } else {
-            MediaUnderstandingState::Unavailable
-        };
-        Ok(MediaUnderstandingConfigView {
-            enabled: record.config.enabled,
-            model_id: record.config.model_id,
-            thinking_level: record.config.thinking_level,
-            state,
-            eligible_models,
-        })
+        MediaAdmin::new(Arc::new(AdminHost(self.clone())))
+            .get_media_understanding_config()
+            .await
     }
-
     pub async fn update_media_understanding_config(
         &self,
         update: MediaUnderstandingConfigUpdate,
     ) -> Result<MediaUnderstandingConfigView, MediaUnderstandingConfigError> {
-        if update.enabled && self.gw.media_derivatives.is_none() {
-            return Err(MediaUnderstandingConfigError::new(
-                "MEDIA_UNDERSTANDING_CONFIG_UNAVAILABLE",
-                "Media Understanding runtime storage is unavailable",
-            ));
-        }
-        if update.enabled {
-            let model_id = update.model_id.as_deref().ok_or_else(|| {
-                MediaUnderstandingConfigError::new(
-                    "MEDIA_UNDERSTANDING_MODEL_REQUIRED",
-                    "Media Understanding requires a logical Model",
-                )
-            })?;
-            let eligible_models = self.list_eligible_media_models().await?;
-            let model = eligible_models
-                .iter()
-                .find(|model| model.id == model_id)
-                .ok_or_else(|| {
-                    MediaUnderstandingConfigError::new(
-                        "MEDIA_UNDERSTANDING_MODEL_UNAVAILABLE",
-                        "The selected Model is unavailable for Media Understanding",
-                    )
-                })?;
-            let thinking_level = update.thinking_level.ok_or_else(|| {
-                MediaUnderstandingConfigError::new(
-                    "MEDIA_UNDERSTANDING_THINKING_LEVEL_REQUIRED",
-                    "Media Understanding requires a Thinking Level",
-                )
-            })?;
-            if !model.supported_thinking_levels.contains(&thinking_level) {
-                return Err(MediaUnderstandingConfigError::new(
-                    "MEDIA_UNDERSTANDING_THINKING_LEVEL_UNAVAILABLE",
-                    "The selected Thinking Level is unavailable on the selected Model",
-                ));
-            }
-        }
-        self.gw
-            .agent_definitions
-            .patch_config(
-                &AgentDefinitionId::new(MEDIA_DEFINITION_ID),
-                AgentDefinitionConfig {
-                    enabled: update.enabled,
-                    model_id: update.model_id,
-                    thinking_level: update.thinking_level,
-                },
-            )
+        MediaAdmin::new(Arc::new(AdminHost(self.clone())))
+            .update_media_understanding_config(update)
             .await
-            .map_err(|_| {
-                MediaUnderstandingConfigError::new(
-                    "MEDIA_UNDERSTANDING_CONFIG_UNAVAILABLE",
-                    "Media Understanding configuration could not be saved",
-                )
-            })?;
-        self.get_media_understanding_config().await
     }
-
-    async fn list_eligible_media_models(
-        &self,
-    ) -> Result<Vec<EligibleMediaModel>, MediaUnderstandingConfigError> {
-        let mut eligible = Vec::new();
-        for model in self.list_models().await.map_err(|_| config_unavailable())? {
-            if !crate::media::model_is_image_capable(&self.gw, &model).await {
-                continue;
-            }
-            let display_name = model.effective_display_name().to_string();
-            eligible.push(EligibleMediaModel {
-                id: model.id,
-                model_id: model.model_id,
-                display_name,
-                supported_thinking_levels: model.supported_thinking_levels.0,
-            });
-        }
-        eligible.sort_by(|left, right| {
-            left.display_name
-                .cmp(&right.display_name)
-                .then(left.model_id.cmp(&right.model_id))
-        });
-        Ok(eligible)
-    }
-
-    async fn media_definition(
-        &self,
-    ) -> Result<crate::agent::AgentDefinitionRecord, MediaUnderstandingConfigError> {
-        self.gw
-            .agent_definitions
-            .get_current(&AgentDefinitionId::new(MEDIA_DEFINITION_ID))
-            .await
-            .map_err(|_| config_unavailable())
-    }
-}
-
-fn config_unavailable() -> MediaUnderstandingConfigError {
-    MediaUnderstandingConfigError::new(
-        "MEDIA_UNDERSTANDING_CONFIG_UNAVAILABLE",
-        "Media Understanding configuration is unavailable",
-    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use stravia_media::admin::MediaUnderstandingState;
+    use stravia_runtime_contract::thinking::ThinkingLevel;
 
     #[tokio::test]
     async fn media_config_defaults_to_disabled_with_read_only_contract() {
@@ -394,10 +278,9 @@ mod tests {
         assert_eq!(updated.model_id.as_deref(), Some(model.id.as_str()));
         assert_eq!(updated.thinking_level, Some(ThinkingLevel::Medium));
         let persisted = admin
-            .media_definition()
+            .get_media_understanding_config()
             .await
-            .expect("Media Definition")
-            .config;
+            .expect("persisted Media configuration");
         assert_eq!(
             (persisted.model_id, persisted.thinking_level),
             (Some(model.id), Some(ThinkingLevel::Medium))

@@ -6,6 +6,8 @@
 
 ## 1. 结论
 
+实现归属独立 `stravia-web-search` crate，包含 Runner、Local/Codex Backend、Definition、报告与证据校验、公开工具、透明注入及配置策略。`stravia-core` 在编译期注入 Agent、Provider 快照、设置与授权的 Host Adapter，并保留 MCP/管理面 Adapter；能力不反向依赖 core。共享执行类型来自 `stravia-runtime-contract`，域名规范化及内部工具 ID 归 `stravia-web-access-contract`，静态地址规则继续归 `stravia-web-access`。
+
 Web Search 是一个由平台总开关控制的 Advanced Capability。它向普通模型请求和 MCP 提供同一个公开 composite `web_search`，返回带来源的 `SearchReport`；Local 与 Codex backend 的差异不进入公开 contract。
 
 平台总开关决定能力是否存在。开关开启后，每个有效 API Key 都可以显式调用；关闭后，普通请求和 MCP 都不可用。API Key 的 Transparent Injection 只决定 Stravia 是否在客户端未声明工具时自动暴露 `web_search`，不承担显式调用授权。

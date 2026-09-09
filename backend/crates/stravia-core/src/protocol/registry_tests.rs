@@ -5,15 +5,20 @@
 //! - Anthropic Messages / Google Generate
 //! - OpenAI Embeddings (registered for ingress route and capability discovery).
 
-use crate::protocol::ids::{
-    ANTHROPIC_MESSAGES_2023_06_01, BEDROCK_CONVERSE_V1, COHERE_CHAT_V2, GATEWAY_LANGUAGE_MODEL_V4,
-    GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA, OPEN_RESPONSES_2026_04_24,
-    OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1, OPENAI_COMPATIBLE_EMBEDDINGS_V1, Protocol, ProtocolId,
-    WATSONX_TEXT_CHAT_V1,
-};
-use crate::protocol::ir::Role;
 use crate::protocol::registry::ProtocolRegistry;
 use serde_json::json;
+use stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01;
+use stravia_runtime_contract::protocol::ids::BEDROCK_CONVERSE_V1;
+use stravia_runtime_contract::protocol::ids::COHERE_CHAT_V2;
+use stravia_runtime_contract::protocol::ids::GATEWAY_LANGUAGE_MODEL_V4;
+use stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA;
+use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
+use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
+use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_EMBEDDINGS_V1;
+use stravia_runtime_contract::protocol::ids::Protocol;
+use stravia_runtime_contract::protocol::ids::ProtocolId;
+use stravia_runtime_contract::protocol::ids::WATSONX_TEXT_CHAT_V1;
+use stravia_runtime_contract::protocol::ir::Role;
 
 #[test]
 fn registers_all_adapters_with_correct_ids() {

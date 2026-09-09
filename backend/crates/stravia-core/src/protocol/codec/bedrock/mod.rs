@@ -10,17 +10,27 @@ use anyhow::{Context, bail};
 use reqwest::header::HeaderMap;
 use serde_json::{Map, Value, json};
 
-use crate::protocol::ids::{
-    BEDROCK_CONVERSE_V1, EndpointCapabilities, ProtocolEndpoint, StreamCaps, VendorFieldPolicy,
-};
-use crate::protocol::ir::{
-    AiItem, AiRequest, AiResponse, AiStreamDelta, ContentBlock, MediaSource, MessageContent, Role,
-    ToolCall, ToolChoice, ToolSpec, Usage,
-};
 use crate::protocol::registry::EndpointRegistration;
 use crate::protocol::transform::{
     ProtocolAdapter, TransformError, WireStreamDecoder, WireStreamEncoder,
 };
+use stravia_runtime_contract::protocol::ids::BEDROCK_CONVERSE_V1;
+use stravia_runtime_contract::protocol::ids::EndpointCapabilities;
+use stravia_runtime_contract::protocol::ids::ProtocolEndpoint;
+use stravia_runtime_contract::protocol::ids::StreamCaps;
+use stravia_runtime_contract::protocol::ids::VendorFieldPolicy;
+use stravia_runtime_contract::protocol::ir::AiItem;
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::AiResponse;
+use stravia_runtime_contract::protocol::ir::AiStreamDelta;
+use stravia_runtime_contract::protocol::ir::ContentBlock;
+use stravia_runtime_contract::protocol::ir::MediaSource;
+use stravia_runtime_contract::protocol::ir::MessageContent;
+use stravia_runtime_contract::protocol::ir::Role;
+use stravia_runtime_contract::protocol::ir::ToolCall;
+use stravia_runtime_contract::protocol::ir::ToolChoice;
+use stravia_runtime_contract::protocol::ir::ToolSpec;
+use stravia_runtime_contract::protocol::ir::Usage;
 
 pub struct BedrockConverseV1;
 
@@ -599,7 +609,9 @@ fn decode_content_block(block: &Value) -> anyhow::Result<ContentBlock> {
     if let Some(result) = block.get("toolResult") {
         return Ok(ContentBlock::ToolResult {
             tool_use_id: required_string(result, "toolUseId")?,
-            content_kind: Some(crate::protocol::ir::ToolResultContentKind::ContentBlocks),
+            content_kind: Some(
+                stravia_runtime_contract::protocol::ir::ToolResultContentKind::ContentBlocks,
+            ),
             content: result
                 .get("content")
                 .cloned()

@@ -19,7 +19,9 @@ fn gemini_tool_result_correlation_success() {
             content: IrMessageContent::Blocks(vec![IrContentBlock::ToolResult {
                 tool_use_id: "read_file".to_string(),
                 content: serde_json::json!({"ok": true}),
-                content_kind: Some(crate::protocol::ir::ToolResultContentKind::Json),
+                content_kind: Some(
+                    stravia_runtime_contract::protocol::ir::ToolResultContentKind::Json,
+                ),
                 is_error: None,
                 cache_control: None,
             }]),
@@ -68,7 +70,9 @@ fn gemini_tool_result_id_hint_matches_out_of_order_calls() {
             content: IrMessageContent::Blocks(vec![IrContentBlock::ToolResult {
                 tool_use_id: "call_b".to_string(),
                 content: serde_json::json!({"ok": true}),
-                content_kind: Some(crate::protocol::ir::ToolResultContentKind::Json),
+                content_kind: Some(
+                    stravia_runtime_contract::protocol::ir::ToolResultContentKind::Json,
+                ),
                 is_error: None,
                 cache_control: None,
             }]),
@@ -81,7 +85,9 @@ fn gemini_tool_result_id_hint_matches_out_of_order_calls() {
             content: IrMessageContent::Blocks(vec![IrContentBlock::ToolResult {
                 tool_use_id: "call_a".to_string(),
                 content: serde_json::json!({"ok": true}),
-                content_kind: Some(crate::protocol::ir::ToolResultContentKind::Json),
+                content_kind: Some(
+                    stravia_runtime_contract::protocol::ir::ToolResultContentKind::Json,
+                ),
                 is_error: None,
                 cache_control: None,
             }]),

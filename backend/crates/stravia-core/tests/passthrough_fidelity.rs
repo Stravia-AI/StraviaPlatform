@@ -6,12 +6,13 @@
 
 use std::time::Duration;
 use stravia_core::protocol::ProviderProtocols;
-use stravia_core::protocol::ids::{
-    ANTHROPIC_MESSAGES_2023_06_01, GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
-    OPEN_RESPONSES_2026_04_24, OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1, ProtocolId,
-};
 use stravia_core::proxy::context::RequestContext;
 use stravia_core::proxy::planner::{ProtocolMode, negotiate};
+use stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01;
+use stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA;
+use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
+use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
+use stravia_runtime_contract::protocol::ids::ProtocolId;
 
 fn single_decl(proto: ProtocolId, url: &str) -> ProviderProtocols {
     ProviderProtocols {

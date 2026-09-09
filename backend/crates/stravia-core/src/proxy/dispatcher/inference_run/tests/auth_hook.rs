@@ -308,15 +308,17 @@ async fn automatic_parent_materializes_rewritten_history_before_the_current_hook
         .await;
     let headers = authorized_headers(&gateway).await;
 
-    let mut first_user = crate::protocol::ir::AiItem::output_text("first");
-    first_user.role = crate::protocol::ir::Role::User;
+    let mut first_user = stravia_runtime_contract::protocol::ir::AiItem::output_text("first");
+    first_user.role = stravia_runtime_contract::protocol::ir::Role::User;
     let mut first_request = AiRequest::new(model, vec![first_user.clone()]);
-    first_request.ext = Some(crate::protocol::ir::ProtocolExt::OpenResponses(
-        crate::protocol::ir::OpenResponsesExt {
-            store: Some(true),
-            ..Default::default()
-        },
-    ));
+    first_request.ext = Some(
+        stravia_runtime_contract::protocol::ir::ProtocolExt::OpenResponses(
+            stravia_runtime_contract::protocol::ir::OpenResponsesExt {
+                store: Some(true),
+                ..Default::default()
+            },
+        ),
+    );
     let first_response = execute_request_with_headers(
         gateway.clone(),
         headers.clone(),
@@ -330,22 +332,24 @@ async fn automatic_parent_materializes_rewritten_history_before_the_current_hook
         .await
         .expect("first response body");
 
-    let mut second_user = crate::protocol::ir::AiItem::output_text("second");
-    second_user.role = crate::protocol::ir::Role::User;
+    let mut second_user = stravia_runtime_contract::protocol::ir::AiItem::output_text("second");
+    second_user.role = stravia_runtime_contract::protocol::ir::Role::User;
     let mut second_request = AiRequest::new(
         model,
         vec![
             first_user,
-            crate::protocol::ir::AiItem::output_text("first answer"),
+            stravia_runtime_contract::protocol::ir::AiItem::output_text("first answer"),
             second_user,
         ],
     );
-    second_request.ext = Some(crate::protocol::ir::ProtocolExt::OpenResponses(
-        crate::protocol::ir::OpenResponsesExt {
-            store: Some(true),
-            ..Default::default()
-        },
-    ));
+    second_request.ext = Some(
+        stravia_runtime_contract::protocol::ir::ProtocolExt::OpenResponses(
+            stravia_runtime_contract::protocol::ir::OpenResponsesExt {
+                store: Some(true),
+                ..Default::default()
+            },
+        ),
+    );
     let second_response = execute_request_with_headers(
         gateway.clone(),
         headers.clone(),
@@ -365,16 +369,18 @@ async fn automatic_parent_materializes_rewritten_history_before_the_current_hook
         .expect("Gateway response ID")
         .to_owned();
 
-    let mut third_user = crate::protocol::ir::AiItem::output_text("third");
-    third_user.role = crate::protocol::ir::Role::User;
+    let mut third_user = stravia_runtime_contract::protocol::ir::AiItem::output_text("third");
+    third_user.role = stravia_runtime_contract::protocol::ir::Role::User;
     let mut third_request = AiRequest::new(model, vec![third_user]);
-    third_request.ext = Some(crate::protocol::ir::ProtocolExt::OpenResponses(
-        crate::protocol::ir::OpenResponsesExt {
-            previous_response_id: Some(second_response_id),
-            store: Some(true),
-            ..Default::default()
-        },
-    ));
+    third_request.ext = Some(
+        stravia_runtime_contract::protocol::ir::ProtocolExt::OpenResponses(
+            stravia_runtime_contract::protocol::ir::OpenResponsesExt {
+                previous_response_id: Some(second_response_id),
+                store: Some(true),
+                ..Default::default()
+            },
+        ),
+    );
     let third_response = execute_request_with_headers(
         gateway,
         headers,

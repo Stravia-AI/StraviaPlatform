@@ -17,7 +17,6 @@
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context as TaskContext, Poll};
 use std::time::{Duration, Instant};
@@ -25,7 +24,7 @@ use std::time::{Duration, Instant};
 use futures::Stream;
 use uuid::Uuid;
 
-use crate::protocol::ids::ProtocolId;
+use stravia_runtime_contract::protocol::ids::ProtocolId;
 
 // ── Deadline ──────────────────────────────────────────────────────────────────
 
@@ -69,55 +68,7 @@ impl Deadline {
 
 // ── Cancellation ─────────────────────────────────────────────────────────────
 
-/// A shareable cancellation signal.  Any holder can cancel; all holders see it.
-#[derive(Clone, Debug)]
-pub struct CancellationToken(Arc<CancellationState>);
-
-#[derive(Debug)]
-struct CancellationState {
-    cancelled: AtomicBool,
-    notify: tokio::sync::Notify,
-}
-
-impl CancellationToken {
-    pub fn new() -> Self {
-        Self(Arc::new(CancellationState {
-            cancelled: AtomicBool::new(false),
-            notify: tokio::sync::Notify::new(),
-        }))
-    }
-
-    /// Signal cancellation.
-    pub fn cancel(&self) {
-        if !self.0.cancelled.swap(true, Ordering::AcqRel) {
-            self.0.notify.notify_waiters();
-        }
-    }
-
-    /// Returns `true` if cancellation has been signalled.
-    pub fn is_cancelled(&self) -> bool {
-        self.0.cancelled.load(Ordering::Acquire)
-    }
-
-    pub async fn cancelled(&self) {
-        loop {
-            let notified = self.0.notify.notified();
-            if self.is_cancelled() {
-                return;
-            }
-            notified.await;
-            if self.is_cancelled() {
-                return;
-            }
-        }
-    }
-}
-
-impl Default for CancellationToken {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+use stravia_runtime_contract::CancellationToken;
 
 // ── Outcome ───────────────────────────────────────────────────────────────────
 
@@ -421,7 +372,7 @@ pub async fn inject_context(mut request: Request, next: Next) -> Response {
     // We don't know the ingress protocol at middleware time; it will be
     // overwritten by the ingress handler via `inject_context_with_protocol`.
     // Use a sentinel until then.
-    use crate::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
+    use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
     let ctx = RequestContext::new(
         OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
         Duration::from_secs(300),
@@ -454,7 +405,7 @@ pub fn stamp_ingress_protocol(ctx: &mut RequestContext, protocol: ProtocolId) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
+    use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
 
     #[test]
     fn request_id_is_unique() {

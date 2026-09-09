@@ -270,3 +270,60 @@ pub fn failed_fetch_result(
         error: Some(WebAccessPublicError { code, message }),
     }
 }
+
+pub const WEB_SEARCH_TOOL_ID: &str = "web-access.search";
+pub const WEB_FETCH_TOOL_ID: &str = "web-access.fetch";
+
+#[derive(Debug, thiserror::Error)]
+#[error("{code:?}: {message}")]
+pub struct WebAccessError {
+    pub code: WebAccessErrorCode,
+    pub message: String,
+}
+
+impl WebAccessError {
+    pub fn invalid(message: impl Into<String>) -> Self {
+        Self {
+            code: WebAccessErrorCode::InvalidInput,
+            message: message.into(),
+        }
+    }
+
+    pub fn from_code(code: WebAccessErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
+pub fn normalize_domains(domains: Vec<String>) -> Result<Vec<String>, WebAccessError> {
+    let mut seen = std::collections::HashSet::new();
+    let mut normalized = Vec::with_capacity(domains.len());
+    for domain in domains {
+        let candidate = domain.trim();
+        if candidate.is_empty()
+            || candidate.contains('/')
+            || candidate.contains('?')
+            || candidate.contains('#')
+            || candidate.contains('@')
+            || candidate.contains(':')
+        {
+            return Err(WebAccessError::invalid(format!(
+                "invalid domain filter: {domain}"
+            )));
+        }
+        let parsed = url::Url::parse(&format!("https://{candidate}/"))
+            .map_err(|_| WebAccessError::invalid(format!("invalid domain filter: {domain}")))?;
+        let hostname = parsed
+            .host_str()
+            .ok_or_else(|| WebAccessError::invalid(format!("invalid domain filter: {domain}")))?
+            .trim_end_matches('.')
+            .to_ascii_lowercase();
+        if hostname.is_empty() || !seen.insert(hostname.clone()) {
+            continue;
+        }
+        normalized.push(hostname);
+    }
+    Ok(normalized)
+}
