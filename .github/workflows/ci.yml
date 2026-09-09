@@ -53,6 +53,7 @@ jobs:
 
       - name: Install Linux system dependencies
         run: |
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             pkg-config libssl-dev cmake clang libclang-dev golang python3 libfontconfig1-dev \
@@ -106,6 +107,7 @@ jobs:
 
       - name: Install Linux system dependencies
         run: |
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends pkg-config libssl-dev cmake clang libclang-dev golang python3 libfontconfig1-dev
 
@@ -187,6 +189,7 @@ jobs:
 
       - name: Install Linux system dependencies
         run: |
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends pkg-config libssl-dev cmake clang libclang-dev golang python3 libfontconfig1-dev
 
@@ -244,6 +247,7 @@ jobs:
 
       - name: Install Linux system dependencies
         run: |
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends pkg-config libssl-dev cmake clang libclang-dev golang python3 libfontconfig1-dev
 
@@ -270,7 +274,9 @@ jobs:
         run: bun ci
 
       - name: Install Chromium
-        run: bun run playwright:install:web -- --with-deps chromium
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list
+          bun run playwright:install:web -- --with-deps chromium
 
       - name: Run WebUI E2E tests
         run: bun run test:e2e:web
