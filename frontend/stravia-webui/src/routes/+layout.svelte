@@ -105,7 +105,7 @@ onMount(() => {
 <ModeWatcher defaultMode="system" modeStorageKey="stravia-theme" />
 <QueryClientProvider client={queryClient}>
   <Tooltip.Provider>
-    <Toaster />
+    <Toaster toastOptions={{ class: 'pointer-events-none' }} />
     {#if authReady}
       <ProductUpdateOverlay />
       <AppShell>

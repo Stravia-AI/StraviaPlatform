@@ -179,6 +179,10 @@ jobs:
           go-version: "1.26.x"
           cache: false
 
+      - name: Install NASM for BoringSSL
+        if: runner.os == 'Windows' && runner.arch == 'X64'
+        run: choco install nasm --yes --no-progress
+
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -338,6 +342,10 @@ jobs:
         with:
           go-version: "1.26.x"
           cache: false
+
+      - name: Install NASM for BoringSSL
+        if: runner.os == 'Windows' && runner.arch == 'X64'
+        run: choco install nasm --yes --no-progress
 
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1

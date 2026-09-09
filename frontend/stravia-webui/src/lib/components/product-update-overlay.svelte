@@ -35,6 +35,7 @@ $effect(() => {
     }
     toast.custom(UpdateNotification, {
       id: notificationId,
+      class: 'pointer-events-auto',
       duration: Number.POSITIVE_INFINITY,
       position: 'bottom-right',
       onDismiss: dismiss,
