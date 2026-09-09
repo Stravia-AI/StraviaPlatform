@@ -1,7 +1,22 @@
 import { expect, test } from '@playwright/test'
 
-import type { CredentialRuleCatalog, MediaUnderstandingConfigView } from '../src/lib/types'
+import type {
+  CredentialRuleCatalog,
+  MediaUnderstandingConfigView,
+  WebAccessSettings,
+  WebProvider,
+} from '../src/lib/types'
 import { prepareApp } from './prepare-app'
+
+const searchSource: WebProvider = {
+  id: 'source-exa',
+  name: 'Search source',
+  kind: 'exa',
+  use_proxy: false,
+  capabilities: { search: true, fetch: true },
+  created_at: '2026-09-01T00:00:00Z',
+  updated_at: '2026-09-01T00:00:00Z',
+}
 
 test.beforeEach(async ({ page }) => {
   await prepareApp(page)
@@ -102,7 +117,7 @@ test('advanced features keep separate media and web search surfaces', async ({ p
     await route.fulfill({ json: { data: mediaConfig } })
   })
   await page.route('**/api/v1/web-access/settings', async (route) => {
-    await route.fulfill({ json: { data: { enabled: true, search_provider_ids: [], fetch_provider_ids: [] } } })
+    await route.fulfill({ json: { data: { search_provider_ids: [], fetch_provider_ids: [] } } })
   })
   await page.route('**/api/v1/web-providers', async (route) => {
     await route.fulfill({ json: { data: [] } })
@@ -124,7 +139,8 @@ test('advanced features keep separate media and web search surfaces', async ({ p
   await navigation.getByRole('link', { name: 'Web search' }).click()
   await expect(page).toHaveURL(/\/web-search$/)
   await expect(page.getByRole('heading', { level: 1, name: 'Web search', exact: true })).toBeVisible()
-  await expect(page.getByRole('heading', { name: 'Web search and page access' })).toBeVisible()
+  await expect(page.locator('#web-search-sources')).toBeVisible()
+  await expect(page.getByRole('switch')).toHaveCount(1)
   await page.getByRole('button', { name: 'Advanced', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'Local search limits' })).toBeVisible()
   const localTurns = page.locator('#search-max-turns')
@@ -134,7 +150,7 @@ test('advanced features keep separate media and web search surfaces', async ({ p
   await page.getByRole('option', { name: 'Use Codex web search' }).click()
   await expect(page.getByText('Codex account', { exact: true })).toBeVisible()
   await expect(page.getByText('Codex model', { exact: true })).toBeVisible()
-  await expect(page.getByRole('heading', { name: 'Web search and page access' })).toHaveCount(0)
+  await expect(page.locator('#web-search-sources')).toHaveCount(0)
   await expect(page.getByRole('heading', { name: 'Local search limits' })).toHaveCount(0)
   await expect(page.getByText(/Search terms and URLs are sent/)).toHaveCount(0)
 
@@ -268,6 +284,12 @@ test('search activation saves only confirmed configuration without discarding th
   await page.route('**/api/v1/web-search/eligible-models', (route) =>
     route.fulfill({ json: { data: [{ id: 'model-search', model_id: 'search-model', display_name: 'Search model' }] } }),
   )
+  await page.route('**/api/v1/web-access/settings', (route) =>
+    route.fulfill({
+      json: { data: { search_provider_ids: [searchSource.id], fetch_provider_ids: [searchSource.id] } },
+    }),
+  )
+  await page.route('**/api/v1/web-providers', (route) => route.fulfill({ json: { data: [searchSource] } }))
   await page.goto('/web-search')
   await page.getByRole('button', { name: 'Advanced', exact: true }).click()
   const turns = page.locator('#search-max-turns')
@@ -318,55 +340,185 @@ test('unloaded settings stay non-editable until a failed baseline is recovered',
   await expect(page.locator('#proxy-url')).toBeVisible()
 })
 
-test('immediate web access failures preserve saved state and independent search drafts', async ({ page }) => {
+test('source save failures preserve selection and drafts before the single search switch can enable', async ({
+  page,
+}) => {
   let rejectSave = true
-  let saved = { enabled: true, search_provider_ids: [], fetch_provider_ids: [] }
-  await page.route('**/api/v1/web-search/config', (route) =>
-    route.fulfill({
-      json: {
-        data: {
-          revision: 1,
-          enabled: false,
-          backend: { kind: 'local', model_id: null },
-          max_turns: 6,
-          total_time_seconds: 180,
-          updated_at: '2026-09-01T00:00:00Z',
-          limits: { min_turns: 1, max_turns: 20, min_total_time_seconds: 30, max_total_time_seconds: 900 },
-        },
-      },
-    }),
+  let saved: WebAccessSettings = { search_provider_ids: [], fetch_provider_ids: [] }
+  let config = {
+    revision: 1,
+    enabled: false,
+    backend: { kind: 'local', model_id: 'model-search' },
+    max_turns: 6,
+    total_time_seconds: 180,
+    updated_at: '2026-09-01T00:00:00Z',
+    limits: { min_turns: 1, max_turns: 20, min_total_time_seconds: 30, max_total_time_seconds: 900 },
+  }
+  await page.route('**/api/v1/web-search/config', async (route) => {
+    if (route.request().method() === 'PUT') {
+      config = { ...config, ...route.request().postDataJSON(), revision: config.revision + 1 }
+    }
+    await route.fulfill({ json: { data: config } })
+  })
+  await page.route('**/api/v1/web-search/eligible-models', (route) =>
+    route.fulfill({ json: { data: [{ id: 'model-search', model_id: 'search-model', display_name: 'Search model' }] } }),
   )
+  await page.route('**/api/v1/web-providers', (route) => route.fulfill({ json: { data: [searchSource] } }))
   await page.route('**/api/v1/web-access/settings', async (route) => {
     if (route.request().method() === 'PUT') {
       if (rejectSave) {
-        await route.fulfill({ status: 503, json: { error: 'Fixture web access save unavailable' } })
+        await route.fulfill({ status: 503, json: { error: 'Fixture source save unavailable' } })
         return
       }
       saved = route.request().postDataJSON()
     }
-    await route.fulfill({ json: { data: saved } })
+    // An obsolete disabled field in cached data must not create a second activation step.
+    await route.fulfill({ json: { data: { ...saved, enabled: false } } })
   })
   await page.goto('/web-search')
-  const searchSwitch = page.getByRole('switch', { name: 'Enable web search', exact: true })
-  const immediateSwitch = page.getByRole('switch', { name: 'Enable web search and page access', exact: true })
+  const searchSwitch = page.getByRole('switch')
+  const searchSourceCheckbox = page.locator('#web-access-search-source-exa')
+  const pageSourceCheckbox = page.locator('#web-access-fetch-source-exa')
+  await expect(searchSwitch).toHaveCount(1)
   await expect(searchSwitch).toBeDisabled()
   await page.getByRole('button', { name: 'Advanced', exact: true }).click()
   const draftTurns = page.locator('#search-max-turns')
   await draftTurns.fill('9')
-  await expect(immediateSwitch).toBeChecked()
-  await immediateSwitch.click()
-  await expect(page.getByRole('alert').filter({ hasText: 'Fixture web access save unavailable' })).toBeVisible()
-  await expect(immediateSwitch).toBeChecked()
+  await searchSourceCheckbox.click()
+  await expect(page.locator('#web-search-sources').getByRole('alert')).toBeVisible()
+  await expect(searchSourceCheckbox).not.toBeChecked()
   await expect(draftTurns).toHaveValue('9')
-  await expect(searchSwitch).not.toBeChecked()
-  await expect(page.getByRole('status').filter({ hasText: 'Unsaved changes' })).toBeVisible()
   rejectSave = false
-  await immediateSwitch.click()
-  await expect(immediateSwitch).not.toBeChecked()
-  await expect(draftTurns).toHaveValue('9')
+  await searchSourceCheckbox.click()
+  await expect(searchSourceCheckbox).toBeChecked()
+  await expect(searchSwitch).toBeDisabled()
+  await pageSourceCheckbox.click()
+  await expect(pageSourceCheckbox).toBeChecked()
+  await expect(searchSwitch).toBeEnabled()
   await expect(searchSwitch).not.toBeChecked()
-  await expect(page.getByRole('status').filter({ hasText: 'Unsaved changes' })).toBeVisible()
-  expect(saved.enabled).toBe(false)
+  await searchSwitch.click()
+  await expect(searchSwitch).toBeChecked()
+  await expect(draftTurns).toHaveValue('9')
+  expect(config.max_turns).toBe(6)
+  expect(saved).toEqual({ search_provider_ids: [searchSource.id], fetch_provider_ids: [searchSource.id] })
+  await page.reload()
+  await expect(searchSwitch).toHaveCount(1)
+  await expect(searchSwitch).toBeChecked()
+  await expect(searchSourceCheckbox).toBeChecked()
+  await expect(pageSourceCheckbox).toBeChecked()
+  await searchSwitch.click()
+  await pageSourceCheckbox.click()
+  await expect(searchSwitch).toBeDisabled()
+})
+
+test('Codex search activation does not depend on Local sources', async ({ page }) => {
+  let config = {
+    revision: 1,
+    enabled: false,
+    backend: { kind: 'codex', provider_id: 'provider-codex', upstream_model: 'gpt-5' },
+    max_turns: 6,
+    total_time_seconds: 180,
+    updated_at: '2026-09-01T00:00:00Z',
+    limits: { min_turns: 1, max_turns: 20, min_total_time_seconds: 30, max_total_time_seconds: 900 },
+  }
+  await page.route('**/api/v1/web-search/config', async (route) => {
+    if (route.request().method() === 'PUT') {
+      config = { ...config, ...route.request().postDataJSON(), revision: config.revision + 1 }
+    }
+    await route.fulfill({ json: { data: config } })
+  })
+  await page.route('**/api/v1/web-search/codex-providers', (route) =>
+    route.fulfill({ json: { data: [{ id: 'provider-codex', name: 'Codex account', models: [{ id: 'gpt-5' }] }] } }),
+  )
+  await page.route('**/api/v1/web-access/**', (route) =>
+    route.fulfill({ status: 503, json: { error: 'Fixture Local sources unavailable' } }),
+  )
+  await page.route('**/api/v1/web-providers', (route) => route.fulfill({ json: { data: [] } }))
+  await page.goto('/web-search')
+  const searchSwitch = page.getByRole('switch')
+  await expect(searchSwitch).toHaveCount(1)
+  await expect(searchSwitch).toBeEnabled()
+  await searchSwitch.click()
+  await expect(searchSwitch).toBeChecked()
+  await page.reload()
+  await expect(searchSwitch).toBeChecked()
+})
+
+test('source load recovery still requires a browser before Local sources can enable search', async ({ page }) => {
+  let settingsUnavailable = true
+  let saved: WebAccessSettings = { search_provider_ids: [], fetch_provider_ids: [] }
+  let browserPath: string | null = null
+  const localSource: WebProvider = { ...searchSource, id: 'source-local', name: 'Local source', kind: 'local' }
+  let config = {
+    revision: 1,
+    enabled: false,
+    backend: { kind: 'local', model_id: 'model-search' },
+    max_turns: 6,
+    total_time_seconds: 180,
+    updated_at: '2026-09-01T00:00:00Z',
+    limits: { min_turns: 1, max_turns: 20, min_total_time_seconds: 30, max_total_time_seconds: 900 },
+  }
+  await page.route('**/api/v1/web-search/config', async (route) => {
+    if (route.request().method() === 'PUT') {
+      config = { ...config, ...route.request().postDataJSON(), revision: config.revision + 1 }
+    }
+    await route.fulfill({ json: { data: config } })
+  })
+  await page.route('**/api/v1/web-search/eligible-models', (route) =>
+    route.fulfill({ json: { data: [{ id: 'model-search', model_id: 'search-model', display_name: 'Search model' }] } }),
+  )
+  await page.route('**/api/v1/web-providers', (route) => route.fulfill({ json: { data: [localSource] } }))
+  await page.route('**/api/v1/web-providers/source-local', (route) => route.fulfill({ json: { data: localSource } }))
+  await page.route('**/api/v1/web-access/browser', async (route) => {
+    if (route.request().method() === 'PUT') browserPath = route.request().postDataJSON().path
+    await route.fulfill({
+      json: {
+        data: {
+          configuredPath: browserPath,
+          resolvedPath: browserPath,
+          source: browserPath ? 'manual' : 'automatic',
+          available: browserPath !== null,
+          error: null,
+        },
+      },
+    })
+  })
+  await page.route('**/api/v1/web-access/settings', async (route) => {
+    if (settingsUnavailable) {
+      await route.fulfill({ status: 503, json: { error: 'Fixture source settings unavailable' } })
+      return
+    }
+    if (route.request().method() === 'PUT') saved = route.request().postDataJSON()
+    await route.fulfill({ json: { data: saved } })
+  })
+  await page.goto('/web-search')
+  const searchSwitch = page.getByRole('switch')
+  const sources = page.locator('#web-search-sources')
+  await expect(searchSwitch).toBeDisabled()
+  await expect(sources.getByRole('alert')).toBeVisible()
+  await expect(page.locator('#web-access-search-source-local')).toHaveCount(0)
+  settingsUnavailable = false
+  await sources.getByRole('button', { name: 'Retry', exact: true }).click()
+  const searchCheckbox = page.locator('#web-access-search-source-local')
+  const fetchCheckbox = page.locator('#web-access-fetch-source-local')
+  await expect(searchCheckbox).toBeDisabled()
+  await expect(fetchCheckbox).toBeDisabled()
+  await expect(searchSwitch).toBeDisabled()
+  await sources.getByRole('button', { name: 'Edit', exact: true }).click()
+  await page.locator('#web-provider-browser-path').fill('C:\\Browser\\chrome.exe')
+  await page.getByRole('dialog').getByRole('button', { name: 'Save service', exact: true }).click()
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+  await expect(searchCheckbox).toBeEnabled()
+  await searchCheckbox.click()
+  await expect(searchCheckbox).toBeChecked()
+  await expect(searchSwitch).toBeDisabled()
+  await fetchCheckbox.click()
+  await expect(fetchCheckbox).toBeChecked()
+  await expect(searchSwitch).toHaveCount(1)
+
+  await expect(searchSwitch).toBeEnabled()
+  await searchSwitch.click()
+  await expect(searchSwitch).toBeChecked()
 })
 
 test('server update notification skips one version without hiding Settings or exposing download', async ({ page }) => {

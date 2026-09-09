@@ -75,6 +75,10 @@ Web Search 是一个由平台总开关控制的 Advanced Capability。它向普�
 
 关闭平台 Gate 后，Key 上已保存的 `inject_web_search` 不删除；运行时忽略它。重新开启 Gate 后，该选择恢复生效。
 
+Web Access 不另设总开关。`WebAccessSettings` 只包含 `search_provider_ids` 与 `fetch_provider_ids`，分别表示搜索与网页读取来源的有序选择；管理 HTTP 与 Desktop 使用同一结构。旧实例的 `web_access_enabled` 设置不再读写，也不再决定运行时可用性。该调整不自动启用 `web_search_config.enabled`，不改变 API Key、MCP 或网络安全校验。
+
+管理界面仅保留顶部 Web Search 启停开关。Local 模式开启前必须有有效的已保存模型绑定，以及可用的搜索与网页读取来源；缺少配置时就地提供补齐入口。来源选择与排序独立即时保存，模型绑定和预算仍显式保存；启停不提交表单草稿，Codex 模式不依赖 Local 来源。
+
 ## 4. Tool identity 与 surface
 
 公开 composite 和 Local leaves 可共享 wire name，但不能共享源码身份或 registry owner：

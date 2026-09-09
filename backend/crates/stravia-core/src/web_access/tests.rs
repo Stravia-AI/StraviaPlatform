@@ -333,12 +333,11 @@ async fn configured_local_adapter_observes_proxy_snapshot_empty_success_and_fail
         .expect("Exa Web Provider");
     admin
         .update_web_access_settings(WebAccessSettings {
-            enabled: true,
             search_provider_ids: vec![local.id.clone(), exa.id.clone()],
             fetch_provider_ids: vec![],
         })
         .await
-        .expect("enabled settings");
+        .expect("selected sources");
     admin
         .set_setting("proxy_url", "http://old-proxy.example:8080")
         .await
@@ -618,7 +617,6 @@ async fn missing_browser_excludes_stale_local_runtime_but_preserves_remote() {
         .find(|provider| provider.kind == "local")
         .unwrap();
     let settings = WebAccessSettings {
-        enabled: true,
         search_provider_ids: vec![local.id.clone()],
         fetch_provider_ids: vec![local.id.clone()],
     };
@@ -661,7 +659,6 @@ async fn missing_browser_excludes_stale_local_runtime_but_preserves_remote() {
     let remote_settings = WebAccessSettings {
         search_provider_ids: vec![local.id.clone(), remote.id.clone()],
         fetch_provider_ids: vec![local.id, remote.id],
-        ..settings
     };
     store.save_settings(&remote_settings).await.unwrap();
     assert_eq!(
@@ -677,7 +674,7 @@ async fn missing_browser_excludes_stale_local_runtime_but_preserves_remote() {
 }
 
 #[tokio::test]
-async fn configuration_changes_do_not_replace_an_inference_run_snapshot() {
+async fn legacy_switch_does_not_block_snapshots_and_source_changes_preserve_active_runs() {
     let data_dir = tempfile::tempdir().expect("temp data dir");
     let gateway = crate::Gateway::new(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
@@ -685,6 +682,12 @@ async fn configuration_changes_do_not_replace_an_inference_run_snapshot() {
     })
     .await
     .expect("gateway");
+    gateway
+        .storage
+        .settings()
+        .set("web_access_enabled", "false")
+        .await
+        .expect("legacy disabled setting");
     let admin = gateway.admin();
     let key = admin
         .create_api_key(crate::db::models::CreateApiKey {
@@ -712,12 +715,11 @@ async fn configuration_changes_do_not_replace_an_inference_run_snapshot() {
         .expect("Web Provider");
     admin
         .update_web_access_settings(WebAccessSettings {
-            enabled: true,
             search_provider_ids: vec![provider.id.clone()],
             fetch_provider_ids: vec![provider.id],
         })
         .await
-        .expect("enabled settings");
+        .expect("selected sources");
     let service = gateway.web_access();
     let old_availability = service
         .capture_run_snapshot("run-old", &key.id)
@@ -733,12 +735,11 @@ async fn configuration_changes_do_not_replace_an_inference_run_snapshot() {
 
     admin
         .update_web_access_settings(WebAccessSettings {
-            enabled: false,
             search_provider_ids: vec![],
             fetch_provider_ids: vec![],
         })
         .await
-        .expect("disabled settings");
+        .expect("cleared sources");
 
     assert!(service.run_snapshot("run-old", &key.id).is_ok());
     assert_eq!(
@@ -901,12 +902,11 @@ async fn configured_local_fetch_retries_only_failed_urls_on_zhipu() {
         .expect("Zhipu Web Provider");
     admin
         .update_web_access_settings(WebAccessSettings {
-            enabled: true,
             search_provider_ids: vec![],
             fetch_provider_ids: vec![local.id.clone(), zhipu.id.clone()],
         })
         .await
-        .expect("enabled settings");
+        .expect("selected sources");
 
     let local_fetch = Arc::new(FakeFetchProvider {
         fail_url: Some("https://8.8.8.8/b".into()),

@@ -3,6 +3,7 @@ import * as m from '$lib/paraglide/messages.js'
 import RequestFailure from '$lib/components/request-failure.svelte'
 import { createQuery, useQueryClient } from '@tanstack/svelte-query'
 import { toast } from 'svelte-sonner'
+import { tick } from 'svelte'
 
 import { admin } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
@@ -31,9 +32,26 @@ const codexProvidersQuery = createQuery(() => ({
 }))
 
 let initialized = $state(false)
+let backendKind = $state<'local' | 'codex'>('local')
+
+const sourceSettingsQuery = createQuery(() => ({
+  queryKey: ['web-access-settings'],
+  queryFn: admin.webAccess.settings.get,
+  enabled: configQuery.data?.backend?.kind === 'local' || (initialized && backendKind === 'local'),
+}))
+const sourceProvidersQuery = createQuery(() => ({
+  queryKey: ['web-providers'],
+  queryFn: admin.webAccess.providers.list,
+  enabled: configQuery.data?.backend?.kind === 'local' || (initialized && backendKind === 'local'),
+}))
+const sourceBrowserQuery = createQuery(() => ({
+  queryKey: ['web-access-browser'],
+  queryFn: admin.webAccess.browser.get,
+  enabled: configQuery.data?.backend?.kind === 'local' || (initialized && backendKind === 'local'),
+}))
+
 let toggleSaving = $state(false)
 let toggleError = $state('')
-let backendKind = $state<'local' | 'codex'>('local')
 let localModelId = $state('')
 let codexProviderId = $state('')
 let codexModelId = $state('')
@@ -94,6 +112,43 @@ const savedBindingReady = $derived.by(() => {
   }
   return false
 })
+// Availability hints use the server's capability metadata; core validates activation.
+const savedSourceIssue = $derived.by(() => {
+  if (configQuery.data?.backend?.kind !== 'local') return undefined
+  // 在提前返回前订阅全部依赖，避免某项加载失败时其余查询停留在旧快照。
+  const settingsStatus = sourceSettingsQuery.status
+  const providersStatus = sourceProvidersQuery.status
+  const settings = sourceSettingsQuery.data
+  const providers = sourceProvidersQuery.data ?? []
+  const browserStatus = sourceBrowserQuery.status
+  const browserFetching = sourceBrowserQuery.isFetching
+  const browserAvailable = sourceBrowserQuery.data?.available === true
+  if (settingsStatus === 'error' || providersStatus === 'error') return 'unavailable'
+  if (settingsStatus === 'pending' || providersStatus === 'pending') return 'loading'
+  const hasSource = (capability: 'search' | 'fetch', ids: string[]) =>
+    providers.some(
+      (provider) =>
+        ids.includes(provider.id) &&
+        provider.capabilities[capability] &&
+        (provider.kind !== 'local' || (browserStatus === 'success' && !browserFetching && browserAvailable)),
+    )
+  if (
+    settings &&
+    hasSource('search', settings.search_provider_ids) &&
+    hasSource('fetch', settings.fetch_provider_ids)
+  ) {
+    return undefined
+  }
+  const selectedLocal = providers.some(
+    (provider) =>
+      provider.kind === 'local' &&
+      (settings?.search_provider_ids.includes(provider.id) || settings?.fetch_provider_ids.includes(provider.id)),
+  )
+  if (selectedLocal && browserFetching) return 'loading'
+  if (selectedLocal && browserStatus === 'error') return 'unavailable'
+  return 'missing'
+})
+const canEnable = $derived(savedBindingReady && !savedSourceIssue)
 const canSave = $derived(
   Boolean(configQuery.data) &&
     hasChanges &&
@@ -131,7 +186,7 @@ function backendDraft(): WebSearchBackend {
 
 async function toggleEnabled(enabled: boolean): Promise<void> {
   const current = configQuery.data
-  if (!current || saving || toggleSaving || enabled === current.enabled || (enabled && !savedBindingReady)) return
+  if (!current || saving || toggleSaving || enabled === current.enabled || (enabled && !canEnable)) return
   toggleSaving = true
   toggleError = ''
   try {
@@ -210,7 +265,7 @@ async function save(): Promise<void> {
           {#if toggleSaving}<Spinner />{/if}
           <Switch
             bind:checked={() => configQuery.data?.enabled ?? false, (value) => void toggleEnabled(value)}
-            disabled={saving || toggleSaving || (!configQuery.data.enabled && !savedBindingReady)}
+            disabled={saving || toggleSaving || (!configQuery.data.enabled && !canEnable)}
             aria-busy={toggleSaving}
             aria-labelledby="search-gate-title"
             aria-describedby="search-gate-description" />
@@ -220,6 +275,25 @@ async function save(): Promise<void> {
         {#if toggleError}<Alert.Root variant="destructive"
             ><Alert.Description>{toggleError}</Alert.Description></Alert.Root
           >{/if}
+        {#if savedSourceIssue}
+          <Alert.Root variant="warning" role="status">
+            <Alert.Description>
+              {savedSourceIssue === 'loading'
+                ? m.common_settings_loading()
+                : savedSourceIssue === 'unavailable'
+                  ? m.web_search_sources_unavailable()
+                  : m.web_search_sources_required()}
+              <Button
+                variant="link"
+                size="sm"
+                onclick={async () => {
+                  backendKind = 'local'
+                  await tick()
+                  document.getElementById('web-search-sources')?.scrollIntoView({ block: 'start' })
+                }}>{m.web_search_configure_sources()}</Button>
+            </Alert.Description>
+          </Alert.Root>
+        {/if}
         {#if !savedBindingReady}
           <Alert.Root variant="warning" role="status">
             <Alert.Description>

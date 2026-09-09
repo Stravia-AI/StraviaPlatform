@@ -7,7 +7,6 @@ use anyhow::Context;
 use async_trait::async_trait;
 use sqlx::{SqlitePool, types::Json};
 
-const ENABLED_KEY: &str = "web_access_enabled";
 const SEARCH_IDS_KEY: &str = "web_access_search_provider_ids";
 const FETCH_IDS_KEY: &str = "web_access_fetch_provider_ids";
 
@@ -169,9 +168,8 @@ impl WebProviderStore for SqliteWebProviderStore {
 
     async fn load_settings(&self) -> anyhow::Result<WebAccessSettings> {
         let rows = sqlx::query_as::<_, (String, String)>(
-            "SELECT name, value FROM settings WHERE name IN (?, ?, ?)",
+            "SELECT name, value FROM settings WHERE name IN (?, ?)",
         )
-        .bind(ENABLED_KEY)
         .bind(SEARCH_IDS_KEY)
         .bind(FETCH_IDS_KEY)
         .fetch_all(&self.pool)
@@ -180,9 +178,6 @@ impl WebProviderStore for SqliteWebProviderStore {
             .into_iter()
             .collect::<std::collections::HashMap<_, _>>();
         Ok(WebAccessSettings {
-            enabled: values
-                .get(ENABLED_KEY)
-                .is_some_and(|value| matches!(value.trim(), "true" | "1")),
             search_provider_ids: parse_ids(values.get(SEARCH_IDS_KEY)),
             fetch_provider_ids: parse_ids(values.get(FETCH_IDS_KEY)),
         })
@@ -194,9 +189,8 @@ impl WebProviderStore for SqliteWebProviderStore {
     ) -> anyhow::Result<WebAccessRuntimeConfig> {
         let mut tx = self.pool.begin().await?;
         let rows = sqlx::query_as::<_, (String, String)>(
-            "SELECT name, value FROM settings WHERE name IN (?, ?, ?)",
+            "SELECT name, value FROM settings WHERE name IN (?, ?)",
         )
-        .bind(ENABLED_KEY)
         .bind(SEARCH_IDS_KEY)
         .bind(FETCH_IDS_KEY)
         .fetch_all(&mut *tx)
@@ -220,9 +214,6 @@ impl WebProviderStore for SqliteWebProviderStore {
             .into_iter()
             .collect::<std::collections::HashMap<_, _>>();
         let settings = WebAccessSettings {
-            enabled: values
-                .get(ENABLED_KEY)
-                .is_some_and(|value| matches!(value.trim(), "true" | "1")),
             search_provider_ids: parse_ids(values.get(SEARCH_IDS_KEY)),
             fetch_provider_ids: parse_ids(values.get(FETCH_IDS_KEY)),
         };
@@ -244,7 +235,6 @@ impl WebProviderStore for SqliteWebProviderStore {
             .await?;
             validate_web_access_provider_lists(&providers, settings)?;
             for (key, value) in [
-                (ENABLED_KEY, settings.enabled.to_string()),
                 (
                     SEARCH_IDS_KEY,
                     serde_json::to_string(&settings.search_provider_ids)?,

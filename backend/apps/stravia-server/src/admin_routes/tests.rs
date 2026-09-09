@@ -822,7 +822,6 @@ async fn web_access_http_cannot_enable_local_without_browser() -> anyhow::Result
         .find(|provider| provider.kind == "local")
         .unwrap();
     let empty = stravia_core::db::models::WebAccessSettings {
-        enabled: false,
         search_provider_ids: vec![],
         fetch_provider_ids: vec![],
     };
@@ -882,7 +881,6 @@ async fn web_access_http_cannot_enable_local_without_browser() -> anyhow::Result
                 Request::put("/api/v1/web-access/settings")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&serde_json::json!({
-                        "enabled": true,
                         "search_provider_ids": if search { vec![local.id.clone()] } else { vec![] },
                         "fetch_provider_ids": if search { vec![] } else { vec![local.id.clone()] }
                     }))?))?,
@@ -966,7 +964,6 @@ async fn web_access_admin_routes_persist_masked_providers_and_atomic_priority() 
             Request::put("/api/v1/web-access/settings")
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_vec(&serde_json::json!({
-                    "enabled": true,
                     "search_provider_ids": [id],
                     "fetch_provider_ids": [id]
                 }))?))?,
@@ -986,7 +983,6 @@ async fn web_access_admin_routes_persist_masked_providers_and_atomic_priority() 
     assert_eq!(settings.status(), StatusCode::OK);
     let settings_body = to_bytes(settings.into_body(), usize::MAX).await?;
     let settings_json: serde_json::Value = serde_json::from_slice(&settings_body)?;
-    assert_eq!(settings_json["data"]["enabled"], true);
     assert_eq!(
         settings_json["data"]["search_provider_ids"],
         serde_json::json!([])

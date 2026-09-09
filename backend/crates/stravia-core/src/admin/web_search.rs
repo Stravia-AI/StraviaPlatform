@@ -308,9 +308,6 @@ impl AdminService {
             .load_settings()
             .await
             .map_err(|_| sources_unavailable())?;
-        if !settings.enabled {
-            return Err(sources_unavailable());
-        }
         let mut providers = store.list().await.map_err(|_| sources_unavailable())?;
         if !self.gw.web_access().local_browser_available().await {
             providers.retain(|provider| provider.kind != "local");
@@ -414,7 +411,7 @@ fn validate_limits(config: &WebSearchConfig) -> Result<(), WebSearchConfigError>
 fn sources_unavailable() -> WebSearchConfigError {
     WebSearchConfigError::new(
         "WEB_SEARCH_SOURCES_UNAVAILABLE",
-        "Local Search requires enabled Search and Fetch sources",
+        "Local Search requires available Search and Fetch sources",
     )
 }
 
@@ -544,7 +541,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn eligible_models_include_tool_capable_openai_compatible_routes() {
+    async fn local_search_requires_sources_but_ignores_the_legacy_disabled_switch() {
         let (_directory, admin) = admin().await;
         let provider = admin
             .gw
@@ -602,6 +599,56 @@ mod tests {
         assert_eq!(eligible[0].id, model.id);
         assert_eq!(eligible[0].model_id, "Search Model");
         assert_eq!(eligible[0].display_name, "Search Model");
+
+        admin
+            .gw
+            .storage
+            .settings()
+            .set("web_access_enabled", "false")
+            .await
+            .unwrap();
+        let current = admin.get_web_search_config().await.unwrap();
+        let config = WebSearchConfig {
+            enabled: true,
+            backend: Some(WebSearchBackendDraft::Local {
+                model_id: Some(model.id),
+            }),
+            ..current.config
+        };
+        let sources = admin.gw.storage.web_providers().unwrap();
+        sources
+            .save_settings(&crate::db::models::WebAccessSettings::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            admin
+                .update_web_search_config(config.clone())
+                .await
+                .unwrap_err()
+                .code,
+            "WEB_SEARCH_SOURCES_UNAVAILABLE"
+        );
+        let remote = admin
+            .create_web_provider(crate::db::models::CreateWebProvider {
+                name: "Search sources".into(),
+                kind: "exa".into(),
+                api_key: Some("secret".into()),
+                use_proxy: false,
+                local_engines: None,
+            })
+            .await
+            .unwrap();
+        admin
+            .update_web_access_settings(crate::db::models::WebAccessSettings {
+                search_provider_ids: vec![remote.id.clone()],
+                fetch_provider_ids: vec![remote.id],
+            })
+            .await
+            .unwrap();
+        assert!(!admin.get_web_search_config().await.unwrap().enabled);
+        let enabled = admin.update_web_search_config(config).await.unwrap();
+        assert!(enabled.enabled);
+        assert_eq!(admin.get_web_search_config().await.unwrap(), enabled);
     }
 
     #[tokio::test]
@@ -619,7 +666,6 @@ mod tests {
             .find(|provider| provider.kind == "local")
             .unwrap();
         let mut settings = crate::db::models::WebAccessSettings {
-            enabled: true,
             search_provider_ids: vec![local.id.clone()],
             fetch_provider_ids: vec![local.id],
         };

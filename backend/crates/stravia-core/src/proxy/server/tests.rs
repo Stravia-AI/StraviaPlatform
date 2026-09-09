@@ -623,7 +623,6 @@ async fn responses_native_web_search_is_concealed_when_search_is_unavailable() {
         .expect("Web Provider");
     admin
         .update_web_access_settings(WebAccessSettings {
-            enabled: true,
             search_provider_ids: vec![web_provider.id],
             fetch_provider_ids: vec![],
         })

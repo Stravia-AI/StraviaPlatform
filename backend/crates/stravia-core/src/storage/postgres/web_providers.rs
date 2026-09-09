@@ -8,7 +8,6 @@ use async_trait::async_trait;
 use sqlx::{Pool, Postgres, types::Json};
 
 const SEARCH_IDS_KEY: &str = "web_access_search_provider_ids";
-const ENABLED_KEY: &str = "web_access_enabled";
 const FETCH_IDS_KEY: &str = "web_access_fetch_provider_ids";
 const SELECT_WEB_PROVIDER: &str = "SELECT id, name, kind, api_key, use_proxy, local_engines, last_test_success, to_char(last_test_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS last_test_at, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS created_at, to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS updated_at FROM web_providers";
 
@@ -164,9 +163,8 @@ impl WebProviderStore for PostgresWebProviderStore {
     }
     async fn load_settings(&self) -> anyhow::Result<WebAccessSettings> {
         let rows = sqlx::query_as::<_, (String, String)>(
-            "SELECT name, value FROM settings WHERE name IN ($1, $2, $3)",
+            "SELECT name, value FROM settings WHERE name IN ($1, $2)",
         )
-        .bind(ENABLED_KEY)
         .bind(SEARCH_IDS_KEY)
         .bind(FETCH_IDS_KEY)
         .fetch_all(&self.pool)
@@ -175,9 +173,6 @@ impl WebProviderStore for PostgresWebProviderStore {
             .into_iter()
             .collect::<std::collections::HashMap<_, _>>();
         Ok(WebAccessSettings {
-            enabled: values
-                .get(ENABLED_KEY)
-                .is_some_and(|value| matches!(value.trim(), "true" | "1")),
             search_provider_ids: parse_ids(values.get(SEARCH_IDS_KEY)),
             fetch_provider_ids: parse_ids(values.get(FETCH_IDS_KEY)),
         })
@@ -192,9 +187,8 @@ impl WebProviderStore for PostgresWebProviderStore {
             .execute(&mut *tx)
             .await?;
         let rows = sqlx::query_as::<_, (String, String)>(
-            "SELECT name, value FROM settings WHERE name IN ($1, $2, $3)",
+            "SELECT name, value FROM settings WHERE name IN ($1, $2)",
         )
-        .bind(ENABLED_KEY)
         .bind(SEARCH_IDS_KEY)
         .bind(FETCH_IDS_KEY)
         .fetch_all(&mut *tx)
@@ -218,9 +212,6 @@ impl WebProviderStore for PostgresWebProviderStore {
             .into_iter()
             .collect::<std::collections::HashMap<_, _>>();
         let settings = WebAccessSettings {
-            enabled: values
-                .get(ENABLED_KEY)
-                .is_some_and(|value| matches!(value.trim(), "true" | "1")),
             search_provider_ids: parse_ids(values.get(SEARCH_IDS_KEY)),
             fetch_provider_ids: parse_ids(values.get(FETCH_IDS_KEY)),
         };
@@ -240,7 +231,6 @@ impl WebProviderStore for PostgresWebProviderStore {
         .await?;
         validate_web_access_provider_lists(&providers, settings)?;
         for (key, value) in [
-            (ENABLED_KEY, settings.enabled.to_string()),
             (
                 SEARCH_IDS_KEY,
                 serde_json::to_string(&settings.search_provider_ids)?,

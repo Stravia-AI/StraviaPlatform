@@ -46,7 +46,6 @@ export interface WebAccessBrowserState {
 }
 
 export interface WebAccessSettings {
-  enabled: boolean
   search_provider_ids: string[]
   fetch_provider_ids: string[]
 }

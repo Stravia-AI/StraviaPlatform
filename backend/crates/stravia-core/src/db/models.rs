@@ -651,7 +651,6 @@ impl WebProvider {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WebAccessSettings {
-    pub enabled: bool,
     pub search_provider_ids: Vec<String>,
     pub fetch_provider_ids: Vec<String>,
 }

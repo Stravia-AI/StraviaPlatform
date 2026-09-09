@@ -24,6 +24,7 @@ import * as AlertDialog from '$lib/components/ui/alert-dialog'
 import * as Empty from '$lib/components/ui/empty'
 import SecretInput from '$lib/components/secret-input.svelte'
 import { Badge } from '$lib/components/ui/badge'
+import { Checkbox } from '$lib/components/ui/checkbox'
 import { Button, buttonVariants } from '$lib/components/ui/button'
 import * as Field from '$lib/components/ui/field'
 import { Input } from '$lib/components/ui/input'
@@ -56,9 +57,7 @@ let deleteTarget = $state<WebProvider>()
 let deleteOpen = $state(false)
 
 const webProviders = $derived(providersQuery.data ?? [])
-const settings = $derived<WebAccessSettings>(
-  settingsQuery.data ?? { enabled: false, search_provider_ids: [], fetch_provider_ids: [] },
-)
+const settings = $derived<WebAccessSettings>(settingsQuery.data ?? { search_provider_ids: [], fetch_provider_ids: [] })
 const settingsUnavailable = $derived(settingsQuery.isPending || settingsQuery.isError)
 const localBrowserAvailable = $derived(
   browserQuery.isSuccess && !browserQuery.isFetching && browserQuery.data.available,
@@ -70,19 +69,6 @@ const browserInputError = $derived(
   browserPathError ?? (browserPathDraft === undefined ? browserQuery.data?.error : undefined),
 )
 const browserInputBusy = $derived(savingEditor || choosingBrowser || browserQuery.isFetching)
-const localSelected = $derived(
-  webProviders.some(
-    (provider) =>
-      provider.kind === 'local' &&
-      (settings.search_provider_ids.includes(provider.id) || settings.fetch_provider_ids.includes(provider.id)),
-  ),
-)
-const globalEnableBlocked = $derived(
-  !settings.enabled &&
-    ((localSelected && !localBrowserAvailable) ||
-      ((providersQuery.isPending || providersQuery.isError) &&
-        (settings.search_provider_ids.length > 0 || settings.fetch_provider_ids.length > 0))),
-)
 
 function kindLabel(kind: WebProviderKind): string {
   return ({ local: 'Local', exa: 'Exa', zhipu: 'Zhipu' } as const)[kind]
@@ -235,14 +221,17 @@ async function saveSettings(next: WebAccessSettings): Promise<void> {
       ((!settings.search_provider_ids.includes(provider.id) && next.search_provider_ids.includes(provider.id)) ||
         (!settings.fetch_provider_ids.includes(provider.id) && next.fetch_provider_ids.includes(provider.id))),
   )
-  if ((!settings.enabled && next.enabled && globalEnableBlocked) || (addsLocal && !localBrowserAvailable)) {
+  if (addsLocal && !localBrowserAvailable) {
     toast.error(m.web_access_browser_required())
     return
   }
   savingSettings = true
   settingsError = ''
   try {
-    const saved = await admin.webAccess.settings.update(next)
+    const saved = await admin.webAccess.settings.update({
+      search_provider_ids: next.search_provider_ids,
+      fetch_provider_ids: next.fetch_provider_ids,
+    })
     queryClient.setQueryData(['web-access-settings'], saved)
   } catch (error) {
     settingsError = localizeBackendErrorMessage(error)
@@ -302,50 +291,10 @@ async function deleteProvider(): Promise<void> {
 }
 </script>
 
-<section class="route-section" aria-labelledby="web-access-gate-title">
+<section id="web-search-sources" class="route-section" aria-labelledby="web-providers-title">
   <div class="route-section-header">
     <div>
-      <h2 id="web-access-gate-title" class="route-section-title">
-        {m.web_access_configuration_web_search_page_access()}
-      </h2>
-      <p class="route-section-description">
-        {m.web_access_configuration_feature_summary()}
-      </p>
-    </div>
-    {#if settingsQuery.data}
-      <div class="flex items-center gap-3" aria-busy={savingSettings}>
-        {#if savingSettings}<Spinner aria-hidden="true" />{/if}
-        <Switch
-          id="web-access-enabled"
-          bind:checked={() => settings.enabled, (checked) => void saveSettings({ ...settings, enabled: checked })}
-          disabled={settingsUnavailable || savingSettings || globalEnableBlocked}
-          aria-label={m.web_access_configuration_enable_web_search_page_access()}
-          aria-describedby="web-access-save-behavior" />
-      </div>
-    {/if}
-  </div>
-  <p id="web-access-save-behavior" class="mb-3 text-sm text-muted-foreground">
-    {m.web_access_configuration_immediate()}
-  </p>
-  {#if settingsQuery.isPending}<p class="text-sm text-muted-foreground" role="status">
-      {m.common_settings_loading()}
-    </p>{/if}
-  {#if settingsError}<Alert.Root variant="destructive"
-      ><Alert.Description>{settingsError}</Alert.Description></Alert.Root
-    >{/if}
-  {#if settingsQuery.isError}
-    <RequestFailure
-      title={m.web_access_configuration_web_search_settings_not_loaded()}
-      message={localizeBackendErrorMessage(settingsQuery.error)}
-      retry={() => settingsQuery.refetch()}
-      retrying={settingsQuery.isFetching} />
-  {/if}
-</section>
-
-<section class="route-section" aria-labelledby="web-providers-title">
-  <div class="route-section-header">
-    <div>
-      <h2 id="web-providers-title" class="route-section-title">{m.common_search_services()}</h2>
+      <h2 id="web-providers-title" class="route-section-title">{m.web_access_configuration_sources_title()}</h2>
       <p class="route-section-description">
         {m.web_access_configuration_service_selection_help()}
       </p>
@@ -359,6 +308,39 @@ async function deleteProvider(): Promise<void> {
       </Button>
     </div>
   </div>
+
+  {#if settingsQuery.isPending || savingSettings}
+    <p class="flex items-center gap-2 text-sm text-muted-foreground" role="status">
+      <Spinner aria-hidden="true" />{savingSettings
+        ? m.web_access_configuration_saving_sources()
+        : m.common_settings_loading()}
+    </p>
+  {/if}
+  {#if settingsError}
+    <Alert.Root variant="destructive"><Alert.Description>{settingsError}</Alert.Description></Alert.Root>
+  {/if}
+  {#if settingsQuery.isError}
+    <RequestFailure
+      title={m.web_access_configuration_web_search_settings_not_loaded()}
+      message={localizeBackendErrorMessage(settingsQuery.error)}
+      retry={() => settingsQuery.refetch()}
+      retrying={settingsQuery.isFetching} />
+  {/if}
+  {#if webProviders.some((provider) => provider.kind === 'local')}
+    {#if browserQuery.isError}
+      <RequestFailure
+        title={m.web_access_browser_load_failed()}
+        message={localizeBackendErrorMessage(browserQuery.error)}
+        retry={() => browserQuery.refetch()}
+        retrying={browserQuery.isFetching} />
+    {:else if browserQuery.isPending}
+      <p class="text-sm text-muted-foreground" role="status">{m.common_settings_loading()}</p>
+    {:else if !localBrowserAvailable}
+      <Alert.Root variant="warning" role="status">
+        <Alert.Description>{m.web_access_browser_required()}</Alert.Description>
+      </Alert.Root>
+    {/if}
+  {/if}
 
   {#if providersQuery.isError && providersQuery.data !== undefined}
     <RequestFailure
@@ -443,7 +425,9 @@ async function deleteProvider(): Promise<void> {
     {#each ['search', 'fetch'] as capability (capability)}
       {@const isSearch = capability === 'search'}
       {@const ids = isSearch ? settings.search_provider_ids : settings.fetch_provider_ids}
-      {@const candidates = webProviders.filter((provider) => isSearch || supportsFetch(provider))}
+      {@const candidates = webProviders.filter((provider) =>
+        isSearch ? provider.capabilities.search : supportsFetch(provider),
+      )}
       <section class="route-section" aria-labelledby={`${capability}-priority-title`}>
         <div class="route-section-header">
           <div>
@@ -460,7 +444,7 @@ async function deleteProvider(): Promise<void> {
             {@const enabled = ids.includes(provider.id)}
             {@const orderIndex = ids.indexOf(provider.id)}
             <div class="flex min-h-14 items-center gap-3 py-2">
-              <Switch
+              <Checkbox
                 id={`web-access-${capability}-${provider.id}`}
                 bind:checked={() => enabled, () => toggleCapability(provider, isSearch ? 'search' : 'fetch')}
                 disabled={settingsUnavailable ||

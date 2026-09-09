@@ -202,6 +202,42 @@ fn enabled_local_config() -> WebSearchConfig {
 }
 
 #[tokio::test]
+async fn disabled_search_rejects_new_runs_without_calling_either_backend() {
+    let local = Arc::new(CountingBackend::local());
+    let codex = Arc::new(CountingBackend::codex());
+    let config = WebSearchConfig {
+        enabled: false,
+        ..enabled_local_config()
+    };
+    let runner = WebSearchRunner::new(
+        Arc::new(MemoryWebSearchConfigStore::new(config)),
+        Arc::new(crate::turn_chain::test_store().await),
+        local.clone(),
+        codex.clone(),
+        Arc::new(SearchReportValidator),
+        Duration::from_secs(7 * 24 * 60 * 60),
+        Arc::new(crate::web_search::AllowSearchRun),
+    );
+    let events = runner
+        .run(WebSearchInput {
+            principal: Principal::new("owner"),
+            query: "Search a verified claim".into(),
+            previous_turn_id: None,
+            policy: None,
+            cancellation: CancellationToken::new(),
+            deadline: Instant::now() + Duration::from_secs(30),
+        })
+        .collect::<Vec<_>>()
+        .await;
+
+    assert!(
+        matches!(events.last(), Some(WebSearchEvent::Failed(error)) if error.code == "disabled")
+    );
+    assert_eq!(local.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(codex.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn runner_is_lazy_and_drop_cancels_the_request_owned_run() {
     let backend = Arc::new(CountingBackend::local());
     let runner = WebSearchRunner::new(

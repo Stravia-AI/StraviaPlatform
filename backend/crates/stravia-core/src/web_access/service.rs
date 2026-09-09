@@ -109,7 +109,7 @@ impl WebAccessService {
             .runtime_config(api_key_id)
             .await
             .map_err(anyhow::Error::new)?;
-        if !settings.enabled || !permissions.api_key_enabled {
+        if !permissions.api_key_enabled {
             self.release_run_snapshot(run_id);
             return Ok(WebAccessAvailability::default());
         }

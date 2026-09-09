@@ -553,7 +553,7 @@ Search Source 是 Search Report 实际引用、且可追溯到当前或历史已
 
 ## Web Access
 
-Web Access 是管理员配置的内部联网能力，为 Local Web Search 提供统一的 Internal Web Search 与 Internal Web Fetch leaves；它不再直接形成公开工具契约。
+Web Access 是管理员配置的内部联网能力，为 Local Web Search 提供统一的 Internal Web Search 与 Internal Web Fetch leaves；它不直接形成公开工具契约，也没有独立的能力总开关。管理员配置其来源与优先级，公开联网搜索统一受 Web Search 的 Platform Capability Gate 控制。
 _避免使用_：Web Search Add-on、Web Tools
 
 ## Internal Web Search Leaf
