@@ -1,7 +1,7 @@
+use crate::http_client::Request;
 use scraper::{ElementRef, Selector};
 use serde::Deserialize;
 use url::Url;
-use wreq::Request;
 
 use crate::{
     http_client::HttpClient,
@@ -15,7 +15,9 @@ const BAIDU_SEARCH_URL: &str = "https://www.baidu.com/s";
 const BAIDU_AUTOCOMPLETE_URL: &str = "https://www.baidu.com/sugrec";
 
 pub async fn request(search: &SearchQuery) -> anyhow::Result<RequestResponse> {
-    Ok(Request::new(wreq::Method::GET, (search_url(search).as_str()).parse()?).into())
+    Ok(http::Request::get(search_url(search).as_str())
+        .body(Vec::new())?
+        .into())
 }
 
 fn search_url(search: &SearchQuery) -> Url {
@@ -56,7 +58,7 @@ fn source_url(el: &ElementRef) -> anyhow::Result<String> {
 pub fn request_autocomplete(query: &str, _client: &HttpClient) -> anyhow::Result<Request> {
     let url = Url::parse_with_params(BAIDU_AUTOCOMPLETE_URL, &[("prod", "pc"), ("wd", query)])
         .expect("Baidu autocomplete URL is valid");
-    Ok(Request::new(wreq::Method::GET, url.as_str().parse()?))
+    Ok(http::Request::get(url.as_str()).body(Vec::new())?)
 }
 
 #[derive(Deserialize)]

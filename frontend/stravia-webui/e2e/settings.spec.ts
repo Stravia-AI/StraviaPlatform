@@ -443,10 +443,9 @@ test('Codex search activation does not depend on Local sources', async ({ page }
   await expect(searchSwitch).toBeChecked()
 })
 
-test('source load recovery still requires a browser before Local sources can enable search', async ({ page }) => {
+test('source load recovery allows embedded Local sources to enable search', async ({ page }) => {
   let settingsUnavailable = true
   let saved: WebAccessSettings = { search_provider_ids: [], fetch_provider_ids: [] }
-  let browserPath: string | null = null
   const localSource: WebProvider = { ...searchSource, id: 'source-local', name: 'Local source', kind: 'local' }
   let config = {
     revision: 1,
@@ -467,21 +466,6 @@ test('source load recovery still requires a browser before Local sources can ena
     route.fulfill({ json: { data: [{ id: 'model-search', model_id: 'search-model', display_name: 'Search model' }] } }),
   )
   await page.route('**/api/v1/web-providers', (route) => route.fulfill({ json: { data: [localSource] } }))
-  await page.route('**/api/v1/web-providers/source-local', (route) => route.fulfill({ json: { data: localSource } }))
-  await page.route('**/api/v1/web-access/browser', async (route) => {
-    if (route.request().method() === 'PUT') browserPath = route.request().postDataJSON().path
-    await route.fulfill({
-      json: {
-        data: {
-          configuredPath: browserPath,
-          resolvedPath: browserPath,
-          source: browserPath ? 'manual' : 'automatic',
-          available: browserPath !== null,
-          error: null,
-        },
-      },
-    })
-  })
   await page.route('**/api/v1/web-access/settings', async (route) => {
     if (settingsUnavailable) {
       await route.fulfill({ status: 503, json: { error: 'Fixture source settings unavailable' } })
@@ -500,14 +484,9 @@ test('source load recovery still requires a browser before Local sources can ena
   await sources.getByRole('button', { name: 'Retry', exact: true }).click()
   const searchCheckbox = page.locator('#web-access-search-source-local')
   const fetchCheckbox = page.locator('#web-access-fetch-source-local')
-  await expect(searchCheckbox).toBeDisabled()
-  await expect(fetchCheckbox).toBeDisabled()
-  await expect(searchSwitch).toBeDisabled()
-  await sources.getByRole('button', { name: 'Edit', exact: true }).click()
-  await page.locator('#web-provider-browser-path').fill('C:\\Browser\\chrome.exe')
-  await page.getByRole('dialog').getByRole('button', { name: 'Save service', exact: true }).click()
-  await expect(page.getByRole('dialog')).toHaveCount(0)
   await expect(searchCheckbox).toBeEnabled()
+  await expect(fetchCheckbox).toBeEnabled()
+  await expect(searchSwitch).toBeDisabled()
   await searchCheckbox.click()
   await expect(searchCheckbox).toBeChecked()
   await expect(searchSwitch).toBeDisabled()

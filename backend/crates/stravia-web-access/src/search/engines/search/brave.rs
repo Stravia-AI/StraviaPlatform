@@ -1,5 +1,4 @@
 use url::Url;
-use wreq::Request;
 
 use crate::search::{
     engines::{EngineResponse, RequestResponse, SearchQuery},
@@ -7,7 +6,9 @@ use crate::search::{
 };
 
 pub async fn request(search: &SearchQuery) -> anyhow::Result<RequestResponse> {
-    Ok(Request::new(wreq::Method::GET, (search_url(search).as_str()).parse()?).into())
+    Ok(http::Request::get(search_url(search).as_str())
+        .body(Vec::new())?
+        .into())
 }
 
 fn search_url(search: &SearchQuery) -> Url {

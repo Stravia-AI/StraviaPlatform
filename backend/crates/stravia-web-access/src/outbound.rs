@@ -98,22 +98,13 @@ impl NoProxyList {
 }
 
 impl LocalWeb {
+    /// 创建固定出站代理快照的内嵌 Web Access 运行时。
     pub fn new(mode: OutboundProxyMode) -> Result<Self, LocalWebError> {
-        Self::with_browser_path(mode, None)
-    }
-
-    /// 创建固定出站代理与浏览器路径快照的运行时；`None` 使用环境变量或本机检测。
-    /// 此处只校验代理配置；每次本地搜索或抓取前校验浏览器路径，不启动浏览器。
-    pub fn with_browser_path(
-        mode: OutboundProxyMode,
-        browser_path: Option<std::path::PathBuf>,
-    ) -> Result<Self, LocalWebError> {
         let snapshot = resolve_mode(mode, |key| std::env::var(key).ok())?;
         let http = build_http_client(&snapshot, SEARCH_TIMEOUT, true)?;
         let fetch_proxied = build_http_client(&snapshot, FETCH_TIMEOUT, false)?;
-        let browser = BrowserRuntime::new(crate::browser::ChromeLaunchConfig {
+        let browser = BrowserRuntime::new(crate::browser::BrowserLaunchConfig {
             proxy: snapshot.clone(),
-            browser_path,
         });
         Ok(Self {
             inner: Arc::new(LocalWebInner {
@@ -125,7 +116,7 @@ impl LocalWeb {
         })
     }
 
-    /// 返回共享搜索 Cookie 与构造期出站快照的 wreq HTTP 客户端克隆。
+    /// 返回共享搜索 Cookie 与构造期出站快照的 Moli HTTP 客户端克隆。
     pub fn http_client(&self) -> HttpClient {
         self.inner.http.clone()
     }
@@ -166,7 +157,6 @@ impl LocalWeb {
         mut query: crate::search::engines::SearchQuery,
         progress_tx: tokio::sync::mpsc::UnboundedSender<crate::search::engines::ProgressUpdate>,
     ) -> anyhow::Result<()> {
-        self.inner.browser.require_available().await?;
         query.http = self.http_client();
         query.browser = self.browser();
         crate::search::engines::search(&query, progress_tx).await
@@ -177,7 +167,6 @@ impl LocalWeb {
         config: &crate::search::config::Config,
         query: &str,
     ) -> anyhow::Result<Vec<String>> {
-        self.inner.browser.require_available().await?;
         crate::search::engines::autocomplete(config, query, &self.inner.http).await
     }
 }
@@ -294,9 +283,8 @@ pub(crate) fn direct_http_client() -> HttpClient {
 
 #[cfg(test)]
 pub(crate) fn direct_browser() -> BrowserRuntime {
-    BrowserRuntime::new(crate::browser::ChromeLaunchConfig {
+    BrowserRuntime::new(crate::browser::BrowserLaunchConfig {
         proxy: ResolvedProxy::direct(),
-        browser_path: None,
     })
 }
 
@@ -384,67 +372,6 @@ mod tests {
         assert!(!snapshot.pins_origin(&Url::parse("https://example.com/").unwrap()));
     }
 
-    #[tokio::test]
-    async fn removed_browser_rejects_local_execution_before_network() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("chrome.exe");
-        std::fs::write(&path, b"metadata fixture; never execute").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
-        }
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let web = LocalWeb::with_browser_path(
-            OutboundProxyMode::Explicit(format!("http://{}", listener.local_addr().unwrap())),
-            Some(path.clone()),
-        )
-        .unwrap();
-        let adapter = crate::local::build_local_adapter(
-            "local".into(),
-            OutboundProxyMode::Explicit(format!("http://{}", listener.local_addr().unwrap())),
-            [(
-                "google".into(),
-                crate::local::LocalSearchEngineSetting { enabled: true },
-            )]
-            .into_iter()
-            .collect(),
-            Some(path.clone()),
-        )
-        .unwrap();
-        std::fs::remove_file(path).unwrap();
-        let search = crate::SearchRequest {
-            query: "Stravia".into(),
-            max_results: 1,
-            allowed_domains: vec![],
-            blocked_domains: vec![],
-        };
-        assert!(adapter.search(&search).await.is_err());
-        let fetch = adapter
-            .fetch(&crate::FetchRequest {
-                urls: vec!["https://example.com/".into()],
-                max_characters: 100,
-            })
-            .await
-            .unwrap();
-        assert_eq!(fetch.result[0].status, crate::FetchStatus::Error);
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        assert!(web.search(web.search_query("Stravia"), tx).await.is_err());
-        assert_eq!(
-            web.fetch("https://example.com/").await.unwrap_err().code(),
-            crate::fetch::FetchErrorCode::Unavailable
-        );
-        assert!(web
-            .autocomplete(&crate::search::config::Config::default(), "Stravia")
-            .await
-            .is_err());
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(25), listener.accept())
-                .await
-                .is_err()
-        );
-    }
-
     #[test]
     fn empty_system_env_is_direct() {
         let snapshot = resolve_mode(OutboundProxyMode::System, env(&[])).unwrap();
@@ -508,10 +435,9 @@ mod tests {
                 .unwrap();
         });
         let web = LocalWeb::new(OutboundProxyMode::Explicit(format!("socks5://{addr}"))).unwrap();
-        let request = wreq::Request::new(
-            wreq::Method::GET,
-            "http://stravia-origin.invalid/".parse().unwrap(),
-        );
+        let request = http::Request::get("http://stravia-origin.invalid/")
+            .body(Vec::new())
+            .unwrap();
         let response = web.http_client().fetch(request).await.unwrap();
         assert_eq!(response.1, b"remote-dns");
         server.await.unwrap();
@@ -560,12 +486,12 @@ mod tests {
             .http_client();
         let url = format!("http://127.0.0.1:{}/search", addr.port());
         let first = client
-            .fetch(wreq::Request::new(wreq::Method::GET, url.parse().unwrap()))
+            .fetch(http::Request::get(&url).body(Vec::new()).unwrap())
             .await
             .unwrap();
         assert_eq!(first.1, b"no-cookie");
         let second = client
-            .fetch(wreq::Request::new(wreq::Method::GET, url.parse().unwrap()))
+            .fetch(http::Request::get(&url).body(Vec::new()).unwrap())
             .await
             .unwrap();
         assert_eq!(second.1, b"with-cookie");

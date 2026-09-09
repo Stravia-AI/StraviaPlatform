@@ -1,0 +1,6 @@
+# Moli 的 V8 Windows 静态归档使用静态 MSVC CRT；Rust 与其他原生依赖必须一致。
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

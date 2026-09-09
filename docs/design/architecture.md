@@ -250,17 +250,15 @@ graph TD
 
 **Local Web Access 运行边界：**
 
-`stravia-web-access` 的 HTTP Search/Fetch 使用 `wreq` 与 `wreq-util`，浏览器回退使用 Rust 直接控制的真实 headless Chrome/Chromium，不依赖 Moli 或 Node/Bun sidecar。`LocalWeb` 固定代理配置快照；HTTP Search 的 Cookie jar、无 Cookie 的 HTTP Fetch 客户端和浏览器 profile 分离，不跨运行时共享。Chrome 按需启动，`STRAVIA_CHROME_PATH` 可覆盖本机发现；运行时显式持有 browser context，使会话 Cookie 不随临时标签页关闭而丢失。最后一个运行时所有者释放时回收进程与临时 profile。
+`stravia-web-access` 内嵌 `Stravia-AI/moli-stealth`，依赖固定到 Git revision。HTTP Search/Fetch 使用 `moli-stealth-net` 和 Chrome 传输指纹，动态渲染使用 `moli-core` 的 Rust Interface 与 V8，不启动外部浏览器或 Node/Bun sidecar。`LocalWeb` 固定代理配置快照；HTTP Search 的 `moli-cookie-jar`、无 Cookie 的 HTTP Fetch 客户端和内嵌浏览器存储分离，不跨运行时共享。HTTP 适配器负责逐跳重定向、跨 origin 凭据清理和解压后流式大小限制，直连 Fetch 使用策略层验证后的固定地址。
 
-Desktop 与 Server 在 Local 服务编辑窗口中共用浏览器路径输入框，自动带入配置或检测到的路径；重新打开编辑窗口会重新检测。Desktop 通过 Tauri 官方 dialog 插件打开系统文件选择窗口，仅授予本地 main WebView `dialog:allow-open`，选择结果只修改草稿；Server 手填服务器本机路径。保存服务时先保存实际修改过的路径；若后续服务设置保存失败，界面明确报告路径已保存。清空路径并保存恢复环境变量或自动检测；未修改自动带入的路径不会被固定为手动覆盖。
+Moli 的 Browser 所有者具有线程亲和性，由专用线程上的 current-thread Tokio runtime 与 LocalSet 创建、使用和释放；调用方只通过有界消息通道提交渲染请求。运行时按需初始化并保留会话 Cookie；preflight 与目标导航共用页面以保留 sessionStorage。页面求值使用隔离世界，JavaScript 导航后重新绑定就绪判定。排队、初始化、导航和提取共用绝对 deadline；接收端取消会取消在途操作，页面句柄释放触发回收，正常完成显式等待关闭。
 
-Core 在 Gateway 创建时读取运行目录下的 `web-access-browser.json`，不进入共享数据库；新文件不存在时一次性将原 `desktop-browser.json` 改名迁移。路径经校验、原子持久化后才激活到 Gateway 及其克隆；持久化、激活与写入锁位于同一个阻塞任务，调用方取消不会导致磁盘与运行时脱节。经过认证的 `GET /api/v1/web-access/browser` 返回 `configuredPath`、`resolvedPath`、`source`、`available` 与 `error`，路径仅供管理端展示；`PUT` 接受 `{path: string|null}`，无效路径或持久化失败不改变原选择。Web Access 在创建包含 Local 来源的执行引擎时捕获解析后的有效路径，传递至 `LocalWeb` 和浏览器启动配置；已有请求保留原选择。解析优先级为手动覆盖、`STRAVIA_CHROME_PATH`、系统安装位置；显式路径无效时不回退。检查只读取配置和文件元数据，不启动浏览器；设置损坏或浏览器卸载不会阻止应用启动。界面保存路径无需重启，更改环境变量则需要重启进程。Desktop 不捆绑或下载浏览器。
+浏览器 HTTP 与 WebSocket 出站经过既有 EgressProxy；Moli 显式配置出口代理并清空 bypass，避免进程环境绕过固定快照。Moli 私网阻断和出口 URL/IP 策略共同生效，直连按已验证公网 IP 建连，不进行 TLS 中间人解密。显式上游代理仍负责其远端 DNS 解析。内嵌 Browser 不具备原 Chrome 子进程的操作系统沙箱边界；这不是网络策略失效时的替代防线，部署需使用最小权限与适当的宿主机隔离。
 
-Core 统一约束 Desktop 与 Server 的 Local Search/Fetch：新增 Local 来源选择时，必须能够解析到浏览器，否则返回 `WEB_ACCESS_BROWSER_REQUIRED` 且不写入设置。移除或保持既有 Local 选择不要求浏览器。WebUI 据浏览器配置接口的可用性限制选择操作，最终校验仍在 Core。Web Access 只管理来源与优先级，不另设启停；公开联网搜索由 Web Search 总开关统一控制。缺少浏览器时，执行引擎排除已保存的 Local 来源，保留远程来源；Local Search 的来源校验使用相同可用性约束。`LocalWeb` 在每次 Search、Fetch 或 autocomplete 进入网络路径前再次检查浏览器，已创建的运行时也不能在可执行文件被移除后退回无浏览器 HTTP 访问。浏览器恢复后来源重新可用，远程 Exa 与 Zhipu 不受此限制。
+Desktop 与 Server 不再提供浏览器路径输入、探测或 `/api/v1/web-access/browser` 管理接口。`STRAVIA_CHROME_PATH` 不再读取；既有 `web-access-browser.json` 与 `desktop-browser.json` 不再读写或迁移，但不主动删除用户文件。Local 来源选择与执行不再受外部浏览器安装门槛约束。Web Access 仍只管理来源与优先级，公开联网搜索仍由唯一的 Web Search 总开关控制；模型与来源完整性校验、API Key 权限以及远程 Exa/Zhipu 行为不变。
 
-浏览器保留沙箱和端到端 TLS，通过本地出口代理执行公共地址校验、直连 DNS 地址固定及上游代理转发；页面、重定向、iframe 和 worker 不能绕过出口。显式上游代理保留远端 DNS 语义与 `NO_PROXY` 快照，不进行 TLS 中间人解密。Fetch 继续限制下载与渲染结果大小，并保留超时、取消与静态提取回退契约。
-
-隐身实现固定移植 OMP commit `daf07999c2fee9b22edc7bf8fea1fb6272e0df5e` 的全部 14 个脚本与 bootstrap，并保留 MIT 声明。CDP 在恢复 target 前配置 UA；页面脚本注入主世界，内部求值默认使用按需获取的隔离世界，不启用 `Runtime.enable` 或自动追加 source URL。导航跟随 frame 当前文档的生命周期事件，而非固定等待首次 `Page.navigate` 返回的 loader；JS 跳转更换文档后重新获取隔离世界并绑定 DOM 就绪等待。Google 的静态响应按真实链接标题 DOM 判断是否需要浏览器回退，不把脚本里的 HTML 模板当成结果。固定语言、核心数等指纹值以及上游 worker 包装范围仍有局限，不构成“不可检测”的承诺。
+Fetch 继续限制下载与渲染结果大小，并保留超时、取消与静态提取回退契约。Google 的静态响应按真实链接标题 DOM 判断是否需要浏览器回退，不把脚本里的 HTML 模板当成结果。旧 CDP 控制与 OMP 隐身脚本已删除，浏览器身份和运行能力由内嵌 Moli 提供；指纹缓解不构成“不可检测”的承诺。
 
 **stravia-core 顶层 `pub mod`（以 lib.rs 为准）：**
 

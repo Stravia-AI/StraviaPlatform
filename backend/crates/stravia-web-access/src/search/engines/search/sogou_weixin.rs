@@ -4,7 +4,6 @@ use futures::future::join_all;
 use regex::Regex;
 use scraper::{ElementRef, Selector};
 use url::Url;
-use wreq::Request;
 
 use crate::{
     browser::RenderRequest,
@@ -27,7 +26,7 @@ static WECHAT_REDIRECT_URL_PARTS: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 pub async fn request(search: &SearchQuery) -> anyhow::Result<RequestResponse> {
-    let request = Request::new(wreq::Method::GET, (search_url(search).as_str()).parse()?);
+    let request = http::Request::get(search_url(search).as_str()).body(Vec::new())?;
     let response = search.http.fetch(request).await?;
     let body = String::from_utf8_lossy(&response.1);
     if requires_browser_render(&body) {
@@ -131,10 +130,10 @@ async fn resolve_article_url(
     client: HttpClient,
 ) -> anyhow::Result<EngineSearchResult> {
     // 依赖搜索 client 的 cookie jar，把结果页的 SNUID 带到这次 /link 请求。
-    let mut request = Request::new(wreq::Method::GET, (&result.url).parse()?);
+    let mut request = http::Request::get(result.url.as_str()).body(Vec::new())?;
     request
         .headers_mut()
-        .insert(wreq::header::REFERER, SOGOU_WECHAT_SEARCH_URL.parse()?);
+        .insert(http::header::REFERER, SOGOU_WECHAT_SEARCH_URL.parse()?);
     let response = client.fetch(request).await?;
     let redirect_page = String::from_utf8_lossy(&response.1);
     let url = extract_wechat_article_url(&redirect_page).ok_or_else(|| {

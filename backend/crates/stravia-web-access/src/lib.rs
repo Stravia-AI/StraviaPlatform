@@ -9,7 +9,6 @@ mod outbound;
 pub mod remote;
 pub mod search;
 
-pub use browser::{resolve_browser_executable, validate_browser_executable};
 pub use outbound::parse_cli_proxy;
 pub use outbound::{LocalWeb, LocalWebError, OutboundProxyMode};
 pub use stravia_web_access_contract::*;

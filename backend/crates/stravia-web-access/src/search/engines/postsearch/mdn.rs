@@ -1,8 +1,8 @@
+use crate::http_client::Request;
 use maud::{html, PreEscaped};
 use scraper::{Html, Selector};
 use serde::Deserialize;
 use tracing::error;
-use wreq::Request;
 
 use crate::search::engines::{Engine, HttpResponse, Response};
 
@@ -18,10 +18,9 @@ pub async fn request(response: &Response) -> anyhow::Result<Option<Request>> {
             .url
             .starts_with("https://developer.mozilla.org/en-US/docs/Web")
         {
-            return Ok(Some(Request::new(
-                wreq::Method::GET,
-                search_result.result.url.parse()?,
-            )));
+            return Ok(Some(
+                http::Request::get(search_result.result.url.as_str()).body(Vec::new())?,
+            ));
         }
     }
 
@@ -40,7 +39,7 @@ pub fn parse_response(
         }
     };
 
-    let url = url::Url::parse(&res.uri().to_string()).ok()?;
+    let url = res.body().clone();
 
     let dom = Html::parse_document(body);
 

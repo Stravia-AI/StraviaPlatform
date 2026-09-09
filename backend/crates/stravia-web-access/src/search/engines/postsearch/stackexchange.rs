@@ -1,7 +1,7 @@
+use crate::http_client::Request;
 use maud::{html, PreEscaped};
 use scraper::{Html, Selector};
 use url::Url;
-use wreq::Request;
 
 use crate::search::engines::{answer::regex, Response};
 
@@ -10,7 +10,7 @@ pub async fn request(response: &Response) -> anyhow::Result<Option<Request>> {
         if regex!(r"^https:\/\/(stackoverflow\.com|serverfault\.com|superuser\.com|\w{1,}\.stackexchange\.com)\/questions\/\d+")
             .is_match(&search_result.result.url)
         {
-            return Ok(Some(Request::new(wreq::Method::GET, search_result.result.url.parse()?)));
+            return Ok(Some(http::Request::get(search_result.result.url.as_str()).body(Vec::new())?));
         }
     }
 

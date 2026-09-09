@@ -18,25 +18,26 @@ chrono-tz = { workspace = true }
 dom_smoothie = { workspace = true }
 fend-core = { workspace = true }
 futures = { workspace = true }
-http-body-util = { workspace = true }
 htmd = { workspace = true }
 maud = { workspace = true }
-wreq = { workspace = true }
-wreq-util = { workspace = true }
+moli-core = { workspace = true }
+moli-stealth-net = { workspace = true }
+moli-cookie-jar = { workspace = true }
+http = { workspace = true }
+async-compression = { workspace = true }
+tokio-util = { workspace = true }
 parking_lot = { workspace = true }
 numbat = { workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }
 reqwest = { workspace = true, features = ["http2", "rustls"] }
-reqwest-websocket = { workspace = true }
 rustls-platform-verifier = { workspace = true }
 rmcp = { workspace = true, features = ["client", "transport-streamable-http-client-reqwest"] }
 scraper = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tempfile = { workspace = true }
-tokio = { workspace = true, features = ["net", "rt", "sync", "time", "process", "io-util", "macros", "fs"] }
+tokio = { workspace = true, features = ["net", "rt", "sync", "time", "io-util", "macros"] }
 tokio-rustls = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }

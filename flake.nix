@@ -144,7 +144,24 @@
             inherit version;
             src = source;
 
-            cargoLock.lockFile = ./Cargo.lock;
+            cargoLock = {
+              lockFile = ./Cargo.lock;
+              allowBuiltinFetchGit = true;
+            };
+            # V8 构建脚本默认联网下载；提前固定归档，让沙箱构建保持离线。
+            RUSTY_V8_ARCHIVE = pkgs.fetchurl (
+              if system == "x86_64-linux" then {
+                url = "https://github.com/denoland/rusty_v8/releases/download/v152.2.0/librusty_v8_ptrcomp_release_x86_64-unknown-linux-gnu.a.gz";
+                sha256 = "aaeba7932acdfa9ff44592d9292bf4dd63651e2abafdeb8a5952199b5901ea50";
+              } else {
+                url = "https://github.com/denoland/rusty_v8/releases/download/v152.2.0/librusty_v8_release_aarch64-unknown-linux-gnu.a.gz";
+                sha256 = "c40196bbf182532e583f65b7daf0196fdbb3354e6fac59b31d0539c20f931f3d";
+              }
+            );
+            RUSTY_V8_SRC_BINDING_PATH = pkgs.fetchurl {
+              url = "https://github.com/denoland/rusty_v8/releases/download/v152.2.0/src_binding_${if system == "x86_64-linux" then "ptrcomp_" else ""}release_${pkgs.stdenv.hostPlatform.rust.rustcTarget}.rs";
+              sha256 = "3e4d5fecdbe0f98a6017e69d7ca82519a77fb032c5eb5e4cdbecdd3e2ec519d5";
+            };
             cargoBuildFlags = [
               "-p"
               "stravia-server"
@@ -153,18 +170,17 @@
             nativeBuildInputs = [
               pkgs.cmake
               pkgs.git
-              pkgs.makeWrapper
+              pkgs.go
+              pkgs.python3
+              pkgs.pkg-config
               pkgs.rustPlatform.bindgenHook
             ];
+            buildInputs = [ pkgs.fontconfig ];
 
             preBuild = ''
+              export GOCACHE="$TMPDIR/go-cache"
               mkdir -p frontend/stravia-webui/dist
               cp -R ${webui}/. frontend/stravia-webui/dist/
-            '';
-
-            postInstall = ''
-              wrapProgram "$out/bin/stravia-server" \
-                --set-default STRAVIA_CHROME_PATH "${pkgs.chromium}/bin/chromium"
             '';
 
             meta = {

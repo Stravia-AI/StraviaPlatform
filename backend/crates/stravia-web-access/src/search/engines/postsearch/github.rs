@@ -1,17 +1,16 @@
+use crate::http_client::Request;
 use maud::{html, PreEscaped};
 use scraper::{Html, Selector};
 use url::Url;
-use wreq::Request;
 
 use crate::search::engines::{answer::regex, Response};
 
 pub async fn request(response: &Response) -> anyhow::Result<Option<Request>> {
     for search_result in response.search_results.iter().take(8) {
         if regex!(r"^https:\/\/github\.com\/[\w-]+\/[\w.-]+$").is_match(&search_result.result.url) {
-            return Ok(Some(Request::new(
-                wreq::Method::GET,
-                search_result.result.url.parse()?,
-            )));
+            return Ok(Some(
+                http::Request::get(search_result.result.url.as_str()).body(Vec::new())?,
+            ));
         }
     }
 

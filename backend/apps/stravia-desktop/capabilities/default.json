@@ -12,7 +12,7 @@
     "core:window:allow-toggle-maximize",
     "core:window:allow-is-maximized",
     "core:window:allow-close",
-    "dialog:allow-open",
+
     "opener:default",
     "allow-get-admin-session",
     "allow-get-server-port",
