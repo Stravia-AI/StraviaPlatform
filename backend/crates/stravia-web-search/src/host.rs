@@ -113,7 +113,6 @@ pub struct SearchSourceSettings {
 pub struct SearchSources {
     pub settings: SearchSourceSettings,
     pub providers: Vec<SearchSourceProvider>,
-    pub local_browser_available: bool,
 }
 #[async_trait]
 pub trait SearchAdminHost: Send + Sync {

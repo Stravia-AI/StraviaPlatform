@@ -316,7 +316,6 @@ impl SearchAdminHost for SearchHost {
                 fetch_provider_ids: settings.fetch_provider_ids,
             },
             providers,
-            local_browser_available: self.0.web_access().local_browser_available().await,
         }))
     }
 }

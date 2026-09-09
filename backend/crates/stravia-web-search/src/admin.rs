@@ -301,10 +301,7 @@ impl SearchAdmin {
             .map_err(|_| sources_unavailable())?
             .ok_or_else(sources_unavailable)?;
         let settings = sources.settings;
-        let mut providers = sources.providers;
-        if !sources.local_browser_available {
-            providers.retain(|provider| provider.kind != "local");
-        }
+        let providers = sources.providers;
         let has_search = settings.search_provider_ids.iter().any(|id| {
             providers
                 .iter()
