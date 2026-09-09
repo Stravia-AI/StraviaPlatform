@@ -1,5 +1,5 @@
 use super::*;
-use crate::protocol::ir::EmbeddingVector;
+use stravia_runtime_contract::protocol::ir::EmbeddingVector;
 
 #[test]
 fn request_round_trip_uses_typed_embedding_fields() {

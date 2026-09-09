@@ -208,7 +208,7 @@ mod tests {
             HeaderValue::from_str(&format!("Bearer {}", key.token)).expect("auth header"),
         );
         let security = Security::new(gateway.storage.auth());
-        let principal = crate::hook::Principal::new(key.id.clone());
+        let principal = stravia_runtime_contract::Principal::new(key.id.clone());
         security
             .authorize_principal_model(&principal, &bound)
             .await
@@ -278,7 +278,7 @@ mod tests {
             .map(|target| {
                 let mut map = target.thinking_level_map.0.clone();
                 for row in &mut map {
-                    row.control = crate::thinking::TargetThinkingControl::Hidden;
+                    row.control = stravia_runtime_contract::thinking::TargetThinkingControl::Hidden;
                 }
                 crate::db::models::UpsertTarget {
                     id: Some(target.id.clone()),

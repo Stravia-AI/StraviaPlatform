@@ -1,24 +1,14 @@
 use std::collections::{HashMap, HashSet};
-use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
 
-use async_trait::async_trait;
+use super::tool::PlatformToolRegistry;
 use futures::FutureExt;
-
-use crate::protocol::ids::ProtocolId;
-use crate::protocol::ir::request::EmbeddingInput;
-use crate::protocol::ir::{
-    AiItem, AiRequest, AiResponse, AiStreamDelta, GenerationConfig, ProtocolExt, ToolCall,
-    ToolChoice, ToolSpec,
-};
-
-use super::context::{ContextCompleteness, ContextSnapshot, ReplaceContextSpan};
-use super::stream::{StreamDirective, StreamTransformer, is_semantic};
-use super::tool::{PlatformToolRegistry, PlatformToolResult, ToolExecutionContext, ToolId};
+use stravia_runtime_contract::hook::stream::is_semantic;
+use stravia_runtime_contract::hook::*;
+use stravia_runtime_contract::protocol::ir::{AiRequest, AiResponse, AiStreamDelta, ToolSpec};
 
 mod types;
-use types::SemanticVariant;
 pub use types::*;
 
 mod apply;

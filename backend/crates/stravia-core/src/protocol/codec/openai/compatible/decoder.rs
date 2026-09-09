@@ -7,12 +7,23 @@
 use anyhow::Result;
 use serde_json::Value;
 
-use crate::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
-use crate::protocol::ir::{
-    AiItem, AiRequest, ContentBlock, GenerationConfig, MediaSource, MessageContent, OpenAIChatExt,
-    ProtocolExt, ReasoningConfig, ReasoningEffort, ResponseFormat, Role, StreamConfig, ToolCall,
-    ToolChoice, ToolSpec,
-};
+use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
+use stravia_runtime_contract::protocol::ir::AiItem;
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::ContentBlock;
+use stravia_runtime_contract::protocol::ir::GenerationConfig;
+use stravia_runtime_contract::protocol::ir::MediaSource;
+use stravia_runtime_contract::protocol::ir::MessageContent;
+use stravia_runtime_contract::protocol::ir::OpenAIChatExt;
+use stravia_runtime_contract::protocol::ir::ProtocolExt;
+use stravia_runtime_contract::protocol::ir::ReasoningConfig;
+use stravia_runtime_contract::protocol::ir::ReasoningEffort;
+use stravia_runtime_contract::protocol::ir::ResponseFormat;
+use stravia_runtime_contract::protocol::ir::Role;
+use stravia_runtime_contract::protocol::ir::StreamConfig;
+use stravia_runtime_contract::protocol::ir::ToolCall;
+use stravia_runtime_contract::protocol::ir::ToolChoice;
+use stravia_runtime_contract::protocol::ir::ToolSpec;
 
 use super::types::*;
 
@@ -60,7 +71,7 @@ impl OpenAIDecoder {
             Some(value) => ReasoningConfig {
                 enabled: true,
                 effort: Some(ReasoningEffort::from_openai_str(value)?),
-                level: Some(crate::thinking::ThinkingLevel::from_wire(value)?),
+                level: Some(stravia_runtime_contract::thinking::ThinkingLevel::from_wire(value)?),
                 ..Default::default()
             },
             None => ReasoningConfig::default(),
@@ -273,7 +284,7 @@ fn decode_message(msg: OpenAIMessage) -> Result<AiItem> {
     // Put any per-message extra fields + refusal into meta.
     let mut meta_obj = serde_json::Map::new();
     for (k, v) in msg.extra {
-        if k != crate::protocol::ir::TOOL_RESULT_CONTENT_KIND_META {
+        if k != stravia_runtime_contract::protocol::ir::TOOL_RESULT_CONTENT_KIND_META {
             meta_obj.insert(k, v);
         }
     }

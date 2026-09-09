@@ -1,12 +1,13 @@
 use super::*;
-use crate::protocol::ir::{ContentBlock, MessageContent};
+use stravia_runtime_contract::protocol::ir::ContentBlock;
+use stravia_runtime_contract::protocol::ir::MessageContent;
 
 #[test]
 fn stream_formatter_closes_failures_with_standard_terminal_sequence() {
     let mut formatter = ResponsesStreamFormatter::new();
     let mut events = formatter.format_deltas(&[AiStreamDelta::StreamError {
-        error: crate::protocol::ir::AiError::new(
-            crate::protocol::ir::AiErrorKind::StreamMidError,
+        error: stravia_runtime_contract::protocol::ir::AiError::new(
+            stravia_runtime_contract::protocol::ir::AiErrorKind::StreamMidError,
             "stream aborted",
         ),
     }]);
@@ -30,17 +31,20 @@ fn stream_formatter_closes_failures_with_standard_terminal_sequence() {
 
 #[test]
 fn response_profile_uses_effective_request_and_provider_confirmed_values() {
-    let mut request = crate::protocol::ir::AiRequest::new("logical-model", Vec::new());
+    let mut request =
+        stravia_runtime_contract::protocol::ir::AiRequest::new("logical-model", Vec::new());
     request.instructions = Some("Be concise.".into());
     request.generation.temperature = Some(0.2);
-    request.ext = Some(crate::protocol::ir::ProtocolExt::OpenResponses(
-        crate::protocol::ir::OpenResponsesExt {
-            store: Some(false),
-            metadata: Some(serde_json::json!({"tenant": "acme"})),
-            safety_identifier: Some("safe-user".into()),
-            ..Default::default()
-        },
-    ));
+    request.ext = Some(
+        stravia_runtime_contract::protocol::ir::ProtocolExt::OpenResponses(
+            stravia_runtime_contract::protocol::ir::OpenResponsesExt {
+                store: Some(false),
+                metadata: Some(serde_json::json!({"tenant": "acme"})),
+                safety_identifier: Some("safe-user".into()),
+                ..Default::default()
+            },
+        ),
+    );
     let mut formatter = ResponsesStreamFormatter::new();
     formatter.set_response_profile_from_request(&request, Some("resp_parent"));
     let events = formatter.format_deltas(&[
@@ -219,16 +223,18 @@ fn tool_only_stream_does_not_emit_an_empty_message_item() {
 #[test]
 fn function_call_item_done_preserves_incomplete_status() {
     let mut formatter = ResponsesStreamFormatter::new();
-    let completed = crate::protocol::ir::AiItem::function_call(crate::protocol::ir::ToolCall {
-        id: "call_1".into(),
-        name: "lookup".into(),
-        arguments: "{}".into(),
-    })
+    let completed = stravia_runtime_contract::protocol::ir::AiItem::function_call(
+        stravia_runtime_contract::protocol::ir::ToolCall {
+            id: "call_1".into(),
+            name: "lookup".into(),
+            arguments: "{}".into(),
+        },
+    )
     .with_graph_metadata(
         Some("fc_provider".into()),
         Some(AiItemStatus::Incomplete),
-        crate::protocol::ir::AiItemProvenance::Provider,
-        crate::protocol::ir::AiItemAudience::Client,
+        stravia_runtime_contract::protocol::ir::AiItemProvenance::Provider,
+        stravia_runtime_contract::protocol::ir::AiItemAudience::Client,
     );
     let events = formatter.format_deltas(&[
         AiStreamDelta::MessageStart {
@@ -346,7 +352,7 @@ fn streams_platform_owned_result_as_indexed_output_item() {
 #[test]
 fn terminal_message_clears_metadata_after_text_rewrite() {
     let mut formatter = ResponsesStreamFormatter::new();
-    let mut completed = crate::protocol::ir::AiItem::output_text("before");
+    let mut completed = stravia_runtime_contract::protocol::ir::AiItem::output_text("before");
     completed.meta = Some(serde_json::json!({
         "__open_responses_content": [{
             "type": "output_text",
@@ -555,7 +561,7 @@ fn completed_item_forwards_encrypted_only_reasoning() {
         },
         AiStreamDelta::ItemDone {
             index: 0,
-            item: crate::protocol::ir::AiItem::reasoning(
+            item: stravia_runtime_contract::protocol::ir::AiItem::reasoning(
                 Vec::new(),
                 Vec::new(),
                 Some("opaque".into()),
@@ -676,18 +682,20 @@ fn preserves_multiple_reasoning_output_indices() {
 #[test]
 fn item_done_creates_empty_messages_and_preserves_item_status() {
     let mut formatter = ResponsesStreamFormatter::new();
-    let completed = crate::protocol::ir::AiItem::output_text("").with_graph_metadata(
-        Some("msg_completed".into()),
-        Some(crate::protocol::ir::AiItemStatus::Completed),
-        crate::protocol::ir::AiItemProvenance::Provider,
-        crate::protocol::ir::AiItemAudience::Client,
-    );
-    let incomplete = crate::protocol::ir::AiItem::output_text("partial").with_graph_metadata(
-        Some("msg_incomplete".into()),
-        Some(crate::protocol::ir::AiItemStatus::Incomplete),
-        crate::protocol::ir::AiItemProvenance::Provider,
-        crate::protocol::ir::AiItemAudience::Client,
-    );
+    let completed = stravia_runtime_contract::protocol::ir::AiItem::output_text("")
+        .with_graph_metadata(
+            Some("msg_completed".into()),
+            Some(stravia_runtime_contract::protocol::ir::AiItemStatus::Completed),
+            stravia_runtime_contract::protocol::ir::AiItemProvenance::Provider,
+            stravia_runtime_contract::protocol::ir::AiItemAudience::Client,
+        );
+    let incomplete = stravia_runtime_contract::protocol::ir::AiItem::output_text("partial")
+        .with_graph_metadata(
+            Some("msg_incomplete".into()),
+            Some(stravia_runtime_contract::protocol::ir::AiItemStatus::Incomplete),
+            stravia_runtime_contract::protocol::ir::AiItemProvenance::Provider,
+            stravia_runtime_contract::protocol::ir::AiItemAudience::Client,
+        );
     let events = formatter.format_deltas(&[
         AiStreamDelta::MessageStart {
             id: "resp_messages".into(),
@@ -733,8 +741,8 @@ fn item_done_creates_empty_messages_and_preserves_item_status() {
 #[test]
 fn annotation_stays_on_its_unchanged_indexed_message() {
     let mut formatter = ResponsesStreamFormatter::new();
-    let mut completed = crate::protocol::ir::AiItem {
-        role: crate::protocol::ir::Role::Assistant,
+    let mut completed = stravia_runtime_contract::protocol::ir::AiItem {
+        role: stravia_runtime_contract::protocol::ir::Role::Assistant,
         content: MessageContent::Blocks(vec![
             ContentBlock::Text {
                 text: String::new(),
@@ -825,7 +833,7 @@ fn annotation_stays_on_its_unchanged_indexed_message() {
 #[test]
 fn rewritten_text_drops_stale_annotation_events() {
     let mut formatter = ResponsesStreamFormatter::new();
-    let mut completed = crate::protocol::ir::AiItem::output_text("before");
+    let mut completed = stravia_runtime_contract::protocol::ir::AiItem::output_text("before");
     completed.meta = Some(serde_json::json!({
         "__open_responses_content": [{
             "type": "output_text",
@@ -896,7 +904,7 @@ fn item_done_does_not_restore_semantic_text_removed_by_a_hook() {
         },
         AiStreamDelta::ItemDone {
             index: 0,
-            item: crate::protocol::ir::AiItem::output_text("provider secret"),
+            item: stravia_runtime_contract::protocol::ir::AiItem::output_text("provider secret"),
         },
         AiStreamDelta::Done {
             stop_reason: "stop".into(),
@@ -917,8 +925,8 @@ fn item_done_does_not_restore_semantic_text_removed_by_a_hook() {
 #[test]
 fn function_output_item_done_emits_lifecycle_and_terminal_item() {
     let mut formatter = ResponsesStreamFormatter::new();
-    let function_output = crate::protocol::ir::AiItem {
-        role: crate::protocol::ir::Role::Tool,
+    let function_output = stravia_runtime_contract::protocol::ir::AiItem {
+        role: stravia_runtime_contract::protocol::ir::Role::Tool,
         content: MessageContent::Blocks(vec![ContentBlock::Text {
             text: "tool output".into(),
             cache_control: None,
@@ -930,8 +938,8 @@ fn function_output_item_done_emits_lifecycle_and_terminal_item() {
     .with_graph_metadata(
         Some("fco_provider".into()),
         Some(AiItemStatus::Completed),
-        crate::protocol::ir::AiItemProvenance::Provider,
-        crate::protocol::ir::AiItemAudience::Client,
+        stravia_runtime_contract::protocol::ir::AiItemProvenance::Provider,
+        stravia_runtime_contract::protocol::ir::AiItemAudience::Client,
     );
     let events = formatter.format_deltas(&[
         AiStreamDelta::MessageStart {

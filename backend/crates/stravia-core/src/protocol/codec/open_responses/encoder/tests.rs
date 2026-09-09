@@ -3,7 +3,7 @@ use super::*;
 use crate::protocol::codec::anthropic::messages::decoder::AnthropicDecoder;
 use crate::protocol::codec::open_responses::decoder::ResponsesDecoder;
 use crate::protocol::codec::openai::compatible::decoder::OpenAIDecoder;
-use crate::protocol::ir::AiItem;
+use stravia_runtime_contract::protocol::ir::AiItem;
 
 #[test]
 fn target_effort_maps_to_responses_shape() {
@@ -14,9 +14,11 @@ fn target_effort_maps_to_responses_shape() {
             "reasoning_effort": "max"
         }))
         .unwrap();
-    request.reasoning.target_control = Some(crate::thinking::TargetThinkingControl::Effort {
-        value: "xhigh".into(),
-    });
+    request.reasoning.target_control = Some(
+        stravia_runtime_contract::thinking::TargetThinkingControl::Effort {
+            value: "xhigh".into(),
+        },
+    );
 
     let (body, _) = ResponsesEncoder.encode_request(&request).unwrap();
 
@@ -91,9 +93,11 @@ fn native_responses_preserves_omitted_reasoning_summary() {
             "reasoning": {"effort": "medium"}
         }))
         .unwrap();
-    request.reasoning.target_control = Some(crate::thinking::TargetThinkingControl::Effort {
-        value: "medium".into(),
-    });
+    request.reasoning.target_control = Some(
+        stravia_runtime_contract::thinking::TargetThinkingControl::Effort {
+            value: "medium".into(),
+        },
+    );
 
     let (body, _) = ResponsesEncoder.encode_request(&request).unwrap();
 
@@ -111,9 +115,11 @@ fn anthropic_thinking_defaults_to_responses_auto_summary() {
             "thinking": {"type": "enabled", "budget_tokens": 512}
         }))
         .unwrap();
-    request.reasoning.target_control = Some(crate::thinking::TargetThinkingControl::Effort {
-        value: "medium".into(),
-    });
+    request.reasoning.target_control = Some(
+        stravia_runtime_contract::thinking::TargetThinkingControl::Effort {
+            value: "medium".into(),
+        },
+    );
 
     let (body, _) = ResponsesEncoder.encode_request(&request).unwrap();
 
@@ -132,9 +138,11 @@ fn anthropic_adaptive_thinking_maps_display_to_responses_summary() {
                 "output_config": {"effort": "medium"}
             }))
             .unwrap();
-        request.reasoning.target_control = Some(crate::thinking::TargetThinkingControl::Effort {
-            value: "medium".into(),
-        });
+        request.reasoning.target_control = Some(
+            stravia_runtime_contract::thinking::TargetThinkingControl::Effort {
+                value: "medium".into(),
+            },
+        );
 
         let (body, _) = ResponsesEncoder.encode_request(&request).unwrap();
 
@@ -163,9 +171,11 @@ fn anthropic_without_thinking_omits_responses_reasoning() {
 #[test]
 fn writes_max_target_effort_without_a_local_allow_list() {
     let mut request = AiRequest::new("gpt", vec![AiItem::output_text("hello")]);
-    request.reasoning.target_control = Some(crate::thinking::TargetThinkingControl::Effort {
-        value: "max".into(),
-    });
+    request.reasoning.target_control = Some(
+        stravia_runtime_contract::thinking::TargetThinkingControl::Effort {
+            value: "max".into(),
+        },
+    );
 
     let (body, _) = ResponsesEncoder.encode_request(&request).unwrap();
 
@@ -216,12 +226,14 @@ fn forwards_provider_persistence_only_when_explicitly_requested() {
             meta: None,
         }],
     );
-    request.ext = Some(crate::protocol::ir::ProtocolExt::OpenResponses(
-        crate::protocol::ir::OpenResponsesExt {
-            store: Some(true),
-            ..Default::default()
-        },
-    ));
+    request.ext = Some(
+        stravia_runtime_contract::protocol::ir::ProtocolExt::OpenResponses(
+            stravia_runtime_contract::protocol::ir::OpenResponsesExt {
+                store: Some(true),
+                ..Default::default()
+            },
+        ),
+    );
 
     let (body, _) = ResponsesEncoder.encode_request(&request).unwrap();
     assert_eq!(body["store"], true);
@@ -239,13 +251,15 @@ fn keeps_dated_metadata_and_safety_identifier_out_of_provider_requests() {
             meta: None,
         }],
     );
-    request.ext = Some(crate::protocol::ir::ProtocolExt::OpenResponses(
-        crate::protocol::ir::OpenResponsesExt {
-            metadata: Some(serde_json::json!({"tenant": "acme"})),
-            safety_identifier: Some("safe-user-1".into()),
-            ..Default::default()
-        },
-    ));
+    request.ext = Some(
+        stravia_runtime_contract::protocol::ir::ProtocolExt::OpenResponses(
+            stravia_runtime_contract::protocol::ir::OpenResponsesExt {
+                metadata: Some(serde_json::json!({"tenant": "acme"})),
+                safety_identifier: Some("safe-user-1".into()),
+                ..Default::default()
+            },
+        ),
+    );
 
     let (body, _) = ResponsesEncoder.encode_request(&request).unwrap();
 
@@ -319,12 +333,14 @@ fn encodes_responses_supported_media_without_text_coercion() {
 #[test]
 fn continuation_without_new_input_omits_input() {
     let mut request = AiRequest::new("logical-model", Vec::new());
-    request.ext = Some(crate::protocol::ir::ProtocolExt::OpenResponses(
-        crate::protocol::ir::OpenResponsesExt {
-            previous_response_id: Some("resp_parent".into()),
-            ..Default::default()
-        },
-    ));
+    request.ext = Some(
+        stravia_runtime_contract::protocol::ir::ProtocolExt::OpenResponses(
+            stravia_runtime_contract::protocol::ir::OpenResponsesExt {
+                previous_response_id: Some("resp_parent".into()),
+                ..Default::default()
+            },
+        ),
+    );
 
     let (body, _) = ResponsesEncoder
         .encode_request(&request)
@@ -412,7 +428,9 @@ fn encodes_non_media_tool_payload_as_json_text() {
                 content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
                     tool_use_id: "call_1".into(),
                     content: payload.clone(),
-                    content_kind: Some(crate::protocol::ir::ToolResultContentKind::Json),
+                    content_kind: Some(
+                        stravia_runtime_contract::protocol::ir::ToolResultContentKind::Json,
+                    ),
                     is_error: None,
                     cache_control: None,
                 }]),
@@ -439,7 +457,7 @@ fn stringifies_invalid_tool_result_content_arrays() {
         content: serde_json::json!([
             {"type": "tool_result", "content": {"temperature": 21}}
         ]),
-        content_kind: Some(crate::protocol::ir::ToolResultContentKind::Json),
+        content_kind: Some(stravia_runtime_contract::protocol::ir::ToolResultContentKind::Json),
         is_error: None,
         cache_control: None,
     }]))

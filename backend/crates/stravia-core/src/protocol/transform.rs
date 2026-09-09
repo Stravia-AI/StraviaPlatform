@@ -2,9 +2,14 @@ use reqwest::header::HeaderMap;
 use serde_json::Value;
 
 use crate::protocol::SseEvent;
-use crate::protocol::ids::{EndpointCapabilities, Protocol, ProtocolEndpoint};
-use crate::protocol::ir::{AiRequest, AiResponse, AiStreamDelta, ProtocolExt};
 use crate::protocol::registry::ProtocolRegistry;
+use stravia_runtime_contract::protocol::ids::EndpointCapabilities;
+use stravia_runtime_contract::protocol::ids::Protocol;
+use stravia_runtime_contract::protocol::ids::ProtocolEndpoint;
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::AiResponse;
+use stravia_runtime_contract::protocol::ir::AiStreamDelta;
+use stravia_runtime_contract::protocol::ir::ProtocolExt;
 
 pub(crate) trait ProtocolAdapter: Send + Sync + 'static {
     fn id(&self) -> ProtocolEndpoint;
@@ -145,16 +150,16 @@ impl ProtocolTransform {
         }
         match request.ext.as_ref() {
             Some(ProtocolExt::OpenResponses(_)) => {
-                Some(crate::protocol::ids::OPEN_RESPONSES_2026_04_24)
+                Some(stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24)
             }
             Some(ProtocolExt::Anthropic(_)) => {
-                Some(crate::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01)
+                Some(stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01)
             }
             Some(ProtocolExt::Google(_)) => {
-                Some(crate::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA)
+                Some(stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA)
             }
             Some(ProtocolExt::OpenAiChat(_)) => {
-                Some(crate::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1)
+                Some(stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1)
             }
             None => None,
         }
@@ -366,7 +371,10 @@ impl StreamEncodeStage {
         }
     }
 
-    pub(crate) fn fail(&mut self, error: crate::protocol::ir::AiError) -> Vec<SseEvent> {
+    pub(crate) fn fail(
+        &mut self,
+        error: stravia_runtime_contract::protocol::ir::AiError,
+    ) -> Vec<SseEvent> {
         self.closed = true;
         let mut events = self.encoder.format_deltas(&[
             AiStreamDelta::StreamError { error },
@@ -600,11 +608,20 @@ fn request_loss_paths(pair: ProtocolPair, request: &AiRequest) -> Vec<String> {
     if let Some(tool_choice) = &request.tool_choice {
         let unsupported = match pair.egress.protocol {
             Protocol::AnthropicMessages => {
-                matches!(tool_choice, crate::protocol::ir::ToolChoice::None)
+                matches!(
+                    tool_choice,
+                    stravia_runtime_contract::protocol::ir::ToolChoice::None
+                )
             }
-            Protocol::GoogleGemini => !matches!(tool_choice, crate::protocol::ir::ToolChoice::Auto),
+            Protocol::GoogleGemini => !matches!(
+                tool_choice,
+                stravia_runtime_contract::protocol::ir::ToolChoice::Auto
+            ),
             Protocol::BedrockConverse => {
-                matches!(tool_choice, crate::protocol::ir::ToolChoice::None)
+                matches!(
+                    tool_choice,
+                    stravia_runtime_contract::protocol::ir::ToolChoice::None
+                )
             }
             Protocol::OpenAICompatible
             | Protocol::OpenResponses
@@ -665,9 +682,9 @@ fn request_loss_paths(pair: ProtocolPair, request: &AiRequest) -> Vec<String> {
                     && matches!(
                         request.tool_choice,
                         Some(
-                            crate::protocol::ir::ToolChoice::Required
-                                | crate::protocol::ir::ToolChoice::Named { .. }
-                                | crate::protocol::ir::ToolChoice::Raw(_)
+                            stravia_runtime_contract::protocol::ir::ToolChoice::Required
+                                | stravia_runtime_contract::protocol::ir::ToolChoice::Named { .. }
+                                | stravia_runtime_contract::protocol::ir::ToolChoice::Raw(_)
                         )
                     ),
                 "tools",
@@ -686,7 +703,7 @@ fn request_loss_paths(pair: ProtocolPair, request: &AiRequest) -> Vec<String> {
                         && text.pointer("/format/description").is_none()
                         && matches!(
                             &request.response_format,
-                            Some(crate::protocol::ir::ResponseFormat::JsonSchema {
+                            Some(stravia_runtime_contract::protocol::ir::ResponseFormat::JsonSchema {
                                 schema,
                                 ..
                             }) if crate::protocol::codec::google::gemini::encoder::schema_is_losslessly_representable(schema)
@@ -764,7 +781,9 @@ fn request_loss_paths(pair: ProtocolPair, request: &AiRequest) -> Vec<String> {
         {
             lost.push(format!("messages[{message_index}].native_item_fields"));
         }
-        let crate::protocol::ir::MessageContent::Blocks(blocks) = &message.content else {
+        let stravia_runtime_contract::protocol::ir::MessageContent::Blocks(blocks) =
+            &message.content
+        else {
             continue;
         };
         for (block_index, block) in blocks.iter().enumerate() {
@@ -773,7 +792,7 @@ fn request_loss_paths(pair: ProtocolPair, request: &AiRequest) -> Vec<String> {
             }
             if matches!(
                 block,
-                crate::protocol::ir::ContentBlock::Image {
+                stravia_runtime_contract::protocol::ir::ContentBlock::Image {
                     detail: Some(_),
                     ..
                 }
@@ -798,9 +817,9 @@ fn request_loss_paths(pair: ProtocolPair, request: &AiRequest) -> Vec<String> {
 
 fn thinking_control_representable(
     protocol: Protocol,
-    control: &crate::thinking::TargetThinkingControl,
+    control: &stravia_runtime_contract::thinking::TargetThinkingControl,
 ) -> bool {
-    use crate::thinking::TargetThinkingControl;
+    use stravia_runtime_contract::thinking::TargetThinkingControl;
     match protocol {
         Protocol::OpenAICompatible => matches!(control, TargetThinkingControl::Effort { .. }),
         Protocol::OpenResponses => match control {
@@ -831,10 +850,10 @@ fn gemini_drops_schema_constraint(value: &Value) -> bool {
 
 fn request_block_representable(
     target: Protocol,
-    role: crate::protocol::ir::Role,
-    block: &crate::protocol::ir::ContentBlock,
+    role: stravia_runtime_contract::protocol::ir::Role,
+    block: &stravia_runtime_contract::protocol::ir::ContentBlock,
 ) -> bool {
-    use crate::protocol::ir::ContentBlock;
+    use stravia_runtime_contract::protocol::ir::ContentBlock;
 
     match target {
         Protocol::AnthropicMessages => matches!(
@@ -881,7 +900,7 @@ fn request_block_representable(
                     | ContentBlock::File { .. }
                     | ContentBlock::ToolUse { .. }
                     | ContentBlock::ToolResult { .. }
-            ) || (role == crate::protocol::ir::Role::Assistant
+            ) || (role == stravia_runtime_contract::protocol::ir::Role::Assistant
                 && matches!(
                     block,
                     ContentBlock::Thinking { .. } | ContentBlock::Reasoning { .. }
@@ -891,7 +910,7 @@ fn request_block_representable(
             block,
             ContentBlock::Text { .. }
                 | ContentBlock::Image {
-                    source: crate::protocol::ir::MediaSource::Base64 { .. },
+                    source: stravia_runtime_contract::protocol::ir::MediaSource::Base64 { .. },
                     ..
                 }
                 | ContentBlock::Thinking { .. }
@@ -933,7 +952,9 @@ fn request_block_representable(
     }
 }
 
-fn open_responses_output_item_representable(item: &crate::protocol::ir::AiItem) -> bool {
+fn open_responses_output_item_representable(
+    item: &stravia_runtime_contract::protocol::ir::AiItem,
+) -> bool {
     if item.is_compaction() || item.is_compaction_trigger() {
         return true;
     }
@@ -950,24 +971,24 @@ fn open_responses_output_item_representable(item: &crate::protocol::ir::AiItem) 
         return crate::protocol::codec::open_responses::encoder::tool_output_representable(content);
     }
     match &item.content {
-        crate::protocol::ir::MessageContent::Text(_) => {
-            item.role == crate::protocol::ir::Role::Assistant
+        stravia_runtime_contract::protocol::ir::MessageContent::Text(_) => {
+            item.role == stravia_runtime_contract::protocol::ir::Role::Assistant
         }
-        crate::protocol::ir::MessageContent::Blocks(blocks) => {
-            (item.role == crate::protocol::ir::Role::Assistant
+        stravia_runtime_contract::protocol::ir::MessageContent::Blocks(blocks) => {
+            (item.role == stravia_runtime_contract::protocol::ir::Role::Assistant
                 && blocks.iter().all(|block| {
                     matches!(
                         block,
-                        crate::protocol::ir::ContentBlock::Text { .. }
-                            | crate::protocol::ir::ContentBlock::Refusal { .. }
+                        stravia_runtime_contract::protocol::ir::ContentBlock::Text { .. }
+                            | stravia_runtime_contract::protocol::ir::ContentBlock::Refusal { .. }
                     )
                 }))
                 || (blocks.len() == 1
                     && matches!(
                         blocks.first(),
                         Some(
-                            crate::protocol::ir::ContentBlock::Reasoning { .. }
-                                | crate::protocol::ir::ContentBlock::Thinking { .. }
+                            stravia_runtime_contract::protocol::ir::ContentBlock::Reasoning { .. }
+                                | stravia_runtime_contract::protocol::ir::ContentBlock::Thinking { .. }
                         )
                     ))
         }
@@ -1027,10 +1048,10 @@ fn response_loss_paths(pair: ProtocolPair, response: &AiResponse) -> Vec<String>
             }
             if matches!(
                 &item.content,
-                crate::protocol::ir::MessageContent::Blocks(blocks)
+                stravia_runtime_contract::protocol::ir::MessageContent::Blocks(blocks)
                     if blocks.iter().any(|block| matches!(
                         block,
-                        crate::protocol::ir::ContentBlock::Refusal { .. }
+                        stravia_runtime_contract::protocol::ir::ContentBlock::Refusal { .. }
                     ))
             ) {
                 lost.push(format!("items[{index}].refusal"));
@@ -1038,10 +1059,10 @@ fn response_loss_paths(pair: ProtocolPair, response: &AiResponse) -> Vec<String>
             if pair.ingress.protocol != Protocol::OpenAICompatible
                 && matches!(
                 &item.content,
-                crate::protocol::ir::MessageContent::Blocks(blocks)
+                stravia_runtime_contract::protocol::ir::MessageContent::Blocks(blocks)
                     if blocks.iter().any(|block| matches!(
                         block,
-                        crate::protocol::ir::ContentBlock::Reasoning { .. }
+                        stravia_runtime_contract::protocol::ir::ContentBlock::Reasoning { .. }
                     ))
                 )
             {

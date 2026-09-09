@@ -75,9 +75,9 @@ async fn non_stream_projection_matches_ordered_content_and_replays_canonical_his
 
     let initial_request = AiRequest::new(
         "projected-platform",
-        vec![crate::protocol::ir::AiItem {
-            role: crate::protocol::ir::Role::User,
-            content: crate::protocol::ir::MessageContent::Text("test".into()),
+        vec![stravia_runtime_contract::protocol::ir::AiItem {
+            role: stravia_runtime_contract::protocol::ir::Role::User,
+            content: stravia_runtime_contract::protocol::ir::MessageContent::Text("test".into()),
             tool_calls: None,
             tool_call_id: None,
             meta: None,

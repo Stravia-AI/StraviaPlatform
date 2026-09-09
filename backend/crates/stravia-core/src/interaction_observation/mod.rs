@@ -833,14 +833,17 @@ struct RunObserverInner {
 }
 impl RunObserver {
     /// Diagnostic-only: pass the received normalized window, never materialized history.
-    pub(crate) fn observe_client_input(&self, input: &[crate::protocol::ir::AiItem]) {
+    pub(crate) fn observe_client_input(
+        &self,
+        input: &[stravia_runtime_contract::protocol::ir::AiItem],
+    ) {
         self.send_tail(tail::Window::capture(input), false);
     }
     /// Call only after successful delivery and Generation commit, with client-visible output.
     pub(crate) fn observe_client_completion(
         &self,
-        input: &[crate::protocol::ir::AiItem],
-        output: &[crate::protocol::ir::AiItem],
+        input: &[stravia_runtime_contract::protocol::ir::AiItem],
+        output: &[stravia_runtime_contract::protocol::ir::AiItem],
     ) {
         let window = tail::Window::capture(input).and_then(|mut window| {
             window

@@ -16,7 +16,7 @@ pub(super) async fn invoke_hook(
     session: &mut dyn HookSession,
     event: HookEvent<'_>,
     hook_id: &HookId,
-    cancellation: crate::proxy::context::CancellationToken,
+    cancellation: stravia_runtime_contract::CancellationToken,
 ) -> Result<ActionBatch, HookError> {
     let event_kind = event.kind();
     let started = std::time::Instant::now();
@@ -69,7 +69,7 @@ pub(super) async fn invoke_hook(
 
 pub(super) async fn await_with_cancellation<F, T>(
     future: F,
-    cancellation: crate::proxy::context::CancellationToken,
+    cancellation: stravia_runtime_contract::CancellationToken,
 ) -> Result<T, ()>
 where
     F: Future<Output = T>,
@@ -247,7 +247,8 @@ pub(super) fn apply_tool_result_actions(
         match action {
             HookAction::PatchToolResult(ToolResultPatch::SetContent(content)) => {
                 staged.content = content;
-                staged.content_kind = crate::protocol::ir::ToolResultContentKind::Json;
+                staged.content_kind =
+                    stravia_runtime_contract::protocol::ir::ToolResultContentKind::Json;
             }
             HookAction::PatchToolResult(ToolResultPatch::SetError(is_error)) => {
                 staged.is_error = is_error;
@@ -411,8 +412,8 @@ pub(super) fn apply_request_patch(
     Ok(())
 }
 pub(super) fn request_metadata_patch_allowed(
-    left: &crate::protocol::ir::RequestMetadata,
-    right: &crate::protocol::ir::RequestMetadata,
+    left: &stravia_runtime_contract::protocol::ir::RequestMetadata,
+    right: &stravia_runtime_contract::protocol::ir::RequestMetadata,
 ) -> bool {
     left.source_protocol == right.source_protocol
         && (right.raw.is_none() || request_metadata_raw_equal(left, right))
@@ -477,8 +478,8 @@ pub(super) fn sanitized_vendor_value_allowed(
 }
 
 pub(super) fn request_metadata_raw_equal(
-    left: &crate::protocol::ir::RequestMetadata,
-    right: &crate::protocol::ir::RequestMetadata,
+    left: &stravia_runtime_contract::protocol::ir::RequestMetadata,
+    right: &stravia_runtime_contract::protocol::ir::RequestMetadata,
 ) -> bool {
     match (&left.raw, &right.raw) {
         (None, None) => true,

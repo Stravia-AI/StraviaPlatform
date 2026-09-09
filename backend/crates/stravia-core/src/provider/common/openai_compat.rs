@@ -161,13 +161,13 @@ macro_rules! openai_compat_vendor {
 
             fn supported_protocols(
                 &self,
-            ) -> &'static [$crate::protocol::ids::ProtocolId] {
+            ) -> &'static [stravia_runtime_contract::protocol::ids::ProtocolId] {
                 &[$($protocol),+]
             }
 
             async fn build_request(
                 &self,
-                req: &mut $crate::protocol::ir::AiRequest,
+                req: &mut stravia_runtime_contract::protocol::ir::AiRequest,
                 ctx: &$crate::provider::vendor::ProviderCtx<'_>,
             ) -> Result<
                 $crate::provider::outbound::OutboundRequest,
@@ -180,7 +180,7 @@ macro_rules! openai_compat_vendor {
                 &self,
                 resp: $crate::provider::inbound::InboundResponse,
                 ctx: &$crate::provider::vendor::ProviderCtx<'_>,
-            ) -> Result<$crate::protocol::ir::AiResponse, $crate::error::GatewayError> {
+            ) -> Result<stravia_runtime_contract::protocol::ir::AiResponse, $crate::error::GatewayError> {
                 $crate::provider::common::pipeline::parse_response(self, resp, ctx).await
             }
 
@@ -243,7 +243,7 @@ macro_rules! standard_openai_vendor {
             $vendor,
             $vendor_id,
             METADATA,
-            [$crate::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1]
+            [stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1]
         );
     };
 }

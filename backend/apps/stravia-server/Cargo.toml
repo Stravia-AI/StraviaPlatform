@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Stravia AI Gateway — Standalone Server Binary"
+description = "Stravia Agent infra — Standalone Server Binary"
 
 [features]
 default = ["embed-webui"]
@@ -12,6 +12,10 @@ embed-webui = ["dep:rust-embed"]
 
 [dependencies]
 stravia-core = { workspace = true }
+stravia-runtime-contract = { workspace = true }
+stravia-media = { workspace = true }
+stravia-web-search = { workspace = true }
+stravia-credential-protection = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 axum = { workspace = true, features = ["http1", "json", "original-uri", "query", "tokio"] }
 futures = { workspace = true }

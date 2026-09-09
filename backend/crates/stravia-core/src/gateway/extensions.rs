@@ -5,10 +5,10 @@ pub(super) async fn configure_gateway_extensions(
     mut hooks: Vec<Arc<dyn Hook>>,
     mut tools: Vec<Arc<dyn PlatformTool>>,
     mut mcp_tools: Vec<Arc<dyn McpTool>>,
-    mut agent_definitions: Vec<agent::AgentDefinitionSpec>,
+    mut agent_definitions: Vec<stravia_runtime_contract::agent::AgentDefinitionSpec>,
 ) -> anyhow::Result<()> {
-    agent_definitions.push(web_search::local_search_definition());
-    agent_definitions.push(media::media_definition());
+    agent_definitions.push(stravia_web_search::local_search_definition());
+    agent_definitions.push(stravia_media::media_definition());
     gateway
         .agent_definitions
         .synchronize(agent_definitions)
@@ -24,7 +24,7 @@ pub(super) async fn configure_gateway_extensions(
     for tool in &web_platform_tools {
         runner_tools.push(Arc::new(agent::PlatformToolAgentAdapter::with_id(
             Arc::clone(tool),
-            agent::VersionedToolId {
+            stravia_runtime_contract::agent::VersionedToolId {
                 id: tool.id().as_str().to_owned(),
                 version: 1,
             },
@@ -36,8 +36,8 @@ pub(super) async fn configure_gateway_extensions(
             1,
         )));
     }
-    let report_validator = Arc::new(web_search::SearchReportValidator);
-    let local_search_evidence = Arc::new(web_search::LocalSearchEvidenceStore::default());
+    let report_validator = Arc::new(stravia_web_search::SearchReportValidator);
+    let local_search_evidence = Arc::new(stravia_web_search::LocalSearchEvidenceStore::default());
     let model = Arc::clone(&gateway.model_turn);
     let mut runner = agent::AgentRunner::new(
         gateway.agent_definitions.clone(),
@@ -54,35 +54,42 @@ pub(super) async fn configure_gateway_extensions(
         service: gateway.web_access(),
     })])
     .with_output_validator(
-        agent::AgentDefinitionId::new(web_search::LOCAL_SEARCH_DEFINITION_ID),
-        web_search::LOCAL_SEARCH_DEFINITION_REVISION,
-        Arc::new(web_search::LocalSearchOutputValidator::new(
+        stravia_runtime_contract::agent::AgentDefinitionId::new(
+            stravia_web_search::LOCAL_SEARCH_DEFINITION_ID,
+        ),
+        stravia_web_search::LOCAL_SEARCH_DEFINITION_REVISION,
+        Arc::new(stravia_web_search::LocalSearchOutputValidator::new(
             Arc::clone(&report_validator),
             Arc::clone(&local_search_evidence),
         )),
     )
     .with_capability_model_authorization(
-        agent::AgentDefinitionId::new(web_search::LOCAL_SEARCH_DEFINITION_ID),
-        web_search::LOCAL_SEARCH_DEFINITION_REVISION,
+        stravia_runtime_contract::agent::AgentDefinitionId::new(
+            stravia_web_search::LOCAL_SEARCH_DEFINITION_ID,
+        ),
+        stravia_web_search::LOCAL_SEARCH_DEFINITION_REVISION,
         agent::CapabilityModelAuthorization::WebSearch,
     )
     .with_capability_model_authorization(
-        agent::AgentDefinitionId::new(media::MEDIA_DEFINITION_ID),
-        media::MEDIA_DEFINITION_REVISION,
+        stravia_runtime_contract::agent::AgentDefinitionId::new(stravia_media::MEDIA_DEFINITION_ID),
+        stravia_media::MEDIA_DEFINITION_REVISION,
         agent::CapabilityModelAuthorization::MediaUnderstanding,
     );
     if let Some(store) = gateway.media_derivatives.as_ref() {
         runner = runner.with_output_validator(
-            agent::AgentDefinitionId::new(media::MEDIA_DEFINITION_ID),
-            media::MEDIA_DEFINITION_REVISION,
-            Arc::new(media::MediaReportValidator::new(Arc::clone(store))),
+            stravia_runtime_contract::agent::AgentDefinitionId::new(
+                stravia_media::MEDIA_DEFINITION_ID,
+            ),
+            stravia_media::MEDIA_DEFINITION_REVISION,
+            Arc::new(stravia_media::MediaReportValidator::new(Arc::clone(store))),
         );
     }
     if let Some(store) = gateway.media_derivatives.as_ref() {
-        *gateway.media_understanding.write().await = Some(media::MediaUnderstandingService::new(
-            runner.clone(),
-            Arc::clone(store),
-        ));
+        *gateway.media_understanding.write().await =
+            Some(stravia_media::MediaUnderstandingService::new(
+                Arc::new(media::AgentHost(runner.clone())),
+                Arc::clone(store),
+            ));
     }
     let definitions = gateway.agent_definitions.list().await;
     for record in &definitions {
@@ -109,16 +116,20 @@ pub(super) async fn configure_gateway_extensions(
             gateway.clone(),
         )));
     }
-    let search_runner = web_search::WebSearchRunner::new(
-        Arc::new(web_search::SettingsWebSearchConfigStore::new(Arc::clone(
-            &gateway.storage,
-        ))),
+    let search_runner = stravia_web_search::WebSearchRunner::new(
+        Arc::new(stravia_web_search::SettingsWebSearchConfigStore::new(
+            Arc::new(web_search::host::SearchSettings(Arc::clone(
+                &gateway.storage,
+            ))),
+        )),
         Arc::clone(&gateway.turn_chains),
-        Arc::new(web_search::LocalSearchBackend::new(
-            runner,
+        Arc::new(stravia_web_search::LocalSearchBackend::new(
+            Arc::new(web_search::host::LocalAgentHost(runner)),
             local_search_evidence,
         )),
-        Arc::new(web_search::CodexAgenticSearchBackend::new(gateway.clone())),
+        Arc::new(stravia_web_search::CodexAgenticSearchBackend::new(
+            Arc::new(web_search::host::SearchHost(gateway.clone())),
+        )),
         report_validator,
         Duration::from_secs(7 * 24 * 60 * 60),
         Arc::new(GatewayWebSearchAuthorizer {
@@ -134,23 +145,26 @@ struct GatewayWebSearchAuthorizer {
     storage: storage::DynStorage,
 }
 
-fn web_search_authorization_error() -> web_search::WebSearchError {
-    web_search::WebSearchError::new("authorization_failed", "Web Search authorization failed")
+fn web_search_authorization_error() -> stravia_web_search::WebSearchError {
+    stravia_web_search::WebSearchError::new(
+        "authorization_failed",
+        "Web Search authorization failed",
+    )
 }
 
 #[async_trait::async_trait]
-impl web_search::SearchRunAuthorizer for GatewayWebSearchAuthorizer {
+impl stravia_web_search::SearchRunAuthorizer for GatewayWebSearchAuthorizer {
     async fn authorize(
         &self,
-        principal: &hook::Principal,
-        binding: &web_search::ResolvedWebSearchBackend,
-    ) -> Result<(), web_search::WebSearchError> {
+        principal: &stravia_runtime_contract::Principal,
+        binding: &stravia_web_search::ResolvedWebSearchBackend,
+    ) -> Result<(), stravia_web_search::WebSearchError> {
         proxy::security::Security::new(self.storage.auth())
             .authorize_principal_web_search(principal)
             .await
             .map_err(|_| web_search_authorization_error())?;
         match binding {
-            web_search::ResolvedWebSearchBackend::Local { model_id } => {
+            stravia_web_search::ResolvedWebSearchBackend::Local { model_id } => {
                 self.storage
                     .routes()
                     .list_active()
@@ -164,7 +178,7 @@ impl web_search::SearchRunAuthorizer for GatewayWebSearchAuthorizer {
                     .await
                     .map_err(|_| web_search_authorization_error())?;
             }
-            web_search::ResolvedWebSearchBackend::Codex {
+            stravia_web_search::ResolvedWebSearchBackend::Codex {
                 provider_id,
                 upstream_model,
             } => {
@@ -174,7 +188,11 @@ impl web_search::SearchRunAuthorizer for GatewayWebSearchAuthorizer {
                     .get(provider_id)
                     .await
                     .map_err(|_| web_search_authorization_error())?
-                    .filter(web_search::codex_provider_contract)
+                    .filter(|provider| {
+                        stravia_web_search::codex_provider_contract(
+                            &web_search::host::provider_snapshot(provider),
+                        )
+                    })
                     .ok_or_else(web_search_authorization_error)?;
                 let model_available = self
                     .storage
@@ -205,8 +223,8 @@ struct GatewayAgentToolAuthorizer {
     storage: storage::DynStorage,
 }
 
-fn agent_tool_authorization_error() -> agent::AgentRunError {
-    agent::AgentRunError::new(
+fn agent_tool_authorization_error() -> stravia_runtime_contract::agent::AgentRunError {
+    stravia_runtime_contract::agent::AgentRunError::new(
         "tool_authorization_failed",
         "Agent Tool authorization failed",
     )
@@ -216,10 +234,10 @@ fn agent_tool_authorization_error() -> agent::AgentRunError {
 impl agent::AgentToolAuthorizer for GatewayAgentToolAuthorizer {
     async fn authorize(
         &self,
-        principal: &hook::Principal,
-        definition_id: &agent::AgentDefinitionId,
+        principal: &stravia_runtime_contract::Principal,
+        definition_id: &stravia_runtime_contract::agent::AgentDefinitionId,
         model_id: &str,
-    ) -> Result<(), agent::AgentRunError> {
+    ) -> Result<(), stravia_runtime_contract::agent::AgentRunError> {
         let model = self
             .storage
             .routes()
@@ -230,8 +248,9 @@ impl agent::AgentToolAuthorizer for GatewayAgentToolAuthorizer {
             .find(|route| route.id == model_id)
             .ok_or_else(agent_tool_authorization_error)?;
         let security = crate::proxy::security::Security::new(self.storage.auth());
-        let capability_owned = definition_id.as_str() == web_search::LOCAL_SEARCH_DEFINITION_ID
-            || definition_id.as_str() == media::MEDIA_DEFINITION_ID;
+        let capability_owned = definition_id.as_str()
+            == stravia_web_search::LOCAL_SEARCH_DEFINITION_ID
+            || definition_id.as_str() == stravia_media::MEDIA_DEFINITION_ID;
         if capability_owned {
             security.authorize_principal_capability(principal).await
         } else {
@@ -263,14 +282,17 @@ impl Drop for WebAccessAgentRunGuard {
 impl agent::AgentRunLifecycle for WebAccessAgentRunLifecycle {
     async fn start(
         &self,
-        principal: &hook::Principal,
-        run_id: &agent::AgentTurnId,
-    ) -> Result<Box<dyn agent::AgentRunGuard>, agent::AgentRunError> {
+        principal: &stravia_runtime_contract::Principal,
+        run_id: &stravia_runtime_contract::agent::AgentTurnId,
+    ) -> Result<Box<dyn agent::AgentRunGuard>, stravia_runtime_contract::agent::AgentRunError> {
         self.service
             .capture_run_snapshot(run_id.as_str(), principal.api_key_id())
             .await
             .map_err(|error| {
-                agent::AgentRunError::new("web_access_unavailable", error.to_string())
+                stravia_runtime_contract::agent::AgentRunError::new(
+                    "web_access_unavailable",
+                    error.to_string(),
+                )
             })?;
         Ok(Box::new(WebAccessAgentRunGuard {
             service: self.service.clone(),
@@ -284,7 +306,9 @@ fn hook_runtime_with_web_search(
     mut hooks: Vec<Arc<dyn Hook>>,
     mut tools: Vec<Arc<dyn PlatformTool>>,
 ) -> anyhow::Result<HookRuntime> {
-    let (builtin_hooks, builtin_tools) = web_search::builtin_extensions(gateway);
+    let (builtin_hooks, builtin_tools) = stravia_web_search::builtin_extensions(Arc::new(
+        web_search::host::SearchHost(gateway.clone()),
+    ));
     hooks.extend(builtin_hooks);
     tools.extend(builtin_tools);
     tools.extend(media::platform_tools(gateway));

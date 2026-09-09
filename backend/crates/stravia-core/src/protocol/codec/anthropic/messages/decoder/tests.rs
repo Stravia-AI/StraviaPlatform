@@ -26,7 +26,7 @@ fn adaptive_thinking_uses_output_effort() {
     assert_eq!(request.reasoning.effort, Some(ReasoningEffort::Medium));
     assert_eq!(
         request.reasoning.level,
-        Some(crate::thinking::ThinkingLevel::Medium)
+        Some(stravia_runtime_contract::thinking::ThinkingLevel::Medium)
     );
 }
 
@@ -42,6 +42,6 @@ fn output_effort_without_thinking_is_preserved() {
     assert_eq!(request.reasoning.effort, Some(ReasoningEffort::High));
     assert_eq!(
         request.reasoning.level,
-        Some(crate::thinking::ThinkingLevel::High)
+        Some(stravia_runtime_contract::thinking::ThinkingLevel::High)
     );
 }

@@ -1,7 +1,7 @@
 <h1 align="center">Stravia</h1>
 
 <p align="center">
-  A local, self-hostable AI access and execution platform that unifies model protocols, runs platform tools and built-in agents, and centrally manages access, history, and usage.
+  Local, self-hostable Agent infra — model access, tool execution, and built-in agent runtime with shared access controls, history, and observability.
 </p>
 
 <p align="center">
@@ -12,9 +12,11 @@
 
 ## Overview
 
-Stravia connects AI clients, model providers, and platform-owned capabilities. Clients keep speaking the protocol they already support; Stravia resolves a virtual model, selects an upstream backend, and translates requests and responses when necessary.
+Stravia is **Agent infra (agent infrastructure)** for developers using AI coding clients or building agent-powered applications. It brings model access, platform-owned tool execution, and bounded built-in agent loops into one locally deployable system.
 
-Beyond routing, Stravia executes platform-owned tools and feeds their results back into subsequent model turns. Its bounded Agent Runner powers local agentic Web Search and is also used by Media Understanding. These capabilities are available through compatible model requests and MCP, with shared identity, access controls, history, usage accounting, and diagnostics.
+The protocol gateway is its model-access layer, not the whole product. Clients keep speaking the protocol they already support; Stravia resolves a virtual model, selects an upstream backend, and translates requests and responses when necessary.
+
+The execution layer runs platform-owned tools and feeds their results back into subsequent model turns. Its bounded Agent Runner powers local agentic Web Search and is also used by Media Understanding. These capabilities are available through compatible model requests and MCP. Shared identity, access controls, history, usage accounting, and diagnostics let developers manage model access and platform execution together.
 
 Agent behavior is defined and versioned by the platform implementation. Administrators configure supported capability settings and model bindings; Stravia is not a user-defined agent or visual workflow builder.
 
@@ -393,12 +395,18 @@ Set `--public-origin` to the trusted, externally reachable Gateway origin (for e
 
 ```text
 backend/crates/stravia-core/       Transport-independent gateway, protocols, providers, storage, and admin service
+backend/crates/stravia-runtime-contract/ Shared canonical IR, Hook, Agent, Artifact, and history contracts
+backend/crates/stravia-media/      Media Understanding implementation and configuration policy
+backend/crates/stravia-web-search/ Web Search backends, reports, tools, and configuration policy
+backend/crates/stravia-credential-protection/ Local credential detection, reversible protection, and mapping storage
 backend/crates/stravia-devtools/   Development and protocol-fixture tools
 backend/apps/stravia-server/       Standalone unified HTTP server
 backend/apps/stravia-desktop/      Tauri desktop shell
 frontend/stravia-webui/            SvelteKit management interface
 tests/e2e/                         Python backend E2E suites and recorded protocol fixtures
 ```
+
+The three capability crates are assembled at compile time by `stravia-core`; they depend on shared contracts, not on core. Core supplies the model, authorization, storage, and observation adapters. There is no dynamic loading or hot unloading, and HTTP/MCP contracts and persisted data formats are unchanged. Rust callers import shared types from `stravia-runtime-contract` and capability types from their owning crate.
 
 Common commands:
 

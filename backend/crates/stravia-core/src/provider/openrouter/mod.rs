@@ -5,8 +5,6 @@ use reqwest::header::HeaderValue;
 use serde_json::Value;
 
 use crate::error::GatewayError;
-use crate::protocol::ids::ProtocolId;
-use crate::protocol::ir::{AiRequest, AiResponse};
 use crate::provider::common::openai_compat::openai_map_error;
 use crate::provider::common::pipeline;
 use crate::provider::inbound::InboundResponse;
@@ -17,6 +15,9 @@ use crate::provider::metadata::{
 use crate::provider::outbound::OutboundRequest;
 use crate::provider::registry::{VendorRegistration, VendorScope};
 use crate::provider::vendor::{ProviderCtx, Vendor};
+use stravia_runtime_contract::protocol::ids::ProtocolId;
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::AiResponse;
 
 const CREDENTIAL_FIELDS: &[CredentialFieldDef] = &[
     CredentialFieldDef {
@@ -113,7 +114,7 @@ impl Vendor for OpenrouterVendor {
         "openrouter"
     }
     fn supported_protocols(&self) -> &'static [ProtocolId] {
-        use crate::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
+        use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
         &[OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1]
     }
 

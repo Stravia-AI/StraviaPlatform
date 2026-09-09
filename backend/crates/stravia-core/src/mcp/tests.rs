@@ -283,7 +283,9 @@ async fn set_concurrency_limit(app: &TestApp, limit: i32) {
         .expect("set concurrency limit");
 }
 
-async fn serve_media_report(source_id: crate::agent::ArtifactId) -> (String, Arc<AtomicUsize>) {
+async fn serve_media_report(
+    source_id: stravia_runtime_contract::artifact::ArtifactId,
+) -> (String, Arc<AtomicUsize>) {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
         .expect("Media provider listener");
@@ -330,7 +332,11 @@ async fn serve_media_report(source_id: crate::agent::ArtifactId) -> (String, Arc
     (format!("http://{address}/v1"), calls)
 }
 
-async fn media_test_app() -> (TestApp, crate::agent::ArtifactId, Arc<AtomicUsize>) {
+async fn media_test_app() -> (
+    TestApp,
+    stravia_runtime_contract::artifact::ArtifactId,
+    Arc<AtomicUsize>,
+) {
     let data_dir = tempfile::tempdir().expect("temp data dir");
     let config = crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
@@ -352,7 +358,7 @@ async fn media_test_app() -> (TestApp, crate::agent::ArtifactId, Arc<AtomicUsize
         })
         .await
         .expect("API key");
-    let principal = crate::hook::Principal::new(key.id.clone());
+    let principal = stravia_runtime_contract::Principal::new(key.id.clone());
     let source = gateway
             .media_derivatives
             .as_ref()
@@ -416,10 +422,10 @@ async fn media_test_app() -> (TestApp, crate::agent::ArtifactId, Arc<AtomicUsize
         .expect("Media Model");
     gateway
         .admin()
-        .update_media_understanding_config(crate::admin::MediaUnderstandingConfigUpdate {
+        .update_media_understanding_config(stravia_media::admin::MediaUnderstandingConfigUpdate {
             enabled: true,
             model_id: Some(model.id),
-            thinking_level: Some(crate::thinking::ThinkingLevel::Medium),
+            thinking_level: Some(stravia_runtime_contract::thinking::ThinkingLevel::Medium),
         })
         .await
         .expect("enable Media Understanding");
@@ -751,7 +757,7 @@ async fn media_platform_gate_removes_the_tool_from_mcp_discovery() {
         .expect("Media config");
     app.gateway
         .admin()
-        .update_media_understanding_config(crate::admin::MediaUnderstandingConfigUpdate {
+        .update_media_understanding_config(stravia_media::admin::MediaUnderstandingConfigUpdate {
             enabled: false,
             model_id: current.model_id,
             thinking_level: current.thinking_level,
@@ -826,17 +832,19 @@ async fn web_search_requires_mcp_access_independently_from_transparent_injection
         )
         .await
         .expect("enable MCP access");
-    crate::web_search::SettingsWebSearchConfigStore::new(app.gateway.storage.clone())
-        .save(&crate::web_search::WebSearchConfig {
-            revision: 1,
-            enabled: true,
-            backend: None,
-            max_turns: 12,
-            total_time_seconds: 600,
-            updated_at: "2026-08-17T00:00:00Z".into(),
-        })
-        .await
-        .expect("enable Web Search gate");
+    stravia_web_search::SettingsWebSearchConfigStore::new(Arc::new(
+        crate::web_search::host::SearchSettings(app.gateway.storage.clone()),
+    ))
+    .save(&stravia_web_search::WebSearchConfig {
+        revision: 1,
+        enabled: true,
+        backend: None,
+        max_turns: 12,
+        total_time_seconds: 600,
+        updated_at: "2026-08-17T00:00:00Z".into(),
+    })
+    .await
+    .expect("enable Web Search gate");
 
     let client = connect(&app).await;
     let listed = client.list_tools(None).await.expect("tools/list");

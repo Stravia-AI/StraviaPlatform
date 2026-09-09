@@ -8,12 +8,12 @@ use axum::response::Response;
 use serde_json::Value;
 
 use crate::Gateway;
-use crate::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01;
-use crate::protocol::ir::RawEnvelope;
 use crate::protocol::transform::ProtocolTransform;
 use crate::proxy::context::RequestContext;
 use crate::proxy::dispatcher::dispatch_pipeline;
 use crate::proxy::ingress::observation;
+use stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01;
+use stravia_runtime_contract::protocol::ir::RawEnvelope;
 
 pub async fn handler(
     State(gw): State<Gateway>,

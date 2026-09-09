@@ -16,10 +16,10 @@ pub(super) fn project_client_history(
     response: &AiResponse,
     prefix: &mut [AiItem],
 ) -> Result<Vec<AiItem>, String> {
-    use crate::protocol::ids::{
-        ANTHROPIC_MESSAGES_2023_06_01, GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
-        OPEN_RESPONSES_2026_04_24, OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
-    };
+    use stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01;
+    use stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA;
+    use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
+    use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
     if ingress == OPEN_RESPONSES_2026_04_24 {
         let _ = prefix;
         return Ok(
@@ -45,7 +45,7 @@ pub(super) fn client_projection_is_valid(
     ingress: Option<ProtocolId>,
     response: &AiResponse,
 ) -> bool {
-    ingress != Some(crate::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1)
+    ingress != Some(stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1)
         || chat_history_is_projected(response)
 }
 
@@ -181,9 +181,9 @@ fn stable_gemini_tool_id(name: &str, arguments: &serde_json::Value) -> String {
     .expect("Gemini tool identity is JSON serializable");
     format!(
         "gemini_call_{}",
-        crate::protocol::ir::canonical::hash_hex(&crate::protocol::ir::canonical::hash_bytes(
-            &identity
-        ))
+        stravia_runtime_contract::protocol::ir::canonical::hash_hex(
+            &stravia_runtime_contract::protocol::ir::canonical::hash_bytes(&identity)
+        )
     )
 }
 
@@ -209,7 +209,7 @@ pub(super) fn item_reference_id(item: &AiItem) -> Option<&str> {
 }
 
 pub(super) fn item_reference_node_ids(ingress: ProtocolId, items: &[AiItem]) -> Vec<String> {
-    if ingress != crate::protocol::ids::OPEN_RESPONSES_2026_04_24 {
+    if ingress != stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24 {
         return Vec::new();
     }
     items
@@ -226,7 +226,7 @@ pub(super) fn resolve_protocol_item_references(
     items: &mut [AiItem],
     catalog: &[AiItem],
 ) -> Result<(), String> {
-    if ingress == crate::protocol::ids::OPEN_RESPONSES_2026_04_24 {
+    if ingress == stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24 {
         let mut index = std::collections::HashMap::<String, AiItem>::new();
         for item in catalog {
             if let Some(id) = item.id_ref() {
@@ -308,10 +308,14 @@ fn apply_provider_effective_request(
     request.tool_choice = effective.tool_choice;
     request.parallel_tool_calls = effective.parallel_tool_calls;
     request.reasoning = effective.reasoning;
-    let Some(crate::protocol::ir::ProtocolExt::OpenResponses(source)) = effective.ext else {
+    let Some(stravia_runtime_contract::protocol::ir::ProtocolExt::OpenResponses(source)) =
+        effective.ext
+    else {
         return;
     };
-    let Some(crate::protocol::ir::ProtocolExt::OpenResponses(target)) = request.ext.as_mut() else {
+    let Some(stravia_runtime_contract::protocol::ir::ProtocolExt::OpenResponses(target)) =
+        request.ext.as_mut()
+    else {
         return;
     };
     target.max_tool_calls = source.max_tool_calls;
@@ -402,7 +406,7 @@ pub(super) fn resolve_item_references(
 }
 
 pub(super) fn items_equal(left: &[AiItem], right: &[AiItem]) -> bool {
-    crate::protocol::ir::canonical::history_items_equal(left, right)
+    stravia_runtime_contract::protocol::ir::canonical::history_items_equal(left, right)
 }
 
 pub(super) fn canonical_client_history_request(request: &AiRequest) -> AiRequest {
@@ -411,7 +415,7 @@ pub(super) fn canonical_client_history_request(request: &AiRequest) -> AiRequest
         let leading_developer_items = canonical
             .items
             .iter()
-            .take_while(|item| item.role == crate::protocol::ir::Role::Developer)
+            .take_while(|item| item.role == stravia_runtime_contract::protocol::ir::Role::Developer)
             .count();
         let instructions = canonical.items[..leading_developer_items]
             .iter()
@@ -504,8 +508,9 @@ fn history_tool_calls(items: &[AiItem]) -> Vec<(String, String)> {
 pub(super) fn history_prefix_item_count(items: &[AiItem], expected_units: usize) -> Option<usize> {
     let mut semantic_units = 0usize;
     for (index, item) in items.iter().enumerate() {
-        semantic_units +=
-            crate::protocol::ir::canonical::history_unit_count(std::slice::from_ref(item));
+        semantic_units += stravia_runtime_contract::protocol::ir::canonical::history_unit_count(
+            std::slice::from_ref(item),
+        );
         match semantic_units.cmp(&expected_units) {
             std::cmp::Ordering::Less => {}
             std::cmp::Ordering::Equal => return Some(index + 1),
@@ -516,9 +521,9 @@ pub(super) fn history_prefix_item_count(items: &[AiItem], expected_units: usize)
 }
 
 pub(super) fn history_context_fingerprint(messages: &[AiItem]) -> String {
-    crate::protocol::ir::canonical::hash_hex(&crate::protocol::ir::canonical::history_context_hash(
-        messages,
-    ))
+    stravia_runtime_contract::protocol::ir::canonical::hash_hex(
+        &stravia_runtime_contract::protocol::ir::canonical::history_context_hash(messages),
+    )
 }
 
 pub(crate) fn generation_session_fingerprint(request: &AiRequest) -> Option<String> {
@@ -530,8 +535,8 @@ pub(crate) fn generation_session_fingerprint(request: &AiRequest) -> Option<Stri
         .as_str()?;
     let mut bytes = b"stravia-generation-session-v1\0".to_vec();
     bytes.extend_from_slice(session_id.as_bytes());
-    Some(crate::protocol::ir::canonical::hash_hex(
-        &crate::protocol::ir::canonical::hash_bytes(&bytes),
+    Some(stravia_runtime_contract::protocol::ir::canonical::hash_hex(
+        &stravia_runtime_contract::protocol::ir::canonical::hash_bytes(&bytes),
     ))
 }
 
@@ -543,10 +548,13 @@ pub(crate) fn set_generation_session_id(request: &mut AiRequest, session_id: imp
 }
 
 pub(super) fn append_history_context_fingerprint(previous: &str, message: &AiItem) -> String {
-    let hash = context_hash_from_hex(previous)
-        .unwrap_or_else(|| crate::protocol::ir::canonical::history_context_hash(&[]));
-    crate::protocol::ir::canonical::hash_hex(
-        &crate::protocol::ir::canonical::append_history_context_hash(&hash, message),
+    let hash = context_hash_from_hex(previous).unwrap_or_else(|| {
+        stravia_runtime_contract::protocol::ir::canonical::history_context_hash(&[])
+    });
+    stravia_runtime_contract::protocol::ir::canonical::hash_hex(
+        &stravia_runtime_contract::protocol::ir::canonical::append_history_context_hash(
+            &hash, message,
+        ),
     )
 }
 
@@ -564,5 +572,7 @@ fn context_hash_from_hex(value: &str) -> Option<[u8; 32]> {
 
 pub(super) fn legacy_payload_fingerprint<T: Serialize>(value: &T) -> String {
     let bytes = serde_json::to_vec(value).unwrap_or_default();
-    crate::protocol::ir::canonical::hash_hex(&crate::protocol::ir::canonical::hash_bytes(&bytes))
+    stravia_runtime_contract::protocol::ir::canonical::hash_hex(
+        &stravia_runtime_contract::protocol::ir::canonical::hash_bytes(&bytes),
+    )
 }

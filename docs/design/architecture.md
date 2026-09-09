@@ -1,18 +1,24 @@
-# Stravia AI Gateway — 架构设计
+# Stravia Agent infra — 架构设计
 
 ---
 
 ## 1. 产品定位与部署形态
 
-Stravia 是一个 **AI 协议网关（AI Gateway）**：在 AI 客户端工具与模型提供商之间做实时协议转换与统一调度。任意使用 OpenAI / Anthropic / Gemini SDK 的客户端无需改代码，仅修改 `base_url` 即可路由到任意 LLM Provider。既可作为**桌面应用**本地零部署运行，也可作为**独立服务端**自托管或团队共享，管理与配置保持私有可控。
+Stravia 定位为本地运行、可自托管的 **Agent infra（智能体基础设施）**，面向使用 AI 编程客户端或构建智能体应用的开发者，提供模型接入、平台工具与内置 Agent 执行，以及统一的访问控制、历史、用量统计和诊断。
+
+协议网关是模型接入层：兼容的客户端可沿用受支持的 OpenAI / Anthropic / Gemini 协议，配置 Stravia 端点、API Key 与 Model ID，由平台完成上游选路和可表示的协议转换。执行层在平台内运行工具并推进有界模型循环，通过兼容模型请求与 MCP 暴露联网搜索、多模态理解等能力。Agent Definition 由程序定义并进行版本管理；管理员配置受支持的能力设置和模型绑定，不创建或改写 Agent 行为。
+
+Stravia 可作为**桌面应用**在本地运行，也可作为**独立服务端**自托管，管理与配置由部署者控制。自托管不代表请求数据始终留在本机：模型调用和外部工具访问仍会发送至配置的上游服务。
 
 ```
 Claude Code · Codex CLI · Gemini CLI · OpenCode
      OpenAI SDK · Anthropic SDK · Gemini SDK
               Any HTTP API Client
                       ↓
-              Stravia AI Gateway
+              Stravia Agent infra
             (localhost:23471)
+       模型接入 · 工具与内置 Agent 执行
+       访问控制 · 历史 · 用量与诊断
                       ↓
     OpenAI · Anthropic · Google · DeepSeek
     MiniMax · xAI · Zhipu · Ollama · ...
@@ -22,10 +28,10 @@ Claude Code · Codex CLI · Gemini CLI · OpenCode
 
 | 形态 | 实现 | 适用场景 |
 |---|---|---|
-| Desktop | Tauri v2 桌面应用（macOS / Windows / Linux） | 个人开发者，零部署，数据不离开本机 |
+| Desktop | Tauri v2 桌面应用，当前发布 Windows / Linux 安装包 | 个人开发者，本地运行与集成管理 |
 | Server | 独立 Rust 二进制，始终启动 Proxy、Admin API 与内嵌 WebUI | 自托管、团队共享 |
 
-核心原则：`stravia-core` 不绑定 HTTP listener，只保留 Gateway 业务能力、AdminService 和 Proxy 路由处理。独立 Server 与 Desktop 复用 `stravia-server` 的 HTTP application；WebUI 通过 HTTP REST 调用管理 API，Desktop IPC 提供本地 Server 端口发现与原生管理会话凭据。
+核心原则：`stravia-core` 不绑定 HTTP listener，拥有模型接入、平台工具与内置 Agent 执行、存储和管理业务逻辑。独立 Server 与 Desktop 复用 `stravia-server` 的 HTTP application；WebUI 通过 HTTP REST 调用管理 API，Desktop IPC 提供本地 Server 端口发现与原生管理会话凭据。
 
 ---
 
@@ -54,10 +60,7 @@ stravia/
 │           │   ├── accumulator.rs
 │           │   ├── support.rs
 │           │   └── tests.rs
-│           ├── reversible_redaction/ # 本地凭据检测、Principal 映射及 canonical 往返替换
-│           │   ├── detection.rs · detection/ # 固定 Betterleaks 规则与本地表达式编译器
-│           │   ├── store.rs           # SQLite/PostgreSQL 映射与有效期
-│           │   └── text.rs · stream.rs # 可读文本遍历与有界流式还原
+│           ├── reversible_redaction/ # 凭据保护的设置/观测 Host Adapter 与 SQL 集成回归
 │           ├── generation_chain/ # Generation Chain Write deep module（crate-private）
 │           │   ├── mod.rs            # GenerationChain / Write interface
 │           │   ├── write.rs          # observe / stage / persist 状态机
@@ -108,31 +111,19 @@ stravia/
 │           │           ├── mod.rs
 │           │           └── generate_content.rs
 │           ├── hook/            # 唯一推理扩展 seam（显式 GatewayBuilder 注入）
-│           │   ├── mod.rs        # HookRuntime / canonical types；run state 仅 crate-private
+│           │   ├── mod.rs        # HookRuntime；run state 仅 crate-private
 │           │   ├── runtime/      # HookRuntime deep module
 │           │   │   ├── mod.rs        # 薄 interface 与内部 re-export
-│           │   │   ├── types.rs      # Hook / HookSession / canonical events
+│           │   │   ├── types.rs      # HookRuntime 装配状态
 │           │   │   ├── apply.rs      # action validation 与 patch 应用
 │           │   │   ├── runtime.rs    # run state 与 stream transform
 │           │   │   └── tests.rs
-│           │   ├── context.rs    # ContextSnapshot / ContextItem / checkpoints
-│           │   ├── stream.rs     # StreamTransformer / bounded semantic streaming
-│           │   ├── tool.rs       # PlatformTool / ToolRegistry / canonical results
-│           │   └── continuation.rs    # in-memory mixed-tool continuation
+│           │   └── tool.rs       # PlatformToolRegistry 与执行/结果归一化
 │           ├── protocol/         # 协议转换引擎
 │           │   ├── mod.rs        # ProviderProtocols / ResolvedEgress 等
-│           │   ├── ids.rs        # ProtocolEndpoint / EndpointCapabilities
 │           │   ├── registry.rs   # endpoint identity / capability / alias / route registry
 │           │   ├── transform.rs  # crate-private ProtocolTransform / ProtocolPair / stream session
 │           │   ├── conversion/   # thinking/Open Responses/Gemini/cross-protocol 契约测试
-│           │   ├── ir/           # 统一内部表示（IR）
-│           │   │   ├── mod.rs
-│           │   │   ├── canonical.rs # semantic item/request hashes
-│           │   │   ├── request.rs   # AiRequest
-│           │   │   ├── response.rs  # AiResponse
-│           │   │   ├── stream.rs    # AiStreamDelta
-│           │   │   ├── usage.rs     # Usage
-│           │   │   └── ...          # envelope / ext / vendor_ext / cache / error 等
 │           │   └── codec/        # ProtocolAdapter 的 wire codec implementation
 │           │       ├── mod.rs
 │           │       ├── reasoning.rs       # think-tag 提取工具
@@ -175,7 +166,8 @@ stravia/
 │           │   ├── settings.rs · observability.rs · web_access.rs · web_search.rs
 │           │   ├── model_catalog.rs · auth_data.rs · model_data.rs
 │           │   └── session_tests.rs
-│           ├── media/            # Media Understanding（crate-private）
+│           ├── media/            # 媒体 Host/MCP Adapter 与集成回归（crate-private）
+│           ├── web_search/       # 搜索 Host/MCP Adapter 与集成回归（crate-private）
 │           ├── web_access/       # Web Access（crate-private）
 │           │   ├── mod.rs            # request / response interface
 │           │   ├── types.rs          # request / response DTO
@@ -186,9 +178,9 @@ stravia/
 │           ├── agent/
 │           │   ├── runner/           # loop / context / tools / types / schema / tests
 │           │   ├── adapters/         # agent call / hook / remote MCP adapters
-│           │   └── artifact/         # ArtifactStore interface / Local store / quota / tests
+│           │   └── artifact/         # LocalArtifactStore / quota / tests
 │           ├── provider_catalog/ # Catalog facade / types / source / parse / persist
-│           ├── turn_chain/       # TurnChainStore interface / memory / sql adapters
+│           ├── turn_chain/       # SqlTurnChainStore 与集成回归
 │           ├── admission.rs      # Principal Concurrency Limit（private）
 │           ├── error.rs          # GatewayError taxonomy
 │           ├── router/           # TargetSelector / HealthRegistry / CacheAffinity
@@ -202,6 +194,12 @@ stravia/
 │           ├── migrations.rs     # SQLx versioned migrations
 │           ├── db/               # SQLite 连接与模型辅助函数
 │           └── auth/
+│   ├── stravia-runtime-contract/ # IR/协议身份、Hook、Agent、Artifact、TurnChain、脱敏 trace 契约
+│   ├── stravia-media/            # 完整媒体理解、预处理、bridge、Derivative、报告与配置策略
+│   ├── stravia-web-search/       # Runner、Backend、报告/证据、公开工具与配置策略
+│   ├── stravia-credential-protection/ # Betterleaks 规则、检测、替换/还原与 SQL 映射实现
+│   ├── stravia-web-access/       # 联网 Adapter、浏览器与静态地址策略
+│   ├── stravia-web-access-contract/ # search/fetch 契约、域名规范化与内部工具 ID
 │   └── stravia-devtools/
 ├── backend/apps/
 │   ├── stravia-desktop/
@@ -225,15 +223,30 @@ graph TD
     webui["stravia-webui (SvelteKit + TypeScript)"]
     tauriIPC["Tauri IPC (port discovery + native session)"]
     httpREST["HTTP REST"]
+    runtimeContract["stravia-runtime-contract"]
+    mediaCapability["stravia-media"]
+    searchCapability["stravia-web-search"]
+    credentialCapability["stravia-credential-protection"]
 
     desktopApp --> straviaCoreLib
     desktopApp --> serverApp
     serverApp --> straviaCoreLib
+    straviaCoreLib --> runtimeContract
+    straviaCoreLib --> mediaCapability
+    straviaCoreLib --> searchCapability
+    straviaCoreLib --> credentialCapability
+    mediaCapability --> runtimeContract
+    searchCapability --> runtimeContract
+    credentialCapability --> runtimeContract
     webui --> tauriIPC
     webui --> httpREST
     tauriIPC --> desktopApp
     httpREST --> serverApp
 ```
+
+三个能力使用独立 Rust crate，在 `gateway/extensions.rs` 与 Gateway runtime 中编译期装配，不引入动态加载、热卸载或能力对 core 的反向依赖。能力拥有完整业务实现；core 的 Host Adapter 只连接模型执行、当前授权、Provider/Artifact/配置存储和观测。共享契约由 `stravia-runtime-contract` 唯一声明，Rust 调用方直接从其所属 crate 导入，不保留旧 core 类型出口。
+
+凭据保护的扫描、规则资源、canonical 文本替换、流式还原及 SQLite/PostgreSQL 映射实现归 `stravia-credential-protection`。Core 保留 settings/observation Adapter、Model Turn 成功终态 gate 和历史保留期集成：还原与映射发布失败仍显式终止，关闭保护仍还原有效旧映射，取消不回滚已发布映射。HTTP/MCP、配置键、Definition Revision 与数据库 schema 不因 crate 拆分改变。
 
 **Local Web Access 运行边界：**
 
@@ -249,15 +262,15 @@ Core 统一约束 Desktop 与 Server 的 Local Search/Fetch：新增 Local 来�
 
 隐身实现固定移植 OMP commit `daf07999c2fee9b22edc7bf8fea1fb6272e0df5e` 的全部 14 个脚本与 bootstrap，并保留 MIT 声明。CDP 在恢复 target 前配置 UA；页面脚本注入主世界，内部求值默认使用按需获取的隔离世界，不启用 `Runtime.enable` 或自动追加 source URL。导航跟随 frame 当前文档的生命周期事件，而非固定等待首次 `Page.navigate` 返回的 loader；JS 跳转更换文档后重新获取隔离世界并绑定 DOM 就绪等待。Google 的静态响应按真实链接标题 DOM 判断是否需要浏览器回退，不把脚本里的 HTML 模板当成结果。固定语言、核心数等指纹值以及上游 worker 包装范围仍有局限，不构成“不可检测”的承诺。
 
-**stravia-core 顶层 `pub mod`（lib.rs，共 21 个）：**
+**stravia-core 顶层 `pub mod`（以 lib.rs 为准）：**
 
 ```
 admin · agent · auth · config · connect_client_apply · db · error · history_marker
 hook · mcp · plugin · protocol · provider · provider_catalog · provider_models · proxy
-router · storage · thinking · turn_chain · web_search
+router · storage · thinking · turn_chain
 ```
 
-crate-private 运行时 module：`generation_chain`、`interaction_observation`、`media`、`model_turn`、`reversible_redaction`、`web_access`；`admission` 保持 crate root private。Generation Chain 与 Interaction Observation 都不属于 Hook，且彼此保持独立：前者保存不可变交付历史，后者保存可丢失的可变诊断投影。
+crate-private 运行时 module：`generation_chain`、`interaction_observation`、`media`、`model_turn`、`reversible_redaction`、`web_access`、`web_search`；`admission` 保持 crate root private。Generation Chain 与 Interaction Observation 都不属于 Hook，且彼此保持独立：前者保存不可变交付历史，后者保存可丢失的可变诊断投影。
 
 **核心 API：**
 
@@ -379,7 +392,7 @@ Inference Run 在 Request Hook 前验证 API Key、建立 Principal 并获取根
 
 ### 3.3 内部表示（IR）
 
-位于 `backend/crates/stravia-core/src/protocol/ir/`，定义统一内部结构：
+位于 `backend/crates/stravia-runtime-contract/src/protocol/ir/`，由宿主与能力 crate 共用，定义统一内部结构：
 
 - `AiRequest`（`ir/request.rs`）：入站请求，含消息列表、工具定义、模型参数
 - `AiResponse`（`ir/response.rs`）：出站响应，含 content / tool_calls / usage / reasoning_content

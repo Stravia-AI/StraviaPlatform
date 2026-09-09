@@ -8,18 +8,26 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
 
-use crate::hook::Principal;
-use crate::protocol::ids::ProtocolId;
-use crate::protocol::ir::request::VERIFIED_HISTORY_REPLAY_META;
-use crate::protocol::ir::{
-    AiItem, AiRequest, AiResponse, ContentBlock, MediaSource, MessageContent, OpenResponsesExt,
-    ProtocolExt, Role,
-};
 use crate::protocol::transform::ProtocolTransform;
-use crate::turn_chain::{
-    ReusablePrefixMetadata, ReusablePrefixQuery, TurnChainStore, TurnCommit, TurnCommitError,
-    TurnNodeId, TurnNodeKind,
-};
+use stravia_runtime_contract::Principal;
+use stravia_runtime_contract::protocol::ids::ProtocolId;
+use stravia_runtime_contract::protocol::ir::AiItem;
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::AiResponse;
+use stravia_runtime_contract::protocol::ir::ContentBlock;
+use stravia_runtime_contract::protocol::ir::MediaSource;
+use stravia_runtime_contract::protocol::ir::MessageContent;
+use stravia_runtime_contract::protocol::ir::OpenResponsesExt;
+use stravia_runtime_contract::protocol::ir::ProtocolExt;
+use stravia_runtime_contract::protocol::ir::Role;
+use stravia_runtime_contract::protocol::ir::request::VERIFIED_HISTORY_REPLAY_META;
+use stravia_runtime_contract::turn_chain::ReusablePrefixMetadata;
+use stravia_runtime_contract::turn_chain::ReusablePrefixQuery;
+use stravia_runtime_contract::turn_chain::TurnChainStore;
+use stravia_runtime_contract::turn_chain::TurnCommit;
+use stravia_runtime_contract::turn_chain::TurnCommitError;
+use stravia_runtime_contract::turn_chain::TurnNodeId;
+use stravia_runtime_contract::turn_chain::TurnNodeKind;
 
 mod materialize;
 mod project;
@@ -50,9 +58,9 @@ const DEFAULT_GENERATION_CHAIN_TTL: Duration = Duration::from_secs(7 * 24 * 60 *
 #[derive(Clone)]
 pub(crate) struct GenerationChain {
     store: GenerationChainStore,
-    artifacts: Option<Arc<dyn crate::agent::ArtifactStore>>,
+    artifacts: Option<Arc<dyn stravia_runtime_contract::artifact::ArtifactStore>>,
     history_markers: Option<Arc<dyn crate::history_marker::HistoryMarkerStore>>,
-    redaction_mappings: Option<Arc<dyn crate::reversible_redaction::store::MappingStore>>,
+    redaction_mappings: Option<Arc<dyn stravia_credential_protection::store::MappingStore>>,
     compaction: Option<crate::compaction::Compaction>,
     ttl: Duration,
 }
@@ -116,7 +124,7 @@ pub(crate) enum PersistError {
     NotStaged,
     Store(TurnCommitError),
     HistoryMarker(crate::history_marker::HistoryMarkerError),
-    Redaction(crate::reversible_redaction::RedactionError),
+    Redaction(stravia_runtime_contract::redaction::RedactionError),
     Compaction(crate::compaction::CompactionError),
 }
 
@@ -145,7 +153,7 @@ impl GenerationChain {
     pub(crate) fn from_turn_chain(
         turn_chain: Arc<dyn TurnChainStore>,
         ttl: Duration,
-        artifacts: Option<Arc<dyn crate::agent::ArtifactStore>>,
+        artifacts: Option<Arc<dyn stravia_runtime_contract::artifact::ArtifactStore>>,
     ) -> Self {
         Self {
             store: GenerationChainStore::from_turn_chain(turn_chain, ttl),
@@ -167,7 +175,7 @@ impl GenerationChain {
 
     pub(crate) fn with_redaction_mappings(
         mut self,
-        mappings: Arc<dyn crate::reversible_redaction::store::MappingStore>,
+        mappings: Arc<dyn stravia_credential_protection::store::MappingStore>,
     ) -> Self {
         self.redaction_mappings = Some(mappings);
         self
@@ -189,7 +197,7 @@ impl GenerationChain {
             .request_delta
             .items
             .iter()
-            .any(|item| item.role == crate::protocol::ir::Role::User);
+            .any(|item| item.role == stravia_runtime_contract::protocol::ir::Role::User);
         let parent_id = write.parent.parent_id;
         let root_id = if parent_id.is_some() {
             write.parent.root_id
@@ -641,9 +649,12 @@ impl GenerationChainState {
         if canonical_request.tools.as_ref().is_some_and(Vec::is_empty) {
             canonical_request.tools = None;
         }
-        self.canonical_controls_fingerprint = crate::protocol::ir::canonical::hash_hex(
-            &crate::protocol::ir::canonical::history_request_controls_hash(&canonical_request),
-        );
+        self.canonical_controls_fingerprint =
+            stravia_runtime_contract::protocol::ir::canonical::hash_hex(
+                &stravia_runtime_contract::protocol::ir::canonical::history_request_controls_hash(
+                    &canonical_request,
+                ),
+            );
         // Keep writing the legacy proof fields until every durable v1-v3 node has
         // expired. They are read only when a persisted node predates the canonical
         // controls proof.
@@ -691,7 +702,8 @@ impl GenerationChainState {
     }
 
     pub(crate) fn supports_open_responses_continuation(&self) -> bool {
-        self.protocol == crate::protocol::ids::OPEN_RESPONSES_2026_04_24.to_string()
+        self.protocol
+            == stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24.to_string()
     }
 
     fn append_output(&mut self, response: &AiResponse) {
@@ -749,11 +761,13 @@ struct ClientHistoryState {
 impl ClientHistoryState {
     fn from_request(request: &AiRequest, items: &[AiItem]) -> Self {
         Self {
-            controls_fingerprint: crate::protocol::ir::canonical::hash_hex(
-                &crate::protocol::ir::canonical::history_request_controls_hash(request),
+            controls_fingerprint: stravia_runtime_contract::protocol::ir::canonical::hash_hex(
+                &stravia_runtime_contract::protocol::ir::canonical::history_request_controls_hash(
+                    request,
+                ),
             ),
-            context_fingerprint: crate::protocol::ir::canonical::hash_hex(
-                &crate::protocol::ir::canonical::history_context_hash(items),
+            context_fingerprint: stravia_runtime_contract::protocol::ir::canonical::hash_hex(
+                &stravia_runtime_contract::protocol::ir::canonical::history_context_hash(items),
             ),
             context_messages: items.len(),
             session_fingerprint: generation_session_fingerprint(request),
@@ -772,14 +786,14 @@ impl ClientHistoryState {
 struct EffectiveRequestConfig {
     model: String,
     instructions: Option<String>,
-    generation: crate::protocol::ir::GenerationConfig,
-    tools: Option<Vec<crate::protocol::ir::ToolSpec>>,
-    tool_choice: Option<crate::protocol::ir::ToolChoice>,
+    generation: stravia_runtime_contract::protocol::ir::GenerationConfig,
+    tools: Option<Vec<stravia_runtime_contract::protocol::ir::ToolSpec>>,
+    tool_choice: Option<stravia_runtime_contract::protocol::ir::ToolChoice>,
     parallel_tool_calls: Option<bool>,
     disable_parallel_tool_calls: Option<bool>,
-    reasoning: crate::protocol::ir::ReasoningConfig,
-    response_format: Option<crate::protocol::ir::ResponseFormat>,
-    safety_settings: Option<Vec<crate::protocol::ir::SafetySettings>>,
+    reasoning: stravia_runtime_contract::protocol::ir::ReasoningConfig,
+    response_format: Option<stravia_runtime_contract::protocol::ir::ResponseFormat>,
+    safety_settings: Option<Vec<stravia_runtime_contract::protocol::ir::SafetySettings>>,
     ext: Option<OpenResponsesExt>,
 }
 

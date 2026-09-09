@@ -11,10 +11,10 @@ use crate::config::GatewayConfig;
 use crate::db::models::{
     CreateApiKey, CreateProvider, CreateRoute, ProviderCredentialInput, ProviderSourceInput,
 };
-use crate::hook::Principal;
 use crate::interaction_observation::ForestQuery;
-use crate::protocol::ids::OPEN_RESPONSES_2026_04_24;
 use crate::provider_models::CreateManualProviderModel;
+use stravia_runtime_contract::Principal;
+use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
 
 struct ProviderRequest {
     body: Value,

@@ -6,14 +6,17 @@ pub(super) enum FollowupModelTurn {
         response: AiResponse,
         pending_generation_chain: Option<crate::generation_chain::GenerationChainWrite>,
     },
-    StreamError(crate::protocol::ir::AiError),
+    StreamError(stravia_runtime_contract::protocol::ir::AiError),
 }
 
-fn hook_stream_error(control: crate::hook::HookControl) -> crate::protocol::ir::AiError {
-    use crate::protocol::ir::{AiError, AiErrorKind};
+fn hook_stream_error(
+    control: stravia_runtime_contract::hook::HookControl,
+) -> stravia_runtime_contract::protocol::ir::AiError {
+    use stravia_runtime_contract::protocol::ir::AiError;
+    use stravia_runtime_contract::protocol::ir::AiErrorKind;
 
     match control {
-        crate::hook::HookControl::Reject(rejection) => {
+        stravia_runtime_contract::hook::HookControl::Reject(rejection) => {
             let kind = match rejection.status {
                 401 => AiErrorKind::AuthenticationError,
                 403 => AiErrorKind::AuthorizationError,
@@ -24,10 +27,11 @@ fn hook_stream_error(control: crate::hook::HookControl) -> crate::protocol::ir::
                 .with_status(rejection.status)
                 .with_raw(serde_json::json!({"code": rejection.code}))
         }
-        crate::hook::HookControl::StreamAbort { message } => {
+        stravia_runtime_contract::hook::HookControl::StreamAbort { message } => {
             AiError::new(AiErrorKind::StreamMidError, message)
         }
-        crate::hook::HookControl::Continue | crate::hook::HookControl::Respond(_) => {
+        stravia_runtime_contract::hook::HookControl::Continue
+        | stravia_runtime_contract::hook::HookControl::Respond(_) => {
             AiError::new(AiErrorKind::Unknown, "invalid hidden-round Hook control")
         }
     }
@@ -43,24 +47,24 @@ pub(super) async fn acquire_followup_model_turn(
     projection: &mut ClientProjectionSession,
     phase: &mut PhaseTracker,
     generation: &GenerationChainRun,
-    fixed_media_plan: Option<&crate::protocol::ir::request::MediaRoutingPlan>,
+    fixed_media_plan: Option<&stravia_runtime_contract::protocol::ir::request::MediaRoutingPlan>,
 ) -> Result<FollowupModelTurn, RoundOutcome> {
     if request_context.cancellation.is_cancelled() {
         return Err(buffered_response(error_response(499, "request cancelled")));
     }
     match inference_run.on_request(request).await {
-        Ok(crate::hook::HookControl::Continue) => {}
-        Ok(crate::hook::HookControl::Respond(response)) => {
+        Ok(stravia_runtime_contract::hook::HookControl::Continue) => {}
+        Ok(stravia_runtime_contract::hook::HookControl::Respond(response)) => {
             let mut response = *response;
-            inference_run.set_route(crate::hook::RouteContext {
+            inference_run.set_route(stravia_runtime_contract::hook::RouteContext {
                 model_id: request.model.clone(),
                 provider_id: "hook".into(),
                 target_id: "hook".into(),
                 egress: ingress,
             });
             match inference_run.on_client_output(&mut response).await {
-                Ok(crate::hook::HookControl::Continue) => {}
-                Ok(crate::hook::HookControl::Respond(replacement)) => {
+                Ok(stravia_runtime_contract::hook::HookControl::Continue) => {}
+                Ok(stravia_runtime_contract::hook::HookControl::Respond(replacement)) => {
                     response = *replacement;
                 }
                 Ok(control) => {
@@ -68,14 +72,14 @@ pub(super) async fn acquire_followup_model_turn(
                 }
                 Err(error) => {
                     return Ok(FollowupModelTurn::StreamError(
-                        crate::protocol::ir::AiError::new(
-                            crate::protocol::ir::AiErrorKind::StreamMidError,
+                        stravia_runtime_contract::protocol::ir::AiError::new(
+                            stravia_runtime_contract::protocol::ir::AiErrorKind::StreamMidError,
                             error.to_string(),
                         ),
                     ));
                 }
             }
-            if ingress == crate::protocol::ids::OPEN_RESPONSES_2026_04_24
+            if ingress == stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24
                 && let Some(write) = generation.write.as_ref()
             {
                 response.id = write.id().to_owned();
@@ -88,8 +92,8 @@ pub(super) async fn acquire_followup_model_turn(
                 Ok(_) => {}
                 Err(error) => {
                     return Ok(FollowupModelTurn::StreamError(
-                        crate::protocol::ir::AiError::new(
-                            crate::protocol::ir::AiErrorKind::StreamMidError,
+                        stravia_runtime_contract::protocol::ir::AiError::new(
+                            stravia_runtime_contract::protocol::ir::AiErrorKind::StreamMidError,
                             error.to_string(),
                         ),
                     ));
@@ -110,16 +114,16 @@ pub(super) async fn acquire_followup_model_turn(
             });
             if let Err(error) = phase.transition(Phase::SemanticComplete) {
                 return Ok(FollowupModelTurn::StreamError(
-                    crate::protocol::ir::AiError::new(
-                        crate::protocol::ir::AiErrorKind::StreamMidError,
+                    stravia_runtime_contract::protocol::ir::AiError::new(
+                        stravia_runtime_contract::protocol::ir::AiErrorKind::StreamMidError,
                         error,
                     ),
                 ));
             }
             if let Err(error) = phase.transition(Phase::AwaitingDelivery) {
                 return Ok(FollowupModelTurn::StreamError(
-                    crate::protocol::ir::AiError::new(
-                        crate::protocol::ir::AiErrorKind::StreamMidError,
+                    stravia_runtime_contract::protocol::ir::AiError::new(
+                        stravia_runtime_contract::protocol::ir::AiErrorKind::StreamMidError,
                         error,
                     ),
                 ));
@@ -132,8 +136,8 @@ pub(super) async fn acquire_followup_model_turn(
         Ok(control) => return Ok(FollowupModelTurn::StreamError(hook_stream_error(control))),
         Err(error) => {
             return Ok(FollowupModelTurn::StreamError(
-                crate::protocol::ir::AiError::new(
-                    crate::protocol::ir::AiErrorKind::StreamMidError,
+                stravia_runtime_contract::protocol::ir::AiError::new(
+                    stravia_runtime_contract::protocol::ir::AiErrorKind::StreamMidError,
                     error.to_string(),
                 ),
             ));
@@ -144,8 +148,8 @@ pub(super) async fn acquire_followup_model_turn(
     }
     if !stabilize_media_generation_chain(generation, request) {
         return Ok(FollowupModelTurn::StreamError(
-            crate::protocol::ir::AiError::new(
-                crate::protocol::ir::AiErrorKind::StreamMidError,
+            stravia_runtime_contract::protocol::ir::AiError::new(
+                stravia_runtime_contract::protocol::ir::AiErrorKind::StreamMidError,
                 "Media bridge could not prepare the hidden request",
             ),
         ));

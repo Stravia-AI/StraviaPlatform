@@ -639,7 +639,7 @@ async fn route_generates_seven_rows_seeds_levels_and_resets_one_override() -> an
     );
     assert_eq!(
         mapping_control(&route.targets[0].thinking_level_map, ThinkingLevel::Minimal),
-        Some(&crate::thinking::TargetThinkingControl::Hidden)
+        Some(&stravia_runtime_contract::thinking::TargetThinkingControl::Hidden)
     );
 
     let mut targets = route_targets_for_update(&route);
@@ -648,7 +648,7 @@ async fn route_generates_seven_rows_seeds_levels_and_resets_one_override() -> an
         .iter_mut()
         .find(|row| row.level == ThinkingLevel::Low)
         .expect("low row");
-    low.control = crate::thinking::TargetThinkingControl::Hidden;
+    low.control = stravia_runtime_contract::thinking::TargetThinkingControl::Hidden;
     let updated = admin
         .update_model(
             &route.model_id,
@@ -680,7 +680,7 @@ async fn route_generates_seven_rows_seeds_levels_and_resets_one_override() -> an
     assert_eq!(low.source, ThinkingMappingSource::Generated);
     assert_eq!(
         low.control,
-        crate::thinking::TargetThinkingControl::Effort {
+        stravia_runtime_contract::thinking::TargetThinkingControl::Effort {
             value: "low".into()
         }
     );
@@ -729,9 +729,11 @@ async fn open_responses_accepts_max_effort_map() -> anyhow::Result<()> {
 
     assert_eq!(
         mapping_control(&route.targets[0].thinking_level_map, ThinkingLevel::Max),
-        Some(&crate::thinking::TargetThinkingControl::Effort {
-            value: "max".into()
-        })
+        Some(
+            &stravia_runtime_contract::thinking::TargetThinkingControl::Effort {
+                value: "max".into()
+            }
+        )
     );
     Ok(())
 }
@@ -997,7 +999,7 @@ async fn regenerate_updates_derived_supported_levels() -> anyhow::Result<()> {
         .iter_mut()
         .find(|row| row.level == ThinkingLevel::High)
         .expect("high row");
-    high.control = crate::thinking::TargetThinkingControl::Effort {
+    high.control = stravia_runtime_contract::thinking::TargetThinkingControl::Effort {
         value: "high".into(),
     };
     let updated = admin
@@ -1048,7 +1050,7 @@ async fn refresh_regenerates_only_generated_rows() -> anyhow::Result<()> {
         .iter_mut()
         .find(|row| row.level == ThinkingLevel::High)
         .expect("high row");
-    high.control = crate::thinking::TargetThinkingControl::Effort {
+    high.control = stravia_runtime_contract::thinking::TargetThinkingControl::Effort {
         value: "custom-high".into(),
     };
     let route = admin
@@ -1086,7 +1088,7 @@ async fn refresh_regenerates_only_generated_rows() -> anyhow::Result<()> {
     assert_eq!(medium.source, ThinkingMappingSource::Generated);
     assert_eq!(
         medium.control,
-        crate::thinking::TargetThinkingControl::Hidden
+        stravia_runtime_contract::thinking::TargetThinkingControl::Hidden
     );
     let high = refreshed.targets[0]
         .thinking_level_map
@@ -1096,7 +1098,7 @@ async fn refresh_regenerates_only_generated_rows() -> anyhow::Result<()> {
     assert_eq!(high.source, ThinkingMappingSource::Overridden);
     assert_eq!(
         high.control,
-        crate::thinking::TargetThinkingControl::Effort {
+        stravia_runtime_contract::thinking::TargetThinkingControl::Effort {
             value: "custom-high".into()
         }
     );

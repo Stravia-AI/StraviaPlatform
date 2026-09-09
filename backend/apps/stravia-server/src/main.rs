@@ -11,7 +11,7 @@ use stravia_server::{
 };
 
 #[derive(Parser)]
-#[command(name = "stravia-server", version, about = "Stravia AI Gateway")]
+#[command(name = "stravia-server", version, about = "Stravia Agent infra")]
 struct Args {
     #[command(subcommand)]
     command: Option<Command>,

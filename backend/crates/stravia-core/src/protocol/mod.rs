@@ -33,15 +33,14 @@ pub(crate) mod codec;
 
 #[cfg(test)]
 mod conversion;
-pub mod ids;
-pub mod ir;
 pub mod registry;
 #[cfg(test)]
 mod registry_tests;
 pub(crate) mod transform;
 
 use crate::db::models::Provider;
-use crate::protocol::ids::{OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1, ProtocolEndpoint};
+use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
+use stravia_runtime_contract::protocol::ids::ProtocolEndpoint;
 
 // ── SSE helper ──
 

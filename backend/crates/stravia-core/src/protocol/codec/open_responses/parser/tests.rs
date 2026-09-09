@@ -1,5 +1,5 @@
 use super::*;
-use crate::protocol::ir::AiStreamDelta;
+use stravia_runtime_contract::protocol::ir::AiStreamDelta;
 
 fn sse_event(event: &str, data: &str) -> String {
     let mut payload: Value = serde_json::from_str(data).expect("SSE fixture JSON");

@@ -21,8 +21,6 @@ use crate::Gateway;
 use crate::db::models::Provider;
 use crate::error::GatewayError;
 use crate::interaction_observation::{ConfirmedUsage, RunEvent, RunObserver};
-use crate::protocol::ids::ProtocolId;
-use crate::protocol::ir::{AiRequest, AiResponse, AiStreamDelta};
 use crate::provider::inbound::InboundResponse;
 use crate::provider::outbound::OutboundRequest;
 use crate::provider::vendor::{ProviderCtx, Vendor};
@@ -30,6 +28,10 @@ use crate::proxy::client::{
     ProxyClient, ResponsesWebSocketAcquireError, ResponsesWebSocketLease,
     ResponsesWebSocketRegistry, ResponsesWebSocketRequest, ResponsesWebSocketTrace,
 };
+use stravia_runtime_contract::protocol::ids::ProtocolId;
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::AiResponse;
+use stravia_runtime_contract::protocol::ir::AiStreamDelta;
 
 pub(crate) struct ProviderCall {
     adapter: ProviderAdapter,
@@ -254,7 +256,7 @@ impl AttemptObservation {
         }
     }
 
-    pub(crate) fn confirm_usage(&self, usage: &crate::protocol::ir::Usage) {
+    pub(crate) fn confirm_usage(&self, usage: &stravia_runtime_contract::protocol::ir::Usage) {
         if self.usage_confirmed.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -334,7 +336,7 @@ fn bytes_value(bytes: &[u8]) -> Value {
         })
 }
 
-fn confirmed_usage(usage: &crate::protocol::ir::Usage) -> ConfirmedUsage {
+fn confirmed_usage(usage: &stravia_runtime_contract::protocol::ir::Usage) -> ConfirmedUsage {
     ConfirmedUsage {
         input_tokens: usage
             .required_components_known
@@ -731,7 +733,8 @@ mod tests {
             Arc::new(crate::provider::gitlab::GitLabVendor),
             ProviderBinding {
                 provider: provider.clone(),
-                protocol: crate::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+                protocol:
+                    stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
                 egress_base_url: base_url.clone(),
                 api_key: "personal-token".into(),
                 actual_model: "gpt-test".into(),
@@ -745,16 +748,18 @@ mod tests {
         );
         let mut request = AiRequest::new(
             "gpt-test",
-            vec![crate::protocol::ir::AiItem {
-                role: crate::protocol::ir::Role::User,
-                content: crate::protocol::ir::MessageContent::Text("hello".into()),
+            vec![stravia_runtime_contract::protocol::ir::AiItem {
+                role: stravia_runtime_contract::protocol::ir::Role::User,
+                content: stravia_runtime_contract::protocol::ir::MessageContent::Text(
+                    "hello".into(),
+                ),
                 tool_calls: None,
                 tool_call_id: None,
                 meta: None,
             }],
         );
         request.meta.source_protocol =
-            Some(crate::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1);
+            Some(stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1);
         let outbound = adapter
             .build_request(&mut request)
             .await
@@ -778,7 +783,8 @@ mod tests {
             Arc::new(crate::provider::gitlab::GitLabVendor),
             ProviderBinding {
                 provider,
-                protocol: crate::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+                protocol:
+                    stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
                 egress_base_url: base_url,
                 api_key: "personal-token".into(),
                 actual_model: "gpt-test".into(),

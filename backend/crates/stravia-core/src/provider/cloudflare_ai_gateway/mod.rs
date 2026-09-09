@@ -7,8 +7,6 @@ use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::Value;
 
 use crate::error::GatewayError;
-use crate::protocol::ids::{OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1, ProtocolId};
-use crate::protocol::ir::{AiRequest, AiResponse};
 use crate::provider::common::{openai_compat::openai_map_error, pipeline};
 use crate::provider::inbound::InboundResponse;
 use crate::provider::metadata::{
@@ -18,6 +16,10 @@ use crate::provider::metadata::{
 use crate::provider::outbound::OutboundRequest;
 use crate::provider::registry::{VendorRegistration, VendorScope};
 use crate::provider::vendor::{ProviderCtx, Vendor, resolve_base_url};
+use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
+use stravia_runtime_contract::protocol::ids::ProtocolId;
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::AiResponse;
 
 const CREDENTIAL_FIELDS: &[CredentialFieldDef] = &[
     CredentialFieldDef {

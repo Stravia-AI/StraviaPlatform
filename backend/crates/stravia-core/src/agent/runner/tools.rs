@@ -150,7 +150,8 @@ impl AgentRunner {
                     Err(error) => PlatformToolResult {
                         tool_id: ToolId::new(tool_id.id.clone()),
                         call_id: call.id.clone(),
-                        content_kind: crate::protocol::ir::ToolResultContentKind::Json,
+                        content_kind:
+                            stravia_runtime_contract::protocol::ir::ToolResultContentKind::Json,
                         content: serde_json::json!({
                             "code": error.code,
                             "message": error.message

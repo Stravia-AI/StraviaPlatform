@@ -6,15 +6,25 @@ use anyhow::{Context, bail};
 use reqwest::header::HeaderMap;
 use serde_json::{Map, Value, json};
 
-use crate::protocol::ids::{COHERE_CHAT_V2, EndpointCapabilities, ProtocolEndpoint};
-use crate::protocol::ir::{
-    AiItem, AiRequest, AiResponse, AiStreamDelta, ContentBlock, MediaSource, MessageContent,
-    ResponseFormat, Role, ToolCall, ToolChoice, Usage,
-};
 use crate::protocol::registry::EndpointRegistration;
 use crate::protocol::transform::{
     ProtocolAdapter, TransformError, WireStreamDecoder, WireStreamEncoder,
 };
+use stravia_runtime_contract::protocol::ids::COHERE_CHAT_V2;
+use stravia_runtime_contract::protocol::ids::EndpointCapabilities;
+use stravia_runtime_contract::protocol::ids::ProtocolEndpoint;
+use stravia_runtime_contract::protocol::ir::AiItem;
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::AiResponse;
+use stravia_runtime_contract::protocol::ir::AiStreamDelta;
+use stravia_runtime_contract::protocol::ir::ContentBlock;
+use stravia_runtime_contract::protocol::ir::MediaSource;
+use stravia_runtime_contract::protocol::ir::MessageContent;
+use stravia_runtime_contract::protocol::ir::ResponseFormat;
+use stravia_runtime_contract::protocol::ir::Role;
+use stravia_runtime_contract::protocol::ir::ToolCall;
+use stravia_runtime_contract::protocol::ir::ToolChoice;
+use stravia_runtime_contract::protocol::ir::Usage;
 
 pub struct CohereChatV2;
 
@@ -31,12 +41,12 @@ const CAPS: EndpointCapabilities = EndpointCapabilities {
     parallel_tool_calls: false,
     extended_reasoning: true,
     deterministic_seed: true,
-    stream: crate::protocol::ids::StreamCaps {
+    stream: stravia_runtime_contract::protocol::ids::StreamCaps {
         server_sent_events: true,
         usage_in_stream: true,
         requires_stream_flag: true,
     },
-    unknown_field_policy: crate::protocol::ids::VendorFieldPolicy::Drop,
+    unknown_field_policy: stravia_runtime_contract::protocol::ids::VendorFieldPolicy::Drop,
 };
 
 impl ProtocolAdapter for CohereChatV2 {
@@ -592,7 +602,7 @@ fn encode_tool_calls(item: &AiItem) -> Vec<Value> {
         .collect()
 }
 
-fn encode_tools(tools: &[crate::protocol::ir::ToolSpec]) -> Vec<Value> {
+fn encode_tools(tools: &[stravia_runtime_contract::protocol::ir::ToolSpec]) -> Vec<Value> {
     tools
         .iter()
         .map(|tool| {
@@ -702,7 +712,9 @@ fn cohere_tool_arguments(function: &Value) -> anyhow::Result<String> {
     }
 }
 
-fn decode_tools(value: &Value) -> anyhow::Result<Vec<crate::protocol::ir::ToolSpec>> {
+fn decode_tools(
+    value: &Value,
+) -> anyhow::Result<Vec<stravia_runtime_contract::protocol::ir::ToolSpec>> {
     value
         .as_array()
         .context("Cohere tools must be an array")?
@@ -711,7 +723,7 @@ fn decode_tools(value: &Value) -> anyhow::Result<Vec<crate::protocol::ir::ToolSp
             let function = tool
                 .get("function")
                 .context("Cohere tool is missing function")?;
-            Ok(crate::protocol::ir::ToolSpec {
+            Ok(stravia_runtime_contract::protocol::ir::ToolSpec {
                 name: required_string(function, "name")?,
                 description: function
                     .get("description")

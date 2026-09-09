@@ -4,7 +4,7 @@ use super::*;
 fn encodes_cohere_tool_schema_without_openai_shape() {
     let mut request = AiRequest::new("command-a", vec![AiItem::output_text("hello")]);
     request.items[0].role = Role::User;
-    request.tools = Some(vec![crate::protocol::ir::ToolSpec {
+    request.tools = Some(vec![stravia_runtime_contract::protocol::ir::ToolSpec {
         name: "weather".into(),
         description: Some("Get weather".into()),
         parameters: json!({"type": "object"}),

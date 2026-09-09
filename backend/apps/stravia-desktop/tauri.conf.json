@@ -19,7 +19,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "Stravia AI Gateway",
+        "title": "Stravia Agent infra",
         "width": 1280,
         "height": 800,
         "minWidth": 900,

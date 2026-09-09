@@ -92,7 +92,7 @@ const POSTGRES_SCHEMA_SQL: &str = concat!(
     include_str!("../../stravia-core/migrations/postgres/0039_remove_route_compaction_policy.sql")
 );
 const POSTGRES_SCHEMA_HEADER: &str = "\
--- Stravia AI Gateway - PostgreSQL Final Schema
+-- Stravia Agent infra - PostgreSQL Final Schema
 --
 -- This file represents the authoritative final-state schema after all migrations.
 -- It is a DBA review artifact only. Do not execute it to initialize a Stravia

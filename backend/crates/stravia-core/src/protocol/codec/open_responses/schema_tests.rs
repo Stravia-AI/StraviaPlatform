@@ -4,7 +4,9 @@ use sha2::{Digest, Sha256};
 
 use super::formatter::ResponsesResponseFormatter;
 use super::stream::ResponsesStreamFormatter;
-use crate::protocol::ir::{AiItem, AiResponse, AiStreamDelta};
+use stravia_runtime_contract::protocol::ir::AiItem;
+use stravia_runtime_contract::protocol::ir::AiResponse;
+use stravia_runtime_contract::protocol::ir::AiStreamDelta;
 
 const OPENAPI: &str =
     include_str!("../../../../tests/fixtures/open_responses_2026_04_24.openapi.json");
@@ -256,8 +258,8 @@ fn indexed_message_deltas_match_dated_event_schemas() {
 fn formatted_failure_and_incomplete_events_match_dated_schemas() {
     let mut failed = ResponsesStreamFormatter::new();
     let mut failed_events = failed.format_deltas(&[AiStreamDelta::StreamError {
-        error: crate::protocol::ir::AiError::new(
-            crate::protocol::ir::AiErrorKind::StreamMidError,
+        error: stravia_runtime_contract::protocol::ir::AiError::new(
+            stravia_runtime_contract::protocol::ir::AiErrorKind::StreamMidError,
             "upstream failed",
         ),
     }]);

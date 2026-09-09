@@ -6,8 +6,11 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::hook::Principal;
-use crate::protocol::ir::{AiItem, AiRequest, ProtocolExt, canonical};
+use stravia_runtime_contract::Principal;
+use stravia_runtime_contract::protocol::ir::AiItem;
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::ProtocolExt;
+use stravia_runtime_contract::protocol::ir::canonical;
 
 mod sql;
 
@@ -323,7 +326,7 @@ fn state_value(item: &AiItem) -> Option<Value> {
     if !item.is_compaction() {
         return None;
     }
-    crate::protocol::codec::open_responses::native_compaction_item(item)
+    stravia_runtime_contract::protocol::ir::canonical::native_compaction_item(item)
 }
 
 fn state_fingerprint(value: &Value) -> Result<String, CompactionError> {
@@ -384,10 +387,13 @@ mod tests {
         input.window = vec![item.clone()];
         input.state_items = vec![item.clone()];
         store.register(&owner, input).await.unwrap();
-        let crate::protocol::ir::MessageContent::Blocks(blocks) = &mut item.content else {
+        let stravia_runtime_contract::protocol::ir::MessageContent::Blocks(blocks) =
+            &mut item.content
+        else {
             panic!("native state must be typed");
         };
-        let crate::protocol::ir::ContentBlock::Compaction { encrypted_content } = &mut blocks[0]
+        let stravia_runtime_contract::protocol::ir::ContentBlock::Compaction { encrypted_content } =
+            &mut blocks[0]
         else {
             panic!("native compaction block");
         };

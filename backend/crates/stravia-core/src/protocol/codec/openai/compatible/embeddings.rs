@@ -9,14 +9,19 @@ use std::collections::HashMap;
 use reqwest::header::HeaderMap;
 use serde_json::Value;
 
-use crate::protocol::ids::{
-    EndpointCapabilities, OPENAI_COMPATIBLE_EMBEDDINGS_V1, ProtocolEndpoint,
-};
-use crate::protocol::ir::{
-    AiItem, AiRequest, AiResponse, EmbeddingData, EmbeddingInput, EmbeddingOutput,
-    EmbeddingRequest, GenerationConfig, StreamConfig,
-};
 use crate::protocol::registry::EndpointRegistration;
+use stravia_runtime_contract::protocol::ids::EndpointCapabilities;
+use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_EMBEDDINGS_V1;
+use stravia_runtime_contract::protocol::ids::ProtocolEndpoint;
+use stravia_runtime_contract::protocol::ir::AiItem;
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::AiResponse;
+use stravia_runtime_contract::protocol::ir::EmbeddingData;
+use stravia_runtime_contract::protocol::ir::EmbeddingInput;
+use stravia_runtime_contract::protocol::ir::EmbeddingOutput;
+use stravia_runtime_contract::protocol::ir::EmbeddingRequest;
+use stravia_runtime_contract::protocol::ir::GenerationConfig;
+use stravia_runtime_contract::protocol::ir::StreamConfig;
 
 use crate::protocol::transform::{
     ProtocolAdapter, TransformError, WireStreamDecoder, WireStreamEncoder,
@@ -39,8 +44,8 @@ const CAPS: EndpointCapabilities = EndpointCapabilities {
     parallel_tool_calls: false,
     extended_reasoning: false,
     deterministic_seed: false,
-    stream: crate::protocol::ids::StreamCaps::DEFAULT,
-    unknown_field_policy: crate::protocol::ids::VendorFieldPolicy::Drop,
+    stream: stravia_runtime_contract::protocol::ids::StreamCaps::DEFAULT,
+    unknown_field_policy: stravia_runtime_contract::protocol::ids::VendorFieldPolicy::Drop,
 };
 
 pub struct OpenAIEmbeddingsV1;

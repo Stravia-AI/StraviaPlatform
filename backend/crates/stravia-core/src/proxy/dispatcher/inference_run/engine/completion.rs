@@ -2,14 +2,20 @@ use crate::Gateway;
 use crate::history_marker::{
     ClaimOutcome, HiddenHistorySegment, HistoryMarker, HistoryMarkerError, PlatformMarkerInput,
 };
-use crate::hook::{DetachedPlatformExecution, Principal};
+use crate::hook::DetachedPlatformExecution;
 use crate::model_turn::TargetIdentity;
-use crate::protocol::ids::OPEN_RESPONSES_2026_04_24;
-use crate::protocol::ir::{
-    AiItem, AiItemAudience, AiItemProvenance, AiItemStatus, AiRequest, AiResponse, ContentBlock,
-    MessageContent, Usage,
-};
 use crate::proxy::context::RequestContext;
+use stravia_runtime_contract::Principal;
+use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
+use stravia_runtime_contract::protocol::ir::AiItem;
+use stravia_runtime_contract::protocol::ir::AiItemAudience;
+use stravia_runtime_contract::protocol::ir::AiItemProvenance;
+use stravia_runtime_contract::protocol::ir::AiItemStatus;
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::AiResponse;
+use stravia_runtime_contract::protocol::ir::ContentBlock;
+use stravia_runtime_contract::protocol::ir::MessageContent;
+use stravia_runtime_contract::protocol::ir::Usage;
 
 use super::{ClientProjectionSession, Phase, PhaseTracker};
 
@@ -37,9 +43,9 @@ impl CompletionContext {
     pub(super) fn from_model_turn(
         gateway: Gateway,
         generation: super::GenerationChainRun,
-        ingress: crate::protocol::ids::ProtocolId,
+        ingress: stravia_runtime_contract::protocol::ids::ProtocolId,
         target: &TargetIdentity,
-        egress: crate::protocol::ids::ProtocolId,
+        egress: stravia_runtime_contract::protocol::ids::ProtocolId,
         model_turn_id: String,
         observer: crate::interaction_observation::RunObserver,
     ) -> Self {
@@ -212,7 +218,7 @@ impl CompletionLease {
 }
 
 pub(super) enum CompletionFailure {
-    Control(Box<crate::hook::HookControl>),
+    Control(Box<stravia_runtime_contract::hook::HookControl>),
     Hook(String),
     AfterCommit(String),
 }
@@ -226,7 +232,10 @@ impl CompletionFailure {
         }
     }
 
-    fn control(control: crate::hook::HookControl, commit: ClientOutputCommit) -> Self {
+    fn control(
+        control: stravia_runtime_contract::hook::HookControl,
+        commit: ClientOutputCommit,
+    ) -> Self {
         match commit {
             ClientOutputCommit::Pending => Self::Control(Box::new(control)),
             ClientOutputCommit::Committed => Self::AfterCommit(
@@ -236,7 +245,7 @@ impl CompletionFailure {
     }
 
     fn hook_outcome(
-        outcome: crate::hook::ResponseHookOutcome,
+        outcome: stravia_runtime_contract::hook::ResponseHookOutcome,
         commit: ClientOutputCommit,
         stage: &str,
     ) -> Result<(), Self> {
@@ -246,7 +255,7 @@ impl CompletionFailure {
             )));
         }
         match outcome.control {
-            crate::hook::HookControl::Continue => Ok(()),
+            stravia_runtime_contract::hook::HookControl::Continue => Ok(()),
             control => Err(Self::control(control, commit)),
         }
     }
@@ -254,7 +263,7 @@ impl CompletionFailure {
 
 #[derive(Clone, Default)]
 pub(super) struct HiddenRoundState {
-    pub(super) items: Vec<crate::protocol::ir::AiItem>,
+    pub(super) items: Vec<stravia_runtime_contract::protocol::ir::AiItem>,
     pub(super) usage: Usage,
     pub(super) round_count: u32,
 }
@@ -426,7 +435,7 @@ fn append_restored_platform_round(
             unreachable!("Platform segments contain ToolResult blocks");
         };
         AiItem {
-            role: crate::protocol::ir::Role::Tool,
+            role: stravia_runtime_contract::protocol::ir::Role::Tool,
             content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
                 tool_use_id: tool_use_id.clone(),
                 content,
@@ -534,7 +543,7 @@ pub(super) async fn complete_canonical_response(
             .map(|call| {
                 run.detached_platform_execution(
                     call,
-                    crate::proxy::context::CancellationToken::new(),
+                    stravia_runtime_contract::CancellationToken::new(),
                 )
             })
             .collect();
@@ -642,8 +651,8 @@ fn response_preserves_upstream(original: &AiResponse, candidate: &AiResponse) ->
             .iter()
             .zip(&candidate.items)
             .all(|(left, right)| {
-                crate::protocol::ir::canonical::item_hash(left)
-                    == crate::protocol::ir::canonical::item_hash(right)
+                stravia_runtime_contract::protocol::ir::canonical::item_hash(left)
+                    == stravia_runtime_contract::protocol::ir::canonical::item_hash(right)
             })
 }
 
@@ -739,7 +748,7 @@ fn record_hidden_round(context: &RequestContext, response: &AiResponse) {
     context.extensions.insert(state);
 }
 
-fn retain_hidden_round_item(item: &crate::protocol::ir::AiItem) -> bool {
+fn retain_hidden_round_item(item: &stravia_runtime_contract::protocol::ir::AiItem) -> bool {
     item.is_compaction()
         || item.output_text_ref().is_some()
         || item.thinking_ref().is_some()
@@ -814,7 +823,7 @@ mod tests {
 
     #[test]
     fn hidden_rounds_retain_typed_reasoning_items() {
-        let item = crate::protocol::ir::AiItem::reasoning(
+        let item = stravia_runtime_contract::protocol::ir::AiItem::reasoning(
             vec!["summary".into()],
             vec!["content".into()],
             Some("opaque".into()),
@@ -843,12 +852,14 @@ mod tests {
     #[test]
     fn ephemeral_response_reuse_requires_live_transport_affinity() {
         let mut request = AiRequest::new("model", Vec::new());
-        request.ext = Some(crate::protocol::ir::ProtocolExt::OpenResponses(
-            crate::protocol::ir::OpenResponsesExt {
-                store: Some(false),
-                ..Default::default()
-            },
-        ));
+        request.ext = Some(
+            stravia_runtime_contract::protocol::ir::ProtocolExt::OpenResponses(
+                stravia_runtime_contract::protocol::ir::OpenResponsesExt {
+                    store: Some(false),
+                    ..Default::default()
+                },
+            ),
+        );
         let unavailable = std::sync::atomic::AtomicBool::new(false);
         let available = std::sync::atomic::AtomicBool::new(true);
 

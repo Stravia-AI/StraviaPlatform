@@ -1,115 +1,14 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+#[cfg(test)]
 use std::time::Duration;
 
 use super::definition_store::{AgentDefinitionStore, MemoryAgentDefinitionStore};
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct AgentDefinitionId(String);
-
-impl AgentDefinitionId {
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct AgentSlug(String);
-
-impl AgentSlug {
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    pub fn tool_name(&self) -> String {
-        format!("agent_{}", self.0)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct VersionedToolId {
-    pub id: String,
-    pub version: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AgentBudgets {
-    pub total_wall_time: Duration,
-    pub working_wall_time: Duration,
-    pub model_turns: u32,
-    pub tool_calls: Option<u32>,
-    pub tool_parallelism: Option<u32>,
-    pub concurrent_runs: Option<u32>,
-    pub total_tokens: Option<u32>,
-    pub finalization_tokens: Option<u32>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ArtifactPolicy {
-    pub max_artifacts: u32,
-    pub max_bytes: u64,
-    pub allowed_mime_types: Vec<String>,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentDefinitionExposure {
-    #[default]
-    Public,
-    Internal,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct AgentDefinitionSpec {
-    pub id: AgentDefinitionId,
-    pub slug: AgentSlug,
-    pub revision: u32,
-    pub description: String,
-    pub instructions: String,
-    pub output_schema: Option<Value>,
-    pub tools: Vec<VersionedToolId>,
-    pub budgets: AgentBudgets,
-    pub artifact_policy: ArtifactPolicy,
-    pub repair_attempts: u32,
-    #[serde(default)]
-    pub exposure: AgentDefinitionExposure,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AgentDefinitionConfig {
-    pub enabled: bool,
-    pub model_id: Option<String>,
-    pub thinking_level: Option<crate::thinking::ThinkingLevel>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct AgentDefinitionRecord {
-    pub spec: AgentDefinitionSpec,
-    pub spec_hash: String,
-    pub config: AgentDefinitionConfig,
-}
-
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum AgentDefinitionError {
-    #[error("invalid Agent Definition: {0}")]
-    Invalid(String),
-    #[error("Agent Definition storage failed: {0}")]
-    Storage(String),
-    #[error("Agent Definition not found")]
-    NotFound,
-}
+use stravia_runtime_contract::agent::*;
 
 #[derive(Clone)]
 pub struct AgentDefinitionRegistry {
@@ -571,7 +470,7 @@ mod tests {
                 AgentDefinitionConfig {
                     enabled: true,
                     model_id: Some("model-1".into()),
-                    thinking_level: Some(crate::thinking::ThinkingLevel::High),
+                    thinking_level: Some(stravia_runtime_contract::thinking::ThinkingLevel::High),
                 },
             )
             .await
@@ -591,7 +490,7 @@ mod tests {
         assert_eq!(record.config.model_id.as_deref(), Some("model-1"));
         assert_eq!(
             record.config.thinking_level,
-            Some(crate::thinking::ThinkingLevel::High)
+            Some(stravia_runtime_contract::thinking::ThinkingLevel::High)
         );
 
         let mut rewritten = definition(1);

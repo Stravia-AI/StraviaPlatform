@@ -65,26 +65,3 @@ impl FetchResponse {
                 .all(|result| result.status == FetchStatus::Error)
     }
 }
-
-#[derive(Debug, thiserror::Error)]
-#[error("{code:?}: {message}")]
-pub struct WebAccessError {
-    pub code: WebAccessErrorCode,
-    pub message: String,
-}
-
-impl WebAccessError {
-    pub(super) fn invalid(message: impl Into<String>) -> Self {
-        Self {
-            code: WebAccessErrorCode::InvalidInput,
-            message: message.into(),
-        }
-    }
-
-    pub(super) fn from_code(code: WebAccessErrorCode, message: impl Into<String>) -> Self {
-        Self {
-            code,
-            message: message.into(),
-        }
-    }
-}

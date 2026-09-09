@@ -89,7 +89,7 @@ fn thinking_level_decodes_case_insensitively() {
 
     assert_eq!(
         request.reasoning.level,
-        Some(crate::thinking::ThinkingLevel::High)
+        Some(stravia_runtime_contract::thinking::ThinkingLevel::High)
     );
 }
 

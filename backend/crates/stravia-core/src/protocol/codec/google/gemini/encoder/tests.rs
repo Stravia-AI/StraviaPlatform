@@ -73,9 +73,11 @@ fn target_controls_replace_raw_gemini_thinking_config() {
             meta: None,
         }],
     );
-    request.reasoning.target_control = Some(crate::thinking::TargetThinkingControl::Effort {
-        value: "high".into(),
-    });
+    request.reasoning.target_control = Some(
+        stravia_runtime_contract::thinking::TargetThinkingControl::Effort {
+            value: "high".into(),
+        },
+    );
     request.meta.vendor.ingress.insert(
         "__google_generation_config".into(),
         serde_json::json!({"thinkingConfig": {"thinkingBudget": 12}}),

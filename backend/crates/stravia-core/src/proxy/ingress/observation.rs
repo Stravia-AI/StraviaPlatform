@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::Gateway;
 use crate::interaction_observation::{IngressObserver, IngressStart, RejectedOutcome, RunEvent};
-use crate::protocol::ids::ProtocolId;
 use crate::proxy::context::RequestContext;
+use stravia_runtime_contract::protocol::ids::ProtocolId;
 
 pub(super) fn begin(
     gateway: &Gateway,

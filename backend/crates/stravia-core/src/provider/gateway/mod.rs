@@ -31,5 +31,5 @@ crate::openai_compat_vendor!(
     GatewayVendor,
     "gateway",
     METADATA,
-    [crate::protocol::ids::GATEWAY_LANGUAGE_MODEL_V4]
+    [stravia_runtime_contract::protocol::ids::GATEWAY_LANGUAGE_MODEL_V4]
 );

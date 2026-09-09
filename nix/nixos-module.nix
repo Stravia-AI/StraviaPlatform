@@ -11,7 +11,7 @@ let
 in
 {
   options.services.stravia = {
-    enable = lib.mkEnableOption "Stravia AI protocol gateway";
+    enable = lib.mkEnableOption "Stravia Agent infra";
 
     package = lib.mkOption {
       type = lib.types.package;
@@ -54,7 +54,7 @@ in
     networking.firewall.allowedTCPPorts = lib.optionals cfg.openFirewall [ cfg.port ];
 
     systemd.services.stravia = {
-      description = "Stravia AI protocol gateway";
+      description = "Stravia Agent infra";
       documentation = [ "https://github.com/Stravia-AI/StraviaPlatform" ];
       wantedBy = [ "multi-user.target" ];
       wants = [ "network-online.target" ];

@@ -1,7 +1,7 @@
 use crate::{
     admin, admission, agent, config, db, generation_chain, history_marker, hook,
-    interaction_observation, media, migrations, model_turn, protocol, provider_catalog, proxy,
-    router, storage, turn_chain, web_access, web_search,
+    interaction_observation, media, migrations, model_turn, provider_catalog, proxy, router,
+    storage, turn_chain, web_access, web_search,
 };
 
 mod builder;
@@ -27,12 +27,15 @@ use anyhow::Context;
 use sqlx::{Pool, Postgres, SqlitePool};
 
 use crate::auth::types::AuthSession;
-use crate::hook::{Hook, HookRuntime, PlatformTool, PlatformToolRegistry};
+use crate::hook::HookRuntime;
+use crate::hook::PlatformToolRegistry;
 use crate::mcp::{McpTool, McpToolRegistry};
 use crate::router::health::HealthRegistry;
 use config::{GatewayConfig, SqlStorageConfig, StorageBackendKind};
 use storage::sql::config::SqlBackendConfig;
 use storage::{DynStorage, PostgresStorage, SqliteStorage};
+use stravia_runtime_contract::hook::Hook;
+use stravia_runtime_contract::hook::PlatformTool;
 
 const STORE_SWEEP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 type StorageRuntime = (
@@ -75,16 +78,16 @@ pub struct Gateway {
     pub(crate) observation: interaction_observation::InteractionObservation,
     pub(crate) auth_sessions: Arc<tokio::sync::RwLock<HashMap<String, AuthSession>>>,
     pub(crate) agent_definitions: agent::AgentDefinitionRegistry,
-    pub(crate) artifact_store: Option<Arc<dyn agent::ArtifactStore>>,
-    pub(crate) media_derivatives: Option<Arc<media::MediaDerivativeStore>>,
+    pub(crate) artifact_store: Option<Arc<dyn stravia_runtime_contract::artifact::ArtifactStore>>,
+    pub(crate) media_derivatives: Option<Arc<stravia_media::MediaDerivativeStore>>,
     pub(crate) media_understanding:
-        Arc<tokio::sync::RwLock<Option<media::MediaUnderstandingService>>>,
-    pub(crate) media_run_snapshots: media::MediaRunSnapshotStore,
+        Arc<tokio::sync::RwLock<Option<stravia_media::MediaUnderstandingService>>>,
+    pub(crate) media_run_snapshots: stravia_media::MediaRunSnapshotStore,
     hook_runtime: HookRuntime,
     pub(crate) mcp_registry: McpToolRegistry,
     pub(crate) history_markers: Arc<dyn history_marker::HistoryMarkerStore>,
     pub(crate) redaction: crate::reversible_redaction::ReversibleRedaction,
-    pub(crate) turn_chains: Arc<dyn turn_chain::TurnChainStore>,
+    pub(crate) turn_chains: Arc<dyn stravia_runtime_contract::turn_chain::TurnChainStore>,
     pub(crate) generation_chains: generation_chain::GenerationChain,
     pub(crate) compaction: crate::compaction::Compaction,
     pub(crate) model_turn: Arc<dyn model_turn::ModelTurnExecutor>,
@@ -92,7 +95,7 @@ pub struct Gateway {
     pub(crate) browser_path: Arc<std::sync::RwLock<Option<std::path::PathBuf>>>,
     pub(crate) browser_preferences: Arc<admin::browser::BrowserPreferences>,
     pub(crate) web_search_runner_state:
-        Arc<tokio::sync::RwLock<Option<web_search::WebSearchRunner>>>,
+        Arc<tokio::sync::RwLock<Option<stravia_web_search::WebSearchRunner>>>,
     pub(crate) web_search_config_lock: Arc<tokio::sync::Mutex<()>>,
     pub(crate) update_service: Arc<admin::updates::UpdateService>,
     pub(crate) _sqlite_pool: Option<SqlitePool>,

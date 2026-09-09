@@ -63,8 +63,8 @@ fn stream_formatter_preserves_reasoning_and_cache_usage() {
 fn stream_formatter_encodes_canonical_stream_error() {
     let mut formatter = GoogleStreamFormatter::new();
     let events = formatter.format_deltas(&[AiStreamDelta::StreamError {
-        error: crate::protocol::ir::AiError::new(
-            crate::protocol::ir::AiErrorKind::StreamMidError,
+        error: stravia_runtime_contract::protocol::ir::AiError::new(
+            stravia_runtime_contract::protocol::ir::AiErrorKind::StreamMidError,
             "stream aborted",
         )
         .with_status(500),

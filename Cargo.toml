@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["backend/crates/stravia-core", "backend/crates/stravia-devtools", "backend/apps/stravia-desktop", "backend/apps/stravia-server", "backend/crates/stravia-web-access", "backend/crates/stravia-web-access-contract"]
+members = ["backend/crates/stravia-core", "backend/crates/stravia-devtools", "backend/apps/stravia-desktop", "backend/apps/stravia-server", "backend/crates/stravia-web-access", "backend/crates/stravia-web-access-contract", "backend/crates/stravia-runtime-contract", "backend/crates/stravia-media", "backend/crates/stravia-web-search", "backend/crates/stravia-credential-protection"]
 
 [workspace.package]
 version = "0.2.0"
@@ -10,6 +10,10 @@ license = "AGPL-3.0-only"
 
 [workspace.dependencies]
 stravia-core = { path = "backend/crates/stravia-core" }
+stravia-runtime-contract = { path = "backend/crates/stravia-runtime-contract" }
+stravia-media = { path = "backend/crates/stravia-media" }
+stravia-web-search = { path = "backend/crates/stravia-web-search" }
+stravia-credential-protection = { path = "backend/crates/stravia-credential-protection" }
 stravia-server = { path = "backend/apps/stravia-server", default-features = false }
 stravia-web-access = { path = "backend/crates/stravia-web-access" }
 stravia-web-access-contract = { path = "backend/crates/stravia-web-access-contract" }

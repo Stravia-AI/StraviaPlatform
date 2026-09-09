@@ -2,10 +2,13 @@ use anyhow::Result;
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::Value;
 
-use crate::protocol::ir::AiRequest;
-use crate::protocol::ir::request::{
-    AiItem, ContentBlock, MediaSource, MessageContent, Role, ToolChoice,
-};
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::request::AiItem;
+use stravia_runtime_contract::protocol::ir::request::ContentBlock;
+use stravia_runtime_contract::protocol::ir::request::MediaSource;
+use stravia_runtime_contract::protocol::ir::request::MessageContent;
+use stravia_runtime_contract::protocol::ir::request::Role;
+use stravia_runtime_contract::protocol::ir::request::ToolChoice;
 
 pub struct AnthropicEncoder;
 
@@ -113,20 +116,20 @@ impl AnthropicEncoder {
 
         if let Some(control) = req.reasoning.target_control.as_ref() {
             let thinking = match control {
-                crate::thinking::TargetThinkingControl::Budget { value } => {
+                stravia_runtime_contract::thinking::TargetThinkingControl::Budget { value } => {
                     serde_json::json!({"type": "enabled", "budget_tokens": value})
                 }
-                crate::thinking::TargetThinkingControl::Enabled => {
+                stravia_runtime_contract::thinking::TargetThinkingControl::Enabled => {
                     serde_json::json!({"type": "enabled"})
                 }
-                crate::thinking::TargetThinkingControl::Disabled => {
+                stravia_runtime_contract::thinking::TargetThinkingControl::Disabled => {
                     serde_json::json!({"type": "disabled"})
                 }
-                crate::thinking::TargetThinkingControl::Effort { value } => {
+                stravia_runtime_contract::thinking::TargetThinkingControl::Effort { value } => {
                     obj.insert("output_config".into(), serde_json::json!({"effort": value}));
                     serde_json::json!({"type": "adaptive"})
                 }
-                crate::thinking::TargetThinkingControl::Hidden => anyhow::bail!(
+                stravia_runtime_contract::thinking::TargetThinkingControl::Hidden => anyhow::bail!(
                     "Anthropic Messages cannot represent Target Thinking Control {control:?}"
                 ),
             };

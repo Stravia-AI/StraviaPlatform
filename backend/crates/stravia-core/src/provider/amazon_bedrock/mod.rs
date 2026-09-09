@@ -11,8 +11,6 @@ use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
 use serde_json::Value;
 
 use crate::error::GatewayError;
-use crate::protocol::ids::{BEDROCK_CONVERSE_V1, ProtocolId};
-use crate::protocol::ir::{AiRequest, AiResponse};
 use crate::provider::common::pipeline;
 use crate::provider::inbound::InboundResponse;
 use crate::provider::metadata::{
@@ -24,6 +22,10 @@ use crate::provider::registry::{VendorRegistration, VendorScope};
 use crate::provider::vendor::{
     ProviderCtx, Vendor, resolve_base_url, validate_declared_credentials,
 };
+use stravia_runtime_contract::protocol::ids::BEDROCK_CONVERSE_V1;
+use stravia_runtime_contract::protocol::ids::ProtocolId;
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::AiResponse;
 
 const CREDENTIAL_FIELDS: &[CredentialFieldDef] = &[
     CredentialFieldDef {

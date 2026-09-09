@@ -1,7 +1,7 @@
 use super::*;
 
 pub(crate) struct GatewayLifecycle {
-    pub(super) cancellation: proxy::context::CancellationToken,
+    pub(super) cancellation: stravia_runtime_contract::CancellationToken,
     owners: AtomicUsize,
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
@@ -9,7 +9,7 @@ pub(crate) struct GatewayLifecycle {
 impl GatewayLifecycle {
     pub(super) fn new() -> Self {
         Self {
-            cancellation: proxy::context::CancellationToken::new(),
+            cancellation: stravia_runtime_contract::CancellationToken::new(),
             owners: AtomicUsize::new(1),
             tasks: Mutex::new(Vec::new()),
         }

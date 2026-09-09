@@ -3,8 +3,13 @@
 
 use std::collections::BTreeMap;
 
-use crate::protocol::ir::request::ToolCall;
-use crate::protocol::ir::{AiItem, AiResponse, AiStreamDelta, ContentBlock, MessageContent, Usage};
+use stravia_runtime_contract::protocol::ir::AiItem;
+use stravia_runtime_contract::protocol::ir::AiResponse;
+use stravia_runtime_contract::protocol::ir::AiStreamDelta;
+use stravia_runtime_contract::protocol::ir::ContentBlock;
+use stravia_runtime_contract::protocol::ir::MessageContent;
+use stravia_runtime_contract::protocol::ir::Usage;
+use stravia_runtime_contract::protocol::ir::request::ToolCall;
 
 enum AccumulatedItem {
     Text(String),
@@ -41,7 +46,7 @@ pub(crate) struct StreamResponseAccumulator {
 
 fn completed_item_semantic_shell(item: &AiItem) -> AiItem {
     let mut shell = item.clone();
-    if shell.role != crate::protocol::ir::Role::Assistant {
+    if shell.role != stravia_runtime_contract::protocol::ir::Role::Assistant {
         return shell;
     }
     match &mut shell.content {
@@ -396,7 +401,7 @@ fn materialize_indexed_items(
         output.insert(
             output_index,
             AiItem {
-                role: crate::protocol::ir::Role::Assistant,
+                role: stravia_runtime_contract::protocol::ir::Role::Assistant,
                 content: MessageContent::Blocks(parts.into_values().collect()),
                 tool_calls: None,
                 tool_call_id: None,
@@ -677,9 +682,9 @@ mod tests {
         let mut accumulator = StreamResponseAccumulator::default();
         let completed = AiItem::output_text("before").with_graph_metadata(
             Some("msg_1".into()),
-            Some(crate::protocol::ir::AiItemStatus::Completed),
-            crate::protocol::ir::AiItemProvenance::Provider,
-            crate::protocol::ir::AiItemAudience::Client,
+            Some(stravia_runtime_contract::protocol::ir::AiItemStatus::Completed),
+            stravia_runtime_contract::protocol::ir::AiItemProvenance::Provider,
+            stravia_runtime_contract::protocol::ir::AiItemAudience::Client,
         );
         accumulator.apply_all(&[
             AiStreamDelta::TextDelta("after".into()),
@@ -873,7 +878,7 @@ mod tests {
     fn groups_multiple_message_parts_under_the_completed_output_item() {
         let mut accumulator = StreamResponseAccumulator::default();
         let completed = AiItem {
-            role: crate::protocol::ir::Role::Assistant,
+            role: stravia_runtime_contract::protocol::ir::Role::Assistant,
             content: MessageContent::Blocks(vec![
                 ContentBlock::Text {
                     text: "provider text".into(),

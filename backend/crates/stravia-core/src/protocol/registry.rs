@@ -8,13 +8,18 @@
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
-use crate::protocol::ids::{
-    ANTHROPIC_MESSAGES_2023_06_01, BEDROCK_CONVERSE_V1, COHERE_CHAT_V2, GATEWAY_LANGUAGE_MODEL_V4,
-    GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA, OPEN_RESPONSES_2026_04_24,
-    OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1, OPENAI_COMPATIBLE_EMBEDDINGS_V1, Protocol,
-    ProtocolEndpoint, WATSONX_TEXT_CHAT_V1,
-};
 use crate::protocol::transform::ProtocolAdapter;
+use stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01;
+use stravia_runtime_contract::protocol::ids::BEDROCK_CONVERSE_V1;
+use stravia_runtime_contract::protocol::ids::COHERE_CHAT_V2;
+use stravia_runtime_contract::protocol::ids::GATEWAY_LANGUAGE_MODEL_V4;
+use stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA;
+use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
+use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
+use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_EMBEDDINGS_V1;
+use stravia_runtime_contract::protocol::ids::Protocol;
+use stravia_runtime_contract::protocol::ids::ProtocolEndpoint;
+use stravia_runtime_contract::protocol::ids::WATSONX_TEXT_CHAT_V1;
 
 /// `inventory::submit!` payload. Each registered adapter ships one of these.
 pub(crate) struct EndpointRegistration {
@@ -84,7 +89,7 @@ impl ProtocolRegistry {
     pub fn capabilities(
         &self,
         id: &ProtocolEndpoint,
-    ) -> Option<&'static crate::protocol::ids::EndpointCapabilities> {
+    ) -> Option<&'static stravia_runtime_contract::protocol::ids::EndpointCapabilities> {
         self.by_id.get(id).map(|adapter| adapter.capabilities())
     }
 
@@ -155,10 +160,10 @@ impl ProtocolRegistry {
     pub(crate) fn protocol_represents_target_thinking_control(
         &self,
         raw: &str,
-        control: &crate::thinking::TargetThinkingControl,
+        control: &stravia_runtime_contract::thinking::TargetThinkingControl,
     ) -> bool {
-        use crate::protocol::ids::Protocol;
-        use crate::thinking::TargetThinkingControl;
+        use stravia_runtime_contract::protocol::ids::Protocol;
+        use stravia_runtime_contract::thinking::TargetThinkingControl;
 
         if matches!(control, TargetThinkingControl::Hidden) {
             return true;

@@ -1,8 +1,9 @@
 use async_trait::async_trait;
 
-use crate::hook::Principal;
-use crate::protocol::ids::ProtocolId;
-use crate::protocol::ir::{AiRequest, ProtocolExt};
+use stravia_runtime_contract::Principal;
+use stravia_runtime_contract::protocol::ids::ProtocolId;
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::ProtocolExt;
 
 pub struct ContinuationTarget<'a> {
     pub namespace: &'a str,
@@ -115,7 +116,7 @@ pub(crate) fn clear_previous_response_id(request: &mut AiRequest) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::ir::OpenResponsesExt;
+    use stravia_runtime_contract::protocol::ir::OpenResponsesExt;
 
     #[test]
     fn stamped_parent_survives_protocol_extension_replacement() {

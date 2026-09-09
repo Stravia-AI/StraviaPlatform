@@ -135,9 +135,13 @@ async fn connect_remote_mcp(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hook::Principal;
-    use crate::protocol::ir::{AiItem, AiRequest, ContentBlock, MessageContent, Role};
     use axum::response::IntoResponse;
+    use stravia_runtime_contract::Principal;
+    use stravia_runtime_contract::protocol::ir::AiItem;
+    use stravia_runtime_contract::protocol::ir::AiRequest;
+    use stravia_runtime_contract::protocol::ir::ContentBlock;
+    use stravia_runtime_contract::protocol::ir::MessageContent;
+    use stravia_runtime_contract::protocol::ir::Role;
 
     async fn mcp_reply(
         axum::extract::State(output): axum::extract::State<Value>,
@@ -175,7 +179,7 @@ mod tests {
         let owner = Principal::new("owner");
         gateway
             .admin()
-            .set_setting(crate::reversible_redaction::SETTING_KEY, "true")
+            .set_setting(stravia_credential_protection::SETTING_KEY, "true")
             .await
             .unwrap();
         let mappings = gateway
@@ -218,7 +222,7 @@ mod tests {
                     AgentToolContext {
                         principal: owner.clone(),
                         turn_id: AgentTurnId::agent(),
-                        cancellation: crate::proxy::context::CancellationToken::new(),
+                        cancellation: stravia_runtime_contract::CancellationToken::new(),
                         deadline: std::time::Instant::now() + std::time::Duration::from_secs(10),
                     },
                     serde_json::json!({}),

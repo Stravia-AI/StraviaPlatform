@@ -16,10 +16,11 @@
 use std::sync::{Arc, OnceLock};
 
 use crate::db::models::Provider;
-use crate::protocol::ids::{Protocol, ProtocolEndpoint};
 use crate::provider::metadata::VendorMetadata;
 use crate::provider::vendor::Vendor;
 use crate::provider::vendor_ext::{VendorAsExt, VendorExtension};
+use stravia_runtime_contract::protocol::ids::Protocol;
+use stravia_runtime_contract::protocol::ids::ProtocolEndpoint;
 
 // ── VendorScope ───────────────────────────────────────────────────────────────
 

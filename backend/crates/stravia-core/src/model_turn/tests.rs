@@ -13,10 +13,11 @@ use crate::config::GatewayConfig;
 use crate::db::models::{
     CreateProvider, CreateRoute, CreateTarget, ProviderCredentialInput, ProviderSourceInput,
 };
-use crate::hook::Principal;
-use crate::protocol::ir::{AiResponse, AiStreamDelta};
 use crate::provider_models::CreateManualProviderModel;
-use crate::proxy::context::CancellationToken;
+use stravia_runtime_contract::CancellationToken;
+use stravia_runtime_contract::Principal;
+use stravia_runtime_contract::protocol::ir::AiResponse;
+use stravia_runtime_contract::protocol::ir::AiStreamDelta;
 
 async fn add_test_provider_model(gateway: &Gateway, provider_id: &str) {
     gateway
@@ -577,19 +578,24 @@ async fn http_continuation_not_retained_by_zdr_replays_full_request_once() {
     );
     let mut request = AiRequest::new(
         "zdr-model",
-        vec![crate::protocol::ir::AiItem {
-            role: crate::protocol::ir::Role::User,
-            content: crate::protocol::ir::MessageContent::Text("follow-up".into()),
+        vec![stravia_runtime_contract::protocol::ir::AiItem {
+            role: stravia_runtime_contract::protocol::ir::Role::User,
+            content: stravia_runtime_contract::protocol::ir::MessageContent::Text(
+                "follow-up".into(),
+            ),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
         }],
     );
     request.stream.enabled = true;
-    request.meta.source_protocol = Some(crate::protocol::ids::OPEN_RESPONSES_2026_04_24);
-    request.ext = Some(crate::protocol::ir::ProtocolExt::OpenResponses(
-        crate::protocol::ir::OpenResponsesExt::default(),
-    ));
+    request.meta.source_protocol =
+        Some(stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24);
+    request.ext = Some(
+        stravia_runtime_contract::protocol::ir::ProtocolExt::OpenResponses(
+            stravia_runtime_contract::protocol::ir::OpenResponsesExt::default(),
+        ),
+    );
 
     let turn = executor
         .execute(TurnInput::new(Principal::new(key.id), request))
@@ -750,7 +756,7 @@ async fn execute_rejects_tools_when_no_target_declares_function_tool_support() {
         .await
         .expect("API key");
     let mut request = AiRequest::new("no-tools-model", Vec::new());
-    request.tools = Some(vec![crate::protocol::ir::ToolSpec {
+    request.tools = Some(vec![stravia_runtime_contract::protocol::ir::ToolSpec {
         name: "lookup".into(),
         description: None,
         parameters: serde_json::json!({"type": "object"}),
@@ -999,7 +1005,7 @@ async fn execute_capability_grant_does_not_require_route_binding() {
 // The real MappingStore seam can hold intern or publication acknowledgements
 // after the database commits. Cancellation is not evidence that commit failed.
 struct HeldPublicationStore {
-    inner: Arc<dyn crate::reversible_redaction::store::MappingStore>,
+    inner: Arc<dyn stravia_credential_protection::store::MappingStore>,
     entered: tokio::sync::Notify,
     release: tokio::sync::Notify,
     fail: bool,
@@ -1017,13 +1023,13 @@ struct HeldInternAcknowledgement {
 }
 
 #[async_trait::async_trait]
-impl crate::reversible_redaction::store::MappingStore for HeldPublicationStore {
+impl stravia_credential_protection::store::MappingStore for HeldPublicationStore {
     async fn active(
         &self,
         principal: &Principal,
     ) -> Result<
-        Vec<crate::reversible_redaction::store::Mapping>,
-        crate::reversible_redaction::RedactionError,
+        Vec<stravia_credential_protection::store::Mapping>,
+        stravia_runtime_contract::redaction::RedactionError,
     > {
         self.inner.active(principal).await
     }
@@ -1033,8 +1039,8 @@ impl crate::reversible_redaction::store::MappingStore for HeldPublicationStore {
         principal: &Principal,
         secrets: &[String],
     ) -> Result<
-        crate::reversible_redaction::store::InternedMappings,
-        crate::reversible_redaction::RedactionError,
+        stravia_credential_protection::store::InternedMappings,
+        stravia_runtime_contract::redaction::RedactionError,
     > {
         let mut result = self.inner.intern(principal, secrets).await?;
         if let Some(held) = &self.held_intern {
@@ -1055,7 +1061,7 @@ impl crate::reversible_redaction::store::MappingStore for HeldPublicationStore {
         principal: &Principal,
         references: &[String],
         retention: Duration,
-    ) -> Result<(), crate::reversible_redaction::RedactionError> {
+    ) -> Result<(), stravia_runtime_contract::redaction::RedactionError> {
         self.starts.fetch_add(1, Ordering::SeqCst);
         if !self.fail {
             self.inner.publish(principal, references, retention).await?;
@@ -1066,7 +1072,7 @@ impl crate::reversible_redaction::store::MappingStore for HeldPublicationStore {
             cancellation.cancel();
         }
         if self.fail {
-            Err(crate::reversible_redaction::RedactionError::Storage)
+            Err(stravia_runtime_contract::redaction::RedactionError::Storage)
         } else {
             Ok(())
         }
@@ -1077,13 +1083,15 @@ impl crate::reversible_redaction::store::MappingStore for HeldPublicationStore {
         principal: &Principal,
         references: &[String],
         retention: Duration,
-    ) -> Result<(), crate::reversible_redaction::RedactionError> {
+    ) -> Result<(), stravia_runtime_contract::redaction::RedactionError> {
         self.inner
             .extend_retention(principal, references, retention)
             .await
     }
 
-    async fn cleanup_expired(&self) -> Result<u64, crate::reversible_redaction::RedactionError> {
+    async fn cleanup_expired(
+        &self,
+    ) -> Result<u64, stravia_runtime_contract::redaction::RedactionError> {
         self.inner.cleanup_expired().await
     }
 }
@@ -1269,7 +1277,7 @@ async fn committed_discovery_survives_replacement_failure_but_failed_intern_crea
             .redaction
             .protect(&principal, &mut request, Some(&observer))
             .await,
-        Err(crate::reversible_redaction::RedactionError::InvalidText)
+        Err(stravia_runtime_contract::redaction::RedactionError::InvalidText)
     ));
     observer.finish(crate::interaction_observation::RunOutcome {
         status: "failed".into(),
@@ -1302,7 +1310,7 @@ async fn committed_discovery_survives_replacement_failure_but_failed_intern_crea
             .redaction
             .protect(&other, &mut request, Some(&observer))
             .await,
-        Err(crate::reversible_redaction::RedactionError::Storage)
+        Err(stravia_runtime_contract::redaction::RedactionError::Storage)
     ));
     drop(observer);
     assert!(store.inner.active(&other).await.unwrap().is_empty());
@@ -1854,7 +1862,9 @@ async fn codex_native_compaction_uses_unary_and_replayable_responses_websocket()
                         .is_some(),
                     "complete state is durable before delivery"
                 );
-                native = crate::protocol::codec::open_responses::native_compaction_item(&item);
+                native = stravia_runtime_contract::protocol::ir::canonical::native_compaction_item(
+                    &item,
+                );
             }
             CanonicalEvent::Completed(_) => break,
             _ => {}

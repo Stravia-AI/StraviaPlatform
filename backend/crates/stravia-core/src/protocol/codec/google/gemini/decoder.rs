@@ -7,12 +7,22 @@
 use anyhow::Result;
 use serde_json::Value;
 
-use crate::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA;
-use crate::protocol::ir::{
-    AiItem, AiRequest, ContentBlock, GenerationConfig, GoogleExt, MediaSource, MessageContent,
-    ProtocolExt, ReasoningConfig, Role, SafetySettings, StreamConfig, ToolCall, ToolChoice,
-    ToolSpec,
-};
+use stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA;
+use stravia_runtime_contract::protocol::ir::AiItem;
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::ContentBlock;
+use stravia_runtime_contract::protocol::ir::GenerationConfig;
+use stravia_runtime_contract::protocol::ir::GoogleExt;
+use stravia_runtime_contract::protocol::ir::MediaSource;
+use stravia_runtime_contract::protocol::ir::MessageContent;
+use stravia_runtime_contract::protocol::ir::ProtocolExt;
+use stravia_runtime_contract::protocol::ir::ReasoningConfig;
+use stravia_runtime_contract::protocol::ir::Role;
+use stravia_runtime_contract::protocol::ir::SafetySettings;
+use stravia_runtime_contract::protocol::ir::StreamConfig;
+use stravia_runtime_contract::protocol::ir::ToolCall;
+use stravia_runtime_contract::protocol::ir::ToolChoice;
+use stravia_runtime_contract::protocol::ir::ToolSpec;
 
 use super::types::*;
 
@@ -162,9 +172,9 @@ impl GoogleDecoder {
             let effort_level = match tc.get("thinkingLevel") {
                 None => None,
                 Some(Value::String(value)) => Some(
-                    crate::thinking::ThinkingLevel::from_wire(value).map_err(|_| {
-                        anyhow::anyhow!("unsupported Gemini thinkingLevel: {value}")
-                    })?,
+                    stravia_runtime_contract::thinking::ThinkingLevel::from_wire(value).map_err(
+                        |_| anyhow::anyhow!("unsupported Gemini thinkingLevel: {value}"),
+                    )?,
                 ),
                 Some(_) => anyhow::bail!("Gemini thinkingLevel must be a string"),
             };
@@ -177,21 +187,24 @@ impl GoogleDecoder {
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
             let level = effort_level
-                .or_else(|| budget.map(crate::thinking::ThinkingLevel::from_budget))
+                .or_else(|| {
+                    budget.map(stravia_runtime_contract::thinking::ThinkingLevel::from_budget)
+                })
                 .or_else(|| {
                     tc.get("includeThoughts")
                         .and_then(Value::as_bool)
                         .map(|enabled| {
                             if enabled {
-                                crate::thinking::ThinkingLevel::Medium
+                                stravia_runtime_contract::thinking::ThinkingLevel::Medium
                             } else {
-                                crate::thinking::ThinkingLevel::Off
+                                stravia_runtime_contract::thinking::ThinkingLevel::Off
                             }
                         })
                 });
             ReasoningConfig {
-                enabled: level.is_some_and(|level| level != crate::thinking::ThinkingLevel::Off)
-                    || include_thoughts,
+                enabled: level.is_some_and(|level| {
+                    level != stravia_runtime_contract::thinking::ThinkingLevel::Off
+                }) || include_thoughts,
                 budget_tokens: budget,
                 level,
                 ..Default::default()
@@ -375,7 +388,9 @@ fn decode_content(content: GoogleContent) -> Result<AiItem> {
                 blocks.push(ContentBlock::ToolResult {
                     tool_use_id,
                     content: function_response.response,
-                    content_kind: Some(crate::protocol::ir::ToolResultContentKind::Json),
+                    content_kind: Some(
+                        stravia_runtime_contract::protocol::ir::ToolResultContentKind::Json,
+                    ),
                     is_error: None,
                     cache_control: None,
                 });

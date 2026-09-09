@@ -1,4 +1,4 @@
--- Stravia AI Gateway - PostgreSQL Final Schema
+-- Stravia Agent infra - PostgreSQL Final Schema
 --
 -- This file represents the authoritative final-state schema after all migrations.
 -- It is a DBA review artifact only. Do not execute it to initialize a Stravia

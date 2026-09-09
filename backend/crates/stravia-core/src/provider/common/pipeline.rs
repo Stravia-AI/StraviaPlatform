@@ -45,7 +45,7 @@ where
 ///  openai_compatible_thinking → codec_encode → post_encode → construct_request`.
 pub async fn build_request<V>(
     vendor: &V,
-    req: &mut crate::protocol::ir::AiRequest,
+    req: &mut stravia_runtime_contract::protocol::ir::AiRequest,
     ctx: &crate::provider::vendor::ProviderCtx<'_>,
 ) -> Result<crate::provider::outbound::OutboundRequest, GatewayError>
 where
@@ -66,7 +66,7 @@ where
 
 pub(crate) async fn build_request_for_purpose<V>(
     vendor: &V,
-    req: &mut crate::protocol::ir::AiRequest,
+    req: &mut stravia_runtime_contract::protocol::ir::AiRequest,
     ctx: &crate::provider::vendor::ProviderCtx<'_>,
     purpose: crate::model_turn::ModelTurnPurpose,
 ) -> Result<crate::provider::outbound::OutboundRequest, GatewayError>
@@ -227,7 +227,7 @@ pub async fn parse_response<V>(
     vendor: &V,
     resp: crate::provider::inbound::InboundResponse,
     ctx: &crate::provider::vendor::ProviderCtx<'_>,
-) -> Result<crate::protocol::ir::AiResponse, GatewayError>
+) -> Result<stravia_runtime_contract::protocol::ir::AiResponse, GatewayError>
 where
     V: crate::provider::vendor::Vendor,
 {
@@ -298,7 +298,7 @@ pub(crate) async fn normalize_stream_chunk(
 pub(crate) async fn normalize_stream_deltas(
     vendor: &dyn crate::provider::vendor::Vendor,
     ctx: &crate::provider::vendor::ProviderCtx<'_>,
-    deltas: &mut [crate::protocol::ir::AiStreamDelta],
+    deltas: &mut [stravia_runtime_contract::protocol::ir::AiStreamDelta],
 ) -> Result<(), GatewayError> {
     let vendor_ctx = ctx.to_vendor_ctx();
     if let Some(extension) = resolve_channel_override(ctx) {
@@ -352,16 +352,17 @@ mod tests {
     use crate::GatewayConfig;
     use crate::db::models::Provider;
     use crate::error::GatewayError;
-    use crate::protocol::ids::{
-        ANTHROPIC_MESSAGES_2023_06_01, OPEN_RESPONSES_2026_04_24,
-        OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1, ProtocolId,
-    };
-    use crate::protocol::ir::{AiRequest, AiResponse};
     use crate::provider::inbound::InboundResponse;
     use crate::provider::openai::OpenAiVendor;
     use crate::provider::outbound::OutboundRequest;
     use crate::provider::registry::VendorScope;
     use crate::provider::vendor::{ProviderCtx, Vendor};
+    use stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01;
+    use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
+    use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
+    use stravia_runtime_contract::protocol::ids::ProtocolId;
+    use stravia_runtime_contract::protocol::ir::AiRequest;
+    use stravia_runtime_contract::protocol::ir::AiResponse;
 
     use async_trait::async_trait;
 
@@ -486,7 +487,9 @@ mod tests {
     }
 
     fn minimal_chat_request() -> AiRequest {
-        use crate::protocol::ir::{AiItem, MessageContent, Role};
+        use stravia_runtime_contract::protocol::ir::AiItem;
+        use stravia_runtime_contract::protocol::ir::MessageContent;
+        use stravia_runtime_contract::protocol::ir::Role;
         let messages = vec![AiItem {
             role: Role::User,
             content: MessageContent::Text("ping".into()),

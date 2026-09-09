@@ -1,7 +1,7 @@
 <h1 align="center">Stravia</h1>
 
 <p align="center">
-  本地运行、可自托管的 AI 接入与执行平台，统一模型协议，执行平台工具与内置 Agent，并集中管理访问、历史和用量。
+  本地运行、可自托管的 Agent infra（智能体基础设施）——提供模型接入、工具执行与内置 Agent 运行能力，统一访问控制、历史与可观测性。
 </p>
 
 <p align="center">
@@ -12,9 +12,11 @@
 
 ## 项目简介
 
-Stravia 连接 AI 客户端、模型提供商与平台自有能力。客户端继续使用自身支持的协议；Stravia 负责解析虚拟模型、选择上游后端，并在必要时转换请求与响应。
+Stravia 定位为 **Agent infra（智能体基础设施）**，面向使用 AI 编程客户端或构建智能体应用的开发者，将模型接入、平台自有工具执行与有界内置 Agent 循环整合到一个可本地部署的系统中。
 
-除了路由，Stravia 还会执行平台自有工具，将结果送回模型并继续后续轮次。其有界 Agent Runner 驱动本地 Agent 联网搜索，也被多模态理解复用。这些能力通过兼容的模型请求与 MCP 提供，共享身份、访问控制、历史、用量统计和诊断。
+协议网关是模型接入层，而不是产品的全部。客户端继续使用自身支持的协议；Stravia 负责解析虚拟模型、选择上游后端，并在必要时转换请求与响应。
+
+执行层运行平台自有工具，将结果送回模型并继续后续轮次。其有界 Agent Runner 驱动本地 Agent 联网搜索，也被多模态理解复用。这些能力通过兼容的模型请求与 MCP 提供；共享的身份、访问控制、历史、用量统计和诊断让开发者统一管理模型接入与平台执行。
 
 Agent 行为由平台实现定义并进行版本管理。管理员配置受支持的能力设置和模型绑定；Stravia 不是用户自定义 Agent 或可视化工作流构建器。
 
@@ -393,12 +395,18 @@ idle_timeout_seconds = 300
 
 ```text
 backend/crates/stravia-core/       与传输层无关的网关、协议、提供商、存储和管理服务
+backend/crates/stravia-runtime-contract/ 共用 canonical IR、Hook、Agent、Artifact 与历史契约
+backend/crates/stravia-media/      媒体理解实现与配置策略
+backend/crates/stravia-web-search/ 搜索 Backend、报告、工具与配置策略
+backend/crates/stravia-credential-protection/ 本地凭据检测、可逆保护与映射存储
 backend/crates/stravia-devtools/   开发与协议 fixture 工具
 backend/apps/stravia-server/       独立统一 HTTP 服务端
 backend/apps/stravia-desktop/      Tauri 桌面外壳
 frontend/stravia-webui/            SvelteKit 管理界面
 tests/e2e/                         Python 后端 E2E 套件与协议录制样本
 ```
+
+三个能力 crate 由 `stravia-core` 在编译期装配，只依赖共享契约，不反向依赖 core。Core 提供模型执行、授权、存储和观测的 Host Adapter。不引入动态加载或热卸载，HTTP/MCP 契约及持久化数据格式不变。Rust 调用方从 `stravia-runtime-contract` 导入共享类型，从各能力所属 crate 导入能力类型。
 
 常用命令：
 

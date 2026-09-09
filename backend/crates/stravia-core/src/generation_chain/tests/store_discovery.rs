@@ -122,7 +122,7 @@ async fn artifact_identity_participates_in_reusable_prefix_semantics() {
         .await
         .expect("second Artifact");
 
-    let request_for = |artifact_id: &crate::agent::ArtifactId| {
+    let request_for = |artifact_id: &stravia_runtime_contract::artifact::ArtifactId| {
         responses_request(vec![AiItem {
             role: Role::User,
             content: MessageContent::Blocks(vec![ContentBlock::Image {
@@ -138,7 +138,7 @@ async fn artifact_identity_participates_in_reusable_prefix_semantics() {
             meta: None,
         }])
     };
-    let artifact_store: Arc<dyn crate::agent::ArtifactStore> = artifacts;
+    let artifact_store: Arc<dyn stravia_runtime_contract::artifact::ArtifactStore> = artifacts;
     let chain = GenerationChain::from_turn_chain(
         Arc::new(crate::turn_chain::test_store().await),
         Duration::from_secs(60),
@@ -160,16 +160,16 @@ async fn artifact_identity_participates_in_reusable_prefix_semantics() {
     first_provider_item.meta = None;
     second_provider_item.meta = None;
     assert_eq!(
-        crate::protocol::ir::canonical::item_value(&first_provider_item),
-        crate::protocol::ir::canonical::item_value(&second_provider_item),
+        stravia_runtime_contract::protocol::ir::canonical::item_value(&first_provider_item),
+        stravia_runtime_contract::protocol::ir::canonical::item_value(&second_provider_item),
         "same bytes must produce the same provider-visible media"
     );
     assert_ne!(
-        crate::protocol::ir::canonical::item_value(&first_request.items[0]),
-        crate::protocol::ir::canonical::item_value(&second_request.items[0]),
+        stravia_runtime_contract::protocol::ir::canonical::item_value(&first_request.items[0]),
+        stravia_runtime_contract::protocol::ir::canonical::item_value(&second_request.items[0]),
         "distinct Artifact identities must not share a reusable prefix"
     );
-    let missing = crate::agent::ArtifactId::new("missing");
+    let missing = stravia_runtime_contract::artifact::ArtifactId::new("missing");
     assert_eq!(
         chain
             .begin(owner, request_for(&missing))
@@ -289,7 +289,7 @@ async fn previous_response_materializes_the_ordered_item_graph_without_collapsin
             AiItemProvenance::Provider,
             AiItemAudience::Client,
         ),
-        AiItem::function_call(crate::protocol::ir::ToolCall {
+        AiItem::function_call(stravia_runtime_contract::protocol::ir::ToolCall {
             id: "call_1".into(),
             name: "lookup".into(),
             arguments: "{}".into(),
@@ -355,7 +355,7 @@ async fn automatic_parent_matches_a_combined_assistant_turn() {
     let mut response = AiResponse::new("upstream", "model");
     response.items = vec![
         AiItem::output_text("planning"),
-        AiItem::function_call(crate::protocol::ir::ToolCall {
+        AiItem::function_call(stravia_runtime_contract::protocol::ir::ToolCall {
             id: "call_1".into(),
             name: "lookup".into(),
             arguments: "{\"value\":1}".into(),
@@ -364,18 +364,18 @@ async fn automatic_parent_matches_a_combined_assistant_turn() {
     let assistant = AiItem {
         role: Role::Assistant,
         content: MessageContent::Blocks(vec![
-            crate::protocol::ir::ContentBlock::Text {
+            stravia_runtime_contract::protocol::ir::ContentBlock::Text {
                 text: "planning".into(),
                 cache_control: None,
             },
-            crate::protocol::ir::ContentBlock::ToolUse {
+            stravia_runtime_contract::protocol::ir::ContentBlock::ToolUse {
                 id: "call_1".into(),
                 name: "lookup".into(),
                 input: serde_json::json!({"value": 1}),
                 cache_control: None,
             },
         ]),
-        tool_calls: Some(vec![crate::protocol::ir::ToolCall {
+        tool_calls: Some(vec![stravia_runtime_contract::protocol::ir::ToolCall {
             id: "call_1".into(),
             name: "lookup".into(),
             arguments: "{\"value\":1}".into(),
@@ -500,13 +500,15 @@ async fn stable_session_does_not_link_semantically_changed_history() {
     let original_user = AiItem {
         role: Role::User,
         content: MessageContent::Blocks(vec![
-            crate::protocol::ir::ContentBlock::Text {
+            stravia_runtime_contract::protocol::ir::ContentBlock::Text {
                 text: "first".into(),
                 cache_control: None,
             },
-            crate::protocol::ir::ContentBlock::Text {
+            stravia_runtime_contract::protocol::ir::ContentBlock::Text {
                 text: "transient reminder".into(),
-                cache_control: Some(crate::protocol::ir::CacheControl::ephemeral()),
+                cache_control: Some(
+                    stravia_runtime_contract::protocol::ir::CacheControl::ephemeral(),
+                ),
             },
         ]),
         tool_calls: None,
@@ -855,7 +857,7 @@ async fn legacy_tool_meta_cannot_authorize_restored_encoded_payloads() {
     .await
     .unwrap();
     let owner = principal("legacy-tool-owner");
-    let key = crate::protocol::ir::TOOL_RESULT_CONTENT_KIND_META;
+    let key = stravia_runtime_contract::protocol::ir::TOOL_RESULT_CONTENT_KIND_META;
     let business = serde_json::json!([
         {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "opaque"},
          (key): "business-data"}
@@ -922,9 +924,9 @@ async fn legacy_tool_meta_cannot_authorize_restored_encoded_payloads() {
             assert_eq!(text, &business);
         }
         for _ in 0..2 {
-            crate::hook::ContextSnapshot::from_request(
+            stravia_runtime_contract::hook::ContextSnapshot::from_request(
                 &request,
-                crate::hook::ContextCompleteness::Full,
+                stravia_runtime_contract::hook::ContextCompleteness::Full,
             )
             .write_to_request(&mut request);
         }
@@ -949,7 +951,7 @@ async fn legacy_tool_meta_cannot_authorize_restored_encoded_payloads() {
             .unwrap();
         assert!(matches!(
             gateway.redaction.protect(&owner, &mut request, None).await,
-            Err(crate::reversible_redaction::RedactionError::AmbiguousToolResult)
+            Err(stravia_runtime_contract::redaction::RedactionError::AmbiguousToolResult)
         ));
     }
 }
@@ -973,7 +975,7 @@ async fn persisted_tool_text_semantics_keep_plain_secrets_and_media_distinct() {
     let plain = AiItem::function_call_output("plain", serde_json::Value::String(encoded.clone()));
     let mut media = AiItem::function_call_output("media", serde_json::Value::String(encoded));
     media.meta = Some(serde_json::json!({
-        (crate::protocol::ir::TOOL_RESULT_CONTENT_KIND_META): "content_blocks"
+        (stravia_runtime_contract::protocol::ir::TOOL_RESULT_CONTENT_KIND_META): "content_blocks"
     }));
     let store = GenerationChainStore::from_turn_chain(
         Arc::clone(&gateway.turn_chains),
@@ -1007,9 +1009,9 @@ async fn persisted_tool_text_semantics_keep_plain_secrets_and_media_distinct() {
         .await
         .unwrap();
     for _ in 0..2 {
-        crate::hook::ContextSnapshot::from_request(
+        stravia_runtime_contract::hook::ContextSnapshot::from_request(
             &request,
-            crate::hook::ContextCompleteness::Full,
+            stravia_runtime_contract::hook::ContextCompleteness::Full,
         )
         .write_to_request(&mut request);
     }
@@ -1436,7 +1438,7 @@ fn target_continuation_namespace_includes_every_hard_request_control() {
     instructions.instructions = Some("different".into());
     variants.push(instructions);
     let mut tools = original.clone();
-    tools.tools = Some(vec![crate::protocol::ir::ToolSpec {
+    tools.tools = Some(vec![stravia_runtime_contract::protocol::ir::ToolSpec {
         name: "lookup".into(),
         description: None,
         parameters: serde_json::json!({"type": "object"}),
@@ -1446,10 +1448,12 @@ fn target_continuation_namespace_includes_every_hard_request_control() {
     }]);
     variants.push(tools);
     let mut reasoning = original.clone();
-    reasoning.reasoning.effort = Some(crate::protocol::ir::ReasoningEffort::High);
+    reasoning.reasoning.effort =
+        Some(stravia_runtime_contract::protocol::ir::ReasoningEffort::High);
     variants.push(reasoning);
     let mut response_format = original;
-    response_format.response_format = Some(crate::protocol::ir::ResponseFormat::JsonObject);
+    response_format.response_format =
+        Some(stravia_runtime_contract::protocol::ir::ResponseFormat::JsonObject);
     variants.push(response_format);
 
     for variant in variants {
@@ -1492,8 +1496,9 @@ fn exact_item_comparison_keeps_reasoning_media_and_unknown_semantics() {
         panic!("image block");
     };
     *detail = Some("low".into());
-    let image_value = crate::protocol::ir::canonical::item_value(&image);
-    let changed_image_value = crate::protocol::ir::canonical::item_value(&changed_image);
+    let image_value = stravia_runtime_contract::protocol::ir::canonical::item_value(&image);
+    let changed_image_value =
+        stravia_runtime_contract::protocol::ir::canonical::item_value(&changed_image);
     assert_ne!(
         image_value, changed_image_value,
         "media semantics collapsed: {image_value}"

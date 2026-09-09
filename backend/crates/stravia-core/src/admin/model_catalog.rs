@@ -9,7 +9,7 @@ pub(super) fn resolve_models_endpoint(provider: &Provider) -> Option<String> {
     }
 
     let base = provider.base_url.trim_end_matches('/');
-    use crate::protocol::ids::Protocol;
+    use stravia_runtime_contract::protocol::ids::Protocol;
     match crate::protocol::registry::ProtocolRegistry::global()
         .parse_protocol(&provider.protocol)?
     {

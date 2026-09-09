@@ -1,5 +1,6 @@
 use super::*;
-use crate::protocol::ir::{AiRequest, MessageContent};
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::MessageContent;
 
 #[test]
 fn encodes_ai_sdk_v4_language_model_wire() {

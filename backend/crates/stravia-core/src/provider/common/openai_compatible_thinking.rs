@@ -8,10 +8,10 @@
 use serde_json::{Value, json};
 
 use crate::db::models::Provider;
-use crate::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
-use crate::protocol::ir::AiRequest;
 use crate::provider::vendor::ProviderCtx;
-use crate::thinking::TargetThinkingControl;
+use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::thinking::TargetThinkingControl;
 
 pub(crate) fn supports_toggle(provider: &Provider, model: &str) -> bool {
     let provider_id = provider_identity(provider.preset_key.as_deref(), provider.vendor.as_deref());

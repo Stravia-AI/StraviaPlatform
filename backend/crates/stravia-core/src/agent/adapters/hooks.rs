@@ -13,7 +13,7 @@ impl AgentDefinitionHook {
 impl Hook for AgentDefinitionHook {
     fn descriptor(&self) -> HookDescriptor {
         HookDescriptor {
-            id: crate::hook::HookId::new("agent-definitions"),
+            id: stravia_runtime_contract::hook::HookId::new("agent-definitions"),
             request_kinds: vec![RequestKind::Generation],
             event_kinds: vec![
                 EventKind::Request,
@@ -29,7 +29,8 @@ impl Hook for AgentDefinitionHook {
     fn create_session(&self, context: &SessionContext) -> Box<dyn HookSession> {
         Box::new(AgentDefinitionHookSession {
             definitions: self.definitions.clone(),
-            expose_turn_ids: context.ingress == crate::protocol::ids::OPEN_RESPONSES_2026_04_24,
+            expose_turn_ids: context.ingress
+                == stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24,
             turn_ids: Vec::new(),
         })
     }
@@ -75,7 +76,7 @@ impl HookSession for AgentDefinitionHookSession {
                 response
                     .items
                     .extend(self.turn_ids.drain(..).map(|turn_id| {
-                        crate::protocol::ir::AiItem::unknown(serde_json::json!({
+                        stravia_runtime_contract::protocol::ir::AiItem::unknown(serde_json::json!({
                             "id": format!("agent_{turn_id}"),
                             "type": "stravia:agent_result",
                             "status": "completed",

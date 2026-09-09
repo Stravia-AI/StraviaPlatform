@@ -1,14 +1,19 @@
-use crate::protocol::ids::OPEN_RESPONSES_2026_04_24;
 use anyhow::Result;
 use reqwest::header::HeaderMap;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
 
-use crate::protocol::ir::request::{
-    AiItem, ContentBlock, MediaSource, MessageContent, Role, ToolChoice, ToolSpec,
-};
-use crate::protocol::ir::{AiRequest, ToolCall};
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::ToolCall;
+use stravia_runtime_contract::protocol::ir::request::AiItem;
+use stravia_runtime_contract::protocol::ir::request::ContentBlock;
+use stravia_runtime_contract::protocol::ir::request::MediaSource;
+use stravia_runtime_contract::protocol::ir::request::MessageContent;
+use stravia_runtime_contract::protocol::ir::request::Role;
+use stravia_runtime_contract::protocol::ir::request::ToolChoice;
+use stravia_runtime_contract::protocol::ir::request::ToolSpec;
 
 pub struct OpenAIEncoder;
 
@@ -45,7 +50,7 @@ impl OpenAIEncoder {
             obj.insert("top_p".into(), p.into());
         }
         match req.reasoning.target_control.as_ref() {
-            Some(crate::thinking::TargetThinkingControl::Effort { value }) => {
+            Some(stravia_runtime_contract::thinking::TargetThinkingControl::Effort { value }) => {
                 obj.insert("reasoning_effort".into(), Value::String(value.clone()));
             }
             None => {}

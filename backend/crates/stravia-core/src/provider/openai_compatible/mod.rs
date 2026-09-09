@@ -32,5 +32,5 @@ crate::openai_compat_vendor!(
     OpenAICompatibleVendor,
     "openai-compatible",
     METADATA,
-    [crate::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1]
+    [stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1]
 );

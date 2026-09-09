@@ -19,9 +19,9 @@ async fn delivered_root_hook_response_is_continuable_without_a_target() {
         .await
         .expect("Principal");
     let mut request = AiRequest::new("__lifecycle_short_circuit__", Vec::new());
-    request.ext = Some(crate::protocol::ir::ProtocolExt::OpenResponses(
-        Default::default(),
-    ));
+    request.ext = Some(
+        stravia_runtime_contract::protocol::ir::ProtocolExt::OpenResponses(Default::default()),
+    );
     let response = execute_request_with_headers(
         gateway.clone(),
         headers.clone(),
@@ -37,12 +37,14 @@ async fn delivered_root_hook_response_is_continuable_without_a_target() {
     let root: serde_json::Value = serde_json::from_slice(&body).expect("root response");
     let root_id = root["id"].as_str().expect("root identity").to_owned();
     let mut continuation = AiRequest::new("__lifecycle_short_circuit__", Vec::new());
-    continuation.ext = Some(crate::protocol::ir::ProtocolExt::OpenResponses(
-        crate::protocol::ir::OpenResponsesExt {
-            previous_response_id: Some(root_id.clone()),
-            ..Default::default()
-        },
-    ));
+    continuation.ext = Some(
+        stravia_runtime_contract::protocol::ir::ProtocolExt::OpenResponses(
+            stravia_runtime_contract::protocol::ir::OpenResponsesExt {
+                previous_response_id: Some(root_id.clone()),
+                ..Default::default()
+            },
+        ),
+    );
     assert_eq!(
         gateway
             .generation_chains
@@ -132,10 +134,10 @@ async fn automatic_parent_discovery_failure_falls_back_to_a_chat_root() {
     let model = "parent-discovery-fallback";
     configure_route(&gateway, model, &[base_url]).await;
     let headers = authorized_headers(&gateway).await;
-    let mut first = crate::protocol::ir::AiItem::output_text("first");
-    first.role = crate::protocol::ir::Role::User;
-    let mut second = crate::protocol::ir::AiItem::output_text("second");
-    second.role = crate::protocol::ir::Role::User;
+    let mut first = stravia_runtime_contract::protocol::ir::AiItem::output_text("first");
+    first.role = stravia_runtime_contract::protocol::ir::Role::User;
+    let mut second = stravia_runtime_contract::protocol::ir::AiItem::output_text("second");
+    second.role = stravia_runtime_contract::protocol::ir::Role::User;
 
     let response = execute_non_stream_request_with_headers(
         gateway,
@@ -184,12 +186,12 @@ async fn embeddings_skip_generation_chain_begin() {
     let mut request = AiRequest::new(
         model,
         vec![
-            crate::protocol::ir::AiItem::output_text("history 1"),
-            crate::protocol::ir::AiItem::output_text("history 2"),
+            stravia_runtime_contract::protocol::ir::AiItem::output_text("history 1"),
+            stravia_runtime_contract::protocol::ir::AiItem::output_text("history 2"),
         ],
     );
-    request.embedding = Some(crate::protocol::ir::EmbeddingRequest {
-        input: crate::protocol::ir::EmbeddingInput::Text("embed me".into()),
+    request.embedding = Some(stravia_runtime_contract::protocol::ir::EmbeddingRequest {
+        input: stravia_runtime_contract::protocol::ir::EmbeddingInput::Text("embed me".into()),
         dimensions: None,
         encoding_format: None,
         user: None,
@@ -245,12 +247,14 @@ async fn delivered_terminal_publishes_response_chain() {
 
     let mut continuation = AiRequest::new("delivered-terminal", Vec::new());
     continuation.stream.enabled = true;
-    continuation.ext = Some(crate::protocol::ir::ProtocolExt::OpenResponses(
-        crate::protocol::ir::OpenResponsesExt {
-            previous_response_id: Some(response_id.clone()),
-            ..Default::default()
-        },
-    ));
+    continuation.ext = Some(
+        stravia_runtime_contract::protocol::ir::ProtocolExt::OpenResponses(
+            stravia_runtime_contract::protocol::ir::OpenResponsesExt {
+                previous_response_id: Some(response_id.clone()),
+                ..Default::default()
+            },
+        ),
+    );
     let headers = authorized_headers(&gateway).await;
     let continuation_response = execute(RunInput {
         gateway: gateway.clone(),
@@ -301,20 +305,22 @@ async fn store_false_keeps_the_gateway_generation_chain_available() {
 
     let mut first = AiRequest::new(
         model,
-        vec![crate::protocol::ir::AiItem {
-            role: crate::protocol::ir::Role::User,
-            content: crate::protocol::ir::MessageContent::Text("first".into()),
+        vec![stravia_runtime_contract::protocol::ir::AiItem {
+            role: stravia_runtime_contract::protocol::ir::Role::User,
+            content: stravia_runtime_contract::protocol::ir::MessageContent::Text("first".into()),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
         }],
     );
-    first.ext = Some(crate::protocol::ir::ProtocolExt::OpenResponses(
-        crate::protocol::ir::OpenResponsesExt {
-            store: Some(false),
-            ..Default::default()
-        },
-    ));
+    first.ext = Some(
+        stravia_runtime_contract::protocol::ir::ProtocolExt::OpenResponses(
+            stravia_runtime_contract::protocol::ir::OpenResponsesExt {
+                store: Some(false),
+                ..Default::default()
+            },
+        ),
+    );
     let first_response = execute_request_with_headers(
         gateway.clone(),
         headers.clone(),
@@ -335,21 +341,23 @@ async fn store_false_keeps_the_gateway_generation_chain_available() {
 
     let mut continuation = AiRequest::new(
         model,
-        vec![crate::protocol::ir::AiItem {
-            role: crate::protocol::ir::Role::User,
-            content: crate::protocol::ir::MessageContent::Text("second".into()),
+        vec![stravia_runtime_contract::protocol::ir::AiItem {
+            role: stravia_runtime_contract::protocol::ir::Role::User,
+            content: stravia_runtime_contract::protocol::ir::MessageContent::Text("second".into()),
             tool_calls: None,
             tool_call_id: None,
             meta: None,
         }],
     );
-    continuation.ext = Some(crate::protocol::ir::ProtocolExt::OpenResponses(
-        crate::protocol::ir::OpenResponsesExt {
-            previous_response_id: Some(response_id),
-            store: Some(false),
-            ..Default::default()
-        },
-    ));
+    continuation.ext = Some(
+        stravia_runtime_contract::protocol::ir::ProtocolExt::OpenResponses(
+            stravia_runtime_contract::protocol::ir::OpenResponsesExt {
+                previous_response_id: Some(response_id),
+                store: Some(false),
+                ..Default::default()
+            },
+        ),
+    );
     let continuation_response = execute_request_with_headers(
         gateway,
         headers,

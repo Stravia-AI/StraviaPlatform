@@ -5,7 +5,9 @@ fn server_tool_results_keep_the_anthropic_wire_discriminator() {
     let encoded = encode_content_block_for_anthropic(&ContentBlock::ServerToolResult {
         tool_use_id: "srv_123".into(),
         content: serde_json::json!([{"type": "text", "text": "result"}]),
-        content_kind: Some(crate::protocol::ir::ToolResultContentKind::ContentBlocks),
+        content_kind: Some(
+            stravia_runtime_contract::protocol::ir::ToolResultContentKind::ContentBlocks,
+        ),
         server_type: Some("web_search_tool_result".into()),
         cache_control: None,
     });
@@ -63,9 +65,11 @@ fn effort_control_encodes_adaptive_without_replaying_raw_thinking() {
             meta: None,
         }],
     );
-    request.reasoning.target_control = Some(crate::thinking::TargetThinkingControl::Effort {
-        value: "high".into(),
-    });
+    request.reasoning.target_control = Some(
+        stravia_runtime_contract::thinking::TargetThinkingControl::Effort {
+            value: "high".into(),
+        },
+    );
     request.meta.vendor.ingress.insert(
         "__anthropic_thinking".into(),
         serde_json::json!({"type": "disabled"}),

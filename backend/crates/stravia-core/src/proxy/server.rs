@@ -94,13 +94,19 @@ async fn observe_inference_ingress(
     } else {
         match request.uri().path() {
             "/v1/chat/completions" => {
-                Some(crate::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1)
+                Some(stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1)
             }
-            "/v1/responses" => Some(crate::protocol::ids::OPEN_RESPONSES_2026_04_24),
-            "/v1/messages" => Some(crate::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01),
-            "/v1/embeddings" => Some(crate::protocol::ids::OPENAI_COMPATIBLE_EMBEDDINGS_V1),
+            "/v1/responses" => {
+                Some(stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24)
+            }
+            "/v1/messages" => {
+                Some(stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01)
+            }
+            "/v1/embeddings" => {
+                Some(stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_EMBEDDINGS_V1)
+            }
             path if path.starts_with("/v1beta/models/") => {
-                Some(crate::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA)
+                Some(stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA)
             }
             _ => None,
         }

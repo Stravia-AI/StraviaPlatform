@@ -1,11 +1,14 @@
 use super::*;
-use crate::protocol::ids::{
-    ANTHROPIC_MESSAGES_2023_06_01, GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
-    OPEN_RESPONSES_2026_04_24, OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
-};
-use crate::protocol::ir::{
-    AiItemAudience, AiItemProvenance, AiItemStatus, OpenResponsesExt, Role, ToolCall,
-};
+use stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01;
+use stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA;
+use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
+use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
+use stravia_runtime_contract::protocol::ir::AiItemAudience;
+use stravia_runtime_contract::protocol::ir::AiItemProvenance;
+use stravia_runtime_contract::protocol::ir::AiItemStatus;
+use stravia_runtime_contract::protocol::ir::OpenResponsesExt;
+use stravia_runtime_contract::protocol::ir::Role;
+use stravia_runtime_contract::protocol::ir::ToolCall;
 
 fn principal(id: &str) -> Principal {
     Principal::new(id)
@@ -57,7 +60,7 @@ fn legacy_context_fingerprint(messages: &[AiItem]) -> String {
             hasher.update(previous.as_bytes());
             hasher.update(message.len().to_be_bytes());
             hasher.update(message);
-            crate::protocol::ir::canonical::hash_hex(&hasher.finalize().into())
+            stravia_runtime_contract::protocol::ir::canonical::hash_hex(&hasher.finalize().into())
         },
     )
 }
@@ -94,7 +97,10 @@ impl TurnChainStore for ImmediatelyExpiredTurnChainStore {
         principal: &Principal,
         kind: TurnNodeKind,
         id: &TurnNodeId,
-    ) -> Result<Vec<crate::turn_chain::TurnNode>, crate::turn_chain::TurnUnavailable> {
+    ) -> Result<
+        Vec<stravia_runtime_contract::turn_chain::TurnNode>,
+        stravia_runtime_contract::turn_chain::TurnUnavailable,
+    > {
         self.inner.materialize(principal, kind, id).await
     }
 
@@ -103,23 +109,30 @@ impl TurnChainStore for ImmediatelyExpiredTurnChainStore {
         principal: &Principal,
         kind: TurnNodeKind,
         id: &TurnNodeId,
-    ) -> Result<crate::turn_chain::MaterializedTurnChain, crate::turn_chain::TurnUnavailable> {
+    ) -> Result<
+        stravia_runtime_contract::turn_chain::MaterializedTurnChain,
+        stravia_runtime_contract::turn_chain::TurnUnavailable,
+    > {
         self.materializations
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Ok(crate::turn_chain::MaterializedTurnChain {
-            nodes: self.inner.materialize(principal, kind, id).await?,
-            expires_at: std::time::Instant::now(),
-        })
+        Ok(
+            stravia_runtime_contract::turn_chain::MaterializedTurnChain {
+                nodes: self.inner.materialize(principal, kind, id).await?,
+                expires_at: std::time::Instant::now(),
+            },
+        )
     }
 
     async fn commit(
         &self,
         commit: TurnCommit,
-    ) -> Result<TurnNodeId, crate::turn_chain::TurnCommitError> {
+    ) -> Result<TurnNodeId, stravia_runtime_contract::turn_chain::TurnCommitError> {
         self.inner.commit(commit).await
     }
 
-    async fn sweep_expired(&self) -> Result<u64, crate::turn_chain::TurnUnavailable> {
+    async fn sweep_expired(
+        &self,
+    ) -> Result<u64, stravia_runtime_contract::turn_chain::TurnUnavailable> {
         self.inner.sweep_expired().await
     }
 }

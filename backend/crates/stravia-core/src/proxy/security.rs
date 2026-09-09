@@ -52,7 +52,7 @@ pub(crate) struct ModelAccessGrant {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AuthenticatedPrincipal {
-    pub(crate) principal: crate::hook::Principal,
+    pub(crate) principal: stravia_runtime_contract::Principal,
     pub(crate) api_key_name: String,
     pub(crate) concurrency_limit: Option<i32>,
 }
@@ -74,7 +74,7 @@ impl<'a> Security<'a> {
     pub(crate) async fn required_principal(
         &self,
         credential: &ClientCredential,
-    ) -> Result<crate::hook::Principal, GatewayError> {
+    ) -> Result<stravia_runtime_contract::Principal, GatewayError> {
         Ok(self.authenticated_principal(credential).await?.principal)
     }
 
@@ -97,7 +97,7 @@ impl<'a> Security<'a> {
             })?;
         validate_key_state(&key)?;
         Ok(AuthenticatedPrincipal {
-            principal: crate::hook::Principal::new(key.id),
+            principal: stravia_runtime_contract::Principal::new(key.id),
             api_key_name: key.name,
             concurrency_limit: key.concurrency_limit,
         })
@@ -128,7 +128,7 @@ impl<'a> Security<'a> {
 
     pub(crate) async fn authorize_principal_model(
         &self,
-        principal: &crate::hook::Principal,
+        principal: &stravia_runtime_contract::Principal,
         model: &Route,
     ) -> Result<ModelAccessGrant, GatewayError> {
         let key = self.principal_key(principal).await?;
@@ -137,7 +137,7 @@ impl<'a> Security<'a> {
 
     pub(crate) async fn authorize_principal_capability(
         &self,
-        principal: &crate::hook::Principal,
+        principal: &stravia_runtime_contract::Principal,
     ) -> Result<ModelAccessGrant, GatewayError> {
         let key = self.principal_key(principal).await?;
         validate_key_state(&key)?;
@@ -149,7 +149,7 @@ impl<'a> Security<'a> {
 
     pub(crate) async fn authorize_principal_web_search(
         &self,
-        principal: &crate::hook::Principal,
+        principal: &stravia_runtime_contract::Principal,
     ) -> Result<WebSearchAccessGrant, GatewayError> {
         let key = self.principal_key(principal).await?;
         validate_key_state(&key)?;
@@ -161,7 +161,7 @@ impl<'a> Security<'a> {
 
     pub(crate) async fn media_transparent_injection_enabled(
         &self,
-        principal: &crate::hook::Principal,
+        principal: &stravia_runtime_contract::Principal,
     ) -> Result<bool, GatewayError> {
         let key = self.principal_key(principal).await?;
         validate_key_state(&key)?;
@@ -170,7 +170,7 @@ impl<'a> Security<'a> {
 
     async fn principal_key(
         &self,
-        principal: &crate::hook::Principal,
+        principal: &stravia_runtime_contract::Principal,
     ) -> Result<ApiKeyAccessRecord, GatewayError> {
         let id = principal.api_key_id();
         let Some(auth) = self.auth else {
@@ -286,8 +286,8 @@ mod tests {
     use super::{ClientCredential, Security, validate_key_state};
     use crate::db::models::Route;
     use crate::error::{AccessDenial, AuthFailure, GatewayError};
-    use crate::hook::Principal;
     use crate::storage::traits::{ApiKeyAccessRecord, AuthAccessStore};
+    use stravia_runtime_contract::Principal;
 
     #[test]
     fn inference_profile_accepts_bearer_and_trims_token() {

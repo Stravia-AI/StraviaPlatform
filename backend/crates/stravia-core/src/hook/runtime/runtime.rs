@@ -65,7 +65,7 @@ struct RuntimeSession {
     held_variants: Vec<SemanticVariant>,
 }
 pub(crate) struct InferenceRun {
-    cancellation: crate::proxy::context::CancellationToken,
+    cancellation: stravia_runtime_contract::CancellationToken,
     context: SessionContext,
     original: ContextSnapshot,
     current: ContextSnapshot,
@@ -149,7 +149,7 @@ impl InferenceRun {
     pub(crate) fn detached_platform_execution(
         &self,
         call: PlatformToolCall,
-        cancellation: crate::proxy::context::CancellationToken,
+        cancellation: stravia_runtime_contract::CancellationToken,
     ) -> DetachedPlatformExecution {
         let limit = self.tools.execution_limit(&call.tool_id);
         DetachedPlatformExecution {

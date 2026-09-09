@@ -6,6 +6,8 @@
 
 ## 1. 结论
 
+实现归属独立 `stravia-media` crate，包含 Definition、配置策略、媒体预处理、Derivative 存储、报告校验、ingest/snapshot、bridge 规划及 Platform Tool 行为。`stravia-core` 在编译期注入 `MediaHost`、`MediaAgentHost`、`MediaArtifactHost`，并保留 MCP/管理面 Adapter；能力不依赖 Gateway 类型。共享 IR、Agent、Artifact、Hook 与身份契约来自 `stravia-runtime-contract`，不复制类型或通过 JSON 往返 canonical 数据。
+
 Media Understanding 是由平台总开关控制的 Advanced Capability。公开工具名固定为 `understand_media`；普通模型请求和 MCP 共用同一个 Media Report contract。
 
 用户可见名称采用“多模态理解”，为未来 PDF、视频和音频扩展保留产品语义。本 Revision 的运行时仍只支持静态 JPEG、PNG 与 WebP 图片；页面不展示或承诺未来格式。

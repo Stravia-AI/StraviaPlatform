@@ -1,12 +1,10 @@
-use super::{
-    AdminService, CredentialDiscoveryPage, CredentialDiscoveryQuery, CredentialMatch,
-    CredentialRuleCatalog,
-};
+use super::{AdminService, CredentialDiscoveryPage, CredentialDiscoveryQuery};
+use stravia_credential_protection::{CredentialMatch, CredentialRuleCatalog};
 
 impl AdminService {
     /// 返回当前实例内置的本地规则及其有效条件，不执行检测或联网验证。
     pub async fn credential_protection_rules(&self) -> anyhow::Result<CredentialRuleCatalog> {
-        Ok(crate::reversible_redaction::rule_catalog().await?)
+        Ok(stravia_credential_protection::rule_catalog().await?)
     }
 
     /// 只检测本次提交的文本；不查询秘密字典，不持久化输入或改变保护状态。
@@ -15,7 +13,7 @@ impl AdminService {
         &self,
         text: String,
     ) -> anyhow::Result<Vec<CredentialMatch>> {
-        Ok(crate::reversible_redaction::test_text(text).await?)
+        Ok(stravia_credential_protection::test_text(text).await?)
     }
 
     /// 查询按客户端交互归组的新增凭据摘要，沿用 Observation 的保留与缺失语义。

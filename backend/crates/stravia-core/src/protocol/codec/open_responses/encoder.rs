@@ -4,10 +4,13 @@ use anyhow::Result;
 use reqwest::header::HeaderMap;
 use serde_json::Value;
 
-use crate::protocol::ir::AiRequest;
-use crate::protocol::ir::request::{
-    ContentBlock, MediaSource, MessageContent, ResponseFormat, Role, ToolChoice,
-};
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::request::ContentBlock;
+use stravia_runtime_contract::protocol::ir::request::MediaSource;
+use stravia_runtime_contract::protocol::ir::request::MessageContent;
+use stravia_runtime_contract::protocol::ir::request::ResponseFormat;
+use stravia_runtime_contract::protocol::ir::request::Role;
+use stravia_runtime_contract::protocol::ir::request::ToolChoice;
 
 /// Encoder for the dated Open Responses request contract.
 pub struct ResponsesEncoder;
@@ -17,7 +20,9 @@ impl ResponsesEncoder {
     pub(crate) fn encode_request(&self, req: &AiRequest) -> Result<(Value, HeaderMap)> {
         validate_target_thinking_control(req)?;
         let extension = match req.ext.as_ref() {
-            Some(crate::protocol::ir::ProtocolExt::OpenResponses(extension)) => Some(extension),
+            Some(stravia_runtime_contract::protocol::ir::ProtocolExt::OpenResponses(extension)) => {
+                Some(extension)
+            }
             _ => None,
         };
         if matches!(req.response_format, Some(ResponseFormat::JsonObject)) {
@@ -193,7 +198,9 @@ impl ResponsesEncoder {
 
 pub(crate) fn response_profile_from_request(req: &AiRequest) -> Value {
     let extension = match req.ext.as_ref() {
-        Some(crate::protocol::ir::ProtocolExt::OpenResponses(extension)) => Some(extension),
+        Some(stravia_runtime_contract::protocol::ir::ProtocolExt::OpenResponses(extension)) => {
+            Some(extension)
+        }
         _ => None,
     };
     let mut profile = serde_json::Map::new();
@@ -247,7 +254,7 @@ pub(crate) fn effective_response_profile_from_request(req: &AiRequest) -> Value 
 fn insert_request_control_fields(
     obj: &mut serde_json::Map<String, Value>,
     req: &AiRequest,
-    extension: Option<&crate::protocol::ir::OpenResponsesExt>,
+    extension: Option<&stravia_runtime_contract::protocol::ir::OpenResponsesExt>,
 ) {
     obj.insert(
         "store".into(),
@@ -279,19 +286,22 @@ fn insert_request_control_fields(
     if let Some(value) = req.parallel_tool_calls {
         obj.insert("parallel_tool_calls".into(), value.into());
     }
-    let converted_to_responses = req
-        .meta
-        .source_protocol
-        .is_some_and(|source| source != crate::protocol::ids::OPEN_RESPONSES_2026_04_24);
+    let converted_to_responses = req.meta.source_protocol.is_some_and(|source| {
+        source != stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24
+    });
     if let Some(control) = req.reasoning.target_control.as_ref() {
         let mut reasoning = serde_json::Map::new();
         let effort = match control {
-            crate::thinking::TargetThinkingControl::Effort { value } => value.as_str(),
-            crate::thinking::TargetThinkingControl::Disabled => "none",
+            stravia_runtime_contract::thinking::TargetThinkingControl::Effort { value } => {
+                value.as_str()
+            }
+            stravia_runtime_contract::thinking::TargetThinkingControl::Disabled => "none",
             _ => return,
         };
         reasoning.insert("effort".into(), Value::String(effort.into()));
-        if req.meta.source_protocol == Some(crate::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01) {
+        if req.meta.source_protocol
+            == Some(stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01)
+        {
             match req.reasoning.display.as_deref() {
                 Some("omitted") => {}
                 Some("summarized") | None => {
@@ -413,15 +423,15 @@ fn validate_target_thinking_control(req: &AiRequest) -> anyhow::Result<()> {
         return Ok(());
     };
     match control {
-        crate::thinking::TargetThinkingControl::Effort { .. }
-        | crate::thinking::TargetThinkingControl::Disabled => Ok(()),
+        stravia_runtime_contract::thinking::TargetThinkingControl::Effort { .. }
+        | stravia_runtime_contract::thinking::TargetThinkingControl::Disabled => Ok(()),
         _ => anyhow::bail!("Open Responses cannot represent Target Thinking Control {control:?}"),
     }
 }
 
 pub(super) fn insert_item_metadata(
     encoded: &mut Value,
-    item: &crate::protocol::ir::AiItem,
+    item: &stravia_runtime_contract::protocol::ir::AiItem,
     status: bool,
 ) {
     let object = encoded
@@ -447,7 +457,7 @@ pub(super) fn insert_item_metadata(
 
 fn insert_reasoning_metadata(
     encoded: &mut Value,
-    item: &crate::protocol::ir::AiItem,
+    item: &stravia_runtime_contract::protocol::ir::AiItem,
     has_encrypted_content: bool,
 ) {
     insert_item_metadata(encoded, item, false);
@@ -461,7 +471,9 @@ fn insert_reasoning_metadata(
     }
 }
 
-fn encode_mixed_assistant_items(item: &crate::protocol::ir::AiItem) -> Result<Option<Vec<Value>>> {
+fn encode_mixed_assistant_items(
+    item: &stravia_runtime_contract::protocol::ir::AiItem,
+) -> Result<Option<Vec<Value>>> {
     let MessageContent::Blocks(blocks) = &item.content else {
         return Ok(None);
     };
@@ -556,7 +568,7 @@ fn encode_mixed_assistant_items(item: &crate::protocol::ir::AiItem) -> Result<Op
 fn push_assistant_message(
     items: &mut Vec<Value>,
     content: &mut Vec<Value>,
-    item: &crate::protocol::ir::AiItem,
+    item: &stravia_runtime_contract::protocol::ir::AiItem,
 ) {
     if content.is_empty() {
         return;

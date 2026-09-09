@@ -3,17 +3,18 @@
 //! `ProtocolAdapter` registration joins the endpoint's decoder, encoder, and
 //! stream codecs behind the Protocol Conversion seam.
 
-use crate::protocol::ids::{
-    EndpointCapabilities, OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1, ProtocolEndpoint,
-};
 use crate::protocol::registry::EndpointRegistration;
+use stravia_runtime_contract::protocol::ids::EndpointCapabilities;
+use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
+use stravia_runtime_contract::protocol::ids::ProtocolEndpoint;
 
-use crate::protocol::ir::{AiRequest, AiResponse};
 use crate::protocol::transform::{
     ProtocolAdapter, TransformError, WireStreamDecoder, WireStreamEncoder,
 };
 use reqwest::header::HeaderMap;
 use serde_json::Value;
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::AiResponse;
 
 pub struct OpenAIChatCompletionsV1;
 

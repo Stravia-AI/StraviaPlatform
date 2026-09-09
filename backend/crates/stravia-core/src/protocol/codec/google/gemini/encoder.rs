@@ -4,10 +4,14 @@ use anyhow::Result;
 use reqwest::header::HeaderMap;
 use serde_json::Value;
 
-use crate::protocol::ir::AiRequest;
-use crate::protocol::ir::request::{
-    AiItem, ContentBlock, MediaSource, MessageContent, ResponseFormat, Role, ToolChoice,
-};
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::request::AiItem;
+use stravia_runtime_contract::protocol::ir::request::ContentBlock;
+use stravia_runtime_contract::protocol::ir::request::MediaSource;
+use stravia_runtime_contract::protocol::ir::request::MessageContent;
+use stravia_runtime_contract::protocol::ir::request::ResponseFormat;
+use stravia_runtime_contract::protocol::ir::request::Role;
+use stravia_runtime_contract::protocol::ir::request::ToolChoice;
 
 pub struct GoogleEncoder;
 
@@ -103,19 +107,19 @@ impl GoogleEncoder {
         }
         if let Some(control) = req.reasoning.target_control.as_ref() {
             let thinking_config = match control {
-                crate::thinking::TargetThinkingControl::Budget { value } => {
+                stravia_runtime_contract::thinking::TargetThinkingControl::Budget { value } => {
                     serde_json::json!({"thinkingBudget": value})
                 }
-                crate::thinking::TargetThinkingControl::Enabled => {
+                stravia_runtime_contract::thinking::TargetThinkingControl::Enabled => {
                     serde_json::json!({"includeThoughts": true})
                 }
-                crate::thinking::TargetThinkingControl::Disabled => {
+                stravia_runtime_contract::thinking::TargetThinkingControl::Disabled => {
                     serde_json::json!({"thinkingBudget": 0})
                 }
-                crate::thinking::TargetThinkingControl::Effort { value } => {
+                stravia_runtime_contract::thinking::TargetThinkingControl::Effort { value } => {
                     serde_json::json!({"thinkingLevel": value.to_ascii_uppercase()})
                 }
-                crate::thinking::TargetThinkingControl::Hidden => anyhow::bail!(
+                stravia_runtime_contract::thinking::TargetThinkingControl::Hidden => anyhow::bail!(
                     "Google Gemini cannot represent Target Thinking Control {control:?}"
                 ),
             };

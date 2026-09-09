@@ -38,23 +38,27 @@ use axum::response::{IntoResponse, Response};
 use futures::StreamExt;
 
 use crate::Gateway;
-use crate::agent::{CanonicalEvent, ModelTurn, ModelTurnExecutor, TurnInput};
+use crate::agent::ModelTurn;
+use crate::agent::ModelTurnExecutor;
+use crate::agent::TurnInput;
 #[cfg(test)]
 use crate::db::models::Provider;
 use crate::error::{AccessDenial, AuthFailure, GatewayError};
 use crate::interaction_observation::{IngressObserver, RunEvent, RunStart};
 use crate::model_turn::StreamResponseAccumulator;
 #[cfg(test)]
-use crate::protocol::ids::Protocol;
-use crate::protocol::ids::ProtocolId;
-use crate::protocol::ir::request::MediaRoutingMode;
-use crate::protocol::ir::{AiRequest, AiResponse};
-#[cfg(test)]
 use crate::provider::VendorRegistry;
 #[cfg(test)]
 use crate::provider::vendor::Vendor;
 use crate::proxy::context::RequestContext;
 use crate::proxy::security::{ClientCredential, Security};
+use stravia_runtime_contract::model_turn::CanonicalEvent;
+#[cfg(test)]
+use stravia_runtime_contract::protocol::ids::Protocol;
+use stravia_runtime_contract::protocol::ids::ProtocolId;
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::AiResponse;
+use stravia_runtime_contract::protocol::ir::request::MediaRoutingMode;
 
 #[cfg(test)]
 fn resolve_vendor_adapter(provider: &Provider, protocol: Protocol) -> Option<Arc<dyn Vendor>> {
@@ -219,12 +223,20 @@ fn stage_visible_response(request_context: &RequestContext, response: &AiRespons
     request_context.extensions.insert(terminal);
 }
 
-fn visible_delta_text(delta: &crate::protocol::ir::AiStreamDelta) -> Option<&str> {
+fn visible_delta_text(
+    delta: &stravia_runtime_contract::protocol::ir::AiStreamDelta,
+) -> Option<&str> {
     match delta {
-        crate::protocol::ir::AiStreamDelta::TextDelta(text)
-        | crate::protocol::ir::AiStreamDelta::TextDeltaWithMetadata { text, .. }
-        | crate::protocol::ir::AiStreamDelta::RefusalDelta(text)
-        | crate::protocol::ir::AiStreamDelta::RefusalDeltaWithIndex { text, .. } => Some(text),
+        stravia_runtime_contract::protocol::ir::AiStreamDelta::TextDelta(text)
+        | stravia_runtime_contract::protocol::ir::AiStreamDelta::TextDeltaWithMetadata {
+            text,
+            ..
+        }
+        | stravia_runtime_contract::protocol::ir::AiStreamDelta::RefusalDelta(text)
+        | stravia_runtime_contract::protocol::ir::AiStreamDelta::RefusalDeltaWithIndex {
+            text,
+            ..
+        } => Some(text),
         _ => None,
     }
 }
@@ -250,7 +262,7 @@ fn thinking_carrier_facts(
 /// Model Turn Executor prepares only the selected target's continuation.
 #[derive(Clone)]
 pub(super) struct GenerationChainRun {
-    principal: crate::hook::Principal,
+    principal: stravia_runtime_contract::Principal,
     write: Option<crate::generation_chain::GenerationChainWrite>,
     client_request: AiRequest,
     previous_response_id: Option<String>,
@@ -301,11 +313,16 @@ fn stabilize_media_generation_chain(
         .items
         .iter()
         .filter_map(|message| match &message.content {
-            crate::protocol::ir::MessageContent::Blocks(blocks) => Some(blocks),
+            stravia_runtime_contract::protocol::ir::MessageContent::Blocks(blocks) => Some(blocks),
             _ => None,
         })
         .flatten()
-        .filter(|block| matches!(block, crate::protocol::ir::ContentBlock::Image { .. }))
+        .filter(|block| {
+            matches!(
+                block,
+                stravia_runtime_contract::protocol::ir::ContentBlock::Image { .. }
+            )
+        })
         .count();
     if image_count == 0 {
         return true;
@@ -322,14 +339,16 @@ fn stabilize_media_generation_chain(
                 .items
                 .iter()
                 .filter_map(|message| match &message.content {
-                    crate::protocol::ir::MessageContent::Blocks(blocks) => Some(blocks),
+                    stravia_runtime_contract::protocol::ir::MessageContent::Blocks(blocks) => {
+                        Some(blocks)
+                    }
                     _ => None,
                 })
                 .flatten()
                 .find(|block| {
                     matches!(
                         block,
-                        crate::protocol::ir::ContentBlock::Text { text, .. }
+                        stravia_runtime_contract::protocol::ir::ContentBlock::Text { text, .. }
                             if text.starts_with("[stravia_media ") && text.contains(&identity)
                     )
                 })
@@ -380,11 +399,12 @@ pub(super) async fn orchestrate(
         .capabilities(&ingress)
         .expect("registered ingress protocol");
     let request_kind = if ingress_capabilities.embeddings {
-        crate::hook::RequestKind::Embeddings
+        stravia_runtime_contract::hook::RequestKind::Embeddings
     } else {
-        crate::hook::RequestKind::Generation
+        stravia_runtime_contract::hook::RequestKind::Generation
     };
-    if let Some(crate::protocol::ir::ProtocolExt::OpenResponses(extension)) = request.ext.as_ref()
+    if let Some(stravia_runtime_contract::protocol::ir::ProtocolExt::OpenResponses(extension)) =
+        request.ext.as_ref()
         && extension.background == Some(true)
     {
         let response = parameter_error_response(
@@ -401,7 +421,7 @@ pub(super) async fn orchestrate(
         );
     }
     let previous_response_id = match request.ext.as_ref() {
-        Some(crate::protocol::ir::ProtocolExt::OpenResponses(extension)) => {
+        Some(stravia_runtime_contract::protocol::ir::ProtocolExt::OpenResponses(extension)) => {
             extension.previous_response_id.clone()
         }
         _ => None,
@@ -431,44 +451,47 @@ pub(super) async fn orchestrate(
     });
     let compact = ctx.extensions.get::<crate::model_turn::ModelTurnPurpose>()
         == Some(crate::model_turn::ModelTurnPurpose::Compact);
-    let generation_chain_write =
-        if !compact && matches!(request_kind, crate::hook::RequestKind::Generation) {
-            let controls = crate::compaction::NativeCompactionControls::classify(&request);
-            let begin = if controls.requested() {
-                gw.generation_chains
-                    .begin_native_compaction(principal.clone(), request)
-                    .await
-            } else {
-                gw.generation_chains.begin(principal.clone(), request).await
-            };
-            match begin {
-                Ok(mut write) => {
-                    if crate::generation_chain::generation_session_fingerprint(write.request())
-                        .is_none()
-                    {
-                        let root_id = write.root_id().to_owned();
-                        crate::generation_chain::set_generation_session_id(
-                            write.request_mut(),
-                            root_id,
-                        );
-                    }
-                    request = write.request().clone();
-                    Some(write)
-                }
-                Err(error) => {
-                    let code = error.to_string();
-                    let response = coded_error_response(StatusCode::BAD_REQUEST, &code, &code);
-                    return reject_before_admission(
-                        &mut Some(ingress_observer),
-                        "protocol",
-                        &code,
-                        response,
+    let generation_chain_write = if !compact
+        && matches!(
+            request_kind,
+            stravia_runtime_contract::hook::RequestKind::Generation
+        ) {
+        let controls = crate::compaction::NativeCompactionControls::classify(&request);
+        let begin = if controls.requested() {
+            gw.generation_chains
+                .begin_native_compaction(principal.clone(), request)
+                .await
+        } else {
+            gw.generation_chains.begin(principal.clone(), request).await
+        };
+        match begin {
+            Ok(mut write) => {
+                if crate::generation_chain::generation_session_fingerprint(write.request())
+                    .is_none()
+                {
+                    let root_id = write.root_id().to_owned();
+                    crate::generation_chain::set_generation_session_id(
+                        write.request_mut(),
+                        root_id,
                     );
                 }
+                request = write.request().clone();
+                Some(write)
             }
-        } else {
-            None
-        };
+            Err(error) => {
+                let code = error.to_string();
+                let response = coded_error_response(StatusCode::BAD_REQUEST, &code, &code);
+                return reject_before_admission(
+                    &mut Some(ingress_observer),
+                    "protocol",
+                    &code,
+                    response,
+                );
+            }
+        }
+    } else {
+        None
+    };
     let (compact_parent_id, compact_root_id, compact_has_new_user) = if compact {
         let prepared = match gw
             .generation_chains
@@ -508,9 +531,10 @@ pub(super) async fn orchestrate(
             .and_then(|write| write.parent_id())
             .map(str::to_owned)
     } else if compact
-        || (ingress == crate::protocol::ids::OPEN_RESPONSES_2026_04_24
+        || (ingress == stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24
             && client_request.items.iter().any(|item| {
-                item.role == crate::protocol::ir::Role::Assistant || item.is_compaction()
+                item.role == stravia_runtime_contract::protocol::ir::Role::Assistant
+                    || item.is_compaction()
             }))
     {
         match gw
@@ -618,14 +642,14 @@ pub(super) async fn orchestrate(
                 request
                     .items
                     .iter()
-                    .any(|item| item.role == crate::protocol::ir::Role::User)
+                    .any(|item| item.role == stravia_runtime_contract::protocol::ir::Role::User)
             },
             |write| {
                 write
                     .request_delta()
                     .items
                     .iter()
-                    .any(|item| item.role == crate::protocol::ir::Role::User)
+                    .any(|item| item.role == stravia_runtime_contract::protocol::ir::Role::User)
             },
         )
     });
@@ -634,8 +658,8 @@ pub(super) async fn orchestrate(
             canonical.sort_all_objects();
             serde_json::to_vec(&canonical)
         }) {
-            Ok(canonical) => crate::protocol::ir::canonical::hash_hex(
-                &crate::protocol::ir::canonical::hash_bytes(&canonical),
+            Ok(canonical) => stravia_runtime_contract::protocol::ir::canonical::hash_hex(
+                &stravia_runtime_contract::protocol::ir::canonical::hash_bytes(&canonical),
             ),
             Err(error) => {
                 ingress_observer.record(RunEvent::ObservationGap {
@@ -685,7 +709,7 @@ pub(super) async fn orchestrate(
         && client_request
             .items
             .iter()
-            .any(crate::protocol::ir::AiItem::is_compaction)
+            .any(stravia_runtime_contract::protocol::ir::AiItem::is_compaction)
     {
         match gw
             .compaction
@@ -731,7 +755,7 @@ pub(super) async fn orchestrate(
         && !client_request
             .items
             .iter()
-            .any(crate::protocol::ir::AiItem::is_compaction)
+            .any(stravia_runtime_contract::protocol::ir::AiItem::is_compaction)
     {
         observer.observe_client_input(&client_request.items);
     }
@@ -777,12 +801,12 @@ pub(super) async fn orchestrate(
         previous_response_id: previous_response_id.clone(),
         compaction_source_generation_id,
     };
-    let session_context = crate::hook::SessionContext {
+    let session_context = stravia_runtime_contract::hook::SessionContext {
         request_id: ctx.request_id.clone(),
         run_id: format!("run-{}", uuid::Uuid::new_v4()),
         request_kind,
         ingress,
-        transport: crate::hook::TransportKind::Http,
+        transport: stravia_runtime_contract::hook::TransportKind::Http,
         inherited_media_turns,
         principal,
         cancellation: ctx.cancellation.clone(),
@@ -793,7 +817,7 @@ pub(super) async fn orchestrate(
         match gw.hook_runtime().begin(
             session_context,
             &request,
-            crate::hook::ContextCompleteness::from_request(&request),
+            stravia_runtime_contract::hook::ContextCompleteness::from_request(&request),
         ) {
             Ok(run) => run,
             Err(error) => return hook_failure_response(error),
@@ -927,19 +951,19 @@ async fn dispatch_round(
                 .on_request(request)
                 .await;
             match request_hook_result {
-                Ok(crate::hook::HookControl::Continue) => {}
-                Ok(crate::hook::HookControl::Respond(response)) => {
+                Ok(stravia_runtime_contract::hook::HookControl::Continue) => {}
+                Ok(stravia_runtime_contract::hook::HookControl::Respond(response)) => {
                     let mut response = *response;
                     let run = inference_run.as_mut().expect("buffered Inference Run");
-                    run.set_route(crate::hook::RouteContext {
+                    run.set_route(stravia_runtime_contract::hook::RouteContext {
                         model_id: request.model.clone(),
                         provider_id: "hook".into(),
                         target_id: "hook".into(),
                         egress: ingress,
                     });
                     match run.on_client_output(&mut response).await {
-                        Ok(crate::hook::HookControl::Continue) => {}
-                        Ok(crate::hook::HookControl::Respond(replacement)) => {
+                        Ok(stravia_runtime_contract::hook::HookControl::Continue) => {}
+                        Ok(stravia_runtime_contract::hook::HookControl::Respond(replacement)) => {
                             response = *replacement;
                         }
                         Ok(control) => {
@@ -947,7 +971,7 @@ async fn dispatch_round(
                         }
                         Err(error) => return hook_failure_response(error),
                     }
-                    if ingress == crate::protocol::ids::OPEN_RESPONSES_2026_04_24
+                    if ingress == stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24
                         && let Some(write) = generation_chain.write.as_ref()
                     {
                         response.id = write.id().to_owned();
@@ -1001,7 +1025,7 @@ async fn dispatch_round(
                         return *response;
                     }
                     let response = render_hook_control(
-                        crate::hook::HookControl::Respond(Box::new(response)),
+                        stravia_runtime_contract::hook::HookControl::Respond(Box::new(response)),
                         ingress,
                         request.stream.enabled,
                     );
@@ -1142,7 +1166,7 @@ async fn acquire_turn(
         Ok(turn) => turn,
         Err(error)
             if error.code == "tools_unsupported"
-                && !crate::web_search::native_web_search_requested(&effective_request)
+                && !stravia_web_search::native_web_search_requested(&effective_request)
                 && !crate::compaction::NativeCompactionControls::classify(&effective_request)
                     .requested() =>
         {
@@ -1255,7 +1279,9 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
         while let Some(event) = output.next().await {
             match event {
                 Ok(CanonicalEvent::Delta(delta)) => {
-                    if let crate::protocol::ir::AiStreamDelta::StreamError { error } = &delta
+                    if let stravia_runtime_contract::protocol::ir::AiStreamDelta::StreamError {
+                        error,
+                    } = &delta
                         && let Some(outcome) = compaction_stream_error_outcome(request, error)
                     {
                         return outcome;
@@ -1279,10 +1305,12 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
                     break;
                 }
                 Ok(CanonicalEvent::Compacted(_)) => {
-                    return model_turn_error_outcome(crate::model_turn::ModelTurnError::new(
-                        "unexpected_compaction_terminal",
-                        "Generation received a standalone compact result",
-                    ));
+                    return model_turn_error_outcome(
+                        stravia_runtime_contract::model_turn::ModelTurnError::new(
+                            "unexpected_compaction_terminal",
+                            "Generation received a standalone compact result",
+                        ),
+                    );
                 }
                 Err(error) => return model_turn_error_outcome(error),
             }
@@ -1308,20 +1336,24 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
                     break;
                 }
                 Ok(CanonicalEvent::Compacted(_)) => {
-                    return model_turn_error_outcome(crate::model_turn::ModelTurnError::new(
-                        "unexpected_compaction_terminal",
-                        "Generation received a standalone compact result",
-                    ));
+                    return model_turn_error_outcome(
+                        stravia_runtime_contract::model_turn::ModelTurnError::new(
+                            "unexpected_compaction_terminal",
+                            "Generation received a standalone compact result",
+                        ),
+                    );
                 }
                 Err(error) => return model_turn_error_outcome(error),
             }
         }
     }
     let Some(completed_response) = completed_response else {
-        return model_turn_error_outcome(crate::agent::ModelTurnError::new(
-            "model_stream_incomplete",
-            "Model Turn ended without a completion",
-        ));
+        return model_turn_error_outcome(
+            stravia_runtime_contract::model_turn::ModelTurnError::new(
+                "model_stream_incomplete",
+                "Model Turn ended without a completion",
+            ),
+        );
     };
     let mut response = streamed_response
         .map(StreamResponseAccumulator::into_ai_response)
@@ -1510,7 +1542,7 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
 #[cfg(test)]
 mod openai_generation_target_tests {
     use super::*;
-    use crate::protocol::ids::OPEN_RESPONSES_2026_04_24;
+    use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
     fn unlabelled_provider() -> Provider {
         Provider {
             id: "provider".into(),
@@ -1565,7 +1597,7 @@ mod openai_generation_target_tests {
         assert!(!is_openai_generation_target(
             None,
             None,
-            crate::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
             false
         ));
     }
@@ -1575,7 +1607,7 @@ mod openai_generation_target_tests {
         assert!(is_openai_generation_target(
             Some("openai"),
             Some("openai"),
-            crate::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
             false
         ));
     }

@@ -8,7 +8,6 @@ use axum::{Extension, Json, Router};
 use crate::http_auth::{AdminHttpState, auth_router, require_admin};
 use serde::Deserialize;
 use stravia_core::Gateway;
-use stravia_core::admin::MediaUnderstandingConfigUpdate;
 use stravia_core::admin::{BindRouteInput, CopyProviderOptions, UnbindRouteInput};
 use stravia_core::auth::{AuthExchangeInput, AuthSessionStatusData, OAuthCallbackMode};
 use stravia_core::provider_catalog::CatalogError;
@@ -16,7 +15,8 @@ use stravia_core::provider_models::{
     CreateManualProviderModel, ProviderModelSelectionPolicy, UpdateProviderModel,
     UpdateProviderModelSelection,
 };
-use stravia_core::web_search::WebSearchConfig;
+use stravia_media::admin::MediaUnderstandingConfigUpdate;
+use stravia_web_search::WebSearchConfig;
 
 use crate::oauth_callback::OAuthCallbackManager;
 use stravia_core::db::models::*;

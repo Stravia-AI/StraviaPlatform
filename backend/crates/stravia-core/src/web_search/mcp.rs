@@ -4,9 +4,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::hook::Principal;
 use crate::mcp::{McpContext, McpTool, McpToolError, McpToolOutput};
-use crate::proxy::context::CancellationToken;
+use stravia_runtime_contract::CancellationToken;
+use stravia_runtime_contract::Principal;
 
 pub(crate) fn tools(gateway: &crate::Gateway) -> Vec<Arc<dyn McpTool>> {
     vec![Arc::new(McpWebSearch {
@@ -21,7 +21,7 @@ struct McpWebSearch {
 #[async_trait]
 impl McpTool for McpWebSearch {
     fn name(&self) -> &str {
-        super::platform::PUBLIC_WEB_SEARCH_TOOL_NAME
+        stravia_web_search::platform::PUBLIC_WEB_SEARCH_TOOL_NAME
     }
 
     fn description(&self) -> Option<&str> {
@@ -29,20 +29,11 @@ impl McpTool for McpWebSearch {
     }
 
     fn input_schema(&self) -> Value {
-        super::input_schema()
+        stravia_web_search::input_schema()
     }
 
     fn output_schema(&self) -> Option<Value> {
-        Some(serde_json::json!({
-            "type": "object",
-            "properties": {
-                "turn_id": { "type": "string" },
-                "completion": { "type": "string", "enum": ["complete", "partial"] },
-                "report": super::local::search_report_schema()
-            },
-            "required": ["turn_id", "completion", "report"],
-            "additionalProperties": false
-        }))
+        Some(stravia_web_search::platform::output_schema())
     }
 
     fn deadline(&self) -> Duration {
@@ -60,8 +51,8 @@ impl McpTool for McpWebSearch {
         if !key.is_some_and(|key| key.is_enabled && key.mcp_access_enabled) {
             return Ok(false);
         }
-        Ok(super::platform::is_available(
-            &self.gateway,
+        Ok(stravia_web_search::platform::is_available(
+            &super::host::SearchHost(self.gateway.clone()),
             &Principal::new(context.api_key_id.clone()),
         )
         .await)
@@ -72,8 +63,8 @@ impl McpTool for McpWebSearch {
         arguments: Value,
         context: &McpContext,
     ) -> Result<McpToolOutput, McpToolError> {
-        match super::execute_public_search(
-            &self.gateway,
+        match stravia_web_search::execute_public_search(
+            &super::host::SearchHost(self.gateway.clone()),
             arguments,
             Principal::new(context.api_key_id.clone()),
             CancellationToken::new(),
@@ -92,7 +83,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::web_search::{
+    use stravia_web_search::{
         BackendOutput, SearchBackend, SearchBackendInput, SearchCompletion, SearchEvidence,
         SearchEvidenceSet, SearchReport, SearchReportValidator, SearchSource,
         WebSearchBackendDraft, WebSearchBackendKind, WebSearchConfig, WebSearchRunner,
@@ -109,7 +100,7 @@ mod tests {
         async fn run(
             &self,
             input: SearchBackendInput,
-        ) -> Result<BackendOutput, crate::web_search::WebSearchError> {
+        ) -> Result<BackendOutput, stravia_web_search::WebSearchError> {
             let source_id = format!("source-{}-1", input.turn_id);
             Ok(BackendOutput {
                 completion: SearchCompletion::Complete,
@@ -136,7 +127,7 @@ mod tests {
 
     #[tokio::test]
     async fn direct_mcp_call_returns_the_terminal_structured_search_result() {
-        use crate::web_search::config::SettingsWebSearchConfigStore;
+        use stravia_web_search::config::SettingsWebSearchConfigStore;
 
         let directory = tempfile::tempdir().expect("temporary directory");
         let gateway = crate::Gateway::new(crate::config::GatewayConfig {
@@ -160,7 +151,9 @@ mod tests {
             })
             .await
             .expect("API key");
-        let config_store = Arc::new(SettingsWebSearchConfigStore::new(gateway.storage.clone()));
+        let config_store = Arc::new(SettingsWebSearchConfigStore::new(Arc::new(
+            super::super::host::SearchSettings(gateway.storage.clone()),
+        )));
         config_store
             .save(&WebSearchConfig {
                 revision: 1,
@@ -182,7 +175,7 @@ mod tests {
             backend,
             Arc::new(SearchReportValidator),
             Duration::from_secs(7 * 24 * 60 * 60),
-            Arc::new(crate::web_search::AllowSearchRun),
+            Arc::new(stravia_web_search::AllowSearchRun),
         );
         *gateway.web_search_runner_state.write().await = Some(runner);
 

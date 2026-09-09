@@ -29,8 +29,10 @@
 //! bridge.finish();   // sets Completed; Drop handles the Failed case
 //! ```
 
-use crate::protocol::ir::Usage;
-use crate::proxy::context::{CancellationToken, RequestContext, RequestOutcome};
+use crate::proxy::context::RequestContext;
+use crate::proxy::context::RequestOutcome;
+use stravia_runtime_contract::CancellationToken;
+use stravia_runtime_contract::protocol::ir::Usage;
 
 // ── Failure variants ──────────────────────────────────────────────────────────
 
@@ -281,10 +283,10 @@ impl Drop for StreamBridge<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
     use crate::proxy::context::RequestContext;
     use std::sync::Arc;
     use std::time::Duration;
+    use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
 
     fn ctx() -> RequestContext {
         RequestContext::new(

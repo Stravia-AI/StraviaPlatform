@@ -1,4 +1,4 @@
-//! Unified error taxonomy for the Stravia AI Gateway.
+//! Unified error taxonomy for Stravia Agent infra.
 //!
 //! Every failure that crosses a layer boundary must be expressed as a
 //! `GatewayError` variant. HTTP status codes, stable error codes for client

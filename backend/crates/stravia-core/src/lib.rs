@@ -28,7 +28,7 @@ pub mod storage;
 pub mod thinking;
 pub mod turn_chain;
 pub(crate) mod web_access;
-pub mod web_search;
+pub(crate) mod web_search;
 
 #[cfg(test)]
 use config::GatewayConfig;

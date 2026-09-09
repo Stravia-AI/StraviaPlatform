@@ -8,12 +8,15 @@ use reqwest::header::HeaderMap;
 use serde_json::Value;
 
 use crate::protocol::codec::openai::compatible::chat_completions::OpenAIChatCompletionsV1;
-use crate::protocol::ids::{EndpointCapabilities, ProtocolEndpoint, WATSONX_TEXT_CHAT_V1};
-use crate::protocol::ir::{AiRequest, AiResponse};
 use crate::protocol::registry::EndpointRegistration;
 use crate::protocol::transform::{
     ProtocolAdapter, TransformError, WireStreamDecoder, WireStreamEncoder,
 };
+use stravia_runtime_contract::protocol::ids::EndpointCapabilities;
+use stravia_runtime_contract::protocol::ids::ProtocolEndpoint;
+use stravia_runtime_contract::protocol::ids::WATSONX_TEXT_CHAT_V1;
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::AiResponse;
 
 pub struct WatsonxTextChatV1;
 

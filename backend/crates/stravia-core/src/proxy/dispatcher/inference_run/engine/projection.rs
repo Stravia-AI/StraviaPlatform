@@ -14,10 +14,15 @@ use crate::history_marker::{
     PROJECTION_DELIMITER_PREFIX, ThinkingMarkerInput, render_history_marker,
     render_preview_projection_end, render_preview_projection_span, render_preview_projection_start,
 };
-use crate::hook::Principal;
-use crate::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
-use crate::protocol::ir::{AiItem, AiResponse, AiStreamDelta, ContentBlock, MessageContent, Role};
 use crate::protocol::transform::ThinkingCarrierFacts;
+use stravia_runtime_contract::Principal;
+use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
+use stravia_runtime_contract::protocol::ir::AiItem;
+use stravia_runtime_contract::protocol::ir::AiResponse;
+use stravia_runtime_contract::protocol::ir::AiStreamDelta;
+use stravia_runtime_contract::protocol::ir::ContentBlock;
+use stravia_runtime_contract::protocol::ir::MessageContent;
+use stravia_runtime_contract::protocol::ir::Role;
 
 const THINKING_MARKER_PENDING_RETENTION: Duration = Duration::from_secs(60 * 60);
 const PUBLISHED_MARKER_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
@@ -283,7 +288,7 @@ impl ClientProjectionSession {
     pub(super) fn new(
         marker_store: Arc<dyn HistoryMarkerStore>,
         principal: Principal,
-        ingress: crate::protocol::ids::ProtocolId,
+        ingress: stravia_runtime_contract::protocol::ids::ProtocolId,
     ) -> Self {
         Self {
             state: ProjectionState::for_ingress(ingress),
@@ -1325,7 +1330,7 @@ impl Default for ProjectionState {
 }
 
 impl ProjectionState {
-    fn for_ingress(ingress: crate::protocol::ids::ProtocolId) -> Self {
+    fn for_ingress(ingress: stravia_runtime_contract::protocol::ids::ProtocolId) -> Self {
         Self {
             openai_compatible: ingress == OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
             ..Self::default()
@@ -1998,7 +2003,7 @@ mod tests {
             },
             AiStreamDelta::ToolCallComplete {
                 index: 0,
-                tool_call: crate::protocol::ir::ToolCall {
+                tool_call: stravia_runtime_contract::protocol::ir::ToolCall {
                     id: "call-split".into(),
                     name: "stravia__ordered_tool".into(),
                     arguments: "{}".into(),
@@ -2071,7 +2076,7 @@ mod tests {
                 &principal,
                 crate::history_marker::PlatformMarkerInput {
                     tool_id: "web_search".into(),
-                    call: crate::protocol::ir::ToolCall {
+                    call: stravia_runtime_contract::protocol::ir::ToolCall {
                         id: "call-platform".into(),
                         name: "web_search".into(),
                         arguments: "{}".into(),
@@ -2117,7 +2122,7 @@ mod tests {
                 &principal,
                 crate::history_marker::PlatformMarkerInput {
                     tool_id: "web_search".into(),
-                    call: crate::protocol::ir::ToolCall {
+                    call: stravia_runtime_contract::protocol::ir::ToolCall {
                         id: "call-platform".into(),
                         name: "web_search".into(),
                         arguments: "{}".into(),
@@ -2196,7 +2201,7 @@ mod tests {
         staged.items = vec![
             AiItem::output_text("answer"),
             AiItem::thinking("reason", None),
-            AiItem::function_call(crate::protocol::ir::ToolCall {
+            AiItem::function_call(stravia_runtime_contract::protocol::ir::ToolCall {
                 id: "call-platform".into(),
                 name: "web_search".into(),
                 arguments: "{}".into(),
@@ -2475,13 +2480,13 @@ mod tests {
         ));
         let mut staged = AiResponse::new("response", "model");
         staged.items = vec![
-            AiItem::function_call(crate::protocol::ir::ToolCall {
+            AiItem::function_call(stravia_runtime_contract::protocol::ir::ToolCall {
                 id: "call-before".into(),
                 name: "web_search".into(),
                 arguments: "{}".into(),
             }),
             AiItem::output_text("C1"),
-            AiItem::function_call(crate::protocol::ir::ToolCall {
+            AiItem::function_call(stravia_runtime_contract::protocol::ir::ToolCall {
                 id: "call-after".into(),
                 name: "web_search".into(),
                 arguments: "{}".into(),
@@ -2648,7 +2653,7 @@ mod tests {
         let mut response = AiResponse::new("response", "model");
         response.items = vec![
             AiItem::output_text("C1"),
-            AiItem::function_call(crate::protocol::ir::ToolCall {
+            AiItem::function_call(stravia_runtime_contract::protocol::ir::ToolCall {
                 id: "call-1".into(),
                 name: "web_search".into(),
                 arguments: "{}".into(),

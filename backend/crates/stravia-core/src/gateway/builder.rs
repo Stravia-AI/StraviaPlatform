@@ -6,7 +6,7 @@ pub struct GatewayBuilder {
     hooks: Vec<Arc<dyn Hook>>,
     tools: Vec<Arc<dyn PlatformTool>>,
     mcp_tools: Vec<Arc<dyn McpTool>>,
-    agent_definitions: Vec<agent::AgentDefinitionSpec>,
+    agent_definitions: Vec<stravia_runtime_contract::agent::AgentDefinitionSpec>,
     generation_chain_ttl: Duration,
 }
 
@@ -42,7 +42,10 @@ impl GatewayBuilder {
         self
     }
 
-    pub fn agent_definition(mut self, definition: agent::AgentDefinitionSpec) -> Self {
+    pub fn agent_definition(
+        mut self,
+        definition: stravia_runtime_contract::agent::AgentDefinitionSpec,
+    ) -> Self {
         self.agent_definitions.push(definition);
         self
     }

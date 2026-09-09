@@ -90,7 +90,7 @@ inference_run::execute / engine::dispatch_pipeline
 - `backend/crates/stravia-core/src/hook/tool.rs`
 - `backend/crates/stravia-core/src/hook/response_chain.rs`
 - `backend/crates/stravia-core/src/hook/continuation.rs`
-- `backend/crates/stravia-core/src/protocol/ir/`
+- `backend/crates/stravia-runtime-contract/src/protocol/ir/`
 
 ### 3.2 可直接复用的 seam
 

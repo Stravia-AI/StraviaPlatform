@@ -5,7 +5,9 @@ use sqlx::{FromRow, types::Json};
 
 use crate::provider::AuthMode;
 use crate::provider::VendorRegistry;
-use crate::thinking::{ThinkingLevel, ThinkingLevelMapping, mapping_control};
+use crate::thinking::ThinkingLevelMapping;
+use crate::thinking::mapping_control;
+use stravia_runtime_contract::thinking::ThinkingLevel;
 
 pub fn default_provider_auth_mode() -> String {
     "apikey".to_string()

@@ -1,7 +1,9 @@
+use async_trait::async_trait;
+use stravia_runtime_contract::Principal;
 use tokio::sync::Mutex;
 
 use super::*;
-use crate::protocol::ir::AiItem;
+use stravia_runtime_contract::protocol::ir::AiItem;
 
 struct TestHook {
     descriptor: HookDescriptor,
@@ -61,10 +63,10 @@ fn session_context(kind: RequestKind) -> SessionContext {
         request_id: "req-1".into(),
         run_id: "run-1".into(),
         request_kind: kind,
-        ingress: crate::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+        ingress: stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
         transport: TransportKind::Http,
         principal: Principal::new("test-key"),
-        cancellation: crate::proxy::context::CancellationToken::new(),
+        cancellation: stravia_runtime_contract::CancellationToken::new(),
         inherited_media_turns: Vec::new(),
         response_id: None,
         previous_response_id: None,
@@ -209,7 +211,7 @@ fn route_context() -> RouteContext {
         model_id: "model-id".into(),
         provider_id: "provider-id".into(),
         target_id: "target-id".into(),
-        egress: crate::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+        egress: stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
     }
 }
 
@@ -234,7 +236,7 @@ async fn response_and_tool_result_stages_are_distinct_and_ordered() {
         tool_id: ToolId::new("tool"),
         call_id: "call".into(),
         content: serde_json::json!("raw"),
-        content_kind: crate::protocol::ir::ToolResultContentKind::Json,
+        content_kind: stravia_runtime_contract::protocol::ir::ToolResultContentKind::Json,
         is_error: false,
         metadata: serde_json::Map::new(),
     };
@@ -300,29 +302,37 @@ struct DelimiterTransformer {
 impl StreamTransformer for DelimiterTransformer {
     fn transform(
         &mut self,
-        delta: &crate::protocol::ir::AiStreamDelta,
-    ) -> Result<crate::hook::StreamDirective, String> {
-        let crate::protocol::ir::AiStreamDelta::TextDelta(text) = delta else {
-            return Ok(crate::hook::StreamDirective::Pass);
+        delta: &stravia_runtime_contract::protocol::ir::AiStreamDelta,
+    ) -> Result<stravia_runtime_contract::hook::StreamDirective, String> {
+        let stravia_runtime_contract::protocol::ir::AiStreamDelta::TextDelta(text) = delta else {
+            return Ok(stravia_runtime_contract::hook::StreamDirective::Pass);
         };
         self.buffer.push_str(text);
         if self.buffer.ends_with('>') {
             self.buffer.clear();
-            Ok(crate::hook::StreamDirective::Replace(vec![
-                crate::protocol::ir::AiStreamDelta::TextDelta("redacted".into()),
-            ]))
+            Ok(stravia_runtime_contract::hook::StreamDirective::Replace(
+                vec![
+                    stravia_runtime_contract::protocol::ir::AiStreamDelta::TextDelta(
+                        "redacted".into(),
+                    ),
+                ],
+            ))
         } else {
-            Ok(crate::hook::StreamDirective::Hold)
+            Ok(stravia_runtime_contract::hook::StreamDirective::Hold)
         }
     }
 
-    fn flush(&mut self) -> Result<Vec<crate::protocol::ir::AiStreamDelta>, String> {
+    fn flush(
+        &mut self,
+    ) -> Result<Vec<stravia_runtime_contract::protocol::ir::AiStreamDelta>, String> {
         if self.buffer.is_empty() {
             return Ok(Vec::new());
         }
-        Ok(vec![crate::protocol::ir::AiStreamDelta::TextDelta(
-            std::mem::take(&mut self.buffer),
-        )])
+        Ok(vec![
+            stravia_runtime_contract::protocol::ir::AiStreamDelta::TextDelta(std::mem::take(
+                &mut self.buffer,
+            )),
+        ])
     }
 
     fn buffered_bytes(&self) -> usize {
@@ -335,9 +345,9 @@ struct DropEverythingTransformer;
 impl StreamTransformer for DropEverythingTransformer {
     fn transform(
         &mut self,
-        _delta: &crate::protocol::ir::AiStreamDelta,
-    ) -> Result<crate::hook::StreamDirective, String> {
-        Ok(crate::hook::StreamDirective::Drop)
+        _delta: &stravia_runtime_contract::protocol::ir::AiStreamDelta,
+    ) -> Result<stravia_runtime_contract::hook::StreamDirective, String> {
+        Ok(stravia_runtime_contract::hook::StreamDirective::Drop)
     }
 }
 
@@ -359,13 +369,15 @@ impl StreamTransformer for PanickingTransformer {
 
     fn transform(
         &mut self,
-        _delta: &crate::protocol::ir::AiStreamDelta,
-    ) -> Result<crate::hook::StreamDirective, String> {
+        _delta: &stravia_runtime_contract::protocol::ir::AiStreamDelta,
+    ) -> Result<stravia_runtime_contract::hook::StreamDirective, String> {
         assert!(self.0 != PanicStage::Transform, "transform panic");
-        Ok(crate::hook::StreamDirective::Pass)
+        Ok(stravia_runtime_contract::hook::StreamDirective::Pass)
     }
 
-    fn close(&mut self) -> Result<Vec<crate::protocol::ir::AiStreamDelta>, String> {
+    fn close(
+        &mut self,
+    ) -> Result<Vec<stravia_runtime_contract::protocol::ir::AiStreamDelta>, String> {
         assert!(self.0 != PanicStage::Close, "close panic");
         Ok(Vec::new())
     }
@@ -400,8 +412,9 @@ fn stream_transformer_panics_are_fail_closed() {
                 ContextCompleteness::Full,
             )
             .unwrap();
-        let first =
-            run.transform_stream(crate::protocol::ir::AiStreamDelta::TextDelta("text".into()));
+        let first = run.transform_stream(
+            stravia_runtime_contract::protocol::ir::AiStreamDelta::TextDelta("text".into()),
+        );
         let error = match stage {
             PanicStage::Begin | PanicStage::Transform | PanicStage::BufferedBytes => {
                 first.unwrap_err()
@@ -438,19 +451,21 @@ async fn stream_transformer_holds_across_deltas_and_flushes_semantic_content() {
         .unwrap();
 
     let first = run
-        .transform_stream(crate::protocol::ir::AiStreamDelta::TextDelta(
-            "<secret".into(),
-        ))
+        .transform_stream(
+            stravia_runtime_contract::protocol::ir::AiStreamDelta::TextDelta("<secret".into()),
+        )
         .unwrap();
     let second = run
-        .transform_stream(crate::protocol::ir::AiStreamDelta::TextDelta(">".into()))
+        .transform_stream(
+            stravia_runtime_contract::protocol::ir::AiStreamDelta::TextDelta(">".into()),
+        )
         .unwrap();
     let flushed = run.flush_stream().unwrap();
 
     assert!(first.is_empty());
     assert!(matches!(
         second.as_slice(),
-        [crate::protocol::ir::AiStreamDelta::TextDelta(text)] if text == "redacted"
+        [stravia_runtime_contract::protocol::ir::AiStreamDelta::TextDelta(text)] if text == "redacted"
     ));
     assert!(flushed.is_empty());
 }
@@ -524,9 +539,11 @@ async fn stream_transformer_cannot_drop_structural_events() {
         .unwrap();
 
     let error = run
-        .transform_stream(crate::protocol::ir::AiStreamDelta::Done {
-            stop_reason: "stop".into(),
-        })
+        .transform_stream(
+            stravia_runtime_contract::protocol::ir::AiStreamDelta::Done {
+                stop_reason: "stop".into(),
+            },
+        )
         .unwrap_err();
 
     assert!(matches!(error, HookError::InvalidAction { .. }));
@@ -557,9 +574,9 @@ async fn stream_transformer_is_rejected_when_its_buffer_exceeds_descriptor_limit
         .unwrap();
 
     let error = run
-        .transform_stream(crate::protocol::ir::AiStreamDelta::TextDelta(
-            "12345".into(),
-        ))
+        .transform_stream(
+            stravia_runtime_contract::protocol::ir::AiStreamDelta::TextDelta("12345".into()),
+        )
         .unwrap_err();
 
     assert!(matches!(error, HookError::InvalidAction { .. }));
@@ -606,7 +623,7 @@ impl HookSession for ExposeToolSession {
     async fn handle(&mut self, event: HookEvent<'_>) -> Result<ActionBatch, String> {
         if matches!(event, HookEvent::Request { .. }) {
             Ok(ActionBatch::one(HookAction::ExposeTool(
-                crate::hook::ToolId::new("image-understanding"),
+                stravia_runtime_contract::hook::ToolId::new("image-understanding"),
             )))
         } else {
             Ok(ActionBatch::default())
@@ -617,9 +634,9 @@ impl HookSession for ExposeToolSession {
 struct RuntimeEchoTool;
 
 #[async_trait]
-impl crate::hook::PlatformTool for RuntimeEchoTool {
-    fn id(&self) -> crate::hook::ToolId {
-        crate::hook::ToolId::new("image-understanding")
+impl stravia_runtime_contract::hook::PlatformTool for RuntimeEchoTool {
+    fn id(&self) -> stravia_runtime_contract::hook::ToolId {
+        stravia_runtime_contract::hook::ToolId::new("image-understanding")
     }
 
     fn external_name(&self) -> &str {
@@ -633,10 +650,12 @@ impl crate::hook::PlatformTool for RuntimeEchoTool {
     async fn execute(
         &self,
         arguments: serde_json::Value,
-        _context: crate::hook::ToolExecutionContext,
-    ) -> Result<serde_json::Value, crate::hook::PlatformToolError> {
+        _context: stravia_runtime_contract::hook::ToolExecutionContext,
+    ) -> Result<serde_json::Value, stravia_runtime_contract::hook::PlatformToolError> {
         if arguments.get("fail").is_some() {
-            Err(crate::hook::PlatformToolError::new("tool failed"))
+            Err(stravia_runtime_contract::hook::PlatformToolError::new(
+                "tool failed",
+            ))
         } else {
             Ok(arguments)
         }
@@ -654,7 +673,7 @@ async fn exposed_platform_tool_is_classified_without_claiming_client_tool() {
         registry,
     );
     let mut request = AiRequest::new("model", Vec::<AiItem>::new());
-    request.tools = Some(vec![crate::protocol::ir::ToolSpec {
+    request.tools = Some(vec![stravia_runtime_contract::protocol::ir::ToolSpec {
         name: "stravia__understand_image".into(),
         description: None,
         parameters: serde_json::json!({"type": "object"}),
@@ -681,12 +700,12 @@ async fn exposed_platform_tool_is_classified_without_claiming_client_tool() {
         .clone();
     let mut response = AiResponse::new("response", "model");
     response.extend_tool_calls(vec![
-        crate::protocol::ir::ToolCall {
+        stravia_runtime_contract::protocol::ir::ToolCall {
             id: "platform-call".into(),
             name: platform_name,
             arguments: "{}".into(),
         },
-        crate::protocol::ir::ToolCall {
+        stravia_runtime_contract::protocol::ir::ToolCall {
             id: "client-call".into(),
             name: "stravia__understand_image".into(),
             arguments: "{}".into(),
@@ -748,10 +767,12 @@ fn reasoning_patch_updates_typed_item_and_protects_encrypted_content() {
     );
     validate_response_protected_fields(&original, &candidate)
         .expect("encrypted content remains unchanged");
-    if let crate::protocol::ir::MessageContent::Blocks(blocks) = &mut candidate.items[0].content
+    if let stravia_runtime_contract::protocol::ir::MessageContent::Blocks(blocks) =
+        &mut candidate.items[0].content
         && let [
-            crate::protocol::ir::ContentBlock::Reasoning {
-                encrypted_content, ..
+            stravia_runtime_contract::protocol::ir::ContentBlock::Reasoning {
+                encrypted_content,
+                ..
             },
         ] = blocks.as_mut_slice()
     {

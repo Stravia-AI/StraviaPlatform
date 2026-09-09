@@ -23,7 +23,7 @@ pub struct McpContext {
 
 #[derive(Clone)]
 struct McpExecutionContext {
-    cancellation: crate::proxy::context::CancellationToken,
+    cancellation: stravia_runtime_contract::CancellationToken,
     deadline: std::time::Instant,
 }
 
@@ -37,7 +37,7 @@ impl McpContext {
 
     fn for_call(
         &self,
-        cancellation: crate::proxy::context::CancellationToken,
+        cancellation: stravia_runtime_contract::CancellationToken,
         deadline: std::time::Instant,
     ) -> Self {
         Self {
@@ -51,7 +51,10 @@ impl McpContext {
 
     pub(crate) fn execution(
         &self,
-    ) -> Option<(crate::proxy::context::CancellationToken, std::time::Instant)> {
+    ) -> Option<(
+        stravia_runtime_contract::CancellationToken,
+        std::time::Instant,
+    )> {
         self.execution
             .as_ref()
             .map(|execution| (execution.cancellation.clone(), execution.deadline))
@@ -237,7 +240,7 @@ impl McpToolRegistry {
                 format!("tool is not available: {name}"),
             ));
         }
-        let cancellation = crate::proxy::context::CancellationToken::new();
+        let cancellation = stravia_runtime_contract::CancellationToken::new();
         let call_context = context.for_call(cancellation.clone(), deadline.into_std());
         let mut call = Box::pin(tool.call(arguments, &call_context));
         tokio::select! {

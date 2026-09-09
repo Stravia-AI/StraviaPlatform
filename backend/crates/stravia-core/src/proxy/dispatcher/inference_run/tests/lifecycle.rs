@@ -62,10 +62,9 @@ async fn edited_visible_reasoning_restores_the_authoritative_protected_block() {
     );
     assert!(projected.contains("stravia-history-marker:"), "{projected}");
     assert_eq!(projected.matches("stravia-history-marker:").count(), 2);
-    let references =
-        crate::history_marker::history_marker_references(&[crate::protocol::ir::AiItem::thinking(
-            projected, None,
-        )]);
+    let references = crate::history_marker::history_marker_references(&[
+        stravia_runtime_contract::protocol::ir::AiItem::thinking(projected, None),
+    ]);
     assert_eq!(references.len(), 2, "{projected}");
     assert_ne!(references[0], references[1], "{projected}");
     assert!(!projected.contains("opaque-signature"), "{projected}");
@@ -79,7 +78,10 @@ async fn edited_visible_reasoning_restores_the_authoritative_protected_block() {
         headers.clone(),
         AiRequest::new(
             "opaque-incompatible",
-            vec![crate::protocol::ir::AiItem::thinking(edited.clone(), None)],
+            vec![stravia_runtime_contract::protocol::ir::AiItem::thinking(
+                edited.clone(),
+                None,
+            )],
         ),
     )
     .await;
@@ -106,7 +108,9 @@ async fn edited_visible_reasoning_restores_the_authoritative_protected_block() {
         ),
         request: AiRequest::new(
             "in-memory-model",
-            vec![crate::protocol::ir::AiItem::thinking(edited, None)],
+            vec![stravia_runtime_contract::protocol::ir::AiItem::thinking(
+                edited, None,
+            )],
         ),
         ingress: OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
         context: RequestContext::new(
@@ -122,11 +126,13 @@ async fn edited_visible_reasoning_restores_the_authoritative_protected_block() {
         .items
         .iter()
         .flat_map(|item| match &item.content {
-            crate::protocol::ir::MessageContent::Blocks(blocks) => blocks.as_slice(),
-            crate::protocol::ir::MessageContent::Text(_) => &[],
+            stravia_runtime_contract::protocol::ir::MessageContent::Blocks(blocks) => {
+                blocks.as_slice()
+            }
+            stravia_runtime_contract::protocol::ir::MessageContent::Text(_) => &[],
         })
         .filter_map(|block| match block {
-            crate::protocol::ir::ContentBlock::Thinking {
+            stravia_runtime_contract::protocol::ir::ContentBlock::Thinking {
                 thinking,
                 signature,
             } => Some((thinking.as_str(), signature.as_deref())),
@@ -248,7 +254,9 @@ async fn signed_reasoning_stream_replay_uses_one_preview_and_authoritative_marke
     let headers = authorized_headers(&gateway).await;
     let mut first_request = AiRequest::new(
         "signed-chat-replay",
-        vec![crate::protocol::ir::AiItem::output_text("hello")],
+        vec![stravia_runtime_contract::protocol::ir::AiItem::output_text(
+            "hello",
+        )],
     );
     first_request.stream.enabled = true;
     let first = execute_request_with_headers(
@@ -307,8 +315,8 @@ async fn signed_reasoning_stream_replay_uses_one_preview_and_authoritative_marke
     let mut second_request = AiRequest::new(
         "signed-chat-replay",
         vec![
-            crate::protocol::ir::AiItem::output_text("hello"),
-            crate::protocol::ir::AiItem::thinking(projected, None),
+            stravia_runtime_contract::protocol::ir::AiItem::output_text("hello"),
+            stravia_runtime_contract::protocol::ir::AiItem::thinking(projected, None),
         ],
     );
     second_request.stream.enabled = true;
@@ -343,11 +351,13 @@ async fn protected_reasoning_replay_preserves_parallel_public_tool_calls() {
         ("call_f", "glob"),
     ]
     .into_iter()
-    .map(|(id, name)| crate::protocol::ir::ToolCall {
-        id: id.into(),
-        name: name.into(),
-        arguments: "{}".into(),
-    })
+    .map(
+        |(id, name)| stravia_runtime_contract::protocol::ir::ToolCall {
+            id: id.into(),
+            name: name.into(),
+            arguments: "{}".into(),
+        },
+    )
     .collect::<Vec<_>>();
     let second_calls = [
         ("call_g", "glob"),
@@ -360,11 +370,13 @@ async fn protected_reasoning_replay_preserves_parallel_public_tool_calls() {
         ("call_n", "glob"),
     ]
     .into_iter()
-    .map(|(id, name)| crate::protocol::ir::ToolCall {
-        id: id.into(),
-        name: name.into(),
-        arguments: "{}".into(),
-    })
+    .map(
+        |(id, name)| stravia_runtime_contract::protocol::ir::ToolCall {
+            id: id.into(),
+            name: name.into(),
+            arguments: "{}".into(),
+        },
+    )
     .collect::<Vec<_>>();
     let (base_url, _connections, provider_requests) = serve_responses_websocket_streams(vec![
         openai_responses_protected_parallel_tools_sse("resp-protected-first", &first_calls),
@@ -392,7 +404,7 @@ async fn protected_reasoning_replay_preserves_parallel_public_tool_calls() {
     configure_route_with_protocol(&gateway, model, &[base_url], "openai", "openai-compatible")
         .await;
     let headers = authorized_headers(&gateway).await;
-    let tools = vec![crate::protocol::ir::ToolSpec {
+    let tools = vec![stravia_runtime_contract::protocol::ir::ToolSpec {
         name: "glob".into(),
         description: Some("Find files".into()),
         parameters: serde_json::json!({
@@ -403,16 +415,20 @@ async fn protected_reasoning_replay_preserves_parallel_public_tool_calls() {
         cache_control: None,
         meta: None,
     }];
-    let system = crate::protocol::ir::AiItem {
-        role: crate::protocol::ir::Role::System,
-        content: crate::protocol::ir::MessageContent::Text("repository instructions".into()),
+    let system = stravia_runtime_contract::protocol::ir::AiItem {
+        role: stravia_runtime_contract::protocol::ir::Role::System,
+        content: stravia_runtime_contract::protocol::ir::MessageContent::Text(
+            "repository instructions".into(),
+        ),
         tool_calls: None,
         tool_call_id: None,
         meta: None,
     };
-    let user = crate::protocol::ir::AiItem {
-        role: crate::protocol::ir::Role::User,
-        content: crate::protocol::ir::MessageContent::Text("inspect repository".into()),
+    let user = stravia_runtime_contract::protocol::ir::AiItem {
+        role: stravia_runtime_contract::protocol::ir::Role::User,
+        content: stravia_runtime_contract::protocol::ir::MessageContent::Text(
+            "inspect repository".into(),
+        ),
         tool_calls: None,
         tool_call_id: None,
         meta: None,
@@ -450,14 +466,14 @@ async fn protected_reasoning_replay_preserves_parallel_public_tool_calls() {
     assert_eq!(first_status, StatusCode::OK, "{first_body}");
     let first_marker = marker_from_stream(&first_body);
 
-    let first_assistant = crate::protocol::ir::AiItem {
-        role: crate::protocol::ir::Role::Assistant,
-        content: crate::protocol::ir::MessageContent::Blocks(vec![
-            crate::protocol::ir::ContentBlock::Thinking {
+    let first_assistant = stravia_runtime_contract::protocol::ir::AiItem {
+        role: stravia_runtime_contract::protocol::ir::Role::Assistant,
+        content: stravia_runtime_contract::protocol::ir::MessageContent::Blocks(vec![
+            stravia_runtime_contract::protocol::ir::ContentBlock::Thinking {
                 thinking: "inspect repository".into(),
                 signature: None,
             },
-            crate::protocol::ir::ContentBlock::Text {
+            stravia_runtime_contract::protocol::ir::ContentBlock::Text {
                 text: first_marker,
                 cache_control: None,
             },
@@ -468,7 +484,7 @@ async fn protected_reasoning_replay_preserves_parallel_public_tool_calls() {
     };
     let mut first_history = vec![system.clone(), user.clone(), first_assistant];
     first_history.extend(first_calls.iter().map(|call| {
-        crate::protocol::ir::AiItem::function_call_output(
+        stravia_runtime_contract::protocol::ir::AiItem::function_call_output(
             &call.id,
             serde_json::Value::String(format!("{}-result", call.id)),
         )
@@ -495,14 +511,14 @@ async fn protected_reasoning_replay_preserves_parallel_public_tool_calls() {
     assert_eq!(second_status, StatusCode::OK, "{second_body}");
     let second_marker = marker_from_stream(&second_body);
 
-    let second_assistant = crate::protocol::ir::AiItem {
-        role: crate::protocol::ir::Role::Assistant,
-        content: crate::protocol::ir::MessageContent::Blocks(vec![
-            crate::protocol::ir::ContentBlock::Thinking {
+    let second_assistant = stravia_runtime_contract::protocol::ir::AiItem {
+        role: stravia_runtime_contract::protocol::ir::Role::Assistant,
+        content: stravia_runtime_contract::protocol::ir::MessageContent::Blocks(vec![
+            stravia_runtime_contract::protocol::ir::ContentBlock::Thinking {
                 thinking: "inspect more files".into(),
                 signature: None,
             },
-            crate::protocol::ir::ContentBlock::Text {
+            stravia_runtime_contract::protocol::ir::ContentBlock::Text {
                 text: second_marker,
                 cache_control: None,
             },
@@ -514,7 +530,7 @@ async fn protected_reasoning_replay_preserves_parallel_public_tool_calls() {
     let mut second_history = first_history;
     second_history.push(second_assistant);
     second_history.extend(second_calls.iter().map(|call| {
-        crate::protocol::ir::AiItem::function_call_output(
+        stravia_runtime_contract::protocol::ir::AiItem::function_call_output(
             &call.id,
             serde_json::Value::String(format!("{}-result", call.id)),
         )
@@ -852,12 +868,12 @@ async fn thinking_level_is_clamped_and_mapped_without_replaying_omitted_control(
     let headers = authorized_headers(&gateway).await;
 
     for level in [
-        Some(crate::thinking::ThinkingLevel::Max),
+        Some(stravia_runtime_contract::thinking::ThinkingLevel::Max),
         None,
-        Some(crate::thinking::ThinkingLevel::Off),
+        Some(stravia_runtime_contract::thinking::ThinkingLevel::Off),
     ] {
-        let mut user = crate::protocol::ir::AiItem::output_text("hello");
-        user.role = crate::protocol::ir::Role::User;
+        let mut user = stravia_runtime_contract::protocol::ir::AiItem::output_text("hello");
+        user.role = stravia_runtime_contract::protocol::ir::Role::User;
         let mut request = AiRequest::new(model, vec![user]);
         request.reasoning.level = level;
         let response = execute_request_with_headers(
@@ -912,9 +928,10 @@ async fn unrepresentable_thinking_control_is_a_typed_422_before_upstream() {
         .expect("thinking Route");
     let mut map = route.targets[0].thinking_level_map.0.clone();
     map.iter_mut()
-        .find(|row| row.level == crate::thinking::ThinkingLevel::Medium)
+        .find(|row| row.level == stravia_runtime_contract::thinking::ThinkingLevel::Medium)
         .expect("medium row")
-        .control = crate::thinking::TargetThinkingControl::Budget { value: 8192 };
+        .control =
+        stravia_runtime_contract::thinking::TargetThinkingControl::Budget { value: 8192 };
     gateway
         .storage
         .routes()
@@ -945,10 +962,10 @@ async fn unrepresentable_thinking_control_is_a_typed_422_before_upstream() {
         .await
         .expect("reload injected Route");
 
-    let mut user = crate::protocol::ir::AiItem::output_text("hello");
-    user.role = crate::protocol::ir::Role::User;
+    let mut user = stravia_runtime_contract::protocol::ir::AiItem::output_text("hello");
+    user.role = stravia_runtime_contract::protocol::ir::Role::User;
     let mut request = AiRequest::new(model, vec![user]);
-    request.reasoning.level = Some(crate::thinking::ThinkingLevel::Medium);
+    request.reasoning.level = Some(stravia_runtime_contract::thinking::ThinkingLevel::Medium);
     let response = execute_request_with_headers(
         gateway.clone(),
         authorized_headers(&gateway).await,
@@ -998,7 +1015,7 @@ async fn explicit_thinking_is_rejected_when_the_route_opens_no_levels() {
         .map(|target| {
             let mut map = target.thinking_level_map.0.clone();
             for row in &mut map {
-                row.control = crate::thinking::TargetThinkingControl::Hidden;
+                row.control = stravia_runtime_contract::thinking::TargetThinkingControl::Hidden;
             }
             crate::db::models::UpsertTarget {
                 id: Some(target.id.clone()),
@@ -1025,10 +1042,10 @@ async fn explicit_thinking_is_rejected_when_the_route_opens_no_levels() {
         .await
         .expect("close Thinking Levels");
 
-    let mut user = crate::protocol::ir::AiItem::output_text("hello");
-    user.role = crate::protocol::ir::Role::User;
+    let mut user = stravia_runtime_contract::protocol::ir::AiItem::output_text("hello");
+    user.role = stravia_runtime_contract::protocol::ir::Role::User;
     let mut request = AiRequest::new(model, vec![user]);
-    request.reasoning.level = Some(crate::thinking::ThinkingLevel::Low);
+    request.reasoning.level = Some(stravia_runtime_contract::thinking::ThinkingLevel::Low);
     let response = execute_request_with_headers(
         gateway.clone(),
         authorized_headers(&gateway).await,
@@ -1078,9 +1095,9 @@ async fn failover_remaps_the_same_clamped_level_for_the_next_target() {
         .map(|(index, target)| {
             let mut map = target.thinking_level_map.0.clone();
             map.iter_mut()
-                .find(|row| row.level == crate::thinking::ThinkingLevel::Medium)
+                .find(|row| row.level == stravia_runtime_contract::thinking::ThinkingLevel::Medium)
                 .expect("medium row")
-                .control = crate::thinking::TargetThinkingControl::Effort {
+                .control = stravia_runtime_contract::thinking::TargetThinkingControl::Effort {
                 value: if index == 0 { "low" } else { "high" }.into(),
             };
             crate::db::models::UpsertTarget {
@@ -1108,10 +1125,10 @@ async fn failover_remaps_the_same_clamped_level_for_the_next_target() {
         .await
         .expect("override per-Target thinking controls");
 
-    let mut user = crate::protocol::ir::AiItem::output_text("hello");
-    user.role = crate::protocol::ir::Role::User;
+    let mut user = stravia_runtime_contract::protocol::ir::AiItem::output_text("hello");
+    user.role = stravia_runtime_contract::protocol::ir::Role::User;
     let mut request = AiRequest::new(model, vec![user]);
-    request.reasoning.level = Some(crate::thinking::ThinkingLevel::Medium);
+    request.reasoning.level = Some(stravia_runtime_contract::thinking::ThinkingLevel::Medium);
     let response = execute_request_with_headers(
         gateway.clone(),
         authorized_headers(&gateway).await,

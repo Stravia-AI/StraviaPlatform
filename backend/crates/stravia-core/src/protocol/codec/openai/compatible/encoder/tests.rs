@@ -64,9 +64,11 @@ fn responses_reasoning_effort_maps_to_chat_without_loss() {
             "reasoning": { "effort": "xhigh", "summary": "auto" }
         }))
         .unwrap();
-    request.reasoning.target_control = Some(crate::thinking::TargetThinkingControl::Effort {
-        value: "xhigh".into(),
-    });
+    request.reasoning.target_control = Some(
+        stravia_runtime_contract::thinking::TargetThinkingControl::Effort {
+            value: "xhigh".into(),
+        },
+    );
 
     let (body, _) = OpenAIEncoder.encode_request(&request).unwrap();
 
@@ -86,14 +88,15 @@ fn generic_toggle_without_provider_adapter_is_rejected() {
             meta: None,
         }],
     );
-    request.reasoning.target_control = Some(crate::thinking::TargetThinkingControl::Enabled);
+    request.reasoning.target_control =
+        Some(stravia_runtime_contract::thinking::TargetThinkingControl::Enabled);
     request.meta.source_protocol =
-        Some(crate::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1);
+        Some(stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1);
 
     let error = crate::protocol::transform::ProtocolTransform::global()
         .bind(
-            crate::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
-            crate::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
         )
         .unwrap()
         .encode_request(&request)

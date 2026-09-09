@@ -43,5 +43,5 @@ crate::openai_compat_vendor!(
     CohereVendor,
     "cohere",
     METADATA,
-    [crate::protocol::ids::COHERE_CHAT_V2]
+    [stravia_runtime_contract::protocol::ids::COHERE_CHAT_V2]
 );

@@ -1,5 +1,7 @@
 use super::*;
-use crate::protocol::ir::{AiItem, MessageContent, Role};
+use stravia_runtime_contract::protocol::ir::AiItem;
+use stravia_runtime_contract::protocol::ir::MessageContent;
+use stravia_runtime_contract::protocol::ir::Role;
 
 #[test]
 fn encodes_watsonx_model_id_and_uses_a_distinct_stream_route() {

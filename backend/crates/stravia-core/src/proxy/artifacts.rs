@@ -9,8 +9,11 @@ use futures::StreamExt;
 use serde::Deserialize;
 
 use crate::Gateway;
-use crate::agent::{ArtifactError, ArtifactPolicy, ArtifactUploadRequest, UploadedArtifactPart};
 use crate::proxy::security::{ClientCredential, Security};
+use stravia_runtime_contract::agent::ArtifactPolicy;
+use stravia_runtime_contract::artifact::ArtifactError;
+use stravia_runtime_contract::artifact::ArtifactUploadRequest;
+use stravia_runtime_contract::artifact::UploadedArtifactPart;
 
 #[derive(Deserialize)]
 pub struct CreateArtifactUpload {
@@ -46,7 +49,7 @@ pub async fn create_upload(
                 retention_ttl: Duration::from_secs(7 * 24 * 60 * 60),
                 policy: ArtifactPolicy {
                     max_artifacts: 1,
-                    max_bytes: crate::agent::MAX_ARTIFACT_BYTES,
+                    max_bytes: stravia_runtime_contract::artifact::MAX_ARTIFACT_BYTES,
                     allowed_mime_types: vec!["*/*".into()],
                 },
             },
@@ -121,7 +124,7 @@ pub async fn complete_upload(
 async fn required_principal(
     gateway: &Gateway,
     headers: &HeaderMap,
-) -> Result<crate::hook::Principal, Response> {
+) -> Result<stravia_runtime_contract::Principal, Response> {
     Security::new(gateway.storage.auth())
         .required_principal(&ClientCredential::from_inference_headers(headers))
         .await

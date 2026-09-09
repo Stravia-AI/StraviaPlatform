@@ -5,12 +5,25 @@ use std::collections::HashMap;
 use anyhow::Result;
 use serde_json::Value;
 
-use crate::protocol::ids::OPEN_RESPONSES_2026_04_24;
-use crate::protocol::ir::{
-    AiItem, AiItemAudience, AiItemProvenance, AiItemStatus, AiRequest, ContentBlock,
-    GenerationConfig, MediaSource, MessageContent, OpenResponsesExt, ProtocolExt, ReasoningConfig,
-    ResponseFormat, Role, StreamConfig, ToolCall, ToolChoice, ToolSpec,
-};
+use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
+use stravia_runtime_contract::protocol::ir::AiItem;
+use stravia_runtime_contract::protocol::ir::AiItemAudience;
+use stravia_runtime_contract::protocol::ir::AiItemProvenance;
+use stravia_runtime_contract::protocol::ir::AiItemStatus;
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::ContentBlock;
+use stravia_runtime_contract::protocol::ir::GenerationConfig;
+use stravia_runtime_contract::protocol::ir::MediaSource;
+use stravia_runtime_contract::protocol::ir::MessageContent;
+use stravia_runtime_contract::protocol::ir::OpenResponsesExt;
+use stravia_runtime_contract::protocol::ir::ProtocolExt;
+use stravia_runtime_contract::protocol::ir::ReasoningConfig;
+use stravia_runtime_contract::protocol::ir::ResponseFormat;
+use stravia_runtime_contract::protocol::ir::Role;
+use stravia_runtime_contract::protocol::ir::StreamConfig;
+use stravia_runtime_contract::protocol::ir::ToolCall;
+use stravia_runtime_contract::protocol::ir::ToolChoice;
+use stravia_runtime_contract::protocol::ir::ToolSpec;
 
 pub struct ResponsesDecoder;
 
@@ -158,7 +171,7 @@ impl ResponsesDecoder {
             let effort = reasoning
                 .get("effort")
                 .and_then(Value::as_str)
-                .map(crate::protocol::ir::ReasoningEffort::from_openai_str)
+                .map(stravia_runtime_contract::protocol::ir::ReasoningEffort::from_openai_str)
                 .transpose()?;
             let summary = reasoning
                 .get("summary")
@@ -171,7 +184,7 @@ impl ResponsesDecoder {
                 level: reasoning
                     .get("effort")
                     .and_then(Value::as_str)
-                    .map(crate::thinking::ThinkingLevel::from_wire)
+                    .map(stravia_runtime_contract::thinking::ThinkingLevel::from_wire)
                     .transpose()?,
                 ..Default::default()
             }

@@ -22,7 +22,7 @@ pub(super) async fn update_media_understanding_handler(
 }
 
 pub(super) fn media_understanding_config_error(
-    error: stravia_core::admin::MediaUnderstandingConfigError,
+    error: stravia_media::admin::MediaUnderstandingConfigError,
 ) -> axum::response::Response {
     let status = if error.code == "MEDIA_UNDERSTANDING_CONFIG_UNAVAILABLE" {
         StatusCode::INTERNAL_SERVER_ERROR
@@ -193,7 +193,7 @@ pub(super) async fn update_web_search_config_handler(
 }
 
 pub(super) fn web_search_config_error(
-    error: stravia_core::admin::WebSearchConfigError,
+    error: stravia_web_search::admin::WebSearchConfigError,
 ) -> axum::response::Response {
     let status = if error.code == "WEB_SEARCH_CONFIG_UNAVAILABLE" {
         StatusCode::INTERNAL_SERVER_ERROR

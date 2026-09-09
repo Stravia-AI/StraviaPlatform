@@ -9,13 +9,16 @@ impl crate::model_turn::ModelTurnExecutor for CompletedThenErrorExecutor {
     async fn execute(
         &self,
         input: crate::model_turn::TurnInput,
-    ) -> Result<crate::model_turn::ModelTurn, crate::model_turn::ModelTurnError> {
-        use crate::model_turn::{CanonicalEvent, ModelTurn, ModelTurnError};
+    ) -> Result<crate::model_turn::ModelTurn, stravia_runtime_contract::model_turn::ModelTurnError>
+    {
+        use crate::model_turn::ModelTurn;
+        use stravia_runtime_contract::model_turn::CanonicalEvent;
+        use stravia_runtime_contract::model_turn::ModelTurnError;
         let mut response = AiResponse::new("completed-upstream", &input.request.model);
         response.push_output_text("completed answer");
         response.stop_reason = Some("stop".into());
         let mut turn = ModelTurn::in_memory(
-            crate::hook::RouteContext {
+            stravia_runtime_contract::hook::RouteContext {
                 model_id: input.request.model.clone(),
                 provider_id: "completed-provider".into(),
                 target_id: "completed-target".into(),
@@ -24,7 +27,9 @@ impl crate::model_turn::ModelTurnExecutor for CompletedThenErrorExecutor {
             input.request,
             [
                 Ok(CanonicalEvent::Delta(
-                    crate::protocol::ir::AiStreamDelta::TextDelta("completed answer".into()),
+                    stravia_runtime_contract::protocol::ir::AiStreamDelta::TextDelta(
+                        "completed answer".into(),
+                    ),
                 )),
                 Ok(CanonicalEvent::Completed(Box::new(response))),
                 Err(ModelTurnError::new(
@@ -100,7 +105,7 @@ struct FailingThinkingMarkerStore {
 impl crate::history_marker::HistoryMarkerStore for FailingThinkingMarkerStore {
     async fn create_platform(
         &self,
-        principal: &crate::hook::Principal,
+        principal: &stravia_runtime_contract::Principal,
         input: crate::history_marker::PlatformMarkerInput,
     ) -> Result<crate::history_marker::HistoryMarker, crate::history_marker::HistoryMarkerError>
     {
@@ -109,7 +114,7 @@ impl crate::history_marker::HistoryMarkerStore for FailingThinkingMarkerStore {
 
     async fn create_thinking(
         &self,
-        principal: &crate::hook::Principal,
+        principal: &stravia_runtime_contract::Principal,
         input: crate::history_marker::ThinkingMarkerInput,
     ) -> Result<crate::history_marker::HistoryMarker, crate::history_marker::HistoryMarkerError>
     {
@@ -123,7 +128,7 @@ impl crate::history_marker::HistoryMarkerStore for FailingThinkingMarkerStore {
 
     async fn create_reserved_thinking(
         &self,
-        principal: &crate::hook::Principal,
+        principal: &stravia_runtime_contract::Principal,
         reserved: &crate::history_marker::HistoryMarker,
         input: crate::history_marker::ThinkingMarkerInput,
     ) -> Result<crate::history_marker::HistoryMarker, crate::history_marker::HistoryMarkerError>
@@ -140,7 +145,7 @@ impl crate::history_marker::HistoryMarkerStore for FailingThinkingMarkerStore {
 
     async fn resolve(
         &self,
-        principal: &crate::hook::Principal,
+        principal: &stravia_runtime_contract::Principal,
         reference: &str,
     ) -> Result<
         Option<crate::history_marker::ResolvedHistoryMarker>,
@@ -151,7 +156,7 @@ impl crate::history_marker::HistoryMarkerStore for FailingThinkingMarkerStore {
 
     async fn claim_execution(
         &self,
-        principal: &crate::hook::Principal,
+        principal: &stravia_runtime_contract::Principal,
         reference: &str,
         owner_id: &str,
         lease: std::time::Duration,
@@ -164,7 +169,7 @@ impl crate::history_marker::HistoryMarkerStore for FailingThinkingMarkerStore {
 
     async fn finish_execution(
         &self,
-        principal: &crate::hook::Principal,
+        principal: &stravia_runtime_contract::Principal,
         reference: &str,
         owner_id: &str,
         state: crate::history_marker::PlatformExecutionState,
@@ -177,7 +182,7 @@ impl crate::history_marker::HistoryMarkerStore for FailingThinkingMarkerStore {
 
     async fn wait_terminal(
         &self,
-        principal: &crate::hook::Principal,
+        principal: &stravia_runtime_contract::Principal,
         reference: &str,
     ) -> Result<
         Option<crate::history_marker::ResolvedHistoryMarker>,
@@ -188,7 +193,7 @@ impl crate::history_marker::HistoryMarkerStore for FailingThinkingMarkerStore {
 
     async fn publish(
         &self,
-        principal: &crate::hook::Principal,
+        principal: &stravia_runtime_contract::Principal,
         references: &[String],
         retention: std::time::Duration,
     ) -> Result<(), crate::history_marker::HistoryMarkerError> {
@@ -202,7 +207,7 @@ impl crate::history_marker::HistoryMarkerStore for FailingThinkingMarkerStore {
 
     async fn extend_retention(
         &self,
-        principal: &crate::hook::Principal,
+        principal: &stravia_runtime_contract::Principal,
         references: &[String],
         retention: std::time::Duration,
     ) -> Result<(), crate::history_marker::HistoryMarkerError> {
@@ -1181,12 +1186,14 @@ async fn post_commit_hook_failures_end_the_stream_without_retry_or_response_chai
             .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
             .collect();
         let mut continuation = AiRequest::new(failure.id(), Vec::new());
-        continuation.ext = Some(crate::protocol::ir::ProtocolExt::OpenResponses(
-            crate::protocol::ir::OpenResponsesExt {
-                previous_response_id: Some(response_id.clone()),
-                ..Default::default()
-            },
-        ));
+        continuation.ext = Some(
+            stravia_runtime_contract::protocol::ir::ProtocolExt::OpenResponses(
+                stravia_runtime_contract::protocol::ir::OpenResponsesExt {
+                    previous_response_id: Some(response_id.clone()),
+                    ..Default::default()
+                },
+            ),
+        );
         let headers = authorized_headers(&gateway).await;
         let continuation_response = execute(RunInput {
             gateway: gateway.clone(),

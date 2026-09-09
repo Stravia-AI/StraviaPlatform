@@ -79,7 +79,7 @@ impl AgentRunner {
     pub(crate) async fn definition_model_with_thinking_level(
         &self,
         id: &AgentDefinitionId,
-    ) -> Option<(String, crate::thinking::ThinkingLevel)> {
+    ) -> Option<(String, stravia_runtime_contract::thinking::ThinkingLevel)> {
         self.definitions
             .get_current(id)
             .await
@@ -90,7 +90,7 @@ impl AgentRunner {
 
     pub(crate) fn validate_definition_tools(
         &self,
-        definition: &crate::agent::AgentDefinitionSpec,
+        definition: &stravia_runtime_contract::agent::AgentDefinitionSpec,
     ) -> Result<(), AgentRunError> {
         self.tools
             .model_specs(&definition.tools)
@@ -203,10 +203,10 @@ impl AgentRunner {
                 .working_wall_time
                 .min(spec.budgets.total_wall_time.mul_f64(0.8));
             (
-                crate::agent::AgentDefinitionRecord {
+                stravia_runtime_contract::agent::AgentDefinitionRecord {
                     spec,
                     spec_hash: String::new(),
-                    config: crate::agent::AgentDefinitionConfig::default(),
+                    config: stravia_runtime_contract::agent::AgentDefinitionConfig::default(),
                 },
                 resolved.model_id,
                 None,
@@ -237,10 +237,10 @@ impl AgentRunner {
                     AgentRunError::new("definition_revision_unavailable", error.to_string())
                 })?;
             (
-                crate::agent::AgentDefinitionRecord {
+                stravia_runtime_contract::agent::AgentDefinitionRecord {
                     spec,
                     spec_hash: String::new(),
-                    config: crate::agent::AgentDefinitionConfig::default(),
+                    config: stravia_runtime_contract::agent::AgentDefinitionConfig::default(),
                 },
                 snapshot.model_id,
                 snapshot.thinking_level,
@@ -382,7 +382,7 @@ impl AgentRunner {
                         request_id: format!("agent-request-{}", turn_id.as_str()),
                         run_id: turn_id.as_str().to_owned(),
                         request_kind: RequestKind::Generation,
-                        ingress: crate::protocol::ids::OPEN_RESPONSES_2026_04_24,
+                        ingress: stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24,
                         transport: TransportKind::Http,
                         principal: input.principal.clone(),
                         cancellation: cancellation.clone(),
@@ -802,9 +802,9 @@ impl AgentRunner {
     async fn commit_turn(
         &self,
         input: &AgentInput,
-        record: &crate::agent::AgentDefinitionRecord,
+        record: &stravia_runtime_contract::agent::AgentDefinitionRecord,
         model_id: &str,
-        thinking_level: Option<crate::thinking::ThinkingLevel>,
+        thinking_level: Option<stravia_runtime_contract::thinking::ThinkingLevel>,
         turn_id: &AgentTurnId,
         transcript: &[AiItem],
         result: &AgentResult,

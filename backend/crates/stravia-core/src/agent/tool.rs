@@ -7,9 +7,10 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::{AgentTurnId, VersionedToolId};
-use crate::hook::Principal;
-use crate::protocol::ir::{ToolResultContentKind, ToolSpec};
-use crate::proxy::context::CancellationToken;
+use stravia_runtime_contract::CancellationToken;
+use stravia_runtime_contract::Principal;
+use stravia_runtime_contract::protocol::ir::ToolResultContentKind;
+use stravia_runtime_contract::protocol::ir::ToolSpec;
 
 #[derive(Clone)]
 pub struct AgentToolContext {
