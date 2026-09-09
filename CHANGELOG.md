@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.2.0] - 2026-09-09
+
 ### Added
 
 - Credential Protection now provides the live read-only rule catalog, interaction-grouped discoveries of actually new mappings, and a local matching tester with Unicode-aware positions. The tester does not save input, contact providers, query saved secrets, or change protection state. Discovery summaries remain secret-free, retain failed or cancelled activity, and distinguish incomplete observations.
