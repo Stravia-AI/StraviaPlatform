@@ -871,7 +871,7 @@ def _recover_in_terminal(binary: Path, config: Path, username: str, password: st
             terminal.fileobj.settimeout(max(0.01, deadline - time.monotonic()))
             return terminal.read()
 
-        def send(value: str) -> None:
+        def send(value: str, *, hidden: bool) -> None:
             terminal.write(value + "\r\n")
 
         def finish() -> int:
@@ -884,6 +884,7 @@ def _recover_in_terminal(binary: Path, config: Path, username: str, password: st
         import pty
         import select
         import signal
+        import termios
 
         pid, fd = pty.fork()
         if pid == 0:
@@ -904,7 +905,14 @@ def _recover_in_terminal(binary: Path, config: Path, username: str, password: st
                 raise EOFError
             return data.decode("utf-8")
 
-        def send(value: str) -> None:
+        def send(value: str, *, hidden: bool) -> None:
+            if hidden:
+                # rpassword 先输出提示再关闭回显；提示可见不代表终端已可安全输入。
+                while termios.tcgetattr(fd)[3] & (termios.ECHO | termios.ECHONL):
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError("credential recovery did not disable terminal echo")
+                    select.select([], [], [], min(0.01, remaining))
             os.write(fd, (value + "\n").encode())
 
         def finish() -> int:
@@ -921,14 +929,14 @@ def _recover_in_terminal(binary: Path, config: Path, username: str, password: st
 
     transcript = ""
     try:
-        for prompt, value in (
-            ("New administrator username: ", username),
-            ("New administrator password: ", password),
-            ("Confirm new administrator password: ", password),
+        for prompt, value, hidden in (
+            ("New administrator username: ", username, False),
+            ("New administrator password: ", password, True),
+            ("Confirm new administrator password: ", password, True),
         ):
             while prompt not in re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", transcript):
                 transcript += read_chunk()
-            send(value)
+            send(value, hidden=hidden)
         while True:
             try:
                 transcript += read_chunk()

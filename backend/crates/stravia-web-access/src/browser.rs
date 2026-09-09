@@ -625,6 +625,24 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    pub(super) async fn configure_http_fixture_profile(
+        profile: &std::path::Path,
+    ) -> anyhow::Result<()> {
+        // 纯 HTTP fixture 不提供 CONNECT/TLS；只豁免这两个测试 host，保持 HTTPS-first 与网络策略启用。
+        let directory = profile.join("Default");
+        tokio::fs::create_dir(&directory).await?;
+        let preferences = json!({
+            "https_only_mode_enabled": true,
+            "https_upgrades": {"policy": {"http_allowlist": ["93.184.216.34", "93.184.216.35"]}}
+        });
+        tokio::fs::write(
+            directory.join("Preferences"),
+            serde_json::to_vec(&preferences)?,
+        )
+        .await?;
+        Ok(())
+    }
+
     struct Fixture {
         config: ChromeLaunchConfig,
         task: tokio::task::JoinHandle<()>,

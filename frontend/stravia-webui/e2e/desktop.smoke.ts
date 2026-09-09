@@ -99,11 +99,18 @@ describe('Stravia desktop smoke', () => {
     await expect($('//h1[normalize-space()="Credential Protection"]')).toBeDisplayed()
     await expect($('#reversible-redaction-enabled')).toHaveAttribute('aria-checked', 'false')
 
+    const matchingTab = await $('button=Matching test')
+    await matchingTab.click()
+    await expect(matchingTab).toHaveAttribute('aria-selected', 'true')
     const sample = 'ghp_9Er8nQ3wM0tY5bS7uL4oG6xI2kC1dZaVfJpH'
-    await $('#credential-test-input').setValue(`配置😀\n${sample}`)
+    const input = await $('#credential-test-input')
+    await expect(input).toBeDisplayed()
+    await input.setValue(`配置😀\n${sample}`)
+    await expect(input).toHaveValue(`配置😀\n${sample}`)
     await $('button=Test matching').click()
-    const result = await $('//button[.//span[contains(text(), "Line 2, column 1")]]')
+    const result = await $('[aria-labelledby="test-results-title"] li button')
     await expect(result).toBeDisplayed()
+    await expect(result).toHaveText(expect.stringContaining('Line 2, column 1'))
     await result.click()
     expect(
       await browser.execute(() => {
@@ -434,32 +441,32 @@ describe('Stravia desktop smoke', () => {
   })
 
   it('persists reversible redaction changes through the native management interface', async () => {
+    const serverPort = (await browser.tauri.execute(({ core }) => core.invoke('get_server_port'))) as number
     await $('a[href="/reversible-redaction"]').click()
     const toggle = () => $('#reversible-redaction-enabled')
-    const save = async () => {
-      await $('button=Save settings').click()
-      await toggle().waitForEnabled()
-      await expect($('button=Save settings')).toBeDisabled()
+    const expectSaved = async (value: string) => {
+      await expect(toggle()).toHaveAttribute('aria-checked', value)
+      await expect(toggle()).toBeEnabled()
+      await expect(toggle()).toHaveAttribute('aria-busy', 'false')
+      expect(await adminRequest(serverPort, '/settings/reversible_redaction_enabled')).toBe(value)
     }
     await toggle().waitForEnabled()
     const original = await toggle().getAttribute('aria-checked')
     const changed = original === 'true' ? 'false' : 'true'
     try {
       await toggle().click()
-      await expect(toggle()).toHaveAttribute('aria-checked', changed)
-      await save()
+      await expectSaved(changed)
       await $('a[href="/settings"]').click()
       await $('a[href="/reversible-redaction"]').click()
       await browser.refresh()
-      await toggle().waitForEnabled()
-      await expect(toggle()).toHaveAttribute('aria-checked', changed)
+      await expectSaved(changed)
     } finally {
       await $('a[href="/reversible-redaction"]').click()
       await toggle().waitForEnabled()
       if ((await toggle().getAttribute('aria-checked')) !== original) {
         await toggle().click()
-        await save()
       }
+      await expectSaved(original)
     }
   })
 

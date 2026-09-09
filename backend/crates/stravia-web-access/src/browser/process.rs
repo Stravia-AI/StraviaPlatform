@@ -168,6 +168,8 @@ impl Process {
         })
         .await??;
         let profile_path = profile.path().to_owned();
+        #[cfg(test)]
+        super::tests::configure_http_fixture_profile(&profile_path).await?;
         let mut command = Command::new(executable);
         command
             .args([
