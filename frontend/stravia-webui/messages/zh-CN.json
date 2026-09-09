@@ -1093,7 +1093,6 @@
   "web_search_eligible_model_help": "这里只显示已启用且支持工具调用的模型；请在下方选择搜索和网页来源。",
   "web_search_limits_title": "本地搜索限制",
   "web_search_method_title": "搜索方式",
-  "web_search_data_disclosure_notice": "搜索词和 URL 会发送到已启用的联网服务；收集到的页面内容随后发送给所选模型，用于撰写带来源引用的回答。",
   "web_search_select_codex_model": "选择可用模型",
   "web_search_select_codex_account": "选择已连接的 Codex 账号",
   "web_search_time_limit_seconds": "时间上限（秒）",

@@ -445,6 +445,8 @@ describe('Stravia desktop smoke', () => {
     await $('a[href="/reversible-redaction"]').click()
     const toggle = () => $('#reversible-redaction-enabled')
     const expectSaved = async (value: string) => {
+      await expect(browser).toHaveUrl(expect.stringContaining('/reversible-redaction'))
+      await expect(toggle()).toBeDisplayed()
       await expect(toggle()).toHaveAttribute('aria-checked', value)
       await expect(toggle()).toBeEnabled()
       await expect(toggle()).toHaveAttribute('aria-busy', 'false')
@@ -457,7 +459,11 @@ describe('Stravia desktop smoke', () => {
       await toggle().click()
       await expectSaved(changed)
       await $('a[href="/settings"]').click()
+      await expect(browser).toHaveUrl(expect.stringContaining('/settings'))
+      await expect(toggle()).not.toExist()
       await $('a[href="/reversible-redaction"]').click()
+      // 客户端路由完成后再刷新，避免刷新仍在离开的设置页。
+      await expectSaved(changed)
       await browser.refresh()
       await expectSaved(changed)
     } finally {

@@ -1093,7 +1093,6 @@
   "web_search_eligible_model_help": "Only enabled models that can use tools are shown. Select search and page sources below.",
   "web_search_limits_title": "Local search limits",
   "web_search_method_title": "Search method",
-  "web_search_data_disclosure_notice": "Search terms and URLs are sent to the enabled web services. Collected page content is then sent to the selected model to write an answer with cited sources.",
   "web_search_select_codex_model": "Select an available model",
   "web_search_select_codex_account": "Select a connected Codex account",
   "web_search_time_limit_seconds": "Time limit (seconds)",

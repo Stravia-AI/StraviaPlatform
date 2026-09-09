@@ -422,10 +422,6 @@ async function save(): Promise<void> {
       {:else if (backendKind === 'local' && eligibleModelsQuery.isPending) || (backendKind === 'codex' && codexProvidersQuery.isPending)}
         <p class="mt-4 text-sm text-muted-foreground" role="status">{m.common_settings_loading()}</p>
       {/if}
-      {#if backendKind === 'local'}
-        <Alert.Root class="mt-4" role="note"
-          ><Alert.Description>{m.web_search_data_disclosure_notice()}</Alert.Description></Alert.Root>
-      {/if}
     </section>
 
     {#if backendKind === 'local'}

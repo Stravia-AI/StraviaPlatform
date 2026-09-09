@@ -152,7 +152,6 @@ test('advanced features keep separate media and web search surfaces', async ({ p
   await expect(page.getByText('Codex model', { exact: true })).toBeVisible()
   await expect(page.locator('#web-search-sources')).toHaveCount(0)
   await expect(page.getByRole('heading', { name: 'Local search limits' })).toHaveCount(0)
-  await expect(page.getByText(/Search terms and URLs are sent/)).toHaveCount(0)
 
   await page.locator('#search-backend').click()
   await page.getByRole('option', { name: 'Use a Stravia model' }).click()
