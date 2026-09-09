@@ -160,11 +160,10 @@ function selectThinkingLevel(value?: string): void {
             disabled={saving || toggleSaving || (!configQuery.data.enabled && !savedBindingReady)}
             aria-busy={toggleSaving}
             aria-labelledby="media-service-title"
-            aria-describedby="media-service-description media-immediate-description" />
+            aria-describedby="media-service-description" />
         </div>
       </div>
       <div class="flex flex-col gap-3">
-        <p id="media-immediate-description" class="text-sm text-muted-foreground">{m.common_settings_immediate()}</p>
         {#if !configQuery.data.enabled && !savedBindingReady}
           <p class="text-sm text-muted-foreground" role="status">{m.common_enable_requires_saved_settings()}</p>
         {/if}

@@ -326,7 +326,6 @@
   "common_save_model": "Save model",
   "common_save_settings": "Save settings",
   "common_settings_loading": "Loading settings…",
-  "common_settings_immediate": "Changes apply immediately.",
   "common_enable_requires_saved_settings": "Save a complete configuration before enabling this feature.",
   "common_settings_unsaved": "Unsaved changes. Save settings to apply.",
   "common_search_services": "Search services",

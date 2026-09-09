@@ -213,11 +213,10 @@ async function save(): Promise<void> {
             disabled={saving || toggleSaving || (!configQuery.data.enabled && !savedBindingReady)}
             aria-busy={toggleSaving}
             aria-labelledby="search-gate-title"
-            aria-describedby="search-gate-description search-immediate-description" />
+            aria-describedby="search-gate-description" />
         </div>
       </div>
       <div class="flex flex-col gap-3">
-        <p id="search-immediate-description" class="text-sm text-muted-foreground">{m.common_settings_immediate()}</p>
         {#if toggleError}<Alert.Root variant="destructive"
             ><Alert.Description>{toggleError}</Alert.Description></Alert.Root
           >{/if}

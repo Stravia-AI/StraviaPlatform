@@ -243,7 +243,7 @@ function selectMatch(match: CredentialMatch): void {
   </div>
 {/snippet}
 
-<div class="route-page protection-page">
+<div class={['route-page protection-page', { 'rules-workspace': tab === 'rules' }]}>
   <PageHeader
     eyebrow={m.app_shell_nav_advanced_features()}
     title={m.reversible_redaction_title()}
@@ -257,7 +257,6 @@ function selectMatch(match: CredentialMatch): void {
         <p id="redaction-setting-description" class="route-section-description">
           {m.credential_protection_scope_brief()}
         </p>
-        <p id="redaction-setting-immediate" class="route-section-description">{m.common_settings_immediate()}</p>
       </div>
       <div class="flex shrink-0 items-center gap-3">
         {#if saving}<Spinner />{/if}
@@ -267,7 +266,7 @@ function selectMatch(match: CredentialMatch): void {
           disabled={!settingQuery.isSuccess || saving}
           aria-busy={saving}
           aria-labelledby="redaction-setting-title"
-          aria-describedby="redaction-setting-description redaction-setting-immediate" />
+          aria-describedby="redaction-setting-description" />
       </div>
     </div>
     {#if !settingQuery.isSuccess || saveError}
@@ -286,7 +285,7 @@ function selectMatch(match: CredentialMatch): void {
     {/if}
   </section>
 
-  <Tabs.Root bind:value={tab} class="min-w-0 gap-0">
+  <Tabs.Root bind:value={tab} class="min-h-0 min-w-0 gap-0">
     <Tabs.List aria-label={m.reversible_redaction_title()}>
       <Tabs.Trigger value="rules"
         ><ListFilterIcon />{m.credential_protection_catalog_title()}
@@ -296,8 +295,8 @@ function selectMatch(match: CredentialMatch): void {
       <Tabs.Trigger value="test"><ScanTextIcon />{m.credential_protection_test_tab()}</Tabs.Trigger>
     </Tabs.List>
 
-    <Tabs.Content value="rules" class="min-w-0">
-      <section class="workspace-panel" aria-labelledby="credential-rules-title">
+    <Tabs.Content value="rules" class="flex min-h-0 min-w-0 flex-col">
+      <section class="workspace-panel flex min-h-0 flex-1 flex-col" aria-labelledby="credential-rules-title">
         <h2 id="credential-rules-title" class="sr-only">{m.credential_protection_catalog_title()}</h2>
         {#if rulesQuery.isError}
           <Alert.Root variant="destructive"
@@ -305,6 +304,7 @@ function selectMatch(match: CredentialMatch): void {
           <Button class="mt-3" variant="outline" onclick={() => void rulesQuery.refetch()}>{m.common_retry()}</Button>
         {:else}
           <DataTable
+            class="min-h-0 flex-1 [&>[data-slot=data-table-viewport]]:min-h-0 [&>[data-slot=data-table-viewport]]:flex-1 [&>[data-slot=data-table-toolbar]]:shrink-0 [&>[data-slot=data-table-paginator]]:shrink-0"
             data={rules}
             columns={ruleColumns}
             labels={tableLabels}
@@ -312,7 +312,7 @@ function selectMatch(match: CredentialMatch): void {
             ariaLabel={m.credential_protection_catalog_title()}
             size="large"
             stickyHeader
-            scrollHeight="clamp(16rem, calc(100svh - 35rem), 42rem)"
+            scrollHeight="100%"
             loading={rulesQuery.isPending}
             loadingRows={8}
             globalFilterEnabled
@@ -707,6 +707,17 @@ function selectMatch(match: CredentialMatch): void {
   max-width: 90rem;
   margin-inline: auto;
   width: 100%;
+}
+.rules-workspace {
+  display: grid;
+  grid-template-rows: auto auto minmax(24rem, 1fr);
+  /* 预留标题栏、主内容内边距与桌面底部沟槽，其余高度交给规则工作区。 */
+  height: calc(100svh - 5rem);
+}
+@media (max-width: 767px) {
+  .rules-workspace {
+    height: calc(100svh - 4.5rem);
+  }
 }
 .workspace-panel {
   min-width: 0;

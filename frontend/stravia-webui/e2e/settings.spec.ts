@@ -554,6 +554,20 @@ test('credential protection table keeps its header above the draggable body scro
   const header = table.locator('thead')
   const scrollArea = page.locator('[data-slot="data-table-viewport"]')
   const viewport = scrollArea.locator('[data-scroll-area-viewport]')
+  const main = page.getByRole('main')
+  const paginator = page.locator('[data-slot="data-table-paginator"]')
+  for (const height of [800, 1039]) {
+    await page.setViewportSize({ width: 1280, height })
+    await expect
+      .poll(async () => {
+        const mainBox = (await main.boundingBox())!
+        const paginatorBox = (await paginator.boundingBox())!
+        const bottomGap = mainBox.y + mainBox.height - paginatorBox.y - paginatorBox.height
+        return bottomGap >= 0 && bottomGap <= 24
+      })
+      .toBe(true)
+  }
+  await page.setViewportSize({ width: 1280, height: 800 })
   const bar = scrollArea.locator('[data-scroll-area-scrollbar][data-orientation="vertical"]')
   const thumb = bar.locator('[data-scroll-area-thumb]')
   await expect(thumb).toBeVisible()

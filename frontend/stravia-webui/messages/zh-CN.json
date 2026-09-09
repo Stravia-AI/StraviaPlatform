@@ -326,7 +326,6 @@
   "common_save_model": "保存模型",
   "common_save_settings": "保存设置",
   "common_settings_loading": "正在加载设置…",
-  "common_settings_immediate": "更改立即生效。",
   "common_enable_requires_saved_settings": "请先保存完整配置，再启用此功能。",
   "common_settings_unsaved": "有未保存的更改，保存设置后生效。",
   "common_search_services": "搜索服务",
