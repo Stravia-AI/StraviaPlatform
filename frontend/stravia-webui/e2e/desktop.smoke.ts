@@ -156,6 +156,7 @@ describe('Stravia desktop smoke', () => {
 
     const brand = await $('[aria-label="Stravia 观策行"]')
     await expect(brand).toBeDisplayed()
+    await $('a[href="/"]').click()
 
     const navigationTrigger = await $('header button[aria-expanded]')
     await expect(navigationTrigger).toBeDisplayed()

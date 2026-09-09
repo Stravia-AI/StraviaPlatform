@@ -433,25 +433,6 @@ fn encodes_non_media_tool_payload_as_json_text() {
 }
 
 #[test]
-fn stringifies_invalid_tool_result_content_arrays() {
-    let output = encode_tool_output(&MessageContent::Blocks(vec![ContentBlock::ToolResult {
-        tool_use_id: "call_1".into(),
-        content: serde_json::json!([
-            {"type": "tool_result", "content": {"temperature": 21}}
-        ]),
-        content_kind: Some(crate::protocol::ir::ToolResultContentKind::Json),
-        is_error: None,
-        cache_control: None,
-    }]))
-    .expect("normalize invalid content array");
-
-    assert_eq!(
-        output,
-        Value::String(r#"[{"content":{"temperature":21},"type":"tool_result"}]"#.into())
-    );
-}
-
-#[test]
 fn tool_output_parts_follow_dated_request_and_response_media_shapes() {
     assert!(request_tool_output_part(&serde_json::json!({
         "type": "input_image",

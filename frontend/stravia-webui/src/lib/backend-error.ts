@@ -105,8 +105,6 @@ export function localizeBackendErrorMessage(error: unknown, locale: Locale = get
       return m.credential_protection_catalog_failed({}, options)
     case 'credential_test_failed':
       return m.credential_protection_tester_failed({}, options)
-    case 'WEB_ACCESS_BROWSER_REQUIRED':
-      return m.web_access_browser_required({}, options)
     case 'PROVIDER_NAME_CONFLICT':
       return m.backend_error_provider_name_conflict({ name }, options)
     case 'ROUTE_ID_CONFLICT':

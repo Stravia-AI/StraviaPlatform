@@ -1,4 +1,4 @@
-//! Chrome 保留端到端 TLS；这里只校验目标并转发原始字节。
+//! 内嵌 Moli 保留端到端 TLS；这里只校验目标并转发原始字节。
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     pin::Pin,

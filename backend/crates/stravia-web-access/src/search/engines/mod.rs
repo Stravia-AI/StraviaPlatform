@@ -8,13 +8,13 @@ use std::{
     time::Instant,
 };
 
+use crate::http_client::Request;
 use futures::future::join_all;
 use maud::PreEscaped;
 use serde::{Deserialize, Deserializer, Serialize};
 use tokio::sync::mpsc;
 use tracing::{error, info};
 use url::{Host, Url};
-use wreq::Request;
 
 #[cfg(test)]
 use crate::outbound::{direct_browser, direct_http_client};
@@ -302,13 +302,13 @@ impl From<Vec<String>> for RequestAutocompleteResponse {
 }
 
 pub struct HttpResponse {
-    pub res: wreq::Response,
+    pub res: crate::http_client::Response,
     pub body: String,
     pub config: Arc<Config>,
 }
 
 impl HttpResponse {
-    fn new((res, bytes): (wreq::Response, Vec<u8>), config: Arc<Config>) -> Self {
+    fn new((res, bytes): (crate::http_client::Response, Vec<u8>), config: Arc<Config>) -> Self {
         let body = String::from_utf8(bytes)
             .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned());
         Self { res, body, config }

@@ -308,10 +308,7 @@ impl AdminService {
             .load_settings()
             .await
             .map_err(|_| sources_unavailable())?;
-        let mut providers = store.list().await.map_err(|_| sources_unavailable())?;
-        if !self.gw.web_access().local_browser_available().await {
-            providers.retain(|provider| provider.kind != "local");
-        }
+        let providers = store.list().await.map_err(|_| sources_unavailable())?;
         let has_search = settings.search_provider_ids.iter().any(|id| {
             providers.iter().any(|provider| {
                 provider.id == *id
@@ -650,11 +647,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_browser_excludes_local_sources_without_blocking_remote_search() {
-        let (directory, admin) = admin().await;
-        admin
-            .gw
-            .set_browser_path(Some(directory.path().join("missing-chrome.exe")));
+    async fn embedded_local_sources_satisfy_search_requirements() {
+        let (_directory, admin) = admin().await;
         let store = admin.gw.storage.web_providers().unwrap();
         let local = store
             .list()
@@ -663,31 +657,26 @@ mod tests {
             .into_iter()
             .find(|provider| provider.kind == "local")
             .unwrap();
-        let mut settings = crate::db::models::WebAccessSettings {
+        let settings = crate::db::models::WebAccessSettings {
             search_provider_ids: vec![local.id.clone()],
             fetch_provider_ids: vec![local.id],
         };
-        store.save_settings(&settings).await.unwrap();
+        admin
+            .update_web_access_settings(settings.clone())
+            .await
+            .unwrap();
+        admin.validate_local_sources().await.unwrap();
+        admin
+            .update_web_access_settings(crate::db::models::WebAccessSettings {
+                fetch_provider_ids: vec![],
+                ..settings
+            })
+            .await
+            .unwrap();
         assert_eq!(
             admin.validate_local_sources().await.unwrap_err().code,
             "WEB_SEARCH_SOURCES_UNAVAILABLE"
         );
-        let remote = admin
-            .create_web_provider(crate::db::models::CreateWebProvider {
-                name: "Remote".into(),
-                kind: "exa".into(),
-                api_key: Some("secret".into()),
-                use_proxy: false,
-                local_engines: None,
-            })
-            .await
-            .unwrap();
-        settings.search_provider_ids.push(remote.id.clone());
-        store.save_settings(&settings).await.unwrap();
-        assert!(admin.validate_local_sources().await.is_err());
-        settings.fetch_provider_ids.push(remote.id);
-        store.save_settings(&settings).await.unwrap();
-        admin.validate_local_sources().await.unwrap();
     }
 
     #[tokio::test]

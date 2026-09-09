@@ -56,7 +56,6 @@ import type {
   UpdateWebProvider,
   VendorMetadata,
   WebAccessSettings,
-  WebAccessBrowserState,
   WebProvider,
   WebSearchConfigView,
   UpdateWebSearchConfig,
@@ -133,10 +132,6 @@ function mapRequest(command: string, args?: Record<string, unknown>): RequestMap
       return { method: 'DELETE', path: `/web-providers/${args?.id}` }
     case 'testWebProvider':
       return { method: 'POST', path: `/web-providers/${args?.id}/test` }
-    case 'getWebAccessBrowser':
-      return { method: 'GET', path: '/web-access/browser' }
-    case 'setWebAccessBrowser':
-      return { method: 'PUT', path: '/web-access/browser', body: { path: args?.path } }
     case 'getWebAccessSettings':
       return { method: 'GET', path: '/web-access/settings' }
     case 'updateWebAccessSettings':
@@ -457,10 +452,6 @@ export const admin = {
     refresh: () => request<CatalogRefreshSummary>('refreshCatalog'),
   },
   webAccess: {
-    browser: {
-      get: () => request<WebAccessBrowserState>('getWebAccessBrowser'),
-      set: (path: string | null) => request<WebAccessBrowserState>('setWebAccessBrowser', { path }),
-    },
     providers: {
       list: () => request<WebProvider[]>('listWebProviders'),
       create: (input: CreateWebProvider) => request<WebProvider>('createWebProvider', { input }),

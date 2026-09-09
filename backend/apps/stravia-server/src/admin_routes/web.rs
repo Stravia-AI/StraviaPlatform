@@ -124,20 +124,6 @@ pub(super) async fn test_web_provider_handler(
     }
 }
 
-pub(super) async fn get_web_access_browser_handler(State(gw): State<Gateway>) -> impl IntoResponse {
-    Json(serde_json::json!({ "data": gw.admin().get_web_access_browser().await }))
-}
-
-pub(super) async fn update_web_access_browser_handler(
-    State(gw): State<Gateway>,
-    Json(input): Json<stravia_core::admin::BrowserSettingsUpdate>,
-) -> impl IntoResponse {
-    match gw.admin().update_web_access_browser(input).await {
-        Ok(value) => Json(serde_json::json!({ "data": value })).into_response(),
-        Err(error) => err(error),
-    }
-}
-
 pub(super) async fn get_web_access_settings_handler(
     State(gw): State<Gateway>,
 ) -> impl IntoResponse {

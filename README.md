@@ -125,11 +125,11 @@ Optional Web Search exposes one public `web_search` capability that returns a te
 
 Configure one Search Backend in the WebUI. Local Search runs a bounded Agent over ordered internal Web Access Search and Fetch sources: the seeded in-process Local Provider, Exa, or Zhipu. Each Web Provider can independently use the Gateway proxy. Codex Agentic Search uses one exact compatible Codex OAuth Responses Provider/model binding and ignores the Local budget. There is no fallback between Local and Codex.
 
-The in-process Local Provider's Search and Fetch use `wreq` and `wreq-util` for Chrome-style HTTP transport. Dynamic pages run in real Chrome/Chromium, started lazily in headless mode and controlled directly from Rust over CDP; no Moli runtime or Node/Bun sidecar is required. Both Desktop and Server require a resolvable Chrome/Chromium executable before Local Search or Fetch can be enabled, including ordinary HTTP access. Install the browser on the machine running Stravia and reopen the Local service editor to refresh detection, or set `STRAVIA_CHROME_PATH` to its executable and restart Stravia. Without a browser, the UI disables Local activation and the management API returns `WEB_ACCESS_BROWSER_REQUIRED` without saving the change. Previously saved Local selections remain removable but are unavailable at runtime; remote Exa and Zhipu services are unaffected. Stravia does not download a browser automatically.
+The in-process Local Provider embeds [Stravia's Moli engine](https://github.com/Stravia-AI/moli-stealth): `moli-stealth-net` handles HTTP Search/Fetch and `moli-core` renders dynamic pages with V8. Desktop and Server require no Chrome/Chromium installation, external Moli executable, or Node/Bun sidecar. Browser execution starts lazily on a dedicated owner thread.
 
-Under **Web search → Search and page sources → Local → Edit**, the **Browser executable** input is filled with the current configured or detected path. Desktop's **Browse** button opens the operating system's file picker; Server supports typing or changing the path on the server host. Selecting a file only changes the draft; click **Save service** to apply it. Clear the input and save to remove the manual override. Use an absolute executable path; on macOS, use the executable inside the `.app` bundle. The setting is saved locally for the running instance, not in the shared database, and survives restarts. A manual path takes precedence over `STRAVIA_CHROME_PATH`, followed by automatic detection; saving an unchanged detected path does not pin it. Invalid explicit paths do not fall back to another browser. Saved changes apply to subsequent Web Access requests without restarting; existing requests keep their captured selection. Checking the path does not launch a browser, and Desktop does not bundle one.
+Select Local under **Web search → Search and page sources** without configuring a browser path. The browser-path management endpoint and `STRAVIA_CHROME_PATH` setting have been removed. Existing `web-access-browser.json` and `desktop-browser.json` files are left untouched but are no longer read or written. Remote Exa and Zhipu services are unchanged.
 
-The renderer ports [OMP's browser patches](https://github.com/can1357/oh-my-pi/tree/daf07999c2fee9b22edc7bf8fea1fb6272e0df5e/packages/coding-agent/src/tools/puppeteer), including all 14 stealth scripts, UA metadata, isolated-world evaluation without `Runtime.enable`, and evaluation without injected source URLs. These are fingerprint mitigations, not a guarantee against bot detection. HTTP and browser paths retain the selected Gateway proxy snapshot, isolated cookie/profile ownership, and Fetch safety limits. Browser traffic passes through a checked egress proxy without TLS interception; certificate verification and Chrome's sandbox remain enabled.
+HTTP uses Moli's Chrome transport fingerprint; fingerprint mitigations do not guarantee access to bot-protected sites. HTTP and browser paths retain the selected Gateway proxy snapshot, separate cookie ownership, and Fetch safety limits. Browser HTTP and WebSocket traffic passes through the checked egress proxy without TLS interception; certificate verification remains enabled. Direct connections pin approved public addresses; an explicitly selected upstream proxy remains responsible for its own DNS resolution. Moli executes in the Stravia process, not a Chrome OS-sandboxed child process; deploy Stravia with least privilege and use host/container isolation appropriate for untrusted page execution.
 
 The platform Web Search switch controls explicit access for every valid API key. Each key separately controls MCP access and Transparent Injection; injection only adds selected enabled capabilities to compatible requests and does not restrict explicit or MCP calls. MCP clients connect to `POST /mcp`, use `Authorization: Bearer <key>`, and discover `web_search` only when both MCP access and the platform capability are enabled. OpenAI Responses native web-search declarations and hidden tool continuations use the same Search contract.
 
@@ -225,8 +225,9 @@ Maintainers publish from `vMAJOR.MINOR.PATCH` or SemVer prerelease tags whose ve
 - Bun `1.4.0`
 - [Task](https://taskfile.dev/) `3.52.0`
 - uv `0.11.28` for Python E2E tests
-- CMake and Clang/libclang for native HTTP dependencies; Windows builds also need NASM
-- Chrome/Chromium for dynamic Local Search/Fetch and `task test:browser`
+- CMake, Clang/libclang, Go 1.24 or newer, and Python for native Moli/V8 dependencies; Windows builds also need NASM and the MSVC C++ toolchain
+- The first build downloads the pinned V8 prebuilt archive; deployed binaries do not download a browser
+- Linux builds need pkg-config and Fontconfig development headers; runtime images need Fontconfig
 - Platform dependencies required by Tauri when building the desktop app
 
 ### Run the standalone server
@@ -257,7 +258,7 @@ nix run .
 nix run github:Stravia-AI/StraviaPlatform/vX.Y.Z
 ```
 
-The flake supports `x86_64-linux` and `aarch64-linux`, builds the embedded WebUI and Server as one package, includes Chromium for dynamic Local Search/Fetch, and configures the public `stravia-platform` Cachix cache as a substituter. An explicit `STRAVIA_CHROME_PATH` overrides the bundled browser.
+The flake supports `x86_64-linux` and `aarch64-linux`, builds the embedded WebUI, Moli engine, and Server as one package, and configures the public `stravia-platform` Cachix cache as a substituter. V8 archives are fetched with fixed hashes before the sandboxed build; no external browser is bundled.
 
 For NixOS, import the service module from the flake:
 
@@ -296,7 +297,7 @@ docker run --rm \
 
 Use `docker build --tag stravia-server:local .` and replace the final image name with `stravia-server:local` to build from the current checkout. The image embeds the production WebUI, listens on `0.0.0.0:23471` inside the container, runs as a non-root user, and persists `server.toml` and SQLite data under `/data`. Put an HTTPS reverse proxy in front of the loopback-published port and set `STRAVIA_PUBLIC_ORIGIN` to that exact external origin; management cookies are Secure and unsafe management requests require the same origin plus Stravia's CSRF header. Do not expose the container port directly over HTTP. The built-in health check calls `GET /healthz`; readiness remains unavailable until setup and Gateway startup complete.
 
-The image includes Chromium. Dynamic rendering requires the host/container policy to permit Chrome's sandbox and its Linux namespaces; Stravia does not fall back to `--no-sandbox` when startup is denied.
+The image embeds Moli and does not install Chromium. Browser code runs in the Stravia process; keep the non-root container and normal host isolation in place.
 
 After creating a virtual model such as `my-model`, call it through any supported client protocol:
 
@@ -409,7 +410,7 @@ Common commands:
 | `task dev:desktop`       | Start the Tauri desktop app in development mode             |
 | `task check`             | Run WebUI checks, ESLint, Rust formatting, and Cargo checks |
 | `task test`              | Run WebUI and supported Rust unit tests                     |
-| `task test:browser`      | Run real headless Chrome regressions against local fixtures |
+| `task test:browser`      | Run embedded Moli regressions against local fixtures        |
 | `task test:e2e:web`      | Run Chromium WebUI E2E tests                                |
 | `task test:e2e:desktop`  | Run the Windows Tauri/WebView2 smoke test                   |
 | `DB_URL=… task test:e2e` | Run the full proxy, Admin, SQLite, and PostgreSQL E2E suite |

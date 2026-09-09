@@ -44,11 +44,6 @@ const sourceProvidersQuery = createQuery(() => ({
   queryFn: admin.webAccess.providers.list,
   enabled: configQuery.data?.backend?.kind === 'local' || (initialized && backendKind === 'local'),
 }))
-const sourceBrowserQuery = createQuery(() => ({
-  queryKey: ['web-access-browser'],
-  queryFn: admin.webAccess.browser.get,
-  enabled: configQuery.data?.backend?.kind === 'local' || (initialized && backendKind === 'local'),
-}))
 
 let toggleSaving = $state(false)
 let toggleError = $state('')
@@ -120,17 +115,11 @@ const savedSourceIssue = $derived.by(() => {
   const providersStatus = sourceProvidersQuery.status
   const settings = sourceSettingsQuery.data
   const providers = sourceProvidersQuery.data ?? []
-  const browserStatus = sourceBrowserQuery.status
-  const browserFetching = sourceBrowserQuery.isFetching
-  const browserAvailable = sourceBrowserQuery.data?.available === true
   if (settingsStatus === 'error' || providersStatus === 'error') return 'unavailable'
   if (settingsStatus === 'pending' || providersStatus === 'pending') return 'loading'
   const hasSource = (capability: 'search' | 'fetch', ids: string[]) =>
     providers.some(
-      (provider) =>
-        ids.includes(provider.id) &&
-        provider.capabilities[capability] &&
-        (provider.kind !== 'local' || (browserStatus === 'success' && !browserFetching && browserAvailable)),
+      (provider) => ids.includes(provider.id) && provider.capabilities[capability],
     )
   if (
     settings &&
@@ -139,13 +128,6 @@ const savedSourceIssue = $derived.by(() => {
   ) {
     return undefined
   }
-  const selectedLocal = providers.some(
-    (provider) =>
-      provider.kind === 'local' &&
-      (settings?.search_provider_ids.includes(provider.id) || settings?.fetch_provider_ids.includes(provider.id)),
-  )
-  if (selectedLocal && browserFetching) return 'loading'
-  if (selectedLocal && browserStatus === 'error') return 'unavailable'
   return 'missing'
 })
 const canEnable = $derived(savedBindingReady && !savedSourceIssue)

@@ -89,8 +89,6 @@ pub struct Gateway {
     pub(crate) compaction: crate::compaction::Compaction,
     pub(crate) model_turn: Arc<dyn model_turn::ModelTurnExecutor>,
     pub(crate) web_access_run_snapshots: web_access::WebAccessRunSnapshotStore,
-    pub(crate) browser_path: Arc<std::sync::RwLock<Option<std::path::PathBuf>>>,
-    pub(crate) browser_preferences: Arc<admin::browser::BrowserPreferences>,
     pub(crate) web_search_runner_state:
         Arc<tokio::sync::RwLock<Option<web_search::WebSearchRunner>>>,
     pub(crate) web_search_config_lock: Arc<tokio::sync::Mutex<()>>,
@@ -140,8 +138,6 @@ impl Gateway {
             compaction: self.compaction.clone(),
             model_turn: Arc::clone(&self.model_turn),
             web_access_run_snapshots: self.web_access_run_snapshots.clone(),
-            browser_path: Arc::clone(&self.browser_path),
-            browser_preferences: Arc::clone(&self.browser_preferences),
             web_search_runner_state: Arc::clone(&self.web_search_runner_state),
             web_search_config_lock: Arc::clone(&self.web_search_config_lock),
             update_service: Arc::clone(&self.update_service),

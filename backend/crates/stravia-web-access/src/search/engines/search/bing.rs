@@ -1,8 +1,8 @@
+use crate::http_client::Request;
 use base64::Engine;
 use rand::RngExt;
 use scraper::{ElementRef, Selector};
 use url::Url;
-use wreq::Request;
 
 use crate::search::{
     engines::{EngineResponse, SearchQuery},
@@ -11,12 +11,9 @@ use crate::search::{
 
 pub async fn request(search: &SearchQuery) -> anyhow::Result<Request> {
     let cvid = generate_cvid();
-    let mut request = Request::new(
-        wreq::Method::GET,
-        (search_url(search, &cvid).as_str()).parse()?,
-    );
+    let mut request = http::Request::get(search_url(search, &cvid).as_str()).body(Vec::new())?;
     request.headers_mut().insert(
-        wreq::header::COOKIE,
+        http::header::COOKIE,
         format!("SRCHHPGUSR=IG={cvid}").parse()?,
     );
     Ok(request)

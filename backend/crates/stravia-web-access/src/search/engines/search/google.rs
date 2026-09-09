@@ -1,9 +1,9 @@
 use std::{sync::LazyLock, time::Duration};
 
+use crate::http_client::Request;
 use futures::future::join_all;
 use scraper::{ElementRef, Html, Selector};
 use url::Url;
-use wreq::Request;
 
 use crate::{
     browser::RenderRequest,
@@ -21,7 +21,9 @@ const GOOGLE_NO_RESULTS_MESSAGE: &str = "Your search did not match any documents
 const BROWSER_RENDER_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub async fn request(search: &SearchQuery) -> anyhow::Result<RequestResponse> {
-    Ok(Request::new(wreq::Method::GET, (search_url(search).as_str()).parse()?).into())
+    Ok(http::Request::get(search_url(search).as_str())
+        .body(Vec::new())?
+        .into())
 }
 
 pub(crate) fn requires_browser_render(body: &str) -> bool {
@@ -164,7 +166,7 @@ fn is_google_goto_url(url: &str) -> bool {
 }
 
 async fn resolve_google_redirect(client: &HttpClient, url: &str) -> anyhow::Result<String> {
-    let request = Request::new(wreq::Method::GET, (url).parse()?);
+    let request = http::Request::get(url).body(Vec::new())?;
     let (response, _) = client
         .fetch_once(request)
         .await
@@ -174,7 +176,7 @@ async fn resolve_google_redirect(client: &HttpClient, url: &str) -> anyhow::Resu
     }
     let location = response
         .headers()
-        .get(wreq::header::LOCATION)
+        .get(http::header::LOCATION)
         .ok_or_else(|| anyhow::anyhow!("Google result redirect omitted Location"))?
         .to_str()?;
     let target = Url::parse(location)
@@ -475,7 +477,7 @@ pub fn request_autocomplete(query: &str, _client: &HttpClient) -> anyhow::Result
         ],
     )
     .unwrap();
-    Ok(Request::new(wreq::Method::GET, url.as_str().parse()?))
+    Ok(http::Request::get(url.as_str()).body(Vec::new())?)
 }
 
 pub fn parse_autocomplete_response(body: &str) -> anyhow::Result<Vec<String>> {

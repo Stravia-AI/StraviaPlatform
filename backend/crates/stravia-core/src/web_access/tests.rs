@@ -235,7 +235,6 @@ impl AdapterFactory for FakeAdapterFactory {
         &self,
         provider: &WebProvider,
         outbound: stravia_web_access::OutboundProxyMode,
-        _browser_path: Option<&std::path::Path>,
     ) -> Result<Arc<dyn WebProviderAdapter>, WebAccessError> {
         self.outbounds
             .lock()
@@ -287,8 +286,6 @@ async fn configured_local_adapter_observes_proxy_snapshot_empty_success_and_fail
     })
     .await
     .expect("gateway");
-    // Only fake or remote adapters execute in these tests; this path is metadata-only.
-    gateway.set_browser_path(Some(std::env::current_exe().expect("test executable")));
     let admin = gateway.admin();
     let key = admin
         .create_api_key(crate::db::models::CreateApiKey {
@@ -597,7 +594,7 @@ async fn search_strictly_filters_allowed_and_blocked_subdomains() {
     assert_eq!(response.results[0].url, "https://guide.docs.rs/start");
 }
 #[tokio::test]
-async fn missing_browser_excludes_stale_local_runtime_but_preserves_remote() {
+async fn embedded_local_runtime_is_available_and_remains_optional() {
     let directory = tempfile::tempdir().unwrap();
     let gateway = crate::Gateway::new(crate::config::GatewayConfig {
         data_dir: directory.path().to_owned(),
@@ -605,9 +602,7 @@ async fn missing_browser_excludes_stale_local_runtime_but_preserves_remote() {
     })
     .await
     .unwrap();
-    gateway.set_browser_path(Some(directory.path().join("missing-chrome.exe")));
     let service = gateway.web_access();
-    assert!(!service.local_browser_available().await);
     let store = gateway.storage.web_providers().unwrap();
     let local = store
         .list()
@@ -649,16 +644,32 @@ async fn missing_browser_excludes_stale_local_runtime_but_preserves_remote() {
         .unwrap();
     assert_eq!(
         service
-            .capture_run_snapshot("missing-local", &key.id)
+            .capture_run_snapshot("embedded-local", &key.id)
+            .await
+            .unwrap(),
+        WebAccessAvailability {
+            search: true,
+            fetch: true,
+        }
+    );
+    service.run_snapshot("embedded-local", &key.id).unwrap();
+    assert_eq!(store.load_settings().await.unwrap(), settings);
+    store
+        .save_settings(&WebAccessSettings::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        service
+            .capture_run_snapshot("disabled-local", &key.id)
             .await
             .unwrap(),
         WebAccessAvailability::default()
     );
-    assert!(service.run_snapshot("missing-local", &key.id).is_err());
-    assert_eq!(store.load_settings().await.unwrap(), settings);
+    assert!(service.run_snapshot("disabled-local", &key.id).is_err());
+    service.run_snapshot("embedded-local", &key.id).unwrap();
     let remote_settings = WebAccessSettings {
-        search_provider_ids: vec![local.id.clone(), remote.id.clone()],
-        fetch_provider_ids: vec![local.id, remote.id],
+        search_provider_ids: vec![remote.id.clone()],
+        fetch_provider_ids: vec![remote.id],
     };
     store.save_settings(&remote_settings).await.unwrap();
     assert_eq!(
@@ -866,8 +877,6 @@ async fn configured_local_fetch_retries_only_failed_urls_on_zhipu() {
     })
     .await
     .expect("gateway");
-    // Only fake or remote adapters execute in these tests; this path is metadata-only.
-    gateway.set_browser_path(Some(std::env::current_exe().expect("test executable")));
     let admin = gateway.admin();
     let key = admin
         .create_api_key(crate::db::models::CreateApiKey {
