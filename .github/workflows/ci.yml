@@ -135,7 +135,11 @@ jobs:
           cache: false
 
       - name: Install NASM for BoringSSL
-        run: choco install nasm --yes --no-progress
+        run: |
+          choco install nasm --yes --no-progress
+          $nasmDirectory = Join-Path $env:ProgramFiles 'NASM'
+          & (Join-Path $nasmDirectory 'nasm.exe') -v
+          $nasmDirectory >> $env:GITHUB_PATH
 
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -297,7 +301,11 @@ jobs:
           cache: false
 
       - name: Install NASM for BoringSSL
-        run: choco install nasm --yes --no-progress
+        run: |
+          choco install nasm --yes --no-progress
+          $nasmDirectory = Join-Path $env:ProgramFiles 'NASM'
+          & (Join-Path $nasmDirectory 'nasm.exe') -v
+          $nasmDirectory >> $env:GITHUB_PATH
 
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
