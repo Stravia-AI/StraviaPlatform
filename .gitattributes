@@ -3,6 +3,6 @@ backend/crates/stravia-core/migrations/**/*.sql text eol=lf
 deploy/schema/postgres.sql text eol=lf
 
 # 固定 Betterleaks 资源按原始字节追溯上游，不允许 checkout 改变快照摘要。
-backend/crates/stravia-core/src/reversible_redaction/detection/betterleaks.toml text eol=lf
-backend/crates/stravia-core/src/reversible_redaction/detection/words.txt text eol=lf
-backend/crates/stravia-core/src/reversible_redaction/detection/LICENSE.betterleaks text eol=lf
+backend/crates/stravia-credential-protection/src/detection/betterleaks.toml text eol=lf
+backend/crates/stravia-credential-protection/src/detection/words.txt text eol=lf
+backend/crates/stravia-credential-protection/src/detection/LICENSE.betterleaks text eol=lf
