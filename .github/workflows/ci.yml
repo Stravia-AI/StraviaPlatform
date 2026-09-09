@@ -120,7 +120,7 @@ jobs:
   web-access-browser:
     name: Embedded Moli Web Access
     needs: check
-    runs-on: windows-latest
+    runs-on: windows-2022
     timeout-minutes: 45
     steps:
       - name: Checkout
@@ -275,7 +275,7 @@ jobs:
   desktop-smoke:
     name: Windows desktop smoke
     needs: check
-    runs-on: windows-latest
+    runs-on: windows-2022
     timeout-minutes: 45
     steps:
       - name: Checkout

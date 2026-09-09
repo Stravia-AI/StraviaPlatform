@@ -207,9 +207,10 @@ test('Mobile model links preserve new-tab navigation and keep row actions indepe
       json: { mode: 'server', authenticated: true, setup_authorized: false, username: 'playwright-admin' },
     }),
   )
-  const newTab = context.waitForEvent('page')
-  await modelLink.click({ modifiers: ['ControlOrMeta'] })
-  const opened = await newTab
+  const [opened] = await Promise.all([
+    context.waitForEvent('page'),
+    modelLink.click({ button: 'middle' }),
+  ])
   await prepareApp(opened)
   await expect(opened).toHaveURL(/\/models\/mobile-model$/)
   await expect(page).toHaveURL(/\/models$/)

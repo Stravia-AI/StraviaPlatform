@@ -159,7 +159,7 @@ jobs:
             target: aarch64-unknown-linux-musl
             libc: musl
             binary: target/aarch64-unknown-linux-musl/release/stravia-server
-          - runner: windows-latest
+          - runner: windows-2022
             suffix: windows-x86_64
             target: ""
             libc: windows
@@ -321,7 +321,7 @@ jobs:
             suffix: linux-aarch64
             bundle: appimage
             bundle_directory: appimage
-          - runner: windows-latest
+          - runner: windows-2022
             suffix: windows-x86_64
             bundle: nsis
             bundle_directory: nsis

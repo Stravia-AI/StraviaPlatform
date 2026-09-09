@@ -276,7 +276,7 @@ mod tests {
             .update_web_access_settings(settings.clone())
             .await
             .unwrap();
-        admin.validate_local_sources().await.unwrap();
+        admin.search_admin().validate_local_sources().await.unwrap();
         admin
             .update_web_access_settings(crate::db::models::WebAccessSettings {
                 fetch_provider_ids: vec![],
