@@ -148,6 +148,21 @@ def _wait_for(description: str, probe: Callable[[], Any], timeout: float = 10.0)
     pytest.fail(f"timed out waiting for {description}; last={last!r}")
 
 
+def _wait_for_rejection_trace(env: dict[str, Any], rejection_id: str) -> dict[str, Any]:
+    def finalized_rejection() -> dict[str, Any] | None:
+        status, body = http_request(
+            "GET",
+            f"{env['admin']}/api/v1/observations/rejections/{rejection_id}",
+            headers=env["auth"],
+        )
+        assert status == 200, body
+        detail = body["data"]
+        # 拒绝记录先于 Trace 最终落盘可见，记录存在不代表捕获已完成。
+        return detail if (detail.get("trace") or {}).get("status") == "complete" else None
+
+    return _wait_for("finalized Rejected Request Trace", finalized_rejection)
+
+
 def _route_interactions(env: dict[str, Any], route_id: str) -> list[dict[str, Any]]:
     page = _forest(env, model=route_id, limit=100)
     return [
@@ -221,6 +236,7 @@ def test_observation_http_sse_usage_and_legacy_cutover(admin_env: dict[str, Any]
     assert len(interactions) == 1
     summary = interactions[0]
     assert summary["status"] == "completed"
+    assert summary["input_preview"] == "observation contract"
     assert summary["visible_tail"] == "mock-ok-0"
     assert summary["usage"] == {
         "input_tokens": 3,
@@ -231,6 +247,7 @@ def test_observation_http_sse_usage_and_legacy_cutover(admin_env: dict[str, Any]
     }
 
     detail = _detail(admin_env, summary["id"])
+    assert detail["interaction"]["input_preview"] == "observation contract"
     assert detail["interaction"]["usage"] == summary["usage"]
     assert len(detail["runs"]) == 1
     run = detail["runs"][0]
@@ -251,6 +268,37 @@ def test_observation_http_sse_usage_and_legacy_cutover(admin_env: dict[str, Any]
     for path in ("/api/v1/logs", "/api/v1/logs/removed"):
         status, _ = http_request("GET", f"{admin_env['admin']}{path}", headers=admin_env["auth"])
         assert status == 404
+
+
+@pytest.mark.e2e
+@pytest.mark.admin
+def test_input_preview_filters_latest_user_before_unicode_limit_with_debug_off(
+    admin_env: dict[str, Any],
+) -> None:
+    route_id, api_key = _create_route(admin_env, "observation-input-preview")
+    status, state = http_request(
+        "GET", f"{admin_env['admin']}/api/v1/observations/debug", headers=admin_env["auth"],
+    )
+    assert status == 200, state
+    assert state["data"]["enabled"] is False
+    status, response = _proxy(admin_env, api_key, "observation-input-preview", [
+        {"role": "system", "content": "private-system-context"},
+        {"role": "user", "content": "old-user-context"},
+        {"role": "assistant", "content": "old-assistant-context"},
+        {"role": "user", "content": [
+            {"type": "text", "text": "api_key=" + "credential" * 600},
+            {"type": "text", "text": "文" * 4200},
+        ]},
+    ])
+    assert status == 200, response
+    summary = _wait_for(
+        "redacted ordinary-mode input preview",
+        lambda: next((item for item in _route_interactions(admin_env, route_id)
+                      if item["input_preview"] is not None), None),
+    )
+    preview = summary["input_preview"]
+    assert preview == ("api_key=***\n" + "文" * 4200)[:4096]
+    assert _detail(admin_env, summary["id"])["interaction"]["input_preview"] == preview
 
 
 @pytest.mark.e2e
@@ -365,6 +413,17 @@ def test_tool_loop_concurrent_branches_and_new_user_group_at_interaction_seam(
         ),
     )
     assert len(loop_detail["runs"]) == 4
+    assert loop_detail["interaction"]["input_preview"] == "observation-tool-loop"
+    assert all(not run["debug_enabled"] and not run["debug_events"] for run in loop_detail["runs"])
+    ordinary_events = [event for run in loop_detail["runs"] for event in run["events"]]
+    assert sorted(
+        event["payload"]["input"]["round"]
+        for event in ordinary_events if event["kind"] == "client_tool_handoff"
+    ) == [1, 2, 3]
+    assert {
+        event["payload"]["content"]
+        for event in ordinary_events if event["kind"] == "client_tool_result"
+    } == {"round 1", "round 2", "round 3"}
 
     branch_route, branch_key = _create_route(admin_env, "observation-branch")
     root_messages = [{"role": "user", "content": "observation-branch"}]
@@ -426,13 +485,17 @@ def test_tool_loop_concurrent_branches_and_new_user_group_at_interaction_seam(
     )
     assert status == 200, response
     interactions = _wait_for(
-        "new-user child Interaction",
-        lambda: (lambda items: items if len(items) == 2 else None)(
+        "new-user child Interaction with persisted input preview",
+        lambda: (lambda items: items if len(items) == 2 and all(
+            item["input_preview"] is not None for item in items
+        ) else None)(
             _route_interactions(admin_env, branch_route)
         ),
     )
     child = next(item for item in interactions if item["id"] != branch_interactions[0]["id"])
     assert child["parent_interaction_id"] == branch_interactions[0]["id"]
+    assert child["input_preview"] == "a later user turn"
+    assert _detail(admin_env, branch_interactions[0]["id"])["interaction"]["input_preview"] == "observation-branch"
 
 
 @pytest.mark.e2e
@@ -845,13 +908,7 @@ def test_debug_snapshot_redaction_bundle_ticket_and_clear_active_history(
         )
 
     rejected = _wait_for("Debug Rejected Request", debug_rejection)
-    status, rejected_body = http_request(
-        "GET",
-        f"{admin_env['admin']}/api/v1/observations/rejections/{rejected['id']}",
-        headers=admin_env["auth"],
-    )
-    assert status == 200, rejected_body
-    rejected_detail = rejected_body["data"]
+    rejected_detail = _wait_for_rejection_trace(admin_env, rejected["id"])
     rejected_directions = {
         event.get("direction")
         for event in rejected_detail["debug_events"]
@@ -1065,18 +1122,7 @@ def test_rejected_debug_bundle_records_real_error_without_inventing_execution(
         )
 
     rejected = _wait_for("captured Rejected Request", latest_rejection)
-
-    def finalized_rejection() -> dict[str, Any] | None:
-        status_, body = http_request(
-            "GET",
-            f"{admin_env['admin']}/api/v1/observations/rejections/{rejected['id']}",
-            headers=admin_env["auth"],
-        )
-        assert status_ == 200, body
-        detail_ = body["data"]
-        return detail_ if (detail_.get("trace") or {}).get("status") == "complete" else None
-
-    detail = _wait_for("finalized Rejected Request Trace", finalized_rejection)
+    detail = _wait_for_rejection_trace(admin_env, rejected["id"])
     assert {
         event["direction"]
         for event in detail["debug_events"]

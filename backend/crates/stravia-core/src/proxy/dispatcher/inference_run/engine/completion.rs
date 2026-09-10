@@ -599,6 +599,10 @@ pub(super) async fn complete_canonical_response(
             crate::interaction_observation::RunEvent::ClientToolHandoff {
                 tool_id: call.id.clone(),
                 name: call.name.clone(),
+                input: Some(
+                    serde_json::from_str(&call.arguments)
+                        .unwrap_or_else(|_| serde_json::Value::String(call.arguments.clone())),
+                ),
             },
         );
     }

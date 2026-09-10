@@ -20,6 +20,72 @@ mod tests {
     use sha2::{Digest, Sha384};
     use sqlx::sqlite::SqlitePoolOptions;
 
+    #[tokio::test]
+    async fn artifact_transfers_upgrade_existing_input_preview_database() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("SQLite pool");
+        let mut history = SQLITE_MIGRATOR
+            .iter()
+            .filter(|migration| migration.version < 40)
+            .cloned()
+            .collect::<Vec<_>>();
+        // 已部署的 0040 属于输入预览，其他分支不能复用其版本号。
+        history.push(sqlx::migrate::Migration::new(
+            40,
+            "interaction input preview".into(),
+            sqlx::migrate::MigrationType::Simple,
+            sqlx::SqlStr::from_static(
+                "ALTER TABLE interaction_observations ADD COLUMN input_preview TEXT;\n",
+            ),
+            false,
+        ));
+        sqlx::migrate::Migrator::with_migrations(history)
+            .run(&pool)
+            .await
+            .expect("existing database history");
+        sqlx::query(
+            "INSERT INTO artifacts
+             (id, principal, mime_type, size, backend_key, state, expires_at, created_at)
+             VALUES ('retained', 'owner', 'text/plain', 4, 'objects/retained', 'ready', 1000, 1)",
+        )
+        .execute(&pool)
+        .await
+        .expect("existing artifact");
+
+        super::migrate_sqlite(&pool)
+            .await
+            .expect("upgrade existing database without rewriting applied migrations");
+        sqlx::query(
+            "INSERT INTO artifact_download_grants (token_hash, artifact_id, expires_at)
+             VALUES ('grant-hash', 'retained', 900)",
+        )
+        .execute(&pool)
+        .await
+        .expect("grant for retained artifact");
+        let retained: (String, i64, String, String, String, i64) = sqlx::query_as(
+            "SELECT a.principal, a.size, a.backend_key, a.state, a.storage_backend, g.expires_at
+             FROM artifacts a JOIN artifact_download_grants g ON g.artifact_id = a.id
+             WHERE a.id = 'retained'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("retained artifact with new download grant");
+        assert_eq!(
+            retained,
+            (
+                "owner".into(),
+                4,
+                "objects/retained".into(),
+                "ready".into(),
+                "internal".into(),
+                900
+            )
+        );
+    }
+
     #[test]
     fn embedded_migrations_use_platform_independent_line_endings() {
         for migration in SQLITE_MIGRATOR.iter().chain(POSTGRES_MIGRATOR.iter()) {

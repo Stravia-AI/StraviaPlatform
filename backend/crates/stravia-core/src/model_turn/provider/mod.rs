@@ -229,6 +229,7 @@ pub(crate) struct AttemptObservation {
     started_at: Instant,
     finished: AtomicBool,
     usage_confirmed: AtomicBool,
+    thinking_active: AtomicBool,
 }
 
 impl AttemptObservation {
@@ -266,6 +267,7 @@ impl AttemptObservation {
             started_at: Instant::now(),
             finished: AtomicBool::new(false),
             usage_confirmed: AtomicBool::new(false),
+            thinking_active: AtomicBool::new(false),
         };
         attempt
     }
@@ -339,6 +341,57 @@ impl AttemptObservation {
         }
     }
 
+    pub(crate) fn observe_delta(&self, delta: &AiStreamDelta) {
+        let Some(observer) = &self.observer else {
+            return;
+        };
+        if self.finished.load(Ordering::Acquire) {
+            return;
+        }
+        match delta {
+            AiStreamDelta::ThinkingDelta(text)
+            | AiStreamDelta::ThinkingDeltaWithMetadata { text, .. }
+            | AiStreamDelta::ReasoningSummaryDelta { text, .. }
+                if !text.is_empty() =>
+            {
+                self.thinking_active.store(true, Ordering::Release);
+                observer.record(RunEvent::ModelThinkingDelta {
+                    model_turn_id: self.model_turn_id.clone(),
+                    attempt_id: self.id.clone(),
+                    text: text.clone(),
+                });
+            }
+            AiStreamDelta::TextDelta(text)
+            | AiStreamDelta::TextDeltaWithMetadata { text, .. }
+            | AiStreamDelta::RefusalDelta(text)
+            | AiStreamDelta::RefusalDeltaWithIndex { text, .. }
+                if !text.is_empty() =>
+            {
+                self.finish_thinking();
+            }
+            AiStreamDelta::ToolCallStart { .. }
+            | AiStreamDelta::ToolCallDelta { .. }
+            | AiStreamDelta::ToolCallComplete { .. }
+            | AiStreamDelta::Done { .. }
+            | AiStreamDelta::StreamError { .. }
+            | AiStreamDelta::UnexpectedEof => self.finish_thinking(),
+            // Item snapshots, usage, metadata and protected state are not readable deltas.
+            _ => {}
+        }
+    }
+
+    fn finish_thinking(&self) {
+        if !self.thinking_active.swap(false, Ordering::AcqRel) {
+            return;
+        }
+        if let Some(observer) = &self.observer {
+            observer.record(RunEvent::ModelThinkingFinished {
+                model_turn_id: self.model_turn_id.clone(),
+                attempt_id: self.id.clone(),
+            });
+        }
+    }
+
     pub(crate) fn gap(&self, reason: &str) {
         if let Some(observer) = &self.observer {
             observer.record(RunEvent::ObservationGap {
@@ -370,6 +423,7 @@ impl AttemptObservation {
         if self.finished.swap(true, Ordering::AcqRel) {
             return;
         }
+        self.finish_thinking();
         if let Some(observer) = &self.observer {
             observer.record(RunEvent::TargetAttemptFinished {
                 model_turn_id: self.model_turn_id.clone(),
@@ -679,6 +733,204 @@ mod tests {
     use std::time::Duration;
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn ordinary_thinking_excludes_protected_state_and_closes_each_segment()
+    -> anyhow::Result<()> {
+        use crate::interaction_observation::{IngressStart, InteractionObservation, RunStart};
+
+        let directory = tempfile::tempdir()?;
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/sqlite/0034_interaction_observation.sql"
+        ))
+        .execute(&pool)
+        .await?;
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/sqlite/0040_interaction_input_preview.sql"
+        ))
+        .execute(&pool)
+        .await?;
+        let observation = InteractionObservation::new(
+            Some(pool.clone()),
+            None,
+            directory.path().to_path_buf(),
+            1,
+            true,
+        )
+        .await;
+        let observer = observation
+            .observe_ingress(IngressStart {
+                id: "ingress".into(),
+                method: "POST".into(),
+                path: "/responses".into(),
+                protocol: "responses".into(),
+            })
+            .admit(RunStart {
+                id: "run".into(),
+                principal: "api-key:test".into(),
+                api_key_id: None,
+                api_key_name: None,
+                generation_root_id: None,
+                generation_parent_id: None,
+                has_new_user: true,
+                canonical_fingerprint: "thinking-test".into(),
+                route_id: "route".into(),
+                model_display_name: None,
+                ingress_protocol: "responses".into(),
+            });
+        assert!(!observer.debug_enabled());
+        observer.protect_secrets(["PLAIN_THINKING_SECRET_9"]);
+        let make_attempt = |id: &str| AttemptObservation {
+            observer: Some(observer.clone()),
+            id: id.into(),
+            model_turn_id: "turn".into(),
+            transport: String::new(),
+            protocol: String::new(),
+            url: String::new(),
+            started_at: Instant::now(),
+            finished: AtomicBool::new(false),
+            usage_confirmed: AtomicBool::new(false),
+            thinking_active: AtomicBool::new(false),
+        };
+        let attempt = make_attempt("attempt");
+        attempt.observe_delta(&AiStreamDelta::ThinkingDelta("readable PLAIN_THINK".into()));
+        let interleaved = make_attempt("interleaved");
+        interleaved.observe_delta(&AiStreamDelta::ThinkingDelta("isolated".into()));
+        interleaved.finish("completed", None, None, None);
+        drop(interleaved);
+        attempt.observe_delta(&AiStreamDelta::ThinkingSignature(
+            "protected-signature".into(),
+        ));
+        attempt.observe_delta(&AiStreamDelta::ProtectedThinkingStart { index: 0 });
+        attempt.observe_delta(&AiStreamDelta::Usage(Default::default()));
+        attempt.observe_delta(&AiStreamDelta::ResponseMetadata {
+            metadata: serde_json::json!({"encrypted_content": "protected-ciphertext"}),
+        });
+        attempt.observe_delta(&AiStreamDelta::TextDelta(String::new()));
+        attempt.observe_delta(&AiStreamDelta::ThinkingDeltaWithMetadata {
+            text: "ING_SECRET_9 content".into(),
+            obfuscation: Some("protected-padding".into()),
+            output_index: Some(0),
+            content_index: None,
+        });
+        attempt.observe_delta(&AiStreamDelta::ReasoningSummaryDelta {
+            text: " summary".into(),
+            obfuscation: Some("protected-padding".into()),
+            output_index: Some(0),
+            content_index: None,
+        });
+        attempt.observe_delta(&AiStreamDelta::TextDelta("answer".into()));
+        attempt.observe_delta(&AiStreamDelta::Done {
+            stop_reason: "stop".into(),
+        });
+        attempt.finish("completed", None, None, None);
+        attempt.observe_delta(&AiStreamDelta::ThinkingDelta("too late".into()));
+        drop(attempt);
+
+        for (id, boundary) in [
+            (
+                "tool",
+                AiStreamDelta::ToolCallStart {
+                    index: 0,
+                    id: "call".into(),
+                    name: "tool".into(),
+                },
+            ),
+            (
+                "done",
+                AiStreamDelta::Done {
+                    stop_reason: "stop".into(),
+                },
+            ),
+            ("eof", AiStreamDelta::UnexpectedEof),
+            (
+                "error",
+                AiStreamDelta::StreamError {
+                    error: stravia_runtime_contract::protocol::ir::AiError::new(
+                        stravia_runtime_contract::protocol::ir::AiErrorKind::StreamMidError,
+                        "unavailable",
+                    ),
+                },
+            ),
+        ] {
+            let attempt = make_attempt(id);
+            attempt.observe_delta(&AiStreamDelta::ThinkingDelta(id.into()));
+            attempt.observe_delta(&boundary);
+            drop(attempt);
+        }
+        let cancelled = make_attempt("cancelled");
+        cancelled.observe_delta(&AiStreamDelta::ThinkingDelta("cancelled".into()));
+        cancelled.finish("cancelled", None, None, None);
+        drop(cancelled);
+        let aborted = make_attempt("aborted");
+        aborted.observe_delta(&AiStreamDelta::ThinkingDelta("aborted".into()));
+        drop(aborted);
+        drop(observer);
+        observation.shutdown().await;
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT kind, payload FROM observation_events WHERE kind LIKE 'model_thinking_%' ORDER BY sequence",
+        ).fetch_all(&pool).await?;
+        let events: Vec<(String, Value)> = rows
+            .into_iter()
+            .map(|(kind, payload)| (kind, serde_json::from_str(&payload).expect("event payload")))
+            .collect();
+        for (id, expected) in [
+            ("attempt", "readable *** content summary"),
+            ("interleaved", "isolated"),
+            ("tool", "tool"),
+            ("done", "done"),
+            ("eof", "eof"),
+            ("error", "error"),
+            ("cancelled", "cancelled"),
+            ("aborted", "aborted"),
+        ] {
+            let scoped: Vec<_> = events
+                .iter()
+                .filter(|(_, payload)| payload["attempt_id"] == id)
+                .collect();
+            assert_eq!(
+                scoped.last().map(|event| event.0.as_str()),
+                Some("model_thinking_finished")
+            );
+            assert_eq!(
+                scoped
+                    .iter()
+                    .filter(|event| event.0 == "model_thinking_finished")
+                    .count(),
+                1
+            );
+            let text: String = scoped
+                .iter()
+                .filter_map(|event| event.1["text"].as_str())
+                .collect();
+            assert_eq!(text, expected);
+            assert!(
+                scoped
+                    .iter()
+                    .all(|event| event.1["model_turn_id"] == "turn")
+            );
+        }
+        let serialized = serde_json::to_string(&events)?;
+        for excluded in [
+            "PLAIN_THINKING_SECRET_9",
+            "protected-signature",
+            "protected-ciphertext",
+            "protected-padding",
+            "answer",
+            "too late",
+        ] {
+            assert!(
+                !serialized.contains(excluded),
+                "unexpected captured content: {excluded}"
+            );
+        }
+        pool.close().await;
+        Ok(())
+    }
 
     #[test]
     fn stream_reasoning_normalization_handles_split_tags() {

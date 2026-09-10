@@ -181,7 +181,7 @@ inference_run::execute / engine::dispatch_pipeline
 - Artifact policy；
 - structured-output repair policy。
 
-代码发布在启动时幂等注册并持久化 Revision。相同 slug+version 的 spec hash 不一致时 readiness 失败，禁止静默覆写旧语义。
+代码发布在启动时幂等注册并持久化 Revision。新 spec hash 使用递归排序 JSON 对象键后的内容计算，数组顺序保持不变。已有 hash 不一致时，比较持久化 spec 的 JSON 内容；仅对象键顺序或编码差异不构成改版，且不重写已有记录。相同 slug+version 的实际 spec 内容不一致时 readiness 失败，禁止静默覆写旧语义。
 
 `AgentDefinitionConfig` 是唯一用户可配置状态：
 

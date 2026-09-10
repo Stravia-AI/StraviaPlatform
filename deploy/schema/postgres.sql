@@ -1488,6 +1488,8 @@ CREATE INDEX idx_native_compaction_source ON native_compaction_sources(source_id
 ALTER TABLE models DROP COLUMN compaction_threshold;
 ALTER TABLE models DROP COLUMN compaction_enabled;
 
+ALTER TABLE interaction_observations ADD COLUMN input_preview TEXT;
+
 ALTER TABLE artifacts ADD COLUMN storage_backend TEXT NOT NULL DEFAULT 'internal';
 ALTER TABLE artifacts ADD COLUMN storage_endpoint TEXT;
 ALTER TABLE artifacts ADD COLUMN storage_bucket TEXT;

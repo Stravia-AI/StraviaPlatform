@@ -282,6 +282,89 @@ impl ObservationStore {
         Ok(affected != 0)
     }
 
+    pub(super) async fn persist_input_preview(
+        &self,
+        interaction_id: &str,
+        run_id: &str,
+        preview: &str,
+        now: i64,
+        expires_at: i64,
+    ) -> anyhow::Result<Option<ObservationEvent>> {
+        let kind = "input_preview_recorded";
+        let payload = serde_json::json!({"kind": kind});
+        let sequence = match self {
+            Self::Sqlite(pool) => {
+                let mut tx = pool.begin().await?;
+                let changed = sqlx::query("UPDATE interaction_observations SET input_preview=? WHERE id=? AND root_run_id=? AND input_preview IS NULL")
+                    .bind(preview).bind(interaction_id).bind(run_id).execute(&mut *tx).await?.rows_affected();
+                if changed == 0 {
+                    return Ok(None);
+                }
+                let sequence = next_sqlite(&mut tx).await?;
+                sqlx::query("UPDATE interaction_observations SET last_event_sequence=? WHERE id=?")
+                    .bind(sequence)
+                    .bind(interaction_id)
+                    .execute(&mut *tx)
+                    .await?;
+                insert_event_sqlite(
+                    &mut tx,
+                    sequence,
+                    now,
+                    Some(interaction_id),
+                    Some(run_id),
+                    None,
+                    kind,
+                    &payload,
+                    expires_at,
+                )
+                .await?;
+                tx.commit().await?;
+                sequence
+            }
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let changed = sqlx::query("UPDATE interaction_observations SET input_preview=$1 WHERE id=$2 AND root_run_id=$3 AND input_preview IS NULL")
+                    .bind(preview).bind(interaction_id).bind(run_id).execute(&mut *tx).await?.rows_affected();
+                if changed == 0 {
+                    return Ok(None);
+                }
+                let sequence = sqlx::query_scalar("SELECT nextval('observation_event_sequence')")
+                    .fetch_one(&mut *tx)
+                    .await?;
+                sqlx::query(
+                    "UPDATE interaction_observations SET last_event_sequence=$1 WHERE id=$2",
+                )
+                .bind(sequence)
+                .bind(interaction_id)
+                .execute(&mut *tx)
+                .await?;
+                insert_event_postgres(
+                    &mut tx,
+                    sequence,
+                    now,
+                    Some(interaction_id),
+                    Some(run_id),
+                    None,
+                    kind,
+                    &payload,
+                    expires_at,
+                )
+                .await?;
+                tx.commit().await?;
+                sequence
+            }
+        };
+        Ok(Some(ObservationEvent {
+            sequence,
+            occurred_at: now,
+            interaction_id: Some(interaction_id.to_owned()),
+            run_id: Some(run_id.to_owned()),
+            rejection_id: None,
+            kind: kind.to_owned(),
+            payload,
+        }))
+    }
+
     pub async fn persist_run_event(
         &self,
         interaction_id: &str,

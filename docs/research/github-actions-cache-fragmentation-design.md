@@ -4,12 +4,36 @@
 
 ## 实施策略
 
-- CI 使用下文四类 Rust 分区及唯一 writer，失败不保存；release 的 Rust/Bun cache 关闭，Docker 不再使用 GHA cache。
-- 可信 main push 可以保存缓存。另允许本仓库 `ci.yml` 在 main 上显式 `workflow_dispatch` 预热；普通手动 CI、PR、release caller 均不可写。该受限预热入口是原 push-only 方案的明确扩展。
-- `cache_warm` 依次选择 `linux-test`、`linux-e2e`、`windows-debug`、`stable-registry`。每次仅运行对应 writer 的原有构建/测试路径，上一阶段成功后再启动下一阶段；不重复执行额外构建来填充 archive。
+- Rust 安装与缓存动作分离，缓存前仅保留活动工具链，避免 runner 预装版本参与指纹。保留实际编译器、环境与依赖指纹，不关闭兼容性隔离。
+- `ci-v2-linux-gnu-pinned-test` 同时服务 pinned/stable 单测；两者编译器相同时共享完整依赖构建缓存，版本不同时由自动指纹隔离。两条单测路径构建相同 Rust 测试集合，不依靠竞争写入合并产物。
+- `ci-v2-linux-gnu-pinned-e2e-mixed` 由 Admin job 写入，覆盖 debug server、devtools 和 release server。预编译串行完成后直接运行 pytest，不重复触发 WebUI 构建与 release 链接。
+- `ci-v3-windows-msvc-desktop-browser-debug` 由 desktop job 唯一写入，先构建 desktop 和 browser 测试依赖，再执行桌面 smoke；browser job 只读。
+- 可信 main push 和本仓库 `ci.yml` 在 main 上的普通或预热 `workflow_dispatch` 可以保存缓存；PR、release caller 仍只读。只有编译成功后才允许失败 job 收尾保存，后续测试失败不丢失成功编译的依赖。
+- `cache_warm` 可选择 `linux-test`、`linux-stable`、`linux-e2e`、`windows-debug`；Windows 预热现在运行 desktop writer。普通 CI 的独立 job 并发启动，不再等待静态检查或整个单测矩阵；所有检查仍参与 workflow 最终结论。
 - Docker 使用 `.github/workflows/docker-cache.yml` 的可信 main producer，按架构写入 `ghcr.io/stravia-ai/straviaplatform:buildcache-amd64` 和 `:buildcache-arm64`，`mode=max`。release 仅恢复，不发布 cache；预热 workflow 不发布产品镜像或 Release。
-- 首次迁移提交使用 `[skip ci]` 避免并发冷写入。确认旧运行结束、刷新 inventory 并按 ID 清理旧 Rust cache 后，顺序 dispatch 四个预热阶段，然后 dispatch 普通 CI 验证完整任务图。Docker cache 单独 dispatch。该标记只控制这次启动顺序，不代替验证。
+- 新 Windows 分区首次需要填充；其余沿用已验证的 Linux 缓存。旧缓存与新缓存短期共存可能触发容量淘汰，不自动删除其他工作流的缓存。下文四分区预算与迁移命令是原研究快照，不是当前操作指引。
 - 容量数字仍是预算，不是硬限制或实测优化结果。GHCR cache 的存储成本、访问权限以及两架构真实构建结果需独立核验。
+
+### 2026-09-10 线上实施结果
+
+配置提交：`c9002a33be6720cabfe978c6ff0bb772bc99c7e5`。推送前 YAML 解析通过；actionlint 只报告既有 `windows-11-vs2026-arm` runner label 未识别，精确排除此诊断后通过。未改变该 runner。
+
+刷新所有 queued/in_progress/waiting/pending/requested 运行清单，均为零后，按明确 ID 删除旧 Rust cache：`7524330050`、`7523948702`、`7523545144`、`7523330408`、`7523283390`。共释放 9,086,002,262 bytes；Bun/uv 保留，未执行全量删除。
+
+| 顺序 | 分区 | 成功运行 | 新 cache ID | 实测 bytes / GiB |
+|---|---|---|---|---:|
+| 1 | Linux pinned test | [34433783954](https://github.com/Stravia-AI/StraviaPlatform/actions/runs/34433783954) | `7530075640` | 1,787,625,029 / 1.665 |
+| 2 | Linux E2E mixed | [34435511669](https://github.com/Stravia-AI/StraviaPlatform/actions/runs/34435511669) | `7531131787` | 2,704,860,695 / 2.519 |
+| 3 | Windows debug | [34438573195](https://github.com/Stravia-AI/StraviaPlatform/actions/runs/34438573195) | `7531961197` | 1,903,622,859 / 1.773 |
+| 4 | stable registry-only | [34441033514](https://github.com/Stravia-AI/StraviaPlatform/actions/runs/34441033514) | `7532584418` | 846,992,763 / 0.789 |
+
+预热后原生池共 7 条，7,319,410,154 bytes = **6.817 GiB**，相较迁移前减少 **1.716 GiB**，10 GiB 配额下剩余 **3.183 GiB**。stable registry-only 实测显著超过原 0.25 GiB 假设；不能再把原分区预算表当作经过验证的预测。其余分区低于预算，使当前总量仍低于 7.80 GiB 目标。依赖或 runner 环境产生第二代大 cache 时仍需容量管理。
+
+Docker [首次构建 34433804346](https://github.com/Stravia-AI/StraviaPlatform/actions/runs/34433804346) 两架构成功，日志确认 registry manifest 导出完成；[第二次构建 34435573470](https://github.com/Stravia-AI/StraviaPlatform/actions/runs/34435573470) 两架构成功，各有 17 个构建步骤 `CACHED`。首次 import 的 `not found` 是尚未创建 ref 的冷启动，随后成功创建；第二次确认可恢复。没有发布产品镜像或 Release。以上不证明源码变化后 Cargo cache mount 可以跨 runner 保存，也不代表 GHCR 没有存储成本。
+
+[完整只读 CI 34442786974](https://github.com/Stravia-AI/StraviaPlatform/actions/runs/34442786974) 执行全部 10 个 job，9 个成功；admin E2E 为 158 passed / 1 failed。失败为 `tests/e2e/admin/test_observations.py:860`，期望两个 wire direction，实际集合为空。同一提交的 admin 预热运行已通过，但尚未定位该断言失败的根因，不能声称完整 CI 全绿，也没有通过重试或修改断言掩盖失败。
+
+缓存日志确认全部 Rust `save-if: false`。Windows browser/desktop 和 stable registry exact hit，所有 E2E 的 uv 命中。Linux pinned/test 的 consumer 获得旧 runner image `20260831.293.1`，请求环境 hash `6750113f`，而 writer 为新镜像的 `095333cd`；E2E 恰好相反，consumer 新镜像请求 `095333cd`，writer 旧镜像为 `6750113f`，均 miss。该次验收证明写入收敛和部分共享恢复有效，**不证明 Linux 热命中稳定或整体 CI 加速**。未放宽兼容性 hash，也未为镜像 rollout 盲目追加第二条大 cache；这一已观察到的限制需要后续工具链环境规范化或 cache action 版本策略单独解决。
 
 ## 结论先行
 
@@ -357,4 +381,4 @@ GitHub 7 天未访问回收意味着低频分区自然变冷；“无 thrash”�
 - **[S11]** GitHub CLI：[gh cache delete](https://cli.github.com/manual/gh_cache_delete)。
 - **[L1]** [ci.yml](../../.github/workflows/ci.yml)；**[L2]** [release.yml](../../.github/workflows/release.yml)；**[L3]** [Taskfile.yml](../../Taskfile.yml)；**[L4]** [Dockerfile](../../Dockerfile)；**[L5]** [Cargo.toml](../../Cargo.toml)；**[L6]** [.cargo/config.toml](../../.cargo/config.toml)。
 
-本次完成的是：只读线上 inventory 复核、字节换算、源码/官方文档研究与配置设计。本文所有命中率目标、优化后容量、冷/热成本、7 天稳定性与安全 gate 运行结果，均留待后续 workflow 实施按上述步骤测量，**没有声称已实施或已验证**。
+原研究阶段仅完成只读 inventory、源码/官方文档研究与配置设计；后续实施和单轮验证结果见开头“线上实施结果”。7 天稳定性、PR/release caller 的实际禁写运行、GHCR 保留成本仍未实测，不能把设计目标作为验收通过结果。

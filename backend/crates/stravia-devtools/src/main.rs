@@ -91,7 +91,9 @@ const POSTGRES_SCHEMA_SQL: &str = concat!(
     "\n",
     include_str!("../../stravia-core/migrations/postgres/0039_remove_route_compaction_policy.sql"),
     "\n",
-    include_str!("../../stravia-core/migrations/postgres/0040_artifact_transfers.sql")
+    include_str!("../../stravia-core/migrations/postgres/0040_interaction_input_preview.sql"),
+    "\n",
+    include_str!("../../stravia-core/migrations/postgres/0041_artifact_transfers.sql")
 );
 const POSTGRES_SCHEMA_HEADER: &str = "\
 -- Stravia Agent infra - PostgreSQL Final Schema

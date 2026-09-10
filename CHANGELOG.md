@@ -9,8 +9,17 @@
 ### Changed
 
 - **Breaking:** `StraviaRead` replaces the former platform search/media tool names. URL-shaped inputs support Artifact downloads/questions, webpage Markdown, stored files, image understanding, and complete `query://` research; internal Agents use the same name for basic retrieval without recursive research. Existing capability preferences remain separate and enforced.
-- Structured media is stored before model execution and materialized per actual Provider call. New history and diagnostics keep references rather than repeated base64; upload credentials are always protected, including expired replay. Migration 40 adds equivalent SQLite/PostgreSQL storage-location and download-grant metadata without rewriting historical media.
+- Structured media is stored before model execution and materialized per actual Provider call. New history and diagnostics keep references rather than repeated base64; upload credentials are always protected, including expired replay. Migration 41 adds equivalent SQLite/PostgreSQL storage-location and download-grant metadata without rewriting historical media, preserving the already-applied migration 40 for interaction input previews.
 - External signed downloads are explicitly opt-in for both client and Provider delivery. Native S3 signatures use the configured download endpoint; links need at least five minutes remaining before Provider calls. Active readers and unexpired grants protect physical cleanup without reviving expired files. Existing multipart limits remain 100 MiB per file and sixteen uploads / 400 MiB staging per Principal, with no saved-file aggregate quota.
+- CI runs independent checks concurrently, caches compiled stable Rust test dependencies alongside the pinned toolchain when compiler fingerprints match, and lets the Windows desktop job populate a combined desktop/browser dependency cache. Prepared Admin and desktop tests no longer repeat their build prerequisites; all existing test coverage remains enabled.
+
+### Fixed
+
+- CI Rust cache keys no longer depend on unused toolchains preinstalled on runner images. Trusted main-branch manual runs can populate caches, and successful unit-test, browser-test, and Admin E2E compilation remains cacheable when subsequent tests fail. Admin cache warm-up builds debug and release profiles serially and includes development tools.
+- The interaction observation E2E waits for the asynchronously persisted input preview before asserting its content, rather than treating Interaction creation as proof that the preview is ready.
+- The Admin statistics E2E waits for persisted usage and duration before comparing totals, without converting unknown usage to zero or retrying inference requests.
+- Existing databases with migration 40 for interaction input previews can upgrade to Artifact storage without a migration checksum conflict or any rewrite of applied migration history.
+- Agent Definition registration no longer mistakes JSON object-key ordering differences between builds for an unversioned content change. Existing revision snapshots remain untouched, while real schema, instruction, tool, and policy changes still require a new revision.
 
 ## [0.2.0] - 2026-09-09
 

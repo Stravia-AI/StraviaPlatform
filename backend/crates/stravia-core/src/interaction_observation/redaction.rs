@@ -7,6 +7,35 @@ use super::types::{IngressStart, RejectedOutcome, RunEvent, RunOutcome};
 
 pub(crate) const REDACTED: &str = "***";
 
+pub(crate) fn user_input_text(
+    items: &[stravia_runtime_contract::protocol::ir::AiItem],
+) -> Option<String> {
+    use stravia_runtime_contract::protocol::ir::{ContentBlock, MessageContent, Role};
+    let item = items.iter().rev().find(|item| item.role == Role::User)?;
+    let text = match &item.content {
+        MessageContent::Text(text) => text.clone(),
+        MessageContent::Blocks(blocks) => blocks
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    };
+    (!text.is_empty()).then_some(text)
+}
+
+pub(crate) fn input_preview(mut text: String, protected: &ProtectedSecrets) -> String {
+    // Full text must cross both filters before taking a Unicode-safe opening window.
+    protected.text(&mut text);
+    text = redact_text(&text);
+    if let Some((end, _)) = text.char_indices().nth(4096) {
+        text.truncate(end);
+    }
+    text
+}
+
 // Shared only by a Run and its trace handles. Deliberately has no Debug implementation.
 #[derive(Clone, Default)]
 pub(crate) struct ProtectedSecrets(std::sync::Arc<std::sync::RwLock<Vec<ProtectedSecret>>>);
@@ -118,7 +147,23 @@ impl ProtectedSecrets {
 
     pub(crate) fn event(&self, event: &mut RunEvent) {
         match event {
-            RunEvent::ClientVisibleContentDelta { text } => self.text(text),
+            RunEvent::ClientVisibleContentDelta { text }
+            | RunEvent::ModelThinkingDelta { text, .. } => self.text(text),
+            RunEvent::ClientToolHandoff {
+                input: Some(value), ..
+            }
+            | RunEvent::PlatformToolStarted {
+                input: Some(value), ..
+            }
+            | RunEvent::ClientToolResult { content: value, .. } => self.value(value),
+            RunEvent::PlatformToolFinished {
+                status, content, ..
+            } => {
+                self.text(status);
+                if let Some(value) = content {
+                    self.value(value);
+                }
+            }
             RunEvent::Checkpoint { payload, .. } => self.value(payload),
             RunEvent::Wire {
                 direction,
@@ -147,8 +192,7 @@ impl ProtectedSecrets {
                 ..
             }
             | RunEvent::ObservationGap { reason } => self.text(reason),
-            RunEvent::ModelTurnFinished { status, .. }
-            | RunEvent::PlatformToolFinished { status, .. } => self.text(status),
+            RunEvent::ModelTurnFinished { status, .. } => self.text(status),
             _ => {}
         }
     }
@@ -602,7 +646,21 @@ pub(crate) fn redact_run_event(event: &mut RunEvent) -> RedactionReport {
                 redact_string(reason, &mut report);
             }
         }
-        RunEvent::ClientVisibleContentDelta { text } => redact_string(text, &mut report),
+        RunEvent::ClientVisibleContentDelta { text }
+        | RunEvent::ModelThinkingDelta { text, .. } => redact_string(text, &mut report),
+        RunEvent::ClientToolHandoff {
+            input: Some(value), ..
+        }
+        | RunEvent::PlatformToolStarted {
+            input: Some(value), ..
+        }
+        | RunEvent::PlatformToolFinished {
+            content: Some(value),
+            ..
+        }
+        | RunEvent::ClientToolResult { content: value, .. } => {
+            report.merge(redact_value(value));
+        }
         RunEvent::ObservationGap { reason } => redact_string(reason, &mut report),
         // Checkpoint and Wire payloads are redacted by TraceHandle::record before its queue.
         _ => {}
@@ -1528,6 +1586,42 @@ fn text_wrapper(character: char) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn input_preview_selects_latest_user_text_without_history_or_tool_payloads() {
+        let items: Vec<stravia_runtime_contract::protocol::ir::AiItem> = serde_json::from_value(serde_json::json!([
+            {"role":"system","content":"system-secret"},
+            {"role":"user","content":"old-user"},
+            {"role":"assistant","content":"assistant-secret"},
+            {"role":"user","content":[{"type":"text","text":"first"},{"type":"text","text":"second"}]},
+            {"role":"tool","content":"tool-secret","tool_call_id":"call"}
+        ])).unwrap();
+        assert_eq!(super::user_input_text(&items), Some("first\nsecond".into()));
+        let items: Vec<stravia_runtime_contract::protocol::ir::AiItem> =
+            serde_json::from_value(serde_json::json!([
+                {"role":"user","content":"old-user"},
+                {"role":"user","content":[]}
+            ]))
+            .unwrap();
+        assert_eq!(super::user_input_text(&items), None);
+    }
+
+    #[test]
+    fn input_preview_redacts_complete_secrets_before_unicode_truncation() {
+        let protected = super::ProtectedSecrets::default();
+        let secret = format!("{}private-ending", "密".repeat(4100));
+        protected.register([secret.as_str()]);
+        let text = format!(
+            "start {secret}\napi_key=credential-sentinel\n{}",
+            "文".repeat(4200)
+        );
+        let preview = super::input_preview(text, &protected);
+        assert!(preview.starts_with("start ***\napi_key=***\n"));
+        assert!(!preview.contains("密"));
+        assert!(!preview.contains("credential-sentinel"));
+        assert_eq!(preview.chars().count(), 4096);
+        assert!(preview.ends_with('文'));
+    }
+
     use super::*;
 
     #[test]

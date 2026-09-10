@@ -387,7 +387,7 @@ def test_redaction_reuses_and_restores_mappings_after_real_restart(
     stravia_binary: Path, storage_runtime: dict[str, object], tmp_path: Path, backend: str,
 ) -> None:
     from tests.e2e.admin.test_credential_protection import key_discoveries
-    from tests.e2e.admin.test_observations import _wait_for
+    from tests.e2e.admin.test_observations import _detail, _wait_for
 
     pg_url = storage_runtime["pg_url"]
     if backend == "postgres" and not pg_url:
@@ -430,6 +430,11 @@ def test_redaction_reuses_and_restores_mappings_after_real_restart(
             )
             assert len(initial) == 1 and initial[0]["new_credential_count"] == 1
             assert "github-pat" in initial[0]["rule_ids"]
+            preview = _wait_for(
+                "redacted input preview before restart",
+                lambda: _detail(env, initial[0]["interaction_id"])["interaction"]["input_preview"],
+            )
+            assert preview == "***"
             stop_stravia_server(process, logs)
             process = None
 
@@ -448,6 +453,7 @@ def test_redaction_reuses_and_restores_mappings_after_real_restart(
             assert restored[0]["new_credential_count"] == 1
             assert SECRET not in json.dumps(restored)
             assert reference not in json.dumps(restored)
+            assert _detail(env, initial[0]["interaction_id"])["interaction"]["input_preview"] == "***"
             status, body = _proxy(env, key, model, [
                 {"role": "user", "content": SECRET},
                 first["choices"][0]["message"],

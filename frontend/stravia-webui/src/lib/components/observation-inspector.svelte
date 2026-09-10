@@ -46,7 +46,7 @@ $effect(() => {
   const hasDebug = interaction
     ? interaction.runs.some((run) => run.debug_enabled)
     : Boolean(rejection?.rejection.debug_enabled)
-  if (!hasDebug) activeTab = 'timeline'
+  if (!hasDebug && activeTab === 'debug') activeTab = 'timeline'
 })
 
 onDestroy(() => {
@@ -160,6 +160,7 @@ function resizeWithKeyboard(event: KeyboardEvent): void {
 }
 .resize-handle {
   position: absolute;
+  z-index: 1;
   inset-block: 0;
   inset-inline-start: -0.35rem;
   width: 0.7rem;

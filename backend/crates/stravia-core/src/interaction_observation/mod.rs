@@ -766,6 +766,9 @@ impl IngressObserver {
             gap: AtomicBool::new(false),
             finalization: Mutex::new(self.finalization.take()),
             pending_finish: Mutex::new(None),
+            pending_input: Mutex::new(None),
+            pending_tool_results: Mutex::new(Vec::new()),
+            thinking_redaction: Mutex::new(HashMap::new()),
             visible_redaction: Mutex::new(redaction::VisibleTextRedactor::with_protected(
                 protected.clone(),
             )),
@@ -852,10 +855,113 @@ struct RunObserverInner {
     gap: AtomicBool,
     finalization: Mutex<Option<mpsc::OwnedPermit<WriterCommand>>>,
     pending_finish: Mutex<Option<RunOutcome>>,
+    // Canonical user text remains memory-only until Model Turn protection succeeds.
+    pending_input: Mutex<Option<String>>,
+    pending_tool_results: Mutex<Vec<RunEvent>>,
+    thinking_redaction: Mutex<HashMap<(String, String), redaction::VisibleTextRedactor>>,
     visible_redaction: Mutex<redaction::VisibleTextRedactor>,
     protected: redaction::ProtectedSecrets,
 }
 impl RunObserver {
+    /// Admission only: use the received canonical window, never effective model history.
+    pub(crate) fn capture_input_preview(
+        &self,
+        input: &[stravia_runtime_contract::protocol::ir::AiItem],
+    ) {
+        *self
+            .inner
+            .pending_input
+            .lock()
+            .expect("input preview state") = redaction::user_input_text(input);
+    }
+
+    /// 客户端返回先留在内存，和输入预览共用凭据映射完成后的发布边界。
+    pub(crate) fn capture_client_tool_results(
+        &self,
+        input: &[stravia_runtime_contract::protocol::ir::AiItem],
+    ) {
+        use stravia_runtime_contract::protocol::ir::{ContentBlock, MessageContent, Role};
+        let mut pending = self
+            .inner
+            .pending_tool_results
+            .lock()
+            .expect("tool result state");
+        for item in input {
+            let before = pending.len();
+            if let MessageContent::Blocks(blocks) = &item.content {
+                for block in blocks {
+                    if let ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                        ..
+                    } = block
+                    {
+                        pending.push(RunEvent::ClientToolResult {
+                            tool_id: tool_use_id.clone(),
+                            content: content.clone(),
+                            is_error: is_error.unwrap_or(false),
+                        });
+                    }
+                }
+            }
+            if pending.len() == before
+                && item.role == Role::Tool
+                && let Some(tool_id) = &item.tool_call_id
+            {
+                pending.push(RunEvent::ClientToolResult {
+                    tool_id: tool_id.clone(),
+                    content: serde_json::to_value(&item.content).expect("canonical tool content"),
+                    is_error: false,
+                });
+            }
+        }
+    }
+
+    /// Publish once, only after all active and newly discovered mappings are registered.
+    pub(crate) fn publish_input_preview(&self) {
+        let tool_results = std::mem::take(
+            &mut *self
+                .inner
+                .pending_tool_results
+                .lock()
+                .expect("tool result state"),
+        );
+        for event in tool_results {
+            self.send_event(event);
+        }
+        let Some(text) = self
+            .inner
+            .pending_input
+            .lock()
+            .expect("input preview state")
+            .take()
+        else {
+            return;
+        };
+        let preview = redaction::input_preview(text, &self.inner.protected);
+        if self
+            .inner
+            .observation
+            .inner
+            .writer
+            .try_send(WriterCommand::InputPreview {
+                run_id: self.inner.run_id.clone(),
+                preview,
+            })
+            .is_err()
+        {
+            self.inner.gap.store(true, Ordering::Release);
+            self.inner
+                .observation
+                .inner
+                .unpersisted_gaps
+                .lock()
+                .expect("observation gaps")
+                .record(&self.inner.run_id, writer::now());
+        }
+    }
+
     /// Diagnostic-only: pass the received normalized window, never materialized history.
     pub(crate) fn observe_client_input(
         &self,
@@ -910,6 +1016,51 @@ impl RunObserver {
         {
             return;
         }
+        if let RunEvent::ModelThinkingDelta {
+            model_turn_id,
+            attempt_id,
+            text,
+        } = event
+        {
+            let ready = self
+                .inner
+                .thinking_redaction
+                .lock()
+                .expect("thinking redaction state")
+                .entry((model_turn_id.clone(), attempt_id.clone()))
+                .or_insert_with(|| {
+                    redaction::VisibleTextRedactor::with_protected(self.inner.protected.clone())
+                })
+                .push(text);
+            if let Some(text) = ready {
+                self.send_event(RunEvent::ModelThinkingDelta {
+                    model_turn_id,
+                    attempt_id,
+                    text,
+                });
+            }
+            return;
+        }
+        if let RunEvent::ModelThinkingFinished {
+            model_turn_id,
+            attempt_id,
+        } = &event
+        {
+            self.flush_thinking(model_turn_id, attempt_id);
+        }
+        if let RunEvent::TargetAttemptFinished {
+            model_turn_id,
+            attempt_id,
+            ..
+        } = &event
+        {
+            if self.flush_thinking(model_turn_id, attempt_id) {
+                self.send_event(RunEvent::ModelThinkingFinished {
+                    model_turn_id: model_turn_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                });
+            }
+        }
         if let RunEvent::ClientVisibleContentDelta { text } = event {
             let ready = self
                 .inner
@@ -929,6 +1080,45 @@ impl RunObserver {
             self.flush_visible();
         }
         self.send_event(event);
+    }
+    fn flush_thinking(&self, model_turn_id: &str, attempt_id: &str) -> bool {
+        let state = self
+            .inner
+            .thinking_redaction
+            .lock()
+            .expect("thinking redaction state")
+            .remove(&(model_turn_id.to_owned(), attempt_id.to_owned()));
+        let Some(mut state) = state else { return false };
+        if let Some(text) = state.finish() {
+            self.send_event(RunEvent::ModelThinkingDelta {
+                model_turn_id: model_turn_id.to_owned(),
+                attempt_id: attempt_id.to_owned(),
+                text,
+            });
+        }
+        true
+    }
+    fn finish_thinking(&self) {
+        let pending = std::mem::take(
+            &mut *self
+                .inner
+                .thinking_redaction
+                .lock()
+                .expect("thinking redaction state"),
+        );
+        for ((model_turn_id, attempt_id), mut state) in pending {
+            if let Some(text) = state.finish() {
+                self.send_event(RunEvent::ModelThinkingDelta {
+                    model_turn_id: model_turn_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                    text,
+                });
+            }
+            self.send_event(RunEvent::ModelThinkingFinished {
+                model_turn_id,
+                attempt_id,
+            });
+        }
     }
     fn flush_visible(&self) {
         let ready = self
@@ -989,6 +1179,7 @@ impl RunObserver {
     }
     pub(crate) fn finish(&self, mut outcome: RunOutcome) {
         self.flush_visible();
+        self.finish_thinking();
         self.inner.protected.text(&mut outcome.status);
         if let Some(reason) = &mut outcome.terminal_reason {
             self.inner.protected.text(reason);
@@ -1022,6 +1213,41 @@ impl RunObserver {
 }
 impl Drop for RunObserverInner {
     fn drop(&mut self) {
+        for ((model_turn_id, attempt_id), mut state) in std::mem::take(
+            self.thinking_redaction
+                .get_mut()
+                .expect("thinking redaction state"),
+        ) {
+            let delta = state.finish().map(|text| RunEvent::ModelThinkingDelta {
+                model_turn_id: model_turn_id.clone(),
+                attempt_id: attempt_id.clone(),
+                text,
+            });
+            for event in [
+                delta,
+                Some(RunEvent::ModelThinkingFinished {
+                    model_turn_id,
+                    attempt_id,
+                }),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if self
+                    .observation
+                    .inner
+                    .writer
+                    .try_send(WriterCommand::Event {
+                        run_id: self.run_id.clone(),
+                        event,
+                        trace: None,
+                    })
+                    .is_err()
+                {
+                    *self.gap.get_mut() = true;
+                }
+            }
+        }
         if let Some(text) = self
             .visible_redaction
             .get_mut()
@@ -1396,7 +1622,74 @@ pub(super) fn record_trace_at(
 
 #[cfg(test)]
 mod snapshot_tests {
+    use serde_json::Value;
+
     use super::*;
+
+    #[tokio::test]
+    async fn input_preview_is_nullable_and_owned_by_initial_run() -> anyhow::Result<()> {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        sqlx::raw_sql(include_str!(
+            "../../migrations/sqlite/0034_interaction_observation.sql"
+        ))
+        .execute(&pool)
+        .await?;
+        let at = writer::now();
+        sqlx::query("INSERT INTO interaction_observations(id,principal,root_id,root_run_id,first_route_id,status,started_at,last_active_at,expires_at) VALUES ('historical','test','historical','initial','route','running',?,?,?)")
+            .bind(at).bind(at).bind(at + 86_400_000).execute(&pool).await?;
+        sqlx::raw_sql(include_str!(
+            "../../migrations/sqlite/0040_interaction_input_preview.sql"
+        ))
+        .execute(&pool)
+        .await?;
+        let preview: Option<String> = sqlx::query_scalar(
+            "SELECT input_preview FROM interaction_observations WHERE id='historical'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(preview, None);
+        sqlx::query("INSERT INTO inference_run_observations(id,interaction_id,ingress_protocol,route_id,status,debug_enabled,started_at,last_active_at,expires_at) VALUES ('initial','historical','openai','route','running',0,?,?,?)")
+            .bind(at).bind(at).bind(at + 86_400_000).execute(&pool).await?;
+        let store = store::ObservationStore::Sqlite(pool.clone());
+        assert!(
+            store
+                .persist_input_preview("historical", "child", "tool-secret", at, at + 86_400_000)
+                .await?
+                .is_none()
+        );
+        store
+            .persist_input_preview("historical", "initial", "first input", at, at + 86_400_000)
+            .await?;
+        assert!(
+            store
+                .persist_input_preview("historical", "initial", "later round", at, at + 86_400_000)
+                .await?
+                .is_none()
+        );
+        assert!(
+            store
+                .persist_input_preview("historical", "child", "tool-secret", at, at + 86_400_000)
+                .await?
+                .is_none()
+        );
+        let preview: Option<String> = sqlx::query_scalar(
+            "SELECT input_preview FROM interaction_observations WHERE id='historical'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(preview.as_deref(), Some("first input"));
+        let payload: String = sqlx::query_scalar(
+            "SELECT payload FROM observation_events WHERE kind='input_preview_recorded'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert!(!payload.contains("first input"));
+        pool.close().await;
+        Ok(())
+    }
 
     #[tokio::test]
     async fn discoveries_group_by_latest_discovery_and_survive_restart() -> anyhow::Result<()> {
@@ -1411,6 +1704,11 @@ mod snapshot_tests {
             .await?;
         sqlx::raw_sql(include_str!(
             "../../migrations/sqlite/0034_interaction_observation.sql"
+        ))
+        .execute(&pool)
+        .await?;
+        sqlx::raw_sql(include_str!(
+            "../../migrations/sqlite/0040_interaction_input_preview.sql"
         ))
         .execute(&pool)
         .await?;
@@ -1566,6 +1864,11 @@ mod snapshot_tests {
         ))
         .execute(&pool)
         .await?;
+        sqlx::raw_sql(include_str!(
+            "../../migrations/sqlite/0040_interaction_input_preview.sql"
+        ))
+        .execute(&pool)
+        .await?;
         let observation = InteractionObservation::new(
             Some(pool.clone()),
             None,
@@ -1687,6 +1990,180 @@ mod snapshot_tests {
         );
         drop(active);
         drop(completed);
+        observation.shutdown().await;
+        pool.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ordinary_tool_payloads_wait_for_protection_and_stay_out_of_visible_output()
+    -> anyhow::Result<()> {
+        use stravia_runtime_contract::protocol::ir::AiItem;
+        let directory = tempfile::tempdir()?;
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        sqlx::raw_sql(include_str!(
+            "../../migrations/sqlite/0034_interaction_observation.sql"
+        ))
+        .execute(&pool)
+        .await?;
+        sqlx::raw_sql(include_str!(
+            "../../migrations/sqlite/0040_interaction_input_preview.sql"
+        ))
+        .execute(&pool)
+        .await?;
+        let observation = InteractionObservation::new(
+            Some(pool.clone()),
+            None,
+            directory.path().to_path_buf(),
+            1,
+            true,
+        )
+        .await;
+        let observer = observation
+            .observe_ingress(IngressStart {
+                id: "ingress".into(),
+                method: "POST".into(),
+                path: "/responses".into(),
+                protocol: "responses".into(),
+            })
+            .admit(RunStart {
+                id: "run".into(),
+                principal: "api-key:test".into(),
+                api_key_id: None,
+                api_key_name: None,
+                generation_root_id: None,
+                generation_parent_id: None,
+                has_new_user: false,
+                canonical_fingerprint: "tool-payload-test".into(),
+                route_id: "route".into(),
+                model_display_name: None,
+                ingress_protocol: "responses".into(),
+            });
+        assert!(!observer.debug_enabled());
+        observer.capture_client_tool_results(&[
+            AiItem::output_text("not a received tool result"),
+            AiItem::function_call_output("plain", serde_json::json!("restored-tool-secret")),
+            AiItem::function_call_output(
+                "structured",
+                serde_json::json!({
+                    "api_key": "CLIENT_TOOL_SECRET", "result": "business result",
+                }),
+            ),
+        ]);
+        observation.flush().await?;
+        let unpublished: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM observation_events WHERE kind='client_tool_result'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(unpublished, 0);
+        observer.protect_secrets(["restored-tool-secret"]);
+        // 工具续跑没有用户预览也必须发布，重复保护边界不得重复记录。
+        observer.publish_input_preview();
+        observer.publish_input_preview();
+        observer.record(RunEvent::ClientToolHandoff {
+            tool_id: "client".into(),
+            name: "local_probe".into(),
+            input: Some(Value::Null),
+        });
+        observer.record(RunEvent::PlatformToolStarted {
+            model_turn_id: "turn".into(),
+            tool_id: "platform".into(),
+            name: "probe".into(),
+            input: Some(serde_json::json!({"api_key": "PLATFORM_INPUT_SECRET", "query": "retain"})),
+        });
+        observer.record(RunEvent::PlatformToolFinished {
+            model_turn_id: "turn".into(),
+            tool_id: "platform".into(),
+            status: "failed".into(),
+            duration_ms: 1,
+            content: Some(serde_json::json!({
+                "error": "restored-tool-secret", "access_token": "PLATFORM_RESULT_SECRET",
+            })),
+        });
+        observer.record(RunEvent::ModelThinkingDelta {
+            model_turn_id: "turn".into(),
+            attempt_id: "attempt".into(),
+            text: "private reasoning".into(),
+        });
+        observer.record(RunEvent::ClientVisibleContentDelta {
+            text: "public answer".into(),
+        });
+        drop(observer);
+        observation.flush().await?;
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT kind, payload FROM observation_events ORDER BY sequence")
+                .fetch_all(&pool)
+                .await?;
+        let events: Vec<(String, Value)> = rows
+            .into_iter()
+            .map(|(kind, payload)| (kind, serde_json::from_str(&payload).expect("event payload")))
+            .collect();
+        let results: Vec<_> = events
+            .iter()
+            .filter(|event| event.0 == "client_tool_result")
+            .map(|event| &event.1)
+            .collect();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0]["content"], "***");
+        assert_eq!(
+            results[1]["content"],
+            serde_json::json!({"api_key":"***","result":"business result"})
+        );
+        let handoff = &events
+            .iter()
+            .find(|event| event.0 == "client_tool_handoff")
+            .unwrap()
+            .1;
+        assert_eq!(handoff.get("input"), Some(&Value::Null));
+        let started = &events
+            .iter()
+            .find(|event| event.0 == "platform_tool_started")
+            .unwrap()
+            .1;
+        assert_eq!(
+            started["input"],
+            serde_json::json!({"api_key":"***","query":"retain"})
+        );
+        let finished = &events
+            .iter()
+            .find(|event| event.0 == "platform_tool_finished")
+            .unwrap()
+            .1;
+        assert_eq!(finished["status"], "failed");
+        assert_eq!(
+            finished["content"],
+            serde_json::json!({"error":"***","access_token":"***"})
+        );
+        let thinking: String = events
+            .iter()
+            .filter(|event| event.0 == "model_thinking_delta")
+            .filter_map(|event| event.1["text"].as_str())
+            .collect();
+        assert_eq!(thinking, "private reasoning");
+        assert!(
+            events
+                .iter()
+                .any(|event| event.0 == "model_thinking_finished")
+        );
+        let visible: String =
+            sqlx::query_scalar("SELECT visible_tail FROM interaction_observations")
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(visible, "public answer");
+        let stored = serde_json::to_string(&events)?;
+        for excluded in [
+            "restored-tool-secret",
+            "CLIENT_TOOL_SECRET",
+            "PLATFORM_INPUT_SECRET",
+            "PLATFORM_RESULT_SECRET",
+            "not a received tool result",
+        ] {
+            assert!(!stored.contains(excluded));
+        }
         observation.shutdown().await;
         pool.close().await;
         Ok(())

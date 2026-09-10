@@ -931,13 +931,26 @@ def test_stats_overview_incremented(admin_env: dict[str, str]) -> None:
     )
     assert status == 200
 
-    status, resp = http_request(
-        "GET",
-        f"{admin_env['admin']}/api/v1/stats/overview",
-        headers=admin_env["auth"],
-    )
-    assert status == 200
-    data = resp.get("data", {})
+    # Request admission is persisted before usage and completion observations.
+    data: dict[str, Any] = {}
+    deadline = time.time() + 10.0
+    while time.time() < deadline:
+        status, resp = http_request(
+            "GET",
+            f"{admin_env['admin']}/api/v1/stats/overview",
+            headers=admin_env["auth"],
+        )
+        assert status == 200, resp
+        data = resp["data"]
+        if all(data.get(field) is not None for field in (
+            "total_input_tokens", "total_output_tokens", "avg_duration_ms",
+        )):
+            break
+        time.sleep(0.3)
+
+    assert data.get("total_input_tokens") is not None, data
+    assert data.get("total_output_tokens") is not None, data
+    assert data.get("avg_duration_ms") is not None, data
     assert data.get("total_requests", 0) >= 1
     assert data.get("total_input_tokens", 0) >= 3
     assert data.get("total_output_tokens", 0) >= 2

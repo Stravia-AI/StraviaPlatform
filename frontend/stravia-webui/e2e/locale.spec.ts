@@ -115,6 +115,7 @@ test('localized Request Records keep one local timestamp across canvas and detai
     status: 'completed',
     started_at: startedAt,
     last_active_at: startedAt + 42,
+    input_preview: '用户输入问题',
     visible_tail: '客户端可见回答',
     usage: {
       input_tokens: 1200,
@@ -155,14 +156,7 @@ test('localized Request Records keep one local timestamp across canvas and detai
   await page.getByRole('button', { name: 'GPT 5.6, 已完成', exact: true }).click()
   const inspector = page.getByRole('complementary', { name: '观测详情' })
   await expect(inspector).toBeVisible()
-  await expect(
-    inspector
-      .locator('dt')
-      .filter({ hasText: /^开始时间$/ })
-      .locator('..')
-      .locator('dd'),
-  ).toHaveText(localTimestamp)
-  await expect(inspector.getByText('未捕获', { exact: true })).toBeVisible()
+  await expect(inspector.getByRole('log', { name: '对话' }).locator('time').first()).toHaveText(localTimestamp)
   await expect(inspector.getByRole('button', { name: '关闭' })).toBeVisible()
 })
 

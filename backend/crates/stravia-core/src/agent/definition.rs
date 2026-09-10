@@ -62,7 +62,10 @@ impl AgentDefinitionRegistry {
                     definition.id.as_str()
                 )));
             }
-            let bytes = serde_json::to_vec(&definition)
+            let mut canonical = serde_json::to_value(&definition)
+                .map_err(|error| AgentDefinitionError::Invalid(error.to_string()))?;
+            canonical.sort_all_objects();
+            let bytes = serde_json::to_vec(&canonical)
                 .map_err(|error| AgentDefinitionError::Invalid(error.to_string()))?;
             validated.push((definition, definition_hash(&bytes)));
         }
@@ -411,7 +414,6 @@ mod tests {
         assert_eq!(records[0].spec.slug.tool_name(), "agent_research");
         assert!(!records[0].config.enabled);
         assert!(records[0].config.model_id.is_none());
-        assert_eq!(records[0].spec_hash.len(), 64);
     }
 
     #[tokio::test]
@@ -428,6 +430,75 @@ mod tests {
             .synchronize(vec![spec])
             .await
             .expect("artifact-free Definition");
+    }
+
+    #[tokio::test]
+    async fn sqlite_registry_accepts_reordered_schema_without_rewriting_history() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("SQLite pool");
+        crate::migrations::migrate_sqlite(&pool)
+            .await
+            .expect("migrations");
+        let spec = definition(1);
+        let schema_json = serde_json::to_string(spec.output_schema.as_ref().unwrap()).unwrap();
+        let legacy_json = serde_json::to_string(&spec).unwrap().replace(
+            &schema_json,
+            r#"{"required":["answer"],"properties":{"answer":{"type":"string"}},"additionalProperties":false,"type":"object"}"#,
+        );
+        let legacy_hash = definition_hash(legacy_json.as_bytes());
+        sqlx::query(
+            "INSERT INTO agent_definition_revisions
+             (definition_id, slug, version, spec_hash, spec_json, created_at)
+             VALUES ('research', 'research', 1, ?, ?, 1)",
+        )
+        .bind(&legacy_hash)
+        .bind(&legacy_json)
+        .execute(&pool)
+        .await
+        .expect("definition saved with another JSON key order");
+
+        let registry = AgentDefinitionRegistry::sqlite(pool.clone());
+        registry
+            .synchronize(vec![spec.clone()])
+            .await
+            .expect("reopen unchanged definition");
+        let saved: (String, String) = sqlx::query_as(
+            "SELECT spec_hash, spec_json FROM agent_definition_revisions
+             WHERE definition_id='research' AND version=1",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("original revision");
+        assert_eq!((&saved.0, &saved.1), (&legacy_hash, &legacy_json));
+        let original_hash = registry.get_current(&spec.id).await.unwrap().spec_hash;
+        let reordered = serde_json::from_str(&legacy_json).expect("reordered definition");
+        registry
+            .synchronize(vec![reordered])
+            .await
+            .expect("same schema in another key order");
+        assert_eq!(
+            registry.get_current(&spec.id).await.unwrap().spec_hash,
+            original_hash
+        );
+
+        let mut changed = spec;
+        changed.output_schema.as_mut().unwrap()["properties"]["answer"]["type"] =
+            serde_json::json!("integer");
+        assert!(matches!(
+            registry.synchronize(vec![changed]).await,
+            Err(AgentDefinitionError::Invalid(_))
+        ));
+        let retained = registry
+            .load_revision(&AgentDefinitionId::new("research"), 1)
+            .await
+            .expect("original definition remains available");
+        assert_eq!(
+            retained.output_schema.unwrap()["properties"]["answer"]["type"],
+            "string"
+        );
     }
 
     #[tokio::test]

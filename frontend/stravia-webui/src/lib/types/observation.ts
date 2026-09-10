@@ -46,6 +46,7 @@ export interface InteractionSummary {
   status: string
   started_at: number
   last_active_at: number
+  input_preview: string | null
   visible_tail: string
   usage: ConfirmedUsage
   debug_status: string

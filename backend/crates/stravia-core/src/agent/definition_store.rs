@@ -119,6 +119,24 @@ fn decode_spec(value: String) -> Result<AgentDefinitionSpec, AgentDefinitionErro
     serde_json::from_str(&value).map_err(|error| AgentDefinitionError::Storage(error.to_string()))
 }
 
+fn same_revision(
+    existing_hash: &str,
+    existing_json: &str,
+    spec_hash: &str,
+    spec_json: &str,
+) -> Result<bool, AgentDefinitionError> {
+    if existing_hash == spec_hash {
+        return Ok(true);
+    }
+    // serde_json feature unification can change object key order between hosts.
+    // Compare content without rewriting any previously persisted revision.
+    let existing: serde_json::Value = serde_json::from_str(existing_json)
+        .map_err(|error| AgentDefinitionError::Storage(error.to_string()))?;
+    let current: serde_json::Value = serde_json::from_str(spec_json)
+        .map_err(|error| AgentDefinitionError::Storage(error.to_string()))?;
+    Ok(existing == current)
+}
+
 #[async_trait]
 impl AgentDefinitionStore for SqlAgentDefinitionStore {
     async fn synchronize_revision(
@@ -148,8 +166,8 @@ impl AgentDefinitionStore for SqlAgentDefinitionStore {
                 .execute(&mut *transaction)
                 .await
                 .map_err(|error| AgentDefinitionError::Storage(error.to_string()))?;
-                let (existing_hash,): (String,) = sqlx::query_as(
-                    "SELECT spec_hash FROM agent_definition_revisions \
+                let (existing_hash, existing_json): (String, String) = sqlx::query_as(
+                    "SELECT spec_hash, spec_json FROM agent_definition_revisions \
                      WHERE definition_id = ? AND version = ?",
                 )
                 .bind(spec.id.as_str())
@@ -157,7 +175,7 @@ impl AgentDefinitionStore for SqlAgentDefinitionStore {
                 .fetch_one(&mut *transaction)
                 .await
                 .map_err(|error| AgentDefinitionError::Storage(error.to_string()))?;
-                if existing_hash != spec_hash {
+                if !same_revision(&existing_hash, &existing_json, spec_hash, &spec_json)? {
                     return Err(revision_mismatch(spec));
                 }
                 sqlx::query(
@@ -208,8 +226,8 @@ impl AgentDefinitionStore for SqlAgentDefinitionStore {
                 .execute(&mut *transaction)
                 .await
                 .map_err(|error| AgentDefinitionError::Storage(error.to_string()))?;
-                let (existing_hash,): (String,) = sqlx::query_as(
-                    "SELECT spec_hash FROM agent_definition_revisions \
+                let (existing_hash, existing_json): (String, String) = sqlx::query_as(
+                    "SELECT spec_hash, spec_json FROM agent_definition_revisions \
                      WHERE definition_id = $1 AND version = $2 FOR UPDATE",
                 )
                 .bind(spec.id.as_str())
@@ -217,7 +235,7 @@ impl AgentDefinitionStore for SqlAgentDefinitionStore {
                 .fetch_one(&mut *transaction)
                 .await
                 .map_err(|error| AgentDefinitionError::Storage(error.to_string()))?;
-                if existing_hash != spec_hash {
+                if !same_revision(&existing_hash, &existing_json, spec_hash, &spec_json)? {
                     return Err(revision_mismatch(spec));
                 }
                 sqlx::query(

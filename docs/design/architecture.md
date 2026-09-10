@@ -528,7 +528,7 @@ OpenAI direct 与 Codex OAuth 的 generation Target 通过同一个 Provider Tra
 
 - Hook 运行在受信 in-process Rust 环境，不获得可变 `Gateway`、任意存储、原始 `Authorization`、API key、provider credential 或 raw request/response。
 - Runtime 仅提供 canonical IR、稳定主体/路由标识、受限 ContextSnapshot 和受控 PlatformTool；凭据始终由 dispatcher/Vendor adapter 持有。
-- 普通 Interaction Observation 只持久化拓扑、生命周期、时间、路由/Target、错误分类、工具生命周期、Client Projection 可见内容和 Confirmed Upstream Usage，不保存 hidden Thinking、canonical payload 或工具 arguments/results。进程级 Debug 默认为关闭且启用必须确认；它只让后续准入 Run 记录 canonical checkpoint 与应用协议消息。
+- 普通 Interaction Observation 持久化拓扑、生命周期、时间、路由/Target、错误分类、凭据脱敏后的用户输入预览、Client Projection 可见内容、模型可读思考、客户端及平台工具输入/返回和 Confirmed Upstream Usage。思考按 Model Turn / Target attempt 隔离增量脱敏和合并，不采集其签名、密文或保护元数据，也不混入可见输出预览。输入预览及收到的客户端工具返回在既有凭据保护成功后发布；输入预览最多保留前 4,096 Unicode 字符，工具续跑不覆盖原始输入。普通内容沿用请求记录保留期，仍可能包含业务敏感数据。完整 canonical payload 与应用协议消息仍由进程级 Debug 控制；开关默认关闭，启用必须确认，只影响后续准入 Run。
 - 管理面、非推理路由和 provider adapter 不通过 HookRuntime 的事件面；Vendor 是独立 adapter seam，而不是 hook 的凭据出口。
 
 ### 4.10 Interaction Observation
@@ -537,7 +537,7 @@ OpenAI direct 与 Codex OAuth 的 generation Target 通过同一个 Provider Tra
 
 普通 Observation 使用有界非阻塞事件 seam，writer 在数据库事务中先提交 event 与 projection，再广播同一单调 sequence。forest snapshot 返回 `snapshot_sequence`，authenticated fetch SSE 从 `after` 续接；游标已超出保留范围时发送明确 `reset_required`。记录失败产生 `observation_gap`，Debug 写入失败产生带稳定 reason 的 `partial`，两者均不能改变 inference、Target retry/selection、Client Output Commit、Delivery 或 Generation Chain。
 
-Request Records 以显式 Unix 毫秒 `[start_at, end_at)` 查询完整 root DAG：两个边界必须同时提供且 `0 < end_at - start_at <= 86400000`，优先于兼容保留的 `anchor_at/window_index`。实时预设按 5、10、30 分钟及 1、4、12、24 小时滚动；自定义本地日期时间范围应用后保持固定边界，最长 24 小时。Interaction forest 与 Rejected Requests 共用该约束；root 按最新 activity 决定成员资格，cursor 分批加载 root，filter 保留整棵因果上下文并标记命中节点，不按时间截断上下文或详情。工具栏支持请求记录全屏切换，Esc 可退出，全屏保留筛选与选中详情。WebUI 以自动布局的无限 canvas 展示 forest：root 横向排列、因果向下、共享祖先只出现一次；右侧 inspector 按时间保持 Run、Model Turn、Target attempt、Platform Tool、client handoff 与 Delivery 层级。窄屏 inspector 全屏；canvas 支持 pan/zoom、fit all、minimap、键盘与触控。Interaction card 只预览 Client Projection；canonical 与应用协议 payload 仅在 Debug Run inspector 中出现。
+Request Records 以显式 Unix 毫秒 `[start_at, end_at)` 查询完整 root DAG：两个边界必须同时提供且 `0 < end_at - start_at <= 86400000`，优先于兼容保留的 `anchor_at/window_index`。实时预设按 5、10、30 分钟及 1、4、12、24 小时滚动；自定义本地日期时间范围应用后保持固定边界，最长 24 小时。Interaction forest 与 Rejected Requests 共用该约束；root 按最新 activity 决定成员资格，cursor 分批加载 root，filter 保留整棵因果上下文并标记命中节点，不按时间截断上下文或详情。工具栏支持请求记录全屏切换，Esc 可退出，全屏保留筛选与选中详情。WebUI 以自动布局的无限 canvas 展示 forest：root 横向排列、因果向下、共享祖先只出现一次；右侧 inspector 按时间保持 Run、Model Turn、Target attempt、Platform Tool、client handoff 与 Delivery 层级。窄屏 inspector 全屏；canvas 支持 pan/zoom、fit all、minimap、键盘与触控。Interaction card 分别预览脱敏用户输入开头与 Client Projection 输出尾部，悬停、聚焦或点按预览框可查看更多；完整 canonical 与应用协议 payload 仅在 Debug Run inspector 中出现。
 
 Debug 是单进程原子开关，每次进程启动为 off；启用必须确认敏感度和容量。Run 在 admission 时、Rejected Request 在 ingress 时分别 snapshot 开关，因而同一 Interaction 可包含 captured、uncaptured 与 partial Run。Trace 保存 canonical checkpoint 及 client↔platform↔upstream 四方向适用的 HTTP header/body chunk、SSE bytes 与 WebSocket handshake/message 应用层顺序；它不声称 TLS、TCP、HTTP/2 frame 或 packet fidelity。凭据 header、URL userinfo、credential-like query value 以及结构化 JSON/form 中显式 credential 字段在进入队列或磁盘前永久替换，但 prompt、业务内容和工具输入/结果仍可能保留。
 

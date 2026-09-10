@@ -309,6 +309,7 @@ One row per Connect Client Interaction. `root_id` and `parent_interaction_id` pr
 | `first_model_display_name` | TEXT | NULL | First Run display name snapshot |
 | `status` | TEXT NOT NULL | — | Activity-first Interaction status |
 | `started_at`, `last_active_at` | BIGINT / INTEGER | — | Lifecycle times |
+| `input_preview` | TEXT | NULL | Opening 4096 Unicode characters of the initiating latest user message's text blocks, joined with newlines; registered-secret and credential filtering precede truncation. Captured from the canonical client window, published after Model Turn protection succeeds, independent of Debug. Historical, non-text, or pre-protection failed input remains NULL; continuation Runs cannot overwrite it. |
 | `visible_tail` | TEXT NOT NULL | `''` | Coalesced Client Projection tail only |
 | `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `reasoning_tokens` | BIGINT / INTEGER | NULL | Nullable Confirmed Upstream Usage; NULL remains unknown |
 | `observation_gap` | BOOLEAN / INTEGER | `false` / `0` | Explicit projection/recording loss |
@@ -592,7 +593,7 @@ Interning serializes lookup and insertion within a database transaction (SQLite 
 | `definition_id` | TEXT NOT NULL | — | 稳定 Definition ID |
 | `slug` | TEXT NOT NULL | — | 外部工具名称使用的稳定 slug |
 | `version` | INTEGER NOT NULL | — | 修订号，大于 0 |
-| `spec_hash` | TEXT NOT NULL | — | Definition 内容 SHA-256 |
+| `spec_hash` | TEXT NOT NULL | — | 新记录为递归排序 JSON 对象键后的 Definition 内容 SHA-256；既有 hash 保持原值，内容等价比较不受键顺序影响 |
 | `spec_json` | JSON/TEXT NOT NULL | — | 完整不可变 Definition spec |
 | `created_at` | BIGINT/INTEGER NOT NULL | — | 创建时间（Unix 毫秒） |
 
@@ -749,7 +750,7 @@ Route Display Name migration 30 把 `models.name` 原值逐字节迁移为 `mode
 
 SQLite 与 PostgreSQL 必须保持 API Key 字段默认值、Turn kind、settings identity、唯一约束和 Artifact 外键等价。
 
-`0040_artifact_transfers` 同时为两个后端增加存储位置元数据与下载授权表。迁移不扫描媒体正文、不抓取旧 URL、不改写旧历史／工具记录，也不续期或删除既有对象。SQLite 通过跨 Store 实例的文件锁保护进行中的读取，PostgreSQL 使用独立连接池中的事务 advisory lock；清理取得排他保护并重新检查逻辑过期和授权后才删除，失败不报告已删除。
+`0040_interaction_input_preview` 保留主仓库已经应用的输入预览列迁移；`0041_artifact_transfers` 同时为两个后端增加存储位置元数据与下载授权表。迁移不扫描媒体正文、不抓取旧 URL、不改写旧历史／工具记录，也不续期或删除既有对象。SQLite 通过跨 Store 实例的文件锁保护进行中的读取，PostgreSQL 使用独立连接池中的事务 advisory lock；清理取得排他保护并重新检查逻辑过期和授权后才删除，失败不报告已删除。
 
 首个 migration 直接使用最终表名 `models`、`model_backends` 和 `api_key_models`；后续 schema 变更通过 SQLite/PostgreSQL 对应版本的 migration 演进。MySQL 不受支持。
 

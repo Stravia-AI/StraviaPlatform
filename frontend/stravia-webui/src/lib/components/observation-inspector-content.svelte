@@ -1,24 +1,23 @@
 <script lang="ts">
 import * as m from '$lib/paraglide/messages.js'
 import { onDestroy } from 'svelte'
-import { SvelteMap } from 'svelte/reactivity'
 import CopyIcon from '@lucide/svelte/icons/copy'
 import DownloadIcon from '@lucide/svelte/icons/download'
 import XIcon from '@lucide/svelte/icons/x'
+import ChevronRightIcon from '@lucide/svelte/icons/chevron-right'
 import { toast } from 'svelte-sonner'
 
-import { formatDuration, formatLogTime, formatTokenCount } from '$lib/format'
-import {
-  observationContextStatusLabel,
-  observationDebugStatusLabel,
-  observationStatusLabel,
-} from '$lib/observation-labels'
+import { formatDuration, formatLogTime, formatTime, formatTokenCount } from '$lib/format'
+import ObservationConversation from '$lib/components/observation-conversation.svelte'
+import { observationDebugStatusLabel, observationStatusLabel } from '$lib/observation-labels'
+import { observationAttemptOutputTokens, observationEventSummary } from '$lib/observation-event-summary'
 import type { InteractionDetail, ObservationEvent, RejectionDetail, RunDetail } from '$lib/types'
 import { Badge } from '$lib/components/ui/badge'
 import { Button } from '$lib/components/ui/button'
 import * as Empty from '$lib/components/ui/empty'
 import * as Tabs from '$lib/components/ui/tabs'
 import * as Alert from '$lib/components/ui/alert'
+import * as Collapsible from '$lib/components/ui/collapsible'
 
 interface Props {
   interaction?: InteractionDetail
@@ -36,9 +35,12 @@ const runIds = $derived(new Set(orderedRuns.map((run) => run.id)))
 
 const title = $derived(
   interaction
-    ? interaction.interaction.first_model_display_name?.trim() || interaction.interaction.first_route_id
+    ? orderedRuns.at(-1)?.model_display_name?.trim() ||
+        orderedRuns.at(-1)?.route_id ||
+        interaction.interaction.first_model_display_name?.trim() ||
+        interaction.interaction.first_route_id
     : rejection
-      ? `${rejection.rejection.method} ${rejection.rejection.path}`
+      ? m.observation_request_failed()
       : m.observation_details(),
 )
 const hasDebug = $derived(
@@ -54,53 +56,38 @@ const debugRecords = $derived.by(() => {
     : []
 })
 
-interface TimelineNode {
-  event: ObservationEvent
-  children: TimelineNode[]
+function orderedEvents(events: ObservationEvent[]): ObservationEvent[] {
+  // 因果子树会把晚发生的完成事件提前；阅读时间线按时间排序，原始关联仍保留在 payload。
+  return events.toSorted((a, b) => a.occurred_at - b.occurred_at || a.sequence - b.sequence)
 }
 
-function eventTree(events: ObservationEvent[]): TimelineNode[] {
-  const nodes = [...events]
-    .sort((a, b) => a.sequence - b.sequence)
-    .map((event) => ({ event, children: [] as TimelineNode[] }))
-  const turns = new SvelteMap<string, TimelineNode>()
-  const attempts = new SvelteMap<string, TimelineNode>()
-  const tools = new SvelteMap<string, TimelineNode>()
-  const payloadOf = (event: ObservationEvent): Record<string, unknown> =>
-    event.payload && typeof event.payload === 'object' ? (event.payload as Record<string, unknown>) : {}
-  for (const node of nodes) {
-    const payload = payloadOf(node.event)
-    if (node.event.kind === 'model_turn_started') turns.set(String(payload.model_turn_id), node)
-    if (node.event.kind === 'target_attempt_started') attempts.set(String(payload.attempt_id), node)
-    if (node.event.kind === 'platform_tool_started') tools.set(String(payload.tool_id), node)
-  }
-  const roots: TimelineNode[] = []
-  for (const node of nodes) {
-    const payload = payloadOf(node.event)
-    const attempt = typeof payload.attempt_id === 'string' ? attempts.get(payload.attempt_id) : undefined
-    const tool =
-      node.event.kind.startsWith('platform_tool') && typeof payload.tool_id === 'string'
-        ? tools.get(payload.tool_id)
-        : undefined
-    const turn = typeof payload.model_turn_id === 'string' ? turns.get(payload.model_turn_id) : undefined
-    const parent = [attempt, tool, turn].find((candidate) => candidate && candidate !== node)
-    if (parent) parent.children.push(node)
-    else roots.push(node)
-  }
-  return roots
+const timelines = $derived(new Map(orderedRuns.map((run) => [run.id, orderedEvents(run.events)])))
+const attemptOutputs = $derived(new Map(orderedRuns.map((run) => [run.id, observationAttemptOutputTokens(run.events)])))
+
+function toolName(event: ObservationEvent): string | null {
+  const payload = event.payload
+  if (event.kind !== 'client_tool_handoff' || !payload || typeof payload !== 'object' || !('name' in payload))
+    return null
+  return typeof payload.name === 'string' && payload.name.trim() ? payload.name : null
 }
 
-const timelines = $derived(new Map(orderedRuns.map((run) => [run.id, eventTree(run.events)])))
-
-function eventTitle(kind: string): string {
-  if (kind === 'compaction_operation') return m.observation_compaction_operation()
-  if (kind === 'native_compaction_associated') return m.observation_ancestry_native()
-  if (kind === 'retained_tail_associated') return m.observation_retained_tail()
-  if (kind === 'generation_associated') return m.observation_ancestry_confirmed()
-  return kind
-    .split('_')
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(' ')
+function eventGroups(events: ObservationEvent[], compact: boolean): ObservationEvent[][] {
+  const groups: ObservationEvent[][] = []
+  for (const event of events) {
+    const previous = groups.at(-1)
+    // 只合并时间线上相邻的输出增量或同名工具交接，不跨越其他事件。
+    const name = toolName(event)
+    if (
+      compact &&
+      previous?.[0].kind === event.kind &&
+      (event.kind === 'client_visible_content_delta' || (name !== null && name === toolName(previous[0])))
+    ) {
+      previous.push(event)
+    } else {
+      groups.push([event])
+    }
+  }
+  return groups
 }
 
 function usageRows(run: RunDetail): ReadonlyArray<readonly [string, number | null]> {
@@ -137,27 +124,71 @@ function downloadRecord(value: unknown, index: number): void {
 }
 </script>
 
-{#snippet timeline(nodes: TimelineNode[])}
+{#snippet timeline(events: ObservationEvent[], compact = true, outputs?: ReadonlyMap<string, number | null>)}
   <ol class="event-list">
-    {#each nodes as node (node.event.sequence)}
-      {@const contextStatus = observationContextStatusLabel(node.event.kind, node.event.payload)}
-      <li>
-        <span class="event-mark" aria-hidden="true"></span>
-        <div class="min-w-0 flex-1">
-          <div class="flex items-baseline justify-between gap-3">
-            <strong>{eventTitle(node.event.kind)}</strong><time class="font-technical text-[11px] text-muted-foreground"
-              >{formatLogTime(node.event.occurred_at)}</time>
+    {#each eventGroups(events, compact) as group (group[0].sequence)}
+      {#if group.length > 1}
+        <li>
+          <span class="event-mark" aria-hidden="true"></span>
+          <Collapsible.Root class="min-w-0 flex-1">
+            <div class="event-heading">
+              <Collapsible.Trigger class="diagnostic-trigger event-group-trigger">
+                <ChevronRightIcon size={14} aria-hidden="true" />
+                {group[0].kind === 'client_visible_content_delta'
+                  ? m.observation_response_updates({ count: group.length })
+                  : m.observation_tool_handoffs({
+                      tool: toolName(group[0]) ?? m.observation_event_tool(),
+                      count: group.length,
+                    })}
+              </Collapsible.Trigger>
+              <time class="font-technical text-xs text-muted-foreground">
+                {formatTime(group[0].occurred_at)}–{formatTime(group[group.length - 1].occurred_at)}
+              </time>
+            </div>
+            <Collapsible.Content>
+              {@render timeline(group, false, outputs)}
+            </Collapsible.Content>
+          </Collapsible.Root>
+        </li>
+      {:else}
+        {@const event = group[0]}
+        {@const summary = observationEventSummary(event, outputs)}
+        <li>
+          <span class="event-mark" data-tone={summary.tone} aria-hidden="true"></span>
+          <div class="min-w-0 flex-1">
+            <Collapsible.Root>
+              <div class="event-heading">
+                <strong>{summary.title}</strong>
+                <div class="event-actions">
+                  <time class="font-technical text-xs text-muted-foreground" title={formatLogTime(event.occurred_at)}
+                    >{formatTime(event.occurred_at)}</time>
+                  <Collapsible.Trigger
+                    class="diagnostic-trigger event-raw-trigger"
+                    aria-label={m.observation_raw_event()}
+                    title={m.observation_raw_event()}>
+                    <ChevronRightIcon size={14} aria-hidden="true" />
+                  </Collapsible.Trigger>
+                </div>
+              </div>
+              {#if summary.facts.length}
+                <dl class="event-facts">
+                  {#each summary.facts as fact (fact.label)}
+                    <div>
+                      <dt>{fact.label}</dt>
+                      <dd>{fact.value}</dd>
+                    </div>
+                  {/each}
+                </dl>
+              {/if}
+              {#if summary.note}<p class="event-note">{summary.note}</p>{/if}
+              <Collapsible.Content>
+                <p class="event-kind">{m.observation_event_type()}: <code>{event.kind}</code></p>
+                <pre>{JSON.stringify(event.payload, null, 2)}</pre>
+              </Collapsible.Content>
+            </Collapsible.Root>
           </div>
-          {#if contextStatus}<Badge variant="outline">{contextStatus}</Badge>{/if}
-          {#if node.event.kind === 'retained_tail_associated'}
-            <p class="text-xs text-muted-foreground">{m.observation_diagnostic_only()}</p>
-          {:else if node.event.kind === 'compaction_operation'}
-            <p class="text-xs text-muted-foreground">{m.observation_compaction_unknown_usage()}</p>
-          {/if}
-          {#if node.event.payload != null}<pre>{JSON.stringify(node.event.payload, null, 2)}</pre>{/if}
-          {#if node.children.length}{@render timeline(node.children)}{/if}
-        </div>
-      </li>
+        </li>
+      {/if}
     {/each}
   </ol>
 {/snippet}
@@ -168,9 +199,6 @@ function downloadRecord(value: unknown, index: number): void {
       {interaction ? m.observation_interaction_details() : m.observation_rejection_details()}
     </p>
     <h2 class="font-structural mt-1 truncate text-xl font-semibold">{title}</h2>
-    {#if interaction}<p class="font-technical mt-1 truncate text-xs text-muted-foreground">
-        {interaction.interaction.id}
-      </p>{/if}
   </div>
   <Button variant="ghost" size="icon" aria-label={m.common_close()} onclick={onclose}><XIcon /></Button>
 </header>
@@ -192,16 +220,34 @@ function downloadRecord(value: unknown, index: number): void {
 {:else}
   <Tabs.Root class="flex min-h-0 flex-1 flex-col" bind:value={activeTab}>
     <div class="flex flex-wrap items-center justify-between gap-3 border-b px-4 py-2">
-      <Tabs.List>
-        <Tabs.Trigger value="timeline">{m.observation_timeline()}</Tabs.Trigger>
-        <Tabs.Trigger value="debug" disabled={!hasDebug}>{m.observation_debug_records()}</Tabs.Trigger>
+      <Tabs.List class="h-auto flex-wrap">
+        <Tabs.Trigger value="timeline">{m.observation_conversation()}</Tabs.Trigger>
+        <Tabs.Trigger value="diagnostics">{m.observation_diagnostics()}</Tabs.Trigger>
+        {#if hasDebug}
+          <Tabs.Trigger value="debug">{m.observation_debug_records()}</Tabs.Trigger>
+        {/if}
       </Tabs.List>
       <Button variant="outline" size="sm" onclick={onbundle}
         ><DownloadIcon data-icon="inline-start" />{m.observation_bundle()}</Button>
     </div>
-    <Tabs.Content value="timeline" class="min-h-0 flex-1 overflow-y-auto p-4">
+    <Tabs.Content value="timeline" class="min-h-0 flex-1 overflow-hidden">
       {#if interaction}
-        <div class="mb-4 grid grid-cols-2 gap-3 border-b pb-4 text-sm sm:grid-cols-4">
+        {#key interaction.interaction.id}
+          <ObservationConversation detail={interaction} />
+        {/key}
+      {:else if rejection}
+        <div class="p-4">
+          <Alert.Root variant="destructive">
+            <Alert.Title>{m.observation_request_failed()}</Alert.Title>
+            <Alert.Description
+              >{m.observation_rejection_summary({ status: rejection.rejection.status_code })}</Alert.Description>
+          </Alert.Root>
+        </div>
+      {/if}
+    </Tabs.Content>
+    <Tabs.Content value="diagnostics" class="min-h-0 flex-1 overflow-y-auto p-4">
+      {#if interaction}
+        <dl class="diagnostic-overview">
           <div>
             <dt class="text-xs text-muted-foreground">{m.common_status()}</dt>
             <dd class="font-medium">{observationStatusLabel(interaction.interaction.status)}</dd>
@@ -218,7 +264,21 @@ function downloadRecord(value: unknown, index: number): void {
             <dt class="text-xs text-muted-foreground">{m.observation_debug()}</dt>
             <dd class="font-medium">{observationDebugStatusLabel(interaction.interaction.debug_status)}</dd>
           </div>
-        </div>
+        </dl>
+        <Collapsible.Root class="mb-4">
+          <Collapsible.Trigger class="diagnostic-trigger">
+            <ChevronRightIcon size={14} aria-hidden="true" />
+            {m.observation_identifiers()}
+          </Collapsible.Trigger>
+          <Collapsible.Content>
+            <dl class="identifier-facts">
+              <div>
+                <dt>{m.observation_interaction_id()}</dt>
+                <dd>{interaction.interaction.id}</dd>
+              </div>
+            </dl>
+          </Collapsible.Content>
+        </Collapsible.Root>
         <div class="timeline">
           {#snippet runBranch(parentId: string | null)}
             {#each orderedRuns.filter( (run) => (parentId === null ? !run.parent_run_id || !runIds.has(run.parent_run_id) : run.parent_run_id === parentId) ) as run (run.id)}
@@ -226,27 +286,19 @@ function downloadRecord(value: unknown, index: number): void {
                 <header class="run-heading">
                   <div class="min-w-0">
                     <div class="flex flex-wrap items-center gap-2">
-                      <h3 class="font-structural font-semibold">{m.observation_inference_run()}</h3>
+                      <h3 class="font-structural font-semibold">{run.model_display_name || run.route_id}</h3>
                       <Badge variant="outline">{observationStatusLabel(run.status)}</Badge>
                       {#if run.user_interrupted}<Badge variant="destructive">{m.observation_user_interrupted()}</Badge
                         >{/if}
-                      <Badge variant={run.trace?.status === 'partial' ? 'destructive' : 'secondary'}
-                        >{observationDebugStatusLabel(
-                          run.debug_enabled ? (run.trace?.status ?? 'missing') : 'none',
-                        )}</Badge>
+                      {#if run.debug_enabled}
+                        <Badge variant={run.trace?.status === 'partial' ? 'destructive' : 'secondary'}
+                          >{observationDebugStatusLabel(run.trace?.status ?? 'missing')}</Badge>
+                      {/if}
                     </div>
-                    <p class="font-technical mt-1 truncate text-xs text-muted-foreground">{run.id}</p>
-                    {#if run.parent_run_id}<p class="font-technical mt-1 text-[11px] text-muted-foreground">
-                        {m.observation_child_of({ id: run.parent_run_id })}
-                      </p>{/if}
                   </div>
                   <time class="font-technical text-xs text-muted-foreground">{formatLogTime(run.started_at)}</time>
                 </header>
                 <dl class="run-facts">
-                  <div>
-                    <dt>{m.observation_route()}</dt>
-                    <dd>{run.model_display_name || run.route_id}</dd>
-                  </div>
                   <div>
                     <dt>{m.observation_protocol()}</dt>
                     <dd>{run.ingress_protocol}</dd>
@@ -260,6 +312,27 @@ function downloadRecord(value: unknown, index: number): void {
                     <dd>{formatDuration(run.finished_at == null ? null : run.finished_at - run.started_at)}</dd>
                   </div>
                 </dl>
+                <Collapsible.Root class="px-3">
+                  <Collapsible.Trigger class="diagnostic-trigger">
+                    <ChevronRightIcon size={14} aria-hidden="true" />
+                    {m.observation_identifiers()}
+                  </Collapsible.Trigger>
+                  <Collapsible.Content>
+                    <dl class="identifier-facts">
+                      <div>
+                        <dt>{m.observation_run_id()}</dt>
+                        <dd>{run.id}</dd>
+                      </div>
+                      <div>
+                        <dt>{m.observation_route()}</dt>
+                        <dd>{run.route_id}</dd>
+                      </div>
+                    </dl>
+                    {#if run.parent_run_id}
+                      <p class="event-kind">{m.observation_child_of({ id: run.parent_run_id })}</p>
+                    {/if}
+                  </Collapsible.Content>
+                </Collapsible.Root>
                 <div class="usage-line" aria-label={m.observation_confirmed_usage()}>
                   {#each usageRows(run) as item (item[0])}<span
                       ><small>{item[0]}</small>{item[1] == null
@@ -275,7 +348,7 @@ function downloadRecord(value: unknown, index: number): void {
                       })}
                     </Alert.Description></Alert.Root>
                 {/if}
-                {@render timeline(timelines.get(run.id) ?? [])}
+                {@render timeline(timelines.get(run.id) ?? [], true, attemptOutputs.get(run.id))}
                 <div class="run-children">{@render runBranch(run.id)}</div>
               </section>
             {/each}
@@ -317,18 +390,7 @@ function downloadRecord(value: unknown, index: number): void {
               })}
             </Alert.Description></Alert.Root>
         {/if}
-        <ol class="event-list mt-5">
-          {#each rejection.events as event (event.sequence)}<li>
-              <span class="event-mark" aria-hidden="true"></span>
-              <div class="min-w-0 flex-1">
-                <div class="flex justify-between gap-3">
-                  <strong>{eventTitle(event.kind)}</strong><time class="font-technical text-[11px]"
-                    >{formatLogTime(event.occurred_at)}</time>
-                </div>
-                {#if event.payload != null}<pre>{JSON.stringify(event.payload, null, 2)}</pre>{/if}
-              </div>
-            </li>{/each}
-        </ol>
+        {@render timeline(orderedEvents(rejection.events))}
       {/if}
     </Tabs.Content>
     <Tabs.Content value="debug" class="min-h-0 flex-1 overflow-y-auto p-4">
@@ -363,6 +425,110 @@ function downloadRecord(value: unknown, index: number): void {
 {/if}
 
 <style>
+.diagnostic-overview {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr));
+  gap: 0.75rem;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 1rem;
+  font-size: 0.875rem;
+}
+:global(.diagnostic-trigger) {
+  display: inline-flex;
+  min-height: 40px;
+  align-items: center;
+  gap: 0.375rem;
+  border-radius: var(--radius-sm);
+  padding: 0.25rem 0.375rem;
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+  text-align: start;
+  cursor: pointer;
+}
+:global(.diagnostic-trigger:hover) {
+  background: var(--accent);
+  color: var(--accent-foreground);
+}
+:global(.diagnostic-trigger svg) {
+  flex: none;
+  transition: transform 140ms cubic-bezier(0.2, 0, 0, 1);
+}
+:global(.diagnostic-trigger[data-state='open'] svg) {
+  transform: rotate(90deg);
+}
+.event-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.25rem 0.75rem;
+}
+.event-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+:global(.event-raw-trigger) {
+  width: 40px;
+  justify-content: center;
+}
+:global(.event-group-trigger) {
+  min-width: 0;
+  color: var(--foreground);
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+.event-heading strong {
+  font-size: 0.875rem;
+  overflow-wrap: anywhere;
+}
+.event-heading time {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+.event-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1rem;
+  margin-top: 0.375rem;
+}
+.event-facts > div {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  min-width: 0;
+}
+.event-facts dt,
+.identifier-facts dt {
+  flex: none;
+  color: var(--muted-foreground);
+}
+.event-facts dd,
+.identifier-facts dd {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.event-note {
+  margin-top: 0.375rem;
+  color: var(--muted-foreground);
+  line-height: 1.6;
+  text-wrap: pretty;
+  overflow-wrap: anywhere;
+}
+.event-kind,
+.identifier-facts {
+  margin-bottom: 0.5rem;
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+.identifier-facts {
+  display: grid;
+  gap: 0.5rem;
+}
+.identifier-facts dd,
+.event-kind code {
+  font-family: var(--font-technical);
+}
 .timeline {
   display: flex;
   flex-direction: column;
@@ -380,6 +546,7 @@ function downloadRecord(value: unknown, index: number): void {
 }
 .run-heading {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
   justify-content: space-between;
   gap: 1rem;
@@ -389,7 +556,7 @@ function downloadRecord(value: unknown, index: number): void {
 .run-facts,
 .rejection-facts {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 8rem), 1fr));
   gap: 0.65rem 1rem;
   padding: 0.8rem;
   font-size: 0.75rem;
@@ -428,20 +595,38 @@ function downloadRecord(value: unknown, index: number): void {
 }
 .event-list li {
   display: flex;
-  margin-inline-start: calc(var(--event-depth, 0) * 1.25rem);
   gap: 0.65rem;
   border-inline-start: 1px solid var(--border);
-  padding: 0 0 1rem 0.75rem;
+  padding: 0 0 0.5rem 0.75rem;
   font-size: 0.75rem;
+}
+.event-list .event-list {
+  padding: 0.75rem 0 0;
 }
 .event-mark {
   width: 0.45rem;
   height: 0.45rem;
   flex: none;
-  transform: translate(-1rem, 0.32rem);
+  transform: translate(-1rem, 1rem);
   border: 1px solid var(--primary);
   border-radius: 999px;
   background: var(--background);
+}
+.event-mark[data-tone='success'] {
+  border-color: var(--success);
+  background: var(--success);
+}
+.event-mark[data-tone='warning'] {
+  height: 0.2rem;
+  border-color: var(--warning);
+  border-radius: 0;
+  background: var(--warning);
+}
+.event-mark[data-tone='error'] {
+  transform: translate(-1rem, 1rem) rotate(45deg);
+  border-color: var(--destructive);
+  border-radius: 0;
+  background: var(--destructive);
 }
 pre {
   max-height: 18rem;
