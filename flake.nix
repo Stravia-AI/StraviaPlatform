@@ -100,7 +100,7 @@
             installPhase = "true";
             outputHashMode = "recursive";
             outputHashAlgo = "sha256";
-            outputHash = "sha256-9aS13YVq9T7xQ7gncuIRYJ4FdTAnRGyJkyvNQU5KEUY=";
+            outputHash = "sha256-7Yabo32uAnUwVoxMi7pxo36ndaZtICDOiTOOEGpGEVk=";
           };
 
           webui = pkgs.stdenvNoCC.mkDerivation {
