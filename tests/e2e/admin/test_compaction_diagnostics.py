@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
 import json
 import time
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -34,6 +36,21 @@ def _user(text: str) -> dict[str, Any]:
 
 def _answer(text: str) -> dict[str, Any]:
     return {"role": "assistant", "content": text}
+
+
+def _media_data_url(name: str, media_type: str) -> str:
+    path = (
+        Path(__file__).parents[3]
+        / "backend"
+        / "crates"
+        / "stravia-core"
+        / "tests"
+        / "fixtures"
+        / "media"
+        / name
+    )
+    encoded = base64.b64encode(path.read_bytes()).decode()
+    return f"data:{media_type};base64,{encoded}"
 
 
 def _semantic(messages: list[dict[str, Any]]) -> str:
@@ -249,7 +266,7 @@ def test_tool_correlations_and_media_are_part_of_exact_retained_evidence(diagnos
             metadata = {**record["data"]["metadata"], "modalities": {"input": ["text", "image"], "output": ["text"]}}
             status, updated = http_request("PUT", f"{conversation.env['admin']}/api/v1/providers/{provider_id}/model", headers=conversation.env["auth"], payload={"model_id": model, "metadata": metadata, "revision": record["data"]["revision"]})
             assert status == 200, updated
-            media = {"role": "user", "content": [{"type": "text", "text": _text("visual question")}, {"type": "image_url", "image_url": {"url": "https://example.invalid/original.png"}}]}
+            media = {"role": "user", "content": [{"type": "text", "text": _text("visual question")}, {"type": "image_url", "image_url": {"url": _media_data_url("transparent.png", "image/png")}}]}
         kept = [media] if mutation == "media" else [_user(_text("tool question")), call, result]
         retained, _ = _seed(conversation, retained=kept)
         changed = copy.deepcopy(retained)
@@ -261,7 +278,7 @@ def test_tool_correlations_and_media_are_part_of_exact_retained_evidence(diagnos
         elif mutation == "tool-result":
             changed[2]["content"] = _text("rewritten result")
         elif mutation == "media":
-            changed[0]["content"][1]["image_url"]["url"] = "https://example.invalid/replacement.png"
+            changed[0]["content"][1]["image_url"]["url"] = _media_data_url("static.webp", "image/webp")
         _, detail = conversation.send([_user("local summary"), *changed, _user("new task")], tools=mutation != "media")
         _diagnostic(conversation, detail, "inferred" if mutation == "complete-tool" else "no_match")
 
