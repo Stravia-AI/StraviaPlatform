@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- CI runs independent checks concurrently, caches compiled stable Rust test dependencies alongside the pinned toolchain when compiler fingerprints match, and lets the Windows desktop job populate a combined desktop/browser dependency cache. Prepared Admin and desktop tests no longer repeat their build prerequisites; all existing test coverage remains enabled.
+
 ### Fixed
 
 - CI Rust cache keys no longer depend on unused toolchains preinstalled on runner images. Trusted main-branch manual runs can populate caches, and successful unit-test, browser-test, and Admin E2E compilation remains cacheable when subsequent tests fail. Admin cache warm-up builds debug and release profiles serially and includes development tools.
