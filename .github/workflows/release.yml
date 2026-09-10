@@ -282,6 +282,8 @@ jobs:
           export PKG_CONFIG_SYSROOT_DIR="${sysroot}"
           export PKG_CONFIG_LIBDIR="${sysroot}/usr/lib/pkgconfig"
           pkg-config --static --libs fontconfig
+          # rusty_v8 的 musl 归档已内置 libc++；禁止 Zig 再链接一份，避免重复 C++ 符号。
+          export CXXSTDLIB=
           cargo zigbuild --locked --release -p stravia-server --target "${{ matrix.target }}"
 
       - name: Package Unix server
