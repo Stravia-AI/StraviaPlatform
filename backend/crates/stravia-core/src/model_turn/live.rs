@@ -103,12 +103,20 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
             });
             if observer.debug_enabled() {
                 match serde_json::to_value(&input.request) {
-                    Ok(payload) => observer.record(RunEvent::Checkpoint {
-                        stage: "artifact_normalized_request".into(),
-                        model_turn_id: Some(model_turn_id.clone()),
-                        attempt_id: None,
-                        payload,
-                    }),
+                    Ok(payload) => {
+                        observer.record(RunEvent::Checkpoint {
+                            stage: "artifact_normalized_request".into(),
+                            model_turn_id: Some(model_turn_id.clone()),
+                            attempt_id: None,
+                            payload: payload.clone(),
+                        });
+                        observer.record(RunEvent::Checkpoint {
+                            stage: "canonical_request".into(),
+                            model_turn_id: Some(model_turn_id.clone()),
+                            attempt_id: None,
+                            payload,
+                        });
+                    }
                     Err(_) => observer.record(RunEvent::ObservationGap {
                         reason: "canonical_request_serialization_failed".into(),
                     }),
