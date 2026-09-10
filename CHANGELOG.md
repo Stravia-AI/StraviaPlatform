@@ -6,6 +6,7 @@
 
 - CI Rust cache keys no longer depend on unused toolchains preinstalled on runner images. Trusted main-branch manual runs can populate caches, and successful unit-test, browser-test, and Admin E2E compilation remains cacheable when subsequent tests fail. Admin cache warm-up builds debug and release profiles serially and includes development tools.
 - The interaction observation E2E waits for the asynchronously persisted input preview before asserting its content, rather than treating Interaction creation as proof that the preview is ready.
+- The Admin statistics E2E waits for persisted usage and duration before comparing totals, without converting unknown usage to zero or retrying inference requests.
 
 ## [0.2.0] - 2026-09-09
 
