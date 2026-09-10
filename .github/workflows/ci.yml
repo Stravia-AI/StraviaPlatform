@@ -31,7 +31,7 @@ env:
   BUN_VERSION: "1.4.0"
   TASK_VERSION: "3.52.0"
   UV_VERSION: "0.11.28"
-  CACHE_WRITE_ALLOWED: ${{ github.repository == 'Stravia-AI/StraviaPlatform' && github.ref == 'refs/heads/main' && github.workflow_ref == 'Stravia-AI/StraviaPlatform/.github/workflows/ci.yml@refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.cache_warm != '' && inputs.cache_warm != 'none')) }}
+  CACHE_WRITE_ALLOWED: ${{ github.repository == 'Stravia-AI/StraviaPlatform' && github.ref == 'refs/heads/main' && github.workflow_ref == 'Stravia-AI/StraviaPlatform/.github/workflows/ci.yml@refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
 
 jobs:
   check:
@@ -52,12 +52,20 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: ${{ env.RUST_VERSION }}
-          cache-shared-key: ci-v1-linux-gnu-pinned-test
+          cache: false
+          components: rustfmt
+
+      - name: Normalize installed Rust toolchains
+        run: python .github/scripts/normalize_rust_toolchains.py
+
+      - name: Restore Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: ci-v2-linux-gnu-pinned-test
           cache-targets: 'true'
-          cache-save-if: 'false'
+          save-if: 'false'
           cache-on-failure: 'false'
           cache-bin: 'false'
-          components: rustfmt
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -110,9 +118,17 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: ${{ matrix.toolchain }}
-          cache-shared-key: ${{ matrix.toolchain == 'stable' && 'ci-v1-linux-gnu-stable-registry' || 'ci-v1-linux-gnu-pinned-test' }}
+          cache: false
+
+      - name: Normalize installed Rust toolchains
+        run: python .github/scripts/normalize_rust_toolchains.py
+
+      - name: Restore Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: ${{ matrix.toolchain == 'stable' && 'ci-v2-linux-gnu-stable-registry' || 'ci-v2-linux-gnu-pinned-test' }}
           cache-targets: ${{ matrix.toolchain != 'stable' }}
-          cache-save-if: ${{ env.CACHE_WRITE_ALLOWED == 'true' }}
+          save-if: ${{ env.CACHE_WRITE_ALLOWED == 'true' }}
           cache-on-failure: 'false'
           cache-bin: 'false'
 
@@ -134,6 +150,14 @@ jobs:
           sudo rm -f /etc/apt/sources.list.d/google-chrome*
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends pkg-config libssl-dev cmake clang libclang-dev golang python3 libfontconfig1-dev
+
+      - name: Compile Rust unit tests
+        run: cargo test --locked --workspace --exclude stravia-desktop --no-run
+
+      # The cache action reads this at job teardown, even if later tests fail.
+      - name: Preserve successfully compiled dependencies
+        shell: bash
+        run: echo "CACHE_ON_FAILURE=true" >> "$GITHUB_ENV"
 
       - name: Run locked unit test suite
         if: matrix.toolchain == '1.98.1'
@@ -170,11 +194,26 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: ${{ env.RUST_VERSION }}
-          cache-shared-key: ci-v1-windows-msvc-pinned-debug
+          cache: false
+
+      - name: Normalize installed Rust toolchains
+        run: python .github/scripts/normalize_rust_toolchains.py
+
+      - name: Restore Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: ci-v2-windows-msvc-pinned-debug
           cache-targets: 'true'
-          cache-save-if: ${{ env.CACHE_WRITE_ALLOWED == 'true' }}
+          save-if: ${{ env.CACHE_WRITE_ALLOWED == 'true' }}
           cache-on-failure: 'false'
           cache-bin: 'false'
+
+      - name: Compile browser regression tests
+        run: cargo test --locked -p stravia-web-access browser::tests --no-run
+
+      - name: Preserve successfully compiled dependencies
+        shell: bash
+        run: echo "CACHE_ON_FAILURE=true" >> "$GITHUB_ENV"
 
       - name: Run real browser regression tests
         run: cargo test --locked -p stravia-web-access browser::tests
@@ -203,9 +242,17 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: ${{ env.RUST_VERSION }}
-          cache-shared-key: ci-v1-linux-gnu-pinned-e2e-mixed
+          cache: false
+
+      - name: Normalize installed Rust toolchains
+        run: python .github/scripts/normalize_rust_toolchains.py
+
+      - name: Restore Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: ci-v2-linux-gnu-pinned-e2e-mixed
           cache-targets: 'true'
-          cache-save-if: ${{ env.CACHE_WRITE_ALLOWED == 'true' && matrix.suite == 'admin' }}
+          save-if: ${{ env.CACHE_WRITE_ALLOWED == 'true' && matrix.suite == 'admin' }}
           cache-on-failure: 'false'
           cache-bin: 'false'
 
@@ -234,6 +281,18 @@ jobs:
           sudo rm -f /etc/apt/sources.list.d/google-chrome*
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends pkg-config libssl-dev cmake clang libclang-dev golang python3 libfontconfig1-dev
+
+      # Build serially: debug and release otherwise compete on a cold runner.
+      - name: Compile E2E cache dependencies
+        if: matrix.suite == 'admin'
+        run: |
+          task build:server:debug
+          task build:devtools:debug
+          task build:server
+
+      - name: Preserve successfully compiled dependencies
+        if: matrix.suite == 'admin'
+        run: echo "CACHE_ON_FAILURE=true" >> "$GITHUB_ENV"
 
       - name: Run backend E2E suite
         run: task test:e2e:${{ matrix.suite }}
@@ -272,9 +331,17 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: ${{ env.RUST_VERSION }}
-          cache-shared-key: ci-v1-linux-gnu-pinned-e2e-mixed
+          cache: false
+
+      - name: Normalize installed Rust toolchains
+        run: python .github/scripts/normalize_rust_toolchains.py
+
+      - name: Restore Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: ci-v2-linux-gnu-pinned-e2e-mixed
           cache-targets: 'true'
-          cache-save-if: 'false'
+          save-if: 'false'
           cache-on-failure: 'false'
           cache-bin: 'false'
 
@@ -363,9 +430,17 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: ${{ env.RUST_VERSION }}
-          cache-shared-key: ci-v1-windows-msvc-pinned-debug
+          cache: false
+
+      - name: Normalize installed Rust toolchains
+        run: python .github/scripts/normalize_rust_toolchains.py
+
+      - name: Restore Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: ci-v2-windows-msvc-pinned-debug
           cache-targets: 'true'
-          cache-save-if: 'false'
+          save-if: 'false'
           cache-on-failure: 'false'
           cache-bin: 'false'
 

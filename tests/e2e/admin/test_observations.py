@@ -485,8 +485,10 @@ def test_tool_loop_concurrent_branches_and_new_user_group_at_interaction_seam(
     )
     assert status == 200, response
     interactions = _wait_for(
-        "new-user child Interaction",
-        lambda: (lambda items: items if len(items) == 2 else None)(
+        "new-user child Interaction with persisted input preview",
+        lambda: (lambda items: items if len(items) == 2 and all(
+            item["input_preview"] is not None for item in items
+        ) else None)(
             _route_interactions(admin_env, branch_route)
         ),
     )
