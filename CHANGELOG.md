@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.2.1] - 2026-09-10
+
 ### Added
 
 - Unified internal/S3 Artifact storage, stable Principal-scoped references, temporary signed downloads, and default-off upload assistance using upload-only fifteen-minute credentials. Settings and setup persist complete client/file addresses with matching English and Chinese loading, saving, and recovery states.
