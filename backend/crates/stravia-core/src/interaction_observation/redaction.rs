@@ -1234,11 +1234,12 @@ mod tests {
             {"role":"tool","content":"tool-secret","tool_call_id":"call"}
         ])).unwrap();
         assert_eq!(super::user_input_text(&items), Some("first\nsecond".into()));
-        let items: Vec<stravia_runtime_contract::protocol::ir::AiItem> = serde_json::from_value(serde_json::json!([
-            {"role":"user","content":"old-user"},
-            {"role":"user","content":[]}
-        ]))
-        .unwrap();
+        let items: Vec<stravia_runtime_contract::protocol::ir::AiItem> =
+            serde_json::from_value(serde_json::json!([
+                {"role":"user","content":"old-user"},
+                {"role":"user","content":[]}
+            ]))
+            .unwrap();
         assert_eq!(super::user_input_text(&items), None);
     }
 
