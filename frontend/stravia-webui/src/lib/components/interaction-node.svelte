@@ -1,11 +1,11 @@
 <script lang="ts">
 import * as m from '$lib/paraglide/messages.js'
 import { Handle, Position, type NodeProps } from '@xyflow/svelte'
+import InteractionPreview from './interaction-preview.svelte'
 
 import { formatCompactCount, formatLogTime } from '$lib/format'
-import { observationDebugStatusLabel, observationStatusLabel } from '$lib/observation-labels'
+import { observationStatusLabel } from '$lib/observation-labels'
 import type { InteractionNodeData } from '$lib/types'
-import { Badge } from '$lib/components/ui/badge'
 
 type InteractionNode = import('@xyflow/svelte').Node<InteractionNodeData, 'interaction'>
 let { data, selected }: NodeProps<InteractionNode> = $props()
@@ -55,12 +55,17 @@ const usage = $derived([
         datetime={new Date(interaction.started_at).toISOString()}>
         {formatLogTime(interaction.started_at)}
       </time>
-      <h3 class="font-structural mt-1 truncate text-base font-semibold">{title}</h3>
+      <h3 class="font-structural mt-1 truncate text-sm font-semibold">{title}</h3>
     </div>
     <span class="status-label" data-status={interaction.status}>
       <span class="status-dot" aria-hidden="true"></span>{statusLabel}
     </span>
   </header>
+
+  <InteractionPreview
+    text={interaction.input_preview}
+    label={m.observation_input_preview()}
+    emptyLabel={m.observation_input_not_recorded()} />
 
   <div class="usage-grid" aria-label={m.observation_confirmed_usage()}>
     {#each usage as item (item[0])}
@@ -72,25 +77,12 @@ const usage = $derived([
     {/each}
   </div>
 
-  <p class={['tail-preview', !interaction.visible_tail && 'text-muted-foreground']}>
-    {#if contextLabel}<strong>{contextLabel}</strong>{#if interaction.visible_tail}
-        ·
-      {/if}{/if}
-    {interaction.visible_tail || (contextLabel ? '' : m.observation_no_visible_output())}
-  </p>
-
-  <footer class="flex items-center justify-between gap-2">
-    <Badge variant={interaction.debug_status === 'partial' ? 'destructive' : 'outline'}>
-      {m.observation_debug_capture({ status: observationDebugStatusLabel(interaction.debug_status) })}
-    </Badge>
-    {#if interaction.observation_gap}
-      <span class="text-xs font-medium text-destructive">{m.observation_gap()}</span>
-    {:else if interaction.matched}
-      <span class="text-xs font-medium text-primary">{m.observation_filter_match()}</span>
-    {:else}
-      <span class="text-xs text-muted-foreground">{m.observation_context_node()}</span>
-    {/if}
-  </footer>
+  <InteractionPreview
+    text={interaction.visible_tail}
+    label={m.observation_output_preview()}
+    emptyLabel={m.observation_no_visible_output()}
+    {contextLabel}
+    tail />
 </article>
 <Handle type="source" position={Position.Bottom} class="observation-handle" aria-hidden="true" />
 
@@ -103,10 +95,10 @@ const usage = $derived([
 }
 .interaction-card {
   width: 18rem;
-  height: 11.875rem;
+  height: 16rem;
   display: flex;
   flex-direction: column;
-  gap: 0.65rem;
+  gap: 0.5rem;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--card);
@@ -174,18 +166,6 @@ const usage = $derived([
   font-size: 0.68rem;
   font-weight: 500;
   text-overflow: ellipsis;
-}
-.tail-preview {
-  display: -webkit-box;
-  min-height: 3.75rem;
-  flex: 1;
-  overflow: hidden;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 4;
-  line-clamp: 4;
-  font-size: 0.75rem;
-  line-height: 0.94rem;
-  white-space: pre-wrap;
 }
 @keyframes observation-breathe {
   50% {

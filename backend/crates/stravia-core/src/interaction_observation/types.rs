@@ -178,16 +178,36 @@ pub(crate) enum RunEvent {
         model_turn_id: String,
         tool_id: String,
         name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input: Option<Value>,
     },
     PlatformToolFinished {
         model_turn_id: String,
         tool_id: String,
         status: String,
         duration_ms: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content: Option<Value>,
     },
     ClientToolHandoff {
         tool_id: String,
         name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input: Option<Value>,
+    },
+    ClientToolResult {
+        tool_id: String,
+        content: Value,
+        is_error: bool,
+    },
+    ModelThinkingDelta {
+        model_turn_id: String,
+        attempt_id: String,
+        text: String,
+    },
+    ModelThinkingFinished {
+        model_turn_id: String,
+        attempt_id: String,
     },
     ClientVisibleContentDelta {
         text: String,
@@ -273,6 +293,8 @@ pub struct InteractionSummary {
     pub status: String,
     pub started_at: i64,
     pub last_active_at: i64,
+    /// Redacted opening text of the initiating user message; absent for uncaptured input.
+    pub input_preview: Option<String>,
     pub visible_tail: String,
     pub usage: ConfirmedUsage,
     pub debug_status: String,

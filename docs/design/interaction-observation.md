@@ -10,7 +10,7 @@
 - Debug 按每个 Inference Run 准入时的进程级开关快照生效；
 - Debug Trace 覆盖四个方向的应用协议级 wire、稳定 canonical checkpoint、HTTP/SSE/WebSocket；
 - Interaction Debug Bundle 以版本化 ZIP 流式导出，明确完整、部分或缺失状态；
-- 普通 Observation 不保存 wire payload、隐藏 Thinking、Platform Tool 参数或结果；
+- 普通 Observation 保存可读思考及客户端、平台工具输入/返回，不保存完整 canonical 或 wire payload，也不采集模型思考的签名和密文；
 - Observation 只服务诊断，不成为推理执行、Generation Chain 或模型历史的事实源。
 
 本设计同时适用于 SQLite 和 PostgreSQL 存储，但实时状态与 Debug 开关只承诺单 Gateway 实例。多实例聚合不在本设计范围内。
@@ -151,9 +151,12 @@ clear_history() -> ClearHistoryResult
 - `model_turn_started`
 - `target_attempt_started`
 - `target_attempt_finished`
+- `model_thinking_delta`
+- `model_thinking_finished`
 - `platform_tool_started`
 - `platform_tool_finished`
 - `client_tool_handoff`
+- `client_tool_result`
 - `client_visible_content_delta`
 - `usage_confirmed`
 - `client_output_committed`
@@ -161,10 +164,13 @@ clear_history() -> ClearHistoryResult
 - `run_finished`
 - `interaction_relinked`
 - `observation_gap`
+- `input_preview_recorded`：仅通知用户输入预览已更新，不在事件 payload 中重复保存输入正文。
 
-普通 Platform Tool 事件可保存 tool ID、状态、开始/结束时间和耗时，不保存参数或结果。普通 Model Turn / Target attempt 事件可保存 Route、Target、Provider、协议、状态、耗时和 Confirmed Upstream Usage，不保存 canonical request/response。
+`platform_tool_started.input` 和 `client_tool_handoff.input` 保存工具输入，`platform_tool_finished.content` 保存平台工具返回；输入为可解析的 JSON 时保留其类型，否则保留原始参数字符串。旧事件缺少这些可选字段时表示未采集，字段值为 `null` 则表示实际采集到 JSON null。`client_tool_result` 保存收到的客户端返回及其调用 ID、错误标记，兼容显式 `tool_result` 块和 `role=tool` 消息；只采集收到的 canonical 窗口，不从恢复后的模型历史重新提取。客户端返回先留在内存，凭据映射注册完成后与输入预览共用发布边界，没有新用户文本的工具续跑也会发布。
 
-`client_visible_content_delta` 只保存 Client Projection 已交付的可见内容。文本以最长 1 秒窗口合并，避免逐 token 数据库写和 Svelte 更新；生命周期与终态事件不等待文本窗口。
+`model_thinking_delta` 只提取上游可读 thinking / reasoning summary 文本，以 Model Turn 和 Target attempt 隔离增量脱敏状态，避免跨分片泄露已知凭据或跨尝试拼接。正文、工具、结束、错误及 EOF 结束当前思考段；尝试结束、Run 结束或取消析构也会收尾。签名、密文、obfuscation 和不透明快照不作为普通思考正文。
+
+`client_visible_content_delta` 仍只保存 Client Projection 已交付的可见内容。writer 按既有 500ms 周期合并同一 Run 中相邻且同作用域的正文或思考文本；作用域变化及其他事件边界先刷新，生命周期与终态不等待文本窗口。思考和工具内容不进入 `visible_tail`，沿用既有凭据脱敏及 `log_retention_days`，不受 Debug 开关控制；业务敏感内容仍可能保留，普通记录存储用量会增加。普通事件不保存完整 canonical request/response。
 
 ### 5.2 Debug canonical checkpoint
 
@@ -433,13 +439,16 @@ SSE 通过普通 `fetch` 携带 Admin Bearer header，并由 `eventsource-parser
 
 固定尺寸卡片显示：
 
-- `本地开始时间 · 首个 Run 的 Model Display Name`；为空回退 Route ID；
+- `本地开始时间 · 首个 Run 的 Model Display Name`；为空回退 Route ID；模型名字号比原卡片标题缩小一级，为正文预览留出空间；
 - 主状态；只有真实执行时显示绿色呼吸圆点；
+- 模型名下显示用户输入预览框，约两行，展示本次交互用户消息开头；`input_preview` 为 nullable 文本，旧记录或没有文本输入时明确显示未记录，不从历史消息或工具结果伪造；
 - Confirmed Upstream Usage；未知字段显示等待上游，不显示 0；
-- 固定 3–5 行尾部内容预览；
-- 普通 Run 只用客户端可见内容生成预览；Debug Run 可以显示完整 canonical 尾部；
-- Debug `complete | partial | none` 标记；
-- 选中、键盘 focus、筛选命中与非命中有明确非颜色状态。
+- 用量栏下显示同宽的输出预览框，约三行，底部对齐并裁去上方溢出，内容更新及字体或尺寸变化后仍显示最新一行；
+- 两个正文框以安全过滤后的 Markdown 渲染，不加载图片或嵌入资源；悬停或键盘聚焦时通过 Tooltip 查看更多，触控点按打开可关闭的内容浮层；长内容限高滚动，不误触卡片详情；
+- 输入预览在凭据脱敏后保留前 4,096 Unicode 字符，普通 Debug 关闭时也记录；同一交互的工具续跑不得覆盖初始输入，新用户子交互记录自己的输入。输入沿用请求记录的保留与清理周期；
+- 输出框及其浮层只使用客户端可见内容的已保留尾部，不因 Debug 开关扩大为 canonical payload，也不宣称完整回答；
+- 不显示底部 Debug 捕获、筛选命中或因果上下文标签；
+- 保留选中路径、键盘 focus 与非命中节点弱化样式。
 
 卡片不会因完整输出增长高度。Interaction 内多 Run 分支只在详情展开，不在卡片显示计数。
 
@@ -451,18 +460,21 @@ SSE 通过普通 `fetch` 携带 Admin Bearer header，并由 `eventsource-parser
 
 桌面使用可调宽、可关闭的右侧检查器，默认约占 40–55%；画布保留选中节点及其因果路径。窄屏使用全屏详情。
 
-详情按时间排序，同时保留层级和 Run 父子关系：
+默认「对话」页以只读消息气泡展示当前 Interaction：用户靠右使用 primary 色，模型靠左使用中性底色。连续同一模型的 Run 共用一组头像与名称，正文和工具继续追加在同一块内，只在末尾显示最后一条消息的时间；换模型或出现用户消息时重新分组。时间旁不显示任何执行状态或预览说明，执行状态仍在画布与诊断中保留。用户消息取已脱敏的 `input_preview`，每个 Run 的回复只拼接按 sequence 排序的 `client_visible_content_delta.text`，不把 Debug 内容当作回复。没有公开文本事件的旧记录只回退一次到 `visible_tail`。没有用户正文时不生成用户消息，没有助手正文时隐藏气泡，但保留流式组件实例，保证首个实时增量仍可逐字显示。
 
-```text
-Inference Run
-├── Model Turn
-│   ├── Target attempt
-│   └── Platform Tool
-├── Client Tool handoff
-└── Delivery
-```
+思考和工具使用官方 shadcn-svelte Marker，默认折叠；有真实详情才提供展开操作，没有可读思考则不显示条目，只有工具名称时显示静态行，不增加「未记录」说明。思考置于所属 Run 正文前，工具置于正文后；展开显示可读思考、工具输入和返回。普通事件优先且无需开启 Debug；同一思考作用域或工具内容已由普通事件提供时，不再重复使用 Debug。旧记录只从 `debug_enabled` Run 中匹配 `run_id`、`layer=canonical`、`payload_encoding=json` 的既有 TraceRecord 补充缺失详情，不补录未采集的历史。Debug 思考读取 `canonical_delta` 与终态快照中的可读字段，完整快照替换而不重复拼接增量；`response_after_hook` 不带 attempt_id 时沿用同一 Model Turn 最近的尝试。签名、密文和 `redacted_thinking.data` 不进入思考正文，Wire 不被猜测解析。
 
-普通详情显示生命周期、Route/Target、协议、状态、耗时、Confirmed Upstream Usage、客户端可见内容。Debug Run 才显示完整 canonical checkpoint、Wire 方向、headers、body/frame、复制与单事件下载能力。
+工具调用按 Run 和调用 ID 关联：普通平台事件的 `tool_id` 就是调用 ID，Debug 平台结果使用 `call_id` 而不是工具类型 `tool_id`。客户端返回来自 `client_tool_result`；旧 Debug 才从 `decoded_request` 的 `tool_result` 块或显式 `role=tool`、`tool_call_id` 文本消息补充。返回仅匹配明确 `parent_run_id` 祖先，祖先路径上的历史重放不重复展示，兄弟分支各自收到的返回独立保留。工具输入与返回以安全纯文本或 JSON 呈现，不递归猜测业务 JSON、不执行 HTML 或加载远程媒体。每条 Marker 以稳定活动 ID 独立保存 localStorage 展开布尔值，折叠时删除该项；不保存正文，存储失败明确提示但不阻断展开。展开已有内容不制造「新活动」提示；后续真实内容变化仍可提示，且不收起已展开条目或抢走阅读位置。
+
+正文复用卡片的安全 Markdown 渲染，lexer 与 parser 均显式启用 GFM，表格继续经过既有 HTML 安全白名单。历史首次打开立即显示；运行中新增后缀按 Unicode grapheme 逐字呈现，批量新增及时追平，结束、文本替换或减少动态效果开启时直接显示当前已收到的文本。此动画不改变后端最长一秒的合并与 SSE 更新契约。处于底部时随逐字增长跟随；用户向上翻阅或展开活动后保持阅读位置，只有点击「回到最新」或主动滚到底部才恢复。切换 Interaction 重置跟随，不滚动外层页面。
+
+「诊断」页默认呈现可读的事件摘要、时间与已记录的关键事实和结果。保留 Run 分组与 Run 父子关系，但每个 Run 内的事件统一按 `occurred_at` 升序、同一时刻按 `sequence` 升序排列，不再将 Model Turn、Target attempt 或工具的子树整体提前展开，以免把较晚的完成事件放到较早的客户端输出之前。拒绝请求的事件采用相同排序规则。每个事件的「原始事件数据」默认折叠，展开后保留原始 kind 与完整 payload，因果关联字段不丢失；Run 和 Interaction ID 收在默认折叠的「技术标识」中。未知事件仍保留原始数据入口，不推断成功或其他未记录的结果。Run 标题优先使用模型显示名、缺失时使用 Route ID，状态、耗时与用量仍可见。
+
+排序后相邻的 `client_visible_content_delta` 合并为默认折叠的计数分组；相邻且 `name` 相同、非空的 `client_tool_handoff` 同样合并，例如「Bash × 4 · 已交给客户端」。分组显示首次和末次事件时间，不跨越其他事件、工具名称或 Run。展开分组保留每条事件的时间与完整原文入口，实时追加保持已有分组的展开状态。事件行将原始数据入口收至标题右侧箭头，不再重复占用一行按钮；关键结果和错误仍直接可见，不因精简而隐藏。
+
+`target_attempt_finished` 的耗时后显示 Token 速度。输出用量来自同一 Run、相同 `attempt_id` 的最后一条 `usage_confirmed`（按 sequence 判断），不累加累计快照，也不借用整个 Run 或其他 attempt 的用量。速度复用 `computeTps` / `formatTps`：有有效首 Token 时间时使用既有净生成耗时与非增量流判定，否则使用上游耗时；缺少用量或有效耗时显示未知。卡片输出浮层使用「模型输出预览」名称；画布的已确认执行来源边保留连线、取消重复文字标签。
+
+普通诊断显示生命周期、Route/Target、协议、状态、耗时、Confirmed Upstream Usage、客户端可见事件。Debug Run 才能进入「Debug 记录」查看完整 canonical checkpoint、Wire 方向、headers、body/frame、复制与单事件下载能力。未开启 Debug 不影响普通诊断访问，实时刷新不得把选中的诊断页签切回对话。Rejected Request 默认显示简洁失败摘要，不伪造成模型对话；技术原因仍在诊断中。
 
 ### 10.7 视觉方向
 

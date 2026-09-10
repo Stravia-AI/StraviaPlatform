@@ -7,7 +7,7 @@ use super::{store::ObservationStore, types::*};
 const DAY_MS: i64 = 86_400_000;
 const DEFAULT_LIMIT: u32 = 50;
 const MAX_LIMIT: u32 = 200;
-const INTERACTION_SELECT: &str = "SELECT i.id,i.root_id,i.parent_interaction_id,i.generation_root_id,i.first_route_id,i.first_model_display_name,i.status,i.started_at,i.last_active_at,i.visible_tail,i.input_tokens,i.output_tokens,i.cache_read_tokens,i.cache_write_tokens,i.reasoning_tokens,i.observation_gap,i.last_event_sequence,CASE WHEN SUM(CASE WHEN r.debug_enabled THEN 1 ELSE 0 END)=0 THEN 'none' WHEN SUM(CASE WHEN r.debug_enabled THEN 1 ELSE 0 END)=COUNT(*) AND COUNT(m.trace_id)=COUNT(*) AND SUM(CASE WHEN m.status='complete' THEN 1 ELSE 0 END)=COUNT(*) THEN 'complete' ELSE 'partial' END debug_status FROM interaction_observations i JOIN inference_run_observations r ON r.interaction_id=i.id LEFT JOIN debug_trace_manifests m ON m.run_id=r.id ";
+const INTERACTION_SELECT: &str = "SELECT i.id,i.root_id,i.parent_interaction_id,i.generation_root_id,i.first_route_id,i.first_model_display_name,i.status,i.started_at,i.last_active_at,i.input_preview,i.visible_tail,i.input_tokens,i.output_tokens,i.cache_read_tokens,i.cache_write_tokens,i.reasoning_tokens,i.observation_gap,i.last_event_sequence,CASE WHEN SUM(CASE WHEN r.debug_enabled THEN 1 ELSE 0 END)=0 THEN 'none' WHEN SUM(CASE WHEN r.debug_enabled THEN 1 ELSE 0 END)=COUNT(*) AND COUNT(m.trace_id)=COUNT(*) AND SUM(CASE WHEN m.status='complete' THEN 1 ELSE 0 END)=COUNT(*) THEN 'complete' ELSE 'partial' END debug_status FROM interaction_observations i JOIN inference_run_observations r ON r.interaction_id=i.id LEFT JOIN debug_trace_manifests m ON m.run_id=r.id ";
 // PostgreSQL promotes SUM(BIGINT) to NUMERIC; keep the public usage contract i64.
 const RUN_SELECT: &str = "SELECT r.id,r.parent_run_id,r.generation_node_id,r.generation_parent_id,r.route_id,r.model_display_name,r.ingress_protocol,r.status,r.terminal_reason,r.user_interrupted,r.debug_enabled,r.client_output_committed,r.started_at,r.finished_at,CASE WHEN COUNT(a.id)=COUNT(a.input_tokens) THEN CAST(SUM(a.input_tokens) AS BIGINT) END input_tokens,CASE WHEN COUNT(a.id)=COUNT(a.output_tokens) THEN CAST(SUM(a.output_tokens) AS BIGINT) END output_tokens,CASE WHEN COUNT(a.id)=COUNT(a.cache_read_tokens) THEN CAST(SUM(a.cache_read_tokens) AS BIGINT) END cache_read_tokens,CASE WHEN COUNT(a.id)=COUNT(a.cache_write_tokens) THEN CAST(SUM(a.cache_write_tokens) AS BIGINT) END cache_write_tokens,CASE WHEN COUNT(a.id)=COUNT(a.reasoning_tokens) THEN CAST(SUM(a.reasoning_tokens) AS BIGINT) END reasoning_tokens FROM inference_run_observations r LEFT JOIN target_attempt_observations a ON a.run_id=r.id WHERE r.interaction_id=";
 
@@ -67,6 +67,7 @@ struct InteractionRow {
     status: String,
     started_at: i64,
     last_active_at: i64,
+    input_preview: Option<String>,
     visible_tail: String,
     input_tokens: Option<i64>,
     output_tokens: Option<i64>,
@@ -888,6 +889,7 @@ fn summary(r: InteractionRow, matched: bool) -> InteractionSummary {
         status: r.status,
         started_at: r.started_at,
         last_active_at: r.last_active_at,
+        input_preview: r.input_preview,
         visible_tail: r.visible_tail,
         usage: ConfirmedUsage {
             input_tokens: r.input_tokens,
