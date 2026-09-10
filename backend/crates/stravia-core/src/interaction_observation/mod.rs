@@ -840,7 +840,10 @@ struct RunObserverInner {
 }
 impl RunObserver {
     /// Admission only: use the received canonical window, never effective model history.
-    pub(crate) fn capture_input_preview(&self, input: &[crate::protocol::ir::AiItem]) {
+    pub(crate) fn capture_input_preview(
+        &self,
+        input: &[stravia_runtime_contract::protocol::ir::AiItem],
+    ) {
         *self
             .inner
             .pending_input
@@ -849,8 +852,11 @@ impl RunObserver {
     }
 
     /// 客户端返回先留在内存，和输入预览共用凭据映射完成后的发布边界。
-    pub(crate) fn capture_client_tool_results(&self, input: &[crate::protocol::ir::AiItem]) {
-        use crate::protocol::ir::{ContentBlock, MessageContent, Role};
+    pub(crate) fn capture_client_tool_results(
+        &self,
+        input: &[stravia_runtime_contract::protocol::ir::AiItem],
+    ) {
+        use stravia_runtime_contract::protocol::ir::{ContentBlock, MessageContent, Role};
         let mut pending = self
             .inner
             .pending_tool_results
@@ -1930,7 +1936,7 @@ mod snapshot_tests {
     #[tokio::test]
     async fn ordinary_tool_payloads_wait_for_protection_and_stay_out_of_visible_output()
     -> anyhow::Result<()> {
-        use crate::protocol::ir::AiItem;
+        use stravia_runtime_contract::protocol::ir::AiItem;
         let directory = tempfile::tempdir()?;
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)

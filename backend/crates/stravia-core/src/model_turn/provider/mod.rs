@@ -757,8 +757,8 @@ mod tests {
             (
                 "error",
                 AiStreamDelta::StreamError {
-                    error: crate::protocol::ir::AiError::new(
-                        crate::protocol::ir::AiErrorKind::StreamMidError,
+                    error: stravia_runtime_contract::protocol::ir::AiError::new(
+                        stravia_runtime_contract::protocol::ir::AiErrorKind::StreamMidError,
                         "unavailable",
                     ),
                 },

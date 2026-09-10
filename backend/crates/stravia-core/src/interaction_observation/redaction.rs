@@ -7,8 +7,10 @@ use super::types::{IngressStart, RejectedOutcome, RunEvent, RunOutcome};
 
 pub(crate) const REDACTED: &str = "***";
 
-pub(crate) fn user_input_text(items: &[crate::protocol::ir::AiItem]) -> Option<String> {
-    use crate::protocol::ir::{ContentBlock, MessageContent, Role};
+pub(crate) fn user_input_text(
+    items: &[stravia_runtime_contract::protocol::ir::AiItem],
+) -> Option<String> {
+    use stravia_runtime_contract::protocol::ir::{ContentBlock, MessageContent, Role};
     let item = items.iter().rev().find(|item| item.role == Role::User)?;
     let text = match &item.content {
         MessageContent::Text(text) => text.clone(),
@@ -1224,7 +1226,7 @@ fn text_wrapper(character: char) -> bool {
 mod tests {
     #[test]
     fn input_preview_selects_latest_user_text_without_history_or_tool_payloads() {
-        let items: Vec<crate::protocol::ir::AiItem> = serde_json::from_value(serde_json::json!([
+        let items: Vec<stravia_runtime_contract::protocol::ir::AiItem> = serde_json::from_value(serde_json::json!([
             {"role":"system","content":"system-secret"},
             {"role":"user","content":"old-user"},
             {"role":"assistant","content":"assistant-secret"},
@@ -1232,7 +1234,7 @@ mod tests {
             {"role":"tool","content":"tool-secret","tool_call_id":"call"}
         ])).unwrap();
         assert_eq!(super::user_input_text(&items), Some("first\nsecond".into()));
-        let items: Vec<crate::protocol::ir::AiItem> = serde_json::from_value(serde_json::json!([
+        let items: Vec<stravia_runtime_contract::protocol::ir::AiItem> = serde_json::from_value(serde_json::json!([
             {"role":"user","content":"old-user"},
             {"role":"user","content":[]}
         ]))
