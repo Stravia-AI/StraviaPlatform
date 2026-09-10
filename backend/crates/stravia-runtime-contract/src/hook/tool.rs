@@ -27,11 +27,51 @@ impl fmt::Display for ToolId {
     }
 }
 
+/// Immutable, platform-selected capabilities for one StraviaRead execution.
+/// This is deliberately not deserializable from tool arguments.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReadExposureScope {
+    networking: bool,
+    media: bool,
+}
+
+impl ReadExposureScope {
+    pub const NONE: Self = Self::new(false, false);
+    pub const FULL: Self = Self::new(true, true);
+
+    pub const fn new(networking: bool, media: bool) -> Self {
+        Self { networking, media }
+    }
+
+    pub const fn networking(self) -> bool {
+        self.networking
+    }
+
+    pub const fn media(self) -> bool {
+        self.media
+    }
+
+    pub const fn union(self, other: Self) -> Self {
+        Self::new(
+            self.networking || other.networking,
+            self.media || other.media,
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StraviaReadDomain {
+    Query,
+    WebPage,
+    Media,
+}
+
 #[derive(Clone)]
 pub struct ToolExecutionContext {
     pub request_id: String,
     pub run_id: String,
     pub principal: Principal,
+    pub read_scope: ReadExposureScope,
     pub cancellation: CancellationToken,
     pub progress: Option<Arc<dyn ToolProgressSink>>,
 }
@@ -94,6 +134,9 @@ impl PlatformToolError {
 pub trait PlatformTool: Send + Sync + 'static {
     fn id(&self) -> ToolId;
     fn external_name(&self) -> &str;
+    fn read_domain(&self) -> Option<StraviaReadDomain> {
+        None
+    }
     fn description(&self) -> Option<&str> {
         None
     }

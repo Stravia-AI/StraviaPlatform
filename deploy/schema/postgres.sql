@@ -1487,3 +1487,13 @@ CREATE INDEX idx_native_compaction_source ON native_compaction_sources(source_id
 -- Drop the threshold first: its CHECK constraint references compaction_enabled.
 ALTER TABLE models DROP COLUMN compaction_threshold;
 ALTER TABLE models DROP COLUMN compaction_enabled;
+
+ALTER TABLE artifacts ADD COLUMN storage_backend TEXT NOT NULL DEFAULT 'internal';
+ALTER TABLE artifacts ADD COLUMN storage_endpoint TEXT;
+ALTER TABLE artifacts ADD COLUMN storage_bucket TEXT;
+CREATE TABLE artifact_download_grants (
+    token_hash TEXT PRIMARY KEY,
+    artifact_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+    expires_at BIGINT NOT NULL
+);
+CREATE INDEX idx_artifact_download_grants_hold ON artifact_download_grants(artifact_id, expires_at);

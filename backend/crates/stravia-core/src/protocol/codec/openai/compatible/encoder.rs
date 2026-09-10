@@ -608,13 +608,31 @@ fn encode_content_block_for_openai(b: &ContentBlock) -> Value {
                 "image_url": image_url
             })
         }
-        ContentBlock::Audio { source } => {
-            let url = media_source_to_url(source);
-            serde_json::json!({"type": "input_audio", "input_audio": {"data": url}})
-        }
+        ContentBlock::Audio { source } => match source {
+            MediaSource::Base64 { media_type, data } => {
+                let format = if matches!(
+                    media_type.as_str(),
+                    "audio/wav" | "audio/x-wav" | "audio/wave"
+                ) {
+                    "wav"
+                } else {
+                    "mp3"
+                };
+                serde_json::json!({"type": "input_audio", "input_audio": {"data": data, "format": format}})
+            }
+            _ => {
+                serde_json::json!({"type": "input_audio", "input_audio": {"data": media_source_to_url(source)}})
+            }
+        },
         ContentBlock::File { source, .. } => {
-            let url = media_source_to_url(source);
-            serde_json::json!({"type": "file", "file": {"url": url}})
+            let file = match source {
+                MediaSource::Base64 { .. } => {
+                    serde_json::json!({"filename": "attachment", "file_data": media_source_to_url(source)})
+                }
+                MediaSource::FileId { file_id, .. } => serde_json::json!({"file_id": file_id}),
+                MediaSource::Url(url) => serde_json::json!({"file_url": url}),
+            };
+            serde_json::json!({"type": "file", "file": file})
         }
         ContentBlock::ToolUse {
             id, name, input, ..

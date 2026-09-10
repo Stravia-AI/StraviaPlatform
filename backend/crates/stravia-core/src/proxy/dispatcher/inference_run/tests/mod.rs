@@ -1036,8 +1036,12 @@ fn marker_artifact_id(request: &str) -> Option<String> {
     fn visit(value: &serde_json::Value) -> Option<String> {
         match value {
             serde_json::Value::String(text) => {
-                let marker = text.split_once("stravia_media artifact_id=\"")?.1;
-                Some(marker.split_once('"')?.0.to_owned())
+                let marker = text.split_once("stravia_media artifact_reference=\"")?.1;
+                let id = stravia_runtime_contract::artifact::ArtifactId::from_reference(
+                    marker.split_once('"')?.0,
+                )
+                .ok()?;
+                Some(id.as_str().to_owned())
             }
             serde_json::Value::Array(values) => values.iter().find_map(visit),
             serde_json::Value::Object(values) => values.values().find_map(visit),
@@ -1093,10 +1097,9 @@ async fn serve_media_parent(
                                     "id": "media-call",
                                     "type": "function",
                                     "function": {
-                                        "name": "stravia__understand_media",
+                                        "name": "StraviaRead",
                                         "arguments": serde_json::json!({
-                                            "prompt": "Describe the image",
-                                            "artifacts": [{"artifact_id": id}]
+                                            "url": format!("https://stravia/artifact/{id}?question=Describe%20the%20image")
                                         }).to_string()
                                     }
                                 }]
@@ -1117,9 +1120,10 @@ async fn serve_media_parent(
                     let turn_id = media_turn_id(&request)
                         .unwrap_or_else(|| panic!("inherited Media Turn marker: {request}"));
                     assert!(
-                        request.contains(r#""name":"stravia__understand_media""#),
-                        "continued request must expose understand_media: {request}"
+                        request.contains(r#""name":"StraviaRead""#),
+                        "continued request must expose StraviaRead: {request}"
                     );
+                    let id = source_id.lock().unwrap().clone().expect("source Artifact");
                     serde_json::json!({
                         "id": "chatcmpl-media-continuation",
                         "object": "chat.completion",
@@ -1134,10 +1138,9 @@ async fn serve_media_parent(
                                     "id": "media-continuation-call",
                                     "type": "function",
                                     "function": {
-                                        "name": "stravia__understand_media",
+                                        "name": "StraviaRead",
                                         "arguments": serde_json::json!({
-                                            "prompt": "Identify the subject",
-                                            "artifacts": [],
+                                            "url": format!("https://stravia/artifact/{id}?question=Identify%20the%20subject"),
                                             "previous_turn_id": turn_id
                                         }).to_string()
                                     }
@@ -4182,5 +4185,7 @@ mod projection;
 mod reversible_redaction;
 #[cfg(test)]
 mod stream_commit;
+#[cfg(test)]
+mod upload_delivery;
 #[cfg(test)]
 mod websocket;

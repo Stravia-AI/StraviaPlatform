@@ -41,17 +41,20 @@ impl AgentRunner {
                 continue;
             };
             for block in blocks {
-                let ContentBlock::Image {
-                    source: MediaSource::FileId { file_id, .. },
-                    ..
-                } = block
-                else {
+                let ContentBlock::Image { source, .. } = block else {
                     continue;
                 };
-                let Some(id) = file_id.strip_prefix("stravia-artifact:") else {
+                let id = match source {
+                    MediaSource::Url(reference) => ArtifactId::from_reference(&reference).ok(),
+                    // Existing persisted Agent turns keep their original representation.
+                    MediaSource::FileId { file_id, .. } => file_id
+                        .strip_prefix("stravia-artifact:")
+                        .map(ArtifactId::new),
+                    MediaSource::Base64 { .. } => None,
+                };
+                let Some(id) = id else {
                     continue;
                 };
-                let id = ArtifactId::new(id);
                 if seen.insert(id.clone()) {
                     artifacts.push(id);
                 }
@@ -109,10 +112,7 @@ impl AgentRunner {
                 ));
             }
             let media_type = reader.artifact.mime_type.clone();
-            let source = MediaSource::FileId {
-                file_id: format!("stravia-artifact:{}", id.as_str()),
-                detail: None,
-            };
+            let source = MediaSource::Url(reader.artifact.reference());
             let block = if media_type.starts_with("image/") {
                 ContentBlock::Image {
                     source,
@@ -174,18 +174,7 @@ impl AgentRunner {
                     .map_err(|error| {
                         AgentRunError::new("artifact_unavailable", error.to_string())
                     })?;
-                *source = match reader.source {
-                    ArtifactSource::HttpsUrl(url) => MediaSource::Url(url),
-                    ArtifactSource::LocalPath(path) => {
-                        let bytes = tokio::fs::read(path).await.map_err(|error| {
-                            AgentRunError::new("artifact_read_failed", error.to_string())
-                        })?;
-                        MediaSource::Base64 {
-                            media_type: reader.artifact.mime_type,
-                            data: base64::engine::general_purpose::STANDARD.encode(bytes),
-                        }
-                    }
-                };
+                *source = MediaSource::Url(reader.artifact.reference());
             }
         }
         Ok(hydrated)

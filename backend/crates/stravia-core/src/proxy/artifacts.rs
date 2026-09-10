@@ -3,7 +3,7 @@ use std::time::Duration;
 use axum::Json;
 use axum::body::Body;
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use futures::StreamExt;
 use serde::Deserialize;
@@ -116,7 +116,13 @@ pub async fn complete_upload(
         .complete_upload(&principal, &upload_id, &input.upload_token, &input.parts)
         .await
     {
-        Ok(artifact) => Json(artifact).into_response(),
+        Ok(artifact) => Json(serde_json::json!({
+            "id": artifact.id,
+            "mime_type": artifact.mime_type,
+            "size": artifact.size,
+            "reference": artifact.reference(),
+        }))
+        .into_response(),
         Err(error) => artifact_error(error),
     }
 }
@@ -125,10 +131,102 @@ async fn required_principal(
     gateway: &Gateway,
     headers: &HeaderMap,
 ) -> Result<stravia_runtime_contract::Principal, Response> {
-    Security::new(gateway.storage.auth())
-        .required_principal(&ClientCredential::from_inference_headers(headers))
+    let credential = ClientCredential::from_inference_headers(headers);
+    let security = Security::new(gateway.storage.auth());
+    if let Some(key) = credential
+        .secret()
+        .filter(|key| key.starts_with("stravia_upload_"))
+    {
+        let principal = gateway
+            .upload_grants
+            .authenticate(key)
+            .map_err(artifact_error)?;
+        security
+            .authorize_principal_capability(&principal)
+            .await
+            .map_err(|_| {
+                (StatusCode::UNAUTHORIZED, "upload principal is unavailable").into_response()
+            })?;
+        return Ok(principal);
+    }
+    security
+        .required_principal(&credential)
         .await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid api key").into_response())
+}
+
+pub async fn download(State(gateway): State<Gateway>, Path(token): Path<String>) -> Response {
+    let Some(store) = gateway.artifact_store() else {
+        return unavailable();
+    };
+    let reader = match store.read_download(&token).await {
+        Ok(reader) => reader,
+        Err(error) => return artifact_error(error),
+    };
+    let mime = match header::HeaderValue::from_str(&reader.artifact.mime_type) {
+        Ok(mime) => mime,
+        Err(_) => return artifact_error(ArtifactError::Storage("invalid stored MIME type".into())),
+    };
+    let size = header::HeaderValue::from_str(&reader.artifact.size.to_string())
+        .expect("decimal Artifact size is a valid header");
+    let body = match reader.source {
+        stravia_runtime_contract::artifact::ArtifactSource::LocalPath(path) => {
+            let file = match tokio::fs::File::open(path).await {
+                Ok(file) => file,
+                Err(error) => return artifact_error(ArtifactError::Storage(error.to_string())),
+            };
+            Body::from_stream(futures::stream::try_unfold(
+                (file, reader.guard),
+                |(mut file, guard)| async move {
+                    use tokio::io::AsyncReadExt;
+                    let mut buffer = vec![0; 64 * 1024];
+                    let count = file.read(&mut buffer).await?;
+                    if count == 0 {
+                        Ok::<_, std::io::Error>(None)
+                    } else {
+                        buffer.truncate(count);
+                        Ok(Some((bytes::Bytes::from(buffer), (file, guard))))
+                    }
+                },
+            ))
+        }
+        stravia_runtime_contract::artifact::ArtifactSource::HttpsUrl(url) => {
+            let response = match gateway.http_client.get(url).send().await {
+                Ok(response) if response.status().is_success() => response,
+                Ok(_) => {
+                    return artifact_error(ArtifactError::Storage(
+                        "Artifact backend download failed".into(),
+                    ));
+                }
+                Err(_) => {
+                    return artifact_error(ArtifactError::Storage(
+                        "Artifact backend is unavailable".into(),
+                    ));
+                }
+            };
+            let guard = reader.guard;
+            Body::from_stream(response.bytes_stream().map(move |chunk| {
+                let _hold = &guard;
+                chunk.map_err(|_| std::io::Error::other("Artifact backend stream failed"))
+            }))
+        }
+    };
+    let mut response = body.into_response();
+    response.headers_mut().insert(header::CONTENT_TYPE, mime);
+    response.headers_mut().insert(header::CONTENT_LENGTH, size);
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("private, no-store"),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        header::HeaderValue::from_static("attachment"),
+    );
+    response.headers_mut().insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        header::HeaderValue::from_static("nosniff"),
+    );
+    response
 }
 
 fn unavailable() -> Response {

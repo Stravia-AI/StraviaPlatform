@@ -8890,6 +8890,7 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
+ "url",
  "uuid",
  "zip 8.6.0",
 ]

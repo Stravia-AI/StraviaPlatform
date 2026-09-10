@@ -69,6 +69,24 @@ import type {
 
 export { isTauri }
 
+export interface ArtifactS3Settings {
+  endpoint: string
+  region: string
+  bucket: string
+  access_key_id: string
+  secret_access_key: string
+  session_token: string | null
+  credentials_expires_at: number | null
+}
+
+export interface ArtifactSettings {
+  client_base_url: string
+  external_signed_downloads: boolean
+  file_public_base_url: string | null
+  upload_prompt_injection: boolean
+  s3: ArtifactS3Settings | null
+}
+
 type HttpMethod = 'DELETE' | 'GET' | 'POST' | 'PUT'
 
 interface RequestMapping {
@@ -531,6 +549,20 @@ export const admin = {
     refresh: (providerId: string) => request<ProviderAllowanceSnapshot>('refreshProviderAllowance', { providerId }),
   },
   settings: {
+    artifacts: async (): Promise<ArtifactSettings> => {
+      const value = await request<string | null>('getSetting', { key: 'artifact_settings' })
+      return value === null
+        ? {
+            client_base_url: '',
+            external_signed_downloads: false,
+            file_public_base_url: null,
+            upload_prompt_injection: false,
+            s3: null,
+          }
+        : JSON.parse(value)
+    },
+    saveArtifacts: (settings: ArtifactSettings) =>
+      request<void>('setSetting', { key: 'artifact_settings', value: JSON.stringify(settings) }),
     get: (key: string) => request<string | null>('getSetting', { key }),
     set: (key: string, value: string) => request<void>('setSetting', { key, value }),
     status: () => request<GatewayStatus>('getGatewayStatus'),

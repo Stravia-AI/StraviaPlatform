@@ -40,9 +40,100 @@ pub(crate) struct ProviderCall {
     continuation_fallback: Option<OutboundRequest>,
     websocket: Option<ResponsesWebSocketCall>,
     allow_retries: bool,
+    artifact_transfers: Option<ArtifactTransfers>,
+}
+
+#[derive(Clone)]
+struct ArtifactTransfers {
+    principal: stravia_runtime_contract::Principal,
+    urls: Vec<(String, stravia_runtime_contract::artifact::ArtifactId)>,
+}
+
+impl ArtifactTransfers {
+    async fn materialize(&self, gateway: &Gateway, body: &Value) -> anyhow::Result<Value> {
+        let store = gateway
+            .artifact_store
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("Artifact storage unavailable"))?;
+        let settings = crate::media::ingest::settings(gateway).await?;
+        anyhow::ensure!(
+            settings.external_signed_downloads,
+            "External signed downloads were disabled before Provider send"
+        );
+        let retention = crate::media::ingest::retention(gateway).await?;
+        let mut replacements = Vec::with_capacity(self.urls.len());
+        let mut earliest_expiry = i64::MAX;
+        for (url, id) in &self.urls {
+            let grant = store
+                .download(&self.principal, id, retention, &settings)
+                .await?;
+            anyhow::ensure!(
+                grant
+                    .expires_at
+                    .saturating_sub(chrono::Utc::now().timestamp_millis())
+                    >= 300_000,
+                "Artifact download cannot retain five minutes of validity"
+            );
+            earliest_expiry = earliest_expiry.min(grant.expires_at);
+            replacements.push((url.as_str(), grant.url));
+        }
+        fn replace(value: &mut Value, replacements: &[(&str, String)]) {
+            match value {
+                Value::String(value) => {
+                    if let Some((_, replacement)) = replacements
+                        .iter()
+                        .find(|(source, _)| *source == value.as_str())
+                    {
+                        value.clone_from(replacement);
+                    }
+                }
+                Value::Array(values) => {
+                    for value in values {
+                        replace(value, replacements);
+                    }
+                }
+                Value::Object(values) => {
+                    for value in values.values_mut() {
+                        replace(value, replacements);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut body = body.clone();
+        replace(&mut body, &replacements);
+        // Later files may have waited on storage or S3 signing. Recheck the
+        // earliest grant only after every asynchronous preparation has finished.
+        anyhow::ensure!(
+            earliest_expiry.saturating_sub(chrono::Utc::now().timestamp_millis()) >= 300_000,
+            "Artifact download cannot retain five minutes of validity at Provider send"
+        );
+        Ok(body)
+    }
 }
 
 impl ProviderCall {
+    pub(crate) fn set_artifact_transfers(
+        &mut self,
+        principal: stravia_runtime_contract::Principal,
+        urls: Vec<(String, stravia_runtime_contract::artifact::ArtifactId)>,
+    ) {
+        self.artifact_transfers =
+            (!urls.is_empty()).then_some(ArtifactTransfers { principal, urls });
+    }
+    async fn transfer_body<'a>(
+        &self,
+        body: &'a Value,
+    ) -> anyhow::Result<std::borrow::Cow<'a, Value>> {
+        match &self.artifact_transfers {
+            Some(transfers) => Ok(std::borrow::Cow::Owned(
+                transfers
+                    .materialize(&self.adapter.binding.gateway, body)
+                    .await?,
+            )),
+            None => Ok(std::borrow::Cow::Borrowed(body)),
+        }
+    }
     pub(crate) fn disable_retries(&mut self) {
         self.allow_retries = false;
         self.continuation_fallback = None;
@@ -399,6 +490,7 @@ impl ProviderAdapter {
             continuation_fallback: None,
             websocket: None,
             allow_retries: true,
+            artifact_transfers: None,
         }
     }
 
@@ -415,6 +507,7 @@ impl ProviderAdapter {
             continuation_fallback: Some(full_outbound),
             websocket: None,
             allow_retries: true,
+            artifact_transfers: None,
         }
     }
 

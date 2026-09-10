@@ -6,6 +6,7 @@ pub(super) fn action_kind(action: &HookAction) -> &'static str {
         HookAction::PatchResponse(_) => "patch_response",
         HookAction::PatchToolResult(_) => "patch_tool_result",
         HookAction::ExposeTool(_) => "expose_tool",
+        HookAction::ExposeRead { .. } => "expose_read",
         HookAction::Respond(_) => "respond",
         HookAction::Reject(_) => "reject",
         HookAction::StreamAbort { .. } => "stream_abort",
@@ -129,6 +130,7 @@ pub(super) fn apply_response_actions(
             HookAction::PatchRequest(_)
             | HookAction::PatchToolResult(_)
             | HookAction::ExposeTool(_)
+            | HookAction::ExposeRead { .. }
             | HookAction::Respond(_)
             | HookAction::Reject(_) => {
                 return Err(invalid_action(
@@ -274,6 +276,7 @@ pub(super) fn apply_request_actions(
     current: &mut ContextSnapshot,
     exposed_tools: &mut HashMap<String, ToolId>,
     exposed_tool_specs: &mut HashMap<String, ToolSpec>,
+    read_scope: &mut ReadExposureScope,
     registry: &PlatformToolRegistry,
     batch: ActionBatch,
 ) -> Result<HookControl, HookError> {
@@ -281,6 +284,7 @@ pub(super) fn apply_request_actions(
     let mut staged_context = current.clone();
     let mut staged_tools = exposed_tools.clone();
     let mut staged_tool_specs = exposed_tool_specs.clone();
+    let mut staged_read_scope = *read_scope;
     let mut protected_specs: HashMap<String, ToolSpec> = staged_request
         .tools
         .iter()
@@ -295,6 +299,40 @@ pub(super) fn apply_request_actions(
             HookAction::PatchRequest(patch) => {
                 apply_request_patch(&mut staged_request, &mut staged_context, *patch)
                     .map_err(|message| invalid_action(hook_id, EventKind::Request, message))?;
+            }
+            HookAction::ExposeRead { scope, description } => {
+                let tool_id = ToolId::new("stravia-read");
+                let provider_name = "StraviaRead".to_string();
+                let mut spec = match staged_tool_specs.get(&provider_name) {
+                    Some(spec) => spec.clone(),
+                    None => {
+                        let mut exposed =
+                            registry
+                                .expose(&tool_id, &HashSet::new())
+                                .map_err(|error| {
+                                    invalid_action(hook_id, EventKind::Request, error.to_string())
+                                })?;
+                        exposed.spec.description = None;
+                        exposed.spec
+                    }
+                };
+                if !description.is_empty() {
+                    match spec.description.as_mut() {
+                        Some(current) if !current.lines().any(|line| line == description) => {
+                            current.push('\n');
+                            current.push_str(&description);
+                        }
+                        None => spec.description = Some(description),
+                        _ => {}
+                    }
+                }
+                let tools = staged_request.tools.get_or_insert_with(Vec::new);
+                tools.retain(|tool| tool.name != provider_name);
+                tools.push(spec.clone());
+                protected_specs.insert(provider_name.clone(), spec.clone());
+                staged_tools.insert(provider_name.clone(), tool_id);
+                staged_tool_specs.insert(provider_name, spec);
+                staged_read_scope = staged_read_scope.union(scope);
             }
             HookAction::ExposeTool(tool_id) => {
                 if staged_tools.values().any(|exposed| exposed == &tool_id) {
@@ -353,6 +391,7 @@ pub(super) fn apply_request_actions(
     *current = staged_context;
     *exposed_tools = staged_tools;
     *exposed_tool_specs = staged_tool_specs;
+    *read_scope = staged_read_scope;
     Ok(control.unwrap_or(HookControl::Continue))
 }
 

@@ -269,7 +269,9 @@ observation-debug/
     └── ...
 ```
 
-每条记录包含 schema version、sequence、recorded_at、layer、direction/stage、transport、protocol、representation、status、headers、payload encoding 与 payload。UTF-8 内容使用 text；非 UTF-8 使用 base64。WebSocket 保留 text/binary/ping/pong/close message 类型；HTTP/SSE 保留 adapter 看到的应用层 chunk 边界，不声称保留网络 packet 边界。
+每条记录包含 schema version、sequence、recorded_at、layer、direction/stage、transport、protocol、representation、status、headers、payload encoding 与 payload。普通可识别 UTF-8 内容保留原契约；只在已知协议媒体位置外置内容，标明 `artifact_externalized`，保留实际请求的 model、system、工具结果和 Provider 字段，不用入口快照覆盖后来请求。具有可证明内容身份时保存 Artifact Reference 与必要元数据；不能关联的媒体、尚未完成鉴权收存的正文或无法可靠识别的二进制正文记录明确的 omission／unrecoverable 状态，不以 base64 再存一份正文。普通文本中的媒体形状 JSON 和业务工具参数不因此当成媒体。HTTP/SSE 需要跨块识别凭据和媒体时重组完整应用消息并标记表示变化，不承诺原始 chunk 或网络 packet 边界。
+
+`artifact_normalized_request` checkpoint 提供已收存输入的稳定引用；Provider 发送时生成的内联正文和签名地址不替代该内容身份。导出对引用执行只读可用性查询，缺失或逻辑过期内容标为不可恢复，不续期或打开文件。旧 Trace 与历史不回填或改写；旧记录参与新请求时，新记录仍采用外置契约。
 
 文件路径只接受模块生成的 opaque trace ID 与固定文件名，所有导出读取都在 canonicalized root 内，防止 path traversal。
 
@@ -316,6 +318,7 @@ Observation、Rejected Request、Debug manifest 与 Trace 文件跟随 `log_rete
 - Debug 识别协议凭据字段与单条应用消息内的完整凭据模式，不承诺拼接多条消息后再识别业务文本中的凭据；这类跨消息内容仍需按敏感数据处理；
 - 其他 prompt、工具参数、工具结果和业务内容在 Debug Trace 中保留，因此开启确认必须明确敏感风险；
 - redaction 在写入前完成；原始凭据不得先落临时文件、数据库或异步队列；
+- `stravia_upload_` 保留语法的上传授权在过期、重启或关闭上传注入／一般可逆脱敏后仍替换为 `<stravia-upload-key>`；签名下载路径中的 token 同样不进入日志。只有客户端实际交付可包含真实上传凭据，思考与 Platform Tool 参数不能签发；
 - Trace event 与 Bundle manifest 记录发生过哪些类别的 redaction，但不记录原值。
 
 ## 8. Interaction Debug Bundle

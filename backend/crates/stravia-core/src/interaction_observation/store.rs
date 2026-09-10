@@ -32,6 +32,17 @@ impl ObservationStore {
         }
     }
 
+    pub(super) async fn artifact_available(&self, id: &str, now: i64) -> anyhow::Result<bool> {
+        Ok(match self {
+            Self::Sqlite(pool) => sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM artifacts WHERE id=? AND state='ready' AND expires_at>?)")
+                .bind(id).bind(now).fetch_one(pool).await?,
+            Self::Postgres(pool) => sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM artifacts WHERE id=$1 AND state='ready' AND expires_at>$2)")
+                .bind(id).bind(now).fetch_one(pool).await?,
+        })
+    }
+
     pub(super) async fn tail_candidates(
         &self,
         principal: &str,

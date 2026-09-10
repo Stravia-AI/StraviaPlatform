@@ -20,6 +20,7 @@ history_markers (principal-scoped hidden history and Platform execution state)
 reversible_redaction_mappings (principal-scoped persistent secret placeholders)
 agent_definition_revisions ──1:1── agent_definition_configs
 artifacts ──1:0..1── artifact_uploads ──1:N── artifact_upload_parts
+    ├──1:N── artifact_download_grants
     └──1:0..1── media_derivatives ──1:1── artifacts (JPEG derivative)
 admin_identity ──1:N── admin_sessions
 settings (key-value, including Web Access and revisioned Web Search configuration)
@@ -615,7 +616,7 @@ Interning serializes lookup and insertion within a database transaction (SQLite 
 
 ## artifacts
 
-API key principal-scoped 的媒体/文件对象。上传完成前为 `staging`，完成后为 `ready`；Agent input 仅接受 opaque `ArtifactId`。
+API key principal-scoped 的不可变媒体／文件对象。上传完成前为 `staging`，完成后为 `ready`；公共稳定引用为 `https://stravia/artifact/<id>`，内部 Agent input 使用 opaque `ArtifactId`。引用不授予访问权。逻辑过期不能复活；已开始的读取与未过期下载授权只保护物理内容，不延长逻辑保留期。
 
 | Column | Type | Default | Description |
 |---|---|---|---|
@@ -624,11 +625,28 @@ API key principal-scoped 的媒体/文件对象。上传完成前为 `staging`�
 | `mime_type` | TEXT NOT NULL | — | 声明 MIME type |
 | `size` | BIGINT/INTEGER NOT NULL | — | 字节数 |
 | `backend_key` | TEXT NOT NULL | — | 本地/S3-compatible object key |
+| `storage_backend` | TEXT NOT NULL | `'internal'` | `internal` 或 `s3`；既有对象保持内部存储 |
+| `storage_endpoint` | TEXT NULL | NULL | S3 对象所属 endpoint，内部存储为空 |
+| `storage_bucket` | TEXT NULL | NULL | S3 对象所属 bucket，内部存储为空 |
 | `state` | TEXT NOT NULL | — | `staging` 或 `ready` |
 | `expires_at` | BIGINT/INTEGER NOT NULL | — | 到期时间（Unix 毫秒） |
 | `created_at` | BIGINT/INTEGER NOT NULL | — | 创建时间（Unix 毫秒） |
 
 **索引**：`idx_artifacts_expiry`
+
+---
+
+## artifact_download_grants
+
+单文件临时下载授权的不可逆校验与物理清理保护。平台 URL 的 token 只向下载方交付，数据库仅保存 SHA-256；原生 S3 预签名 URL 同样建立到期保护记录。访问下载 URL 不刷新 Artifact 保留期。授权默认十五分钟；S3 还受签名凭据到期时间约束。
+
+| Column | Type | Default | Description |
+|---|---|---|---|
+| `token_hash` | TEXT PK | — | 随机下载 token 的 SHA-256，不保存明文 token 或签名 URL |
+| `artifact_id` | TEXT NOT NULL | — | Artifact（FK → artifacts.id, ON DELETE CASCADE） |
+| `expires_at` | BIGINT/INTEGER NOT NULL | — | 授权及物理删除保护截止时间（Unix 毫秒） |
+
+**索引**：`idx_artifact_download_grants_hold` on `(artifact_id, expires_at)`。
 
 ---
 ## media_derivatives
@@ -650,6 +668,8 @@ Media Understanding 源 Artifact 到内部 JPEG Media Derivative 的 principal-s
 ## artifact_uploads
 
 Artifact multipart 上传会话；只存 upload token hash，完成后删除。
+
+同一 Principal 的未完成且未过期任务最多十六个，声明大小合计最多 400 MiB；单文件最多 100 MiB。完成任务不占暂存名额，不限制已保存对象的聚合容量。创建准入通过 SQLite 写事务或 PostgreSQL Principal advisory lock 协调。
 
 | Column | Type | Default | Description |
 |---|---|---|---|
@@ -683,6 +703,10 @@ Artifact multipart 上传会话；只存 upload token hash，完成后删除。
 ## settings
 
 系统配置键值对。`web_search_config` 保存带 revision 的完整替换配置；Web Access 保存 Local backend 使用的有序 Search / Fetch source IDs。`log_retention_days` 控制 Observation、Rejected Request、event、Debug manifest 与托管 Trace segment 的共同保留期；未设置或不可读时运行时使用 7 天。
+
+`artifact_settings` 原子保存 `client_base_url`、`external_signed_downloads`、`file_public_base_url`、`upload_prompt_injection` 与可选 `s3`。两个开关默认关闭；地址保存完整 base URL，不从后续 Host／转发头更新。`s3` 包含 `endpoint`、`region`、`bucket`、`access_key_id`、`secret_access_key`、可选 `session_token` 与 Unix 毫秒 `credentials_expires_at`。文件相关读取对配置加载或解析失败明确报错，不伪装为关闭。
+
+内部键 `artifact_upload_signing_key` 保存随机签名密钥，通过冲突忽略插入保证并发初始化与重启稳定；通用管理设置读写拒绝访问此键。上传凭据本身不入库：签名载荷包含 Principal、固定十五分钟截止时间、随机 nonce 与限定的上传用途。上传认证每次检查所属 API Key 状态；重放脱敏识别保留的凭据语法，不依赖有效凭据表或一般可逆脱敏开关。
 
 | Column | Type | Default | Description |
 |---|---|---|---|
@@ -724,6 +748,8 @@ Route Display Name migration 30 把 `models.name` 原值逐字节迁移为 `mode
 `0036_credential_discovery_coverage`、`0037_route_native_compaction` 与 `0038_native_compaction` 保持既有版本、内容与校验和不变。`0037` 曾为 `models` 新增 `compaction_enabled` 与 `compaction_threshold`；`0039_remove_route_compaction_policy` 先删除带有交叉列 CHECK 约束的阈值列，再删除开关列，只移除这两项已废弃的 Route 策略设置，不删除 Route、Target 或原生压缩状态。客户端显式压缩控制直接透传至当前选中的 Target，平台不存储自动压缩策略。`0038` 创建的 `native_compactions`、`native_compaction_states` 和 `native_compaction_sources` 及其既有数据、`turn_chain_nodes` 引用保持不变；不从 Observation 或历史内容回填压缩记录。两个后端按版本顺序应用迁移；SQLite 使用与既有 DROP COLUMN 迁移相同的现代 SQLite 要求（3.35.0 或更新）。
 
 SQLite 与 PostgreSQL 必须保持 API Key 字段默认值、Turn kind、settings identity、唯一约束和 Artifact 外键等价。
+
+`0040_artifact_transfers` 同时为两个后端增加存储位置元数据与下载授权表。迁移不扫描媒体正文、不抓取旧 URL、不改写旧历史／工具记录，也不续期或删除既有对象。SQLite 通过跨 Store 实例的文件锁保护进行中的读取，PostgreSQL 使用独立连接池中的事务 advisory lock；清理取得排他保护并重新检查逻辑过期和授权后才删除，失败不报告已删除。
 
 首个 migration 直接使用最终表名 `models`、`model_backends` 和 `api_key_models`；后续 schema 变更通过 SQLite/PostgreSQL 对应版本的 migration 演进。MySQL 不受支持。
 

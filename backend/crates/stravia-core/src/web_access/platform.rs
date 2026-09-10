@@ -1,53 +1,72 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use serde::Deserialize;
 use serde_json::Value;
 
-use stravia_runtime_contract::Principal;
-use stravia_runtime_contract::hook::PlatformTool;
-use stravia_runtime_contract::hook::PlatformToolError;
-use stravia_runtime_contract::hook::PlatformToolOutput;
-use stravia_runtime_contract::hook::ToolExecutionContext;
-use stravia_runtime_contract::hook::ToolId;
+use stravia_runtime_contract::hook::{
+    PlatformTool, PlatformToolError, PlatformToolOutput, ToolExecutionContext, ToolId,
+};
 use stravia_runtime_contract::protocol::ir::ContentBlock;
-
-use super::{
-    FetchRequest, SearchRequest, WEB_FETCH_NAME, WEB_SEARCH_NAME, WebAccessError, WebAccessService,
+use stravia_web_access_contract::{
+    DEFAULT_SEARCH_RESULTS, STRAVIA_READ_TOOL_ID, STRAVIA_READ_TOOL_NAME,
 };
 
-use stravia_web_access_contract::{WEB_FETCH_TOOL_ID, WEB_SEARCH_TOOL_ID};
+use super::{SearchRequest, WebAccessError};
 
 pub(crate) fn internal_platform_tools(gateway: &crate::Gateway) -> Vec<Arc<dyn PlatformTool>> {
-    let service = gateway.web_access();
-    vec![
-        Arc::new(WebSearchTool {
-            service: service.clone(),
-        }),
-        Arc::new(WebFetchTool { service }),
-    ]
+    vec![Arc::new(InternalReadTool {
+        gateway: gateway.clone(),
+    })]
 }
 
-struct WebSearchTool {
-    service: WebAccessService,
+struct InternalReadTool {
+    gateway: crate::Gateway,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadRequest {
+    url: String,
+}
+
+pub(crate) fn decode_query_url(url: &str) -> Option<String> {
+    let query = url.strip_prefix("query://")?;
+    // Encode delimiters before using form decoding: the entire suffix is search text.
+    let encoded = format!("q={}", query.replace('&', "%26"));
+    Some(
+        url::form_urlencoded::parse(encoded.as_bytes())
+            .next()
+            .map(|(_, value)| value.into_owned())
+            .unwrap_or_default(),
+    )
 }
 
 #[async_trait]
-impl PlatformTool for WebSearchTool {
+impl PlatformTool for InternalReadTool {
     fn id(&self) -> ToolId {
-        ToolId::new(WEB_SEARCH_TOOL_ID)
+        ToolId::new(STRAVIA_READ_TOOL_ID)
     }
 
     fn external_name(&self) -> &str {
-        WEB_SEARCH_NAME
+        STRAVIA_READ_TOOL_NAME
     }
 
     fn description(&self) -> Option<&str> {
-        Some("Search the public web and return normalized results with source URLs.")
+        Some(
+            "Read a URL. query:// followed by URL-encoded search text performs basic public web retrieval, never a research Agent. Public HTTP(S) pages return Markdown; images and files follow platform artifact rules. Artifact references support download or an explicit question parameter.",
+        )
     }
 
     fn parameters(&self) -> Value {
-        super::search_input_schema()
+        serde_json::json!({
+            "type": "object",
+            "properties": { "url": { "type": "string" } },
+            "required": ["url"],
+            "additionalProperties": false
+        })
     }
+
     fn parallel_safe(&self) -> bool {
         true
     }
@@ -67,108 +86,49 @@ impl PlatformTool for WebSearchTool {
         arguments: Value,
         context: ToolExecutionContext,
     ) -> Result<PlatformToolOutput, PlatformToolError> {
-        let api_key_id = require_api_key(&context.principal)?;
-        let request: SearchRequest = match serde_json::from_value(arguments) {
+        let request: ReadRequest = match serde_json::from_value(arguments) {
             Ok(request) => request,
             Err(error) => {
                 return Ok(web_access_error_output(WebAccessError::invalid(format!(
-                    "invalid web_search arguments: {error}"
+                    "invalid StraviaRead arguments: {error}"
                 ))));
             }
         };
+        let Some(query) = decode_query_url(&request.url) else {
+            return crate::mcp::read::execute_internal_read(&self.gateway, request.url, context)
+                .await;
+        };
+        if !crate::mcp::read::networking_available(&self.gateway, &context.principal).await {
+            return Err(PlatformToolError::new(
+                "Networking capability is unavailable",
+            ));
+        }
         let response = match self
-            .service
-            .search_in_run(&context.run_id, api_key_id, request)
+            .gateway
+            .web_access()
+            .search_in_run(
+                &context.run_id,
+                context.principal.api_key_id(),
+                SearchRequest {
+                    query,
+                    max_results: DEFAULT_SEARCH_RESULTS,
+                    allowed_domains: Vec::new(),
+                    blocked_domains: Vec::new(),
+                },
+            )
             .await
         {
             Ok(response) => response,
             Err(error) => return Ok(web_access_error_output(error)),
         };
         let value = serde_json::to_value(response).map_err(|error| {
-            PlatformToolError::new(format!("web_search result encoding failed: {error}"))
-        })?;
-        Ok(success_output(value))
-    }
-}
-
-struct WebFetchTool {
-    service: WebAccessService,
-}
-
-#[async_trait]
-impl PlatformTool for WebFetchTool {
-    fn id(&self) -> ToolId {
-        ToolId::new(WEB_FETCH_TOOL_ID)
-    }
-
-    fn external_name(&self) -> &str {
-        WEB_FETCH_NAME
-    }
-
-    fn description(&self) -> Option<&str> {
-        Some("Fetch readable content from one or more public HTTP(S) URLs.")
-    }
-
-    fn parameters(&self) -> Value {
-        super::fetch_input_schema()
-    }
-    fn parallel_safe(&self) -> bool {
-        true
-    }
-
-    async fn execute(
-        &self,
-        arguments: Value,
-        context: ToolExecutionContext,
-    ) -> Result<Value, PlatformToolError> {
-        self.execute_result(arguments, context)
-            .await
-            .and_then(output_value)
-    }
-
-    async fn execute_result(
-        &self,
-        arguments: Value,
-        context: ToolExecutionContext,
-    ) -> Result<PlatformToolOutput, PlatformToolError> {
-        let api_key_id = require_api_key(&context.principal)?;
-        let request: FetchRequest = match serde_json::from_value(arguments) {
-            Ok(request) => request,
-            Err(error) => {
-                return Ok(web_access_error_output(WebAccessError::invalid(format!(
-                    "invalid web_fetch arguments: {error}"
-                ))));
-            }
-        };
-        let response = match self
-            .service
-            .fetch_in_run(&context.run_id, api_key_id, request)
-            .await
-        {
-            Ok(response) => response,
-            Err(error) => return Ok(web_access_error_output(error)),
-        };
-        let is_error = response.is_execution_error();
-        let value = serde_json::to_value(response).map_err(|error| {
-            PlatformToolError::new(format!("web_fetch result encoding failed: {error}"))
+            PlatformToolError::new(format!("StraviaRead result encoding failed: {error}"))
         })?;
         Ok(PlatformToolOutput {
             content: vec![ContentBlock::Unknown { raw: value }],
-            is_error,
+            is_error: false,
             metadata: serde_json::Map::new(),
         })
-    }
-}
-
-fn require_api_key(principal: &Principal) -> Result<&str, PlatformToolError> {
-    Ok(principal.api_key_id())
-}
-
-fn success_output(value: Value) -> PlatformToolOutput {
-    PlatformToolOutput {
-        content: vec![ContentBlock::Unknown { raw: value }],
-        is_error: false,
-        metadata: serde_json::Map::new(),
     }
 }
 
@@ -190,7 +150,7 @@ fn web_access_error_output(error: WebAccessError) -> PlatformToolOutput {
 fn output_value(output: PlatformToolOutput) -> Result<Value, PlatformToolError> {
     let Some(ContentBlock::Unknown { raw }) = output.content.into_iter().next() else {
         return Err(PlatformToolError::new(
-            "Web Access returned no structured output",
+            "StraviaRead returned no structured output",
         ));
     };
     if output.is_error {
@@ -204,33 +164,13 @@ fn output_value(output: PlatformToolOutput) -> Result<Value, PlatformToolError> 
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn internal_leaves_keep_bounded_search_and_fetch_contracts() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let gateway = crate::Gateway::new(crate::config::GatewayConfig {
-            data_dir: directory.path().to_path_buf(),
-            ..Default::default()
-        })
-        .await
-        .expect("Gateway");
-        let tools = internal_platform_tools(&gateway);
-
-        assert_eq!(tools[0].id().as_str(), WEB_SEARCH_TOOL_ID);
-        assert_eq!(tools[0].external_name(), "web_search");
+    #[test]
+    fn query_urls_decode_search_text_without_interpreting_url_parameters() {
         assert_eq!(
-            tools[0].parameters()["properties"]["max_results"]["maximum"],
-            20
+            decode_query_url("query://Rust%20%26%20C%2B%2B?year=2026"),
+            Some("Rust & C++?year=2026".into())
         );
-        assert_eq!(tools[1].id().as_str(), WEB_FETCH_TOOL_ID);
-        assert_eq!(tools[1].external_name(), "web_fetch");
-        assert_eq!(tools[1].parameters()["properties"]["urls"]["maxItems"], 20);
-        assert_ne!(
-            tools[0].id().as_str(),
-            stravia_web_search::platform::PUBLIC_WEB_SEARCH_TOOL_ID
-        );
-        assert_ne!(
-            tools[1].id().as_str(),
-            stravia_web_search::platform::PUBLIC_WEB_SEARCH_TOOL_ID
-        );
+        assert_eq!(decode_query_url("query://a&b"), Some("a&b".into()));
+        assert_eq!(decode_query_url("https://example.com/?question=test"), None);
     }
 }

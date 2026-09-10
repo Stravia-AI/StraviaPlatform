@@ -37,7 +37,7 @@ struct Args {
     #[arg(
         long,
         env = "STRAVIA_PUBLIC_ORIGIN",
-        help = "Canonical HTTPS public origin used for browser security and signed Artifact URLs",
+        help = "Canonical public origin used for browser security; file access addresses are managed in settings",
         help_heading = "Server",
         global = true
     )]

@@ -177,7 +177,7 @@ def initialize_server(
     status, body = session.request(
         "POST",
         "/api/v1/setup/complete",
-        {"database": database, "username": username, "password": password},
+        {"database": database, "username": username, "password": password, "client_base_url": base_url},
         timeout=40.0,
     )
     assert status == 200, f"complete setup failed: {status} {body}"

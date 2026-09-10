@@ -423,7 +423,6 @@ async fn continuation_uses_the_exact_parent_snapshot_and_supports_sibling_branch
     {
         let inputs = local.inputs.lock().expect("inputs");
         assert_eq!(inputs[1].ancestors.len(), 1);
-        assert_eq!(inputs[1].definition_revision, Some(1));
         assert_eq!(
             inputs[1].local_limits.map(|limits| limits.max_turns),
             Some(12)

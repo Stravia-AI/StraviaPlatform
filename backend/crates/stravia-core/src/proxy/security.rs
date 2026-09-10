@@ -39,7 +39,7 @@ impl ClientCredential {
         Self { secret }
     }
 
-    fn secret(&self) -> Option<&str> {
+    pub(super) fn secret(&self) -> Option<&str> {
         self.secret.as_deref()
     }
 }

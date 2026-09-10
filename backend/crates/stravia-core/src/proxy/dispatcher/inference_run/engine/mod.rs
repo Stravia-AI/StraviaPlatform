@@ -330,35 +330,26 @@ fn stabilize_media_generation_chain(
     if image_count != plan.source_artifact_ids.len() {
         return false;
     }
-    let markers = plan
-        .source_artifact_ids
-        .iter()
-        .filter_map(|source_id| {
-            let identity = format!("artifact_id=\"{source_id}\"");
-            rewritten
-                .items
-                .iter()
-                .filter_map(|message| match &message.content {
-                    stravia_runtime_contract::protocol::ir::MessageContent::Blocks(blocks) => {
-                        Some(blocks)
-                    }
-                    _ => None,
-                })
-                .flatten()
-                .find(|block| {
-                    matches!(
-                        block,
-                        stravia_runtime_contract::protocol::ir::ContentBlock::Text { text, .. }
-                            if text.starts_with("[stravia_media ") && text.contains(&identity)
-                    )
-                })
-                .cloned()
-        })
-        .collect::<Vec<_>>();
-    if markers.len() != image_count {
-        return false;
-    }
-    markers.len() == image_count
+    plan.source_artifact_ids.iter().all(|source_id| {
+        let identity = format!("artifact_reference=\"https://stravia/artifact/{source_id}\"");
+        rewritten
+            .items
+            .iter()
+            .filter_map(|message| match &message.content {
+                stravia_runtime_contract::protocol::ir::MessageContent::Blocks(blocks) => {
+                    Some(blocks)
+                }
+                _ => None,
+            })
+            .flatten()
+            .any(|block| {
+                matches!(
+                    block,
+                    stravia_runtime_contract::protocol::ir::ContentBlock::Text { text, .. }
+                        if text.starts_with("[stravia_media ") && text.contains(&identity)
+                )
+            })
+    })
 }
 
 pub(super) async fn orchestrate(
@@ -394,7 +385,7 @@ pub(super) async fn orchestrate(
     if let Some(session_id) = client_session_id(&headers, &request) {
         crate::generation_chain::set_generation_session_id(&mut request, session_id);
     }
-    let client_request = request.clone();
+    let mut client_request = request.clone();
     let ingress_capabilities = crate::protocol::registry::ProtocolRegistry::global()
         .capabilities(&ingress)
         .expect("registered ingress protocol");
@@ -445,6 +436,28 @@ pub(super) async fn orchestrate(
     let concurrency_limit = authenticated_principal.concurrency_limit;
     let api_key_name = authenticated_principal.api_key_name;
     let principal = authenticated_principal.principal;
+    if let Err(error) =
+        crate::media::ingest::normalize_request(&gw, &principal, &mut request, &ctx.cancellation)
+            .await
+    {
+        return reject_before_admission(
+            &mut Some(ingress_observer),
+            "attachments",
+            "attachment_ingest_failed",
+            coded_error_response(
+                StatusCode::BAD_REQUEST,
+                "attachment_ingest_failed",
+                &error.to_string(),
+            ),
+        );
+    }
+    client_request.clone_from(&request);
+    ingress_observer.record_debug(|| RunEvent::Checkpoint {
+        stage: "artifact_normalized_request".into(),
+        model_turn_id: None,
+        attempt_id: None,
+        payload: checkpoint_payload(&ingress_observer, &request),
+    });
     ctx.auth_subject = Some(crate::proxy::context::AuthSubject {
         api_key_id: Some(principal.api_key_id().to_owned()),
         label: Some(api_key_name.clone()),
@@ -579,6 +592,27 @@ pub(super) async fn orchestrate(
             );
         }
     };
+    if let Err(error) =
+        crate::media::ingest::normalize_request(&gw, &principal, &mut request, &ctx.cancellation)
+            .await
+    {
+        return reject_before_admission(
+            &mut Some(ingress_observer),
+            "attachments",
+            "attachment_ingest_failed",
+            coded_error_response(
+                StatusCode::BAD_REQUEST,
+                "attachment_ingest_failed",
+                &error.to_string(),
+            ),
+        );
+    }
+    ingress_observer.record_debug(|| RunEvent::Checkpoint {
+        stage: "artifact_normalized_request".into(),
+        model_turn_id: None,
+        attempt_id: None,
+        payload: checkpoint_payload(&ingress_observer, &request),
+    });
     ingress_observer.record_debug(|| RunEvent::Checkpoint {
         stage: "restored_request".into(),
         model_turn_id: None,
@@ -802,6 +836,7 @@ pub(super) async fn orchestrate(
         compaction_source_generation_id,
     };
     let session_context = stravia_runtime_contract::hook::SessionContext {
+        tools_fixed: false,
         request_id: ctx.request_id.clone(),
         run_id: format!("run-{}", uuid::Uuid::new_v4()),
         request_kind,
@@ -823,11 +858,14 @@ pub(super) async fn orchestrate(
             Err(error) => return hook_failure_response(error),
         },
     );
-    let mut projection = Some(ClientProjectionSession::new(
-        Arc::clone(&gw.history_markers),
-        generation.principal.clone(),
-        ingress,
-    ));
+    let mut projection = Some(
+        ClientProjectionSession::new(
+            Arc::clone(&gw.history_markers),
+            generation.principal.clone(),
+            ingress,
+        )
+        .with_upload_gateway(gw.clone()),
+    );
     let response = dispatch_pipeline_inner(DispatchContext {
         gw: gw.clone(),
         executor,
@@ -1024,6 +1062,12 @@ async fn dispatch_round(
                     if let Err(response) = enter_phase(phase, Phase::AwaitingDelivery) {
                         return *response;
                     }
+                    let response = match projection_session.prepare_upload_delivery(&response).await
+                    {
+                        Ok(std::borrow::Cow::Borrowed(_)) => response,
+                        Ok(std::borrow::Cow::Owned(delivered)) => delivered,
+                        Err(error) => return hook_failure_response(error),
+                    };
                     let response = render_hook_control(
                         stravia_runtime_contract::hook::HookControl::Respond(Box::new(response)),
                         ingress,
@@ -1347,7 +1391,7 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
             }
         }
     }
-    let Some(completed_response) = completed_response else {
+    let Some(mut completed_response) = completed_response else {
         return model_turn_error_outcome(
             stravia_runtime_contract::model_turn::ModelTurnError::new(
                 "model_stream_incomplete",
@@ -1358,6 +1402,19 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
     let mut response = streamed_response
         .map(StreamResponseAccumulator::into_ai_response)
         .unwrap_or_else(|| completed_response.clone());
+    if streamed
+        && let Err(error) = completion::reconcile_completed_media(
+            &mut response,
+            std::mem::take(&mut completed_response.items),
+        )
+    {
+        return model_turn_error_outcome(
+            stravia_runtime_contract::model_turn::ModelTurnError::new(
+                "output_media_reconciliation_failed",
+                error,
+            ),
+        );
+    }
     if response.usage.prompt_tokens == 0 && response.usage.completion_tokens == 0 {
         response.usage = completed_response.usage;
     }
@@ -1461,7 +1518,19 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
     } else {
         DeliveryAdapter::non_stream(ingress, route.egress)
     };
-    let mut delivered = delivery.deliver_canonical(&prepared_response, StatusCode::OK);
+    let mut delivered = match delivery
+        .deliver_projected(&prepared_response, StatusCode::OK, projection_session)
+        .await
+    {
+        Ok(delivered) => delivered,
+        Err(error) => {
+            return buffered_response(render_completion_failure(
+                CompletionFailure::hook(error, ClientOutputCommit::Pending),
+                ingress,
+                request.stream.enabled,
+            ));
+        }
+    };
     if delivered.progress != BufferedDeliveryProgress::Prepared {
         return buffered_response(delivered.response);
     }

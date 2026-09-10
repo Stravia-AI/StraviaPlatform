@@ -84,6 +84,8 @@ impl HookDescriptor {
 
 #[derive(Debug, Clone)]
 pub struct SessionContext {
+    /// Agent execution supplies an immutable tool allowlist; automatic exposure is disabled.
+    pub tools_fixed: bool,
     pub request_id: String,
     pub run_id: String,
     pub request_kind: RequestKind,
@@ -107,6 +109,7 @@ pub enum HookEvent<'a> {
     Request {
         session: &'a SessionContext,
         original: &'a ContextSnapshot,
+        read_scope: super::tool::ReadExposureScope,
         current: &'a AiRequest,
         context: &'a ContextSnapshot,
         route: Option<&'a RouteContext>,
@@ -188,9 +191,15 @@ pub enum HookAction {
     PatchResponse(ResponsePatch),
     PatchToolResult(ToolResultPatch),
     ExposeTool(ToolId),
+    ExposeRead {
+        scope: super::tool::ReadExposureScope,
+        description: String,
+    },
     Respond(Box<AiResponse>),
     Reject(HookRejection),
-    StreamAbort { message: String },
+    StreamAbort {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Default)]

@@ -1,6 +1,128 @@
 use super::*;
 
 #[tokio::test]
+async fn media_only_injection_rejects_guessed_search_before_research_execution() {
+    let mut tool_round = openai_response("");
+    tool_round["choices"][0]["message"]["tool_calls"] = serde_json::json!([{
+        "id": "guessed-search",
+        "type": "function",
+        "function": {"name": "StraviaRead", "arguments": "{\"url\":\"query://unexposed%20networking\"}"}
+    }]);
+    tool_round["choices"][0]["finish_reason"] = serde_json::json!("tool_calls");
+    let (parent_url, parent_calls, requests) = serve_openai_sequence_with_requests(vec![
+        tool_round,
+        openai_response("The requested search capability is unavailable in this run."),
+    ])
+    .await;
+    let (search_url, search_calls) =
+        serve_openai_sequence(vec![openai_response("unexpected research")]).await;
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let gateway = Gateway::new(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .expect("Gateway");
+    let parent_provider = create_test_provider_with_model(
+        &gateway, "Read scope parent", parent_url, "vision",
+        serde_json::json!({"id":"vision", "tool_call":true, "modalities":{"input":["text","image"],"output":["text"]}}),
+    ).await;
+    let admin = gateway.admin();
+    let parent = admin
+        .create_model(CreateRoute {
+            model_id: "read-scope-parent".into(),
+            display_name: None,
+            balance: None,
+            target_provider: parent_provider.id,
+            target_model: "vision".into(),
+            targets: vec![],
+        })
+        .await
+        .expect("parent Model");
+    let search_model = configure_route_with_id(&gateway, "read-scope-search", &[search_url]).await;
+    admin
+        .update_media_understanding_config(stravia_media::admin::MediaUnderstandingConfigUpdate {
+            enabled: true,
+            model_id: Some(parent.id.clone()),
+            thinking_level: Some(stravia_runtime_contract::thinking::ThinkingLevel::Medium),
+        })
+        .await
+        .expect("enable Media Understanding");
+    let source = admin
+        .create_web_provider(crate::db::models::CreateWebProvider {
+            name: "Unused search source".into(),
+            kind: "exa".into(),
+            api_key: Some("unused-test-key".into()),
+            use_proxy: false,
+            local_engines: None,
+        })
+        .await
+        .expect("configure search source");
+    admin
+        .update_web_access_settings(crate::db::models::WebAccessSettings {
+            search_provider_ids: vec![source.id.clone()],
+            fetch_provider_ids: vec![source.id],
+        })
+        .await
+        .expect("configure search sources");
+    let search_config = admin
+        .get_web_search_config()
+        .await
+        .expect("search configuration");
+    admin
+        .update_web_search_config(stravia_web_search::WebSearchConfig {
+            enabled: true,
+            backend: Some(stravia_web_search::WebSearchBackendDraft::Local {
+                model_id: Some(search_model),
+            }),
+            ..search_config.config
+        })
+        .await
+        .expect("enable Networking globally");
+    let key = admin
+        .create_api_key(crate::db::models::CreateApiKey {
+            key: None,
+            name: "Media-only reader".into(),
+            concurrency_limit: None,
+            expires_at: None,
+            mcp_access_enabled: false,
+            transparent_injection_enabled: true,
+            inject_web_search: false,
+            inject_media_understanding: true,
+            model_ids: vec![parent.id],
+        })
+        .await
+        .expect("media-only API key");
+    let mut user = stravia_runtime_contract::protocol::ir::AiItem::output_text(
+        "Read the available media if needed.",
+    );
+    user.role = stravia_runtime_contract::protocol::ir::Role::User;
+    let request = AiRequest::new("read-scope-parent", vec![user]);
+    let response =
+        execute_non_stream_request_with_headers(gateway, bearer_headers(&key.token), request).await;
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("response body");
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert_eq!(parent_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        search_calls.load(Ordering::SeqCst),
+        0,
+        "guessed networking must not start research despite global availability"
+    );
+    let requests = requests
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let followup: serde_json::Value =
+        serde_json::from_str(requests[1].split_once("\r\n\r\n").expect("HTTP body").1)
+            .expect("provider request JSON");
+    assert!(followup["messages"].as_array().expect("messages").iter()
+        .any(|message| message["role"] == "tool" && message["tool_call_id"] == "guessed-search"),
+        "guessed platform call must return a tool result without executing research or being delegated to the client");
+}
+
+#[tokio::test]
 async fn non_vision_parent_uses_capability_owned_media_model() {
     let source_id = Arc::new(std::sync::Mutex::new(None));
     let (parent_url, parent_calls) = serve_media_parent(source_id.clone()).await;
@@ -154,10 +276,11 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
         execute_non_stream_request_with_headers(gateway.clone(), headers.clone(), request.clone())
             .await;
 
-    assert_eq!(response.status(), StatusCode::OK);
+    let status = response.status();
     let body = to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("bridge response body");
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
     assert!(
         String::from_utf8_lossy(&body).contains("parent used Media Report"),
         "{}",
@@ -414,10 +537,6 @@ async fn mixed_media_route_prefers_native_targets_and_rejects_targets_without_to
     assert!(native_request.contains(image_data), "{native_request}");
     assert!(
         !native_request.contains("stravia_media"),
-        "{native_request}"
-    );
-    assert!(
-        !native_request.contains("stravia__understand_media"),
         "{native_request}"
     );
 

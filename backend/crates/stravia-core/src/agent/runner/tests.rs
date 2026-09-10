@@ -88,6 +88,7 @@ async fn platform_output_roundtrip(blocks: Vec<ContentBlock>) -> (AiRequest, Pla
                 request_id: "request".into(),
                 run_id: "run".into(),
                 principal: Principal::new("owner"),
+                read_scope: stravia_runtime_contract::hook::ReadExposureScope::NONE,
                 cancellation: CancellationToken::new(),
                 progress: None,
             },
@@ -335,90 +336,6 @@ impl AgentToolAuthorizer for DenyToolAuthorizer {
         _model_id: &str,
     ) -> Result<(), AgentRunError> {
         Err(AgentRunError::new("revoked", "revoked"))
-    }
-}
-
-struct ImageArtifactStore {
-    path: std::path::PathBuf,
-}
-
-#[async_trait]
-impl ArtifactStore for ImageArtifactStore {
-    async fn create_upload(
-        &self,
-        _principal: &Principal,
-        _request: stravia_runtime_contract::artifact::ArtifactUploadRequest,
-    ) -> Result<
-        stravia_runtime_contract::artifact::ArtifactUpload,
-        stravia_runtime_contract::artifact::ArtifactError,
-    > {
-        Err(stravia_runtime_contract::artifact::ArtifactError::Storage(
-            "not used".into(),
-        ))
-    }
-
-    async fn upload_part(
-        &self,
-        _principal: &Principal,
-        _upload_id: &str,
-        _upload_token: &str,
-        _part_number: u32,
-        _bytes: stravia_runtime_contract::artifact::ArtifactByteStream,
-    ) -> Result<
-        stravia_runtime_contract::artifact::UploadedArtifactPart,
-        stravia_runtime_contract::artifact::ArtifactError,
-    > {
-        Err(stravia_runtime_contract::artifact::ArtifactError::Storage(
-            "not used".into(),
-        ))
-    }
-
-    async fn complete_upload(
-        &self,
-        _principal: &Principal,
-        _upload_id: &str,
-        _upload_token: &str,
-        _parts: &[stravia_runtime_contract::artifact::UploadedArtifactPart],
-    ) -> Result<
-        stravia_runtime_contract::artifact::ArtifactRef,
-        stravia_runtime_contract::artifact::ArtifactError,
-    > {
-        Err(stravia_runtime_contract::artifact::ArtifactError::Storage(
-            "not used".into(),
-        ))
-    }
-
-    async fn open(
-        &self,
-        _principal: &Principal,
-        id: &ArtifactId,
-    ) -> Result<
-        stravia_runtime_contract::artifact::ArtifactReader,
-        stravia_runtime_contract::artifact::ArtifactError,
-    > {
-        Ok(stravia_runtime_contract::artifact::ArtifactReader {
-            artifact: stravia_runtime_contract::artifact::ArtifactRef {
-                id: id.clone(),
-                mime_type: "image/png".into(),
-                size: 3,
-            },
-            source: ArtifactSource::LocalPath(self.path.clone()),
-        })
-    }
-
-    async fn extend_retention(
-        &self,
-        _principal: &Principal,
-        _id: &ArtifactId,
-        _retention: Duration,
-    ) -> Result<(), stravia_runtime_contract::artifact::ArtifactError> {
-        Ok(())
-    }
-
-    async fn sweep_expired(
-        &self,
-    ) -> Result<u64, stravia_runtime_contract::artifact::ArtifactError> {
-        Ok(0)
     }
 }
 
@@ -1012,50 +929,4 @@ async fn child_turn_reuses_parent_transcript_without_mutating_parent() {
         requests[2].instructions.as_deref(),
         Some(expected_system.as_str())
     );
-}
-#[tokio::test]
-async fn runner_materializes_artifact_as_canonical_multimodal_input() {
-    let directory = tempfile::tempdir().expect("temporary directory");
-    let path = directory.path().join("image.png");
-    tokio::fs::write(&path, b"png")
-        .await
-        .expect("image fixture");
-    let mut response = AiResponse::new("response-1", "model-1");
-    response.push_output_text(r#"{"answer":"image"}"#);
-    let model = Arc::new(crate::agent::InMemoryModelTurnExecutor::scripted([
-        response,
-    ]));
-    let runner = AgentRunner::new(
-        enabled_registry().await,
-        model.clone(),
-        vec![Arc::new(EchoTool)],
-        Arc::new(crate::turn_chain::test_store().await),
-    )
-    .expect("Agent Runner")
-    .with_artifact_store(Some(Arc::new(ImageArtifactStore { path })));
-
-    let events = runner
-        .run(AgentInput {
-            principal: Principal::new("owner"),
-            definition_id: AgentDefinitionId::new("research"),
-            parent_turn_id: None,
-            prompt: "describe".into(),
-            artifacts: vec![ArtifactId::new("artifact-1")],
-            cancellation: CancellationToken::new(),
-        })
-        .collect::<Vec<_>>()
-        .await;
-
-    assert!(matches!(events.last(), Some(AgentEvent::Completed(_))));
-    let requests = model.requests();
-    let MessageContent::Blocks(blocks) = &requests[0].items[0].content else {
-        panic!("expected multimodal blocks");
-    };
-    assert!(matches!(
-        &blocks[1],
-        ContentBlock::Image {
-            source: MediaSource::Base64 { media_type, data },
-            ..
-        } if media_type == "image/png" && data == "cG5n"
-    ));
 }

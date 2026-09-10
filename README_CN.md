@@ -48,7 +48,7 @@ Claude Code · Codex CLI · Gemini CLI · OpenCode · 各类 SDK
 
 - **平台自有工具执行：** 向兼容的模型请求暴露工具，在 Stravia 内执行平台工具调用，并携带结果继续模型轮次。客户端自有工具仍由客户端负责执行。
 - **有界 Agent 循环：** 在时间、轮次、token 和工具预算内协调模型与工具轮次，支持受控工具并发、取消和输出校验。
-- **内置能力：** `web_search` 返回带来源的 Search Report；`understand_media` 为受支持的图片返回强校验 Media Report。两者均可通过 `previous_turn_id` 显式续接与分支。
+- **内置能力：** `StraviaRead` 统一读取文件与网页，通过 `query://` 返回带来源的 Search Report，并回答受支持图片的问题。搜索与媒体结果保留 `previous_turn_id` 显式续接与分支。
 - **MCP 与透明注入：** 将已启用能力提供给 MCP 客户端，或按配置将所选能力注入兼容的模型请求。
 - **执行管理：** 将请求及嵌套执行归属于调用方 Principal，实施访问与并发限制，并记录历史、上游确认用量和诊断。
 
@@ -123,7 +123,7 @@ Route Builder 使用独立页面。选择 Provider 后会自动加载其可用 P
 
 ### 联网搜索与 MCP
 
-可选的联网搜索只公开一个 `web_search` 能力，返回终态、带来源的 Search Report，而不是单页搜索结果。成功结果包含答案、已引用的公网 HTTP(S) 来源、限制、完成状态、用量和稳定 `turn_id`。将该 ID 作为 `previous_turn_id` 传入，可从同一 Principal 的完整祖先链续接或创建独立分支；Stravia 不会隐式选择“最新”Turn。
+可选的联网搜索通过 `StraviaRead` 调用，输入为 `{"url":"query://URL-encoded%20question"}`，返回终态、带来源的 Search Report，而不是单页搜索结果。成功结果包含答案、已引用的公网 HTTP(S) 来源、限制、完成状态、用量和稳定 `turn_id`。将该 ID 作为 `previous_turn_id` 传入，可从同一 Principal 的完整祖先链续接或创建独立分支；Stravia 不会隐式选择“最新”Turn。网页 URL 返回 Markdown，不启动研究 Agent。内部搜索 Agent 使用相同工具名，但其 `query://` 只执行基础检索，不递归启动研究。
 
 在 WebUI 中配置一个 Search Backend。Local Search 使用有界 Agent 编排有序的内部 Web Access Search/Fetch 来源：自动创建的进程内 Local Provider、Exa 或智谱。每个 Web Provider 都可独立选择是否使用 Gateway 代理。Codex Agentic Search 固定到一个精确且兼容的 Codex OAuth Responses Provider/model，不使用 Local budget。Local 与 Codex 之间不做 fallback。
 
@@ -133,7 +133,7 @@ Route Builder 使用独立页面。选择 Provider 后会自动加载其可用 P
 
 HTTP 使用 Moli 的 Chrome 传输指纹；指纹缓解措施不保证绕过反爬检测。HTTP 与浏览器路径保留所选 Gateway 代理快照、分离的 Cookie 归属和 Fetch 安全限制。浏览器 HTTP 与 WebSocket 流量经过校验出口代理，不进行 TLS 中间人解密，证书校验保持启用。直连固定到校验通过的公网地址；显式选择的上游代理仍负责自身 DNS 解析。Moli 在 Stravia 进程内执行，不再使用具有操作系统沙箱的 Chrome 子进程；部署时应采用最小权限，并为不可信页面执行配置适当的宿主机或容器隔离。
 
-平台联网搜索总开关统一控制所有有效 API Key 的显式访问。每个 Key 分别控制 MCP 访问和透明注入；透明注入只把所选且已启用的能力加入兼容请求，不限制显式调用或 MCP。MCP 客户端连接 `POST /mcp`，通过 `Authorization: Bearer <key>` 认证，并且只在 MCP 权限与平台能力都开启时发现 `web_search`。OpenAI Responses 的原生 web-search 声明与隐藏 tool continuation 使用同一个 Search contract。
+平台联网搜索总开关同时控制所有有效 API Key 的搜索与网页读取。每个 Key 分别控制 MCP 访问和透明注入；选中且已开启的联网与媒体能力合并为一个 `StraviaRead` 声明，执行层强制检查本次暴露范围。注入偏好不限制显式调用或 MCP。MCP 客户端连接 `POST /mcp`，通过 `Authorization: Bearer <key>` 认证并发现 `StraviaRead`；文件下载检查归属，联网和媒体操作还分别检查平台开关。Provider 原生 web-search 工具类型不变。旧平台 `web_search`、`web_fetch` 和 `understand_media` 调用别名不再注册。
 
 联网搜索与 Web Access 配置属于部署本地状态，不参与配置导出/导入。Search Turn 只保留 Report 元数据与引用 URL，不保存抓取的网页正文或内部 Agent transcript。
 
@@ -141,9 +141,31 @@ Local Fetch 和浏览器出站检查会拒绝去除主机尾随点后成为非�
 
 ### Media Understanding
 
-Media Understanding 公开一个用于静态 JPEG、PNG 与 WebP 图片的 `understand_media` 能力。若父 Route 存在支持图片的 Target，Stravia 会原样发送图片；否则，支持工具的父 Model 可调用已配置的隐藏视觉 Model，并获得包含 source ArtifactId 与可分支 `turn_id` 的强校验 Media Report。原生视觉 Route 失败后不会 fallback 到隐藏 Model。
+Media Understanding 通过 `StraviaRead` 读取静态 JPEG、PNG 与 WebP 图片，例如 `{"url":"https://stravia/artifact/<id>?question=Describe%20the%20image"}`。裸 Artifact Reference 只返回下载信息，不调用模型。外部图片 URL 先收存，再描述内容并提取可读文字；原 URL 的查询参数完整保留，不作为平台指令。若父 Route 存在支持图片的 Target，Stravia 会原生交付已保存的图片；否则，支持工具的父 Model 可调用已配置的隐藏视觉 Model，并获得包含 source ArtifactId 与可分支 `turn_id` 的强校验 Media Report。新 Artifact 问题可同时携带 `previous_turn_id` 续接。原生视觉 Route 失败后不会 fallback 到隐藏 Model。
 
-在**多模态理解**页面启用平台能力、选择逻辑 Model 并设置思考等级。选择器只列出所有 Target 都明确声明图片输入能力的已启用 Model；思考等级选择器只列出每个 Target 都支持的等级。启用后，所有有效 API Key 都能显式调用 `understand_media`；MCP 访问和透明注入仍由每个 Key 独立控制。隐藏调用计入调用方配额，但不会授予所选 Model 的直接访问权。外部图片 URL 仅允许公网 HTTPS 目标，并会在使用前创建 snapshot。预处理始终生成有界的有损 JPEG derivative，忽略 ICC profile，因此精确颜色或细小文本 OCR 可能不准确。
+在**多模态理解**页面启用平台能力、选择逻辑 Model 并设置思考等级。选择器只列出所有 Target 都明确声明图片输入能力的已启用 Model；思考等级选择器只列出每个 Target 都支持的等级。启用后，所有有效 API Key 都能通过 `StraviaRead` 请求理解；MCP 访问和透明注入仍由每个 Key 独立控制。隐藏调用计入调用方配额，但不会授予所选 Model 的直接访问权。外部文件仅允许公网 HTTP(S)，校验 DNS、固定实际连接地址并逐跳校验重定向。预处理始终生成有界的有损 JPEG derivative，忽略 ICC profile，因此精确颜色或细小文本 OCR 可能不准确。
+
+### 文件存储与临时传输
+
+未配置 S3 时直接使用内部存储。可选 S3 沿用相同上传步骤：`POST /v1/artifacts/uploads` 创建，携带 `x-upload-token` 调用 `PUT /v1/artifacts/uploads/{upload_id}/parts/{part_number}`，最后调用 `POST /v1/artifacts/uploads/{upload_id}/complete`。完成结果保留原有文件元数据，并增加形如 `https://stravia/artifact/<opaque-id>` 的 `reference`。这是稳定、Principal-scoped 的文件身份，不是网络下载地址或凭据。同一 API Key 可跨对话使用，其他 Principal 无权解析。
+
+结构化内联媒体和远程附件 URL 必须先保存成功，模型调用才会开始。普通文本链接和类似 base64 的文本不会自动下载或改写。`StraviaRead` 导入普通文件 URL，返回引用、MIME、大小、文件名（或不透明回退值）和临时下载地址，不自动解压、执行或理解文件。
+
+在初始化或设置中保存完整的**客户端访问地址**，包括协议、端口与部署路径前缀。保存值始终有效，后续 Host 和转发头不能替换它。**外部签名下载**和**上传提示词注入**分别默认关闭：
+
+| 外部签名下载 | Provider 输入 | 客户端下载 |
+|---|---|---|
+| 关闭，内部或 S3 | 从 Artifact 生成 base64 | 保存的客户端地址下的平台签名 URL |
+| 开启，内部存储 | 文件公开地址下的平台签名 URL | 相同公开入口 |
+| 开启，S3 | 原生 S3 预签名 URL | 原生 S3 预签名 URL |
+
+启用外部签名下载时必须填写文件公开地址，初始带入客户端地址或 S3 endpoint。保存成功不代表可达性已验证；实际客户端和 Provider 必须能够访问该入口，S3 存储桶无须公开。URL 通常有效十五分钟；每次实际调用 Provider 前，包括重试和后续模型轮次，至少剩余五分钟。协议不能表达 URL 时，在发送前选择其支持的内联形式；上游 URL 抓取失败不会触发自动 base64 重跑。
+
+上传提示词注入提供真实的分片上传 curl 流程。模型只见 `<stravia-upload-key>`；仅交付给客户端的普通回答和客户端工具参数会替换为临时上传凭据，思考和平台工具参数不签发。同一响应复用仍有效的凭据；每个凭据固定有效十五分钟，支持多文件且只授权上传。关闭注入不撤销已有凭据，但撤销所属 API Key 仍会拒绝上传。客户端回传的凭据，包括过期凭据，在发送给 Provider 或平台持久化前均恢复为占位符，不依赖一般凭据保护开关。
+
+单文件上限为 100 MiB。每个 Principal 最多保留十六个未完成且未过期的上传任务，声明大小合计最多 400 MiB；完成上传释放暂存名额。不设已保存文件总容量上限。鉴权后的文件使用按请求保留期续期；签名下载和文本提及不续期。过期引用不能复活；进行中读取和未过期下载授权只延迟物理清理，不延长逻辑保留期。签名 URL 是可转交的临时凭据：持有者在有效期内可下载对应文件。
+
+新历史和诊断以引用与元数据外置结构化媒体，不把媒体捕获称为原始 wire 字节；缺失或过期正文明确标为不可恢复。升级不回填、改写或续期旧历史。修改或移除 S3 endpoint／bucket 凭据不会迁移现有对象；对象仍在使用时，应保留匹配的存储配置。
 
 ### 凭据保护
 
@@ -383,7 +405,7 @@ idle_timeout_seconds = 300
 
 该命令会提示输入用户名，并无回显地读取新密码及确认；密码不接受命令行参数。它会原地更新已有唯一管理员，并撤销全部旧管理会话；不会删除业务数据或重新开放数据库设置。
 
-监听非回环地址前，必须通过 `--public-origin` 指定可信且可从外部访问的 Gateway origin（例如 `https://gateway.example.com`）。Stravia 不会信任转发 header 来推导管理 origin 或签名 Artifact URL。请由反向代理终止 HTTPS，并将请求原样转发至 Stravia listener：
+监听非回环地址前，必须通过 `--public-origin` 指定可信且可从外部访问的 Gateway origin（例如 `https://gateway.example.com`）。它控制浏览器安全边界，不替代独立保存的客户端／文件访问地址；Stravia 不会信任转发头来替换这些设置。请由反向代理终止 HTTPS，并将请求原样转发至 Stravia listener：
 
 ```bash
 ./target/release/stravia-server \

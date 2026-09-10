@@ -90,7 +90,7 @@ impl MediaDerivativeStore {
         if reader.artifact.size == 0 || reader.artifact.size > max_bytes {
             return Err(MediaStoreError::TooLarge);
         }
-        let ArtifactSource::LocalPath(path) = reader.source else {
+        let ArtifactSource::LocalPath(path) = &reader.source else {
             return Err(MediaStoreError::Corrupt);
         };
         let file = tokio::fs::File::open(path)

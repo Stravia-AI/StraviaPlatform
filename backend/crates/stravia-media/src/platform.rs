@@ -14,7 +14,7 @@ use super::{MediaUnderstandingInput, MediaUnderstandingService};
 
 pub const MEDIA_TOOL_ID: &str = "media-understanding";
 pub const MEDIA_TOOL_DESCRIPTION: &str = "Understand static JPEG, PNG, or WebP Artifacts using OCR, description, comparison, or visual reasoning.";
-pub const MEDIA_TOOL_NAME: &str = "understand_media";
+pub const MEDIA_TOOL_NAME: &str = "StraviaRead";
 
 pub fn model_is_image_capable(model: &crate::host::MediaRoute) -> bool {
     model.is_enabled
@@ -50,7 +50,7 @@ pub fn input_schema() -> Value {
                 "type": "array",
                 "maxItems": 8,
                 "default": [],
-                "description": "New static JPEG, PNG, or WebP source Artifacts in stable order. Use [] when continuing previous_turn_id without new media. Never repeat Artifact IDs from previous turns.",
+                "description": "Static JPEG, PNG, or WebP source Artifacts in stable order. Retained ancestor sources are reused when continuing previous_turn_id; duplicate IDs within one call are rejected.",
                 "items": {
                     "type": "object",
                     "properties": {
@@ -130,7 +130,7 @@ pub async fn execute_until(
         serde_json::json!({
             "error": {
                 "code": "invalid_input",
-                "message": "Invalid understand_media arguments"
+                "message": "Invalid Media Understanding arguments"
             }
         })
     })?;
@@ -155,74 +155,14 @@ async fn execute_platform(
     arguments: Value,
     context: &ToolExecutionContext,
 ) -> Result<Value, Value> {
-    let input: MediaUnderstandingInput =
-        serde_json::from_value(arguments.clone()).map_err(|_| {
-            serde_json::json!({
-                "error": {
-                    "code": "invalid_input",
-                    "message": "Invalid understand_media arguments"
-                }
-            })
-        })?;
-    if let Some(previous_turn_id) = input.previous_turn_id.as_ref()
-        && !gateway.media_run_snapshots.permits_turn(
-            &context.run_id,
-            &context.principal,
-            previous_turn_id,
-        )
-    {
-        return Err(serde_json::json!({
-            "error": {
-                "code": "media_turn_unavailable",
-                "message": "Previous Media Turn is unavailable to this Inference Run"
-            }
-        }));
-    }
-    let artifact_ids = input
-        .artifacts
-        .iter()
-        .map(|artifact| artifact.artifact_id.clone())
-        .collect::<Vec<_>>();
-    if !artifact_ids.is_empty()
-        && !gateway
-            .media_run_snapshots
-            .permits(&context.run_id, &context.principal, &artifact_ids)
-    {
-        return Err(serde_json::json!({
-            "error": {
-                "code": "media_artifact_unavailable",
-                "message": "Media Artifact is unavailable to this Inference Run; continue a previous Media Turn with artifacts: [] when no new media was attached"
-            }
-        }));
-    }
-    let deadline = gateway
-        .media_run_snapshots
-        .deadline(&context.run_id, &context.principal)
-        .ok_or_else(|| {
-            serde_json::json!({
-                "error": {
-                    "code": "media_artifact_unavailable",
-                    "message": "Media Artifact is unavailable to this Inference Run"
-                }
-            })
-        })?;
-    let result = execute_until(
+    execute_until(
         gateway,
         arguments,
         context.principal.clone(),
         context.cancellation.clone(),
-        deadline,
+        std::time::Instant::now() + crate::MEDIA_TOTAL_WALL_TIME,
     )
-    .await?;
-    if let Some(turn_id) = result.get("turn_id").and_then(Value::as_str) {
-        gateway.media_run_snapshots.allow_turn(
-            &context.run_id,
-            &context.principal,
-            stravia_runtime_contract::agent::AgentTurnId::new(turn_id),
-            deadline,
-        );
-    }
-    Ok(result)
+    .await
 }
 
 fn unavailable_error() -> Value {
@@ -240,6 +180,9 @@ struct MediaUnderstandingPlatformTool {
 
 #[async_trait]
 impl PlatformTool for MediaUnderstandingPlatformTool {
+    fn read_domain(&self) -> Option<stravia_runtime_contract::hook::StraviaReadDomain> {
+        Some(stravia_runtime_contract::hook::StraviaReadDomain::Media)
+    }
     fn id(&self) -> ToolId {
         ToolId::new(MEDIA_TOOL_ID)
     }
@@ -296,34 +239,6 @@ impl PlatformTool for MediaUnderstandingPlatformTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn media_tool_schema_is_strict_and_media_specific() {
-        let schema = input_schema();
-        assert_eq!(schema["additionalProperties"], false);
-        assert_eq!(schema["properties"]["artifacts"]["maxItems"], 8);
-        assert_eq!(
-            schema["properties"]["artifacts"]["default"],
-            serde_json::json!([])
-        );
-        assert_eq!(
-            schema["properties"]["artifacts"]["items"]["additionalProperties"],
-            false
-        );
-        assert_eq!(schema["required"], serde_json::json!(["prompt"]));
-        assert_eq!(
-            schema["anyOf"][0]["required"],
-            serde_json::json!(["previous_turn_id"])
-        );
-        assert_eq!(schema["anyOf"][1]["properties"]["artifacts"]["minItems"], 1);
-        let continuation: MediaUnderstandingInput = serde_json::from_value(serde_json::json!({
-            "prompt": "Continue the prior analysis",
-            "previous_turn_id": "aturn_parent"
-        }))
-        .expect("continuation input may omit new Artifacts");
-        assert!(continuation.artifacts.is_empty());
-        assert!(MEDIA_TOOL_DESCRIPTION.contains("JPEG"));
-    }
 
     #[test]
     fn missing_modality_metadata_is_not_treated_as_image_support() {

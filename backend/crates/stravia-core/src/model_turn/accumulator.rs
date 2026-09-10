@@ -224,8 +224,18 @@ impl StreamResponseAccumulator {
                 }
             }
             AiStreamDelta::ItemDone { index, item } => {
-                self.completed_items
-                    .insert(*index, completed_item_semantic_shell(item));
+                if item
+                    .meta
+                    .as_ref()
+                    .is_some_and(|meta| meta.get("__google_media_part").is_some())
+                {
+                    // Gemini parts have no output-item indices; keep their wire
+                    // order alongside text rather than treating index zero as replacement.
+                    self.items.push(AccumulatedItem::Unknown(item.clone()));
+                } else {
+                    self.completed_items
+                        .insert(*index, completed_item_semantic_shell(item));
+                }
             }
             AiStreamDelta::Usage(usage) => self.usage = usage.clone(),
             AiStreamDelta::ResponseTerminal {

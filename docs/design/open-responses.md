@@ -341,12 +341,7 @@ Ingress 接受 `{ "id": "..." }`；若显式提供 `type`，必须等于 `item_r
 
 ### 9.2 Platform Tool wire identity
 
-平台工具采用 namespaced request tool：
-
-- `stravia:web_search`
-- 后续显式注册的其它 `stravia:*`
-
-不保留 OpenAI hosted-tool aliases，不为 Stravia 私有工具制造无前缀 core 类型。
+平台工具使用标准 function 声明，`name` 为 `StraviaRead`，参数由统一入口 schema 描述。旧平台扩展 `stravia:web_search` 不再接受，不保留调用别名。Provider-native `web_search` 等工具类型继续按其原协议透传，不被平台工具改名覆盖；客户端自有的同名 function 也不因此改写为原生工具类型。
 
 ### 9.3 Final output policy
 

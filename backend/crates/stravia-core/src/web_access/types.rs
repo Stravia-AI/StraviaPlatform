@@ -1,54 +1,6 @@
 use super::*;
 
-pub const WEB_SEARCH_NAME: &str = "web_search";
-pub const WEB_FETCH_NAME: &str = "web_fetch";
 pub(super) const WEB_ACCESS_DEADLINE: Duration = Duration::from_secs(60);
-pub fn search_input_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "query": { "type": "string", "minLength": 1, "maxLength": 2000 },
-            "max_results": { "type": "integer", "minimum": 1, "maximum": 20, "default": 5 },
-            "allowed_domains": {
-                "type": "array",
-                "maxItems": 20,
-                "items": { "type": "string" },
-                "default": []
-            },
-            "blocked_domains": {
-                "type": "array",
-                "maxItems": 20,
-                "items": { "type": "string" },
-                "default": []
-            }
-        },
-        "required": ["query"],
-        "additionalProperties": false
-    })
-}
-
-pub fn fetch_input_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "urls": {
-                "type": "array",
-                "minItems": 1,
-                "maxItems": 20,
-                "items": { "type": "string", "format": "uri" }
-            },
-            "max_characters": {
-                "type": "integer",
-                "minimum": 1000,
-                "maximum": 50000,
-                "default": 8000
-            }
-        },
-        "required": ["urls"],
-        "additionalProperties": false
-    })
-}
-
 pub const MAX_FETCH_TOTAL_CHARACTERS: usize = 64_000;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]

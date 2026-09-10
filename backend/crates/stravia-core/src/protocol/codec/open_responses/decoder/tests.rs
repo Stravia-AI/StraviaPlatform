@@ -56,27 +56,6 @@ fn accepts_codex_rolling_request_extensions() {
 }
 
 #[test]
-fn registered_web_search_extension_decodes_without_vendor_aliases() {
-    let ParsedTools {
-        tools,
-        native_web_search: native,
-        passthrough_tools,
-    } = parse_tools(Some(&serde_json::json!([{
-        "type": "stravia:web_search",
-        "filters": { "allowed_domains": ["docs.rs"] },
-        "search_context_size": "high"
-    }])))
-    .expect("registered web search");
-
-    assert_eq!(tools, Some(Vec::new()));
-    assert!(passthrough_tools.is_empty());
-    let native = native.expect("web search extension");
-    assert_eq!(native["type"], "stravia:web_search");
-    assert_eq!(native["filters"]["allowed_domains"][0], "docs.rs");
-    assert_eq!(native["search_context_size"], "high");
-}
-
-#[test]
 fn rolling_tools_are_preserved_and_client_function_names_remain_independent() {
     for tool_type in ["web_search", "web_search_2025_08_26", "web_search_preview"] {
         let parsed = parse_tools(Some(&serde_json::json!([{"type": tool_type}])))
@@ -88,20 +67,18 @@ fn rolling_tools_are_preserved_and_client_function_names_remain_independent() {
 
     let ParsedTools {
         tools,
-        native_web_search: native,
         passthrough_tools,
     } = parse_tools(Some(&serde_json::json!([
-        { "type": "stravia:web_search" },
+        { "type": "web_search" },
         {
             "type": "function",
             "name": "web_search",
             "parameters": { "type": "object" }
         }
     ])))
-    .expect("client function and registered extension");
+    .expect("client function and Provider-native tool");
     assert_eq!(tools.expect("function tools")[0].name, "web_search");
-    assert!(native.is_some());
-    assert!(passthrough_tools.is_empty());
+    assert_eq!(passthrough_tools[0]["type"], "web_search");
 }
 
 #[test]

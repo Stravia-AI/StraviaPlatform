@@ -15,7 +15,7 @@ use stravia_runtime_contract::Principal;
 #[cfg(test)]
 use stravia_runtime_contract::agent::ArtifactPolicy;
 
-use stravia_runtime_contract::artifact::*;
+pub use stravia_runtime_contract::artifact::*;
 const MAX_PRINCIPAL_STAGING_BYTES: u64 = 4 * MAX_ARTIFACT_BYTES;
 const MAX_PRINCIPAL_STAGING_UPLOADS: i64 = 16;
 

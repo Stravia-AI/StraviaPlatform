@@ -17,6 +17,114 @@ from tests.e2e.admin.test_reversible_redaction import REFERENCE, SECRET, echo_pr
 
 @pytest.mark.e2e
 @pytest.mark.admin
+@pytest.mark.parametrize("tool", [False, True])
+def test_media_shaped_business_json_is_preserved_in_diagnostics(
+    admin_env: dict[str, Any], tool: bool,
+) -> None:
+    business = {"type": "image", "url": "https://example.com/ordinary-business",
+                "inlineData": {"mimeType": "image/png", "data": "b3JkaW5hcnktYnVzaW5lc3M="},
+                "messages": [{"content": [{"type": "image_url", "image_url": {"url": "ordinary-not-media"}}]}]}
+    text = json.dumps(business)
+    with echo_provider(tool=tool, tool_values=lambda _: [business]) as (url, received):
+        env = {**admin_env, "mock": url}
+        model = f"diagnostic-business-json-{tool}"
+        route_id, api_key = _create_route(env, model)
+        set_enabled(env, False)
+        status, state = http_request("PUT", f"{env['admin']}/api/v1/observations/debug",
+            payload={"enabled": True, "confirmed": True}, headers=env["auth"])
+        assert status == 200, state
+        try:
+            status, body = _proxy(env, api_key, model, [{"role": "user", "content": text}])
+            assert status == 200, body
+            assert received[-1]["body"]["messages"][-1]["content"] == text
+            message = body["choices"][0]["message"]
+            if tool:
+                assert json.loads(message["tool_calls"][0]["function"]["arguments"])["value"] == business
+            else:
+                assert message["content"] == text
+
+            def finished() -> dict[str, Any] | None:
+                for interaction in _route_interactions(env, route_id):
+                    detail = _detail(env, interaction["id"])
+                    if detail["runs"] and all((run.get("trace") or {}).get("status") == "complete" for run in detail["runs"]):
+                        return detail
+                return None
+
+            detail = _wait_for("preserved business JSON diagnostics", finished)
+            records = [event for run in detail["runs"] for event in run["debug_events"]]
+            for direction in ("client_to_platform", "upstream_request", "upstream_response", "platform_to_client"):
+                encoded = json.dumps([event for event in records if event.get("direction") == direction])
+                assert "b3JkaW5hcnktYnVzaW5lc3M=" in encoded
+                assert "ordinary-not-media" in encoded
+                assert "unrecoverable" not in encoded
+        finally:
+            http_request("PUT", f"{env['admin']}/api/v1/observations/debug",
+                payload={"enabled": False, "confirmed": False}, headers=env["auth"])
+
+
+@pytest.mark.e2e
+@pytest.mark.admin
+@pytest.mark.parametrize("enabled", [True, False])
+def test_reserved_expired_upload_grant_never_enters_diagnostics(
+    admin_env: dict[str, Any], enabled: bool,
+) -> None:
+    # Reserved syntax is protected even without a recognition registry or a valid signature.
+    grant = "stravia_upload_eyJhbGciOiJIUzI1NiJ9.eyJleHAiOjF9.ZXhwaXJlZC1zaWduYXR1cmU"
+    ordinary = "ordinary-aGVsbG8td29ybGQ= https://example.com/ordinary"
+    with echo_provider(tool=False) as (url, received):
+        env = {**admin_env, "mock": url}
+        model = f"diagnostic-upload-grant-{enabled}"
+        route_id, api_key = _create_route(env, model)
+        set_enabled(env, enabled)
+        status, state = http_request(
+            "PUT", f"{env['admin']}/api/v1/observations/debug",
+            payload={"enabled": True, "confirmed": True}, headers=env["auth"],
+        )
+        assert status == 200, state
+        try:
+            status, body = _proxy(env, api_key, model, [
+                {"role": "user", "content": f"{ordinary} {grant}"},
+            ])
+            assert status == 200, body
+            assert grant not in json.dumps(received)
+            assert ordinary in json.dumps(received)
+
+            def finished() -> dict[str, Any] | None:
+                for interaction in _route_interactions(env, route_id):
+                    detail = _detail(env, interaction["id"])
+                    if detail["runs"] and all(
+                        (run.get("trace") or {}).get("status") == "complete"
+                        for run in detail["runs"]
+                    ):
+                        return detail
+                return None
+
+            detail = _wait_for("finalized upload grant diagnostics", finished)
+            encoded = json.dumps(detail)
+            assert grant not in encoded
+            assert "<stravia-upload-key>" in encoded
+            assert ordinary in encoded
+            status, ticket = http_request(
+                "POST", f"{env['admin']}/api/v1/observations/interactions/{detail['interaction']['id']}/debug-bundle-tickets",
+                payload={"through_sequence": detail["snapshot_sequence"]}, headers=env["auth"],
+            )
+            assert status == 200, ticket
+            download = ticket["data"]["download_url"]
+            status, _, archive = http_bytes("GET", f"{env['admin']}{download}" if download.startswith("/") else download)
+            assert status == 200
+            with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
+                for name in bundle.namelist():
+                    assert grant.encode() not in bundle.read(name)
+        finally:
+            set_enabled(env, False)
+            http_request(
+                "PUT", f"{env['admin']}/api/v1/observations/debug",
+                payload={"enabled": False, "confirmed": False}, headers=env["auth"],
+            )
+
+
+@pytest.mark.e2e
+@pytest.mark.admin
 @pytest.mark.parametrize("tool,stream", [(False, False), (False, True), (True, False), (True, True)])
 @pytest.mark.parametrize("enabled", [True, False])
 def test_restored_plaintext_is_scrubbed_from_diagnostics(

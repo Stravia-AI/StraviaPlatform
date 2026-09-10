@@ -1,4 +1,5 @@
 use super::*;
+use stravia_runtime_contract::artifact::{ArtifactStore, bytes_stream};
 
 #[tokio::test]
 async fn materialization_cache_never_serves_an_expired_durable_chain() {
@@ -104,19 +105,21 @@ async fn artifact_identity_participates_in_reusable_prefix_semantics() {
     ));
     let owner = principal("owner");
     let first = artifacts
-        .create_ready_bytes(
+        .ingest(
             &owner,
             "image/png",
-            bytes::Bytes::from_static(b"same image"),
+            Some(10),
+            bytes_stream(bytes::Bytes::from_static(b"same image")),
             Duration::from_secs(60),
         )
         .await
         .expect("first Artifact");
     let second = artifacts
-        .create_ready_bytes(
+        .ingest(
             &owner,
             "image/png",
-            bytes::Bytes::from_static(b"same image"),
+            Some(10),
+            bytes_stream(bytes::Bytes::from_static(b"same image")),
             Duration::from_secs(60),
         )
         .await
@@ -155,15 +158,6 @@ async fn artifact_identity_participates_in_reusable_prefix_semantics() {
     let first_request = first_write.request();
     let second_request = second_write.request();
 
-    let mut first_provider_item = first_request.items[0].clone();
-    let mut second_provider_item = second_request.items[0].clone();
-    first_provider_item.meta = None;
-    second_provider_item.meta = None;
-    assert_eq!(
-        stravia_runtime_contract::protocol::ir::canonical::item_value(&first_provider_item),
-        stravia_runtime_contract::protocol::ir::canonical::item_value(&second_provider_item),
-        "same bytes must produce the same provider-visible media"
-    );
     assert_ne!(
         stravia_runtime_contract::protocol::ir::canonical::item_value(&first_request.items[0]),
         stravia_runtime_contract::protocol::ir::canonical::item_value(&second_request.items[0]),

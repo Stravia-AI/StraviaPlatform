@@ -1,6 +1,6 @@
 # Stravia Agent Core 融合设计
 
-> 状态：Core、SQL persistence、Local ArtifactStore、HTTP/Admin/MCP/PlatformTool/Responses adapters、Web Search 与 Media Understanding vertical slices 已实施；generic Agent Admin API 已删除；S3 adapter 与 generic Agent WebUI 尚未实施
+> 状态：Core、SQL persistence、内部／S3 ArtifactStore、HTTP/Admin/MCP/PlatformTool/Responses adapters、StraviaRead、Web Search 与 Media Understanding 已实施；generic Agent Admin API 已删除；不提供 generic Agent WebUI
 > 决策记录：[`ADR-0007`](../adr/0007-own-agent-execution-behind-native-seams.md)、[`ADR-0009`](../adr/0009-add-media-understanding-as-capability-tool.md)  
 > 调研快照：2026-08-10  
 > 范围：`stravia-core`、Server/Desktop adapters、持久化与协议 surface  
@@ -240,9 +240,9 @@ Runner 消费 canonical stream，并在唯一 `Completed` 后立即停止。该�
 
 ### 5.6 Artifact
 
-`Artifact` 是不可变、principal-scoped 的媒体或大对象。公共 `ArtifactId` 是随机 opaque ID；内容 hash 仅用于内部去重，不作为外部身份。
+`Artifact` 是不可变、principal-scoped 的媒体或大对象。公共引用为 `https://stravia/artifact/<opaque-id>`，不授予访问权，也不走 DNS／公网抓取。同 Principal 可跨对话使用；签名下载授权和仅限上传的授权分别具有固定期限，不与文件保留期合并。上传重试不承诺内容去重或幂等。
 
-`ArtifactStore` 是保存/读取 bytes 的 seam。SQL 只保存 metadata、owner、hash、MIME、size、state、TTL 和 references。
+`ArtifactStore` 是保存／读取 bytes 的 seam，隐藏内部文件与 S3 后端，复用同一 multipart、暂存配额和完整收存规则。SQL 保存 metadata、owner、MIME、size、state、TTL、后端位置和下载授权 hash。Reader guard 与持久化下载授权协调物理清理；逻辑过期文件不能因这些保护复活。Runner 与新历史保留稳定引用，只有实际 Target 调用前生成签名 URL／base64。
 
 ---
 
@@ -881,9 +881,9 @@ MCP execution failure使用 tool `isError`/structured error；JSON-RPC error 仅
 
 ### 阶段 C：ArtifactStore 与 canonical video
 
-已完成 LocalFS、SQLite/PostgreSQL metadata、authenticated multipart HTTP、canonical `Video`、Gemini native-video 映射与非原生 typed reject。S3-compatible backend 与引用感知 GC 尚未实施。
+已完成内部／S3 bytes、SQLite/PostgreSQL metadata、authenticated multipart HTTP、稳定 Artifact Reference、限时下载与上传授权、canonical `Video`、Gemini native-video 映射与非原生 typed reject。清理通过进行中读取保护与未过期下载授权协调，不采用引用计数续期。
 
-验收：当前覆盖 principal isolation、MIME/size、multipart、TTL、native-video/reject；S3 与 refcount 不在当前实现内。
+验收 seam 包括公开 HTTP／MCP 的上传、收存与下载，以及 Artifact Store 的 Principal 隔离、暂存配额、固定授权期限、读取／清理竞争、SQLite/PostgreSQL 重建与真实 S3 预签名下载；不以 refcount 或签名访问刷新逻辑保留期。
 
 ### 阶段 D：AgentDefinition 与 AgentRunner
 
@@ -903,7 +903,7 @@ Web Search 已作为首个生产 vertical slice 实施。上层 `WebSearchRunner
 
 完整 interface、clean cutover、迁移与验收见 [`web-search.md`](web-search.md) 和 [`ADR-0017`](../adr/0017-rename-web-research-to-web-search-and-split-tool-identities.md)。
 
-Media Understanding 已实施：它以专用 `understand_media` adapters 调 internal-only Agent Definition，在 AgentRunner 前执行显式 Media preprocessing，并直接复用 Agent Turn。完整 contract、JPEG normalization、Gate、Admin surface 与验收见 [`media-understanding.md`](media-understanding.md)、[`ADR-0009`](../adr/0009-add-media-understanding-as-capability-tool.md) 和 [`ADR-0016`](../adr/0016-gate-advanced-capabilities-and-separate-transparent-injection.md)。
+Media Understanding 通过 `StraviaRead` 的 Artifact `question` 分流调用 internal-only Agent Definition，在 AgentRunner 前执行显式 Media preprocessing，并直接复用 Agent Turn。完整 contract、JPEG normalization、Gate、Admin surface 与验收见 [`media-understanding.md`](media-understanding.md)、[`ADR-0009`](../adr/0009-add-media-understanding-as-capability-tool.md) 和 [`ADR-0051`](../adr/0051-disambiguate-artifact-download-and-understanding.md)。
 
 ---
 

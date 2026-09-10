@@ -335,6 +335,7 @@ def test_postgres_legacy_upgrade_installs_observation_schema_and_reconnects(
                     "POST",
                     "/api/v1/setup/complete",
                     {
+                        "client_base_url": reconnect_base,
                         "database": {"backend": "postgres", "url": postgres_dsn},
                         "username": "must-not-replace-owner",
                         "password": "must not replace horse battery staple",

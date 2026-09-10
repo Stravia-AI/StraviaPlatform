@@ -52,6 +52,16 @@ impl HookRuntime {
             tools: self.tools.clone(),
             exposed_tools: HashMap::new(),
             exposed_tool_specs: HashMap::new(),
+            read_scope: if request
+                .tools
+                .iter()
+                .flatten()
+                .any(|tool| tool.name == "StraviaRead")
+            {
+                ReadExposureScope::FULL
+            } else {
+                ReadExposureScope::NONE
+            },
             skips: Vec::new(),
             stream_leg_open: false,
         })
@@ -75,6 +85,7 @@ pub(crate) struct InferenceRun {
     tools: PlatformToolRegistry,
     exposed_tools: HashMap<String, ToolId>,
     exposed_tool_specs: HashMap<String, ToolSpec>,
+    read_scope: ReadExposureScope,
     skips: Vec<HookSkip>,
     stream_leg_open: bool,
 }
@@ -159,6 +170,7 @@ impl InferenceRun {
                 request_id: self.context.request_id.clone(),
                 run_id: self.context.run_id.clone(),
                 principal: self.context.principal.clone(),
+                read_scope: self.read_scope,
                 cancellation,
                 progress: None,
             },
@@ -186,6 +198,7 @@ impl InferenceRun {
             let event = HookEvent::Request {
                 session: &self.context,
                 original: &self.original,
+                read_scope: self.read_scope,
                 current: &hook_view,
                 context: &self.current,
                 route: self.route.as_ref(),
@@ -206,6 +219,7 @@ impl InferenceRun {
                 &mut self.current,
                 &mut self.exposed_tools,
                 &mut self.exposed_tool_specs,
+                &mut self.read_scope,
                 &self.tools,
                 batch,
             )?;

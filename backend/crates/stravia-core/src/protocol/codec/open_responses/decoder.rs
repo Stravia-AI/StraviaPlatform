@@ -157,7 +157,6 @@ impl ResponsesDecoder {
         // ── Tools ─────────────────────────────────────────────────────────────
         let ParsedTools {
             tools,
-            native_web_search,
             passthrough_tools,
         } = parse_tools(obj.get("tools"))?;
         let tool_choice = obj
@@ -229,7 +228,7 @@ impl ResponsesDecoder {
                 .get("service_tier")
                 .and_then(Value::as_str)
                 .map(String::from),
-            native_web_search,
+            native_web_search: None,
             tool_choice_ext: None,
         };
 
@@ -903,7 +902,6 @@ fn decode_message_item(item: &Value, allow_video: bool) -> Result<Option<AiItem>
 #[derive(Debug)]
 struct ParsedTools {
     tools: Option<Vec<ToolSpec>>,
-    native_web_search: Option<Value>,
     passthrough_tools: Vec<Value>,
 }
 
@@ -911,13 +909,11 @@ fn parse_tools(raw_tools: Option<&Value>) -> Result<ParsedTools> {
     let Some(Value::Array(items)) = raw_tools else {
         return Ok(ParsedTools {
             tools: None,
-            native_web_search: None,
             passthrough_tools: Vec::new(),
         });
     };
 
     let mut tools = Vec::new();
-    let mut native_web_search = None;
     let mut passthrough_tools = Vec::new();
     for item in items {
         let tool_type = item
@@ -969,12 +965,6 @@ fn parse_tools(raw_tools: Option<&Value>) -> Result<ParsedTools> {
                     meta: None,
                 });
             }
-            "stravia:web_search" => {
-                if native_web_search.is_some() {
-                    anyhow::bail!("only one stravia:web_search tool may be declared");
-                }
-                native_web_search = Some(item.clone());
-            }
             other if super::is_namespaced_extension(other) => {
                 anyhow::bail!("unregistered Open Responses tool extension: {other}");
             }
@@ -984,7 +974,6 @@ fn parse_tools(raw_tools: Option<&Value>) -> Result<ParsedTools> {
 
     Ok(ParsedTools {
         tools: Some(tools),
-        native_web_search,
         passthrough_tools,
     })
 }

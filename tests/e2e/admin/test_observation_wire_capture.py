@@ -92,6 +92,50 @@ def _request_body_events(detail: dict[str, Any]) -> list[dict[str, Any]]:
 
 @pytest.mark.e2e
 @pytest.mark.admin
+@pytest.mark.parametrize("malformed", [False, True])
+@pytest.mark.parametrize("carrier", ["openai", "bedrock"])
+def test_rejected_media_capture_omits_payload_and_declares_loss(
+    admin_env: dict[str, Any], malformed: bool, carrier: str,
+) -> None:
+    _enable_debug(admin_env)
+    media = "cHJpdmF0ZS1tZWRpYS1ieXRlcy1tdXN0LW5vdC1wZXJzaXN0"
+    ordinary = json.dumps({"type": "image", "inlineData": {"data": "b3JkaW5hcnktdGV4dA=="}})
+    block = ({"image": {"format": "png", "source": {"bytes": media}}} if carrier == "bedrock"
+             else {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{media}"}})
+    raw = json.dumps({"model": "rejected-media", "messages": [{"role": "user", "content": [
+        {"type": "text", "text": ordinary}, block,
+    ]}]}).encode()
+    if malformed:
+        raw = raw[:-3]
+    rejected_at = int(time.time() * 1000)
+    status, response = _raw_post(admin_env, raw)
+    assert 400 <= status < 500, response
+
+    def captured() -> dict[str, Any] | None:
+        status, response = http_request("GET", f"{admin_env['admin']}/api/v1/observations/rejections", headers=admin_env["auth"])
+        assert status == 200, response
+        for item in response["data"]["items"]:
+            if not item["debug_enabled"] or item["occurred_at"] < rejected_at:
+                continue
+            status, response = http_request("GET", f"{admin_env['admin']}/api/v1/observations/rejections/{item['id']}", headers=admin_env["auth"])
+            assert status == 200, response
+            detail = response["data"]
+            if any(event.get("message_type") == "request_body" for event in detail.get("debug_events", [])):
+                return detail
+        return None
+
+    detail = _wait_for("externalized rejected media trace", captured)
+    assert media not in json.dumps(detail)
+    events = _request_body_events(detail)
+    assert any("unrecoverable" in json.dumps(event["payload"]) for event in events)
+    assert all(event["representation"] == "artifact_externalized" for event in events)
+    if not malformed:
+        payload = json.loads(events[0]["payload"])
+        assert payload["messages"][0]["content"][0]["text"] == ordinary
+
+
+@pytest.mark.e2e
+@pytest.mark.admin
 def test_http_wire_capture_preserves_exact_nonsecret_body(admin_env: dict[str, Any]) -> None:
     _enable_debug(admin_env)
     route_id, api_key = _create_route(admin_env, "wire-body-fidelity")

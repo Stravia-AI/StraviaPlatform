@@ -19,6 +19,90 @@ use stravia_runtime_contract::protocol::ir::Usage;
 
 use super::{ClientProjectionSession, Phase, PhaseTracker};
 
+/// Stream hooks may edit semantic deltas, but structural media events are
+/// read-only. Reconcile by media order rather than item offsets: dropping text
+/// may shift offsets, and replacing the whole Completed response would undo
+/// those edits. The producer already stored these leaves; do not ingest again.
+pub(super) fn reconcile_completed_media(
+    response: &mut AiResponse,
+    completed_items: Vec<AiItem>,
+) -> Result<(), String> {
+    let mut media = std::collections::VecDeque::new();
+    for mut item in completed_items {
+        if let MessageContent::Blocks(blocks) = &mut item.content {
+            visit_completion_media(blocks, &mut |block| {
+                media.push_back(std::mem::replace(
+                    block,
+                    ContentBlock::Text {
+                        text: String::new(),
+                        cache_control: None,
+                    },
+                ));
+                Ok(())
+            })?;
+        }
+    }
+    for item in &mut response.items {
+        if let MessageContent::Blocks(blocks) = &mut item.content {
+            visit_completion_media(blocks, &mut |block| {
+                let normalized = media
+                    .pop_front()
+                    .ok_or("stream media missing from Model Turn completion")?;
+                if std::mem::discriminant(block) != std::mem::discriminant(&normalized) {
+                    return Err("stream media differs from Model Turn completion".into());
+                }
+                *block = normalized;
+                Ok(())
+            })?;
+        }
+    }
+    if !media.is_empty() {
+        return Err("Model Turn completion media missing from stream".into());
+    }
+    Ok(())
+}
+
+fn visit_completion_media(
+    blocks: &mut [ContentBlock],
+    visit: &mut impl FnMut(&mut ContentBlock) -> Result<(), String>,
+) -> Result<(), String> {
+    use stravia_runtime_contract::protocol::ir::{DocumentSource, ToolResultContentKind};
+    for block in blocks {
+        match block {
+            ContentBlock::Image { .. }
+            | ContentBlock::Audio { .. }
+            | ContentBlock::File { .. }
+            | ContentBlock::Video { .. }
+            | ContentBlock::Document {
+                source: DocumentSource::Base64Pdf { .. } | DocumentSource::Url(_),
+                ..
+            } => visit(block)?,
+            ContentBlock::Document {
+                source: DocumentSource::Blocks { content },
+                ..
+            }
+            | ContentBlock::SearchResult { content, .. } => visit_completion_media(content, visit)?,
+            ContentBlock::ToolResult {
+                content,
+                content_kind: Some(ToolResultContentKind::ContentBlocks),
+                ..
+            }
+            | ContentBlock::ServerToolResult {
+                content,
+                content_kind: Some(ToolResultContentKind::ContentBlocks),
+                ..
+            } => {
+                let mut nested: Vec<ContentBlock> = serde_json::from_value(std::mem::take(content))
+                    .map_err(|error| error.to_string())?;
+                visit_completion_media(&mut nested, visit)?;
+                *content = serde_json::to_value(nested).map_err(|error| error.to_string())?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 struct GenerationChainCompletion {
     write: crate::generation_chain::GenerationChainWrite,
@@ -748,7 +832,9 @@ fn record_hidden_round(context: &RequestContext, response: &AiResponse) {
     context.extensions.insert(state);
 }
 
-fn retain_hidden_round_item(item: &stravia_runtime_contract::protocol::ir::AiItem) -> bool {
+pub(super) fn retain_hidden_round_item(
+    item: &stravia_runtime_contract::protocol::ir::AiItem,
+) -> bool {
     item.is_compaction()
         || item.output_text_ref().is_some()
         || item.thinking_ref().is_some()

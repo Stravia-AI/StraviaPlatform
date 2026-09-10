@@ -8,6 +8,7 @@ use serde_json::Value;
 #[cfg(test)]
 use serde_json::json;
 
+pub(crate) mod read;
 mod server;
 
 pub(crate) use server::router;
@@ -118,6 +119,9 @@ pub trait McpTool: Send + Sync + 'static {
     fn name(&self) -> &str;
     fn description(&self) -> Option<&str> {
         None
+    }
+    async fn description_for(&self, _context: &McpContext) -> Option<String> {
+        self.description().map(str::to_owned)
     }
     fn input_schema(&self) -> Value;
     async fn input_schema_for(&self, _context: &McpContext) -> Value {

@@ -141,7 +141,7 @@ impl MediaUnderstandingService {
             .iter()
             .map(|artifact| artifact.artifact_id.clone())
             .collect::<Vec<_>>();
-        let prepared = self
+        let mut prepared = self
             .preprocessor
             .preprocess_until(&principal, &source_ids, &cancellation, deadline)
             .await
@@ -155,15 +155,9 @@ impl MediaUnderstandingService {
             "Media preprocessing completed"
         );
         let ancestor_set = ancestor_derivatives.iter().collect::<HashSet<_>>();
-        if prepared
-            .iter()
-            .any(|media| ancestor_set.contains(&media.derivative.id))
-        {
-            return Err(MediaUnderstandingError::new(
-                "duplicate_media_artifact",
-                "Media Artifact is already present in the ancestor chain",
-            ));
-        }
+        // A stable Artifact URL can be questioned again in a continuation. Its
+        // retained derivative is already in the parent context, not a new attachment.
+        prepared.retain(|media| !ancestor_set.contains(&media.derivative.id));
         let prompt = serde_json::json!({
             "task": input.prompt,
             "media": prepared.iter().enumerate().map(|(index, media)| serde_json::json!({

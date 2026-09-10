@@ -16,8 +16,8 @@ use stravia_runtime_contract::protocol::ir::{ContentBlock, ProtocolExt, ToolChoi
 
 use super::{SearchTurnId, WebSearchEvent, WebSearchInput, WebSearchRunPolicy, WebSearchRunner};
 
-pub const PUBLIC_WEB_SEARCH_TOOL_ID: &str = "web-search";
-pub const PUBLIC_WEB_SEARCH_TOOL_NAME: &str = "web_search";
+pub const PUBLIC_WEB_SEARCH_TOOL_ID: &str = "stravia-read";
+pub const PUBLIC_WEB_SEARCH_TOOL_NAME: &str = "StraviaRead";
 const MAX_PUBLIC_DEADLINE: Duration = Duration::from_secs(15 * 60);
 
 pub type BuiltinExtensions = (Vec<Arc<dyn Hook>>, Vec<Arc<dyn PlatformTool>>);
@@ -193,6 +193,10 @@ struct WebSearchPlatformTool {
 
 #[async_trait]
 impl PlatformTool for WebSearchPlatformTool {
+    fn read_domain(&self) -> Option<stravia_runtime_contract::hook::StraviaReadDomain> {
+        Some(stravia_runtime_contract::hook::StraviaReadDomain::Query)
+    }
+
     fn id(&self) -> ToolId {
         ToolId::new(PUBLIC_WEB_SEARCH_TOOL_ID)
     }
@@ -276,7 +280,7 @@ impl Hook for WebSearchHook {
         Box::new(WebSearchHookSession {
             gateway: self.gateway.clone(),
             principal: context.principal.clone(),
-            resolved: false,
+            resolved: context.tools_fixed,
             native_filters: None,
         })
     }
@@ -304,7 +308,7 @@ impl HookSession for WebSearchHookSession {
                 if let Some(batch) = client_web_search_precedence(current) {
                     return Ok(batch);
                 }
-                let Some(access) =
+                let Some(_access) =
                     authorized_search_access(self.gateway.as_ref(), &self.principal).await
                 else {
                     return if native.is_some() {
@@ -317,7 +321,7 @@ impl HookSession for WebSearchHookSession {
                         Ok(ActionBatch::default())
                     };
                 };
-                if native.is_none() && !access.transparent_injection_enabled {
+                if native.is_none() {
                     return Ok(ActionBatch::default());
                 }
                 let mut actions = Vec::with_capacity(2);
@@ -339,9 +343,10 @@ impl HookSession for WebSearchHookSession {
                         )));
                     }
                 }
-                actions.push(HookAction::ExposeTool(ToolId::new(
-                    PUBLIC_WEB_SEARCH_TOOL_ID,
-                )));
+                actions.push(HookAction::ExposeRead {
+                    scope: stravia_runtime_contract::hook::ReadExposureScope::new(true, false),
+                    description: "Use query://<URL-encoded query> for complete sourced research, or public HTTP(S) URLs for webpage Markdown and file import.".into(),
+                });
                 Ok(ActionBatch { actions })
             }
             HookEvent::Request { current, .. } if self.native_filters.is_some() => {
@@ -371,6 +376,13 @@ impl HookSession for WebSearchHookSession {
                     ) else {
                         continue;
                     };
+                    if !arguments
+                        .get("url")
+                        .and_then(Value::as_str)
+                        .is_some_and(|url| url.starts_with("query://"))
+                    {
+                        continue;
+                    }
                     if let Some(allowed_domains) = filters.allowed_domains.as_ref() {
                         arguments
                             .insert("allowed_domains".into(), serde_json::json!(allowed_domains));

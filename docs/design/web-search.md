@@ -1,31 +1,31 @@
 # Web Search 设计
 
 > 状态：已实施
-> 更新：2026-08-17
+> 更新：2026-09-10
 > 相关决策：[ADR-0016](../adr/0016-gate-advanced-capabilities-and-separate-transparent-injection.md)、[ADR-0017](../adr/0017-rename-web-research-to-web-search-and-split-tool-identities.md)
 
 ## 1. 结论
 
 实现归属独立 `stravia-web-search` crate，包含 Runner、Local/Codex Backend、Definition、报告与证据校验、公开工具、透明注入及配置策略。`stravia-core` 在编译期注入 Agent、Provider 快照、设置与授权的 Host Adapter，并保留 MCP/管理面 Adapter；能力不反向依赖 core。共享执行类型来自 `stravia-runtime-contract`，域名规范化及内部工具 ID 归 `stravia-web-access-contract`，静态地址规则继续归 `stravia-web-access`。
 
-Web Search 是一个由平台总开关控制的 Advanced Capability。它向普通模型请求和 MCP 提供同一个公开 composite `web_search`，返回带来源的 `SearchReport`；Local 与 Codex backend 的差异不进入公开 contract。
+Web Search 是一个由平台总开关控制的 Advanced Capability。普通模型请求与 MCP 通过 `StraviaRead` 的 `query://` 输入执行完整研究并返回带来源的 `SearchReport`；Local 与 Codex backend 的差异不进入公开 contract。网页读取共用该开关和透明注入选择。参见 [ADR-0051](../adr/0051-disambiguate-artifact-download-and-understanding.md)。
 
-平台总开关决定能力是否存在。开关开启后，每个有效 API Key 都可以显式调用；关闭后，普通请求和 MCP 都不可用。API Key 的 Transparent Injection 只决定 Stravia 是否在客户端未声明工具时自动暴露 `web_search`，不承担显式调用授权。
+平台总开关决定联网能力是否存在。开关开启后，每个有效 API Key 都可以显式调用；关闭后，普通请求和 MCP 的联网分流均不可用。API Key 的 Transparent Injection 只决定是否自动暴露 `StraviaRead` 的联网分流，不承担显式调用授权；执行层强制检查本次暴露范围。
 
 ## 2. 公开 contract
 
-公开 wire name 保持 `web_search`。输入字段：
+公开 wire name 为 `StraviaRead`，不保留旧平台工具调用别名。输入字段：
 
 ```json
 {
-  "query": "question or topic",
+  "url": "query://question%20or%20topic",
   "previous_turn_id": "wst_...",
   "allowed_domains": ["example.com"],
   "blocked_domains": ["blocked.example"]
 }
 ```
 
-`query` 必填。`previous_turn_id` 用于继续或分支既有 Search Turn；domain filters 可选。
+`url` 必填，搜索文本采用 URL 参数编码。`previous_turn_id` 用于继续或分支既有 Search Turn；domain filters 只用于 `query://`。外部网页 URL 的原始查询参数不解释为工具参数。
 
 成功结果：
 
@@ -70,10 +70,10 @@ Web Search 是一个由平台总开关控制的 Advanced Capability。它向普�
 
 | 调用面 | 额外条件 | Transparent Injection 的作用 |
 |---|---|---|
-| 客户端显式 `web_search` | 平台 Gate 开启 | 无 |
+| 客户端显式 `StraviaRead` 联网分流 | 平台 Gate 开启 | 无 |
 | Hosted/native web search 声明 | 平台 Gate 开启 | 无 |
-| Stravia 自动暴露 `web_search` | Key 的 master 与 `inject_web_search` 均开启 | 决定是否暴露 |
-| MCP `tools/list` / `tools/call` | `mcp_access_enabled` 与平台 Gate 均开启 | 无 |
+| Stravia 自动暴露联网分流 | Key 的 master 与 `inject_web_search` 均开启 | 同时暴露搜索和网页读取 |
+| MCP 联网调用 | `mcp_access_enabled` 与平台 Gate 均开启 | 无；裸 Artifact 下载独立可用 |
 
 关闭平台 Gate 后，Key 上已保存的 `inject_web_search` 不删除；运行时忽略它。重新开启 Gate 后，该选择恢复生效。
 
@@ -83,15 +83,14 @@ Web Access 不另设总开关。`WebAccessSettings` 只包含 `search_provider_i
 
 ## 4. Tool identity 与 surface
 
-公开 composite 和 Local leaves 可共享 wire name，但不能共享源码身份或 registry owner：
+统一入口与内部 Local 检索使用相同 wire name，但 registry 由受信执行环境分别装配，模型不能选择执行层级：
 
 | Owner | Source Tool ID | Wire name | Hook/Platform | MCP | AgentToolRegistry |
 |---|---|---|---:|---:|---:|
-| Public composite | `web-search` | `web_search` | 是 | 是 | 否 |
-| Internal search leaf | `web-access.search` | `web_search` | 否 | 否 | 是 |
-| Internal fetch leaf | `web-access.fetch` | `web_fetch` | 否 | 否 | 是 |
+| Public router | `stravia-read` | `StraviaRead` | 是 | 是 | 否 |
+| Internal read router | `stravia-read` | `StraviaRead` | 否 | 否 | 是 |
 
-`GatewayBuilder` 先用调用方传入的 Platform/MCP tools 和两个 internal Web Access leaves 构建 `AgentToolRegistry`，再把 public Web Search composite 加入 Hook 和 MCP registry。public composite 因而不会形成 Agent → Agent nesting；internal leaves 也不会进入普通客户端或 MCP discovery。
+`GatewayBuilder` 先为内部 Agent 装配基础读取 router，再在外层 Hook/MCP registry 装配公开 router。外层 `query://` 调用现有完整 Web Search owner；内部 `query://` 只调用基础检索。两者的网页 URL 均复用现有 Web Access owner。插件通过 `PlatformTool::read_domain()` 贡献可判定领域、非空简短描述与处理入口；重复领域或冲突身份显式失败，不通过描述或加载顺序路由。
 
 Local Definition 使用 `id = "web-search-local"`、`slug = "web_search_local"`，并且 `exposure = Internal`。
 

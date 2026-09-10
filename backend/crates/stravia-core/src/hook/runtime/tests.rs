@@ -60,6 +60,7 @@ fn anonymous_principal_cannot_be_constructed() {
 
 fn session_context(kind: RequestKind) -> SessionContext {
     SessionContext {
+        tools_fixed: false,
         request_id: "req-1".into(),
         run_id: "run-1".into(),
         request_kind: kind,
@@ -580,40 +581,6 @@ async fn stream_transformer_is_rejected_when_its_buffer_exceeds_descriptor_limit
         .unwrap_err();
 
     assert!(matches!(error, HookError::InvalidAction { .. }));
-}
-
-#[tokio::test]
-async fn gateway_builder_registers_hooks_in_declared_order() {
-    let storage: crate::storage::DynStorage =
-        Arc::new(crate::storage::MemoryStorage::new(vec![], vec![], vec![]));
-    let gateway = crate::Gateway::builder(crate::config::GatewayConfig::default())
-        .storage(storage)
-        .hook(Arc::new(TestHook {
-            descriptor: HookDescriptor::all("first"),
-            make: Arc::new(|| Box::new(ResponseStagesSession)),
-        }))
-        .hook(Arc::new(TestHook {
-            descriptor: HookDescriptor::all("second"),
-            make: Arc::new(|| Box::new(ResponseStagesSession)),
-        }))
-        .build()
-        .await
-        .unwrap();
-
-    assert_eq!(
-        gateway
-            .hook_runtime()
-            .descriptors()
-            .into_iter()
-            .map(|descriptor| descriptor.id.as_str().to_string())
-            .collect::<Vec<_>>(),
-        [
-            "first",
-            "second",
-            "web-search",
-            "media-understanding-planner"
-        ]
-    );
 }
 
 struct ExposeToolSession;

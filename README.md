@@ -48,7 +48,7 @@ The same Rust core powers two deployment modes:
 
 - **Platform-owned tool execution:** expose tools to compatible model requests, execute platform tool calls inside Stravia, and continue model turns with their results. Client-owned tool calls remain the client's responsibility.
 - **Bounded agent loops:** coordinate model and tool turns with time, turn, token, and tool budgets, controlled tool concurrency, cancellation, and validated outputs.
-- **Built-in capabilities:** `web_search` returns a source-backed Search Report; `understand_media` returns a validated Media Report for supported images. Both support explicit continuation and branching through `previous_turn_id`.
+- **Built-in capabilities:** `StraviaRead` reads files and webpages, returns source-backed Search Reports for `query://` inputs, and answers questions about supported images. Search and media reports retain explicit continuation and branching through `previous_turn_id`.
 - **MCP and transparent injection:** expose enabled capabilities to MCP clients, or inject selected capabilities into compatible model requests according to configuration.
 - **Execution management:** associate requests and nested executions with the calling Principal, enforce access and concurrency limits, and track history, confirmed upstream usage, and diagnostics.
 
@@ -123,7 +123,7 @@ The Route Builder is a full page. Selecting a Provider automatically loads its a
 
 ### Web Search and MCP
 
-Optional Web Search exposes one public `web_search` capability that returns a terminal sourced Search Report rather than a single search page. A successful result includes the answer, cited public HTTP(S) sources, limitations, completion state, usage, and a stable `turn_id`. Pass that ID as `previous_turn_id` to continue from the complete same-principal ancestor chain or to create an independent branch; Stravia never selects an implicit latest turn.
+Optional Web Search is available through `StraviaRead` with `{"url":"query://URL-encoded%20question"}`. It returns a terminal sourced Search Report rather than a single search page. A successful result includes the answer, cited public HTTP(S) sources, limitations, completion state, usage, and a stable `turn_id`. Pass that ID as `previous_turn_id` to continue from the complete same-principal ancestor chain or to create an independent branch; Stravia never selects an implicit latest turn. A webpage URL returns Markdown without starting a research Agent. Internal search Agents use the same tool name, but their `query://` inputs perform basic retrieval rather than recursively starting research.
 
 Configure one Search Backend in the WebUI. Local Search runs a bounded Agent over ordered internal Web Access Search and Fetch sources: the seeded in-process Local Provider, Exa, or Zhipu. Each Web Provider can independently use the Gateway proxy. Codex Agentic Search uses one exact compatible Codex OAuth Responses Provider/model binding and ignores the Local budget. There is no fallback between Local and Codex.
 
@@ -133,7 +133,7 @@ Select Local under **Web search → Search and page sources** without configurin
 
 HTTP uses Moli's Chrome transport fingerprint; fingerprint mitigations do not guarantee access to bot-protected sites. HTTP and browser paths retain the selected Gateway proxy snapshot, separate cookie ownership, and Fetch safety limits. Browser HTTP and WebSocket traffic passes through the checked egress proxy without TLS interception; certificate verification remains enabled. Direct connections pin approved public addresses; an explicitly selected upstream proxy remains responsible for its own DNS resolution. Moli executes in the Stravia process, not a Chrome OS-sandboxed child process; deploy Stravia with least privilege and use host/container isolation appropriate for untrusted page execution.
 
-The platform Web Search switch controls explicit access for every valid API key. Each key separately controls MCP access and Transparent Injection; injection only adds selected enabled capabilities to compatible requests and does not restrict explicit or MCP calls. MCP clients connect to `POST /mcp`, use `Authorization: Bearer <key>`, and discover `web_search` only when both MCP access and the platform capability are enabled. OpenAI Responses native web-search declarations and hidden tool continuations use the same Search contract.
+The platform Web Search switch controls both search and webpage reading for every valid API key. Each key separately controls MCP access and Transparent Injection; selected enabled networking and media capabilities merge into one `StraviaRead` declaration, and execution enforces that response's exposed scope. Injection preferences do not restrict explicit or MCP calls. MCP clients connect to `POST /mcp`, use `Authorization: Bearer <key>`, and discover `StraviaRead`; file downloads require ownership, while networking and media operations additionally require their platform switches. Provider-native web-search tool types are unchanged. The former platform `web_search`, `web_fetch`, and `understand_media` call aliases are not registered.
 
 Web Search and Web Access configuration are deployment-local and are not included in configuration export/import. Search Turns retain report metadata and cited URLs, not fetched page bodies or internal Agent transcripts.
 
@@ -141,9 +141,31 @@ Local Fetch and browser outbound checks reject URLs whose host becomes a non-pub
 
 ### Media Understanding
 
-Media Understanding exposes one `understand_media` capability for static JPEG, PNG, and WebP images. If a parent route has an image-capable Target, Stravia sends the original image natively. Otherwise, a tool-capable parent Model can call the configured hidden visual Model and receive a validated Media Report with source Artifact IDs and a branchable `turn_id`. Stravia does not fall back from a failed native-vision route to the hidden Model.
+Media Understanding uses `StraviaRead` with `{"url":"https://stravia/artifact/<id>?question=Describe%20the%20image"}` for static JPEG, PNG, and WebP images. A bare Artifact Reference returns download information without calling a model. An external image URL is stored first, then described with readable text extracted; its original query parameters are preserved and are not platform instructions. If a parent route has an image-capable Target, Stravia delivers the stored image natively. Otherwise, a tool-capable parent Model can call the configured hidden visual Model and receive a validated Media Report with source Artifact IDs and a branchable `turn_id`. Pass `previous_turn_id` alongside a new Artifact question to continue. Stravia does not fall back from a failed native-vision route to the hidden Model.
 
-Enable the platform capability, select a logical Model, and choose its Thinking Level on the **Media Understanding** page. The selector only lists enabled Models where every Target explicitly advertises image input, and the Thinking Level selector only lists levels supported by every Target. All valid API keys can then call `understand_media` explicitly; MCP access and Transparent Injection remain independent per-key controls. Hidden calls consume the caller's quota without granting direct access to the selected Model. External image URLs are restricted to public HTTPS destinations and snapshotted before use. Preprocessing always creates a bounded lossy JPEG derivative, ignores ICC profiles, and may reduce exact-color or fine-text OCR accuracy.
+Enable the platform capability, select a logical Model, and choose its Thinking Level on the **Media Understanding** page. The selector only lists enabled Models where every Target explicitly advertises image input, and the Thinking Level selector only lists levels supported by every Target. All valid API keys can then request understanding through `StraviaRead`; MCP access and Transparent Injection remain independent per-key controls. Hidden calls consume the caller's quota without granting direct access to the selected Model. External files are restricted to public HTTP(S) destinations, with checked DNS, pinned connections, and checked redirects. Preprocessing always creates a bounded lossy JPEG derivative, ignores ICC profiles, and may reduce exact-color or fine-text OCR accuracy.
+
+### File storage and temporary transfers
+
+Internal storage works without S3. Optional S3 uses the same upload workflow: `POST /v1/artifacts/uploads`, `PUT /v1/artifacts/uploads/{upload_id}/parts/{part_number}` with `x-upload-token`, then `POST /v1/artifacts/uploads/{upload_id}/complete`. Completion retains the existing file metadata and includes `reference`, shaped as `https://stravia/artifact/<opaque-id>`. This is a stable Principal-scoped identity, not a network download URL or a credential. The same API key may reuse it across conversations; other Principals cannot resolve it.
+
+Structured inline media and remote attachment URLs are stored before a model call can begin. Ordinary text links and base64-looking text are not downloaded or rewritten. `StraviaRead` imports ordinary file URLs and returns their reference, MIME, size, filename (or an opaque fallback), and a temporary download URL; it does not unpack, execute, or automatically understand them.
+
+Configure the complete **Client access address** in setup or Settings, including the protocol, port, and deployment path prefix. The saved value remains authoritative; request Host and forwarding headers do not change it. **External signed downloads** and **Upload prompt injection** are independently off by default:
+
+| External signed downloads | Provider input | Client download |
+|---|---|---|
+| Off, internal or S3 storage | Base64 generated from the Artifact | Signed Stravia URL under the saved client address |
+| On, internal storage | Signed Stravia URL under the file public address | Same public entry |
+| On, S3 storage | Native S3 presigned URL | Native S3 presigned URL |
+
+Enabling external signed downloads requires a file public address, initially filled from the client address or S3 endpoint. Saving does not verify reachability: actual clients and Providers must reach that entry. S3 buckets remain private. URLs normally last fifteen minutes and must retain at least five minutes before each actual Provider call, including retries and later model turns. A protocol that cannot express URL input uses supported inline input before sending; an upstream URL fetch failure never triggers an automatic base64 rerun.
+
+Upload prompt injection supplies the actual multipart curl workflow. Models see only `<stravia-upload-key>`; only delivered ordinary answers and client tool arguments receive a temporary upload credential. Thinking and platform tool arguments do not mint credentials. One response reuses a still-valid grant; each grant lasts a fixed fifteen minutes, supports multiple files, and authorizes uploads only. Disabling injection stops new issuance, not existing grants; revoking the owning API key still denies uploads. Returned credentials, including expired ones, are replaced with the placeholder before Provider use and platform persistence, independently of general credential protection.
+
+The single-file limit is 100 MiB. Each Principal may have at most sixteen unfinished, unexpired uploads reserving at most 400 MiB; completed uploads release staging slots. There is no aggregate saved-file quota. Authenticated file use refreshes retention using the request retention setting; signed downloads and text mentions do not. Expired references cannot be revived. Active readers and unexpired download grants delay physical cleanup without extending logical retention. Signed URLs are transferable temporary credentials: anyone holding one may download that one file until expiry.
+
+New histories and diagnostics externalize structured media as references and metadata; media captures are not original wire bytes. Missing or expired content is marked unrecoverable. Existing historical records are not backfilled, rewritten, or refreshed by the upgrade. Changing or removing S3 endpoint/bucket credentials does not migrate existing objects; retain the matching storage configuration while those objects remain in use.
 
 ### Credential Protection
 
@@ -383,7 +405,7 @@ To recover forgotten credentials, run the local interactive command against the 
 
 The command prompts for the username and reads the new password plus confirmation without echoing it or accepting it as a command-line argument. It updates the existing single administrator in place and revokes every old management session; it does not delete business data or reopen database setup.
 
-Set `--public-origin` to the trusted, externally reachable Gateway origin (for example, `https://gateway.example.com`) before binding to a non-loopback host. Stravia never trusts forwarding headers to derive the management origin or signed Artifact URLs. Terminate HTTPS at a reverse proxy and forward requests unchanged to the Stravia listener:
+Set `--public-origin` to the trusted, externally reachable Gateway origin (for example, `https://gateway.example.com`) before binding to a non-loopback host. It governs browser security, not the separately saved client/file access addresses. Stravia never trusts forwarding headers to replace these settings. Terminate HTTPS at a reverse proxy and forward requests unchanged to the Stravia listener:
 
 ```bash
 ./target/release/stravia-server \

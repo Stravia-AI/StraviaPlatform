@@ -23,6 +23,7 @@ let postgresUrl = $state('')
 let maxConnections = $state('')
 let minConnections = $state('')
 let idleTimeoutSeconds = $state('')
+let clientBaseUrl = $state('')
 let username = $state('')
 let password = $state('')
 let confirmingPassword = $state('')
@@ -46,6 +47,7 @@ const databaseReady = $derived(
 )
 
 onMount(() => {
+  clientBaseUrl = `${window.location.origin}${window.location.pathname.replace(/\/setup\/?$/, '').replace(/\/$/, '')}`
   void getAuthState()
     .then((state) => {
       if (state.mode !== 'setup') {
@@ -119,7 +121,7 @@ async function complete(): Promise<void> {
   error = ''
   success = ''
   try {
-    await completeSetup(databaseConfig(), username.trim(), password)
+    await completeSetup(databaseConfig(), username.trim(), password, clientBaseUrl)
     window.location.replace('/login')
   } catch (cause) {
     error = errorMessage(cause)
@@ -292,6 +294,11 @@ async function complete(): Promise<void> {
               void complete()
             }}>
             <Field.FieldGroup>
+              <Field.Field>
+                <Field.FieldLabel for="setup-client-base-url">{m.artifact_client_base_url()}</Field.FieldLabel>
+                <Field.FieldDescription>{m.artifact_client_base_help()}</Field.FieldDescription>
+                <Input id="setup-client-base-url" type="url" required bind:value={clientBaseUrl} />
+              </Field.Field>
               <Field.Field>
                 <Field.FieldLabel for="setup-username">{m.login_username()}</Field.FieldLabel>
                 <Input id="setup-username" bind:value={username} autocomplete="username" />

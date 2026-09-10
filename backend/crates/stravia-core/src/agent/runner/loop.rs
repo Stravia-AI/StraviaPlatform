@@ -379,6 +379,7 @@ impl AgentRunner {
             .map(|runtime| {
                 runtime.begin(
                     SessionContext {
+                        tools_fixed: true,
                         request_id: format!("agent-request-{}", turn_id.as_str()),
                         run_id: turn_id.as_str().to_owned(),
                         request_kind: RequestKind::Generation,

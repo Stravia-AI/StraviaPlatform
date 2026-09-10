@@ -56,6 +56,12 @@ impl LiveModelTurnExecutor {
 #[async_trait]
 impl ModelTurnExecutor for LiveModelTurnExecutor {
     async fn execute(&self, mut input: TurnInput) -> Result<ModelTurn, ModelTurnError> {
+        tokio::select! {
+            biased;
+            _ = input.cancellation.cancelled() => return Err(interruption_error(input.deadline)),
+            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(input.deadline)) => return Err(ModelTurnError::new("deadline_exceeded", "Model Turn deadline exceeded")),
+            result = crate::media::ingest::normalize_request(&self.gateway, &input.principal, &mut input.request, &input.cancellation) => result.map_err(|error| ModelTurnError::new("attachment_ingest_failed", error.to_string()))?,
+        }
         let model_turn_id = uuid::Uuid::new_v4().to_string();
         let operation_started = Instant::now();
         let standalone = input.purpose == super::ModelTurnPurpose::Compact;
@@ -98,7 +104,7 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
             if observer.debug_enabled() {
                 match serde_json::to_value(&input.request) {
                     Ok(payload) => observer.record(RunEvent::Checkpoint {
-                        stage: "canonical_request".into(),
+                        stage: "artifact_normalized_request".into(),
                         model_turn_id: Some(model_turn_id.clone()),
                         attempt_id: None,
                         payload,
@@ -117,7 +123,7 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
             finished: false,
         });
         let result = if input.cancellation.is_cancelled() {
-            Err(ModelTurnError::new("cancelled", "Model Turn cancelled"))
+            Err(interruption_error(input.deadline))
         } else if Instant::now() >= input.deadline {
             Err(ModelTurnError::new(
                 "deadline_exceeded",
@@ -129,7 +135,7 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
             tokio::select! {
                 biased;
                 _ = cancellation.cancelled() => {
-                    Err(ModelTurnError::new("cancelled", "Model Turn cancelled"))
+                    Err(interruption_error(deadline.into_std()))
                 }
                 _ = tokio::time::sleep_until(deadline) => {
                     Err(ModelTurnError::new("deadline_exceeded", "Model Turn deadline exceeded"))
@@ -408,7 +414,11 @@ fn completion_stream(
         }
         let result = tokio::select! {
             biased;
-            _ = cancellation.cancelled() => Err(ModelTurnError::new("cancelled", "Model Turn cancelled")),
+            _ = cancellation.cancelled() => Err(if tokio::time::Instant::now() >= deadline {
+                ModelTurnError::new("deadline_exceeded", "Model Turn deadline exceeded")
+            } else {
+                ModelTurnError::new("cancelled", "Model Turn cancelled")
+            }),
             _ = tokio::time::sleep_until(deadline) => Err(ModelTurnError::new("deadline_exceeded", "Model Turn deadline exceeded")),
             result = async {
                 match output.next().await {
@@ -429,10 +439,10 @@ fn completion_stream(
         };
         // The publication future may have made cancellation/deadline ready during
         // its final poll. Success is still provisional until this last decision.
-        let result = if cancellation.is_cancelled() {
-            Err(ModelTurnError::new("cancelled", "Model Turn cancelled"))
-        } else if tokio::time::Instant::now() >= deadline {
+        let result = if tokio::time::Instant::now() >= deadline {
             Err(ModelTurnError::new("deadline_exceeded", "Model Turn deadline exceeded"))
+        } else if cancellation.is_cancelled() {
+            Err(ModelTurnError::new("cancelled", "Model Turn cancelled"))
         } else {
             result
         };
@@ -1082,6 +1092,22 @@ async fn prepare_attempt(
         provider_request.reasoning.target_control = None;
     }
     provider_request.model.clone_from(&route.model_id);
+    if let Some(observer) = &input.observer {
+        observer.record_debug(|| RunEvent::Checkpoint {
+            stage: "artifact_normalized_request".into(),
+            model_turn_id: Some(model_turn_id.to_owned()),
+            attempt_id: None,
+            payload: serde_json::to_value(&provider_request).unwrap_or_default(),
+        });
+    }
+    let artifact_transfers = crate::media::ingest::materialize_request(
+        gateway,
+        &input.principal,
+        &mut provider_request,
+        egress,
+    )
+    .await
+    .map_err(|error| AttemptFailure::terminal("attachment_delivery_failed", error.to_string()))?;
     let mut full_provider_request = provider_request.clone();
     crate::model_turn::clear_previous_response_id(&mut full_provider_request);
     let mut full_outbound = if compact {
@@ -1203,6 +1229,7 @@ async fn prepare_attempt(
     } else {
         adapter.bind(client, outbound)
     };
+    provider_call.set_artifact_transfers(input.principal.clone(), artifact_transfers);
     if compact || controls.requested() {
         provider_call.disable_retries();
     }
@@ -1445,7 +1472,7 @@ async fn begin_attempt(
                 Some(call.raw),
             ));
         }
-        let response = match call.canonical {
+        let mut response = match call.canonical {
             Ok(response) => response,
             Err(error) => {
                 call.attempt.finish(
@@ -1460,6 +1487,16 @@ async fn begin_attempt(
                 ));
             }
         };
+        crate::media::ingest::normalize_response(
+            gateway,
+            &input.principal,
+            &mut response,
+            &input.cancellation,
+        )
+        .await
+        .map_err(|error| {
+            AttemptFailure::terminal("output_media_ingest_failed", error.to_string())
+        })?;
         gateway.cache_affinity.record_success(
             &input.principal,
             &route.id,
@@ -1656,8 +1693,10 @@ async fn begin_attempt(
             let next = tokio::select! {
                 biased;
                 _ = cancellation.cancelled() => {
-                    provider_stream.attempt().finish("cancelled", None, Some("cancelled".into()), None);
-                    let _ = tx.send(Err(ModelTurnError::new("cancelled", "Model Turn cancelled"))).await;
+                    let error = interruption_error(deadline);
+                    let outcome = if error.code == "cancelled" { "cancelled" } else { "failed" };
+                    provider_stream.attempt().finish(outcome, None, Some(error.code.clone()), None);
+                    let _ = tx.send(Err(error)).await;
                     return;
                 }
                 _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
@@ -1759,7 +1798,29 @@ async fn begin_attempt(
                 return;
             }
         }
-        let response = accumulator.into_ai_response();
+        let mut response = accumulator.into_ai_response();
+        if let Err(error) = crate::media::ingest::normalize_response(
+            &gateway,
+            &principal,
+            &mut response,
+            &cancellation,
+        )
+        .await
+        {
+            provider_stream.attempt().finish(
+                "failed",
+                Some(provider_stream.status),
+                Some("output_media_ingest_failed".into()),
+                first_token_ms,
+            );
+            let _ = tx
+                .send(Err(ModelTurnError::new(
+                    "output_media_ingest_failed",
+                    error.to_string(),
+                )))
+                .await;
+            return;
+        }
         gateway.cache_affinity.record_success(
             &principal,
             &route_id,
@@ -1991,6 +2052,14 @@ fn supports_modality(
             .iter()
             .any(|value| value.eq_ignore_ascii_case(modality))
     })
+}
+
+fn interruption_error(deadline: Instant) -> ModelTurnError {
+    if Instant::now() >= deadline {
+        ModelTurnError::new("deadline_exceeded", "Model Turn deadline exceeded")
+    } else {
+        ModelTurnError::new("cancelled", "Model Turn cancelled")
+    }
 }
 
 fn model_turn_gateway_error(error: GatewayError) -> ModelTurnError {

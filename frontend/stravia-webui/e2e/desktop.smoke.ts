@@ -82,6 +82,36 @@ async function unusedPort(): Promise<number> {
 }
 
 describe('Stravia desktop smoke', () => {
+  it('persists the complete client address through native authenticated settings without weakening access checks', async () => {
+    await browser.execute(() => {
+      localStorage.setItem('stravia-locale', 'en-US')
+      localStorage.setItem('stravia-sidebar-state', 'expanded')
+    })
+    const port = (await browser.tauri.execute(({ core }) => core.invoke('get_server_port'))) as number
+    const original = (await adminRequest(port, '/settings/artifact_settings')) as string
+    const configuration = JSON.parse(original) as { client_base_url: string }
+    expect(configuration.client_base_url).toBe(`http://127.0.0.1:${port}`)
+    expect((await fetch(`http://127.0.0.1:${port}/api/v1/settings/artifact_settings`)).status).toBe(401)
+    try {
+      await browser.refresh()
+      await browser.tauri.switchWindow('main')
+      await $('a[href="/settings"]').click()
+      const address = await $('#artifact-client-base-url')
+      await expect(address).toHaveValue(configuration.client_base_url)
+      await address.setValue('https://desktop.example:9443/client/prefix')
+      await $('button=Save file settings').click()
+      await expect($('button=Save file settings')).not.toBeEnabled()
+      await browser.refresh()
+      await expect($('#artifact-client-base-url')).toHaveValue('https://desktop.example:9443/client/prefix')
+      const persisted = JSON.parse((await adminRequest(port, '/settings/artifact_settings')) as string)
+      expect(persisted.client_base_url).toBe('https://desktop.example:9443/client/prefix')
+    } finally {
+      await adminRequest(port, '/settings/artifact_settings', {
+        method: 'PUT',
+        body: JSON.stringify({ value: original }),
+      })
+    }
+  })
   it('tests credential rules through the actual desktop page while protection is disabled', async () => {
     await browser.execute(() => {
       localStorage.setItem('stravia-locale', 'en-US')

@@ -19,6 +19,7 @@ pub(super) struct ResponsesWebSocketStream {
     event_seen: bool,
     replayed_full_request: bool,
     allow_retries: bool,
+    artifact_transfers: Option<ArtifactTransfers>,
     full_request: Value,
     websocket_url: String,
     client: ProxyClient,
@@ -68,6 +69,7 @@ impl ProviderAdapter {
             outbound,
             continuation_fallback,
             allow_retries: true,
+            artifact_transfers: None,
             websocket: Some(ResponsesWebSocketCall {
                 registry,
                 namespace,
@@ -189,10 +191,11 @@ impl ProviderCall {
                         } else {
                             &self.outbound.body
                         };
+                    let request_body = self.transfer_body(request_body).await?;
                     let connection = lease.connection_metadata();
                     let request = self
                         .adapter
-                        .build_responses_websocket_request(request_body, connection)?;
+                        .build_responses_websocket_request(request_body.as_ref(), connection)?;
                     let full_request = self.adapter.build_responses_websocket_request(
                         &websocket.full_outbound.body,
                         connection,
@@ -445,6 +448,7 @@ impl ProviderCall {
                 event_seen: false,
                 replayed_full_request: false,
                 allow_retries: self.allow_retries,
+                artifact_transfers: self.artifact_transfers.clone(),
                 client: self.client.clone(),
                 fallback_outbound,
                 http_fallback: None,
@@ -631,7 +635,18 @@ impl ResponsesWebSocketStream {
                         Some("previous_response_not_found".into()),
                         None,
                     );
-                    let replay_text = serde_json::to_string(&self.full_request)
+                    let body = match &self.artifact_transfers {
+                        Some(transfers) => std::borrow::Cow::Owned(
+                            transfers
+                                .materialize(&adapter.binding.gateway, &self.full_request)
+                                .await
+                                .map_err(|error| {
+                                    ProviderStreamError::Uncertain(error.to_string())
+                                })?,
+                        ),
+                        None => std::borrow::Cow::Borrowed(&self.full_request),
+                    };
+                    let replay_text = serde_json::to_string(body.as_ref())
                         .map_err(|error| ProviderStreamError::Uncertain(error.to_string()))?;
                     let replay_attempt = Arc::new(adapter.begin_attempt_with_message(
                         "websocket",
@@ -739,8 +754,17 @@ impl ResponsesWebSocketStream {
             Some("responses_websocket_fallback".into()),
             None,
         );
+        let body = match &self.artifact_transfers {
+            Some(transfers) => std::borrow::Cow::Owned(
+                transfers
+                    .materialize(&adapter.binding.gateway, &self.fallback_outbound.body)
+                    .await
+                    .map_err(|error| ProviderStreamError::Uncertain(error.to_string()))?,
+            ),
+            None => std::borrow::Cow::Borrowed(&self.fallback_outbound.body),
+        };
         let request_body = bytes::Bytes::from(
-            serde_json::to_vec(&self.fallback_outbound.body)
+            serde_json::to_vec(body.as_ref())
                 .map_err(|error| ProviderStreamError::Uncertain(error.to_string()))?,
         );
         let fallback_attempt = Arc::new(adapter.begin_attempt(

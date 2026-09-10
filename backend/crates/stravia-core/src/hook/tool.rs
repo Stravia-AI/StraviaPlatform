@@ -76,8 +76,12 @@ impl PlatformToolRegistry {
             .tools
             .get(id)
             .ok_or_else(|| PlatformToolError::new(format!("platform tool not found: {id}")))?;
-        let base = provider_safe_name(tool.external_name());
-        let provider_name = if existing_names.contains(&base) {
+        let base = if id.as_str() == "stravia-read" {
+            "StraviaRead".to_string()
+        } else {
+            provider_safe_name(tool.external_name())
+        };
+        let provider_name = if id.as_str() != "stravia-read" && existing_names.contains(&base) {
             (2_u32..)
                 .map(|suffix| format!("{base}_{suffix}"))
                 .find(|candidate| !existing_names.contains(candidate))
@@ -299,6 +303,7 @@ mod tests {
                     request_id: "request".into(),
                     run_id: "run".into(),
                     principal: Principal::new("test-key"),
+                    read_scope: ReadExposureScope::NONE,
                     cancellation: stravia_runtime_contract::CancellationToken::new(),
                     progress: None,
                 },

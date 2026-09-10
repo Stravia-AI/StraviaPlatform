@@ -1,4 +1,5 @@
 use super::*;
+use stravia_runtime_contract::artifact::{ArtifactStore, bytes_stream};
 
 #[tokio::test]
 async fn completed_inline_window_is_the_parent_after_cold_restore() {
@@ -203,10 +204,11 @@ async fn native_compaction_source_keeps_reference_and_artifact_resolution() {
     ));
     let owner = principal("native-artifact-owner");
     let artifact = artifacts
-        .create_ready_bytes(
+        .ingest(
             &owner,
             "image/png",
-            bytes::Bytes::from_static(b"image"),
+            Some(5),
+            bytes_stream(bytes::Bytes::from_static(b"image")),
             Duration::from_secs(60),
         )
         .await
@@ -258,8 +260,8 @@ async fn native_compaction_source_keeps_reference_and_artifact_resolution() {
         &write.request().items[3].content,
         MessageContent::Blocks(blocks) if matches!(
             &blocks[0],
-            ContentBlock::Image { source: MediaSource::Base64 { media_type, data }, .. }
-                if media_type == "image/png" && data == "aW1hZ2U="
+            ContentBlock::Image { source: MediaSource::Url(reference), .. }
+                if reference == &artifact.reference()
         )
     ));
 }

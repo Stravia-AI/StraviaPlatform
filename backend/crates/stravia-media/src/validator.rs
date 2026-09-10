@@ -106,20 +106,23 @@ impl MediaReportValidator {
                 continue;
             };
             for block in blocks {
-                let ContentBlock::Image {
-                    source: MediaSource::FileId { file_id, .. },
-                    ..
-                } = block
-                else {
+                let ContentBlock::Image { source, .. } = block else {
                     continue;
                 };
-                let Some(derivative_id) = file_id.strip_prefix("stravia-artifact:") else {
-                    return Err(AgentRunError::new(
+                let derivative_id = match source {
+                    MediaSource::Url(reference) => ArtifactId::from_reference(reference).ok(),
+                    // Existing committed histories retain their original representation.
+                    MediaSource::FileId { file_id, .. } => file_id
+                        .strip_prefix("stravia-artifact:")
+                        .map(ArtifactId::new),
+                    _ => None,
+                }
+                .ok_or_else(|| {
+                    AgentRunError::new(
                         "media_report_invalid",
                         "Media transcript evidence is invalid",
-                    ));
-                };
-                let derivative_id = ArtifactId::new(derivative_id);
+                    )
+                })?;
                 let source_id = self
                     .store
                     .source_for_derivative(principal, &derivative_id)

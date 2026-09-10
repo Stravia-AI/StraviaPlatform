@@ -289,7 +289,10 @@ fn encode_content(msg: &AiItem, call_names: &HashMap<&str, &str>) -> Result<Valu
     Ok(serde_json::json!({"role": role, "parts": parts}))
 }
 
-fn encode_content_block_for_gemini(b: &ContentBlock, call_names: &HashMap<&str, &str>) -> Value {
+pub(super) fn encode_content_block_for_gemini(
+    b: &ContentBlock,
+    call_names: &HashMap<&str, &str>,
+) -> Value {
     match b {
         ContentBlock::Text { text, .. } => serde_json::json!({"text": text}),
         ContentBlock::Image { source, .. } => match source {
@@ -304,6 +307,7 @@ fn encode_content_block_for_gemini(b: &ContentBlock, call_names: &HashMap<&str, 
                 serde_json::json!({"fileData": {"fileUri": file_id}})
             }
         },
+        ContentBlock::Audio { source } => encode_media_source(source, None),
         ContentBlock::File { source, media_type } | ContentBlock::Video { source, media_type } => {
             encode_media_source(source, media_type.as_deref())
         }

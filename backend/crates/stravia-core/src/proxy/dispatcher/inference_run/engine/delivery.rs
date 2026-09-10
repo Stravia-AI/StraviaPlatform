@@ -128,6 +128,16 @@ impl DeliveryAdapter {
         }
     }
 
+    pub(super) async fn deliver_projected(
+        &mut self,
+        response: &AiResponse,
+        status: StatusCode,
+        projection: &mut super::projection::ClientProjectionSession,
+    ) -> Result<BufferedDelivery, crate::history_marker::HistoryMarkerError> {
+        let delivered = projection.prepare_upload_delivery(response).await?;
+        Ok(self.deliver_canonical(delivered.as_ref(), status))
+    }
+
     pub(super) fn deliver_canonical(
         &mut self,
         response: &AiResponse,

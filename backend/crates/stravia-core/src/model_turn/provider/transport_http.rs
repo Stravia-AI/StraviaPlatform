@@ -5,7 +5,8 @@ impl ProviderCall {
         &self,
         outbound: &OutboundRequest,
     ) -> anyhow::Result<(Value, u16, HeaderMap, AttemptObservation)> {
-        let request_body = bytes::Bytes::from(serde_json::to_vec(&outbound.body)?);
+        let body = self.transfer_body(&outbound.body).await?;
+        let request_body = bytes::Bytes::from(serde_json::to_vec(body.as_ref())?);
         let mut request_headers = outbound.headers.clone();
         request_headers
             .entry(reqwest::header::CONTENT_TYPE)
@@ -126,7 +127,8 @@ impl ProviderCall {
         &self,
         outbound: &OutboundRequest,
     ) -> anyhow::Result<(reqwest::Response, u16, AttemptObservation)> {
-        let request_body = bytes::Bytes::from(serde_json::to_vec(&outbound.body)?);
+        let body = self.transfer_body(&outbound.body).await?;
+        let request_body = bytes::Bytes::from(serde_json::to_vec(body.as_ref())?);
         let mut request_headers = outbound.headers.clone();
         request_headers
             .entry(reqwest::header::CONTENT_TYPE)

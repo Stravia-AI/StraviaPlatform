@@ -153,7 +153,9 @@ impl ServerHandler for StraviaMcpServer {
         let mut tools = Vec::with_capacity(available.len());
         for tool in available {
             let input_schema = tool.input_schema_for(&context).await;
-            tools.push(tool_definition_with_input(tool.as_ref(), input_schema));
+            let mut definition = tool_definition_with_input(tool.as_ref(), input_schema);
+            definition.description = tool.description_for(&context).await.map(Into::into);
+            tools.push(definition);
         }
         let mut result = ListToolsResult::with_all_items(tools)
             .with_ttl_ms(0)

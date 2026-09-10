@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Added
+
+- Unified internal/S3 Artifact storage, stable Principal-scoped references, temporary signed downloads, and default-off upload assistance using upload-only fifteen-minute credentials. Settings and setup persist complete client/file addresses with matching English and Chinese loading, saving, and recovery states.
+
+### Changed
+
+- **Breaking:** `StraviaRead` replaces the former platform search/media tool names. URL-shaped inputs support Artifact downloads/questions, webpage Markdown, stored files, image understanding, and complete `query://` research; internal Agents use the same name for basic retrieval without recursive research. Existing capability preferences remain separate and enforced.
+- Structured media is stored before model execution and materialized per actual Provider call. New history and diagnostics keep references rather than repeated base64; upload credentials are always protected, including expired replay. Migration 40 adds equivalent SQLite/PostgreSQL storage-location and download-grant metadata without rewriting historical media.
+- External signed downloads are explicitly opt-in for both client and Provider delivery. Native S3 signatures use the configured download endpoint; links need at least five minutes remaining before Provider calls. Active readers and unexpired grants protect physical cleanup without reviving expired files. Existing multipart limits remain 100 MiB per file and sixteen uploads / 400 MiB staging per Principal, with no saved-file aggregate quota.
+
 ## [0.2.0] - 2026-09-09
 
 ### Added

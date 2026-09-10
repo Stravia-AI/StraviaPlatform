@@ -6,7 +6,8 @@ import { setMode, userPrefersMode } from 'mode-watcher'
 import { toast } from 'svelte-sonner'
 import { onMount } from 'svelte'
 
-import { admin, isTauri } from '$lib/admin-client'
+import { admin, isTauri, type ArtifactSettings, type ArtifactS3Settings } from '$lib/admin-client'
+import SecretInput from '$lib/components/secret-input.svelte'
 import { changeCredentials, getAuthState } from '$lib/auth'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
 import DesktopPortSettings from '$lib/components/desktop-port-settings.svelte'
@@ -23,6 +24,72 @@ import { Skeleton } from '$lib/components/ui/skeleton'
 import { Switch } from '$lib/components/ui/switch'
 
 const queryClient = useQueryClient()
+const artifactQuery = createQuery(() => ({ queryKey: ['artifact-settings'], queryFn: admin.settings.artifacts }))
+let artifactDraft = $state<ArtifactSettings>()
+let artifactSaving = $state(false)
+let artifactError = $state('')
+const artifact = $derived(artifactDraft ?? artifactQuery.data)
+const artifactDirty = $derived(
+  artifactDraft !== undefined && JSON.stringify(artifactDraft) !== JSON.stringify(artifactQuery.data),
+)
+
+function editArtifact(patch: Partial<ArtifactSettings>): void {
+  if (artifact) artifactDraft = { ...artifact, ...patch }
+}
+
+function editS3(patch: Partial<ArtifactS3Settings>): void {
+  if (artifact?.s3) editArtifact({ s3: { ...artifact.s3, ...patch } })
+}
+
+function selectArtifactStorage(value: string): void {
+  if (!artifact || value === (artifact.s3 ? 's3' : 'internal')) return
+  const s3 =
+    value === 's3'
+      ? {
+          endpoint: '',
+          region: '',
+          bucket: '',
+          access_key_id: '',
+          secret_access_key: '',
+          session_token: null,
+          credentials_expires_at: null,
+        }
+      : null
+  editArtifact({ s3 })
+}
+
+async function saveArtifact(value: ArtifactSettings, completeDraft: boolean): Promise<void> {
+  artifactSaving = true
+  artifactError = ''
+  try {
+    await admin.settings.saveArtifacts(value)
+    queryClient.setQueryData(['artifact-settings'], value)
+    if (completeDraft) artifactDraft = undefined
+    toast.success(m.artifact_saved())
+  } catch (error) {
+    artifactError = localizeBackendErrorMessage(error)
+  } finally {
+    artifactSaving = false
+  }
+}
+
+async function toggleArtifact(
+  key: 'upload_prompt_injection' | 'external_signed_downloads',
+  enabled: boolean,
+): Promise<void> {
+  const saved = artifactQuery.data
+  if (!saved) return
+  if (key === 'external_signed_downloads' && enabled && !saved.file_public_base_url) {
+    editArtifact({
+      external_signed_downloads: true,
+      file_public_base_url: artifact?.file_public_base_url || artifact?.s3?.endpoint || artifact?.client_base_url || '',
+    })
+    return
+  }
+  const next = { ...saved, [key]: enabled }
+  await saveArtifact(next, false)
+  if (!artifactError && artifactDraft) artifactDraft = { ...artifactDraft, [key]: enabled }
+}
 const authStateQuery = createQuery(() => ({ queryKey: ['auth-state'], queryFn: getAuthState }))
 const retentionQuery = createQuery(() => ({
   queryKey: ['setting', 'log_retention_days'],
@@ -228,6 +295,155 @@ function retrySettings(): void {
     {#if isTauri}
       <DesktopPortSettings />
     {/if}
+
+    <section id="artifacts" class="route-section scroll-mt-20 pb-8" aria-labelledby="artifacts-title">
+      <div class="route-section-header">
+        <div>
+          <h2 id="artifacts-title" class="route-section-title">{m.artifact_settings_title()}</h2>
+          <p class="route-section-description">{m.artifact_settings_help()}</p>
+        </div>
+      </div>
+      {#if artifactQuery.error}<RequestFailure
+          title={m.artifact_load_failed()}
+          message={localizeBackendErrorMessage(artifactQuery.error)}
+          retry={() => {
+            void artifactQuery.refetch()
+          }}
+          retrying={artifactQuery.isFetching} />
+      {:else if artifact}
+        <Field.FieldGroup>
+          <Field.Field size="fill"
+            ><Field.FieldLabel for="artifact-client-base-url" hint={m.artifact_client_base_help()}
+              >{m.artifact_client_base_url()}</Field.FieldLabel
+            ><Input
+              id="artifact-client-base-url"
+              value={artifact.client_base_url}
+              disabled={artifactSaving}
+              oninput={(event) => editArtifact({ client_base_url: event.currentTarget.value })} /></Field.Field>
+          <Field.Field
+            ><Field.FieldLabel for="artifact-storage">{m.artifact_storage()}</Field.FieldLabel><Select.Root
+              type="single"
+              value={artifact.s3 ? 's3' : 'internal'}
+              onValueChange={selectArtifactStorage}
+              disabled={artifactSaving}
+              ><Select.Trigger id="artifact-storage"
+                >{artifact.s3 ? m.artifact_s3_storage() : m.artifact_internal_storage()}</Select.Trigger
+              ><Select.Content
+                ><Select.Group
+                  ><Select.Item value="internal">{m.artifact_internal_storage()}</Select.Item><Select.Item value="s3"
+                    >{m.artifact_s3_storage()}</Select.Item
+                  ></Select.Group
+                ></Select.Content
+              ></Select.Root
+            ></Field.Field>
+          {#if artifact.s3}
+            <Field.Field size="fill"
+              ><Field.FieldLabel for="artifact-s3-endpoint">{m.artifact_s3_endpoint()}</Field.FieldLabel><Input
+                id="artifact-s3-endpoint"
+                value={artifact.s3.endpoint ?? ''}
+                disabled={artifactSaving}
+                oninput={(event) => editS3({ endpoint: event.currentTarget.value })} /></Field.Field>
+            <Field.Field size="fill"
+              ><Field.FieldLabel for="artifact-s3-region">{m.artifact_s3_region()}</Field.FieldLabel><Input
+                id="artifact-s3-region"
+                value={artifact.s3.region ?? ''}
+                disabled={artifactSaving}
+                oninput={(event) => editS3({ region: event.currentTarget.value })} /></Field.Field>
+            <Field.Field size="fill"
+              ><Field.FieldLabel for="artifact-s3-bucket">{m.artifact_s3_bucket()}</Field.FieldLabel><Input
+                id="artifact-s3-bucket"
+                value={artifact.s3.bucket ?? ''}
+                disabled={artifactSaving}
+                oninput={(event) => editS3({ bucket: event.currentTarget.value })} /></Field.Field>
+            <Field.Field size="fill"
+              ><Field.FieldLabel for="artifact-s3-access_key_id">{m.artifact_s3_access_key()}</Field.FieldLabel><Input
+                id="artifact-s3-access_key_id"
+                value={artifact.s3.access_key_id ?? ''}
+                disabled={artifactSaving}
+                oninput={(event) => editS3({ access_key_id: event.currentTarget.value })} /></Field.Field>
+            <Field.Field size="fill"
+              ><Field.FieldLabel for="artifact-s3-secret_access_key">{m.artifact_s3_secret_key()}</Field.FieldLabel
+              ><SecretInput
+                id="artifact-s3-secret_access_key"
+                value={artifact.s3.secret_access_key ?? ''}
+                disabled={artifactSaving}
+                oninput={(event) => editS3({ secret_access_key: event.currentTarget.value })} /></Field.Field>
+            <Field.Field size="fill"
+              ><Field.FieldLabel for="artifact-s3-session_token">{m.artifact_s3_session_token()}</Field.FieldLabel
+              ><SecretInput
+                id="artifact-s3-session_token"
+                value={artifact.s3.session_token ?? ''}
+                disabled={artifactSaving}
+                oninput={(event) => editS3({ session_token: event.currentTarget.value || null })} /></Field.Field>
+            <Field.Field size="datetime"
+              ><Field.FieldLabel for="artifact-s3-expiry" hint={m.artifact_s3_expiry_help()}
+                >{m.artifact_s3_expiry()}</Field.FieldLabel
+              ><Input
+                id="artifact-s3-expiry"
+                type="number"
+                value={artifact.s3.credentials_expires_at ?? ''}
+                disabled={artifactSaving}
+                oninput={(event) =>
+                  editS3({
+                    credentials_expires_at: event.currentTarget.value === '' ? null : Number(event.currentTarget.value),
+                  })} /></Field.Field>
+          {/if}
+          <Field.Field orientation="horizontal"
+            ><div class="flex-1">
+              <Field.FieldLabel for="artifact-external-downloads">{m.artifact_external_downloads()}</Field.FieldLabel>
+            </div>
+            <Switch
+              id="artifact-external-downloads"
+              checked={artifact.external_signed_downloads}
+              disabled={artifactSaving || !artifactQuery.data?.client_base_url}
+              onCheckedChange={(value) => {
+                void toggleArtifact('external_signed_downloads', value)
+              }} /></Field.Field>
+          {#if artifact.external_signed_downloads}
+            <Field.Field size="fill"
+              ><Field.FieldLabel for="artifact-public-base-url">{m.artifact_public_base_url()}</Field.FieldLabel><Input
+                id="artifact-public-base-url"
+                value={artifact.file_public_base_url ?? ''}
+                disabled={artifactSaving}
+                oninput={(event) => editArtifact({ file_public_base_url: event.currentTarget.value })} /></Field.Field>
+            <p class="text-sm text-muted-foreground">
+              {artifact.s3 ? m.artifact_s3_warning() : m.artifact_public_warning()}
+            </p>
+            <p class="text-sm text-muted-foreground">{m.artifact_transfer_warning()}</p>
+          {/if}
+          <Field.Field orientation="horizontal"
+            ><div class="flex-1">
+              <Field.FieldLabel for="artifact-upload-injection">{m.artifact_upload_injection()}</Field.FieldLabel>
+            </div>
+            <Switch
+              id="artifact-upload-injection"
+              checked={artifactQuery.data?.upload_prompt_injection ?? false}
+              disabled={artifactSaving || !artifactQuery.data?.client_base_url}
+              onCheckedChange={(value) => {
+                void toggleArtifact('upload_prompt_injection', value)
+              }} /></Field.Field>
+          <p class="text-sm text-muted-foreground">{m.artifact_upload_help()}</p>
+          {#if !artifactQuery.data?.client_base_url}<p class="text-sm text-muted-foreground">
+              {m.artifact_save_address_first()}
+            </p>{/if}
+          {#if artifactDirty}<p role="status" class="text-sm text-muted-foreground">{m.artifact_unsaved()}</p>{/if}
+          {#if artifactError}<Field.FieldError role="alert">{artifactError}</Field.FieldError>{/if}
+          <div class="field-actions">
+            <Button
+              disabled={!artifactDirty || artifactSaving}
+              aria-busy={artifactSaving}
+              onclick={() => {
+                if (artifact) void saveArtifact(artifact, true)
+              }}
+              >{#if artifactSaving}<Spinner data-icon="inline-start" />{/if}{artifactSaving
+                ? m.artifact_saving()
+                : m.artifact_save()}</Button>
+          </div>
+        </Field.FieldGroup>
+      {:else}<div class="flex flex-col gap-4" aria-busy="true">
+          <Skeleton class="h-10" /><Skeleton class="h-10" />
+        </div>{/if}
+    </section>
 
     <section id="proxy" class="route-section scroll-mt-20 pb-8" aria-labelledby="proxy-title">
       <div class="route-section-header">

@@ -6,7 +6,6 @@ use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, State};
 use axum::middleware;
 use axum::routing::{get, post};
-use base64::Engine;
 use futures::Stream;
 use tower_http::trace::TraceLayer;
 
@@ -21,8 +20,8 @@ use super::ingress;
 pub use super::ingress::open_responses::websocket::AllowedWebSocketOrigins;
 use crate::Gateway;
 
-// Multimodal Gemini/OpenAI-compatible requests commonly carry base64 media in JSON.
-const PROXY_JSON_BODY_LIMIT_BYTES: usize = 100 * 1024 * 1024;
+// 单文件限制按解码字节执行；JSON 入口须容纳对应 base64 与协议元数据。
+const PROXY_JSON_BODY_LIMIT_BYTES: usize = 140 * 1024 * 1024;
 
 pub fn create_router(gateway: Gateway) -> Router {
     let mcp_router = crate::mcp::router(gateway.clone());
@@ -39,6 +38,10 @@ pub fn create_router(gateway: Gateway) -> Router {
         .route(
             "/v1/artifacts/uploads/{upload_id}/complete",
             post(super::artifacts::complete_upload),
+        )
+        .route(
+            "/v1/artifacts/downloads/{token}",
+            get(super::artifacts::download),
         )
         .route(
             "/v1/chat/completions",
@@ -214,8 +217,9 @@ impl CapturedBodyStream {
         let payload = match String::from_utf8(std::mem::take(&mut self.bytes)) {
             Ok(text) => serde_json::Value::String(text),
             Err(error) => serde_json::json!({
-                "encoding": "base64",
-                "data": base64::engine::general_purpose::STANDARD.encode(error.as_bytes()),
+                "capture_fidelity": "body_unavailable",
+                "reason": "invalid_utf8",
+                "byte_count": error.as_bytes().len(),
             }),
         };
         self.capture.record(RunEvent::Wire {
@@ -283,3 +287,6 @@ mod tests;
 
 #[cfg(test)]
 mod compaction_tests;
+
+#[cfg(test)]
+mod upload_grant_tests;

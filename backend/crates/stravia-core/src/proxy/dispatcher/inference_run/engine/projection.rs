@@ -1,7 +1,8 @@
 //! Client Projection for one Inference Run.
 //!
-//! Canonical Text is delivered unchanged. OpenAI-compatible clients keep
-//! Thinking on the reasoning carrier until the first non-empty Text, then use
+//! Canonical Text stays credential-free; upload placeholders are replaced only
+//! in client delivery copies. OpenAI-compatible clients keep Thinking on the
+//! reasoning carrier until the first non-empty Text, then use
 //! quoted `content` previews bound to authoritative Thinking History Markers.
 //! Other protocols retain their native carriers.
 
@@ -23,6 +24,289 @@ use stravia_runtime_contract::protocol::ir::AiStreamDelta;
 use stravia_runtime_contract::protocol::ir::ContentBlock;
 use stravia_runtime_contract::protocol::ir::MessageContent;
 use stravia_runtime_contract::protocol::ir::Role;
+
+const UPLOAD_PLACEHOLDER: &str = "<stravia-upload-key>";
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum UploadCarrier {
+    Text(Option<usize>, Option<usize>),
+    Tool(usize),
+}
+
+struct PendingUploadPrefix {
+    text: String,
+    slots: Vec<u64>,
+}
+
+/// Only delivery copies enter this state. Pending text is bounded by one
+/// placeholder prefix per carrier; queued events retain their original order.
+#[derive(Default)]
+struct UploadProjection {
+    gateway: Option<crate::Gateway>,
+    enabled: bool,
+    grant: Option<crate::agent::upload_grant::UploadGrant>,
+    pending: HashMap<UploadCarrier, PendingUploadPrefix>,
+    queue: VecDeque<(u64, AiStreamDelta)>,
+    next_slot: u64,
+}
+
+impl UploadProjection {
+    async fn refresh(&mut self) -> Result<(), HistoryMarkerError> {
+        if let Some(gateway) = &self.gateway {
+            self.enabled = crate::agent::upload_grant::upload_prompt_enabled(gateway)
+                .await
+                .map_err(|error| HistoryMarkerError::Storage(error.to_string()))?;
+        }
+        Ok(())
+    }
+
+    fn replace(
+        &mut self,
+        text: &mut String,
+        principal: &Principal,
+    ) -> Result<(), HistoryMarkerError> {
+        if !self.enabled || !text.contains(UPLOAD_PLACEHOLDER) {
+            return Ok(());
+        }
+        let gateway = self
+            .gateway
+            .as_ref()
+            .expect("enabled upload projection gateway");
+        if !self
+            .grant
+            .as_ref()
+            .is_some_and(|grant| gateway.upload_grants.is_valid(grant))
+        {
+            self.grant = Some(
+                gateway
+                    .upload_grants
+                    .issue(principal)
+                    .map_err(|error| HistoryMarkerError::Storage(error.to_string()))?,
+            );
+        }
+        *text = text.replace(
+            UPLOAD_PLACEHOLDER,
+            &self.grant.as_ref().expect("issued upload grant").key,
+        );
+        Ok(())
+    }
+
+    fn replace_item(
+        &mut self,
+        item: &mut AiItem,
+        principal: &Principal,
+    ) -> Result<(), HistoryMarkerError> {
+        if item.role != Role::Assistant {
+            return Ok(());
+        }
+        match &mut item.content {
+            MessageContent::Text(text) => self.replace(text, principal)?,
+            MessageContent::Blocks(blocks) => {
+                for block in blocks {
+                    if let ContentBlock::Text { text, .. } = block {
+                        self.replace(text, principal)?;
+                    }
+                }
+            }
+        }
+        if let Some(calls) = &mut item.tool_calls {
+            for call in calls {
+                self.replace(&mut call.arguments, principal)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn item_candidate(item: &AiItem, needle: &str) -> bool {
+        item.role == Role::Assistant && (match &item.content {
+            MessageContent::Text(text) => text.contains(needle),
+            MessageContent::Blocks(blocks) => blocks.iter().any(
+                |block| matches!(block, ContentBlock::Text { text, .. } if text.contains(needle)),
+            ),
+        } || item
+            .tool_calls
+            .as_ref()
+            .is_some_and(|calls| calls.iter().any(|call| call.arguments.contains(needle))))
+    }
+
+    fn candidate(delta: &AiStreamDelta) -> bool {
+        match delta {
+            AiStreamDelta::TextDelta(text)
+            | AiStreamDelta::TextDeltaWithMetadata { text, .. }
+            | AiStreamDelta::ToolCallDelta {
+                arguments: text, ..
+            } => text.contains('<'),
+            AiStreamDelta::ToolCallComplete { tool_call, .. } => tool_call.arguments.contains('<'),
+            AiStreamDelta::ItemDone { item, .. } => Self::item_candidate(item, "<"),
+            _ => false,
+        }
+    }
+
+    fn carrier(delta: &AiStreamDelta) -> Option<UploadCarrier> {
+        match delta {
+            AiStreamDelta::TextDelta(_) => Some(UploadCarrier::Text(None, None)),
+            AiStreamDelta::TextDeltaWithMetadata {
+                output_index,
+                content_index,
+                ..
+            } => Some(UploadCarrier::Text(*output_index, *content_index)),
+            AiStreamDelta::ToolCallDelta { index, .. } => Some(UploadCarrier::Tool(*index)),
+            _ => None,
+        }
+    }
+
+    fn text(delta: &mut AiStreamDelta) -> &mut String {
+        match delta {
+            AiStreamDelta::TextDelta(text)
+            | AiStreamDelta::TextDeltaWithMetadata { text, .. }
+            | AiStreamDelta::ToolCallDelta {
+                arguments: text, ..
+            } => text,
+            _ => unreachable!("upload text carrier"),
+        }
+    }
+
+    fn drain_ready(
+        &mut self,
+        principal: &Principal,
+    ) -> Result<Vec<AiStreamDelta>, HistoryMarkerError> {
+        let first_blocked = self
+            .pending
+            .values()
+            .flat_map(|prefix| prefix.slots.iter())
+            .min()
+            .copied();
+        let mut ready = Vec::new();
+        while self
+            .queue
+            .front()
+            .is_some_and(|(slot, _)| first_blocked.is_none_or(|blocked| *slot < blocked))
+        {
+            let mut delta = self.queue.pop_front().expect("queued upload delta").1;
+            match &mut delta {
+                AiStreamDelta::TextDelta(text)
+                | AiStreamDelta::TextDeltaWithMetadata { text, .. }
+                | AiStreamDelta::ToolCallDelta {
+                    arguments: text, ..
+                } => self.replace(text, principal)?,
+                AiStreamDelta::ToolCallComplete { tool_call, .. } => {
+                    self.replace(&mut tool_call.arguments, principal)?
+                }
+                AiStreamDelta::ItemDone { item, .. } => self.replace_item(item, principal)?,
+                _ => {}
+            }
+            ready.push(delta);
+        }
+        Ok(ready)
+    }
+
+    fn flush(&mut self, principal: &Principal) -> Result<Vec<AiStreamDelta>, HistoryMarkerError> {
+        self.pending.clear();
+        self.drain_ready(principal)
+    }
+
+    fn push(
+        &mut self,
+        mut delta: AiStreamDelta,
+        principal: &Principal,
+    ) -> Result<Vec<AiStreamDelta>, HistoryMarkerError> {
+        if !self.enabled && self.pending.is_empty() && self.queue.is_empty() {
+            return Ok(vec![delta]);
+        }
+        if let Some(carrier) = Self::carrier(&delta) {
+            let text = Self::text(&mut delta);
+            if text.is_empty() {
+                self.queue.push_back((self.next_slot, delta));
+                self.next_slot += 1;
+                return self.drain_ready(principal);
+            }
+            if let Some(mut prefix) = self.pending.remove(&carrier) {
+                let missing = &UPLOAD_PLACEHOLDER[prefix.text.len()..];
+                if text.starts_with(missing) {
+                    let replacement = UPLOAD_PLACEHOLDER.to_owned();
+                    for (slot, queued) in &mut self.queue {
+                        if prefix.slots.contains(slot) {
+                            *Self::text(queued) = if *slot == prefix.slots[0] {
+                                replacement.clone()
+                            } else {
+                                String::new()
+                            };
+                        }
+                    }
+                    text.drain(..missing.len());
+                } else if missing.starts_with(text.as_str()) {
+                    prefix.text.push_str(text);
+                    prefix.slots.push(self.next_slot);
+                    self.pending.insert(carrier, prefix);
+                    self.queue.push_back((self.next_slot, delta));
+                    self.next_slot += 1;
+                    return self.drain_ready(principal);
+                }
+                // A mismatch releases the original fragments verbatim.
+            }
+            let keep = if self.enabled {
+                (1..UPLOAD_PLACEHOLDER.len())
+                    .rev()
+                    .find(|&len| text.ends_with(&UPLOAD_PLACEHOLDER[..len]))
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            let suffix = text.split_off(text.len() - keep);
+            if keep > 0 {
+                let mut pending_delta = delta.clone();
+                *Self::text(&mut pending_delta) = suffix.clone();
+                if let AiStreamDelta::TextDeltaWithMetadata {
+                    logprobs,
+                    obfuscation,
+                    ..
+                } = &mut pending_delta
+                {
+                    logprobs.clear();
+                    *obfuscation = None;
+                }
+                self.queue.push_back((self.next_slot, delta));
+                self.next_slot += 1;
+                self.pending.insert(
+                    carrier,
+                    PendingUploadPrefix {
+                        text: suffix,
+                        slots: vec![self.next_slot],
+                    },
+                );
+                self.queue.push_back((self.next_slot, pending_delta));
+            } else {
+                self.queue.push_back((self.next_slot, delta));
+            }
+            self.next_slot += 1;
+        } else {
+            match &mut delta {
+                AiStreamDelta::ToolCallComplete { index, .. } => {
+                    self.pending.remove(&UploadCarrier::Tool(*index));
+                }
+                AiStreamDelta::ItemDone { index, .. } => {
+                    self.pending.retain(|carrier, _| {
+                        !matches!(carrier, UploadCarrier::Tool(i) if i == index)
+                            && !matches!(carrier, UploadCarrier::Text(Some(i), _) if i == index)
+                    });
+                }
+                AiStreamDelta::ThinkingDelta(_)
+                | AiStreamDelta::ThinkingDeltaWithMetadata { .. }
+                | AiStreamDelta::ReasoningSummaryDelta { .. }
+                | AiStreamDelta::ToolCallStart { .. } => {
+                    self.pending.remove(&UploadCarrier::Text(None, None));
+                }
+                AiStreamDelta::Done { .. } | AiStreamDelta::ResponseTerminal { .. } => {
+                    self.pending.clear()
+                }
+                _ => {}
+            }
+            self.queue.push_back((self.next_slot, delta));
+            self.next_slot += 1;
+        }
+        self.drain_ready(principal)
+    }
+}
 
 const THINKING_MARKER_PENDING_RETENTION: Duration = Duration::from_secs(60 * 60);
 const PUBLISHED_MARKER_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
@@ -282,6 +566,11 @@ pub(super) struct ClientProjectionSession {
     current_unindexed_item_kind: Option<UnindexedItemKind>,
     client_output_started: bool,
     response_started: bool,
+    upload: UploadProjection,
+    staged_upload_items: HashSet<usize>,
+    staged_item_count: usize,
+    retained_upload_items: Vec<bool>,
+    hidden_upload_items: Vec<bool>,
 }
 
 impl ClientProjectionSession {
@@ -319,7 +608,58 @@ impl ClientProjectionSession {
             current_unindexed_item_kind: None,
             client_output_started: false,
             response_started: false,
+            upload: UploadProjection::default(),
+            staged_upload_items: HashSet::new(),
+            staged_item_count: 0,
+            retained_upload_items: Vec::new(),
+            hidden_upload_items: Vec::new(),
         }
+    }
+
+    pub(super) fn with_upload_gateway(mut self, gateway: crate::Gateway) -> Self {
+        self.upload.gateway = Some(gateway);
+        self
+    }
+
+    /// Copy only at the transport boundary, after canonical persistence staging.
+    pub(super) async fn prepare_upload_delivery<'a>(
+        &mut self,
+        response: &'a AiResponse,
+    ) -> Result<std::borrow::Cow<'a, AiResponse>, HistoryMarkerError> {
+        let hidden_count = response.items.len().saturating_sub(self.staged_item_count);
+        let has_candidate = response.items.iter().enumerate().any(|(index, item)| {
+            let eligible = if index < hidden_count {
+                self.hidden_upload_items
+                    .get(index)
+                    .copied()
+                    .unwrap_or(false)
+            } else {
+                self.staged_upload_items.contains(&(index - hidden_count))
+            };
+            eligible && UploadProjection::item_candidate(item, UPLOAD_PLACEHOLDER)
+        });
+        if !has_candidate {
+            return Ok(std::borrow::Cow::Borrowed(response));
+        }
+        self.upload.refresh().await?;
+        if !self.upload.enabled {
+            return Ok(std::borrow::Cow::Borrowed(response));
+        }
+        let mut delivered = response.clone();
+        for (index, item) in delivered.items.iter_mut().enumerate() {
+            let eligible = if index < hidden_count {
+                self.hidden_upload_items
+                    .get(index)
+                    .copied()
+                    .unwrap_or(false)
+            } else {
+                self.staged_upload_items.contains(&(index - hidden_count))
+            };
+            if eligible {
+                self.upload.replace_item(item, &self.principal)?;
+            }
+        }
+        Ok(std::borrow::Cow::Owned(delivered))
     }
 
     pub(super) fn begin_model_leg(
@@ -549,6 +889,18 @@ impl ClientProjectionSession {
         mut deltas: Vec<AiStreamDelta>,
         model_leg_completed: bool,
     ) -> Result<Vec<ProjectedDeltaBatch>, HistoryMarkerError> {
+        deltas = self.filter_platform_deltas(deltas);
+        if !self.upload.pending.is_empty() || deltas.iter().any(UploadProjection::candidate) {
+            self.upload.refresh().await?;
+        }
+        let mut ready = Vec::new();
+        for delta in deltas {
+            ready.extend(self.upload.push(delta, &self.principal)?);
+        }
+        if model_leg_completed {
+            ready.extend(self.upload.flush(&self.principal)?);
+        }
+        deltas = ready;
         self.capture_protected_candidates(&deltas);
         self.capture_unindexed_signatures(&mut deltas);
         let has_completed_thinking = deltas.iter().any(|delta| {
@@ -607,6 +959,10 @@ impl ClientProjectionSession {
     }
 
     pub(super) fn complete_live_model_leg(&mut self) -> ProjectedDeltaBatch {
+        debug_assert!(
+            self.upload.queue.is_empty(),
+            "completed Model Leg flushes upload delivery prefixes"
+        );
         let pending_thinking = self.flush_unindexed_thinking();
         ProjectedDeltaBatch::visible(self.route_visible_deltas(pending_thinking))
     }
@@ -890,6 +1246,131 @@ impl ClientProjectionSession {
         visible
     }
 
+    fn filter_platform_deltas(&mut self, deltas: Vec<AiStreamDelta>) -> Vec<AiStreamDelta> {
+        let mut visible = Vec::new();
+        for delta in deltas {
+            match &delta {
+                AiStreamDelta::ToolCallStart { index, name, .. } => {
+                    if self.pending_tool_deltas.contains_key(index) {
+                        let index = *index;
+                        let accumulated = self.pending_tool_names.entry(index).or_default();
+                        accumulated.push_str(name);
+                        let is_platform = self.exposed_tool_names.contains(accumulated);
+                        let remains_ambiguous = self
+                            .exposed_tool_names
+                            .iter()
+                            .any(|registered| registered.starts_with(accumulated.as_str()));
+                        self.pending_tool_deltas
+                            .entry(index)
+                            .or_default()
+                            .push(delta);
+                        if is_platform {
+                            self.pending_tool_deltas.remove(&index);
+                            self.pending_tool_names.remove(&index);
+                            self.platform_tool_indices.insert(index);
+                        } else if !remains_ambiguous {
+                            if let Some(pending) = self.pending_tool_deltas.remove(&index) {
+                                visible.extend(pending);
+                            }
+                            self.pending_tool_names.remove(&index);
+                        }
+                        continue;
+                    }
+                    if self.exposed_tool_names.contains(name) {
+                        self.pending_tool_deltas.remove(index);
+                        self.pending_tool_names.remove(index);
+                        self.platform_tool_indices.insert(*index);
+                        continue;
+                    }
+                    if self
+                        .exposed_tool_names
+                        .iter()
+                        .any(|registered| registered.starts_with(name))
+                    {
+                        self.pending_tool_names.insert(*index, name.clone());
+                        self.pending_tool_deltas
+                            .entry(*index)
+                            .or_default()
+                            .push(delta);
+                        continue;
+                    }
+                }
+                AiStreamDelta::ToolCallDelta { index, .. }
+                    if self.pending_tool_deltas.contains_key(index) =>
+                {
+                    self.pending_tool_deltas
+                        .entry(*index)
+                        .or_default()
+                        .push(delta);
+                    continue;
+                }
+                AiStreamDelta::ToolCallComplete { index, tool_call } => {
+                    if self.exposed_tool_names.contains(&tool_call.name) {
+                        self.pending_tool_deltas.remove(index);
+                        self.pending_tool_names.remove(index);
+                        self.platform_tool_indices.insert(*index);
+                        continue;
+                    }
+                    if let Some(pending) = self.pending_tool_deltas.remove(index) {
+                        visible.extend(pending);
+                    }
+                    self.pending_tool_names.remove(index);
+                }
+                AiStreamDelta::ItemDone { index, item } => {
+                    let platform = item
+                        .function_call_ref()
+                        .is_some_and(|call| self.exposed_tool_names.contains(&call.name));
+                    if platform {
+                        self.pending_tool_deltas.remove(index);
+                        self.pending_tool_names.remove(index);
+                        self.platform_tool_indices.insert(*index);
+                        continue;
+                    }
+                    if let Some(pending) = self.pending_tool_deltas.remove(index) {
+                        visible.extend(pending);
+                    }
+                    self.pending_tool_names.remove(index);
+                }
+                _ => {}
+            }
+            let hidden_platform_delta = match &delta {
+                AiStreamDelta::ToolCallStart { index, name, .. }
+                    if self.exposed_tool_names.contains(name) =>
+                {
+                    self.platform_tool_indices.insert(*index);
+                    true
+                }
+                AiStreamDelta::ToolCallDelta { index, .. } => {
+                    self.platform_tool_indices.contains(index)
+                }
+                AiStreamDelta::ToolCallComplete { index, tool_call } => {
+                    let hidden = self.platform_tool_indices.contains(index)
+                        || self.exposed_tool_names.contains(&tool_call.name);
+                    if hidden {
+                        self.platform_tool_indices.insert(*index);
+                    }
+                    hidden
+                }
+                AiStreamDelta::ItemDone { index, item } => {
+                    let hidden = self.platform_tool_indices.contains(index)
+                        || item
+                            .function_call_ref()
+                            .is_some_and(|call| self.exposed_tool_names.contains(&call.name));
+                    if hidden {
+                        self.platform_tool_indices.insert(*index);
+                    }
+                    hidden
+                }
+                _ => false,
+            };
+            if hidden_platform_delta {
+                continue;
+            }
+            visible.push(delta);
+        }
+        visible
+    }
+
     fn filter_live_deltas(&mut self, deltas: Vec<AiStreamDelta>) -> Vec<AiStreamDelta> {
         let mut visible = Vec::new();
         for delta in deltas {
@@ -971,123 +1452,6 @@ impl ClientProjectionSession {
             {
                 continue;
             }
-            match &delta {
-                AiStreamDelta::ToolCallStart { index, name, .. } => {
-                    if self.pending_tool_deltas.contains_key(index) {
-                        let index = *index;
-                        let accumulated = self.pending_tool_names.entry(index).or_default();
-                        accumulated.push_str(name);
-                        let is_platform = self.exposed_tool_names.contains(accumulated);
-                        let remains_ambiguous = self
-                            .exposed_tool_names
-                            .iter()
-                            .any(|registered| registered.starts_with(accumulated.as_str()));
-                        self.pending_tool_deltas
-                            .entry(index)
-                            .or_default()
-                            .push(delta);
-                        if is_platform {
-                            self.pending_tool_deltas.remove(&index);
-                            self.pending_tool_names.remove(&index);
-                            self.platform_tool_indices.insert(index);
-                        } else if !remains_ambiguous {
-                            if let Some(pending) = self.pending_tool_deltas.remove(&index) {
-                                visible.extend(self.route_visible_deltas(pending));
-                            }
-                            self.pending_tool_names.remove(&index);
-                        }
-                        continue;
-                    }
-                    if self.exposed_tool_names.contains(name) {
-                        self.pending_tool_deltas.remove(index);
-                        self.pending_tool_names.remove(index);
-                        self.platform_tool_indices.insert(*index);
-                        continue;
-                    }
-                    if self
-                        .exposed_tool_names
-                        .iter()
-                        .any(|registered| registered.starts_with(name))
-                    {
-                        self.pending_tool_names.insert(*index, name.clone());
-                        self.pending_tool_deltas
-                            .entry(*index)
-                            .or_default()
-                            .push(delta);
-                        continue;
-                    }
-                }
-                AiStreamDelta::ToolCallDelta { index, .. }
-                    if self.pending_tool_deltas.contains_key(index) =>
-                {
-                    self.pending_tool_deltas
-                        .entry(*index)
-                        .or_default()
-                        .push(delta);
-                    continue;
-                }
-                AiStreamDelta::ToolCallComplete { index, tool_call } => {
-                    if self.exposed_tool_names.contains(&tool_call.name) {
-                        self.pending_tool_deltas.remove(index);
-                        self.pending_tool_names.remove(index);
-                        self.platform_tool_indices.insert(*index);
-                        continue;
-                    }
-                    if let Some(pending) = self.pending_tool_deltas.remove(index) {
-                        visible.extend(self.route_visible_deltas(pending));
-                    }
-                    self.pending_tool_names.remove(index);
-                }
-                AiStreamDelta::ItemDone { index, item } => {
-                    let platform = item
-                        .function_call_ref()
-                        .is_some_and(|call| self.exposed_tool_names.contains(&call.name));
-                    if platform {
-                        self.pending_tool_deltas.remove(index);
-                        self.pending_tool_names.remove(index);
-                        self.platform_tool_indices.insert(*index);
-                        continue;
-                    }
-                    if let Some(pending) = self.pending_tool_deltas.remove(index) {
-                        visible.extend(self.route_visible_deltas(pending));
-                    }
-                    self.pending_tool_names.remove(index);
-                }
-                _ => {}
-            }
-            let hidden_platform_delta = match &delta {
-                AiStreamDelta::ToolCallStart { index, name, .. }
-                    if self.exposed_tool_names.contains(name) =>
-                {
-                    self.platform_tool_indices.insert(*index);
-                    true
-                }
-                AiStreamDelta::ToolCallDelta { index, .. } => {
-                    self.platform_tool_indices.contains(index)
-                }
-                AiStreamDelta::ToolCallComplete { index, tool_call } => {
-                    let hidden = self.platform_tool_indices.contains(index)
-                        || self.exposed_tool_names.contains(&tool_call.name);
-                    if hidden {
-                        self.platform_tool_indices.insert(*index);
-                    }
-                    hidden
-                }
-                AiStreamDelta::ItemDone { index, item } => {
-                    let hidden = self.platform_tool_indices.contains(index)
-                        || item
-                            .function_call_ref()
-                            .is_some_and(|call| self.exposed_tool_names.contains(&call.name));
-                    if hidden {
-                        self.platform_tool_indices.insert(*index);
-                    }
-                    hidden
-                }
-                _ => false,
-            };
-            if hidden_platform_delta {
-                continue;
-            }
             if matches!(&delta, AiStreamDelta::ItemDone { index, .. } if self.projected_thinking_items.remove(index))
             {
                 continue;
@@ -1110,6 +1474,9 @@ impl ClientProjectionSession {
         let mut projected = Vec::with_capacity(response.items.len() + platform.len());
         let mut staged_deltas = Vec::new();
         let mut staged_references = Vec::new();
+        self.hidden_upload_items
+            .append(&mut self.retained_upload_items);
+        self.staged_upload_items.clear();
 
         for (output_index, mut item) in std::mem::take(&mut response.items).into_iter().enumerate()
         {
@@ -1133,6 +1500,7 @@ impl ClientProjectionSession {
             match std::mem::replace(&mut item.content, MessageContent::Text(String::new())) {
                 MessageContent::Text(text) => {
                     if !text.is_empty() {
+                        self.staged_upload_items.insert(projected.len());
                         projected.push(AiItem {
                             role: Role::Assistant,
                             content: MessageContent::Text(text),
@@ -1149,6 +1517,7 @@ impl ClientProjectionSession {
                             if matches!(&block, ContentBlock::Text { text, .. } if !text.is_empty())
                             {
                                 post_text = true;
+                                self.staged_upload_items.insert(projected.len());
                             }
                             push_projection_block(&mut projected, block, &mut meta);
                             continue;
@@ -1227,6 +1596,7 @@ impl ClientProjectionSession {
                         }
                         marker_item_for(self.state.openai_compatible, marker_post_text, marker)
                     } else {
+                        self.staged_upload_items.insert(projected.len());
                         AiItem::function_call(call)
                     };
                     call_item.meta = meta.take();
@@ -1248,6 +1618,13 @@ impl ClientProjectionSession {
         if post_text {
             self.state.post_text_started = true;
         }
+        self.staged_item_count = projected.len();
+        self.retained_upload_items = projected
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| super::completion::retain_hidden_round_item(item))
+            .map(|(index, _)| self.staged_upload_items.contains(&index))
+            .collect();
         response.items = projected;
         self.staged_delivery = Some(ProjectedDeltaBatch {
             deltas: staged_deltas,
@@ -1765,6 +2142,93 @@ async fn projection_session_fixture(
 mod tests {
     use super::*;
     use crate::history_marker::HistoryMarkerKind;
+
+    #[tokio::test]
+    async fn upload_delivery_renews_expired_grants_without_extending_old_authorization() {
+        use crate::agent::upload_grant::{UPLOAD_PLACEHOLDER, UploadGrantIssuer};
+        use std::sync::atomic::{AtomicI64, Ordering};
+
+        async fn deliver(session: &mut ClientProjectionSession) -> String {
+            let batches = session
+                .project_live_deltas(
+                    vec![AiStreamDelta::TextDelta(UPLOAD_PLACEHOLDER.into())],
+                    false,
+                )
+                .await
+                .unwrap();
+            let mut text = String::new();
+            for batch in batches {
+                text.push_str(&text_of(batch.deltas()));
+                session
+                    .report_delivery(batch, ProjectionDelivery::Sent)
+                    .await
+                    .unwrap();
+            }
+            text
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let mut gateway = crate::Gateway::new(crate::config::GatewayConfig {
+            data_dir: directory.path().to_path_buf(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let now = Arc::new(AtomicI64::new(1_800_000_000_000));
+        let clock = Arc::clone(&now);
+        gateway.upload_grants = Arc::new(UploadGrantIssuer::with_clock(
+            &[17; 32],
+            Arc::new(move || clock.load(Ordering::SeqCst)),
+        ));
+        let mut settings = stravia_runtime_contract::artifact::ArtifactSettings {
+            client_base_url: "https://client.example/prefix".into(),
+            upload_prompt_injection: true,
+            ..Default::default()
+        };
+        gateway
+            .admin()
+            .set_setting(
+                "artifact_settings",
+                &serde_json::to_string(&settings).unwrap(),
+            )
+            .await
+            .unwrap();
+        let (session, _, principal) = projection_session_fixture("long-upload-owner").await;
+        let mut session = session.with_upload_gateway(gateway.clone());
+        begin_openai_leg(&mut session);
+        let first = deliver(&mut session).await;
+        assert_eq!(
+            gateway.upload_grants.authenticate(&first).unwrap(),
+            principal
+        );
+        now.fetch_add(14 * 60 * 1000, Ordering::SeqCst);
+        assert_eq!(deliver(&mut session).await, first);
+        now.fetch_add(60 * 1000, Ordering::SeqCst);
+        let renewed = deliver(&mut session).await;
+        assert_ne!(renewed, first);
+        assert!(gateway.upload_grants.authenticate(&first).is_err());
+        assert_eq!(
+            gateway.upload_grants.authenticate(&renewed).unwrap(),
+            principal
+        );
+
+        let (next, _, _) = projection_session_fixture("long-upload-owner").await;
+        let mut next = next.with_upload_gateway(gateway.clone());
+        begin_openai_leg(&mut next);
+        assert_ne!(deliver(&mut next).await, renewed);
+        settings.upload_prompt_injection = false;
+        gateway
+            .admin()
+            .set_setting(
+                "artifact_settings",
+                &serde_json::to_string(&settings).unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(deliver(&mut session).await, UPLOAD_PLACEHOLDER);
+        assert!(gateway.upload_grants.authenticate(&renewed).is_ok());
+        gateway.shutdown().await;
+    }
 
     fn marker(reference: &str, kind: HistoryMarkerKind) -> HistoryMarker {
         HistoryMarker {

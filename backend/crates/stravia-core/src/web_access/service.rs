@@ -142,7 +142,7 @@ impl WebAccessService {
         snapshot.engine.search(request).await
     }
 
-    pub(super) async fn fetch_in_run(
+    pub(crate) async fn fetch_in_run(
         &self,
         run_id: &str,
         api_key_id: &str,

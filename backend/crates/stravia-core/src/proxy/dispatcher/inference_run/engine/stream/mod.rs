@@ -569,7 +569,14 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
             }
             accumulator.apply_all(&terminal_deltas);
             let mut response = accumulator.into_ai_response();
-            if let Some(completed) = completed_response {
+            if let Some(mut completed) = completed_response {
+                if let Err(error) = super::completion::reconcile_completed_media(
+                    &mut response,
+                    std::mem::take(&mut completed.items),
+                ) {
+                    aborted = true;
+                    preflight_failure = Some(buffered_response(hook_failure_response(error)));
+                }
                 if response.usage.prompt_tokens == 0 && response.usage.completion_tokens == 0 {
                     response.usage = completed.usage;
                 }
@@ -697,60 +704,84 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                                     pending_generation_chain = hook_generation_chain;
                                     let hook_marker_delivery = projection.take_staged_delivery();
                                     if !buffer_terminal_hooks {
-                                        let mut deltas = ai_response_to_deltas(&response);
-                                        terminal_deltas = deltas
-                                            .iter()
-                                            .filter(|delta| {
-                                                matches!(
-                                                    delta,
-                                                    AiStreamDelta::ResponseTerminal { .. }
-                                                )
-                                            })
-                                            .cloned()
-                                            .collect();
-                                        deltas.retain(|delta| {
-                                            !matches!(
-                                                delta,
-                                                AiStreamDelta::Usage(_)
-                                                    | AiStreamDelta::ResponseTerminal { .. }
-                                                    | AiStreamDelta::Done { .. }
-                                            )
-                                        });
-                                        let progress = delivery.send_deltas(&deltas).await;
-                                        let outcome = if progress == DeliveryProgress::Sent {
-                                            ProjectionDelivery::Sent
-                                        } else {
-                                            ProjectionDelivery::Cancelled
-                                        };
-                                        match projection
-                                            .report_delivery(hook_marker_delivery, outcome)
+                                        let delivered_response = match projection
+                                            .prepare_upload_delivery(&response)
                                             .await
                                         {
-                                            Ok(references)
-                                                if progress == DeliveryProgress::Sent =>
-                                            {
-                                                let mut published = request_context
-                                                    .extensions
-                                                    .get::<PublishedPlatformExecutions>()
-                                                    .unwrap_or_default();
-                                                published.references.extend(references);
-                                                request_context.extensions.insert(published);
-                                            }
-                                            Ok(_) => match progress {
-                                                DeliveryProgress::Cancelled => cancelled = true,
-                                                DeliveryProgress::ReceiverClosed => {
-                                                    receiver_closed = true
-                                                }
-                                                DeliveryProgress::ProtocolFailed => {
-                                                    protocol_failed = true
-                                                }
-                                                DeliveryProgress::Sent => {}
-                                            },
+                                            Ok(response) => Some(response),
                                             Err(error) => {
-                                                tracing::error!(
-                                                    "failed to publish Hook response markers: {error}"
-                                                );
                                                 aborted = true;
+                                                preflight_failure = Some(buffered_response(
+                                                    render_completion_failure(
+                                                        CompletionFailure::hook(
+                                                            error,
+                                                            completion_context
+                                                                .client_output_commit(),
+                                                        ),
+                                                        ingress,
+                                                        true,
+                                                    ),
+                                                ));
+                                                None
+                                            }
+                                        };
+                                        if let Some(delivered_response) = delivered_response {
+                                            let mut deltas =
+                                                ai_response_to_deltas(delivered_response.as_ref());
+                                            terminal_deltas = deltas
+                                                .iter()
+                                                .filter(|delta| {
+                                                    matches!(
+                                                        delta,
+                                                        AiStreamDelta::ResponseTerminal { .. }
+                                                    )
+                                                })
+                                                .cloned()
+                                                .collect();
+                                            deltas.retain(|delta| {
+                                                !matches!(
+                                                    delta,
+                                                    AiStreamDelta::Usage(_)
+                                                        | AiStreamDelta::ResponseTerminal { .. }
+                                                        | AiStreamDelta::Done { .. }
+                                                )
+                                            });
+                                            let progress = delivery.send_deltas(&deltas).await;
+                                            let outcome = if progress == DeliveryProgress::Sent {
+                                                ProjectionDelivery::Sent
+                                            } else {
+                                                ProjectionDelivery::Cancelled
+                                            };
+                                            match projection
+                                                .report_delivery(hook_marker_delivery, outcome)
+                                                .await
+                                            {
+                                                Ok(references)
+                                                    if progress == DeliveryProgress::Sent =>
+                                                {
+                                                    let mut published = request_context
+                                                        .extensions
+                                                        .get::<PublishedPlatformExecutions>()
+                                                        .unwrap_or_default();
+                                                    published.references.extend(references);
+                                                    request_context.extensions.insert(published);
+                                                }
+                                                Ok(_) => match progress {
+                                                    DeliveryProgress::Cancelled => cancelled = true,
+                                                    DeliveryProgress::ReceiverClosed => {
+                                                        receiver_closed = true
+                                                    }
+                                                    DeliveryProgress::ProtocolFailed => {
+                                                        protocol_failed = true
+                                                    }
+                                                    DeliveryProgress::Sent => {}
+                                                },
+                                                Err(error) => {
+                                                    tracing::error!(
+                                                        "failed to publish Hook response markers: {error}"
+                                                    );
+                                                    aborted = true;
+                                                }
                                             }
                                         }
                                     } else {
@@ -912,40 +943,57 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                 && !receiver_closed
                 && !protocol_failed
             {
-                delivery.reset_stream_encoder();
-                let mut final_deltas = ai_response_to_deltas(&response);
-                final_deltas.retain(|delta| !matches!(delta, AiStreamDelta::Done { .. }));
-                let progress = delivery.send_deltas(&final_deltas).await;
-                match progress {
-                    DeliveryProgress::Sent => {}
-                    DeliveryProgress::Cancelled => cancelled = true,
-                    DeliveryProgress::ReceiverClosed => receiver_closed = true,
-                    DeliveryProgress::ProtocolFailed => protocol_failed = true,
-                }
-                if let Some(marker_delivery) = staged_delivery.take() {
-                    let outcome = if progress == DeliveryProgress::Sent {
-                        ProjectionDelivery::Sent
-                    } else {
-                        ProjectionDelivery::Cancelled
-                    };
-                    match projection.report_delivery(marker_delivery, outcome).await {
-                        Ok(references) if progress == DeliveryProgress::Sent => {
-                            let mut published = request_context
-                                .extensions
-                                .get::<PublishedPlatformExecutions>()
-                                .unwrap_or_default();
-                            published.references.extend(references);
-                            request_context.extensions.insert(published);
-                        }
-                        Ok(_) => {}
-                        Err(error) => {
-                            tracing::error!("failed to publish terminal Hook markers: {error}");
-                            aborted = true;
+                let delivered_response = match projection.prepare_upload_delivery(&response).await {
+                    Ok(response) => Some(response),
+                    Err(error) => {
+                        aborted = true;
+                        preflight_failure = Some(buffered_response(render_completion_failure(
+                            CompletionFailure::hook(
+                                error,
+                                completion_context.client_output_commit(),
+                            ),
+                            ingress,
+                            true,
+                        )));
+                        None
+                    }
+                };
+                if let Some(delivered_response) = delivered_response {
+                    delivery.reset_stream_encoder();
+                    let mut final_deltas = ai_response_to_deltas(delivered_response.as_ref());
+                    final_deltas.retain(|delta| !matches!(delta, AiStreamDelta::Done { .. }));
+                    let progress = delivery.send_deltas(&final_deltas).await;
+                    match progress {
+                        DeliveryProgress::Sent => {}
+                        DeliveryProgress::Cancelled => cancelled = true,
+                        DeliveryProgress::ReceiverClosed => receiver_closed = true,
+                        DeliveryProgress::ProtocolFailed => protocol_failed = true,
+                    }
+                    if let Some(marker_delivery) = staged_delivery.take() {
+                        let outcome = if progress == DeliveryProgress::Sent {
+                            ProjectionDelivery::Sent
+                        } else {
+                            ProjectionDelivery::Cancelled
+                        };
+                        match projection.report_delivery(marker_delivery, outcome).await {
+                            Ok(references) if progress == DeliveryProgress::Sent => {
+                                let mut published = request_context
+                                    .extensions
+                                    .get::<PublishedPlatformExecutions>()
+                                    .unwrap_or_default();
+                                published.references.extend(references);
+                                request_context.extensions.insert(published);
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                tracing::error!("failed to publish terminal Hook markers: {error}");
+                                aborted = true;
+                            }
                         }
                     }
+                    marker_output_delivered =
+                        !aborted && !cancelled && !receiver_closed && !protocol_failed;
                 }
-                marker_output_delivered =
-                    !aborted && !cancelled && !receiver_closed && !protocol_failed;
             }
 
             if marker_output_delivered && !aborted && !background_executions.is_empty() {

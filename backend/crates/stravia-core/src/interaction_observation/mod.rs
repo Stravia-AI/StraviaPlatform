@@ -587,6 +587,30 @@ impl InteractionObservation {
                 }
             }
         };
+        let mut snapshot = snapshot;
+        let mut references = std::collections::BTreeSet::new();
+        for run in &snapshot.runs {
+            if let Some(trace) = &run.trace {
+                for value in load_trace_values(trace.clone()).await? {
+                    collect_captured_artifacts(&value, &mut references);
+                }
+            }
+        }
+        if !references.is_empty() {
+            let mut media = Vec::with_capacity(references.len());
+            for reference in references {
+                let id = reference.trim_start_matches("https://stravia/artifact/");
+                let available = self.inner.store.artifact_available(id, exported_at).await?;
+                media.push(serde_json::json!({
+                    "artifact_reference": reference,
+                    "media_externalized": true,
+                    "content_capture": if available { "reference_only" } else { "unrecoverable" },
+                    "reason": if available { "media_not_embedded_in_bundle" } else { "artifact_expired_or_unavailable" },
+                    "checked_at": exported_at
+                }));
+            }
+            snapshot.summary["externalized_media"] = serde_json::Value::Array(media);
+        }
         Ok(self.inner.bundles.issue(snapshot))
     }
     pub(crate) async fn consume_bundle_ticket(&self, ticket: &str) -> anyhow::Result<BundleStream> {
@@ -1207,6 +1231,44 @@ fn project_bundle_summary(
         "events": events,
     })
 }
+fn collect_captured_artifacts(
+    value: &serde_json::Value,
+    references: &mut std::collections::BTreeSet<String>,
+) {
+    match value {
+        serde_json::Value::Object(object) => {
+            if object
+                .get("media_externalized")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+            {
+                if let Some(reference) = object
+                    .get("artifact_reference")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    references.insert(reference.to_owned());
+                }
+            }
+            for value in object.values() {
+                collect_captured_artifacts(value, references);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                collect_captured_artifacts(value, references);
+            }
+        }
+        serde_json::Value::String(text) => {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
+                if !value.is_string() {
+                    collect_captured_artifacts(&value, references);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 async fn load_trace_values(
     snapshot: trace::TraceSnapshot,
 ) -> anyhow::Result<Vec<serde_json::Value>> {

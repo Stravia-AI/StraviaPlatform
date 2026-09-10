@@ -86,6 +86,7 @@ struct CompleteInput {
     database: DatabaseConfig,
     username: String,
     password: String,
+    client_base_url: String,
 }
 
 #[derive(Serialize)]
@@ -389,6 +390,17 @@ async fn complete_setup(
     {
         return auth_error(StatusCode::CONFLICT, "setup_complete");
     }
+    let artifact_settings = stravia_core::agent::artifact::ArtifactSettings {
+        client_base_url: input.client_base_url,
+        ..Default::default()
+    };
+    if let Err(error) = artifact_settings.validate_for_save() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": error.to_string() })),
+        )
+            .into_response();
+    }
     let database = match resolve_database_config(&runtime.startup.config_path, input.database) {
         Ok(database) => database,
         Err(_) => return auth_error(StatusCode::BAD_REQUEST, "database_unavailable"),
@@ -413,12 +425,24 @@ async fn complete_setup(
             return auth_error(StatusCode::SERVICE_UNAVAILABLE, "database_unavailable");
         }
     };
-    let auth = AdminAuth::new(storage);
+    let artifact_json = match serde_json::to_string(&artifact_settings) {
+        Ok(value) => value,
+        Err(_) => return auth_error(StatusCode::INTERNAL_SERVER_ERROR, "config_save_failed"),
+    };
+    let auth = AdminAuth::new(storage.clone());
     let has_admin = match auth.has_admin().await {
         Ok(value) => value,
         Err(error) => return map_setup_auth_error(error),
     };
     if !has_admin {
+        if storage
+            .settings()
+            .set("artifact_settings", &artifact_json)
+            .await
+            .is_err()
+        {
+            return auth_error(StatusCode::INTERNAL_SERVER_ERROR, "config_save_failed");
+        }
         if let Err(error) = auth.create_admin(&input.username, &input.password).await {
             if matches!(&error, AuthError::Conflict) {
                 match auth.has_admin().await {

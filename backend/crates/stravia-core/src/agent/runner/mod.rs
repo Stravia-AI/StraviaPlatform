@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use base64::Engine;
 use futures::{StreamExt, stream};
 use serde_json::Value;
 use tokio::sync::{Mutex, Semaphore, mpsc};
@@ -20,7 +19,7 @@ use stravia_runtime_contract::agent::{
     AgentInput, AgentOutputValidationContext, AgentOutputValidator, AgentResult, AgentRunError,
     AgentRunLimits, AgentTurnId, ArtifactPolicy, VersionedToolId,
 };
-use stravia_runtime_contract::artifact::{ArtifactId, ArtifactSource, ArtifactStore};
+use stravia_runtime_contract::artifact::{ArtifactId, ArtifactStore};
 use stravia_runtime_contract::hook::{
     ContextCompleteness, HookControl, PlatformToolResult, RequestKind, SessionContext, ToolId,
     TransportKind,

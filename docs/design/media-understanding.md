@@ -1,36 +1,37 @@
 # Media Understanding 设计
 
 > 状态：已实施
-> 更新：2026-08-31
+> 更新：2026-09-10
 > 相关决策：[ADR-0009](../adr/0009-add-media-understanding-as-capability-tool.md)、[ADR-0016](../adr/0016-gate-advanced-capabilities-and-separate-transparent-injection.md)
 
 ## 1. 结论
 
 实现归属独立 `stravia-media` crate，包含 Definition、配置策略、媒体预处理、Derivative 存储、报告校验、ingest/snapshot、bridge 规划及 Platform Tool 行为。`stravia-core` 在编译期注入 `MediaHost`、`MediaAgentHost`、`MediaArtifactHost`，并保留 MCP/管理面 Adapter；能力不依赖 Gateway 类型。共享 IR、Agent、Artifact、Hook 与身份契约来自 `stravia-runtime-contract`，不复制类型或通过 JSON 往返 canonical 数据。
 
-Media Understanding 是由平台总开关控制的 Advanced Capability。公开工具名固定为 `understand_media`；普通模型请求和 MCP 共用同一个 Media Report contract。
+Media Understanding 是由独立平台开关控制的 Advanced Capability，通过 `StraviaRead` 的 Artifact URL `question` 参数调用；普通模型请求和 MCP 共用同一个 Media Report contract。统一入口的授权、收存、下载和路由归 core，媒体理解仍由本能力执行。参见 [ADR-0048](../adr/0048-separate-artifact-references-from-transfer-grants.md) 至 [ADR-0051](../adr/0051-disambiguate-artifact-download-and-understanding.md)。
 
 用户可见名称采用“多模态理解”，为未来 PDF、视频和音频扩展保留产品语义。本 Revision 的运行时仍只支持静态 JPEG、PNG 与 WebP 图片；页面不展示或承诺未来格式。
 
-平台 Gate 开启后，每个有效 API Key 都能显式调用 `understand_media`。关闭后，任何 Key 的显式调用和 MCP discovery/call 都不可用。API Key 的 Transparent Injection 只控制 non-vision parent 的自动 bridge，不承担显式授权。
+平台 Gate 开启后，每个有效 API Key 都能通过统一入口显式请求理解。关闭后，该分流不可调用，但裸 Artifact 下载不受媒体开关影响。API Key 的 Transparent Injection 只选择本次自动暴露的能力，不承担显式授权；执行层仍检查本次暴露范围。
 
 ## 2. 公开 contract
 
 工具 wire name：
 
 ```text
-understand_media
+StraviaRead
 ```
 
 输入：
 
 ```json
 {
-  "prompt": "Describe the image",
-  "artifacts": [{ "artifact_id": "artifact_..." }],
+  "url": "https://stravia/artifact/artifact_...?question=Describe%20the%20image",
   "previous_turn_id": "agt_..."
 }
 ```
+
+`question` 只解释于 Artifact Reference。裸引用返回下载信息；外部图片 URL 先收存，再执行描述和文字提取，其原始 query 完整保留。`previous_turn_id` 保留同 Principal 的续接与分支，已经在祖先中保留的 source 复用，不重复附加；同次调用的重复 source 仍拒绝。旧平台调用别名不注册，旧持久化记录不批量改写。
 
 结果：
 
@@ -58,8 +59,8 @@ understand_media
 
 | 调用面 | 条件 | Transparent Injection 的作用 |
 |---|---|---|
-| 显式 `understand_media` | Media Gate 开启且 Key 有效 | 无 |
-| MCP discovery/call | Media Gate、有效 Key、`mcp_access_enabled` | 无 |
+| 显式 `StraviaRead` 媒体分流 | Media Gate 开启且 Key 有效 | 无 |
+| MCP 媒体调用 | Media Gate、有效 Key、`mcp_access_enabled` | 无 |
 | non-vision parent 自动 bridge | Media Gate、有效 Key、master 与 `inject_media_understanding` | 决定是否启用 bridge |
 | 原生 vision Target | 逻辑 Model 自身的图片能力 | 无；原生路径优先 |
 
@@ -69,7 +70,7 @@ Gate 关闭时，API Key 已保存的 `inject_media_understanding` 保留但运�
 
 含图片的普通推理请求按以下顺序规划：
 
-1. 逻辑 Model 存在 eligible native vision Target：固定使用 native 路径，原图片直接交给该 Target；
+1. 逻辑 Model 存在 eligible native vision Target：固定使用 native 路径，已收存 Artifact 在实际调用前生成对应传输表示；
 2. 没有 native Target，但存在 tool-capable parent Target，且 Media Gate 与 Transparent Injection 均允许：使用 bridge；
 3. 其他情况：在上游调用前返回明确的 input/capability error。
 
@@ -77,11 +78,11 @@ native 路径永远优先，不因为 Media Tool 可用而改写为 bridge。一
 
 bridge 会：
 
-- 把 inline/base64 或公网 HTTPS 图片保存为 principal-scoped source Artifact；
+- 复用输入收存得到的 principal-scoped source Artifact；原始输入只允许明确的结构化内联媒体或公网 HTTP(S) 附件；
 - 在原始图文位置写入稳定 Artifact marker；
 - 从发送给 non-vision parent 的内容中移除原始图片 bytes/URL；
-- 注入 code-owned 安全说明，并自动暴露 `understand_media`；
-- 让父模型用 marker 中的 Artifact ID 显式调用工具。
+- 注入 code-owned 安全说明，并把媒体能力并入 `StraviaRead`；
+- 让父模型使用 marker 中的稳定 Artifact Reference 与 URL 编码的问题。
 
 ## 5. 内部执行
 
@@ -114,9 +115,9 @@ Media Understanding 使用 `id = "media-understanding"` 的 internal Agent Defin
 ## 7. 安全边界
 
 - 图片和其中的文字都是不可信数据，不能改变 system instructions、authorization、Artifact allowlist 或 tool policy；
-- HTTPS ingest 在初始 URL 和 redirect 上执行公网地址、DNS、协议、字节数和 deadline 检查；
+- HTTP(S) ingest 在初始 URL 和每次 redirect 上执行公网地址、DNS、实际连接、字节数和 deadline 检查；
 - ArtifactStore 再次验证 principal owner；
-- ordinary bridge 只允许本 Inference Run snapshot 和 parent-chain Artifact；
+- 统一读取先验证当前 Principal 的 Artifact 归属，同 Principal 可跨对话复用，不能用公开下载入口绕过归属；
 - MCP 可使用调用 principal 自己的 ready Artifact；
 - ordinary logs 不记录图片 bytes、下载 URL、tool arguments/results 或 derivative mapping；
 - capability 在运行中被撤销后，下一次隐藏 side effect 前终止，不提交新的 Media Turn。
@@ -161,7 +162,7 @@ Media Definition、Agent Turn、Artifact 与 `media_derivatives` 继续使用既
 
 ## 10. 验证边界
 
-- Gate 开/关对显式 `understand_media` 和 MCP discovery/call 的影响；
+- Gate 开／关对 `StraviaRead` 媒体分流和 MCP 调用的影响，裸 Artifact 下载独立可用；
 - Transparent Injection 关闭时显式 MCP 仍可用；
 - Gate 关闭时保存的注入选择保留但不生效；
 - native vision Target 优先于 bridge；

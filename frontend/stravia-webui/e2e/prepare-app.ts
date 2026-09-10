@@ -2,6 +2,13 @@ import type { Page } from '@playwright/test'
 import type { UpdateStatus } from '../src/lib/product-update'
 
 const settingValues: Record<string, string> = {
+  artifact_settings: JSON.stringify({
+    client_base_url: 'https://client.example/stravia',
+    external_signed_downloads: false,
+    file_public_base_url: null,
+    upload_prompt_injection: false,
+    s3: null,
+  }),
   log_retention_days: '7',
   proxy_bypass: '',
   proxy_enabled: 'false',

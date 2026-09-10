@@ -22,6 +22,157 @@ test.beforeEach(async ({ page }) => {
   await prepareApp(page)
 })
 
+test('file settings retain drafts and confirmed switches across failed atomic saves', async ({ page }) => {
+  let saved = {
+    client_base_url: 'https://client.example:8443/prefix',
+    external_signed_downloads: false,
+    file_public_base_url: null as string | null,
+    upload_prompt_injection: false,
+    s3: null,
+  }
+  let rejectSave = false
+  await page.route('**/api/v1/settings/artifact_settings', async (route) => {
+    if (route.request().method() === 'PUT') {
+      if (rejectSave) return route.fulfill({ status: 503, json: { error: 'File settings unavailable' } })
+      saved = JSON.parse(route.request().postDataJSON().value)
+    }
+    await route.fulfill({ json: { data: JSON.stringify(saved) } })
+  })
+  await page.goto('/settings')
+  const client = page.locator('#artifact-client-base-url')
+  const upload = page.locator('#artifact-upload-injection')
+  await client.fill('https://edited.example:9443/deployment')
+  await upload.click()
+  await expect(upload).toBeChecked()
+  expect(saved.client_base_url).toBe('https://client.example:8443/prefix')
+  await expect(client).toHaveValue('https://edited.example:9443/deployment')
+  await page.locator('#artifact-external-downloads').click()
+  await expect(page.locator('#artifact-public-base-url')).toHaveValue('https://edited.example:9443/deployment')
+  expect(saved.external_signed_downloads).toBe(false)
+  rejectSave = true
+  await page.getByRole('button', { name: 'Save file settings', exact: true }).click()
+  await expect(page.getByRole('alert').filter({ hasText: 'File settings unavailable' })).toBeVisible()
+  await expect(client).toHaveValue('https://edited.example:9443/deployment')
+  await expect(upload).toBeChecked()
+  expect(saved.external_signed_downloads).toBe(false)
+  rejectSave = false
+  await page.getByRole('button', { name: 'Save file settings', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Save file settings', exact: true })).toBeDisabled()
+  await page.reload()
+  await expect(client).toHaveValue('https://edited.example:9443/deployment')
+  await expect(page.locator('#artifact-external-downloads')).toBeChecked()
+})
+
+test('S3 storage remains independent of signed downloads and prefills the selected endpoint', async ({ page }) => {
+  let saved = {
+    client_base_url: 'https://client.example/prefix',
+    external_signed_downloads: false,
+    file_public_base_url: null as string | null,
+    upload_prompt_injection: false,
+    s3: null,
+  }
+  await page.route('**/api/v1/settings/artifact_settings', async (route) => {
+    if (route.request().method() === 'PUT') saved = JSON.parse(route.request().postDataJSON().value)
+    await route.fulfill({ json: { data: JSON.stringify(saved) } })
+  })
+  await page.goto('/settings')
+  await page.locator('#artifact-storage').click()
+  await page.getByRole('option', { name: 'External S3', exact: true }).click()
+  await page.locator('#artifact-s3-endpoint').fill('https://objects.example/storage')
+  await page.locator('#artifact-s3-region').fill('local-region')
+  await page.locator('#artifact-s3-bucket').fill('private-files')
+  await page.locator('#artifact-s3-access_key_id').fill('fixture-access')
+  await page.locator('#artifact-s3-secret_access_key').fill('fixture-secret')
+  await expect(page.locator('#artifact-s3-secret_access_key')).toHaveAttribute('type', 'password')
+  await page.getByRole('button', { name: 'Save file settings', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Save file settings', exact: true })).toBeDisabled()
+  await page.reload()
+  await expect(page.locator('#artifact-s3-endpoint')).toHaveValue('https://objects.example/storage')
+  await expect(page.locator('#artifact-external-downloads')).not.toBeChecked()
+  await expect(page.locator('#artifact-public-base-url')).toHaveCount(0)
+  await page.locator('#artifact-external-downloads').click()
+  await expect(page.locator('#artifact-public-base-url')).toHaveValue('https://objects.example/storage')
+  await page.locator('#artifact-public-base-url').fill('https://downloads.example/objects')
+  await page.getByRole('button', { name: 'Save file settings', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Save file settings', exact: true })).toBeDisabled()
+  await page.reload()
+  await expect(page.locator('#artifact-public-base-url')).toHaveValue('https://downloads.example/objects')
+  await expect(page.locator('#artifact-external-downloads')).toBeChecked()
+})
+
+for (const locale of ['en-US', 'zh-CN']) {
+  test(`file settings recover loading failures without showing disabled defaults (${locale})`, async ({ page }) => {
+    await page.addInitScript((value) => localStorage.setItem('stravia-locale', value), locale)
+    let failed = true
+    await page.route('**/api/v1/settings/artifact_settings', (route) =>
+      route.fulfill(
+        failed
+          ? { status: 503, json: { error: 'File baseline unavailable' } }
+          : {
+              json: {
+                data: JSON.stringify({
+                  client_base_url: 'https://saved.example/path',
+                  external_signed_downloads: false,
+                  file_public_base_url: null,
+                  upload_prompt_injection: true,
+                  s3: null,
+                }),
+              },
+            },
+      ),
+    )
+    await page.goto('/settings')
+    await expect(page.locator('#artifacts').getByRole('alert')).toBeVisible()
+    await expect(page.locator('#artifact-upload-injection')).toHaveCount(0)
+    failed = false
+    await page.locator('#artifacts').getByRole('button').click()
+    await expect(page.locator('#artifact-upload-injection')).toBeChecked()
+    await expect(page.locator('#artifact-client-base-url')).toHaveValue('https://saved.example/path')
+    await page.setViewportSize({ width: 320, height: 900 })
+    await expect(page.locator('#artifact-client-base-url')).toBeVisible()
+  })
+}
+
+test('setup prefills its entry and preserves an edited complete client address after failure', async ({ page }) => {
+  let completed = false
+  let rejectSave = true
+  await page.route('**/api/v1/auth/state', (route) =>
+    route.fulfill({
+      json: {
+        mode: completed ? 'server' : 'setup',
+        authenticated: false,
+        setup_authorized: !completed,
+        username: null,
+      },
+    }),
+  )
+  await page.route('**/api/v1/setup/test', (route) => route.fulfill({ status: 204 }))
+  let submitted = ''
+  await page.route('**/api/v1/setup/complete', async (route) => {
+    submitted = route.request().postDataJSON().client_base_url
+    if (rejectSave) return route.fulfill({ status: 503, json: { error: 'Setup storage unavailable' } })
+    completed = true
+    await route.fulfill({ json: { mode: 'server' } })
+  })
+  await page.goto('/setup')
+  const address = page.locator('#setup-client-base-url')
+  await expect(address).toHaveValue(new URL(page.url()).origin)
+  await address.fill('https://entry.example:8443/my/stravia')
+  await page.locator('#setup-username').fill('administrator')
+  await page.locator('#setup-password').fill('a-secure-setup-password')
+  await page.locator('#setup-confirm-password').fill('a-secure-setup-password')
+  await page.getByRole('button', { name: 'Test connection', exact: true }).click()
+  await page.locator('form button[type="submit"]').click()
+  await expect(address).toHaveValue('https://entry.example:8443/my/stravia')
+  await expect(page.locator('form').getByRole('alert')).toBeVisible()
+  await expect(page.locator('form button[type="submit"]')).toBeEnabled()
+  expect(completed).toBe(false)
+  rejectSave = false
+  await page.locator('form button[type="submit"]').click()
+  await expect(page).toHaveURL(/\/login$/)
+  expect(submitted).toBe('https://entry.example:8443/my/stravia')
+})
+
 test('settings fields align in wide containers and stack in narrow containers', async ({ page }) => {
   await page.setViewportSize({ width: 1500, height: 900 })
   await page.goto('/settings')

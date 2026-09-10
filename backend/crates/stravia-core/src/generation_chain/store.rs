@@ -61,35 +61,6 @@ pub(crate) fn request_has_item_references(request: &AiRequest) -> bool {
 pub(super) fn item_reference_ids(items: &[AiItem]) -> impl Iterator<Item = &str> {
     items.iter().filter_map(item_reference_id)
 }
-async fn read_response_artifact_image(
-    store: &dyn stravia_runtime_contract::artifact::ArtifactStore,
-    principal: &Principal,
-    artifact_id: &stravia_runtime_contract::artifact::ArtifactId,
-) -> Result<(bytes::Bytes, String), ()> {
-    const MAX_RESPONSE_ARTIFACT_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
-
-    let reader = store.open(principal, artifact_id).await.map_err(|_| ())?;
-    if reader.artifact.size == 0 || reader.artifact.size > MAX_RESPONSE_ARTIFACT_IMAGE_BYTES {
-        return Err(());
-    }
-    let media_type = reader.artifact.mime_type;
-    let stravia_runtime_contract::artifact::ArtifactSource::LocalPath(path) = reader.source else {
-        return Err(());
-    };
-    let file = tokio::fs::File::open(path).await.map_err(|_| ())?;
-    let mut bytes = Vec::with_capacity(usize::try_from(reader.artifact.size).unwrap_or(0));
-    file.take(MAX_RESPONSE_ARTIFACT_IMAGE_BYTES.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .await
-        .map_err(|_| ())?;
-    if bytes.len() as u64 > MAX_RESPONSE_ARTIFACT_IMAGE_BYTES
-        || bytes.len() as u64 != reader.artifact.size
-    {
-        return Err(());
-    }
-    Ok((bytes::Bytes::from(bytes), media_type))
-}
-
 pub(crate) async fn hydrate_response_artifact_references(
     principal: &Principal,
     request: &mut AiRequest,
@@ -115,18 +86,15 @@ pub(crate) async fn hydrate_response_artifact_references(
                 continue;
             };
             let store = artifacts.ok_or_else(|| "item_reference_not_found".to_string())?;
-            let (bytes, media_type) = read_response_artifact_image(
-                store,
-                principal,
-                &stravia_runtime_contract::artifact::ArtifactId::new(artifact_id.clone()),
-            )
-            .await
-            .map_err(|_| "item_reference_not_found".to_string())?;
+            let reader = store
+                .open(
+                    principal,
+                    &stravia_runtime_contract::artifact::ArtifactId::new(artifact_id.clone()),
+                )
+                .await
+                .map_err(|_| "item_reference_not_found".to_string())?;
             *block = ContentBlock::Image {
-                source: MediaSource::Base64 {
-                    media_type,
-                    data: base64::engine::general_purpose::STANDARD.encode(bytes),
-                },
+                source: MediaSource::Url(reader.artifact.reference()),
                 detail,
                 cache_control: None,
             };

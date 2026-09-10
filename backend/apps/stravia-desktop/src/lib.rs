@@ -134,6 +134,18 @@ pub fn run() {
                 Arc::new(SystemPortOwnerResolver),
             ))?;
             let server_port = runtime.current_port();
+            // The native frontend is not an HTTP entry. Use its actual local transport
+            // once, then preserve the administrator's complete saved address.
+            tauri::async_runtime::block_on(async {
+                if gateway.storage.settings().get("artifact_settings").await?.is_none() {
+                    let settings = stravia_core::agent::artifact::ArtifactSettings {
+                        client_base_url: format!("http://127.0.0.1:{server_port}"),
+                        ..Default::default()
+                    };
+                    gateway.admin().set_setting("artifact_settings", &serde_json::to_string(&settings)?).await?;
+                }
+                Ok::<(), anyhow::Error>(())
+            })?;
 
             app.manage(gateway);
             app.manage(native_admin_session);

@@ -101,6 +101,7 @@ def test_development_task_accepts_vite_origin_without_bypassing_csrf(
         status, body = operator.request(
             "POST", "/api/v1/setup/complete",
             {
+                "client_base_url": base,
                 "database": {"backend": "sqlite", "path": str(tmp_path / "gateway.db")},
                 "username": "owner", "password": "correct horse battery staple",
             },
@@ -163,6 +164,7 @@ def test_relative_sqlite_path_uses_config_directory_across_setup_and_restart(
         status, body = operator.request(
             "POST", "/api/v1/setup/complete",
             {
+                "client_base_url": base,
                 "database": database,
                 "username": "existing-owner", "password": "correct horse battery staple",
             },
@@ -232,6 +234,7 @@ def test_fresh_server_is_claimed_once_then_completed_and_logged_in(
                 "POST",
                 "/api/v1/setup/complete",
                 {
+                    "client_base_url": base,
                     "database": {
                         "backend": "sqlite",
                         "path": str(Path(data_dir) / "gateway.db"),
@@ -257,6 +260,7 @@ def test_fresh_server_is_claimed_once_then_completed_and_logged_in(
                 "POST",
                 "/api/v1/setup/complete",
                 {
+                    "client_base_url": base,
                     "database": {
                         "backend": "sqlite",
                         "path": str(Path(data_dir) / "gateway.db"),
@@ -495,6 +499,7 @@ def test_setup_connection_failure_can_be_corrected_in_same_session(
                 "POST",
                 "/api/v1/setup/complete",
                 {
+                    "client_base_url": base,
                     "database": database,
                     "username": "owner",
                     "password": "correct horse battery staple",
@@ -535,7 +540,7 @@ def test_concurrent_setup_completion_never_overwrites_the_admin(
                 status, _ = http_request(
                     "POST",
                     f"{base}/api/v1/setup/complete",
-                    payload={"database": database, "username": username, "password": password},
+                    payload={"client_base_url": base, "database": database, "username": username, "password": password},
                     headers={"cookie": cookie, "origin": base, "x-stravia-csrf": "1"},
                     timeout=40.0,
                 )
@@ -589,14 +594,14 @@ def test_failed_setup_preserves_commit_order_and_restart_replaces_setup_credenti
             config_parent.write_text("block configuration persistence", encoding="utf-8")
             status, _ = operator.request(
                 "POST", "/api/v1/setup/complete",
-                {"database": database, "username": "must-not-exist", "password": "valid initial password"},
+                {"client_base_url": base, "database": database, "username": "must-not-exist", "password": "valid initial password"},
                 timeout=40.0,
             )
             assert status == 500
             config_parent.unlink()
             status, _ = operator.request(
                 "POST", "/api/v1/setup/complete",
-                {"database": database, "username": "owner", "password": ""},
+                {"client_base_url": base, "database": database, "username": "owner", "password": ""},
                 timeout=40.0,
             )
             assert status == 400

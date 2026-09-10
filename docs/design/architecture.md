@@ -76,7 +76,7 @@ stravia/
 │           │   │   └── websocket.rs
 │           │   ├── context.rs    # RequestContext / ContextBag
 │           │   ├── handler.rs    # models_list 只读端点（≤110 行）
-│           │   ├── artifacts.rs  # artifact upload endpoints
+│           │   ├── artifacts.rs  # multipart upload / signed download adapters
 │           │   ├── security.rs   # crate-private client credential policy deep module
 │           │   ├── server.rs     # axum HTTP Server 启动
 │           │   ├── server/tests.rs   # Proxy HTTP 装配契约
@@ -178,7 +178,8 @@ stravia/
 │           ├── agent/
 │           │   ├── runner/           # loop / context / tools / types / schema / tests
 │           │   ├── adapters/         # agent call / hook / remote MCP adapters
-│           │   └── artifact/         # LocalArtifactStore / quota / tests
+│           │   ├── artifact/         # 内部/S3 ArtifactStore、quota、传输授权和读取保护
+│           │   └── upload_grant.rs   # 固定期限上传授权、回放保护与上传说明
 │           ├── provider_catalog/ # Catalog facade / types / source / parse / persist
 │           ├── turn_chain/       # SqlTurnChainStore 与集成回归
 │           ├── admission.rs      # Principal Concurrency Limit（private）

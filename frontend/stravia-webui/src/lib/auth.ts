@@ -185,10 +185,19 @@ export async function testDatabase(database: DatabaseConfig): Promise<void> {
   await decode<void>(response)
 }
 
-export async function completeSetup(database: DatabaseConfig, username: string, password: string): Promise<AuthState> {
+export async function completeSetup(
+  database: DatabaseConfig,
+  username: string,
+  password: string,
+  client_base_url: string,
+): Promise<AuthState> {
   const response = await rawFetch(
     '/setup/complete',
-    { method: 'POST', headers: unsafeHeaders(true), body: JSON.stringify({ database, username, password }) },
+    {
+      method: 'POST',
+      headers: unsafeHeaders(true),
+      body: JSON.stringify({ database, username, password, client_base_url }),
+    },
     false,
   )
   return decode<AuthState>(response)

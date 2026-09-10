@@ -97,17 +97,59 @@ impl TraceRecord {
                 if protect {
                     protected.value(&mut decoded_payload);
                 }
+                kinds.extend(
+                    super::redaction::externalize_capture(&mut decoded_payload, true).into_kinds(),
+                );
                 kinds.extend(redact_value(&mut decoded_payload).into_kinds());
                 let Value::String(redacted_text) = decoded_payload else {
                     return Err(CREDENTIAL_REDACTION_UNSUPPORTED);
                 };
-                self.payload = Value::String(
-                    base64::engine::general_purpose::STANDARD.encode(redacted_text.as_bytes()),
-                );
+                if kinds.contains(&RedactionKind::MediaExternalized)
+                    || kinds.contains(&RedactionKind::MediaUnrecoverable)
+                {
+                    self.payload_encoding = "json".into();
+                    self.payload = Value::String(redacted_text);
+                } else {
+                    self.payload = Value::String(
+                        base64::engine::general_purpose::STANDARD.encode(redacted_text.as_bytes()),
+                    );
+                }
+            } else {
+                self.payload_encoding = "json".into();
+                self.payload = serde_json::json!({
+                    "media_externalized": true,
+                    "original_wire_bytes": false,
+                    "content_capture": "unrecoverable",
+                    "reason": "opaque_binary_not_normalized"
+                });
+                kinds.insert(RedactionKind::MediaUnrecoverable);
             }
         } else {
             if protect {
                 protected.value(&mut self.payload);
+            }
+            if self.direction.is_some()
+                || matches!(
+                    self.stage.as_deref(),
+                    Some(
+                        "artifact_normalized_request"
+                            | "decoded_request"
+                            | "restored_request"
+                            | "effective_model_request"
+                            | "canonical_terminal_response"
+                            | "canonical_delta"
+                            | "response_after_hook"
+                            | "client_projection_event"
+                    )
+                )
+            {
+                kinds.extend(
+                    super::redaction::externalize_capture(
+                        &mut self.payload,
+                        self.direction.is_some(),
+                    )
+                    .into_kinds(),
+                );
             }
             kinds.extend(redact_value(&mut self.payload).into_kinds());
         }
@@ -175,6 +217,7 @@ pub(crate) struct TraceHandle {
 }
 
 struct TraceState {
+    wire_pending: std::sync::Mutex<std::collections::HashMap<String, (String, TraceRecord)>>,
     protected: super::redaction::ProtectedSecrets,
     bytes_written: AtomicU64,
     retained_and_reserved: AtomicU64,
@@ -244,6 +287,7 @@ impl TraceManager {
     pub(crate) fn create(&self) -> TraceHandle {
         let trace_id = uuid::Uuid::new_v4().simple().to_string();
         let state = Arc::new(TraceState {
+            wire_pending: std::sync::Mutex::new(std::collections::HashMap::new()),
             protected: super::redaction::ProtectedSecrets::default(),
             bytes_written: AtomicU64::new(0),
             retained_and_reserved: AtomicU64::new(0),
@@ -373,9 +417,68 @@ impl TraceHandle {
         {
             return TraceWriteOutcome::Partial(STORAGE_ERROR);
         }
+        if matches!(
+            record.message_type.as_deref(),
+            Some("body_chunk" | "sse_chunk")
+        ) {
+            if let Some(text) = record.payload.as_str() {
+                let key = format!(
+                    "{}:{}:{}",
+                    record.direction.as_deref().unwrap_or_default(),
+                    record.attempt_id.as_deref().unwrap_or_default(),
+                    record.message_type.as_deref().unwrap_or_default()
+                );
+                let mut pending = self
+                    .state
+                    .wire_pending
+                    .lock()
+                    .expect("wire capture fragments");
+                let (buffer, _) = pending.entry(key.clone()).or_insert_with(|| {
+                    let mut template = record.clone();
+                    template.payload = Value::Null;
+                    (String::new(), template)
+                });
+                buffer.push_str(text);
+                if buffer.len() as u64 > RUN_LIMIT_BYTES {
+                    pending.remove(&key);
+                    self.mark_partial("structured_wire_capture_limit", false);
+                    return TraceWriteOutcome::Partial("structured_wire_capture_limit");
+                }
+                let complete = serde_json::from_str::<Value>(buffer).is_ok()
+                    || ((buffer.starts_with("data:")
+                        || buffer.starts_with("event:")
+                        || buffer.starts_with(':'))
+                        && (buffer.ends_with("\n\n") || buffer.ends_with("\r\n\r\n")));
+                if !complete {
+                    return TraceWriteOutcome::Queued;
+                }
+                record.payload =
+                    Value::String(pending.remove(&key).expect("complete wire message").0);
+                record.representation = "reassembled_application_message".into();
+            }
+        }
+        self.queue_record(record)
+    }
+
+    fn queue_record(&self, mut record: TraceRecord) -> TraceWriteOutcome {
         if let Err(reason) = record.redact_before_queue(&self.state.protected) {
             self.mark_partial(reason, false);
             return TraceWriteOutcome::Partial(reason);
+        }
+        let externalized = record.redactions.iter().any(|kind| {
+            matches!(
+                kind,
+                RedactionKind::MediaExternalized | RedactionKind::MediaUnrecoverable
+            )
+        });
+        if externalized {
+            record.representation = "artifact_externalized".into();
+            if record
+                .redactions
+                .contains(&RedactionKind::MediaUnrecoverable)
+            {
+                self.mark_partial("media_unrecoverable", false);
+            }
         }
         let mut bytes = match serde_json::to_vec(&record) {
             Ok(bytes) => bytes,
@@ -421,6 +524,28 @@ impl TraceHandle {
 
     pub(crate) async fn finish(&self) -> TraceManifest {
         if !self.state.finished.swap(true, Ordering::AcqRel) {
+            let pending = std::mem::take(
+                &mut *self
+                    .state
+                    .wire_pending
+                    .lock()
+                    .expect("wire capture fragments"),
+            );
+            for (_, (text, mut record)) in pending {
+                let trimmed = text.trim_start();
+                if trimmed.starts_with(['{', '[', '"', ':'])
+                    || trimmed.starts_with("data:")
+                    || trimmed.starts_with("event:")
+                {
+                    self.mark_partial("incomplete_structured_wire_omitted", false);
+                } else {
+                    // Plain-text HTTP errors are complete at EOF, not at a JSON/SSE boundary.
+                    // Delay their redaction until now so split upload grants remain secret.
+                    record.payload = Value::String(text);
+                    record.representation = "reassembled_application_message".into();
+                    let _ = self.queue_record(record);
+                }
+            }
             let (response, receive) = oneshot::channel();
             let sent = self
                 .manager
@@ -868,7 +993,7 @@ mod tests {
     }
 
     #[test]
-    fn opaque_binary_is_preserved_while_utf8_structured_bytes_are_redacted() {
+    fn opaque_binary_is_omitted_while_utf8_structured_bytes_are_redacted() {
         let opaque = base64::engine::general_purpose::STANDARD.encode([0xff, 0x00, 0x81]);
         let mut opaque_record = binary_record(opaque.clone());
         assert!(
@@ -876,7 +1001,8 @@ mod tests {
                 .redact_before_queue(&super::super::redaction::ProtectedSecrets::default())
                 .is_ok()
         );
-        assert_eq!(opaque_record.payload, Value::String(opaque));
+        assert!(!opaque_record.payload.to_string().contains(&opaque));
+        assert_eq!(opaque_record.payload["content_capture"], "unrecoverable");
 
         let sentinel = "never-persist-this";
         let encoded_json = base64::engine::general_purpose::STANDARD

@@ -79,6 +79,7 @@ pub struct Gateway {
     pub(crate) auth_sessions: Arc<tokio::sync::RwLock<HashMap<String, AuthSession>>>,
     pub(crate) agent_definitions: agent::AgentDefinitionRegistry,
     pub(crate) artifact_store: Option<Arc<dyn stravia_runtime_contract::artifact::ArtifactStore>>,
+    pub(crate) upload_grants: Arc<agent::upload_grant::UploadGrantIssuer>,
     pub(crate) media_derivatives: Option<Arc<stravia_media::MediaDerivativeStore>>,
     pub(crate) media_understanding:
         Arc<tokio::sync::RwLock<Option<stravia_media::MediaUnderstandingService>>>,
@@ -129,6 +130,7 @@ impl Gateway {
             auth_sessions: Arc::clone(&self.auth_sessions),
             agent_definitions: self.agent_definitions.clone(),
             artifact_store: self.artifact_store.clone(),
+            upload_grants: Arc::clone(&self.upload_grants),
             media_derivatives: self.media_derivatives.clone(),
             media_understanding: Arc::clone(&self.media_understanding),
             media_run_snapshots: self.media_run_snapshots.clone(),

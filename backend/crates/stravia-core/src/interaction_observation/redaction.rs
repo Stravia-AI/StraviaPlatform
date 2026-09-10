@@ -161,6 +161,7 @@ const VISIBLE_URL_AUTHORITY_BYTES: usize = 4096;
 enum CredentialContinuation {
     Quoted { quote: u8, escaped: bool },
     Token,
+    UploadGrant,
     UrlAuthority,
 }
 
@@ -332,6 +333,14 @@ impl VisibleTextRedactor {
                     cursor += 1;
                 }
             }
+            CredentialContinuation::UploadGrant => {
+                while cursor < bytes.len()
+                    && (bytes[cursor].is_ascii_alphanumeric()
+                        || matches!(bytes[cursor], b'_' | b'-' | b'.'))
+                {
+                    cursor += 1;
+                }
+            }
             CredentialContinuation::UrlAuthority => {
                 while cursor < bytes.len()
                     && !bytes[cursor].is_ascii_whitespace()
@@ -351,6 +360,29 @@ impl VisibleTextRedactor {
     fn emit_safe(&mut self, output: &mut String, finish: bool) {
         if self.pending.is_empty() {
             return;
+        }
+        if !finish {
+            const PREFIX: &str = "stravia_upload_";
+            if let Some(start) = self.pending.rfind(PREFIX) {
+                if self.pending[start + PREFIX.len()..]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+                {
+                    output.push_str(&redact_text(&self.pending[..start]));
+                    output.push_str("<stravia-upload-key>");
+                    self.pending.clear();
+                    self.continuation = Some(CredentialContinuation::UploadGrant);
+                    return;
+                }
+            }
+            for length in (1..PREFIX.len()).rev() {
+                if self.pending.ends_with(&PREFIX[..length]) {
+                    let start = self.pending.len() - length;
+                    output.push_str(&redact_text(&self.pending[..start]));
+                    self.pending.drain(..start);
+                    return;
+                }
+            }
         }
         if let Some(trailing) = trailing_credential(&self.pending) {
             match trailing {
@@ -424,6 +456,8 @@ pub(crate) enum RedactionKind {
     CredentialQuery,
     CredentialField,
     CredentialText,
+    MediaExternalized,
+    MediaUnrecoverable,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -446,6 +480,7 @@ impl RedactionReport {
 }
 
 pub(crate) fn redact_headers(headers: &mut Value) -> RedactionReport {
+    crate::agent::upload_grant::scrub_upload_grant_value(headers);
     let mut report = RedactionReport::default();
     redact_header_node(headers, &mut report);
     report
@@ -470,6 +505,21 @@ pub(crate) fn redact_url(value: &str) -> (String, RedactionReport) {
         Err(_) => return (value.to_owned(), report),
     };
 
+    if let Some(start) = url.path().find("/v1/artifacts/downloads/") {
+        let prefix_end = start + "/v1/artifacts/downloads/".len();
+        if url.path().len() > prefix_end {
+            let path = format!("{}{}", &url.path()[..prefix_end], REDACTED);
+            url.set_path(&path);
+            report.record(RedactionKind::CredentialText);
+        }
+    }
+    let scrubbed = crate::agent::upload_grant::scrub_upload_grants(url.as_str());
+    if scrubbed != url.as_str() {
+        if let Ok(scrubbed_url) = reqwest::Url::parse(&scrubbed) {
+            url = scrubbed_url;
+            report.record(RedactionKind::CredentialText);
+        }
+    }
     if !url.username().is_empty() || url.password().is_some() {
         let _ = url.set_username(REDACTED);
         if url.password().is_some() {
@@ -578,7 +628,8 @@ fn redact_string(value: &mut String, report: &mut RedactionReport) {
 }
 
 fn text_may_need_redaction(value: &str) -> bool {
-    value.bytes().any(|byte| matches!(byte, b':' | b'='))
+    value.contains("stravia_upload_")
+        || value.bytes().any(|byte| matches!(byte, b':' | b'='))
         || value.split_whitespace().any(|token| {
             token.eq_ignore_ascii_case("bearer") || token.eq_ignore_ascii_case("basic")
         })
@@ -700,7 +751,11 @@ fn ambiguous_credential_suffix(value: &str) -> Option<usize> {
 }
 
 fn redact_text_with_report(message: &str) -> (String, RedactionReport) {
-    let (redacted, mut report) = redact_quoted_credential_fields(message);
+    let scrubbed = crate::agent::upload_grant::scrub_upload_grants(message);
+    let (redacted, mut report) = redact_quoted_credential_fields(&scrubbed);
+    if scrubbed != message {
+        report.record(RedactionKind::CredentialText);
+    }
     let redacted = redact_credential_text(&redacted, &mut report);
     let (redacted, form_report) = redact_form_encoded(&redacted);
     report.merge(form_report);
@@ -886,9 +941,313 @@ fn redact_header_node(value: &mut Value, report: &mut RedactionReport) {
     }
 }
 
+/// Parse transport envelopes only at the adapter boundary. Business strings and tool
+/// arguments are credential-scrubbed separately and never interpreted as media.
+pub(crate) fn externalize_capture(value: &mut Value, wire: bool) -> RedactionReport {
+    let mut report = RedactionReport::default();
+    if wire {
+        if let Value::String(text) = value {
+            if let Ok(mut envelope) = serde_json::from_str::<Value>(text) {
+                externalize_envelope(&mut envelope, &mut report);
+                if !report.kinds.is_empty() {
+                    *text = envelope.to_string();
+                }
+            } else if text.starts_with("data:")
+                || text.starts_with("event:")
+                || text.starts_with(':')
+            {
+                let mut output = String::with_capacity(text.len());
+                for line in text.split_inclusive('\n') {
+                    if let Some(data) = line.strip_prefix("data:") {
+                        if let Ok(mut envelope) = serde_json::from_str::<Value>(data.trim()) {
+                            let mut line_report = RedactionReport::default();
+                            externalize_envelope(&mut envelope, &mut line_report);
+                            if !line_report.kinds.is_empty() {
+                                output.push_str("data: ");
+                                output.push_str(&envelope.to_string());
+                                if line.ends_with('\n') {
+                                    output.push('\n');
+                                }
+                                report.merge(line_report);
+                                continue;
+                            }
+                        }
+                    }
+                    output.push_str(line);
+                }
+                if !report.kinds.is_empty() {
+                    *text = output;
+                }
+            } else if text.trim_start().starts_with(['{', '['])
+                && ([
+                    "\"image_url\"",
+                    "\"input_audio\"",
+                    "\"inlineData\"",
+                    "\"inline_data\"",
+                    "\"file_data\"",
+                    "\"base64\"",
+                    "\"base64_pdf\"",
+                ]
+                .iter()
+                .any(|key| text.contains(key))
+                    || (text.contains("\"image\"")
+                        && text.contains("\"source\"")
+                        && text.contains("\"bytes\"")))
+            {
+                *text = serde_json::json!({"media_externalized":true, "original_wire_bytes":false,
+                    "content_capture":"unrecoverable", "reason":"malformed_structured_media"})
+                .to_string();
+                report.record(RedactionKind::MediaUnrecoverable);
+            }
+            return report;
+        }
+    }
+    externalize_envelope(value, &mut report);
+    report
+}
+
+fn externalize_envelope(value: &mut Value, report: &mut RedactionReport) {
+    if let Value::Array(envelopes) = value {
+        // Adapter response batches and client projection batches contain envelopes,
+        // never recursively decoded business strings or tool argument values.
+        for envelope in envelopes {
+            externalize_envelope(envelope, report);
+        }
+        return;
+    }
+    let Value::Object(object) = value else { return };
+    let kind = object
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    // Tool arguments/results, provider function payloads, text and reasoning are opaque
+    // business values. Only explicit content-block arrays may contain media blocks.
+    if matches!(
+        kind,
+        "text"
+            | "input_text"
+            | "output_text"
+            | "tool_use"
+            | "function_call"
+            | "function_call_output"
+            | "thinking"
+            | "reasoning"
+            | "tool_result"
+    ) {
+        return;
+    }
+    if matches!(
+        kind,
+        "response.audio.delta"
+            | "response.output_audio.delta"
+            | "response.image_generation_call.partial_image"
+    ) {
+        externalize_media(value, report);
+        return;
+    }
+    let anthropic_media = matches!(kind, "content_block_start" | "content_block_stop");
+    if object.get("kind").and_then(Value::as_str) == Some("item_done") {
+        if let Some(item) = object.get_mut("data").and_then(|data| data.get_mut("item")) {
+            externalize_envelope(item, report);
+        }
+    }
+    if anthropic_media {
+        if let Some(block) = object.get_mut("content_block") {
+            externalize_media(block, report);
+        }
+    }
+    for key in ["content", "parts"] {
+        if let Some(Value::Array(blocks)) = object.get_mut(key) {
+            for block in blocks {
+                externalize_media(block, report);
+            }
+        }
+    }
+    if object
+        .get("audio")
+        .and_then(|audio| audio.get("data"))
+        .is_some()
+    {
+        externalize_media(value, report);
+    }
+    let Value::Object(object) = value else { return };
+    for key in [
+        "messages",
+        "items",
+        "contents",
+        "input",
+        "output",
+        "choices",
+        "candidates",
+    ] {
+        if let Some(Value::Array(items)) = object.get_mut(key) {
+            for item in items {
+                // Responses input/output arrays mix messages with explicit media blocks.
+                externalize_media(item, report);
+                externalize_envelope(item, report);
+            }
+        }
+    }
+    for key in [
+        "message",
+        "content",
+        "delta",
+        "response",
+        "request",
+        "canonical_request",
+        "canonical_response",
+    ] {
+        if let Some(nested) = object.get_mut(key) {
+            externalize_envelope(nested, report);
+        }
+    }
+}
+
+// Called exclusively for a known protocol media block, never arbitrary business JSON.
+fn externalize_media(value: &mut Value, report: &mut RedactionReport) {
+    let Value::Object(object) = value else { return };
+    if object.get("type").and_then(Value::as_str) == Some("tool_result") {
+        if object.get("content_kind").and_then(Value::as_str) != Some("json") {
+            if let Some(Value::Array(blocks)) = object.get_mut("content") {
+                for block in blocks {
+                    externalize_media(block, report);
+                }
+            }
+        }
+        return;
+    }
+    // Bedrock Converse's currently supported image block has no type discriminator.
+    // This function is called only for a protocol content block, not tool input JSON.
+    if let Some(image) = object.get_mut("image").and_then(Value::as_object_mut) {
+        if image
+            .get("source")
+            .and_then(|source| source.get("bytes"))
+            .is_some()
+        {
+            image.insert("source".into(), serde_json::json!({
+                "media_externalized": true, "original_wire_bytes": false,
+                "content_capture": "unrecoverable", "reason": "artifact_not_available_at_capture"
+            }));
+            report.record(RedactionKind::MediaUnrecoverable);
+        }
+    }
+    let kind = object
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let media = matches!(
+        kind,
+        "image"
+            | "audio"
+            | "video"
+            | "file"
+            | "document"
+            | "image_url"
+            | "input_image"
+            | "input_audio"
+            | "input_file"
+            | "output_audio"
+            | "base64"
+            | "base64_pdf"
+            | "response.audio.delta"
+            | "response.output_audio.delta"
+            | "response.image_generation_call.partial_image"
+    ) || object.contains_key("inlineData")
+        || object.contains_key("inline_data")
+        || object.contains_key("fileData")
+        || object.contains_key("file_data")
+        || object
+            .get("audio")
+            .and_then(|audio| audio.get("data"))
+            .is_some();
+    if !media {
+        return;
+    }
+    // Plain-text documents and nested document blocks are not binary media.
+    if object
+        .get("source")
+        .and_then(|source| source.get("type"))
+        .and_then(Value::as_str)
+        .is_some_and(|kind| matches!(kind, "plain_text" | "blocks"))
+    {
+        return;
+    }
+    for key in [
+        "source",
+        "image_url",
+        "input_audio",
+        "inlineData",
+        "inline_data",
+        "fileData",
+        "file_data",
+        "data",
+        "url",
+        "file_url",
+        "audio",
+        "delta",
+        "partial_image_b64",
+    ] {
+        let Some(source) = object.get_mut(key) else {
+            continue;
+        };
+        let reference = source
+            .as_str()
+            .or_else(|| source.get("url").and_then(Value::as_str))
+            .filter(|url| url.starts_with("https://stravia/artifact/"))
+            .map(str::to_owned);
+        let mut metadata = serde_json::Map::new();
+        if let Some(fields) = source.as_object() {
+            for name in [
+                "media_type",
+                "mimeType",
+                "mime_type",
+                "filename",
+                "size",
+                "format",
+                "detail",
+                "id",
+                "transcript",
+                "expires_at",
+            ] {
+                if let Some(field) = fields.get(name) {
+                    metadata.insert(name.to_owned(), field.clone());
+                }
+            }
+        }
+        metadata.insert("media_externalized".into(), Value::Bool(true));
+        metadata.insert("original_wire_bytes".into(), Value::Bool(false));
+        if let Some(reference) = reference {
+            metadata.insert("artifact_reference".into(), Value::String(reference));
+            metadata.insert(
+                "content_capture".into(),
+                Value::String("reference_only".into()),
+            );
+            report.record(RedactionKind::MediaExternalized);
+        } else {
+            metadata.insert(
+                "content_capture".into(),
+                Value::String("unrecoverable".into()),
+            );
+            metadata.insert(
+                "reason".into(),
+                Value::String("artifact_not_available_at_capture".into()),
+            );
+            report.record(RedactionKind::MediaUnrecoverable);
+        }
+        *source = Value::Object(metadata);
+    }
+}
+
 fn redact_value_node(value: &mut Value, report: &mut RedactionReport) {
     let mut pending = vec![value];
     while let Some(value) = pending.pop() {
+        if value
+            .as_object()
+            .is_some_and(|object| object.keys().any(|key| key.contains("stravia_upload_")))
+        {
+            crate::agent::upload_grant::scrub_upload_grant_value(value);
+            report.record(RedactionKind::CredentialText);
+        }
         match value {
             Value::Object(object) => {
                 for (key, value) in object {
@@ -982,6 +1341,9 @@ fn is_credential_header(key: &str) -> bool {
 
 const CREDENTIAL_KEY_NAMES: &[&str] = &[
     "key",
+    "uploadkey",
+    "uploadgrant",
+    "straviauploadkey",
     "apikey",
     "accesskey",
     "accesskeyid",

@@ -16,6 +16,7 @@ pub(super) async fn configure_gateway_extensions(
     let web_platform_tools = web_access::internal_platform_tools(gateway);
     let mut runner_tools: Vec<Arc<dyn agent::AgentTool>> = tools
         .iter()
+        .filter(|tool| tool.read_domain().is_none())
         .map(|tool| {
             Arc::new(agent::PlatformToolAgentAdapter::new(Arc::clone(tool), 1))
                 as Arc<dyn agent::AgentTool>
@@ -137,8 +138,10 @@ pub(super) async fn configure_gateway_extensions(
         }),
     );
     *gateway.web_search_runner_state.write().await = Some(search_runner);
-    gateway.hook_runtime = hook_runtime_with_web_search(gateway, hooks, tools)?;
-    gateway.mcp_registry = mcp_registry_with_web_search(gateway, mcp_tools)?;
+    let (hook_runtime, read_tool) = hook_runtime_with_web_search(gateway, hooks, tools)?;
+    gateway.hook_runtime = hook_runtime;
+    mcp_tools.push(Arc::new(read_tool));
+    gateway.mcp_registry = McpToolRegistry::new(mcp_tools)?;
     Ok(())
 }
 struct GatewayWebSearchAuthorizer {
@@ -305,7 +308,7 @@ fn hook_runtime_with_web_search(
     gateway: &Gateway,
     mut hooks: Vec<Arc<dyn Hook>>,
     mut tools: Vec<Arc<dyn PlatformTool>>,
-) -> anyhow::Result<HookRuntime> {
+) -> anyhow::Result<(HookRuntime, crate::mcp::read::ReadTool)> {
     let (builtin_hooks, builtin_tools) = stravia_web_search::builtin_extensions(Arc::new(
         web_search::host::SearchHost(gateway.clone()),
     ));
@@ -313,6 +316,11 @@ fn hook_runtime_with_web_search(
     tools.extend(builtin_tools);
     tools.extend(media::platform_tools(gateway));
     hooks.push(media::planning_hook(gateway));
+    let read_tool = crate::mcp::read::ReadTool::new(gateway, &mut tools)?;
+    tools.push(Arc::new(read_tool.clone()));
+    hooks.push(Arc::new(crate::mcp::read::ReadPlanningHook {
+        tool: read_tool.clone(),
+    }));
 
     let mut hook_ids = std::collections::HashSet::new();
     for hook in &hooks {
@@ -325,13 +333,5 @@ fn hook_runtime_with_web_search(
         }
     }
     let tool_registry = PlatformToolRegistry::new(tools).map_err(anyhow::Error::new)?;
-    Ok(HookRuntime::with_tools(hooks, tool_registry))
-}
-fn mcp_registry_with_web_search(
-    gateway: &Gateway,
-    mut tools: Vec<Arc<dyn McpTool>>,
-) -> anyhow::Result<McpToolRegistry> {
-    tools.extend(web_search::mcp_tools(gateway));
-    tools.extend(media::mcp_tools(gateway));
-    McpToolRegistry::new(tools)
+    Ok((HookRuntime::with_tools(hooks, tool_registry), read_tool))
 }

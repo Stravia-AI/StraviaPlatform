@@ -25,10 +25,7 @@ use stravia_runtime_contract::model_turn::ModelTurnError;
 use stravia_runtime_contract::protocol::ir::AiResponse;
 use stravia_runtime_contract::protocol::ir::ToolCall;
 
-use crate::web_access::WEB_FETCH_NAME;
-use crate::web_access::WEB_SEARCH_NAME;
-use stravia_web_access_contract::WEB_FETCH_TOOL_ID;
-use stravia_web_access_contract::WEB_SEARCH_TOOL_ID;
+use stravia_web_access_contract::{STRAVIA_READ_TOOL_ID, STRAVIA_READ_TOOL_NAME};
 
 struct SchemaRepairModel {
     turns: Arc<AtomicUsize>,
@@ -69,7 +66,7 @@ impl ModelTurnExecutor for SchemaRepairModel {
                         .expect("search tool")
                         .name
                         .clone(),
-                    arguments: serde_json::json!({"query": "verified claim"}).to_string(),
+                    arguments: serde_json::json!({"url": "query://verified%20claim"}).to_string(),
                 }]);
                 response.stop_reason = Some("tool_calls".into());
             }
@@ -169,28 +166,16 @@ async fn local_backend_repairs_schema_without_native_structured_outputs() {
         Arc::new(SchemaRepairModel {
             turns: Arc::clone(&turns),
         }),
-        vec![
-            Arc::new(PlatformToolAgentAdapter::with_id(
-                Arc::new(SearchLeaf {
-                    id: WEB_SEARCH_TOOL_ID,
-                    name: WEB_SEARCH_NAME,
-                }),
-                VersionedToolId {
-                    id: WEB_SEARCH_TOOL_ID.into(),
-                    version: 1,
-                },
-            )),
-            Arc::new(PlatformToolAgentAdapter::with_id(
-                Arc::new(SearchLeaf {
-                    id: WEB_FETCH_TOOL_ID,
-                    name: WEB_FETCH_NAME,
-                }),
-                VersionedToolId {
-                    id: WEB_FETCH_TOOL_ID.into(),
-                    version: 1,
-                },
-            )),
-        ],
+        vec![Arc::new(PlatformToolAgentAdapter::with_id(
+            Arc::new(SearchLeaf {
+                id: STRAVIA_READ_TOOL_ID,
+                name: STRAVIA_READ_TOOL_NAME,
+            }),
+            VersionedToolId {
+                id: STRAVIA_READ_TOOL_ID.into(),
+                version: 1,
+            },
+        ))],
         Arc::new(crate::turn_chain::test_store().await),
     )
     .expect("Agent Runner")

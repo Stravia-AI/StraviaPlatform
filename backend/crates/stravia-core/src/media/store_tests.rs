@@ -203,11 +203,12 @@ mod tests {
             Err(MediaStoreError::Unavailable)
         ));
 
-        sqlx::query("UPDATE artifacts SET expires_at = 0 WHERE principal = ?")
-            .bind(owner.continuation_key())
-            .execute(&pool)
-            .await
-            .expect("expire media");
+        let original_expiry: i64 =
+            sqlx::query_scalar("SELECT expires_at FROM artifacts WHERE id = ?")
+                .bind(source.id.as_str())
+                .fetch_one(&pool)
+                .await
+                .expect("live source expiry");
         assert!(matches!(
             store
                 .promote(
@@ -224,7 +225,7 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .expect("source expiry after failed promotion");
-        assert_eq!(source_expiry, 0);
+        assert_eq!(source_expiry, original_expiry);
         store
             .promote(
                 &owner,

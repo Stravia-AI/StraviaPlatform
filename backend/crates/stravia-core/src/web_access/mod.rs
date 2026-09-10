@@ -13,7 +13,7 @@ type RuntimeConfig = (
     WebAccessApiKeyPermissions,
 );
 
-pub(crate) use platform::internal_platform_tools;
+pub(crate) use platform::{decode_query_url, internal_platform_tools};
 use stravia_web_access_contract::WebAccessError;
 
 mod types;

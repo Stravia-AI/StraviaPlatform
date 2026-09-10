@@ -183,6 +183,13 @@ impl Gateway {
             };
         let redaction =
             crate::reversible_redaction::ReversibleRedaction::new(Arc::clone(&storage), mappings);
+        let upload_grants = Arc::new(
+            agent::upload_grant::UploadGrantIssuer::load(
+                history_sqlite_pool.as_ref(),
+                postgres_pool.as_ref(),
+            )
+            .await?,
+        );
 
         let (artifact_store, media_derivatives): (
             Option<Arc<dyn stravia_runtime_contract::artifact::ArtifactStore>>,
@@ -218,6 +225,20 @@ impl Gateway {
         } else {
             (None, None)
         };
+        if let Some(store) = artifact_store.as_ref() {
+            let settings = storage
+                .settings()
+                .get("artifact_settings")
+                .await?
+                .map(|value| {
+                    serde_json::from_str::<stravia_runtime_contract::artifact::ArtifactSettings>(
+                        &value,
+                    )
+                })
+                .transpose()?
+                .unwrap_or_default();
+            store.configure(&settings).await?;
+        }
         let compaction = if let Some(pool) = history_sqlite_pool.as_ref() {
             crate::compaction::Compaction::sqlite(pool.clone())
         } else {
@@ -280,6 +301,7 @@ impl Gateway {
             auth_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             agent_definitions,
             artifact_store,
+            upload_grants,
             media_run_snapshots: stravia_media::MediaRunSnapshotStore::default(),
             media_derivatives,
             media_understanding: Arc::new(tokio::sync::RwLock::new(None)),

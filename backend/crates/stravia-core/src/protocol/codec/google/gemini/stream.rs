@@ -72,7 +72,11 @@ impl GoogleResponseParser {
                     continue;
                 }
 
-                items.push(AiItem::unknown(part.clone()));
+                if let Some(item) = google_media_item(part)? {
+                    items.push(item);
+                } else {
+                    items.push(AiItem::unknown(part.clone()));
+                }
             }
         }
 
@@ -333,6 +337,10 @@ fn parse_gemini_chunk(
                     });
                 }
                 GeminiStreamPart::Other(raw) => {
+                    if let Some(item) = google_media_item(raw)? {
+                        deltas.push(AiStreamDelta::ItemDone { index: 0, item });
+                        continue;
+                    }
                     if raw.as_object().is_some_and(|fields| {
                         fields.contains_key("text") || fields.contains_key("functionCall")
                     }) {
@@ -443,6 +451,9 @@ impl GoogleStreamFormatter {
                     self.emit_thinking_signature(&mut events, signature);
                 }
                 AiStreamDelta::ItemDone { item, .. } => {
+                    if let Some(part) = google_media_part(item) {
+                        events.push(SseEvent::new(None, serde_json::json!({"candidates":[{"content":{"role":"model","parts":[part]}}],"modelVersion":self.model}).to_string()));
+                    }
                     if let Some((_, _, Some(signature))) = item.reasoning_ref()
                         && !signature.is_empty()
                     {
@@ -608,11 +619,98 @@ fn google_parts_from_response(resp: &AiResponse) -> Vec<Value> {
             parts.push(serde_json::json!({
                 "functionCall": {"id": call.id, "name": call.name, "args": args}
             }));
+        } else if let Some(part) = google_media_part(item) {
+            parts.push(part);
         } else if let Some(raw) = item.unknown_ref() {
             parts.push(raw.clone());
         }
     }
     parts
+}
+
+fn google_media_part(item: &AiItem) -> Option<Value> {
+    use stravia_runtime_contract::protocol::ir::{ContentBlock, MessageContent};
+    let MessageContent::Blocks(blocks) = &item.content else {
+        return None;
+    };
+    let [
+        block @ (ContentBlock::Image { .. }
+        | ContentBlock::Audio { .. }
+        | ContentBlock::Video { .. }
+        | ContentBlock::File { .. }),
+    ] = blocks.as_slice()
+    else {
+        return None;
+    };
+    let mut part = super::encoder::encode_content_block_for_gemini(block, &HashMap::new());
+    if let Some(extra) = item
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get("__google_media_part"))
+        .and_then(Value::as_object)
+    {
+        part.as_object_mut()?.extend(
+            extra
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone())),
+        );
+    }
+    Some(part)
+}
+
+fn google_media_item(part: &Value) -> Result<Option<AiItem>> {
+    use stravia_runtime_contract::protocol::ir::{ContentBlock, MediaSource, MessageContent, Role};
+    let Some(data) = part.get("inlineData") else {
+        return Ok(None);
+    };
+    let mime = data
+        .get("mimeType")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("Gemini inlineData is missing mimeType"))?;
+    let data = data
+        .get("data")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("Gemini inlineData is missing data"))?;
+    let source = MediaSource::Base64 {
+        media_type: mime.to_owned(),
+        data: data.to_owned(),
+    };
+    let block = if mime.starts_with("image/") {
+        ContentBlock::Image {
+            source,
+            detail: None,
+            cache_control: None,
+        }
+    } else if mime.starts_with("audio/") {
+        ContentBlock::Audio { source }
+    } else if mime.starts_with("video/") {
+        ContentBlock::Video {
+            source,
+            media_type: Some(mime.to_owned()),
+        }
+    } else {
+        ContentBlock::File {
+            source,
+            media_type: Some(mime.to_owned()),
+        }
+    };
+    let extra = part
+        .as_object()
+        .map(|fields| {
+            fields
+                .iter()
+                .filter(|(key, _)| key.as_str() != "inlineData")
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect::<Map<String, Value>>()
+        })
+        .unwrap_or_default();
+    Ok(Some(AiItem {
+        role: Role::Assistant,
+        content: MessageContent::Blocks(vec![block]),
+        tool_calls: None,
+        tool_call_id: None,
+        meta: Some(serde_json::json!({"__google_media_part": extra})),
+    }))
 }
 
 fn is_plain_text_part(part: &Value) -> bool {

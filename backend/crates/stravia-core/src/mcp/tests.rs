@@ -293,41 +293,43 @@ async fn serve_media_report(
     let calls = Arc::new(AtomicUsize::new(0));
     let observed = calls.clone();
     tokio::spawn(async move {
-        let (mut socket, _) = listener.accept().await.expect("Media provider request");
-        let mut request = vec![0_u8; 32 * 1024];
-        let read = socket.read(&mut request).await.expect("read Media request");
-        observed.fetch_add(1, Ordering::SeqCst);
-        assert!(
-            String::from_utf8_lossy(&request[..read]).contains("data:image/jpeg;base64"),
-            "Media Model must receive the JPEG derivative"
-        );
-        let report = json!({
+        for _ in 0..2 {
+            let (mut socket, _) = listener.accept().await.expect("Media provider request");
+            let mut request = vec![0_u8; 32 * 1024];
+            let read = socket.read(&mut request).await.expect("read Media request");
+            observed.fetch_add(1, Ordering::SeqCst);
+            assert!(
+                String::from_utf8_lossy(&request[..read]).contains("data:image/jpeg;base64"),
+                "Media Model must receive the JPEG derivative"
+            );
+            let report = json!({
             "answer": format!("Direct MCP understood the image [artifact:{}]", source_id.as_str()),
             "artifacts": [{"artifact_id": source_id}],
             "limitations": []
         })
         .to_string();
-        let body = json!({
-            "id": "chatcmpl-media",
-            "object": "chat.completion",
-            "created": 1,
-            "model": "vision",
-            "choices": [{
-                "index": 0,
-                "message": {"role": "assistant", "content": report},
-                "finish_reason": "stop"
-            }],
-            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
-        })
-        .to_string();
-        let response = format!(
-            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-            body.len()
-        );
-        socket
-            .write_all(response.as_bytes())
-            .await
-            .expect("write Media response");
+            let body = json!({
+                "id": "chatcmpl-media",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "vision",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": report},
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write Media response");
+        }
     });
     (format!("http://{address}/v1"), calls)
 }
@@ -433,6 +435,18 @@ async fn media_test_app() -> (
         .await
         .expect("MCP listener");
     let address = listener.local_addr().expect("MCP address");
+    gateway
+        .admin()
+        .set_setting(
+            "artifact_settings",
+            &serde_json::to_string(&crate::agent::artifact::ArtifactSettings {
+                client_base_url: format!("http://{address}"),
+                ..Default::default()
+            })
+            .expect("Artifact settings"),
+        )
+        .await
+        .expect("configure Artifact downloads");
     let app = crate::proxy::server::create_router(gateway.clone());
     let server = tokio::spawn(async move {
         axum::serve(listener, app).await.expect("MCP test server");
@@ -542,9 +556,11 @@ async fn official_client_discovers_lists_and_calls_tools() {
     assert_server_metadata(listed.meta.as_ref());
     assert_eq!(listed.cache_scope, Some(rmcp::model::CacheScope::Private));
     assert_eq!(listed.ttl_ms, Some(0));
-    assert_eq!(listed.tools.len(), 1);
-    let tool = &listed.tools[0];
-    assert_eq!(tool.name, "echo");
+    let tool = listed
+        .tools
+        .iter()
+        .find(|tool| tool.name == "echo")
+        .expect("registered Echo tool");
     assert_eq!(tool.description.as_deref(), Some("Echo an integer"));
     let encoded = serde_json::to_value(tool).expect("tool schema");
     assert_eq!(
@@ -708,22 +724,28 @@ async fn official_client_calls_media_with_a_principal_owned_artifact() {
     let (app, source_id, media_calls) = media_test_app().await;
     let client = connect(&app).await;
     let listed = client.list_tools(None).await.expect("tools/list");
-    assert!(
-        listed
-            .tools
-            .iter()
-            .any(|tool| tool.name == "understand_media")
-    );
+    assert!(listed.tools.iter().any(|tool| tool.name == "StraviaRead"));
+    for name in ["understand_media", "web_search", "web_fetch"] {
+        assert!(listed.tools.iter().all(|tool| tool.name != name));
+        let rejected = client
+            .call_tool(CallToolRequestParams::new(name).with_arguments(serde_json::Map::new()))
+            .await
+            .expect_err("removed alias must be rejected by the MCP protocol");
+        assert!(matches!(
+            rejected,
+            rmcp::ServiceError::McpError(error)
+                if error.code == rmcp::model::ErrorCode::INVALID_PARAMS
+        ));
+    }
     let arguments = json!({
-        "prompt": "Describe the image",
-        "artifacts": [{"artifact_id": source_id}]
+        "url": format!("https://stravia/artifact/{}?question=Describe%20the%20image", source_id.as_str())
     })
     .as_object()
     .expect("Media arguments")
     .clone();
 
     let result = client
-        .call_tool(CallToolRequestParams::new("understand_media").with_arguments(arguments))
+        .call_tool(CallToolRequestParams::new("StraviaRead").with_arguments(arguments))
         .await
         .expect("Media tools/call");
 
@@ -744,11 +766,47 @@ async fn official_client_calls_media_with_a_principal_owned_artifact() {
             .is_some_and(|answer| answer.contains("Direct MCP understood"))
     );
     assert_eq!(media_calls.load(Ordering::SeqCst), 1);
+
+    let previous_turn_id = structured["turn_id"].as_str().expect("first Media Turn");
+    let continued = client
+        .call_tool(CallToolRequestParams::new("StraviaRead").with_arguments(
+            json!({
+                "url": format!("https://stravia/artifact/{}?question=What%20else%20is%20visible", source_id.as_str()),
+                "previous_turn_id": previous_turn_id,
+            }).as_object().expect("continuation arguments").clone(),
+        ))
+        .await
+        .expect("Media continuation");
+    assert_ne!(
+        continued.is_error,
+        Some(true),
+        "{:?}",
+        continued.structured_content
+    );
+    let continued = continued
+        .structured_content
+        .expect("continued Media result");
+    assert_ne!(
+        continued["turn_id"].as_str().expect("next Media Turn"),
+        previous_turn_id
+    );
+    assert_eq!(
+        continued["report"]["artifacts"][0]["artifact_id"],
+        source_id.as_str()
+    );
+    assert!(
+        continued["report"]["answer"]
+            .as_str()
+            .is_some_and(|answer| {
+                answer.contains(&format!("[artifact:{}]", source_id.as_str()))
+            })
+    );
+    assert_eq!(media_calls.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
-async fn media_platform_gate_removes_the_tool_from_mcp_discovery() {
-    let (app, _, media_calls) = media_test_app().await;
+async fn artifact_download_remains_available_without_media_and_rejects_other_principals() {
+    let (app, source_id, media_calls) = media_test_app().await;
     let current = app
         .gateway
         .admin()
@@ -766,13 +824,81 @@ async fn media_platform_gate_removes_the_tool_from_mcp_discovery() {
         .expect("disable Media Understanding");
 
     let client = connect(&app).await;
-    let listed = client.list_tools(None).await.expect("tools/list");
-    assert!(
-        listed
-            .tools
-            .iter()
-            .all(|tool| tool.name != "understand_media")
+    let reference = format!("https://stravia/artifact/{}", source_id.as_str());
+    let read_arguments = json!({"url": reference})
+        .as_object()
+        .expect("read arguments")
+        .clone();
+    let result = client
+        .call_tool(CallToolRequestParams::new("StraviaRead").with_arguments(read_arguments.clone()))
+        .await
+        .expect("Artifact download grant");
+    assert_ne!(
+        result.is_error,
+        Some(true),
+        "{:?}",
+        result.structured_content
     );
+    let download = result.structured_content.expect("download information");
+    assert_eq!(download["artifact_reference"], reference);
+    let response = reqwest::get(download["download_url"].as_str().expect("download URL"))
+        .await
+        .expect("signed file download");
+    assert!(response.status().is_success());
+    assert_eq!(
+        response.bytes().await.expect("downloaded file").as_ref(),
+        base64::engine::general_purpose::STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+            .expect("source PNG").as_slice()
+    );
+    let understanding = client
+        .call_tool(
+            CallToolRequestParams::new("StraviaRead").with_arguments(
+                json!({"url": format!("{reference}?question=Describe")})
+                    .as_object()
+                    .expect("question arguments")
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("disabled understanding result");
+    assert_eq!(understanding.is_error, Some(true));
+
+    let other = app
+        .gateway
+        .admin()
+        .create_api_key(crate::db::models::CreateApiKey {
+            key: None,
+            name: "Other MCP owner".into(),
+            concurrency_limit: None,
+            expires_at: None,
+            mcp_access_enabled: true,
+            transparent_injection_enabled: false,
+            inject_web_search: false,
+            model_ids: vec![],
+            inject_media_understanding: false,
+        })
+        .await
+        .expect("other API key");
+    let transport = StreamableHttpClientTransport::with_client(
+        reqwest::Client::new(),
+        StreamableHttpClientTransportConfig::with_uri(app.endpoint.clone())
+            .auth_header(other.token),
+    );
+    let other_client = ClientInfo::default()
+        .serve_with_lifecycle(
+            transport,
+            ClientLifecycleMode::Discover {
+                preferred_versions: vec![ProtocolVersion::V_2026_07_28],
+            },
+        )
+        .await
+        .expect("other MCP client");
+    let denied = other_client
+        .call_tool(CallToolRequestParams::new("StraviaRead").with_arguments(read_arguments))
+        .await
+        .expect("ownership rejection");
+    assert_eq!(denied.is_error, Some(true));
     assert_eq!(media_calls.load(Ordering::SeqCst), 0);
 }
 
@@ -801,12 +927,7 @@ async fn media_tool_requires_mcp_access_independently_from_transparent_injection
         .expect("disable MCP access");
 
     let listed = client.list_tools(None).await.expect("tools/list");
-    assert!(
-        listed
-            .tools
-            .iter()
-            .all(|tool| tool.name != "understand_media")
-    );
+    assert!(listed.tools.iter().all(|tool| tool.name != "StraviaRead"));
     assert_eq!(media_calls.load(Ordering::SeqCst), 0);
 }
 
@@ -848,7 +969,7 @@ async fn web_search_requires_mcp_access_independently_from_transparent_injection
 
     let client = connect(&app).await;
     let listed = client.list_tools(None).await.expect("tools/list");
-    assert!(listed.tools.iter().any(|tool| tool.name == "web_search"));
+    assert!(listed.tools.iter().any(|tool| tool.name == "StraviaRead"));
 
     app.gateway
         .admin()
@@ -871,11 +992,11 @@ async fn web_search_requires_mcp_access_independently_from_transparent_injection
         .expect("disable MCP access");
 
     let listed = client.list_tools(None).await.expect("tools/list");
-    assert!(listed.tools.iter().all(|tool| tool.name != "web_search"));
+    assert!(listed.tools.iter().all(|tool| tool.name != "StraviaRead"));
     let mut arguments = serde_json::Map::new();
-    arguments.insert("query".into(), json!("Search the claim"));
+    arguments.insert("url".into(), json!("query://Search%20the%20claim"));
     let unavailable = client
-        .call_tool(CallToolRequestParams::new("web_search").with_arguments(arguments))
+        .call_tool(CallToolRequestParams::new("StraviaRead").with_arguments(arguments))
         .await
         .expect("structured unavailable result");
     assert_eq!(unavailable.is_error, Some(true));

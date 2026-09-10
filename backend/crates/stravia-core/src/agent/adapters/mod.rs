@@ -108,6 +108,7 @@ impl AgentTool for PlatformToolAgentAdapter {
                     request_id: context.turn_id.to_string(),
                     run_id: context.turn_id.to_string(),
                     principal: context.principal,
+                    read_scope: stravia_runtime_contract::hook::ReadExposureScope::FULL,
                     cancellation: context.cancellation,
                     progress: None,
                 },

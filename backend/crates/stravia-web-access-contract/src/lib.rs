@@ -271,8 +271,8 @@ pub fn failed_fetch_result(
     }
 }
 
-pub const WEB_SEARCH_TOOL_ID: &str = "web-access.search";
-pub const WEB_FETCH_TOOL_ID: &str = "web-access.fetch";
+pub const STRAVIA_READ_TOOL_ID: &str = "stravia-read";
+pub const STRAVIA_READ_TOOL_NAME: &str = "StraviaRead";
 
 #[derive(Debug, thiserror::Error)]
 #[error("{code:?}: {message}")]

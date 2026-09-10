@@ -4,12 +4,10 @@ use stravia_runtime_contract::Principal;
 use crate::host::MediaRoute as Route;
 use stravia_runtime_contract::hook::{
     ActionBatch, EventKind, Hook, HookAction, HookDescriptor, HookEvent, HookId, HookRejection,
-    HookSession, RequestKind, RequestPatch, ResponsePatch, SessionContext, ToolId,
+    HookSession, ReadExposureScope, RequestKind, RequestPatch, ResponsePatch, SessionContext,
 };
 use stravia_runtime_contract::protocol::ir::AiItem;
 use stravia_runtime_contract::protocol::ir::request::{MediaRoutingMode, MediaRoutingPlan};
-
-use super::platform::MEDIA_TOOL_ID;
 
 pub fn hook(gateway: &crate::host::MediaRuntime) -> std::sync::Arc<dyn Hook> {
     std::sync::Arc::new(MediaPlanningHook {
@@ -44,7 +42,7 @@ impl Hook for MediaPlanningHook {
             run_id: context.run_id.clone(),
             media_deadline: std::time::Instant::now() + super::MEDIA_TOTAL_WALL_TIME,
             inherited_media_turns: context.inherited_media_turns.clone(),
-            internal_agent: context.run_id.starts_with("aturn_"),
+            internal_agent: context.tools_fixed,
             planned: false,
             bridge_active: false,
             project_results: context.ingress
@@ -77,7 +75,7 @@ impl Drop for MediaPlanningSession {
 impl HookSession for MediaPlanningSession {
     async fn handle(&mut self, event: HookEvent<'_>) -> Result<ActionBatch, String> {
         if let HookEvent::ToolResult { result, .. } = &event {
-            if result.tool_id.as_str() == MEDIA_TOOL_ID
+            if result.tool_id.as_str() == "stravia-read"
                 && !result.is_error
                 && let Some(value) = result.metadata.get("stravia_media")
             {
@@ -95,7 +93,10 @@ impl HookSession for MediaPlanningSession {
             )));
         }
         let HookEvent::Request {
-            current, session, ..
+            current,
+            read_scope,
+            session,
+            ..
         } = event
         else {
             return Ok(ActionBatch::default());
@@ -142,7 +143,7 @@ impl HookSession for MediaPlanningSession {
                     "No eligible Target can continue Media Understanding",
                 ));
             }
-            if !transparent_bridge_available(&self.gateway, &self.principal).await {
+            if !transparent_bridge_available(&self.gateway, &self.principal, read_scope).await {
                 return Ok(reject(
                     503,
                     "media_understanding_unavailable",
@@ -161,7 +162,10 @@ impl HookSession for MediaPlanningSession {
                     HookAction::PatchRequest(Box::new(RequestPatch::ReplaceCanonical(Box::new(
                         request,
                     )))),
-                    HookAction::ExposeTool(ToolId::new(MEDIA_TOOL_ID)),
+                    HookAction::ExposeRead {
+                        scope: ReadExposureScope::new(false, true),
+                        description: "Read an Artifact Reference with ?question= to understand its media content.".into(),
+                    },
                 ],
             });
         }
@@ -194,7 +198,7 @@ impl HookSession for MediaPlanningSession {
             });
         }
         if bridge_targets.is_empty()
-            || !transparent_bridge_available(&self.gateway, &self.principal).await
+            || !transparent_bridge_available(&self.gateway, &self.principal, read_scope).await
         {
             return Ok(reject(
                 400,
@@ -247,7 +251,10 @@ impl HookSession for MediaPlanningSession {
                 HookAction::PatchRequest(Box::new(RequestPatch::ReplaceCanonical(Box::new(
                     request,
                 )))),
-                HookAction::ExposeTool(ToolId::new(MEDIA_TOOL_ID)),
+                HookAction::ExposeRead {
+                        scope: ReadExposureScope::new(false, true),
+                        description: "Read an Artifact Reference with ?question= to understand its media content.".into(),
+                    },
             ],
         })
     }
@@ -260,9 +267,10 @@ impl HookSession for MediaPlanningSession {
 async fn transparent_bridge_available(
     gateway: &crate::host::MediaRuntime,
     principal: &Principal,
+    read_scope: ReadExposureScope,
 ) -> bool {
     super::platform::is_available(gateway, principal).await
-        && gateway.host.transparent_injection_enabled(principal).await
+        && (read_scope.media() || gateway.host.transparent_injection_enabled(principal).await)
 }
 
 fn materialize_media_turns(
@@ -297,10 +305,23 @@ fn materialize_media_turns(
                 continue;
             };
             turn_ids.push(stravia_runtime_contract::agent::AgentTurnId::new(turn_id));
-            *block = stravia_runtime_contract::protocol::ir::ContentBlock::Text {
-                text: format!(
+            let reference = raw
+                .get("artifact_reference")
+                .and_then(serde_json::Value::as_str)
+                .filter(|reference| {
+                    stravia_runtime_contract::artifact::ArtifactId::from_reference(reference)
+                        .is_ok()
+                });
+            let text = match reference {
+                Some(reference) => format!(
+                    "[stravia_media_turn turn_id=\"{turn_id}\" completion=\"{completion}\" artifact_reference=\"{reference}\"]"
+                ),
+                None => format!(
                     "[stravia_media_turn turn_id=\"{turn_id}\" completion=\"{completion}\"]"
                 ),
+            };
+            *block = stravia_runtime_contract::protocol::ir::ContentBlock::Text {
+                text,
                 cache_control: None,
             };
         }
@@ -370,6 +391,7 @@ fn project_media_results(
             "status": "completed",
             "turn_id": result.get("turn_id")?.as_str()?,
             "completion": result.get("completion")?.as_str()?,
+            "artifact_reference": result.get("artifact_reference"),
         })))
     });
     response.items.splice(0..0, projected);

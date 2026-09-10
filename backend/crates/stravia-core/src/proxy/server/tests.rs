@@ -1,7 +1,6 @@
 use crate::config::GatewayConfig;
 use crate::db::models::{
-    CreateProvider, CreateRoute, CreateWebProvider, ProviderCredentialInput, ProviderSourceInput,
-    WebAccessSettings,
+    CreateProvider, CreateRoute, ProviderCredentialInput, ProviderSourceInput,
 };
 use crate::provider_models::CreateManualProviderModel;
 use axum::{
@@ -548,7 +547,7 @@ async fn responses_websocket_rejects_unknown_event_types() {
     server.abort();
 }
 #[tokio::test]
-async fn responses_native_web_search_is_concealed_when_search_is_unavailable() {
+async fn responses_rejects_removed_platform_web_search_extension() {
     let data_dir = tempfile::tempdir().expect("temp data dir");
     let config = GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
@@ -610,24 +609,6 @@ async fn responses_native_web_search_is_concealed_when_search_is_unavailable() {
         })
         .await
         .expect("API key");
-    let web_provider = admin
-        .create_web_provider(CreateWebProvider {
-            name: "Exa".into(),
-            kind: "exa".into(),
-            api_key: Some("secret".into()),
-            use_proxy: false,
-            local_engines: None,
-        })
-        .await
-        .expect("Web Provider");
-    admin
-        .update_web_access_settings(WebAccessSettings {
-            search_provider_ids: vec![web_provider.id],
-            fetch_provider_ids: vec![],
-        })
-        .await
-        .expect("Web Access settings");
-
     let response = create_router(gateway)
         .oneshot(
             Request::post("/v1/responses")
@@ -645,14 +626,7 @@ async fn responses_native_web_search_is_concealed_when_search_is_unavailable() {
         )
         .await
         .expect("Responses response");
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    let body: serde_json::Value = serde_json::from_slice(
-        &to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("response body"),
-    )
-    .expect("response JSON");
-    assert_eq!(body["error"]["code"], "web_search_unavailable", "{body}");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 #[tokio::test]
 async fn artifact_upload_is_api_key_scoped_and_completes() {

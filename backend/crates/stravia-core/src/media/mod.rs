@@ -21,8 +21,7 @@ use stravia_runtime_contract::artifact::ArtifactReader;
 use stravia_runtime_contract::artifact::ArtifactRef;
 use stravia_runtime_contract::artifact::ArtifactStore;
 
-mod mcp;
-pub(crate) use mcp::tools as mcp_tools;
+pub(crate) mod ingest;
 
 pub(crate) struct AgentHost(pub AgentRunner);
 #[async_trait]
@@ -59,7 +58,13 @@ impl MediaArtifactHost for ArtifactHost {
         retention: Duration,
     ) -> Result<ArtifactRef, ArtifactError> {
         self.0
-            .create_ready_bytes(principal, mime_type, bytes, retention)
+            .ingest(
+                principal,
+                mime_type,
+                Some(bytes.len() as u64),
+                stravia_runtime_contract::artifact::bytes_stream(bytes),
+                retention,
+            )
             .await
     }
     async fn open(
@@ -207,6 +212,8 @@ pub(crate) fn supports_image(metadata: &crate::provider_models::ProviderModelMet
     )
 }
 
+#[cfg(test)]
+mod ingest_tests;
 #[cfg(test)]
 mod preprocessor_tests;
 #[cfg(test)]

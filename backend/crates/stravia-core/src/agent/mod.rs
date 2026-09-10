@@ -1,9 +1,10 @@
 mod adapters;
-mod artifact;
+pub mod artifact;
 mod definition;
 mod definition_store;
 mod runner;
 mod tool;
+pub(crate) mod upload_grant;
 pub(crate) use adapters::{AgentCallMcpTool, AgentCallPlatformTool, AgentDefinitionHook};
 pub use adapters::{
     McpToolAgentAdapter, PlatformToolAgentAdapter, RemoteMcpToolSource, discover_remote_mcp_tools,

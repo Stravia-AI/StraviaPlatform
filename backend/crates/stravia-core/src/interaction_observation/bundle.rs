@@ -225,6 +225,9 @@ struct BundleManifest<'a> {
     rejected_request: Option<CaptureManifest<'a>>,
     redaction: RedactionDeclaration,
     fidelity: &'static str,
+    media_content: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    externalized_media: Option<&'a Value>,
 }
 
 #[derive(Serialize)]
@@ -291,9 +294,11 @@ impl<'a> BundleManifest<'a> {
                     "recursive_structured_credential_fields",
                     "credential_patterns_in_errors",
                 ],
-                opaque_binary: "preserved_as_base64_without_structured_field_interpretation",
+                opaque_binary: "new_uninterpretable_binary_omitted_legacy_records_unchanged",
             },
             fidelity: "application_protocol_capture_not_packet_capture",
+            media_content: "references_only_not_complete_media_capture",
+            externalized_media: snapshot.summary.get("externalized_media"),
         }
     }
 }
@@ -325,7 +330,16 @@ fn bundle_completeness(snapshot: &BundleSnapshot) -> &'static str {
         snapshot.resource_status.as_str(),
         "running" | "waiting_client"
     );
-    if terminal && statuses.iter().all(|status| *status == "complete") {
+    let unrecoverable = snapshot
+        .summary
+        .get("externalized_media")
+        .and_then(Value::as_array)
+        .is_some_and(|media| {
+            media.iter().any(|item| {
+                item.get("content_capture").and_then(Value::as_str) == Some("unrecoverable")
+            })
+        });
+    if terminal && !unrecoverable && statuses.iter().all(|status| *status == "complete") {
         "complete"
     } else {
         "partial"
@@ -416,7 +430,7 @@ impl Write for ChunkWriter {
     }
 }
 
-const README: &str = "Stravia Interaction Debug Bundle\n\nSchema version: 1\n\nThis archive contains application-protocol observations captured at Stravia adapter boundaries. It is not a packet capture and does not preserve TLS records, TCP packets, HTTP/2 frames, or operating-system network framing. HTTP body chunks, SSE bytes, and WebSocket messages reflect the application adapters' observed boundaries.\n\nCredential headers, URL userinfo, credential-like query values, recursive structured credential fields, and recognizable credential patterns in errors are permanently replaced with *** before persistence. Credential patterns in business text are interpreted within each application message, not by joining text across multiple messages. Opaque non-UTF-8 application payloads are preserved as base64 and are not interpreted as structured fields. Other prompts, tool arguments/results, binary content, and business content may remain sensitive.\n\nCompleteness is declared in manifest.json. complete means every applicable Debug trace for a terminal resource is present. partial includes running point-in-time snapshots, mixed Debug enablement, writer/capacity/storage gaps, and missing applicable records. none means no applicable Debug trace is available. Each run entry gives its own capture status, byte counts, and stable reasons. The export is fixed through through_event_sequence; later activity is not included.\n";
+const README: &str = "Stravia Interaction Debug Bundle\n\nSchema version: 1\n\nThis archive contains application-protocol observations captured at Stravia adapter boundaries. It is not a packet capture and does not preserve TLS records, TCP packets, HTTP/2 frames, or operating-system network framing. HTTP body chunks, SSE bytes, and WebSocket messages reflect the application adapters' observed boundaries.\n\nCredential headers, URL userinfo, credential-like query values, recursive structured credential fields, and recognizable credential patterns in errors are permanently replaced with *** before persistence. Credential patterns in business text are interpreted within each application message, not by joining text across multiple messages. Reserved upload grants are always replaced with <stravia-upload-key>, including expired grants, independently of reversible redaction. New structured media captures contain externalized Artifact references and metadata, not media base64 or original wire bytes. When normalization is unavailable, media is explicitly omitted as unrecoverable. New uninterpretable binary payloads are omitted; legacy records remain unchanged. Artifact availability at export is declared in externalized_media; expired or unavailable content is unrecoverable. Reference-only captures are not complete media captures and the bundle does not embed file bodies. Other prompts, tool arguments/results, and business content may remain sensitive.\n\nCompleteness is declared in manifest.json. complete means every applicable Debug trace for a terminal resource is present. partial includes running point-in-time snapshots, mixed Debug enablement, writer/capacity/storage gaps, and missing applicable records. none means no applicable Debug trace is available. Each run entry gives its own capture status, byte counts, and stable reasons. The export is fixed through through_event_sequence; later activity is not included.\n";
 
 #[cfg(test)]
 mod tests {
