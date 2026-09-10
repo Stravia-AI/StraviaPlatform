@@ -149,7 +149,6 @@ jobs:
             target: x86_64-unknown-linux-musl
             libc: musl
             binary: target/x86_64-unknown-linux-musl/release/stravia-server
-            v8_sha256: 68f284fb8184b9f9e8d7e23b8f2675dbe464f43f77c0bf152f705bf7ead29558
           - runner: ubuntu-24.04-arm
             suffix: linux-aarch64-gnu
             target: ""
@@ -160,7 +159,6 @@ jobs:
             target: aarch64-unknown-linux-musl
             libc: musl
             binary: target/aarch64-unknown-linux-musl/release/stravia-server
-            v8_sha256: 419a242557833151cf9dde82c12c8272c3c00015bfe7e340e48164a600d34039
           - runner: windows-2022
             suffix: windows-x86_64
             target: ""
@@ -285,16 +283,12 @@ jobs:
           export PKG_CONFIG_LIBDIR="${sysroot}/usr/lib/pkgconfig"
           pkg-config --static --libs fontconfig
 
-          # Zig 始终为 C++ 链接 libc++，而上游 musl 归档也内置了 stdexcept.o。
-          # 删除归档中的单个冲突对象，其他 V8 对象仍使用 Zig 提供的同 ABI libc++。
-          v8_archive_gz="${RUNNER_TEMP}/librusty_v8.a.gz"
-          v8_archive="${RUNNER_TEMP}/librusty_v8.a"
-          curl --fail --location --output "${v8_archive_gz}" \
-            "https://github.com/denoland/rusty_v8/releases/download/v152.2.0/librusty_v8_release_${{ matrix.target }}.a.gz"
-          echo "${{ matrix.v8_sha256 }}  ${v8_archive_gz}" | sha256sum --check -
-          gzip --decompress --stdout "${v8_archive_gz}" > "${v8_archive}"
-          ar d "${v8_archive}" stdexcept.o
-          export RUSTY_V8_ARCHIVE="${v8_archive}"
+          # 上游 musl V8 归档携带 Chromium ABI 的 libc++；丢弃依赖注入的系统
+          # C++ 标准库参数，避免 Zig 追加 ABI 不兼容的第二份 libc++。
+          chmod +x .github/scripts/zig-with-v8-libcxx.sh
+          export STRAVIA_REAL_ZIG
+          STRAVIA_REAL_ZIG="$(command -v zig)"
+          export CARGO_ZIGBUILD_ZIG_PATH="${GITHUB_WORKSPACE}/.github/scripts/zig-with-v8-libcxx.sh"
 
           cargo zigbuild --locked --release -p stravia-server --target "${{ matrix.target }}"
 
