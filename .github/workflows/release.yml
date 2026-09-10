@@ -149,6 +149,7 @@ jobs:
             target: x86_64-unknown-linux-musl
             libc: musl
             binary: target/x86_64-unknown-linux-musl/release/stravia-server
+            v8_sha256: 68f284fb8184b9f9e8d7e23b8f2675dbe464f43f77c0bf152f705bf7ead29558
           - runner: ubuntu-24.04-arm
             suffix: linux-aarch64-gnu
             target: ""
@@ -159,6 +160,7 @@ jobs:
             target: aarch64-unknown-linux-musl
             libc: musl
             binary: target/aarch64-unknown-linux-musl/release/stravia-server
+            v8_sha256: 419a242557833151cf9dde82c12c8272c3c00015bfe7e340e48164a600d34039
           - runner: windows-2022
             suffix: windows-x86_64
             target: ""
@@ -282,11 +284,19 @@ jobs:
           export PKG_CONFIG_SYSROOT_DIR="${sysroot}"
           export PKG_CONFIG_LIBDIR="${sysroot}/usr/lib/pkgconfig"
           pkg-config --static --libs fontconfig
-          # rusty_v8 的 musl 归档已内置 libc++。cc-rs 优先读取目标专用变量，
-          # 因此同时清空最高优先级的 CXXSTDLIB_<target>，避免 Zig 再链接一份。
-          export CXXSTDLIB=
-          target_cxxstdlib="CXXSTDLIB_${{ matrix.target }}"
-          env "${target_cxxstdlib}=" cargo zigbuild --locked --release -p stravia-server --target "${{ matrix.target }}"
+
+          # Zig 始终为 C++ 链接 libc++，而上游 musl 归档也内置了 stdexcept.o。
+          # 删除归档中的单个冲突对象，其他 V8 对象仍使用 Zig 提供的同 ABI libc++。
+          v8_archive_gz="${RUNNER_TEMP}/librusty_v8.a.gz"
+          v8_archive="${RUNNER_TEMP}/librusty_v8.a"
+          curl --fail --location --output "${v8_archive_gz}" \
+            "https://github.com/denoland/rusty_v8/releases/download/v152.2.0/librusty_v8_release_${{ matrix.target }}.a.gz"
+          echo "${{ matrix.v8_sha256 }}  ${v8_archive_gz}" | sha256sum --check -
+          gzip --decompress --stdout "${v8_archive_gz}" > "${v8_archive}"
+          ar d "${v8_archive}" stdexcept.o
+          export RUSTY_V8_ARCHIVE="${v8_archive}"
+
+          cargo zigbuild --locked --release -p stravia-server --target "${{ matrix.target }}"
 
       - name: Package Unix server
         if: runner.os != 'Windows'
