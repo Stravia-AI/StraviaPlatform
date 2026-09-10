@@ -221,6 +221,7 @@ def test_observation_http_sse_usage_and_legacy_cutover(admin_env: dict[str, Any]
     assert len(interactions) == 1
     summary = interactions[0]
     assert summary["status"] == "completed"
+    assert summary["input_preview"] == "observation contract"
     assert summary["visible_tail"] == "mock-ok-0"
     assert summary["usage"] == {
         "input_tokens": 3,
@@ -231,6 +232,7 @@ def test_observation_http_sse_usage_and_legacy_cutover(admin_env: dict[str, Any]
     }
 
     detail = _detail(admin_env, summary["id"])
+    assert detail["interaction"]["input_preview"] == "observation contract"
     assert detail["interaction"]["usage"] == summary["usage"]
     assert len(detail["runs"]) == 1
     run = detail["runs"][0]
@@ -251,6 +253,37 @@ def test_observation_http_sse_usage_and_legacy_cutover(admin_env: dict[str, Any]
     for path in ("/api/v1/logs", "/api/v1/logs/removed"):
         status, _ = http_request("GET", f"{admin_env['admin']}{path}", headers=admin_env["auth"])
         assert status == 404
+
+
+@pytest.mark.e2e
+@pytest.mark.admin
+def test_input_preview_filters_latest_user_before_unicode_limit_with_debug_off(
+    admin_env: dict[str, Any],
+) -> None:
+    route_id, api_key = _create_route(admin_env, "observation-input-preview")
+    status, state = http_request(
+        "GET", f"{admin_env['admin']}/api/v1/observations/debug", headers=admin_env["auth"],
+    )
+    assert status == 200, state
+    assert state["data"]["enabled"] is False
+    status, response = _proxy(admin_env, api_key, "observation-input-preview", [
+        {"role": "system", "content": "private-system-context"},
+        {"role": "user", "content": "old-user-context"},
+        {"role": "assistant", "content": "old-assistant-context"},
+        {"role": "user", "content": [
+            {"type": "text", "text": "api_key=" + "credential" * 600},
+            {"type": "text", "text": "文" * 4200},
+        ]},
+    ])
+    assert status == 200, response
+    summary = _wait_for(
+        "redacted ordinary-mode input preview",
+        lambda: next((item for item in _route_interactions(admin_env, route_id)
+                      if item["input_preview"] is not None), None),
+    )
+    preview = summary["input_preview"]
+    assert preview == ("api_key=***\n" + "文" * 4200)[:4096]
+    assert _detail(admin_env, summary["id"])["interaction"]["input_preview"] == preview
 
 
 @pytest.mark.e2e
@@ -365,6 +398,17 @@ def test_tool_loop_concurrent_branches_and_new_user_group_at_interaction_seam(
         ),
     )
     assert len(loop_detail["runs"]) == 4
+    assert loop_detail["interaction"]["input_preview"] == "observation-tool-loop"
+    assert all(not run["debug_enabled"] and not run["debug_events"] for run in loop_detail["runs"])
+    ordinary_events = [event for run in loop_detail["runs"] for event in run["events"]]
+    assert sorted(
+        event["payload"]["input"]["round"]
+        for event in ordinary_events if event["kind"] == "client_tool_handoff"
+    ) == [1, 2, 3]
+    assert {
+        event["payload"]["content"]
+        for event in ordinary_events if event["kind"] == "client_tool_result"
+    } == {"round 1", "round 2", "round 3"}
 
     branch_route, branch_key = _create_route(admin_env, "observation-branch")
     root_messages = [{"role": "user", "content": "observation-branch"}]
@@ -433,6 +477,8 @@ def test_tool_loop_concurrent_branches_and_new_user_group_at_interaction_seam(
     )
     child = next(item for item in interactions if item["id"] != branch_interactions[0]["id"])
     assert child["parent_interaction_id"] == branch_interactions[0]["id"]
+    assert child["input_preview"] == "a later user turn"
+    assert _detail(admin_env, branch_interactions[0]["id"])["interaction"]["input_preview"] == "observation-branch"
 
 
 @pytest.mark.e2e

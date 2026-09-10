@@ -48,20 +48,20 @@ impl crate::hook::PlatformTool for CredentialFileTool {
 
 #[tokio::test]
 async fn platform_tool_http_roundtrip_restores_execution_and_protects_hidden_turn() {
-    platform_tool_roundtrip(false, false).await;
+    platform_tool_roundtrip(false, false, false).await;
 }
 
 #[tokio::test]
 async fn platform_tool_responses_websocket_restores_execution_and_hidden_turn() {
-    platform_tool_roundtrip(true, false).await;
+    platform_tool_roundtrip(true, false, true).await;
 }
 
 #[tokio::test]
 async fn platform_tool_json_array_type_fields_remain_business_data() {
-    platform_tool_roundtrip(false, true).await;
+    platform_tool_roundtrip(false, true, true).await;
 }
 
-async fn platform_tool_roundtrip(websocket: bool, array_output: bool) {
+async fn platform_tool_roundtrip(websocket: bool, array_output: bool, debug: bool) {
     use futures::StreamExt;
 
     let requests = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
@@ -73,7 +73,7 @@ async fn platform_tool_roundtrip(websocket: bool, array_output: bool) {
             async move {
                 let mut requests = captured.lock().unwrap();
                 requests.push(body.clone());
-                let response = if !body["messages"].as_array().unwrap().iter()
+                let mut response = if !body["messages"].as_array().unwrap().iter()
                     .any(|message| message["role"] == "tool") {
                     let wire = serde_json::to_string(&body["messages"]).unwrap();
                     let reference = regex::Regex::new(r"~stravia-secret:[0-9a-f]{32}~")
@@ -92,6 +92,8 @@ async fn platform_tool_roundtrip(websocket: bool, array_output: bool) {
                         .find(|message| message["role"] == "tool").unwrap();
                     openai_response(result["content"].as_str().unwrap())
                 };
+                response["choices"][0]["message"]["reasoning_content"] =
+                    serde_json::json!("Inspect the request and tool result.");
                 use axum::response::IntoResponse;
                 if body["stream"] != true {
                     return axum::Json(response).into_response();
@@ -99,6 +101,9 @@ async fn platform_tool_roundtrip(websocket: bool, array_output: bool) {
                 let choice = &response["choices"][0];
                 let message = &choice["message"];
                 let mut deltas = vec![serde_json::json!({"role": "assistant"})];
+                for text in ["Inspect the request ", "and tool result."] {
+                    deltas.push(serde_json::json!({"reasoning_content": text}));
+                }
                 if let Some(calls) = message["tool_calls"].as_array() {
                     for (index, call) in calls.iter().enumerate() {
                         deltas.push(serde_json::json!({"tool_calls": [{
@@ -153,7 +158,7 @@ async fn platform_tool_roundtrip(websocket: bool, array_output: bool) {
     .build()
     .await
     .unwrap();
-    gateway.observation.set_debug_enabled(true);
+    gateway.observation.set_debug_enabled(debug);
     let mut observations = gateway.observation.subscribe(0);
     configure_route(&gateway, "redaction-platform", &[provider_url]).await;
     gateway
@@ -304,15 +309,61 @@ async fn platform_tool_roundtrip(websocket: bool, array_output: bool) {
         .await
         .unwrap()
         .unwrap();
-    let checkpoint = detail
-        .runs
+    let events: Vec<_> = detail.runs.iter().flat_map(|run| &run.events).collect();
+    let started = events
         .iter()
-        .flat_map(|run| &run.debug_events)
-        .find(|event| event["stage"] == "platform_tool_call")
-        .expect("platform execution argument checkpoint");
-    let recorded_arguments: serde_json::Value =
-        serde_json::from_str(checkpoint["payload"]["arguments"].as_str().unwrap()).unwrap();
-    assert_eq!(recorded_arguments, serde_json::json!({"value": "***"}));
+        .find(|event| event.kind == "platform_tool_started")
+        .expect("ordinary platform input");
+    assert_eq!(
+        started.payload["input"],
+        serde_json::json!({"value": "***"})
+    );
+    let finished = events
+        .iter()
+        .find(|event| event.kind == "platform_tool_finished")
+        .expect("ordinary platform result");
+    assert_eq!(finished.payload["tool_id"], started.payload["tool_id"]);
+    assert_eq!(finished.payload["status"], "completed");
+    assert!(finished.payload.get("content").is_some());
+    if !array_output {
+        assert_eq!(
+            finished.payload["content"],
+            serde_json::json!({"api_key": "***", "configured": true})
+        );
+    }
+    let mut thoughts = std::collections::BTreeMap::<String, String>::new();
+    for event in &events {
+        if event.kind == "model_thinking_delta" {
+            thoughts
+                .entry(event.payload["attempt_id"].as_str().unwrap().to_owned())
+                .or_default()
+                .push_str(event.payload["text"].as_str().unwrap());
+        }
+    }
+    assert_eq!(thoughts.len(), 2);
+    assert!(
+        thoughts
+            .values()
+            .all(|text| text == "Inspect the request and tool result.")
+    );
+    if debug {
+        let checkpoint = detail
+            .runs
+            .iter()
+            .flat_map(|run| &run.debug_events)
+            .find(|event| event["stage"] == "platform_tool_call")
+            .expect("platform execution argument checkpoint");
+        let recorded_arguments: serde_json::Value =
+            serde_json::from_str(checkpoint["payload"]["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(recorded_arguments, serde_json::json!({"value": "***"}));
+    } else {
+        assert!(
+            detail
+                .runs
+                .iter()
+                .all(|run| !run.debug_enabled && run.debug_events.is_empty())
+        );
+    }
     if array_output {
         let continuation = serde_json::json!({
             "model": "redaction-platform",

@@ -122,7 +122,7 @@ let edges = $derived.by<Edge[]>(() => {
         source: parent,
         target: interaction.id,
         type: 'smoothstep',
-        label: m.observation_ancestry_confirmed(),
+
         selectable: false,
         focusable: false,
         style: `stroke: ${selectedPath.has(parent) && selectedPath.has(interaction.id) ? 'var(--primary)' : 'var(--border)'}; stroke-width: 1.5`,
@@ -230,11 +230,11 @@ async function focusNode(id: string): Promise<void> {
     return position ? [position] : []
   })
   const centerX = target.x + 144
-  const centerY = target.y + 95
+  const centerY = target.y + 128
   const minX = Math.min(...rootPositions.map((position) => position.x))
   const maxX = Math.max(...rootPositions.map((position) => position.x + 288))
   const minY = Math.min(...rootPositions.map((position) => position.y))
-  const maxY = Math.max(...rootPositions.map((position) => position.y + 190))
+  const maxY = Math.max(...rootPositions.map((position) => position.y + 256))
   const horizontalReach = Math.max(centerX - minX, maxX - centerX)
   const verticalReach = Math.max(centerY - minY, maxY - centerY)
   const fittingZoom = Math.min(

@@ -22,7 +22,7 @@ export interface LayoutResponse {
 }
 
 const nodeWidth = 288
-const nodeHeight = 190
+const nodeHeight = 256
 const rootGap = 160
 const layouts = new Map<string, { topology: string; positions: LayoutPosition[]; width: number }>()
 

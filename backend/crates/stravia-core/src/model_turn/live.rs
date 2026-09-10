@@ -143,6 +143,7 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
                         .protect(&input.principal, &mut input.request, observer.as_ref()).await?;
                     if let Some(observer) = &observer {
                         observer.protect_secrets(mappings.iter().map(|mapping| mapping.secret.as_str()));
+                        observer.publish_input_preview();
                     }
                     let registrations = input.compaction_records.clone();
                     let mut turn = execute_inner(self.clone(), input, model_turn_id.clone()).await?;
@@ -1467,16 +1468,17 @@ async fn begin_attempt(
         call.attempt.confirm_usage(&response.usage);
         call.attempt
             .checkpoint("canonical_terminal_response", &response);
+        let canonical_deltas = ai_response_to_deltas(&response);
+        for delta in &canonical_deltas {
+            call.attempt.observe_delta(delta);
+            call.attempt.checkpoint("canonical_delta", delta);
+        }
         call.attempt.finish(
             "completed",
             Some(call.status),
             None,
             Some(attempt_started.elapsed().as_millis() as i64),
         );
-        let canonical_deltas = ai_response_to_deltas(&response);
-        for delta in &canonical_deltas {
-            call.attempt.checkpoint("canonical_delta", delta);
-        }
         let mut events = canonical_deltas
             .into_iter()
             .map(CanonicalEvent::Delta)
@@ -1577,6 +1579,10 @@ async fn begin_attempt(
         AiStreamDelta::StreamError { error } => Some(error),
         _ => None,
     }) {
+        // This batch is rejected before send_deltas, but its readable thinking was received.
+        for delta in &first_deltas {
+            provider_stream.attempt().observe_delta(delta);
+        }
         provider_stream.attempt().finish(
             "failed",
             error.status_code,
@@ -1797,6 +1803,10 @@ async fn send_deltas(
     deltas: Vec<AiStreamDelta>,
 ) -> Result<(), ()> {
     accumulator.apply_all(&deltas);
+    // Observe received content even when delivery stops partway through this batch.
+    for delta in &deltas {
+        attempt.observe_delta(delta);
+    }
     for delta in deltas {
         attempt.checkpoint("canonical_delta", &delta);
         tx.send(Ok(CanonicalEvent::Delta(delta)))

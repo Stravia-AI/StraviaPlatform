@@ -671,6 +671,12 @@ pub(super) async fn orchestrate(
         model_display_name,
         ingress_protocol: ingress.to_string(),
     });
+    // Use the received request snapshot, never restored history or hook-added results.
+    // Publication waits for the observer's credential-protected preview boundary.
+    observer.capture_client_tool_results(&client_request.items);
+    if has_new_user {
+        observer.capture_input_preview(&client_request.items);
+    }
     if let Some(root_id) = generation_root_id.clone() {
         observer.record(RunEvent::GenerationAssociated {
             root_id,

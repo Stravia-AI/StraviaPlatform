@@ -17,6 +17,10 @@ use super::{
 
 pub(super) enum WriterCommand {
     ClearTail,
+    InputPreview {
+        run_id: String,
+        preview: String,
+    },
     Purge {
         expired_before: Option<i64>,
         done: oneshot::Sender<anyhow::Result<()>>,
@@ -71,7 +75,8 @@ pub(super) fn spawn(
     let handle = tokio::spawn(async move {
         let mut grouping = GroupingIndex::default();
         let mut tail = super::tail::TailIndex::default();
-        let mut pending_text: HashMap<String, String> = HashMap::new();
+        // 只合并同一 Run 中相邻且同作用域的正文或思考增量，不跨事件边界重排。
+        let mut pending_text: HashMap<String, RunEvent> = HashMap::new();
         let mut pending_gaps: HashMap<String, i64> = HashMap::new();
         let mut persisted_manifests: HashMap<String, TraceManifest> = HashMap::new();
         let mut interval = tokio::time::interval(Duration::from_millis(500));
@@ -107,6 +112,27 @@ pub(super) fn spawn(
             tail.sweep(now());
             match command {
                 Some(WriterCommand::ClearTail) => tail = super::tail::TailIndex::default(),
+                Some(WriterCommand::InputPreview { run_id, preview }) => {
+                    let Some(interaction) = grouping.interaction_for_run(&run_id) else {
+                        continue;
+                    };
+                    let at = now();
+                    let expiry = expires(at, retention_days.load(Ordering::Relaxed));
+                    match store
+                        .persist_input_preview(interaction, &run_id, &preview, at, expiry)
+                        .await
+                    {
+                        Ok(Some(event)) => {
+                            let _ = updates.send(ObservationUpdate::Event(event));
+                        }
+                        Ok(None) => {}
+                        Err(_) => {
+                            // Never include SQL bind values or input text in diagnostics.
+                            tracing::warn!(%run_id, "input preview persistence failed");
+                            pending_gaps.insert(interaction.to_owned(), at);
+                        }
+                    }
+                }
                 Some(WriterCommand::Purge {
                     expired_before,
                     done,
@@ -243,10 +269,46 @@ pub(super) fn spawn(
                 }
                 Some(WriterCommand::Event {
                     run_id,
-                    event: RunEvent::ClientVisibleContentDelta { text },
+                    event:
+                        event @ (RunEvent::ClientVisibleContentDelta { .. }
+                        | RunEvent::ModelThinkingDelta { .. }),
                     ..
                 }) => {
-                    pending_text.entry(run_id).or_default().push_str(&text);
+                    let append = match (pending_text.get_mut(&run_id), &event) {
+                        (
+                            Some(RunEvent::ClientVisibleContentDelta { text: pending }),
+                            RunEvent::ClientVisibleContentDelta { text },
+                        ) => Some((pending, text)),
+                        (
+                            Some(RunEvent::ModelThinkingDelta {
+                                model_turn_id: pending_turn,
+                                attempt_id: pending_attempt,
+                                text: pending,
+                            }),
+                            RunEvent::ModelThinkingDelta {
+                                model_turn_id,
+                                attempt_id,
+                                text,
+                            },
+                        ) if pending_turn == model_turn_id && pending_attempt == attempt_id => {
+                            Some((pending, text))
+                        }
+                        _ => None,
+                    };
+                    if let Some((pending, text)) = append {
+                        pending.push_str(text);
+                    } else {
+                        flush_one(
+                            &store,
+                            &grouping,
+                            &retention_days,
+                            &updates,
+                            &mut pending_text,
+                            &run_id,
+                        )
+                        .await;
+                        pending_text.insert(run_id, event);
+                    }
                 }
                 Some(WriterCommand::Event {
                     run_id,
@@ -550,7 +612,7 @@ async fn persist_finish(
     grouping: &mut GroupingIndex,
     retention: &AtomicU32,
     updates: &broadcast::Sender<ObservationUpdate>,
-    pending_text: &mut HashMap<String, String>,
+    pending_text: &mut HashMap<String, RunEvent>,
     run_id: &str,
     outcome: &RunOutcome,
 ) {
@@ -579,7 +641,7 @@ async fn flush_text(
     grouping: &GroupingIndex,
     retention: &AtomicU32,
     updates: &broadcast::Sender<ObservationUpdate>,
-    pending: &mut HashMap<String, String>,
+    pending: &mut HashMap<String, RunEvent>,
 ) {
     let ids: Vec<_> = pending.keys().cloned().collect();
     for id in ids {
@@ -591,17 +653,16 @@ async fn flush_one(
     grouping: &GroupingIndex,
     retention: &AtomicU32,
     updates: &broadcast::Sender<ObservationUpdate>,
-    pending: &mut HashMap<String, String>,
+    pending: &mut HashMap<String, RunEvent>,
     run_id: &str,
 ) {
-    let Some(text) = pending.remove(run_id) else {
+    let Some(mut event) = pending.remove(run_id) else {
         return;
     };
     let Some(interaction) = grouping.interaction_for_run(run_id) else {
         return;
     };
     let at = now();
-    let mut event = RunEvent::ClientVisibleContentDelta { text };
     super::redaction::redact_run_event(&mut event);
     match store
         .persist_run_event(

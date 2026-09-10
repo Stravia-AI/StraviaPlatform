@@ -35,6 +35,10 @@ impl Gateway {
                 model_turn_id: job.model_turn_id.clone(),
                 tool_id: call.id.clone(),
                 name: call.name.clone(),
+                input: Some(
+                    serde_json::from_str(&call.arguments)
+                        .unwrap_or_else(|_| serde_json::Value::String(call.arguments.clone())),
+                ),
             });
             if observer.debug_enabled() {
                 observer.record_debug(|| RunEvent::Checkpoint {
@@ -90,6 +94,7 @@ impl Gateway {
                 }
                 .into(),
                 duration_ms: started.elapsed().as_millis().min(i64::MAX as u128) as i64,
+                content: Some(result.content.clone()),
             });
             if observer.debug_enabled() {
                 observer.record_debug(|| RunEvent::Checkpoint {
