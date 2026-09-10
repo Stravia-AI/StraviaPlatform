@@ -144,10 +144,21 @@
             inherit version;
             src = source;
 
-            cargoLock = {
-              lockFile = ./Cargo.lock;
-              allowBuiltinFetchGit = true;
-            };
+            cargoHash = "sha256-NGM5FREiCPAbfUU34brE/kt0b8AteazEEDcjOUYDdJk=";
+            # 此包链接预编译 V8；移除源构建子模块，让 Moli 扩展选择公共头文件回退路径。
+            cargoDepsHook = ''
+              cargoDepsPrebuilt="$TMPDIR/00000000000000000000000000000000-cargo-deps-prebuilt"
+              cp -R "$cargoDeps" "$cargoDepsPrebuilt"
+              chmod -R u+w "$cargoDepsPrebuilt"
+
+              v8Crate=$(echo "$cargoDepsPrebuilt"/source-git-*/v8-152.2.0)
+              if [ ! -d "$v8Crate" ]; then
+                echo "Expected exactly one vendored rusty_v8 crate, got: $v8Crate" >&2
+                exit 1
+              fi
+              rm -rf "$v8Crate/v8"
+              cargoDeps="$cargoDepsPrebuilt"
+            '';
             # V8 构建脚本默认联网下载；提前固定归档，让沙箱构建保持离线。
             RUSTY_V8_ARCHIVE = pkgs.fetchurl (
               if system == "x86_64-linux" then {
