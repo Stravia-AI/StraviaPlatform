@@ -148,6 +148,21 @@ def _wait_for(description: str, probe: Callable[[], Any], timeout: float = 10.0)
     pytest.fail(f"timed out waiting for {description}; last={last!r}")
 
 
+def _wait_for_rejection_trace(env: dict[str, Any], rejection_id: str) -> dict[str, Any]:
+    def finalized_rejection() -> dict[str, Any] | None:
+        status, body = http_request(
+            "GET",
+            f"{env['admin']}/api/v1/observations/rejections/{rejection_id}",
+            headers=env["auth"],
+        )
+        assert status == 200, body
+        detail = body["data"]
+        # 拒绝记录先于 Trace 最终落盘可见，记录存在不代表捕获已完成。
+        return detail if (detail.get("trace") or {}).get("status") == "complete" else None
+
+    return _wait_for("finalized Rejected Request Trace", finalized_rejection)
+
+
 def _route_interactions(env: dict[str, Any], route_id: str) -> list[dict[str, Any]]:
     page = _forest(env, model=route_id, limit=100)
     return [
@@ -891,13 +906,7 @@ def test_debug_snapshot_redaction_bundle_ticket_and_clear_active_history(
         )
 
     rejected = _wait_for("Debug Rejected Request", debug_rejection)
-    status, rejected_body = http_request(
-        "GET",
-        f"{admin_env['admin']}/api/v1/observations/rejections/{rejected['id']}",
-        headers=admin_env["auth"],
-    )
-    assert status == 200, rejected_body
-    rejected_detail = rejected_body["data"]
+    rejected_detail = _wait_for_rejection_trace(admin_env, rejected["id"])
     rejected_directions = {
         event.get("direction")
         for event in rejected_detail["debug_events"]
@@ -1111,18 +1120,7 @@ def test_rejected_debug_bundle_records_real_error_without_inventing_execution(
         )
 
     rejected = _wait_for("captured Rejected Request", latest_rejection)
-
-    def finalized_rejection() -> dict[str, Any] | None:
-        status_, body = http_request(
-            "GET",
-            f"{admin_env['admin']}/api/v1/observations/rejections/{rejected['id']}",
-            headers=admin_env["auth"],
-        )
-        assert status_ == 200, body
-        detail_ = body["data"]
-        return detail_ if (detail_.get("trace") or {}).get("status") == "complete" else None
-
-    detail = _wait_for("finalized Rejected Request Trace", finalized_rejection)
+    detail = _wait_for_rejection_trace(admin_env, rejected["id"])
     assert {
         event["direction"]
         for event in detail["debug_events"]
