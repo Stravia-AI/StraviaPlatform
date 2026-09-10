@@ -4,6 +4,8 @@ status: accepted
 
 # Rename Web Research to Web Search and split public and internal tool identities
 
+> ADR-0051 部分取代本决策的公开及内部工具 wire name：Stravia 自有工具直接切换为 StraviaRead，不保留旧调用别名；公开研究与内部基础检索仍须区分执行身份和 owner。此注记记录后续设计决策，不表示切换已实现。
+
 Stravia 将原 `Web Research` 领域全量 clean cutover 为 `Web Search`：文档、源码类型与模块、前端/REST contract、settings key、错误码、日志和 turn identity 使用新名称，旧公共路径、旧配置 key、旧别名不再保留。公开 composite 仍使用 wire name `web_search` 并返回原有带来源的 Search Report、continuation 和 branch 语义；Local Agent 内部继续使用 wire names `web_search` 与 `web_fetch`，但源码使用不同的 Tool ID、注册面和 owner，使 public composite 与 internal leaves 即使 wire name 相同也永不共用身份。
 
 Codex Agentic Search 仍固定管理员选择的 OAuth Provider/账号和上游模型，但不使用 Stravia 的 Local research step/time budgets；Codex 模式隐藏 Local Web Provider 与 Local limits，切回 Local 时恢复已保存配置。请求取消、请求生命周期和传输安全边界仍有效。既有 `web_research_config` 的配置值迁移到新 settings key；旧 Research Turn 历史失效，不提供旧 identity 的读取兼容。

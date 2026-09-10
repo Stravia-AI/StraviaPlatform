@@ -4,6 +4,8 @@ status: accepted
 
 # Add Media Understanding as a capability-owned internal Agent
 
+> ADR-0051 部分取代本决策的公开工具身份：Stravia 自有工具直接切换为 StraviaRead，不保留 `understand_media` 调用别名；Media Understanding 的独立执行职责继续保留。此注记记录后续设计决策，不表示切换已实现。
+
 Stravia 以公开工具 `understand_media` 提供 Media Understanding：普通推理使用隐藏 PlatformTool，MCP 直调同一 contract；专用 adapters 调用一个 internal-only Agent Definition，并直接把其 Agent Turn 投影为 Media Understanding Turn，而不新增 Runner、Backend enum 或 Turn kind。当前 Revision 只支持静态 JPEG/PNG/WebP 源 Artifact；Media preprocessor 在 AgentRunner 前生成 write-once JPEG Q85/4:4:4 derivative，模型接收 derivative，tool/Report 始终引用 principal-scoped source ArtifactId。这样 ArtifactStore 与 AgentRunner 保持通用，Report provenance、媒体压缩和 outer non-vision rewrite 各有单一 owner。
 
 完整 contracts、状态、压缩、routing、persistence、安全边界、迁移与已接受风险见 [`docs/design/media-understanding.md`](../design/media-understanding.md)。WebP 上游支持的一手研究见 [`docs/research/media-understanding-webp-support.md`](../research/media-understanding-webp-support.md)。

@@ -43,7 +43,7 @@ _避免使用_：Connect Client Interaction、Anonymous Principal、孤立 Inter
 
 ## Wire Debug Capture
 
-Wire Debug Capture 是 Connect Client 到 Stravia、Stravia 到上游、上游到 Stravia、Stravia 到 Connect Client 四个方向的应用协议级诊断记录。它保留 HTTP header 与 body chunk、SSE byte，以及 WebSocket handshake 元数据和 message 的顺序与时间，但不表示 TLS、TCP、HTTP/2 frame 或其他网络分包；header、URL 与结构化 body 中的凭据值永久脱敏，其他内容保留。
+Wire Debug Capture 是 Connect Client 到 Stravia、Stravia 到上游、上游到 Stravia、Stravia 到 Connect Client 四个方向的应用协议级诊断记录。它记录 HTTP header 与 body chunk、SSE byte，以及 WebSocket handshake 元数据和 message 的顺序与时间，但不表示 TLS、TCP、HTTP/2 frame 或其他网络分包；凭据值永久脱敏，结构化媒体内容以 Artifact 引用与必要元数据代替并明确标记已外置，其他内容保留。媒体部分不承诺原始 wire 字节保真，内容恢复受 Artifact 保留期约束。
 _避免使用_：Network Capture、Packet Capture、Raw Credential Dump
 
 ## Inference Run Debug Trace
@@ -159,6 +159,21 @@ Artifact 是归属于一个认证主体的不可变媒体或大对象。外部�
 ## Artifact Store
 
 Artifact Store 是保存并读取 Artifact 内容的深模块。它向调用方隐藏本地文件或对象存储差异，不负责解释媒体语义或执行模型任务。
+
+## Artifact Reference
+
+Artifact Reference 是供 Connect Client 与模型传递的稳定、不透明文件引用，不是实际下载地址，也不授予访问权限。解析必须校验当前 Principal 的归属；同一 Principal 可以跨对话复用，不同 Principal 不得解析。
+_避免使用_：公开文件地址、下载凭据、伪 URL
+
+## Artifact Download Grant
+
+Artifact Download Grant 是针对单个 Artifact 的限时下载授权，持有其签名下载地址即可在有效期内下载，无须另外提供 Stravia API Key。它可以被转交，不代表 Artifact 公开或永久可访问。
+_避免使用_：Artifact Reference、永久公开链接
+
+## Artifact Upload Grant
+
+Artifact Upload Grant 是允许向指定 Principal 上传文件的临时受限凭据，不授予模型调用、读取已有 Artifact 或管理权限。它不是 Stravia API Key，也不是用于提示模型的凭据占位符。
+_避免使用_：Stravia API Key、Artifact Download Grant
 
 ## Platform Tool
 
@@ -535,7 +550,7 @@ Media Derivative 是 Media Understanding 为一个源 Artifact 生成并复用�
 
 ## Web Search
 
-Web Search 是把查询转换为有来源 Search Report 的平台能力。用户可见名称为“联网搜索”；公开工具名是 `web_search`；具体执行由管理员选择的 Search Backend 拥有。
+Web Search 是把查询转换为有来源 Search Report 的平台能力。用户可见名称为“联网搜索”，通过外层 StraviaRead 的查询输入提供；具体执行由管理员选择的 Search Backend 拥有。
 
 ## Search Backend
 
@@ -558,13 +573,23 @@ Search Source 是 Search Report 实际引用、且可追溯到当前或历史已
 Web Access 是管理员配置的内部联网能力，为 Local Web Search 提供统一的 Internal Web Search 与 Internal Web Fetch leaves；它不直接形成公开工具契约，也没有独立的能力总开关。管理员配置其来源与优先级，公开联网搜索统一受 Web Search 的 Platform Capability Gate 控制。
 _避免使用_：Web Search Add-on、Web Tools
 
+## Web Fetch
+
+Web Fetch 是客户端与外层模型通过 StraviaRead 读取指定网页并获得 Markdown 正文的平台能力，用户可见名称为“网页读取”，与 Web Search 共用“联网搜索”Platform Capability Gate 及透明注入选择项，不新增独立开关或勾选项。它不等于完整研究搜索或 Artifact 文件导入。
+_避免使用_：Web Search、Web Access、Internal Web Fetch Leaf
+
 ## Internal Web Search Leaf
 
-Internal Web Search Leaf 是 Local Agent 执行 Web Search 时使用的隐藏搜索工具，内部 Agent 可见名称为 `web_search`；它不进入客户端或 MCP discovery。
+Internal Web Search Leaf 是搜索 Agent 收集证据时使用的隐藏基础检索能力，不执行完整 Web Search。它通过内部 StraviaRead 入口使用，不作为独立工具进入客户端或 MCP discovery。
 
 ## Internal Web Fetch Leaf
 
-Internal Web Fetch Leaf 是 Local Agent 执行 Web Search 时使用的隐藏页面读取工具，内部 Agent 可见名称为 `web_fetch`；它不进入客户端或 MCP discovery。
+Internal Web Fetch Leaf 是内部 Agent 读取网页正文的基础能力，通过内部 StraviaRead 入口使用。客户端也可通过其 StraviaRead 入口调用网页抓取，但不因此获得内部 Agent 的执行身份。
+
+## StraviaRead
+
+StraviaRead 是客户端、外层模型与内部 Agent 的统一读取工具入口，覆盖 Artifact 下载与理解、网页读取及搜索。搜索语义由平台确定的执行环境区分为外层完整研究与内部基础检索，统一入口不合并两者的执行身份。
+_避免使用_：Artifact Store、无上下文的全局工具执行器
 
 ## Fetched Page
 
@@ -649,12 +674,12 @@ _避免使用_：透明注入、API Key 脱敏授权、脱敏工具
 ## Advanced Capability
 
 
-Advanced Capability 是面向用户提供、由平台级总开关控制可用性的高级能力；当前包括用户可见名称为“多模态理解”的 Media Understanding，以及用户可见名称为“联网搜索”的 Web Search。
+Advanced Capability 是面向用户提供、由平台级总开关控制可用性的高级能力；包括用户可见名称为“多模态理解”的 Media Understanding、“联网搜索”的 Web Search，以及“网页读取”的 Web Fetch。
 
 ## Platform Capability Gate
 
-Platform Capability Gate 是单个 Advanced Capability 的平台级总开关。总开关打开后，该能力对所有有效 API Key 可用；总开关关闭时，任何 API Key 都不能使用该能力。它同时约束显式工具调用与 MCP；API Key 不再单独授予或撤销 Media Understanding、Web Search。
+Platform Capability Gate 是控制高级能力可用性的平台级总开关；Web Search 与 Web Fetch 共用“联网搜索”开关，Media Understanding 使用“多模态理解”开关。总开关打开后，对应能力对所有有效 API Key 可用，关闭时任何 API Key 都不能直接使用；它同时约束显式工具调用与 MCP，不由 API Key 单独授予或撤销。
 
 ## Transparent Injection
 
-Transparent Injection 是平台在客户端未显式声明工具时，按 API Key 配置把可用 Advanced Capability 自动暴露给模型请求的行为。它独立于 Platform Capability Gate 和 MCP 访问；关闭总开关的能力不能被透明注入。透明注入关闭不影响客户端显式调用已开启的平台能力。总开关关闭期间，API Key 已选择的注入项保留但不生效，重新打开后恢复。
+Transparent Injection 是平台在客户端未显式声明工具时，按 API Key 的“联网搜索”与“多模态理解”选择自动暴露可用能力的行为；联网搜索包含搜索与网页读取，多项能力合并为一个 StraviaRead 声明，本次执行范围仅包含选中且平台已开启的能力。它是自动提供工具的偏好，不是 API Key 能力授权，不限制客户端显式声明工具或通过 MCP 使用平台已开启的能力；总开关关闭期间，已选择的注入项保留但不生效，重新打开后恢复。
