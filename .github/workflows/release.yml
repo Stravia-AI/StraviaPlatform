@@ -191,6 +191,9 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: ${{ env.RUST_VERSION }}
+          cache: 'false'
+          cache-save-if: 'false'
+          cache-on-failure: 'false'
 
       - name: Add musl target
         if: matrix.target != ''
@@ -201,6 +204,7 @@ jobs:
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ env.BUN_VERSION }}
+          no-cache: true
 
       - name: Setup Task
         uses: go-task/setup-task@v2
@@ -360,11 +364,15 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: ${{ env.RUST_VERSION }}
+          cache: 'false'
+          cache-save-if: 'false'
+          cache-on-failure: 'false'
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ env.BUN_VERSION }}
+          no-cache: true
 
       - name: Setup Task
         uses: go-task/setup-task@v2
@@ -507,19 +515,29 @@ jobs:
     name: Docker validation (${{ matrix.platform }})
     needs: prepare
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: read
     strategy:
       fail-fast: false
       matrix:
         include:
           - runner: ubuntu-24.04
             platform: linux/amd64
-            cache_scope: docker-amd64
+            arch: amd64
           - runner: ubuntu-24.04-arm
             platform: linux/arm64
-            cache_scope: docker-arm64
+            arch: arm64
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+
+      - name: Login to GHCR for cache reads
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -539,8 +557,7 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ needs.prepare.outputs.version }}
             org.opencontainers.image.licenses=AGPL-3.0-only
-          cache-from: type=gha,scope=${{ matrix.cache_scope }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.cache_scope }}
+          cache-from: type=registry,ref=${{ env.IMAGE_NAME }}:buildcache-${{ matrix.arch }}
 
   nix-build:
     name: Nix (${{ matrix.system }})
@@ -744,11 +761,11 @@ jobs:
         include:
           - runner: ubuntu-24.04
             platform: linux/amd64
-            cache_scope: docker-amd64
+            arch: amd64
             artifact: docker-digest-amd64
           - runner: ubuntu-24.04-arm
             platform: linux/arm64
-            cache_scope: docker-arm64
+            arch: arm64
             artifact: docker-digest-arm64
     steps:
       - name: Checkout
@@ -779,8 +796,7 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ needs.prepare.outputs.version }}
             org.opencontainers.image.licenses=AGPL-3.0-only
-          cache-from: type=gha,scope=${{ matrix.cache_scope }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.cache_scope }}
+          cache-from: type=registry,ref=${{ env.IMAGE_NAME }}:buildcache-${{ matrix.arch }}
           outputs: type=image,name=${{ env.IMAGE_NAME }},push=true,push-by-digest=true,name-canonical=true
 
       - name: Export digest
