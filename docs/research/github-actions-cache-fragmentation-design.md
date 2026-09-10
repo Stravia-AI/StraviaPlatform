@@ -11,6 +11,27 @@
 - 首次迁移提交使用 `[skip ci]` 避免并发冷写入。确认旧运行结束、刷新 inventory 并按 ID 清理旧 Rust cache 后，顺序 dispatch 四个预热阶段，然后 dispatch 普通 CI 验证完整任务图。Docker cache 单独 dispatch。该标记只控制这次启动顺序，不代替验证。
 - 容量数字仍是预算，不是硬限制或实测优化结果。GHCR cache 的存储成本、访问权限以及两架构真实构建结果需独立核验。
 
+### 2026-09-10 线上实施结果
+
+配置提交：`c9002a33be6720cabfe978c6ff0bb772bc99c7e5`。推送前 YAML 解析通过；actionlint 只报告既有 `windows-11-vs2026-arm` runner label 未识别，精确排除此诊断后通过。未改变该 runner。
+
+刷新所有 queued/in_progress/waiting/pending/requested 运行清单，均为零后，按明确 ID 删除旧 Rust cache：`7524330050`、`7523948702`、`7523545144`、`7523330408`、`7523283390`。共释放 9,086,002,262 bytes；Bun/uv 保留，未执行全量删除。
+
+| 顺序 | 分区 | 成功运行 | 新 cache ID | 实测 bytes / GiB |
+|---|---|---|---|---:|
+| 1 | Linux pinned test | [34433783954](https://github.com/Stravia-AI/StraviaPlatform/actions/runs/34433783954) | `7530075640` | 1,787,625,029 / 1.665 |
+| 2 | Linux E2E mixed | [34435511669](https://github.com/Stravia-AI/StraviaPlatform/actions/runs/34435511669) | `7531131787` | 2,704,860,695 / 2.519 |
+| 3 | Windows debug | [34438573195](https://github.com/Stravia-AI/StraviaPlatform/actions/runs/34438573195) | `7531961197` | 1,903,622,859 / 1.773 |
+| 4 | stable registry-only | [34441033514](https://github.com/Stravia-AI/StraviaPlatform/actions/runs/34441033514) | `7532584418` | 846,992,763 / 0.789 |
+
+预热后原生池共 7 条，7,319,410,154 bytes = **6.817 GiB**，相较迁移前减少 **1.716 GiB**，10 GiB 配额下剩余 **3.183 GiB**。stable registry-only 实测显著超过原 0.25 GiB 假设；不能再把原分区预算表当作经过验证的预测。其余分区低于预算，使当前总量仍低于 7.80 GiB 目标。依赖或 runner 环境产生第二代大 cache 时仍需容量管理。
+
+Docker [首次构建 34433804346](https://github.com/Stravia-AI/StraviaPlatform/actions/runs/34433804346) 两架构成功，日志确认 registry manifest 导出完成；[第二次构建 34435573470](https://github.com/Stravia-AI/StraviaPlatform/actions/runs/34435573470) 两架构成功，各有 17 个构建步骤 `CACHED`。首次 import 的 `not found` 是尚未创建 ref 的冷启动，随后成功创建；第二次确认可恢复。没有发布产品镜像或 Release。以上不证明源码变化后 Cargo cache mount 可以跨 runner 保存，也不代表 GHCR 没有存储成本。
+
+[完整只读 CI 34442786974](https://github.com/Stravia-AI/StraviaPlatform/actions/runs/34442786974) 执行全部 10 个 job，9 个成功；admin E2E 为 158 passed / 1 failed。失败为 `tests/e2e/admin/test_observations.py:860`，期望两个 wire direction，实际集合为空。同一提交的 admin 预热运行已通过，但尚未定位该断言失败的根因，不能声称完整 CI 全绿，也没有通过重试或修改断言掩盖失败。
+
+缓存日志确认全部 Rust `save-if: false`。Windows browser/desktop 和 stable registry exact hit，所有 E2E 的 uv 命中。Linux pinned/test 的 consumer 获得旧 runner image `20260831.293.1`，请求环境 hash `6750113f`，而 writer 为新镜像的 `095333cd`；E2E 恰好相反，consumer 新镜像请求 `095333cd`，writer 旧镜像为 `6750113f`，均 miss。该次验收证明写入收敛和部分共享恢复有效，**不证明 Linux 热命中稳定或整体 CI 加速**。未放宽兼容性 hash，也未为镜像 rollout 盲目追加第二条大 cache；这一已观察到的限制需要后续工具链环境规范化或 cache action 版本策略单独解决。
+
 ## 结论先行
 
 1. 当前 8 条 cache 共 **9,162,311,070 bytes = 8.533067 GiB**；Rust 占 **99.1671%**。先收敛 Rust 写入者和重复分区，不值得先优化仅约 0.071 GiB 的 Bun/uv。
@@ -357,4 +378,4 @@ GitHub 7 天未访问回收意味着低频分区自然变冷；“无 thrash”�
 - **[S11]** GitHub CLI：[gh cache delete](https://cli.github.com/manual/gh_cache_delete)。
 - **[L1]** [ci.yml](../../.github/workflows/ci.yml)；**[L2]** [release.yml](../../.github/workflows/release.yml)；**[L3]** [Taskfile.yml](../../Taskfile.yml)；**[L4]** [Dockerfile](../../Dockerfile)；**[L5]** [Cargo.toml](../../Cargo.toml)；**[L6]** [.cargo/config.toml](../../.cargo/config.toml)。
 
-本次完成的是：只读线上 inventory 复核、字节换算、源码/官方文档研究与配置设计。本文所有命中率目标、优化后容量、冷/热成本、7 天稳定性与安全 gate 运行结果，均留待后续 workflow 实施按上述步骤测量，**没有声称已实施或已验证**。
+原研究阶段仅完成只读 inventory、源码/官方文档研究与配置设计；后续实施和单轮验证结果见开头“线上实施结果”。7 天稳定性、PR/release caller 的实际禁写运行、GHCR 保留成本仍未实测，不能把设计目标作为验收通过结果。
