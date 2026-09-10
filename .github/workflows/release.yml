@@ -282,11 +282,11 @@ jobs:
           export PKG_CONFIG_SYSROOT_DIR="${sysroot}"
           export PKG_CONFIG_LIBDIR="${sysroot}/usr/lib/pkgconfig"
           pkg-config --static --libs fontconfig
-          # rusty_v8 的 musl 归档已内置 libc++。其他 C++ 依赖仍会让 Zig 提供同 ABI
-          # 的 libc++；优先使用归档中的定义，并允许链接器忽略后一份重复定义。
+          # rusty_v8 的 musl 归档已内置 libc++。cc-rs 优先读取目标专用变量，
+          # 因此同时清空最高优先级的 CXXSTDLIB_<target>，避免 Zig 再链接一份。
           export CXXSTDLIB=
-          export RUSTFLAGS="${RUSTFLAGS} -C link-arg=-Wl,--allow-multiple-definition"
-          cargo zigbuild --locked --release -p stravia-server --target "${{ matrix.target }}"
+          target_cxxstdlib="CXXSTDLIB_${{ matrix.target }}"
+          env "${target_cxxstdlib}=" cargo zigbuild --locked --release -p stravia-server --target "${{ matrix.target }}"
 
       - name: Package Unix server
         if: runner.os != 'Windows'
