@@ -11,6 +11,9 @@ use stravia_runtime_contract::protocol::ir::AiResponse;
 use stravia_runtime_contract::protocol::ir::AiStreamDelta;
 use stravia_runtime_contract::protocol::ir::ProtocolExt;
 
+mod replay;
+pub(crate) use replay::prepare_thinking_replay;
+
 pub(crate) trait ProtocolAdapter: Send + Sync + 'static {
     fn id(&self) -> ProtocolEndpoint;
     fn capabilities(&self) -> &'static EndpointCapabilities;

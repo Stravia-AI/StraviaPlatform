@@ -134,6 +134,9 @@ impl GenerationChainWrite {
         {
             return false;
         }
+        if let Some(source) = source.thinking_source() {
+            source.stamp_response(response);
+        }
         attach_persisted_profile(
             response,
             &mut self.request,

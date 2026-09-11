@@ -195,7 +195,16 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                 turn.route.egress,
                 turn.reasoning_encrypted_content_requested,
             );
-            projection.begin_model_leg(carrier_facts, inference_run.exposed_tool_names());
+            projection.begin_model_leg(
+                carrier_facts,
+                inference_run.exposed_tool_names(),
+                Some(crate::history_marker::ThinkingSource {
+                    namespace: turn.target.namespace.clone(),
+                    protocol: turn.route.egress,
+                    actual_model: turn.target.actual_model.clone(),
+                    target_id: turn.target.target_id.clone(),
+                }),
+            );
             let mut completion_context = CompletionContext::from_model_turn(
                 gateway.clone(),
                 generation.clone(),

@@ -90,7 +90,6 @@ enum ParsedItem {
 pub struct MarkerResolution {
     pub restored_platform_segments: usize,
     pub restored_thinking_segments: usize,
-    pub restored_protected_thinking_segments: usize,
 }
 
 pub fn render_history_marker(marker: &HistoryMarker) -> String {
@@ -484,21 +483,10 @@ fn segment_items(
                 MarkerResolution {
                     restored_platform_segments: 1,
                     restored_thinking_segments: 0,
-                    restored_protected_thinking_segments: 0,
                 },
             )
         }
-        HiddenHistorySegment::Thinking { block } => {
-            let protected = matches!(
-                &block,
-                ContentBlock::Thinking {
-                    signature: Some(_),
-                    ..
-                } | ContentBlock::Reasoning {
-                    encrypted_content: Some(_),
-                    ..
-                } | ContentBlock::RedactedThinking { .. }
-            );
+        HiddenHistorySegment::Thinking { block, source } => {
             let item = AiItem {
                 role: Role::Assistant,
                 content: MessageContent::Blocks(vec![block]),
@@ -506,17 +494,19 @@ fn segment_items(
                 tool_call_id: None,
                 meta: None,
             };
-            let item = mark_restored(
+            let mut item = mark_restored(
                 item,
                 stravia_runtime_contract::protocol::ir::AiItemProvenance::Provider,
                 reference,
             );
+            if let Some(source) = source {
+                source.stamp_item(&mut item);
+            }
             (
                 vec![item],
                 MarkerResolution {
                     restored_platform_segments: 0,
                     restored_thinking_segments: 1,
-                    restored_protected_thinking_segments: usize::from(protected),
                 },
             )
         }
@@ -749,8 +739,6 @@ async fn materialize_parsed_item(
                 let (mut restored, restored_summary) = segment_items(segment, &reference);
                 summary.restored_platform_segments += restored_summary.restored_platform_segments;
                 summary.restored_thinking_segments += restored_summary.restored_thinking_segments;
-                summary.restored_protected_thinking_segments +=
-                    restored_summary.restored_protected_thinking_segments;
                 resolved_items.append(&mut restored);
             }
         }

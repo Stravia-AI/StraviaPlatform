@@ -343,6 +343,8 @@ Ingress 接受 `{ "id": "..." }`；若显式提供 `type`，必须等于 `item_r
 
 平台工具使用标准 function 声明，`name` 为 `StraviaRead`，参数由统一入口 schema 描述。旧平台扩展 `stravia:web_search` 不再接受，不保留调用别名。Provider-native `web_search` 等工具类型继续按其原协议透传，不被平台工具改名覆盖；客户端自有的同名 function 也不因此改写为原生工具类型。
 
+模型侧 `StraviaRead` 声明使用 `strict: true`，所有参数属性均列入 `required`，并禁止额外属性。可选的 `previous_turn_id`、`allowed_domains` 和 `blocked_domains` 通过 `null` 表示未指定；MCP 发现与调用仍允许省略这些字段，不受模型侧 strict 声明约束。
+
 ### 9.3 Final output policy
 
 Stravia extension 只暴露最终结果，不暴露私有 progress events：

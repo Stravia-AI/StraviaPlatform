@@ -308,6 +308,67 @@ test.describe('Interaction Observation canvas', () => {
     await prepareApp(page)
   })
 
+  test('fills remaining window space in both tabs and scrolls rejected requests only inside the list', async ({
+    page,
+  }) => {
+    await installObservationFixture(page)
+    await page.route('**/api/v1/observations/rejections?*', (route) =>
+      route.fulfill({
+        json: {
+          data: {
+            items: Array.from({ length: 30 }, (_, index) => ({
+              id: `rejection-${index}`,
+              occurred_at: startedAt,
+              method: 'POST',
+              path: `/v1/responses/${index}`,
+              stage: 'decode',
+              code: 'invalid_request',
+              status_code: 400,
+              debug_status: 'disabled',
+            })),
+            total: 31,
+            next_cursor: 'more',
+            snapshot_sequence: 0,
+          },
+        },
+      }),
+    )
+    await page.goto('/logs')
+    await expect(node(page, 'Atlas', 'completed')).toBeVisible()
+
+    for (const viewport of [
+      { width: 1440, height: 1200 },
+      { width: 1280, height: 640 },
+      { width: 500, height: 800 },
+      { width: 320, height: 740 },
+    ]) {
+      await page.setViewportSize(viewport)
+      for (const tab of ['Interaction Chains', 'Rejected Requests']) {
+        await page.getByRole('tab', { name: tab, exact: true }).click()
+        await expect
+          .poll(() =>
+            page.locator('.observation-workspace').evaluate((workspace) => {
+              const main = document.querySelector('main')!
+              const bottom = main.getBoundingClientRect().bottom - parseFloat(getComputedStyle(main).paddingBottom)
+              return {
+                gap: Math.round(bottom - workspace.getBoundingClientRect().bottom),
+                overflow: main.scrollHeight - main.clientHeight,
+                horizontalOverflow: main.scrollWidth - main.clientWidth,
+              }
+            }),
+          )
+          .toEqual({ gap: 0, overflow: 0, horizontalOverflow: 0 })
+      }
+      const list = page.locator('.rejection-list')
+      await expect(list).toBeVisible()
+      await page.locator('.rejections-view').evaluate((element) => {
+        element.scrollTop = element.scrollHeight
+      })
+      await expect(list.getByRole('button').last()).toBeInViewport()
+      await expect(page.getByRole('button', { name: 'Load more', exact: true })).toBeInViewport()
+    }
+  })
+
   test('opens readable conversation bubbles while retaining raw events in diagnostics', async ({ page }) => {
     await installObservationFixture(page, false, true)
     await page.goto('/logs')

@@ -14,7 +14,7 @@ status: accepted
 - 压缩操作的 instructions 不必等于原任务指令。确认操作来源时，可用平台已发布的 output item identity 定位同 Principal 的节点，并核验其完整 client-shaped 前缀；不能仅凭 ID 或正文相似度确认来源。这个查询不复用来源 controls，不改变普通 Generation 的严格父发现，也不将原生 compact ID 当成 Generation ID。
 - 明确的原生控制或已开启的 Route 自动策略使用原生用途的来源准备：已验证的完整来源窗口可以提供父关系与输入 delta，即使本次没有追加 User。执行仍以当前客户端窗口与控制为准；阈值未触发时不伪造压缩事件。Standalone 使用相同来源与 delta 元数据分组，但不 stage/persist Generation。普通请求仍不把完全相同的已完成窗口视为严格后继。
 - SQLite/PostgreSQL 是原生登记事实源，与诊断保留隔离。登记后、交付确认前已经可解析；未确认且未引用的记录保留一小时，确认交付或合法引用后保留七天并延长必要来源。状态重复使用与分支不是消费操作。SQLite 读后写事务与 Turn Chain 一样预先取得写锁，避免立即回传与交付确认的快照升级竞争。
-- 原生状态绑定已知 Target、账号/配置 generation、模型与协议；这不扩大 [ADR-0028](0028-persist-hidden-history-behind-markers.md) 普通 Opaque Context Requirement。原生 compact ID、upstream response ID、Generation ID 不互换。Target Continuation 失效时，允许重放的完整上下文仍是当前压缩窗口。
+- 原生状态绑定已知 Target、账号/配置 generation、模型与协议；它不适用 [ADR-0028](0028-persist-hidden-history-behind-markers.md) 的历史推理降级，不能为了切换 Target 而省略 compaction state。原生 compact ID、upstream response ID、Generation ID 不互换。Target Continuation 失效时，允许重放的完整上下文仍是当前压缩窗口。
 - Route 策略默认关闭，仅在客户端原生控制缺省时注入；实际阈值由支持原生 server-side compaction 的 Target 判断，不使用累计 usage、字节估算或平台摘要回路。`context_management` 决定本次执行策略，不改变已经交付的历史身份；调整或取消阈值后仍可发现完整的压缩后继。请求与 Target Continuation 的语义指纹继续区分该控制的缺省、null 和空集合，不能复用不兼容的上游状态。
 - Retained Tail Association 只保存诊断元数据。其敏感内容索引可丢失；重启后存在未索引保留候选、索引容量不足或搜索不完整时，返回 unavailable/resource-limit，不宣称唯一。已有持久关系仍可查询，清理后的卡片不从核心历史复活。
 

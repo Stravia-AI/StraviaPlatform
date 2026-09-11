@@ -164,6 +164,35 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
                     let registrations = input.compaction_records.clone();
                     let mut turn = execute_inner(self.clone(), input, model_turn_id.clone()).await?;
                     turn.output = self.gateway.redaction.restore_stream(turn.output, mappings, trace.clone());
+                    let thinking_source = crate::history_marker::ThinkingSource {
+                        namespace: turn.target.namespace.clone(),
+                        protocol: turn.route.egress,
+                        actual_model: turn.target.actual_model.clone(),
+                        target_id: turn.target.target_id.clone(),
+                    };
+                    {
+                        use futures::StreamExt;
+                        turn.output = Box::pin(turn.output.map(move |mut event| {
+                            match &mut event {
+                                Ok(CanonicalEvent::Completed(response)) => {
+                                    thinking_source.stamp_response(response);
+                                }
+                                Ok(CanonicalEvent::Delta(AiStreamDelta::ItemDone { item, .. }))
+                                    if matches!(
+                                    &item.content,
+                                    stravia_runtime_contract::protocol::ir::MessageContent::Blocks(blocks)
+                                        if blocks.iter().any(|block| matches!(
+                                            block,
+                                            stravia_runtime_contract::protocol::ir::ContentBlock::Thinking { .. }
+                                                | stravia_runtime_contract::protocol::ir::ContentBlock::Reasoning { .. }
+                                                | stravia_runtime_contract::protocol::ir::ContentBlock::RedactedThinking { .. }
+                                        ))
+                                ) => thinking_source.stamp_item(item),
+                                _ => {}
+                            }
+                            event
+                        }));
+                    }
                     turn.output = register_compaction_stream(
                         turn.output, self.gateway.compaction.clone(), principal.clone(),
                         crate::compaction::CompactionTarget { target_key: turn.target.target_id.clone(), namespace: turn.target.namespace.clone(), model: turn.target.actual_model.clone(), protocol: turn.route.egress.to_string() },
@@ -584,44 +613,55 @@ async fn execute_inner(
         || crate::compaction::NativeCompactionControls::classify(&input.request).requested();
     let mut last_error = None;
     while let Some(target) = attempts.next_healthy(&gateway.health_registry) {
+        let mut omit_protected_thinking = false;
         loop {
             let attempt_started = Instant::now();
-            let result =
-                match prepare_attempt(&executor, &route, &target, &input, &model_turn_id).await {
-                    Ok(prepared) => {
-                        let attempt = begin_attempt(
-                            gateway,
-                            &route,
-                            &target,
-                            &input,
-                            prepared,
-                            attempt_started,
-                            gateway.route_policy_state.clone(),
-                            attempt_context.clone(),
-                        );
-                        let result = if target.first_token_timeout_ms == 0 {
-                            attempt.await
-                        } else {
-                            match tokio::time::timeout(
-                                Duration::from_millis(target.first_token_timeout_ms as u64),
-                                attempt,
-                            )
-                            .await
-                            {
-                                Ok(result) => result,
-                                Err(_) => Err(AttemptFailure::upstream(
-                                    stravia_runtime_contract::protocol::ir::AiErrorKind::Timeout,
-                                    None,
-                                    "first_token_timeout",
-                                    "Target did not produce a First Token before its timeout",
-                                    None,
-                                )),
-                            }
-                        };
-                        result
-                    }
-                    Err(failure) => Err(failure),
-                };
+            let mut protected_thinking_sent = false;
+            let result = match prepare_attempt(
+                &executor,
+                &route,
+                &target,
+                &input,
+                &model_turn_id,
+                omit_protected_thinking,
+            )
+            .await
+            {
+                Ok(prepared) => {
+                    protected_thinking_sent = prepared.protected_thinking_replayed;
+                    let attempt = begin_attempt(
+                        gateway,
+                        &route,
+                        &target,
+                        &input,
+                        prepared,
+                        attempt_started,
+                        gateway.route_policy_state.clone(),
+                        attempt_context.clone(),
+                    );
+                    let result = if target.first_token_timeout_ms == 0 {
+                        attempt.await
+                    } else {
+                        match tokio::time::timeout(
+                            Duration::from_millis(target.first_token_timeout_ms as u64),
+                            attempt,
+                        )
+                        .await
+                        {
+                            Ok(result) => result,
+                            Err(_) => Err(AttemptFailure::upstream(
+                                stravia_runtime_contract::protocol::ir::AiErrorKind::Timeout,
+                                None,
+                                "first_token_timeout",
+                                "Target did not produce a First Token before its timeout",
+                                None,
+                            )),
+                        }
+                    };
+                    result
+                }
+                Err(failure) => Err(failure),
+            };
             let failure = match result {
                 Ok(turn) => {
                     attempts.accept_current();
@@ -631,6 +671,14 @@ async fn execute_inner(
             };
             if native_compaction_requested {
                 return Err(failure.error);
+            }
+            if !omit_protected_thinking
+                && protected_thinking_sent
+                && failure.protected_reasoning_rejected
+            {
+                // 只在上游明确拒绝密文/签名、且尚未产出 canonical 输出时修正一次请求。
+                omit_protected_thinking = true;
+                continue;
             }
             let Some(kind) = failure.kind.clone() else {
                 return Err(failure.error);
@@ -731,6 +779,7 @@ struct PreparedAttempt {
     route: RouteContext,
     provider_call: ProviderCall,
     reasoning_encrypted_content_requested: bool,
+    protected_thinking_replayed: bool,
     force_stream: bool,
     actual_model: String,
     namespace: String,
@@ -741,6 +790,7 @@ struct AttemptFailure {
     kind: Option<stravia_runtime_contract::protocol::ir::AiErrorKind>,
     record_health: bool,
     retry_after: Option<Duration>,
+    protected_reasoning_rejected: bool,
 }
 
 impl AttemptFailure {
@@ -750,6 +800,7 @@ impl AttemptFailure {
             kind: Some(stravia_runtime_contract::protocol::ir::AiErrorKind::ServiceUnavailable),
             record_health: true,
             retry_after: None,
+            protected_reasoning_rejected: false,
         }
     }
 
@@ -769,6 +820,7 @@ impl AttemptFailure {
             kind: Some(kind),
             record_health,
             retry_after,
+            protected_reasoning_rejected: false,
         }
     }
 
@@ -778,6 +830,8 @@ impl AttemptFailure {
         status: Option<u16>,
         body: Option<serde_json::Value>,
     ) -> Self {
+        self.protected_reasoning_rejected = matches!(status, None | Some(400 | 422))
+            && body.as_ref().is_some_and(protected_reasoning_rejected);
         if !passthrough {
             return self;
         }
@@ -798,6 +852,7 @@ impl AttemptFailure {
             kind: None,
             record_health: false,
             retry_after: None,
+            protected_reasoning_rejected: false,
         }
     }
 
@@ -807,6 +862,7 @@ impl AttemptFailure {
             kind: Some(stravia_runtime_contract::protocol::ir::AiErrorKind::ModelNotAvailable),
             record_health: false,
             retry_after: None,
+            protected_reasoning_rejected: false,
         }
     }
 }
@@ -817,6 +873,7 @@ async fn prepare_attempt(
     target: &SelectedTarget,
     input: &TurnInput,
     model_turn_id: &str,
+    omit_protected_thinking: bool,
 ) -> Result<PreparedAttempt, AttemptFailure> {
     let gateway = &executor.gateway;
     let target_key = selected_target_key(target);
@@ -934,11 +991,33 @@ async fn prepare_attempt(
         provider.preset_key.as_deref(),
         input.request.embedding.is_some(),
     );
-    let responses_representable = openai_generation_target
-        && crate::protocol::transform::ProtocolTransform::global()
+    let responses_representable = openai_generation_target && {
+        crate::protocol::transform::ProtocolTransform::global()
             .bind(ingress, OPEN_RESPONSES_2026_04_24)
-            .and_then(|pair| pair.encode_request(&input.request))
-            .is_ok();
+            .and_then(|pair| {
+                pair.encode_request(&input.request).or_else(|error| {
+                    let mut probe = input.request.clone();
+                    if !crate::protocol::transform::prepare_thinking_replay(
+                        &mut probe,
+                        OPEN_RESPONSES_2026_04_24,
+                        |item| {
+                            crate::history_marker::ThinkingSource::from_item(item).map_or(
+                                ingress == OPEN_RESPONSES_2026_04_24,
+                                |source| {
+                                    source.protocol == OPEN_RESPONSES_2026_04_24
+                                        && source.target_id == target_key
+                                        && source.actual_model == actual_model
+                                },
+                            )
+                        },
+                    ) {
+                        return Err(error);
+                    }
+                    pair.encode_request(&probe)
+                })
+            })
+            .is_ok()
+    };
     let mut request_context = RequestContext::new(
         ingress,
         input
@@ -971,26 +1050,6 @@ async fn prepare_attempt(
         })?
     };
     let egress = plan.egress;
-    if input
-        .request
-        .meta
-        .vendor
-        .ingress
-        .get("__stravia_opaque_context_required")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-        && !matches!(
-            egress,
-            stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24
-                | stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01
-                | stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA
-        )
-    {
-        return Err(AttemptFailure::ineligible(
-            "protected_context_unrepresentable",
-            "Target protocol cannot losslessly represent restored protected reasoning",
-        ));
-    }
     let egress_base_url = provider_runtime
         .binding
         .base_url_override
@@ -1043,6 +1102,34 @@ async fn prepare_attempt(
         .unwrap_or_default();
     let compact = input.purpose == super::ModelTurnPurpose::Compact;
     let mut provider_request = input.request.clone();
+    let thinking_source = crate::history_marker::ThinkingSource {
+        namespace: target_namespace.clone(),
+        protocol: egress,
+        actual_model: actual_model.clone(),
+        target_id: target_key.clone(),
+    };
+    // 降级只改变当前 Target 的回放视图；权威历史保留密文，切回来源时仍可原生回放。
+    let thinking_replayed = crate::protocol::transform::prepare_thinking_replay(
+        &mut provider_request,
+        egress,
+        |item| {
+            !omit_protected_thinking
+                && crate::history_marker::ThinkingSource::from_item(item)
+                    .map_or(ingress == egress, |source| source == thinking_source)
+        },
+    );
+    let protected_thinking_replayed = provider_request.items.iter().any(|item| {
+        matches!(
+            &item.content,
+            stravia_runtime_contract::protocol::ir::MessageContent::Blocks(blocks)
+                if blocks.iter().any(|block| matches!(
+                    block,
+                    stravia_runtime_contract::protocol::ir::ContentBlock::Thinking { signature: Some(_), .. }
+                        | stravia_runtime_contract::protocol::ir::ContentBlock::Reasoning { encrypted_content: Some(_), .. }
+                        | stravia_runtime_contract::protocol::ir::ContentBlock::RedactedThinking { .. }
+                ))
+        )
+    });
     let controls = crate::compaction::NativeCompactionControls::classify(&provider_request);
     // Capability booleans describe advertised support, not a negative guarantee.
     // Unknown Responses targets must receive the client's native controls unchanged.
@@ -1149,7 +1236,9 @@ async fn prepare_attempt(
             .get("store")
             .and_then(serde_json::Value::as_bool)
             == Some(false);
-    let continued_id = if compact {
+    let continued_id = if compact || thinking_replayed {
+        // 原生续接的前缀不能替代已经按当前 Target 改写过的完整历史。
+        crate::model_turn::clear_previous_response_id(&mut provider_request);
         None
     } else {
         executor
@@ -1252,6 +1341,7 @@ async fn prepare_attempt(
         },
         provider_call,
         reasoning_encrypted_content_requested,
+        protected_thinking_replayed,
         force_stream: !compact
             && (input.request.stream.enabled
                 || websocket_enabled
@@ -1259,6 +1349,20 @@ async fn prepare_attempt(
         actual_model,
         namespace: target_namespace,
     })
+}
+
+fn protected_reasoning_rejected(body: &serde_json::Value) -> bool {
+    let error = body.get("error").unwrap_or(body);
+    if error.get("code").and_then(serde_json::Value::as_str) == Some("invalid_encrypted_content") {
+        return true;
+    }
+    let message = error
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    message.contains("invalid signature in thinking block")
+        || message.contains("invalid thinking signature")
 }
 
 fn requests_reasoning_encrypted_content(body: &serde_json::Value) -> bool {
@@ -1638,7 +1742,7 @@ async fn begin_attempt(
             Some("upstream_stream_error".into()),
             first_token_ms,
         );
-        return Err(AttemptFailure::upstream(
+        let mut failure = AttemptFailure::upstream(
             error.kind.clone(),
             error.status_code,
             "upstream_stream_error",
@@ -1653,7 +1757,9 @@ async fn begin_attempt(
             native_compaction_requested,
             error.status_code,
             error.raw.clone(),
-        ));
+        );
+        failure.protected_reasoning_rejected &= !first_deltas.iter().any(is_first_output);
+        return Err(failure);
     }
 
     let (tx, rx) = tokio::sync::mpsc::channel(32);

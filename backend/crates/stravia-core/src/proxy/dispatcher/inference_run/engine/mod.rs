@@ -619,12 +619,6 @@ pub(super) async fn orchestrate(
         attempt_id: None,
         payload: checkpoint_payload(&ingress_observer, &request),
     });
-    if marker_resolution.restored_protected_thinking_segments > 0 {
-        request.meta.vendor.ingress.insert(
-            "__stravia_opaque_context_required".into(),
-            serde_json::Value::Bool(true),
-        );
-    }
     ctx.deadline = crate::proxy::context::Deadline::from_now(execution_window);
     let admission = if marker_resolution.restored_platform_segments > 0 {
         tokio::select! {
@@ -1026,6 +1020,7 @@ async fn dispatch_round(
                     projection_session.begin_model_leg(
                         thinking_carrier_facts(ingress, ingress, false),
                         run.exposed_tool_names(),
+                        None,
                     );
                     let observer = ctx
                         .extensions
@@ -1300,6 +1295,12 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
             .as_ref()
             .expect("buffered Inference Run before projection")
             .exposed_tool_names(),
+        Some(crate::history_marker::ThinkingSource {
+            namespace: turn.target.namespace.clone(),
+            protocol: turn.route.egress,
+            actual_model: turn.target.actual_model.clone(),
+            target_id: turn.target.target_id.clone(),
+        }),
     );
 
     let route = turn.route.clone();

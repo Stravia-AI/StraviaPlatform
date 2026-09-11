@@ -115,6 +115,7 @@ struct GenerationChainCompletion {
 pub(super) struct CompletionContext {
     gateway: Gateway,
     actual_model: String,
+    thinking_source: crate::history_marker::ThinkingSource,
     logical_model: String,
     principal: Principal,
     generation_chain: Option<GenerationChainCompletion>,
@@ -152,6 +153,12 @@ impl CompletionContext {
         Self {
             gateway,
             actual_model: target.actual_model.clone(),
+            thinking_source: crate::history_marker::ThinkingSource {
+                namespace: target.namespace.clone(),
+                protocol: egress,
+                actual_model: target.actual_model.clone(),
+                target_id: target.target_id.clone(),
+            },
             logical_model,
             principal: generation.principal,
             generation_chain,
@@ -549,6 +556,7 @@ pub(super) async fn complete_canonical_response(
         projection,
     } = input;
     let commit = context.client_output_commit;
+    context.thinking_source.stamp_response(&mut response);
     fill_canonical_defaults(context, &mut response);
     let upstream_response = response.clone();
 

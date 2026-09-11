@@ -29,6 +29,85 @@ pub enum HistoryMarkerKind {
     Thinking,
 }
 
+/// Actual provider identity for protected reasoning replay. Stored only in private history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThinkingSource {
+    pub namespace: String,
+    #[serde(with = "thinking_source_protocol")]
+    pub protocol: stravia_runtime_contract::protocol::ids::ProtocolEndpoint,
+    pub actual_model: String,
+    pub target_id: String,
+}
+
+impl ThinkingSource {
+    pub(crate) fn from_item(item: &stravia_runtime_contract::protocol::ir::AiItem) -> Option<Self> {
+        serde_json::from_value(
+            item.meta
+                .as_ref()?
+                .get("__stravia_thinking_source")?
+                .clone(),
+        )
+        .ok()
+    }
+
+    pub(crate) fn stamp_response(
+        &self,
+        response: &mut stravia_runtime_contract::protocol::ir::AiResponse,
+    ) {
+        for item in &mut response.items {
+            if let stravia_runtime_contract::protocol::ir::MessageContent::Blocks(blocks) =
+                &item.content
+            {
+                if blocks.iter().any(|block| {
+                    matches!(
+                        block,
+                        ContentBlock::Thinking { .. }
+                            | ContentBlock::Reasoning { .. }
+                            | ContentBlock::RedactedThinking { .. }
+                    )
+                }) && Self::from_item(item).is_none()
+                {
+                    self.stamp_item(item);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn stamp_item(&self, item: &mut stravia_runtime_contract::protocol::ir::AiItem) {
+        let meta = item.meta.get_or_insert_with(|| serde_json::json!({}));
+        if !meta.is_object() {
+            *meta = serde_json::json!({ "vendor_meta": meta.take() });
+        }
+        meta.as_object_mut()
+            .expect("item metadata is an object")
+            .insert(
+                "__stravia_thinking_source".into(),
+                serde_json::to_value(self).expect("thinking source is serializable"),
+            );
+    }
+}
+
+mod thinking_source_protocol {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use stravia_runtime_contract::protocol::ids::ProtocolEndpoint;
+
+    pub fn serialize<S: Serializer>(
+        value: &ProtocolEndpoint,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(value)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<ProtocolEndpoint, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        crate::protocol::registry::ProtocolRegistry::global()
+            .resolve_alias(&value)
+            .ok_or_else(|| serde::de::Error::custom("unknown thinking source protocol"))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum HiddenHistorySegment {
@@ -38,6 +117,8 @@ pub enum HiddenHistorySegment {
     },
     Thinking {
         block: ContentBlock,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<ThinkingSource>,
     },
 }
 
@@ -77,6 +158,7 @@ pub struct PlatformMarkerInput {
 #[derive(Debug, Clone)]
 pub struct ThinkingMarkerInput {
     pub block: ContentBlock,
+    pub source: Option<ThinkingSource>,
     pub activity: String,
     pub pending_retention: Duration,
 }

@@ -480,6 +480,7 @@ async fn sqlite_thinking_markers_are_immutable_and_publish_extends_retention() {
         .create_thinking(
             &owner,
             ThinkingMarkerInput {
+                source: None,
                 block: block.clone(),
                 activity: "Preserving protected reasoning".into(),
                 pending_retention: Duration::from_millis(50),
@@ -505,6 +506,7 @@ async fn sqlite_thinking_markers_are_immutable_and_publish_extends_retention() {
     assert!(resolved.published);
     let Some(HiddenHistorySegment::Thinking {
         block: restored_block,
+        ..
     }) = resolved.segment
     else {
         panic!("Thinking marker should restore one Thinking segment");
@@ -523,6 +525,7 @@ async fn resolver_restores_trailing_marker_at_its_exact_position_and_preserves_e
         .create_thinking(
             &owner,
             ThinkingMarkerInput {
+                source: None,
                 block: ContentBlock::Thinking {
                     thinking: "authoritative".into(),
                     signature: Some("opaque-signature".into()),
@@ -585,6 +588,7 @@ async fn resolver_collapses_legacy_marker_item_duplicate_without_losing_public_c
         .create_thinking(
             &owner,
             ThinkingMarkerInput {
+                source: None,
                 block: ContentBlock::Thinking {
                     thinking: "authoritative".into(),
                     signature: Some("opaque-signature".into()),
@@ -648,6 +652,7 @@ async fn resolver_removes_unknown_and_unauthorized_private_markers() {
         .create_thinking(
             &owner,
             ThinkingMarkerInput {
+                source: None,
                 block: ContentBlock::RedactedThinking {
                     data: "private".into(),
                 },
@@ -785,6 +790,7 @@ async fn resolver_replaces_protected_preview_with_authoritative_thinking() {
         .create_thinking(
             &owner,
             ThinkingMarkerInput {
+                source: None,
                 block: ContentBlock::Thinking {
                     thinking: "authoritative".into(),
                     signature: Some("opaque-signature".into()),
@@ -830,6 +836,7 @@ async fn resolver_treats_content_preview_as_display_only_while_marker_remains() 
         .create_thinking(
             &owner,
             ThinkingMarkerInput {
+                source: None,
                 block: ContentBlock::Thinking {
                     thinking: "authoritative R2".into(),
                     signature: None,
@@ -894,6 +901,7 @@ async fn reserved_thinking_reference_is_in_memory_until_atomic_creation() {
             &owner,
             &reserved,
             ThinkingMarkerInput {
+                source: None,
                 block: ContentBlock::Thinking {
                     thinking: "authoritative".into(),
                     signature: None,
@@ -917,7 +925,8 @@ async fn reserved_thinking_reference_is_in_memory_until_atomic_creation() {
             block: ContentBlock::Thinking {
                 thinking,
                 signature: None,
-            }
+            },
+            ..
         }) if thinking == "authoritative"
     ));
 }
@@ -945,10 +954,17 @@ async fn resolver_keeps_content_preview_as_text_after_marker_deletion() {
 async fn resolver_replaces_reasoning_previews_and_restores_redacted_blocks() {
     let store = sqlite_store().await;
     let owner = principal("owner");
+    let source = ThinkingSource {
+        namespace: "provider:model".into(),
+        protocol: stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24,
+        actual_model: "actual-model".into(),
+        target_id: "original-target".into(),
+    };
     let encrypted = store
         .create_thinking(
             &owner,
             ThinkingMarkerInput {
+                source: Some(source.clone()),
                 block: ContentBlock::Reasoning {
                     summary: vec!["authoritative summary".into()],
                     content: vec!["authoritative content".into()],
@@ -964,6 +980,7 @@ async fn resolver_replaces_reasoning_previews_and_restores_redacted_blocks() {
         .create_thinking(
             &owner,
             ThinkingMarkerInput {
+                source: None,
                 block: ContentBlock::RedactedThinking {
                     data: "opaque-redacted-content".into(),
                 },
@@ -1010,6 +1027,14 @@ async fn resolver_replaces_reasoning_previews_and_restores_redacted_blocks() {
 
     assert_eq!(summary.restored_thinking_segments, 2);
     assert_eq!(request.items.len(), 2);
+    assert_eq!(ThinkingSource::from_item(&request.items[0]), Some(source));
+    assert_eq!(ThinkingSource::from_item(&request.items[1]), None);
+    let mut response = stravia_runtime_contract::protocol::ir::AiResponse::new("response", "model");
+    response.items = request.items.clone();
+    let wire = crate::protocol::codec::open_responses::formatter::ResponsesResponseFormatter
+        .format_response(&response);
+    assert!(!wire.to_string().contains("__stravia_thinking_source"));
+    assert!(!wire.to_string().contains("original-target"));
     assert!(matches!(
         request.items[0].reasoning_ref(),
         Some((summary, content, Some("opaque-encrypted-content")))
@@ -1034,6 +1059,7 @@ async fn resolver_strips_mismatched_delimiters_without_retyping_visible_bytes() 
         .create_thinking(
             &owner,
             ThinkingMarkerInput {
+                source: None,
                 block: ContentBlock::Thinking {
                     thinking: "authoritative".into(),
                     signature: Some("opaque-signature".into()),
@@ -1083,6 +1109,7 @@ async fn resolver_treats_marker_removal_as_an_explicit_projection_edit() {
         .create_thinking(
             &owner,
             ThinkingMarkerInput {
+                source: None,
                 block: ContentBlock::Thinking {
                     thinking: "authoritative".into(),
                     signature: Some("opaque-signature".into()),
@@ -1129,6 +1156,7 @@ async fn resolver_restores_multiple_markers_at_block_boundaries_once_in_order() 
         .create_thinking(
             &owner,
             ThinkingMarkerInput {
+                source: None,
                 block: ContentBlock::Thinking {
                     thinking: "first authoritative".into(),
                     signature: Some("first-signature".into()),
@@ -1143,6 +1171,7 @@ async fn resolver_restores_multiple_markers_at_block_boundaries_once_in_order() 
         .create_thinking(
             &owner,
             ThinkingMarkerInput {
+                source: None,
                 block: ContentBlock::Thinking {
                     thinking: "second authoritative".into(),
                     signature: Some("second-signature".into()),
@@ -1197,6 +1226,7 @@ async fn resolver_strips_unpublished_and_expired_markers_without_losing_visible_
         .create_thinking(
             &owner,
             ThinkingMarkerInput {
+                source: None,
                 block: ContentBlock::Thinking {
                     thinking: "unpublished".into(),
                     signature: Some("opaque".into()),
@@ -1211,6 +1241,7 @@ async fn resolver_strips_unpublished_and_expired_markers_without_losing_visible_
         .create_thinking(
             &owner,
             ThinkingMarkerInput {
+                source: None,
                 block: ContentBlock::Thinking {
                     thinking: "expired".into(),
                     signature: Some("opaque".into()),

@@ -518,6 +518,7 @@ async fn observe_effective_persists_marker_at_ordered_projection_atom() {
         .create_thinking(
             &owner,
             crate::history_marker::ThinkingMarkerInput {
+                source: None,
                 block: ContentBlock::Thinking {
                     thinking: "R1".into(),
                     signature: Some("opaque".into()),

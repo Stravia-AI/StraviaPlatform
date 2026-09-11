@@ -13,9 +13,9 @@ async fn edited_visible_reasoning_restores_the_authoritative_protected_block() {
     let gateway = crate::Gateway::new(config.clone())
         .await
         .expect("gateway init");
-    let (incompatible_url, incompatible_calls) =
-        serve_openai_response(200, openai_response("must not be called")).await;
-    configure_route(&gateway, "opaque-incompatible", &[incompatible_url]).await;
+    let (chat_url, chat_calls) =
+        serve_openai_response(200, openai_response("continued without foreign ciphertext")).await;
+    configure_route(&gateway, "opaque-chat-replay", &[chat_url]).await;
     let headers = authorized_headers(&gateway).await;
     let mut protected = AiResponse::new("protected-response", "in-memory-model");
     protected.push_reasoning("provider reasoning", Some("opaque-signature".into()));
@@ -73,11 +73,11 @@ async fn edited_visible_reasoning_restores_the_authoritative_protected_block() {
     let gateway = crate::Gateway::new(config)
         .await
         .expect("gateway reconstruction");
-    let rejected = execute_non_stream_request_with_headers(
+    let continued = execute_non_stream_request_with_headers(
         gateway.clone(),
         headers.clone(),
         AiRequest::new(
-            "opaque-incompatible",
+            "opaque-chat-replay",
             vec![stravia_runtime_contract::protocol::ir::AiItem::thinking(
                 edited.clone(),
                 None,
@@ -85,16 +85,16 @@ async fn edited_visible_reasoning_restores_the_authoritative_protected_block() {
         ),
     )
     .await;
-    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
-    let rejected_body = to_bytes(rejected.into_body(), usize::MAX)
+    assert_eq!(continued.status(), StatusCode::OK);
+    let continued_body = to_bytes(continued.into_body(), usize::MAX)
         .await
-        .expect("incompatible route body");
+        .expect("Chat continuation body");
     assert!(
-        String::from_utf8_lossy(&rejected_body).contains("protected_context_unrepresentable"),
+        String::from_utf8_lossy(&continued_body).contains("continued without foreign ciphertext"),
         "{}",
-        String::from_utf8_lossy(&rejected_body)
+        String::from_utf8_lossy(&continued_body)
     );
-    assert_eq!(incompatible_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(chat_calls.load(Ordering::SeqCst), 1);
 
     let second = execute(RunInput {
         gateway,
@@ -154,6 +154,321 @@ async fn edited_visible_reasoning_restores_the_authoritative_protected_block() {
             .any(|item| item.thinking_ref() == Some(("client-edited reasoning", None))),
         "client edits must not replace the authoritative protected block"
     );
+}
+
+#[tokio::test]
+async fn encrypted_reasoning_survives_target_switch_and_restart_for_original_target_replay() {
+    use serde_json::{Value, json};
+
+    fn responses(id: &str, output: Vec<Value>) -> Value {
+        crate::protocol::codec::open_responses::formatter::response_resource_snapshot(
+            id,
+            "provider-model",
+            "completed",
+            output,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+        )
+    }
+
+    fn answer(text: &str) -> Value {
+        json!({
+            "type": "message",
+            "id": "msg_answer",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": text, "annotations": []}]
+        })
+    }
+
+    fn captured_body(raw: &str) -> Value {
+        serde_json::from_str(raw.split_once("\r\n\r\n").expect("HTTP body").1)
+            .expect("upstream request JSON")
+    }
+
+    let (origin_url, origin_calls, origin_requests) = serve_openai_sequence_with_requests(vec![
+        responses(
+            "origin-first",
+            vec![
+                json!({
+                    "type": "reasoning",
+                    "id": "rs_visible",
+                    "summary": [{"type": "summary_text", "text": "retained public summary"}],
+                    "encrypted_content": "origin-visible-cipher"
+                }),
+                json!({
+                    "type": "reasoning",
+                    "id": "rs_opaque",
+                    "summary": [],
+                    "encrypted_content": "origin-opaque-cipher"
+                }),
+                answer("origin answer"),
+            ],
+        ),
+        responses("origin-returned", vec![answer("resumed original target")]),
+    ])
+    .await;
+    let (foreign_url, foreign_calls, foreign_requests) =
+        serve_openai_sequence_with_requests(vec![responses(
+            "foreign-response",
+            vec![answer("foreign Responses answer")],
+        )])
+        .await;
+    let (chat_url, chat_calls, chat_requests) =
+        serve_openai_sequence_with_requests(vec![openai_response("foreign Chat answer")]).await;
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let config = crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    };
+    let gateway = Gateway::new(config.clone()).await.expect("gateway init");
+    configure_route_with_protocol(
+        &gateway,
+        "origin-replay",
+        &[origin_url],
+        "test-http",
+        "open-responses",
+    )
+    .await;
+    configure_route_with_protocol(
+        &gateway,
+        "foreign-responses-replay",
+        &[foreign_url],
+        "test-http",
+        "open-responses",
+    )
+    .await;
+    configure_route(&gateway, "foreign-chat-replay", &[chat_url]).await;
+    let headers = authorized_headers(&gateway).await;
+    let mut messages = vec![json!({"role": "user", "content": "start"})];
+    for (model, expected) in [
+        ("origin-replay", "origin answer"),
+        ("foreign-responses-replay", "foreign Responses answer"),
+        ("foreign-chat-replay", "foreign Chat answer"),
+    ] {
+        let request = crate::protocol::transform::ProtocolTransform::global()
+            .bind(
+                OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+                OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            )
+            .expect("Chat protocol")
+            .decode_request(json!({"model": model, "messages": messages}))
+            .expect("client replay");
+        let response =
+            execute_non_stream_request_with_headers(gateway.clone(), headers.clone(), request)
+                .await;
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("client response body");
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let body: Value = serde_json::from_slice(&body).expect("client response JSON");
+        let message = body["choices"][0]["message"].clone();
+        assert!(
+            message["content"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(expected)
+        );
+        messages.push(message);
+        messages.push(json!({"role": "user", "content": "continue"}));
+    }
+    for captured in [&foreign_requests, &chat_requests] {
+        let requests = captured.lock().expect("captured requests");
+        let body = captured_body(&requests[0]);
+        let wire = body.to_string();
+        assert!(wire.contains("retained public summary"), "{wire}");
+        assert!(!wire.contains("origin-visible-cipher"), "{wire}");
+        assert!(!wire.contains("origin-opaque-cipher"), "{wire}");
+        assert!(!wire.contains("__stravia_thinking_source"), "{wire}");
+    }
+    drop(gateway);
+    let gateway = Gateway::new(config).await.expect("gateway reconstruction");
+    let request = crate::protocol::transform::ProtocolTransform::global()
+        .bind(
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+        )
+        .expect("Chat protocol")
+        .decode_request(json!({"model": "origin-replay", "messages": messages}))
+        .expect("return to original Target");
+    let response = execute_non_stream_request_with_headers(gateway, headers, request).await;
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("returned response body");
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert!(String::from_utf8_lossy(&body).contains("resumed original target"));
+    let requests = origin_requests.lock().expect("origin requests");
+    let replay = captured_body(&requests[1]);
+    let encrypted = replay["input"]
+        .as_array()
+        .expect("Responses input")
+        .iter()
+        .filter_map(|item| item.get("encrypted_content").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        encrypted,
+        vec!["origin-visible-cipher", "origin-opaque-cipher"]
+    );
+    let replay_wire = replay.to_string();
+    assert!(replay_wire.contains("foreign Responses answer"));
+    assert!(replay_wire.contains("foreign Chat answer"));
+    assert!(!replay_wire.contains("__stravia_thinking_source"));
+    assert_eq!(origin_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(foreign_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(chat_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn rejected_encrypted_reasoning_is_replayed_once_without_ciphertext_before_output() {
+    use axum::{Json, Router, extract::State, response::IntoResponse, routing::post};
+    use serde_json::{Value, json};
+
+    #[derive(Clone)]
+    struct Fixture {
+        requests: Arc<std::sync::Mutex<Vec<Value>>>,
+        error_code: &'static str,
+        stream_rejection: bool,
+        output_before_rejection: bool,
+    }
+
+    async fn handle(State(fixture): State<Fixture>, Json(body): Json<Value>) -> Response {
+        let first = {
+            let mut requests = fixture.requests.lock().expect("captured requests");
+            requests.push(body.clone());
+            requests.len() == 1
+        };
+        if first {
+            let error = json!({"error": {
+                "type": "invalid_request_error",
+                "code": fixture.error_code,
+                "message": "Request cannot be accepted"
+            }});
+            if fixture.stream_rejection {
+                let prefix = if fixture.output_before_rejection {
+                    openai_responses_sse("already emitted")
+                        .split("event: response.completed")
+                        .next()
+                        .unwrap()
+                        .to_owned()
+                } else {
+                    String::new()
+                };
+                let event = json!({"type": "error", "error": error["error"]});
+                return (
+                    [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                    format!("{prefix}event: error\ndata: {event}\n\n"),
+                )
+                    .into_response();
+            }
+            return (StatusCode::BAD_REQUEST, Json(error)).into_response();
+        }
+        if body["stream"] == true {
+            return (
+                [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                openai_responses_sse("recovered"),
+            )
+                .into_response();
+        }
+        Json(
+            crate::protocol::codec::open_responses::formatter::response_resource_snapshot(
+                "resp-recovered",
+                "provider-model",
+                "completed",
+                vec![json!({
+                    "type": "message", "id": "msg_recovered", "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "recovered", "annotations": []}]
+                })],
+                Value::Null,
+                Value::Null,
+                Value::Null,
+            ),
+        )
+        .into_response()
+    }
+
+    for (stream, error_code, stream_rejection, output_before_rejection, expected_calls) in [
+        (false, "invalid_encrypted_content", false, false, 2),
+        (true, "invalid_encrypted_content", false, false, 2),
+        (true, "invalid_encrypted_content", true, false, 2),
+        (true, "invalid_encrypted_content", true, true, 1),
+        (false, "invalid_request_error", false, false, 1),
+    ] {
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let app = Router::new()
+            .route("/v1/responses", post(handle))
+            .with_state(Fixture {
+                requests: requests.clone(),
+                error_code,
+                stream_rejection,
+                output_before_rejection,
+            });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("local upstream");
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let data_dir = tempfile::tempdir().unwrap();
+        let gateway = Gateway::new(crate::config::GatewayConfig {
+            data_dir: data_dir.path().to_path_buf(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        configure_route_with_protocol(
+            &gateway,
+            "rejected-cipher-replay",
+            &[format!("http://{address}/v1")],
+            "test-http",
+            "open-responses",
+        )
+        .await;
+        let headers = authorized_headers(&gateway).await;
+        let request = crate::protocol::transform::ProtocolTransform::global()
+            .bind(OPEN_RESPONSES_2026_04_24, OPEN_RESPONSES_2026_04_24)
+            .unwrap()
+            .decode_request(json!({
+                "model": "rejected-cipher-replay",
+                "stream": stream,
+                "input": [
+                    {"type": "reasoning", "summary": [{"type": "summary_text", "text": "public summary"}],
+                     "encrypted_content": "unusable-cipher"},
+                    {"role": "user", "content": "continue"}
+                ]
+            }))
+            .unwrap();
+        let response = execute_request_with_headers(
+            gateway,
+            headers,
+            request,
+            OPEN_RESPONSES_2026_04_24,
+            "/v1/responses",
+        )
+        .await;
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let requests = requests.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            expected_calls,
+            "{}",
+            String::from_utf8_lossy(&body)
+        );
+        assert!(requests[0].to_string().contains("unusable-cipher"));
+        if expected_calls == 2 {
+            assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+            assert!(String::from_utf8_lossy(&body).contains("recovered"));
+            assert!(!requests[1].to_string().contains("unusable-cipher"));
+            assert!(requests[1].to_string().contains("public summary"));
+            assert!(requests[1].get("previous_response_id").is_none());
+        } else if !output_before_rejection {
+            assert_ne!(status, StatusCode::OK);
+        }
+        server.abort();
+    }
 }
 
 #[tokio::test]

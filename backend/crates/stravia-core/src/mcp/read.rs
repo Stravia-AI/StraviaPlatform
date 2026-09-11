@@ -455,7 +455,15 @@ impl PlatformTool for ReadTool {
         Some(DOWNLOAD_DESCRIPTION)
     }
     fn parameters(&self) -> Value {
-        input_schema()
+        let mut schema = input_schema();
+        // Strict 模型工具以 null 表示可选值；MCP 仍允许省略这些字段。
+        schema["required"] = json!([
+            "url",
+            "previous_turn_id",
+            "allowed_domains",
+            "blocked_domains"
+        ]);
+        schema
     }
     fn parallel_safe(&self) -> bool {
         true

@@ -1006,10 +1006,15 @@ function formatBytes(value: number | undefined): string {
 <style>
 .observation-page {
   min-height: 0;
+  /* 与壳层保持一致：扣除标题栏、内容内边距和桌面底部沟槽。 */
+  height: calc(100svh - 5rem);
 }
 .observation-workspace {
   position: relative;
-  min-height: 38rem;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -1017,6 +1022,7 @@ function formatBytes(value: number | undefined): string {
 }
 .workspace-toolbar {
   display: flex;
+  flex-shrink: 0;
   min-height: 3.5rem;
   align-items: center;
   justify-content: space-between;
@@ -1040,30 +1046,16 @@ function formatBytes(value: number | undefined): string {
   position: fixed;
   inset: 0;
   z-index: 40;
-  display: flex;
-  flex-direction: column;
   width: 100%;
   height: 100dvh;
   min-height: 0;
   border: 0;
   border-radius: 0;
 }
-.workspace-fullscreen .canvas-stage,
-.observation-workspace:fullscreen .canvas-stage {
-  flex: 1;
-  height: auto;
-  min-height: 0;
-}
-.workspace-fullscreen .rejections-view,
-.observation-workspace:fullscreen .rejections-view {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-}
 .canvas-stage {
   position: relative;
-  height: min(68vh, 50rem);
-  min-height: 34rem;
+  flex: 1;
+  min-height: 0;
   overflow: hidden;
 }
 .stage-state {
@@ -1091,11 +1083,23 @@ function formatBytes(value: number | undefined): string {
 }
 .rejections-view {
   position: relative;
-  min-height: 34rem;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+}
+.rejections-view > header,
+.rejections-view > .border-t {
+  flex-shrink: 0;
+}
+.rejections-view > .stage-state {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 .rejection-list {
-  max-height: 65vh;
-  overflow-y: auto;
+  flex-shrink: 0;
 }
 .rejection-list button {
   display: flex;
@@ -1123,6 +1127,9 @@ function formatBytes(value: number | undefined): string {
   font-size: 0.72rem;
 }
 @media (max-width: 767px) {
+  .observation-page {
+    height: calc(100svh - 4.5rem);
+  }
   .workspace-toolbar {
     align-items: stretch;
     flex-direction: column;
@@ -1133,13 +1140,6 @@ function formatBytes(value: number | undefined): string {
   .window-controls :global(.range-picker) {
     order: 1;
     width: 100%;
-  }
-  .canvas-stage {
-    height: 70svh;
-    min-height: 30rem;
-  }
-  .observation-workspace {
-    min-height: 32rem;
   }
 }
 </style>

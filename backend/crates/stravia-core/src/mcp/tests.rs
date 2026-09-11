@@ -211,6 +211,62 @@ impl Drop for TestApp {
 
 type SdkClient = RunningService<RoleClient, ClientInfo>;
 
+#[tokio::test]
+async fn read_tool_responses_schema_supports_strict_optional_arguments() {
+    use crate::hook::tool::PlatformToolRegistry;
+    use crate::protocol::codec::open_responses::encoder::ResponsesEncoder;
+    use stravia_runtime_contract::hook::ToolId;
+    use stravia_runtime_contract::protocol::ir::{AiItem, AiRequest, Role};
+
+    let data_dir = tempfile::tempdir().expect("temp data dir");
+    let gateway = Gateway::new(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .expect("gateway");
+    let tool = read::ReadTool::new(&gateway, &mut Vec::new()).expect("read tool");
+    let mcp_schema = McpTool::input_schema(&tool);
+    let registry = PlatformToolRegistry::new(vec![Arc::new(tool)]).expect("registry");
+    let exposed = registry
+        .expose(&ToolId::new(read::TOOL_ID), &Default::default())
+        .expect("expose read tool");
+    let mut input = AiItem::output_text("Read query://Rust");
+    input.role = Role::User;
+    let mut request = AiRequest::new("gpt-6-astra", vec![input]);
+    request.tools = Some(vec![exposed.spec]);
+    let (body, _) = ResponsesEncoder
+        .encode_request(&request)
+        .expect("encode Responses request");
+    let function = &body["tools"][0];
+    assert_eq!(function["strict"], true);
+    let schema = &function["parameters"];
+    let required = schema["required"].as_array().expect("required array");
+    for name in schema["properties"].as_object().expect("properties").keys() {
+        assert!(
+            required.contains(&json!(name)),
+            "invalid_function_parameters: strict StraviaRead schema is missing required property {name}"
+        );
+    }
+    assert_eq!(schema["additionalProperties"], false);
+    let validator = jsonschema::validator_for(schema).expect("valid schema");
+    let arguments = json!({
+        "url": "query://Rust",
+        "previous_turn_id": null,
+        "allowed_domains": null,
+        "blocked_domains": null
+    });
+    assert!(validator.is_valid(&arguments));
+    assert!(!validator.is_valid(&json!({
+        "url": "query://Rust",
+        "previous_turn_id": 42,
+        "allowed_domains": null,
+        "blocked_domains": null
+    })));
+    let mcp_validator = jsonschema::validator_for(&mcp_schema).expect("valid MCP schema");
+    assert!(mcp_validator.is_valid(&json!({"url": "query://Rust"})));
+}
+
 async fn test_app() -> TestApp {
     test_app_with_tools(vec![Arc::new(EchoTool)]).await
 }

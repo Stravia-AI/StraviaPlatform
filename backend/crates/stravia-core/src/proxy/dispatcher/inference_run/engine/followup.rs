@@ -87,6 +87,7 @@ pub(super) async fn acquire_followup_model_turn(
             projection.begin_model_leg(
                 super::thinking_carrier_facts(ingress, ingress, false),
                 inference_run.exposed_tool_names(),
+                None,
             );
             match projection.project_staged(&mut response, &[]).await {
                 Ok(_) => {}

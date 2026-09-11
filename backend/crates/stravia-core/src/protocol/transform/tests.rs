@@ -39,6 +39,240 @@ use stravia_runtime_contract::protocol::ir::Role;
 use stravia_runtime_contract::protocol::ir::ToolCall;
 
 #[test]
+fn historical_reasoning_replay_is_target_local_and_keeps_readable_parts() {
+    let native = ProtocolTransform::global()
+        .bind(OPEN_RESPONSES_2026_04_24, OPEN_RESPONSES_2026_04_24)
+        .unwrap();
+    let original = native.decode_request(json!({
+        "model":"model", "input":[
+            {"type":"reasoning", "id":"rs_1", "summary":[{"type":"summary_text","text":"summary"}],
+             "content":[{"type":"reasoning_text","text":"detail"}], "encrypted_content":"secret", "native_hint":"opaque"},
+            {"role":"user","content":"continue"}
+        ]
+    })).unwrap();
+    let before = serde_json::to_value(&original).unwrap();
+    let mut compatible = original.clone();
+    assert!(!super::prepare_thinking_replay(
+        &mut compatible,
+        OPEN_RESPONSES_2026_04_24,
+        |_| true
+    ));
+    assert_eq!(
+        native.encode_request(&compatible).unwrap().body["input"][0]["encrypted_content"],
+        "secret"
+    );
+
+    for target in [
+        OPEN_RESPONSES_2026_04_24,
+        OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+        ANTHROPIC_MESSAGES_2023_06_01,
+        GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+    ] {
+        let mut replay = original.clone();
+        assert!(super::prepare_thinking_replay(&mut replay, target, |_| {
+            false
+        }));
+        let pair = ProtocolTransform::global()
+            .bind(OPEN_RESPONSES_2026_04_24, target)
+            .unwrap();
+        let body = pair.encode_request(&replay).unwrap().body;
+        let serialized = body.to_string();
+        assert!(serialized.contains("summary"));
+        assert!(serialized.contains("detail"));
+        assert!(serialized.contains("continue"));
+        assert!(!serialized.contains("secret"));
+        assert!(!serialized.contains("native_hint"));
+        if target == OPEN_RESPONSES_2026_04_24 {
+            assert_eq!(body["input"][0]["type"], "message");
+            assert_eq!(body["input"][0]["content"][0]["text"], "summary");
+            assert_eq!(body["input"][0]["content"][1]["text"], "detail");
+        }
+    }
+    assert_eq!(serde_json::to_value(&original).unwrap(), before);
+}
+
+#[test]
+fn replay_drops_only_empty_thinking_and_retains_tools_and_hard_fields() {
+    let pair = ProtocolTransform::global()
+        .bind(
+            OPEN_RESPONSES_2026_04_24,
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+        )
+        .unwrap();
+    let mut request = pair
+        .decode_request(json!({"model":"model","input":[
+            {"type":"reasoning","summary":[],"encrypted_content":"secret"},
+            {"role":"user","content":"continue"}
+        ]}))
+        .unwrap();
+    let mut mixed = request.items[0].clone();
+    mixed.tool_calls = Some(vec![ToolCall {
+        id: "call_1".into(),
+        name: "lookup".into(),
+        arguments: "{}".into(),
+    }]);
+    mixed.meta = Some(json!({"ordinary":"retained"}));
+    request.items.insert(1, mixed);
+    request.items.insert(
+        2,
+        AiItem::function_call_output("call_1", json!("lookup result")),
+    );
+    assert!(super::prepare_thinking_replay(
+        &mut request,
+        OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+        |_| false
+    ));
+    assert_eq!(request.items.len(), 3);
+    assert_eq!(
+        request.items[0].meta.as_ref().unwrap()["ordinary"],
+        "retained"
+    );
+    let body = pair.encode_request(&request).unwrap().body;
+    assert_eq!(body["messages"][0]["tool_calls"][0]["id"], "call_1");
+    assert_eq!(body["messages"][1]["tool_call_id"], "call_1");
+    assert_eq!(body["messages"][1]["content"], "lookup result");
+    assert_eq!(body["messages"][2]["content"], "continue");
+
+    let MessageContent::Blocks(blocks) = &mut request.items[0].content else {
+        panic!("blocks")
+    };
+    blocks.push(ContentBlock::Compaction {
+        encrypted_content: "compaction-secret".into(),
+    });
+    assert!(!super::prepare_thinking_replay(
+        &mut request,
+        OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+        |_| false
+    ));
+    assert!(matches!(
+        pair.encode_request(&request),
+        Err(TransformError::Unrepresentable { .. })
+    ));
+}
+
+#[test]
+fn replay_retains_native_signed_thinking_but_not_foreign_signatures_or_redactions() {
+    let native = ProtocolTransform::global()
+        .bind(ANTHROPIC_MESSAGES_2023_06_01, ANTHROPIC_MESSAGES_2023_06_01)
+        .unwrap();
+    let mut original = native.decode_request(json!({"model":"model","max_tokens":100,"messages":[
+        {"role":"assistant","content":[{"type":"thinking","thinking":"visible","signature":"signed"},{"type":"text","text":"answer"}]},
+        {"role":"user","content":"continue"}
+    ]})).unwrap();
+    let MessageContent::Blocks(blocks) = &mut original.items[0].content else {
+        panic!("blocks")
+    };
+    blocks.insert(
+        1,
+        ContentBlock::RedactedThinking {
+            data: "hidden".into(),
+        },
+    );
+    let mut same = original.clone();
+    assert!(!super::prepare_thinking_replay(
+        &mut same,
+        ANTHROPIC_MESSAGES_2023_06_01,
+        |_| true
+    ));
+    let encoded = native.encode_request(&same).unwrap().body.to_string();
+    assert!(encoded.contains("signed"));
+    assert!(encoded.contains("hidden"));
+    let mut foreign = original.clone();
+    assert!(super::prepare_thinking_replay(
+        &mut foreign,
+        ANTHROPIC_MESSAGES_2023_06_01,
+        |_| false
+    ));
+    let body = native.encode_request(&foreign).unwrap().body;
+    assert_eq!(
+        body["messages"][0]["content"][0],
+        json!({"type":"text","text":"visible"})
+    );
+    assert_eq!(
+        body["messages"][0]["content"][1],
+        json!({"type":"text","text":"answer"})
+    );
+
+    let chat = ProtocolTransform::global()
+        .bind(
+            ANTHROPIC_MESSAGES_2023_06_01,
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+        )
+        .unwrap();
+    let mut replay = original;
+    assert!(super::prepare_thinking_replay(
+        &mut replay,
+        OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+        |_| true
+    ));
+    let body = chat.encode_request(&replay).unwrap().body;
+    assert!(
+        body["messages"][0]["content"]
+            .to_string()
+            .contains("visible")
+    );
+    assert!(body["messages"][0].get("reasoning_content").is_none());
+    assert!(!body.to_string().contains("signed"));
+    assert!(!body.to_string().contains("hidden"));
+}
+
+#[test]
+fn replay_keeps_native_reasoning_tools_and_ordinary_loss_checks() {
+    let native = ProtocolTransform::global()
+        .bind(OPEN_RESPONSES_2026_04_24, OPEN_RESPONSES_2026_04_24)
+        .unwrap();
+    let mut request = native.decode_request(json!({"model":"model","input":[
+        {"type":"reasoning","summary":[{"type":"summary_text","text":"summary"}],"content":[{"type":"reasoning_text","text":"detail"}],"encrypted_content":"secret"},
+        {"role":"user","content":"continue"}
+    ]})).unwrap();
+    request.items[0].tool_calls = Some(vec![ToolCall {
+        id: "call_1".into(),
+        name: "lookup".into(),
+        arguments: "{}".into(),
+    }]);
+    assert!(super::prepare_thinking_replay(
+        &mut request,
+        OPEN_RESPONSES_2026_04_24,
+        |_| true
+    ));
+    let body = native.encode_request(&request).unwrap().body;
+    assert_eq!(body["input"][0]["encrypted_content"], "secret");
+    assert_eq!(body["input"][0]["content"][0]["text"], "detail");
+    assert_eq!(body["input"][1]["type"], "function_call");
+    assert_eq!(body["input"][1]["call_id"], "call_1");
+
+    request.items[2].meta = Some(json!({"__open_responses_item_fields":{"hard_field":true}}));
+    let pair = ProtocolTransform::global()
+        .bind(
+            OPEN_RESPONSES_2026_04_24,
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+        )
+        .unwrap();
+    assert!(super::prepare_thinking_replay(
+        &mut request,
+        OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+        |_| false
+    ));
+    assert!(matches!(
+        pair.encode_request(&request),
+        Err(TransformError::Unrepresentable { .. })
+    ));
+    request.items[2].meta = None;
+    request.items[2].content = MessageContent::Blocks(vec![ContentBlock::Unknown {
+        raw: json!({"type":"future_hard_content"}),
+    }]);
+    assert!(!super::prepare_thinking_replay(
+        &mut request,
+        OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+        |_| false
+    ));
+    assert!(matches!(
+        pair.encode_request(&request),
+        Err(TransformError::Unrepresentable { .. })
+    ));
+}
+
+#[test]
 fn native_compaction_controls_and_state_cannot_be_lossily_converted() {
     let outbound = ProtocolTransform::global()
         .bind(

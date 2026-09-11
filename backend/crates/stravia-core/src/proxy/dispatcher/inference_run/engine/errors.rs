@@ -188,8 +188,7 @@ pub(super) fn model_turn_error_response(
         | "compaction_unsupported"
         | "compaction_target_mismatch"
         | "invalid_compaction_state"
-        | "compaction_conflict"
-        | "protected_context_unrepresentable" => StatusCode::BAD_REQUEST,
+        | "compaction_conflict" => StatusCode::BAD_REQUEST,
         "protocol_lossy_rejected" | "STRAVIA_PROTOCOL_LOSSY_REJECTED" => {
             StatusCode::UNPROCESSABLE_ENTITY
         }

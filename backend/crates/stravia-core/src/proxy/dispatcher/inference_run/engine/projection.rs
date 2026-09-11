@@ -546,6 +546,7 @@ pub(super) struct ClientProjectionSession {
     marker_store: Arc<dyn HistoryMarkerStore>,
     principal: Principal,
     leg_started_post_text: bool,
+    thinking_source: Option<crate::history_marker::ThinkingSource>,
     early_thinking: BTreeMap<usize, VecDeque<ProjectedThinkingMarker>>,
     live_platform_carriers: HashMap<String, bool>,
     staged_delivery: Option<ProjectedDeltaBatch>,
@@ -584,6 +585,7 @@ impl ClientProjectionSession {
             marker_store,
             principal,
             leg_started_post_text: false,
+            thinking_source: None,
             early_thinking: BTreeMap::new(),
             live_platform_carriers: HashMap::new(),
             staged_delivery: None,
@@ -666,7 +668,9 @@ impl ClientProjectionSession {
         &mut self,
         carrier_facts: ThinkingCarrierFacts,
         exposed_tool_names: impl IntoIterator<Item = String>,
+        source: Option<crate::history_marker::ThinkingSource>,
     ) {
+        self.thinking_source = source;
         self.state.begin_model_leg();
         debug_assert!(
             self.early_thinking.is_empty() && self.live_platform_carriers.is_empty(),
@@ -798,7 +802,12 @@ impl ClientProjectionSession {
             .filter(|block| is_thinking(block) && (post_text || is_protected_thinking(block)))
         {
             let marker = self
-                .persist_thinking_block(block.clone(), reserved.take())
+                .persist_thinking_block(
+                    block.clone(),
+                    reserved.take(),
+                    crate::history_marker::ThinkingSource::from_item(item)
+                        .or_else(|| self.thinking_source.clone()),
+                )
                 .await?;
             markers.push(marker);
         }
@@ -1496,6 +1505,8 @@ impl ClientProjectionSession {
                 .early_thinking
                 .remove(&output_index)
                 .unwrap_or_default();
+            let source = crate::history_marker::ThinkingSource::from_item(&item)
+                .or_else(|| self.thinking_source.clone());
             let mut meta = item.meta.take();
             match std::mem::replace(&mut item.content, MessageContent::Text(String::new())) {
                 MessageContent::Text(text) => {
@@ -1541,7 +1552,9 @@ impl ClientProjectionSession {
                         let (marker, newly_persisted) = if let Some(entry) = prepared.pop_front() {
                             (entry.marker, false)
                         } else {
-                            let marker = self.persist_thinking_block(block.clone(), None).await?;
+                            let marker = self
+                                .persist_thinking_block(block.clone(), None, source.clone())
+                                .await?;
                             (marker, true)
                         };
                         if block_post_text {
@@ -1637,9 +1650,11 @@ impl ClientProjectionSession {
         &self,
         block: ContentBlock,
         reserved: Option<&HistoryMarker>,
+        source: Option<crate::history_marker::ThinkingSource>,
     ) -> Result<HistoryMarker, HistoryMarkerError> {
         let input = ThinkingMarkerInput {
             block,
+            source,
             activity: "Preserving protected reasoning".into(),
             pending_retention: THINKING_MARKER_PENDING_RETENTION,
         };
@@ -2246,6 +2261,7 @@ mod tests {
                 stream_unprotected_summaries: false,
             },
             Vec::new(),
+            None,
         );
     }
 
@@ -2381,6 +2397,7 @@ mod tests {
                 stream_unprotected_summaries: true,
             },
             Vec::new(),
+            None,
         );
         let streamed = session
             .project_live_deltas(
@@ -2404,6 +2421,7 @@ mod tests {
                 stream_unprotected_summaries: false,
             },
             Vec::new(),
+            None,
         );
         let indexed_buffered = session
             .project_live_deltas(
@@ -2426,6 +2444,7 @@ mod tests {
                 stream_unprotected_summaries: false,
             },
             Vec::new(),
+            None,
         );
         let unindexed_buffered = session
             .project_live_deltas(
@@ -2449,6 +2468,7 @@ mod tests {
                 stream_unprotected_summaries: false,
             },
             vec!["stravia__ordered_tool".to_owned()],
+            None,
         );
         for delta in [
             AiStreamDelta::ToolCallStart {
@@ -2494,6 +2514,7 @@ mod tests {
                 stream_unprotected_summaries: false,
             },
             Vec::new(),
+            None,
         );
         assert!(
             session
@@ -2981,6 +3002,7 @@ mod tests {
                 stream_unprotected_summaries: false,
             },
             vec!["stravia__ordered_tool".to_owned()],
+            None,
         );
         let empty = session
             .project_live_deltas(vec![AiStreamDelta::TextDelta(String::new())], false)

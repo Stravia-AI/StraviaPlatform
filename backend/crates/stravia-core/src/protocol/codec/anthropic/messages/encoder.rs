@@ -243,6 +243,7 @@ const ALLOWED_BLOCK_TYPES: &[&str] = &[
     "text",
     "image",
     "thinking",
+    "redacted_thinking",
     "tool_use",
     "tool_result",
     "document",

@@ -81,6 +81,16 @@ _避免使用_：Principal、Connect Client、上游账户
 实例管理员是一个 Stravia 实例唯一的管理用户，拥有该实例的全部管理权限。实例不提供其他管理用户的创建、禁用或删除功能。
 _避免使用_：多用户管理、普通用户、API Key 所有者
 
+## 管理入口
+
+管理入口是浏览器访问 Stravia 管理面的外部源，由协议、主机与有效端口共同标识，不包含页面路径。它不同于服务监听地址、反向代理回源地址或客户端／文件访问地址。
+_避免使用_：服务地址（未区分外部入口与内部监听时）
+
+## 受信代理
+
+受信代理是部署者明确授权、可以向 Stravia 声明浏览器侧原始访问信息的反向代理。该信任不授予管理员身份，也不代表其声明的管理入口自动获得允许。
+_避免使用_：可信入口、已认证客户端
+
 ## 设置令牌（Setup Token）
 
 设置令牌是领取 Stravia 首次设置资格的一次性凭据，只用于选择服务存储并建立首个实例管理员。它不是日常管理凭据，也不授予覆盖已有管理员的资格。
@@ -215,10 +225,10 @@ _避免使用_：History Marker、Hidden History Segment、Projection Record
 Hidden History Segment 是 Client Projection 省略、但属于模型有效上下文的单个受保护单元；它是一个 Thinking block，或一个 Platform Tool Execution 的 call/result 对。恢复只替换对应 History Marker，不覆盖 Marker 之外的客户端历史，也不拥有同一模型轮次中客户端可见的工具调用。一次恢复同时给出模型可见历史，以及仍带 Marker 的 client-shaped 对照；Generation Chain 落盘 effective request 时使用该对照，不自己回锚 Marker。
 _避免使用_：Hidden Client History、完整历史快照
 
-## Opaque Context Requirement
+## Thinking Replay
 
-Opaque Context Requirement 是恢复受保护推理后对 Target 施加的无损协议表示约束，不绑定原 Provider、credential namespace 或 model。Target 不能满足该约束时必须跳过；没有可用 Target 时，本次生成必须拒绝，不能丢弃密文或降级为明文继续。
-_避免使用_：Reasoning Fallback、Best-effort Thinking
+Thinking Replay 是面向当前 Target 的历史推理回放视图，优先让会话继续。来源绑定兼容且协议能够承载时保留原生推理；否则保留可见文本而省略不可用的密文或签名，不把摘要视为完整推理的等价替代。回放视图不改写权威历史；原历史仍在且回到兼容来源时，可以重新使用保留的密文。它不放宽普通消息、工具调用、原生压缩状态或其他硬约束。
+_避免使用_：无损跨模型思维链、解密降级、删除原始推理
 
 ## History Marker Store
 

@@ -1,6 +1,7 @@
 import { createParser, type EventSourceMessage } from 'eventsource-parser'
 
-import { apiBase, authenticatedFetch } from '$lib/auth'
+import { apiBase, authenticatedFetch, isTauri } from '$lib/auth'
+import { openExternalUrl } from '$lib/open-external'
 import type { DownloadTicket, ObservationEvent, ObservationStreamUpdate } from '$lib/types'
 
 export interface ObservationSubscription {
@@ -104,6 +105,11 @@ export async function navigateToBundle(ticket: DownloadTicket): Promise<void> {
     : ticket.download_url.startsWith('/api/v1/')
       ? `${adminOrigin}${ticket.download_url}`
       : `${base}${ticket.download_url.startsWith('/') ? ticket.download_url : `/${ticket.download_url}`}`
+  if (isTauri) {
+    // 一次性票据可独立下载；交给系统浏览器，避免在内嵌 WebView 中导航。
+    await openExternalUrl(href)
+    return
+  }
   const anchor = document.createElement('a')
   anchor.href = href
   anchor.dataset.sveltekitReload = ''

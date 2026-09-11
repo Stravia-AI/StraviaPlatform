@@ -86,6 +86,25 @@ pub(crate) enum GenerationSource {
     },
 }
 
+impl GenerationSource {
+    pub(crate) fn thinking_source(&self) -> Option<crate::history_marker::ThinkingSource> {
+        match self {
+            Self::Target {
+                namespace,
+                protocol,
+                actual_model,
+                selected_target_key,
+            } => Some(crate::history_marker::ThinkingSource {
+                namespace: namespace.clone(),
+                protocol: *protocol,
+                actual_model: actual_model.clone(),
+                target_id: selected_target_key.clone(),
+            }),
+            Self::Hook { .. } => None,
+        }
+    }
+}
+
 #[derive(Clone)]
 struct StagedGeneration {
     response: AiResponse,

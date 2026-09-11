@@ -537,19 +537,22 @@ impl UpdateService {
     }
 
     async fn view(&self, state: PersistedUpdateState) -> anyhow::Result<UpdateStatus> {
+        // 更新缓存跨安装版本保留；历史候选不能继续作为已安装版本的可用更新。
+        let available_update = state
+            .available_update
+            .filter(|update| update.version > self.current_version);
         let skipped_version = self
             .storage
             .settings()
             .get(SKIPPED_VERSION_KEY)
             .await?
             .and_then(|value| Version::parse(value.trim()).ok());
-        let skipped = state
-            .available_update
+        let skipped = available_update
             .as_ref()
             .is_some_and(|update| skipped_version.as_ref() == Some(&update.version));
         let check_status = if state.last_failure.is_some() {
             UpdateCheckStatus::Error
-        } else if state.available_update.is_some() {
+        } else if available_update.is_some() {
             UpdateCheckStatus::Available
         } else if state.last_success_at.is_some() {
             UpdateCheckStatus::UpToDate
@@ -561,7 +564,7 @@ impl UpdateService {
             check_status,
             last_success_at: state.last_success_at,
             last_failure: state.last_failure,
-            available_update: state.available_update,
+            available_update,
             skipped,
             download_supported: self.download_supported,
         })
@@ -975,6 +978,39 @@ mod tests {
         )
         .expect("a later release should be available");
         assert_eq!(selected.version, Version::parse("1.3.0").unwrap());
+    }
+
+    #[tokio::test]
+    async fn installed_update_is_not_offered_from_persisted_cache() {
+        let source = Arc::new(FakeSource::new([
+            ReleaseReply::Releases(vec![release("1.2.0", false)]),
+            ReleaseReply::Error("offline"),
+        ]));
+        let clock = Arc::new(FakeClock::new("2026-09-05T00:00:00Z"));
+        let old = service(Arc::clone(&source), Arc::clone(&clock), "1.0.0");
+        old.check(UpdateCheckMode::Manual).await.unwrap();
+        old.set_skipped_version(Some("1.2.0")).await.unwrap();
+        let installed = UpdateService::new(
+            Arc::clone(&old.storage),
+            source,
+            clock,
+            Version::parse("1.2.0").unwrap(),
+            true,
+            true,
+        );
+
+        for status in [
+            installed.status().await.unwrap(),
+            installed.check(UpdateCheckMode::Automatic).await.unwrap(),
+        ] {
+            assert!(status.available_update.is_none());
+            assert_eq!(status.check_status, UpdateCheckStatus::UpToDate);
+            assert!(!status.skipped);
+        }
+        let failed = installed.check(UpdateCheckMode::Manual).await.unwrap();
+        assert_eq!(failed.check_status, UpdateCheckStatus::Error);
+        assert!(failed.available_update.is_none());
+        assert!(!failed.skipped);
     }
 
     #[tokio::test]

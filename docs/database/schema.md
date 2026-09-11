@@ -546,7 +546,7 @@ History Marker Store 的持久化事实源。每行只保存一个受保护 Thin
 | `activity` | TEXT NOT NULL | — | 注册元数据提供的安全英文活动说明 |
 | `tool_id` | TEXT | NULL | Platform Tool 注册 ID；Thinking Marker 必须为 NULL |
 | `call_payload` | JSON/TEXT | NULL | 单个完整 Platform call；Thinking Marker 必须为 NULL |
-| `segment_payload` | JSON/TEXT | NULL | Thinking block，或 terminal Platform call/result 对 |
+| `segment_payload` | JSON/TEXT | NULL | Thinking block 与可选来源绑定，或 terminal Platform call/result 对 |
 | `execution_state` | TEXT | NULL | Platform 的 `pending`、`running`、`completed`、`failed` 或 `interrupted` |
 | `execution_owner` | TEXT | NULL | 当前原子 claim owner；terminal 时清空 |
 | `lease_expires_at` | BIGINT/INTEGER | NULL | running owner lease 到期时间（Unix 毫秒） |
@@ -559,6 +559,8 @@ History Marker Store 的持久化事实源。每行只保存一个受保护 Thin
 **索引**：`idx_history_markers_principal_reference`、`idx_history_markers_execution`、`idx_history_markers_expiry`
 
 Platform terminal `segment_payload` 的工具结果保留同一 `content_kind` 语义，Hook 和隐藏历史重建不能把缺失值自动补为可信 JSON。业务 JSON 中同名字段只是业务数据，不作为内部语义标记。
+
+Thinking `segment_payload` 的可选 `source` 保存 `namespace`、`protocol`、`actual_model` 和 `target_id`，用于选择原生或降级回放；旧 JSON 缺失该字段时保持来源未知。来源是平台私有元数据，不发送给客户端或上游。Target 请求副本的降级不修改 `block` 或来源，切回兼容来源时可以恢复原密文。该可选 JSON 字段不改变 SQLite/PostgreSQL 表结构或现有 migration。
 
 ---
 

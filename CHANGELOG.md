@@ -4,9 +4,15 @@
 
 ### Changed
 
+- Historical thinking now uses Target-local best-effort replay: incompatible ciphertext/signatures are omitted while visible text is retained, without rewriting original history. New reasoning records retain source bindings so returning to the original compatible Target can reuse ciphertext after intervening Targets or restarts.
 - Windows MSVC builds use the Rust toolchain's bundled LLD linker while retaining static CRT linkage, full development debug information, and incremental compilation.
 - Desktop builds emit only the Rust library consumed by the executable, avoiding unused C ABI static and dynamic library outputs during rebuilds.
 - Added `task build:desktop:debug` for Rust-only desktop rebuilds without WebUI preparation or installer bundling; documented the incremental-build workflow for both applications.
+
+### Fixed
+
+- Explicit encrypted-content or thinking-signature rejections before output permit one protected-reasoning-free replay; ordinary errors and native compaction do not. DeepSeek tool history retains existing reasoning and supplies an empty field when none was captured. Anthropic native replay accepts preserved `redacted_thinking` blocks.
+- `StraviaRead` model tool schemas now list nullable optional arguments as required in strict mode, preventing Codex/Responses `invalid_function_parameters` failures while preserving optional fields for MCP callers.
 
 ## [0.2.1] - 2026-09-10
 

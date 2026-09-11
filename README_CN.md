@@ -73,9 +73,11 @@ Open Responses 推理正文使用当前客户端采用的 rolling `response.reas
 
 重新提交完整历史的客户端必须原样保留 History Marker 与 Projection Delimiter。Stravia 会删除仅用于展示的 Preview 字节，并在原位置恢复权威 Thinking、ToolCall 与 ToolResult；删除 Marker 或 Delimiter 会被视为有意编辑历史。客户端关闭流式传输时，Stravia 会先执行仅含 Platform Tool 的隐藏续轮，再一次性返回语义等价的 buffered projection。live stream 则在启动对应 Platform Tool 前交付并发布每个 Marker。
 
-OpenAI direct 与 Codex OAuth 的生成 Target 会为 Chat Completions、Open Responses、Anthropic Messages 和 Gemini 请求使用上游 Responses WebSocket，不受客户端是否流式影响；Embeddings 仍只使用 HTTP。Hook 与协议可表示性检查完成后，Stravia 可从最长且严格等价的 canonical item 前缀续接；Principal、精确 Target、Provider 账号与配置、resolved model、instructions、tools、reasoning、response format 和请求控制必须全部一致。任一条件不匹配都会发送完整有效历史，不会削弱请求语义。
+切换 Target 时优先继续会话。历史推理的 Target、账号/配置、模型与协议来源兼容时原生回放；否则仅在该 Target 的请求中保留可见文本，省略不可用的密文或签名。原始历史保持不变：只要历史与 Marker 仍可用，包括重启之后，切回兼容来源仍可重新使用原密文。旧记录缺少来源时不伪造来源；同协议可尝试原生回放，跨协议保守降级。上游在任何输出前明确拒绝 encrypted content 或 thinking signature 时，允许一次省略受保护推理的完整回放，不扩展为普通错误重试。该策略不放宽工具、普通消息或原生压缩的硬要求。
 
-`POST /v1/responses` 以 Open Responses 2026-04-24 作为 canonical baseline，同时接受结构安全的 rolling additive 字段和 hosted tool 声明。同协议 Target 保留这层 compatibility envelope；跨协议 Target 可以省略 advisory 字段和未被强制选择的 hosted tools，但绝不省略内容或硬约束。后台执行仍不支持。
+OpenAI direct 与 Codex OAuth 的生成 Target 会为 Chat Completions、Open Responses、Anthropic Messages 和 Gemini 请求使用上游 Responses WebSocket，不受客户端是否流式影响；Embeddings 仍只使用 HTTP。Hook 与协议可表示性检查完成后，Stravia 可从最长且严格等价的 canonical item 前缀续接；Principal、精确 Target、Provider 账号与配置、resolved model、instructions、tools、reasoning、response format 和请求控制必须全部一致。任一条件不匹配都会发送面向当前 Target 的完整历史；推理降级后不复用不兼容的续接前缀。
+
+`POST /v1/responses` 以 Open Responses 2026-04-24 作为 canonical baseline，同时接受结构安全的 rolling additive 字段和 hosted tool 声明。同协议 Target 保留这层 compatibility envelope；跨协议 Target 可以省略 advisory 字段和未被强制选择的 hosted tools，但绝不省略普通内容或硬约束。历史推理采用上述面向当前 Target 的回放策略。后台执行仍不支持。
 
 客户端发起的远程压缩请求转发给正常路由选定的 Target。`POST /v1/responses/compact` 是独立的 HTTP unary 操作，返回包含 retained items 与 opaque state 的完整下一窗口；后续必须完整回放该窗口，不能自行裁剪或改写。Responses 同时承载原生 compaction item、内嵌触发项，以及客户端提交的 `context_management` 控制。这些属于协议硬要求：Target 协议无法承载时返回不支持，不能静默丢弃；compact 操作不是空 Generation。
 
@@ -203,6 +205,8 @@ SvelteKit WebUI 可管理：
 
 Interaction Observation 在 Debug 与 Release 构建中均可用。进程级 **Debug** 开关每次重启后默认为关闭，启用前必须确认；每个新准入的 Inference Run 独立快照当时开关，因此切换只影响之后准入的 Run。Debug 记录 canonical checkpoint 与有序 HTTP、SSE、WebSocket 应用协议消息，不是 TLS record、TCP packet、HTTP/2 frame，也不保证应用 adapter 以下的 packet/chunk 保真。凭据 header、URL userinfo、疑似凭据的 query value 和结构化凭据字段会在持久化前永久脱敏；提示词、业务正文及工具输入/输出仍可能属于敏感数据。
 
+Desktop 点击 **Debug 诊断包**后，通过一次性下载票据交由系统浏览器下载，桌面检查器保持打开。WebUI 则由当前浏览器处理下载。
+
 Interaction 卡片在缩小的模型名下分别展示用户输入与模型输出预览。悬停或键盘聚焦任一预览可查看更多内容；触控设备点按预览即可打开。两个预览均使用经过安全过滤的 Markdown，不加载图片或嵌入资源。输入展示用户消息开头，输出在内容更新时持续显示最新一行。卡片保持统一固定高度，底部不显示 Debug 捕获或筛选命中标签。
 
 新交互随请求记录保存最多 4,096 字符的凭据脱敏用户输入文本，无需开启 Debug。该预览不包含系统指令、历史消息或工具结果，工具续跑不会覆盖原始输入。旧记录、没有文本的消息，以及输入保护完成前就终止的请求，在卡片预览中说明未记录文本。展开的输出预览展示已保留的输出尾部，不保证包含完整回答。
@@ -226,6 +230,8 @@ Observation 元数据与托管 Debug Trace segment 共用 `log_retention_days`�
 界面支持英文与简体中文、响应式导航，以及浅色、深色和跟随操作系统三种主题。首次使用时，简体中文（`Hans`）客户端 locale 会选择 `zh-CN`，不支持的 locale 使用英文；可在 Login 页面或**设置 → 外观**中无刷新切换语言，每个浏览器或桌面 WebView 分别记住自己的选择。
 
 管理面会检查公开 GitHub Releases 中的可选更新。Stravia Desktop 启动时检查，只在用户操作后下载签名的 Windows x86_64/ARM64 NSIS 或 Linux x86_64/ARM64 AppImage 更新；standalone server 只报告精确 Release，绝不覆盖自身程序。成功结果缓存 24 小时，失败的自动尝试限流 1 小时，**设置 → 更新**始终可以立即重试。更新流量在实例启用 Outbound proxy 时使用该代理，否则直连 GitHub。
+
+缓存中的更新在提供给用户前会与当前运行版本重新比较。升级后，即使离线，也不会再提供相同或更旧的缓存版本。
 
 ### 存储与部署
 

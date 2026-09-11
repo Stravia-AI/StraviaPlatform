@@ -53,8 +53,11 @@ impl SqlHistoryMarkerStore {
             return Err(HistoryMarkerError::InvalidPayload);
         }
         let principal = principal.continuation_key();
-        let segment = serde_json::to_string(&HiddenHistorySegment::Thinking { block: input.block })
-            .map_err(|error| HistoryMarkerError::Storage(error.to_string()))?;
+        let segment = serde_json::to_string(&HiddenHistorySegment::Thinking {
+            block: input.block,
+            source: input.source,
+        })
+        .map_err(|error| HistoryMarkerError::Storage(error.to_string()))?;
         let now = Self::now();
         let expires_at = Self::after(now, input.pending_retention);
         match self {

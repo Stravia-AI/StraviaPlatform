@@ -35,7 +35,11 @@ Stravia 将客户端可见历史与 Provider 有效历史保持为两个视图�
 
 ## Target and storage boundaries
 
-恢复 opaque thinking 后，Target只按 egress协议能否无损表示进行筛选；OpenAI-compatible Chat Target应跳过，没有可表示 Target时返回 typed `protected_context_unrepresentable`。不绑定原 Provider、credential namespace或 model，也不把 opaque内容降级成明文或静默丢弃。
+历史推理采用以继续会话为目标的 Thinking Replay，而不是将密文可表示性作为 Target 准入硬约束。平台为新产生的 Thinking 保存实际 Target、Provider 账号/配置 namespace、模型和协议来源；只有来源绑定兼容且协议可承载时才原生回放密文或签名。其他 Target 的请求副本只保留可见摘要/正文为普通文本，省略不可用的密文与纯 redacted block；这不是解密，也不声称摘要等价于完整推理。
+
+权威历史和 History Marker payload 不因 Target 降级而改写。客户端保留原历史引用且记录未过期时，即使经过其他 Target、分支或 Gateway 重启，切回兼容来源仍可再次回放原密文。旧记录或外部原生历史缺少来源时不伪造来源：同 ingress/egress 协议可以尝试原生回放，跨协议保守降级。上游在任何 canonical 输出前以 HTTP 400/422 或未携带 HTTP 状态的结构化流错误明确拒绝 encrypted content 或 thinking signature 时，仅对当前 Target 做一次去除受保护推理的完整回放；普通错误、输出已开始或原生压缩操作不触发这一修正。发生推理降级后不使用旧 `previous_response_id` 代替改写过的完整历史。
+
+以上只适用于历史推理。普通消息、公开及隐藏工具调用/结果、原生 compaction state 和其他硬约束继续严格校验。DeepSeek Chat 在携带 tools 时为缺失推理的 assistant 历史提供空 `reasoning_content`，不伪造占位推理，也不覆盖已有原生推理。
 
 History Marker Store沿用现有 SQLite/PostgreSQL 存储安全边界，不单独增加应用层静态加密。`MemoryTurnChainStore` production和public路径直接删除：Gateway、Agent、Generation Chain、Web Search及测试统一使用 durable SQL Turn Chain；History Marker Store不提供内存事实源。
 

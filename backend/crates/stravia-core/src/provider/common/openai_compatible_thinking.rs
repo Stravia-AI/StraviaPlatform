@@ -28,6 +28,27 @@ pub(crate) fn apply(ctx: &ProviderCtx<'_>, req: &mut AiRequest) {
         ctx.provider.vendor.as_deref(),
     );
     apply_compatible_control(provider_id, ctx.actual_model, req);
+    prepare_reasoning_history(provider_id, ctx.actual_model, req);
+}
+
+fn prepare_reasoning_history(vendor_id: Option<&str>, model: &str, req: &mut AiRequest) {
+    if !(vendor_is(vendor_id, &["deepseek"]) || contains_ascii_case_insensitive(model, "deepseek"))
+        || req.tools.as_ref().is_none_or(Vec::is_empty)
+    {
+        return;
+    }
+    // DeepSeek 携带 tools 时要求所有 assistant 历史都有 reasoning_content。
+    // 外国密文不可用时只声明未捕获推理；不能伪造 "."，已有原生推理由编码器保留。
+    for item in &mut req.items {
+        if item.role != stravia_runtime_contract::protocol::ir::Role::Assistant {
+            continue;
+        }
+        let meta = item.meta.get_or_insert_with(|| json!({}));
+        if let Some(meta) = meta.as_object_mut() {
+            meta.entry("reasoning_content")
+                .or_insert_with(|| Value::String(String::new()));
+        }
+    }
 }
 
 fn provider_identity<'a>(
@@ -212,6 +233,36 @@ mod tests {
         req.meta.source_protocol = Some(OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1);
         req.reasoning.target_control = Some(control);
         req
+    }
+
+    #[test]
+    fn deepseek_tool_history_keeps_native_reasoning_and_marks_missing_reasoning_empty() {
+        let pair = ProtocolTransform::global()
+            .bind(
+                OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+                OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            )
+            .unwrap();
+        let mut req = pair
+            .decode_request(json!({
+                "model": "deepseek-v4-flash",
+                "messages": [
+                    {"role": "assistant", "content": "foreign answer"},
+                    {"role": "assistant", "content": "native answer", "reasoning_content": "native reasoning"},
+                    {"role": "user", "content": "continue"}
+                ],
+                "tools": [{
+                    "type": "function",
+                    "function": {"name": "lookup", "parameters": {"type": "object", "properties": {}}}
+                }]
+            }))
+            .unwrap();
+        prepare_reasoning_history(Some("deepseek"), "deepseek-v4-flash", &mut req);
+        let wire = pair.encode_request(&req).unwrap().body;
+        assert_eq!(wire["messages"][0]["reasoning_content"], "");
+        assert_eq!(wire["messages"][0]["content"], "foreign answer");
+        assert_eq!(wire["messages"][1]["reasoning_content"], "native reasoning");
+        assert!(wire["messages"][2].get("reasoning_content").is_none());
     }
 
     #[test]
