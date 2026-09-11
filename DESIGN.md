@@ -385,6 +385,15 @@ Lucide 图标使用 16px 为常规尺寸，跟随文字颜色；图标只辅助�
 
 ## Components
 
+### Brand identity / 节律 Cadence
+
+- 标志采用三个独立轮廓：上方舒展、中间转承、下方斜向圆角收尾。保留原稿的长短与转折差异，不复制一个形状构造三个单元。
+- `frontend/stravia-webui/src/assets/logos/stravia-logo.svg` 是唯一图形源。`BrandMark` 内联此 SVG 并继承 `foreground`；导航、登录和设置引导中的品牌图形不得使用 PNG。通用操作图标继续使用 Lucide SVG，第三方服务标志沿用各自来源。
+- 仅 Logo 英文字标使用 Sora 500、`Stravia` 大小写及 -0.02em 字距，以 `src/assets/logos/stravia-wordmark.svg` 的固定轮廓通过 `BrandWordmark` 渲染。界面正文、标题、导航项目和中文继续使用原有字体；不全局加载 Sora。字体出处与授权见同目录 `Sora-OFL.txt`。品牌图形常规尺寸至少 24px；favicon 使用减少内边距的 SVG，保留三个不同轮廓。
+- 默认静态。壳层首次呈现可播放一次 780ms 的错峰就位；登录或设置操作进行中可用 1.6s 的轻微位移循环，完成时 440ms 归位。动效仅表达真实操作，不作为持久在线状态或后台流量指示。隐藏页面停止动画，`prefers-reduced-motion` 下完全静止。
+- `task brand:generate` 从唯一 SVG 源生成静态黑白版本、自适应 SVG favicon、透明底黑白应用 SVG 及 Tauri 所需的 PNG／ICO／ICNS；不得手工编辑导出文件。不得在 WebUI 中优先加载位图 favicon。
+- Windows 运行中的任务栏窗口图标与托盘使用透明底节律图形，浅色系统用黑色、深色系统用白色。读取并监听 `SystemUsesLightTheme`，独立于应用主题；窗口隐藏到托盘后仍响应切换。macOS 托盘使用系统 template image；其他平台按窗口主题选择。未运行时的 Windows 固定快捷方式由系统缓存的静态 ICO 决定，不承诺自动换色。
+
 ### App Shell 与导航
 
 - 主导航按 Setup、Advanced Features、Monitor、System 分组；信息架构来自用户任务，不按后端 crate 或数据库表分组。

@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = ["backend/crates/stravia-core", "backend/crates/stravia-devtools", "backend/apps/stravia-desktop", "backend/apps/stravia-server", "backend/crates/stravia-web-access", "backend/crates/stravia-web-access-contract", "backend/crates/stravia-runtime-contract", "backend/crates/stravia-media", "backend/crates/stravia-web-search", "backend/crates/stravia-credential-protection"]
+# 与 dev:server 保持相同的依赖特性图，避免裸 build 先构建桌面特性并集。
+default-members = ["backend/apps/stravia-server"]
 
 [workspace.package]
 version = "0.2.1"
@@ -102,3 +104,11 @@ incremental = true
 
 [profile.dev.package."*"]
 opt-level = 3
+
+# Cargo 是否复用运行期产物会影响 bindgen 依赖的默认 debuginfo；
+# 固定这两个包，避免仅切换 workspace 成员就让原生 TLS 构建失效。
+[profile.dev.package."bitflags@2"]
+debug = true
+
+[profile.dev.package.glob]
+debug = true

@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { execFileSync } from 'node:child_process'
 
 const appBinaryPath = fileURLToPath(new URL('../../target/debug/stravia-desktop.exe', import.meta.url))
 const runRootPrefix = 'stravia-desktop-e2e-'
@@ -21,6 +22,15 @@ const codexHome = join(runRoot, 'codex')
 mkdirSync(codexHome, { recursive: true })
 process.env.STRAVIA_DESKTOP_E2E_RUN_ROOT = runRoot
 process.env.CODEX_HOME = codexHome
+
+const themeKey = `Software\\Stravia\\Tests\\${basename(runRoot)}`
+process.env.STRAVIA_DESKTOP_E2E_THEME_KEY = themeKey
+for (const [name, value] of [
+  ['SystemUsesLightTheme', '1'],
+  ['AppsUseLightTheme', '0'],
+]) {
+  execFileSync('reg.exe', ['add', `HKCU\\${themeKey}`, '/v', name, '/t', 'REG_DWORD', '/d', value, '/f'])
+}
 
 export const config: WebdriverIO.Config = {
   runner: 'local',
@@ -50,6 +60,7 @@ export const config: WebdriverIO.Config = {
   connectionRetryCount: 1,
   mochaOpts: { ui: 'bdd', timeout: 60_000 },
   onComplete: () => {
+    execFileSync('reg.exe', ['delete', `HKCU\\${themeKey}`, '/f'])
     rmSync(runRoot, { recursive: true, force: true })
   },
 }

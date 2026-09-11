@@ -8943,6 +8943,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9052,6 +9053,7 @@ dependencies = [
  "futures",
  "htmd",
  "http 1.5.0",
+ "libc",
  "maud",
  "moli-cookie-jar",
  "moli-core",
@@ -9065,6 +9067,7 @@ dependencies = [
  "rustls-platform-verifier",
  "scraper",
  "serde",
+ "serde_core",
  "serde_json",
  "stravia-web-access-contract",
  "thiserror 2.0.20",

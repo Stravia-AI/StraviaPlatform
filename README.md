@@ -42,6 +42,8 @@ The same Rust core powers two deployment modes:
 - **Desktop:** a Tauri application that runs the platform locally with an integrated management interface.
 - **Server:** a standalone binary that runs the same platform capabilities and serves the proxy API, MCP, Admin API, health probes, and an embedded WebUI from one listener.
 
+On Windows, the transparent Cadence taskbar and tray mark switches between black and white with the system color mode, including while hidden in the tray. Pinned shortcuts use the static application icon when Stravia is not running.
+
 ## Current Capabilities
 
 ### Platform tools and built-in agent execution
@@ -502,6 +504,20 @@ Common commands:
 | `task test:e2e:web`      | Run Chromium WebUI E2E tests                                |
 | `task test:e2e:desktop`  | Run the Windows Tauri/WebView2 smoke test                   |
 | `DB_URL=… task test:e2e` | Run the full proxy, Admin, SQLite, and PostgreSQL E2E suite |
+
+### Rust build reuse
+
+At the repository root, bare `cargo build`, `cargo check`, and `cargo test` select only `stravia-server`. This keeps the default build's dependency features aligned with `task dev:server`, instead of first compiling the combined server/desktop workspace features. Use `cargo build --workspace` for all members, `task check` for workspace checks, and `task test` for the supported unit-test suite; their scope is unchanged.
+
+- **Server development:** run `task dev:server` directly, or prebuild with `cargo build --locked` / `task build:server:debug`. A separate workspace build is not required.
+- **Desktop development:** run `task dev:desktop` directly. Tauri selects its own dependency features and supplies build-script configuration; a bare workspace build is not an exact desktop-dev prebuild.
+- **Rust test prebuild:** use `cargo test --locked --workspace --exclude stravia-desktop --no-run`, matching `task test`. Test harnesses, `cfg(test)`, and features enabled by dev-dependencies require additional artifacts even after a normal build. For a focused test, keep the same `-p` selection between prebuild and execution.
+
+Cargo reuses artifacts with matching inputs, not every artifact under `target/debug`. Switching package selections, features, toolchains, target triples, compiler flags, or build-script environment can require recompilation. `cargo check` is not a code-generation prebuild, and release artifacts do not replace debug artifacts. Keep these inputs stable and do not run `cargo clean` as a routine development step. The repository already enables incremental compilation and uses LLD on Windows; third-party dependencies use `opt-level = 3` in development, trading a slower initial build for runtime speed.
+
+To avoid rebuilding Moli's native TLS when switching between server, desktop, and tests, `stravia-web-access` deliberately declares `libc`, `regex`, and `serde_core` as build dependencies to unify their build-time features. These are feature-resolution anchors even without a local `build.rs`, not unused runtime dependencies. The root dev profile also fixes debuginfo for `bitflags` 2.x and `glob`: Cargo's host/runtime artifact sharing would otherwise change their effective settings between entry points. This does not unify runtime proxy, JSON, or test-only features, so other configuration-specific artifacts remain necessary. Changes to these declarations can require a one-time rebuild; retain the resulting cache.
+
+Server integration tests also build the ordinary executable with the test dependency graph. Switching back to `cargo build -p stravia-server` can therefore recompile/link that binary (`UnitDependencyInfoChanged`) even when every library artifact is reused; this is distinct from rebuilding native TLS or losing the dependency cache.
 
 To check Google independently, run `cargo test --locked -p stravia-web-access live_google_returns_parsable_destination_urls -- --ignored --nocapture`. This contacts Google through the system proxy snapshot and verifies actual result titles and destination URLs; it is not part of the default test suite.
 

@@ -5,6 +5,11 @@ vars:
   TAURI_CLI_VERSION: 2.11.1
 
 tasks:
+  brand:generate:
+    desc: Generate SVG brand variants and required native icons from the Cadence master.
+    cmds:
+      - bun frontend/stravia-webui/scripts/generate-brand.ts
+
   install:web:
     desc: Install the locked Bun workspace dependencies.
     cmds:

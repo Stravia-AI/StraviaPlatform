@@ -44,6 +44,13 @@ tracing = { workspace = true }
 url = { workspace = true }
 urlencoding = { workspace = true }
 
+# 固定 Moli 原生 TLS 的 bindgen 构建期特性，避免切换 Tauri/server/test 时重编 SSL。
+# 这些依赖只参与构建期特性解析，不改变运行期代理、JSON 或测试能力。
+[build-dependencies]
+libc = "0.2"
+regex = { workspace = true }
+serde_core = "1"
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["io-util", "macros", "rt-multi-thread"] }
 tracing-subscriber = { workspace = true }

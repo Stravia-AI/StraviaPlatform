@@ -5,6 +5,7 @@ import CheckIcon from '@lucide/svelte/icons/check'
 import { claimSetup, completeSetup, getAuthState, testDatabase, type DatabaseConfig } from '$lib/auth'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
 import BrandMark from '$lib/components/brand-mark.svelte'
+import BrandWordmark from '$lib/components/brand-wordmark.svelte'
 import LanguageSelector from '$lib/components/language-selector.svelte'
 import { Button } from '$lib/components/ui/button'
 import * as Card from '$lib/components/ui/card'
@@ -137,9 +138,11 @@ async function complete(): Promise<void> {
   <div class="mx-auto flex w-full max-w-3xl flex-col gap-6">
     <header class="flex items-center justify-between gap-4 border-b pb-5">
       <div class="flex items-center gap-3">
-        <BrandMark class="size-10" />
+        <BrandMark
+          class="size-10"
+          state={loading || claiming || testing || completing ? 'running' : databaseTested ? 'complete' : 'static'} />
         <div>
-          <p class="font-structural text-sm font-semibold tracking-[0.12em]">STRAVIA</p>
+          <p class="text-lg"><BrandWordmark /></p>
           <h1 class="font-structural text-2xl font-semibold">{m.setup_title()}</h1>
         </div>
       </div>

@@ -42,6 +42,8 @@ Claude Code · Codex CLI · Gemini CLI · OpenCode · 各类 SDK
 - **桌面应用：** 基于 Tauri，在本地运行平台并提供集成管理界面。
 - **独立服务端：** 单个二进制运行相同的平台能力，通过统一端口提供代理 API、MCP、Admin API、健康探针和内嵌 WebUI。
 
+Windows 任务栏与托盘采用透明底「节律」图形，随系统颜色模式自动切换黑白，隐藏到托盘后仍生效。Stravia 未运行时，固定快捷方式使用静态应用图标。
+
 ## 当前能力
 
 ### 平台工具与内置 Agent 执行
@@ -502,6 +504,20 @@ tests/e2e/                         Python 后端 E2E 套件与协议录制样本
 | `task test:e2e:web`      | 运行 Chromium WebUI E2E 测试                         |
 | `task test:e2e:desktop`  | 运行 Windows Tauri/WebView2 冒烟测试                 |
 | `DB_URL=… task test:e2e` | 运行完整 Proxy、Admin、SQLite 和 PostgreSQL E2E 套件 |
+
+### Rust 构建复用
+
+仓库根目录的裸 `cargo build`、`cargo check` 和 `cargo test` 默认只选择 `stravia-server`，使默认构建的依赖特性与 `task dev:server` 一致，避免先编译 server／desktop 的 workspace 特性并集。全量构建使用 `cargo build --workspace`，全工作区检查使用 `task check`，受支持的单元测试使用 `task test`；这些命令的范围保持不变。
+
+- **服务端开发：** 直接运行 `task dev:server`，或用 `cargo build --locked` / `task build:server:debug` 预编译，不需要先构建整个 workspace。
+- **桌面开发：** 直接运行 `task dev:desktop`。Tauri 会选择自己的依赖特性并传入 build script 配置；裸 workspace 构建不等于桌面开发模式的精确预编译。
+- **Rust 测试预编译：** 使用 `cargo test --locked --workspace --exclude stravia-desktop --no-run`，与 `task test` 对齐。测试 harness、`cfg(test)` 和 dev-dependencies 启用的特性需要额外产物，普通 build 不能代替。运行局部测试时，预编译与执行保持相同的 `-p` 选择。
+
+Cargo 复用的是输入一致的产物，不是 `target/debug` 中的任意产物。切换包选择、features、工具链、target triple、编译参数或 build script 环境，均可能触发重新编译。`cargo check` 不等于代码生成预编译，release 产物也不能代替 debug 产物。保持这些输入稳定，不要把 `cargo clean` 当作日常开发步骤。仓库已启用增量编译，Windows 已使用 LLD；第三方依赖在开发模式下使用 `opt-level = 3`，以较慢的首次编译换取运行速度。
+
+为避免在 server、desktop 和 tests 之间切换时重编 Moli 的原生 TLS，`stravia-web-access` 有意将 `libc`、`regex` 和 `serde_core` 声明为构建依赖，统一它们的构建期特性。即使没有本地 `build.rs`，这些声明也是特性解析的统一锚点，不是未使用的运行期依赖。根目录 dev profile 还固定了 `bitflags` 2.x 和 `glob` 的 debuginfo，避免 Cargo 的构建期／运行期产物共享机制在不同入口下改变实际编译参数。该优化不统一运行期代理、JSON 或测试专属 features，其他配置专属产物仍然必要。调整这些声明后可能需要一次重新编译；之后保留生成的缓存即可。
+
+Server 集成测试还会使用测试依赖图构建普通可执行文件。因此切回 `cargo build -p stravia-server` 时，即使所有库产物都已复用，仍可能重新编译／链接这个二进制（`UnitDependencyInfoChanged`）；这不等于重编原生 TLS 或依赖缓存丢失。
 
 如需单独验证 Google，请运行 `cargo test --locked -p stravia-web-access live_google_returns_parsable_destination_urls -- --ignored --nocapture`。该检查通过系统代理快照访问 Google，验证真实结果标题与目标 URL，不属于默认测试套件。
 

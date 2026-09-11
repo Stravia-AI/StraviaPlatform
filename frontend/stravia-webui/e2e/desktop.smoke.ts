@@ -82,6 +82,37 @@ async function unusedPort(): Promise<number> {
 }
 
 describe('Stravia desktop smoke', () => {
+  it('switches native icons with the shell preference even while hidden in the tray', async () => {
+    const themeKey = process.env.STRAVIA_DESKTOP_E2E_THEME_KEY
+    if (!themeKey || !/^Software\\Stravia\\Tests\\stravia-desktop-e2e-[a-zA-Z0-9-]+$/.test(themeKey)) {
+      throw new Error('Missing isolated shell theme fixture')
+    }
+    const setTheme = (name: string, value: number) =>
+      execFileSync('reg.exe', ['add', `HKCU\\${themeKey}`, '/v', name, '/t', 'REG_DWORD', '/d', String(value), '/f'])
+    const expectTheme = async (theme: string) => {
+      await browser.waitUntil(
+        async () => (await browser.tauri.execute(({ core }) => core.invoke('get_desktop_icon_theme'))) === theme,
+        { timeoutMsg: `Native icons did not switch to ${theme}` },
+      )
+    }
+    await expectTheme('light')
+    try {
+      await browser.tauri.execute(({ core }) => core.invoke('plugin:window|close', { label: 'main' }))
+      expect(
+        await browser.tauri.execute(({ core }) => core.invoke('plugin:window|is_visible', { label: 'main' })),
+      ).toBe(false)
+      setTheme('AppsUseLightTheme', 1)
+      setTheme('SystemUsesLightTheme', 0)
+      await expectTheme('dark')
+      setTheme('AppsUseLightTheme', 0)
+      setTheme('SystemUsesLightTheme', 1)
+      await expectTheme('light')
+    } finally {
+      setTheme('SystemUsesLightTheme', 1)
+      await browser.tauri.execute(({ core }) => core.invoke('plugin:window|show', { label: 'main' }))
+    }
+  })
+
   it('persists the complete client address through native authenticated settings without weakening access checks', async () => {
     await browser.execute(() => {
       localStorage.setItem('stravia-locale', 'en-US')

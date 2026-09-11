@@ -4,6 +4,7 @@ import SecretInput from '$lib/components/secret-input.svelte'
 
 import { login } from '$lib/auth'
 import BrandMark from '$lib/components/brand-mark.svelte'
+import BrandWordmark from '$lib/components/brand-wordmark.svelte'
 import LanguageSelector from '$lib/components/language-selector.svelte'
 import { Button } from '$lib/components/ui/button'
 import * as Field from '$lib/components/ui/field'
@@ -52,9 +53,9 @@ async function submit(): Promise<void> {
       aria-labelledby="login-brand-title">
       <div>
         <div class="flex items-center gap-3" aria-label="Stravia 观策行">
-          <BrandMark class="size-12" />
+          <BrandMark class="size-12" state={submitting ? 'running' : 'static'} />
           <div>
-            <p class="font-structural text-sm font-semibold tracking-[0.12em]">STRAVIA</p>
+            <p class="text-xl"><BrandWordmark /></p>
             <p class="mt-0.5 text-xs tracking-[0.08em] text-muted-foreground">观策行</p>
           </div>
         </div>

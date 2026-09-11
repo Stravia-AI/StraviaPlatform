@@ -26,6 +26,7 @@ import { logout } from '$lib/auth'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
 import { createWindowChrome } from '$lib/window-chrome'
 import BrandMark from '$lib/components/brand-mark.svelte'
+import BrandWordmark from '$lib/components/brand-wordmark.svelte'
 import StatusIndicator from '$lib/components/status-indicator.svelte'
 import WindowControls from '$lib/components/window-controls.svelte'
 import { Button } from '$lib/components/ui/button'
@@ -318,8 +319,8 @@ onMount(() => {
       ]}>
       {#if !hasNavigation || !isDesktopNavigation || !sidebarCollapsed}
         <div class="flex min-w-0 items-center gap-2 pe-2" aria-label="Stravia 观策行">
-          <BrandMark class="size-6" />
-          <span class="font-structural truncate text-sm font-semibold tracking-[0.04em]">STRAVIA</span>
+          <BrandMark class="size-6" state="launch" />
+          <BrandWordmark class="text-sm" />
         </div>
       {/if}
       {#if hasNavigation}
@@ -385,7 +386,7 @@ onMount(() => {
             <div class="flex items-center gap-2">
               <BrandMark class="size-8" />
               <div>
-                <p class="font-structural tracking-[0.04em]">STRAVIA</p>
+                <p><BrandWordmark /></p>
                 <p class="text-sm text-muted-foreground">{m.app_shell_local_ai_gateway()}</p>
               </div>
             </div>

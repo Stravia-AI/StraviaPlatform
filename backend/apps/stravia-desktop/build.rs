@@ -1,6 +1,8 @@
 fn main() {
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
         tauri_build::AppManifest::new().commands(&[
+            #[cfg(feature = "desktop-e2e")]
+            "get_desktop_icon_theme",
             "get_admin_session",
             "get_server_port",
             "get_desktop_port_state",

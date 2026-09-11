@@ -15,7 +15,7 @@
           "identifier": "desktop-e2e",
           "description": "WebDriver permissions for the desktop smoke test binary.",
           "windows": ["main"],
-          "permissions": ["wdio:default", "wdio-webdriver:default", "process:allow-exit"]
+          "permissions": ["wdio:default", "wdio-webdriver:default", "process:allow-exit", "core:window:allow-show", "core:window:allow-is-visible", "allow-get-desktop-icon-theme"]
         }
       ]
     }
