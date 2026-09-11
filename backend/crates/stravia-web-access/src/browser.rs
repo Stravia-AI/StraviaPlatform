@@ -24,6 +24,7 @@ struct RenderCommand {
     url: String,
     preflight_url: Option<String>,
     ready_selector: String,
+    failure_expression: Option<&'static str>,
     deadline: tokio::time::Instant,
     response: oneshot::Sender<anyhow::Result<RenderedPage>>,
 }
@@ -82,6 +83,7 @@ impl BrowserRuntime {
                     url: request.url.to_owned(),
                     preflight_url: request.preflight_url.map(str::to_owned),
                     ready_selector: request.ready_selector.to_owned(),
+                    failure_expression: request.failure_expression,
                     deadline,
                     response,
                 })
@@ -126,6 +128,7 @@ async fn serve(config: BrowserLaunchConfig, mut commands: mpsc::Receiver<RenderC
                 &command.url,
                 command.preflight_url.as_deref(),
                 &command.ready_selector,
+                command.failure_expression,
                 command.deadline,
             )
             .await
@@ -151,6 +154,7 @@ async fn render_page(
     url: &str,
     preflight: Option<&str>,
     selector: &str,
+    failure_expression: Option<&str>,
     deadline: tokio::time::Instant,
 ) -> anyhow::Result<RenderedPage> {
     let mut page = browser
@@ -162,7 +166,7 @@ async fn render_page(
         .await?;
     let result = async {
         if preflight.is_some() {
-            wait_for_document(&mut page, "body")
+            wait_for_document(&mut page, "body", failure_expression)
                 .await
                 .context("preflight navigation failed")?;
             let context = page.create_isolated_world_async("stravia", false).await?;
@@ -179,7 +183,7 @@ async fn render_page(
                 navigation
             );
         }
-        wait_for_document(&mut page, selector).await
+        wait_for_document(&mut page, selector, failure_expression).await
     }
     .await;
     let closed = page.close_async().await;
@@ -191,10 +195,13 @@ async fn render_page(
 async fn wait_for_document(
     page: &mut moli_core::page::Page,
     selector: &str,
+    failure_expression: Option<&str>,
 ) -> anyhow::Result<RenderedPage> {
     // 在隔离世界判定就绪并序列化，避免页面覆盖 document/JSON；导航后重新绑定。
+    // 终止条件先于就绪条件，已被拦截的页面不必等待结果节点或文档加载完成。
     let expression = format!(
-        "(() => {{ if (document.readyState === 'loading' || !document.querySelector({})) return null; return JSON.stringify({{html: (document.doctype ? new XMLSerializer().serializeToString(document.doctype) + '\\n' : '') + document.documentElement.outerHTML, url: location.href}}); }})()",
+        "(() => {{ const failure = ({}); if (failure) return JSON.stringify({{failure}}); if (document.readyState === 'loading' || !document.querySelector({})) return null; return JSON.stringify({{html: (document.doctype ? new XMLSerializer().serializeToString(document.doctype) + '\\n' : '') + document.documentElement.outerHTML, url: location.href}}); }})()",
+        failure_expression.unwrap_or("null"),
         serde_json::to_string(selector)?,
     );
     loop {
@@ -219,6 +226,9 @@ async fn wait_for_document(
         );
         if let Some(serialized) = evaluated["value"].as_str() {
             let value: serde_json::Value = serde_json::from_str(serialized)?;
+            if let Some(failure) = value["failure"].as_str() {
+                anyhow::bail!("{failure}");
+            }
             let url = value["url"].as_str().context("missing rendered URL")?;
             validate_navigation(url)?;
             return Ok(RenderedPage {
@@ -247,6 +257,7 @@ pub(crate) struct RenderRequest<'a> {
     pub url: &'a str,
     pub preflight_url: Option<&'a str>,
     pub ready_selector: &'a str,
+    pub failure_expression: Option<&'static str>,
     pub timeout: Duration,
     pub request_guard: Option<fn(&str) -> bool>,
 }
@@ -298,6 +309,10 @@ mod tests {
                                     std::future::pending::<()>().await;
                                 }
                                 let (content_type, cookie, body) = match url.path() {
+                                    "/challenge" => ("text/html", "", "<html><body><script>setTimeout(()=>{document.body.innerHTML='<p>Our systems have detected unusual traffic from your computer network.</p><div class=\"g-recaptcha\"></div>'},30)</script></body></html>".to_owned()),
+                                    "/challenge-redirect" => ("text/html", "", "<html><body><script>location.replace('/challenge')</script></body></html>".to_owned()),
+                                    "/challenge-preflight" => ("text/html", "", "<html><body>Our systems have detected unusual traffic from your computer network.</body></html>".to_owned()),
+                                    "/traffic-results" => ("text/html", "", "<html><body><a href='https://example.com/sorry/'><h3>Understanding unusual traffic and g-recaptcha</h3></a></body></html>".to_owned()),
                                     "/redirect" => ("text/html", "", "<html><body><script>location.replace('/worlds')</script><script defer src='/pending.js'></script></body></html>".to_owned()),
                                     "/preflight" => ("text/html", "Set-Cookie: gate=passed; Path=/\r\n", "<html><body><script>sessionStorage.setItem('gate','passed')</script>cookie ready</body></html>".to_owned()),
                                     "/worlds" => ("text/html", "", "<html><body><script>globalThis.frameMarker='top';const probe=new Error();Object.defineProperty(probe,'stack',{get(){document.body.dataset.stackRead='true';return 'probe'}});console.debug(probe)</script><iframe src='/frame' onload=\"document.body.id='ready'\"></iframe></body></html>".to_owned()),
@@ -344,9 +359,46 @@ mod tests {
             url,
             preflight_url: None,
             ready_selector: selector,
+            failure_expression: None,
             timeout: Duration::from_secs(20),
             request_guard: None,
         }
+    }
+
+    #[tokio::test]
+    async fn moli_google_challenge_stops_before_deadline() {
+        let private = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let fixture = Fixture::start(private.local_addr().unwrap()).await;
+        let runtime = BrowserRuntime::new(fixture.config.clone());
+        for (url, preflight) in [
+            ("http://93.184.216.34/challenge", None),
+            (
+                "http://93.184.216.34/challenge-redirect",
+                Some("http://93.184.216.34/preflight"),
+            ),
+            (
+                "http://93.184.216.34/traffic-results",
+                Some("http://93.184.216.34/challenge-preflight"),
+            ),
+        ] {
+            let mut input = request(url, "a h3");
+            input.preflight_url = preflight;
+            input.failure_expression =
+                Some(crate::search::engines::search::google::GOOGLE_FAILURE_EXPRESSION);
+            let error = tokio::time::timeout(Duration::from_secs(5), runtime.render(input))
+                .await
+                .expect("challenge must terminate before the render deadline")
+                .unwrap_err();
+            assert!(
+                format!("{error:#}").contains("automated-traffic challenge"),
+                "{error:#}"
+            );
+        }
+        let mut input = request("http://93.184.216.34/traffic-results", "a h3");
+        input.failure_expression =
+            Some(crate::search::engines::search::google::GOOGLE_FAILURE_EXPRESSION);
+        let page = runtime.render(input).await.unwrap();
+        assert!(page.html.contains("Understanding unusual traffic"));
     }
 
     #[tokio::test]

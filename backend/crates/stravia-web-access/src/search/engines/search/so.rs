@@ -52,6 +52,7 @@ pub(crate) async fn render_response(search: &SearchQuery) -> anyhow::Result<Engi
             url: url.as_str(),
             preflight_url: Some(SO_HOME_URL),
             ready_selector: SO_RESULT_SELECTOR,
+            failure_expression: None,
             timeout: BROWSER_RENDER_TIMEOUT,
             request_guard: None,
         })

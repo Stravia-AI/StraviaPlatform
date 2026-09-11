@@ -31,6 +31,7 @@ pub(crate) async fn render_response(search: &SearchQuery) -> anyhow::Result<Engi
             url: search_url(search).as_str(),
             preflight_url: Some(GOOGLE_SCHOLAR_HOME_URL),
             ready_selector: GOOGLE_SCHOLAR_RESULT_SELECTOR,
+            failure_expression: None,
             timeout: BROWSER_RENDER_TIMEOUT,
             request_guard: None,
         })
