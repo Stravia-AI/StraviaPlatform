@@ -94,8 +94,12 @@ test('HTTP management and HTTPS proxy sessions retain browser cookie boundaries'
         },
       )
       upstream.on('error', () => {
-        outgoing.writeHead(502)
-        outgoing.end()
+        if (outgoing.headersSent) {
+          outgoing.destroy()
+        } else {
+          outgoing.writeHead(502)
+          outgoing.end()
+        }
       })
       incoming.pipe(upstream)
     }

@@ -386,19 +386,57 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Setup Go for BoringSSL
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+          cache: false
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          cache: false
+
+      - name: Normalize installed Rust toolchains
+        run: python .github/scripts/normalize_rust_toolchains.py
+
+      - name: Restore Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: ci-v2-linux-gnu-pinned-e2e-mixed
+          cache-targets: 'true'
+          save-if: 'false'
+          cache-on-failure: 'false'
+          cache-bin: 'false'
+
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ env.BUN_VERSION }}
           no-cache: true
 
+      - name: Setup Task
+        uses: go-task/setup-task@v2
+        with:
+          version: ${{ env.TASK_VERSION }}
+
       - name: Install locked WebUI dependencies
         run: bun ci
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/google-chrome*
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends pkg-config libssl-dev cmake clang libclang-dev golang python3 libfontconfig1-dev
 
       - name: Install Chromium
         run: |
           sudo rm -f /etc/apt/sources.list.d/google-chrome*
           bun run playwright:install:web -- --with-deps chromium
+
+      - name: Build production server
+        run: task build:server
 
       - name: Run WebUI E2E tests
         run: bun run test:e2e:web

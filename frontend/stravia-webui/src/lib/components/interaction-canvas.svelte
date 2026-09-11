@@ -401,6 +401,7 @@ export async function focusLatest(): Promise<void> {
   min-width: 11rem;
   align-items: center;
   gap: 0.65rem;
+  pointer-events: none;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: color-mix(in oklab, var(--background) 92%, transparent);
