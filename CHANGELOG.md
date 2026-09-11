@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Changed
+
+- Windows MSVC builds use the Rust toolchain's bundled LLD linker while retaining static CRT linkage, full development debug information, and incremental compilation.
+- Desktop builds emit only the Rust library consumed by the executable, avoiding unused C ABI static and dynamic library outputs during rebuilds.
+- Added `task build:desktop:debug` for Rust-only desktop rebuilds without WebUI preparation or installer bundling; documented the incremental-build workflow for both applications.
+
 ## [0.2.1] - 2026-09-10
 
 ### Added

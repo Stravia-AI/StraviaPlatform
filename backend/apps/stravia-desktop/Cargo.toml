@@ -48,4 +48,5 @@ tokio = { workspace = true, features = ["macros", "time"] }
 
 [lib]
 name = "stravia_desktop_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# 桌面二进制通过 Rust 链接此库，避免增量构建额外打包 C ABI 静态库和动态库。
+crate-type = ["rlib"]
