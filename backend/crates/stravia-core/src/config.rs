@@ -56,9 +56,6 @@ impl Default for GatewayStorageConfig {
 pub struct GatewayConfig {
     pub data_dir: PathBuf,
     pub auth_key: Option<String>,
-    /// Canonical externally reachable origin used for signed Artifact URLs.
-    /// Request forwarding headers are never trusted for this value.
-    pub public_origin: Option<String>,
     pub storage: GatewayStorageConfig,
     /// Whether this process has a trusted Desktop updater bridge.
     pub product_update_download_supported: bool,
@@ -73,7 +70,6 @@ impl Default for GatewayConfig {
         Self {
             data_dir: default_data_dir(),
             auth_key: None,
-            public_origin: None,
             storage: GatewayStorageConfig::default(),
             product_update_download_supported: false,
             config_poll_interval: Duration::ZERO,

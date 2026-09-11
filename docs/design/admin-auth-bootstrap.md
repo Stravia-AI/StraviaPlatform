@@ -15,7 +15,7 @@
 - JWT 验签之外还必须校验服务端会话状态。退出撤销当前会话，修改密码或本地恢复凭据撤销全部旧会话；后续请求与刷新均不得继续使用已撤销会话。
 - 认证存储故障返回 `503`，不能被当成无效凭据或成功注销。撤销未完成时不得清除 Cookie；WebUI 保留当前页面并显示错误，避免把仍有效的服务端会话误报为已退出。
 - Server WebUI 通过 `stravia_access`（`Path=/`）与 `stravia_refresh`（`Path=/api/v1/auth`）两个 `HttpOnly`、`SameSite=Strict` Cookie 携带凭据；HTTPS origin 下同时设置 `Secure`。前端不将凭据存入 localStorage。
-- `GET /api/v1/auth/state` 报告 `setup`、`server`、`desktop` 或 `unavailable` 模式，以及当前请求的认证/设置资格；该只读检查不会刷新凭据。`POST /api/v1/auth/login`、`POST /api/v1/auth/refresh`、`POST /api/v1/auth/logout` 与 `PUT /api/v1/auth/credentials` 是 Server 日常认证入口；响应正文不返回 token。所有会修改状态的 Web 请求均要求 `Origin` 精确等于规范 origin，并携带 `X-Stravia-CSRF: 1`；需要正文时还必须使用 JSON content type。
+- `GET /api/v1/auth/state` 报告 `setup`、`server`、`desktop` 或 `unavailable` 模式，以及当前请求的认证/设置资格；该只读检查不会刷新凭据。`POST /api/v1/auth/login`、`POST /api/v1/auth/refresh`、`POST /api/v1/auth/logout` 与 `PUT /api/v1/auth/credentials` 是 Server 日常认证入口；响应正文不返回 token。所有会修改状态的 Web 请求均要求 `Origin` 精确等于独立恢复的当前请求外部源，并携带 `X-Stravia-CSRF: 1`；需要正文时还必须使用 JSON content type。
 - Desktop 通过受限原生通道取得 access JWT，仅在内存中保存，以 Bearer JWT 请求 HTTP 管理 API；refresh token 只保留在原生进程内存中。两种载体共享后端会话验证。登录总有效期耗尽后，Desktop 可通过原生通道重新取得会话。
 - 取舍见 [ADR-0040](../adr/0040-separate-admin-identity-and-revoke-sessions.md)。
 
@@ -68,7 +68,18 @@
 - 已有 Server 首次升级通过新的设置令牌创建管理员，完成前只提供初始化服务。已有 PostgreSQL 安装必须先将原连接配置迁入文件，不能因缺少配置默认切换到 SQLite。
 - Server 提供 `stravia-server --config <path> recover-admin` 本地交互式凭据恢复命令；操作者针对同一数据库运行它。命令在终端读取用户名，并以无回显方式读取新密码及确认，原地更新唯一管理员并撤销全部旧会话。
 - 恢复要求配置文件、目标数据库与既有管理员均可读；它不删除管理员、不重新开放数据库选择向导、不提供邮件找回。密码不得通过命令行参数或日志传递。
-- 非回环 `--host` 必须同时配置 HTTPS `--public-origin`；远程部署应由反向代理终止 TLS，不信任转发 header 推导规范 origin。Docker 与 Nix 的数据库连接同样只来自持久化的 `server.toml`。
+- 管理入口默认支持 HTTP 与 HTTPS，非回环监听不要求 HTTPS，默认监听仍为 `127.0.0.1:23471`。Docker 与 Nix 的数据库连接同样只来自持久化的 `server.toml`。
+
+## 管理入口与代理信任
+
+- Server HTTP 传输层统一拥有外部源恢复、实际 TCP 对端信任与管理入口准入；core 不解释 HTTP header。设置、正常管理和不可用状态共用这一规则，Desktop 原生 Bearer 认证契约不变。
+- `--admin-origin` 可重复，环境变量 `STRAVIA_ADMIN_ORIGINS` 使用逗号分隔。未配置表示不限入口；显式配置后按规范化协议、主机及有效端口精确匹配整个管理面，包括 WebUI、设置、登录、认证状态与全部管理 GET／写操作。未列出入口被直接拒绝，不按不可信 Host 重定向。模型 API、MCP 和健康探针及其既有认证／CORS 不变。
+- `--trusted-proxy` 可重复，环境变量 `STRAVIA_TRUSTED_PROXIES` 使用逗号分隔 IP／CIDR。默认不信任任何代理；仅实际直接 TCP 对端可匹配信任范围，不能从 `X-Forwarded-For` 或客户端 header 推断对端。入口列表和代理信任相互独立，均仅由部署端配置、重启生效；非法或显式空项使启动失败，而非降级为不限入口。入口不允许凭据、页面路径、query、fragment 或通配符。
+- 不受信对端的转发声明被忽略；直连外部源由 Host 和 HTTP 恢复。受信代理必须覆盖客户端头，提供唯一一对 `X-Forwarded-Proto: http|https` 与 `X-Forwarded-Host: <authority>`（保留外部端口）。缺少配对、重复、逗号链、非法／冲突信息或任何 RFC `Forwarded` 均拒绝；代理应清除 `Forwarded`。受信对端完全不发送这些转发头时按直连处理。多级代理只接受最后一个受信代理提供的一对权威、已清洗声明，不解析转发链。
+- `Origin` 请求头只是独立校验对象，不能用于恢复预期外部源。允许入口 A 与 B 不代表 A 可以跨源写 B；不开放管理跨源 CORS。既有 CSRF、JSON、HttpOnly、SameSite 与会话撤销要求保留。
+- 设置、访问、刷新 Cookie 的设置和清除均根据每个请求恢复的外部协议采用 Secure；HTTPS 代理的 HTTP 回源不造成降级。不同主机不承诺登录态互通；同一主机 Cookie 不按协议／端口隔离，已有 Secure Cookie 可能阻止 HTTP 覆写。不能为兼容混用而取消 Secure 或扩大 Domain。
+- 旧 `--public-origin`、`STRAVIA_PUBLIC_ORIGIN` 与 Server `--admin-cors-origin` 已移除，不保留兼容入口。残留的 `STRAVIA_PUBLIC_ORIGIN` 会使 Server 启动失败并要求迁移，不会静默丢弃旧入口限制。入口列表误配置可通过本地修改启动配置并重启恢复，无需登录。
+- HTTP 暴露密码、会话与请求完整性；默认不限入口失去固定主机列表的部分 DNS rebinding 防护。启动警告按允许 HTTP／不限入口的配置事实提示，不把 HTTP 回源当成浏览器明文。可信代理 CIDR 应尽量窄，不得默认信任全部网络；入口列表、同源与 CSRF 均不能替代 TLS／防火墙。完整 Nginx、Docker、Nix 与 Vite 配置见两种语言的 README，决策见 [ADR-0052](../adr/0052-allow-explicit-http-admin-origin.md)。
 
 ## 实施验收
 

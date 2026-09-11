@@ -1064,7 +1064,7 @@ Observation metadata 与数据库 manifest 共用 `log_retention_days`（默认 
 
 - 每个数据库只有一个独立管理用户，唯一角色为 `admin`；它不拥有 API Key，管理 JWT 也不能替代推理/MCP 的 API Key。
 - Desktop 模式下共享 HTTP Server 监听 `127.0.0.1:0`，由操作系统分配端口；只有受限 Tauri 原生通道能取得内存中的 Bearer JWT，普通回环 HTTP 请求仍需有效管理认证。
-- Server 模式下 Proxy、Admin API、健康探针和 WebUI 共用一个 listener。WebUI 使用可撤销会话的 HttpOnly Cookie；所有会修改状态的管理请求执行精确 origin 和 CSRF 校验。非回环 `--host` 必须配置 HTTPS `--public-origin`。
+- Server 模式下 Proxy、Admin API、健康探针和 WebUI 共用一个 listener。WebUI 使用可撤销会话的 HttpOnly Cookie；所有会修改状态的管理请求执行精确 origin 和 CSRF 校验。HTTP 与 HTTPS 管理入口均受支持，默认监听不变。Server 传输层集中恢复外部源并按实际 TCP 对端应用显式代理信任；可选 `--admin-origin`／`STRAVIA_ADMIN_ORIGINS` 限制整个管理面，`--trusted-proxy`／`STRAVIA_TRUSTED_PROXIES` 默认不信任任何代理。设置、正常与不可用状态共用准入，模型 API、MCP 与健康探针不受入口列表影响；代理转发及 Cookie 契约见 [管理认证设计](admin-auth-bootstrap.md#管理入口与代理信任)。
 - Server 数据库连接只来自 `server.toml`。配置缺失进入受控制台一次性令牌保护的设置模式；配置损坏、数据库不可达或 schema 不兼容均失败关闭，不回退到 SQLite。
 
 ---

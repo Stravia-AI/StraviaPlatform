@@ -23,7 +23,19 @@ export default defineConfig(({ mode }) => {
     server: {
       port: 5173,
       proxy: {
-        '/api/v1': { target: `http://127.0.0.1:${backendPort}`, changeOrigin: true },
+        '/api/v1': {
+          target: `http://127.0.0.1:${backendPort}`,
+          changeOrigin: true,
+          configure(proxy) {
+            proxy.on('proxyReq', (proxyReq, req) => {
+              // Only this local HTTP proxy may declare the browser-facing entry.
+              proxyReq.removeHeader('forwarded')
+              proxyReq.setHeader('x-forwarded-proto', 'http')
+              proxyReq.removeHeader('x-forwarded-host')
+              if (req.headers.host) proxyReq.setHeader('x-forwarded-host', req.headers.host)
+            })
+          },
+        },
         '/v1': { target: `http://127.0.0.1:${backendPort}`, changeOrigin: true },
         '/v1beta': { target: `http://127.0.0.1:${backendPort}`, changeOrigin: true },
       },

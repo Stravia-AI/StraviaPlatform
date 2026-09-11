@@ -2,7 +2,7 @@
 status: accepted
 ---
 
-# 允许部署者显式选择 HTTP 管理入口
+# 默认支持 HTTP／HTTPS 管理入口，并显式配置入口限制与代理信任
 
 为支持内网直连和反向代理部署，管理入口默认支持 HTTP 与 HTTPS，不再因非回环监听而强制 HTTPS，也不增加独立的“允许不安全 HTTP”开关。用户已确认此方向；HTTP 会使管理员密码、会话凭据及管理请求缺少传输加密和链路完整性保护，由部署者承担网络安全责任，部署说明与启动警告须明确该风险；身份认证、Origin 与 CSRF 防护不能因此取消，HTTPS 入口的 Cookie 保护不能因同时支持 HTTP 而降级。
 
@@ -14,4 +14,12 @@ status: accepted
 
 管理入口允许列表与受信代理仅通过部署端启动参数或环境变量配置，重启生效，不增加 WebUI 设置或数据库配置。配置错误导致管理入口不可用时，由部署者修改启动配置并重启恢复。
 
-此方向调整 `docs/design/admin-auth-bootstrap.md` 中非回环监听必须配置 HTTPS origin 的约束，保留 ADR-0040《管理身份独立于推理身份，并支持立即撤销管理会话》的身份隔离与可撤销会话原则。用户已逐项确认上述产品决策并要求生成实施规格；设计已接受，代码尚未实施，当前运行行为仍以现有实现为准。完整实施与验收要求见[管理入口规格](../../.scratch/admin-entry-security/spec.md)。
+最终部署契约使用可重复的 `--admin-origin` 与 `--trusted-proxy`，对应逗号分隔的 `STRAVIA_ADMIN_ORIGINS` 与 `STRAVIA_TRUSTED_PROXIES`。前者为精确规范化的 HTTP／HTTPS 外部源，后者为实际直接 TCP 对端 IP／CIDR；省略分别表示不限入口和不信任代理，显式空项或非法项必须启动失败。旧 public-origin 与 Server admin-cors-origin 配置不保留兼容路径。
+
+受信代理必须覆盖客户端传入头，提供唯一一对 `X-Forwarded-Proto: http|https` 与 `X-Forwarded-Host: <含外部端口的 authority>`，并清除 RFC `Forwarded`。缺少配对、重复、逗号链、非法／冲突信息或任何 `Forwarded` 均拒绝；完全不提供转发元数据时按直连 Host／HTTP 处理。不受信对端的转发声明被忽略；多级代理只接受最终受信对端的一对权威、已清洗声明，不解释转发链。信任不能由 `X-Forwarded-For` 等客户端字段建立，也不绕过入口列表或 CSRF。
+
+Server HTTP 传输层统一拥有来源恢复与管理准入，设置、正常与不可用状态共用；健康探针和模型／MCP 既有边界保持。管理写请求的 `Origin` 独立匹配当前请求外部源，允许多个入口不是跨源授权。设置、访问及刷新 Cookie 的设置与清除按每个请求恢复的外部协议决定 Secure，不因 HTTP 回源削弱 HTTPS。保留主机限定 Cookie；同一主机不同协议／端口不是独立 Cookie 命名空间，不以取消 Secure 或扩大 Domain 解决混用限制。
+
+此决策替代原非回环强制 HTTPS 的部署约束，保留 ADR-0040 的身份隔离与可撤销会话原则。已接受的取舍是 HTTP 明文凭据／请求风险，以及默认不限入口失去固定主机列表的部分 DNS rebinding 防护；启动警告按配置事实提示风险。生产不可信网络应选择 HTTPS、明确入口与窄代理范围并隔离后端端口，不能把入口列表当作防火墙。
+
+设计状态：已接受并实现，部署文档与管理 HTTP／真实浏览器回归已同步。验证结果和运行环境限制记录于实施任务，不把设计接受等同于所有平台测试通过。完整验收要求见[管理入口规格](../../.scratch/admin-entry-security/spec.md)，当前接口说明见[管理认证设计](../design/admin-auth-bootstrap.md#管理入口与代理信任)及中英文 README。

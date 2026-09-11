@@ -1,9 +1,10 @@
+use crate::admin_entry::{RequestOrigin, canonical_origin};
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
-use axum::{Json, Router};
+use axum::{Extension, Json, Router};
 use serde::{Deserialize, Serialize};
 use stravia_core::admin::identity::{AdminAuth, AuthError, SessionTokens};
 
@@ -17,7 +18,6 @@ const CSRF_HEADER: &str = "x-stravia-csrf";
 pub(crate) struct AdminHttpState {
     pub auth: AdminAuth,
     pub mode: AdminMode,
-    pub origin: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -64,9 +64,14 @@ pub(crate) async fn require_admin(
     next: Next,
 ) -> Response {
     if state.mode == AdminMode::Server && request.method() != Method::GET {
-        if let Err(response) =
-            validate_web_request(state.origin.as_deref(), request.headers(), false)
-        {
+        if let Err(response) = validate_web_request(
+            request
+                .extensions()
+                .get::<RequestOrigin>()
+                .map(RequestOrigin::as_str),
+            request.headers(),
+            false,
+        ) {
             return response;
         }
     }
@@ -115,17 +120,29 @@ async fn auth_state(State(state): State<AdminHttpState>, headers: HeaderMap) -> 
 
 async fn login(
     State(state): State<AdminHttpState>,
+    origin: Option<Extension<RequestOrigin>>,
     headers: HeaderMap,
     Json(input): Json<LoginInput>,
 ) -> Response {
     if state.mode != AdminMode::Server {
         return StatusCode::NOT_FOUND.into_response();
     }
-    if let Err(response) = validate_web_request(state.origin.as_deref(), &headers, true) {
+    if let Err(response) = validate_web_request(
+        origin.as_ref().map(|origin| origin.as_str()),
+        &headers,
+        true,
+    ) {
         return response;
     }
     match state.auth.login(&input.username, &input.password).await {
-        Ok(tokens) => session_response(&state, tokens).await,
+        Ok(tokens) => {
+            session_response(
+                &state,
+                origin.as_ref().is_some_and(|origin| origin.secure()),
+                tokens,
+            )
+            .await
+        }
         Err(AuthError::InvalidCredentials) => {
             auth_error(StatusCode::UNAUTHORIZED, "invalid_credentials")
         }
@@ -133,27 +150,50 @@ async fn login(
     }
 }
 
-async fn refresh(State(state): State<AdminHttpState>, headers: HeaderMap) -> Response {
+async fn refresh(
+    State(state): State<AdminHttpState>,
+    origin: Option<Extension<RequestOrigin>>,
+    headers: HeaderMap,
+) -> Response {
     if state.mode != AdminMode::Server {
         return StatusCode::NOT_FOUND.into_response();
     }
-    if let Err(response) = validate_web_request(state.origin.as_deref(), &headers, false) {
+    if let Err(response) = validate_web_request(
+        origin.as_ref().map(|origin| origin.as_str()),
+        &headers,
+        false,
+    ) {
         return response;
     }
     let Some(token) = cookie(&headers, REFRESH_COOKIE) else {
         return auth_error(StatusCode::UNAUTHORIZED, "unauthorized");
     };
     match state.auth.refresh(token).await {
-        Ok(tokens) => session_response(&state, tokens).await,
+        Ok(tokens) => {
+            session_response(
+                &state,
+                origin.as_ref().is_some_and(|origin| origin.secure()),
+                tokens,
+            )
+            .await
+        }
         Err(error) => map_auth_error(error),
     }
 }
 
-async fn logout(State(state): State<AdminHttpState>, headers: HeaderMap) -> Response {
+async fn logout(
+    State(state): State<AdminHttpState>,
+    origin: Option<Extension<RequestOrigin>>,
+    headers: HeaderMap,
+) -> Response {
     if state.mode != AdminMode::Server {
         return StatusCode::NOT_FOUND.into_response();
     }
-    if let Err(response) = validate_web_request(state.origin.as_deref(), &headers, false) {
+    if let Err(response) = validate_web_request(
+        origin.as_ref().map(|origin| origin.as_str()),
+        &headers,
+        false,
+    ) {
         return response;
     }
     let session_id = if let Some(token) = cookie(&headers, ACCESS_COOKIE) {
@@ -182,19 +222,27 @@ async fn logout(State(state): State<AdminHttpState>, headers: HeaderMap) -> Resp
         return map_auth_error(error);
     }
     let mut response = StatusCode::NO_CONTENT.into_response();
-    clear_session_cookies(&state, response.headers_mut());
+    clear_session_cookies(
+        origin.as_ref().is_some_and(|origin| origin.secure()),
+        response.headers_mut(),
+    );
     response
 }
 
 async fn change_credentials(
     State(state): State<AdminHttpState>,
+    origin: Option<Extension<RequestOrigin>>,
     headers: HeaderMap,
     Json(input): Json<CredentialsInput>,
 ) -> Response {
     if state.mode != AdminMode::Server {
         return StatusCode::NOT_FOUND.into_response();
     }
-    if let Err(response) = validate_web_request(state.origin.as_deref(), &headers, true) {
+    if let Err(response) = validate_web_request(
+        origin.as_ref().map(|origin| origin.as_str()),
+        &headers,
+        true,
+    ) {
         return response;
     }
     let Some(token) = cookie(&headers, ACCESS_COOKIE) else {
@@ -216,7 +264,10 @@ async fn change_credentials(
     {
         Ok(()) => {
             let mut response = StatusCode::NO_CONTENT.into_response();
-            clear_session_cookies(&state, response.headers_mut());
+            clear_session_cookies(
+                origin.as_ref().is_some_and(|origin| origin.secure()),
+                response.headers_mut(),
+            );
             response
         }
         Err(AuthError::InvalidCredentials) => {
@@ -226,7 +277,7 @@ async fn change_credentials(
     }
 }
 
-async fn session_response(state: &AdminHttpState, tokens: SessionTokens) -> Response {
+async fn session_response(state: &AdminHttpState, secure: bool, tokens: SessionTokens) -> Response {
     let username = state
         .auth
         .authenticate(&tokens.access_token)
@@ -244,7 +295,7 @@ async fn session_response(state: &AdminHttpState, tokens: SessionTokens) -> Resp
         ACCESS_COOKIE,
         &tokens.access_token,
         "/",
-        state.secure_cookies(),
+        secure,
         (tokens.access_expires_at - chrono::Utc::now().timestamp()).max(0),
     );
     append_cookie(
@@ -252,7 +303,7 @@ async fn session_response(state: &AdminHttpState, tokens: SessionTokens) -> Resp
         REFRESH_COOKIE,
         &tokens.refresh_token,
         "/api/v1/auth",
-        state.secure_cookies(),
+        secure,
         (tokens.session_expires_at - chrono::Utc::now().timestamp()).max(0),
     );
     response
@@ -266,7 +317,12 @@ pub(crate) fn validate_web_request(
     let Some(expected_origin) = expected_origin else {
         return Err(auth_error(StatusCode::FORBIDDEN, "origin_required"));
     };
-    if headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) != Some(expected_origin) {
+    let mut origins = headers.get_all(header::ORIGIN).iter();
+    let origin = origins
+        .next()
+        .and_then(|v| v.to_str().ok())
+        .and_then(|value| canonical_origin(value).ok());
+    if origins.next().is_some() || origin.as_deref() != Some(expected_origin) {
         return Err(auth_error(StatusCode::FORBIDDEN, "origin_mismatch"));
     }
     if headers.get(CSRF_HEADER).and_then(|v| v.to_str().ok()) != Some("1") {
@@ -326,13 +382,9 @@ fn append_cookie(
     }
 }
 
-fn clear_session_cookies(state: &AdminHttpState, headers: &mut HeaderMap) {
+fn clear_session_cookies(secure: bool, headers: &mut HeaderMap) {
     for (name, path) in [(ACCESS_COOKIE, "/"), (REFRESH_COOKIE, "/api/v1/auth")] {
-        let secure = if state.secure_cookies() {
-            "; Secure"
-        } else {
-            ""
-        };
+        let secure = if secure { "; Secure" } else { "" };
         let value = format!("{name}=; Path={path}; HttpOnly; SameSite=Strict; Max-Age=0{secure}");
         if let Ok(value) = HeaderValue::from_str(&value) {
             headers.append(header::SET_COOKIE, value);
@@ -358,12 +410,4 @@ pub(crate) fn auth_error(status: StatusCode, code: &'static str) -> Response {
         Json(serde_json::json!({ "error": code, "code": code })),
     )
         .into_response()
-}
-
-impl AdminHttpState {
-    fn secure_cookies(&self) -> bool {
-        self.origin
-            .as_deref()
-            .is_some_and(|origin| origin.starts_with("https://"))
-    }
 }

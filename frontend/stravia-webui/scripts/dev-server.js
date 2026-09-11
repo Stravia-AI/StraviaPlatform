@@ -18,7 +18,7 @@ try {
   webui.printUrls()
 
   // Vite may select another port when other workspaces are already running.
-  const backend = spawn('cargo', ['run', '-p', 'stravia-server', '--', '--public-origin', new URL(localUrl).origin], {
+  const backend = spawn('cargo', ['run', '-p', 'stravia-server', '--', '--admin-origin', new URL(localUrl).origin, '--trusted-proxy', '127.0.0.1'], {
     cwd: repositoryRoot,
     stdio: 'inherit',
   })

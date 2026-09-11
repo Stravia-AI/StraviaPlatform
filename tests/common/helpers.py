@@ -266,6 +266,7 @@ def stop_stravia_server(
             proc.wait(timeout=3)
     if proc.returncode not in (0, None, -15):
         tail = "\n".join(logs[-print_tail:])
+        tail = re.sub(r"(Stravia setup token:)\s*\S+", r"\1 [redacted]", tail)
         print("\n--- stravia-server logs (tail) ---", file=sys.stderr)
         print(tail, file=sys.stderr)
 

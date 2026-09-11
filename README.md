@@ -326,7 +326,7 @@ For NixOS, import the service module from the flake:
 }
 ```
 
-The service listens on `127.0.0.1:23471` by default, runs with a dynamic system user, and persists its data and `/var/lib/stravia/server.toml` under `/var/lib/stravia`. Set `services.stravia.host`, `port`, and `openFirewall` when exposing it. A non-loopback listener also requires `STRAVIA_PUBLIC_ORIGIN` to be the canonical HTTPS origin; place that non-database setting in `services.stravia.environmentFile` and terminate TLS at a reverse proxy. Database settings are never read from the environment. For an existing PostgreSQL deployment, write the `[database]` configuration shown below to `/var/lib/stravia/server.toml` before starting the upgraded service.
+The service listens on `127.0.0.1:23471` by default, runs with a dynamic system user, and persists its data and `/var/lib/stravia/server.toml` under `/var/lib/stravia`. Set `services.stravia.host`, `port`, and `openFirewall` when exposing it. HTTP works without entry configuration, including on non-loopback listeners. To restrict entries or trust a reverse proxy, set optional `STRAVIA_ADMIN_ORIGINS` and `STRAVIA_TRUSTED_PROXIES` in `services.stravia.environmentFile`; see the proxy contract below. No proxy network is trusted automatically. Database settings are never read from the environment. For an existing PostgreSQL deployment, write the `[database]` configuration shown below to `/var/lib/stravia/server.toml` before starting the upgraded service.
 
 ### Run the server with Docker
 
@@ -336,12 +336,11 @@ docker pull ghcr.io/stravia-ai/straviaplatform:latest
 
 docker run --rm \
   --publish 127.0.0.1:23471:23471 \
-  --env STRAVIA_PUBLIC_ORIGIN=https://gateway.example.com \
   --mount source=stravia-data,target=/data \
   ghcr.io/stravia-ai/straviaplatform:latest
 ```
 
-Use `docker build --tag stravia-server:local .` and replace the final image name with `stravia-server:local` to build from the current checkout. The image embeds the production WebUI, listens on `0.0.0.0:23471` inside the container, runs as a non-root user, and persists `server.toml` and SQLite data under `/data`. Put an HTTPS reverse proxy in front of the loopback-published port and set `STRAVIA_PUBLIC_ORIGIN` to that exact external origin; management cookies are Secure and unsafe management requests require the same origin plus Stravia's CSRF header. Do not expose the container port directly over HTTP. The built-in health check calls `GET /healthz`; readiness remains unavailable until setup and Gateway startup complete.
+Use `docker build --tag stravia-server:local .` and replace the final image name with `stravia-server:local` to build from the current checkout. The image embeds the production WebUI, listens on `0.0.0.0:23471` inside the container, runs as a non-root user, and persists `server.toml` and SQLite data under `/data`. The example supports direct HTTP at `http://127.0.0.1:23471` without entry configuration. For remote exposure, prefer an HTTPS reverse proxy and an explicit `STRAVIA_ADMIN_ORIGINS` list. Set `STRAVIA_TRUSTED_PROXIES` only to the actual proxy peer seen inside the container (Docker NAT may make this a bridge address, not `127.0.0.1`); inspect your network topology instead of trusting every container or all networks. Follow the forwarding contract below and isolate the backend port. The built-in health check calls `GET /healthz`; readiness remains unavailable until setup and Gateway startup complete.
 
 The image embeds Moli and does not install Chromium. Browser code runs in the Stravia process; keep the non-root container and normal host isolation in place.
 
@@ -386,7 +385,8 @@ Common CLI options and environment variables:
 | ------------------------ | ------------------------------ | ------------ |
 | `--host`                 | `STRAVIA_HOST`                 | `127.0.0.1`  |
 | `--port`                 | `STRAVIA_PORT`                 | `23471`      |
-| `--public-origin`        | `STRAVIA_PUBLIC_ORIGIN`        | derived for loopback; required HTTPS origin otherwise |
+| `--admin-origin`         | `STRAVIA_ADMIN_ORIGINS`        | omitted: unrestricted management entries |
+| `--trusted-proxy`        | `STRAVIA_TRUSTED_PROXIES`      | omitted: no trusted proxies |
 | `--config`               | —                              | `<data-dir>/server.toml` |
 | `--data-dir`             | `STRAVIA_DATA_DIR`             | Debug: `.stravia-dev`; release: `~/.stravia` |
 | `--log-level`            | `STRAVIA_LOG_LEVEL`            | `info`       |
@@ -417,7 +417,7 @@ idle_timeout_seconds = 300
 
 The three pool settings are optional. Protect `server.toml` because a PostgreSQL URL can contain credentials. The connection account needs permission to run Stravia's migrations in that database, but not permission to create a database. Existing PostgreSQL deployments must create this file with their current connection URL **before the first upgraded start**. Removing the old database environment variables without doing so intentionally enters setup; Stravia will not infer the old PostgreSQL database or silently choose SQLite.
 
-On an unconfigured or configured-admin-free database, the console token is accepted only by `POST /api/v1/setup/claim`; the resulting `stravia_setup` HttpOnly, `SameSite=Strict` cookie (`Path=/api/v1`, and `Secure` for HTTPS) can call `/api/v1/setup/test` and `/api/v1/setup/complete`. Setup access cannot call management APIs and is closed when an administrator already exists. `GET /api/v1/auth/state` reports setup, availability, and current authentication without refreshing credentials. Normal Server authentication uses `/api/v1/auth/login`, `/api/v1/auth/refresh`, `/api/v1/auth/logout`, and `/api/v1/auth/credentials`. Access and refresh values remain in `HttpOnly`, `SameSite=Strict` cookies (`stravia_access` with `Path=/`, and `stravia_refresh` with `Path=/api/v1/auth`), not browser storage; HTTPS origins add `Secure`. Remote management requires an HTTPS canonical origin. The browser client sends `X-Stravia-CSRF: 1`, and Stravia rejects unsafe requests whose `Origin` differs from `--public-origin`.
+On an unconfigured or configured-admin-free database, the console token is accepted only by `POST /api/v1/setup/claim`; the resulting `stravia_setup` HttpOnly, `SameSite=Strict` cookie (`Path=/api/v1`, and `Secure` for HTTPS) can call `/api/v1/setup/test` and `/api/v1/setup/complete`. Setup access cannot call management APIs and is closed when an administrator already exists. `GET /api/v1/auth/state` reports setup, availability, and current authentication without refreshing credentials. Normal Server authentication uses `/api/v1/auth/login`, `/api/v1/auth/refresh`, `/api/v1/auth/logout`, and `/api/v1/auth/credentials`. Access and refresh values remain in `HttpOnly`, `SameSite=Strict` cookies (`stravia_access` with `Path=/`, and `stravia_refresh` with `Path=/api/v1/auth`), not browser storage; HTTPS origins add `Secure`. HTTP and HTTPS entries both support the complete management flow. The browser client sends `X-Stravia-CSRF: 1`, and Stravia rejects unsafe requests whose `Origin` differs from the independently recovered external request origin.
 
 To recover forgotten credentials, run the local interactive command against the same config:
 
@@ -427,14 +427,46 @@ To recover forgotten credentials, run the local interactive command against the 
 
 The command prompts for the username and reads the new password plus confirmation without echoing it or accepting it as a command-line argument. It updates the existing single administrator in place and revokes every old management session; it does not delete business data or reopen database setup.
 
-Set `--public-origin` to the trusted, externally reachable Gateway origin (for example, `https://gateway.example.com`) before binding to a non-loopback host. It governs browser security, not the separately saved client/file access addresses. Stravia never trusts forwarding headers to replace these settings. Terminate HTTPS at a reverse proxy and forward requests unchanged to the Stravia listener:
+### Management entries and reverse proxies
+
+No entry configuration is required: every reachable valid HTTP or HTTPS entry can use setup, login, and management, subject to authentication and same-origin/CSRF checks. The default listener remains `127.0.0.1:23471`; HTTP on a non-loopback listener is supported without an unsafe-mode switch. TLS is terminated by your reverse proxy, not by Stravia.
+
+To restrict the entire management surface (WebUI, setup, login, auth state, and all management API reads/writes, including setup and unavailable modes), repeat `--admin-origin`, for example `--admin-origin http://192.168.1.20:23471 --admin-origin https://gateway.example.com`, or set `STRAVIA_ADMIN_ORIGINS=http://192.168.1.20:23471,https://gateway.example.com`. Entries are exact normalized scheme/host/effective-port origins; IPv6 uses brackets, for example `http://[::1]:23471`. No wildcards, credentials, page paths, query, or fragment are allowed. Omit the setting for unrestricted entries; explicitly empty or invalid entries fail startup, not open access. The list does not change model API, MCP, health probes, or their existing authorization/CORS. Two allowed entries do not authorize cross-origin management calls: each write's `Origin` must independently match the request's recovered external origin, with the existing CSRF and JSON requirements. This is not a management CORS allowlist.
+
+By default no proxy is trusted: external origin comes from direct `Host` and HTTP, and forwarding headers from untrusted TCP peers are ignored. Repeat `--trusted-proxy` for actual immediate peer IPs or CIDRs, or use comma-separated `STRAVIA_TRUSTED_PROXIES`; invalid or explicitly empty entries fail startup. Only the actual TCP peer establishes trust, never `X-Forwarded-For` or another client claim. Trust only the proxy addresses you control; a broad CIDR (especially `0.0.0.0/0` or `::/0`) lets other clients impersonate external entries. A trusted proxy must overwrite inbound `X-Forwarded-Proto` with exactly one `http` or `https` and `X-Forwarded-Host` with exactly one browser-facing authority, including any non-default port. Both must be present together; duplicate headers, comma-separated chains, malformed/conflicting metadata, and any RFC `Forwarded` header are rejected. If a trusted peer sends neither supported header nor `Forwarded`, direct Host/HTTP applies. For multiple proxy hops, the final trusted peer must supply one authoritative sanitized pair; Stravia does not interpret forwarding chains. Proxy trust never bypasses the entry list or CSRF.
+
+For example, run Nginx on the same host as Stravia, install your certificate/key at the shown paths, and use the following configuration. `$http_host` preserves an external port; `$scheme` describes the browser connection to this TLS edge. An HTTP proxy can instead listen on HTTP and use the same header directives, with an HTTP allowed origin. An inner proxy behind another TLS terminator must use a separately secured, sanitized upstream contract rather than claiming its HTTP hop is the browser protocol.
 
 ```bash
 ./target/release/stravia-server \
   --host 127.0.0.1 \
   --port 23471 \
-  --public-origin https://gateway.example.com
+  --admin-origin https://gateway.example.com \
+  --trusted-proxy 127.0.0.1
 ```
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name gateway.example.com;
+    ssl_certificate /etc/nginx/tls/gateway.crt;
+    ssl_certificate_key /etc/nginx/tls/gateway.key;
+
+    location / {
+        proxy_pass http://127.0.0.1:23471;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $http_host;
+        proxy_set_header Forwarded "";
+    }
+}
+```
+
+Both lists are deployment-only settings, take effect on restart, and are not stored in the WebUI/database. Fix a restrictive misconfiguration locally and restart. Remove the old `--public-origin` / `STRAVIA_PUBLIC_ORIGIN` and server `--admin-cors-origin` settings when upgrading; there is no compatibility alias. A remaining `STRAVIA_PUBLIC_ORIGIN` makes Server startup fail with a migration error rather than silently discarding the old entry restriction. Client/file access addresses remain separate.
+
+Setup, access, and refresh cookies are set and cleared with `Secure` exactly when the recovered external request is HTTPS, even with HTTP upstream transport. HTTP remains usable without weakening HTTPS cookies; `HttpOnly`, `SameSite=Strict`, revocation, and CSRF remain enabled. Sessions are not promised to follow between hosts. Cookies are not isolated by port or scheme on the same host: mixing HTTP and HTTPS can prevent HTTP from replacing existing Secure cookies. Prefer distinct hostnames or HTTPS consistently rather than removing Secure or broadening Cookie Domain. HTTP also does not guarantee browser APIs that require a secure context.
+
+**Security warning:** HTTP exposes passwords, sessions, and management requests to interception and alteration. Startup warns when HTTP is allowed or entries are unrestricted; this describes policy, not evidence that an HTTPS proxy request was plaintext. Default unrestricted entries lose the partial DNS-rebinding protection of a fixed host allowlist. CSRF, SameSite, a private LAN, and trusted proxy configuration do not replace TLS or network isolation. Use HTTPS, explicit entries, and a firewall/backend-port isolation on untrusted networks; a client able to connect can construct Host, so an entry list is not a firewall.
 
 ## Development
 
@@ -470,11 +502,12 @@ Common commands:
 To check Google independently, run `cargo test --locked -p stravia-web-access live_google_returns_parsable_destination_urls -- --ignored --nocapture`. This contacts Google through the system proxy snapshot and verifies actual result titles and destination URLs; it is not part of the default test suite.
 
 Backend Python tests use the locked `test` dependency group in `pyproject.toml`; Task invokes them through `uv run --locked`.
+`task test:e2e:web` also builds the production Server for real management-entry browser tests. These tests require `openssl` on PATH, create an isolated local TLS proxy, and trust only the temporary certificate's public key in the test browser; they do not change system trust or disable certificate validation globally.
 Debug server builds do not embed or serve WebUI assets. `task dev:server` starts the Vite development server alongside the backend; release server builds embed the WebUI.
 
-`task dev:server` starts Vite first and passes its actual listening origin to the backend's `--public-origin`. If port `5173` is occupied, Vite automatically selects another port; open the exact **Local** URL printed in the terminal. Concurrent workspaces should use distinct `STRAVIA_PORT` values for their backend listeners; WebUI ports need not be fixed.
+`task dev:server` starts Vite first, passes its actual listening origin as `--admin-origin`, and trusts only the Vite proxy's `127.0.0.1` TCP peer. Vite overwrites the forwarding pair with `http` and the incoming authority (including the selected port), and removes `Forwarded`. If port `5173` is occupied, Vite automatically selects another port; open the exact **Local** URL printed in the terminal. Concurrent workspaces should use distinct `STRAVIA_PORT` values for their backend listeners; WebUI ports need not be fixed.
 
-If you run `task dev:web` and the backend separately, pass the WebUI's actual origin to the backend, for example `cargo run -p stravia-server -- --public-origin http://localhost:5174`. `localhost` and `127.0.0.1` are different browser origins. After restarting an unfinished setup, use the new setup token printed by the new Server process.
+If you run `task dev:web` and the backend separately, pass the WebUI's actual origin to the backend, for example `cargo run -p stravia-server -- --admin-origin http://localhost:5174 --trusted-proxy 127.0.0.1`. `localhost` and `127.0.0.1` are different browser origins. After restarting an unfinished setup, use the new setup token printed by the new Server process.
 
 ## Documentation
 

@@ -142,7 +142,7 @@ tasks:
 
   test:e2e:web:
     desc: Run Chromium WebUI E2E tests.
-    deps: [install:web]
+    deps: [build:server]
     cmds:
       - bun run test:e2e:web
 

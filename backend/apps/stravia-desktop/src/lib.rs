@@ -121,8 +121,8 @@ pub fn run() {
                 HttpAppConfig {
                     admin_auth,
                     admin_mode: AdminMode::Desktop,
-                    admin_origin: None,
-                    admin_cors_origins: cors_origins.clone(),
+                    admin_entry: Default::default(),
+                    desktop_cors_origins: cors_origins.clone(),
                     proxy_cors_origins: cors_origins,
                     serve_embedded_webui: false,
                 },

@@ -3,12 +3,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::admin_entry::RequestOrigin;
 use anyhow::{Context, bail};
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::{Extension, Json, Router};
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -22,7 +23,7 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 use crate::http_auth::{auth_error, cookie, validate_web_request};
-use crate::{AdminMode, HttpAppConfig, build_admin_cors_layer, build_http_app};
+use crate::{AdminMode, HttpAppConfig, build_http_app};
 
 const SETUP_COOKIE: &str = "stravia_setup";
 
@@ -52,8 +53,7 @@ struct ServerFileConfig {
 pub struct ServerStartupConfig {
     pub config_path: PathBuf,
     pub gateway: GatewayConfig,
-    pub admin_origin: String,
-    pub admin_cors_origins: Vec<String>,
+    pub admin_entry: crate::AdminEntryPolicy,
     pub proxy_cors_origins: Vec<String>,
     pub serve_embedded_webui: bool,
 }
@@ -241,7 +241,7 @@ pub async fn recover_admin(config_path: &Path, base: GatewayConfig) -> anyhow::R
 }
 
 fn setup_router(runtime: Arc<SetupRuntime>) -> Router {
-    let origins = vec![runtime.startup.admin_origin.clone()];
+    let policy = runtime.startup.admin_entry.clone();
     let serve_embedded_webui = runtime.startup.serve_embedded_webui;
     let router = Router::new()
         .route("/healthz", get(setup_health))
@@ -250,15 +250,14 @@ fn setup_router(runtime: Arc<SetupRuntime>) -> Router {
         .route("/api/v1/setup/claim", post(claim_setup))
         .route("/api/v1/setup/test", post(test_database))
         .route("/api/v1/setup/complete", post(complete_setup))
-        .layer(build_admin_cors_layer(&origins))
         .with_state(runtime);
 
     #[cfg(all(feature = "embed-webui", not(debug_assertions)))]
     if serve_embedded_webui {
-        return router.fallback(crate::serve_embedded_webui_or_not_found);
+        return policy.protect(router.fallback(crate::serve_embedded_webui_or_not_found));
     }
     let _ = serve_embedded_webui;
-    router.fallback(setup_not_found)
+    policy.protect(router.fallback(setup_not_found))
 }
 
 async fn dispatch_current(State(runtime): State<Arc<SetupRuntime>>, request: Request) -> Response {
@@ -281,20 +280,19 @@ async fn setup_ready() -> impl IntoResponse {
 }
 
 fn unavailable_router(runtime: &SetupRuntime) -> Router {
-    let origins = vec![runtime.startup.admin_origin.clone()];
+    let policy = runtime.startup.admin_entry.clone();
     let serve_embedded_webui = runtime.startup.serve_embedded_webui;
     let router = Router::new()
         .route("/healthz", get(setup_health))
         .route("/readyz", get(unavailable_ready))
-        .route("/api/v1/auth/state", get(unavailable_state))
-        .layer(build_admin_cors_layer(&origins));
+        .route("/api/v1/auth/state", get(unavailable_state));
 
     #[cfg(all(feature = "embed-webui", not(debug_assertions)))]
     if serve_embedded_webui {
-        return router.fallback(crate::serve_embedded_webui_or_not_found);
+        return policy.protect(router.fallback(crate::serve_embedded_webui_or_not_found));
     }
     let _ = serve_embedded_webui;
-    router.fallback(setup_not_found)
+    policy.protect(router.fallback(setup_not_found))
 }
 
 async fn unavailable_ready() -> impl IntoResponse {
@@ -331,11 +329,11 @@ async fn setup_state(
 
 async fn claim_setup(
     State(runtime): State<Arc<SetupRuntime>>,
+    Extension(origin): Extension<RequestOrigin>,
     headers: HeaderMap,
     Json(input): Json<ClaimInput>,
 ) -> Response {
-    if let Err(response) = validate_web_request(Some(&runtime.startup.admin_origin), &headers, true)
-    {
+    if let Err(response) = validate_web_request(Some(origin.as_str()), &headers, true) {
         return response;
     }
     let mut token = runtime.setup_token.lock().await;
@@ -345,7 +343,7 @@ async fn claim_setup(
     token.take();
     let session = Uuid::new_v4().simple().to_string();
     *runtime.setup_session.lock().await = Some(session.clone());
-    let secure = runtime.startup.admin_origin.starts_with("https://");
+    let secure = origin.secure();
     let secure = if secure { "; Secure" } else { "" };
     let value =
         format!("{SETUP_COOKIE}={session}; Path=/api/v1; HttpOnly; SameSite=Strict{secure}");
@@ -358,10 +356,11 @@ async fn claim_setup(
 
 async fn test_database(
     State(runtime): State<Arc<SetupRuntime>>,
+    Extension(origin): Extension<RequestOrigin>,
     headers: HeaderMap,
     Json(input): Json<TestInput>,
 ) -> Response {
-    if let Err(response) = authorize_setup(&runtime, &headers, true).await {
+    if let Err(response) = authorize_setup(&runtime, &origin, &headers, true).await {
         return response;
     }
     let database = match resolve_database_config(&runtime.startup.config_path, input.database) {
@@ -376,10 +375,11 @@ async fn test_database(
 
 async fn complete_setup(
     State(runtime): State<Arc<SetupRuntime>>,
+    Extension(origin): Extension<RequestOrigin>,
     headers: HeaderMap,
     Json(input): Json<CompleteInput>,
 ) -> Response {
-    if let Err(response) = authorize_setup(&runtime, &headers, true).await {
+    if let Err(response) = authorize_setup(&runtime, &origin, &headers, true).await {
         return response;
     }
     let _completion = runtime.completion.lock().await;
@@ -468,7 +468,7 @@ async fn complete_setup(
         Err(error) => {
             tracing::warn!(error = %redacted_database_error(&error), "gateway initialization failed");
             return clear_setup_cookie(
-                &runtime,
+                &origin,
                 auth_error(StatusCode::SERVICE_UNAVAILABLE, "gateway_unavailable"),
             );
         }
@@ -477,17 +477,13 @@ async fn complete_setup(
     let normal = normal_app(gateway, auth, &runtime.startup);
     *runtime.current.write().await = normal;
     clear_setup_cookie(
-        &runtime,
+        &origin,
         Json(serde_json::json!({ "mode": "server" })).into_response(),
     )
 }
 
-fn clear_setup_cookie(runtime: &SetupRuntime, mut response: Response) -> Response {
-    let secure = if runtime.startup.admin_origin.starts_with("https://") {
-        "; Secure"
-    } else {
-        ""
-    };
+fn clear_setup_cookie(origin: &RequestOrigin, mut response: Response) -> Response {
+    let secure = if origin.secure() { "; Secure" } else { "" };
     let value =
         format!("{SETUP_COOKIE}=; Path=/api/v1; HttpOnly; SameSite=Strict; Max-Age=0{secure}");
     if let Ok(value) = HeaderValue::from_str(&value) {
@@ -498,10 +494,11 @@ fn clear_setup_cookie(runtime: &SetupRuntime, mut response: Response) -> Respons
 
 async fn authorize_setup(
     runtime: &SetupRuntime,
+    origin: &RequestOrigin,
     headers: &HeaderMap,
     json: bool,
 ) -> Result<(), Response> {
-    validate_web_request(Some(&runtime.startup.admin_origin), headers, json)?;
+    validate_web_request(Some(origin.as_str()), headers, json)?;
     let session = runtime.setup_session.lock().await;
     if cookie(headers, SETUP_COOKIE)
         .zip(session.as_deref())
@@ -614,8 +611,8 @@ fn normal_app(gateway: Gateway, auth: AdminAuth, startup: &ServerStartupConfig) 
         HttpAppConfig {
             admin_auth: auth,
             admin_mode: AdminMode::Server,
-            admin_origin: Some(startup.admin_origin.clone()),
-            admin_cors_origins: startup.admin_cors_origins.clone(),
+            admin_entry: startup.admin_entry.clone(),
+            desktop_cors_origins: Vec::new(),
             proxy_cors_origins: startup.proxy_cors_origins.clone(),
             serve_embedded_webui: startup.serve_embedded_webui,
         },

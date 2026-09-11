@@ -2,12 +2,11 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
 use stravia_core::config::GatewayConfig;
 use stravia_server::{
-    DEFAULT_PORT, ServerStartupConfig, prepare_server_app, recover_admin, standalone_local_origins,
-    start_http_server,
+    AdminEntryPolicy, DEFAULT_PORT, ServerStartupConfig, prepare_server_app, recover_admin,
+    standalone_local_origins, start_http_server,
 };
 
 #[derive(Parser)]
@@ -35,13 +34,26 @@ struct Args {
     port: u16,
 
     #[arg(
-        long,
-        env = "STRAVIA_PUBLIC_ORIGIN",
-        help = "Canonical public origin used for browser security; file access addresses are managed in settings",
+        long = "admin-origin",
+        env = "STRAVIA_ADMIN_ORIGINS",
+        action = clap::ArgAction::Append,
+        value_delimiter = ',',
+        help = "Allowed management HTTP(S) origin (repeatable; omitted means unrestricted)",
         help_heading = "Server",
         global = true
     )]
-    public_origin: Option<String>,
+    admin_origins: Vec<String>,
+
+    #[arg(
+        long = "trusted-proxy",
+        env = "STRAVIA_TRUSTED_PROXIES",
+        action = clap::ArgAction::Append,
+        value_delimiter = ',',
+        help = "Trusted immediate TCP proxy IP or CIDR (repeatable; none trusted by default)",
+        help_heading = "Server",
+        global = true
+    )]
+    trusted_proxies: Vec<String>,
 
     #[arg(
         long,
@@ -52,15 +64,6 @@ struct Args {
         global = true
     )]
     log_level: String,
-
-    #[arg(
-        long = "admin-cors-origin",
-        action = clap::ArgAction::Append,
-        help = "Allowed CORS origin for admin API (repeatable; wildcard is not accepted)",
-        help_heading = "Advanced",
-        global = true
-    )]
-    admin_cors_origins: Vec<String>,
 
     #[arg(
         long = "proxy-cors-origin",
@@ -130,25 +133,25 @@ async fn main() -> anyhow::Result<()> {
 async fn run_server(
     args: &Args,
     config_path: PathBuf,
-    mut gateway: GatewayConfig,
+    gateway: GatewayConfig,
 ) -> anyhow::Result<()> {
-    let admin_origin = canonical_admin_origin(args)?;
-    gateway.public_origin = Some(admin_origin.clone());
-    if args
-        .admin_cors_origins
-        .iter()
-        .any(|origin| origin.trim() == "*")
-    {
-        bail!("wildcard admin CORS origin is not allowed with cookie authentication");
+    if std::env::var_os("STRAVIA_PUBLIC_ORIGIN").is_some() {
+        anyhow::bail!(
+            "STRAVIA_PUBLIC_ORIGIN was removed; migrate the entry restriction to STRAVIA_ADMIN_ORIGINS"
+        );
+    }
+    let admin_entry = AdminEntryPolicy::new(&args.admin_origins, &args.trusted_proxies)?;
+    if admin_entry.unrestricted() {
+        tracing::warn!(
+            "Management entry origins are unrestricted; configure --admin-origin and network isolation to restrict access"
+        );
+    }
+    if admin_entry.allows_http() {
+        tracing::warn!(
+            "Management policy permits HTTP; plaintext entry exposes credentials, sessions and management operations. CSRF and SameSite do not replace TLS"
+        );
     }
     let local_origins = standalone_local_origins(args.port);
-    let mut admin_cors_origins = args.admin_cors_origins.clone();
-    if !admin_cors_origins
-        .iter()
-        .any(|origin| origin.trim() == admin_origin.as_str())
-    {
-        admin_cors_origins.push(admin_origin.clone());
-    }
     let proxy_cors_origins = if args.proxy_cors_origins.is_empty() {
         local_origins
     } else {
@@ -158,8 +161,7 @@ async fn run_server(
     let prepared = prepare_server_app(ServerStartupConfig {
         config_path,
         gateway,
-        admin_origin,
-        admin_cors_origins,
+        admin_entry,
         proxy_cors_origins,
         serve_embedded_webui: true,
     })
@@ -179,50 +181,9 @@ async fn run_server(
 fn base_gateway_config(args: &Args, data_dir: PathBuf) -> GatewayConfig {
     GatewayConfig {
         data_dir,
-        public_origin: args
-            .public_origin
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned),
         config_poll_interval: Duration::from_secs(args.config_poll_interval),
         ..Default::default()
     }
-}
-
-fn canonical_admin_origin(args: &Args) -> anyhow::Result<String> {
-    let origin = match args
-        .public_origin
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        Some(value) => {
-            let url =
-                url::Url::parse(value).context("--public-origin must be a valid HTTP(S) origin")?;
-            if !matches!(url.scheme(), "http" | "https")
-                || url.host_str().is_none()
-                || !url.username().is_empty()
-                || url.password().is_some()
-                || url.query().is_some()
-                || url.fragment().is_some()
-                || url.path() != "/"
-            {
-                bail!(
-                    "--public-origin must contain only an HTTP(S) scheme, host, and optional port"
-                );
-            }
-            url.origin().ascii_serialization()
-        }
-        None if is_loopback_host(&args.host) => {
-            format!("http://{}:{}", display_origin_host(&args.host), args.port)
-        }
-        None => bail!("--public-origin is required when --host is not loopback"),
-    };
-    if !is_loopback_host(&args.host) && !origin.starts_with("https://") {
-        bail!("--public-origin must use HTTPS when --host is not loopback");
-    }
-    Ok(origin)
 }
 
 fn load_dotenv() -> anyhow::Result<()> {
@@ -252,10 +213,6 @@ async fn shutdown_signal() {
     let terminate = std::future::pending::<()>();
     tokio::select! { _ = ctrl_c => {}, _ = terminate => {} }
     tracing::info!("shutdown signal received");
-}
-
-fn is_loopback_host(host: &str) -> bool {
-    matches!(host, "127.0.0.1" | "localhost" | "::1")
 }
 
 fn display_origin_host(host: &str) -> String {

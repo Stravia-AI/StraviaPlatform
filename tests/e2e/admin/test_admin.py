@@ -550,7 +550,7 @@ def test_status_describes_gateway_without_a_listener_port(admin_env: dict[str, s
 
 @pytest.mark.e2e
 @pytest.mark.admin
-def test_unified_listener_allows_admin_and_proxy_cors(
+def test_unified_listener_preserves_proxy_cors_without_cross_origin_management(
     admin_env: dict[str, str],
 ) -> None:
     origin = admin_env["admin"]
@@ -571,20 +571,22 @@ def test_unified_listener_allows_admin_and_proxy_cors(
             status = error.code
             allowed_origin = error.headers.get("Access-Control-Allow-Origin")
 
-        assert status == 200
-        assert allowed_origin == origin
+        if path.startswith("/api/"):
+            assert status == 403
+            assert allowed_origin is None
+        else:
+            assert status == 200
+            assert allowed_origin == origin
 
 
 @pytest.mark.e2e
 @pytest.mark.admin
-@pytest.mark.parametrize("path", ["/api/v1/providers", "/v1/chat/completions"])
-def test_unified_listener_rejects_untrusted_cors_origin_and_method(
+def test_proxy_rejects_untrusted_cors_origin_and_method(
     admin_env: dict[str, str],
-    path: str,
 ) -> None:
     def preflight(origin: str, method: str) -> tuple[int, str | None, str | None]:
         request = Request(
-            f"{admin_env['admin']}{path}",
+            f"{admin_env['admin']}/v1/chat/completions",
             method="OPTIONS",
             headers={
                 "Origin": origin,

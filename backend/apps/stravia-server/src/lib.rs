@@ -19,7 +19,9 @@ use rust_embed::RustEmbed;
 use stravia_core::Gateway;
 use stravia_core::admin::identity::AdminAuth;
 
+mod admin_entry;
 mod admin_routes;
+pub use admin_entry::AdminEntryPolicy;
 mod http_auth;
 mod oauth_callback;
 mod setup;
@@ -46,8 +48,8 @@ pub enum AdminMode {
 pub struct HttpAppConfig {
     pub admin_auth: AdminAuth,
     pub admin_mode: AdminMode,
-    pub admin_origin: Option<String>,
-    pub admin_cors_origins: Vec<String>,
+    pub admin_entry: AdminEntryPolicy,
+    pub desktop_cors_origins: Vec<String>,
     pub proxy_cors_origins: Vec<String>,
     pub serve_embedded_webui: bool,
 }
@@ -71,15 +73,16 @@ pub fn desktop_origins() -> Vec<String> {
 }
 
 pub fn build_http_app(gateway: Gateway, config: HttpAppConfig) -> Router {
-    let admin_router = admin_routes::create_router(
+    let mut admin_router = admin_routes::create_router(
         gateway.clone(),
         http_auth::AdminHttpState {
             auth: config.admin_auth,
             mode: config.admin_mode,
-            origin: config.admin_origin,
         },
-    )
-    .layer(build_admin_cors_layer(&config.admin_cors_origins));
+    );
+    if config.admin_mode == AdminMode::Desktop {
+        admin_router = admin_router.layer(build_admin_cors_layer(&config.desktop_cors_origins));
+    }
     let proxy_router = stravia_core::proxy::server::create_router(gateway)
         .layer(Extension(
             stravia_core::proxy::server::AllowedWebSocketOrigins::new(
@@ -92,11 +95,21 @@ pub fn build_http_app(gateway: Gateway, config: HttpAppConfig) -> Router {
     #[cfg(all(feature = "embed-webui", not(debug_assertions)))]
     {
         if config.serve_embedded_webui {
-            return app.fallback(serve_embedded_webui_or_not_found);
+            let app = app.fallback(serve_embedded_webui_or_not_found);
+            return if config.admin_mode == AdminMode::Server {
+                config.admin_entry.protect(app)
+            } else {
+                app
+            };
         }
     }
 
-    app.fallback(api_not_found)
+    let app = app.fallback(api_not_found);
+    if config.admin_mode == AdminMode::Server {
+        config.admin_entry.protect(app)
+    } else {
+        app
+    }
 }
 
 struct ServerState {
@@ -171,12 +184,15 @@ pub async fn start_http_server(
     let (shutdown_tx, mut shutdown_rx) = watch::channel(());
 
     let task = tokio::spawn(async move {
-        let result = axum::serve(listener, app)
-            .with_graceful_shutdown(async move {
-                let _ = shutdown_rx.changed().await;
-            })
-            .await
-            .map_err(anyhow::Error::from);
+        let result = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            let _ = shutdown_rx.changed().await;
+        })
+        .await
+        .map_err(anyhow::Error::from);
         if let Err(error) = &result {
             tracing::error!(%error, "HTTP server stopped unexpectedly");
         }
@@ -222,7 +238,8 @@ async fn api_not_found() -> StatusCode {
 
 #[cfg(all(feature = "embed-webui", not(debug_assertions)))]
 fn is_reserved_api_namespace(path: &str) -> bool {
-    matches!(path, "/api" | "/v1" | "/v1beta")
+    matches!(path, "/api" | "/v1" | "/v1beta" | "/mcp")
+        || path.starts_with("/mcp/")
         || path.starts_with("/api/")
         || path.starts_with("/v1/")
         || path.starts_with("/v1beta/")

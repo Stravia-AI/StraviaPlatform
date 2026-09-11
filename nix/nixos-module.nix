@@ -44,7 +44,9 @@ in
       example = "/run/secrets/stravia.env";
       description = ''
         Optional systemd environment file for non-database Stravia settings,
-        such as STRAVIA_PUBLIC_ORIGIN. Database connection settings belong
+        such as STRAVIA_ADMIN_ORIGINS and STRAVIA_TRUSTED_PROXIES. Both are
+        optional comma-separated lists; no proxy is trusted by default.
+        Database connection settings belong
         only in /var/lib/stravia/server.toml.
       '';
     };

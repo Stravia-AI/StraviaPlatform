@@ -326,7 +326,7 @@ flake 支持 `x86_64-linux` 和 `aarch64-linux`，会把内嵌 WebUI、Moli 引�
 }
 ```
 
-service 默认监听 `127.0.0.1:23471`，使用动态系统用户运行，并将数据及 `/var/lib/stravia/server.toml` 持久化到 `/var/lib/stravia`。如需对外提供服务，请配置 `services.stravia.host`、`port` 和 `openFirewall`。监听非回环地址还必须将 `STRAVIA_PUBLIC_ORIGIN` 设为规范 HTTPS origin；把该非数据库设置放入 `services.stravia.environmentFile`，并由反向代理终止 TLS。数据库设置绝不从环境变量读取。已有 PostgreSQL 部署升级前，必须先按下文格式写入 `/var/lib/stravia/server.toml`，再启动升级后的 service。
+service 默认监听 `127.0.0.1:23471`，使用动态系统用户运行，并将数据及 `/var/lib/stravia/server.toml` 持久化到 `/var/lib/stravia`。如需对外提供服务，请配置 `services.stravia.host`、`port` 和 `openFirewall`。HTTP 无需入口配置即可使用，包括非回环监听。如需限制入口或信任反向代理，可在 `services.stravia.environmentFile` 中设置可选的 `STRAVIA_ADMIN_ORIGINS` 与 `STRAVIA_TRUSTED_PROXIES`；代理契约见下文，不会自动信任任何代理网段。数据库设置绝不从环境变量读取。已有 PostgreSQL 部署升级前，必须先按下文格式写入 `/var/lib/stravia/server.toml`，再启动升级后的 service。
 
 ### 使用 Docker 运行服务端
 
@@ -336,12 +336,11 @@ docker pull ghcr.io/stravia-ai/straviaplatform:latest
 
 docker run --rm \
   --publish 127.0.0.1:23471:23471 \
-  --env STRAVIA_PUBLIC_ORIGIN=https://gateway.example.com \
   --mount source=stravia-data,target=/data \
   ghcr.io/stravia-ai/straviaplatform:latest
 ```
 
-如需从当前 checkout 构建，请运行 `docker build --tag stravia-server:local .`，并把最后的镜像名替换为 `stravia-server:local`。镜像内嵌生产 WebUI，在容器内监听 `0.0.0.0:23471`，以非 root 用户运行，并把 `server.toml` 和 SQLite 数据持久化到 `/data`。请在仅发布到回环地址的端口前放置 HTTPS 反向代理，并将 `STRAVIA_PUBLIC_ORIGIN` 设为完全一致的外部 origin；管理 Cookie 使用 Secure，非安全管理请求必须具有相同 origin 和 Stravia 的 CSRF header。不得通过 HTTP 直接暴露容器端口。内置健康检查会请求 `GET /healthz`；完成设置且 Gateway 成功启动前，就绪探针仍返回未就绪。
+如需从当前 checkout 构建，请运行 `docker build --tag stravia-server:local .`，并把最后的镜像名替换为 `stravia-server:local`。镜像内嵌生产 WebUI，在容器内监听 `0.0.0.0:23471`，以非 root 用户运行，并把 `server.toml` 和 SQLite 数据持久化到 `/data`。此示例无需入口配置即可通过 `http://127.0.0.1:23471` 直连 HTTP。远程暴露时优先使用 HTTPS 反向代理及显式 `STRAVIA_ADMIN_ORIGINS` 列表。`STRAVIA_TRUSTED_PROXIES` 只能配置容器实际看到的代理对端（Docker NAT 可能使它成为网桥地址而非 `127.0.0.1`）；请检查网络拓扑，不要信任所有容器或全部网络。遵循下文转发契约并隔离后端端口。内置健康检查会请求 `GET /healthz`；完成设置且 Gateway 成功启动前，就绪探针仍返回未就绪。
 
 镜像内嵌 Moli，不再安装 Chromium。浏览器代码运行在 Stravia 进程内，应保留非 root 容器运行方式及正常的宿主机隔离。
 
@@ -386,7 +385,8 @@ task build:desktop:installer
 | ------------------------ | ------------------------------ | ------------ |
 | `--host`                 | `STRAVIA_HOST`                 | `127.0.0.1`  |
 | `--port`                 | `STRAVIA_PORT`                 | `23471`      |
-| `--public-origin`        | `STRAVIA_PUBLIC_ORIGIN`        | 回环地址自动推导；其他地址必须提供 HTTPS origin |
+| `--admin-origin`         | `STRAVIA_ADMIN_ORIGINS`        | 未配置：不限制管理入口 |
+| `--trusted-proxy`        | `STRAVIA_TRUSTED_PROXIES`      | 未配置：不信任任何代理 |
 | `--config`               | —                              | `<data-dir>/server.toml` |
 | `--data-dir`             | `STRAVIA_DATA_DIR`             | Debug：`.stravia-dev`；Release：`~/.stravia` |
 | `--log-level`            | `STRAVIA_LOG_LEVEL`            | `info`       |
@@ -417,7 +417,7 @@ idle_timeout_seconds = 300
 
 三个连接池设置均可省略。PostgreSQL URL 可能包含凭据，因此必须保护 `server.toml`。连接账户需有权在该数据库中运行 Stravia migrations，但无需创建数据库。已有 PostgreSQL 部署必须在首次运行升级版本**之前**，用当前连接 URL 创建此文件。只删除旧数据库环境变量而未创建该文件，会按设计进入设置流程；Stravia 不会推断旧 PostgreSQL 数据库，也不会静默选择 SQLite。
 
-对于未配置数据库或已配置但还没有管理员的数据库，控制台令牌只能由 `POST /api/v1/setup/claim` 领取；得到的 `stravia_setup` HttpOnly、`SameSite=Strict` Cookie（`Path=/api/v1`，HTTPS 下同时为 `Secure`）可调用 `/api/v1/setup/test` 和 `/api/v1/setup/complete`。设置权限不能调用管理 API；数据库已有管理员时设置入口会关闭。`GET /api/v1/auth/state` 会报告设置、可用性与当前认证状态，但不会刷新凭据。Server 正常认证使用 `/api/v1/auth/login`、`/api/v1/auth/refresh`、`/api/v1/auth/logout` 和 `/api/v1/auth/credentials`。访问与刷新凭据只保存在 `HttpOnly`、`SameSite=Strict` Cookie（`stravia_access` 使用 `Path=/`，`stravia_refresh` 使用 `Path=/api/v1/auth`）中，不写入浏览器存储；HTTPS origin 下同时设置 `Secure`。远程管理必须使用 HTTPS 规范 origin。浏览器客户端会发送 `X-Stravia-CSRF: 1`；会修改状态的请求其 `Origin` 与 `--public-origin` 不一致时，Stravia 会拒绝请求。
+对于未配置数据库或已配置但还没有管理员的数据库，控制台令牌只能由 `POST /api/v1/setup/claim` 领取；得到的 `stravia_setup` HttpOnly、`SameSite=Strict` Cookie（`Path=/api/v1`，HTTPS 下同时为 `Secure`）可调用 `/api/v1/setup/test` 和 `/api/v1/setup/complete`。设置权限不能调用管理 API；数据库已有管理员时设置入口会关闭。`GET /api/v1/auth/state` 会报告设置、可用性与当前认证状态，但不会刷新凭据。Server 正常认证使用 `/api/v1/auth/login`、`/api/v1/auth/refresh`、`/api/v1/auth/logout` 和 `/api/v1/auth/credentials`。访问与刷新凭据只保存在 `HttpOnly`、`SameSite=Strict` Cookie（`stravia_access` 使用 `Path=/`，`stravia_refresh` 使用 `Path=/api/v1/auth`）中，不写入浏览器存储；HTTPS origin 下同时设置 `Secure`。HTTP 和 HTTPS 入口均支持完整管理流程。浏览器客户端会发送 `X-Stravia-CSRF: 1`；会修改状态的请求其 `Origin` 与独立恢复的请求外部源不一致时，Stravia 会拒绝请求。
 
 忘记凭据时，使用同一配置运行本地交互命令：
 
@@ -427,14 +427,46 @@ idle_timeout_seconds = 300
 
 该命令会提示输入用户名，并无回显地读取新密码及确认；密码不接受命令行参数。它会原地更新已有唯一管理员，并撤销全部旧管理会话；不会删除业务数据或重新开放数据库设置。
 
-监听非回环地址前，必须通过 `--public-origin` 指定可信且可从外部访问的 Gateway origin（例如 `https://gateway.example.com`）。它控制浏览器安全边界，不替代独立保存的客户端／文件访问地址；Stravia 不会信任转发头来替换这些设置。请由反向代理终止 HTTPS，并将请求原样转发至 Stravia listener：
+### 管理入口与反向代理
+
+默认无需入口配置：所有可达的有效 HTTP 或 HTTPS 入口均可进行首次设置、登录及管理，仍受身份认证和同源／CSRF 保护。默认监听保持 `127.0.0.1:23471`；非回环监听也支持 HTTP，无需“不安全模式”开关。TLS 由反向代理终止，Stravia 不内建 TLS listener。
+
+如需限制整个管理面（WebUI、设置、登录、认证状态及全部管理 API 读写，包含初始化与不可用状态），重复使用 `--admin-origin`，例如 `--admin-origin http://192.168.1.20:23471 --admin-origin https://gateway.example.com`，或设置 `STRAVIA_ADMIN_ORIGINS=http://192.168.1.20:23471,https://gateway.example.com`。入口按规范化的协议／主机／有效端口精确匹配；IPv6 使用方括号，例如 `http://[::1]:23471`。不允许通配符、凭据、页面路径、query 或 fragment。省略表示不限入口；显式空项或非法项会使启动失败，不会退回放行。列表不改变模型 API、MCP、健康探针及其既有授权／CORS。两个入口均被允许不表示可以跨源管理：每个写请求的 `Origin` 必须独立匹配恢复的请求外部源，继续满足 CSRF 和 JSON 要求。这不是管理 CORS 允许列表。
+
+默认不信任任何代理：外部源来自直连 `Host` 和 HTTP，不受信 TCP 对端的转发头被忽略。可重复使用 `--trusted-proxy` 配置实际直接对端 IP 或 CIDR，或使用逗号分隔的 `STRAVIA_TRUSTED_PROXIES`；非法项或显式空项会使启动失败。信任只来自实际 TCP 对端，绝不依据 `X-Forwarded-For` 等客户端声明。只信任自己控制的代理地址；宽泛 CIDR（尤其 `0.0.0.0/0` 或 `::/0`）会让其他客户端冒充外部入口。受信代理必须覆盖客户端传入的 `X-Forwarded-Proto`，使其为唯一的 `http` 或 `https`，并覆盖 `X-Forwarded-Host`，使其为唯一的浏览器侧 authority，包含非默认端口。两者必须同时提供；重复头、逗号链、非法／冲突信息及任何 RFC `Forwarded` 头均被拒绝。受信对端既不发送这两个头也不发送 `Forwarded` 时，按直连 Host／HTTP 处理。多级代理只能由最后一个受信对端提供一对权威且已清洗的声明；Stravia 不解析转发链。代理信任不能豁免入口列表或 CSRF。
+
+例如，在 Stravia 同一主机运行 Nginx，在所示路径安装证书及私钥，然后使用下列配置。`$http_host` 保留外部端口；`$scheme` 表示浏览器连接到此 TLS 边缘的协议。HTTP 代理可改用 HTTP 监听及 HTTP 允许入口，沿用相同头指令。位于其他 TLS 终止器之后的内部代理必须使用另行保护、清洗的上游契约，不能把自身 HTTP 回源协议声称为浏览器协议。
 
 ```bash
 ./target/release/stravia-server \
   --host 127.0.0.1 \
   --port 23471 \
-  --public-origin https://gateway.example.com
+  --admin-origin https://gateway.example.com \
+  --trusted-proxy 127.0.0.1
 ```
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name gateway.example.com;
+    ssl_certificate /etc/nginx/tls/gateway.crt;
+    ssl_certificate_key /etc/nginx/tls/gateway.key;
+
+    location / {
+        proxy_pass http://127.0.0.1:23471;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $http_host;
+        proxy_set_header Forwarded "";
+    }
+}
+```
+
+两个列表仅属于部署配置，重启生效，不写入 WebUI／数据库。列表误配置时可本地修改并重启恢复。升级时删除旧 `--public-origin`／`STRAVIA_PUBLIC_ORIGIN` 及 Server `--admin-cors-origin` 设置；不保留兼容别名。残留的 `STRAVIA_PUBLIC_ORIGIN` 会使 Server 启动失败并提示迁移，避免静默丢弃旧入口限制。客户端／文件访问地址仍是独立配置。
+
+设置、访问和刷新 Cookie 的设置与清除均按每个请求恢复的外部协议决定：HTTPS 使用 `Secure`，即使代理通过 HTTP 回源。HTTP 可用不以削弱 HTTPS Cookie 为代价；`HttpOnly`、`SameSite=Strict`、撤销和 CSRF 继续有效。不承诺不同主机间会话互通。同一主机的 Cookie 不按端口或协议隔离：混用 HTTP 与 HTTPS 时，HTTP 可能无法替换已有 Secure Cookie。应优先采用不同主机名或统一 HTTPS，而非取消 Secure 或扩大 Cookie Domain。HTTP 也不保证需要安全上下文的浏览器 API 可用。
+
+**安全警告：** HTTP 会使密码、会话与管理请求遭到窃听或篡改。允许 HTTP 或未限制入口时的启动警告说明配置风险，不代表某个 HTTPS 代理请求实际走了明文。默认不限入口会失去固定主机允许列表提供的部分 DNS rebinding 防护。CSRF、SameSite、内网和代理信任均不能替代 TLS 或网络隔离。不可信网络应使用 HTTPS、显式入口列表及防火墙／后端端口隔离；能连接的客户端可构造 Host，因此入口列表不是防火墙。
 
 ## 开发
 
@@ -470,11 +502,12 @@ tests/e2e/                         Python 后端 E2E 套件与协议录制样本
 如需单独验证 Google，请运行 `cargo test --locked -p stravia-web-access live_google_returns_parsable_destination_urls -- --ignored --nocapture`。该检查通过系统代理快照访问 Google，验证真实结果标题与目标 URL，不属于默认测试套件。
 
 后端 Python 测试使用 `pyproject.toml` 中锁定的 `test` 依赖组，Task 通过 `uv run --locked` 执行。
+`task test:e2e:web` 也会构建生产 Server，以运行真实管理入口浏览器测试。这些测试要求 PATH 中存在 `openssl`，创建隔离的本地 TLS 代理，并仅在测试浏览器中信任临时证书公钥；不会修改系统信任或全局关闭证书校验。
 Debug 服务端构建不会内嵌或提供 WebUI 资源。`task dev:server` 会同时启动 Vite 开发服务器和后端；Release 服务端构建仍会内嵌 WebUI。
 
-`task dev:server` 会先启动 Vite，再把实际监听地址作为 `--public-origin` 传给后端。端口 `5173` 被占用时，Vite 会自动选择其他端口；请打开终端输出的精确 **Local** 地址。多个 workspace 并行开发时，各后端使用不同的 `STRAVIA_PORT`；前端端口无需固定。
+`task dev:server` 会先启动 Vite，再把实际监听地址作为 `--admin-origin` 传给后端，并仅信任 Vite 代理的 `127.0.0.1` TCP 对端。Vite 用 `http` 和传入的 authority（含实际端口）覆盖转发头对，并移除 `Forwarded`。端口 `5173` 被占用时，Vite 会自动选择其他端口；请打开终端输出的精确 **Local** 地址。多个 workspace 并行开发时，各后端使用不同的 `STRAVIA_PORT`；前端端口无需固定。
 
-如果分别启动 `task dev:web` 和后端，请把 WebUI 的实际来源传给后端，例如 `cargo run -p stravia-server -- --public-origin http://localhost:5174`。`localhost` 和 `127.0.0.1` 是不同的浏览器来源。首次设置未完成时重启服务，需要使用新 Server 进程输出的新设置令牌。
+如果分别启动 `task dev:web` 和后端，请把 WebUI 的实际来源传给后端，例如 `cargo run -p stravia-server -- --admin-origin http://localhost:5174 --trusted-proxy 127.0.0.1`。`localhost` 和 `127.0.0.1` 是不同的浏览器来源。首次设置未完成时重启服务，需要使用新 Server 进程输出的新设置令牌。
 
 ## 文档
 
