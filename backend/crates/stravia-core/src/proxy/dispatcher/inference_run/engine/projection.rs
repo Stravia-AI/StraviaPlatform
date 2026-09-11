@@ -311,12 +311,13 @@ impl UploadProjection {
 const THINKING_MARKER_PENDING_RETENTION: Duration = Duration::from_secs(60 * 60);
 const PUBLISHED_MARKER_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum PreviewCarrier {
     Unindexed,
     Indexed {
         output_index: Option<usize>,
         content_index: Option<usize>,
+        summary: bool,
     },
 }
 
@@ -327,6 +328,7 @@ impl PreviewCarrier {
             Self::Indexed {
                 output_index,
                 content_index,
+                ..
             } => AiStreamDelta::TextDeltaWithMetadata {
                 text,
                 logprobs: Vec::new(),
@@ -367,7 +369,7 @@ impl QuotedThinkingPreviewEncoder {
         if !self.started {
             self.started = true;
             quoted = format!(
-                "{}\n> {quoted}",
+                "{}\n\n> {quoted}",
                 render_preview_projection_start(&self.reference, 0)
             );
         }
@@ -380,11 +382,11 @@ impl QuotedThinkingPreviewEncoder {
         let mut quoted = self.quote_lines(&escaped, true);
         if !self.started {
             quoted = format!(
-                "{}\n> {quoted}",
+                "{}\n\n> {quoted}",
                 render_preview_projection_start(&self.reference, 0)
             );
         }
-        quoted.push('\n');
+        quoted.push_str("\n\n");
         quoted.push_str(&render_preview_projection_end(&self.reference, 0));
         quoted
     }
@@ -442,15 +444,6 @@ enum ProtectedPreviewCarrier {
 }
 
 impl ProtectedPreviewCarrier {
-    fn ordinal(self) -> usize {
-        match self {
-            Self::Unindexed => 0,
-            Self::Thinking { content_index, .. } | Self::Summary { content_index, .. } => {
-                content_index.unwrap_or(0)
-            }
-        }
-    }
-
     fn delta(self, text: String, obfuscation: Option<String>) -> AiStreamDelta {
         match self {
             Self::Unindexed => AiStreamDelta::ThinkingDelta(text),
@@ -479,6 +472,8 @@ impl ProtectedPreviewCarrier {
 struct LiveProtectedPreview {
     marker: HistoryMarker,
     carrier: Option<ProtectedPreviewCarrier>,
+    ordinal: usize,
+    canonical_text: String,
 }
 
 #[derive(Clone)]
@@ -728,10 +723,9 @@ impl ClientProjectionSession {
         }
         let post_text = self.state.post_text_started();
         let reserved = self.state.reserved_thinking_marker(output_index).cloned();
-        let had_live_projection = reserved.is_some();
         let preview_started = self.state.thinking_preview_started(output_index);
         let markers = self
-            .persist_thinking_blocks(item, reserved.as_ref(), post_text)
+            .persist_thinking_blocks(item, reserved.as_ref())
             .await?;
         let finish_deltas = self.state.close_thinking_preview(output_index);
         let mut preview_deltas = Vec::new();
@@ -741,13 +735,20 @@ impl ClientProjectionSession {
         {
             let mut markers_for_blocks = markers.iter();
             for block in blocks {
-                if !is_thinking(block) || (!post_text && !is_protected_thinking(block)) {
+                if !is_thinking(block) {
                     continue;
                 }
                 let marker = markers_for_blocks
                     .next()
                     .ok_or(HistoryMarkerError::InvalidPayload)?;
-                if is_protected_thinking(block) {
+                if post_text {
+                    if let Some(text) = public_thinking_text(block) {
+                        preview_deltas.push(AiStreamDelta::TextDelta(render_quoted_preview(
+                            &marker.reference,
+                            &text,
+                        )));
+                    }
+                } else {
                     preview_deltas.extend(self.state.preview_deltas(output_index, block, marker));
                 }
             }
@@ -773,7 +774,7 @@ impl ClientProjectionSession {
             preview_deltas,
             marker_deltas,
             markers,
-            had_live_projection: had_live_projection || preview_started,
+            had_live_projection: preview_started,
         })
     }
 
@@ -781,7 +782,6 @@ impl ClientProjectionSession {
         &self,
         item: &AiItem,
         reserved: Option<&HistoryMarker>,
-        post_text: bool,
     ) -> Result<Vec<HistoryMarker>, HistoryMarkerError> {
         if !self.state.openai_compatible {
             return reserved
@@ -797,10 +797,7 @@ impl ClientProjectionSession {
         };
         let mut markers = Vec::new();
         let mut reserved = reserved;
-        for block in blocks
-            .iter()
-            .filter(|block| is_thinking(block) && (post_text || is_protected_thinking(block)))
-        {
+        for block in blocks.iter().filter(|block| is_thinking(block)) {
             let marker = self
                 .persist_thinking_block(
                     block.clone(),
@@ -910,46 +907,71 @@ impl ClientProjectionSession {
             ready.extend(self.upload.flush(&self.principal)?);
         }
         deltas = ready;
-        self.capture_protected_candidates(&deltas);
-        self.capture_unindexed_signatures(&mut deltas);
         let has_completed_thinking = deltas.iter().any(|delta| {
             matches!(
                 delta,
                 AiStreamDelta::ItemDone { item, .. } if is_thinking_item(item)
             )
         });
-        let thinking_completed = !has_completed_thinking
-            && (model_leg_completed
-                || deltas
-                    .iter()
-                    .any(ClientProjectionSession::ends_unindexed_thinking));
-        if thinking_completed
+        let mut batches = Vec::new();
+        for delta in deltas {
+            self.capture_protected_candidates(std::slice::from_ref(&delta));
+            let Some(delta) = self.capture_unindexed_signature(delta) else {
+                continue;
+            };
+            if !has_completed_thinking
+                && Self::ends_unindexed_thinking(&delta)
+                && let Some((index, item)) = self
+                    .synthetic_buffered_thinking_item()
+                    .or_else(|| self.synthetic_post_text_thinking_item())
+            {
+                let (deltas, markers) = self.close_live_thinking(index, &item).await?;
+                if !deltas.is_empty() {
+                    batches.push(ProjectedDeltaBatch {
+                        deltas: self.commit_visible(deltas),
+                        references: markers
+                            .into_iter()
+                            .map(|marker| ProjectedMarkerReference {
+                                reference: marker.reference,
+                                platform: false,
+                            })
+                            .collect(),
+                    });
+                }
+                self.current_unindexed_item_kind = None;
+            }
+            if let AiStreamDelta::ItemDone { index, item } = &delta
+                && is_thinking_item(item)
+            {
+                let (deltas, markers) = self.close_live_thinking(*index, item).await?;
+                if !deltas.is_empty() {
+                    batches.push(ProjectedDeltaBatch {
+                        deltas: self.commit_visible(deltas),
+                        references: markers
+                            .into_iter()
+                            .map(|marker| ProjectedMarkerReference {
+                                reference: marker.reference,
+                                platform: false,
+                            })
+                            .collect(),
+                    });
+                }
+            }
+            let visible = self.filter_live_deltas(std::iter::once(delta));
+            if !visible.is_empty() {
+                batches.push(ProjectedDeltaBatch::visible(visible));
+            }
+        }
+        if model_leg_completed
+            && !has_completed_thinking
             && let Some((index, item)) = self
-                .synthetic_signed_thinking_item()
+                .synthetic_buffered_thinking_item()
                 .or_else(|| self.synthetic_post_text_thinking_item())
         {
-            deltas.insert(0, AiStreamDelta::ItemDone { index, item });
-        }
-
-        let mut completed_indices = HashSet::new();
-        let completed = deltas
-            .iter()
-            .filter_map(|delta| match delta {
-                AiStreamDelta::ItemDone { index, item }
-                    if completed_indices.insert(*index) && is_thinking_item(item) =>
-                {
-                    Some((*index, item.clone()))
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        let mut batches = Vec::new();
-        for (output_index, item) in completed {
-            let (marker_deltas, markers) = self.close_live_thinking(output_index, &item).await?;
-            let marker_deltas = self.route_visible_deltas(marker_deltas);
-            if !marker_deltas.is_empty() {
+            let (deltas, markers) = self.close_live_thinking(index, &item).await?;
+            if !deltas.is_empty() {
                 batches.push(ProjectedDeltaBatch {
-                    deltas: marker_deltas,
+                    deltas: self.commit_visible(deltas),
                     references: markers
                         .into_iter()
                         .map(|marker| ProjectedMarkerReference {
@@ -959,10 +981,7 @@ impl ClientProjectionSession {
                         .collect(),
                 });
             }
-        }
-        let visible = self.filter_live_deltas(deltas);
-        if !visible.is_empty() {
-            batches.push(ProjectedDeltaBatch::visible(visible));
+            self.current_unindexed_item_kind = None;
         }
         Ok(batches)
     }
@@ -987,34 +1006,34 @@ impl ClientProjectionSession {
         }
     }
 
-    fn capture_unindexed_signatures(&mut self, deltas: &mut Vec<AiStreamDelta>) {
+    fn capture_unindexed_signature(&mut self, delta: AiStreamDelta) -> Option<AiStreamDelta> {
         if self.pending_unindexed_thinking.is_none() {
-            return;
+            return Some(delta);
         }
-        let mut remaining = Vec::with_capacity(deltas.len());
-        for delta in std::mem::take(deltas) {
-            match delta {
-                AiStreamDelta::ThinkingSignature(signature) => {
-                    if !signature.is_empty() {
-                        self.pending_unindexed_signature
-                            .get_or_insert_with(String::new)
-                            .push_str(&signature);
-                    }
-                    self.pending_unindexed_thinking
-                        .as_mut()
-                        .expect("pending unindexed Thinking remains present")
-                        .1
-                        .push(AiStreamDelta::ThinkingSignature(signature));
+        match delta {
+            AiStreamDelta::ThinkingSignature(signature) => {
+                if !signature.is_empty() {
+                    self.pending_unindexed_signature
+                        .get_or_insert_with(String::new)
+                        .push_str(&signature);
                 }
-                other => remaining.push(other),
+                self.pending_unindexed_thinking
+                    .as_mut()
+                    .expect("pending unindexed Thinking remains present")
+                    .1
+                    .push(AiStreamDelta::ThinkingSignature(signature));
+                None
             }
+            other => Some(other),
         }
-        *deltas = remaining;
     }
 
-    fn synthetic_signed_thinking_item(&self) -> Option<(usize, AiItem)> {
-        let signature = self.pending_unindexed_signature.as_deref()?;
-        if signature.is_empty() {
+    fn synthetic_buffered_thinking_item(&self) -> Option<(usize, AiItem)> {
+        let signature = self
+            .pending_unindexed_signature
+            .as_ref()
+            .filter(|value| !value.is_empty());
+        if signature.is_none() && !self.state.openai_compatible {
             return None;
         }
         let (index, deltas) = self.pending_unindexed_thinking.as_ref()?;
@@ -1026,10 +1045,7 @@ impl ClientProjectionSession {
                 _ => None,
             })
             .collect::<String>();
-        Some((
-            *index,
-            AiItem::thinking(thinking, Some(signature.to_owned())),
-        ))
+        Some((*index, AiItem::thinking(thinking, signature.cloned())))
     }
 
     fn synthetic_post_text_thinking_item(&self) -> Option<(usize, AiItem)> {
@@ -1074,7 +1090,6 @@ impl ClientProjectionSession {
         for delta in deltas {
             if let AiStreamDelta::ProtectedThinkingStart { index } = delta {
                 self.known_protected_thinking_indices.insert(*index);
-                self.begin_protected_thinking(*index);
                 continue;
             }
             let Some(index) = self.protected_candidate_index(delta) else {
@@ -1131,6 +1146,11 @@ impl ClientProjectionSession {
         } else {
             None
         };
+        if self.current_unindexed_item_kind == Some(UnindexedItemKind::Thinking)
+            && self.next_unindexed_output_index.checked_sub(1) == Some(index)
+        {
+            self.current_unindexed_item_kind = None;
+        }
         let closed = self.close_thinking(index, item).await?;
         if closed.had_live_projection || !closed.markers.is_empty() {
             self.projected_thinking_items.insert(index);
@@ -1380,7 +1400,10 @@ impl ClientProjectionSession {
         visible
     }
 
-    fn filter_live_deltas(&mut self, deltas: Vec<AiStreamDelta>) -> Vec<AiStreamDelta> {
+    fn filter_live_deltas(
+        &mut self,
+        deltas: impl IntoIterator<Item = AiStreamDelta>,
+    ) -> Vec<AiStreamDelta> {
         let mut visible = Vec::new();
         for delta in deltas {
             if matches!(
@@ -1435,6 +1458,7 @@ impl ClientProjectionSession {
                     visible.extend(self.project_live_delta(index, delta));
                 } else if self.known_protected_thinking_indices.contains(&index) {
                     self.streamed_protected_thinking_indices.insert(index);
+                    self.begin_protected_thinking(index);
                     let projected = self.project_protected_delta(index, delta);
                     visible.extend(self.commit_visible(projected));
                 }
@@ -1537,8 +1561,7 @@ impl ClientProjectionSession {
                         let recorded = prepared.front().cloned();
                         let block_post_text =
                             recorded.as_ref().map_or(post_text, |entry| entry.post_text);
-                        let needs_marker = self.state.openai_compatible
-                            && (block_post_text || is_protected_thinking(&block));
+                        let needs_marker = self.state.openai_compatible;
                         if !needs_marker {
                             push_projection_block(&mut projected, block, &mut meta);
                             continue;
@@ -1777,30 +1800,47 @@ impl ProjectionState {
                     content_index,
                 }]
             }
-            AiStreamDelta::ThinkingDelta(text)
-                if self.openai_compatible && self.post_text_started =>
+            delta @ (AiStreamDelta::ThinkingDelta(_)
+            | AiStreamDelta::ThinkingDeltaWithMetadata { .. }
+            | AiStreamDelta::ReasoningSummaryDelta { .. })
+                if self.openai_compatible =>
             {
-                self.project_thinking_delta(output_index, PreviewCarrier::Unindexed, text)
+                if !self.post_text_started {
+                    self.begin_protected_thinking(output_index);
+                    return self.project_protected_delta(output_index, delta);
+                }
+                let (carrier, text) = match delta {
+                    AiStreamDelta::ThinkingDelta(text) => (PreviewCarrier::Unindexed, text),
+                    AiStreamDelta::ThinkingDeltaWithMetadata {
+                        text,
+                        output_index,
+                        content_index,
+                        ..
+                    } => (
+                        PreviewCarrier::Indexed {
+                            output_index,
+                            content_index,
+                            summary: false,
+                        },
+                        text,
+                    ),
+                    AiStreamDelta::ReasoningSummaryDelta {
+                        text,
+                        output_index,
+                        content_index,
+                        ..
+                    } => (
+                        PreviewCarrier::Indexed {
+                            output_index,
+                            content_index,
+                            summary: true,
+                        },
+                        text,
+                    ),
+                    _ => unreachable!(),
+                };
+                self.project_thinking_delta(output_index, carrier, text)
             }
-            AiStreamDelta::ThinkingDeltaWithMetadata {
-                text,
-                output_index: delta_output_index,
-                content_index,
-                ..
-            }
-            | AiStreamDelta::ReasoningSummaryDelta {
-                text,
-                output_index: delta_output_index,
-                content_index,
-                ..
-            } if self.openai_compatible && self.post_text_started => self.project_thinking_delta(
-                output_index,
-                PreviewCarrier::Indexed {
-                    output_index: delta_output_index,
-                    content_index,
-                },
-                text,
-            ),
             other => vec![other],
         }
     }
@@ -1812,6 +1852,8 @@ impl ProjectionState {
                 .or_insert_with(|| LiveProtectedPreview {
                     marker: crate::history_marker::reserve_thinking_marker(),
                     carrier: None,
+                    ordinal: 0,
+                    canonical_text: String::new(),
                 });
         }
     }
@@ -1861,21 +1903,29 @@ impl ProjectionState {
             ),
             other => return vec![other],
         };
+        if text.is_empty() {
+            return Vec::new();
+        }
+        preview.canonical_text.push_str(&text);
         let mut projected = Vec::with_capacity(2);
         if let Some(previous) = preview.carrier
             && previous != carrier
         {
             projected.push(previous.delta(
-                render_preview_projection_end(&preview.marker.reference, previous.ordinal()),
+                format!(
+                    "\n\n{}",
+                    render_preview_projection_end(&preview.marker.reference, preview.ordinal)
+                ),
                 None,
             ));
+            preview.ordinal += 1;
         }
         let text = if preview.carrier == Some(carrier) {
             text
         } else {
             format!(
-                "{}{text}",
-                render_preview_projection_start(&preview.marker.reference, carrier.ordinal())
+                "{}\n\n{text}",
+                render_preview_projection_start(&preview.marker.reference, preview.ordinal)
             )
         };
         preview.carrier = Some(carrier);
@@ -1889,6 +1939,9 @@ impl ProjectionState {
         carrier: PreviewCarrier,
         text: String,
     ) -> Vec<AiStreamDelta> {
+        if text.is_empty() {
+            return Vec::new();
+        }
         let preview = self.live_previews.entry(output_index).or_insert_with(|| {
             let marker = crate::history_marker::reserve_thinking_marker();
             LiveThinkingPreview {
@@ -1898,9 +1951,16 @@ impl ProjectionState {
                 canonical_text: String::new(),
             }
         });
+        let new_part = preview.carrier != carrier;
         preview.carrier = carrier;
         preview.canonical_text.push_str(&text);
-        let projected = preview.encoder.push(&text);
+        let projected = if new_part {
+            let mut projected = preview.encoder.push("\n\n");
+            projected.push_str(&preview.encoder.push(&text));
+            projected
+        } else {
+            preview.encoder.push(&text)
+        };
         (!projected.is_empty())
             .then(|| carrier.text_delta(projected))
             .into_iter()
@@ -1930,6 +1990,11 @@ impl ProjectionState {
         self.live_previews
             .get(&output_index)
             .map(|preview| AiItem::thinking(preview.canonical_text.clone(), None))
+            .or_else(|| {
+                self.pre_text_protected_previews
+                    .get(&output_index)
+                    .map(|preview| AiItem::thinking(preview.canonical_text.clone(), None))
+            })
     }
 
     pub(super) fn close_thinking_preview(&mut self, output_index: usize) -> Vec<AiStreamDelta> {
@@ -1941,7 +2006,13 @@ impl ProjectionState {
             .and_then(|preview| {
                 preview.carrier.map(|carrier| {
                     carrier.delta(
-                        render_preview_projection_end(&preview.marker.reference, carrier.ordinal()),
+                        format!(
+                            "\n\n{}",
+                            render_preview_projection_end(
+                                &preview.marker.reference,
+                                preview.ordinal
+                            )
+                        ),
                         None,
                     )
                 })
@@ -2057,27 +2128,19 @@ fn is_thinking_item(item: &AiItem) -> bool {
     }
 }
 
-/// Protected reasoning the client must not receive in its authoritative form.
-fn is_protected_thinking(block: &ContentBlock) -> bool {
-    matches!(
-        block,
-        ContentBlock::Thinking {
-            signature: Some(_),
-            ..
-        } | ContentBlock::Reasoning {
-            encrypted_content: Some(_),
-            ..
-        } | ContentBlock::RedactedThinking { .. }
-    )
-}
-
 fn public_thinking_text(block: &ContentBlock) -> Option<String> {
     match block {
         ContentBlock::Thinking { thinking, .. } => (!thinking.is_empty()).then(|| thinking.clone()),
         ContentBlock::Reasoning {
             summary, content, ..
         } => {
-            let text = summary.iter().chain(content).cloned().collect::<String>();
+            let text = summary
+                .iter()
+                .chain(content)
+                .filter(|text| !text.is_empty())
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join("\n\n");
             (!text.is_empty()).then_some(text)
         }
         ContentBlock::RedactedThinking { .. } => None,
@@ -2088,13 +2151,28 @@ fn public_thinking_text(block: &ContentBlock) -> Option<String> {
 fn render_preview_spans(block: &mut ContentBlock, marker: &HistoryMarker) {
     match block {
         ContentBlock::Thinking { thinking, .. } => {
-            *thinking = render_preview_projection_span(&marker.reference, 0, thinking);
+            if !thinking.is_empty() {
+                *thinking = render_preview_projection_span(
+                    &marker.reference,
+                    0,
+                    &format!("\n\n{thinking}\n\n"),
+                );
+            }
         }
         ContentBlock::Reasoning {
             summary, content, ..
         } => {
-            for (ordinal, text) in summary.iter_mut().chain(content).enumerate() {
-                *text = render_preview_projection_span(&marker.reference, ordinal, text);
+            for (ordinal, text) in summary
+                .iter_mut()
+                .chain(content)
+                .filter(|text| !text.is_empty())
+                .enumerate()
+            {
+                *text = render_preview_projection_span(
+                    &marker.reference,
+                    ordinal,
+                    &format!("\n\n{text}\n\n"),
+                );
             }
         }
         _ => unreachable!("protected Thinking preview remains a reasoning block"),
@@ -2157,6 +2235,132 @@ async fn projection_session_fixture(
 mod tests {
     use super::*;
     use crate::history_marker::HistoryMarkerKind;
+
+    #[tokio::test]
+    async fn same_batch_text_and_thinking_close_in_wire_order_and_restore_original() {
+        let (mut session, store, principal) = projection_session_fixture("same-batch-owner").await;
+        begin_openai_leg(&mut session);
+        let original = "**first**\nsecond";
+        let batches = session
+            .project_live_deltas(
+                vec![
+                    AiStreamDelta::TextDelta("answer".into()),
+                    AiStreamDelta::ThinkingDelta(original.into()),
+                    AiStreamDelta::ItemDone {
+                        index: 1,
+                        item: AiItem::thinking(original, None),
+                    },
+                ],
+                true,
+            )
+            .await
+            .expect("project same-batch completion");
+        let rendered = batches
+            .iter()
+            .map(|batch| text_of(batch.deltas()))
+            .collect::<String>();
+        assert!(rendered.starts_with("answer"), "{rendered}");
+        assert!(rendered.contains("> **first**\n> second"), "{rendered}");
+        assert_eq!(
+            rendered.matches(HISTORY_MARKER_PREFIX).count(),
+            1,
+            "{rendered}"
+        );
+        for batch in batches {
+            session
+                .report_delivery(batch, ProjectionDelivery::Sent)
+                .await
+                .expect("publish delivery");
+        }
+        let mut request = stravia_runtime_contract::protocol::ir::AiRequest::new(
+            "model",
+            vec![AiItem::output_text(rendered)],
+        );
+        crate::history_marker::resolve_request_markers(store.as_ref(), &principal, &mut request)
+            .await
+            .expect("restore authoritative Thinking");
+        let reasoning = request
+            .items
+            .iter()
+            .filter_map(|item| match &item.content {
+                MessageContent::Blocks(blocks) => Some(blocks),
+                _ => None,
+            })
+            .flatten()
+            .filter(|block| is_thinking(block))
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            reasoning.as_slice(),
+            [ContentBlock::Thinking { thinking, signature: None }] if thinking == original
+        ));
+    }
+
+    #[tokio::test]
+    async fn empty_deltas_and_late_signature_restore_buffered_thinking_without_layout() {
+        let (mut session, store, principal) =
+            projection_session_fixture("signed-batch-owner").await;
+        session.begin_model_leg(
+            ThinkingCarrierFacts {
+                indexed: false,
+                may_be_protected: true,
+                stream_unprotected_summaries: false,
+            },
+            Vec::new(),
+            None,
+        );
+        let batches = session
+            .project_live_deltas(
+                vec![
+                    AiStreamDelta::ThinkingDelta(String::new()),
+                    AiStreamDelta::ThinkingDelta("**first**".into()),
+                    AiStreamDelta::ThinkingDelta(String::new()),
+                    AiStreamDelta::ThinkingDelta("second".into()),
+                    AiStreamDelta::ThinkingSignature("opaque-signature".into()),
+                    AiStreamDelta::TextDelta("answer".into()),
+                ],
+                true,
+            )
+            .await
+            .expect("close signed buffered Thinking");
+        let rendered = batches
+            .iter()
+            .map(|batch| text_of(batch.deltas()))
+            .collect::<String>();
+        assert!(rendered.contains("**first**second"), "{rendered}");
+        assert!(rendered.ends_with("answer"), "{rendered}");
+        assert!(!rendered.contains("opaque-signature"), "{rendered}");
+        assert_eq!(rendered.matches(":start -->").count(), 1, "{rendered}");
+        for batch in batches {
+            session
+                .report_delivery(batch, ProjectionDelivery::Sent)
+                .await
+                .expect("publish delivery");
+        }
+        let mut request = stravia_runtime_contract::protocol::ir::AiRequest::new(
+            "model",
+            vec![AiItem::thinking(rendered, None)],
+        );
+        crate::history_marker::resolve_request_markers(store.as_ref(), &principal, &mut request)
+            .await
+            .expect("restore signed original");
+        let reasoning = request
+            .items
+            .iter()
+            .filter_map(|item| match &item.content {
+                MessageContent::Blocks(blocks) => Some(blocks),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|block| match block {
+                ContentBlock::Thinking {
+                    thinking,
+                    signature: Some(signature),
+                } => Some((thinking.as_str(), signature.as_str())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(reasoning, vec![("**first**second", "opaque-signature")]);
+    }
 
     #[tokio::test]
     async fn upload_delivery_renews_expired_grants_without_extending_old_authorization() {
@@ -2412,8 +2616,9 @@ mod tests {
             .await
             .expect("project public summary");
         assert_eq!(streamed.len(), 1);
-        assert_eq!(text_of(streamed[0].deltas()), "public summary");
+        assert!(text_of(streamed[0].deltas()).contains("public summary"));
 
+        let (mut session, _, _) = projection_session_fixture("carrier-facts-indexed-owner").await;
         session.begin_model_leg(
             ThinkingCarrierFacts {
                 indexed: true,
@@ -2437,6 +2642,7 @@ mod tests {
             .expect("buffer indexed protected candidate");
         assert!(indexed_buffered.is_empty());
 
+        let (mut session, _, _) = projection_session_fixture("carrier-facts-unindexed-owner").await;
         session.begin_model_leg(
             ThinkingCarrierFacts {
                 indexed: false,
@@ -2863,13 +3069,7 @@ mod tests {
             .collect::<String>();
 
         assert!(matches!(first[0].deltas(), [AiStreamDelta::TextDelta(_)]));
-        assert!(rendered.starts_with(&format!(
-            "{PROJECTION_DELIMITER_PREFIX}{reference}:preview:0:start -->\n> R1"
-        )));
         assert!(rendered.contains("\n> \n> R2"), "{rendered}");
-        assert!(rendered.contains(&format!(
-            "\n{PROJECTION_DELIMITER_PREFIX}{reference}:preview:0:end -->"
-        )));
         let marker = closed
             .iter()
             .find(|batch| text_of(batch.deltas()).contains(HISTORY_MARKER_PREFIX))
@@ -2937,6 +3137,7 @@ mod tests {
         assert!(
             body.replace("\r\n", "\n")
                 .lines()
+                .filter(|line| !line.is_empty())
                 .all(|line| line.starts_with("> ")),
             "{expected}"
         );

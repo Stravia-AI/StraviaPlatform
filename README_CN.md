@@ -71,7 +71,9 @@ Open Responses 推理正文使用当前客户端采用的 rolling `response.reas
 
 隐藏的 Platform Tool 续跑通过 HTML comment 形式的 History Marker 投影到客户端历史。OpenAI-compatible Chat Completions 在首个非空 `content` delta 前继续通过 `reasoning_content` 交付 Thinking；未请求 encrypted reasoning 时，Open Responses 的公开 summary delta 会保持实时交付，而在 item 开始时已明确标记的 protected reasoning 也会流式交付公开 summary，并把 opaque 字节保留在 Marker 后。之后的 Thinking 通过 `content` 以 Markdown 引用 Preview 流式交付，后续 Thinking Marker 与 Platform Marker 也使用 `content`，从而在客户端按字段聚合时保持顺序。纯文本客户端可能直接显示这些 Marker comment。Open Responses、Anthropic Messages 与 Gemini 保留原生有序 reasoning/thinking carrier；若所选协议无法表示已观察到的顺序，Stravia 会显式失败，而不会延迟普通 Text。
 
-重新提交完整历史的客户端必须原样保留 History Marker 与 Projection Delimiter。Stravia 会删除仅用于展示的 Preview 字节，并在原位置恢复权威 Thinking、ToolCall 与 ToolResult；删除 Marker 或 Delimiter 会被视为有意编辑历史。客户端关闭流式传输时，Stravia 会先执行仅含 Platform Tool 的隐藏续轮，再一次性返回语义等价的 buffered projection。live stream 则在启动对应 Platform Tool 前交付并发布每个 Marker。
+OpenAI-compatible Thinking Preview 使用 Markdown 空行分隔独立块及 summary/content part；同一 part 内的 delta 保持连续。每个权威 Thinking block 各有一个 History Marker，包括公开的无签名 Thinking；同一块中的多个 part 共享该 Marker。段落空白只属于 Preview，不改变原始 Thinking。流式与非流式交付产生相同的可见排版。
+
+重新提交完整历史的客户端必须原样保留 History Marker 与 Projection Delimiter。Stravia 会删除仅用于展示的 Preview 字节，包括新增的段落空白，并在原位置恢复权威 Thinking、ToolCall 与 ToolResult。Thinking 原文保留原始空白和 part 边界；向兼容上游回放时使用原始签名或密文，而不是展示用 Markdown。删除 Marker 或 Delimiter 会被视为有意编辑历史。客户端关闭流式传输时，Stravia 会先执行仅含 Platform Tool 的隐藏续轮，再一次性返回语义等价的 buffered projection。live stream 则在启动对应 Platform Tool 前交付并发布每个 Marker。
 
 切换 Target 时优先继续会话。历史推理的 Target、账号/配置、模型与协议来源兼容时原生回放；否则仅在该 Target 的请求中保留可见文本，省略不可用的密文或签名。原始历史保持不变：只要历史与 Marker 仍可用，包括重启之后，切回兼容来源仍可重新使用原密文。旧记录缺少来源时不伪造来源；同协议可尝试原生回放，跨协议保守降级。上游在任何输出前明确拒绝 encrypted content 或 thinking signature 时，允许一次省略受保护推理的完整回放，不扩展为普通错误重试。该策略不放宽工具、普通消息或原生压缩的硬要求。
 

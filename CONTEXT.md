@@ -192,6 +192,7 @@ Platform Tool 是由平台拥有、注册和执行的模型工具。平台向模
 ## Client Projection
 
 Client Projection 是把 canonical response 变成客户端可见视图：Platform Tool call/result 与 authoritative Thinking 可替换为 History Marker，普通可见 Text 不因潜在或实际 Platform ToolCall 而延迟交付；OpenAI-compatible 的 Post-Text Thinking 以 Markdown 引用 Preview、Projection Delimiter 与一对一 History Marker 经 Text carrier 交付，其他协议保持原生 carrier，不能表示该顺序时显式失败而不回退缓冲。它拥有 Thinking History Marker 的 reserve → 落盘 → 交付 → publish 顺序，以及 Platform History Marker 的投影与交付 → publish；交付指把 Marker 交给 Delivery，publish 只在 caller 确认 Sent 之后；Cancelled 或失败则废弃 Reserved Thinking Marker。Platform Tool Execution 的落盘与执行仍不在 Client Projection。live 流式 delta 与 staged 完整响应走同一 Client Projection，不是两套投影。它不拥有 Hook 变换、Delivery 发送、Model Leg 循环、Platform Tool Execution，也不拥有 Marker 的持久化事实源。它不按 Target 的 egress 协议 id 选择缓冲或 carrier。它不是 Protocol Conversion，也不拥有 ingress 协议形态改写；Generation Chain 保存的是投影完成之后、按 ingress 协议落盘的结果。
+OpenAI-compatible 的每个 Thinking block 都由独立的权威 History Marker 恢复，包括首个 Text 之前的公开无签名 Thinking。独立块和块内 summary/content part 在 Preview 中保留段落边界；同一 part 的 delta 不引入新段落。展示排版不改变权威原文、原始空白或块内 part 结构。
 _避免使用_：History Marker Projection；把 Generation Chain 的协议形态改写称为 Client Projection；把 Platform Tool Execution 生命周期称为 Client Projection；把 live 流式路径称为第二套投影
 
 ## Post-Text Thinking
@@ -212,7 +213,7 @@ _避免使用_：占位文本、Platform Tool Call、Client History Token
 
 ## Reserved Thinking Marker
 
-Reserved Thinking Marker 是每个 canonical Post-Text Thinking block 的首个 delta 到达时由 Client Projection 在当前 Inference Run 中分配、尚未落盘且未发布的 History Marker reference；它允许 Preview 立即流式交付，只有完整 block 以同一 reference 原子落盘、Marker 按顺序交付并发布后才能恢复，后续 Text 必须等待该过程完成。落盘或发布失败必须显式终止交付且不得提交 Generation Chain，不得把 Preview 降级为 canonical Text；失败或未完整交付的 reference 必须废弃。无原生 block identity 时，一个连续 Thinking delta run 构成一个 block。
+Reserved Thinking Marker 是 canonical Thinking block 开始投影时由 Client Projection 在当前 Inference Run 中分配、尚未落盘且未发布的 History Marker reference，适用于 OpenAI-compatible 的 Text 前后两种 Thinking carrier；它允许 Preview 立即流式交付，只有完整 block 以同一 reference 原子落盘、Marker 按顺序交付并发布后才能恢复，后续 Text 必须等待该过程完成。落盘或发布失败必须显式终止交付且不得提交 Generation Chain，不得把 Preview 降级为 canonical Text；失败或未完整交付的 reference 必须废弃。无原生 block identity 时，一个连续 Thinking delta run 构成一个 block。
 _避免使用_：Published Marker、Partial Thinking
 
 ## Projection Delimiter
