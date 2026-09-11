@@ -2,13 +2,16 @@
 
 ## Unreleased
 
+## [0.2.2] - 2026-09-12
+
 ### Added
 
 - Credential Protection supplements its Betterleaks snapshot with all 1,013 Kingfisher v1.109.0 offline rules, including bare Zhipu-format and additional `sk-` credentials. Capture selection, entropy, character requirements, safe-list filters, and checksums run locally; 152 hidden helper rules do not create mappings. The combined catalog and matching tester use the same detector as request protection, with no online validation or runtime rule downloads.
+- WebUI and desktop applications now share the unified Cadence logo, wordmark, and favicons, with brand components and action-state motion replacing the legacy bitmap logos. The Windows taskbar and tray icons follow the system light/dark theme.
 
 ### Changed
 
-- **Breaking:** 管理入口默认支持 HTTP／HTTPS 且不限制可达入口，保留默认回环监听、同源／CSRF 与可撤销会话。可重复 `--admin-origin`／`STRAVIA_ADMIN_ORIGINS` 限制整个管理面，可重复 `--trusted-proxy`／`STRAVIA_TRUSTED_PROXIES` 显式信任实际代理对端；HTTPS Cookie 按每个请求的可信外部协议设置。移除旧 public-origin 与 Server admin-cors-origin 配置，同步迁移 Vite、Docker／Nix 部署说明；HTTP 与不限入口的传输安全／DNS rebinding 风险需由部署者控制。
+- **Breaking:** The admin interface now defaults to accepting HTTP and HTTPS from any reachable origin while retaining the default loopback listener, same-origin/CSRF protection, and revocable sessions. Repeated `--admin-origin`/`STRAVIA_ADMIN_ORIGINS` restricts the entire admin surface, and repeated `--trusted-proxy`/`STRAVIA_TRUSTED_PROXIES` explicitly trusts actual proxy peers; HTTPS cookies follow each request's trusted external protocol. The former public-origin and Server admin-cors-origin configuration is removed, with Vite, Docker, and Nix deployment guidance migrated accordingly. Deployments accepting HTTP or unrestricted entry points must control their own transport-security and DNS-rebinding risks.
 
 - Historical thinking now uses Target-local best-effort replay: incompatible ciphertext/signatures are omitted while visible text is retained, without rewriting original history. New reasoning records retain source bindings so returning to the original compatible Target can reuse ciphertext after intervening Targets or restarts.
 - Windows MSVC builds use the Rust toolchain's bundled LLD linker while retaining static CRT linkage, full development debug information, and incremental compilation.
@@ -22,6 +25,8 @@
 - Uncached Provider inventories now refresh global Catalog indexes before downloading, avoiding `CATALOG_SCOPE_REFRESH_FAILED` when local indexes lag behind the remote revision. Revision changes during downloads still fail without modifying saved Provider Models.
 - Google browser search now exits early with an explicit automated-traffic challenge error when CAPTCHA or unusual-traffic pages are detected during preflight or result navigation, instead of waiting for the rendering timeout.
 - Explicit encrypted-content or thinking-signature rejections before output permit one protected-reasoning-free replay; ordinary errors and native compaction do not. DeepSeek tool history retains existing reasoning and supplies an empty field when none was captured. Anthropic native replay accepts preserved `redacted_thinking` blocks.
+- Ordinary chat messages carrying unknown provider fields now complete chat delivery and tool calls across protocol conversion, and same-protocol responses retain ordinary item additional fields. Unknown content types and native compaction states are still rejected as lossy conversions.
+- Each OpenAI-compatible Thinking block now persists its own History Marker while preserving summary/content part boundaries and original whitespace, so preview formatting no longer contaminates replayed content. Streaming and unary projections use the same order, and stale preview fields are cleared once content enters canonical blocks.
 - `StraviaRead` model tool schemas now list nullable optional arguments as required in strict mode, preventing Codex/Responses `invalid_function_parameters` failures while preserving optional fields for MCP callers.
 
 ## [0.2.1] - 2026-09-10
