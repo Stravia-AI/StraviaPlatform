@@ -775,15 +775,6 @@ fn request_loss_paths(pair: ProtocolPair, request: &AiRequest) -> Vec<String> {
     }
 
     for (message_index, message) in request.items.iter().enumerate() {
-        if message
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.get("__open_responses_item_fields"))
-            .and_then(Value::as_object)
-            .is_some_and(|fields| !fields.is_empty())
-        {
-            lost.push(format!("messages[{message_index}].native_item_fields"));
-        }
         let stravia_runtime_contract::protocol::ir::MessageContent::Blocks(blocks) =
             &message.content
         else {
@@ -1040,15 +1031,6 @@ fn response_loss_paths(pair: ProtocolPair, response: &AiResponse) -> Vec<String>
     }
     if pair.ingress.protocol != Protocol::OpenResponses {
         for (index, item) in response.items.iter().enumerate() {
-            if item
-                .meta
-                .as_ref()
-                .and_then(|meta| meta.get("__open_responses_item_fields"))
-                .and_then(Value::as_object)
-                .is_some_and(|fields| !fields.is_empty())
-            {
-                lost.push(format!("items[{index}].native_item_fields"));
-            }
             if matches!(
                 &item.content,
                 stravia_runtime_contract::protocol::ir::MessageContent::Blocks(blocks)
@@ -1121,9 +1103,7 @@ fn stream_loss_paths(pair: ProtocolPair, deltas: &[AiStreamDelta]) -> Vec<String
         match delta {
             AiStreamDelta::ItemDone { item, .. }
                 if pair.ingress.protocol != Protocol::OpenResponses
-                    && (item.is_compaction() || item.is_compaction_trigger()
-                        || item.meta.as_ref().and_then(|meta| meta.get("__open_responses_item_fields"))
-                            .and_then(Value::as_object).is_some_and(|fields| !fields.is_empty())) =>
+                    && (item.is_compaction() || item.is_compaction_trigger()) =>
             {
                 lost.push(format!("deltas[{index}].native_compaction"));
             }

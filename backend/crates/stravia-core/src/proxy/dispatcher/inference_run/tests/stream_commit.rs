@@ -451,7 +451,6 @@ async fn non_stream_post_text_marker_persistence_failure_is_typed_error() {
             "index": 0,
             "message": {
                 "role": "assistant",
-                "reasoning_content": "R1",
                 "content": "C1",
                 "tool_calls": [{
                     "id": "platform-marker-failure",

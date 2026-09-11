@@ -296,6 +296,12 @@ fn decode_message(msg: OpenAIMessage) -> Result<AiItem> {
             super::stream::extract_reasoning_from_message(&Value::Object(meta_obj.clone()))
         && !reasoning.is_empty()
     {
+        // 思考文本已进入 canonical block；保留副本会在历史恢复后再次转发旧 Preview。
+        for field in ["reasoning_content", "reasoning"] {
+            if meta_obj.get(field).is_some_and(Value::is_string) {
+                meta_obj.remove(field);
+            }
+        }
         let mut blocks = vec![ContentBlock::Thinking {
             thinking: reasoning,
             signature: None,

@@ -17,13 +17,14 @@ OpenAI-compatible chat chunks provide separate `reasoning_content` and `content`
 Supersede ADR-0030 and adopt immediate Text delivery as the primary invariant.
 
 - Ordinary visible Text is never buffered solely because a Platform Tool is exposed or later used.
-- The first successfully delivered non-empty Text starts a run-wide Post-Text state. It persists across hidden Model Legs within the same Inference Run.
-- Before that transition, OpenAI-compatible Thinking and History Markers remain in `reasoning_content`.
+- The first projected non-empty Text starts a run-wide Post-Text state, independently of delivery acknowledgement. It persists across hidden Model Legs within the same Inference Run.
+- Before that transition, OpenAI-compatible Thinking previews and History Markers remain in `reasoning_content`.
 - After that transition, Platform Markers and Thinking Markers use `content` as raw HTML comments.
 - Public Post-Text Thinking is streamed in `content` as a Markdown blockquote inside the existing Projection Delimiter `preview` mode.
-- Every canonical Post-Text Thinking block has one authoritative Thinking History Marker. Without native block identity, one maximal continuous Thinking delta run is one block.
+- Every canonical OpenAI-compatible Thinking block has one authoritative Thinking History Marker, including public unsigned Thinking before Text. Without native block identity, one maximal continuous Thinking delta run is one block.
+- Independent Thinking blocks and non-empty summary/content parts have Markdown paragraph boundaries. Deltas within the same part are appended without inserted whitespace; part boundaries do not create additional authoritative blocks or Markers.
 - The Marker reference is reserved in memory when the block starts. At block close, Stravia atomically stores the complete authoritative Thinking under that reference, delivers and publishes the Marker, then permits later Text.
-- The quoted Preview is presentation only. Replay discards it when its Marker is present and restores authoritative Thinking. If the Marker is deleted, the remaining quote is ordinary Text.
+- Both reasoning-carried and quoted Previews are presentation only. Replay discards them when their Markers are present and restores each authoritative Thinking block with its original text, whitespace, part structure and protected payload. If the Marker is deleted, the remaining Preview stays client-edited content in its carrier; a remaining quote is ordinary Text.
 - Only already-public Thinking bytes may be previewed. Protected payloads remain in the History Marker Store; without a public summary, the client receives only the Marker.
 - Projection-generated whitespace, blockquote prefixes and escaping remain within the Preview Delimiter span and are removed during replay.
 - A bounded lexical lookbehind may retain enough bytes to handle line boundaries, CRLF and private Marker/Delimiter prefixes split across deltas. This is encoding state, not Model Leg Text buffering.
@@ -39,14 +40,15 @@ The removal is narrow. Protocol framing, UTF-8 completion, partial private synta
 ### Positive
 
 - Text remains genuinely streaming when transparent Platform Tools are enabled, including when no tool is called.
-- The latency cost is limited to the specific Post-Text Thinking block that requires authoritative Marker finalization, not the entire Model Leg.
+- Marker finalization waits only for the specific Thinking block being closed, not the entire Model Leg.
 - OpenAI-compatible field aggregation preserves the order of earlier Text, Platform Markers, quoted later Thinking and subsequent Text.
 - Multi-turn replay remains lossless because History Markers, not Markdown Preview text, are authoritative.
 - The design reuses the existing History Marker Store and Projection Delimiter without a schema migration or a new durable pending state.
 
 ### Negative
 
-- Plain-text clients may display raw HTML Marker comments carried in `content`.
+- Plain-text clients may display raw HTML Marker comments carried in `reasoning_content` or `content`.
+- Public unsigned Thinking also requires per-block Marker persistence so presentation spacing can be removed without guessing the original text.
 - Post-Text public Thinking is presented as quoted content rather than through a dedicated reasoning field.
 - The streaming projector needs stateful Markdown framing and bounded cross-delta syntax detection.
 - A storage or publish failure can occur after a Preview has already been delivered, requiring an explicit terminal error and leaving the client with a visibly partial failed response.

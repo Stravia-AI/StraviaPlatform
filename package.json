@@ -12,7 +12,7 @@
   ],
   "scripts": {
     "dev:web": "bun run --filter stravia-webui dev",
-    "dev:server": "bun run --filter stravia-webui dev:server",
+    "dev:server": "bun run --cwd frontend/stravia-webui dev:server",
     "build:web": "bun run --filter stravia-webui build",
     "build:web:desktop-e2e": "bun run --filter stravia-webui build:desktop-e2e",
     "check:web": "bun run --filter stravia-webui check",

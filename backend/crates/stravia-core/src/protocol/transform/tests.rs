@@ -241,7 +241,6 @@ fn replay_keeps_native_reasoning_tools_and_ordinary_loss_checks() {
     assert_eq!(body["input"][1]["type"], "function_call");
     assert_eq!(body["input"][1]["call_id"], "call_1");
 
-    request.items[2].meta = Some(json!({"__open_responses_item_fields":{"hard_field":true}}));
     let pair = ProtocolTransform::global()
         .bind(
             OPEN_RESPONSES_2026_04_24,
@@ -253,11 +252,6 @@ fn replay_keeps_native_reasoning_tools_and_ordinary_loss_checks() {
         OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
         |_| false
     ));
-    assert!(matches!(
-        pair.encode_request(&request),
-        Err(TransformError::Unrepresentable { .. })
-    ));
-    request.items[2].meta = None;
     request.items[2].content = MessageContent::Blocks(vec![ContentBlock::Unknown {
         raw: json!({"type":"future_hard_content"}),
     }]);
@@ -270,6 +264,91 @@ fn replay_keeps_native_reasoning_tools_and_ordinary_loss_checks() {
         pair.encode_request(&request),
         Err(TransformError::Unrepresentable { .. })
     ));
+}
+
+#[test]
+fn provider_message_metadata_does_not_interrupt_chat_delivery() {
+    let pair = ProtocolTransform::global()
+        .bind(
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            OPEN_RESPONSES_2026_04_24,
+        )
+        .unwrap();
+    let item = json!({
+        "type": "message", "id": "msg_1", "status": "completed",
+        "role": "assistant", "phase": "commentary",
+        "content": [{"type": "output_text", "text": "Checking hardware.",
+                     "annotations": [], "logprobs": []}],
+        "internal_chat_message_metadata_passthrough": {
+            "create_time": 1789103215.391322, "turn_id": "turn_1"
+        },
+        "metadata": {"turn_id": "turn_1"},
+        "provider_extension": {"future_field": true}
+    });
+    let (mut decoder, mut encoder) = pair.stream().unwrap().into_parts();
+    let mut delivered = Vec::new();
+    for event in [
+        json!({"type":"response.created","response":
+            dated_response("resp_1", "in_progress", json!([]), Value::Null)
+        }),
+        json!({"type":"response.output_item.added","output_index":0,"item":{
+            "type":"message","id":"msg_1","role":"assistant",
+            "status":"in_progress","content":[]
+        }}),
+        json!({"type":"response.output_item.done","output_index":0,"item":item}),
+        json!({"type":"response.output_item.added","output_index":1,"item":{
+            "type":"function_call","id":"fc_1","call_id":"call_1",
+            "name":"Bash","arguments":"","status":"in_progress"
+        }}),
+        json!({"type":"response.function_call_arguments.delta","output_index":1,
+            "item_id":"fc_1","delta":"{\"command\":\"hostname\"}"}),
+    ] {
+        let wire = format!("event: {}\ndata: {event}\n\n", event["type"].as_str().unwrap());
+        let deltas = decoder.decode_chunk(wire.as_bytes()).unwrap();
+        delivered.extend(encoder.encode_deltas(&deltas).expect("deliver ordinary message and subsequent tool"));
+    }
+    let chunks: Vec<Value> = delivered
+        .iter()
+        .filter_map(|event| serde_json::from_str(&event.data).ok())
+        .collect();
+    assert!(chunks.iter().any(|chunk|
+        chunk["choices"][0]["delta"]["content"] == "Checking hardware."
+    ));
+    assert!(chunks.iter().any(|chunk|
+        chunk["choices"][0]["delta"]["tool_calls"][0]["function"]["name"] == "Bash"
+    ));
+    assert!(chunks.iter().any(|chunk|
+        chunk["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
+            == "{\"command\":\"hostname\"}"
+    ));
+    let response = pair.decode_response(dated_response(
+        "resp_1", "completed", json!([item]), Value::Null,
+    )).unwrap();
+    assert_eq!(
+        pair.encode_response(&response).unwrap()["choices"][0]["message"]["content"],
+        "Checking hardware."
+    );
+    let native = ProtocolTransform::global()
+        .bind(OPEN_RESPONSES_2026_04_24, OPEN_RESPONSES_2026_04_24)
+        .unwrap();
+    let output = native.encode_response(&response).unwrap();
+    for field in [
+        "metadata",
+        "internal_chat_message_metadata_passthrough",
+        "provider_extension",
+    ] {
+        assert_eq!(output["output"][0][field], item[field]);
+    }
+    let outbound = ProtocolTransform::global()
+        .bind(OPEN_RESPONSES_2026_04_24, OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1)
+        .unwrap();
+    let request = outbound.decode_request(json!({
+        "model":"model", "input":[item, {"role":"user","content":"continue"}]
+    })).unwrap();
+    assert_eq!(
+        outbound.encode_request(&request).unwrap().body["messages"][0]["content"],
+        "Checking hardware."
+    );
 }
 
 #[test]
@@ -311,6 +390,14 @@ fn native_compaction_controls_and_state_cannot_be_lossily_converted() {
     assert!(matches!(
         inbound.encode_response(&response),
         Err(TransformError::Unrepresentable { .. })
+    ));
+    let (_, mut encoder) = inbound.stream().unwrap().into_parts();
+    assert!(matches!(
+        encoder.encode_deltas(&[AiStreamDelta::ItemDone {
+            index: 0, item: response.items[0].clone(),
+        }]),
+        Err(TransformError::Unrepresentable { lost, .. })
+            if lost == ["deltas[0].native_compaction"]
     ));
 }
 

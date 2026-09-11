@@ -1,6 +1,308 @@
 use super::*;
 
 #[tokio::test]
+async fn responses_thinking_paragraphs_replay_original_parts_through_chat() {
+    use axum::Json;
+    use axum::response::IntoResponse;
+    use axum::routing::post;
+    use serde_json::{Value, json};
+    use std::sync::Mutex;
+
+    fn snapshot(status: &str, output: Vec<Value>) -> Value {
+        crate::protocol::codec::open_responses::formatter::response_resource_snapshot(
+            "resp-paragraphs",
+            "provider-model",
+            status,
+            output,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+        )
+    }
+
+    fn sse(items: &[Value]) -> String {
+        let mut events = vec![json!({
+            "type": "response.created", "response": snapshot("in_progress", Vec::new())
+        })];
+        for (output_index, item) in items.iter().enumerate() {
+            let mut started = item.clone();
+            started["summary"] = json!([]);
+            started["content"] = json!([]);
+            events.push(json!({
+                "type": "response.output_item.added", "output_index": output_index,
+                "item": started
+            }));
+            for (summary_index, part) in item["summary"].as_array().unwrap().iter().enumerate() {
+                events.push(json!({
+                    "type": "response.reasoning_summary_part.added", "output_index": output_index,
+                    "item_id": item["id"], "summary_index": summary_index,
+                    "part": {"type": "summary_text", "text": ""}
+                }));
+                let text = part["text"].as_str().unwrap();
+                // An empty delta must not make a paragraph; splitting a bold heading must
+                // not create a boundary inside the same semantic part either.
+                for delta in [&text[..4], "", &text[4..]] {
+                    events.push(json!({
+                        "type": "response.reasoning_summary_text.delta", "output_index": output_index,
+                        "item_id": item["id"], "summary_index": summary_index, "delta": delta
+                    }));
+                }
+                events.push(json!({
+                    "type": "response.reasoning_summary_text.done", "output_index": output_index,
+                    "item_id": item["id"], "summary_index": summary_index, "text": text
+                }));
+                events.push(json!({
+                    "type": "response.reasoning_summary_part.done", "output_index": output_index,
+                    "item_id": item["id"], "summary_index": summary_index, "part": part
+                }));
+            }
+            events.push(json!({
+                "type": "response.output_item.done", "output_index": output_index, "item": item
+            }));
+        }
+        events.push(json!({"type": "response.completed", "response": snapshot("completed", items.to_vec())}));
+        let mut body = String::new();
+        for (sequence, mut event) in events.into_iter().enumerate() {
+            event["sequence_number"] = json!(sequence);
+            body.push_str(&format!(
+                "event: {}\ndata: {event}\n\n",
+                event["type"].as_str().unwrap()
+            ));
+        }
+        body.push_str("data: [DONE]\n\n");
+        body
+    }
+
+    #[derive(Clone)]
+    struct Fixture {
+        requests: Arc<Mutex<Vec<Value>>>,
+        items: Vec<Value>,
+    }
+
+    async fn handle(State(fixture): State<Fixture>, Json(body): Json<Value>) -> Response {
+        let first = {
+            let mut requests = fixture
+                .requests
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            requests.push(body.clone());
+            requests.len() == 1
+        };
+        let items = if first { fixture.items } else { Vec::new() };
+        if body["stream"] == true {
+            ([(header::CONTENT_TYPE, "text/event-stream")], sse(&items)).into_response()
+        } else {
+            Json(snapshot("completed", items)).into_response()
+        }
+    }
+
+    // Ignore transport-only HTML comments, not source whitespace. This models the
+    // visible Markdown and also permits comparing independently generated references.
+    fn visible(mut carrier: &str) -> String {
+        let mut result = String::new();
+        while let Some(start) = carrier.find("<!-- stravia-") {
+            result.push_str(&carrier[..start]);
+            let end = carrier[start..]
+                .find(" -->")
+                .expect("closed private comment")
+                + start
+                + 4;
+            carrier = &carrier[end..];
+        }
+        result.push_str(carrier);
+        result
+    }
+
+    let parts = [
+        " \r\n**First heading**\r\nbody with trailing space ",
+        "**Second heading**\r\nsecond body ",
+        "Full reasoning\r\nwith original whitespace \n",
+        "**Public heading**\r\npublic body\r\n ",
+    ];
+    let items = vec![
+        json!({
+            "type": "reasoning", "id": "rs_protected",
+            "summary": [
+                {"type": "summary_text", "text": parts[0]},
+                {"type": "summary_text", "text": parts[1]}
+            ],
+            "content": [{"type": "reasoning_text", "text": parts[2]}],
+            "encrypted_content": "opaque-paragraph-cipher"
+        }),
+        json!({
+            "type": "reasoning", "id": "rs_public",
+            "summary": [{"type": "summary_text", "text": parts[3]}],
+            "content": []
+        }),
+    ];
+    let mut displays = Vec::new();
+    for stream in [true, false] {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new()
+            .route("/v1/responses", post(handle))
+            .with_state(Fixture {
+                requests: Arc::clone(&requests),
+                items: items.clone(),
+            });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let data_dir = tempfile::tempdir().unwrap();
+        let gateway = Gateway::new(crate::config::GatewayConfig {
+            data_dir: data_dir.path().to_path_buf(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let model = "thinking-paragraph-replay";
+        configure_route_with_protocol(
+            &gateway,
+            model,
+            &[format!("http://{address}/v1")],
+            "test-http",
+            "open-responses",
+        )
+        .await;
+        let headers = authorized_headers(&gateway).await;
+        let response = execute_protocol_request(
+            gateway.clone(),
+            model,
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            "/v1/chat/completions",
+            stream,
+        )
+        .await;
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let message = if stream {
+            let mut reasoning = String::new();
+            let mut content = String::new();
+            for data in std::str::from_utf8(&body)
+                .unwrap()
+                .lines()
+                .filter_map(|line| line.strip_prefix("data: "))
+            {
+                if data == "[DONE]" {
+                    continue;
+                }
+                let event: Value = serde_json::from_str(data).expect("Chat SSE JSON");
+                let delta = &event["choices"][0]["delta"];
+                if let Some(text) = delta["reasoning_content"].as_str() {
+                    reasoning.push_str(text);
+                }
+                if let Some(text) = delta["content"].as_str() {
+                    content.push_str(text);
+                }
+            }
+            json!({"role": "assistant", "reasoning_content": reasoning, "content": content})
+        } else {
+            let response: Value = serde_json::from_slice(&body).unwrap();
+            response["choices"][0]["message"].clone()
+        };
+        let reasoning = message["reasoning_content"]
+            .as_str()
+            .expect("visible thinking");
+        let displayed = visible(reasoning);
+        let mut previous_end = None;
+        for part in parts {
+            let start = displayed.find(part).unwrap_or_else(|| panic!("source bytes changed or delta boundary inserted: stream={stream}, {displayed:?}"));
+            if let Some(end) = previous_end {
+                let gap: &str = &displayed[end..start];
+                assert!(
+                    gap.contains("\n\n"),
+                    "independent thinking parts require a Markdown paragraph: stream={stream}, gap={gap:?}, {displayed:?}"
+                );
+            }
+            previous_end = Some(start + part.len());
+        }
+        let carriers = format!(
+            "{reasoning}{}",
+            message["content"].as_str().unwrap_or_default()
+        );
+        assert_eq!(
+            carriers
+                .matches(crate::history_marker::HISTORY_MARKER_PREFIX)
+                .count(),
+            2,
+            "one recoverable marker per independent block, not per summary part: {carriers}"
+        );
+        displays.push(displayed);
+
+        let request = crate::protocol::transform::ProtocolTransform::global()
+            .bind(
+                OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+                OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            )
+            .unwrap()
+            .decode_request(json!({
+                "model": model,
+                "messages": [
+                    {"role": "user", "content": "test"}, message,
+                    {"role": "user", "content": "continue"}
+                ]
+            }))
+            .expect("decode the actual client assistant message");
+        let response = execute_non_stream_request_with_headers(gateway, headers, request).await;
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let captured = requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(
+            captured.len(),
+            2,
+            "one original generation and one continuation"
+        );
+        let input = captured[1]["input"].as_array().expect("Responses input");
+        assert!(
+            input
+                .iter()
+                .all(|item| item["type"] == "reasoning" || item["role"] == "user"),
+            "display-only whitespace must not become an upstream assistant text item: {input:?}"
+        );
+        let replayed = input
+            .iter()
+            .filter(|item| item["type"] == "reasoning")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            replayed.len(),
+            items.len(),
+            "independent reasoning blocks survive replay"
+        );
+        for (actual, expected) in replayed.iter().zip(&items) {
+            assert_eq!(
+                actual["summary"], expected["summary"],
+                "exact summary parts, including CRLF and spaces"
+            );
+            assert_eq!(
+                actual["content"], expected["content"],
+                "no fabricated reasoning content"
+            );
+            assert_eq!(
+                actual["encrypted_content"], expected["encrypted_content"],
+                "exact protected cipher and public-block absence"
+            );
+        }
+        let upstream = captured[1].to_string();
+        assert!(
+            !upstream.contains(crate::history_marker::HISTORY_MARKER_PREFIX),
+            "{upstream}"
+        );
+        assert!(
+            !upstream.contains(crate::history_marker::PROJECTION_DELIMITER_PREFIX),
+            "{upstream}"
+        );
+        server.abort();
+    }
+    assert_eq!(
+        displays[0], displays[1],
+        "streaming and unary Markdown agree"
+    );
+}
+
+#[tokio::test]
 async fn non_stream_projection_matches_ordered_content_and_replays_canonical_history() {
     let platform_round = serde_json::json!({
         "id": "chatcmpl-projected-platform",
@@ -97,7 +399,6 @@ async fn non_stream_projection_matches_ordered_content_and_replays_canonical_his
     let content = body["choices"][0]["message"]["content"]
         .as_str()
         .expect("content");
-    assert_eq!(reasoning, "R1");
     let c1 = content.find("C1").expect("first Text");
     let platform_marker = content
         .find(crate::history_marker::HISTORY_MARKER_PREFIX)
@@ -348,13 +649,9 @@ async fn failed_platform_call_and_successful_retry_preserve_marker_and_result_or
         .await
         .expect("retry response body");
     let body: serde_json::Value = serde_json::from_slice(&body).expect("retry response JSON");
-    let reasoning = body["choices"][0]["message"]["reasoning_content"]
-        .as_str()
-        .expect("retry reasoning_content");
     let content = body["choices"][0]["message"]["content"]
         .as_str()
         .expect("retry content");
-    assert_eq!(reasoning, "R1");
     let marker_positions = content
         .match_indices(crate::history_marker::HISTORY_MARKER_PREFIX)
         .map(|(position, _)| position)
@@ -484,7 +781,6 @@ async fn platform_stream_projects_post_text_thinking_into_ordered_content() {
         vec!["reasoning", "content"],
         "{body}"
     );
-    assert_eq!(runs[0].1, "R1", "{body}");
     assert!(
         runs[1]
             .1
@@ -699,7 +995,6 @@ async fn platform_stream_projection_matrix_for_registered_generation_ingresses()
                 vec!["reasoning", "content"],
                 "{ingress}: {body}"
             );
-            assert_eq!(runs[0].1, "R1", "{ingress}: {body}");
             assert!(
                 runs[1].1.contains("C1")
                     && runs[1]
@@ -738,7 +1033,7 @@ async fn platform_stream_projection_matrix_for_registered_generation_ingresses()
 }
 
 #[tokio::test]
-async fn exposed_platform_tools_preserve_non_platform_stream_order_and_bytes() {
+async fn exposed_platform_tools_preserve_visible_text_and_thinking_order() {
     let (base_url, provider_calls) =
         serve_sse_sequence(vec![openai_sse_reasoning_and_text("R1", "C1", 11, 2)]).await;
     let data_dir = tempfile::tempdir().expect("temporary data directory");
@@ -782,12 +1077,23 @@ async fn exposed_platform_tools_preserve_non_platform_stream_order_and_bytes() {
         .filter(|(_, text)| !text.is_empty())
         .collect::<Vec<_>>();
 
+    let text_start = visible
+        .iter()
+        .position(|(kind, _)| *kind == "content")
+        .unwrap();
+    assert!(
+        visible[..text_start]
+            .iter()
+            .all(|(kind, _)| *kind == "reasoning")
+    );
+    assert!(
+        visible[..text_start]
+            .iter()
+            .any(|(_, text)| text.contains("R1"))
+    );
     assert_eq!(
-        visible,
-        vec![
-            ("reasoning", "R1".to_string()),
-            ("content", "C1".to_string())
-        ],
+        &visible[text_start..],
+        &[("content", "C1".to_string())],
         "{body}"
     );
     assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
