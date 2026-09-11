@@ -19,6 +19,17 @@ const GOOGLE_HOME_URL: &str = "https://www.google.com/";
 const GOOGLE_READY_SELECTOR: &str = "a h3, div[role='heading'][aria-level='2']";
 const GOOGLE_NO_RESULTS_MESSAGE: &str = "Your search did not match any documents";
 const BROWSER_RENDER_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const GOOGLE_FAILURE_EXPRESSION: &str = r#"(() => {
+    if (document.querySelector('a[href] h3')) return null;
+    const text = document.body?.innerText || '';
+    if (text.includes('Your search did not match any documents')) return null;
+    if (location.pathname.startsWith('/sorry/') ||
+        document.querySelector('.g-recaptcha, form[action*="/sorry/"]') ||
+        text.includes('Our systems have detected unusual traffic from your computer network')) {
+        return 'Google blocked browser rendering with an automated-traffic challenge';
+    }
+    return null;
+})()"#;
 
 pub async fn request(search: &SearchQuery) -> anyhow::Result<RequestResponse> {
     Ok(http::Request::get(search_url(search).as_str())
@@ -40,11 +51,12 @@ pub(crate) async fn render_response(search: &SearchQuery) -> anyhow::Result<Engi
             url: url.as_str(),
             preflight_url: Some(GOOGLE_HOME_URL),
             ready_selector: GOOGLE_READY_SELECTOR,
+            failure_expression: Some(GOOGLE_FAILURE_EXPRESSION),
             timeout: BROWSER_RENDER_TIMEOUT,
             request_guard: None,
         })
         .await
-        .map_err(|error| anyhow::anyhow!("Google browser renderer failed: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("Google browser renderer failed: {error:#}"))?;
     let body = rendered.html;
 
     if is_no_results_page(&body) {

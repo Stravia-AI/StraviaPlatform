@@ -11,6 +11,7 @@
 
 ### Fixed
 
+- Google browser search now exits early with an explicit automated-traffic challenge error when CAPTCHA or unusual-traffic pages are detected during preflight or result navigation, instead of waiting for the rendering timeout.
 - Explicit encrypted-content or thinking-signature rejections before output permit one protected-reasoning-free replay; ordinary errors and native compaction do not. DeepSeek tool history retains existing reasoning and supplies an empty field when none was captured. Anthropic native replay accepts preserved `redacted_thinking` blocks.
 - `StraviaRead` model tool schemas now list nullable optional arguments as required in strict mode, preventing Codex/Responses `invalid_function_parameters` failures while preserving optional fields for MCP callers.
 

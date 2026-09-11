@@ -61,6 +61,7 @@ pub(crate) async fn render_response(search: &SearchQuery) -> anyhow::Result<Engi
             url: url.as_str(),
             preflight_url: Some(SOGOU_WECHAT_ORIGIN),
             ready_selector: SOGOU_WECHAT_RESULT_SELECTOR,
+            failure_expression: None,
             timeout: BROWSER_RENDER_TIMEOUT,
             request_guard: None,
         })

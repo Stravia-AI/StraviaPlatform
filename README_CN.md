@@ -137,6 +137,8 @@ HTTP 使用 Moli 的 Chrome 传输指纹；指纹缓解措施不保证绕过反�
 
 平台联网搜索总开关同时控制所有有效 API Key 的搜索与网页读取。每个 Key 分别控制 MCP 访问和透明注入；选中且已开启的联网与媒体能力合并为一个 `StraviaRead` 声明，执行层强制检查本次暴露范围。注入偏好不限制显式调用或 MCP。MCP 客户端连接 `POST /mcp`，通过 `Authorization: Bearer <key>` 认证并发现 `StraviaRead`；文件下载检查归属，联网和媒体操作还分别检查平台开关。Provider 原生 web-search 工具类型不变。旧平台 `web_search`、`web_fetch` 和 `understand_media` 调用别名不再注册。
 
+Google 浏览器搜索检测到验证码或异常流量页时，会提前返回明确的自动流量拦截错误，包括首页 preflight 阶段，而不是继续等待搜索结果超时。这不会自动解答验证码或绕过 Google 的网络限制。
+
 联网搜索与 Web Access 配置属于部署本地状态，不参与配置导出/导入。Search Turn 只保留 Report 元数据与引用 URL，不保存抓取的网页正文或内部 Agent transcript。
 
 Local Fetch 和浏览器出站检查会拒绝去除主机尾随点后成为非公网 IP 的 URL，例如 `http://127.0.0.1../`，与 Web Access 准入保持一致。无需配置迁移，代理选择和 DNS 职责分工不变。

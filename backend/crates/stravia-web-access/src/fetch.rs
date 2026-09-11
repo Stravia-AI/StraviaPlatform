@@ -143,6 +143,7 @@ impl RenderBackend for MoliBackend {
                     url: url.as_str(),
                     preflight_url: None,
                     ready_selector: "body",
+                    failure_expression: None,
                     timeout: RENDER_TIMEOUT,
                     request_guard: Some(policy::is_public_browser_request),
                 })
