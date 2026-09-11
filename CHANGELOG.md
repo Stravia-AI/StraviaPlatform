@@ -17,6 +17,8 @@
 
 ### Fixed
 
+- Inferred observation links now place continuations below their source using the same layout and connection geometry as confirmed links, distinguished only by a dashed stroke. Removed inference labels from canvas edges and card previews while retaining diagnostic details.
+- Request-record diagnostic associations now preserve exact public thinking projections with History Markers across client model-instruction changes, instead of treating those public carriers as private-reasoning boundaries. Streaming and unary output snapshots share ingress history shaping with Generation Chain, matching the block structure clients replay. Execution ancestry, Principal isolation, private-reasoning exclusions, and ambiguity checks remain unchanged.
 - Uncached Provider inventories now refresh global Catalog indexes before downloading, avoiding `CATALOG_SCOPE_REFRESH_FAILED` when local indexes lag behind the remote revision. Revision changes during downloads still fail without modifying saved Provider Models.
 - Google browser search now exits early with an explicit automated-traffic challenge error when CAPTCHA or unusual-traffic pages are detected during preflight or result navigation, instead of waiting for the rendering timeout.
 - Explicit encrypted-content or thinking-signature rejections before output permit one protected-reasoning-free replay; ordinary errors and native compaction do not. DeepSeek tool history retains existing reasoning and supplies an empty field when none was captured. Anthropic native replay accepts preserved `redacted_thinking` blocks.

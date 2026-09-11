@@ -204,14 +204,18 @@ fn generation_commit_flag(
         .generation_committed
 }
 
-fn stage_visible_response(request_context: &RequestContext, response: &AiResponse) {
+fn stage_visible_response(
+    request_context: &RequestContext,
+    ingress: stravia_runtime_contract::protocol::ids::ProtocolId,
+    response: &AiResponse,
+) {
     let Some(mut terminal) = request_context
         .extensions
         .get::<super::RunTerminalContext>()
     else {
         return;
     };
-    terminal.client_output = response.items.clone();
+    terminal.stage_client_output(ingress, response);
     terminal.visible_text.extend(
         response
             .items
@@ -778,7 +782,7 @@ pub(super) async fn orchestrate(
         waiting_client: false,
         visible_text: Vec::new(),
         client_input: Arc::new(client_request.items.clone()),
-        client_output: Vec::new(),
+        client_output: None,
         compaction: gw.compaction.clone(),
         principal: principal.clone(),
         compaction_records: compaction_records.clone(),
@@ -1042,7 +1046,7 @@ async fn dispatch_round(
                         attempt_id: None,
                         payload: checkpoint_payload(&observer, &response),
                     });
-                    stage_visible_response(ctx, &response);
+                    stage_visible_response(ctx, ingress, &response);
                     let marker_delivery = projection_session.take_staged_delivery();
                     let pending_generation_chain =
                         generation_chain.write.take().and_then(|mut write| {
@@ -1609,7 +1613,7 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
             }
         });
     }
-    stage_visible_response(request_context, &prepared_response);
+    stage_visible_response(request_context, ingress, &prepared_response);
     buffered_completion(delivered.response)
 }
 

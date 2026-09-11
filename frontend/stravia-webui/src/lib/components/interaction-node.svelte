@@ -17,17 +17,6 @@ const contextLabel = $derived.by(() => {
   const events = interaction.context_events ?? []
   if (events.some((event) => event.kind === 'compaction_operation')) return m.observation_compaction_operation()
   if (events.some((event) => event.kind === 'native_compaction_associated')) return m.observation_ancestry_native()
-  if (
-    events.some(
-      (event) =>
-        event.kind === 'retained_tail_associated' &&
-        event.payload &&
-        typeof event.payload === 'object' &&
-        'status' in event.payload &&
-        event.payload.status === 'inferred',
-    )
-  )
-    return m.observation_ancestry_inferred()
   return ''
 })
 const usage = $derived([

@@ -58,7 +58,7 @@ impl Window {
                 return None;
             };
             for mut value in values {
-                if private_control(&value) {
+                if private_control(&value) && !public_thinking_projection(&value) {
                     // A nonmatching boundary preserves continuity without retaining private state.
                     value = serde_json::json!({"diagnostic_boundary": uuid::Uuid::new_v4().to_string()});
                 }
@@ -209,6 +209,26 @@ impl TailIndex {
     }
 }
 
+fn public_thinking_projection(value: &Value) -> bool {
+    if value.get("role").and_then(Value::as_str) != Some("assistant")
+        || value.pointer("/content/type").and_then(Value::as_str) != Some("reasoning")
+        || !value
+            .pointer("/content/encrypted_content")
+            .is_some_and(Value::is_null)
+    {
+        return false;
+    }
+    let Some(text) = value.pointer("/content/text").and_then(Value::as_str) else {
+        return false;
+    };
+    if !text.contains(crate::history_marker::HISTORY_MARKER_PREFIX) {
+        return false;
+    }
+    // Marker carrier 是已交付的公开投影，不是隐藏 reasoning；仍精确比较全部预览与标记字节，
+    // 不解析隐藏内容，也不允许仅凭 Marker 绕过完整交互、唯一候选及 Principal 隔离。
+    !crate::history_marker::history_marker_references(&[AiItem::thinking(text, None)]).is_empty()
+}
+
 fn private_control(value: &Value) -> bool {
     match value {
         Value::Object(object) => {
@@ -279,4 +299,89 @@ fn strong(units: &[Unit], bytes: usize) -> bool {
         }
     }
     calls == resolved && ((user && answer) || (!calls.is_empty() && answer))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn user(text: &str) -> AiItem {
+        AiItem {
+            role: stravia_runtime_contract::protocol::ir::Role::User,
+            content: stravia_runtime_contract::protocol::ir::MessageContent::Text(text.into()),
+            tool_calls: None,
+            tool_call_id: None,
+            meta: None,
+        }
+    }
+
+    fn association(thinking: AiItem, replayed_thinking: AiItem) -> RunEvent {
+        let question = user("你好，你是什么模型");
+        let answer = AiItem::output_text(
+            "我是编程助手，可以帮助你阅读代码、运行命令、定位错误、处理文档，以及执行浏览器自动化和桌面操作。",
+        );
+        let mut old = Window::capture(&[question.clone()]).unwrap();
+        assert!(old.append(Window::capture(&[thinking, answer.clone()]).unwrap()));
+        let input = Window::capture(&[
+            question,
+            replayed_thinking,
+            answer,
+            user("我当前是什么电脑"),
+        ])
+        .unwrap();
+        let mut index = TailIndex::default();
+        index.insert("previous-run".into(), old, i64::MAX);
+        index.associate(
+            Some(&input),
+            &[("previous-run".into(), "previous-interaction".into())],
+        )
+    }
+
+    #[test]
+    fn projected_thinking_preserves_complete_interaction_tail() {
+        let reference = "hm_0123456789abcdefghij";
+        let projected = format!(
+            "{}{}",
+            crate::history_marker::render_preview_projection_span(reference, 0, "公开思考预览"),
+            crate::history_marker::render_history_marker_reference(reference),
+        );
+        let thinking = AiItem::thinking(projected.clone(), None);
+        assert!(matches!(
+            association(thinking.clone(), thinking.clone()),
+            RunEvent::RetainedTailAssociated {
+                status,
+                source_interaction_id: Some(source),
+                ..
+            } if status == "inferred" && source == "previous-interaction"
+        ));
+        for replay in [
+            AiItem::thinking(projected.replace("公开思考预览", "修改后的预览"), None),
+            AiItem::thinking(
+                projected.replace(reference, "hm_abcdefghijklmnopqrst"),
+                None,
+            ),
+        ] {
+            assert!(matches!(
+                association(thinking.clone(), replay),
+                RunEvent::RetainedTailAssociated { status, .. } if status == "no_match"
+            ));
+        }
+    }
+
+    #[test]
+    fn private_thinking_remains_an_unmatchable_boundary() {
+        for thinking in [
+            AiItem::thinking("未投影的原始思考", None),
+            AiItem::thinking(
+                crate::history_marker::render_history_marker_reference("hm_0123456789abcdefghij"),
+                Some("protected-signature".into()),
+            ),
+            AiItem::thinking("<!-- stravia-history-marker:invalid -->", None),
+        ] {
+            assert!(matches!(
+                association(thinking.clone(), thinking),
+                RunEvent::RetainedTailAssociated { status, .. } if status == "no_match"
+            ));
+        }
+    }
 }

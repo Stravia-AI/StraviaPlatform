@@ -21,6 +21,7 @@ import {
 import '@xyflow/svelte/dist/style.css'
 
 import { observationStatusLabel } from '$lib/observation-labels'
+import type { LayoutPosition } from '$lib/interaction-layout.worker'
 import type { ForestRoot, InteractionNodeData, InteractionSummary } from '$lib/types'
 import InteractionNode from '$lib/components/interaction-node.svelte'
 import { Button } from '$lib/components/ui/button'
@@ -66,7 +67,7 @@ let {
 
 const { fitView, setCenter, zoomIn, zoomOut, getViewport, getNode } = useSvelteFlow<FlowInteractionNode, Edge>()
 const nodeTypes = { interaction: InteractionNode }
-let positions = $state.raw(new Map<string, { x: number; y: number }>())
+let positions = $state.raw(new Map<string, LayoutPosition>())
 let canvasElement = $state<HTMLDivElement>()
 let minimapOpen = $state(false)
 let requestId = 0
@@ -144,10 +145,10 @@ let edges = $derived.by<Edge[]>(() => {
         source,
         target: interaction.id,
         type: 'smoothstep',
-        label: native ? m.observation_ancestry_native() : m.observation_ancestry_inferred(),
+        label: native ? m.observation_ancestry_native() : undefined,
         selectable: false,
         focusable: false,
-        style: `stroke: var(--muted-foreground); stroke-width: 1.5; stroke-dasharray: ${native ? '3 3' : '8 5'}`,
+        style: `stroke: ${native ? 'var(--muted-foreground)' : selectedPath.has(source) && selectedPath.has(interaction.id) ? 'var(--primary)' : 'var(--border)'}; stroke-width: 1.5; stroke-dasharray: ${native ? '3 3' : '8 5'}`,
       })
     }
   }
@@ -180,16 +181,14 @@ async function acceptLayout(
 
 function requestLayout(): void {
   if (!worker) return
-  const layoutRoots = roots.map((root) => ({
-    id: root.id,
-    interactions: root.interactions.map(({ id, parent_interaction_id }) => ({ id, parent_interaction_id })),
-  }))
-  const topology = JSON.stringify(layoutRoots)
+  const layoutRoots = roots.map((root) => ({ id: root.id, interactions: root.interactions.map(({ id }) => ({ id })) }))
+  const layoutEdges = edges.map(({ source, target }) => ({ source, target }))
+  const topology = JSON.stringify({ roots: layoutRoots, edges: layoutEdges })
   if (topology === requestedTopology) return
   requestedTopology = topology
   if (!resolveLayout) pendingLayout = new Promise<void>((resolve) => (resolveLayout = resolve))
   requestId += 1
-  worker.postMessage({ requestId, roots: layoutRoots })
+  worker.postMessage({ requestId, roots: layoutRoots, edges: layoutEdges })
 }
 
 onMount(() => {
@@ -222,13 +221,9 @@ async function focusNode(id: string): Promise<void> {
   await pendingLayout
   await waitForRenderedLayout()
   const target = positions.get(id)
-  const root = roots.find((candidate) => candidate.interactions.some((interaction) => interaction.id === id))
-  if (!target || !root || !canvasElement) return
+  if (!target || !canvasElement) return
 
-  const rootPositions = root.interactions.flatMap((interaction) => {
-    const position = positions.get(interaction.id)
-    return position ? [position] : []
-  })
+  const rootPositions = [...positions.values()].filter((position) => position.rootId === target.rootId)
   const centerX = target.x + 144
   const centerY = target.y + 128
   const minX = Math.min(...rootPositions.map((position) => position.x))

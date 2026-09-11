@@ -1081,7 +1081,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                     .extensions
                     .get::<super::super::RunTerminalContext>()
                 {
-                    terminal.client_output = response.items.clone();
+                    terminal.stage_client_output(ingress, &response);
                     request_context.extensions.insert(terminal);
                 }
                 if let Some(mut pending) = pending_generation_chain.take() {

@@ -11,7 +11,7 @@ pub(super) fn project_client_output(
     project_client_history(ingress, response, prefix).map_err(TurnCommitError::Storage)
 }
 
-pub(super) fn project_client_history(
+pub(crate) fn project_client_history(
     ingress: ProtocolId,
     response: &AiResponse,
     prefix: &mut [AiItem],

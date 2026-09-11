@@ -89,6 +89,8 @@ Stravia does not provide platform-level compaction settings, inject default comp
 
 Registered native states preserve their known ancestry across restarts within retention, without restoring removed history. Their Target, account/configuration generation, model, and protocol must remain compatible. Monitoring distinguishes confirmed generation ancestry, native bridges, and inferred retained-tail associations; inferred links never affect inference or enable Target Continuation. Clearing monitoring history does not delete valid native state mappings. Ordinary monitoring excludes opaque payloads and reports unreported compaction usage as unknown.
 
+When a client switches models and updates its leading instructions, an unchanged complete interaction—including public thinking previews and their History Markers—can still support a diagnostic association with a unique source under the same API Key. This does not establish an execution parent. Edited previews or markers, private reasoning, ambiguous evidence, or an unavailable process-local index do not qualify; existing request records are not backfilled.
+
 ### Providers and model routing
 
 Built-in provider metadata currently covers:
@@ -229,7 +231,7 @@ Conversation **Thinking** and **Tool call** markers reveal these recorded conten
 
 Within each Run, diagnostic events are ordered by their recorded time, then by sequence for ties, rather than by a nested model/tool tree. Consecutive response-text updates or same-name client tool handoffs are folded into counted groups with their time range. Expand a group to inspect individual events; each event's arrow reveals its original data. Delivery, completion, failure, and intervening events stay separate, and live updates preserve an expanded group's state. Model-service attempts show token output speed using that attempt's latest confirmed output usage and the existing generation-time calculation; missing usage or valid timing is shown as unknown, not estimated.
 
-The output tooltip is named **Model output preview**. Confirmed execution-source links retain their connecting lines without repeated text labels.
+The output tooltip is named **Model output preview**. Confirmed execution-source links retain their connecting lines without repeated text labels. Inferred retained-tail links use the same top-to-bottom layout and connection geometry, differing only by a dashed line; neither the line nor the card preview adds an inference label. Association details remain available in diagnostics.
 
 Debug redaction covers protocol credential fields and complete recognizable patterns within one application message. Business text that forms a credential only after joining multiple messages may remain and must still be treated as sensitive.
 

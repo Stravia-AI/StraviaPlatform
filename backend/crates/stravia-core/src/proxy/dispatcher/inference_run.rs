@@ -301,7 +301,7 @@ pub(super) struct RunTerminalContext {
     pub waiting_client: bool,
     pub visible_text: Vec<String>,
     pub client_input: std::sync::Arc<Vec<stravia_runtime_contract::protocol::ir::AiItem>>,
-    pub client_output: Vec<stravia_runtime_contract::protocol::ir::AiItem>,
+    pub client_output: Option<Vec<stravia_runtime_contract::protocol::ir::AiItem>>,
     pub compaction: crate::compaction::Compaction,
     pub principal: stravia_runtime_contract::Principal,
     pub compaction_records: crate::model_turn::CompactionPublications,
@@ -458,6 +458,29 @@ fn compaction_delivery_event(
 }
 
 impl RunTerminalContext {
+    fn stage_client_output(
+        &mut self,
+        ingress: stravia_runtime_contract::protocol::ids::ProtocolId,
+        response: &stravia_runtime_contract::protocol::ir::AiResponse,
+    ) {
+        // 诊断比较客户端实际回放的 ingress 形态，不比较交付前的 canonical 分块。
+        let prefix = if ingress
+            == stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA
+        {
+            std::sync::Arc::make_mut(&mut self.client_input).as_mut_slice()
+        } else {
+            &mut []
+        };
+        self.client_output =
+            match crate::generation_chain::project_client_history(ingress, response, prefix) {
+                Ok(output) => Some(output),
+                Err(error) => {
+                    tracing::warn!(%error, "diagnostic client history projection failed");
+                    None
+                }
+            };
+    }
+
     fn has_pending_inline_publications(&self) -> bool {
         self.compaction_records
             .lock()
@@ -559,7 +582,13 @@ impl RunTerminalContext {
                 .generation_committed
                 .load(std::sync::atomic::Ordering::Acquire)
         {
-            observer.observe_client_completion(&self.client_input, &self.client_output);
+            if let Some(output) = &self.client_output {
+                observer.observe_client_completion(&self.client_input, output);
+            } else {
+                observer.record(RunEvent::ObservationGap {
+                    reason: "client_history_projection_unavailable".into(),
+                });
+            }
         }
         let records = self
             .compaction_records

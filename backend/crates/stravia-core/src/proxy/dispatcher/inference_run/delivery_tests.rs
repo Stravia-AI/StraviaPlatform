@@ -93,7 +93,7 @@ async fn delivered_native_state_survives_later_failure_but_unexposed_states_expi
         waiting_client: false,
         visible_text: Vec::new(),
         client_input: Arc::new(Vec::new()),
-        client_output: Vec::new(),
+        client_output: None,
         compaction: compaction.clone(),
         principal: principal.clone(),
         compaction_records: publications,

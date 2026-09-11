@@ -130,6 +130,26 @@ def diagnostic_provider(admin_env: dict[str, Any]):
             if expected is None or body.get("previous_response_id"):
                 self._write_json(422, {"error": {"type": "invalid_context", "message": "context is not an accepted conversation"}})
                 return
+            if body.get("stream"):
+                chunks = [
+                    {
+                        "id": "chatcmpl-diagnostic-stream",
+                        "object": "chat.completion.chunk",
+                        "model": body["model"],
+                        "choices": [{"index": 0, "delta": {field: expected[field]}, "finish_reason": None}],
+                    }
+                    for field in ("reasoning_content", "content")
+                    if field in expected
+                ]
+                chunks.append({
+                    "id": "chatcmpl-diagnostic-stream",
+                    "object": "chat.completion.chunk",
+                    "model": body["model"],
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 31, "completion_tokens": 17, "total_tokens": 48},
+                })
+                self._write_sse(chunks)
+                return
             self._write_json(200, {
                 "id": "chatcmpl-" + uuid4().hex,
                 "object": "chat.completion",
@@ -201,6 +221,69 @@ def test_retained_interaction_anywhere_is_only_diagnostic_and_new_user_stays_new
         assert status == 200, key
         _, control = conversation.send(supplied, answer=answer, key=key["data"]["key"])
         _diagnostic(conversation, control, "no_match")
+
+
+@pytest.mark.e2e
+@pytest.mark.admin
+@pytest.mark.parametrize("stream", [False, True])
+def test_projected_reasoning_links_diagnostics_after_model_instruction_change(diagnostic_provider, stream: bool) -> None:
+    conversation = diagnostic_provider("projected-reasoning")
+    question = _user("你好，你是什么模型")
+    original = [{"role": "system", "content": "You are powered by model A."}, question]
+    upstream_answer = {
+        **_answer(_text("public coding assistant answer")),
+        "reasoning_content": "Consider the user's question before describing the available coding tools.",
+    }
+    conversation.accepted[_semantic(original)] = upstream_answer
+    status, body = _proxy(
+        conversation.env, conversation.key, conversation.name, original,
+        body_extra={"stream": stream},
+    )
+    assert status == 200, body
+    if stream:
+        assert "data: [DONE]" in body
+        returned = {"role": "assistant", "content": "", "reasoning_content": ""}
+        for line in body.splitlines():
+            if not line.startswith("data: ") or line == "data: [DONE]":
+                continue
+            for choice in json.loads(line[6:]).get("choices", []):
+                for field in ("content", "reasoning_content"):
+                    returned[field] += choice.get("delta", {}).get(field) or ""
+    else:
+        returned = body["choices"][0]["message"]
+    assert "stravia-history-marker:" in returned["reasoning_content"]
+
+    def source_finished() -> dict[str, Any] | None:
+        for item in _all_interactions(conversation.env, conversation.route_id):
+            detail = _detail(conversation.env, item["id"])
+            if detail["runs"] and detail["runs"][0]["status"] == "completed":
+                return detail
+        return None
+
+    source = _wait_for("projected reasoning delivery", source_finished)
+    changed_system = {"role": "system", "content": "You are powered by model B."}
+    follow_up = _user("我当前是什么电脑")
+    replay = [changed_system, question, returned, follow_up]
+    final_answer = _answer(_text("current environment answer"))
+    # The provider must receive the restored reasoning, not the public projection
+    # or the previous system instructions.
+    restored = [
+        changed_system,
+        question,
+        {
+            "role": "assistant",
+            "provenance": "provider",
+            "audience": "internal",
+            "reasoning_content": upstream_answer["reasoning_content"],
+        },
+        _answer(upstream_answer["content"]),
+        follow_up,
+    ]
+    conversation.accepted[_semantic(restored)] = final_answer
+    _, detail = conversation.send(replay, answer=final_answer)
+    event = _diagnostic(conversation, detail, "inferred")
+    assert event["source_run_id"] == source["runs"][0]["id"]
+    assert event["source_interaction_id"] == source["interaction"]["id"]
 
 
 @pytest.mark.e2e
