@@ -476,6 +476,45 @@ async fn provider_scope_recovers_from_corruption_and_never_uses_a_prior_revision
 }
 
 #[tokio::test]
+async fn uncached_provider_scope_refreshes_stale_global_indexes() -> anyhow::Result<()> {
+    let data_dir = tempfile::tempdir()?;
+    let source = source();
+    let catalog = ProviderCatalog::with_source(data_dir.path(), Arc::new(source.clone()))?;
+    catalog.refresh().await?;
+    source.set_version(version("revision-2")).await;
+
+    let scope = catalog.provider_scope("demo").await?;
+
+    assert_eq!(scope.revision, "revision-2");
+    assert_eq!(scope.models[0].metadata["id"], "chat");
+    assert_eq!(catalog.providers().await.revision, "revision-2");
+    Ok(())
+}
+
+#[tokio::test]
+async fn uncached_provider_scope_preserves_indexes_when_global_refresh_fails()
+-> anyhow::Result<()> {
+    let data_dir = tempfile::tempdir()?;
+    let source = source();
+    let catalog = ProviderCatalog::with_source(data_dir.path(), Arc::new(source.clone()))?;
+    catalog.refresh().await?;
+    source.set_version(version("revision-2")).await;
+    source.set_canonical_models(b"not json".to_vec()).await;
+
+    let error = catalog.provider_scope("demo").await.unwrap_err();
+
+    assert!(matches!(
+        error.downcast_ref::<CatalogError>(),
+        Some(CatalogError::ScopeRefresh { .. })
+    ));
+    assert_eq!(catalog.providers().await.revision, "revision-1");
+    assert_eq!(catalog.canonical_model("demo/chat").await?["name"], "Demo Chat");
+    let restarted = ProviderCatalog::with_source(data_dir.path(), Arc::new(source))?;
+    assert_eq!(restarted.providers().await.revision, "revision-1");
+    Ok(())
+}
+
+#[tokio::test]
 async fn scope_download_rejects_a_revision_changed_by_concurrent_global_refresh()
 -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;

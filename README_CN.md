@@ -101,6 +101,8 @@ Stravia 不提供平台级压缩设置，不注入默认压缩控制，也不生
 
 客户端发送一个 **Model ID**。该值就是 Route ID，匹配时包含字母大小写在内完全精确。逻辑 Model 还可以设置可选、可重复的展示名称；展示为空时回退到 Model ID，并且永不参与路由、授权或绑定。对应 Route 可以同时保留已启用和已禁用 Target；已禁用 Target 保留配置但不会接收流量。Stravia 先选择可用的最高 Target Priority 组，再在组内使用 Traffic Equalization 或 Latency Preference；适用时，Conversation Affinity 与 Cache Affinity 可继续偏好此前成功的已启用 Target。Stravia 从 revisioned `models.stravia.cn` 索引刷新 Provider Catalog：轻量 Provider 与 Canonical Model 索引以同一 revision 原子更新，Provider-scoped inventory 仅在需要时加载。Catalog Provider 使用其 scoped inventory；账号级 discovery 仍决定可调用的模型 ID，Core 只为精确匹配补充元数据，不会加入仅存在于 Catalog 的模型。
 
+当前 revision 下没有可用的 Provider inventory 缓存时，Stravia 会先刷新全局索引，再下载该模型目录，因此本地索引落后时无需另行手动刷新。下载期间目录再次变版或刷新失败时，操作仍会明确失败，且不会改动已保存的 Provider Models。
+
 添加提供商时，先选择完整的提供商/通道选项。API Key 与 OAuth 通道是独立选项，创建后不能互相转换。Codex 与 Claude Code OAuth 在桌面端和通过回环地址访问的 WebUI 中会自动接收回调；远程 WebUI 则会在浏览器登录后要求粘贴完整 callback URL。等待授权期间，三种环境都支持手动粘贴完整 callback URL，即使自动监听正常运行也可使用。Grok OAuth 使用 xAI device authorization flow：WebUI 打开验证页面，在需要时显示 user code，并轮询直到授权完成，无需填写 callback URL。
 
 接入无需认证的服务时，创建仅使用 API Key 的连接（包括自定义 OpenAI 兼容端点）可以将密钥留空。模型发现和推理会省略默认认证，不发送空的 Bearer token；填写密钥后仍正常发送。OAuth、Setup Token、Vertex 及结构化 Adapter Credentials 的凭据要求保持不变。客户端访问 Stravia 仍须使用有效的 Stravia API Key。

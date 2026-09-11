@@ -154,6 +154,18 @@ impl ProviderCatalog {
         }
         drop(snapshot);
 
+        // Scoped URLs expose the latest catalog, not the revision of our cached indexes.
+        self.refresh()
+            .await
+            .map_err(|error| CatalogError::ScopeRefresh {
+                provider_id: provider_id.to_string(),
+                message: error.to_string(),
+            })?;
+        let snapshot = self.snapshot.read().await;
+        ensure_catalog_provider(&snapshot, provider_id)?;
+        let revision = snapshot.version.revision.clone();
+        drop(snapshot);
+
         let body = self
             .source
             .fetch_provider_scope(provider_id)
@@ -251,6 +263,7 @@ impl ProviderCatalog {
     }
 
     pub async fn model(&self, provider_id: &str, model_id: &str) -> anyhow::Result<CatalogModel> {
+        let source = self.model_source(provider_id, model_id).await?;
         let provider = self
             .snapshot
             .read()
@@ -260,7 +273,6 @@ impl ProviderCatalog {
             .find(|provider| provider.id == provider_id)
             .cloned()
             .ok_or_else(|| anyhow!("catalog provider not found: {provider_id}"))?;
-        let source = self.model_source(provider_id, model_id).await?;
         parse_catalog_model(provider_id, &provider.protocol, &source.metadata)
     }
 
@@ -358,6 +370,7 @@ impl ProviderCatalog {
         provider_id: &str,
         channel_id: &str,
     ) -> anyhow::Result<(CatalogProvider, CatalogProviderScope)> {
+        let scope = self.provider_scope(provider_id).await?;
         let provider = self
             .snapshot
             .read()
@@ -374,7 +387,6 @@ impl ProviderCatalog {
         {
             bail!("catalog channel not found: {provider_id}/{channel_id}");
         }
-        let scope = self.provider_scope(provider_id).await?;
         Ok((provider, scope))
     }
 
