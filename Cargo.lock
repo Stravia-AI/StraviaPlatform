@@ -8900,11 +8900,13 @@ name = "stravia-credential-protection"
 version = "0.2.1"
 dependencies = [
  "async-trait",
+ "base64 0.23.1",
  "chrono",
  "futures",
  "regex",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "sqlx",
  "stravia-runtime-contract",
  "tiktoken-rs",

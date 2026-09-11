@@ -1,4 +1,4 @@
-//! Local Betterleaks snapshot: 95237cf8eb4d8e9f67409595b245e674832992cf.
+//! Bundled Betterleaks and Kingfisher offline credential detection.
 //!
 //! Each model-text field is one virtual source with an empty trusted path. File
 //! rules and path filters are compiled and evaluated, never inferred from text.
@@ -9,6 +9,8 @@
 //! are evaluated but do not gate local protection.
 #[path = "detection/expression.rs"]
 mod expression;
+#[path = "detection/kingfisher.rs"]
+mod kingfisher;
 
 use super::RedactionError;
 use expression::{Context, Program};
@@ -193,6 +195,7 @@ struct Component {
     optional: bool,
 }
 struct Rule {
+    kingfisher: Option<kingfisher::Conditions>,
     regex: Option<Regex>,
     path: Option<Regex>,
     secret_group: usize,
@@ -212,6 +215,7 @@ pub(super) struct Detector {
     tokenizer: tiktoken_rs::CoreBPE,
     words: HashSet<&'static str>,
     word_lengths: Vec<usize>,
+    kingfisher_safe_list: Vec<Regex>,
 }
 #[derive(Clone)]
 struct Finding<'a> {
@@ -289,6 +293,7 @@ impl Detector {
             // compiled: its network requests must not participate in local scanning.
             let _ = &source.validate;
             rules.push(Rule {
+                kingfisher: None,
                 regex,
                 path,
                 secret_group: source.secret_group,
@@ -311,7 +316,7 @@ impl Detector {
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect();
-        Ok(Self {
+        let mut detector = Self {
             rules,
             order,
             prefilter: Program::compile(&snapshot.prefilter)?,
@@ -319,6 +324,7 @@ impl Detector {
             tokenizer: tiktoken_rs::cl100k_base().map_err(|_| RedactionError::Detection)?,
             words,
             word_lengths,
+            kingfisher_safe_list: Vec::new(),
             catalog: CredentialRuleCatalog {
                 prefilter: snapshot.prefilter,
                 filter: snapshot.filter,
@@ -359,7 +365,9 @@ impl Detector {
                     })
                     .collect(),
             },
-        })
+        };
+        kingfisher::extend(&mut detector)?;
+        Ok(detector)
     }
 
     pub(super) fn detect(&self, texts: &[&str]) -> Result<Vec<DetectedCredential>> {
@@ -368,9 +376,7 @@ impl Detector {
         let mut secrets: Vec<DetectedCredential> = Vec::new();
         for (source_index, raw) in texts.iter().enumerate() {
             let empty = self.context(raw, "", "", 0, 0);
-            if self.prefilter.evaluate(&empty)? {
-                continue;
-            }
+            let skip_betterleaks = self.prefilter.evaluate(&empty)?;
             let lower = raw.to_lowercase();
             let mut candidates: Vec<Option<Vec<Finding<'_>>>> =
                 (0..self.rules.len()).map(|_| None).collect();
@@ -378,6 +384,7 @@ impl Detector {
             for &index in &self.order {
                 let rule = &self.rules[index];
                 if rule.skip_report
+                    || (skip_betterleaks && rule.kingfisher.is_none())
                     || !rule.keywords.is_empty()
                         && !rule.keywords.iter().any(|key| lower.contains(key))
                 {
@@ -509,6 +516,27 @@ impl Detector {
     }
 
     fn find<'a>(&self, raw: &'a str, index: usize) -> Result<Vec<Finding<'a>>> {
+        let mut findings = if let Some(conditions) = &self.rules[index].kingfisher {
+            kingfisher::find(self, raw, index, conditions)?
+        } else {
+            self.find_betterleaks(raw, index)?
+        };
+        let references: Vec<_> = raw
+            .match_indices(super::text::PREFIX)
+            .filter_map(|(start, _)| {
+                super::text::reference_prefix(&raw[start..])
+                    .map(|reference| start..start + reference.len())
+            })
+            .collect();
+        findings.retain(|finding| {
+            !references
+                .iter()
+                .any(|reference| finding.start < reference.end && reference.start < finding.end)
+        });
+        Ok(findings)
+    }
+
+    fn find_betterleaks<'a>(&self, raw: &'a str, index: usize) -> Result<Vec<Finding<'a>>> {
         let rule = &self.rules[index];
         if rule.path.as_ref().is_some_and(|path| !path.is_match(b"")) {
             return Ok(Vec::new());
@@ -591,6 +619,8 @@ impl Detector {
                     .chain(&other.components)
                     .any(|candidate| {
                         candidate.rule != finding.rule
+                            && self.rules[candidate.rule].kingfisher.is_some()
+                                == self.rules[finding.rule].kingfisher.is_some()
                             && candidate.start_line == finding.start_line
                             && candidate.secret.contains(finding.secret)
                             && self.rules[candidate.rule].specificity
@@ -635,7 +665,7 @@ mod tests {
         let utf16: Vec<_> = text.encode_utf16().collect();
         let generic: Vec<_> = matches
             .iter()
-            .filter(|found| String::from_utf16(&utf16[found.start..found.end]).unwrap() == secret)
+            .filter(|found| found.rule_id == "generic-api-key")
             .collect();
         assert_eq!(generic.len(), 2);
         assert_eq!((generic[0].start_line, generic[0].start_column), (1, 13));

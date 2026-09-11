@@ -21,6 +21,11 @@ pub(super) fn valid_reference(value: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
 }
 
+pub(super) fn reference_prefix(value: &str) -> Option<&str> {
+    let reference = value.get(..REFERENCE_LEN)?;
+    valid_reference(reference).then_some(reference)
+}
+
 pub(super) fn active(mapping: &Mapping) -> bool {
     mapping.expires_at > chrono::Utc::now().timestamp_millis()
         && valid_reference(&mapping.reference)
@@ -51,6 +56,13 @@ pub(super) fn replace(
     let mut result = String::with_capacity(text.len());
     let mut position = 0;
     while position < text.len() {
+        // References are protocol atoms. Neither a broad detector nor a known
+        // secret matching their identifier may nest another reference inside one.
+        if !restore && let Some(reference) = reference_prefix(&text[position..]) {
+            result.push_str(reference);
+            position += reference.len();
+            continue;
+        }
         if let Some(mapping) = candidates
             .iter()
             .find(|m| text[position..].starts_with(if restore { &m.reference } else { &m.secret }))
@@ -678,6 +690,30 @@ pub fn restore_response(
 mod tests {
     use super::*;
     use stravia_runtime_contract::hook::{ContextCompleteness, ContextSnapshot};
+
+    #[test]
+    fn outbound_replacement_preserves_reference_atoms_when_identifiers_are_known_secrets() {
+        let identifier = "65ecadffe021442ab611243aca232c08";
+        let reference = format!("{PREFIX}{identifier}~");
+        let mapping = Mapping {
+            reference: format!("{PREFIX}{}~", "b".repeat(32)),
+            secret: identifier.into(),
+            expires_at: i64::MAX,
+        };
+        let mut used = BTreeSet::new();
+        let replaced = replace(
+            &format!("{reference} {identifier}"),
+            std::slice::from_ref(&mapping),
+            false,
+            &mut used,
+        );
+        assert_eq!(replaced, format!("{reference} {}", mapping.reference));
+        assert_eq!(used, BTreeSet::from([mapping.reference.clone()]));
+        assert_eq!(
+            replace(&replaced, &[mapping], true, &mut BTreeSet::new()),
+            format!("{reference} {identifier}")
+        );
+    }
 
     #[test]
     fn encoded_tool_media_stays_opaque_after_context_rebuilds() {

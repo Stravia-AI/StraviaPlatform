@@ -198,7 +198,7 @@ stravia/
 │   ├── stravia-runtime-contract/ # IR/协议身份、Hook、Agent、Artifact、TurnChain、脱敏 trace 契约
 │   ├── stravia-media/            # 完整媒体理解、预处理、bridge、Derivative、报告与配置策略
 │   ├── stravia-web-search/       # Runner、Backend、报告/证据、公开工具与配置策略
-│   ├── stravia-credential-protection/ # Betterleaks 规则、检测、替换/还原与 SQL 映射实现
+│   ├── stravia-credential-protection/ # Betterleaks/Kingfisher 规则、检测、替换/还原与 SQL 映射实现
 │   ├── stravia-web-access/       # 联网 Adapter、浏览器与静态地址策略
 │   ├── stravia-web-access-contract/ # search/fetch 契约、域名规范化与内部工具 ID
 │   └── stravia-devtools/
@@ -560,6 +560,10 @@ Trace segment 位于 data directory 下的托管 `observation-debug` 目录；�
 页尾测试使用 POST 请求体中的单段文本，不查询实例设置或已保存秘密字典，不创建映射、Observation 或历史，不执行联网验证。输入不写入日志、Debug、数据库或浏览器持久化存储；响应只有规则与位置，检测失败不降级为空匹配。鉴权、CSRF、JSON 请求体限制及错误封装沿用管理入口。
 
 检测器内置 Betterleaks 提交 `95237cf8eb4d8e9f67409595b245e674832992cf` 的 462 条规则、上游词表及许可证。Rust 编译器启动检测时核对完整快照并编译本地正则、过滤表达式、熵与组合条件；token efficiency 使用内置 `cl100k_base`。模型文本没有受信文件路径，因此文件专属条件以空路径求值。`validate` 仅保留在原始快照中，不编译、不执行；运行时不下载规则或词表。先扫描全部可读文本、补齐新秘密映射，再统一执行最长优先的单次精确替换；工具 JSON 以解码后的字符串参加检测与替换，不改写协议标识、媒体或不透明载荷。
+
+补充的 Kingfisher v1.109.0 快照固定于提交 `9ffb8969c4ad5a5c6c24e686cb252c434bc8adce`，包含全部 1,013 条规则，其中 861 条可报告、152 条隐藏辅助规则。其正则使用上游 Rust 字节模式及注释清理，秘密选择优先级为命中的 `TOKEN` 命名组、首个命名组、组 1、完整匹配。字节 Shannon 熵必须严格大于规则阈值；字符数量、排除子串、18 条内置安全列表及 14 条规则的校验和均在本地执行。校验和模板被编译为封闭的类型化运算，不引入 Liquid 或网络执行器。隐藏规则只列入目录，不产生映射；置信度不阻断保护。Betterleaks 的全局过滤仅作用于自身规则，两组规则共享最终位置报告与秘密去重，但不相互抑制命中。
+
+Kingfisher 移植范围是模型文本的离线规则检测，不包含其文件发现、可选解码、Tree-sitter、数据库 URI 解析、用户安全列表、内联忽略指令或联网验证。字节正则产生的非 UTF-8 字符边界片段不作文本替换。离线快照不保留 `validation`、`revocation` 或用于联网验证的依赖绑定。开发期导入方式、来源逐文件散列和许可记录见 `backend/crates/stravia-credential-protection/tools/import_kingfisher.py` 与 `src/detection/UPSTREAM.kingfisher.json`；管理规则目录、匹配测试与正式保护使用同一个合并检测器。
 
 SQL 映射以 Principal 为唯一访问边界，引用格式为 `~stravia-secret:<32 位随机小写十六进制>~`。同 Key 并发请求及重启后复用仍有效映射，其他 Key 的映射不参加匹配或还原。新映射可靠持久化后才能发往 Provider；未发布保留一小时。Model Turn 内部 gate 在还原器尾部 delta 已交出后读取共享 trace 当前引用并发布，将有效期延长至至少七天，然后才交出唯一 `Completed`；无本地映射或不提交 Agent Turn 也不绕过发布。取消与 deadline 可抢占发布等待，但不保证数据库尚未提交，也不撤销已发布映射。Generation Chain 写入按自身 TTL 延长仍有效的已发布引用，不缩短已有期限，也不复活过期行。清理复用既有历史维护任务，映射不随某一来源对话删除而级联消失。
 

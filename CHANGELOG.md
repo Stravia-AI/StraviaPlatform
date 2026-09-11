@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Credential Protection supplements its Betterleaks snapshot with all 1,013 Kingfisher v1.109.0 offline rules, including bare Zhipu-format and additional `sk-` credentials. Capture selection, entropy, character requirements, safe-list filters, and checksums run locally; 152 hidden helper rules do not create mappings. The combined catalog and matching tester use the same detector as request protection, with no online validation or runtime rule downloads.
+
 ### Changed
 
 - **Breaking:** 管理入口默认支持 HTTP／HTTPS 且不限制可达入口，保留默认回环监听、同源／CSRF 与可撤销会话。可重复 `--admin-origin`／`STRAVIA_ADMIN_ORIGINS` 限制整个管理面，可重复 `--trusted-proxy`／`STRAVIA_TRUSTED_PROXIES` 显式信任实际代理对端；HTTPS Cookie 按每个请求的可信外部协议设置。移除旧 public-origin 与 Server admin-cors-origin 配置，同步迁移 Vite、Docker／Nix 部署说明；HTTP 与不限入口的传输安全／DNS rebinding 风险需由部署者控制。
