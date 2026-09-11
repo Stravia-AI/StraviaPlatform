@@ -144,7 +144,7 @@
             inherit version;
             src = source;
 
-            cargoHash = "sha256-R3MeoGJ3iFiJ5xYbWsZ4GzBf4nQVO0gaT69nZr98Lz0=";
+            cargoHash = "sha256-oucCfSfTnoAoihYyVAIuUVlggOQDlm3sHqCUlTZTO9A=";
             # 此包链接预编译 V8；移除源构建子模块，让 Moli 扩展选择公共头文件回退路径。
             cargoDepsHook = ''
               cargoDepsPrebuilt="$TMPDIR/00000000000000000000000000000000-cargo-deps-prebuilt"
