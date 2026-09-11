@@ -303,27 +303,43 @@ fn provider_message_metadata_does_not_interrupt_chat_delivery() {
         json!({"type":"response.function_call_arguments.delta","output_index":1,
             "item_id":"fc_1","delta":"{\"command\":\"hostname\"}"}),
     ] {
-        let wire = format!("event: {}\ndata: {event}\n\n", event["type"].as_str().unwrap());
+        let wire = format!(
+            "event: {}\ndata: {event}\n\n",
+            event["type"].as_str().unwrap()
+        );
         let deltas = decoder.decode_chunk(wire.as_bytes()).unwrap();
-        delivered.extend(encoder.encode_deltas(&deltas).expect("deliver ordinary message and subsequent tool"));
+        delivered.extend(
+            encoder
+                .encode_deltas(&deltas)
+                .expect("deliver ordinary message and subsequent tool"),
+        );
     }
     let chunks: Vec<Value> = delivered
         .iter()
         .filter_map(|event| serde_json::from_str(&event.data).ok())
         .collect();
-    assert!(chunks.iter().any(|chunk|
-        chunk["choices"][0]["delta"]["content"] == "Checking hardware."
-    ));
-    assert!(chunks.iter().any(|chunk|
-        chunk["choices"][0]["delta"]["tool_calls"][0]["function"]["name"] == "Bash"
-    ));
-    assert!(chunks.iter().any(|chunk|
-        chunk["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
+    assert!(
+        chunks
+            .iter()
+            .any(|chunk| chunk["choices"][0]["delta"]["content"] == "Checking hardware.")
+    );
+    assert!(
+        chunks.iter().any(
+            |chunk| chunk["choices"][0]["delta"]["tool_calls"][0]["function"]["name"] == "Bash"
+        )
+    );
+    assert!(chunks.iter().any(
+        |chunk| chunk["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
             == "{\"command\":\"hostname\"}"
     ));
-    let response = pair.decode_response(dated_response(
-        "resp_1", "completed", json!([item]), Value::Null,
-    )).unwrap();
+    let response = pair
+        .decode_response(dated_response(
+            "resp_1",
+            "completed",
+            json!([item]),
+            Value::Null,
+        ))
+        .unwrap();
     assert_eq!(
         pair.encode_response(&response).unwrap()["choices"][0]["message"]["content"],
         "Checking hardware."
@@ -340,11 +356,16 @@ fn provider_message_metadata_does_not_interrupt_chat_delivery() {
         assert_eq!(output["output"][0][field], item[field]);
     }
     let outbound = ProtocolTransform::global()
-        .bind(OPEN_RESPONSES_2026_04_24, OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1)
+        .bind(
+            OPEN_RESPONSES_2026_04_24,
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+        )
         .unwrap();
-    let request = outbound.decode_request(json!({
-        "model":"model", "input":[item, {"role":"user","content":"continue"}]
-    })).unwrap();
+    let request = outbound
+        .decode_request(json!({
+            "model":"model", "input":[item, {"role":"user","content":"continue"}]
+        }))
+        .unwrap();
     assert_eq!(
         outbound.encode_request(&request).unwrap().body["messages"][0]["content"],
         "Checking hardware."

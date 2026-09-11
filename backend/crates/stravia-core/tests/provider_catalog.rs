@@ -492,8 +492,8 @@ async fn uncached_provider_scope_refreshes_stale_global_indexes() -> anyhow::Res
 }
 
 #[tokio::test]
-async fn uncached_provider_scope_preserves_indexes_when_global_refresh_fails()
--> anyhow::Result<()> {
+async fn uncached_provider_scope_preserves_indexes_when_global_refresh_fails() -> anyhow::Result<()>
+{
     let data_dir = tempfile::tempdir()?;
     let source = source();
     let catalog = ProviderCatalog::with_source(data_dir.path(), Arc::new(source.clone()))?;
@@ -508,7 +508,10 @@ async fn uncached_provider_scope_preserves_indexes_when_global_refresh_fails()
         Some(CatalogError::ScopeRefresh { .. })
     ));
     assert_eq!(catalog.providers().await.revision, "revision-1");
-    assert_eq!(catalog.canonical_model("demo/chat").await?["name"], "Demo Chat");
+    assert_eq!(
+        catalog.canonical_model("demo/chat").await?["name"],
+        "Demo Chat"
+    );
     let restarted = ProviderCatalog::with_source(data_dir.path(), Arc::new(source))?;
     assert_eq!(restarted.providers().await.revision, "revision-1");
     Ok(())

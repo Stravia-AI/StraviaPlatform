@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 from pathlib import Path
 from typing import Any
+from xml.etree import ElementTree
 
 import pytest
 
@@ -466,10 +467,10 @@ def test_webui_routes_fall_back_to_the_embedded_app(
 def test_embedded_static_assets_take_priority_over_webui_fallback(
     admin_env: dict[str, str],
 ) -> None:
-    with urlopen(f"{admin_env['admin']}/stravia-logo.png") as response:
+    with urlopen(f"{admin_env['admin']}/stravia-logo.svg") as response:
         assert response.status == 200
-        assert response.headers.get_content_type() == "image/png"
-        assert response.read(8) == b"\x89PNG\r\n\x1a\n"
+        assert response.headers.get_content_type() == "image/svg+xml"
+        assert ElementTree.fromstring(response.read()).tag == "{http://www.w3.org/2000/svg}svg"
 
 
 @pytest.mark.e2e
