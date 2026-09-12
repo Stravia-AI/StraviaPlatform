@@ -93,7 +93,7 @@ Observation 写入、SSE、Debug 分段文件、容量统计或导出失败不�
 
 `native_compaction_associated` 表示原生状态跨越已登记边界，`retained_tail_associated` 仅表示客户端幸存上下文的诊断推断。两者与既有确定 Generation 关系在 `context_events`、forest/detail、SSE、详情及画布中分开；推断不改变父边、Target Continuation、有效输入或新 User 的 Interaction 分组。来源卡片已清理时不从核心存储复活。
 
-尾部索引只接收实际收到的规范化 client-shaped 输入和已交付公开输出。流式与非流式输出均复用 Generation Chain 拥有的 ingress 历史整形规则，使诊断索引与客户端回放采用相同分块；整形失败记录 observation gap，不能把交付前的 canonical 分块作为后备索引。指纹仅筛选候选，完整语义再次核验；匹配旧历史后缀与新请求任意连续区间。只有顶层 leading system/developer 可排除，内部差异不能删除后拼接。完整工具 ID、参数、结果、角色、媒体与控制保持语义身份。
+尾部索引只接收实际收到的规范化 client-shaped 输入和已交付公开输出。流式与非流式输出均复用 Generation Chain 拥有的 ingress 历史整形规则，使诊断索引与客户端回放采用相同分块；整形失败记录 observation gap，不能把交付前的 canonical 分块作为后备索引。指纹仅筛选候选，完整语义再次核验；匹配旧历史后缀与新请求任意连续区间。只有顶层 leading system/developer 可排除，内部差异不能删除后拼接。完整工具 ID、参数、结果、角色、媒体与控制保持语义身份。有 Generation parent 时仍对本次收到的 client 输入做尾部诊断。多个来源同时匹配时，若其中唯一一个匹配的语义单元与字节均严格更长，采用该更长来源；并列等长匹配仍为 `ambiguous`。
 
 无签名、无密文且带合法 History Marker 的公开思考投影参与精确匹配，保留全部预览与标记字节，不恢复隐藏内容，也不把投影本身算作公开回答。它不截断相邻 User 与公开回答的完整交互，因此客户端切换模型并更新顶层提示后，仍可形成诊断关联。无 Marker 的原始思考、签名、密文和 native state 继续使用不可匹配边界；预览或 Marker 的改动不能跳过后拼接。完整交互、唯一来源、Principal 隔离及资源预算要求不变，Generation Chain 的严格父链规则不变。
 
@@ -425,7 +425,7 @@ SSE 通过普通 `fetch` 携带 Admin Bearer header，并由 `eventsource-parser
 - 提供适配已加载内容、回到进行中、缩放、可折叠 minimap；
 - 所有屏宽都使用同一画布；窄屏点击节点后详情全屏。
 
-使用 `@dagrejs/dagre` 在 worker 中计算 top-to-bottom 子树布局。布局使用画布实际显示的全部连接；被诊断关联连接的 Generation Chain 根归入同一视觉分组，后续 Interaction 位于来源下方，同父子节点横向分叉。不相连的分组沿用页面快照的根顺序，实时数据只重排受影响分组；关联变化也必须触发布局更新。视觉分组不改写后端根身份、根计数或执行父链，跟随视口以完整视觉分组计算范围。
+使用 `@dagrejs/dagre` 在 worker 中计算 top-to-bottom 子树布局。布局使用画布实际显示的全部连接；被诊断关联连接的 Generation Chain 根归入同一视觉分组，后续 Interaction 位于来源下方。同一确认父节点的多个确认子节点横向分叉。若确认父边跳过了更早的推断续接，且该确认子的 `retained_tail` 推断来源指向该中间节点（输入含中间轮，例如切模型后再切回并带上其中间输出），画布把它接到中间节点下方，不并列分叉。推断来源仍是确认父、无匹配或 `ambiguous` 时保持分叉（输入不含中间轮，是从原链真实分叉）。旧记录缺少尾部事件时，仍按时间接到最新推断中间节点。这只改变视觉父边，不改写 `parent_interaction_id` 或 Generation Chain。不相连的分组沿用页面快照的根顺序，实时数据只重排受影响分组；关联变化也必须触发布局更新。视觉分组不改写后端根身份、根计数或执行父链，跟随视口以完整视觉分组计算范围。
 
 保留尾部推断关联与已确认直连使用相同的底部 source、顶部 target、路径、颜色与线宽，只以虚线区别；单一续接上下对齐，不为跨根关联绕到卡片侧面。连线上与卡片预览中均不附加推断关联说明，具体关联类型仍可在诊断详情中查看。
 

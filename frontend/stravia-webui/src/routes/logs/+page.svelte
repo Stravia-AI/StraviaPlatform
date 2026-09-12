@@ -17,6 +17,7 @@ import { toast } from 'svelte-sonner'
 import { admin } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
 import { formatLogTime } from '$lib/format'
+import { visualParent } from '$lib/interaction-canvas-links'
 import { observationDebugStatusLabel, observationStatusLabel } from '$lib/observation-labels'
 import { navigateToBundle, subscribeToObservations, type ObservationSubscription } from '$lib/observation-stream'
 import type {
@@ -118,9 +119,10 @@ const latestInteraction = $derived.by(
 const selectedPath = $derived.by(() => {
   const path = new SvelteSet<string>()
   let current = selectedInteraction
-  while (current) {
+  while (current && !path.has(current.id)) {
     path.add(current.id)
-    current = interactions.find((candidate) => candidate.id === current?.parent_interaction_id)
+    const parentId = visualParent(current, interactions)?.id
+    current = parentId ? interactions.find((candidate) => candidate.id === parentId) : undefined
   }
   return path
 })

@@ -204,7 +204,27 @@ impl TailIndex {
             [(source, (units, bytes, start))] => {
                 result("inferred", Some(source), 1, *units, *bytes, Some(*start))
             }
-            _ => result("ambiguous", None, accepted.len(), 0, 0, None),
+            _ => {
+                // 同一会话的嵌套来源会同时命中；唯一更长的窗口是更后一轮，不是并列历史。
+                let Some((source, (units, bytes, start))) = accepted
+                    .iter()
+                    .max_by_key(|(_, (units, bytes, _))| (*units, *bytes))
+                else {
+                    return result("ambiguous", None, accepted.len(), 0, 0, None);
+                };
+                if accepted
+                    .iter()
+                    .filter(|(_, (match_units, match_bytes, _))| {
+                        *match_units == *units && *match_bytes == *bytes
+                    })
+                    .count()
+                    == 1
+                {
+                    result("inferred", Some(*source), 1, *units, *bytes, Some(*start))
+                } else {
+                    result("ambiguous", None, accepted.len(), 0, 0, None)
+                }
+            }
         }
     }
 }
@@ -366,6 +386,102 @@ mod tests {
                 RunEvent::RetainedTailAssociated { status, .. } if status == "no_match"
             ));
         }
+    }
+
+    fn long_user(tag: &str) -> AiItem {
+        user(&format!("{tag} {}", "用户问题内容。".repeat(8)))
+    }
+
+    fn long_answer(tag: &str) -> AiItem {
+        AiItem::output_text(format!("{tag} {}", "助手回答内容。".repeat(8)))
+    }
+
+    fn nested_sources() -> (TailIndex, Window, Window) {
+        let first_user = long_user("first");
+        let first_answer = long_answer("glm");
+        let switch_user = long_user("switch");
+        let switch_answer = long_answer("gpt");
+        let resume_user = long_user("resume");
+        let mut first = Window::capture(&[first_user.clone()]).unwrap();
+        assert!(first.append(Window::capture(&[first_answer.clone()]).unwrap()));
+        let mut switched = Window::capture(&[
+            first_user.clone(),
+            first_answer.clone(),
+            switch_user.clone(),
+        ])
+        .unwrap();
+        assert!(switched.append(Window::capture(&[switch_answer.clone()]).unwrap()));
+        let with_gpt = Window::capture(&[
+            first_user.clone(),
+            first_answer.clone(),
+            switch_user,
+            switch_answer,
+            resume_user.clone(),
+        ])
+        .unwrap();
+        let without_gpt = Window::capture(&[first_user, first_answer, resume_user]).unwrap();
+        let mut index = TailIndex::default();
+        index.insert("run-first".into(), first, i64::MAX);
+        index.insert("run-switch".into(), switched, i64::MAX);
+        (index, with_gpt, without_gpt)
+    }
+
+    fn candidates() -> Vec<(String, String)> {
+        vec![
+            ("run-first".into(), "glm-first".into()),
+            ("run-switch".into(), "gpt-switch".into()),
+        ]
+    }
+
+    #[test]
+    fn unique_longest_nested_source_is_the_later_turn() {
+        let (index, with_gpt, _) = nested_sources();
+        assert!(matches!(
+            index.associate(Some(&with_gpt), &candidates()),
+            RunEvent::RetainedTailAssociated {
+                status,
+                source_interaction_id: Some(source),
+                ..
+            } if status == "inferred" && source == "gpt-switch"
+        ));
+    }
+
+    #[test]
+    fn omitting_the_switched_turn_keeps_the_earlier_source() {
+        let (index, _, without_gpt) = nested_sources();
+        assert!(matches!(
+            index.associate(Some(&without_gpt), &candidates()),
+            RunEvent::RetainedTailAssociated {
+                status,
+                source_interaction_id: Some(source),
+                ..
+            } if status == "inferred" && source == "glm-first"
+        ));
+    }
+
+    #[test]
+    fn equal_length_independent_sources_stay_ambiguous() {
+        let first_user = long_user("first");
+        let first_answer = long_answer("glm");
+        let resume_user = long_user("resume");
+        let mut first = Window::capture(&[first_user.clone()]).unwrap();
+        assert!(first.append(Window::capture(&[first_answer.clone()]).unwrap()));
+        let duplicate = Window::capture(&[first_user.clone(), first_answer.clone()]).unwrap();
+        let input = Window::capture(&[first_user, first_answer, resume_user]).unwrap();
+        let mut index = TailIndex::default();
+        index.insert("run-a".into(), first, i64::MAX);
+        index.insert("run-b".into(), duplicate, i64::MAX);
+        assert!(matches!(
+            index.associate(
+                Some(&input),
+                &[
+                    ("run-a".into(), "interaction-a".into()),
+                    ("run-b".into(), "interaction-b".into()),
+                ]
+            ),
+            RunEvent::RetainedTailAssociated { status, candidate_count: 2, .. }
+                if status == "ambiguous"
+        ));
     }
 
     #[test]

@@ -1,7 +1,6 @@
 <script lang="ts">
 import * as m from '$lib/paraglide/messages.js'
 import { onMount, tick, untrack } from 'svelte'
-import { SvelteSet } from 'svelte/reactivity'
 import ChevronDownIcon from '@lucide/svelte/icons/chevron-down'
 import CrosshairIcon from '@lucide/svelte/icons/crosshair'
 import LocateFixedIcon from '@lucide/svelte/icons/locate-fixed'
@@ -20,8 +19,9 @@ import {
 } from '@xyflow/svelte'
 import '@xyflow/svelte/dist/style.css'
 
-import { observationStatusLabel } from '$lib/observation-labels'
+import { canvasLinks } from '$lib/interaction-canvas-links'
 import type { LayoutPosition } from '$lib/interaction-layout.worker'
+import { observationStatusLabel } from '$lib/observation-labels'
 import type { ForestRoot, InteractionNodeData, InteractionSummary } from '$lib/types'
 import InteractionNode from '$lib/components/interaction-node.svelte'
 import { Button } from '$lib/components/ui/button'
@@ -103,57 +103,23 @@ let nodes = $derived.by<FlowInteractionNode[]>(() =>
     })),
   ),
 )
-let edges = $derived.by<Edge[]>(() => {
-  const interactions = roots.flatMap((root) => root.interactions)
-  const visible = new Set(interactions.map((interaction) => interaction.id))
-  const result: Edge[] = []
-  for (const interaction of interactions) {
-    const parent = interaction.parent_interaction_id
-    const nativeParent = (interaction.context_events ?? []).some(
-      (event) =>
-        event.kind === 'native_compaction_associated' &&
-        event.payload &&
-        typeof event.payload === 'object' &&
-        'source_interaction_id' in event.payload &&
-        event.payload.source_interaction_id === parent,
-    )
-    if (parent && visible.has(parent) && !nativeParent) {
-      result.push({
-        id: `confirmed-${parent}-${interaction.id}`,
-        source: parent,
-        target: interaction.id,
-        type: 'smoothstep',
-
-        selectable: false,
-        focusable: false,
-        style: `stroke: ${selectedPath.has(parent) && selectedPath.has(interaction.id) ? 'var(--primary)' : 'var(--border)'}; stroke-width: 1.5`,
-      })
+let edges = $derived.by<Edge[]>(() =>
+  canvasLinks(roots.flatMap((root) => root.interactions)).map((link) => {
+    const onPath = selectedPath.has(link.source) && selectedPath.has(link.target)
+    const stroke = link.kind === 'native' ? 'var(--muted-foreground)' : onPath ? 'var(--primary)' : 'var(--border)'
+    const dash = link.kind === 'native' ? '3 3' : link.kind === 'inferred' ? '8 5' : undefined
+    return {
+      id: link.id,
+      source: link.source,
+      target: link.target,
+      type: 'smoothstep',
+      label: link.kind === 'native' ? m.observation_ancestry_native() : undefined,
+      selectable: false,
+      focusable: false,
+      style: `stroke: ${stroke}; stroke-width: 1.5${dash ? `; stroke-dasharray: ${dash}` : ''}`,
     }
-    const seen = new SvelteSet<string>()
-    for (const event of interaction.context_events ?? []) {
-      if (!event.payload || typeof event.payload !== 'object') continue
-      const payload = event.payload as Record<string, unknown>
-      const native = event.kind === 'native_compaction_associated'
-      if (!native && !(event.kind === 'retained_tail_associated' && payload.status === 'inferred')) continue
-      const source = payload.source_interaction_id
-      if (typeof source !== 'string' || source === interaction.id || !visible.has(source)) continue
-      const id = `${native ? 'native' : 'inferred'}-${source}-${interaction.id}`
-      if (seen.has(id)) continue
-      seen.add(id)
-      result.push({
-        id,
-        source,
-        target: interaction.id,
-        type: 'smoothstep',
-        label: native ? m.observation_ancestry_native() : undefined,
-        selectable: false,
-        focusable: false,
-        style: `stroke: ${native ? 'var(--muted-foreground)' : selectedPath.has(source) && selectedPath.has(interaction.id) ? 'var(--primary)' : 'var(--border)'}; stroke-width: 1.5; stroke-dasharray: ${native ? '3 3' : '8 5'}`,
-      })
-    }
-  }
-  return result
-})
+  }),
+)
 
 async function waitForRenderedLayout(): Promise<void> {
   await tick()

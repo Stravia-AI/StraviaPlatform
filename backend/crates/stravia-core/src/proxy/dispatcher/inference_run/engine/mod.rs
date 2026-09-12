@@ -787,13 +787,12 @@ pub(super) async fn orchestrate(
         principal: principal.clone(),
         compaction_records: compaction_records.clone(),
     });
-    if generation_chain_write
-        .as_ref()
-        .is_none_or(|write| write.parent_id().is_none())
-        && !client_request
-            .items
-            .iter()
-            .any(stravia_runtime_contract::protocol::ir::AiItem::is_compaction)
+    // 有 Generation parent 也要做尾部诊断：用来区分切模型后续接（输入含中间轮）
+    // 和从原链真实分叉（不含中间轮）。压缩请求改走 native compaction 关联。
+    if !client_request
+        .items
+        .iter()
+        .any(stravia_runtime_contract::protocol::ir::AiItem::is_compaction)
     {
         observer.observe_client_input(&client_request.items);
     }
