@@ -84,7 +84,17 @@ impl TraceRecord {
             .message_type
             .as_deref()
             .is_some_and(|kind| kind.eq_ignore_ascii_case("binary"));
-        if self.payload_encoding == "base64" || binary_message || wrapped_base64 {
+        if self.transport.as_deref() == Some("websocket")
+            && matches!(self.message_type.as_deref(), Some("ping" | "pong"))
+        {
+            // 心跳载荷可以是任意字节，既不是媒体，也不能绕过凭据保护原样落盘。
+            self.payload_encoding = "json".into();
+            self.payload = serde_json::json!({
+                "original_wire_bytes": false,
+                "content_capture": "omitted",
+                "reason": "control_frame_payload_omitted"
+            });
+        } else if self.payload_encoding == "base64" || binary_message || wrapped_base64 {
             self.payload_encoding = "base64".to_owned();
             let Some(encoded) = self.payload.as_str() else {
                 return Err(CREDENTIAL_REDACTION_UNSUPPORTED);
@@ -989,6 +999,27 @@ mod tests {
             payload: Value::String(payload),
             error: None,
             redactions: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn websocket_control_payloads_are_omitted_without_media_gaps() {
+        for message_type in ["ping", "pong"] {
+            for bytes in [b"\xff\x00\x81".as_slice(), b"api_key=never-persist-this"] {
+                let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+                let mut record = binary_record(encoded.clone());
+                record.message_type = Some(message_type.to_owned());
+                record.payload_encoding = "json".to_owned();
+                record.payload = serde_json::json!({"encoding": "base64", "data": encoded});
+                record
+                    .redact_before_queue(&super::super::redaction::ProtectedSecrets::default())
+                    .expect("control frame capture");
+                assert_eq!(record.payload["content_capture"], "omitted");
+                assert_eq!(record.payload["reason"], "control_frame_payload_omitted");
+                assert!(!record.payload.to_string().contains("never-persist-this"));
+                assert!(!record.payload.to_string().contains(&encoded));
+                assert!(!record.redactions.contains(&RedactionKind::MediaUnrecoverable));
+            }
         }
     }
 

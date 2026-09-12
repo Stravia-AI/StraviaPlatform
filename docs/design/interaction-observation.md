@@ -268,6 +268,8 @@ SQLite 与 PostgreSQL 使用等价 schema 和索引。具体 SQL 由各自迁移
 
 ### 6.2 Debug 分段文件
 
+WebSocket Ping/Pong 控制帧保留事件类型、方向与时间，不保存任意字节载荷，避免将非 UTF-8 心跳误判为媒体或绕过凭据保护。payload 显式记录 `original_wire_bytes: false`、`content_capture: omitted` 与 `reason: control_frame_payload_omitted`；策略性省略不产生 `MediaUnrecoverable` 或 partial 状态。该规则不放宽其他二进制消息的脱敏与缺失标记；历史 Trace 不回填或改写。
+
 payload 写入 `GatewayConfig.data_dir` 下由 Observation 模块拥有的目录，建议布局：
 
 ```text
