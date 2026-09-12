@@ -134,7 +134,6 @@ async fn responses_terminal_body_drop_preserves_observed_generation_chain() {
     let router = crate::proxy::server::create_router(gateway.clone());
     let mut events = gateway.observation.subscribe(0);
     let mut input = Vec::new();
-    let mut previous_interaction = None;
     let mut previous_response = None;
 
     for prompt in ["first", "second", "third"] {
@@ -188,10 +187,11 @@ async fn responses_terminal_body_drop_preserves_observed_generation_chain() {
             .iter()
             .flat_map(|root| &root.interactions)
             .find(|interaction| {
-                interaction.parent_interaction_id == previous_interaction
-                    && interaction.visible_tail == format!("{prompt} answer")
+                interaction
+                    .visible_tail
+                    .ends_with(&format!("{prompt} answer"))
             })
-            .expect("new interaction linked to its parent");
+            .expect("terminal response remains visible in its interaction");
         assert_eq!(interaction.status, "completed");
         let detail = gateway
             .observation
@@ -199,15 +199,15 @@ async fn responses_terminal_body_drop_preserves_observed_generation_chain() {
             .await
             .expect("interaction query")
             .expect("interaction");
-        assert_eq!(detail.runs.len(), 1);
-        assert_eq!(detail.runs[0].status, "completed");
-        assert_eq!(detail.runs[0].terminal_reason, None);
-        assert_eq!(
-            detail.runs[0].generation_node_id.as_deref(),
-            Some(response_id)
-        );
-        assert_eq!(detail.runs[0].generation_parent_id, previous_response);
-        previous_interaction = Some(interaction.id.clone());
+        let run = detail
+            .runs
+            .iter()
+            .find(|run| run.generation_node_id.as_deref() == Some(response_id))
+            .expect("delivered generation remains observed");
+        assert_eq!(run.status, "completed");
+        assert_eq!(run.terminal_reason, None);
+        assert!(!run.user_interrupted);
+        assert_eq!(run.generation_parent_id, previous_response);
         previous_response = Some(response_id.to_owned());
         input.extend(
             completed["response"]["output"]

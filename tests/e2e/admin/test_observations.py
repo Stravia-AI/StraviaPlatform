@@ -393,7 +393,11 @@ def test_tool_loop_concurrent_branches_and_new_user_group_at_interaction_seam(
         assert status == 200, response
         assistant = _tool_call_message(response)
         messages.extend(
-            [assistant, {"role": "tool", "tool_call_id": assistant["tool_calls"][0]["id"], "content": f"round {round_number}"}]
+            [
+                assistant,
+                {"role": "tool", "tool_call_id": assistant["tool_calls"][0]["id"], "content": f"round {round_number}"},
+                {"role": "user", "content": "Continue the unfinished tool work."},
+            ]
         )
     status, response = http_request(
         "POST",
@@ -403,7 +407,10 @@ def test_tool_loop_concurrent_branches_and_new_user_group_at_interaction_seam(
     )
     assert status == 200, response
     loop_interactions = _wait_for(
-        "three-round tool Interaction", lambda: _route_interactions(admin_env, loop_route)
+        "four persisted tool-loop requests",
+        lambda: (lambda items: items if sum(
+            len(_detail(admin_env, item["id"])["runs"]) for item in items
+        ) == 4 else None)(_route_interactions(admin_env, loop_route)),
     )
     assert len(loop_interactions) == 1
     loop_detail = _wait_for(
@@ -471,36 +478,35 @@ def test_tool_loop_concurrent_branches_and_new_user_group_at_interaction_seam(
     assert len(children) == 2
     assert len({run["parent_run_id"] for run in children}) == 1
 
-    completed_history = root_messages + [
-        assistant,
-        {"role": "tool", "tool_call_id": assistant["tool_calls"][0]["id"], "content": "left"},
-        _tool_call_message(outcomes["left"][1]),
-    ]
+    quick_route, quick_key = _create_route(admin_env, "observation-quick-followup")
+    quick_history = [{"role": "user", "content": "finish this task"}]
+    status, completed_response = _proxy(
+        admin_env, quick_key, "observation-quick-followup", quick_history
+    )
+    assert status == 200, completed_response
+    quick_history.append(_tool_call_message(completed_response))
     status, response = _proxy(
         admin_env,
-        branch_key,
-        "observation-branch",
-        completed_history + [{"role": "user", "content": "a later user turn"}],
-        body_extra={"tools": tools},
+        quick_key,
+        "observation-quick-followup",
+        quick_history + [{"role": "user", "content": "The todo list is unfinished. Continue."}],
     )
     assert status == 200, response
     interactions = _wait_for(
-        "new-user child Interaction with persisted input preview",
-        lambda: (lambda items: items if len(items) == 2 and all(
-            item["input_preview"] is not None for item in items
-        ) else None)(
-            _route_interactions(admin_env, branch_route)
-        ),
+        "completed response and quick follow-up",
+        lambda: (lambda items: items if sum(
+            len(_detail(admin_env, item["id"])["runs"]) for item in items
+        ) == 2 else None)(_route_interactions(admin_env, quick_route)),
     )
-    child = next(item for item in interactions if item["id"] != branch_interactions[0]["id"])
-    assert child["parent_interaction_id"] == branch_interactions[0]["id"]
-    assert child["input_preview"] == "a later user turn"
-    assert _detail(admin_env, branch_interactions[0]["id"])["interaction"]["input_preview"] == "observation-branch"
+    assert len(interactions) == 1
+    quick_detail = _detail(admin_env, interactions[0]["id"])
+    assert quick_detail["interaction"]["input_preview"] == "finish this task"
+    assert all(not run["user_interrupted"] for run in quick_detail["runs"])
 
 
 @pytest.mark.e2e
 @pytest.mark.admin
-def test_superseded_running_branch_finishes_as_user_interrupted_in_live_and_bundle(
+def test_tool_result_with_user_input_preserves_running_branch_in_live_and_bundle(
     admin_env: dict[str, Any],
 ) -> None:
     route_id, api_key = _create_route(admin_env, "observation-interruption")
@@ -583,37 +589,37 @@ def test_superseded_running_branch_finishes_as_user_interrupted_in_live_and_bund
     assert status == 200, replacement_response
     assert replacement_response["choices"][0]["message"]["content"] == "mock-ok-1"
 
-    interrupted_while_active = _wait_for(
-        "truthfully active interrupted branch",
-        lambda: (lambda detail: detail if any(
+    continued_while_active = _wait_for(
+        "tool-result follow-up without interrupting the active sibling",
+        lambda: (lambda detail: detail if len(detail["runs"]) == 3 and any(
             run["id"] == old_run["id"]
             and run["status"] == "running"
-            and run["user_interrupted"] is True
+            and run["user_interrupted"] is False
             and run["finished_at"] is None
             for run in detail["runs"]
         ) else None)(_detail(admin_env, original["interaction"]["id"])),
     )
-    assert interrupted_while_active["interaction"]["status"] == "running"
+    assert continued_while_active["interaction"]["status"] == "running"
 
     old_worker.join(timeout=10.0)
     assert old_outcome and old_outcome[0][0] == 200
     assert old_outcome[0][1]["choices"][0]["message"]["content"] == "mock-ok-1"
     finished = _wait_for(
-        "terminal user interruption",
-        lambda: (lambda detail: detail if detail["interaction"]["status"] == "interrupted"
+        "completed sibling branches in the same Interaction",
+        lambda: (lambda detail: detail if detail["interaction"]["status"] == "completed"
             and next(run for run in detail["runs"] if run["id"] == old_run["id"])["status"]
-            == "user_interrupted"
+            == "completed"
             else None)(_detail(admin_env, original["interaction"]["id"])),
     )
     terminal_run = next(run for run in finished["runs"] if run["id"] == old_run["id"])
-    assert terminal_run["terminal_reason"] == "user_interrupted"
-    assert terminal_run["user_interrupted"] is True
+    assert terminal_run["terminal_reason"] is None
+    assert terminal_run["user_interrupted"] is False
     assert terminal_run["finished_at"] is not None
     finished_event = next(
         event for event in terminal_run["events"] if event["kind"] == "run_finished"
     )
-    assert finished_event["payload"]["status"] == "user_interrupted"
-    assert finished_event["payload"]["terminal_reason"] == "user_interrupted"
+    assert finished_event["payload"]["status"] == "completed"
+    assert finished_event["payload"]["terminal_reason"] is None
 
     status, ticket = http_request(
         "POST",
@@ -630,15 +636,15 @@ def test_superseded_running_branch_finishes_as_user_interrupted_in_live_and_bund
     with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
         manifest = json.loads(bundle.read("manifest.json"))
         summary = json.loads(bundle.read("interaction.json"))
-        assert manifest["status"] == "interrupted"
-        assert summary["status"] == "interrupted"
+        assert manifest["status"] == "completed"
+        assert summary["status"] == "completed"
         bundled_finish = next(
             event
             for event in summary["events"]
             if event["run_id"] == old_run["id"] and event["kind"] == "run_finished"
         )
-        assert bundled_finish["payload"]["status"] == "user_interrupted"
-        assert bundled_finish["payload"]["terminal_reason"] == "user_interrupted"
+        assert bundled_finish["payload"]["status"] == "completed"
+        assert bundled_finish["payload"]["terminal_reason"] is None
 
 
 @pytest.mark.e2e
@@ -1368,6 +1374,8 @@ def test_root_batches_filters_and_fixed_anchor_reload_preserve_complete_context(
     )
     assert status == 200, completed
     old_anchor = int(time.time() * 1000)
+    # This fixture needs a distinct user interaction, outside the rapid-continuation window.
+    time.sleep(2.01)
     status, child = http_request(
         "POST",
         f"{admin_env['proxy']}/v1/responses",

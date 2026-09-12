@@ -89,6 +89,8 @@ Stravia does not provide platform-level compaction settings, inject default comp
 
 Registered native states preserve their known ancestry across restarts within retention, without restoring removed history. Their Target, account/configuration generation, model, and protocol must remain compatible. Monitoring distinguishes confirmed generation ancestry, native bridges, and inferred retained-tail associations; inferred links never affect inference or enable Target Continuation. Clearing monitoring history does not delete valid native state mappings. Ordinary monitoring excludes opaque payloads and reports unreported compaction usage as unknown.
 
+Automatic history-parent discovery compares complete message semantics, not tracking metadata. A client may omit application metadata and internal tracking fields without breaking an otherwise exact history prefix; message roles, content, tool-call/result associations, protected reasoning, native compaction state, and unclassified protocol extensions remain significant. Existing history-prefix indexes are rebuilt under the current semantics at startup without rewriting original history or parent links; upstream continuation still requires compatible Targets and request controls.
+
 When a client switches models and updates its leading instructions, an unchanged complete interaction—including public thinking previews and their History Markers—can still support a diagnostic association with a unique source under the same API Key. This does not establish an execution parent. Edited previews or markers, private reasoning, ambiguous evidence, or an unavailable process-local index do not qualify; existing request records are not backfilled.
 
 ### Providers and model routing
@@ -214,6 +216,8 @@ The SvelteKit WebUI manages:
 - Ready-to-copy integration examples for SDKs and coding tools
 
 Interaction Observation is available in both Debug and release builds. Its process-local **Debug** switch starts off after every restart and requires confirmation before enabling. Each newly admitted Inference Run snapshots the current switch, so changing it affects only later admissions. Debug records canonical checkpoints and ordered HTTP, SSE, and WebSocket application messages—not TLS records, TCP packets, HTTP/2 frames, or packet/chunk fidelity below the application adapter. Credential headers, URL userinfo, credential-like query values, and structured credential fields are permanently redacted before persistence; prompts, business content, and tool inputs/results may still remain sensitive.
+
+Requests that exactly continue a parent response under the same API key stay in its Interaction when they contain no new user input, return a pending client-tool result (with no time limit), or arrive within two seconds after that parent response was fully delivered. The last two cases may include additional user input; a completed Interaction can become active again. The two-second rule also groups fast human follow-ups: it does not identify harness hooks, discard input, or change model execution. Other new user inputs start a new Interaction.
 
 Desktop opens **Debug bundle** downloads in the system browser using a one-time download ticket; the desktop inspector stays open. In the WebUI, the current browser handles the download.
 

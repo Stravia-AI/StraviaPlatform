@@ -777,6 +777,8 @@ mod tests {
                 generation_root_id: None,
                 generation_parent_id: None,
                 has_new_user: true,
+                has_matching_pending_tool_result: false,
+                ingress_received_at: 0,
                 canonical_fingerprint: "thinking-test".into(),
                 route_id: "route".into(),
                 model_display_name: None,

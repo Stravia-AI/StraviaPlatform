@@ -724,6 +724,7 @@ async fn automatic_parent_matches_gemini_reasoning_and_tool_id_replay() {
 
     assert_eq!(third.parent.parent_id.as_deref(), Some(second_id.as_str()));
     assert_eq!(third.request_delta.items.len(), 1);
+    assert!(third.has_matching_pending_tool_result());
     assert_eq!(
         third
             .request
@@ -752,11 +753,7 @@ async fn automatic_parent_matches_anthropic_output_replayed_as_responses_items()
         .expect("begin Anthropic root");
     let mut response = AiResponse::new("upstream", "model");
     response.items = vec![
-        AiItem::reasoning(
-            vec!["summary".into()],
-            vec!["reasoning".into()],
-            Some("opaque".into()),
-        ),
+        AiItem::reasoning(vec!["reasoning".into()], vec![], Some("opaque".into())),
         AiItem::output_text("answer"),
         AiItem::function_call(stravia_runtime_contract::protocol::ir::ToolCall {
             id: "call_1".into(),
@@ -774,11 +771,7 @@ async fn automatic_parent_matches_anthropic_output_replayed_as_responses_items()
 
     let mut resumed_request = responses_request(vec![
         question,
-        AiItem::reasoning(
-            vec!["summary".into()],
-            vec!["reasoning".into()],
-            Some("opaque".into()),
-        ),
+        AiItem::reasoning(vec!["reasoning".into()], vec![], Some("opaque".into())),
         AiItem::output_text("answer"),
         AiItem::function_call(stravia_runtime_contract::protocol::ir::ToolCall {
             id: "call_1".into(),

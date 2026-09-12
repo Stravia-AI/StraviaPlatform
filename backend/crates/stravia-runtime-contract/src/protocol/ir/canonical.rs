@@ -70,25 +70,50 @@ pub fn history_unit_count(items: &[AiItem]) -> usize {
 }
 
 fn history_item_values(item: &AiItem) -> Vec<serde_json::Value> {
-    if let Some(native) = native_compaction_item(item) {
-        return vec![serde_json::json!({"role": item.role, "native_compaction": native})];
-    }
-    let values = if item.role == super::Role::Assistant {
+    let values = if let Some(mut native) = native_compaction_item(item) {
+        if let Some(fields) = native.as_object_mut() {
+            for key in [
+                "id",
+                "status",
+                "metadata",
+                "internal_chat_message_metadata_passthrough",
+            ] {
+                fields.remove(key);
+            }
+        }
+        vec![serde_json::json!({"role": item.role, "native_compaction": native})]
+    } else if item.role == super::Role::Assistant {
         assistant_history_values(item)
     } else if let Some(values) = tool_output_history_values(item) {
         values
     } else {
         vec![history_item_value(item)]
     };
-    if let Some(fields) = item
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.get("__open_responses_item_fields"))
-        .filter(|fields| fields.as_object().is_some_and(|fields| !fields.is_empty()))
-    {
+    if let Some(fields) = history_native_item_fields(item) {
         return vec![serde_json::json!({"items": values, "native_item_fields": fields})];
     }
     values
+}
+
+// This bag contains additive wire fields, not just metadata. Preserve every
+// unclassified extension conservatively: it may carry model content. Only the
+// protocol's application metadata and internal tracking carrier are non-semantic.
+fn history_native_item_fields(item: &AiItem) -> Option<serde_json::Value> {
+    let fields = item.meta.as_ref()?.get("__open_responses_item_fields")?;
+    let Some(object) = fields.as_object() else {
+        return Some(fields.clone());
+    };
+    let semantic = object
+        .iter()
+        .filter(|(key, _)| {
+            !matches!(
+                key.as_str(),
+                "metadata" | "internal_chat_message_metadata_passthrough"
+            )
+        })
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<serde_json::Map<_, _>>();
+    (!semantic.is_empty()).then_some(serde_json::Value::Object(semantic))
 }
 
 fn history_values(items: &[AiItem]) -> Vec<serde_json::Value> {
@@ -161,10 +186,12 @@ fn assistant_history_values(item: &AiItem) -> Vec<serde_json::Value> {
                         encrypted_content,
                     } => {
                         flush_text(&mut values, &mut text);
-                        values.push(reasoning_value(
-                            summary.iter().chain(content).cloned().collect(),
-                            encrypted_content.as_deref(),
-                        ));
+                        values.push(assistant_content_value(serde_json::json!({
+                            "type": "reasoning",
+                            "summary": summary,
+                            "content": content,
+                            "encrypted_content": encrypted_content,
+                        })));
                     }
                     ContentBlock::ToolUse {
                         id, name, input, ..
@@ -276,7 +303,8 @@ fn assistant_content_value(content: serde_json::Value) -> serde_json::Value {
 fn reasoning_value(text: String, encrypted_content: Option<&str>) -> serde_json::Value {
     assistant_content_value(serde_json::json!({
         "type": "reasoning",
-        "text": text,
+        "summary": [text],
+        "content": [],
         "encrypted_content": encrypted_content,
     }))
 }
@@ -292,11 +320,11 @@ fn tool_call_value(id: &str, name: &str, arguments: serde_json::Value) -> serde_
     })
 }
 
-/// Compares only fields positively classified as Provider-context semantics.
+/// Compares the same semantic projection used by history fingerprints.
 ///
-/// Response delivery metadata and cache policy never enter this projection.
-/// New IR fields remain non-semantic until explicitly added to
-/// `history_item_value` or `history_content_block_value`.
+/// Typed content, role order, media identity and native state are retained;
+/// delivery metadata and cache policy are not. Unclassified additive wire
+/// fields remain significant until explicitly classified as non-semantic.
 pub fn history_items_equal(left: &[AiItem], right: &[AiItem]) -> bool {
     history_values(left) == history_values(right)
 }
@@ -958,11 +986,7 @@ mod tests {
                 }]
             };
         let responses = vec![
-            AiItem::reasoning(
-                vec!["summary".into()],
-                vec!["reasoning".into()],
-                Some("opaque".into()),
-            ),
+            AiItem::thinking("summaryreasoning", Some("opaque".into())),
             AiItem::output_text("answer"),
             AiItem::function_call(ToolCall {
                 id: "call_1".into(),

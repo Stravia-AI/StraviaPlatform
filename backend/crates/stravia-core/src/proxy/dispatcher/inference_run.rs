@@ -173,6 +173,7 @@ pub(crate) struct DeferredWebSocketDelivery;
 pub(crate) struct WebSocketRunDelivery {
     observer: RunObserver,
     terminal: RunTerminalContext,
+    delivery_completed_at: Option<i64>,
     committed: bool,
     finished: bool,
 }
@@ -183,12 +184,19 @@ impl WebSocketRunDelivery {
     }
 
     pub(crate) fn sent_text(&mut self, text: &str) {
+        let sent_at = chrono::Utc::now().timestamp_millis();
         if !self.committed {
             self.committed = true;
             self.observer.record(RunEvent::ClientOutputCommitted);
         }
         self.record_wire_text(text);
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
+            if matches!(
+                value.get("type").and_then(serde_json::Value::as_str),
+                Some("response.completed" | "response.incomplete")
+            ) {
+                self.delivery_completed_at.get_or_insert(sent_at);
+            }
             if self.terminal.has_pending_inline_publications() {
                 self.terminal.receive_native_event(&self.observer, &value);
             }
@@ -240,6 +248,9 @@ impl WebSocketRunDelivery {
             return;
         }
         self.finished = true;
+        let delivery_completed_at = (status == "delivered")
+            .then_some(self.delivery_completed_at)
+            .flatten();
         self.observer.record_debug(|| RunEvent::Checkpoint {
             stage: "delivery_terminal".into(),
             model_turn_id: None,
@@ -254,6 +265,7 @@ impl WebSocketRunDelivery {
         self.terminal
             .finish_delivery_associations(&self.observer, delivered);
         self.observer.finish(RunOutcome {
+            delivery_completed_at,
             status: if delivered {
                 if self.terminal.waiting_client {
                     "waiting_client"
@@ -295,6 +307,7 @@ impl Drop for WebSocketRunDelivery {
 
 #[derive(Clone)]
 pub(super) struct RunTerminalContext {
+    pub delivery_completed_at: Option<i64>,
     pub generation_node_id: Option<String>,
     pub generation_root_id: Option<String>,
     pub generation_committed: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -368,12 +381,15 @@ impl ObservedDeliveryStream {
             return;
         }
         self.finished = true;
+        let delivery_completed_at = (delivery_status == "delivered" && self.status_code < 400)
+            .then(|| chrono::Utc::now().timestamp_millis());
         let Some(mut completion) = self.stream_completion.take() else {
             self.terminal.finish_http_delivery(
                 &self.observer,
                 self.status_code,
                 delivery_status,
                 reason,
+                delivery_completed_at,
             );
             return;
         };
@@ -383,22 +399,36 @@ impl ObservedDeliveryStream {
         // HTTP body 的 Drop/EOF 可能早于生成链落盘；协议终态与落盘结果由生产任务裁决。
         let finish = move |result: Result<Option<RunTerminalContext>, ()>| match result {
             Ok(Some(terminal)) => {
-                terminal.finish_http_delivery(&observer, status_code, "delivered", None);
+                terminal.finish_http_delivery(
+                    &observer,
+                    status_code,
+                    "delivered",
+                    None,
+                    terminal.delivery_completed_at,
+                );
             }
             Ok(None) if delivery_status != "delivered" => {
-                terminal.finish_http_delivery(&observer, status_code, delivery_status, reason);
+                terminal.finish_http_delivery(
+                    &observer,
+                    status_code,
+                    delivery_status,
+                    reason,
+                    None,
+                );
             }
             Ok(None) => terminal.finish_http_delivery(
                 &observer,
                 status_code,
                 "delivery_failed",
                 Some("stream_incomplete".into()),
+                None,
             ),
             Err(()) => terminal.finish_http_delivery(
                 &observer,
                 status_code,
                 "delivery_failed",
                 Some("stream_task_aborted".into()),
+                None,
             ),
         };
         match completion.0.try_recv() {
@@ -612,6 +642,7 @@ impl RunTerminalContext {
         status_code: u16,
         delivery_status: &str,
         reason: Option<String>,
+        delivery_completed_at: Option<i64>,
     ) {
         observer.record_debug(|| RunEvent::Checkpoint {
             stage: "delivery_terminal".into(),
@@ -641,6 +672,7 @@ impl RunTerminalContext {
         let delivered = delivery_status == "delivered";
         self.finish_delivery_associations(observer, delivered && status_code < 400);
         observer.finish(RunOutcome {
+            delivery_completed_at,
             status: status.to_owned(),
             terminal_reason: reason,
             generation_node_id: (delivered
@@ -827,6 +859,7 @@ async fn execute_observed(input: RunInput) -> Response {
             extensions.insert(WebSocketRunDelivery {
                 observer,
                 terminal,
+                delivery_completed_at: None,
                 committed: false,
                 finished: false,
             });

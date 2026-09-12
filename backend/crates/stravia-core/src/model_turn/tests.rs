@@ -1117,6 +1117,8 @@ fn credential_observer(
             generation_root_id: None,
             generation_parent_id: None,
             has_new_user: true,
+            has_matching_pending_tool_result: false,
+            ingress_received_at: 0,
             canonical_fingerprint: uuid::Uuid::new_v4().to_string(),
             route_id: "discovery-model".into(),
             model_display_name: None,
@@ -1174,6 +1176,7 @@ async fn committed_discovery_survives_dropped_protection_before_intern_acknowled
     protection.abort();
     assert!(matches!(protection.await, Err(error) if error.is_cancelled()));
     observer.finish(crate::interaction_observation::RunOutcome {
+        delivery_completed_at: None,
         status: "cancelled".into(),
         terminal_reason: Some("cancelled".into()),
         generation_node_id: None,
@@ -1280,6 +1283,7 @@ async fn committed_discovery_survives_replacement_failure_but_failed_intern_crea
         Err(stravia_runtime_contract::redaction::RedactionError::InvalidText)
     ));
     observer.finish(crate::interaction_observation::RunOutcome {
+        delivery_completed_at: None,
         status: "failed".into(),
         terminal_reason: Some("reversible_redaction_failed".into()),
         generation_node_id: None,
@@ -1365,6 +1369,7 @@ async fn discovery_event_write_failure_does_not_change_protection_and_reports_ga
             .contains("Q8n4Vk7sT2p9X5a3Lc6D0h1R")
     );
     observer.finish(crate::interaction_observation::RunOutcome {
+        delivery_completed_at: None,
         status: "completed".into(),
         terminal_reason: None,
         generation_node_id: None,
@@ -1452,6 +1457,8 @@ async fn held_publication_turn(
             generation_root_id: None,
             generation_parent_id: None,
             has_new_user: true,
+            has_matching_pending_tool_result: false,
+            ingress_received_at: 0,
             canonical_fingerprint: "publication-fixture".into(),
             route_id: "publication-model".into(),
             model_display_name: None,

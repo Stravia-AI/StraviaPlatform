@@ -291,7 +291,10 @@ impl GenerationChainStore {
                     principal,
                     TurnNodeKind::Response,
                     &ReusablePrefixQuery {
-                        namespace: state.controls_fingerprint.clone(),
+                        namespace: format!(
+                            "stravia-generation-history-v2:{}",
+                            state.controls_fingerprint
+                        ),
                         fingerprints: context_fingerprints,
                     },
                 )

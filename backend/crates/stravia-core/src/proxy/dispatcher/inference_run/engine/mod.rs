@@ -509,32 +509,34 @@ pub(super) async fn orchestrate(
     } else {
         None
     };
-    let (compact_parent_id, compact_root_id, compact_has_new_user) = if compact {
-        let prepared = match gw
-            .generation_chains
-            .prepare_compaction(principal.clone(), request)
-            .await
-        {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                let code = error.to_string();
-                return reject_before_admission(
-                    &mut Some(ingress_observer),
-                    "protocol",
-                    &code,
-                    coded_error_response(StatusCode::BAD_REQUEST, &code, &code),
-                );
-            }
+    let (compact_parent_id, compact_root_id, compact_has_new_user, compact_pending_tool_result) =
+        if compact {
+            let prepared = match gw
+                .generation_chains
+                .prepare_compaction(principal.clone(), request)
+                .await
+            {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    let code = error.to_string();
+                    return reject_before_admission(
+                        &mut Some(ingress_observer),
+                        "protocol",
+                        &code,
+                        coded_error_response(StatusCode::BAD_REQUEST, &code, &code),
+                    );
+                }
+            };
+            request = prepared.request;
+            (
+                prepared.parent_id,
+                prepared.root_id,
+                Some(prepared.has_new_user),
+                prepared.has_matching_pending_tool_result,
+            )
+        } else {
+            (None, None, None, false)
         };
-        request = prepared.request;
-        (
-            prepared.parent_id,
-            prepared.root_id,
-            Some(prepared.has_new_user),
-        )
-    } else {
-        (None, None, None)
-    };
     let compaction_source_generation_id = if compact && compact_parent_id.is_some() {
         compact_parent_id.clone()
     } else if !compact
@@ -722,6 +724,12 @@ pub(super) async fn orchestrate(
         generation_root_id: generation_root_id.clone(),
         generation_parent_id: generation_parent_id.clone(),
         has_new_user,
+        has_matching_pending_tool_result: has_new_user
+            && (compact_pending_tool_result
+                || generation_chain_write
+                    .as_ref()
+                    .is_some_and(|write| write.has_matching_pending_tool_result())),
+        ingress_received_at: 0, // Admission replaces this with the ingress observer's receipt.
         canonical_fingerprint,
         route_id,
         model_display_name,
@@ -776,6 +784,7 @@ pub(super) async fn orchestrate(
     ctx.extensions.insert(observer.clone());
     let compaction_records = crate::model_turn::CompactionPublications::default();
     ctx.extensions.insert(super::RunTerminalContext {
+        delivery_completed_at: None,
         generation_node_id,
         generation_root_id,
         generation_committed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),

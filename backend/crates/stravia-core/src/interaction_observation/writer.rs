@@ -198,30 +198,33 @@ pub(super) fn spawn(
                 }) => {
                     let now = now();
                     let persisted_parent = match start.generation_parent_id.as_deref() {
-                        Some(parent) => store.generation_parent(parent).await.ok().flatten(),
+                        Some(parent) => match store
+                            .observed_generation_parent(parent, &start.principal)
+                            .await
+                        {
+                            Ok(parent) => parent,
+                            Err(error) => {
+                                unpersisted_gaps
+                                    .lock()
+                                    .expect("observation gaps")
+                                    .record(&start.id, now);
+                                tracing::warn!(run_id=%start.id, %error, "observation parent lookup failed");
+                                None
+                            }
+                        },
                         None => None,
                     };
-                    let mut assignment = grouping.assign(&start, now);
-                    let mut parent_interaction = None;
-                    if !start.has_new_user {
-                        if let Some((interaction, run)) = persisted_parent.clone() {
-                            assignment.interaction_id = interaction;
-                            assignment.parent_run_id = Some(run);
-                            assignment.inferred_retry = false;
-                            grouping.relink_run(&start.id, &assignment.interaction_id);
-                        }
-                    } else if let Some((interaction, _)) = persisted_parent {
-                        parent_interaction = Some(interaction);
-                    }
+                    let assignment = grouping.assign(&start, now, persisted_parent.as_ref());
                     let expires = expires(now, retention_days.load(Ordering::Relaxed));
                     match store
                         .admit(Admission {
                             start: &start,
                             interaction_id: &assignment.interaction_id,
                             parent_run_id: assignment.parent_run_id.as_deref(),
-                            parent_interaction_id: parent_interaction.as_deref(),
+                            parent_interaction_id: assignment.parent_interaction_id.as_deref(),
                             debug_enabled,
                             inferred_retry: assignment.inferred_retry,
+                            grouping_reason: assignment.grouping_reason,
                             now,
                             expires_at: expires,
                         })
@@ -326,9 +329,6 @@ pub(super) fn spawn(
                     .await;
                     if matches!(event, RunEvent::ClientOutputCommitted) {
                         grouping.output_committed(&run_id);
-                    }
-                    if let RunEvent::GenerationAssociated { ref root_id, .. } = event {
-                        grouping.generation_associated(&run_id, root_id);
                     }
                     if let Some(interaction) = grouping.interaction_for_run(&run_id) {
                         let at = now();
@@ -629,9 +629,6 @@ async fn persist_finish(
             }
             Err(error) => tracing::warn!(%run_id,%error,"observation finish persistence failed"),
         }
-    }
-    if let Some(node_id) = outcome.generation_node_id.as_deref() {
-        grouping.generation_associated(run_id, node_id);
     }
     grouping.finish(run_id, &outcome.status, at);
 }

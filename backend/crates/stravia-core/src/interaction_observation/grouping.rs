@@ -9,6 +9,15 @@ pub(super) struct GroupAssignment {
     pub interaction_id: String,
     pub parent_run_id: Option<String>,
     pub inferred_retry: bool,
+    pub grouping_reason: &'static str,
+    pub parent_interaction_id: Option<String>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub(super) struct ObservedParent {
+    pub interaction_id: String,
+    pub run_id: String,
+    pub delivery_completed_at: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -25,7 +34,6 @@ struct RetryCandidate {
 #[derive(Default)]
 pub(super) struct GroupingIndex {
     runs: HashMap<String, RetryCandidate>,
-    generation_nodes: HashMap<String, (String, String)>,
 }
 
 impl GroupingIndex {
@@ -34,57 +42,84 @@ impl GroupingIndex {
             interactions.iter().map(String::as_str).collect();
         self.runs
             .retain(|_, run| !removed.contains(run.interaction_id.as_str()));
-        self.generation_nodes
-            .retain(|_, (interaction, _)| !removed.contains(interaction.as_str()));
     }
 
-    pub fn assign(&mut self, start: &RunStart, now: i64) -> GroupAssignment {
-        let explicit_parent = start
-            .generation_parent_id
-            .as_ref()
-            .and_then(|id| self.generation_nodes.get(id).cloned());
-        let (interaction_id, parent_run_id, inferred_retry) =
-            if let Some((interaction, run)) = explicit_parent {
-                if start.has_new_user {
-                    (uuid::Uuid::new_v4().to_string(), Some(run), false)
-                } else {
-                    (interaction, Some(run), false)
-                }
-            } else if start.generation_parent_id.is_some() {
-                (uuid::Uuid::new_v4().to_string(), None, false)
+    pub fn assign(
+        &mut self,
+        start: &RunStart,
+        now: i64,
+        parent: Option<&ObservedParent>,
+    ) -> GroupAssignment {
+        let mut grouping_reason = "new_root";
+        let mut parent_interaction_id = None;
+        let (interaction_id, parent_run_id, inferred_retry) = if let Some(parent) = parent {
+            let continuation = if !start.has_new_user {
+                Some("exact_continuation")
+            } else if start.has_matching_pending_tool_result {
+                Some("pending_tool_result")
+            } else if parent.delivery_completed_at.is_some_and(|delivered_at| {
+                start
+                    .ingress_received_at
+                    .checked_sub(delivered_at)
+                    .is_some_and(|elapsed| (0..=2000).contains(&elapsed))
+            }) {
+                Some("rapid_exact_continuation")
             } else {
-                let candidate = self
-                    .runs
-                    .values()
-                    .filter(|candidate| {
-                        candidate.principal == start.principal
-                            && candidate.fingerprint == start.canonical_fingerprint
-                            && !candidate.active
-                            && !candidate.client_output_committed
-                            && candidate.failed_at.is_some_and(|failed_at| {
-                                now >= failed_at && now.saturating_sub(failed_at) < RETRY_WINDOW_MS
-                            })
-                    })
-                    .max_by_key(|candidate| candidate.failed_at);
-                let identical_active = self.runs.values().any(|candidate| {
+                None
+            };
+            if let Some(reason) = continuation {
+                grouping_reason = reason;
+                (
+                    parent.interaction_id.clone(),
+                    Some(parent.run_id.clone()),
+                    false,
+                )
+            } else {
+                grouping_reason = "new_user";
+                parent_interaction_id = Some(parent.interaction_id.clone());
+                (
+                    uuid::Uuid::new_v4().to_string(),
+                    Some(parent.run_id.clone()),
+                    false,
+                )
+            }
+        } else if start.generation_parent_id.is_some() {
+            grouping_reason = "unmatched_parent";
+            (uuid::Uuid::new_v4().to_string(), None, false)
+        } else {
+            let candidate = self
+                .runs
+                .values()
+                .filter(|candidate| {
                     candidate.principal == start.principal
                         && candidate.fingerprint == start.canonical_fingerprint
-                        && candidate.active
-                });
-                if !identical_active {
-                    if let Some(candidate) = candidate {
-                        (
-                            candidate.interaction_id.clone(),
-                            Some(candidate.run_id.clone()),
-                            true,
-                        )
-                    } else {
-                        (uuid::Uuid::new_v4().to_string(), None, false)
-                    }
+                        && !candidate.active
+                        && !candidate.client_output_committed
+                        && candidate.failed_at.is_some_and(|failed_at| {
+                            now >= failed_at && now.saturating_sub(failed_at) < RETRY_WINDOW_MS
+                        })
+                })
+                .max_by_key(|candidate| candidate.failed_at);
+            let identical_active = self.runs.values().any(|candidate| {
+                candidate.principal == start.principal
+                    && candidate.fingerprint == start.canonical_fingerprint
+                    && candidate.active
+            });
+            if !identical_active {
+                if let Some(candidate) = candidate {
+                    grouping_reason = "inferred_retry";
+                    (
+                        candidate.interaction_id.clone(),
+                        Some(candidate.run_id.clone()),
+                        true,
+                    )
                 } else {
                     (uuid::Uuid::new_v4().to_string(), None, false)
                 }
-            };
+            } else {
+                (uuid::Uuid::new_v4().to_string(), None, false)
+            }
+        };
         self.runs.insert(
             start.id.clone(),
             RetryCandidate {
@@ -101,21 +136,8 @@ impl GroupingIndex {
             interaction_id,
             parent_run_id,
             inferred_retry,
-        }
-    }
-
-    pub fn relink_run(&mut self, run_id: &str, interaction_id: &str) {
-        if let Some(run) = self.runs.get_mut(run_id) {
-            run.interaction_id = interaction_id.to_owned();
-        }
-    }
-
-    pub fn generation_associated(&mut self, run_id: &str, node_id: &str) {
-        if let Some(run) = self.runs.get(run_id) {
-            self.generation_nodes.insert(
-                node_id.to_owned(),
-                (run.interaction_id.clone(), run_id.to_owned()),
-            );
+            grouping_reason,
+            parent_interaction_id,
         }
     }
 
@@ -185,6 +207,8 @@ mod tests {
             generation_root_id: None,
             generation_parent_id: None,
             has_new_user: true,
+            has_matching_pending_tool_result: false,
+            ingress_received_at: 0,
             canonical_fingerprint: fingerprint.into(),
             route_id: "route".into(),
             model_display_name: None,
@@ -194,39 +218,39 @@ mod tests {
     #[test]
     fn failed_root_retry_requires_every_exact_guard() {
         let mut index = GroupingIndex::default();
-        let first = index.assign(&start("one", "principal", "exact"), 1_000);
+        let first = index.assign(&start("one", "principal", "exact"), 1_000, None);
         index.finish("one", "failed", 2_000);
-        let retry = index.assign(&start("two", "principal", "exact"), 121_999);
+        let retry = index.assign(&start("two", "principal", "exact"), 121_999, None);
         assert_eq!(retry.interaction_id, first.interaction_id);
         assert!(retry.inferred_retry);
         index.finish("two", "failed", 123_000);
-        let late = index.assign(&start("three", "principal", "exact"), 243_000);
+        let late = index.assign(&start("three", "principal", "exact"), 243_000, None);
         assert_ne!(late.interaction_id, first.interaction_id);
-        let other = index.assign(&start("four", "other", "exact"), 243_002);
+        let other = index.assign(&start("four", "other", "exact"), 243_002, None);
         assert_ne!(other.interaction_id, first.interaction_id);
     }
     #[test]
     fn output_commit_and_concurrency_prevent_inferred_retry() {
         let mut committed = GroupingIndex::default();
-        let first = committed.assign(&start("one", "p", "f"), 0);
+        let first = committed.assign(&start("one", "p", "f"), 0, None);
         committed.output_committed("one");
         committed.finish("one", "failed", 1);
-        let retry = committed.assign(&start("two", "p", "f"), 2);
+        let retry = committed.assign(&start("two", "p", "f"), 2, None);
         assert_ne!(retry.interaction_id, first.interaction_id);
         let mut concurrent = GroupingIndex::default();
-        let active = concurrent.assign(&start("active", "p", "f"), 0);
-        let duplicate = concurrent.assign(&start("duplicate", "p", "f"), 1);
+        let active = concurrent.assign(&start("active", "p", "f"), 0, None);
+        let duplicate = concurrent.assign(&start("duplicate", "p", "f"), 1, None);
         assert_ne!(duplicate.interaction_id, active.interaction_id);
     }
     #[test]
     fn explicit_parent_never_uses_failed_root_inference() {
         let mut index = GroupingIndex::default();
-        let failed = index.assign(&start("failed", "p", "f"), 0);
+        let failed = index.assign(&start("failed", "p", "f"), 0, None);
         index.finish("failed", "failed", 1);
         let mut continuation = start("continuation", "p", "f");
         continuation.generation_parent_id = Some("unobserved-parent".into());
         continuation.has_new_user = false;
-        let assigned = index.assign(&continuation, 2);
+        let assigned = index.assign(&continuation, 2, None);
         assert_ne!(assigned.interaction_id, failed.interaction_id);
         assert!(!assigned.inferred_retry);
         assert_eq!(assigned.parent_run_id, None);

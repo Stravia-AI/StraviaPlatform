@@ -29,11 +29,11 @@
 
 ### 3.1 Interaction 边界
 
-1. 一条新的 canonical `User` item 开启新的 Connect Client Interaction。
+1. 一条新的 canonical `User` item 通常开启新的 Connect Client Interaction；精确父响应的工具续接与两秒快速续接按以下规则归并。
 2. 无法归入已有 Interaction、且不含 User item 的合法根请求也开启新的 Interaction。
-3. 客户端公开工具调用结束当前 Inference Run；工具结果续接若没有新 User item，仍属于原 Interaction。
+3. 客户端公开工具调用结束当前 Inference Run。同一 Principal 下精确续接父响应、没有新增 User item 的请求继续原 Interaction；请求 delta 提交父历史中尚未得到结果的工具调用所对应的结果时，即使夹带新增 User item 也继续原 Interaction，不限时间。完整历史中的旧工具结果不构成归并证据。
 4. 同一父响应的并发续接属于同一 Interaction，并在详情中形成 Run 子树。
-5. 新 User item 总是开启新 Interaction；原 Interaction 中尚无最终响应的执行分支标记为 `user_interrupted`。
+5. 同一 Principal 下精确续接父响应的新请求，其 ingress 接收时间距父响应完整交付时间在 `[0, 2000]` 毫秒内时，即使包含新增 User item 或父 Interaction 已完成，也继续原 Interaction；已完成交互重新进入活动状态。时间不取 admission 处理时间或可变的 `last_active_at`。这项规则仅表示快速续接，不识别或信任 harness hook，真人快速追问同样归并。其他新增 User item 开启新 Interaction；仅此时原 Interaction 中尚无最终响应的执行分支标记为 `user_interrupted`。
 6. 有明确 Generation Chain parent、无新 User item 的失败重试恢复原 Interaction，并保留失败 Run。
 7. 无 parent 的失败根 Run 只在以下条件全部满足时归并：
    - Principal 相同；
@@ -44,6 +44,7 @@
    - 没有相同 fingerprint 的 Run 正在执行。
 8. 根重试 fingerprint 只保存在当前进程的短期索引中，不写入 Observation、日志或 API；进程重启后不再归并。
 9. 根重试归并只改变 Observation 分组，不建立或伪造 Generation Chain parent。
+10. 工具续接与快速续接同样只改变 Observation 分组，保留独立 Run 与全部输入，不修改 Generation Chain 父边、权限或模型执行。诊断记录保留归并依据；缺少精确父关系或完整交付时间时，不猜测快速归并。
 
 ### 3.2 Interaction 主状态
 
@@ -537,10 +538,13 @@ Rust workspace 新增：
 
 - 一个 User 输入跨三次 client tool round-trip，只出现一个 Interaction 卡片；详情有三个 Run。
 - 同一父响应并发两次工具结果，卡片仍唯一，详情显示 Run 子树与两个最终回答。
-- 新 User 输入创建子 Interaction；原未完成分支显示 user interrupted。
+- 超出快速续接窗口且不提交待完成工具结果的新 User 输入创建子 Interaction；原未完成分支显示 user interrupted。
+- 工具结果夹带 User 提醒时仍归入原 Interaction，工具执行耗时不影响判断；历史中的旧工具结果不能触发此规则。
+- 精确父响应完整交付后 2,000 毫秒到达的新 User 输入归并，2,001 毫秒到达且不满足工具续接的请求分开；排队处理耗时不改变判定。
+- 已完成响应后两秒内精确续接可重新激活原 Interaction；真人快速追问与自动提醒遵循同一规则，原 Run 完成记录不变。
 - 明确 Generation parent 的失败重试恢复原 Interaction。
 - 无 parent 根失败在两分钟、同 Principal、精确 fingerprint、无 Client Output Commit 时归并；超时、不同 Principal、已有 output commit、并发相同请求均不归并。
-- 同一父 Interaction 的两个新 User 分支在画布真实分叉，不复制祖先。
+- 同一父 Interaction 的两个不满足归并条件的新 User 分支在画布真实分叉，不复制祖先。
 
 ### 13.2 时间与加载
 

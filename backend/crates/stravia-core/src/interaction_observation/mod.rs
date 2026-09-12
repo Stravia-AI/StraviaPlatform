@@ -156,6 +156,7 @@ impl InteractionObservation {
         }
     }
     pub(crate) fn observe_ingress(&self, mut start: IngressStart) -> IngressObserver {
+        let received_at = writer::now();
         redaction::redact_ingress(&mut start);
         let debug = self.inner.debug.load(Ordering::Acquire);
         // 保留一个控制槽，最终状态与 Trace 关闭不能被普通事件挤出队列。
@@ -164,6 +165,7 @@ impl InteractionObservation {
         let websocket = start.method == "WEBSOCKET";
         IngressObserver {
             observation: self.clone(),
+            received_at,
             start: Some(start),
             debug_enabled: debug,
             trace,
@@ -678,6 +680,7 @@ impl InteractionObservation {
 }
 
 pub(crate) struct IngressObserver {
+    received_at: i64,
     observation: InteractionObservation,
     start: Option<IngressStart>,
     debug_enabled: bool,
@@ -731,7 +734,8 @@ impl IngressObserver {
             record_trace(trace, None, None, event)
         }
     }
-    pub(crate) fn admit(mut self, start: RunStart) -> RunObserver {
+    pub(crate) fn admit(mut self, mut start: RunStart) -> RunObserver {
+        start.ingress_received_at = self.received_at;
         let ingress = self.start.take();
         let debug_enabled = self.observation.inner.debug.load(Ordering::Acquire);
         let discarded_trace = if !debug_enabled {
@@ -1275,6 +1279,7 @@ impl Drop for RunObserverInner {
             .take();
         if !*self.terminal.get_mut() {
             pending_finish = Some(RunOutcome {
+                delivery_completed_at: None,
                 status: "interrupted".into(),
                 terminal_reason: Some("observer_dropped".into()),
                 generation_node_id: None,
@@ -1827,6 +1832,210 @@ mod snapshot_tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn exact_parent_grouping_uses_delivery_and_ingress_across_restart() -> anyhow::Result<()>
+    {
+        let directory = tempfile::tempdir()?;
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        sqlx::raw_sql(include_str!(
+            "../../migrations/sqlite/0034_interaction_observation.sql"
+        ))
+        .execute(&pool)
+        .await?;
+        sqlx::raw_sql(include_str!(
+            "../../migrations/sqlite/0040_interaction_input_preview.sql"
+        ))
+        .execute(&pool)
+        .await?;
+        let mut observation = InteractionObservation::new(
+            Some(pool.clone()),
+            None,
+            directory.path().to_path_buf(),
+            1,
+            false,
+        )
+        .await;
+        let delivered_at = writer::now() - 100_000;
+        for restarted in [false, true] {
+            for (case, delay, tools, parent, principal, new_user, merged, reason) in [
+                (
+                    "boundary",
+                    2000,
+                    false,
+                    true,
+                    "owner",
+                    true,
+                    true,
+                    "rapid_exact_continuation",
+                ),
+                ("late", 2001, false, true, "owner", true, false, "new_user"),
+                (
+                    "tool",
+                    86_400_000,
+                    true,
+                    true,
+                    "owner",
+                    true,
+                    true,
+                    "pending_tool_result",
+                ),
+                (
+                    "human",
+                    1,
+                    false,
+                    true,
+                    "owner",
+                    true,
+                    true,
+                    "rapid_exact_continuation",
+                ),
+                (
+                    "unmatched",
+                    1,
+                    true,
+                    false,
+                    "owner",
+                    true,
+                    false,
+                    "unmatched_parent",
+                ),
+                (
+                    "other-principal",
+                    1,
+                    true,
+                    true,
+                    "other",
+                    true,
+                    false,
+                    "unmatched_parent",
+                ),
+                ("before", -1, false, true, "owner", true, false, "new_user"),
+                (
+                    "ordinary",
+                    86_400_000,
+                    false,
+                    true,
+                    "owner",
+                    false,
+                    true,
+                    "exact_continuation",
+                ),
+            ] {
+                let id = format!("{restarted}-{case}");
+                let make_run = |observation: &InteractionObservation,
+                                id: String,
+                                received_at,
+                                parent,
+                                principal: &str,
+                                tools,
+                                new_user| {
+                    let mut ingress = observation.observe_ingress(IngressStart {
+                        id: id.clone(),
+                        method: "POST".into(),
+                        path: "/responses".into(),
+                        protocol: "responses".into(),
+                    });
+                    ingress.received_at = received_at;
+                    ingress.admit(RunStart {
+                        id: id.clone(),
+                        principal: principal.into(),
+                        api_key_id: None,
+                        api_key_name: None,
+                        generation_root_id: None,
+                        generation_parent_id: parent,
+                        has_new_user: new_user,
+                        has_matching_pending_tool_result: tools,
+                        ingress_received_at: 0,
+                        canonical_fingerprint: id,
+                        route_id: "route".into(),
+                        model_display_name: None,
+                        ingress_protocol: "responses".into(),
+                    })
+                };
+                let parent_id = format!("parent-{id}");
+                let node_id = format!("node-{id}");
+                let first = make_run(
+                    &observation,
+                    parent_id.clone(),
+                    delivered_at - 1,
+                    None,
+                    "owner",
+                    false,
+                    true,
+                );
+                first.finish(RunOutcome {
+                    status: if tools { "waiting_client" } else { "completed" }.into(),
+                    terminal_reason: None,
+                    generation_node_id: Some(node_id.clone()),
+                    generation_root_id: Some(node_id.clone()),
+                    delivery_completed_at: Some(delivered_at),
+                });
+                observation.flush().await?;
+                // Later observation work must not move the delivery timestamp.
+                first.record(RunEvent::ObservationGap {
+                    reason: "late observation".into(),
+                });
+                observation.flush().await?;
+                if restarted {
+                    drop(first);
+                    observation.shutdown().await;
+                    observation = InteractionObservation::new(
+                        Some(pool.clone()),
+                        None,
+                        directory.path().to_path_buf(),
+                        1,
+                        false,
+                    )
+                    .await;
+                }
+                let child = make_run(
+                    &observation,
+                    id.clone(),
+                    delivered_at + delay,
+                    Some(if parent {
+                        node_id
+                    } else {
+                        "different-node".into()
+                    }),
+                    principal,
+                    tools,
+                    new_user,
+                );
+                observation.flush().await?;
+                let parent_row: (String, bool) = sqlx::query_as("SELECT interaction_id,user_interrupted FROM inference_run_observations WHERE id=?")
+                    .bind(&parent_id).fetch_one(&pool).await?;
+                let child_interaction: String = sqlx::query_scalar(
+                    "SELECT interaction_id FROM inference_run_observations WHERE id=?",
+                )
+                .bind(&id)
+                .fetch_one(&pool)
+                .await?;
+                assert_eq!(child_interaction == parent_row.0, merged, "{id}");
+                assert!(
+                    !parent_row.1,
+                    "grouping must not interrupt its exact parent: {id}"
+                );
+                let status: String =
+                    sqlx::query_scalar("SELECT status FROM interaction_observations WHERE id=?")
+                        .bind(&child_interaction)
+                        .fetch_one(&pool)
+                        .await?;
+                assert_eq!(status, "running");
+                let recorded_reason: String = sqlx::query_scalar("SELECT json_extract(payload,'$.grouping_reason') FROM observation_events WHERE run_id=? AND kind='run_admitted'")
+                    .bind(&id).fetch_one(&pool).await?;
+                assert_eq!(recorded_reason, reason, "{id}");
+                drop(child);
+                observation.flush().await?;
+            }
+        }
+        observation.shutdown().await;
+        pool.close().await;
+        Ok(())
+    }
+
     #[test]
     fn undurable_gaps_follow_current_retention_and_clear_generations() {
         let day = 86_400_000;
@@ -1893,6 +2102,8 @@ mod snapshot_tests {
                     generation_root_id: None,
                     generation_parent_id: None,
                     has_new_user: true,
+                    has_matching_pending_tool_result: false,
+                    ingress_received_at: 0,
                     canonical_fingerprint: id.into(),
                     route_id: "test-route".into(),
                     model_display_name: None,
@@ -1908,6 +2119,7 @@ mod snapshot_tests {
             }],
         });
         completed.finish(RunOutcome {
+            delivery_completed_at: None,
             status: "completed".into(),
             terminal_reason: None,
             generation_node_id: None,
@@ -1946,6 +2158,7 @@ mod snapshot_tests {
         assert_eq!(page.items[0].new_credential_count, 1);
 
         active.finish(RunOutcome {
+            delivery_completed_at: None,
             status: "completed".into(),
             terminal_reason: None,
             generation_node_id: None,
@@ -2037,6 +2250,8 @@ mod snapshot_tests {
                 generation_root_id: None,
                 generation_parent_id: None,
                 has_new_user: false,
+                has_matching_pending_tool_result: false,
+                ingress_received_at: 0,
                 canonical_fingerprint: "tool-payload-test".into(),
                 route_id: "route".into(),
                 model_display_name: None,

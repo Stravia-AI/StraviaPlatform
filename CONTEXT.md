@@ -28,7 +28,7 @@ _避免使用_：Agent（当指这些工具）、接入 Agent、把 Desktop 和 
 
 ## Connect Client Interaction
 
-Connect Client Interaction 通常由一次新 User 输入发起，并包含其后所有未经过另一条新 User 输入的 Inference Run 续接；无法归入已有 Interaction、且不含 User item 的合法根请求也作为一个新的 Connect Client Interaction。客户端公开工具调用及工具结果可以让它跨越多个 Run；同一父响应的并发续接可以在 Interaction 内形成 Run 子树并产生多个最终生成响应。任何新 User 输入都会开启新的 Interaction；如果原执行分支尚未得到最终响应，该分支会被标记为由用户中断。失败的 Inference Run 不会单独结束 Interaction：没有新 User 输入、且后续请求续接同一 Generation Chain 父节点时，原 Interaction 可以恢复并保留失败记录。没有父节点的根 Run 仅在同 Principal、canonical request fingerprint 精确相同、前次 Run 已失败且从未发生 Client Output Commit、并在失败后两分钟内开始时，才在 Interaction Observation 中归并为同一 Interaction；这条诊断归并不建立 Generation Chain 关系。
+Connect Client Interaction 通常由一次新 User 输入发起，包含随后推进同一任务的一个或多个 Inference Run；无法归入已有 Interaction、且不含 User item 的合法根请求也开启新的 Interaction。同一 Principal 下精确续接父响应时，没有新增 User 的请求继续原 Interaction；提交父历史中待完成工具调用结果的请求即使夹带新增 User 也继续原 Interaction，不限时间；请求在父响应完整交付后两秒内到达时，即使包含新增 User 或父 Interaction 已完成，也归入原 Interaction。两秒快速续接是诊断归并规则，不证明输入来自 harness；真人快速追问同样可能归并。其他新增 User 开启新的 Interaction，原执行分支尚未得到最终响应时标记为由用户中断。同一父响应的并发续接可以在 Interaction 内形成 Run 子树并产生多个最终生成响应，已完成 Interaction 可以被合法续接重新激活。失败的 Inference Run 不会单独结束 Interaction：合法续接可以恢复原 Interaction 并保留失败记录。没有父节点的根 Run 仅在同 Principal、canonical request fingerprint 精确相同、前次 Run 已失败且从未发生 Client Output Commit、并在失败后两分钟内开始时，才在 Interaction Observation 中归并为同一 Interaction；诊断归并不建立 Generation Chain 关系，也不改变输入、权限或执行。
 _避免使用_：Agent Turn、Model Turn、Inference Run、Agent Loop
 
 ## Interaction Observation
@@ -258,7 +258,7 @@ Generation Materialization Cache 是 Gateway 进程内、按字节上限淘汰�
 
 ## Automatic Parent Discovery
 
-Automatic Parent Discovery 是在调用方未显式给出父节点时，为 Generation Chain 选择父节点的规则。它只在同一 Principal 内比较严格 canonical 历史前缀，选择最长且仍留下新 input item 的候选；任何语义差异或无候选都创建新根。它不从连接、网络属性或模糊文本推断父节点。
+Automatic Parent Discovery 是在调用方未显式给出父节点时，为 Generation Chain 选择父节点的规则。它只在同一 Principal 内比较完整消息语义的严格 canonical 历史前缀，选择最长且仍留下新 input item 的候选。角色、顺序、指令、内容块、工具调用与结果关联、受保护推理及原生压缩状态属于历史语义；应用元数据、追踪标识和交付状态不构成历史身份，未分类的协议扩展仍保守比较。任何语义差异或无候选都创建新根。它不从连接、网络属性、时间接近或模糊文本推断父节点。
 
 ## Native Compaction Boundary
 

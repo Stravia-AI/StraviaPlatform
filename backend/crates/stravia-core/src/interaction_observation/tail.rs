@@ -238,15 +238,20 @@ fn public_thinking_projection(value: &Value) -> bool {
     {
         return false;
     }
-    let Some(text) = value.pointer("/content/text").and_then(Value::as_str) else {
-        return false;
-    };
-    if !text.contains(crate::history_marker::HISTORY_MARKER_PREFIX) {
-        return false;
-    }
     // Marker carrier 是已交付的公开投影，不是隐藏 reasoning；仍精确比较全部预览与标记字节，
     // 不解析隐藏内容，也不允许仅凭 Marker 绕过完整交互、唯一候选及 Principal 隔离。
-    !crate::history_marker::history_marker_references(&[AiItem::thinking(text, None)]).is_empty()
+    ["/content/summary", "/content/content"]
+        .into_iter()
+        .filter_map(|path| value.pointer(path).and_then(Value::as_array))
+        .flatten()
+        .filter_map(Value::as_str)
+        .any(|text| {
+            text.contains(crate::history_marker::HISTORY_MARKER_PREFIX)
+                && !crate::history_marker::history_marker_references(&[AiItem::thinking(
+                    text, None,
+                )])
+                .is_empty()
+        })
 }
 
 fn private_control(value: &Value) -> bool {

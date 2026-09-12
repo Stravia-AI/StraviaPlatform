@@ -27,6 +27,7 @@ use stravia_runtime_contract::turn_chain::TurnNodeId;
 use stravia_runtime_contract::turn_chain::TurnNodeKind;
 
 mod materialize;
+pub(crate) use materialize::rebuilt_prefix;
 mod project;
 mod store;
 mod write;
@@ -164,6 +165,7 @@ pub(crate) struct PreparedCompactionInput {
     pub parent_id: Option<String>,
     pub root_id: Option<String>,
     pub has_new_user: bool,
+    pub has_matching_pending_tool_result: bool,
 }
 
 impl GenerationChain {
@@ -215,6 +217,8 @@ impl GenerationChain {
             .items
             .iter()
             .any(|item| item.role == stravia_runtime_contract::protocol::ir::Role::User);
+        let has_matching_pending_tool_result =
+            has_new_user && write.has_matching_pending_tool_result();
         let parent_id = write.parent.parent_id;
         let root_id = if parent_id.is_some() {
             write.parent.root_id
@@ -226,6 +230,7 @@ impl GenerationChain {
             parent_id,
             root_id,
             has_new_user,
+            has_matching_pending_tool_result,
         })
     }
 
@@ -793,9 +798,12 @@ impl ClientHistoryState {
 
     fn reusable_namespace(&self) -> String {
         if self.session_fingerprint.is_some() {
-            "stravia-generation-session-v1".into()
+            "stravia-generation-history-v2:session".into()
         } else {
-            self.controls_fingerprint.clone()
+            format!(
+                "stravia-generation-history-v2:{}",
+                self.controls_fingerprint
+            )
         }
     }
 }

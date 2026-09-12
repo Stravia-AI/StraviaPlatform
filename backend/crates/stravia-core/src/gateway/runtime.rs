@@ -129,6 +129,19 @@ impl Gateway {
                 7
             }
         };
+        let turn_chains = if let Some(pool) = history_sqlite_pool.as_ref() {
+            turn_chain::SqlTurnChainStore::sqlite(pool.clone())
+        } else {
+            turn_chain::SqlTurnChainStore::postgres(
+                postgres_pool
+                    .as_ref()
+                    .expect("Gateway requires a SQL history store")
+                    .clone(),
+            )
+        };
+        turn_chains.rebuild_generation_prefixes().await?;
+        let turn_chains: Arc<dyn stravia_runtime_contract::turn_chain::TurnChainStore> =
+            Arc::new(turn_chains);
         let observation = interaction_observation::InteractionObservation::new(
             history_sqlite_pool.clone(),
             postgres_pool.clone(),
@@ -137,17 +150,6 @@ impl Gateway {
             !matches!(storage_kind, RuntimeStorageKind::Memory),
         )
         .await;
-        let turn_chains: Arc<dyn stravia_runtime_contract::turn_chain::TurnChainStore> =
-            if let Some(pool) = history_sqlite_pool.as_ref() {
-                Arc::new(turn_chain::SqlTurnChainStore::sqlite(pool.clone()))
-            } else {
-                Arc::new(turn_chain::SqlTurnChainStore::postgres(
-                    postgres_pool
-                        .as_ref()
-                        .expect("Gateway requires a SQL history store")
-                        .clone(),
-                ))
-            };
         let history_markers: Arc<dyn history_marker::HistoryMarkerStore> =
             if let Some(pool) = history_sqlite_pool.as_ref() {
                 Arc::new(history_marker::SqlHistoryMarkerStore::sqlite(pool.clone()))

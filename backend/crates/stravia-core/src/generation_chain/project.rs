@@ -417,14 +417,18 @@ pub(super) fn canonical_client_history_request(request: &AiRequest) -> AiRequest
             .iter()
             .take_while(|item| item.role == stravia_runtime_contract::protocol::ir::Role::Developer)
             .count();
-        let instructions = canonical.items[..leading_developer_items]
-            .iter()
-            .map(|item| item.content.to_text())
-            .collect::<Vec<_>>()
-            .join("\n");
-        if !instructions.is_empty() {
-            canonical.instructions = Some(instructions);
-            canonical.items.drain(..leading_developer_items);
+        // Only the unambiguous Responses instructions carrier is equivalent to
+        // one plain developer message. Never flatten multiple messages or rich
+        // blocks: doing so erases role boundaries and model-visible content.
+        if leading_developer_items == 1
+            && let MessageContent::Text(instructions) = &canonical.items[0].content
+            && !instructions.is_empty()
+            && canonical.items[0].tool_calls.is_none()
+            && canonical.items[0].tool_call_id.is_none()
+            && canonical.items[0].meta.is_none()
+        {
+            canonical.instructions = Some(instructions.clone());
+            canonical.items.remove(0);
         }
     }
 
@@ -443,60 +447,67 @@ pub(super) fn canonical_client_history_request(request: &AiRequest) -> AiRequest
     canonical
 }
 
-pub(super) fn remap_client_tool_result_ids(
-    delta: &mut [AiItem],
-    client_history: &[AiItem],
-    effective_history: &[AiItem],
-) {
+pub(super) fn tool_result_id_mapping<'a>(
+    client_history: &'a [AiItem],
+    effective_history: &'a [AiItem],
+) -> HashMap<&'a str, &'a str> {
     let client_calls = history_tool_calls(client_history);
     let effective_calls = history_tool_calls(effective_history);
     let mut ids = HashMap::new();
     for ((client_id, client_name), (effective_id, effective_name)) in
         client_calls.into_iter().zip(effective_calls)
     {
-        if client_name.eq_ignore_ascii_case(&effective_name) {
-            ids.insert(client_id, effective_id.clone());
+        if client_name.eq_ignore_ascii_case(effective_name) {
+            ids.insert(client_id, effective_id);
             ids.insert(client_name, effective_id);
         }
     }
+    ids
+}
 
+pub(super) fn remap_client_tool_result_ids(
+    delta: &mut [AiItem],
+    client_history: &[AiItem],
+    effective_history: &[AiItem],
+) {
+    let ids = tool_result_id_mapping(client_history, effective_history);
     for item in delta {
         if let Some(tool_call_id) = item.tool_call_id.as_mut()
-            && let Some(effective_id) = ids.get(tool_call_id)
+            && let Some(effective_id) = ids.get(tool_call_id.as_str())
         {
-            *tool_call_id = effective_id.clone();
+            (*effective_id).clone_into(tool_call_id);
         }
         if let MessageContent::Blocks(blocks) = &mut item.content {
             for block in blocks {
                 if let ContentBlock::ToolResult { tool_use_id, .. } = block
-                    && let Some(effective_id) = ids.get(tool_use_id)
+                    && let Some(effective_id) = ids.get(tool_use_id.as_str())
                 {
-                    *tool_use_id = effective_id.clone();
+                    (*effective_id).clone_into(tool_use_id);
                 }
             }
         }
     }
 }
 
-fn history_tool_calls(items: &[AiItem]) -> Vec<(String, String)> {
+fn history_tool_calls(items: &[AiItem]) -> Vec<(&str, &str)> {
     let mut calls = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for item in items {
         if let Some(tool_calls) = item.tool_calls.as_ref() {
             for call in tool_calls {
-                if seen.insert((call.id.clone(), call.name.to_ascii_lowercase())) {
-                    calls.push((call.id.clone(), call.name.clone()));
+                if seen.insert((call.id.as_str(), call.name.to_ascii_lowercase())) {
+                    calls.push((call.id.as_str(), call.name.as_str()));
                 }
             }
         } else if let MessageContent::Blocks(blocks) = &item.content {
             for (id, name) in blocks.iter().filter_map(|block| {
                 if let ContentBlock::ToolUse { id, name, .. } = block {
-                    Some((id.clone(), name.clone()))
+                    Some((id.as_str(), name.as_str()))
                 } else {
                     None
                 }
             }) {
-                if seen.insert((id.clone(), name.to_ascii_lowercase())) {
+                if seen.insert((id, name.to_ascii_lowercase())) {
                     calls.push((id, name));
                 }
             }

@@ -34,6 +34,9 @@ pub(crate) struct RunStart {
     pub generation_root_id: Option<String>,
     pub generation_parent_id: Option<String>,
     pub has_new_user: bool,
+    pub has_matching_pending_tool_result: bool,
+    /// Captured at ingress receipt, before admission or writer queuing.
+    pub ingress_received_at: i64,
     // 仅用于进程内精确重试索引，不允许持久化或对外序列化。
     pub canonical_fingerprint: String,
     pub route_id: String,
@@ -50,6 +53,9 @@ pub(crate) struct RejectedOutcome {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct RunOutcome {
+    /// Full successful client delivery, captured by the transport, not the writer.
+    #[serde(default)]
+    pub delivery_completed_at: Option<i64>,
     pub status: String,
     pub terminal_reason: Option<String>,
     pub generation_node_id: Option<String>,

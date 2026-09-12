@@ -64,7 +64,7 @@ pub(super) struct LiveStreamRequest {
     pub(super) tx: tokio::sync::mpsc::Sender<Result<String, Infallible>>,
     pub(super) cancellation: CancellationToken,
     pub(super) preflight: tokio::sync::oneshot::Sender<Result<(), RoundOutcome>>,
-    pub(super) terminal_delivery: tokio::sync::oneshot::Receiver<()>,
+    pub(super) terminal_delivery: tokio::sync::oneshot::Receiver<i64>,
     pub(super) commit: tokio::sync::oneshot::Receiver<()>,
 }
 
@@ -73,7 +73,7 @@ pub(super) struct LiveStreamSink {
     cancellation: CancellationToken,
     preflight: Option<tokio::sync::oneshot::Sender<Result<(), RoundOutcome>>>,
     commit: Option<tokio::sync::oneshot::Receiver<()>>,
-    terminal_delivery: Option<tokio::sync::oneshot::Receiver<()>>,
+    terminal_delivery: Option<tokio::sync::oneshot::Receiver<i64>>,
     committed: bool,
 }
 
@@ -317,7 +317,7 @@ impl DeliveryAdapter {
     pub(super) fn response_from_receiver(
         receiver: tokio::sync::mpsc::Receiver<Result<String, Infallible>>,
         commit: tokio::sync::oneshot::Sender<()>,
-        terminal_delivery: tokio::sync::oneshot::Sender<()>,
+        terminal_delivery: tokio::sync::oneshot::Sender<i64>,
         egress: ProtocolId,
     ) -> Response {
         streaming_response(Body::from_stream(CommitOnPollStream {
@@ -327,27 +327,19 @@ impl DeliveryAdapter {
             egress,
         }))
     }
-    pub(super) async fn wait_for_terminal_delivery(&mut self) -> DeliveryProgress {
+    pub(super) async fn wait_for_terminal_delivery(&mut self) -> Option<i64> {
         let Self::Stream {
             live: Some(live), ..
         } = self
         else {
-            return DeliveryProgress::Sent;
+            return None;
         };
-        let Some(terminal_delivery) = live.terminal_delivery.take() else {
-            return DeliveryProgress::ReceiverClosed;
-        };
+        let terminal_delivery = live.terminal_delivery.take()?;
         tokio::select! {
-            // 已确认的协议终态不可被随后关闭 HTTP body 产生的取消信号推翻。
+            // A confirmed terminal receipt wins over subsequent body cancellation.
             biased;
-            result = terminal_delivery => {
-                if result.is_ok() {
-                    DeliveryProgress::Sent
-                } else {
-                    DeliveryProgress::ReceiverClosed
-                }
-            }
-            _ = live.cancellation.cancelled() => DeliveryProgress::Cancelled,
+            result = terminal_delivery => result.ok(),
+            _ = live.cancellation.cancelled() => None,
         }
     }
 }
@@ -398,7 +390,7 @@ fn protocol_error_event(ingress: ProtocolId, error: &TransformError) -> SseEvent
 struct CommitOnPollStream {
     inner: ReceiverStream<Result<String, Infallible>>,
     commit: Option<tokio::sync::oneshot::Sender<()>>,
-    terminal_delivery: Option<tokio::sync::oneshot::Sender<()>>,
+    terminal_delivery: Option<tokio::sync::oneshot::Sender<i64>>,
     egress: ProtocolId,
 }
 
@@ -414,7 +406,7 @@ impl Stream for CommitOnPollStream {
             && terminal_payload_delivered(self.egress, payload)
             && let Some(terminal_delivery) = self.terminal_delivery.take()
         {
-            let _ = terminal_delivery.send(());
+            let _ = terminal_delivery.send(chrono::Utc::now().timestamp_millis());
         }
         poll
     }
@@ -583,6 +575,43 @@ mod tests {
             preflight_rx,
             commit_tx,
         )
+    }
+
+    #[tokio::test]
+    async fn terminal_receipt_survives_later_cancellation_without_retiming() {
+        use futures::StreamExt;
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        let (commit_tx, commit_rx) = tokio::sync::oneshot::channel();
+        let (terminal_tx, terminal_rx) = tokio::sync::oneshot::channel();
+        let (preflight_tx, _preflight_rx) = tokio::sync::oneshot::channel();
+        let cancellation = CancellationToken::new();
+        let mut delivery = DeliveryAdapter::live_stream(LiveStreamRequest {
+            ingress: OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            egress: OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            tx: tx.clone(),
+            cancellation: cancellation.clone(),
+            preflight: preflight_tx,
+            terminal_delivery: terminal_rx,
+            commit: commit_rx,
+        });
+        let response = DeliveryAdapter::response_from_receiver(
+            rx,
+            commit_tx,
+            terminal_tx,
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+        );
+        tx.send(Ok("data: [DONE]\n\n".into())).await.unwrap();
+        let before = chrono::Utc::now().timestamp_millis();
+        let mut body = response.into_body().into_data_stream();
+        assert_eq!(
+            body.next().await.unwrap().unwrap().as_ref(),
+            b"data: [DONE]\n\n"
+        );
+        let after = chrono::Utc::now().timestamp_millis();
+        cancellation.cancel();
+        let received_at = delivery.wait_for_terminal_delivery().await.unwrap();
+        assert!((before..=after).contains(&received_at));
+        assert_eq!(delivery.wait_for_terminal_delivery().await, None);
     }
 
     #[tokio::test]

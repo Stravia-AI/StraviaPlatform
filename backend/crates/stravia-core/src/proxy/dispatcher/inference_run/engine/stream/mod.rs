@@ -1037,7 +1037,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                 false
             };
 
-            let mut terminal_delivered = false;
+            let mut delivery_completed_at = None;
             if aborted && !preflight_failed && !committed_failure_delivered {
                 if !cancelled && !receiver_closed && !protocol_failed {
                     let native_error = crate::compaction::NativeCompactionControls::classify(&request)
@@ -1072,15 +1072,15 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                     .await
                     == DeliveryProgress::Sent
             {
-                terminal_delivered =
-                    delivery.wait_for_terminal_delivery().await == DeliveryProgress::Sent;
+                delivery_completed_at = delivery.wait_for_terminal_delivery().await;
             }
 
-            if terminal_delivered {
+            if delivery_completed_at.is_some() {
                 if let Some(mut terminal) = request_context
                     .extensions
                     .get::<super::super::RunTerminalContext>()
                 {
+                    terminal.delivery_completed_at = delivery_completed_at;
                     terminal.stage_client_output(ingress, &response);
                     request_context.extensions.insert(terminal);
                 }
@@ -1098,7 +1098,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                 }
             }
             if let Some(completion) = completion_tx {
-                let terminal = terminal_delivered.then(|| {
+                let terminal = delivery_completed_at.is_some().then(|| {
                     request_context
                         .extensions
                         .get::<super::super::RunTerminalContext>()

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Fixed
+
+- Generation history discovery now ignores application and internal tracking metadata while preserving complete message semantics, tool-result associations, protected reasoning, and unclassified protocol extensions. Startup rebuilds older derived prefix indexes without rewriting original history or parent links.
+- Interaction Observation keeps exact pending-tool continuations in the same Interaction even when they include user reminders, without a time limit. Exact follow-ups received within two seconds of the parent response's complete delivery also stay together and can reactivate a completed Interaction; this diagnostic rule includes fast human follow-ups and does not alter model input or execution. Grouping reasons and immutable delivery timestamps survive observation delays and restarts.
+
 ## [0.2.2] - 2026-09-12
 
 ### Added

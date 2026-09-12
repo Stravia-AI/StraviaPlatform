@@ -2,6 +2,195 @@ use super::*;
 use stravia_runtime_contract::artifact::{ArtifactStore, bytes_stream};
 
 #[tokio::test]
+async fn reasoning_tracking_metadata_does_not_fork_generation_history() {
+    let backend = Arc::new(crate::turn_chain::test_store().await);
+    let chain = GenerationChain::from_turn_chain(backend.clone(), Duration::from_secs(60), None);
+    let owner = principal("owner");
+    let question = user_message("question");
+    let mut a = chain
+        .begin(owner.clone(), responses_request(vec![question.clone()]))
+        .await
+        .unwrap();
+    let mut output_a = AiResponse::new("upstream-a", "model");
+    output_a.push_output_text("answer-a");
+    a.stage(&mut output_a, &generation_source(), None);
+    a.persist().await.unwrap();
+    let history_a = vec![
+        question,
+        AiItem::output_text("answer-a"),
+        user_message("next"),
+    ];
+    let mut b = chain
+        .begin(owner.clone(), responses_request(history_a.clone()))
+        .await
+        .unwrap();
+    assert_eq!(b.parent.parent_id.as_deref(), Some(a.id()));
+    let mut reasoning = AiItem::reasoning(
+        vec!["summary".into()],
+        vec!["content".into()],
+        Some("ciphertext".into()),
+    );
+    reasoning.meta = Some(serde_json::json!({"__open_responses_item_fields": {
+        "internal_chat_message_metadata_passthrough": {"trace": "opaque"},
+        "metadata": {"turn_id": "trace-turn"}
+    }}));
+    let mut output_b = AiResponse::new("upstream-b", "model");
+    output_b.items = vec![reasoning];
+    b.stage(&mut output_b, &generation_source(), None);
+    b.persist().await.unwrap();
+
+    // Simulate durable indexes written by the previous projection, without
+    // changing immutable payloads or parent edges.
+    let crate::turn_chain::SqlTurnChainStore::Sqlite(pool) = backend.as_ref() else {
+        unreachable!()
+    };
+    sqlx::query("UPDATE turn_chain_nodes SET prefix_namespace = 'old-controls', prefix_fingerprint = 'old-projection', prefix_item_count = 99 WHERE id = ?")
+        .bind(b.id()).execute(pool).await.unwrap();
+    backend.rebuild_generation_prefixes().await.unwrap();
+    let restarted =
+        GenerationChain::from_turn_chain(backend.clone(), Duration::from_secs(60), None);
+    let mut replay = history_a;
+    replay.push(AiItem::reasoning(
+        vec!["summary".into()],
+        vec!["content".into()],
+        Some("ciphertext".into()),
+    ));
+    replay.push(user_message("continue"));
+    let resumed = restarted
+        .begin(owner.clone(), responses_request(replay.clone()))
+        .await
+        .unwrap();
+    assert_eq!(resumed.parent.parent_id.as_deref(), Some(b.id()));
+    assert_eq!(resumed.request_delta.items.len(), 1);
+
+    for changed in [
+        AiItem::reasoning(
+            vec!["summarycontent".into()],
+            vec![],
+            Some("ciphertext".into()),
+        ),
+        AiItem::reasoning(
+            vec!["summary".into()],
+            vec!["content".into()],
+            Some("changed".into()),
+        ),
+    ] {
+        replay[3] = changed;
+        let fork = restarted
+            .begin(owner.clone(), responses_request(replay.clone()))
+            .await
+            .unwrap();
+        assert_eq!(fork.parent.parent_id.as_deref(), Some(a.id()));
+    }
+    let mut unknown_extension = AiItem::reasoning(
+        vec!["summary".into()],
+        vec!["content".into()],
+        Some("ciphertext".into()),
+    );
+    unknown_extension.meta = Some(
+        serde_json::json!({"__open_responses_item_fields": {"future_model_content": "different"}}),
+    );
+    replay[3] = unknown_extension;
+    let fork = restarted
+        .begin(owner.clone(), responses_request(replay))
+        .await
+        .unwrap();
+    assert_eq!(fork.parent.parent_id.as_deref(), Some(a.id()));
+    let nodes = restarted
+        .store
+        .turn_chain
+        .materialize(&owner, TurnNodeKind::Response, &TurnNodeId::new(b.id()))
+        .await
+        .unwrap();
+    assert_eq!(
+        nodes[1].parent_id.as_ref().map(TurnNodeId::as_str),
+        Some(a.id())
+    );
+    assert!(
+        serde_json::to_string(&nodes[1].payload)
+            .unwrap()
+            .contains("internal_chat_message_metadata_passthrough")
+    );
+    backend.rebuild_generation_prefixes().await.unwrap();
+    sqlx::query("UPDATE turn_chain_nodes SET expires_at = 0 WHERE id = ?")
+        .bind(a.id())
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE turn_chain_nodes SET prefix_namespace = 'old-controls' WHERE id = ?")
+        .bind(b.id())
+        .execute(pool)
+        .await
+        .unwrap();
+    backend.rebuild_generation_prefixes().await.unwrap();
+    let unavailable: (Option<String>, Option<String>, String) = sqlx::query_as(
+        "SELECT prefix_namespace, parent_id, payload FROM turn_chain_nodes WHERE id = ?",
+    )
+    .bind(b.id())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(unavailable.0, None);
+    assert_eq!(unavailable.1.as_deref(), Some(a.id()));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&unavailable.2).unwrap(),
+        nodes[1].payload
+    );
+}
+
+#[tokio::test]
+async fn observation_tool_result_evidence_requires_a_pending_parent_call() {
+    let chain = GenerationChain::from_turn_chain(
+        Arc::new(crate::turn_chain::test_store().await),
+        Duration::from_secs(60),
+        None,
+    );
+    let owner = principal("owner");
+    let question = user_message("question");
+    let call = AiItem::function_call(stravia_runtime_contract::protocol::ir::ToolCall {
+        id: "pending-call".into(),
+        name: "lookup".into(),
+        arguments: "{}".into(),
+    });
+    let mut root = chain
+        .begin(owner.clone(), responses_request(vec![question.clone()]))
+        .await
+        .unwrap();
+    let mut response = AiResponse::new("upstream", "model");
+    response.items = vec![call.clone()];
+    root.stage(&mut response, &generation_source(), None);
+    root.persist().await.unwrap();
+    let result = AiItem::function_call_output("pending-call", serde_json::json!("result"));
+    let history = vec![question, call, result.clone(), user_message("also this")];
+    let mut continuation = chain
+        .begin(owner.clone(), responses_request(history.clone()))
+        .await
+        .unwrap();
+    assert!(continuation.has_matching_pending_tool_result());
+    let mut unmatched = history.clone();
+    unmatched[2] = AiItem::function_call_output("unknown-call", serde_json::json!("result"));
+    assert!(
+        !chain
+            .begin(owner.clone(), responses_request(unmatched))
+            .await
+            .unwrap()
+            .has_matching_pending_tool_result()
+    );
+    let mut final_response = AiResponse::new("upstream-final", "model");
+    final_response.push_output_text("done");
+    continuation.stage(&mut final_response, &generation_source(), None);
+    continuation.persist().await.unwrap();
+    let mut replay = history;
+    replay.extend([AiItem::output_text("done"), result]);
+    let repeated = chain.begin(owner, responses_request(replay)).await.unwrap();
+    assert_eq!(
+        repeated.parent.parent_id.as_deref(),
+        Some(continuation.id())
+    );
+    assert!(!repeated.has_matching_pending_tool_result());
+}
+
+#[tokio::test]
 async fn materialization_cache_never_serves_an_expired_durable_chain() {
     let backend = Arc::new(ImmediatelyExpiredTurnChainStore {
         inner: crate::turn_chain::test_store().await,

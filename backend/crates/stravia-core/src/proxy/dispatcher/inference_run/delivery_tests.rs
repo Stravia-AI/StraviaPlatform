@@ -36,6 +36,8 @@ async fn delivered_native_state_survives_later_failure_but_unexposed_states_expi
             generation_root_id: None,
             generation_parent_id: None,
             has_new_user: true,
+            has_matching_pending_tool_result: false,
+            ingress_received_at: 0,
             canonical_fingerprint: "native-delivery".into(),
             route_id: "local-route".into(),
             model_display_name: None,
@@ -87,6 +89,7 @@ async fn delivered_native_state_survives_later_failure_but_unexposed_states_expi
         states.push(item);
     }
     let terminal = RunTerminalContext {
+        delivery_completed_at: None,
         generation_node_id: None,
         generation_root_id: None,
         generation_committed: Arc::new(AtomicBool::new(false)),
@@ -128,6 +131,7 @@ async fn delivered_native_state_survives_later_failure_but_unexposed_states_expi
         200,
         "delivery_failed",
         Some("upstream_eof".into()),
+        None,
     );
     // Advance beyond pending retention, without sleeping or touching the record
     // through resolve (which would itself renew it).

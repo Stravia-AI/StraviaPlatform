@@ -1,5 +1,21 @@
 use super::*;
 
+fn result_ids(item: &AiItem) -> impl Iterator<Item = &str> {
+    let top_level = (item.role == stravia_runtime_contract::protocol::ir::Role::Tool)
+        .then_some(item.tool_call_id.as_deref())
+        .flatten();
+    let blocks = match &item.content {
+        MessageContent::Blocks(blocks) => blocks.as_slice(),
+        _ => &[],
+    };
+    top_level
+        .into_iter()
+        .chain(blocks.iter().filter_map(|block| match block {
+            ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
+            _ => None,
+        }))
+}
+
 impl GenerationChainWrite {
     pub(crate) fn request(&self) -> &AiRequest {
         &self.request
@@ -11,6 +27,54 @@ impl GenerationChainWrite {
 
     pub(crate) fn request_delta(&self) -> &AiRequest {
         &self.request_delta
+    }
+
+    /// Observation evidence only; never changes history, execution lineage or input.
+    pub(crate) fn has_matching_pending_tool_result(&self) -> bool {
+        if self.parent.parent_id.is_none()
+            || !self
+                .request_delta
+                .items
+                .iter()
+                .any(|item| result_ids(item).next().is_some())
+        {
+            return false;
+        }
+        // begin retains the original client request_delta; only the execution
+        // request is remapped. Never use hook/platform effective tool history here.
+        let mut pending = std::collections::HashSet::new();
+        for item in &self.parent.parent_client_items {
+            if item.role == stravia_runtime_contract::protocol::ir::Role::Assistant {
+                for call in item.tool_calls.iter().flatten() {
+                    if !call.id.is_empty() {
+                        pending.insert(call.id.as_str());
+                    }
+                }
+                if let MessageContent::Blocks(blocks) = &item.content {
+                    for block in blocks {
+                        if let ContentBlock::ToolUse { id, .. } = block {
+                            if !id.is_empty() {
+                                pending.insert(id.as_str());
+                            }
+                        }
+                    }
+                }
+            }
+            for id in result_ids(item) {
+                pending.remove(id);
+            }
+        }
+        // Gemini may return a function-name alias instead of the normalized
+        // client call ID. Use the execution path's same last-call alias rules.
+        let aliases = tool_result_id_mapping(
+            &self.parent.parent_client_items,
+            &self.parent.parent_client_items,
+        );
+        self.request_delta
+            .items
+            .iter()
+            .flat_map(result_ids)
+            .any(|id| pending.contains(aliases.get(id).copied().unwrap_or(id)))
     }
 
     pub(crate) fn id(&self) -> &str {

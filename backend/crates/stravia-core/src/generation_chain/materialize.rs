@@ -94,6 +94,14 @@ pub(super) fn materialize_generation_nodes(
     if payload_version == 0 {
         return Err("generation chain was empty".into());
     }
+    // Client identity is derived from retained client history. Do not replace
+    // upstream proofs: they may describe a reversible-redaction Provider view,
+    // not these retained items. An old incompatible proof safely declines
+    // Target Continuation while automatic parent discovery remains available.
+    if let Some(history) = client_history.as_mut() {
+        history.context_fingerprint = history_context_fingerprint(&client_items);
+        history.context_messages = client_items.len();
+    }
     Ok(MaterializedGeneration {
         effective_items,
         client_items,
@@ -106,6 +114,30 @@ pub(super) fn materialize_generation_nodes(
         payload_version,
         expires_at,
     })
+}
+
+pub(crate) fn rebuilt_prefix(
+    nodes: Vec<stravia_runtime_contract::turn_chain::TurnNode>,
+    completed_at: i64,
+) -> Result<Option<ReusablePrefixMetadata>, String> {
+    let materialized = materialize_generation_nodes(nodes, std::time::Instant::now())?;
+    let Some(history) = materialized.client_history else {
+        return Ok(None);
+    };
+    Ok(Some(ReusablePrefixMetadata {
+        namespace: history.reusable_namespace(),
+        fingerprint: history
+            .session_fingerprint
+            .clone()
+            .unwrap_or(history.context_fingerprint.clone()),
+        item_count: u32::try_from(
+            stravia_runtime_contract::protocol::ir::canonical::history_unit_count(
+                &materialized.client_items,
+            ),
+        )
+        .map_err(|error| error.to_string())?,
+        completed_at,
+    }))
 }
 
 pub(super) fn materialization_size_bytes(materialized: &MaterializedGeneration) -> usize {

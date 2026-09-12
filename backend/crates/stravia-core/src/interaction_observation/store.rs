@@ -19,6 +19,7 @@ pub(super) struct Admission<'a> {
     pub parent_interaction_id: Option<&'a str>,
     pub debug_enabled: bool,
     pub inferred_retry: bool,
+    pub grouping_reason: &'a str,
     pub now: i64,
     pub expires_at: i64,
 }
@@ -78,7 +79,7 @@ impl ObservationStore {
                     .bind(&admission.start.id).bind(admission.interaction_id).bind(admission.parent_run_id).bind(&admission.start.generation_parent_id)
                     .bind(&admission.start.ingress_protocol).bind(&admission.start.route_id).bind(&admission.start.model_display_name)
                     .bind(admission.debug_enabled).bind(admission.now).bind(admission.now).bind(sequence).bind(admission.expires_at).execute(&mut *tx).await?;
-                let payload = serde_json::json!({"route_id": admission.start.route_id, "model_display_name": admission.start.model_display_name, "debug_enabled": admission.debug_enabled, "inferred_retry": admission.inferred_retry, "parent_run_id": admission.parent_run_id, "generation_parent_id": admission.start.generation_parent_id, "has_new_user": admission.start.has_new_user, "parent_interaction_id": admission.parent_interaction_id, "root_id": admission.start.generation_root_id.as_deref().unwrap_or(admission.interaction_id)});
+                let payload = serde_json::json!({"route_id": admission.start.route_id, "model_display_name": admission.start.model_display_name, "debug_enabled": admission.debug_enabled, "inferred_retry": admission.inferred_retry, "grouping_reason": admission.grouping_reason, "ingress_received_at": admission.start.ingress_received_at, "parent_run_id": admission.parent_run_id, "generation_parent_id": admission.start.generation_parent_id, "has_new_user": admission.start.has_new_user, "parent_interaction_id": admission.parent_interaction_id, "root_id": admission.start.generation_root_id.as_deref().unwrap_or(admission.interaction_id)});
                 insert_event_sqlite(
                     &mut tx,
                     sequence,
@@ -121,7 +122,7 @@ impl ObservationStore {
                     .bind(&admission.start.id).bind(admission.interaction_id).bind(admission.parent_run_id).bind(&admission.start.generation_parent_id)
                     .bind(&admission.start.ingress_protocol).bind(&admission.start.route_id).bind(&admission.start.model_display_name)
                     .bind(admission.debug_enabled).bind(admission.now).bind(admission.now).bind(sequence).bind(admission.expires_at).execute(&mut *tx).await?;
-                let payload = serde_json::json!({"route_id": admission.start.route_id, "model_display_name": admission.start.model_display_name, "debug_enabled": admission.debug_enabled, "inferred_retry": admission.inferred_retry, "parent_run_id": admission.parent_run_id, "generation_parent_id": admission.start.generation_parent_id, "has_new_user": admission.start.has_new_user, "parent_interaction_id": admission.parent_interaction_id, "root_id": admission.start.generation_root_id.as_deref().unwrap_or(admission.interaction_id)});
+                let payload = serde_json::json!({"route_id": admission.start.route_id, "model_display_name": admission.start.model_display_name, "debug_enabled": admission.debug_enabled, "inferred_retry": admission.inferred_retry, "grouping_reason": admission.grouping_reason, "ingress_received_at": admission.start.ingress_received_at, "parent_run_id": admission.parent_run_id, "generation_parent_id": admission.start.generation_parent_id, "has_new_user": admission.start.has_new_user, "parent_interaction_id": admission.parent_interaction_id, "root_id": admission.start.generation_root_id.as_deref().unwrap_or(admission.interaction_id)});
                 insert_event_postgres(
                     &mut tx,
                     sequence,
@@ -631,6 +632,21 @@ impl ObservationStore {
                     payload,
                 ))
             }
+        }
+    }
+
+    pub async fn observed_generation_parent(
+        &self,
+        generation_node_id: &str,
+        principal: &str,
+    ) -> anyhow::Result<Option<super::grouping::ObservedParent>> {
+        // Immutable transport evidence survives late observation work and restart recovery.
+        // Old rows without this evidence cannot qualify for time-based grouping.
+        match self {
+            Self::Sqlite(pool) => Ok(sqlx::query_as("SELECT r.interaction_id,r.id AS run_id,(SELECT json_extract(e.payload,'$.delivery_completed_at') FROM observation_events e WHERE e.run_id=r.id AND e.kind='run_finished' ORDER BY e.sequence LIMIT 1) AS delivery_completed_at FROM inference_run_observations r JOIN interaction_observations i ON i.id=r.interaction_id WHERE r.generation_node_id=? AND i.principal=? LIMIT 1")
+                .bind(generation_node_id).bind(principal).fetch_optional(pool).await?),
+            Self::Postgres(pool) => Ok(sqlx::query_as("SELECT r.interaction_id,r.id AS run_id,(SELECT (e.payload->>'delivery_completed_at')::bigint FROM observation_events e WHERE e.run_id=r.id AND e.kind='run_finished' ORDER BY e.sequence LIMIT 1) AS delivery_completed_at FROM inference_run_observations r JOIN interaction_observations i ON i.id=r.interaction_id WHERE r.generation_node_id=$1 AND i.principal=$2 LIMIT 1")
+                .bind(generation_node_id).bind(principal).fetch_optional(pool).await?),
         }
     }
 
@@ -1215,6 +1231,8 @@ mod tests {
             generation_root_id: Some("root".into()),
             generation_parent_id: None,
             has_new_user: true,
+            has_matching_pending_tool_result: false,
+            ingress_received_at: 0,
             canonical_fingerprint: id.into(),
             route_id: "test-route".into(),
             model_display_name: None,
@@ -1228,6 +1246,7 @@ mod tests {
                 parent_interaction_id: None,
                 debug_enabled: false,
                 inferred_retry: false,
+                grouping_reason: "new_root",
                 now: 1,
                 expires_at: i64::MAX,
             })
@@ -1248,6 +1267,7 @@ mod tests {
                     parent_interaction_id: Some("parent"),
                     debug_enabled: false,
                     inferred_retry: false,
+                    grouping_reason: "new_root",
                     now: 2,
                     expires_at: i64::MAX,
                 })

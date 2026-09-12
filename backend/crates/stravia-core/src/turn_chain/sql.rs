@@ -15,6 +15,57 @@ impl SqlTurnChainStore {
     pub fn postgres(pool: PgPool) -> Self {
         Self::Postgres(pool)
     }
+
+    /// Upgrade derived Generation indexes before accepting requests. The namespace
+    /// is the projection version: current indexes require no history reads. Each
+    /// transaction preserves payloads, parent edges, expiry and completion times.
+    pub async fn rebuild_generation_prefixes(&self) -> Result<(), TurnUnavailable> {
+        macro_rules! rebuild {
+            ($pool:expr) => {{
+                let mut transaction = $pool.begin().await
+                    .map_err(|error| TurnUnavailable::Storage(error.to_string()))?;
+                let now = chrono::Utc::now().timestamp_millis();
+                let heads: Vec<(String, String, i64)> = sqlx::query_as(
+                    "SELECT id, principal, COALESCE(prefix_completed_at, created_at) FROM turn_chain_nodes \
+                     WHERE kind = 'response' AND prefix_namespace IS NOT NULL \
+                     AND prefix_namespace NOT LIKE 'stravia-generation-history-v2:%' AND expires_at > $1"
+                ).bind(now).fetch_all(&mut *transaction).await
+                    .map_err(|error| TurnUnavailable::Storage(error.to_string()))?;
+                for (id, principal, completed_at) in heads {
+                    let rows: Vec<(String, Option<String>, i64, String, i64)> = sqlx::query_as(
+                        "WITH RECURSIVE ancestors(id, parent_id, payload_version, payload, expires_at, depth) AS (\
+                         SELECT id, parent_id, payload_version, payload, expires_at, 0 FROM turn_chain_nodes \
+                         WHERE id = $1 AND principal = $2 AND kind = 'response' \
+                         UNION ALL SELECT node.id, node.parent_id, node.payload_version, node.payload, node.expires_at, ancestors.depth + 1 \
+                         FROM turn_chain_nodes node JOIN ancestors ON node.id = ancestors.parent_id \
+                         WHERE node.principal = $2 AND node.kind = 'response') \
+                         SELECT id, parent_id, payload_version, payload, expires_at FROM ancestors ORDER BY depth DESC"
+                    ).bind(&id).bind(&principal).fetch_all(&mut *transaction).await
+                        .map_err(|error| TurnUnavailable::Storage(error.to_string()))?;
+                    if rows.first().is_none_or(|row| row.1.is_some()) || rows.iter().any(|row| row.4 <= now) {
+                        sqlx::query("UPDATE turn_chain_nodes SET prefix_namespace = NULL, prefix_fingerprint = NULL, prefix_item_count = NULL, prefix_completed_at = NULL WHERE id = $1 AND principal = $2")
+                            .bind(&id).bind(&principal).execute(&mut *transaction).await
+                            .map_err(|error| TurnUnavailable::Storage(error.to_string()))?;
+                        continue;
+                    }
+                    let nodes = rows.into_iter().map(|(id, parent_id, version, payload, _)| {
+                        decode_node(TurnNodeId::new(id), TurnNodeKind::Response, parent_id, version, payload)
+                    }).collect::<Result<Vec<_>, _>>()?;
+                    let Some(prefix) = crate::generation_chain::rebuilt_prefix(nodes, completed_at)
+                        .map_err(TurnUnavailable::Storage)? else { continue };
+                    sqlx::query("UPDATE turn_chain_nodes SET prefix_namespace = $1, prefix_fingerprint = $2, prefix_item_count = $3 WHERE id = $4 AND principal = $5")
+                        .bind(prefix.namespace).bind(prefix.fingerprint).bind(i64::from(prefix.item_count)).bind(id).bind(principal)
+                        .execute(&mut *transaction).await.map_err(|error| TurnUnavailable::Storage(error.to_string()))?;
+                }
+                transaction.commit().await.map_err(|error| TurnUnavailable::Storage(error.to_string()))?;
+            }};
+        }
+        match self {
+            Self::Sqlite(pool) => rebuild!(pool),
+            Self::Postgres(pool) => rebuild!(pool),
+        }
+        Ok(())
+    }
 }
 
 fn unix_millis_after(ttl: Duration) -> i64 {
