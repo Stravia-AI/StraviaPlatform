@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 import tomllib
 from contextlib import closing
 from pathlib import Path
@@ -195,6 +196,8 @@ def test_discoveries_group_tool_continuation_and_split_new_user(admin_env: dict[
             assert "github-pat" in grouped["rule_ids"]
             detail = _wait_for("two completed runs", lambda: (lambda value: value if len(value["runs"]) == 2 else None)(_detail(env, grouped["interaction_id"])))
             assert len(detail["runs"]) == 2
+            # 新 User 输入需要在快速续接窗口之外才会开启新的 Interaction（CONTEXT.md 归并规则）。
+            time.sleep(2.01)
             messages += [response["choices"][0]["message"], {"role": "user", "content": third}]
             status, response = _proxy(env, key, model, messages, body_extra={"tools": tools})
             assert status == 200, response

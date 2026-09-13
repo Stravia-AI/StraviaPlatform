@@ -134,6 +134,8 @@ def test_trace_storage_failure_is_partial_without_changing_inference_or_continua
                 failed_trace_messages = [
                     {"role": "user", "content": blocked_prompt}
                 ]
+                # 新 User 输入需要在快速续接窗口之外才会开启新的 Interaction（CONTEXT.md 归并规则）。
+                time.sleep(2.01)
                 request_outcome: list[tuple[int, Any] | Exception] = []
 
                 def blocked_trace_request() -> None:
@@ -227,6 +229,8 @@ def test_trace_storage_failure_is_partial_without_changing_inference_or_continua
                     under_failure["choices"][0]["message"],
                     {"role": "user", "content": "continue after trace storage failure"},
                 ]
+                # 新 User 输入需要在快速续接窗口之外才会开启新的 Interaction（CONTEXT.md 归并规则）。
+                time.sleep(2.01)
                 status, continuation = _proxy(
                     env,
                     api_key,
@@ -712,11 +716,24 @@ def test_history_cleanup_expires_event_cursor_without_rewinding_sequence(
                     payload={"model": "missing", "messages": []},
                 )
                 assert status == 401, rejected_response
+
+                def historical_rejection_sequence() -> int | None:
+                    # 只看全局序列推进会在 run 终态事件先落盘时提前满足；
+                    # 等拒绝记录本身可见，才能保证其事件已进入全局序列。
+                    status_, body = http_request(
+                        "GET",
+                        f"{env['admin']}/api/v1/observations/rejections",
+                        headers=env["auth"],
+                    )
+                    assert status_ == 200, body
+                    if not any(item["status_code"] == 401 for item in body["data"]["items"]):
+                        return None
+                    sequence = _forest(env)["snapshot_sequence"]
+                    return sequence if sequence > interaction_sequence else None
+
                 old_sequence = _wait_for(
                     "historical rejection event",
-                    lambda: (lambda sequence: sequence if sequence > interaction_sequence else None)(
-                        _forest(env)["snapshot_sequence"]
-                    ),
+                    historical_rejection_sequence,
                 )
 
                 status, cleared = http_request(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from concurrent.futures import ThreadPoolExecutor
 from urllib.request import Request, urlopen
 import threading
@@ -209,6 +210,8 @@ def test_native_compact_window_continues_without_restoring_removed_history(admin
     assert compacted["id"] == "cmp_operation_one"
     assert compacted["output"] == window
     assert "usage" not in compacted
+    # 新 User 输入需要在快速续接窗口之外才会开启新的 Interaction（CONTEXT.md 归并规则）。
+    time.sleep(2.01)
     status, continued = http_request("POST", f"{admin_env['proxy']}/v1/responses", payload={"model": "native-compaction-roundtrip", "input": compacted["output"] + [{"role": "user", "content": "continue the task"}]}, headers=headers)
     assert status == 200, continued
     assert continued["output"][0]["content"][0]["text"] == "continued from compacted window"
