@@ -46,9 +46,9 @@
 ### 数据库选择与配置
 
 - SQLite 自动创建本地数据库文件。PostgreSQL 连接用户事先创建的数据库，验证连接后运行 Stravia 自身的 schema migrations；不创建 PostgreSQL 数据库，不要求 `CREATEDB` 权限，也不安装或启动 PostgreSQL 服务。
-- 数据库连接以 `server.toml` 配置文件为唯一来源；`--config <path>` 显式选择文件，默认路径是 `<data-dir>/server.toml`。`--data-dir` 仅定位运行时产物，不覆盖数据库。旧数据库 CLI 参数与环境变量入口已删除，不保留覆盖或兼容读取路径。
-- 配置使用带 `backend` tag 的 `[database]`：SQLite 写入 `backend = "sqlite"` 与以 `gateway.db` 结尾的 `path`；PostgreSQL 写入 `backend = "postgres"`、`url`，并可选 `max_connections`、`min_connections`、`idle_timeout_seconds`。PostgreSQL URL 属于秘密，配置文件需受文件权限保护。
-- SQLite 相对路径以配置文件所在目录为基准，连接测试、初始化、启动和本地恢复使用同一解析规则；向导保存解析后的绝对路径。默认 Debug 配置和 SQLite 数据库分别位于当前 workspace 的 `.stravia-dev/server.toml` 与 `.stravia-dev/gateway.db`，不随进程工作目录改变。
+- 数据库后端及 PostgreSQL 连接以 `server.toml` 为唯一来源；`--config <path>` 显式选择文件，默认是 `<data-dir>/server.toml`。`--data-dir` 拥有全部托管本地路径，不改变后端选择；旧数据库 CLI 参数与环境变量入口不保留。
+- 配置使用带 `backend` tag 的 `[database]`：SQLite 仅写入 `backend = "sqlite"`，固定使用 `<data-dir>/db/gateway.db`，设置接口不再接受 `path`；PostgreSQL 写入 `backend = "postgres"`、`url`，并可选连接池设置。PostgreSQL URL 属于秘密，配置文件需受文件权限保护。
+- 宿主在启动时解析绝对数据根；连接测试、初始化、启动和本地恢复都使用此根，不由外部配置文件改变。默认 Debug 配置和数据库分别是 `.stravia-dev/server.toml` 与 `.stravia-dev/db/gateway.db`。旧布局或旧路径配置要求停机后显式执行 `stravia-tools migrate-data`，不创建替代空库。
 - 若向导选择的数据库已有管理员，保存连接配置后关闭设置权限，转到正常登录页；必须使用该数据库已有管理员的凭据，设置令牌不能重建或覆盖管理员。
 - 数据库配置来源取舍见 [ADR-0041](../adr/0041-own-database-connection-in-config-file.md)。
 
@@ -66,7 +66,7 @@
 
 - 当前仓库支持的 schema 通过本次增量迁移加入用户与会话结构，保留 Provider、API Key、历史及其他已有业务数据。不补齐所有历史 schema 的升级链；更旧或不兼容的 schema 明确报错，不删库重建。
 - 已有 Server 首次升级通过新的设置令牌创建管理员，完成前只提供初始化服务。已有 PostgreSQL 安装必须先将原连接配置迁入文件，不能因缺少配置默认切换到 SQLite。
-- Server 提供 `stravia-server --config <path> recover-admin` 本地交互式凭据恢复命令；操作者针对同一数据库运行它。命令在终端读取用户名，并以无回显方式读取新密码及确认，原地更新唯一管理员并撤销全部旧会话。
+- Server 提供 `stravia-server --data-dir <root> --config <path> recover-admin` 本地交互式凭据恢复命令；操作者先停止占用该根的实例，再针对同一数据根及配置运行它。命令在终端读取用户名，并以无回显方式读取新密码及确认，原地更新唯一管理员并撤销全部旧会话。
 - 恢复要求配置文件、目标数据库与既有管理员均可读；它不删除管理员、不重新开放数据库选择向导、不提供邮件找回。密码不得通过命令行参数或日志传递。
 - 管理入口默认支持 HTTP 与 HTTPS，非回环监听不要求 HTTPS，默认监听仍为 `127.0.0.1:23471`。Docker 与 Nix 的数据库连接同样只来自持久化的 `server.toml`。
 

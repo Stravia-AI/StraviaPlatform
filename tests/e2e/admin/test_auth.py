@@ -102,7 +102,7 @@ def test_development_task_accepts_vite_origin_without_bypassing_csrf(
             "POST", "/api/v1/setup/complete",
             {
                 "client_base_url": base,
-                "database": {"backend": "sqlite", "path": str(tmp_path / "gateway.db")},
+                "database": {"backend": "sqlite"},
                 "username": "owner", "password": "correct horse battery staple",
             },
             headers={"origin": origin}, timeout=40.0,
@@ -135,11 +135,11 @@ def test_development_task_accepts_vite_origin_without_bypassing_csrf(
 
 @pytest.mark.e2e
 @pytest.mark.admin
-def test_relative_sqlite_path_uses_config_directory_across_setup_and_restart(
+def test_sqlite_uses_data_root_across_external_config_and_restart(
     stravia_binary: Path, tmp_path: Path,
 ) -> None:
     data_dir = tmp_path / ".stravia-dev"
-    config_path = data_dir / "server.toml"
+    config_path = tmp_path / "external-config" / "server.toml"
     other_cwd = tmp_path / "other-workdir"
     other_cwd.mkdir()
     port = find_free_port()
@@ -156,11 +156,20 @@ def test_relative_sqlite_path_uses_config_directory_across_setup_and_restart(
         operator = WebSession(base)
         token = wait_for_setup_token(logs, proc)
         assert operator.request("POST", "/api/v1/setup/claim", {"token": token})[0] == 204
-        database = {"backend": "sqlite", "path": "gateway.db"}
+        legacy_database = {"backend": "sqlite", "path": str(tmp_path / "gateway.db")}
+        for endpoint in ("test", "complete"):
+            status, _ = operator.request(
+                "POST", f"/api/v1/setup/{endpoint}",
+                {"database": legacy_database, "username": "owner", "password": "valid password", "client_base_url": base},
+            )
+            assert status == 422
+        assert not (data_dir / "db").exists()
+        assert not (tmp_path / "gateway.db").exists()
+        database = {"backend": "sqlite"}
         status, body = operator.request("POST", "/api/v1/setup/test", {"database": database})
         assert status == 204, body
-        assert (data_dir / "gateway.db").is_file()
-        assert not (tmp_path / "gateway.db").exists()
+        assert (data_dir / "db" / "gateway.db").is_file()
+        assert not (tmp_path / "db" / "gateway.db").exists()
         status, body = operator.request(
             "POST", "/api/v1/setup/complete",
             {
@@ -174,9 +183,8 @@ def test_relative_sqlite_path_uses_config_directory_across_setup_and_restart(
     finally:
         stop_stravia_server(proc, logs)
 
-    # Neither cwd nor the runtime directory may redirect an existing relative configuration.
-    config_path.write_text('[database]\nbackend = "sqlite"\npath = "gateway.db"\n', encoding="utf-8")
-    args[args.index("--data-dir") + 1] = str(other_cwd / "runtime")
+    # Changing cwd cannot redirect SQLite away from the selected data root.
+    assert not (config_path.parent / "db").exists()
     proc, logs = start_stravia_server(
         stravia_binary=stravia_binary, args=args, cwd=other_cwd,
     )
@@ -192,7 +200,7 @@ def test_relative_sqlite_path_uses_config_directory_across_setup_and_restart(
         )
         assert status == 200, body
         assert operator.request("GET", "/api/v1/status")[0] == 200
-        assert not (other_cwd / "gateway.db").exists()
+        assert not (other_cwd / "db" / "gateway.db").exists()
     finally:
         stop_stravia_server(proc, logs)
 
@@ -237,7 +245,6 @@ def test_fresh_server_is_claimed_once_then_completed_and_logged_in(
                     "client_base_url": base,
                     "database": {
                         "backend": "sqlite",
-                        "path": str(Path(data_dir) / "gateway.db"),
                     },
                     "username": "owner",
                     "password": "correct horse battery staple",
@@ -263,7 +270,6 @@ def test_fresh_server_is_claimed_once_then_completed_and_logged_in(
                     "client_base_url": base,
                     "database": {
                         "backend": "sqlite",
-                        "path": str(Path(data_dir) / "gateway.db"),
                     },
                     "username": "owner",
                     "password": "correct horse battery staple",
@@ -323,7 +329,7 @@ def _initialized_server(stravia_binary: Path) -> Iterator[dict[str, object]]:
             session = initialize_server(
                 base,
                 token,
-                {"backend": "sqlite", "path": str(Path(data_dir) / "gateway.db")},
+                {"backend": "sqlite"},
                 username="owner",
                 password="correct horse battery staple",
             )
@@ -364,7 +370,7 @@ def test_storage_outage_does_not_report_logout_success_or_discard_the_session(
         refresh_only.cookies.clear(
             access_cookie.domain, access_cookie.path, access_cookie.name
         )
-        database = sqlite3.connect(server["data_dir"] / "gateway.db")
+        database = sqlite3.connect(server["data_dir"] / "db" / "gateway.db")
         try:
             database.execute("ALTER TABLE admin_sessions RENAME TO unavailable_sessions")
             database.commit()
@@ -458,7 +464,7 @@ def test_removed_database_and_admin_token_environment_does_not_bypass_setup(
                 headers={"authorization": "Bearer removed-static-token"},
             )
             assert status == 404
-            assert not (Path(data_dir) / "gateway.db").exists()
+            assert not (Path(data_dir) / "db" / "gateway.db").exists()
         finally:
             stop_stravia_server(proc, logs)
 
@@ -490,7 +496,7 @@ def test_setup_connection_failure_can_be_corrected_in_same_session(
                 timeout=40.0,
             )
             assert status >= 400
-            database = {"backend": "sqlite", "path": str(Path(data_dir) / "gateway.db")}
+            database = {"backend": "sqlite"}
             status, body = operator.request(
                 "POST", "/api/v1/setup/test", {"database": database}
             )
@@ -532,7 +538,7 @@ def test_concurrent_setup_completion_never_overwrites_the_admin(
                 "/api/v1/setup/claim",
                 {"token": wait_for_setup_token(logs, proc)},
             )[0] == 204
-            database = {"backend": "sqlite", "path": str(Path(data_dir) / "gateway.db")}
+            database = {"backend": "sqlite"}
             cookie = operator.cookie_header()
 
             def complete(credentials: tuple[str, str]) -> int:
@@ -575,7 +581,7 @@ def test_failed_setup_preserves_commit_order_and_restart_replaces_setup_credenti
         root = Path(directory)
         config_parent = root / "config"
         config = config_parent / "server.toml"
-        database = {"backend": "sqlite", "path": str(root / "database" / "gateway.db")}
+        database = {"backend": "sqlite"}
         port = find_free_port()
         base = f"http://127.0.0.1:{port}"
         args = [
@@ -826,6 +832,7 @@ def test_interactive_recovery_preserves_data_and_revokes_all_sessions(
         _recover_in_terminal(
             stravia_binary,
             Path(str(server["config"])),
+            Path(str(server["data_dir"])),
             "recovered-owner",
             new_password,
         )
@@ -863,9 +870,9 @@ def test_interactive_recovery_preserves_data_and_revokes_all_sessions(
             stop_stravia_server(recovered, recovered_logs)
 
 
-def _recover_in_terminal(binary: Path, config: Path, username: str, password: str) -> None:
+def _recover_in_terminal(binary: Path, config: Path, data_dir: Path, username: str, password: str) -> None:
     """Use a real terminal so hidden password input is exercised, not bypassed."""
-    argv = [str(binary), "--config", str(config), "recover-admin"]
+    argv = [str(binary), "--config", str(config), "--data-dir", str(data_dir), "recover-admin"]
     deadline = time.monotonic() + 40
     if os.name == "nt":
         from winpty import PtyProcess
@@ -961,8 +968,9 @@ def _recover_in_terminal(binary: Path, config: Path, username: str, password: st
     [
         "this is not valid TOML = [",
         "[database]\nbackend = \"postgres\"\nurl = \"postgresql://127.0.0.1:1/unreachable\"\n",
+        "[database]\nbackend = \"sqlite\"\npath = \"gateway.db\"\n",
     ],
-    ids=["malformed", "unreachable"],
+    ids=["malformed", "unreachable", "legacy-sqlite-path"],
 )
 def test_invalid_config_fails_without_setup_or_sqlite_fallback(
     stravia_binary: Path, config_text: str
@@ -990,4 +998,4 @@ def test_invalid_config_fails_without_setup_or_sqlite_fallback(
         output = result.stdout + result.stderr
         assert result.returncode != 0
         assert "Stravia setup token:" not in output
-        assert not (Path(data_dir) / "gateway.db").exists()
+        assert not (Path(data_dir) / "db" / "gateway.db").exists()

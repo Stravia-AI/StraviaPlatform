@@ -149,7 +149,7 @@ def set_enabled(env: dict[str, Any], enabled: bool) -> None:
 
 
 def mapping_sql(env: dict[str, Any], sql: str, *parameters: Any) -> list[tuple[Any, ...]]:
-    with closing(sqlite3.connect(env["data_dir"] / "gateway.db", isolation_level=None)) as database:
+    with closing(sqlite3.connect(env["data_dir"] / "db" / "gateway.db", isolation_level=None)) as database:
         return database.execute(sql, parameters).fetchall()
 
 

@@ -330,7 +330,7 @@ def stravia_proxy_base(
         session = initialize_server(
             admin_base,
             setup_token,
-            {"backend": "sqlite", "path": str(Path(data_dir.name) / "gateway.db")},
+            {"backend": "sqlite"},
         )
         api_key, route_ids = _configure_proxy_routes(
             admin_base, session.auth_headers(), replay_cluster, replay_models

@@ -141,7 +141,7 @@ Route Builder 使用独立页面。选择 Provider 后会自动加载其可用 P
 
 进程内 Local Provider 内嵌 [Stravia 的 Moli 引擎](https://github.com/Stravia-AI/moli-stealth)：`moli-stealth-net` 负责 HTTP Search/Fetch，`moli-core` 使用 V8 渲染动态页面。桌面端与服务端均不需要安装 Chrome/Chromium、外部 Moli 可执行文件或 Node/Bun sidecar。浏览器执行按需在专用所有者线程启动。
 
-本地搜索将浏览器 profile 保存在 `<data_dir>/web-access/browser-profile`，独立的 HTTP 搜索 Cookie jar 保存在 `<data_dir>/web-access/search-cookies.json`。Google 搜索全程使用浏览器：没有适用于搜索 URL 的未过期 Cookie 时，先打开 `https://www.google.com/` 接收匿名 Cookie，再在同一页面搜索。后续搜索复用保存的身份，重启后仍有效；其他带首页预访问的浏览器搜索引擎也按 Cookie 可用性决定是否预访问。Bing 等 HTTP 引擎复用各自保存的 Cookie。Fetch 使用独立临时浏览器存储和禁用 Cookie 的 HTTP 客户端，不使用搜索 profile。这些文件属于部署本地状态，不从个人浏览器导入，不应分享或提交到仓库；需要重置搜索身份时，先停止 Stravia，再删除这些文件。站点可能不下发 Cookie，也仍可能拦截自动流量。
+本地搜索将浏览器 profile 保存在 `<data_dir>/state/web-access/browser-profile`，独立的 HTTP 搜索 Cookie jar 保存在 `<data_dir>/state/web-access/search-cookies.json`。Google 搜索全程使用浏览器：没有适用于搜索 URL 的未过期 Cookie 时，先打开 `https://www.google.com/` 接收匿名 Cookie，再在同一页面搜索。后续搜索复用保存的身份，重启后仍有效；其他带首页预访问的浏览器搜索引擎也按 Cookie 可用性决定是否预访问。Bing 等 HTTP 引擎复用各自保存的 Cookie。Fetch 使用独立临时浏览器存储和禁用 Cookie 的 HTTP 客户端，不使用搜索 profile。这些文件属于部署本地状态，不从个人浏览器导入，不应分享或提交到仓库；需要重置搜索身份时，先停止 Stravia，再删除这些文件。站点可能不下发 Cookie，也仍可能拦截自动流量。
 
 在 **联网搜索 → 搜索与网页来源** 中直接选择 Local，无需配置浏览器路径。浏览器路径管理接口及 `STRAVIA_CHROME_PATH` 设置已移除。已有 `web-access-browser.json` 和 `desktop-browser.json` 文件保留不动，但不再读写。远程 Exa 与智谱服务保持不变。
 
@@ -261,14 +261,44 @@ Observation 元数据与托管 Debug Trace segment 共用 `log_retention_days`�
 
 ### 存储与部署
 
-- 首次设置流程可选择 **SQLite** 或 **PostgreSQL**。
+- Server 首次设置流程可选择 **SQLite** 或 **PostgreSQL**；Desktop 使用本地 SQLite。
 - 所选数据库连接只保存在 `server.toml`；不支持数据库命令行参数或环境变量覆盖。
+- SQLite 固定使用 `<data-dir>/db/gateway.db`；数据库选择不会反向改变数据根目录。
 - SQLx migrations 会保留当前受支持 schema 的数据，并在正常 Gateway 就绪前执行。
 - `GET /healthz` 是存活探针；设置未完成或 Gateway 无法启动时，`GET /readyz` 返回未就绪。
 
 PostgreSQL 数据库必须已由部署者创建，连接账户只需能创建和迁移 Stravia 自身表；Stravia 不创建数据库，也不要求 `CREATEDB` 权限。不兼容的旧 schema 会明确失败，而不是被删除或重建。
 
 审阅数据库结构时，可执行 `stravia-tools dump-schema --backend sqlite --output deploy/schema/sqlite.sql`，导出隔离内存数据库执行全部迁移后的结构。PostgreSQL 使用 `--backend postgres --output deploy/schema/postgres.sql`，需要开发环境的 `DATABASE_URL`、`CREATEDB` 权限和兼容的 `pg_dump`；工具创建并删除临时数据库，不迁移源数据库。这些仅是开发工具要求，不是 Gateway 部署要求。两种导出均只含结构，供审阅而非初始化部署。详见 [Database Schema](docs/database/schema.md)。
+
+#### 托管数据布局与迁移
+
+Server 和 Desktop 按 `--data-dir`、`STRAVIA_DATA_DIR`、部署默认值的优先级选择根目录。相对根目录在启动时解析一次。根目录不可用时明确失败；实例锁阻止 Server/Desktop 同时占用同一根目录。`--config` 可以选择外部 Server 配置文件，但不能改变本地数据位置。
+
+| 相对路径 | 内容 |
+|---|---|
+| `server.toml` | 默认 Server 配置；必须保护其中的 PostgreSQL 凭据 |
+| `db/gateway.db` | SQLite 业务数据；相邻 WAL/SHM 由 SQLite 管理 |
+| `artifacts/{objects,staging,locks}` | 本地对象、未完成上传及运行锁 |
+| `diagnostics/observation-debug` | 与数据库 manifest 配套的 Debug Trace |
+| `cache/catalog` | 可重建的 Provider Catalog 与图标 |
+| `state/web-access` | 搜索 Cookie 和浏览器 profile，不是可随意删除的缓存 |
+| `state/desktop-port.json` | Desktop 固定端口偏好 |
+| `state/desktop-webview` | Windows/Linux Desktop WebView 数据 |
+
+PostgreSQL 数据和 S3 对象仍在外部，单独复制此目录不构成这些后端的完整备份。普通浏览器存储、Connect Client 配置、用户选择的下载位置，以及操作系统和更新安装器管理的文件不在此布局内。macOS WKWebView 不支持文件系统 `data_directory`，因此其 WebView 状态不受全部归根保证覆盖。
+
+旧布局和带有 SQLite `path` 的配置会被拒绝，不会静默打开空数据库。请显式迁移到不存在或为空、且父目录已经存在的目标：
+
+```bash
+cargo run -p stravia-devtools -- migrate-data --from ./old-data --to ./data
+# 停止所有使用源目录的 Server/Desktop 后，再应用同一计划：
+cargo run -p stravia-devtools -- migrate-data --from ./old-data --to ./data --apply --source-stopped
+```
+
+默认命令只输出计划。外部旧配置使用 `--config <old-server.toml>`；需要保留旧 Desktop 浏览器状态时，添加 `--webview-from <旧平台WebView目录>`。此前 Windows/Linux 构建使用平台 local-data 下的 `com.stravia.ai-gateway`（E2E 为 `com.stravia.ai-gateway.desktop-e2e`），独立于网关根目录。工具不会猜测或自动读取用户目录。Linux 共用根目录时，显式将同一目录传给 `--from` 和 `--webview-from`，可将未被 Stravia 托管条目消费的内容作为 WebView 状态收存，不重复复制数据库或对象。
+
+迁移保留源数据，将复制的 WAL 应用到私有 SQLite 快照并检查完整性，全部复制成功后才发布目标。工具不升级数据库 schema，也不连接 PostgreSQL/S3。未知文件、链接/reparse point、目录重叠和目标冲突会明确失败。应用时可能创建源 `.instance.lock` 并保留目标旁路锁；这些协调文件不含业务数据。旧二进制没有实例锁，迁移期间不得启动。验证后使用新 `--data-dir` 和默认的已转换 `server.toml` 启动，不再引用旧外部配置。旧副本保留到验证完成；新实例接受写入后直接切回旧副本会丢失这些新写入。
 
 ## 发布版本
 
@@ -399,9 +429,9 @@ task build:desktop
 task build:desktop:installer
 ```
 
-开发构建会把服务端和桌面端运行状态（包括 `gateway.db` 和桌面端固定端口配置）统一放在仓库根目录下已忽略的 `.stravia-dev/` 目录中。Release 服务端使用 `~/.stravia`；Release 桌面端仍使用操作系统的应用数据目录。
+开发构建默认使用仓库根目录下已忽略的 `.stravia-dev/`，其中数据库为 `db/gateway.db`，固定端口偏好为 `state/desktop-port.json`。Release 服务端默认使用 `~/.stravia`；Release 桌面端默认使用操作系统应用数据目录。显式指定根目录时遵循相同托管布局。Desktop 会在重启和自动启动时保留选定的绝对根目录。
 
-启用 `desktop-e2e` feature 的桌面构建（包括 Debug 模式）使用独立且已忽略的 `.stravia-desktop-e2e/` 目录。`task test:e2e:desktop` 会在其中写入假的 `9.9.9` 更新，用于验证下载和安装流程，不会下载或安装真实发布版本；这些测试夹具不得进入日常开发或生产数据。
+启用 `desktop-e2e` feature 的桌面构建忽略普通根目录覆盖。`task test:e2e:desktop` 在系统临时目录下提供隔离的 `STRAVIA_DESKTOP_E2E_RUN_ROOT`，运行数据放在其 `data/` 子目录；没有此测试专用变量时默认使用已忽略的 `.stravia-desktop-e2e/`。流程写入假的 `9.9.9` 更新验证下载和安装，不安装真实发布版本；夹具不得进入日常开发或生产数据。
 
 桌面进程会在 `127.0.0.1` 上启动同一个统一 HTTP 应用。首次使用时，应用优先绑定默认固定端口 `23471`；后续启动会优先使用在 **设置 → 桌面端** 保存的固定端口。若首选端口无法绑定，Stravia 仍会使用临时随机端口保持可用，在概览页报告冲突，并允许用户无需重启即可重新检测或更换固定端口。此桌面本机设置不会改变下方独立服务端的参数。
 
@@ -420,17 +450,16 @@ task build:desktop:installer
 | `--log-level`            | `STRAVIA_LOG_LEVEL`            | `info`       |
 | `--config-poll-interval` | `STRAVIA_CONFIG_POLL_INTERVAL` | `3` 秒       |
 
-`--config` 选择唯一的数据库配置来源。`--data-dir` 仍用于运行时产物及默认配置文件路径，不选择或覆盖数据库。配置文件缺失时进入首次设置；配置文件损坏、已配置数据库不可达或 schema 不兼容时启动失败，绝不回退到 SQLite。
+`--config` 选择数据库后端及 PostgreSQL 连接的唯一配置来源。`--data-dir` 拥有包括 SQLite 在内的全部托管本地路径，并提供默认配置文件路径。配置文件缺失时进入首次设置；配置损坏、旧布局、已配置数据库不可达或 schema 不兼容时启动失败，绝不回退到其他数据库。
 
 设置流程会原子写入以下两种格式之一：
 
 ```toml
 [database]
 backend = "sqlite"
-path = "/var/lib/stravia/gateway.db"
 ```
 
-SQLite 文件名必须是 `gateway.db`。相对路径（包括设置向导默认的 `gateway.db`）以 `server.toml` 所在目录为基准，不依赖进程工作目录。向导保存解析后的绝对路径；已有绝对路径保持不变。使用默认 Debug 配置时，数据库位于 `<workspace>/.stravia-dev/gateway.db`。
+SQLite 不再有独立 `path` 字段。连接测试、初始化、重启和管理员恢复都使用 `<data-dir>/db/gateway.db`，外部 `server.toml` 不改变此位置。默认 Debug 根目录下为 `<workspace>/.stravia-dev/db/gateway.db`。旧的带路径配置必须使用上方显式迁移命令转换。
 
 对于已创建好的 PostgreSQL 数据库：
 
@@ -447,10 +476,10 @@ idle_timeout_seconds = 300
 
 对于未配置数据库或已配置但还没有管理员的数据库，控制台令牌只能由 `POST /api/v1/setup/claim` 领取；得到的 `stravia_setup` HttpOnly、`SameSite=Strict` Cookie（`Path=/api/v1`，HTTPS 下同时为 `Secure`）可调用 `/api/v1/setup/test` 和 `/api/v1/setup/complete`。设置权限不能调用管理 API；数据库已有管理员时设置入口会关闭。`GET /api/v1/auth/state` 会报告设置、可用性与当前认证状态，但不会刷新凭据。Server 正常认证使用 `/api/v1/auth/login`、`/api/v1/auth/refresh`、`/api/v1/auth/logout` 和 `/api/v1/auth/credentials`。访问与刷新凭据只保存在 `HttpOnly`、`SameSite=Strict` Cookie（`stravia_access` 使用 `Path=/`，`stravia_refresh` 使用 `Path=/api/v1/auth`）中，不写入浏览器存储；HTTPS origin 下同时设置 `Secure`。HTTP 和 HTTPS 入口均支持完整管理流程。浏览器客户端会发送 `X-Stravia-CSRF: 1`；会修改状态的请求其 `Origin` 与独立恢复的请求外部源不一致时，Stravia 会拒绝请求。
 
-忘记凭据时，使用同一配置运行本地交互命令：
+忘记凭据时，先停止占用数据根目录的实例，再使用同一数据根及配置运行本地交互命令：
 
 ```bash
-./target/release/stravia-server --config /var/lib/stravia/server.toml recover-admin
+./target/release/stravia-server --data-dir /var/lib/stravia --config /var/lib/stravia/server.toml recover-admin
 ```
 
 该命令会提示输入用户名，并无回显地读取新密码及确认；密码不接受命令行参数。它会原地更新已有唯一管理员，并撤销全部旧管理会话；不会删除业务数据或重新开放数据库设置。

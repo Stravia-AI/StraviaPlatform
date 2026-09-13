@@ -6,10 +6,12 @@ mod product_update;
 use std::sync::Arc;
 
 use desktop_gateway_runtime::{
-    DesktopGatewayRuntime, PortSwitchPublisher, SystemPortOwnerResolver, desktop_port_store,
-    desktop_runtime_dir,
+    DesktopGatewayRuntime, PortSwitchPublisher, SystemPortOwnerResolver, autostart_root_argument,
+    desktop_port_store, desktop_root_override, desktop_runtime_dir,
 };
-use stravia_core::{Gateway, admin::identity::AdminAuth, config::GatewayConfig};
+use stravia_core::{
+    Gateway, admin::identity::AdminAuth, config::GatewayConfig, data_paths::DataPaths,
+};
 use stravia_server::{AdminMode, HttpAppConfig, build_http_app, desktop_origins};
 use tauri::{
     Manager,
@@ -59,7 +61,28 @@ pub fn run() {
         .with_env_filter("stravia=debug,tower_http=debug")
         .init();
 
-    let builder = tauri::Builder::default();
+    let root_override = desktop_root_override();
+    let mut restart_env = tauri::Env::default();
+    if let Ok(Some(root)) = &root_override {
+        // Tauri process/updater restart uses this managed argument vector. Append an
+        // absolute root after removing the original override, including relative paths.
+        let mut args = restart_env.args_os.into_iter();
+        let mut pinned = args.next().into_iter().collect::<Vec<_>>();
+        while let Some(arg) = args.next() {
+            if arg == "--data-dir" {
+                args.next();
+            } else if !arg
+                .to_str()
+                .is_some_and(|arg| arg.starts_with("--data-dir="))
+            {
+                pinned.push(arg);
+            }
+        }
+        pinned.push("--data-dir".into());
+        pinned.push(root.as_os_str().to_owned());
+        restart_env.args_os = pinned;
+    }
+    let builder = tauri::Builder::default().manage(restart_env);
     #[cfg(feature = "desktop-e2e")]
     let builder = builder
         .plugin(tauri_plugin_wdio::init())
@@ -84,13 +107,39 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_autostart::init(
-            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            None,
-        ))
         .plugin(tauri_plugin_store::Builder::default().build())
-        .setup(|app| {
-            let data_dir = desktop_runtime_dir(app);
+        .setup(move |app| {
+            let prepared = (|| {
+                let root_override = root_override?;
+                let data_dir = desktop_runtime_dir(app, root_override.as_deref())?;
+                let paths = DataPaths::new(&data_dir);
+                paths.prepare()?;
+                let lock = paths.lock()?;
+                Ok::<_, anyhow::Error>((data_dir, lock))
+            })();
+            let (data_dir, lock) = match prepared {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    tracing::error!(%error, "desktop data directory startup failed");
+                    eprintln!("Stravia could not open its data directory: {error:#}");
+                    return Err(error.into());
+                }
+            };
+            let paths = DataPaths::new(&data_dir);
+            app.manage(lock);
+            let autostart_root = autostart_root_argument(&data_dir)?;
+            app.handle().plugin(
+                tauri_plugin_autostart::Builder::new()
+                    .args(["--data-dir", autostart_root.as_str()])
+                    .build(),
+            )?;
+            #[cfg(not(feature = "desktop-e2e"))]
+            {
+                let autostart = app.state::<tauri_plugin_autostart::AutoLaunchManager>();
+                if autostart.is_enabled()? {
+                    autostart.enable()?;
+                }
+            }
             let gateway = tauri::async_runtime::block_on(Gateway::new(GatewayConfig {
                 data_dir: data_dir.clone(),
                 product_update_download_supported: true,
@@ -155,6 +204,13 @@ pub fn run() {
             app.manage(native_admin_session);
             app.manage(runtime.clone());
             app.manage(product_update::DesktopUpdateState::default());
+            let window_config = app.config().app.windows.iter()
+                .find(|window| window.label == "main")
+                .ok_or_else(|| anyhow::anyhow!("main WebView configuration is missing"))?;
+            std::fs::create_dir_all(paths.desktop_webview())?;
+            tauri::WebviewWindowBuilder::from_config(app, window_config)?
+                .data_directory(paths.desktop_webview())
+                .build()?;
             app.manage(setup_tray(app, server_port)?);
             desktop_icons::setup(app.handle())?;
             runtime.set_switch_publisher(Arc::new(TauriPortSwitchPublisher {

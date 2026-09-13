@@ -6,8 +6,11 @@ use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
 pub async fn init_pool(data_dir: &Path) -> anyhow::Result<SqlitePool> {
-    std::fs::create_dir_all(data_dir)?;
-    let db_path = data_dir.join("gateway.db");
+    let root = crate::data_paths::resolve_data_dir(data_dir)?;
+    let paths = crate::data_paths::DataPaths::new(&root);
+    paths.prepare()?;
+    std::fs::create_dir_all(paths.database_dir())?;
+    let db_path = paths.database();
 
     let options = SqliteConnectOptions::new()
         .filename(&db_path)

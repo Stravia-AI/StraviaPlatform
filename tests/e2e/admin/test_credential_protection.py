@@ -107,7 +107,7 @@ def test_catalog_tester_positions_and_read_only_boundary(admin_env: dict[str, An
             assert mapping_sql(env, "SELECT COUNT(*) FROM interaction_observations") == before_interactions
             assert discoveries(env) == before_discoveries
             assert not any(SECRET in line for line in env["logs"])
-            with closing(sqlite3.connect(env["data_dir"] / "gateway.db")) as database:
+            with closing(sqlite3.connect(env["data_dir"] / "db" / "gateway.db")) as database:
                 assert text not in "\n".join(database.iterdump())
 
             for method, resource, payload in [("GET", "rules", None), ("GET", "discoveries", None), ("POST", "test", {"text": SECRET})]:

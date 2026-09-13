@@ -283,7 +283,7 @@ WebSocket Ping/Pong 控制帧保留事件类型、方向与时间，不保存任
 payload 写入 `GatewayConfig.data_dir` 下由 Observation 模块拥有的目录，建议布局：
 
 ```text
-observation-debug/
+diagnostics/observation-debug/
 └── <trace-id>/
     ├── segment-000001.jsonl
     ├── segment-000002.jsonl

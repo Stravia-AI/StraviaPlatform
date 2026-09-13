@@ -26,7 +26,7 @@ def test_native_client_and_effective_windows_survive_restart_and_observation_cle
     if backend == "postgres" and not pg_url:
         pytest.skip("postgres backend requires DB_URL")
     schema = None
-    database = {"backend": "sqlite", "path": str(tmp_path / "gateway.db")}
+    database = {"backend": "sqlite"}
     if backend == "postgres":
         schema = storage_runtime["make_isolated_schema"]("stravia_compaction_restart")
         storage_runtime["run_schema_action"]("create", work_dir=storage_runtime["work_dir"], pg_url=pg_url, schema=schema)

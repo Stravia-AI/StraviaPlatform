@@ -44,7 +44,7 @@ def admin_env(stravia_binary: Path) -> dict[str, Any]:
             session = initialize_server(
                 admin_base,
                 setup_token,
-                {"backend": "sqlite", "path": str(Path(data_dir) / "gateway.db")},
+                {"backend": "sqlite"},
             )
 
             try:

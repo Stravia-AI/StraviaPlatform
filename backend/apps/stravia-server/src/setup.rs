@@ -18,6 +18,7 @@ use stravia_core::admin::identity::{AdminAuth, AuthError};
 use stravia_core::config::{
     GatewayConfig, GatewayStorageConfig, SqlStorageConfig, StorageBackendKind,
 };
+use stravia_core::data_paths::DataPaths;
 use tokio::sync::{Mutex, RwLock};
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -28,11 +29,10 @@ use crate::{AdminMode, HttpAppConfig, build_http_app};
 const SETUP_COOKIE: &str = "stravia_setup";
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "backend", rename_all = "snake_case")]
+#[serde(tag = "backend", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DatabaseConfig {
-    Sqlite {
-        path: PathBuf,
-    },
+    // Empty struct variants enforce deny_unknown_fields; unit variants ignore extra keys.
+    Sqlite {},
     Postgres {
         url: String,
         #[serde(default = "default_max_connections")]
@@ -145,36 +145,21 @@ pub async fn prepare_server_app(startup: ServerStartupConfig) -> anyhow::Result<
 }
 
 /// Read the database configuration, returning `None` when the file is absent.
-/// Relative SQLite paths are resolved from the configuration file's directory.
-/// Unreadable or invalid configurations and unresolvable paths return an error.
+/// SQLite always uses the data root; legacy path overrides require explicit migration.
+/// Unreadable or invalid configurations return an error.
 pub fn read_database_config(path: &Path) -> anyhow::Result<Option<DatabaseConfig>> {
     let source = match std::fs::read_to_string(path) {
         Ok(source) => source,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error).context("read server configuration"),
     };
-    let config: ServerFileConfig =
-        toml::from_str(&source).map_err(|_| anyhow::anyhow!("server configuration is invalid"))?;
-    resolve_database_config(path, config.database).map(Some)
-}
-
-fn resolve_database_config(
-    config_path: &Path,
-    mut database: DatabaseConfig,
-) -> anyhow::Result<DatabaseConfig> {
-    validate_database_config(&database)?;
-    if let DatabaseConfig::Sqlite { path } = &mut database {
-        *path = expand_path(path);
-        if path.is_relative() {
-            let config_path =
-                std::path::absolute(config_path).context("resolve configuration file path")?;
-            let directory = config_path
-                .parent()
-                .context("configuration file has no parent directory")?;
-            *path = directory.join(&*path);
-        }
-    }
-    Ok(database)
+    let config: ServerFileConfig = toml::from_str(&source).map_err(|_| {
+        anyhow::anyhow!(
+            "server configuration is invalid; legacy SQLite path configurations require stravia-tools migrate-data"
+        )
+    })?;
+    validate_database_config(&config.database)?;
+    Ok(Some(config.database))
 }
 
 pub fn gateway_config(
@@ -184,13 +169,7 @@ pub fn gateway_config(
     validate_database_config(database)?;
     let mut config = base.clone();
     match database {
-        DatabaseConfig::Sqlite { path } => {
-            let path = expand_path(path);
-            let parent = path
-                .parent()
-                .filter(|path| !path.as_os_str().is_empty())
-                .unwrap_or_else(|| Path::new("."));
-            config.data_dir = parent.to_path_buf();
+        DatabaseConfig::Sqlite {} => {
             config.storage = GatewayStorageConfig::default();
         }
         DatabaseConfig::Postgres {
@@ -363,11 +342,8 @@ async fn test_database(
     if let Err(response) = authorize_setup(&runtime, &origin, &headers, true).await {
         return response;
     }
-    let database = match resolve_database_config(&runtime.startup.config_path, input.database) {
-        Ok(database) => database,
-        Err(_) => return auth_error(StatusCode::BAD_REQUEST, "database_unavailable"),
-    };
-    match preflight_database(&database).await {
+    let database = input.database;
+    match preflight_database(&runtime.startup.gateway.data_dir, &database).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(_) => auth_error(StatusCode::BAD_REQUEST, "database_unavailable"),
     }
@@ -401,11 +377,8 @@ async fn complete_setup(
         )
             .into_response();
     }
-    let database = match resolve_database_config(&runtime.startup.config_path, input.database) {
-        Ok(database) => database,
-        Err(_) => return auth_error(StatusCode::BAD_REQUEST, "database_unavailable"),
-    };
-    if let Err(error) = preflight_database(&database).await {
+    let database = input.database;
+    if let Err(error) = preflight_database(&runtime.startup.gateway.data_dir, &database).await {
         tracing::warn!(error = %redacted_database_error(&error), "database preflight failed");
         return auth_error(StatusCode::BAD_REQUEST, "database_unavailable");
     }
@@ -510,19 +483,16 @@ async fn authorize_setup(
     }
 }
 
-async fn preflight_database(database: &DatabaseConfig) -> anyhow::Result<()> {
+async fn preflight_database(data_dir: &Path, database: &DatabaseConfig) -> anyhow::Result<()> {
     validate_database_config(database)?;
     match database {
-        DatabaseConfig::Sqlite { path } => {
-            let path = expand_path(path);
-            let parent = path
-                .parent()
-                .filter(|path| !path.as_os_str().is_empty())
-                .unwrap_or_else(|| Path::new("."));
-            std::fs::create_dir_all(parent).context("create SQLite directory")?;
-            tempfile::NamedTempFile::new_in(parent).context("SQLite directory is not writable")?;
+        DatabaseConfig::Sqlite {} => {
+            let paths = DataPaths::new(data_dir);
+            let parent = paths.database_dir();
+            std::fs::create_dir_all(&parent).context("create SQLite directory")?;
+            tempfile::NamedTempFile::new_in(&parent).context("SQLite directory is not writable")?;
             let options = SqliteConnectOptions::new()
-                .filename(path)
+                .filename(paths.database())
                 .create_if_missing(true);
             let pool = SqlitePoolOptions::new()
                 .max_connections(1)
@@ -580,11 +550,7 @@ fn save_database_config(path: &Path, database: &DatabaseConfig) -> anyhow::Resul
 
 fn validate_database_config(database: &DatabaseConfig) -> anyhow::Result<()> {
     match database {
-        DatabaseConfig::Sqlite { path } => {
-            if path.file_name().and_then(|value| value.to_str()) != Some("gateway.db") {
-                bail!("SQLite database path must end in gateway.db");
-            }
-        }
+        DatabaseConfig::Sqlite {} => {}
         DatabaseConfig::Postgres {
             url,
             max_connections,
@@ -647,10 +613,6 @@ fn redacted_database_error(error: &anyhow::Error) -> String {
     } else {
         message
     }
-}
-
-fn expand_path(path: &Path) -> PathBuf {
-    PathBuf::from(shellexpand::tilde(&path.to_string_lossy()).as_ref())
 }
 
 fn default_max_connections() -> u32 {

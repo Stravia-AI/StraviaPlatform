@@ -26,6 +26,8 @@ async fn run_provider_allowance_sampler<F, Fut>(
 }
 
 async fn open_storage_runtime(config: &GatewayConfig) -> anyhow::Result<StorageRuntime> {
+    let root = crate::data_paths::resolve_data_dir(&config.data_dir)?;
+    crate::data_paths::DataPaths::new(&root).prepare()?;
     let (storage_kind, storage, sqlite_pool, postgres_pool): StorageRuntime =
         match config.storage.backend {
             StorageBackendKind::Sqlite => {
@@ -78,7 +80,8 @@ impl Gateway {
         self.observation.shutdown().await;
     }
 
-    pub async fn new(config: GatewayConfig) -> anyhow::Result<Self> {
+    pub async fn new(mut config: GatewayConfig) -> anyhow::Result<Self> {
+        config.data_dir = crate::data_paths::resolve_data_dir(&config.data_dir)?;
         let (storage_kind, storage, sqlite_pool, postgres_pool) =
             open_storage_runtime(&config).await?;
         Self::from_storage_with_kind(config, storage, storage_kind, sqlite_pool, postgres_pool)
@@ -90,12 +93,15 @@ impl Gateway {
     }
 
     async fn from_storage_with_kind(
-        config: GatewayConfig,
+        mut config: GatewayConfig,
         storage: DynStorage,
         storage_kind: RuntimeStorageKind,
         sqlite_pool: Option<SqlitePool>,
         postgres_pool: Option<Pool<Postgres>>,
     ) -> anyhow::Result<Self> {
+        config.data_dir = crate::data_paths::resolve_data_dir(&config.data_dir)?;
+        let paths = crate::data_paths::DataPaths::new(&config.data_dir);
+        paths.prepare()?;
         let history_sqlite_pool = if sqlite_pool.is_none() && postgres_pool.is_none() {
             let pool = sqlx::sqlite::SqlitePoolOptions::new()
                 .max_connections(1)
@@ -119,7 +125,7 @@ impl Gateway {
         ));
         let health_registry = Arc::new(HealthRegistry::new());
         let ollama_capability_cache = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
-        let provider_catalog = provider_catalog::ProviderCatalog::new(&config.data_dir)?;
+        let provider_catalog = provider_catalog::ProviderCatalog::new(paths.catalog_root())?;
         let retention_days = match storage.settings().get("log_retention_days").await {
             Ok(value) => value
                 .and_then(|value| value.parse::<u32>().ok())
@@ -145,7 +151,7 @@ impl Gateway {
         let observation = interaction_observation::InteractionObservation::new(
             history_sqlite_pool.clone(),
             postgres_pool.clone(),
-            config.data_dir.clone(),
+            paths.diagnostics(),
             retention_days,
             !matches!(storage_kind, RuntimeStorageKind::Memory),
         )
@@ -199,7 +205,7 @@ impl Gateway {
         ) = if let Some(pool) = sqlite_pool.as_ref() {
             let local = Arc::new(agent::LocalArtifactStore::sqlite(
                 pool.clone(),
-                config.data_dir.join("artifacts"),
+                paths.artifacts(),
             ));
             let artifacts: Arc<dyn stravia_runtime_contract::artifact::ArtifactStore> =
                 local.clone();
@@ -213,7 +219,7 @@ impl Gateway {
         } else if let Some(pool) = postgres_pool.as_ref() {
             let local = Arc::new(agent::LocalArtifactStore::postgres(
                 pool.clone(),
-                config.data_dir.join("artifacts"),
+                paths.artifacts(),
             ));
             let artifacts: Arc<dyn stravia_runtime_contract::artifact::ArtifactStore> =
                 local.clone();

@@ -63,7 +63,7 @@ def _start_initialized(
     session = initialize_server(
         base,
         wait_for_setup_token(logs, process),
-        {"backend": "sqlite", "path": str(data_dir / "gateway.db")},
+        {"backend": "sqlite"},
     )
     return (
         {
@@ -126,7 +126,7 @@ def test_trace_storage_failure_is_partial_without_changing_inference_or_continua
                 )
                 assert status == 200, body
 
-                trace_root = data_dir / "observation-debug"
+                trace_root = data_dir / "diagnostics" / "observation-debug"
                 displaced_root = data_dir / "observation-debug-before-failure"
                 trace_root.rename(displaced_root)
                 trace_root.write_bytes(b"regular file blocks managed trace directories")
@@ -163,7 +163,7 @@ def test_trace_storage_failure_is_partial_without_changing_inference_or_continua
                         if not trace or trace["status"] != "partial":
                             continue
                         try:
-                            with closing(sqlite3.connect(data_dir / "gateway.db")) as connection:
+                            with closing(sqlite3.connect(data_dir / "db" / "gateway.db")) as connection:
                                 persisted = connection.execute(
                                     "SELECT status, partial_reason, completed_at FROM debug_trace_manifests WHERE run_id = ?",
                                     (detail["runs"][0]["id"],),
@@ -358,7 +358,7 @@ def test_startup_reconciliation_completes_trace_tombstone(stravia_binary: Path) 
     try:
         with tempfile.TemporaryDirectory(prefix="stravia-tombstone-restart-e2e-") as temporary:
             data_dir = Path(temporary)
-            database = data_dir / "gateway.db"
+            database = data_dir / "db" / "gateway.db"
             env, process, logs = _start_initialized(
                 stravia_binary, data_dir, f"http://127.0.0.1:{mock_port}"
             )
@@ -392,7 +392,7 @@ def test_startup_reconciliation_completes_trace_tombstone(stravia_binary: Path) 
             finally:
                 stop_stravia_server(process, logs)
 
-            trace_directory = data_dir / "observation-debug" / trace_id
+            trace_directory = data_dir / "diagnostics" / "observation-debug" / trace_id
             assert trace_directory.is_dir()
             with closing(sqlite3.connect(database)) as connection:
                 updated = connection.execute(
@@ -630,7 +630,7 @@ def test_expired_waiting_client_is_removed_with_events_and_trace(
                 run_id = detail["runs"][0]["id"]
                 trace = detail["runs"][0]["trace"]
                 assert trace is not None
-                trace_directory = data_dir / "observation-debug" / trace["trace_id"]
+                trace_directory = data_dir / "diagnostics" / "observation-debug" / trace["trace_id"]
                 assert trace_directory.is_dir()
 
                 status, cleared = http_request(
@@ -655,7 +655,7 @@ def test_expired_waiting_client_is_removed_with_events_and_trace(
                     lambda: not _route_interactions(env, route_id),
                 )
                 assert not trace_directory.exists()
-                with closing(sqlite3.connect(data_dir / "gateway.db")) as connection:
+                with closing(sqlite3.connect(data_dir / "db" / "gateway.db")) as connection:
                     assert connection.execute(
                         "SELECT COUNT(*) FROM interaction_observations WHERE id = ?",
                         (waiting["id"],),

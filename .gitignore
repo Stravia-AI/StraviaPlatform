@@ -22,6 +22,7 @@
 /backend/apps/stravia-desktop/icons/ios/
 
 # Local runtime state
+/data/
 *.db
 *.db-wal
 *.db-shm

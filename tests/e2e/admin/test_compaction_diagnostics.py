@@ -467,7 +467,7 @@ def test_trace_failure_preserves_exact_compacted_inference_and_reports_partial(d
     retained, source = _seed(conversation)
     status, body = http_request("PUT", f"{conversation.env['admin']}/api/v1/observations/debug", headers=conversation.env["auth"], payload={"enabled": True, "confirmed": True})
     assert status == 200, body
-    trace_root = conversation.env["data_dir"] / "observation-debug"
+    trace_root = conversation.env["data_dir"] / "diagnostics" / "observation-debug"
     displaced = conversation.env["data_dir"] / ("diagnostic-trace-" + uuid4().hex)
     trace_root.rename(displaced)
     trace_root.write_bytes(b"injected trace-storage failure")

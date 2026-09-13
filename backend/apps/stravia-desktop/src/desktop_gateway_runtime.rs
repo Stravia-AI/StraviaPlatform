@@ -20,7 +20,6 @@ use tokio::sync::{Mutex, RwLock};
 const FIXED_PORT_KEY: &str = "fixed_port";
 const DEVELOPMENT_RUNTIME_DIR: &str = ".stravia-dev";
 const E2E_RUNTIME_DIR: &str = ".stravia-desktop-e2e";
-const PORT_STORE_FILE: &str = "desktop-port.json";
 const MIN_FIXED_PORT: u16 = 1024;
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -83,39 +82,183 @@ impl PortPreferenceStore for TauriPortPreferenceStore {
     }
 }
 
-pub(crate) fn desktop_runtime_dir(app: &tauri::App) -> PathBuf {
-    let production_data_dir = app
-        .path()
-        .app_data_dir()
-        .unwrap_or_else(|_| PathBuf::from(".stravia"));
-    runtime_dir(
-        cfg!(debug_assertions),
+pub(crate) fn desktop_root_override() -> anyhow::Result<Option<PathBuf>> {
+    if cfg!(feature = "desktop-e2e") {
+        if let Some(root) = std::env::var_os("STRAVIA_DESKTOP_E2E_RUN_ROOT") {
+            return e2e_data_dir(Path::new(&root)).map(Some);
+        }
+    }
+    select_root_override(
         cfg!(feature = "desktop-e2e"),
-        production_data_dir,
+        std::env::args_os().skip(1),
+        std::env::var_os("STRAVIA_DATA_DIR"),
     )
+}
+
+fn e2e_data_dir(root: &Path) -> anyhow::Result<PathBuf> {
+    anyhow::ensure!(root.is_absolute(), "E2E run root must be absolute");
+    anyhow::ensure!(
+        root.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("stravia-desktop-e2e-")),
+        "E2E run root must have the stravia-desktop-e2e- prefix",
+    );
+    let temporary = std::env::temp_dir().canonicalize()?;
+    let parent = root
+        .parent()
+        .context("E2E run root must have a parent")?
+        .canonicalize()?;
+    anyhow::ensure!(
+        parent == temporary,
+        "E2E run root must be directly inside the system temporary directory"
+    );
+    let metadata = std::fs::symlink_metadata(root).context("E2E run root must already exist")?;
+    anyhow::ensure!(
+        metadata.is_dir() && !metadata.file_type().is_symlink(),
+        "E2E run root must be a real directory"
+    );
+    let canonical = root.canonicalize()?;
+    anyhow::ensure!(
+        canonical.parent() == Some(temporary.as_path()),
+        "E2E run root must not redirect outside the temporary directory"
+    );
+    let data = canonical.join("data");
+    match std::fs::symlink_metadata(&data) {
+        Ok(metadata) => {
+            anyhow::ensure!(
+                metadata.is_dir() && !metadata.file_type().is_symlink(),
+                "E2E data root must be a real directory"
+            );
+            anyhow::ensure!(
+                data.canonicalize()?.parent() == Some(canonical.as_path()),
+                "E2E data root must not redirect outside the run directory"
+            );
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(data)
+}
+
+fn select_root_override(
+    desktop_e2e: bool,
+    args: impl IntoIterator<Item = std::ffi::OsString>,
+    environment: Option<std::ffi::OsString>,
+) -> anyhow::Result<Option<PathBuf>> {
+    // Fixture runs must never inherit a user-selected production root.
+    if desktop_e2e {
+        return stravia_core::data_paths::resolve_data_dir(
+            &repository_root().join(E2E_RUNTIME_DIR),
+        )
+        .map(Some);
+    }
+    let mut selected = None;
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        let value = if arg == "--data-dir" {
+            Some(args.next().context("--data-dir requires a path")?)
+        } else {
+            arg.to_str()
+                .and_then(|arg| arg.strip_prefix("--data-dir="))
+                .map(std::ffi::OsString::from)
+        };
+        if let Some(value) = value {
+            anyhow::ensure!(selected.is_none(), "--data-dir may only be specified once");
+            anyhow::ensure!(!value.is_empty(), "--data-dir requires a non-empty path");
+            selected = Some(value);
+        }
+    }
+    selected
+        .or(environment)
+        .map(|path| {
+            anyhow::ensure!(
+                !path.is_empty(),
+                "STRAVIA_DATA_DIR requires a non-empty path"
+            );
+            stravia_core::data_paths::resolve_data_dir(Path::new(&path))
+        })
+        .transpose()
+}
+
+pub(crate) fn autostart_root_argument(root: &Path) -> anyhow::Result<String> {
+    let root = root
+        .to_str()
+        .context("desktop data directory must be valid Unicode for autostart")?;
+    #[cfg(target_os = "windows")]
+    {
+        // auto-launch joins arguments verbatim into a Windows command line.
+        let mut quoted = String::from("\"");
+        let mut slashes = 0;
+        for character in root.chars() {
+            if character == '\\' {
+                slashes += 1;
+                continue;
+            }
+            quoted.extend(std::iter::repeat_n(
+                '\\',
+                if character == '"' {
+                    slashes * 2 + 1
+                } else {
+                    slashes
+                },
+            ));
+            quoted.push(character);
+            slashes = 0;
+        }
+        quoted.extend(std::iter::repeat_n('\\', slashes * 2));
+        quoted.push('"');
+        Ok(quoted)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // Desktop Entry Exec has both string escaping and quoted argument escaping.
+        anyhow::ensure!(
+            !root.contains(['\n', '\r']),
+            "autostart data directory cannot contain line breaks"
+        );
+        let escaped = root
+            .replace('\\', "\\\\\\\\")
+            .replace('"', "\\\\\"")
+            .replace('`', "\\\\`")
+            .replace('$', "\\\\$")
+            .replace('%', "%%");
+        Ok(format!("\"{escaped}\""))
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
+        // LaunchAgent stores each argument as a separate plist string.
+        Ok(root.to_owned())
+    }
+}
+
+pub(crate) fn desktop_runtime_dir(
+    app: &tauri::App,
+    root_override: Option<&Path>,
+) -> anyhow::Result<PathBuf> {
+    let root = if let Some(root) = root_override {
+        root.to_path_buf()
+    } else if cfg!(debug_assertions) {
+        repository_root().join(DEVELOPMENT_RUNTIME_DIR)
+    } else {
+        app.path()
+            .app_data_dir()
+            .context("failed to resolve desktop app data directory")?
+    };
+    stravia_core::data_paths::resolve_data_dir(&root)
 }
 
 pub(crate) fn desktop_port_store(
     app: &tauri::App,
     runtime_dir: &Path,
 ) -> anyhow::Result<Arc<dyn PortPreferenceStore>> {
+    let path = stravia_core::data_paths::DataPaths::new(runtime_dir).desktop_port();
+    std::fs::create_dir_all(path.parent().context("desktop port store has no parent")?)?;
     let store = app
-        .store_builder(port_store_path(runtime_dir))
+        .store_builder(path)
         .disable_auto_save()
         .build()
         .context("failed to open desktop port store")?;
     Ok(Arc::new(TauriPortPreferenceStore { store }))
-}
-
-fn runtime_dir(development: bool, desktop_e2e: bool, production_data_dir: PathBuf) -> PathBuf {
-    // E2E 会写入假更新等夹具，必须先于 Debug 分支隔离整个运行目录。
-    if desktop_e2e {
-        repository_root().join(E2E_RUNTIME_DIR)
-    } else if development {
-        repository_root().join(DEVELOPMENT_RUNTIME_DIR)
-    } else {
-        production_data_dir
-    }
 }
 
 fn repository_root() -> &'static Path {
@@ -123,10 +266,6 @@ fn repository_root() -> &'static Path {
         .ancestors()
         .nth(3)
         .expect("desktop crate must live under backend/apps")
-}
-
-fn port_store_path(runtime_dir: &Path) -> PathBuf {
-    runtime_dir.join(PORT_STORE_FILE)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]

@@ -531,7 +531,7 @@ def test_setup_mode_is_live_but_not_ready(
             status, state = http_request("GET", f"{base}/api/v1/auth/state")
             assert status == 200
             assert state["mode"] == "setup"
-            assert not (Path(data_dir) / "gateway.db").exists()
+            assert not (Path(data_dir) / "db" / "gateway.db").exists()
         finally:
             stop_stravia_server(proc, logs)
 

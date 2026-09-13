@@ -15,14 +15,15 @@ export interface SessionSummary {
   session_expires_at: number
 }
 
-export interface DatabaseConfig {
-  backend: 'sqlite' | 'postgres'
-  path?: string
-  url?: string
-  max_connections?: number
-  min_connections?: number
-  idle_timeout_seconds?: number
-}
+export type DatabaseConfig =
+  | { backend: 'sqlite' }
+  | {
+      backend: 'postgres'
+      url: string
+      max_connections?: number
+      min_connections?: number
+      idle_timeout_seconds?: number
+    }
 
 interface NativeSession {
   access_token: string

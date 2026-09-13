@@ -219,7 +219,7 @@ test('HTTP management and HTTPS proxy sessions retain browser cookie boundaries'
     expect(await api(page, '/api/v1/setup/claim', 'POST', { token: setupToken })).toBe(204)
     expect(
       await api(page, '/api/v1/setup/complete', 'POST', {
-        database: { backend: 'sqlite', path: join(directory, 'gateway.db') },
+        database: { backend: 'sqlite' },
         username: 'admin',
         password,
         client_base_url: plainOrigin,

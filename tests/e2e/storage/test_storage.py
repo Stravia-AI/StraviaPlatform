@@ -90,11 +90,12 @@ def _prepare_legacy_sqlite(database: Path, migrations: Path) -> None:
 def test_sqlite_upgrade_removes_legacy_logs_and_installs_observation_schema(
     stravia_binary: Path, repo_root: Path, tmp_path: Path
 ) -> None:
-    database = tmp_path / "gateway.db"
+    database = tmp_path / "db" / "gateway.db"
+    database.parent.mkdir()
     _prepare_legacy_sqlite(
         database, repo_root / "backend" / "crates" / "stravia-core" / "migrations" / "sqlite"
     )
-    orphan = tmp_path / "observation-debug" / "00000000000040008000000000000001"
+    orphan = tmp_path / "diagnostics" / "observation-debug" / "00000000000040008000000000000001"
     orphan.mkdir(parents=True)
     (orphan / "segment-000001.jsonl").write_text('{"orphan":true}\n', encoding="utf-8")
     server_port = find_free_port()
@@ -108,7 +109,7 @@ def test_sqlite_upgrade_removes_legacy_logs_and_installs_observation_schema(
         session = initialize_server(
             base,
             wait_for_setup_token(logs, proc),
-            {"backend": "sqlite", "path": str(database)},
+            {"backend": "sqlite"},
         )
         status, body = http_request(
             "GET", f"{base}/api/v1/observations/interactions", headers=session.auth_headers()
@@ -394,7 +395,7 @@ def test_redaction_reuses_and_restores_mappings_after_real_restart(
         pytest.skip("postgres backend requires DB_URL")
     run_schema_action: Callable[..., str] = storage_runtime["run_schema_action"]  # type: ignore[assignment]
     schema = None
-    database = {"backend": "sqlite", "path": str(tmp_path / "gateway.db")}
+    database = {"backend": "sqlite"}
     if backend == "postgres":
         make_schema: Callable[..., str] = storage_runtime["make_isolated_schema"]  # type: ignore[assignment]
         dsn_for_schema: Callable[[str, str], str] = storage_runtime["postgres_dsn_for_schema"]  # type: ignore[assignment]
@@ -504,7 +505,7 @@ def test_observation_tool_replay_and_trace_survive_restart(
         pytest.skip("postgres backend requires DB_URL")
     run_schema_action = storage_runtime["run_schema_action"]
     schema = None
-    database = {"backend": "sqlite", "path": str(tmp_path / "gateway.db")}
+    database = {"backend": "sqlite"}
     if backend == "postgres":
         schema = storage_runtime["make_isolated_schema"]("stravia_tool_replay")
         run_schema_action("create", work_dir=storage_runtime["work_dir"], pg_url=pg_url, schema=schema)

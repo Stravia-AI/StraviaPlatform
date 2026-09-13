@@ -78,7 +78,5 @@ impl Default for GatewayConfig {
 }
 
 fn default_data_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".stravia")
+    PathBuf::from("~/.stravia")
 }

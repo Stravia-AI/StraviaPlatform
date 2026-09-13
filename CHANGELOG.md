@@ -4,6 +4,8 @@
 
 ### Changed
 
+- **Breaking:** Server and Desktop now keep managed local state beneath one resolved data root: SQLite at `db/gateway.db`, diagnostics under `diagnostics/`, rebuildable catalogs under `cache/`, and browser/host state under `state/`. SQLite configuration no longer accepts a separate path; `--config` does not redirect the data root. Existing layouts require the explicit, stopped-source `stravia-tools migrate-data` command, which plans by default and publishes a verified copy without deleting source data. Desktop restart and autostart retain the selected root.
+
 - Observation canvases no longer mount every new card at the origin for measurement. Shared node and handle geometry enables viewport culling before the first mount; unchanged nodes retain their identity, and long-chain ancestry checks reuse traversed prefixes without changing causal links.
 
 - Streaming Observation now seals immutable text blocks at 16 KiB or approximately two seconds, batches event and summary writes, and compresses new blocks only when storage decreases. Existing rows remain unchanged. The inspector separates unsaved live previews from committed history, loads events incrementally, and pages older records. Ordinary detail reads no longer flush writers; Debug Bundle issuance flushes only the selected Interaction before fixing its complete snapshot. A process crash may lose pending observation text from the normal two-second window.

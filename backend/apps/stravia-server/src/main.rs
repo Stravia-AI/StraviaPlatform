@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use stravia_core::config::GatewayConfig;
+use stravia_core::data_paths::{DataPaths, resolve_data_dir};
 use stravia_server::{
     AdminEntryPolicy, DEFAULT_PORT, ServerStartupConfig, prepare_server_app, recover_admin,
     standalone_local_origins, start_http_server,
@@ -78,7 +79,7 @@ struct Args {
         long,
         default_value_t = default_data_dir(),
         env = "STRAVIA_DATA_DIR",
-        help = "Runtime data and artifact directory (not a database override)",
+        help = "Root for configuration, SQLite database, artifacts, diagnostics, cache and host state",
         help_heading = "Storage",
         global = true
     )]
@@ -116,12 +117,15 @@ async fn main() -> anyhow::Result<()> {
     let filter = format!("stravia={level},tower_http={level}", level = args.log_level);
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
-    let data_dir = expanded_path(&args.data_dir);
+    let data_dir = resolve_data_dir(Path::new(&args.data_dir))?;
+    let paths = DataPaths::new(&data_dir);
+    paths.prepare()?;
+    let _instance_lock = paths.lock()?;
     let config_path = args
         .config
         .as_deref()
         .map(expanded_path)
-        .unwrap_or_else(|| data_dir.join("server.toml"));
+        .unwrap_or_else(|| paths.server_config());
     let gateway = base_gateway_config(&args, data_dir);
 
     match args.command {

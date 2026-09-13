@@ -238,7 +238,7 @@ def test_client_visible_credentials_are_redacted_from_observation_artifacts(
     assert any(safe.encode() in content for content in contents)
 
     data_dir = Path(admin_env["data_dir"])
-    with closing(sqlite3.connect(data_dir / "gateway.db")) as connection:
+    with closing(sqlite3.connect(data_dir / "db" / "gateway.db")) as connection:
         tails = connection.execute(
             "SELECT visible_tail FROM interaction_observations WHERE id = ?",
             (detail["interaction"]["id"],),
@@ -263,7 +263,7 @@ def test_client_visible_credentials_are_redacted_from_observation_artifacts(
             for line in event["payload"].splitlines():
                 if line.startswith("data: ") and line[6:] != "[DONE]":
                     json.loads(line[6:])
-        trace_dir = data_dir / "observation-debug" / trace["trace_id"]
+        trace_dir = data_dir / "diagnostics" / "observation-debug" / trace["trace_id"]
         for path in trace_dir.rglob("*"):
             if path.is_file():
                 assert sentinel.encode() not in path.read_bytes(), path

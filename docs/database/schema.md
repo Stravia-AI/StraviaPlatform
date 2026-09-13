@@ -414,7 +414,7 @@ Pre-admission decode, protocol, or authentication failures remain outside Princi
 | `created_at`, `completed_at` | BIGINT / INTEGER | `completed_at` NULL | Lifecycle times |
 | `expires_at` | BIGINT / INTEGER NOT NULL | — | Retention boundary |
 
-Exactly one of `run_id` and `rejection_id` is non-NULL. Large Debug payloads are not stored in relational rows. They are segmented JSONL under the managed `observation-debug` data directory, capped at 64 MiB per Run and 2 GiB retained total. The relational manifest permits startup reconciliation of tombstones and orphan managed directories.
+Exactly one of `run_id` and `rejection_id` is non-NULL. Large Debug payloads are not stored in relational rows. They are segmented JSONL under `<data-dir>/diagnostics/observation-debug`, capped at 64 MiB per Run and 2 GiB retained total. The relational manifest permits startup reconciliation of tombstones and orphan managed directories. SQLite resides at `<data-dir>/db/gateway.db`; reorganizing the local layout does not change table definitions or persisted relative object/Trace identities.
 
 **索引**：`debug_manifests_expiry_idx`
 

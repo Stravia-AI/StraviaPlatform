@@ -50,11 +50,8 @@ pub struct WebAccessService {
 
 impl WebAccessService {
     pub(crate) fn new(gateway: crate::Gateway) -> Self {
-        let profile_dir = gateway
-            .config
-            .data_dir
-            .join("web-access")
-            .join("browser-profile");
+        let profile_dir =
+            crate::data_paths::DataPaths::new(&gateway.config.data_dir).web_access_profile();
         Self {
             gateway,
             adapter_factory: Arc::new(ProductionAdapterFactory { profile_dir }),

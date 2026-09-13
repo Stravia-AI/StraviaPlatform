@@ -1,6 +1,5 @@
 use std::{
     io,
-    path::PathBuf,
     sync::{
         Arc, Condvar, Mutex as StdMutex,
         atomic::{AtomicBool, AtomicU16, Ordering},
@@ -12,43 +11,85 @@ use axum::{Router, routing::get};
 use tokio::sync::{Notify, oneshot};
 
 use super::{
-    BindingFailureKind, DEFAULT_PORT, DEVELOPMENT_RUNTIME_DIR, DesktopGatewayRuntime,
-    DesktopPortMode, OwnerLookupStatus, PortOperationErrorCode, PortOwner, PortOwnerResolver,
-    PortPreferenceLoad, PortPreferenceStore, PortSwitchPublisher, TestBind, repository_root,
-    runtime_dir, start_http_server,
+    BindingFailureKind, DEFAULT_PORT, DesktopGatewayRuntime, DesktopPortMode, OwnerLookupStatus,
+    PortOperationErrorCode, PortOwner, PortOwnerResolver, PortPreferenceLoad, PortPreferenceStore,
+    PortSwitchPublisher, TestBind, e2e_data_dir, select_root_override, start_http_server,
 };
 
 #[test]
-fn desktop_e2e_runtime_is_isolated_from_development_and_production() {
-    let production_data_dir = PathBuf::from("production-app-data");
-    for development in [true, false] {
-        let e2e_dir = runtime_dir(development, true, production_data_dir.clone());
-        assert_ne!(
-            e2e_dir,
-            runtime_dir(true, false, production_data_dir.clone())
-        );
-        assert_ne!(
-            e2e_dir,
-            runtime_dir(false, false, production_data_dir.clone())
-        );
-    }
-}
-
-#[test]
-fn development_runtime_uses_a_hidden_repository_directory() {
-    let production_data_dir = PathBuf::from("production-app-data");
-    assert_eq!(
-        runtime_dir(true, false, production_data_dir),
-        repository_root().join(DEVELOPMENT_RUNTIME_DIR)
+fn desktop_e2e_ignores_cli_and_environment_roots() {
+    let isolated = select_root_override(true, [], None).unwrap().unwrap();
+    let selected = select_root_override(
+        true,
+        ["--data-dir".into(), "production-root".into()],
+        Some("production-env".into()),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(selected, isolated);
+    assert_ne!(
+        selected,
+        std::env::current_dir().unwrap().join("production-root")
     );
 }
 
 #[test]
-fn production_runtime_keeps_the_tauri_app_data_directory() {
-    let production_data_dir = PathBuf::from("production-app-data");
+fn explicit_desktop_root_overrides_environment_and_preserves_unicode() {
+    let selected = select_root_override(
+        false,
+        ["--data-dir".into(), "中文 空格".into()],
+        Some("environment-root".into()),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(selected, std::env::current_dir().unwrap().join("中文 空格"));
+    let environment = select_root_override(false, [], Some("environment-root".into()))
+        .unwrap()
+        .unwrap();
     assert_eq!(
-        runtime_dir(false, false, production_data_dir.clone()),
-        production_data_dir
+        environment,
+        std::env::current_dir().unwrap().join("environment-root")
+    );
+}
+
+#[test]
+fn malformed_desktop_override_does_not_fall_back_to_environment() {
+    assert!(
+        select_root_override(
+            false,
+            ["--data-dir".into()],
+            Some("environment-root".into()),
+        )
+        .is_err()
+    );
+    assert!(select_root_override(false, ["--data-dir=".into()], None).is_err());
+    assert!(select_root_override(false, [], Some("".into())).is_err());
+}
+
+#[test]
+fn desktop_e2e_run_root_must_be_a_dedicated_temporary_directory() {
+    let root = tempfile::Builder::new()
+        .prefix("stravia-desktop-e2e-")
+        .tempdir()
+        .unwrap();
+    assert_eq!(
+        e2e_data_dir(root.path()).unwrap(),
+        root.path().canonicalize().unwrap().join("data")
+    );
+    assert!(e2e_data_dir(std::path::Path::new("stravia-desktop-e2e-relative")).is_err());
+    let wrong_name = tempfile::tempdir().unwrap();
+    assert!(e2e_data_dir(wrong_name.path()).is_err());
+    let nested = root.path().join("stravia-desktop-e2e-nested");
+    std::fs::create_dir(&nested).unwrap();
+    assert!(e2e_data_dir(&nested).is_err());
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_autostart_quotes_unicode_roots_and_trailing_separators() {
+    assert_eq!(
+        super::autostart_root_argument(std::path::Path::new("C:\\中文 空格\\")).unwrap(),
+        "\"C:\\中文 空格\\\\\"",
     );
 }
 

@@ -19,7 +19,6 @@ let loading = $state(true)
 let authorized = $state(false)
 let token = $state('')
 let backend = $state<'sqlite' | 'postgres'>('sqlite')
-let sqlitePath = $state('gateway.db')
 let postgresUrl = $state('')
 let maxConnections = $state('')
 let minConnections = $state('')
@@ -42,9 +41,7 @@ const poolSettingsValid = $derived(
   ),
 )
 const databaseReady = $derived(
-  backend === 'sqlite'
-    ? /(?:^|[\\/])gateway\.db$/.test(sqlitePath.trim()) || sqlitePath.trim() === 'gateway.db'
-    : postgresUrl.trim().length > 0 && poolSettingsValid,
+  backend === 'sqlite' || (postgresUrl.trim().length > 0 && poolSettingsValid),
 )
 
 onMount(() => {
@@ -72,7 +69,7 @@ function optionalPositiveInteger(value: string): number | undefined {
 }
 
 function databaseConfig(): DatabaseConfig {
-  if (backend === 'sqlite') return { backend, path: sqlitePath.trim() }
+  if (backend === 'sqlite') return { backend }
   return {
     backend,
     url: postgresUrl.trim(),
@@ -217,19 +214,7 @@ async function complete(): Promise<void> {
                 </Select.Content>
               </Select.Root>
             </Field.Field>
-            {#if backend === 'sqlite'}
-              <Field.Field data-invalid={!databaseReady ? true : undefined}>
-                <Field.FieldLabel for="sqlite-path">{m.setup_sqlite_path()}</Field.FieldLabel>
-                <Input
-                  id="sqlite-path"
-                  class="font-technical"
-                  bind:value={sqlitePath}
-                  oninput={() => (databaseTested = false)}
-                  aria-invalid={!databaseReady}
-                  placeholder="/var/lib/stravia/gateway.db" />
-                <Field.FieldDescription>{m.setup_sqlite_path_help()}</Field.FieldDescription>
-              </Field.Field>
-            {:else}
+            {#if backend === 'postgres'}
               <Field.Field data-invalid={!databaseReady ? true : undefined}>
                 <Field.FieldLabel for="postgres-url">{m.setup_postgres_url()}</Field.FieldLabel>
                 <Input

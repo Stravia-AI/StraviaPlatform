@@ -247,7 +247,7 @@ def test_observation_history_pages_decode_preserve_snapshot_and_do_not_write(adm
     payload = json.dumps({"kind": "client_visible_content_delta", "block_id": "history-compressed",
                           "text_storage": {"codec": "zip-deflate-v1", "bytes": len(text.encode()),
                                            "data": base64.b64encode(archive.getvalue()).decode()}})
-    database = Path(admin_env["data_dir"]) / "gateway.db"
+    database = Path(admin_env["data_dir"]) / "db" / "gateway.db"
     with closing(sqlite3.connect(database)) as connection:
         expires = int(time.time() * 1000) + 86400000
         connection.executemany(

@@ -19,6 +19,8 @@
     "withGlobalTauri": true,
     "windows": [
       {
+        "label": "main",
+        "create": false,
         "title": "Stravia Agent infra",
         "width": 1280,
         "height": 800,

@@ -5,6 +5,7 @@ pub mod auth;
 mod compaction;
 pub mod config;
 pub mod connect_client_apply;
+pub mod data_paths;
 pub mod db;
 pub mod error;
 mod gateway;

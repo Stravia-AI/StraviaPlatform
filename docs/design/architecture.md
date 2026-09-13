@@ -251,7 +251,7 @@ graph TD
 
 **Local Web Access 运行边界：**
 
-`stravia-web-access` 内嵌 `Stravia-AI/moli-stealth`，依赖固定到 Git revision `65b76086fe98b890bbd4755899698c71bdcef1d7`（合并上游 v1.1.5，移植网络能力并保留隐身传输）。HTTP Search/Fetch 使用 `moli-stealth-net` 和 Chrome 传输指纹，动态渲染使用 `moli-core` 的 Rust Interface 与 V8，不启动外部浏览器或 Node/Bun sidecar。`LocalWeb` 固定代理配置快照；生产 adapter 从 `GatewayConfig.data_dir` 派生 `web-access/browser-profile`，通过 `LocalWeb::with_profile` 启用浏览器持久存储。HTTP Search 的 `moli-cookie-jar` 使用上游 `moli-cookie-cache` 单独读写 `web-access/search-cookies.json`；相同路径在进程内共享 Cookie owner，独立锁文件防止跨进程写入冲突，收到 Set-Cookie 后原子保存，读写失败显式返回错误。HTTP 与浏览器搜索不互相导入 Cookie。Fetch 使用禁用 Cookie 的 HTTP 客户端及独立临时浏览器，不访问搜索 profile。`LocalWeb::new` 保持临时存储，供隔离示例与测试使用。HTTP 适配器负责逐跳重定向、跨 origin 凭据清理和解压后流式大小限制，直连 Fetch 使用策略层验证后的固定地址。
+`stravia-web-access` 内嵌 `Stravia-AI/moli-stealth`，依赖固定到 Git revision `65b76086fe98b890bbd4755899698c71bdcef1d7`（合并上游 v1.1.5，移植网络能力并保留隐身传输）。HTTP Search/Fetch 使用 `moli-stealth-net` 和 Chrome 传输指纹，动态渲染使用 `moli-core` 的 Rust Interface 与 V8，不启动外部浏览器或 Node/Bun sidecar。`LocalWeb` 固定代理配置快照；生产 adapter 从 `GatewayConfig.data_dir` 经 `DataPaths` 派生 `state/web-access/browser-profile`，通过 `LocalWeb::with_profile` 启用浏览器持久存储。HTTP Search 的 `moli-cookie-jar` 使用上游 `moli-cookie-cache` 单独读写 `state/web-access/search-cookies.json`；相同路径在进程内共享 Cookie owner，独立锁文件防止跨进程写入冲突，收到 Set-Cookie 后原子保存，读写失败显式返回错误。HTTP 与浏览器搜索不互相导入 Cookie。Fetch 使用禁用 Cookie 的 HTTP 客户端及独立临时浏览器，不访问搜索 profile。`LocalWeb::new` 保持临时存储，供隔离示例与测试使用。HTTP 适配器负责逐跳重定向、跨 origin 凭据清理和解压后流式大小限制，直连 Fetch 使用策略层验证后的固定地址。
 
 Moli 的 Browser 所有者具有线程亲和性，由专用线程上的 current-thread Tokio runtime 与 LocalSet 创建、使用和释放；调用方只通过有界消息通道提交渲染请求。持久 profile 按规范化路径串行使用，每条命令完成、超时或取消后，先销毁 Browser、刷新分区并关闭出口，再释放 profile gate，避免旧、新代理快照同时占用同一 profile。临时浏览器继续在运行时内复用。预访问根据目标 URL 的有效网络 Cookie 决定，包含 HttpOnly，并遵循过期、domain、path、Secure、SameSite 与分区规则；没有可用 Cookie 才执行 preflight，与目标导航共用页面以保留本次 sessionStorage。页面求值使用隔离世界，JavaScript 导航后重新绑定就绪判定。排队、初始化、导航和提取共用绝对 deadline；接收端取消会取消在途操作，页面句柄释放触发回收，正常完成显式等待关闭。
 
@@ -545,7 +545,7 @@ Request Records 以显式 Unix 毫秒 `[start_at, end_at)` 查询完整 root DAG
 
 Debug 是单进程原子开关，每次进程启动为 off；启用必须确认敏感度和容量。Run 在 admission 时、Rejected Request 在 ingress 时分别 snapshot 开关，因而同一 Interaction 可包含 captured、uncaptured 与 partial Run。Trace 保存 canonical checkpoint 及 client↔platform↔upstream 四方向适用的 HTTP header/body chunk、SSE bytes 与 WebSocket handshake/message 应用层顺序；它不声称 TLS、TCP、HTTP/2 frame 或 packet fidelity。凭据 header、URL userinfo、credential-like query value 以及结构化 JSON/form 中显式 credential 字段在进入队列或磁盘前永久替换，但 prompt、业务内容和工具输入/结果仍可能保留。
 
-Trace segment 位于 data directory 下的托管 `observation-debug` 目录；每 Run 固定上限 64 MiB，全局 retained Trace 固定上限 2 GiB，容量压力不提前逐出未过期数据。Observation、Rejected Request、event、manifest 与 segment 共用 `log_retention_days`（默认 7 天）。定期清理与 Clear History 都保留 `running` / `waiting_client` Interaction，并报告 skipped active；manifest tombstone 与启动 reconciliation 保证 crash 后继续删除 orphan/残留托管目录。
+Trace segment 位于 data directory 下的托管 `diagnostics/observation-debug` 目录；每 Run 固定上限 64 MiB，全局 retained Trace 固定上限 2 GiB，容量压力不提前逐出未过期数据。Observation、Rejected Request、event、manifest 与 segment 共用 `log_retention_days`（默认 7 天）。定期清理与 Clear History 都保留 `running` / `waiting_client` Interaction，并报告 skipped active；manifest tombstone 与启动 reconciliation 保证 crash 后继续删除 orphan/残留托管目录。
 
 已认证 POST 可为 Interaction 或 Rejected Request 固定 through-sequence 的 snapshot，并签发 60 秒、单次使用、高熵 opaque ticket；普通 GET 消费 ticket 并流式生成 versioned ZIP，URL 不携带 Admin credential。manifest 记录 export time、through-sequence、resource status、每 Run capture state/bytes/reason 及整体 `complete|partial|none`；运行中导出只能是 point-in-time partial。过期、重放、跨资源或进程重启后的 ticket 统一失效。当前 realtime、Debug switch、Trace storage 与 ticket 都仅保证单 Gateway instance，不提供 cluster fanout、共享 Trace 或跨实例 ticket。
 
@@ -892,6 +892,10 @@ Canonical Model 只用作一次性模板：创建 Route 时，客户端请求使
 SQLite 与 PostgreSQL 通过 SQLx versioned migrations 演进。Server 未配置时先提供设置服务，选择并保存数据库配置后才运行 migration 和正常 Gateway；Desktop 直接打开本地 SQLite。当前受支持 schema 的增量迁移保留业务数据，不兼容 schema 明确失败且不自动清空。权威 Schema 文档为 [docs/database/schema.md](../database/schema.md)（含供审阅的 `deploy/schema/postgres.sql`）。
 
 ### 10.2 核心表结构（最终态，post-migration）
+
+本地布局由 `stravia-core::data_paths::DataPaths` 统一推导：`db/gateway.db`、`artifacts/`、`diagnostics/observation-debug/`、`cache/catalog/` 和 `state/`。宿主只选择并解析根目录，Server/Desktop 持有根 `.instance.lock` 到退出；SQLite 位置不再反向决定根目录。Desktop 的端口与 Windows/Linux WebView 分别位于 `state/desktop-port.json`、`state/desktop-webview/`。Memory Gateway 的临时 Trace 使用所选根内的隔离子目录，并在 shutdown 清理。
+
+旧布局启动失败，使用 `stravia-tools migrate-data` 停机复制、转换配置并校验 SQLite 后发布完整目标；不改 schema、不连接外部后端，也不自动删除源数据。Artifact 相对键和 Trace 相对身份保持不变，数据库与其本地文件必须配套迁移。操作步骤、外部 WebView 输入和支持范围见双语 README；路径来源取舍见 ADR-0041。
 
 > 首个 SQLx migration 直接创建基础表；后续版本在 SQLite 与 PostgreSQL 中等价演进，不通过删除数据库处理不兼容版本。
 

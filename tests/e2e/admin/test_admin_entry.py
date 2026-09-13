@@ -120,7 +120,7 @@ def test_nonloopback_http_without_entry_configuration_supports_management(
     try:
         token = wait_for_setup_token(logs, proc)
         wait_until_ready(f"{base}/healthz")
-        first = initialize_server(base, token, {"backend": "sqlite", "path": str(tmp_path / "gateway.db")})
+        first = initialize_server(base, token, {"backend": "sqlite"})
         assert first.request("GET", "/api/v1/status")[0] == 200
         assert first.request("PUT", "/api/v1/settings/log_retention_days", {"value": "9"})[0] == 200
         assert first.request("GET", "/api/v1/settings/log_retention_days")[1]["data"] == "9"
@@ -289,7 +289,7 @@ def test_restarting_with_entry_list_gates_existing_admin_without_gating_model_ap
     stravia_binary: Path, tmp_path: Path,
 ) -> None:
     with _server(stravia_binary, tmp_path) as (base, token):
-        operator = initialize_server(base, token, {"backend": "sqlite", "path": str(tmp_path / "gateway.db")})
+        operator = initialize_server(base, token, {"backend": "sqlite"})
         status, key = operator.request("POST", "/api/v1/api-keys", {
             "name": "protocol-client", "model_ids": [], "mcp_access_enabled": True,
         })
@@ -362,9 +362,9 @@ def test_unavailable_transition_keeps_the_entire_management_entry_guard(
         operator = WebSession(base)
         headers = {"host": "entry.test", "origin": "http://entry.test"}
         assert operator.request("POST", "/api/v1/setup/claim", {"token": token}, headers=headers)[0] == 204
-        database_path = tmp_path / "gateway.db"
+        database_path = tmp_path / "db" / "gateway.db"
         setup = {
-            "database": {"backend": "sqlite", "path": str(database_path)},
+            "database": {"backend": "sqlite"},
             "username": "admin", "password": "", "client_base_url": "http://entry.test",
         }
         assert operator.request("POST", "/api/v1/setup/complete", setup, headers=headers)[0] == 400

@@ -102,9 +102,8 @@ impl InteractionObservation {
         if store.recover_after_restart().await.is_err() {
             tracing::warn!("observation restart recovery unavailable");
         }
-        let ephemeral_root = (!persistent).then(|| {
-            std::env::temp_dir().join(format!("stravia-observation-{}", uuid::Uuid::new_v4()))
-        });
+        let ephemeral_root =
+            (!persistent).then(|| data_dir.join(format!(".ephemeral-{}", uuid::Uuid::new_v4())));
         let trace_data_dir = ephemeral_root.clone().unwrap_or(data_dir);
         let traces = TraceManager::new(trace_data_dir).unwrap_or_else(|_| {
             tracing::warn!("observation trace storage unavailable");

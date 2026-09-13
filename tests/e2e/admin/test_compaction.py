@@ -579,7 +579,7 @@ def test_observation_trace_failure_cannot_break_native_continuation(stravia_bina
         source, window = _boundary(env, key, model)
         status, body = http_request("PUT", f"{env['admin']}/api/v1/observations/debug", payload={"enabled": True, "confirmed": True}, headers=env["auth"])
         assert status == 200, body
-        trace_root = tmp_path / "observation-debug"
+        trace_root = tmp_path / "diagnostics" / "observation-debug"
         trace_root.rename(tmp_path / "observation-debug-before-failure")
         trace_root.write_bytes(b"block managed trace storage")
         continued = _success(env, key, model, window + [{"role": "user", "content": "continue with broken diagnostics"}])

@@ -141,7 +141,7 @@ Configure one Search Backend in the WebUI. Local Search runs a bounded Agent ove
 
 The in-process Local Provider embeds [Stravia's Moli engine](https://github.com/Stravia-AI/moli-stealth): `moli-stealth-net` handles HTTP Search/Fetch and `moli-core` renders dynamic pages with V8. Desktop and Server require no Chrome/Chromium installation, external Moli executable, or Node/Bun sidecar. Browser execution starts lazily on a dedicated owner thread.
 
-Local search saves its browser profile under `<data_dir>/web-access/browser-profile` and the separate HTTP search cookie jar in `<data_dir>/web-access/search-cookies.json`. Google searches use the browser throughout: without an unexpired cookie applicable to the search URL, Stravia first opens `https://www.google.com/` to receive anonymous cookies, then searches in the same page. Later searches reuse the saved identity, including after restart; other browser engines with homepage preflight use the same cookie-aware rule. Bing and other HTTP engines reuse their own saved cookies. Fetch uses separate temporary browser storage and cookie-disabled HTTP clients, never the search profile. These files are deployment-local, are not imported from your personal browser, and should not be shared or committed; stop Stravia before removing them to reset the search identity. A site may decline to issue cookies or still block automated traffic.
+Local search saves its browser profile under `<data_dir>/state/web-access/browser-profile` and the separate HTTP search cookie jar in `<data_dir>/state/web-access/search-cookies.json`. Google searches use the browser throughout: without an unexpired cookie applicable to the search URL, Stravia first opens `https://www.google.com/` to receive anonymous cookies, then searches in the same page. Later searches reuse the saved identity, including after restart; other browser engines with homepage preflight use the same cookie-aware rule. Bing and other HTTP engines reuse their own saved cookies. Fetch uses separate temporary browser storage and cookie-disabled HTTP clients, never the search profile. These files are deployment-local, are not imported from your personal browser, and should not be shared or committed; stop Stravia before removing them to reset the search identity. A site may decline to issue cookies or still block automated traffic.
 
 Select Local under **Web search → Search and page sources** without configuring a browser path. The browser-path management endpoint and `STRAVIA_CHROME_PATH` setting have been removed. Existing `web-access-browser.json` and `desktop-browser.json` files are left untouched but are no longer read or written. Remote Exa and Zhipu services are unchanged.
 
@@ -261,14 +261,44 @@ Cached updates are rechecked against the running version before being offered. A
 
 ### Storage and deployment
 
-- **SQLite** and **PostgreSQL** are selected during the first-run setup flow.
+- Server selects **SQLite** or **PostgreSQL** during first-run setup; Desktop uses local SQLite.
 - The selected database connection is stored only in `server.toml`; database CLI options and environment-variable overrides are not supported.
+- SQLite always uses `<data-dir>/db/gateway.db`; selecting a database never changes the data root.
 - SQLx migrations preserve data from the currently supported schema and run before the normal Gateway becomes ready.
 - `GET /healthz` is the liveness probe; `GET /readyz` returns unavailable while setup is incomplete or the Gateway cannot start.
 
 PostgreSQL must already exist and be reachable by an account that can create and migrate Stravia's own tables; Stravia does not create the database or require `CREATEDB`. Incompatible older schemas fail explicitly rather than being deleted or rebuilt.
 
 For schema review, `stravia-tools dump-schema --backend sqlite --output deploy/schema/sqlite.sql` exports an isolated in-memory database after all migrations. The PostgreSQL equivalent uses `--backend postgres --output deploy/schema/postgres.sql` and requires a development `DATABASE_URL`, `CREATEDB`, and compatible `pg_dump`; it creates and removes a temporary database without migrating the source database. These are development-tool requirements, not Gateway deployment requirements. Both exports are schema-only review artifacts, not deployment initialization scripts. See [Database Schema](docs/database/schema.md).
+
+#### Managed data layout and migration
+
+Server and Desktop use `--data-dir`, then `STRAVIA_DATA_DIR`, then their deployment default. Relative roots resolve once at startup. An unavailable root fails explicitly; an instance lock prevents Server/Desktop from concurrently owning the same root. `--config` may select an external Server configuration file, but never redirects local data.
+
+| Relative path | Contents |
+|---|---|
+| `server.toml` | Default Server configuration; protect PostgreSQL credentials |
+| `db/gateway.db` | SQLite business data; SQLite manages its adjacent WAL/SHM |
+| `artifacts/{objects,staging,locks}` | Local objects, incomplete uploads, and operational locks |
+| `diagnostics/observation-debug` | Debug Trace segments paired with database manifests |
+| `cache/catalog` | Rebuildable Provider Catalog and logos |
+| `state/web-access` | Search cookies and persistent browser profile, not disposable cache |
+| `state/desktop-port.json` | Desktop fixed-port preference |
+| `state/desktop-webview` | Desktop WebView data on Windows/Linux |
+
+PostgreSQL rows and S3 objects remain external: copying this directory alone is not a complete backup of those backends. Ordinary browser storage, Connect Client configuration, user-selected downloads, and OS/updater-managed files remain outside this layout. macOS WKWebView does not support filesystem `data_directory`, so its WebView state is not covered by the directory guarantee.
+
+Old layouts and SQLite configurations containing `path` are rejected rather than silently opening an empty database. Migrate explicitly to a nonexistent or empty target whose parent already exists:
+
+```bash
+cargo run -p stravia-devtools -- migrate-data --from ./old-data --to ./data
+# Stop every Server/Desktop using the source, then apply the same plan:
+cargo run -p stravia-devtools -- migrate-data --from ./old-data --to ./data --apply --source-stopped
+```
+
+The default command only prints a plan. Add `--config <old-server.toml>` for an external configuration. Add `--webview-from <old-platform-webview-directory>` to preserve old Desktop browser state: previous Windows/Linux builds used the platform local-data directory under `com.stravia.ai-gateway` (E2E used `com.stravia.ai-gateway.desktop-e2e`), independently of the gateway root. No user directory is guessed or read automatically. For a shared Linux root, explicitly passing the same directory as `--from` and `--webview-from` moves otherwise-unmapped entries as WebView state without duplicating the database or objects.
+
+Migration retains source data, replays copied WAL into a private SQLite snapshot, checks its integrity, and publishes the complete target only after copying succeeds. It does not upgrade database schemas or contact PostgreSQL/S3. Unknown entries, links/reparse points, overlapping roots, and conflicting targets fail explicitly. Apply may create source `.instance.lock` files and retains a sibling target reservation lock; these contain no business data. Do not run old binaries during migration: they predate the instance lock. After verification, start with the new `--data-dir` and default converted `server.toml`, not the old external configuration. Keep the old copy until verification is complete; switching back after new writes would lose those writes.
 
 ## Releases
 
@@ -399,9 +429,9 @@ task build:desktop
 task build:desktop:installer
 ```
 
-Development builds keep server and desktop runtime state—including `gateway.db` and the desktop fixed-port store—under the repository-local, ignored `.stravia-dev/` directory. Release server builds use `~/.stravia`; release desktop builds continue to use the operating system application-data directory.
+Development builds default to the repository-local, ignored `.stravia-dev/` root, including `db/gateway.db` and `state/desktop-port.json`. Release server builds default to `~/.stravia`; release desktop builds default to the operating system application-data directory. Explicit roots follow the same managed layout. Desktop preserves the selected absolute root for restart and autostart.
 
-Desktop builds with the `desktop-e2e` feature use a separate, ignored `.stravia-desktop-e2e/` directory, including when built in debug mode. The `task test:e2e:desktop` workflow seeds a fake `9.9.9` update there to exercise download and installation without fetching or installing a real release; these fixtures must not enter normal development or production data.
+Desktop builds with the `desktop-e2e` feature ignore ordinary root overrides. The `task test:e2e:desktop` workflow supplies an isolated `STRAVIA_DESKTOP_E2E_RUN_ROOT` beneath the system temporary directory and stores runtime data in its `data/` child; without that test-only variable, the default is the ignored `.stravia-desktop-e2e/` root. It seeds a fake `9.9.9` update to exercise download and installation without installing a real release; fixtures must not enter normal development or production data.
 
 The desktop process starts the same unified HTTP application locally on `127.0.0.1`. On first use it prefers the fixed default port `23471`; later launches prefer any fixed port saved under **Settings → Desktop**. If the preferred port cannot be bound, Stravia remains available on a temporary random port, reports the conflict on Overview, and lets you recheck or replace the fixed port without restarting. This desktop-local setting does not change the standalone server options below.
 
@@ -420,17 +450,16 @@ Common CLI options and environment variables:
 | `--log-level`            | `STRAVIA_LOG_LEVEL`            | `info`       |
 | `--config-poll-interval` | `STRAVIA_CONFIG_POLL_INTERVAL` | `3` seconds  |
 
-`--config` selects the only database configuration source. `--data-dir` still locates runtime artifacts and supplies the default config path; it does not select or override the database. A missing config enters first-run setup. A malformed config, unreachable configured database, or incompatible schema is a startup error and never falls back to SQLite.
+`--config` selects the only database-backend and PostgreSQL-connection configuration source. `--data-dir` owns all managed local paths, including SQLite, and supplies the default config path. A missing config enters first-run setup. A malformed config, legacy layout, unreachable configured database, or incompatible schema is a startup error and never falls back to another database.
 
 The setup flow atomically writes one of these forms:
 
 ```toml
 [database]
 backend = "sqlite"
-path = "/var/lib/stravia/gateway.db"
 ```
 
-The SQLite filename must be `gateway.db`. Relative paths, including the setup wizard's default `gateway.db`, resolve from the directory containing `server.toml`, not the process working directory. Setup saves the resolved absolute path; existing absolute paths are unchanged. With the default Debug configuration, this uses `<workspace>/.stravia-dev/gateway.db`.
+SQLite has no independent `path` field. Setup testing, completion, restart, and administrator recovery all use `<data-dir>/db/gateway.db`; an external `server.toml` does not change that location. With the default Debug root, this is `<workspace>/.stravia-dev/db/gateway.db`. Use the explicit migration command above for old path-bearing configurations.
 
 For an already-created PostgreSQL database:
 
@@ -447,10 +476,10 @@ The three pool settings are optional. Protect `server.toml` because a PostgreSQL
 
 On an unconfigured or configured-admin-free database, the console token is accepted only by `POST /api/v1/setup/claim`; the resulting `stravia_setup` HttpOnly, `SameSite=Strict` cookie (`Path=/api/v1`, and `Secure` for HTTPS) can call `/api/v1/setup/test` and `/api/v1/setup/complete`. Setup access cannot call management APIs and is closed when an administrator already exists. `GET /api/v1/auth/state` reports setup, availability, and current authentication without refreshing credentials. Normal Server authentication uses `/api/v1/auth/login`, `/api/v1/auth/refresh`, `/api/v1/auth/logout`, and `/api/v1/auth/credentials`. Access and refresh values remain in `HttpOnly`, `SameSite=Strict` cookies (`stravia_access` with `Path=/`, and `stravia_refresh` with `Path=/api/v1/auth`), not browser storage; HTTPS origins add `Secure`. HTTP and HTTPS entries both support the complete management flow. The browser client sends `X-Stravia-CSRF: 1`, and Stravia rejects unsafe requests whose `Origin` differs from the independently recovered external request origin.
 
-To recover forgotten credentials, run the local interactive command against the same config:
+To recover forgotten credentials, stop the instance owning the data root, then run the local interactive command against the same data root and configuration:
 
 ```bash
-./target/release/stravia-server --config /var/lib/stravia/server.toml recover-admin
+./target/release/stravia-server --data-dir /var/lib/stravia --config /var/lib/stravia/server.toml recover-admin
 ```
 
 The command prompts for the username and reads the new password plus confirmation without echoing it or accepting it as a command-line argument. It updates the existing single administrator in place and revokes every old management session; it does not delete business data or reopen database setup.
