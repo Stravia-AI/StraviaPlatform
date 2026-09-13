@@ -164,12 +164,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
     let fixed_media_plan = request.meta.media_routing.clone();
     let observe_delivery =
         !crate::proxy::dispatcher::is_websocket_delivery_deferred(&request_context);
-    let (completion_tx, completion_rx) = if observe_delivery {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        (Some(tx), Some(rx))
-    } else {
-        (None, None)
-    };
+    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
     let extensions = request_context.extensions.clone();
 
     tokio::spawn(async move {
@@ -1097,15 +1092,13 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                     }
                 }
             }
-            if let Some(completion) = completion_tx {
-                let terminal = delivery_completed_at.is_some().then(|| {
-                    request_context
-                        .extensions
-                        .get::<super::super::RunTerminalContext>()
-                        .expect("Inference Run terminal context")
-                });
-                let _ = completion.send(terminal);
-            }
+            let terminal = delivery_completed_at.is_some().then(|| {
+                request_context
+                    .extensions
+                    .get::<super::super::RunTerminalContext>()
+                    .expect("Inference Run terminal context")
+            });
+            let _ = completion_tx.send(terminal);
             if let Some(mut phase) = owned_phase.take() {
                 phase.finish();
             }
@@ -1123,9 +1116,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
             ));
         }
     }
-    if let Some(completion) = completion_rx {
-        extensions.insert(super::super::StreamDeliveryCompletion(completion));
-    }
+    extensions.insert(super::super::StreamDeliveryCompletion(completion_rx));
     live_response(DeliveryAdapter::response_from_receiver(
         rx,
         commit_tx,

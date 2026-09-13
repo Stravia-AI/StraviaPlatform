@@ -5,6 +5,7 @@ type LabelMessage = () => string
 const STATUS_LABELS: Record<string, LabelMessage> = {
   cancelled: m.observation_status_cancelled,
   completed: m.observation_status_completed,
+  disconnected: m.observation_status_disconnected,
   failed: m.observation_status_failed,
   interrupted: m.observation_status_interrupted,
   running: m.observation_status_running,

@@ -172,13 +172,42 @@ pub(crate) struct DeferredWebSocketDelivery;
 
 pub(crate) struct WebSocketRunDelivery {
     observer: RunObserver,
+    connection: Option<crate::interaction_observation::ClientConnectionObservation>,
     terminal: RunTerminalContext,
+    stream_completion: Option<StreamDeliveryCompletion>,
     delivery_completed_at: Option<i64>,
     committed: bool,
     finished: bool,
 }
 
 impl WebSocketRunDelivery {
+    pub(crate) async fn complete(delivery: &std::sync::Mutex<Self>) {
+        let completion = delivery
+            .lock()
+            .expect("delivery lock")
+            .stream_completion
+            .take();
+        let result = match completion {
+            Some(completion) => Some(completion.0.await),
+            None => None,
+        };
+        let mut delivery = delivery.lock().expect("delivery lock");
+        match result {
+            Some(Ok(Some(terminal))) => {
+                // 协议帧发送完不代表生产任务已提交生成链或确定工具交接状态。
+                delivery.terminal = terminal;
+                delivery.finish("delivered", None);
+            }
+            None => delivery.finish("delivered", None),
+            Some(Ok(None)) => {
+                delivery.finish("delivery_failed", Some("stream_incomplete".into()));
+            }
+            Some(Err(_)) => {
+                delivery.finish("delivery_failed", Some("stream_task_aborted".into()));
+            }
+        }
+    }
+
     pub(crate) fn observer(&self) -> RunObserver {
         self.observer.clone()
     }
@@ -294,6 +323,12 @@ impl WebSocketRunDelivery {
             .then(|| self.terminal.generation_root_id.clone())
             .flatten(),
         });
+        if delivered
+            && self.terminal.waiting_client
+            && let Some(connection) = &self.connection
+        {
+            connection.waiting(&self.observer);
+        }
     }
 }
 
@@ -858,7 +893,10 @@ async fn execute_observed(input: RunInput) -> Response {
         (Some(observer), Some(terminal)) if extensions.contains::<DeferredWebSocketDelivery>() => {
             extensions.insert(WebSocketRunDelivery {
                 observer,
+                connection: extensions
+                    .get::<crate::interaction_observation::ClientConnectionObservation>(),
                 terminal,
+                stream_completion: extensions.take::<StreamDeliveryCompletion>(),
                 delivery_completed_at: None,
                 committed: false,
                 finished: false,

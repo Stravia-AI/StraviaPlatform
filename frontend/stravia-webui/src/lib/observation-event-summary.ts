@@ -64,6 +64,7 @@ function statusLabel(status: string): string {
     case 'cancelled':
     case 'running':
     case 'interrupted':
+    case 'disconnected':
     case 'user_interrupted':
     case 'waiting_client':
       return observationStatusLabel(status)
@@ -80,6 +81,7 @@ function statusTone(status: unknown): EventSummary['tone'] {
       return 'error'
     case 'cancelled':
     case 'interrupted':
+    case 'disconnected':
     case 'user_interrupted':
       return 'warning'
     default:

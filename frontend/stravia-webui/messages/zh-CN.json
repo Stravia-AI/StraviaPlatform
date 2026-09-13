@@ -1502,6 +1502,7 @@
   "observation_status_completed": "已完成",
   "observation_status_failed": "失败",
   "observation_status_interrupted": "已中断",
+  "observation_status_disconnected": "已断开",
   "observation_status_running": "运行中",
   "observation_status_unknown": "未知",
   "observation_status_waiting_client": "等待客户端",

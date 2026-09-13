@@ -17,6 +17,9 @@ use super::{
 
 pub(super) enum WriterCommand {
     ClearTail,
+    ClientDisconnected {
+        runs: Vec<String>,
+    },
     ClientToolResults {
         run_id: String,
         events: Vec<RunEvent>,
@@ -170,6 +173,24 @@ pub(super) fn spawn(
             }
             match command {
                 Some(WriterCommand::ClearTail) => tail = super::tail::TailIndex::default(),
+                Some(WriterCommand::ClientDisconnected { runs }) => {
+                    for run_id in runs {
+                        match store.disconnect_waiting_client(&run_id, now()).await {
+                            Ok(Some(event)) => publish(&updates, &trace_sequence, event),
+                            Ok(None) => {}
+                            Err(_) => {
+                                unpersisted_gaps
+                                    .lock()
+                                    .expect("observation gaps")
+                                    .record(&run_id, now());
+                                if let Some(interaction) = grouping.interaction_for_run(&run_id) {
+                                    pending_gaps.insert(interaction.to_owned(), now());
+                                }
+                                tracing::warn!(%run_id, "client disconnect persistence failed");
+                            }
+                        }
+                    }
+                }
                 Some(WriterCommand::ClientToolResults { run_id, events }) => {
                     flush_one(
                         &store,

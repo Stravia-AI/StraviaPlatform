@@ -451,6 +451,29 @@ class _MinimalMockHandler(BaseHTTPRequestHandler):
             message = {"role": "assistant", "content": content}
             finish_reason = "stop"
 
+        if body.get("stream") is True and "observation-websocket" in scenario:
+            delta = dict(message)
+            if "tool_calls" in delta:
+                delta["tool_calls"] = [
+                    {"index": index, **call} for index, call in enumerate(delta["tool_calls"])
+                ]
+            self._write_sse([
+                {
+                    "id": f"chatcmpl-mock-{tool_results}",
+                    "object": "chat.completion.chunk",
+                    "model": model,
+                    "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
+                },
+                {
+                    "id": f"chatcmpl-mock-{tool_results}",
+                    "object": "chat.completion.chunk",
+                    "model": model,
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
+                    "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+                },
+            ])
+            return
+
         self._write_json(
             200,
             {

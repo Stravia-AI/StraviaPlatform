@@ -166,17 +166,21 @@ pub(super) fn rollup_status<'a>(
 ) -> &'static str {
     let mut waiting = false;
     let mut completed = false;
+    let mut disconnected = false;
     for (status, is_leaf) in statuses {
         if status == "running" {
             return "running";
         }
         waiting |= is_leaf && status == "waiting_client";
         completed |= status == "completed";
+        disconnected |= is_leaf && status == "disconnected";
     }
     if waiting {
         "waiting_client"
     } else if completed {
         "completed"
+    } else if disconnected {
+        "disconnected"
     } else {
         "interrupted"
     }

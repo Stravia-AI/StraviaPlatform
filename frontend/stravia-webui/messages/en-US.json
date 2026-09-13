@@ -1506,6 +1506,7 @@
   "observation_status_completed": "Completed",
   "observation_status_failed": "Failed",
   "observation_status_interrupted": "Interrupted",
+  "observation_status_disconnected": "Disconnected",
   "observation_status_running": "Running",
   "observation_status_unknown": "Unknown",
   "observation_status_waiting_client": "Waiting for client",

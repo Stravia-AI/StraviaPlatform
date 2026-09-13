@@ -292,6 +292,9 @@ async fn serve(
         None::<crate::interaction_observation::RunObserver>,
     ));
     let active_delivery: SharedRunDelivery = Arc::new(Mutex::new(None));
+    let connection_observation = crate::interaction_observation::ClientConnectionObservation::new(
+        gateway.observation.clone(),
+    );
 
     let read_loop = async {
         while let Some(message) = source.next().await {
@@ -302,6 +305,9 @@ async fn serve(
                 Message::Text(text) => {
                     let request_context =
                         RequestContext::new(OPEN_RESPONSES_2026_04_24, RUN_DEADLINE);
+                    request_context
+                        .extensions
+                        .insert(connection_observation.clone());
                     let ingress =
                         websocket_ingress(&gateway, &headers, &handshake_response, "message");
                     ingress.record_debug(|| {
@@ -626,6 +632,7 @@ async fn serve(
     let expired = tokio::time::timeout(CONNECTION_TTL, read_loop)
         .await
         .is_err();
+    connection_observation.close();
     if expired {
         terminate_expired_connection(
             &outgoing,
@@ -729,11 +736,13 @@ async fn forward_response(
             .terminal_failure
             .clone();
         if let Some(delivery) = delivery.as_ref() {
-            let mut delivery = delivery.lock().expect("delivery lock");
             if let Some(reason) = terminal_failure {
-                delivery.finish("delivery_failed", Some(reason));
+                delivery
+                    .lock()
+                    .expect("delivery lock")
+                    .finish("delivery_failed", Some(reason));
             } else {
-                delivery.finish("delivered", None);
+                crate::proxy::dispatcher::WebSocketRunDelivery::complete(delivery).await;
             }
         }
     } else {

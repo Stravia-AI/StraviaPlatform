@@ -53,11 +53,14 @@
 1. 任一 Run 正在执行：`running`，绿色圆点呼吸；
 2. 无 Run 执行，但任一叶分支等待 Connect Client 工具结果：`waiting_client`，静态琥珀圆点；
 3. 无活动分支且至少有最终生成响应：`completed`；
-4. 其余终态：`interrupted`，详情保留 `failed`、`cancelled`、`delivery_failed`、`user_interrupted` 等原因。
+4. 既无活动分支，也无最终生成响应，且仍有因客户端连接关闭而结束等待的叶分支：`disconnected`，显示“已断开”；
+5. 其余终态：`interrupted`，详情保留 `failed`、`cancelled`、`delivery_failed`、`user_interrupted` 等原因。
 
-等待客户端不使用猜测超时。它持续到合法续接到达、记录按保留期删除或用户清理历史；旧父节点发生合法晚到续接时，Interaction 可以重新进入活动状态。
+等待客户端不使用猜测超时。WebSocket 连接关闭时，该连接所属、仍在等待且没有后继 Run 的分支转为 `disconnected`，记录 `client_disconnected` 原因并发布 `run_state_changed`；已完整交付的结果与 Generation Chain 保留。其他连接的等待、已续接分支与最终生成响应不受影响。HTTP/SSE 响应正常结束不能证明客户端离线，仍等待合法续接或保留期清理。旧父节点发生合法晚到续接时，Interaction 可以重新进入活动状态；无法证明连接归属的旧记录不回填断线状态。
 
 HTTP 流式响应以 Delivery 确认的协议终态为完成边界，而不是客户端是否继续读取到 body EOF。Observation 在流处理任务完成 Generation Chain 提交尝试后记录最终状态与已提交的节点关联；协议终态之后关闭读取不能覆盖成功结果，终态之前断线仍按中断记录。公开工具交付后的 `waiting_client` 使用流处理任务最终确定的状态。
+
+WebSocket 同样等待流生产任务的最终结果，再记录成功交付与工具交接；不能使用开始转发时的终态快照。连接关闭与最终交接采用同一连接范围内的同步登记，关闭先发生或后发生均能结束等待，不额外延长 Inference Run 的执行期限。
 
 `prefers-reduced-motion: reduce` 下，`running` 使用静态绿色圆点，不播放呼吸动画。
 

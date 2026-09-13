@@ -307,7 +307,7 @@ One row per Connect Client Interaction. `root_id` and `parent_interaction_id` pr
 | `root_id`, `root_run_id` | TEXT NOT NULL | — | Observation forest root and first Run |
 | `first_route_id` | TEXT NOT NULL | — | Stable title fallback |
 | `first_model_display_name` | TEXT | NULL | First Run display name snapshot |
-| `status` | TEXT NOT NULL | — | Activity-first Interaction status |
+| `status` | TEXT NOT NULL | — | Activity-first Interaction status: `running`, `waiting_client`, `completed`, `disconnected`, or `interrupted` |
 | `started_at`, `last_active_at` | BIGINT / INTEGER | — | Lifecycle times |
 | `input_preview` | TEXT | NULL | Opening 4096 Unicode characters of the initiating latest user message's text blocks, joined with newlines; registered-secret and credential filtering precede truncation. Captured from the canonical client window, published after Model Turn protection succeeds, independent of Debug. Historical, non-text, or pre-protection failed input remains NULL; continuation Runs cannot overwrite it. |
 | `visible_tail` | TEXT NOT NULL | `''` | Coalesced Client Projection tail only |

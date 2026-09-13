@@ -38,6 +38,53 @@ use writer::WriterCommand;
 pub(crate) struct InteractionObservation {
     inner: Arc<Inner>,
 }
+
+#[derive(Clone)]
+pub(crate) struct ClientConnectionObservation {
+    observation: InteractionObservation,
+    waiting: Arc<Mutex<Option<Vec<String>>>>,
+}
+
+impl ClientConnectionObservation {
+    pub(crate) fn new(observation: InteractionObservation) -> Self {
+        Self {
+            observation,
+            waiting: Arc::new(Mutex::new(Some(Vec::new()))),
+        }
+    }
+
+    pub(crate) fn waiting(&self, observer: &RunObserver) {
+        let mut waiting = self.waiting.lock().expect("connection observation");
+        if let Some(runs) = waiting.as_mut() {
+            runs.push(observer.inner.run_id.clone());
+        } else {
+            self.disconnect(vec![observer.inner.run_id.clone()]);
+        }
+    }
+
+    pub(crate) fn close(&self) {
+        if let Some(runs) = self.waiting.lock().expect("connection observation").take() {
+            self.disconnect(runs);
+        }
+    }
+
+    fn disconnect(&self, runs: Vec<String>) {
+        if runs.is_empty() {
+            return;
+        }
+        let writer = self.observation.inner.writer.clone();
+        let command = WriterCommand::ClientDisconnected { runs };
+        if let Err(error) = writer.try_send(command) {
+            // 断线不阻塞传输清理；队列繁忙时仍按写者顺序提交状态更新。
+            tokio::spawn(async move {
+                if writer.send(error.into_inner()).await.is_err() {
+                    tracing::warn!("client disconnect observation unavailable");
+                }
+            });
+        }
+    }
+}
+
 struct Inner {
     store: ObservationStore,
     writer: mpsc::Sender<WriterCommand>,
@@ -1685,6 +1732,94 @@ mod snapshot_tests {
     use serde_json::Value;
 
     use super::*;
+
+    #[tokio::test]
+    async fn connection_close_and_tool_handoff_commute() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        crate::migrations::migrate_sqlite(&pool).await?;
+        let observation = InteractionObservation::new(
+            Some(pool.clone()),
+            None,
+            directory.path().to_owned(),
+            1,
+            true,
+        )
+        .await;
+        for close_first in [false, true] {
+            let connection = ClientConnectionObservation::new(observation.clone());
+            let mut observers = Vec::new();
+            for status in ["waiting_client", "completed"] {
+                let id = format!("{close_first}-{status}");
+                let observer = observation
+                    .observe_ingress(IngressStart {
+                        id: id.clone(),
+                        method: "WEBSOCKET".into(),
+                        path: "/v1/responses".into(),
+                        protocol: "responses".into(),
+                    })
+                    .admit(RunStart {
+                        id: id.clone(),
+                        principal: "owner".into(),
+                        api_key_id: None,
+                        api_key_name: None,
+                        generation_root_id: None,
+                        generation_parent_id: None,
+                        has_new_user: true,
+                        has_matching_pending_tool_result: false,
+                        ingress_received_at: 0,
+                        canonical_fingerprint: id.clone(),
+                        route_id: "route".into(),
+                        model_display_name: None,
+                        ingress_protocol: "responses".into(),
+                    });
+                if close_first {
+                    connection.close();
+                }
+                observer.finish(RunOutcome {
+                    status: status.into(),
+                    terminal_reason: None,
+                    generation_node_id: Some(format!("node-{id}")),
+                    generation_root_id: Some(format!("node-{id}")),
+                    delivery_completed_at: Some(writer::now()),
+                });
+                // 持久层仍须保护已完成响应，不能把连接关闭当成交付失败。
+                connection.waiting(&observer);
+                observers.push(observer);
+            }
+            connection.close();
+            connection.close();
+            observation.flush().await?;
+            let rows: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
+                "SELECT status,terminal_reason,generation_node_id FROM inference_run_observations WHERE id LIKE ? ORDER BY id",
+            ).bind(format!("{close_first}-%")).fetch_all(&pool).await?;
+            assert_eq!(
+                rows,
+                vec![
+                    (
+                        "completed".into(),
+                        None,
+                        Some(format!("node-{close_first}-completed"))
+                    ),
+                    (
+                        "disconnected".into(),
+                        Some("client_disconnected".into()),
+                        Some(format!("node-{close_first}-waiting_client"))
+                    ),
+                ]
+            );
+            let count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM observation_events WHERE run_id=? AND kind='run_state_changed'",
+            ).bind(format!("{close_first}-waiting_client")).fetch_one(&pool).await?;
+            assert_eq!(count, 1);
+            drop(observers);
+        }
+        observation.shutdown().await;
+        Ok(())
+    }
 
     #[tokio::test]
     async fn committed_details_remain_readable_without_a_writer() -> anyhow::Result<()> {

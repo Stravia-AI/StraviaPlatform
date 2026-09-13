@@ -3,7 +3,10 @@ from __future__ import annotations
 import base64
 import io
 import json
+import os
+import socket
 import sqlite3
+import struct
 from contextlib import closing
 import tempfile
 import threading
@@ -11,7 +14,7 @@ import time
 import zipfile
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
 import pytest
@@ -92,6 +95,110 @@ def _create_route(
     )
     assert status == 200, body
     return route_id, str(body["data"]["key"])
+
+
+@pytest.mark.e2e
+@pytest.mark.admin
+@pytest.mark.parametrize("graceful", [True, False])
+def test_websocket_waiting_client_disconnects_without_losing_generation(
+    admin_env: dict[str, Any], graceful: bool,
+) -> None:
+    model = f"observation-branch-ws-{graceful}"
+    route_id, api_key = _create_route(admin_env, model)
+    endpoint = urlparse(admin_env["proxy"])
+
+    def send_frame(connection: socket.socket, opcode: int, payload: bytes) -> None:
+        mask = os.urandom(4)
+        size = len(payload)
+        header = bytes([0x80 | opcode, 0x80 | (size if size < 126 else 126)])
+        if size >= 126:
+            header += struct.pack("!H", size)
+        connection.sendall(header + mask + bytes(value ^ mask[i % 4] for i, value in enumerate(payload)))
+
+    with socket.create_connection((endpoint.hostname, endpoint.port), timeout=15) as connection:
+        key = base64.b64encode(os.urandom(16)).decode()
+        connection.sendall((
+            f"GET /v1/responses HTTP/1.1\r\nHost: {endpoint.netloc}\r\n"
+            f"Authorization: Bearer {api_key}\r\nUpgrade: websocket\r\n"
+            f"Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {key}\r\n\r\n"
+        ).encode())
+
+        def read_exact(size: int) -> bytes:
+            result = bytearray()
+            while len(result) < size:
+                chunk = connection.recv(size - len(result))
+                assert chunk, "WebSocket closed before response completed"
+                result.extend(chunk)
+            return bytes(result)
+
+        handshake = bytearray()
+        while not handshake.endswith(b"\r\n\r\n"):
+            handshake.extend(read_exact(1))
+        assert b" 101 " in handshake, handshake
+        send_frame(connection, 1, json.dumps({
+            "type": "response.create",
+            "model": model,
+            "input": [{"role": "user", "content": "observation-branch observation-websocket disconnect"}],
+            "tools": [{"type": "function", "name": "local_probe", "parameters": {"type": "object"}}],
+        }).encode())
+        while True:
+            opcode, size = read_exact(2)
+            assert not size & 0x80
+            size &= 0x7F
+            if size == 126:
+                size = struct.unpack("!H", read_exact(2))[0]
+            elif size == 127:
+                size = struct.unpack("!Q", read_exact(8))[0]
+            payload = read_exact(size)
+            assert opcode & 0xF == 1, payload
+            event = json.loads(payload)
+            assert event["type"] not in ("error", "response.failed"), event
+            if event["type"] == "response.completed":
+                break
+        def delivered_waiting() -> dict[str, Any] | None:
+            for item in _route_interactions(admin_env, route_id):
+                detail = _detail(admin_env, item["id"])
+                if (item["status"] == "waiting_client" and detail["runs"]
+                        and detail["runs"][0]["generation_node_id"] is not None):
+                    return item
+            return None
+
+        waiting = _wait_for(
+            "WebSocket waiting-client Interaction",
+            delivered_waiting,
+        )
+        before = _detail(admin_env, waiting["id"])
+        generation = before["runs"][0]["generation_node_id"]
+        assert generation is not None
+        if graceful:
+            send_frame(connection, 8, struct.pack("!H", 1000))
+
+    disconnected = _wait_for(
+        "disconnected waiting-client Interaction",
+        lambda: (detail if (detail := _detail(admin_env, waiting["id"]))["interaction"]["status"]
+                 == "disconnected" else None),
+    )
+    assert disconnected["runs"][0]["terminal_reason"] == "client_disconnected"
+    assert disconnected["runs"][0]["generation_node_id"] == generation
+    response = event["response"]
+    call = next(item for item in response["output"] if item["type"] == "function_call")
+    status, resumed = http_request(
+        "POST", f"{admin_env['proxy']}/v1/responses",
+        payload={
+            "model": model,
+            "previous_response_id": response["id"],
+            "input": [{"type": "function_call_output", "call_id": call["call_id"], "output": "done"}],
+        },
+        headers={"authorization": f"Bearer {api_key}"},
+    )
+    assert status == 200, resumed
+    completed = _wait_for(
+        "resumed disconnected Interaction",
+        lambda: (detail if (detail := _detail(admin_env, waiting["id"]))["interaction"]["status"]
+                 == "completed" else None),
+    )
+    assert len(completed["runs"]) == 2
+    assert any(run["parent_run_id"] == before["runs"][0]["id"] for run in completed["runs"])
 
 
 def _proxy(

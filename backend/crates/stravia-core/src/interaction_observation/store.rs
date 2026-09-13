@@ -663,6 +663,98 @@ impl ObservationStore {
         Ok(result)
     }
 
+    pub(super) async fn disconnect_waiting_client(
+        &self,
+        run_id: &str,
+        now: i64,
+    ) -> anyhow::Result<Option<ObservationEvent>> {
+        let payload = serde_json::json!({"status":"disconnected","reason":"client_disconnected"});
+        match self {
+            Self::Sqlite(pool) => {
+                let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+                let row: Option<(String, i64)> = sqlx::query_as(
+                    "UPDATE inference_run_observations SET status='disconnected',terminal_reason='client_disconnected',last_active_at=? WHERE id=? AND status='waiting_client' AND NOT EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=inference_run_observations.id) RETURNING interaction_id,expires_at",
+                ).bind(now).bind(run_id).fetch_optional(&mut *tx).await?;
+                let Some((interaction, expiry)) = row else {
+                    return Ok(None);
+                };
+                let seq = next_sqlite(&mut tx).await?;
+                sqlx::query(
+                    "UPDATE inference_run_observations SET last_event_sequence=? WHERE id=?",
+                )
+                .bind(seq)
+                .bind(run_id)
+                .execute(&mut *tx)
+                .await?;
+                recompute_status_sqlite(&mut tx, &interaction, now, seq).await?;
+                insert_event_sqlite(
+                    &mut tx,
+                    seq,
+                    now,
+                    Some(&interaction),
+                    Some(run_id),
+                    None,
+                    "run_state_changed",
+                    &payload,
+                    expiry,
+                )
+                .await?;
+                tx.commit().await?;
+                Ok(Some(event(
+                    seq,
+                    now,
+                    Some(&interaction),
+                    Some(run_id),
+                    None,
+                    "run_state_changed",
+                    payload,
+                )))
+            }
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let row: Option<(String, i64)> = sqlx::query_as(
+                    "UPDATE inference_run_observations SET status='disconnected',terminal_reason='client_disconnected',last_active_at=$1 WHERE id=$2 AND status='waiting_client' AND NOT EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=inference_run_observations.id) RETURNING interaction_id,expires_at",
+                ).bind(now).bind(run_id).fetch_optional(&mut *tx).await?;
+                let Some((interaction, expiry)) = row else {
+                    return Ok(None);
+                };
+                let seq: i64 = sqlx::query_scalar("SELECT nextval('observation_event_sequence')")
+                    .fetch_one(&mut *tx)
+                    .await?;
+                sqlx::query(
+                    "UPDATE inference_run_observations SET last_event_sequence=$1 WHERE id=$2",
+                )
+                .bind(seq)
+                .bind(run_id)
+                .execute(&mut *tx)
+                .await?;
+                recompute_status_postgres(&mut tx, &interaction, now, seq).await?;
+                insert_event_postgres(
+                    &mut tx,
+                    seq,
+                    now,
+                    Some(&interaction),
+                    Some(run_id),
+                    None,
+                    "run_state_changed",
+                    &payload,
+                    expiry,
+                )
+                .await?;
+                tx.commit().await?;
+                Ok(Some(event(
+                    seq,
+                    now,
+                    Some(&interaction),
+                    Some(run_id),
+                    None,
+                    "run_state_changed",
+                    payload,
+                )))
+            }
+        }
+    }
+
     pub async fn finish_run(
         &self,
         interaction_id: &str,
@@ -1306,7 +1398,7 @@ async fn recompute_status_sqlite(
     now: i64,
     seq: i64,
 ) -> anyhow::Result<()> {
-    sqlx::query("UPDATE interaction_observations SET status=CASE WHEN EXISTS(SELECT 1 FROM inference_run_observations WHERE interaction_id=? AND (status='running' OR background_active>0)) THEN 'running' WHEN EXISTS(SELECT 1 FROM inference_run_observations r WHERE r.interaction_id=? AND r.status='waiting_client' AND NOT EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=r.id)) THEN 'waiting_client' WHEN EXISTS(SELECT 1 FROM inference_run_observations WHERE interaction_id=? AND status='completed') THEN 'completed' ELSE 'interrupted' END,last_active_at=?,last_event_sequence=? WHERE id=?").bind(iid).bind(iid).bind(iid).bind(now).bind(seq).bind(iid).execute(&mut **tx).await?;
+    sqlx::query("UPDATE interaction_observations SET status=CASE WHEN EXISTS(SELECT 1 FROM inference_run_observations WHERE interaction_id=? AND (status='running' OR background_active>0)) THEN 'running' WHEN EXISTS(SELECT 1 FROM inference_run_observations r WHERE r.interaction_id=? AND r.status='waiting_client' AND NOT EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=r.id)) THEN 'waiting_client' WHEN EXISTS(SELECT 1 FROM inference_run_observations WHERE interaction_id=? AND status='completed') THEN 'completed' WHEN EXISTS(SELECT 1 FROM inference_run_observations r WHERE r.interaction_id=? AND r.status='disconnected' AND NOT EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=r.id)) THEN 'disconnected' ELSE 'interrupted' END,last_active_at=?,last_event_sequence=? WHERE id=?").bind(iid).bind(iid).bind(iid).bind(iid).bind(now).bind(seq).bind(iid).execute(&mut **tx).await?;
     Ok(())
 }
 async fn recompute_status_postgres(
@@ -1315,7 +1407,7 @@ async fn recompute_status_postgres(
     now: i64,
     seq: i64,
 ) -> anyhow::Result<()> {
-    sqlx::query("UPDATE interaction_observations SET status=CASE WHEN EXISTS(SELECT 1 FROM inference_run_observations WHERE interaction_id=$1 AND (status='running' OR background_active>0)) THEN 'running' WHEN EXISTS(SELECT 1 FROM inference_run_observations r WHERE r.interaction_id=$1 AND r.status='waiting_client' AND NOT EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=r.id)) THEN 'waiting_client' WHEN EXISTS(SELECT 1 FROM inference_run_observations WHERE interaction_id=$1 AND status='completed') THEN 'completed' ELSE 'interrupted' END,last_active_at=$2,last_event_sequence=$3 WHERE id=$1").bind(iid).bind(now).bind(seq).execute(&mut **tx).await?;
+    sqlx::query("UPDATE interaction_observations SET status=CASE WHEN EXISTS(SELECT 1 FROM inference_run_observations WHERE interaction_id=$1 AND (status='running' OR background_active>0)) THEN 'running' WHEN EXISTS(SELECT 1 FROM inference_run_observations r WHERE r.interaction_id=$1 AND r.status='waiting_client' AND NOT EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=r.id)) THEN 'waiting_client' WHEN EXISTS(SELECT 1 FROM inference_run_observations WHERE interaction_id=$1 AND status='completed') THEN 'completed' WHEN EXISTS(SELECT 1 FROM inference_run_observations r WHERE r.interaction_id=$1 AND r.status='disconnected' AND NOT EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=r.id)) THEN 'disconnected' ELSE 'interrupted' END,last_active_at=$2,last_event_sequence=$3 WHERE id=$1").bind(iid).bind(now).bind(seq).execute(&mut **tx).await?;
     Ok(())
 }
 fn event(

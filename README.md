@@ -93,6 +93,8 @@ Automatic history-parent discovery compares complete message semantics, not trac
 
 When a client switches models and updates its leading instructions, an unchanged complete interaction—including public thinking previews and their History Markers—can still support a diagnostic association with a unique source under the same API Key. This does not establish an execution parent. Edited previews or markers, private reasoning, ambiguous evidence, or an unavailable process-local index do not qualify; existing request records are not backfilled.
 
+When a WebSocket client disconnects while an Interaction is waiting for its tool results, Request Records changes the affected waiting leaf branches to **Disconnected**. Successfully delivered responses and their Generation Chain remain available for later continuation. Normal HTTP/SSE response completion does not prove that the client is offline; older records without a known connection association are not backfilled.
+
 ### Providers and model routing
 
 Built-in provider metadata currently covers:
