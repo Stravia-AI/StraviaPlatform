@@ -345,7 +345,6 @@ impl ObservationStore {
             end,
             bounded_end,
         } = query_window(q.start_at, q.end_at, q.anchor_at, q.window_index)?;
-        let snapshot_sequence = self.max_sequence().await?;
         let limit = q.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT) as i64;
         let (root_total, root_rows) = match self {
             Self::Sqlite(p) => forest_roots_sqlite(p, &q, start, end, bounded_end, limit).await?,
@@ -396,6 +395,9 @@ impl ObservationStore {
             .flat_map(|root| &root.interactions)
             .map(|interaction| interaction.id.as_str())
             .collect();
+        // 快照序列必须在行读取之后获取：行状态可能已包含终态（如 run_finished 提交），
+        // 若快照早于行读取，事件分页会截掉行状态已经反映的终态事件。
+        let snapshot_sequence = self.max_sequence().await?;
         let mut context = self.context_events(&ids, snapshot_sequence).await?;
         for root in &mut roots {
             for interaction in &mut root.interactions {
@@ -427,7 +429,6 @@ impl ObservationStore {
             filters.anchor_at,
             filters.window_index,
         )?;
-        let snapshot_sequence = self.max_sequence().await?;
         let Some(selected_row) = (match self {
             Self::Sqlite(p) => interaction_sqlite(p, id).await?,
             Self::Postgres(p) => interaction_postgres(p, id).await?,
@@ -456,6 +457,8 @@ impl ObservationStore {
             .iter()
             .map(|interaction| interaction.id.as_str())
             .collect();
+        // 与 query_forest 相同：快照序列在行读取之后获取，避免事件分页截掉行状态已见的终态事件。
+        let snapshot_sequence = self.max_sequence().await?;
         let mut context = self.context_events(&ids, snapshot_sequence).await?;
         for interaction in &mut root_interactions {
             interaction.context_events = context.remove(&interaction.id).unwrap_or_default();
@@ -707,12 +710,13 @@ impl ObservationStore {
         })
     }
     pub async fn get_rejection(&self, id: &str) -> anyhow::Result<Option<RejectionDetail>> {
-        let snapshot_sequence = self.max_sequence().await?;
         let row = match self {
             Self::Sqlite(p) => rejection_sqlite(p, id).await?,
             Self::Postgres(p) => rejection_postgres(p, id).await?,
         };
         let Some(row) = row else { return Ok(None) };
+        // 与 interaction 详情相同：快照序列在行读取之后获取，避免截掉行状态已见的终态事件。
+        let snapshot_sequence = self.max_sequence().await?;
         let events = self.rejection_events(id, snapshot_sequence).await?;
         Ok(Some(RejectionDetail {
             rejection: rejection_summary(row),
