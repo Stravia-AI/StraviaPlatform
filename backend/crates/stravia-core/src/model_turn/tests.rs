@@ -1630,12 +1630,8 @@ async fn canonical_completion_deadline_interrupts_publication() {
 async fn assert_publication_observation(gateway: &Gateway, status: &str) {
     use crate::interaction_observation::ForestQuery;
 
-    // Detail queries synchronize the existing asynchronous observation writer.
-    gateway
-        .observation
-        .get_interaction("absent", ForestQuery::default())
-        .await
-        .unwrap();
+    // 查询路径不再隐式等待异步观测 writer，需要读己之写的断言必须显式请求屏障。
+    gateway.observation.flush().await.unwrap();
     let forest = gateway
         .observation
         .query_forest(ForestQuery::default())

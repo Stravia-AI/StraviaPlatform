@@ -26,6 +26,11 @@ impl AdminService {
         self.gw.observation.get_interaction(id, filters).await
     }
 
+    /// 显式等待异步观测 writer 排空；查询接口本身不提供该保证。
+    pub async fn observation_flush(&self) -> anyhow::Result<()> {
+        self.gw.observation.flush().await
+    }
+
     pub async fn observation_interaction_events(
         &self,
         id: &str,

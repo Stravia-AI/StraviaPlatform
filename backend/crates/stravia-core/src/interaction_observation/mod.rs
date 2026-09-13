@@ -676,7 +676,7 @@ impl InteractionObservation {
             .map_err(|_| anyhow::anyhow!("observation writer unavailable"))?
     }
 
-    async fn flush(&self) -> anyhow::Result<()> {
+    pub(crate) async fn flush(&self) -> anyhow::Result<()> {
         let (sender, receiver) = oneshot::channel();
         self.inner
             .writer

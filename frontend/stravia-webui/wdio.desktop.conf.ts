@@ -59,8 +59,24 @@ export const config: WebdriverIO.Config = {
   connectionRetryTimeout: 90_000,
   connectionRetryCount: 1,
   mochaOpts: { ui: 'bdd', timeout: 60_000 },
-  onComplete: () => {
+  onComplete: async () => {
     execFileSync('reg.exe', ['delete', `HKCU\\${themeKey}`, '/f'])
-    rmSync(runRoot, { recursive: true, force: true })
+    // 托管数据根目录统一后 WebView2 的用户数据目录位于 runRoot 内，
+    // 其锁文件在应用退出后仍被 msedgewebview2.exe 短暂持有。临时目录清理是
+    // 尽力而为：短暂重试，耗尽后仅告警，不让已通过的用例被清理失败判为失败。
+    for (let attempt = 1; ; attempt++) {
+      try {
+        rmSync(runRoot, { recursive: true, force: true })
+        return
+      } catch (error) {
+        if (attempt >= 20) {
+          console.warn(`stravia-desktop-e2e: 无法清理临时目录 ${runRoot}: ${error}`)
+          return
+        }
+        const { promise: sleep, resolve: finishSleep } = Promise.withResolvers<void>()
+        setTimeout(finishSleep, 250)
+        await sleep
+      }
+    }
   },
 }

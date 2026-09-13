@@ -231,8 +231,8 @@ async fn registry_failure_gates_http_native_publication_and_standalone_compactio
         assert!(failure["error"]["message"].as_str().is_some(), "standalone must return a visible error: {failure}");
         assert!(!failure.to_string().contains("never-public-ciphertext"));
 
-        // Detail lookup is an Observation writer barrier, not timing-based polling.
-        assert!(admin.observation_interaction("publication-barrier", ForestQuery::default()).await.unwrap().is_none());
+        // 查询路径不再隐式等待观测 writer；显式屏障代替基于时间的轮询。
+        admin.observation_flush().await.unwrap();
         let forest = admin.observation_forest(ForestQuery::default()).await.unwrap();
         let interactions: Vec<_> = forest.roots.iter().flat_map(|root| &root.interactions).collect();
         assert_eq!(interactions.len(), 2, "both failed requests remain visible in admin");
@@ -419,8 +419,8 @@ async fn inbound_responses_websocket_preserves_native_compaction_and_replays_cur
                 break;
             }
         }
-        // Detail queries include a writer barrier; no timing-based polling is needed.
-        assert!(admin.observation_interaction("not-an-interaction", ForestQuery::default()).await.unwrap().is_none());
+        // 查询路径不再隐式等待观测 writer；显式屏障代替基于时间的轮询。
+        admin.observation_flush().await.unwrap();
         let forest = admin.observation_forest(ForestQuery::default()).await.unwrap();
         let replay = forest.roots.iter().flat_map(|root| &root.interactions)
             .find(|interaction| interaction.context_events.iter().any(|event| event.kind == "native_compaction_associated"))
