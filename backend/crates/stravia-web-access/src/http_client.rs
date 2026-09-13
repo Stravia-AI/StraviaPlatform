@@ -1,4 +1,12 @@
-use std::{fmt, io, net::SocketAddr, pin::Pin, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    fmt, io,
+    net::SocketAddr,
+    path::PathBuf,
+    pin::Pin,
+    sync::{Arc, LazyLock, Weak},
+    time::Duration,
+};
 
 use anyhow::{bail, Context, Result};
 use async_compression::tokio::bufread::{BrotliDecoder, GzipDecoder, ZlibDecoder, ZstdDecoder};
@@ -37,8 +45,61 @@ struct HttpClientInner {
     snapshot: ResolvedProxy,
     timeout: Duration,
     response_limit: Option<usize>,
-    cookies: Option<Mutex<BrowserCookieStore>>,
+    cookies: Option<Arc<Mutex<SearchCookies>>>,
     pin: Option<(String, Vec<SocketAddr>)>,
+}
+
+#[derive(Default)]
+struct SearchCookies {
+    jar: BrowserCookieStore,
+    path: Option<PathBuf>,
+    // 锁文件独立于 Cookie 数据文件，原子替换数据时仍保持进程间互斥。
+    _file_lock: Option<std::fs::File>,
+}
+
+impl SearchCookies {
+    fn persistent(path: PathBuf) -> Result<Arc<Mutex<Self>>> {
+        static STORES: LazyLock<Mutex<HashMap<PathBuf, Weak<Mutex<SearchCookies>>>>> =
+            LazyLock::new(|| Mutex::new(HashMap::new()));
+        let parent = path
+            .parent()
+            .context("Cookie cache requires a parent directory")?;
+        std::fs::create_dir_all(parent).context("failed to create Cookie cache directory")?;
+        let path = parent
+            .canonicalize()?
+            .join(path.file_name().context("missing Cookie cache filename")?);
+        let mut stores = STORES.lock();
+        stores.retain(|_, store| store.strong_count() > 0);
+        if let Some(store) = stores.get(&path).and_then(Weak::upgrade) {
+            return Ok(store);
+        }
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path.with_extension("lock"))?;
+        lock.try_lock()
+            .context("search Cookie cache is in use by another process")?;
+        let mut jar = BrowserCookieStore::default();
+        for cookie in moli_cookie_cache::load_cookie_cache(&path)? {
+            jar.upsert_with_request_url_report(cookie, None, moli_cookie_jar::CookieSource::Cdp);
+        }
+        let store = Arc::new(Mutex::new(Self {
+            jar,
+            path: Some(path.clone()),
+            _file_lock: Some(lock),
+        }));
+        stores.insert(path, Arc::downgrade(&store));
+        Ok(store)
+    }
+
+    fn persist(&mut self) -> Result<()> {
+        if let Some(path) = &self.path {
+            moli_cookie_cache::save_cookie_cache(path, self.jar.cookies())?;
+        }
+        Ok(())
+    }
 }
 
 impl HttpClient {
@@ -49,6 +110,19 @@ impl HttpClient {
         response_limit: Option<usize>,
     ) -> Result<Self> {
         Self::build(snapshot, timeout, cookies, response_limit, None)
+    }
+
+    pub(crate) fn with_cookie_cache(
+        snapshot: ResolvedProxy,
+        timeout: Duration,
+        path: PathBuf,
+    ) -> Result<Self> {
+        let cookies = SearchCookies::persistent(path)?;
+        let mut client = Self::build(snapshot, timeout, false, None, None)?;
+        Arc::get_mut(&mut client.inner)
+            .expect("new HTTP client is uniquely owned")
+            .cookies = Some(cookies);
+        Ok(client)
     }
 
     /// 固定策略层校验通过的地址，连接时不再解析源站。
@@ -92,7 +166,7 @@ impl HttpClient {
                 timeout,
                 response_limit,
                 pin,
-                cookies: cookies.then(|| Mutex::new(BrowserCookieStore::default())),
+                cookies: cookies.then(|| Arc::new(Mutex::new(SearchCookies::default()))),
             }),
         })
     }
@@ -168,7 +242,7 @@ impl HttpClient {
             }
             if let Some(jar) = &self.inner.cookies {
                 if !request.headers().contains_key(header::COOKIE) {
-                    let report = jar.lock().cookie_access_report_for_request(
+                    let report = jar.lock().jar.cookie_access_report_for_request(
                         &from,
                         NetworkCookieRequestContext::top_level_navigation(
                             request.method().as_str(),
@@ -197,11 +271,23 @@ impl HttpClient {
             }
             let response = self.inner.transport.execute(outgoing).await?;
             if let Some(jar) = &self.inner.cookies {
-                jar.lock().store_response_headers_with_context_reports(
-                    &from,
-                    &response.headers,
-                    &NetworkCookieRequestContext::top_level_navigation(request.method().as_str()),
-                );
+                if response
+                    .headers
+                    .iter()
+                    .any(|(name, _)| name.eq_ignore_ascii_case("set-cookie"))
+                {
+                    let mut cookies = jar.lock();
+                    cookies.jar.store_response_headers_with_context_reports(
+                        &from,
+                        &response.headers,
+                        &NetworkCookieRequestContext::top_level_navigation(
+                            request.method().as_str(),
+                        ),
+                    );
+                    cookies
+                        .persist()
+                        .context("failed to persist search Cookies")?;
+                }
             }
             let mut metadata = http::Response::builder()
                 .status(response.status)
@@ -526,6 +612,83 @@ mod tests {
             .unwrap();
         assert_eq!(persisted.1, b"sid=one");
         assert_eq!(isolated.1, b"none");
+    }
+
+    #[tokio::test]
+    async fn search_cookies_survive_runtime_rebuild_without_entering_fetch() {
+        struct Directory(PathBuf);
+        impl Drop for Directory {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let directory = Directory(std::env::temp_dir().join(format!(
+            "stravia-search-cookies-{}-{:016x}",
+            std::process::id(),
+            rand::random::<u64>(),
+        )));
+        let profile = directory.0.join("browser-profile");
+        let server = spawn_server(vec![
+            Reply::Fixed(
+                "HTTP/1.1 200 OK\r\nSet-Cookie: sid=anonymous; Path=/; HttpOnly\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            ),
+            Reply::EchoCookie,
+            Reply::EchoCookie,
+            Reply::Fixed(
+                "HTTP/1.1 200 OK\r\nSet-Cookie: sid=fetch-only; Path=/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            ),
+            Reply::EchoCookie,
+            Reply::EchoCookie,
+        ]);
+        let first =
+            crate::LocalWeb::with_profile(crate::OutboundProxyMode::Direct, profile.clone())
+                .unwrap();
+        let simultaneous =
+            crate::LocalWeb::with_profile(crate::OutboundProxyMode::Direct, profile.clone())
+                .unwrap();
+        first
+            .http_client()
+            .fetch(get(&server.base_url))
+            .await
+            .unwrap();
+        assert_eq!(
+            simultaneous
+                .http_client()
+                .fetch(get(&server.base_url))
+                .await
+                .unwrap()
+                .1,
+            b"sid=anonymous",
+        );
+        drop(first);
+        drop(simultaneous);
+        let rebuilt =
+            crate::LocalWeb::with_profile(crate::OutboundProxyMode::Direct, profile).unwrap();
+        let mut bing = crate::search::engines::search::bing::request(&rebuilt.search_query("Rust"))
+            .await
+            .unwrap();
+        // 使用真实引擎请求，只将目标换成本地 Cookie 回显服务。
+        *bing.uri_mut() = server.base_url.parse().unwrap();
+        assert_eq!(
+            rebuilt.http_client().fetch(bing).await.unwrap().1,
+            b"sid=anonymous",
+        );
+        let fetch = rebuilt.fetch_proxied_client();
+        fetch.fetch_once(get(&server.base_url)).await.unwrap();
+        let mut request = get(&server.base_url);
+        request
+            .headers_mut()
+            .insert(header::COOKIE, "sid=explicit".parse().unwrap());
+        assert_eq!(fetch.fetch_once(request).await.unwrap().1, b"none");
+        assert_eq!(
+            rebuilt
+                .http_client()
+                .fetch(get(&server.base_url))
+                .await
+                .unwrap()
+                .1,
+            b"sid=anonymous",
+        );
     }
 
     #[tokio::test]

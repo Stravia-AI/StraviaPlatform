@@ -141,6 +141,8 @@ Route Builder 使用独立页面。选择 Provider 后会自动加载其可用 P
 
 进程内 Local Provider 内嵌 [Stravia 的 Moli 引擎](https://github.com/Stravia-AI/moli-stealth)：`moli-stealth-net` 负责 HTTP Search/Fetch，`moli-core` 使用 V8 渲染动态页面。桌面端与服务端均不需要安装 Chrome/Chromium、外部 Moli 可执行文件或 Node/Bun sidecar。浏览器执行按需在专用所有者线程启动。
 
+本地搜索将浏览器 profile 保存在 `<data_dir>/web-access/browser-profile`，独立的 HTTP 搜索 Cookie jar 保存在 `<data_dir>/web-access/search-cookies.json`。Google 搜索全程使用浏览器：没有适用于搜索 URL 的未过期 Cookie 时，先打开 `https://www.google.com/` 接收匿名 Cookie，再在同一页面搜索。后续搜索复用保存的身份，重启后仍有效；其他带首页预访问的浏览器搜索引擎也按 Cookie 可用性决定是否预访问。Bing 等 HTTP 引擎复用各自保存的 Cookie。Fetch 使用独立临时浏览器存储和禁用 Cookie 的 HTTP 客户端，不使用搜索 profile。这些文件属于部署本地状态，不从个人浏览器导入，不应分享或提交到仓库；需要重置搜索身份时，先停止 Stravia，再删除这些文件。站点可能不下发 Cookie，也仍可能拦截自动流量。
+
 在 **联网搜索 → 搜索与网页来源** 中直接选择 Local，无需配置浏览器路径。浏览器路径管理接口及 `STRAVIA_CHROME_PATH` 设置已移除。已有 `web-access-browser.json` 和 `desktop-browser.json` 文件保留不动，但不再读写。远程 Exa 与智谱服务保持不变。
 
 HTTP 使用 Moli 的 Chrome 传输指纹；指纹缓解措施不保证绕过反爬检测。HTTP 与浏览器路径保留所选 Gateway 代理快照、分离的 Cookie 归属和 Fetch 安全限制。浏览器 HTTP 与 WebSocket 流量经过校验出口代理，不进行 TLS 中间人解密，证书校验保持启用。直连固定到校验通过的公网地址；显式选择的上游代理仍负责自身 DNS 解析。Moli 在 Stravia 进程内执行，不再使用具有操作系统沙箱的 Chrome 子进程；部署时应采用最小权限，并为不可信页面执行配置适当的宿主机或容器隔离。

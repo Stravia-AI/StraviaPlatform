@@ -11,12 +11,8 @@ use crate::search::{
 
 pub async fn request(search: &SearchQuery) -> anyhow::Result<Request> {
     let cvid = generate_cvid();
-    let mut request = http::Request::get(search_url(search, &cvid).as_str()).body(Vec::new())?;
-    request.headers_mut().insert(
-        http::header::COOKIE,
-        format!("SRCHHPGUSR=IG={cvid}").parse()?,
-    );
-    Ok(request)
+    // 显式 Cookie 会覆盖共享 jar；保留搜索参数，让服务端分配的身份自动随请求发送。
+    Ok(http::Request::get(search_url(search, &cvid).as_str()).body(Vec::new())?)
 }
 
 fn search_url(search: &SearchQuery, cvid: &str) -> Url {

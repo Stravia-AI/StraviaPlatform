@@ -86,7 +86,7 @@ pub(crate) async fn fetch_with_runtime(
         value,
         &NetworkBackend::from_local_web(web),
         &MoliBackend {
-            browser: web.browser(),
+            browser: web.fetch_browser(),
         },
     )
     .await

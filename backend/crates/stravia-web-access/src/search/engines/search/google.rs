@@ -32,9 +32,10 @@ pub(crate) const GOOGLE_FAILURE_EXPRESSION: &str = r#"(() => {
 })()"#;
 
 pub async fn request(search: &SearchQuery) -> anyhow::Result<RequestResponse> {
-    Ok(http::Request::get(search_url(search).as_str())
-        .body(Vec::new())?
-        .into())
+    // 首次搜索也必须先建立浏览器身份，不能先用独立 HTTP Cookie jar 访问结果页。
+    Ok(RequestResponse::Instant(Box::new(
+        render_response(search).await?,
+    )))
 }
 
 pub(crate) fn requires_browser_render(body: &str) -> bool {

@@ -50,9 +50,14 @@ pub struct WebAccessService {
 
 impl WebAccessService {
     pub(crate) fn new(gateway: crate::Gateway) -> Self {
+        let profile_dir = gateway
+            .config
+            .data_dir
+            .join("web-access")
+            .join("browser-profile");
         Self {
             gateway,
-            adapter_factory: Arc::new(ProductionAdapterFactory),
+            adapter_factory: Arc::new(ProductionAdapterFactory { profile_dir }),
         }
     }
 
@@ -308,7 +313,9 @@ pub(super) trait AdapterFactory: Send + Sync {
     ) -> Result<Arc<dyn WebProviderAdapter>, WebAccessError>;
 }
 
-struct ProductionAdapterFactory;
+struct ProductionAdapterFactory {
+    profile_dir: std::path::PathBuf,
+}
 
 impl AdapterFactory for ProductionAdapterFactory {
     fn build(
@@ -336,6 +343,7 @@ impl AdapterFactory for ProductionAdapterFactory {
                     provider.id.clone(),
                     outbound,
                     engines,
+                    self.profile_dir.clone(),
                 )
                 .map_err(provider_failure)
             }

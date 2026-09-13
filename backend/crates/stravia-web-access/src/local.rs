@@ -42,8 +42,9 @@ pub fn build_local_adapter(
     id: String,
     outbound: OutboundProxyMode,
     engines: LocalSearchEngineSettings,
+    profile_dir: std::path::PathBuf,
 ) -> Result<Arc<dyn WebProviderAdapter>, ProviderFailure> {
-    let runtime = LocalWeb::new(outbound).map_err(|error| {
+    let runtime = LocalWeb::with_profile(outbound, profile_dir).map_err(|error| {
         ProviderFailure::new(WebAccessErrorCode::Unavailable, error.to_string())
     })?;
     build_local_adapter_with_runtime(id, engines, Arc::new(runtime))

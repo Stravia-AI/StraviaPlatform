@@ -23,6 +23,7 @@ maud = { workspace = true }
 moli-core = { workspace = true }
 moli-stealth-net = { workspace = true }
 moli-cookie-jar = { workspace = true }
+moli-cookie-cache = { workspace = true }
 http = { workspace = true }
 async-compression = { workspace = true }
 tokio-util = { workspace = true }

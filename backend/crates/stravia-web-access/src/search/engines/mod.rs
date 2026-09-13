@@ -465,11 +465,6 @@ async fn make_requests(
                         {
                             search::google_scholar::render_response(query).await
                         }
-                        Engine::Google
-                            if search::google::requires_browser_render(&http_response.body) =>
-                        {
-                            search::google::render_response(query).await
-                        }
                         _ => engine.parse_response(&http_response),
                     } {
                         Ok(response) => response,

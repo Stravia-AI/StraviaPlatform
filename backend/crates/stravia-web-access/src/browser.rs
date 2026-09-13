@@ -1,6 +1,11 @@
 use anyhow::Context;
 use moli_core::runtime::{Browser, BrowserConfig, RenderedDomWaitUntil};
-use std::{sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{Arc, Weak},
+    time::Duration,
+};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 mod egress;
@@ -8,6 +13,20 @@ mod egress;
 #[derive(Debug, Clone)]
 pub(crate) struct BrowserLaunchConfig {
     pub proxy: crate::outbound::ResolvedProxy,
+    pub profile_dir: Option<PathBuf>,
+}
+
+async fn profile_gate(path: &std::path::Path) -> Arc<Mutex<()>> {
+    static GATES: std::sync::LazyLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> =
+        std::sync::LazyLock::new(Default::default);
+    let mut gates = GATES.lock().await;
+    gates.retain(|_, gate| gate.strong_count() > 0);
+    if let Some(gate) = gates.get(path).and_then(Weak::upgrade) {
+        return gate;
+    }
+    let gate = Arc::new(Mutex::new(()));
+    gates.insert(path.to_owned(), Arc::downgrade(&gate));
+    gate
 }
 
 #[derive(Clone)]
@@ -103,14 +122,23 @@ async fn serve(config: BrowserLaunchConfig, mut commands: mpsc::Receiver<RenderC
         if command.response.is_closed() {
             continue;
         }
+        let mut profile_guard = None;
         let operation = async {
+            if let Some(path) = config.profile_dir.as_ref() {
+                std::fs::create_dir_all(path).context("creating Moli profile directory")?;
+                let path =
+                    std::fs::canonicalize(path).context("resolving Moli profile directory")?;
+                profile_guard = Some(profile_gate(&path).await.lock_owned().await);
+            }
             if state.is_none() {
                 // 内嵌 API 不执行 Moli CLI 的进程级初始化，必须显式选择同一传输指纹。
                 moli_stealth_net::initialize_process_fingerprint(
                     moli_stealth_net::TransportFingerprint::chrome(),
                 )?;
                 let proxy = egress::EgressProxy::start(config.proxy.clone()).await?;
+                let profile_dir = config.profile_dir.clone();
                 let mut config = BrowserConfig::default();
+                config.set_profile_dir(profile_dir);
                 config.set_subframe_loading_enabled(true);
                 config
                     .set_optional_resource_fetch_mask(moli_core::OptionalResourceFetchMask::all());
@@ -135,11 +163,20 @@ async fn serve(config: BrowserLaunchConfig, mut commands: mpsc::Receiver<RenderC
         };
         let result = tokio::select! {
             biased;
-            _ = command.response.closed() => continue,
+            _ = command.response.closed() => Err(anyhow::anyhow!("Moli rendering cancelled")),
             result = tokio::time::timeout_at(command.deadline, operation) => {
                 result.context("Moli rendering timed out").and_then(|result| result)
             }
         };
+        // 持久分区只有一个写入者；取消也必须先结束生产者并 flush，再交给下一请求。
+        // 不把 profile 锁绑到 adapter 生命周期，旧代理快照仍可与新快照交替使用。
+        if config.profile_dir.is_some() {
+            if let Some((browser, proxy)) = state.take() {
+                drop(browser);
+                proxy.shutdown().await;
+            }
+        }
+        drop(profile_guard);
         let _ = command.response.send(result);
     }
     // 先停止渲染生产者、回收资源所有者并刷新私有存储分区，再关闭出口监听。
@@ -157,6 +194,33 @@ async fn render_page(
     failure_expression: Option<&str>,
     deadline: tokio::time::Instant,
 ) -> anyhow::Result<RenderedPage> {
+    let preflight = if preflight.is_some() {
+        let target = url::Url::parse(url)?;
+        let mut cookies = moli_cookie_jar::BrowserCookieStore::default();
+        for cookie in browser.cookies()? {
+            if !cookie.is_expired() && cookie.matches(&target) {
+                cookies.upsert_with_request_url_report(
+                    cookie,
+                    None,
+                    moli_cookie_jar::CookieSource::Cdp,
+                );
+            }
+        }
+        // 查询网络 Cookie 而非 document.cookie：HttpOnly 有效，分区与 SameSite 仍由上游判定。
+        let context = moli_cookie_jar::NetworkCookieRequestContext::top_level_navigation("GET")
+            .with_initiator_url(&target, &target);
+        let has_cookie = !cookies
+            .observe_cookie_access_report_for_request(&target, context)
+            .included_cookies
+            .is_empty();
+        if has_cookie {
+            None
+        } else {
+            preflight
+        }
+    } else {
+        None
+    };
     let mut page = browser
         .fetch_allow_http_error_with_wait_until(
             preflight.unwrap_or(url),
@@ -276,6 +340,7 @@ mod tests {
 
     struct Fixture {
         config: BrowserLaunchConfig,
+        requests: Arc<Mutex<Vec<String>>>,
         task: tokio::task::JoinHandle<()>,
     }
 
@@ -290,12 +355,15 @@ mod tests {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let proxy =
                 url::Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let recorded = requests.clone();
             let task = tokio::spawn(async move {
                 let mut connections = tokio::task::JoinSet::new();
                 loop {
                     tokio::select! {
                         accepted = listener.accept() => {
                             let (mut stream, _) = accepted.unwrap();
+                            let recorded = recorded.clone();
                             connections.spawn(async move {
                                 let mut request = Vec::new();
                                 while !request.ends_with(b"\r\n\r\n") && request.len() < 32768 {
@@ -305,10 +373,19 @@ mod tests {
                                 let request = String::from_utf8_lossy(&request);
                                 let raw_url = request.split_whitespace().nth(1).unwrap_or_default();
                                 let Ok(url) = url::Url::parse(raw_url) else { return };
+                                recorded.lock().await.push(url.as_str().to_owned());
                                 if url.path() == "/pending.js" {
                                     std::future::pending::<()>().await;
                                 }
                                 let (content_type, cookie, body) = match url.path() {
+                                    "/identity-home" => ("text/html", "Set-Cookie: identity=retained; Path=/; HttpOnly; Max-Age=3600\r\n", "<html><body><script>fetch('/identity-observed')</script>identity ready</body></html>".to_owned()),
+                                    "/identity-expire" => ("text/html", "Set-Cookie: identity=retained; Path=/; HttpOnly; Max-Age=1\r\n", "<html><body>expires shortly</body></html>".to_owned()),
+                                    "/identity-path" => ("text/html", "Set-Cookie: identity=retained; Path=/other; HttpOnly; Max-Age=3600\r\n", "<html><body>unrelated path</body></html>".to_owned()),
+                                    "/identity-secure" => ("text/html", "Set-Cookie: identity=retained; Path=/; Secure; HttpOnly; Max-Age=3600\r\n", "<html><body>secure only</body></html>".to_owned()),
+                                    "/identity-results" => {
+                                        let cookie = request.to_ascii_lowercase().contains("cookie: identity=retained");
+                                        ("text/html", "", format!("<html><body data-cookie=\"{cookie}\">results</body></html>"))
+                                    }
                                     "/challenge" => ("text/html", "", "<html><body><script>setTimeout(()=>{document.body.innerHTML='<p>Our systems have detected unusual traffic from your computer network.</p><div class=\"g-recaptcha\"></div>'},30)</script></body></html>".to_owned()),
                                     "/challenge-redirect" => ("text/html", "", "<html><body><script>location.replace('/challenge')</script></body></html>".to_owned()),
                                     "/challenge-preflight" => ("text/html", "", "<html><body>Our systems have detected unusual traffic from your computer network.</body></html>".to_owned()),
@@ -343,12 +420,14 @@ mod tests {
             });
             Self {
                 config: BrowserLaunchConfig {
+                    profile_dir: None,
                     proxy: crate::outbound::ResolvedProxy {
                         http: Some(proxy.clone()),
                         https: Some(proxy),
                         no_proxy: Default::default(),
                     },
                 },
+                requests,
                 task,
             }
         }
@@ -363,6 +442,136 @@ mod tests {
             timeout: Duration::from_secs(20),
             request_guard: None,
         }
+    }
+
+    struct TempProfile(PathBuf);
+
+    impl TempProfile {
+        fn new() -> Self {
+            Self(std::env::temp_dir().join(format!(
+                "stravia-browser-{}-{:016x}",
+                std::process::id(),
+                rand::random::<u64>()
+            )))
+        }
+    }
+
+    impl Drop for TempProfile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    async fn identity_search(runtime: &BrowserRuntime) -> RenderedPage {
+        let mut input = request("http://93.184.216.34/identity-results", "body");
+        input.preflight_url = Some("http://93.184.216.34/identity-home");
+        runtime.render(input).await.unwrap()
+    }
+
+    async fn home_visits(fixture: &Fixture) -> usize {
+        fixture
+            .requests
+            .lock()
+            .await
+            .iter()
+            .filter(|url| url.as_str() == "http://93.184.216.34/identity-home")
+            .count()
+    }
+
+    #[tokio::test]
+    async fn moli_preflight_reuses_httponly_cookie_after_profile_rebuild() {
+        let fixture = Fixture::start("127.0.0.1:1".parse().unwrap()).await;
+        let profile = TempProfile::new();
+        let mut config = fixture.config.clone();
+        config.profile_dir = Some(profile.0.clone());
+        let runtime = BrowserRuntime::new(config.clone());
+        assert!(identity_search(&runtime)
+            .await
+            .html
+            .contains("data-cookie=\"true\""));
+        assert_eq!(home_visits(&fixture).await, 1);
+        assert!(identity_search(&runtime)
+            .await
+            .html
+            .contains("data-cookie=\"true\""));
+        assert_eq!(home_visits(&fixture).await, 1);
+        drop(runtime);
+        let rebuilt = BrowserRuntime::new(config);
+        assert!(identity_search(&rebuilt)
+            .await
+            .html
+            .contains("data-cookie=\"true\""));
+        assert_eq!(home_visits(&fixture).await, 1);
+
+        // Fetch 的临时分区不能看见搜索身份，即使访问完全相同的 URL。
+        let fetch = BrowserRuntime::new(fixture.config.clone());
+        let fetched = fetch
+            .render(request("http://93.184.216.34/identity-results", "body"))
+            .await
+            .unwrap();
+        assert!(fetched.html.contains("data-cookie=\"false\""));
+    }
+
+    #[tokio::test]
+    async fn moli_preflight_ignores_expired_and_nonmatching_cookies() {
+        let fixture = Fixture::start("127.0.0.1:1".parse().unwrap()).await;
+        for seed in [
+            "http://93.184.216.34/identity-expire",
+            "http://93.184.216.34/identity-path",
+            "http://93.184.216.35/identity-home",
+            "http://93.184.216.34/identity-secure",
+        ] {
+            let runtime = BrowserRuntime::new(fixture.config.clone());
+            runtime.render(request(seed, "body")).await.unwrap();
+            if seed.ends_with("identity-expire") {
+                tokio::time::sleep(Duration::from_millis(1100)).await;
+            }
+            let before = home_visits(&fixture).await;
+            assert!(
+                identity_search(&runtime)
+                    .await
+                    .html
+                    .contains("data-cookie=\"true\""),
+                "{seed}"
+            );
+            assert_eq!(home_visits(&fixture).await, before + 1, "{seed}");
+        }
+    }
+
+    #[tokio::test]
+    async fn moli_profile_cancellation_flushes_before_next_owner() {
+        let fixture = Fixture::start("127.0.0.1:1".parse().unwrap()).await;
+        let profile = TempProfile::new();
+        let mut config = fixture.config.clone();
+        config.profile_dir = Some(profile.0.clone());
+        let runtime = BrowserRuntime::new(config.clone());
+        let pending = tokio::spawn(async move {
+            runtime
+                .render(request("http://93.184.216.34/identity-home", "#never"))
+                .await
+        });
+        // 等页面消费设置 Cookie 的响应后再取消，避免只测到启动前取消。
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !fixture
+                .requests
+                .lock()
+                .await
+                .iter()
+                .any(|url| url.ends_with("/identity-observed"))
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        pending.abort();
+        let _ = pending.await;
+        let next = BrowserRuntime::new(config);
+        assert!(identity_search(&next)
+            .await
+            .html
+            .contains("data-cookie=\"true\""));
+        assert_eq!(home_visits(&fixture).await, 1);
     }
 
     #[tokio::test]
@@ -381,6 +590,7 @@ mod tests {
                 Some("http://93.184.216.34/challenge-preflight"),
             ),
         ] {
+            let runtime = BrowserRuntime::new(fixture.config.clone());
             let mut input = request(url, "a h3");
             input.preflight_url = preflight;
             input.failure_expression =

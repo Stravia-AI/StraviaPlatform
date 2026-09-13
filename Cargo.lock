@@ -126,7 +126,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -137,7 +137,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -935,7 +935,7 @@ dependencies = [
 [[package]]
 name = "btls"
 version = "0.5.6"
-source = "git+https://github.com/Stravia-AI/btls.git?rev=5c97e6ccda22a66de82d4911421e19cef24d2548#5c97e6ccda22a66de82d4911421e19cef24d2548"
+source = "git+https://github.com/Stravia-AI/btls.git?rev=5ee7faa63188777eb0c1d4a28ef1f465d7bb02b9#5ee7faa63188777eb0c1d4a28ef1f465d7bb02b9"
 dependencies = [
  "bitflags 2.13.1",
  "btls-sys",
@@ -947,7 +947,7 @@ dependencies = [
 [[package]]
 name = "btls-sys"
 version = "0.5.6"
-source = "git+https://github.com/Stravia-AI/btls.git?rev=5c97e6ccda22a66de82d4911421e19cef24d2548#5c97e6ccda22a66de82d4911421e19cef24d2548"
+source = "git+https://github.com/Stravia-AI/btls.git?rev=5ee7faa63188777eb0c1d4a28ef1f465d7bb02b9#5ee7faa63188777eb0c1d4a28ef1f465d7bb02b9"
 dependencies = [
  "bindgen 0.72.1",
  "cmake",
@@ -2111,7 +2111,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -2143,7 +2143,7 @@ version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ab8ecd87370524b461f8557c119c405552c396ed91fc0a8eec68679eab26f94a"
 dependencies = [
- "libloading 0.8.9",
+ "libloading 0.7.4",
 ]
 
 [[package]]
@@ -2454,7 +2454,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3117,7 +3117,7 @@ dependencies = [
  "gobject-sys 0.21.5",
  "libc",
  "system-deps 7.0.8",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3705,7 +3705,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.61.2",
 ]
 
 [[package]]
@@ -4809,12 +4809,12 @@ dependencies = [
 [[package]]
 name = "moli-action-window"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 
 [[package]]
 name = "moli-broadcast-channel"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "moli-storage-key",
  "parking_lot",
@@ -4823,7 +4823,7 @@ dependencies = [
 [[package]]
 name = "moli-browser-profile"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "anyhow",
  "libc",
@@ -4835,7 +4835,7 @@ dependencies = [
 [[package]]
 name = "moli-canvas"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "base64 0.23.1",
  "font8x8",
@@ -4846,7 +4846,7 @@ dependencies = [
 [[package]]
 name = "moli-charset-parser"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "encoding_rs",
  "html5ever 0.39.0",
@@ -4855,7 +4855,7 @@ dependencies = [
 [[package]]
 name = "moli-content-type"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "data-url",
 ]
@@ -4863,7 +4863,7 @@ dependencies = [
 [[package]]
 name = "moli-cookie-cache"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "anyhow",
  "moli-cookie-jar",
@@ -4877,7 +4877,7 @@ dependencies = [
 [[package]]
 name = "moli-cookie-jar"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "moli-cookie-store",
  "moli-site",
@@ -4891,7 +4891,7 @@ dependencies = [
 [[package]]
 name = "moli-cookie-store"
 version = "0.22.1"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "cookie 0.18.2 (git+https://github.com/Stravia-AI/cookie-rs.git?rev=868ce01f66268651f524302cd84c4278ad11e286)",
  "document-features",
@@ -4904,7 +4904,7 @@ dependencies = [
 [[package]]
 name = "moli-core"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "anyhow",
  "moli-browser-profile",
@@ -4930,7 +4930,7 @@ dependencies = [
 [[package]]
 name = "moli-crypto"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "aws-lc-rs",
 ]
@@ -4938,7 +4938,7 @@ dependencies = [
 [[package]]
 name = "moli-css-parse"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "cssparser 0.37.0",
  "stylo",
@@ -4949,7 +4949,7 @@ dependencies = [
 [[package]]
 name = "moli-dns-resolver"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "crossbeam-channel",
  "parking_lot",
@@ -4958,12 +4958,13 @@ dependencies = [
 [[package]]
 name = "moli-dom"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "html5ever 0.39.0",
  "indexmap 2.14.2",
  "moli-css-parse",
  "moli-html-input-temporal",
+ "moli-html-input-type",
  "percent-encoding",
  "selectors 0.40.0",
  "serde_json",
@@ -4975,7 +4976,7 @@ dependencies = [
 [[package]]
 name = "moli-encoding"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "encoding_rs",
  "moli-charset-parser",
@@ -4985,7 +4986,7 @@ dependencies = [
 [[package]]
 name = "moli-encoding-detector"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "compact-enc-det",
  "encoding_rs",
@@ -4994,7 +4995,7 @@ dependencies = [
 [[package]]
 name = "moli-fetch"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "anyhow",
  "async-compression",
@@ -5012,6 +5013,7 @@ dependencies = [
  "moli-web-bot-auth",
  "moli-web-mime",
  "parking_lot",
+ "percent-encoding",
  "strum",
  "tokio",
  "tracing",
@@ -5022,7 +5024,7 @@ dependencies = [
 [[package]]
 name = "moli-file-api"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "base64 0.23.1",
  "encoding_rs",
@@ -5035,28 +5037,37 @@ dependencies = [
 [[package]]
 name = "moli-geometry"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
+ "dragonbox_ecma",
  "moli-css-parse",
 ]
 
 [[package]]
 name = "moli-header-field"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 
 [[package]]
 name = "moli-html-input-temporal"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "time",
 ]
 
 [[package]]
+name = "moli-html-input-type"
+version = "0.1.0"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
+dependencies = [
+ "strum",
+]
+
+[[package]]
 name = "moli-http-cache"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "anyhow",
  "httpdate",
@@ -5071,7 +5082,7 @@ dependencies = [
 [[package]]
 name = "moli-image"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "image",
  "jpeg-decoder",
@@ -5085,7 +5096,7 @@ dependencies = [
 [[package]]
 name = "moli-import-map"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "import_map",
  "serde_json",
@@ -5095,7 +5106,7 @@ dependencies = [
 [[package]]
 name = "moli-indexeddb"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "moli-crypto",
  "serde",
@@ -5106,7 +5117,7 @@ dependencies = [
 [[package]]
 name = "moli-layout"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "euclid",
  "kurbo",
@@ -5124,7 +5135,7 @@ dependencies = [
 [[package]]
 name = "moli-local-executor"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "tokio",
 ]
@@ -5132,7 +5143,7 @@ dependencies = [
 [[package]]
 name = "moli-message-port"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "parking_lot",
 ]
@@ -5140,7 +5151,7 @@ dependencies = [
 [[package]]
 name = "moli-module-script-tree"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "url",
 ]
@@ -5148,7 +5159,7 @@ dependencies = [
 [[package]]
 name = "moli-module-syntax"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "oxc_allocator",
  "oxc_ast",
@@ -5160,7 +5171,7 @@ dependencies = [
 [[package]]
 name = "moli-multipart"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "moli-header-field",
 ]
@@ -5168,7 +5179,7 @@ dependencies = [
 [[package]]
 name = "moli-opfs"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "moli-crypto",
  "parking_lot",
@@ -5181,7 +5192,7 @@ dependencies = [
 [[package]]
 name = "moli-owner-queue"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "parking_lot",
  "tokio",
@@ -5190,7 +5201,7 @@ dependencies = [
 [[package]]
 name = "moli-page-types"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "bitflags 2.13.1",
  "http-auth",
@@ -5207,7 +5218,7 @@ dependencies = [
 [[package]]
 name = "moli-paint"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "anyrender",
  "anyrender_svg",
@@ -5220,7 +5231,7 @@ dependencies = [
 [[package]]
 name = "moli-parser"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "anyhow",
  "html5ever 0.39.0",
@@ -5238,7 +5249,7 @@ dependencies = [
 [[package]]
 name = "moli-protocol-cdp"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "moli-page-types",
  "moli-time",
@@ -5249,7 +5260,7 @@ dependencies = [
 [[package]]
 name = "moli-renderer-v8"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "anyhow",
  "app_units",
@@ -5321,6 +5332,7 @@ dependencies = [
  "moli-webidl",
  "moli-webidl-callback",
  "moli-websocket",
+ "moli-window-features",
  "moli-xpath",
  "parking_lot",
  "percent-encoding",
@@ -5349,7 +5361,7 @@ dependencies = [
 [[package]]
 name = "moli-script"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "moli-page-types",
  "moli-web-mime",
@@ -5358,7 +5370,7 @@ dependencies = [
 [[package]]
 name = "moli-selector"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "app_units",
  "cssparser 0.37.0",
@@ -5379,7 +5391,7 @@ dependencies = [
 [[package]]
 name = "moli-shared-worker"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "moli-storage-key",
  "parking_lot",
@@ -5388,7 +5400,7 @@ dependencies = [
 [[package]]
 name = "moli-site"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "moli-url",
  "psl-types",
@@ -5398,7 +5410,7 @@ dependencies = [
 [[package]]
 name = "moli-stealth-net"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "base64 0.23.1",
  "brotli",
@@ -5423,7 +5435,7 @@ dependencies = [
 [[package]]
 name = "moli-storage-key"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "moli-site",
  "moli-url",
@@ -5433,7 +5445,7 @@ dependencies = [
 [[package]]
 name = "moli-storage-service"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -5451,17 +5463,17 @@ dependencies = [
 [[package]]
 name = "moli-streams"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 
 [[package]]
 name = "moli-structured-clone"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 
 [[package]]
 name = "moli-stylesheet-blocking"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "futures-util",
  "moli-dom",
@@ -5476,7 +5488,7 @@ dependencies = [
 [[package]]
 name = "moli-svg"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "kurbo",
  "moli-css-parse",
@@ -5486,7 +5498,7 @@ dependencies = [
 [[package]]
 name = "moli-time"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "time",
 ]
@@ -5494,12 +5506,12 @@ dependencies = [
 [[package]]
 name = "moli-trace"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 
 [[package]]
 name = "moli-url"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "url",
 ]
@@ -5507,7 +5519,7 @@ dependencies = [
 [[package]]
 name = "moli-url-policy"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "moli-url",
  "url",
@@ -5516,7 +5528,7 @@ dependencies = [
 [[package]]
 name = "moli-v8-init"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "v8",
 ]
@@ -5524,7 +5536,7 @@ dependencies = [
 [[package]]
 name = "moli-v8-platform"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "crossbeam-utils",
  "parking_lot",
@@ -5536,7 +5548,7 @@ dependencies = [
 [[package]]
 name = "moli-v8-util"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "moli-web-errors",
  "serde_json",
@@ -5546,7 +5558,7 @@ dependencies = [
 [[package]]
 name = "moli-web-bot-auth"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -5557,12 +5569,12 @@ dependencies = [
 [[package]]
 name = "moli-web-errors"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 
 [[package]]
 name = "moli-web-mime"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "content_disposition",
  "data-url",
@@ -5574,7 +5586,7 @@ dependencies = [
 [[package]]
 name = "moli-webapi-declare"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "moli-v8-util",
  "moli-webapi-declare-derive",
@@ -5584,7 +5596,7 @@ dependencies = [
 [[package]]
 name = "moli-webapi-declare-derive"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -5594,7 +5606,7 @@ dependencies = [
 [[package]]
 name = "moli-webcrypto"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "base64 0.23.1",
  "ed448-goldilocks",
@@ -5610,7 +5622,7 @@ dependencies = [
 [[package]]
 name = "moli-webidl"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "moli-v8-util",
  "moli-webidl-callback",
@@ -5621,7 +5633,7 @@ dependencies = [
 [[package]]
 name = "moli-webidl-callback"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "v8",
 ]
@@ -5629,7 +5641,7 @@ dependencies = [
 [[package]]
 name = "moli-webidl-derive"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -5639,7 +5651,7 @@ dependencies = [
 [[package]]
 name = "moli-websocket"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -5655,9 +5667,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "moli-window-features"
+version = "0.1.0"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
+dependencies = [
+ "indexmap 2.14.2",
+ "stylo",
+]
+
+[[package]]
 name = "moli-xpath"
 version = "0.1.0"
-source = "git+https://github.com/Stravia-AI/moli-stealth?rev=c40d4b168adaa0f17e38a72430df92d720dee6aa#c40d4b168adaa0f17e38a72430df92d720dee6aa"
+source = "git+https://github.com/Stravia-AI/moli-stealth?rev=65b76086fe98b890bbd4755899698c71bdcef1d7#65b76086fe98b890bbd4755899698c71bdcef1d7"
 dependencies = [
  "log",
  "markup5ever 0.39.0",
@@ -5691,7 +5712,7 @@ dependencies = [
  "png 0.18.1",
  "serde",
  "thiserror 2.0.20",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5804,7 +5825,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -7202,7 +7223,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -7751,7 +7772,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -7764,7 +7785,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -7837,7 +7858,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -8124,7 +8145,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3afb591f9cdb6223c88ba39269aff895620c7f0716dc42b705b5733d5c7c0823"
 dependencies = [
  "annotate-snippets",
- "base64 0.23.1",
+ "base64 0.21.7",
  "encoding_rs_io",
  "granit-parser",
  "nohash-hasher",
@@ -8565,7 +8586,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -9059,6 +9080,7 @@ dependencies = [
  "http 1.5.0",
  "libc",
  "maud",
+ "moli-cookie-cache",
  "moli-cookie-jar",
  "moli-core",
  "moli-stealth-net",
@@ -9934,7 +9956,7 @@ dependencies = [
  "serde_with",
  "swift-rs",
  "thiserror 2.0.20",
- "toml 1.1.5+spec-1.1.0",
+ "toml 0.9.12+spec-1.1.0",
  "url",
  "urlpattern",
  "uuid",
@@ -9962,7 +9984,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -10223,7 +10245,7 @@ dependencies = [
 [[package]]
 name = "tokio-btls"
 version = "0.5.6"
-source = "git+https://github.com/Stravia-AI/btls.git?rev=5c97e6ccda22a66de82d4911421e19cef24d2548#5c97e6ccda22a66de82d4911421e19cef24d2548"
+source = "git+https://github.com/Stravia-AI/btls.git?rev=5ee7faa63188777eb0c1d4a28ef1f465d7bb02b9#5ee7faa63188777eb0c1d4a28ef1f465d7bb02b9"
 dependencies = [
  "btls",
  "tokio",
@@ -10546,7 +10568,7 @@ dependencies = [
  "png 0.18.1",
  "serde",
  "thiserror 2.0.20",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -10629,7 +10651,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset",
  "tempfile",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -11306,7 +11328,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

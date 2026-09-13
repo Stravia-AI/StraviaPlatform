@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use url::Url;
 
@@ -36,6 +36,7 @@ struct LocalWebInner {
     http: HttpClient,
     fetch_proxied: HttpClient,
     browser: BrowserRuntime,
+    fetch_browser: BrowserRuntime,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,11 +101,36 @@ impl NoProxyList {
 impl LocalWeb {
     /// 创建固定出站代理快照的内嵌 Web Access 运行时。
     pub fn new(mode: OutboundProxyMode) -> Result<Self, LocalWebError> {
+        Self::build(mode, None)
+    }
+
+    /// 在应用专用目录持久化搜索身份；Fetch 始终保持隔离。
+    pub fn with_profile(
+        mode: OutboundProxyMode,
+        profile_dir: PathBuf,
+    ) -> Result<Self, LocalWebError> {
+        Self::build(mode, Some(profile_dir))
+    }
+
+    fn build(mode: OutboundProxyMode, profile_dir: Option<PathBuf>) -> Result<Self, LocalWebError> {
         let snapshot = resolve_mode(mode, |key| std::env::var(key).ok())?;
-        let http = build_http_client(&snapshot, SEARCH_TIMEOUT, true)?;
+        let http = match &profile_dir {
+            Some(path) => HttpClient::with_cookie_cache(
+                snapshot.clone(),
+                SEARCH_TIMEOUT,
+                path.with_file_name("search-cookies.json"),
+            )
+            .map_err(|error| LocalWebError(format!("search Cookie store failed: {error}")))?,
+            None => build_http_client(&snapshot, SEARCH_TIMEOUT, true)?,
+        };
         let fetch_proxied = build_http_client(&snapshot, FETCH_TIMEOUT, false)?;
         let browser = BrowserRuntime::new(crate::browser::BrowserLaunchConfig {
             proxy: snapshot.clone(),
+            profile_dir,
+        });
+        let fetch_browser = BrowserRuntime::new(crate::browser::BrowserLaunchConfig {
+            proxy: snapshot.clone(),
+            profile_dir: None,
         });
         Ok(Self {
             inner: Arc::new(LocalWebInner {
@@ -112,6 +138,7 @@ impl LocalWeb {
                 http,
                 fetch_proxied,
                 browser,
+                fetch_browser,
             }),
         })
     }
@@ -135,6 +162,10 @@ impl LocalWeb {
 
     pub(crate) fn browser(&self) -> BrowserRuntime {
         self.inner.browser.clone()
+    }
+
+    pub(crate) fn fetch_browser(&self) -> BrowserRuntime {
+        self.inner.fetch_browser.clone()
     }
 
     pub(crate) fn snapshot(&self) -> &ResolvedProxy {
@@ -285,6 +316,7 @@ pub(crate) fn direct_http_client() -> HttpClient {
 pub(crate) fn direct_browser() -> BrowserRuntime {
     BrowserRuntime::new(crate::browser::BrowserLaunchConfig {
         proxy: ResolvedProxy::direct(),
+        profile_dir: None,
     })
 }
 
