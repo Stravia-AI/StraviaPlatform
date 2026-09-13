@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import re
@@ -10,6 +11,7 @@ import subprocess
 import sys
 import threading
 import time
+import zipfile
 from http.cookiejar import CookieJar
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -90,6 +92,44 @@ def http_request(
     """Make an HTTP request and return (status_code, decoded_body)."""
     status, _, body = http_bytes(method, url, payload, headers, timeout)
     return status, _decode_body(body)
+
+
+def download_observation_bundle(
+    env: dict[str, Any], detail: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, str], bytes]:
+    """Download a one-use bundle while enforcing the metadata-only detail contract."""
+    assert "debug_events" not in detail
+    assert all("debug_events" not in run for run in detail.get("runs", []))
+    if "interaction" in detail:
+        resource = f"interactions/{detail['interaction']['id']}"
+    else:
+        resource = f"rejections/{detail['rejection']['id']}"
+    status, ticket = http_request(
+        "POST", f"{env['admin']}/api/v1/observations/{resource}/debug-bundle-tickets",
+        payload={"through_sequence": detail["snapshot_sequence"]}, headers=env["auth"],
+    )
+    assert status == 200, ticket
+    data = ticket["data"]
+    download = data["download_url"]
+    status, headers, archive = http_bytes(
+        "GET", f"{env['admin']}{download}" if download.startswith("/") else download,
+    )
+    assert status == 200
+    assert "application/zip" in headers["content-type"]
+    return data, headers, archive
+
+
+def observation_bundle_events(archive: bytes, run_id: str | None = None) -> list[dict[str, Any]]:
+    """Read capture records from the ZIP's per-run or rejected-request JSONL files."""
+    with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
+        return [
+            json.loads(line)
+            for name in bundle.namelist()
+            if name.endswith(".jsonl")
+            if run_id is None or name.endswith(f"-{run_id}/events.jsonl")
+            for line in bundle.read(name).splitlines()
+            if line.strip()
+        ]
 
 
 class WebSession:

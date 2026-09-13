@@ -2,6 +2,7 @@ import { createParser, type EventSourceMessage } from 'eventsource-parser'
 
 import { apiBase, authenticatedFetch, isTauri } from '$lib/auth'
 import { openExternalUrl } from '$lib/open-external'
+import { isLiveContentBlock } from '$lib/observation-state'
 import type { DownloadTicket, ObservationEvent, ObservationStreamUpdate } from '$lib/types'
 
 export interface ObservationSubscription {
@@ -20,9 +21,23 @@ export function subscribeToObservations(
   let reconnectDelay = 500
 
   const accept = async (message: EventSourceMessage): Promise<void> => {
-    if (!message.data || (message.event !== 'observation' && message.event !== 'reset_required')) return
+    if (!message.data || !message.event || !['observation', 'reset_required', 'live_content', 'live_snapshot', 'live_gap'].includes(message.event)) return
     const payload: unknown = JSON.parse(message.data)
     if (!payload || typeof payload !== 'object') throw new Error('Invalid Observation event')
+    if (message.event.startsWith('live_')) {
+      if (message.id) throw new Error('Volatile Observation cannot have a cursor')
+      if (message.event === 'live_content') {
+        if (!isLiveContentBlock(payload)) throw new Error('Invalid live content')
+        await onUpdate({ type: 'live_content', block: payload })
+      } else if (message.event === 'live_snapshot') {
+        if (!('blocks' in payload) || !Array.isArray(payload.blocks) || !payload.blocks.every(isLiveContentBlock)) throw new Error('Invalid live snapshot')
+        await onUpdate({ type: 'live_snapshot', blocks: payload.blocks })
+      } else {
+        if (!('interaction_id' in payload) || typeof payload.interaction_id !== 'string' || !('run_id' in payload) || typeof payload.run_id !== 'string' || !('reason' in payload) || typeof payload.reason !== 'string') throw new Error('Invalid live gap')
+        await onUpdate({ type: 'live_gap', interaction_id: payload.interaction_id, run_id: payload.run_id, reason: payload.reason })
+      }
+      return
+    }
     if (message.event === 'reset_required') {
       if (!('snapshot_sequence' in payload) || !Number.isSafeInteger(payload.snapshot_sequence)) {
         throw new Error('Invalid Observation reset sequence')

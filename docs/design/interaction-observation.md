@@ -171,9 +171,15 @@ clear_history() -> ClearHistoryResult
 
 `platform_tool_started.input` 和 `client_tool_handoff.input` 保存工具输入，`platform_tool_finished.content` 保存平台工具返回；输入为可解析的 JSON 时保留其类型，否则保留原始参数字符串。旧事件缺少这些可选字段时表示未采集，字段值为 `null` 则表示实际采集到 JSON null。`client_tool_result` 保存收到的客户端返回及其调用 ID、错误标记，兼容显式 `tool_result` 块和 `role=tool` 消息；只采集收到的 canonical 窗口，不从恢复后的模型历史重新提取。客户端返回先留在内存，凭据映射注册完成后与输入预览共用发布边界，没有新用户文本的工具续跑也会发布。
 
+客户端工具结果按收到的批次查询当前 Run 及明确 `parent_run_id` 祖先，只使用同一 Principal、仍在保留期内的调用证据。最近一次 `client_tool_handoff` 确定调用边界；相同 ID 的新 handoff 是新调用。只有与该调用最近结果的脱敏后正文、`is_error` 均相同时才跳过重复写入。正文变化、错误状态变化、分支结果与新调用保留；没有 handoff 证据，或最近结果正文缺失、为 null 时，不跨越该不确定边界去重。比较状态只存在于当前批次，不另存正文副本或原始凭据摘要。既有历史事件不回写、不删除。
+
 `model_thinking_delta` 只提取上游可读 thinking / reasoning summary 文本，以 Model Turn 和 Target attempt 隔离增量脱敏状态，避免跨分片泄露已知凭据或跨尝试拼接。正文、工具、结束、错误及 EOF 结束当前思考段；尝试结束、Run 结束或取消析构也会收尾。签名、密文、obfuscation 和不透明快照不作为普通思考正文。
 
-`client_visible_content_delta` 仍只保存 Client Projection 已交付的可见内容。writer 按既有 500ms 周期合并同一 Run 中相邻且同作用域的正文或思考文本；作用域变化及其他事件边界先刷新，生命周期与终态不等待文本窗口。思考和工具内容不进入 `visible_tail`，沿用既有凭据脱敏及 `log_retention_days`，不受 Debug 开关控制；业务敏感内容仍可能保留，普通记录存储用量会增加。普通事件不保存完整 canonical request/response。
+`client_visible_content_delta` 仍只保存 Client Projection 已交付的可见内容。writer 将同一 Run 中相邻且同作用域的正文或思考文本封装为不可变内容块：达到 16 KiB UTF-8 或首字节等待约两秒时封口，作用域变化、其他事件与终态也会封口；不切断 UTF-8 字符。内容块不是新的对话消息，Markdown 在同一语义消息内连续渲染。无关 Run 的准入和普通详情读取不强制封口。普通事件按同一 Run 批量提交，批次只更新一次 Run/Interaction 摘要，只有影响生命周期的事件重算活动状态。
+
+未封口文本约每 100ms 发布完整易失内容块，由 `block_id` 与递增 `revision` 替换显示；持久事件携带同一 `block_id`，提交后移除对应易失预览。界面显示未保存状态。允许正常调度下约两秒未落盘窗口，进程崩溃可能丢失这些观察文本；这不是存储故障下的持久化时限保证。持久化失败与预览容量不足分别提示，不能把预览截断误报成已落盘历史丢失。
+
+只对新封口的 1–16 KiB 文本尝试 `zip-deflate-v1` 压缩，含容器、base64 与元数据仍有净收益时才采用；读取、SSE 和导出恢复普通 `text` 契约。旧 payload 不改写、不删除。思考和工具内容不进入 `visible_tail`，沿用既有凭据脱敏及 `log_retention_days`，不受 Debug 开关控制；业务敏感内容仍可能保留。普通事件不保存完整 canonical request/response。
 
 ### 5.2 Debug canonical checkpoint
 
@@ -193,9 +199,13 @@ Debug Run 额外写入以下稳定语义阶段：
 
 每项带 Interaction ID、Run ID、Model Turn ID、Target attempt ID（适用时）、单调事件序号与 UTC 时间。不得序列化锁、缓存、credential object、连接对象或其他临时 Rust 内部状态。
 
+`Wire` 与 `Checkpoint` 直接写入 Debug Trace 队列，不再逐条写入普通 `observation_events`，也不占用普通事件队列。普通生命周期、可见输出、工具结果及 Trace manifest 状态仍持久化并驱动 SSE。Trace 使用下一持久观察边界作为水位，同一 Trace 中排队记录的水位保持非递减。manifest 按独立两秒维护周期或显式生命周期边界持久化；普通详情、summary 与事件分页均只读已提交状态，不触发 flush，也不叠加未提交 manifest。Interaction 导出票据只排空目标 Interaction 的待写文本与 Trace，再固定截止水位；既有 ZIP 截止水位不能包含之后的新采集内容。四方向 Wire 与 canonical checkpoint 仍由 ZIP 提供，Debug 关闭时不采集。
+
 ### 5.3 顺序与 SSE cursor
 
 Observation writer 为持久化事件分配递增 `event_sequence`。事件及受影响摘要在同一数据库事务内提交后才广播；SSE event ID 等于 sequence。
+
+`live_content`、`live_snapshot` 和 `live_gap` 不带 SSE ID，不推进持久 cursor。订阅先分批重放已提交事件（每批最多 512 条），再发送完整易失快照，包括空快照。重连、reset 或断线时替换或清除旧易失状态，不按文本猜测去重。易失预览不承诺重启恢复。
 
 SQLite 的 Run admission 使用 `BEGIN IMMEDIATE`，在读取父 Run 状态前取得写锁，使父分支中断与子 Interaction 入库保持原子性，避免并发写入导致读事务升级失败。
 
@@ -380,7 +390,9 @@ Rejected Request 导出使用同一 schema family，但 `kind = rejected_request
 
 ```text
 GET    /api/v1/observations/interactions
+GET    /api/v1/observations/interactions/{id}/summary
 GET    /api/v1/observations/interactions/{id}
+GET    /api/v1/observations/interactions/{id}/events
 GET    /api/v1/observations/rejections
 GET    /api/v1/observations/rejections/{id}
 GET    /api/v1/observations/events?after=<sequence>
@@ -404,6 +416,8 @@ Interaction forest 查询参数：
 
 SSE 通过普通 `fetch` 携带 Admin Bearer header，并由 `eventsource-parser` 解析；Admin token 不进入 query string。
 
+普通详情只返回整个 Interaction 最新 200 条事件及 `older_events_cursor`。事件分页使用互斥的 `after_sequence` / `before_sequence`，以及固定快照上界 `through_sequence`；`limit` 默认 200、最大 500。负游标、超出快照的游标及无效 limit 返回 400。返回 `runs`、`snapshot_sequence`、`next_cursor`，每个 Run 包含本页事件，页内按 sequence 升序；仅在仍有后续页时返回游标。增量读取固定同一上界直至分页完成，历史加载向前翻页。诊断包独立读取完整截止历史，不受详情窗口限制。
+
 ## 10. 请求记录页面
 
 ### 10.1 信息架构
@@ -425,6 +439,9 @@ SSE 通过普通 `fetch` 携带 Admin Bearer header，并由 `eventsource-parser
 - touch pan 与 pinch zoom；
 - 节点可选、可聚焦，但不可拖动、删除、重连或创建连接；
 - `onlyRenderVisibleElements` 启用；
+- 节点、布局与连线共用固定的 288×256 CSS 像素几何及上下连接点；未取得 worker 布局的新节点不挂到原点，不为测量尺寸或连接点而一次性挂载全量卡片。保留完整图数据，由视口及可见连线端点决定实际挂载，移动与缩放时按需更新；
+- “适配全部”直接按完整布局的已知几何计算视口，不等待屏外节点的 DOM 测量，也不只适配已经挂载的卡片；
+- 未改变的节点沿用原引用；同一确认父节点下的候选共享祖先判定，避免长链反复回溯相同前缀。该缓存仅属于当前判定，不改变确认、推断与原生压缩关联语义；
 - 提供适配已加载内容、回到进行中、缩放、可折叠 minimap；
 - 所有屏宽都使用同一画布；窄屏点击节点后详情全屏。
 
@@ -433,6 +450,8 @@ SSE 通过普通 `fetch` 携带 Admin Bearer header，并由 `eventsource-parser
 保留尾部推断关联与已确认直连使用相同的底部 source、顶部 target、路径、颜色与线宽，只以虚线区别；单一续接上下对齐，不为跨根关联绕到卡片侧面。连线上与卡片预览中均不附加推断关联说明，具体关联类型仍可在诊断详情中查看。
 
 一个时间页先加载最新一批根链的完整子树；横向接近已加载边缘时按 cursor 加载下一批。未加载完时显示 `loaded / total`。“适配全部”先加载剩余根链并显示进度，再计算完整 bounds。
+
+实时更新使用 `GET /api/v1/observations/interactions/{id}/summary`，返回 `InteractionSnapshot { interaction, root, snapshot_sequence }`。该接口保留原详情的筛选、完整根链和时间参数校验，但只读取已持久化的摘要与关联事件，不读取 Run、普通事件正文或 Trace，也不等待 Trace flush。检查器初次加载有界详情，之后按 sequence 增量读取；“加载更早记录”向前分页并保持滚动锚点，未变更 Run 与消息沿用原引用。易失通知只更新文本预览，不触发 HTTP 请求。选择、关闭或时间范围变化后，旧请求不得覆盖新的检查器状态。Forest、summary 与 detail 共用有界批量关联事件查询，按交互分组并保持 sequence 顺序及快照上界。点击下载时不沿用页面的旧截止序号，由服务端完成目标屏障后固定票据快照。
 
 ### 10.3 时间页与迁移
 
@@ -472,9 +491,9 @@ SSE 通过普通 `fetch` 携带 Admin Bearer header，并由 `eventsource-parser
 
 默认「对话」页以只读消息气泡展示当前 Interaction：用户靠右使用 primary 色，模型靠左使用中性底色。连续同一模型的 Run 共用一组头像与名称，正文和工具继续追加在同一块内，只在末尾显示最后一条消息的时间；换模型或出现用户消息时重新分组。时间旁不显示任何执行状态或预览说明，执行状态仍在画布与诊断中保留。用户消息取已脱敏的 `input_preview`，每个 Run 的回复只拼接按 sequence 排序的 `client_visible_content_delta.text`，不把 Debug 内容当作回复。没有公开文本事件的旧记录只回退一次到 `visible_tail`。没有用户正文时不生成用户消息，没有助手正文时隐藏气泡，但保留流式组件实例，保证首个实时增量仍可逐字显示。
 
-思考和工具使用官方 shadcn-svelte Marker，默认折叠；有真实详情才提供展开操作，没有可读思考则不显示条目，只有工具名称时显示静态行，不增加「未记录」说明。思考置于所属 Run 正文前，工具置于正文后；展开显示可读思考、工具输入和返回。普通事件优先且无需开启 Debug；同一思考作用域或工具内容已由普通事件提供时，不再重复使用 Debug。旧记录只从 `debug_enabled` Run 中匹配 `run_id`、`layer=canonical`、`payload_encoding=json` 的既有 TraceRecord 补充缺失详情，不补录未采集的历史。Debug 思考读取 `canonical_delta` 与终态快照中的可读字段，完整快照替换而不重复拼接增量；`response_after_hook` 不带 attempt_id 时沿用同一 Model Turn 最近的尝试。签名、密文和 `redacted_thinking.data` 不进入思考正文，Wire 不被猜测解析。
+思考和工具使用官方 shadcn-svelte Marker，默认折叠；有真实详情才提供展开操作，没有可读思考则不显示条目，只有工具名称时显示静态行，不增加「未记录」说明。思考置于所属 Run 正文前，工具置于正文后；展开显示普通观察事件记录的可读思考、工具输入和返回，无需开启 Debug。详情与对话不读取 Debug Trace，也不从旧 Trace 补充内容或补录未采集的历史。签名、密文不进入普通思考正文。
 
-工具调用按 Run 和调用 ID 关联：普通平台事件的 `tool_id` 就是调用 ID，Debug 平台结果使用 `call_id` 而不是工具类型 `tool_id`。客户端返回来自 `client_tool_result`；旧 Debug 才从 `decoded_request` 的 `tool_result` 块或显式 `role=tool`、`tool_call_id` 文本消息补充。返回仅匹配明确 `parent_run_id` 祖先，祖先路径上的历史重放不重复展示，兄弟分支各自收到的返回独立保留。工具输入与返回以安全纯文本或 JSON 呈现，不递归猜测业务 JSON、不执行 HTML 或加载远程媒体。每条 Marker 以稳定活动 ID 独立保存 localStorage 展开布尔值，折叠时删除该项；不保存正文，存储失败明确提示但不阻断展开。展开已有内容不制造「新活动」提示；后续真实内容变化仍可提示，且不收起已展开条目或抢走阅读位置。
+工具调用按 Run 和调用 ID 关联：普通平台事件的 `tool_id` 就是调用 ID，客户端返回来自 `client_tool_result`。返回仅匹配明确 `parent_run_id` 祖先，祖先路径上的历史重放不重复展示，兄弟分支各自收到的返回独立保留。工具输入与返回以安全纯文本或 JSON 呈现，不递归猜测业务 JSON、不执行 HTML 或加载远程媒体。每条 Marker 以稳定活动 ID 独立保存 localStorage 展开布尔值，折叠时删除该项；不保存正文，存储失败明确提示但不阻断展开。展开已有内容不制造「新活动」提示；后续真实内容变化仍可提示，且不收起已展开条目或抢走阅读位置。
 
 正文复用卡片的安全 Markdown 渲染，lexer 与 parser 均显式启用 GFM，表格继续经过既有 HTML 安全白名单。历史首次打开立即显示；运行中新增后缀按 Unicode grapheme 逐字呈现，批量新增及时追平，结束、文本替换或减少动态效果开启时直接显示当前已收到的文本。此动画不改变后端最长一秒的合并与 SSE 更新契约。处于底部时随逐字增长跟随；用户向上翻阅或展开活动后保持阅读位置，只有点击「回到最新」或主动滚到底部才恢复。切换 Interaction 重置跟随，不滚动外层页面。
 
@@ -484,7 +503,7 @@ SSE 通过普通 `fetch` 携带 Admin Bearer header，并由 `eventsource-parser
 
 `target_attempt_finished` 的耗时后显示 Token 速度。输出用量来自同一 Run、相同 `attempt_id` 的最后一条 `usage_confirmed`（按 sequence 判断），不累加累计快照，也不借用整个 Run 或其他 attempt 的用量。速度复用 `computeTps` / `formatTps`：有有效首 Token 时间时使用既有净生成耗时与非增量流判定，否则使用上游耗时；缺少用量或有效耗时显示未知。卡片输出浮层使用「模型输出预览」名称；画布的已确认执行来源边保留连线、取消重复文字标签。
 
-普通诊断显示生命周期、Route/Target、协议、状态、耗时、Confirmed Upstream Usage、客户端可见事件。Debug Run 才能进入「Debug 记录」查看完整 canonical checkpoint、Wire 方向、headers、body/frame、复制与单事件下载能力。未开启 Debug 不影响普通诊断访问，实时刷新不得把选中的诊断页签切回对话。Rejected Request 默认显示简洁失败摘要，不伪造成模型对话；技术原因仍在诊断中。
+普通诊断显示生命周期、Route/Target、协议、状态、耗时、Confirmed Upstream Usage、客户端可见事件。完整 canonical checkpoint、Wire headers、body/frame 只通过 Debug Bundle 下载提供，不再内嵌展示、复制或提供单事件下载。Interaction 与 Rejected Request 详情不返回 `debug_events`，不打开或解析 Trace 分段；保留 manifest 状态与缺失原因，运行中 manifest 可从内存捕获状态更新。下载沿用有界快照与单次 ticket，不改变捕获、脱敏、保留或清理规则。未开启 Debug 不影响普通诊断访问，实时刷新不得把选中的诊断页签切回对话。Rejected Request 默认显示简洁失败摘要，不伪造成模型对话；技术原因仍在诊断中。
 
 ### 10.7 视觉方向
 

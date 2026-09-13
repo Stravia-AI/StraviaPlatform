@@ -1,21 +1,41 @@
 <script lang="ts">
-import { untrack } from 'svelte'
+import { tick, untrack } from 'svelte'
 import ArrowDownIcon from '@lucide/svelte/icons/arrow-down'
 import BotIcon from '@lucide/svelte/icons/bot'
 import UserIcon from '@lucide/svelte/icons/user'
 import * as m from '$lib/paraglide/messages.js'
 import { formatLogTime } from '$lib/format'
-import { observationConversationMessages } from '$lib/observation-conversation'
+import { observationConversationMessages, type ObservationChatMessage } from '$lib/observation-conversation'
 import { observationConversationActivities } from '$lib/observation-activities'
 import ObservationActivity from '$lib/components/observation-activity.svelte'
-import type { InteractionDetail } from '$lib/types'
+import type { InteractionDetail, LiveContentBlock } from '$lib/types'
+import { Badge } from '$lib/components/ui/badge'
 import StreamingMarkdown from '$lib/components/streaming-markdown.svelte'
 import { Button } from '$lib/components/ui/button'
 
-let { detail }: { detail: InteractionDetail } = $props()
-const messages = $derived(
-  observationConversationMessages(detail).filter((message) => message.role !== 'user' || message.text.trim()),
-)
+let { detail, liveBlocks = [], olderLoading = false, onolder }: { detail: InteractionDetail; liveBlocks?: LiveContentBlock[]; olderLoading?: boolean; onolder?: () => Promise<void> } = $props()
+let previousMessages: ObservationChatMessage[] = []
+const messages = $derived.by(() => {
+  previousMessages = observationConversationMessages(detail, liveBlocks, previousMessages)
+  return previousMessages.filter((message) => message.role !== 'user' || message.text.trim())
+})
+let viewportElement: HTMLElement | undefined
+let prepending = false
+async function loadOlder(): Promise<void> {
+  const viewport = viewportElement
+  if (!viewport || !onolder || olderLoading) return
+  inspectActivity?.()
+  prepending = true
+  const height = viewport.scrollHeight
+  const top = viewport.scrollTop
+  try {
+    await onolder()
+    await tick()
+    viewport.scrollTop = top + viewport.scrollHeight - height
+  } finally {
+    prepending = false
+  }
+}
 const groups = $derived.by(() => {
   const result: (typeof messages)[] = []
   for (const message of messages) {
@@ -34,13 +54,15 @@ const groups = $derived.by(() => {
   }
   return result
 })
-const activities = $derived(observationConversationActivities(detail))
+const durableActivities = $derived(observationConversationActivities(detail))
+const activities = $derived(observationConversationActivities(detail, liveBlocks, durableActivities))
 let hasNewActivity = $state(false)
 let returnToLatest: (() => void) | undefined
 let inspectActivity: (() => void) | undefined
 
 function followConversation(viewport: HTMLElement): () => void {
   return untrack(() => {
+    viewportElement = viewport
     const content = viewport.firstElementChild!
     let following = true
     let previousTop = viewport.scrollTop
@@ -72,6 +94,7 @@ function followConversation(viewport: HTMLElement): () => void {
       if (following) scrollToLatest()
     })
     const mutation = new MutationObserver((records) => {
+      if (prepending) return
       // 用户展开已有详情并不是收到新内容；仍观察详情内部的实时文本变化。
       if (
         records.every(
@@ -120,6 +143,9 @@ function followConversation(viewport: HTMLElement): () => void {
     tabindex="0"
     {@attach followConversation}>
     <div class="conversation-messages">
+      {#if detail.older_events_cursor !== null && onolder}
+        <Button variant="outline" disabled={olderLoading} aria-busy={olderLoading} onclick={loadOlder}>{m.observation_load_earlier()}</Button>
+      {/if}
       {#each groups as group (group[0].id)}
         {@const user = group[0].role === 'user'}
         {@const actor = user ? m.observation_chat_you() : group[0].model || m.observation_chat_model()}
@@ -130,6 +156,7 @@ function followConversation(viewport: HTMLElement): () => void {
           <div class="message-body">
             <h3 class="actor-name">{actor}</h3>
             {#each group as message (message.id)}
+              {#if message.unsaved}<Badge variant="outline">{m.observation_live_unsaved()}</Badge>{/if}
               {#if !user}
                 {#each activities.get(message.id) ?? [] as activity (activity.id)}
                   {#if activity.kind === 'thinking'}

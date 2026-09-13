@@ -227,6 +227,8 @@ pub(crate) struct TraceHandle {
 }
 
 struct TraceState {
+    // Segment snapshots are byte prefixes, so queued records must be sequence-ordered.
+    queued_sequence: std::sync::Mutex<i64>,
     wire_pending: std::sync::Mutex<std::collections::HashMap<String, (String, TraceRecord)>>,
     protected: super::redaction::ProtectedSecrets,
     bytes_written: AtomicU64,
@@ -246,6 +248,10 @@ enum WriterCommand {
         trace_id: Arc<str>,
         state: Arc<TraceState>,
         bytes: Vec<u8>,
+    },
+    Flush {
+        trace_id: Arc<str>,
+        response: oneshot::Sender<io::Result<()>>,
     },
     Snapshot {
         trace_id: String,
@@ -297,6 +303,7 @@ impl TraceManager {
     pub(crate) fn create(&self) -> TraceHandle {
         let trace_id = uuid::Uuid::new_v4().simple().to_string();
         let state = Arc::new(TraceState {
+            queued_sequence: std::sync::Mutex::new(0),
             wire_pending: std::sync::Mutex::new(std::collections::HashMap::new()),
             protected: super::redaction::ProtectedSecrets::default(),
             bytes_written: AtomicU64::new(0),
@@ -490,6 +497,9 @@ impl TraceHandle {
                 self.mark_partial("media_unrecoverable", false);
             }
         }
+        let mut queued_sequence = self.state.queued_sequence.lock().expect("trace sequence");
+        record.sequence = record.sequence.max(*queued_sequence);
+        *queued_sequence = record.sequence;
         let mut bytes = match serde_json::to_vec(&record) {
             Ok(bytes) => bytes,
             Err(_) => {
@@ -572,6 +582,21 @@ impl TraceHandle {
             }
         }
         self.manifest()
+    }
+
+    /// Drain queued records without closing capture or copying trace segments.
+    pub(crate) async fn flush(&self) -> io::Result<()> {
+        let (response, receive) = oneshot::channel();
+        self.manager
+            .inner
+            .tx
+            .send(WriterCommand::Flush {
+                trace_id: Arc::clone(&self.trace_id),
+                response,
+            })
+            .await
+            .map_err(|_| writer_unavailable())?;
+        receive.await.map_err(|_| writer_unavailable())?
     }
 
     pub(crate) async fn snapshot(&self, through_sequence: i64) -> io::Result<TraceSnapshot> {
@@ -659,6 +684,13 @@ async fn writer_loop(inner: Arc<ManagerInner>, mut rx: mpsc::Receiver<WriterComm
                         writers.remove(trace_id.as_ref());
                     }
                 }
+            }
+            WriterCommand::Flush { trace_id, response } => {
+                let result = match writers.get_mut(trace_id.as_ref()) {
+                    Some(writer) => writer.flush().await,
+                    None => Ok(()),
+                };
+                let _ = response.send(result);
             }
             WriterCommand::Snapshot {
                 trace_id,
@@ -1018,7 +1050,11 @@ mod tests {
                 assert_eq!(record.payload["reason"], "control_frame_payload_omitted");
                 assert!(!record.payload.to_string().contains("never-persist-this"));
                 assert!(!record.payload.to_string().contains(&encoded));
-                assert!(!record.redactions.contains(&RedactionKind::MediaUnrecoverable));
+                assert!(
+                    !record
+                        .redactions
+                        .contains(&RedactionKind::MediaUnrecoverable)
+                );
             }
         }
     }

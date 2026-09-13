@@ -12,14 +12,19 @@ import {
   BackgroundVariant,
   MiniMap,
   Panel,
+  Position,
   SvelteFlow,
+  getNodesBounds,
+  getViewportForBounds,
   useSvelteFlow,
   type Edge,
   type Node,
+  type NodeHandle,
 } from '@xyflow/svelte'
 import '@xyflow/svelte/dist/style.css'
 
 import { canvasLinks } from '$lib/interaction-canvas-links'
+import { interactionNodeWidth, interactionNodeHeight } from '$lib/interaction-node-geometry'
 import type { LayoutPosition } from '$lib/interaction-layout.worker'
 import { observationStatusLabel } from '$lib/observation-labels'
 import type { ForestRoot, InteractionNodeData, InteractionSummary } from '$lib/types'
@@ -65,8 +70,12 @@ let {
   onfollow,
 }: Props = $props()
 
-const { fitView, setCenter, zoomIn, zoomOut, getViewport, getNode } = useSvelteFlow<FlowInteractionNode, Edge>()
+const { setViewport, setCenter, zoomIn, zoomOut, getViewport, getNode } = useSvelteFlow<FlowInteractionNode, Edge>()
 const nodeTypes = { interaction: InteractionNode }
+const interactionNodeHandles: NodeHandle[] = [
+  { type: 'target', position: Position.Top, x: interactionNodeWidth / 2 - 0.5, y: -0.5, width: 1, height: 1 },
+  { type: 'source', position: Position.Bottom, x: interactionNodeWidth / 2 - 0.5, y: interactionNodeHeight - 0.5, width: 1, height: 1 },
+]
 let positions = $state.raw(new Map<string, LayoutPosition>())
 let canvasElement = $state<HTMLDivElement>()
 let minimapOpen = $state(false)
@@ -78,31 +87,43 @@ let worker: Worker | undefined
 let pendingLayout = Promise.resolve()
 let resolveLayout: (() => void) | undefined
 
-let nodes = $derived.by<FlowInteractionNode[]>(() =>
-  roots.flatMap((root) =>
-    root.interactions.map((interaction) => ({
-      id: interaction.id,
-      type: 'interaction' as const,
-      position: positions.get(interaction.id) ?? { x: 0, y: 0 },
-      // 保留画布已测得的尺寸；仅更新选中路径不应让等尺寸节点重新变成不可见。
-      measured: untrack(() => getNode(interaction.id)?.measured),
-      data: {
-        interaction,
-        onSelectedPath: selectedPath.has(interaction.id),
-        subdued:
-          (selectedId != null && !selectedPath.has(interaction.id)) ||
-          (!interaction.matched && roots.some((item) => item.interactions.some((node) => node.matched))),
-      },
-      selected: interaction.id === selectedId,
-      draggable: false,
-      connectable: false,
-      deletable: false,
-      focusable: true,
-      ariaRole: 'button' as const,
-      ariaLabel: `${interaction.first_model_display_name || interaction.first_route_id}, ${observationStatusLabel(interaction.status)}`,
-    })),
-  ),
-)
+let nodes = $derived.by<FlowInteractionNode[]>(() => {
+  const hasMatches = roots.some((root) => root.interactions.some((interaction) => interaction.matched))
+  return roots.flatMap((root) =>
+    root.interactions.flatMap((interaction) => {
+      const position = positions.get(interaction.id)
+      // 布局未返回时不把新节点堆在原点；已知几何让裁剪不再依赖全量 DOM 测量。
+      if (!position) return []
+      const current = untrack(() => getNode(interaction.id))
+      const selected = interaction.id === selectedId
+      const onSelectedPath = selectedPath.has(interaction.id)
+      const subdued = (selectedId != null && !onSelectedPath) || (!interaction.matched && hasMatches)
+      const ariaLabel = `${interaction.first_model_display_name || interaction.first_route_id}, ${observationStatusLabel(interaction.status)}`
+      if (current &&
+        current.data.interaction === interaction &&
+        current.position.x === position.x && current.position.y === position.y &&
+        current.selected === selected && current.data.onSelectedPath === onSelectedPath &&
+        current.data.subdued === subdued && current.ariaLabel === ariaLabel) return [current]
+      return [{
+        id: interaction.id,
+        type: 'interaction' as const,
+        position,
+        width: interactionNodeWidth,
+        height: interactionNodeHeight,
+        handles: interactionNodeHandles,
+        measured: current?.measured,
+        data: { interaction, onSelectedPath, subdued },
+        selected,
+        draggable: false,
+        connectable: false,
+        deletable: false,
+        focusable: true,
+        ariaRole: 'button' as const,
+        ariaLabel,
+      }]
+    }),
+  )
+})
 let edges = $derived.by<Edge[]>(() =>
   canvasLinks(roots.flatMap((root) => root.interactions)).map((link) => {
     const onPath = selectedPath.has(link.source) && selectedPath.has(link.target)
@@ -175,9 +196,14 @@ $effect(() => {
 async function fitLoaded(): Promise<void> {
   await pendingLayout
   await waitForRenderedLayout()
+  if (!canvasElement || nodes.length === 0) return
+  const viewport = getViewportForBounds(
+    getNodesBounds(nodes), canvasElement.clientWidth, canvasElement.clientHeight, 0.18, 1, 0.16,
+  )
   internalMove = true
   try {
-    await fitView({ padding: 0.16, maxZoom: 1, duration: cameraDuration(240) })
+    // fitView 会等待全图完成 DOM 测量；虚拟画布直接用已知几何定位，不等待屏外节点。
+    await setViewport(viewport, { duration: cameraDuration(240) })
   } finally {
     internalMove = false
   }
@@ -190,12 +216,12 @@ async function focusNode(id: string): Promise<void> {
   if (!target || !canvasElement) return
 
   const rootPositions = [...positions.values()].filter((position) => position.rootId === target.rootId)
-  const centerX = target.x + 144
-  const centerY = target.y + 128
+  const centerX = target.x + interactionNodeWidth / 2
+  const centerY = target.y + interactionNodeHeight / 2
   const minX = Math.min(...rootPositions.map((position) => position.x))
-  const maxX = Math.max(...rootPositions.map((position) => position.x + 288))
+  const maxX = Math.max(...rootPositions.map((position) => position.x + interactionNodeWidth))
   const minY = Math.min(...rootPositions.map((position) => position.y))
-  const maxY = Math.max(...rootPositions.map((position) => position.y + 256))
+  const maxY = Math.max(...rootPositions.map((position) => position.y + interactionNodeHeight))
   const horizontalReach = Math.max(centerX - minX, maxX - centerX)
   const verticalReach = Math.max(centerY - minY, maxY - centerY)
   const fittingZoom = Math.min(
@@ -217,7 +243,7 @@ function handleMoveEnd(): void {
   if (!internalMove) onmanualmove()
   if (!nextCursor || loadingMore || nodes.length === 0) return
   const viewport = getViewport()
-  const rightmost = Math.max(...nodes.map((node) => node.position.x + 288))
+  const rightmost = Math.max(...nodes.map((node) => node.position.x + interactionNodeWidth))
   const visibleRight = (-viewport.x + (canvasElement?.clientWidth ?? 0)) / viewport.zoom
   if (visibleRight > rightmost - 220) onloadmore()
 }

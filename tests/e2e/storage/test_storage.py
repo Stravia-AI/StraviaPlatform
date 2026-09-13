@@ -484,3 +484,119 @@ def test_redaction_reuses_and_restores_mappings_after_real_restart(
             run_schema_action(
                 "drop", work_dir=storage_runtime["work_dir"], pg_url=pg_url, schema=schema,
             )
+
+
+@pytest.mark.e2e
+@pytest.mark.storage
+@pytest.mark.parametrize("backend", ["sqlite", "postgres"], ids=["sqlite", "postgres"])
+def test_observation_tool_replay_and_trace_survive_restart(
+    stravia_binary: Path, storage_runtime: dict[str, object], tmp_path: Path, backend: str,
+) -> None:
+    from tests.common.helpers import (
+        download_observation_bundle, minimal_mock_provider, observation_bundle_events,
+    )
+    from tests.e2e.admin.test_observations import (
+        _detail, _route_interactions, _tool_call_message, _wait_for,
+    )
+
+    pg_url = storage_runtime["pg_url"]
+    if backend == "postgres" and not pg_url:
+        pytest.skip("postgres backend requires DB_URL")
+    run_schema_action = storage_runtime["run_schema_action"]
+    schema = None
+    database = {"backend": "sqlite", "path": str(tmp_path / "gateway.db")}
+    if backend == "postgres":
+        schema = storage_runtime["make_isolated_schema"]("stravia_tool_replay")
+        run_schema_action("create", work_dir=storage_runtime["work_dir"], pg_url=pg_url, schema=schema)
+        database = {
+            "backend": "postgres",
+            "url": storage_runtime["postgres_dsn_for_schema"](pg_url, schema),
+        }
+    upstream_port = find_free_port()
+    mock, mock_thread = minimal_mock_provider(upstream_port)
+    port = find_free_port()
+    base = f"http://127.0.0.1:{port}"
+    args = ["--data-dir", str(tmp_path), "--host", "127.0.0.1", "--port", str(port)]
+    process = None
+    logs: list[str] = []
+    try:
+        process, logs = start_stravia_server(stravia_binary=stravia_binary, args=args)
+        wait_until_ready(f"{base}/api/v1/auth/state", timeout=30.0)
+        session = initialize_server(base, wait_for_setup_token(logs, process), database)
+        env = {"admin": base, "proxy": base, "mock": f"http://127.0.0.1:{upstream_port}", "auth": session.auth_headers()}
+        model = f"observation-tool-loop-{backend}"
+        route, key = _create_route(env, model)
+        messages = [{"role": "user", "content": "observation-tool-loop"}]
+        tools = [{"type": "function", "function": {"name": "local_probe", "parameters": {"type": "object"}}}]
+        for round_number in range(4):
+            if round_number == 2:
+                stop_stravia_server(process, logs)
+                process = None
+                process, logs = start_stravia_server(stravia_binary=stravia_binary, args=args)
+                wait_until_ready(f"{base}/api/v1/auth/state", timeout=30.0)
+                session = WebSession(base)
+                status, body = session.request("POST", "/api/v1/auth/login", {
+                    "username": "admin", "password": "correct horse battery staple",
+                })
+                assert status == 200, body
+                env["auth"] = session.auth_headers()
+            enabled = round_number != 1
+            status, body = http_request("PUT", f"{base}/api/v1/observations/debug", payload={
+                "enabled": enabled, "confirmed": enabled,
+            }, headers=env["auth"])
+            assert status == 200, body
+            status, response = http_request("POST", f"{base}/v1/chat/completions", payload={
+                "model": model, "messages": messages, "tools": tools,
+            }, headers={"authorization": f"Bearer {key}"})
+            assert status == 200, response
+            if round_number < 3:
+                assistant = _tool_call_message(response)
+                messages.extend([
+                    assistant,
+                    {"role": "tool", "tool_call_id": assistant["tool_calls"][0]["id"], "content": f"result-{round_number}"},
+                    {"role": "user", "content": "Continue the unfinished tool work."},
+                ])
+            def persisted_round() -> bool:
+                runs = [
+                    run
+                    for item in _route_interactions(env, route)
+                    for run in _detail(env, item["id"])["runs"]
+                ]
+                return len(runs) == round_number + 1 and all(
+                    any(event["kind"] == "run_finished" for event in run["events"])
+                    and (not run["debug_enabled"] or (run.get("trace") or {}).get("status") == "complete")
+                    for run in runs
+                )
+
+            _wait_for("persisted tool loop round", persisted_round)
+        interactions = _route_interactions(env, route)
+        assert len(interactions) == 1
+        detail = _wait_for("completed tool replay trace", lambda: (
+            (lambda value: value if value["interaction"]["status"] == "completed"
+             and all(not run["debug_enabled"] or (run.get("trace") or {}).get("status") == "complete" for run in value["runs"])
+             else None)(_detail(env, interactions[0]["id"]))
+        ))
+        events = [event for run in detail["runs"] for event in run["events"]]
+        results = [event["payload"]["content"] for event in events if event["kind"] == "client_tool_result"]
+        assert sorted(results) == ["result-0", "result-1", "result-2"]
+        assert not any(event["kind"] in {"wire", "checkpoint"} for event in events)
+        assert [run["debug_enabled"] for run in detail["runs"]] == [True, False, True, True]
+        _, _, archive = download_observation_bundle(env, detail)
+        records = observation_bundle_events(archive)
+        assert {record.get("direction") for record in records if record.get("layer") == "wire"} == {
+            "client_to_platform", "upstream_request", "upstream_response", "platform_to_client",
+        }
+        assert {
+            "decoded_request", "restored_request", "effective_model_request", "canonical_request",
+            "canonical_terminal_response", "response_after_hook", "client_projection_event", "delivery_terminal",
+        } <= {
+            record.get("stage") for record in records
+        }
+    finally:
+        if process is not None:
+            stop_stravia_server(process, logs)
+        mock.shutdown()
+        mock.server_close()
+        mock_thread.join(timeout=5.0)
+        if schema is not None:
+            run_schema_action("drop", work_dir=storage_runtime["work_dir"], pg_url=pg_url, schema=schema)

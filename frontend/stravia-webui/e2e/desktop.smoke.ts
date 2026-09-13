@@ -490,10 +490,10 @@ describe('Stravia desktop smoke', () => {
     await request.click()
     const inspector = await $('[aria-label="Observation details"]')
     await expect(inspector).toBeDisplayed()
-    await inspector.$('button=Debug records').click()
-    await expect(inspector.$('.debug-record pre')).toHaveText(
-      expect.stringContaining('"direction": "client_to_platform"'),
-    )
+    await expect(inspector.$('button=Debug records')).not.toExist()
+    await expect(inspector.$('button=Debug bundle')).toBeEnabled()
+    await inspector.$('button=Diagnostics').click()
+    await expect(inspector.$('dd=401')).toBeDisplayed()
     await debugSwitch.click()
     await expect(debugSwitch).toHaveAttribute('aria-checked', 'false')
 

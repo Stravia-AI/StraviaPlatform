@@ -29,6 +29,9 @@ import type {
   ForestPage,
   ForestQuery,
   InteractionDetail,
+  InteractionEventsQuery,
+  InteractionEventsPage,
+  InteractionSnapshot,
   RejectionPage,
   RejectionQuery,
   RejectionDetail,
@@ -303,6 +306,14 @@ function mapRequest(command: string, args?: Record<string, unknown>): RequestMap
       const resource = command === 'queryObservationForest' ? 'interactions' : 'rejections'
       return { method: 'GET', path: `/observations/${resource}${suffix}` }
     }
+    case 'getObservationInteractionSummary': {
+      const params = new URLSearchParams()
+      for (const [key, value] of Object.entries((args?.query as ForestQuery | undefined) ?? {})) {
+        if (value != null && value !== '') params.set(key, String(value))
+      }
+      const suffix = params.size > 0 ? `?${params}` : ''
+      return { method: 'GET', path: `/observations/interactions/${encodeURIComponent(String(args?.id))}/summary${suffix}` }
+    }
     case 'getObservationInteraction': {
       const params = new URLSearchParams()
       const query = (args?.query as ForestQuery | undefined) ?? {}
@@ -311,6 +322,13 @@ function mapRequest(command: string, args?: Record<string, unknown>): RequestMap
       }
       const suffix = params.size > 0 ? `?${params}` : ''
       return { method: 'GET', path: `/observations/interactions/${encodeURIComponent(String(args?.id))}${suffix}` }
+    }
+    case 'getObservationInteractionEvents': {
+      const params = new URLSearchParams()
+      for (const [key, value] of Object.entries((args?.query as InteractionEventsQuery | undefined) ?? {})) {
+        if (value != null) params.set(key, String(value))
+      }
+      return { method: 'GET', path: `/observations/interactions/${encodeURIComponent(String(args?.id))}/events?${params}` }
     }
     case 'getObservationRejection':
       return { method: 'GET', path: `/observations/rejections/${encodeURIComponent(String(args?.id))}` }
@@ -526,8 +544,12 @@ export const admin = {
   },
   observations: {
     forest: (query: ForestQuery) => request<ForestPage>('queryObservationForest', { query }),
+    interactionSummary: (id: string, query?: ForestQuery) =>
+      request<InteractionSnapshot>('getObservationInteractionSummary', { id, query }),
     interaction: (id: string, query?: ForestQuery) =>
       request<InteractionDetail>('getObservationInteraction', { id, query }),
+    interactionEvents: (id: string, query: InteractionEventsQuery) =>
+      request<InteractionEventsPage>('getObservationInteractionEvents', { id, query }),
     rejections: (query: RejectionQuery) => request<RejectionPage>('queryObservationRejections', { query }),
     rejection: (id: string) => request<RejectionDetail>('getObservationRejection', { id }),
     debug: () => request<DebugState>('getObservationDebug'),

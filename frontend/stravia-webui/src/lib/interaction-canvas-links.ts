@@ -51,16 +51,28 @@ function underConfirmed(
   confirmed: string,
   byId: Map<string, InteractionSummary>,
   visible: Set<string>,
+  ancestry: Map<string, boolean>,
 ): boolean {
   const seen = new Set<string>()
   let current: InteractionSummary | undefined = node
+  let found = false
   while (current && !seen.has(current.id)) {
+    const known = ancestry.get(current.id)
+    if (known !== undefined) {
+      found = known
+      break
+    }
     seen.add(current.id)
-    if (current.id === confirmed) return true
-    const parentId = rawParents(current, visible)[0]
+    if (current.id === confirmed) {
+      found = true
+      break
+    }
+    const parentId: string | undefined = rawParents(current, visible)[0]
     current = parentId ? byId.get(parentId) : undefined
   }
-  return false
+  // 同一确认父节点下的候选共享祖先判定，长链不再为每个候选反复回溯同一前缀。
+  for (const id of seen) ancestry.set(id, found)
+  return found
 }
 
 export function visualParent(
@@ -78,12 +90,13 @@ export function visualParent(
     return { id: confirmed, kind: 'native' }
   }
   if (confirmed) {
+    const ancestry = new Map<string, boolean>()
     const intermediates = interactions.filter((other) => {
       if (other.id === interaction.id || other.id === confirmed || other.started_at >= interaction.started_at) {
         return false
       }
       if (other.parent_interaction_id === confirmed) return false
-      return underConfirmed(other, confirmed, byId, visible)
+      return underConfirmed(other, confirmed, byId, visible, ancestry)
     })
     const spineSources = inferred.filter((id) => intermediates.some((item) => item.id === id))
     if (spineSources.length > 0) {

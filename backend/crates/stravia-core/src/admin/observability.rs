@@ -7,12 +7,31 @@ impl AdminService {
         self.gw.observation.query_forest(query).await
     }
 
+    pub async fn observation_interaction_summary(
+        &self,
+        id: &str,
+        filters: ForestQuery,
+    ) -> anyhow::Result<Option<InteractionSnapshot>> {
+        self.gw
+            .observation
+            .get_interaction_summary(id, filters)
+            .await
+    }
+
     pub async fn observation_interaction(
         &self,
         id: &str,
         filters: ForestQuery,
     ) -> anyhow::Result<Option<InteractionDetail>> {
         self.gw.observation.get_interaction(id, filters).await
+    }
+
+    pub async fn observation_interaction_events(
+        &self,
+        id: &str,
+        query: InteractionEventsQuery,
+    ) -> anyhow::Result<Option<InteractionEventsPage>> {
+        self.gw.observation.get_interaction_events(id, query).await
     }
 
     pub async fn observation_rejections(

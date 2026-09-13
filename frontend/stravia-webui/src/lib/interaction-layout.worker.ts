@@ -2,6 +2,7 @@
 
 import dagre from '@dagrejs/dagre'
 
+import { interactionNodeWidth as nodeWidth, interactionNodeHeight as nodeHeight } from './interaction-node-geometry'
 import type { InteractionSummary } from '$lib/types'
 
 export interface LayoutPosition {
@@ -22,8 +23,6 @@ export interface LayoutResponse {
   positions: LayoutPosition[]
 }
 
-const nodeWidth = 288
-const nodeHeight = 256
 const rootGap = 160
 const layouts = new Map<string, { topology: string; positions: LayoutPosition[]; width: number }>()
 

@@ -264,7 +264,9 @@ impl ObservationStore {
                 struct Payload {
                     discoveries: Vec<CredentialDiscovery>,
                 }
-                let payload: Payload = serde_json::from_str(&payload)?;
+                let payload: Payload = serde_json::from_value(super::codec::decode_payload(
+                    serde_json::from_str(&payload)?,
+                )?)?;
                 count += payload.discoveries.len() as i64;
                 for discovery in payload.discoveries {
                     rule_ids.extend(discovery.rule_ids);
@@ -293,13 +295,46 @@ impl ObservationStore {
 
     async fn context_events(
         &self,
-        interaction: &str,
+        interactions: &[&str],
         through: i64,
-    ) -> anyhow::Result<Vec<ObservationEvent>> {
-        match self {
-            Self::Sqlite(pool) => map_sqlite_events(sqlx::query("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload FROM observation_events WHERE interaction_id=? AND sequence<=? AND kind IN ('compaction_operation','native_compaction_associated','retained_tail_associated') ORDER BY sequence").bind(interaction).bind(through).fetch_all(pool).await?),
-            Self::Postgres(pool) => map_postgres_events(sqlx::query("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload::text FROM observation_events WHERE interaction_id=$1 AND sequence<=$2 AND kind IN ('compaction_operation','native_compaction_associated','retained_tail_associated') ORDER BY sequence").bind(interaction).bind(through).fetch_all(pool).await?),
+    ) -> anyhow::Result<std::collections::HashMap<String, Vec<ObservationEvent>>> {
+        let mut grouped: std::collections::HashMap<String, Vec<ObservationEvent>> =
+            std::collections::HashMap::new();
+        // Leave room for the sequence bound under SQLite's historical 999-variable limit.
+        for ids in interactions.chunks(900) {
+            let events = match self {
+                Self::Sqlite(pool) => {
+                    let mut query = QueryBuilder::<sqlx::Sqlite>::new(
+                        "SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload FROM observation_events WHERE interaction_id IN (",
+                    );
+                    let mut separated = query.separated(",");
+                    for id in ids {
+                        separated.push_bind(*id);
+                    }
+                    query.push(") AND sequence<=").push_bind(through);
+                    query.push(" AND kind IN ('compaction_operation','native_compaction_associated','retained_tail_associated') ORDER BY interaction_id,sequence");
+                    map_sqlite_events(query.build().fetch_all(pool).await?)?
+                }
+                Self::Postgres(pool) => {
+                    let mut query = QueryBuilder::<sqlx::Postgres>::new(
+                        "SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload::text FROM observation_events WHERE interaction_id IN (",
+                    );
+                    let mut separated = query.separated(",");
+                    for id in ids {
+                        separated.push_bind(*id);
+                    }
+                    query.push(") AND sequence<=").push_bind(through);
+                    query.push(" AND kind IN ('compaction_operation','native_compaction_associated','retained_tail_associated') ORDER BY interaction_id,sequence");
+                    map_postgres_events(query.build().fetch_all(pool).await?)?
+                }
+            };
+            for event in events {
+                if let Some(id) = &event.interaction_id {
+                    grouped.entry(id.clone()).or_default().push(event);
+                }
+            }
         }
+        Ok(grouped)
     }
 
     pub async fn query_forest(&self, q: ForestQuery) -> anyhow::Result<ForestPage> {
@@ -356,11 +391,15 @@ impl ObservationStore {
                 }
             })
             .collect();
+        let ids: Vec<_> = roots
+            .iter()
+            .flat_map(|root| &root.interactions)
+            .map(|interaction| interaction.id.as_str())
+            .collect();
+        let mut context = self.context_events(&ids, snapshot_sequence).await?;
         for root in &mut roots {
             for interaction in &mut root.interactions {
-                interaction.context_events = self
-                    .context_events(&interaction.id, snapshot_sequence)
-                    .await?;
+                interaction.context_events = context.remove(&interaction.id).unwrap_or_default();
             }
         }
         let next_cursor =
@@ -377,11 +416,11 @@ impl ObservationStore {
         })
     }
 
-    pub async fn get_interaction(
+    pub async fn get_interaction_summary(
         &self,
         id: &str,
         filters: ForestQuery,
-    ) -> anyhow::Result<Option<InteractionDetail>> {
+    ) -> anyhow::Result<Option<InteractionSnapshot>> {
         query_window(
             filters.start_at,
             filters.end_at,
@@ -405,16 +444,84 @@ impl ObservationStore {
             Self::Sqlite(p) => matching_in_roots_sqlite(p, &filters, &root_ids).await?,
             Self::Postgres(p) => matching_in_roots_postgres(p, &filters, &root_ids).await?,
         };
-        let events = self.events_for(Some(id), None).await?;
+        let mut selected = summary(selected_row.clone(), matched.contains(id));
+        let mut root_interactions: Vec<_> = root_rows
+            .into_iter()
+            .map(|row| {
+                let hit = matched.contains(&row.id);
+                summary(row, hit)
+            })
+            .collect();
+        let ids: Vec<_> = root_interactions
+            .iter()
+            .map(|interaction| interaction.id.as_str())
+            .collect();
+        let mut context = self.context_events(&ids, snapshot_sequence).await?;
+        for interaction in &mut root_interactions {
+            interaction.context_events = context.remove(&interaction.id).unwrap_or_default();
+            if interaction.id == id {
+                selected.context_events = interaction.context_events.clone();
+            }
+        }
+        root_interactions.sort_by(|a, b| {
+            a.started_at
+                .cmp(&b.started_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        let last = root_interactions
+            .iter()
+            .map(|i| i.last_active_at)
+            .max()
+            .unwrap_or(selected_row.last_active_at);
+        Ok(Some(InteractionSnapshot {
+            interaction: selected,
+            root: ForestRoot {
+                id: root_id,
+                last_active_at: last,
+                interactions: root_interactions,
+            },
+            snapshot_sequence,
+        }))
+    }
+
+    pub async fn get_interaction(
+        &self,
+        id: &str,
+        filters: ForestQuery,
+    ) -> anyhow::Result<Option<InteractionDetail>> {
+        let Some(snapshot) = self.get_interaction_summary(id, filters).await? else {
+            return Ok(None);
+        };
+        let snapshot_sequence = snapshot.snapshot_sequence;
+        let (events, older_events_cursor) = self
+            .event_page(id, &InteractionEventsQuery::default(), snapshot_sequence)
+            .await?;
+        let runs = self.run_details(id, events).await?;
+        Ok(Some(InteractionDetail {
+            interaction: snapshot.interaction,
+            root: snapshot.root,
+            runs,
+            snapshot_sequence,
+            older_events_cursor,
+        }))
+    }
+
+    async fn run_details(
+        &self,
+        id: &str,
+        events: Vec<ObservationEvent>,
+    ) -> anyhow::Result<Vec<RunDetail>> {
+        let mut by_run = std::collections::HashMap::<String, Vec<ObservationEvent>>::new();
+        for event in events {
+            if let Some(run_id) = &event.run_id {
+                by_run.entry(run_id.clone()).or_default().push(event);
+            }
+        }
         let runs = self.runs(id).await?;
         let mut details = Vec::with_capacity(runs.len());
         for run in runs {
             let trace = self.manifest_for_run(&run.id).await?;
-            let run_events = events
-                .iter()
-                .filter(|e| e.run_id.as_deref() == Some(&run.id) && e.sequence <= snapshot_sequence)
-                .cloned()
-                .collect();
+            let run_events = by_run.remove(&run.id).unwrap_or_default();
             details.push(RunDetail {
                 id: run.id,
                 parent_run_id: run.parent_run_id,
@@ -439,42 +546,140 @@ impl ObservationStore {
                 },
                 events: run_events,
                 trace,
-                debug_events: Vec::new(),
             });
         }
-        let mut selected = summary(selected_row.clone(), matched.contains(id));
-        selected.context_events = self.context_events(id, snapshot_sequence).await?;
-        let mut root_interactions: Vec<_> = root_rows
-            .into_iter()
-            .map(|row| {
-                let hit = matched.contains(&row.id);
-                summary(row, hit)
-            })
-            .collect();
-        for interaction in &mut root_interactions {
-            interaction.context_events = self
-                .context_events(&interaction.id, snapshot_sequence)
-                .await?;
+        Ok(details)
+    }
+
+    pub async fn get_interaction_events(
+        &self,
+        id: &str,
+        query: InteractionEventsQuery,
+    ) -> anyhow::Result<Option<InteractionEventsPage>> {
+        let current_sequence = self.max_sequence().await?;
+        let snapshot_sequence = query.through_sequence.unwrap_or(current_sequence);
+        anyhow::ensure!(
+            snapshot_sequence >= 0
+                && snapshot_sequence <= current_sequence
+                && !(query.after_sequence.is_some() && query.before_sequence.is_some())
+                && query
+                    .after_sequence
+                    .is_none_or(|cursor| cursor >= 0 && cursor <= snapshot_sequence)
+                && query
+                    .before_sequence
+                    .is_none_or(|cursor| cursor >= 0 && cursor <= snapshot_sequence)
+                && query.limit.is_none_or(|limit| (1..=500).contains(&limit)),
+            ObservationQueryError::InvalidEventPage
+        );
+        let exists = match self {
+            Self::Sqlite(pool) => interaction_sqlite(pool, id).await?.is_some(),
+            Self::Postgres(pool) => interaction_postgres(pool, id).await?.is_some(),
+        };
+        if !exists {
+            return Ok(None);
         }
-        root_interactions.sort_by(|a, b| {
-            a.started_at
-                .cmp(&b.started_at)
-                .then_with(|| a.id.cmp(&b.id))
-        });
-        let last = root_interactions
-            .iter()
-            .map(|i| i.last_active_at)
-            .max()
-            .unwrap_or(selected_row.last_active_at);
-        Ok(Some(InteractionDetail {
-            interaction: selected,
-            root: ForestRoot {
-                id: root_id,
-                last_active_at: last,
-                interactions: root_interactions,
-            },
-            runs: details,
+        let (events, next_cursor) = self.event_page(id, &query, snapshot_sequence).await?;
+        Ok(Some(InteractionEventsPage {
+            runs: self.run_details(id, events).await?,
             snapshot_sequence,
+            next_cursor,
+        }))
+    }
+
+    async fn event_page(
+        &self,
+        id: &str,
+        query: &InteractionEventsQuery,
+        through: i64,
+    ) -> anyhow::Result<(Vec<ObservationEvent>, Option<i64>)> {
+        let limit = query.limit.unwrap_or(200) as usize;
+        let forward = query.after_sequence.is_some();
+        let mut events = match self {
+            Self::Sqlite(pool) => {
+                let mut sql = QueryBuilder::<sqlx::Sqlite>::new(
+                    "SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload FROM observation_events WHERE interaction_id=",
+                );
+                sql.push_bind(id).push(" AND sequence<=").push_bind(through);
+                if let Some(after) = query.after_sequence {
+                    sql.push(" AND sequence>").push_bind(after);
+                }
+                if let Some(before) = query.before_sequence {
+                    sql.push(" AND sequence<").push_bind(before);
+                }
+                sql.push(if forward {
+                    " ORDER BY sequence ASC LIMIT "
+                } else {
+                    " ORDER BY sequence DESC LIMIT "
+                })
+                .push_bind((limit + 1) as i64);
+                map_sqlite_events(sql.build().fetch_all(pool).await?)?
+            }
+            Self::Postgres(pool) => {
+                let mut sql = QueryBuilder::<sqlx::Postgres>::new(
+                    "SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload::text FROM observation_events WHERE interaction_id=",
+                );
+                sql.push_bind(id).push(" AND sequence<=").push_bind(through);
+                if let Some(after) = query.after_sequence {
+                    sql.push(" AND sequence>").push_bind(after);
+                }
+                if let Some(before) = query.before_sequence {
+                    sql.push(" AND sequence<").push_bind(before);
+                }
+                sql.push(if forward {
+                    " ORDER BY sequence ASC LIMIT "
+                } else {
+                    " ORDER BY sequence DESC LIMIT "
+                })
+                .push_bind((limit + 1) as i64);
+                map_postgres_events(sql.build().fetch_all(pool).await?)?
+            }
+        };
+        let more = events.len() > limit;
+        events.truncate(limit);
+        let next_cursor = if more {
+            events.last().map(|event| event.sequence)
+        } else {
+            None
+        };
+        if !forward {
+            events.reverse();
+        }
+        Ok((events, next_cursor))
+    }
+
+    pub async fn get_interaction_for_bundle(
+        &self,
+        id: &str,
+        through: i64,
+    ) -> anyhow::Result<Option<InteractionDetail>> {
+        let Some(snapshot) = self
+            .get_interaction_summary(id, ForestQuery::default())
+            .await?
+        else {
+            return Ok(None);
+        };
+        let snapshot_sequence = through.min(snapshot.snapshot_sequence);
+        let mut events = Vec::new();
+        let mut after = 0;
+        loop {
+            let query = InteractionEventsQuery {
+                after_sequence: Some(after),
+                limit: Some(500),
+                ..Default::default()
+            };
+            let (page, next) = self.event_page(id, &query, snapshot_sequence).await?;
+            events.extend(page);
+            let Some(next) = next else {
+                break;
+            };
+            after = next;
+        }
+        Ok(Some(InteractionDetail {
+            interaction: snapshot.interaction,
+            root: snapshot.root,
+            runs: self.run_details(id, events).await?,
+            snapshot_sequence,
+            older_events_cursor: None,
         }))
     }
 
@@ -508,17 +713,11 @@ impl ObservationStore {
             Self::Postgres(p) => rejection_postgres(p, id).await?,
         };
         let Some(row) = row else { return Ok(None) };
-        let events = self
-            .events_for(None, Some(id))
-            .await?
-            .into_iter()
-            .filter(|e| e.sequence <= snapshot_sequence)
-            .collect();
+        let events = self.rejection_events(id, snapshot_sequence).await?;
         Ok(Some(RejectionDetail {
             rejection: rejection_summary(row),
             events,
             trace: self.manifest_for_rejection(id).await?,
-            debug_events: Vec::new(),
             snapshot_sequence,
         }))
     }
@@ -547,12 +746,15 @@ impl ObservationStore {
         let row=match self{Self::Sqlite(p)=>sqlx::query_as("SELECT trace_id,status,bytes_written,event_count,partial_reason FROM debug_trace_manifests WHERE rejection_id=?").bind(id).fetch_optional(p).await?,Self::Postgres(p)=>sqlx::query_as("SELECT trace_id,status,bytes_written,event_count,partial_reason FROM debug_trace_manifests WHERE rejection_id=$1").bind(id).fetch_optional(p).await?};
         Ok(row.map(manifest))
     }
-    async fn events_for(
+    async fn rejection_events(
         &self,
-        interaction: Option<&str>,
-        rejection: Option<&str>,
+        id: &str,
+        through: i64,
     ) -> anyhow::Result<Vec<ObservationEvent>> {
-        match(self,interaction,rejection){(Self::Sqlite(p),Some(id),_)=>map_sqlite_events(sqlx::query("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload FROM observation_events WHERE interaction_id=? ORDER BY sequence").bind(id).fetch_all(p).await?),(Self::Postgres(p),Some(id),_)=>map_postgres_events(sqlx::query("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload::text FROM observation_events WHERE interaction_id=$1 ORDER BY sequence").bind(id).fetch_all(p).await?),(Self::Sqlite(p),_,Some(id))=>map_sqlite_events(sqlx::query("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload FROM observation_events WHERE rejection_id=? ORDER BY sequence").bind(id).fetch_all(p).await?),(Self::Postgres(p),_,Some(id))=>map_postgres_events(sqlx::query("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload::text FROM observation_events WHERE rejection_id=$1 ORDER BY sequence").bind(id).fetch_all(p).await?),_=>Ok(Vec::new())}
+        match self {
+            Self::Sqlite(pool) => map_sqlite_events(sqlx::query("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload FROM observation_events WHERE rejection_id=? AND sequence<=? ORDER BY sequence").bind(id).bind(through).fetch_all(pool).await?),
+            Self::Postgres(pool) => map_postgres_events(sqlx::query("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload::text FROM observation_events WHERE rejection_id=$1 AND sequence<=$2 ORDER BY sequence").bind(id).bind(through).fetch_all(pool).await?),
+        }
     }
 }
 
@@ -928,11 +1130,72 @@ fn map_sqlite_events(rows: Vec<sqlx::sqlite::SqliteRow>) -> anyhow::Result<Vec<O
                 run_id: r.try_get(3)?,
                 rejection_id: r.try_get(4)?,
                 kind: r.try_get(5)?,
-                payload: serde_json::from_str(&r.try_get::<String, _>(6)?)?,
+                payload: super::codec::decode_payload(serde_json::from_str(
+                    &r.try_get::<String, _>(6)?,
+                )?)?,
             })
         })
         .collect()
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn context_batches_preserve_groups_order_and_watermark() -> anyhow::Result<()> {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        let store = ObservationStore::Sqlite(pool.clone());
+        // An empty root must not touch observation storage at all.
+        assert!(store.context_events(&[], 10).await?.is_empty());
+        sqlx::query("CREATE TABLE observation_events (sequence INTEGER PRIMARY KEY, occurred_at INTEGER NOT NULL, interaction_id TEXT, run_id TEXT, rejection_id TEXT, kind TEXT NOT NULL, payload TEXT NOT NULL)")
+            .execute(&pool).await?;
+        let ids: Vec<_> = (0..1_801)
+            .map(|index| format!("interaction-{index}"))
+            .collect();
+        let mut tx = pool.begin().await?;
+        for (index, id) in ids.iter().enumerate() {
+            sqlx::query("INSERT INTO observation_events VALUES (?,0,?,NULL,NULL,'compaction_operation','{}')")
+                .bind(index as i64 + 1).bind(id).execute(&mut *tx).await?;
+        }
+        for (sequence, kind) in [
+            (1_802i64, "retained_tail_associated"),
+            (1_803, "native_compaction_associated"),
+            (1_804, "client_tool_result"),
+            (1_805, "compaction_operation"),
+        ] {
+            sqlx::query("INSERT INTO observation_events VALUES (?,0,?,NULL,NULL,?,'{}')")
+                .bind(sequence)
+                .bind(&ids[0])
+                .bind(kind)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        let refs: Vec<_> = ids.iter().map(String::as_str).collect();
+        let context = store.context_events(&refs, 1_804).await?;
+        for (index, id) in ids.iter().enumerate() {
+            let sequences: Vec<_> = context[id].iter().map(|event| event.sequence).collect();
+            assert_eq!(
+                sequences,
+                if index == 0 {
+                    vec![1, 1_802, 1_803]
+                } else {
+                    vec![index as i64 + 1]
+                }
+            );
+            assert!(
+                context[id]
+                    .iter()
+                    .all(|event| event.interaction_id.as_ref() == Some(id))
+            );
+        }
+        Ok(())
+    }
+}
+
 fn map_postgres_events(rows: Vec<sqlx::postgres::PgRow>) -> anyhow::Result<Vec<ObservationEvent>> {
     rows.into_iter()
         .map(|r| {
@@ -943,7 +1206,9 @@ fn map_postgres_events(rows: Vec<sqlx::postgres::PgRow>) -> anyhow::Result<Vec<O
                 run_id: r.try_get(3)?,
                 rejection_id: r.try_get(4)?,
                 kind: r.try_get(5)?,
-                payload: serde_json::from_str(&r.try_get::<String, _>(6)?)?,
+                payload: super::codec::decode_payload(serde_json::from_str(
+                    &r.try_get::<String, _>(6)?,
+                )?)?,
             })
         })
         .collect()

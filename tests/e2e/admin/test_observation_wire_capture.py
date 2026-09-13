@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import http.client
 import io
 import json
@@ -13,7 +14,7 @@ from urllib.parse import urlparse
 
 import pytest
 
-from tests.common.helpers import http_bytes, http_request
+from tests.common.helpers import download_observation_bundle, http_request, observation_bundle_events
 from tests.e2e.admin.test_observations import (
     _create_route,
     _detail,
@@ -77,13 +78,10 @@ def _finalized_route_detail(env: dict[str, Any], route_id: str) -> dict[str, Any
     return detail
 
 
-def _request_body_events(detail: dict[str, Any]) -> list[dict[str, Any]]:
-    debug_events = detail.get("debug_events")
-    if debug_events is None:
-        debug_events = detail["runs"][0]["debug_events"]
+def _request_body_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
         event
-        for event in debug_events
+        for event in events
         if event.get("direction") == "client_to_platform"
         and event.get("transport") == "http"
         and event.get("message_type") == "request_body"
@@ -120,13 +118,17 @@ def test_rejected_media_capture_omits_payload_and_declares_loss(
             status, response = http_request("GET", f"{admin_env['admin']}/api/v1/observations/rejections/{item['id']}", headers=admin_env["auth"])
             assert status == 200, response
             detail = response["data"]
-            if any(event.get("message_type") == "request_body" for event in detail.get("debug_events", [])):
+            if (detail.get("trace") or {}).get("status") in {"complete", "partial"}:
                 return detail
         return None
 
     detail = _wait_for("externalized rejected media trace", captured)
     assert media not in json.dumps(detail)
-    events = _request_body_events(detail)
+    _, _, archive = download_observation_bundle(admin_env, detail)
+    with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
+        assert all(media.encode() not in bundle.read(name) for name in bundle.namelist())
+    records = observation_bundle_events(archive)
+    events = _request_body_events(records)
     assert any("unrecoverable" in json.dumps(event["payload"]) for event in events)
     assert all(event["representation"] == "artifact_externalized" for event in events)
     if not malformed:
@@ -151,7 +153,9 @@ def test_http_wire_capture_preserves_exact_nonsecret_body(admin_env: dict[str, A
         "finalized exact-body trace",
         lambda: _finalized_route_detail(admin_env, route_id),
     )
-    events = _request_body_events(detail)
+    _, _, archive = download_observation_bundle(admin_env, detail)
+    records = observation_bundle_events(archive)
+    events = _request_body_events(records)
     assert len(events) == 1
     assert events[0]["payload"] == raw.decode("utf-8")
     assert isinstance(events[0]["payload"], str)
@@ -211,12 +215,7 @@ def test_client_visible_credentials_are_redacted_from_observation_artifacts(
         lambda: _finalized_route_detail(admin_env, route_id),
     )
     serialized_detail = json.dumps(detail)
-    assert sentinel not in serialized_detail, [
-        (event.get("direction"), event.get("stage"), event.get("message_type"))
-        for run in detail["runs"]
-        for event in run["debug_events"]
-        if sentinel in json.dumps(event)
-    ]
+    assert sentinel not in serialized_detail
     assert safe in serialized_detail
     assert sentinel not in detail["interaction"]["visible_tail"]
     assert safe in detail["interaction"]["visible_tail"]
@@ -231,18 +230,8 @@ def test_client_visible_credentials_are_redacted_from_observation_artifacts(
     assert sentinel not in serialized_replay
     assert safe in serialized_replay
 
-    status, ticket = http_request(
-        "POST",
-        f"{admin_env['admin']}/api/v1/observations/interactions/{detail['interaction']['id']}/debug-bundle-tickets",
-        payload={"through_sequence": detail["snapshot_sequence"]},
-        headers=admin_env["auth"],
-    )
-    assert status == 200, ticket
-    download_url = ticket["data"]["download_url"]
-    if download_url.startswith("/"):
-        download_url = f"{admin_env['admin']}{download_url}"
-    status, _, archive = http_bytes("GET", download_url)
-    assert status == 200
+    _, _, archive = download_observation_bundle(admin_env, detail)
+    records = observation_bundle_events(archive)
     with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
         contents = [bundle.read(name) for name in bundle.namelist()]
     assert all(sentinel.encode() not in content for content in contents)
@@ -259,11 +248,16 @@ def test_client_visible_credentials_are_redacted_from_observation_artifacts(
             (detail["interaction"]["id"],),
         ).fetchall()
     assert all(sentinel not in value for (value,) in tails + events)
+    for (stored,) in events:
+        payload = json.loads(stored)
+        if "text_storage" in payload:
+            with zipfile.ZipFile(io.BytesIO(base64.b64decode(payload["text_storage"]["data"]))) as compressed:
+                assert sentinel not in compressed.read("content").decode("utf-8")
     # Generation Chain preserves business content; only diagnostic artifacts use this policy.
     trace = detail["runs"][0]["trace"]
     if debug_enabled:
         assert trace is not None
-        for event in detail["runs"][0]["debug_events"]:
+        for event in records:
             if event.get("transport") != "sse" or not isinstance(event.get("payload"), str):
                 continue
             for line in event["payload"].splitlines():
@@ -275,7 +269,7 @@ def test_client_visible_credentials_are_redacted_from_observation_artifacts(
                 assert sentinel.encode() not in path.read_bytes(), path
     else:
         assert trace is None
-        assert detail["runs"][0]["debug_events"] == []
+        assert records == []
 
 
 @pytest.mark.e2e
@@ -307,27 +301,25 @@ def test_rejected_json_records_actual_body_without_execution_metadata(
             )
             assert status_ == 200, candidate
             detail = candidate["data"]
-            if any(
-                event.get("message_type") == "request_body"
-                and event.get("payload") == malformed.decode("utf-8")
-                for event in detail.get("debug_events", [])
-            ):
+            if (detail.get("trace") or {}).get("status") == "complete":
                 return detail
         return None
 
     detail = _wait_for("rejected predecode body trace", captured_rejection)
-    events = _request_body_events(detail)
+    _, _, archive = download_observation_bundle(admin_env, detail)
+    records = observation_bundle_events(archive)
+    events = _request_body_events(records)
     assert len(events) == 1
     assert events[0]["payload"] == malformed.decode("utf-8")
     response_heads = [
         event
-        for event in detail["debug_events"]
+        for event in records
         if event.get("direction") == "platform_to_client"
         and event.get("message_type") == "response_head"
     ]
     response_chunks = [
         event["payload"]
-        for event in detail["debug_events"]
+        for event in records
         if event.get("direction") == "platform_to_client"
         and event.get("message_type") == "body_chunk"
     ]
@@ -378,7 +370,11 @@ def test_chunk_split_http_credential_is_redacted_only_after_complete_body(
     )
     serialized = json.dumps(detail)
     assert sentinel not in serialized
-    events = _request_body_events(detail)
+    _, _, archive = download_observation_bundle(admin_env, detail)
+    with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
+        assert all(sentinel.encode() not in bundle.read(name) for name in bundle.namelist())
+    records = observation_bundle_events(archive)
+    events = _request_body_events(records)
     assert len(events) == 1
     assert isinstance(events[0]["payload"], str)
     assert "***" in events[0]["payload"]

@@ -1,6 +1,6 @@
 <script lang="ts">
 import * as m from '$lib/paraglide/messages.js'
-import { onMount, tick } from 'svelte'
+import { onMount, tick, untrack } from 'svelte'
 import { page } from '$app/state'
 import { SvelteSet } from 'svelte/reactivity'
 import { createQuery, useQueryClient } from '@tanstack/svelte-query'
@@ -18,6 +18,7 @@ import { admin } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
 import { formatLogTime } from '$lib/format'
 import { visualParent } from '$lib/interaction-canvas-links'
+import { eventBlockId, mergeObservationRuns, retainLiveBlocks, withoutCommittedBlocks } from '$lib/observation-state'
 import { observationDebugStatusLabel, observationStatusLabel } from '$lib/observation-labels'
 import { navigateToBundle, subscribeToObservations, type ObservationSubscription } from '$lib/observation-stream'
 import type {
@@ -26,6 +27,8 @@ import type {
   ForestRoot,
   InteractionDetail,
   InteractionSummary,
+  LiveContentBlock,
+  ObservationStreamUpdate,
   RejectionDetail,
   RejectionSummary,
 } from '$lib/types'
@@ -63,6 +66,7 @@ let workspace = $state<HTMLElement>()
 let fullscreenButton = $state<HTMLButtonElement | null>(null)
 let fullscreen = $state(false)
 let rangeVersion = 0
+let selectionVersion = 0
 let roots = $state.raw<ForestRoot[]>([])
 let rootTotal = $state(0)
 let nextCursor = $state<string | null>()
@@ -75,7 +79,12 @@ let rootBatchRequest: Promise<void> | undefined
 let loadError = $state<unknown>()
 let selectedInteraction = $state<InteractionSummary>()
 let selectedRejection = $state<RejectionSummary>()
-let interactionDetail = $state<InteractionDetail>()
+let interactionDetail = $state.raw<InteractionDetail>()
+let liveBlocks = $state.raw<LiveContentBlock[]>([])
+let liveGaps = $state.raw<string[]>([])
+let liveCapacityGaps = $state.raw<string[]>([])
+let olderLoading = $state(false)
+const selectedLiveBlocks = $derived(liveBlocks.filter((block) => block.interaction_id === selectedInteraction?.id))
 let rejectionDetail = $state<RejectionDetail>()
 let detailLoading = $state(false)
 let inspectorWidth = $state(46)
@@ -166,6 +175,8 @@ onMount(() => {
   }, 1000)
   return () => {
     clearInterval(clock)
+    rangeVersion += 1
+    selectionVersion += 1
     stream?.close()
     if (fullscreen && document.fullscreenElement === workspace) {
       void document.exitFullscreen().catch((error: unknown) => toast.error(localizeBackendErrorMessage(error)))
@@ -257,46 +268,49 @@ $effect(() => {
   const id = page.url.searchParams.get('interaction')
   if (!id) return
   let active = true
+  untrack(closeInspector)
+  const selection = selectionVersion
   followPaused = true
   detailLoading = true
   void admin.observations
     .interaction(id)
     .then((detail) => {
-      if (!active) return
-      selectedInteraction = detail.interaction
-      selectedRejection = undefined
-      interactionDetail = detail
-      rejectionDetail = undefined
+      if (!active || selection !== selectionVersion) return
+      applySelectedDetail(detail, selection)
+      return refreshSelectedEvents(id, selection)
     })
     .catch((error: unknown) => {
-      if (active) toast.error(localizeBackendErrorMessage(error))
+      if (active && selection === selectionVersion) toast.error(localizeBackendErrorMessage(error))
     })
     .finally(() => {
-      if (active) detailLoading = false
+      if (active && selection === selectionVersion) detailLoading = false
     })
   return () => {
     active = false
   }
 })
 
-function applyPage(page: ForestPage, replace: boolean): void {
+function applyPage(page: ForestPage, replace: boolean, advanceStream: boolean): void {
   roots = replace
     ? page.roots
     : [...roots, ...page.roots.filter((root) => !roots.some((known) => known.id === root.id))]
   rootTotal = page.root_total
   nextCursor = page.next_cursor
   snapshotSequence = page.snapshot_sequence
-  if (replace) stream?.setCursor(page.snapshot_sequence)
+  if (replace && advanceStream) stream?.setCursor(page.snapshot_sequence)
   if (!stream) {
     stream = subscribeToObservations(
       page.snapshot_sequence,
       handleObservationUpdate,
-      (connected) => (streamConnected = connected),
+      (connected) => {
+        streamConnected = connected
+        if (!connected) liveBlocks = []
+      },
     )
   }
 }
 
-async function loadForest(replace: boolean): Promise<void> {
+async function loadForest(replace: boolean, advanceStream = true): Promise<void> {
   const version = rangeVersion
   if (replace) {
     loading = true
@@ -308,7 +322,7 @@ async function loadForest(replace: boolean): Promise<void> {
       cursor: replace ? undefined : (nextCursor ?? undefined),
     })
     if (version !== rangeVersion) return
-    applyPage(page, replace)
+    applyPage(page, replace, advanceStream)
     loadError = undefined
     if (replace && liveWindow && !followPaused) {
       await tick()
@@ -326,8 +340,7 @@ async function loadForest(replace: boolean): Promise<void> {
 
 async function reloadForFilters(): Promise<void> {
   rangeVersion += 1
-  selectedInteraction = undefined
-  interactionDetail = undefined
+  closeInspector()
   followPaused = !liveWindow
   hasNewActivity = false
   migratedRoots = new Set()
@@ -359,51 +372,162 @@ async function fitAll(): Promise<void> {
   fitProgress = undefined
 }
 
+function applySelectedDetail(detail: InteractionDetail, selection: number): void {
+  if (selection !== selectionVersion) return
+  if (interactionDetail && interactionDetail.snapshot_sequence > detail.snapshot_sequence) return
+  selectedInteraction = detail.interaction
+  interactionDetail = detail
+  liveBlocks = withoutCommittedBlocks(liveBlocks, detail)
+  detailLoading = false
+}
+
+async function refreshSelectedEvents(id: string, selection: number): Promise<void> {
+  if (!interactionDetail || selection !== selectionVersion) return
+  let after = interactionDetail.snapshot_sequence
+  let through: number | undefined
+  do {
+    const page = await admin.observations.interactionEvents(id, { after_sequence: after, through_sequence: through })
+    if (selection !== selectionVersion || !interactionDetail) return
+    through ??= page.snapshot_sequence
+    interactionDetail = { ...interactionDetail, runs: mergeObservationRuns(interactionDetail.runs, page.runs, page.snapshot_sequence < interactionDetail.snapshot_sequence),
+      snapshot_sequence: page.next_cursor === null ? Math.max(through, interactionDetail.snapshot_sequence) : interactionDetail.snapshot_sequence }
+    liveBlocks = withoutCommittedBlocks(liveBlocks, interactionDetail)
+    if (page.next_cursor === null) return
+    after = page.next_cursor
+  } while (selection === selectionVersion)
+}
+
+async function loadOlderEvents(): Promise<void> {
+  if (!interactionDetail || interactionDetail.older_events_cursor === null || olderLoading) return
+  const selection = selectionVersion
+  const id = interactionDetail.interaction.id
+  olderLoading = true
+  try {
+    const page = await admin.observations.interactionEvents(id, {
+      before_sequence: interactionDetail.older_events_cursor,
+      through_sequence: interactionDetail.snapshot_sequence,
+    })
+    if (selection !== selectionVersion || !interactionDetail) return
+    interactionDetail = { ...interactionDetail, runs: mergeObservationRuns(interactionDetail.runs, page.runs, true), older_events_cursor: page.next_cursor }
+    liveBlocks = withoutCommittedBlocks(liveBlocks, interactionDetail)
+  } catch (error) {
+    if (selection === selectionVersion) toast.error(localizeBackendErrorMessage(error))
+  } finally {
+    if (selection === selectionVersion) olderLoading = false
+  }
+}
+
 async function selectInteraction(interaction: InteractionSummary): Promise<void> {
+  closeInspector()
+  const selection = selectionVersion
   selectedInteraction = interaction
-  selectedRejection = undefined
-  interactionDetail = undefined
-  rejectionDetail = undefined
   detailLoading = true
   if (interaction.id !== latestInteraction?.id) followPaused = true
   try {
-    interactionDetail = await admin.observations.interaction(interaction.id, currentQuery)
+    applySelectedDetail(await admin.observations.interaction(interaction.id, currentQuery), selection)
+    await refreshSelectedEvents(interaction.id, selection)
   } catch (error) {
-    toast.error(localizeBackendErrorMessage(error))
+    if (selection === selectionVersion) toast.error(localizeBackendErrorMessage(error))
   } finally {
-    detailLoading = false
+    if (selection === selectionVersion) detailLoading = false
   }
 }
 
 async function selectRejection(rejection: RejectionSummary): Promise<void> {
+  closeInspector()
+  const selection = selectionVersion
   selectedRejection = rejection
-  selectedInteraction = undefined
-  rejectionDetail = undefined
-  interactionDetail = undefined
   detailLoading = true
   try {
-    rejectionDetail = await admin.observations.rejection(rejection.id)
+    const detail = await admin.observations.rejection(rejection.id)
+    if (selection === selectionVersion) rejectionDetail = detail
   } catch (error) {
-    toast.error(localizeBackendErrorMessage(error))
+    if (selection === selectionVersion) toast.error(localizeBackendErrorMessage(error))
   } finally {
-    detailLoading = false
+    if (selection === selectionVersion) detailLoading = false
   }
 }
 
 function closeInspector(): void {
+  selectionVersion += 1
+  olderLoading = false
+  liveBlocks = retainLiveBlocks(liveBlocks)
   selectedInteraction = undefined
   selectedRejection = undefined
   interactionDetail = undefined
   rejectionDetail = undefined
+  detailLoading = false
 }
 
-async function handleObservationUpdate(update: import('$lib/types').ObservationStreamUpdate): Promise<void> {
+function applyLiveBlocks(blocks: LiveContentBlock[]): void {
+  const retained = retainLiveBlocks(blocks, selectedInteraction?.id)
+  if (retained.length !== blocks.length) {
+    const ids = new Set(retained.map((block) => block.block_id))
+    liveCapacityGaps = [...new Set([...liveCapacityGaps, ...blocks.filter((block) => !ids.has(block.block_id)).map((block) => block.interaction_id)])].slice(-64)
+  }
+  liveBlocks = retained
+}
+
+async function handleObservationUpdate(update: ObservationStreamUpdate): Promise<void> {
+  if (update.type === 'live_content') {
+    const previous = liveBlocks.find((block) => block.block_id === update.block.block_id)
+    if (previous && previous.revision >= update.block.revision) return
+    let blocks = previous
+      ? liveBlocks.map((block) => block.block_id === update.block.block_id ? update.block : block)
+      : [...liveBlocks, update.block]
+    if (interactionDetail) blocks = withoutCommittedBlocks(blocks, interactionDetail)
+    applyLiveBlocks(blocks)
+    return
+  }
+  if (update.type === 'live_snapshot') {
+    applyLiveBlocks(interactionDetail ? withoutCommittedBlocks(update.blocks, interactionDetail) : update.blocks)
+    return
+  }
+  if (update.type === 'live_gap') {
+    if (update.reason === 'live_capacity') {
+      liveCapacityGaps = [...liveCapacityGaps.filter((id) => id !== update.interaction_id), update.interaction_id].slice(-64)
+    } else {
+      liveGaps = [...liveGaps.filter((id) => id !== update.interaction_id), update.interaction_id].slice(-64)
+    }
+    return
+  }
   const version = rangeVersion
   updateLiveBounds()
   if (update.type === 'reset_required') {
-    await Promise.all([loadForest(true), activeTab === 'rejections' ? loadRejections() : Promise.resolve()])
-    if (loadError) throw loadError
+    selectionVersion += 1
+    olderLoading = false
+    liveBlocks = []
+    liveGaps = []
+    liveCapacityGaps = []
+    interactionDetail = undefined
+    const selection = selectionVersion
+    const interactionId = selectedInteraction?.id
+    const rejectionId = selectedRejection?.id
+    try {
+      await Promise.all([
+        loadForest(true, false),
+        activeTab === 'rejections' ? loadRejections() : Promise.resolve(),
+        interactionId
+          ? admin.observations.interaction(interactionId, currentQuery).then((detail) => applySelectedDetail(detail, selection))
+          : rejectionId
+            ? admin.observations.rejection(rejectionId).then((detail) => {
+                if (selection === selectionVersion) rejectionDetail = detail
+              })
+            : Promise.resolve(),
+      ])
+      if (version !== rangeVersion) return
+      if (loadError) throw loadError
+      stream?.setCursor(snapshotSequence)
+    } catch (error) {
+      if (version !== rangeVersion) return
+      loadError = error
+      throw error
+    }
     return
+  }
+  if (update.event.interaction_id !== selectedInteraction?.id) {
+    const blockId = eventBlockId(update.event)
+    if (blockId) liveBlocks = liveBlocks.filter((block) => block.block_id !== blockId)
   }
   snapshotSequence = Math.max(snapshotSequence, update.event.sequence)
   if (liveWindow && activeTab === 'rejections' && update.event.rejection_id) await loadRejections()
@@ -414,43 +538,42 @@ async function handleObservationUpdate(update: import('$lib/types').ObservationS
     )
     if (root) migratedRoots = new Set([...migratedRoots, root.id])
   }
-  if (update.event.interaction_id && interactions.some((item) => item.id === update.event.interaction_id)) {
-    const known = interactions.find((item) => item.id === update.event.interaction_id)
-    const inspectorNeedsEvent =
-      selectedInteraction?.id === update.event.interaction_id &&
-      (interactionDetail?.snapshot_sequence ?? 0) < update.event.sequence
+  const interactionId = update.event.interaction_id
+  if (interactionId) {
+    const known = interactions.find((item) => item.id === interactionId)
+    const selected = selectedInteraction?.id === interactionId
+    const inspectorNeedsEvent = selected && (interactionDetail?.snapshot_sequence ?? 0) < update.event.sequence
     if (known && known.last_event_sequence >= update.event.sequence && !inspectorNeedsEvent) return
+    const eventInWindow = update.event.occurred_at >= windowStart && update.event.occurred_at < windowEnd
+    if (!known && !selected && !liveWindow && !eventInWindow) return
+    const selection = selectionVersion
     try {
-      const detail = await admin.observations.interaction(update.event.interaction_id, currentQuery)
+      const [snapshot] = await Promise.all([
+        admin.observations.interactionSummary(interactionId, currentQuery),
+        selected ? refreshSelectedEvents(interactionId, selection) : Promise.resolve(),
+      ])
       if (version !== rangeVersion) return
-      if (detail.root.interactions.some((item) => item.matched)) {
-        roots = roots.map((root) => (root.id === detail.root.id ? detail.root : root))
-      } else {
-        roots = roots.filter((root) => root.id !== detail.root.id)
+      updateLiveBounds()
+      const root = snapshot.root
+      const existing = roots.some((item) => item.id === root.id)
+      const inWindow = root.last_active_at >= windowStart && root.last_active_at < windowEnd
+      // Keep loaded historical roots after migration, and live roots that advanced during this request.
+      const keepLoaded = existing && (!liveWindow || root.last_active_at >= windowStart)
+      const visible = (inWindow || keepLoaded) && root.interactions.some((item) => item.matched)
+      if (visible) {
+        roots = existing ? roots.map((item) => (item.id === root.id ? root : item)) : [...roots, root]
+        if (!existing) rootTotal += 1
+      } else if (existing) {
+        roots = roots.filter((item) => item.id !== root.id)
         rootTotal = Math.max(0, rootTotal - 1)
       }
-      if (selectedInteraction?.id === detail.interaction.id) {
-        selectedInteraction = detail.interaction
-        interactionDetail = detail
+      if (selected && selection === selectionVersion) {
+        selectedInteraction = snapshot.interaction
+        if (interactionDetail) interactionDetail = { ...interactionDetail, interaction: snapshot.interaction, root: snapshot.root }
       }
       loadError = undefined
     } catch (error) {
-      loadError = error
-      throw error
-    }
-  } else if (liveWindow && update.event.interaction_id) {
-    try {
-      const detail = await admin.observations.interaction(update.event.interaction_id, currentQuery)
       if (version !== rangeVersion) return
-      if (detail.root.last_active_at < windowStart || detail.root.last_active_at >= windowEnd) return
-      const existingIndex = roots.findIndex((root) => root.id === detail.root.id)
-      if (existingIndex >= 0) roots = roots.map((root) => (root.id === detail.root.id ? detail.root : root))
-      else if (detail.root.interactions.some((interaction) => interaction.matched)) {
-        roots = [...roots, detail.root]
-        rootTotal += 1
-      }
-      loadError = undefined
-    } catch (error) {
       loadError = error
       throw error
     }
@@ -565,10 +688,9 @@ async function clearHistory(): Promise<void> {
 async function downloadBundle(): Promise<void> {
   const kind = interactionDetail ? 'interaction' : 'rejected_request'
   const id = interactionDetail?.interaction.id ?? rejectionDetail?.rejection.id
-  const through = interactionDetail?.snapshot_sequence ?? rejectionDetail?.snapshot_sequence
   if (!id) return
   try {
-    await navigateToBundle(await admin.observations.issueBundleTicket(kind, id, through))
+    await navigateToBundle(await admin.observations.issueBundleTicket(kind, id))
   } catch (error) {
     toast.error(localizeBackendErrorMessage(error))
   }
@@ -767,6 +889,11 @@ function formatBytes(value: number | undefined): string {
           <ObservationInspector
             portalTarget={fullscreen ? workspace : undefined}
             interaction={interactionDetail}
+            liveBlocks={selectedLiveBlocks}
+            liveGap={liveGaps.includes(selectedInteraction.id)}
+            liveCapacity={liveCapacityGaps.includes(selectedInteraction.id)}
+            {olderLoading}
+            onolder={loadOlderEvents}
             loading={detailLoading}
             width={inspectorWidth}
             onwidthchange={(value) => (inspectorWidth = value)}

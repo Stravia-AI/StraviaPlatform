@@ -83,8 +83,8 @@ const usage = $derived([
   opacity: 0;
 }
 .interaction-card {
-  width: 18rem;
-  height: 16rem;
+  width: 100%;
+  height: 100%;
   display: flex;
   flex-direction: column;
   gap: 0.5rem;

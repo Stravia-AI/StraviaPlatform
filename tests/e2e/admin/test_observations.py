@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 import io
 import json
+import sqlite3
+from contextlib import closing
 import tempfile
 import threading
 import time
@@ -15,6 +17,8 @@ from urllib.request import Request, urlopen
 import pytest
 
 from tests.common.helpers import (
+    download_observation_bundle,
+    observation_bundle_events,
     find_free_port,
     http_bytes,
     http_request,
@@ -118,7 +122,7 @@ def _forest(env: dict[str, Any], **query: object) -> dict[str, Any]:
 
 @pytest.mark.e2e
 @pytest.mark.admin
-@pytest.mark.parametrize("resource", ["interactions", "rejections"])
+@pytest.mark.parametrize("resource", ["interactions", "rejections", "interactions/missing/summary"])
 @pytest.mark.parametrize("bounds", [
     {"start_at": 1_000},
     {"end_at": 2_000},
@@ -180,7 +184,123 @@ def _detail(env: dict[str, Any], interaction_id: str) -> dict[str, Any]:
         headers=env["auth"],
     )
     assert status == 200, body
+    detail = body["data"]
+    cursor = detail.get("older_events_cursor")
+    runs = {run["id"]: run for run in detail["runs"]}
+    while cursor is not None:
+        page = _event_page(env, interaction_id, before_sequence=cursor,
+                           through_sequence=detail["snapshot_sequence"])
+        for run in page["runs"]:
+            runs[run["id"]]["events"] = run["events"] + runs[run["id"]]["events"]
+        cursor = page["next_cursor"]
+    return detail
+
+
+def _event_page(env: dict[str, Any], interaction_id: str, **query: object) -> dict[str, Any]:
+    status, body = http_request(
+        "GET", f"{env['admin']}/api/v1/observations/interactions/{interaction_id}/events?{urlencode(query)}",
+        headers=env["auth"],
+    )
+    assert status == 200, body
     return body["data"]
+
+
+@pytest.mark.e2e
+@pytest.mark.admin
+@pytest.mark.parametrize("query", [
+    {"after_sequence": -1}, {"before_sequence": -1}, {"through_sequence": -1},
+    {"after_sequence": 0, "before_sequence": 1}, {"limit": 0}, {"limit": 501},
+    {"limit": -1}, {"after_sequence": "invalid"},
+    {"after_sequence": 2, "through_sequence": 1},
+    {"before_sequence": 2, "through_sequence": 1},
+    {"through_sequence": 9223372036854775807},
+])
+def test_observation_event_pages_reject_invalid_queries(admin_env: dict[str, Any], query: dict[str, Any]) -> None:
+    status, _ = http_request(
+        "GET", f"{admin_env['admin']}/api/v1/observations/interactions/missing/events?{urlencode(query)}",
+        headers=admin_env["auth"],
+    )
+    assert status == 400
+
+
+@pytest.mark.e2e
+@pytest.mark.admin
+def test_observation_history_pages_decode_preserve_snapshot_and_do_not_write(admin_env: dict[str, Any]) -> None:
+    route_id, key = _create_route(admin_env, "observation-history-pages")
+    status, response = _proxy(admin_env, key, "observation-history-pages", [{"role": "user", "content": "hello"}])
+    assert status == 200, response
+
+    def finished() -> dict[str, Any] | None:
+        interactions = _route_interactions(admin_env, route_id)
+        if not interactions:
+            return None
+        detail = _detail(admin_env, interactions[0]["id"])
+        return detail if detail["runs"] and all(run["status"] != "running" for run in detail["runs"]) else None
+
+    initial = _wait_for("completed history fixture", finished)
+    interaction_id = initial["interaction"]["id"]
+    run_id = initial["runs"][0]["id"]
+    text = "decoded compressed history 文本 " * 100
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zipped:
+        zipped.writestr("content", text)
+    payload = json.dumps({"kind": "client_visible_content_delta", "block_id": "history-compressed",
+                          "text_storage": {"codec": "zip-deflate-v1", "bytes": len(text.encode()),
+                                           "data": base64.b64encode(archive.getvalue()).decode()}})
+    database = Path(admin_env["data_dir"]) / "gateway.db"
+    with closing(sqlite3.connect(database)) as connection:
+        expires = int(time.time() * 1000) + 86400000
+        connection.executemany(
+            "INSERT INTO observation_events(occurred_at,interaction_id,run_id,kind,payload,expires_at) VALUES(?,?,?,?,?,?)",
+            [(int(time.time() * 1000), interaction_id, run_id, "client_visible_content_delta",
+              payload if index == 0 else json.dumps({"kind": "client_visible_content_delta", "text": f"part-{index}"}), expires)
+             for index in range(430)],
+        )
+        connection.execute("UPDATE observation_sequence SET next_sequence=(SELECT MAX(sequence)+1 FROM observation_events) WHERE singleton_id=1")
+        connection.commit()
+        stored = connection.execute("SELECT sequence,payload FROM observation_events WHERE interaction_id=? ORDER BY sequence", (interaction_id,)).fetchall()
+    status, body = http_request("GET", f"{admin_env['admin']}/api/v1/observations/interactions/{interaction_id}", headers=admin_env["auth"])
+    assert status == 200, body
+    bounded = body["data"]
+    latest = sorted(event["sequence"] for run in bounded["runs"] for event in run["events"])
+    assert latest == [sequence for sequence, _ in stored][-200:]
+    assert bounded["older_events_cursor"] == latest[0]
+    through = bounded["snapshot_sequence"]
+    # Arrivals after the first page must not leak into this traversal.
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute("INSERT INTO observation_events(occurred_at,interaction_id,run_id,kind,payload,expires_at) VALUES(?,?,?,?,?,?)",
+                           (int(time.time() * 1000), interaction_id, run_id, "client_visible_content_delta", '{"text":"late"}', expires))
+        connection.execute("UPDATE observation_sequence SET next_sequence=(SELECT MAX(sequence)+1 FROM observation_events) WHERE singleton_id=1")
+        connection.commit()
+    for direction in ("after_sequence", "before_sequence"):
+        cursor = 0 if direction == "after_sequence" else None
+        seen: list[dict[str, Any]] = []
+        while True:
+            bounds = {} if cursor is None else {direction: cursor}
+            page = _event_page(admin_env, interaction_id, **bounds, through_sequence=through, limit=73)
+            assert page["snapshot_sequence"] == through
+            events = sorted((event for run in page["runs"] for event in run["events"]), key=lambda event: event["sequence"])
+            assert len(events) <= 73
+            seen = seen + events if direction == "after_sequence" else events + seen
+            cursor = page["next_cursor"]
+            if cursor is None:
+                break
+        expected = [sequence for sequence, _ in stored]
+        assert [event["sequence"] for event in seen] == expected
+        assert next(event["payload"]["text"] for event in seen if event["payload"].get("block_id") == "history-compressed") == text
+        assert all("text_storage" not in event["payload"] for event in seen)
+    full = _detail(admin_env, interaction_id)
+    assert any(event["kind"] == "run_admitted" for run in full["runs"] for event in run["events"])
+    with closing(sqlite3.connect(database)) as connection:
+        unchanged = connection.execute("SELECT sequence,payload FROM observation_events WHERE interaction_id=? AND sequence<=? ORDER BY sequence", (interaction_id, through)).fetchall()
+    assert unchanged == stored
+    _, _, downloaded = download_observation_bundle(admin_env, bounded)
+    with zipfile.ZipFile(io.BytesIO(downloaded)) as bundle:
+        exported = json.loads(bundle.read("interaction.json"))
+    exported_events = sorted(exported["events"], key=lambda event: event["sequence"])
+    assert [event["sequence"] for event in exported_events] == [sequence for sequence, _ in stored]
+    assert any(event["kind"] == "run_admitted" for event in exported_events)
+    assert next(event["payload"]["text"] for event in exported_events if event["payload"].get("block_id") == "history-compressed") == text
 
 
 def _sse_event(env: dict[str, Any], after: int) -> dict[str, Any]:
@@ -204,6 +324,15 @@ def _sse_event(env: dict[str, Any], after: int) -> dict[str, Any]:
                 event_id = line[3:].strip()
             elif line.startswith("data:"):
                 data.append(line[5:].strip())
+
+
+@pytest.mark.e2e
+@pytest.mark.admin
+def test_observation_live_snapshot_has_no_durable_event_id(admin_env: dict[str, Any]) -> None:
+    snapshot = _sse_event(admin_env, _forest(admin_env)["snapshot_sequence"])
+    assert snapshot["event"] == "live_snapshot"
+    assert snapshot["id"] == ""
+    assert isinstance(snapshot["data"]["blocks"], list)
 
 
 def _tool_call_message(response: dict[str, Any]) -> dict[str, Any]:
@@ -320,6 +449,8 @@ def test_observation_resources_require_admin_and_rejections_invent_no_principal(
 ) -> None:
     protected = (
         "/api/v1/observations/interactions",
+        "/api/v1/observations/interactions/missing/summary",
+        "/api/v1/observations/interactions/missing/events",
         "/api/v1/observations/rejections",
         "/api/v1/observations/events?after=0",
         "/api/v1/observations/debug",
@@ -421,7 +552,8 @@ def test_tool_loop_concurrent_branches_and_new_user_group_at_interaction_seam(
     )
     assert len(loop_detail["runs"]) == 4
     assert loop_detail["interaction"]["input_preview"] == "observation-tool-loop"
-    assert all(not run["debug_enabled"] and not run["debug_events"] for run in loop_detail["runs"])
+    assert "debug_events" not in loop_detail
+    assert all(not run["debug_enabled"] and "debug_events" not in run for run in loop_detail["runs"])
     ordinary_events = [event for run in loop_detail["runs"] for event in run["events"]]
     assert sorted(
         event["payload"]["input"]["round"]
@@ -915,9 +1047,10 @@ def test_debug_snapshot_redaction_bundle_ticket_and_clear_active_history(
 
     rejected = _wait_for("Debug Rejected Request", debug_rejection)
     rejected_detail = _wait_for_rejection_trace(admin_env, rejected["id"])
+    _, _, rejected_archive = download_observation_bundle(admin_env, rejected_detail)
     rejected_directions = {
         event.get("direction")
-        for event in rejected_detail["debug_events"]
+        for event in observation_bundle_events(rejected_archive)
         if isinstance(event, dict) and event.get("layer") == "wire"
     }
     assert rejected_directions == {"client_to_platform", "platform_to_client"}
@@ -948,7 +1081,9 @@ def test_debug_snapshot_redaction_bundle_ticket_and_clear_active_history(
     assert run["debug_enabled"] is True
     assert run["trace"]["enabled"] is True
 
-    stages = [event.get("stage") for event in run["debug_events"] if isinstance(event, dict)]
+    ticket_data, headers, archive = download_observation_bundle(admin_env, detail)
+    records = observation_bundle_events(archive)
+    stages = [event.get("stage") for event in records if isinstance(event, dict)]
     required = {
         "decoded_request",
         "restored_request",
@@ -961,7 +1096,7 @@ def test_debug_snapshot_redaction_bundle_ticket_and_clear_active_history(
         "delivery_terminal",
     }
     assert required <= set(stages)
-    directions = {event.get("direction") for event in run["debug_events"] if isinstance(event, dict)}
+    directions = {event.get("direction") for event in records if isinstance(event, dict)}
     assert {
         "client_to_platform",
         "upstream_request",
@@ -969,19 +1104,9 @@ def test_debug_snapshot_redaction_bundle_ticket_and_clear_active_history(
         "platform_to_client",
     } <= directions
 
-    status, ticket = http_request(
-        "POST",
-        f"{admin_env['admin']}/api/v1/observations/interactions/{interaction['id']}/debug-bundle-tickets",
-        payload={"through_sequence": detail["snapshot_sequence"]},
-        headers=admin_env["auth"],
-    )
-    assert status == 200, ticket
-    ticket_data = ticket["data"]
     download_url = ticket_data["download_url"]
     if download_url.startswith("/"):
         download_url = f"{admin_env['admin']}{download_url}"
-    status, headers, archive = http_bytes("GET", download_url)
-    assert status == 200
     assert "application/zip" in headers["content-type"]
     assert headers["cache-control"] == "no-store"
     assert headers["referrer-policy"] == "no-referrer"
@@ -1129,9 +1254,10 @@ def test_rejected_debug_bundle_records_real_error_without_inventing_execution(
 
     rejected = _wait_for("captured Rejected Request", latest_rejection)
     detail = _wait_for_rejection_trace(admin_env, rejected["id"])
+    _, _, archive = download_observation_bundle(admin_env, detail)
     assert {
         event["direction"]
-        for event in detail["debug_events"]
+        for event in observation_bundle_events(archive)
         if event.get("layer") == "wire"
     } == {"client_to_platform", "platform_to_client"}
     after_page = _forest(admin_env)
@@ -1142,18 +1268,6 @@ def test_rejected_debug_bundle_records_real_error_without_inventing_execution(
         for item in root["interactions"]
     } == before_interactions
 
-    status, ticket = http_request(
-        "POST",
-        f"{admin_env['admin']}/api/v1/observations/rejections/{rejected['id']}/debug-bundle-tickets",
-        payload={"through_sequence": detail["snapshot_sequence"]},
-        headers=admin_env["auth"],
-    )
-    assert status == 200, ticket
-    download_url = str(ticket["data"]["download_url"])
-    if download_url.startswith("/"):
-        download_url = f"{admin_env['admin']}{download_url}"
-    status, _, archive = http_bytes("GET", download_url)
-    assert status == 200
     with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
         assert set(bundle.namelist()) == {
             "manifest.json",
@@ -1362,13 +1476,14 @@ def test_root_batches_filters_and_fixed_anchor_reload_preserve_complete_context(
     )
     assert status == 200, first
     call = next(item for item in first["output"] if item["type"] == "function_call")
+    large_tool_result = "summary-must-not-load-tool-body:" + "x" * 100_000
     status, completed = http_request(
         "POST",
         f"{admin_env['proxy']}/v1/responses",
         payload={
             "model": "observation-branch-context",
             "previous_response_id": first["id"],
-            "input": [{"type": "function_call_output", "call_id": call["call_id"], "output": "context result"}],
+            "input": [{"type": "function_call_output", "call_id": call["call_id"], "output": large_tool_result}],
         },
         headers={"authorization": f"Bearer {api_key}"},
     )
@@ -1441,6 +1556,51 @@ def test_root_batches_filters_and_fixed_anchor_reload_preserve_complete_context(
     assert child_detail["interaction"]["id"] == context[1]["id"]
     assert child_detail["runs"]
     assert {run["route_id"] for run in child_detail["runs"]} == {child_route}
+
+    # Time windows validate the request but must not prune the selected root's DAG.
+    for selected_id in (context[0]["id"], context[1]["id"]):
+        detail = _detail(admin_env, selected_id)
+        for query in (
+            {"model": child_route, "start_at": 0, "end_at": 1},
+            {"model": parent_route, "anchor_at": old_anchor, "window_index": 0},
+            {"model": "missing-route", "start_at": last_active_at, "end_at": last_active_at + 1},
+        ):
+            suffix = urlencode(query)
+            status, snapshot_body = http_request(
+                "GET",
+                f"{admin_env['admin']}/api/v1/observations/interactions/{selected_id}/summary?{suffix}",
+                headers=admin_env["auth"],
+            )
+            assert status == 200, snapshot_body
+            snapshot = snapshot_body["data"]
+            status, filtered_detail_body = http_request(
+                "GET",
+                f"{admin_env['admin']}/api/v1/observations/interactions/{selected_id}?{suffix}",
+                headers=admin_env["auth"],
+            )
+            assert status == 200, filtered_detail_body
+            assert set(snapshot) == {"interaction", "root", "snapshot_sequence"}
+            assert snapshot["interaction"] == filtered_detail_body["data"]["interaction"]
+            assert snapshot["root"] == filtered_detail_body["data"]["root"]
+            assert [item["id"] for item in snapshot["root"]["interactions"]] == [
+                item["id"] for item in context
+            ]
+            assert snapshot["root"]["interactions"][1]["parent_interaction_id"] == context[0]["id"]
+            assert large_tool_result not in json.dumps(snapshot)
+            assert all(
+                event["sequence"] <= snapshot["snapshot_sequence"]
+                for item in snapshot["root"]["interactions"]
+                for event in item["context_events"]
+            )
+        if selected_id == context[0]["id"]:
+            assert large_tool_result in json.dumps(detail)
+
+    status, missing_body = http_request(
+        "GET",
+        f"{admin_env['admin']}/api/v1/observations/interactions/missing/summary",
+        headers=admin_env["auth"],
+    )
+    assert status == 404, missing_body
 
     batch_route, batch_key = _create_route(admin_env, "observation-root-batches")
     for number in range(3):

@@ -433,6 +433,16 @@ Exactly one of `run_id` and `rejection_id` is non-NULL. Large Debug payloads are
 
 **索引**：`observation_events_interaction_idx`、`observation_events_run_idx`、`observation_events_rejection_idx`、`observation_events_expiry_idx`
 
+Migration `0042_observation_context_index` adds `idx_observation_events_context (interaction_id, sequence)` on both backends, limited to `compaction_operation`, `native_compaction_associated`, and `retained_tail_associated` rows. Forest, summary, and detail queries fetch these context events in bounded batches, without scanning unrelated event payloads for each interaction. No existing event is rewritten or deleted.
+
+Migration `0043_observation_tool_result_dedup` adds `idx_observation_events_client_tool_call` on both backends: `(run_id, tool_id extracted from payload, sequence DESC)`, limited to `client_tool_handoff` and `client_tool_result`. A received batch looks up the latest event for its call IDs along retained, same-principal `parent_run_id` ancestry. Only matching redacted content and error state after a proven handoff are deduplicated; a new handoff, missing/null result, or unknown ancestry prevents reuse of an earlier baseline. Ranking uses event identities and reads only the selected result bodies. No body side table, raw-credential digest, historical rewrite, or historical deletion is introduced.
+
+New `wire` and `checkpoint` records belong exclusively to Debug Trace files, not `observation_events`. Ordinary events and persisted Trace manifest boundaries continue to drive summaries and SSE replay. Previously stored `wire` and `checkpoint` rows remain intact until normal retention or explicit history clearing.
+
+New visible/thinking text events are immutable UTF-8 content blocks, sealed at 16 KiB, approximately two seconds, or a semantic/lifecycle boundary. Each carries `block_id`. Only 1–16 KiB text with a net size saving is stored as `text_storage: {"codec":"zip-deflate-v1","bytes":<original UTF-8 length>,"data":<base64 single-member ZIP>}` instead of `text`. The ZIP member is named `content`. Readers validate the codec, bounded declared and decoded sizes, archive integrity, and UTF-8 before restoring the public `text` payload; corruption is an error, not empty text. Old plain payloads remain readable and are never rewritten. This changes JSON encoding only; no table, migration, or generated SQL reference change is required.
+
+Same-Run event batches commit event rows and their summary updates atomically. Ordinary detail and event-page reads do not flush writers. Volatile previews are process-local and never allocate durable sequences; a crash may lose roughly two seconds of pending observation text under normal scheduling. This is not a durability deadline during storage failures.
+
 Credential discoveries use the ordinary `credential_mappings_created` event kind with payload `{"discoveries":[{"rule_ids":[...],"source_types":[...]}]}`. Each element represents one actually created mapping, not one occurrence or rule match. No secret value, recoverable placeholder, fingerprint, or message excerpt is stored in this metadata. Summaries aggregate retained events by `interaction_id` and order by the latest discovery time; mapping reuse, renewal, and restoration do not produce discovery events.
 
 Migration `0036_credential_discovery_coverage` introduces no new tables or columns. It sets `interaction_observations.observation_gap` for retained pre-feature rows on both backends because they lack discovery metadata; it does not reconstruct discoveries from mapping storage or historical content. Discovery events follow the existing Observation retention and cascade boundaries. Clearing them does not alter `reversible_redaction_mappings` or make valid reuse a new discovery.
@@ -756,4 +766,13 @@ SQLite 与 PostgreSQL 必须保持 API Key 字段默认值、Turn kind、setting
 
 首个 migration 直接使用最终表名 `models`、`model_backends` 和 `api_key_models`；后续 schema 变更通过 SQLite/PostgreSQL 对应版本的 migration 演进。MySQL 不受支持。
 
-`deploy/schema/postgres.sql` 是由 `stravia-tools dump-schema --backend postgres` 从 PostgreSQL migration 导出的 DBA 审阅参考产物，不能直接执行来初始化数据库：直接执行不会记录 SQLx migration 历史。应让 `stravia-server` 对空数据库应用 migrations。MySQL reference schema 不再提供。
+`deploy/schema/postgres.sql` 与 `deploy/schema/sqlite.sql` 是执行全部 migration 后导出的最终结构，不是历史 migration 的拼接。两者只供 DBA 审阅，不能用来初始化部署：导出不包含 SQLx migration 历史与业务数据，应让 `stravia-server` 对空数据库应用 migrations。MySQL reference schema 不再提供。
+
+```bash
+stravia-tools dump-schema --backend sqlite --output deploy/schema/sqlite.sql
+stravia-tools dump-schema --backend postgres --output deploy/schema/postgres.sql
+```
+
+SQLite 在内存数据库执行迁移并导出 `sqlite_schema`。PostgreSQL 需要开发服务器的 `DATABASE_URL`、具有 `CREATEDB` 权限的角色，以及 PATH 中与服务端版本兼容的 `pg_dump`；工具创建独立临时数据库、执行迁移、导出后删除，不在连接 URL 指定的原数据库上迁移。不要使用生产连接。密码经环境变量传给 `pg_dump`，不放入其命令行参数。
+
+默认 migration 目录来自工具编译时的源码位置；移动工具后可使用 `--migrations-dir backend/crates/stravia-core/migrations`。目录在运行时读取，因此新增迁移无需手动更新导出列表。PostgreSQL 的最终约束可以由 `pg_dump` 表示为 `ALTER TABLE ... ADD CONSTRAINT`，这不是历史 schema 演进。跨环境对比生成文件时应固定 PostgreSQL 与 `pg_dump` 主版本。

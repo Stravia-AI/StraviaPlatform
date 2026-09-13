@@ -20,11 +20,13 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 chrono = { workspace = true, features = ["clock", "std"] }
 anyhow = { workspace = true }
+sqlx = { workspace = true }
 
 clap = { workspace = true }
 base64 = { workspace = true }
 walkdir = { workspace = true }
 url = { workspace = true }
+urlencoding = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -8,7 +8,7 @@ from urllib.request import Request, urlopen
 
 import pytest
 
-from tests.common.helpers import http_bytes, http_request
+from tests.common.helpers import download_observation_bundle, http_request, observation_bundle_events
 from tests.e2e.admin.test_observations import (
     _create_route, _detail, _proxy, _route_interactions, _wait_for,
 )
@@ -51,7 +51,8 @@ def test_media_shaped_business_json_is_preserved_in_diagnostics(
                 return None
 
             detail = _wait_for("preserved business JSON diagnostics", finished)
-            records = [event for run in detail["runs"] for event in run["debug_events"]]
+            _, _, archive = download_observation_bundle(env, detail)
+            records = observation_bundle_events(archive)
             for direction in ("client_to_platform", "upstream_request", "upstream_response", "platform_to_client"):
                 encoded = json.dumps([event for event in records if event.get("direction") == direction])
                 assert "b3JkaW5hcnktYnVzaW5lc3M=" in encoded
@@ -104,14 +105,7 @@ def test_reserved_expired_upload_grant_never_enters_diagnostics(
             assert grant not in encoded
             assert "<stravia-upload-key>" in encoded
             assert ordinary in encoded
-            status, ticket = http_request(
-                "POST", f"{env['admin']}/api/v1/observations/interactions/{detail['interaction']['id']}/debug-bundle-tickets",
-                payload={"through_sequence": detail["snapshot_sequence"]}, headers=env["auth"],
-            )
-            assert status == 200, ticket
-            download = ticket["data"]["download_url"]
-            status, _, archive = http_bytes("GET", f"{env['admin']}{download}" if download.startswith("/") else download)
-            assert status == 200
+            _, _, archive = download_observation_bundle(env, detail)
             with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
                 for name in bundle.namelist():
                     assert grant.encode() not in bundle.read(name)
@@ -196,7 +190,8 @@ def test_restored_plaintext_is_scrubbed_from_diagnostics(
             assert SECRET not in json.dumps(detail)
             if not tool:
                 assert detail["interaction"]["visible_tail"] == "ordinary-before *** ordinary-after"
-            events = [event for run in detail["runs"] for event in run["debug_events"]]
+            _, _, archive = download_observation_bundle(env, detail)
+            events = observation_bundle_events(archive)
             for predicate in (
                 lambda event: event.get("stage") == "client_projection_event",
                 lambda event: event.get("direction") == "platform_to_client",
@@ -207,14 +202,7 @@ def test_restored_plaintext_is_scrubbed_from_diagnostics(
                 assert SECRET not in encoded
             terminal = json.dumps([event for event in events if event.get("stage") == "canonical_terminal_response"])
             assert "ordinary-before" in terminal and "ordinary-after" in terminal
-            status, ticket = http_request(
-                "POST", f"{env['admin']}/api/v1/observations/interactions/{detail['interaction']['id']}/debug-bundle-tickets",
-                payload={"through_sequence": detail["snapshot_sequence"]}, headers=env["auth"],
-            )
-            assert status == 200, ticket
-            download = ticket["data"]["download_url"]
-            status, _, archive = http_bytes("GET", f"{env['admin']}{download}" if download.startswith("/") else download)
-            assert status == 200
+
             with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
                 manifest = json.loads(bundle.read("manifest.json"))
                 for run in manifest["runs"]:

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 mod fixture;
@@ -8,109 +8,7 @@ mod record;
 mod replay;
 mod scenarios;
 
-const POSTGRES_SCHEMA_SQL: &str = concat!(
-    include_str!("../../stravia-core/migrations/postgres/0001_initial.sql"),
-    "\n",
-    include_str!("../../stravia-core/migrations/postgres/0002_provider_models.sql"),
-    "\n",
-    include_str!("../../stravia-core/migrations/postgres/0003_web_access.sql"),
-    "\n",
-    include_str!("../../stravia-core/migrations/postgres/0004_oauth_connection_generation.sql"),
-    "\n",
-    include_str!("../../stravia-core/migrations/postgres/0005_split_web_access_permissions.sql"),
-    "\n",
-    include_str!("../../stravia-core/migrations/postgres/0006_zhipu_web_provider.sql"),
-    "\n",
-    include_str!("../../stravia-core/migrations/postgres/0007_turn_chain.sql"),
-    "\n",
-    include_str!("../../stravia-core/migrations/postgres/0008_agent_definitions.sql"),
-    "\n",
-    include_str!("../../stravia-core/migrations/postgres/0009_artifacts.sql"),
-    "\n",
-    include_str!("../../stravia-core/migrations/postgres/0010_web_research.sql"),
-    "\n",
-    include_str!("../../stravia-core/migrations/postgres/0011_media_understanding.sql"),
-    "\n",
-    include_str!("../../stravia-core/migrations/postgres/0012_media_derivatives.sql"),
-    "\n",
-    include_str!("../../stravia-core/migrations/postgres/0013_image_generation.sql"),
-    "\n",
-    include_str!("../../stravia-core/migrations/postgres/0014_require_api_key.sql"),
-    "\n",
-    include_str!("../../stravia-core/migrations/postgres/0015_reusable_response_prefix.sql"),
-    "\n",
-    include_str!("../../stravia-core/migrations/postgres/0016_remove_image_generation.sql"),
-    "\n",
-    include_str!("../../stravia-core/migrations/postgres/0017_principal_concurrency_limit.sql"),
-    "\n",
-    include_str!(
-        "../../stravia-core/migrations/postgres/0018_advanced_capabilities_web_search.sql"
-    ),
-    "\n",
-    include_str!("../../stravia-core/migrations/postgres/0019_always_record_payloads.sql"),
-    "\n",
-    include_str!("../../stravia-core/migrations/postgres/0020_revisioned_catalog_source.sql"),
-    "\n",
-    include_str!(
-        "../../stravia-core/migrations/postgres/0021_adapter_credentials_and_vendor_npm.sql"
-    ),
-    "\n",
-    include_str!("../../stravia-core/migrations/postgres/0022_thinking_level_mapping.sql"),
-    "\n",
-    include_str!("../../stravia-core/migrations/postgres/0023_history_markers.sql"),
-    "\n",
-    include_str!("../../stravia-core/migrations/postgres/0024_derive_route_thinking_levels.sql"),
-    "\n",
-    include_str!("../../stravia-core/migrations/postgres/0025_request_log_usage_details.sql"),
-    "\n",
-    include_str!("../../stravia-core/migrations/postgres/0026_agent_definition_thinking_level.sql"),
-    "\n",
-    include_str!("../../stravia-core/migrations/postgres/0027_route_target_aggregate.sql"),
-    "\n",
-    include_str!("../../stravia-core/migrations/postgres/0028_web_access_adapters.sql"),
-    "\n",
-    include_str!("../../stravia-core/migrations/postgres/0029_provider_allowance_samples.sql"),
-    "\n",
-    include_str!("../../stravia-core/migrations/postgres/0030_route_display_name.sql"),
-    "\n",
-    include_str!("../../stravia-core/migrations/postgres/0031_layer_route_target_selection.sql"),
-    "\n",
-    include_str!("../../stravia-core/migrations/postgres/0032_route_target_enabled.sql"),
-    "\n",
-    include_str!("../../stravia-core/migrations/postgres/0033_admin_identity.sql"),
-    "\n",
-    include_str!("../../stravia-core/migrations/postgres/0034_interaction_observation.sql"),
-    "\n",
-    include_str!("../../stravia-core/migrations/postgres/0035_reversible_redaction.sql"),
-    "\n",
-    include_str!("../../stravia-core/migrations/postgres/0036_credential_discovery_coverage.sql"),
-    "\n",
-    include_str!("../../stravia-core/migrations/postgres/0037_route_native_compaction.sql"),
-    "\n",
-    include_str!("../../stravia-core/migrations/postgres/0038_native_compaction.sql"),
-    "\n",
-    include_str!("../../stravia-core/migrations/postgres/0039_remove_route_compaction_policy.sql"),
-    "\n",
-    include_str!("../../stravia-core/migrations/postgres/0040_interaction_input_preview.sql"),
-    "\n",
-    include_str!("../../stravia-core/migrations/postgres/0041_artifact_transfers.sql")
-);
-const POSTGRES_SCHEMA_HEADER: &str = "\
--- Stravia Agent infra - PostgreSQL Final Schema
---
--- This file represents the authoritative final-state schema after all migrations.
--- It is a DBA review artifact only. Do not execute it to initialize a Stravia
--- database: direct execution does not record SQLx migration history.
--- Start stravia-server with a blank database so it can apply the migrations.
---
--- Generated from: backend/crates/stravia-core/migrations/postgres/
--- Regenerate  : stravia-tools dump-schema --backend postgres
---
-";
-
-fn postgres_schema() -> String {
-    format!("{POSTGRES_SCHEMA_HEADER}{POSTGRES_SCHEMA_SQL}")
-}
+mod schema;
 
 #[derive(Parser)]
 #[command(
@@ -135,22 +33,8 @@ enum Command {
     Replay(replay::ReplayArgs),
     /// Print scenario metadata (anchor + expected_fields per protocol) as JSON — consumed by pytest
     PrintScenarios,
-    /// Print the final-state PostgreSQL DDL schema.
-    /// Useful for DBAs to review schema changes.
-    /// The output matches deploy/schema/postgres.sql in the repository.
-    DumpSchema(DumpSchemaArgs),
-}
-
-#[derive(Parser)]
-struct DumpSchemaArgs {
-    /// PostgreSQL is Stravia's only reference-schema backend.
-    #[arg(long, value_enum, default_value = "postgres")]
-    backend: SchemaBackend,
-}
-
-#[derive(ValueEnum, Clone)]
-enum SchemaBackend {
-    Postgres,
+    /// Export final-state PostgreSQL or SQLite DDL after applying all migrations in isolation.
+    DumpSchema(schema::DumpSchemaArgs),
 }
 
 #[tokio::main]
@@ -161,12 +45,7 @@ async fn main() -> Result<()> {
         Command::Record(args) => record::run(args).await,
         Command::Replay(args) => replay::run(args).await,
         Command::PrintScenarios => print_scenarios(),
-        Command::DumpSchema(args) => {
-            match args.backend {
-                SchemaBackend::Postgres => print!("{}", postgres_schema()),
-            }
-            Ok(())
-        }
+        Command::DumpSchema(args) => schema::run(args).await,
     }
 }
 
@@ -211,6 +90,7 @@ fn print_scenarios() -> Result<()> {
 fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(filter)
         .with_target(false)
         .compact()

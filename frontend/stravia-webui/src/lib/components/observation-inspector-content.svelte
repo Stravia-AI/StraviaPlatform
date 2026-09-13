@@ -1,17 +1,14 @@
 <script lang="ts">
 import * as m from '$lib/paraglide/messages.js'
-import { onDestroy } from 'svelte'
-import CopyIcon from '@lucide/svelte/icons/copy'
 import DownloadIcon from '@lucide/svelte/icons/download'
 import XIcon from '@lucide/svelte/icons/x'
 import ChevronRightIcon from '@lucide/svelte/icons/chevron-right'
-import { toast } from 'svelte-sonner'
 
 import { formatDuration, formatLogTime, formatTime, formatTokenCount } from '$lib/format'
 import ObservationConversation from '$lib/components/observation-conversation.svelte'
 import { observationDebugStatusLabel, observationStatusLabel } from '$lib/observation-labels'
 import { observationAttemptOutputTokens, observationEventSummary } from '$lib/observation-event-summary'
-import type { InteractionDetail, ObservationEvent, RejectionDetail, RunDetail } from '$lib/types'
+import type { InteractionDetail, LiveContentBlock, ObservationEvent, RejectionDetail, RunDetail } from '$lib/types'
 import { Badge } from '$lib/components/ui/badge'
 import { Button } from '$lib/components/ui/button'
 import * as Empty from '$lib/components/ui/empty'
@@ -22,6 +19,11 @@ import * as Collapsible from '$lib/components/ui/collapsible'
 interface Props {
   interaction?: InteractionDetail
   rejection?: RejectionDetail
+  liveBlocks?: LiveContentBlock[]
+  liveGap?: boolean
+  liveCapacity?: boolean
+  olderLoading?: boolean
+  onolder?: () => Promise<void>
   loading?: boolean
   activeTab: string
   onclose: () => void
@@ -29,7 +31,7 @@ interface Props {
   onlatest?: () => void
 }
 
-let { interaction, rejection, loading = false, activeTab = $bindable(), onclose, onbundle, onlatest }: Props = $props()
+let { interaction, rejection, liveBlocks = [], liveGap = false, liveCapacity = false, olderLoading = false, onolder, loading = false, activeTab = $bindable(), onclose, onbundle, onlatest }: Props = $props()
 const orderedRuns = $derived([...(interaction?.runs ?? [])].sort((a, b) => a.started_at - b.started_at))
 const runIds = $derived(new Set(orderedRuns.map((run) => run.id)))
 
@@ -43,19 +45,6 @@ const title = $derived(
       ? m.observation_request_failed()
       : m.observation_details(),
 )
-const hasDebug = $derived(
-  interaction ? interaction.runs.some((run) => run.debug_enabled) : Boolean(rejection?.rejection.debug_enabled),
-)
-const debugRecords = $derived.by(() => {
-  if (interaction)
-    return interaction.runs.flatMap((run) =>
-      run.debug_enabled ? run.debug_events.map((value) => ({ runId: run.id, value })) : [],
-    )
-  return rejection?.rejection.debug_enabled
-    ? rejection.debug_events.map((value) => ({ runId: rejection.rejection.id, value }))
-    : []
-})
-
 function orderedEvents(events: ObservationEvent[]): ObservationEvent[] {
   // 因果子树会把晚发生的完成事件提前；阅读时间线按时间排序，原始关联仍保留在 payload。
   return events.toSorted((a, b) => a.occurred_at - b.occurred_at || a.sequence - b.sequence)
@@ -100,28 +89,6 @@ function usageRows(run: RunDetail): ReadonlyArray<readonly [string, number | nul
   ]
 }
 
-let mounted = true
-onDestroy(() => {
-  mounted = false
-})
-
-async function copyRecord(value: unknown): Promise<void> {
-  try {
-    await navigator.clipboard.writeText(JSON.stringify(value, null, 2))
-    if (mounted) toast.success(m.observation_event_copied())
-  } catch {
-    if (mounted) toast.error(m.common_not_copy_clipboard())
-  }
-}
-
-function downloadRecord(value: unknown, index: number): void {
-  const url = URL.createObjectURL(new Blob([JSON.stringify(value, null, 2)], { type: 'application/json' }))
-  const anchor = document.createElement('a')
-  anchor.href = url
-  anchor.download = `observation-event-${index + 1}.json`
-  anchor.click()
-  URL.revokeObjectURL(url)
-}
 </script>
 
 {#snippet timeline(events: ObservationEvent[], compact = true, outputs?: ReadonlyMap<string, number | null>)}
@@ -210,6 +177,14 @@ function downloadRecord(value: unknown, index: number): void {
   </div>
 {/if}
 
+{#if liveCapacity}
+  <Alert.Root><Alert.Title>{m.observation_live_capacity()}</Alert.Title></Alert.Root>
+{/if}
+
+{#if liveGap}
+  <Alert.Root variant="destructive"><Alert.Title>{m.observation_live_save_failed()}</Alert.Title></Alert.Root>
+{/if}
+
 {#if loading}
   <div class="grid flex-1 place-items-center">
     <p class="text-sm text-muted-foreground">{m.observation_loading_details()}</p>
@@ -223,9 +198,6 @@ function downloadRecord(value: unknown, index: number): void {
       <Tabs.List class="h-auto flex-wrap">
         <Tabs.Trigger value="timeline">{m.observation_conversation()}</Tabs.Trigger>
         <Tabs.Trigger value="diagnostics">{m.observation_diagnostics()}</Tabs.Trigger>
-        {#if hasDebug}
-          <Tabs.Trigger value="debug">{m.observation_debug_records()}</Tabs.Trigger>
-        {/if}
       </Tabs.List>
       <Button variant="outline" size="sm" onclick={onbundle}
         ><DownloadIcon data-icon="inline-start" />{m.observation_bundle()}</Button>
@@ -233,7 +205,7 @@ function downloadRecord(value: unknown, index: number): void {
     <Tabs.Content value="timeline" class="min-h-0 flex-1 overflow-hidden">
       {#if interaction}
         {#key interaction.interaction.id}
-          <ObservationConversation detail={interaction} />
+          <ObservationConversation detail={interaction} {liveBlocks} {olderLoading} {onolder} />
         {/key}
       {:else if rejection}
         <div class="p-4">
@@ -392,34 +364,6 @@ function downloadRecord(value: unknown, index: number): void {
         {/if}
         {@render timeline(orderedEvents(rejection.events))}
       {/if}
-    </Tabs.Content>
-    <Tabs.Content value="debug" class="min-h-0 flex-1 overflow-y-auto p-4">
-      <p class="mb-4 text-sm text-muted-foreground">{m.observation_debug_fidelity()}</p>
-      <div class="flex flex-col gap-3">
-        {#each debugRecords as record, index (`${record.runId}-${index}`)}
-          <article class="debug-record">
-            <header class="flex items-center justify-between gap-2 border-b px-3 py-2">
-              <span class="font-technical truncate text-xs">{record.runId} · {index + 1}</span>
-              <div class="flex gap-1">
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  aria-label={m.common_copy()}
-                  onclick={() => void copyRecord(record.value)}><CopyIcon /></Button
-                ><Button
-                  variant="ghost"
-                  size="icon-sm"
-                  aria-label={m.observation_download_event()}
-                  onclick={() => downloadRecord(record.value, index)}><DownloadIcon /></Button>
-              </div>
-            </header>
-            <pre>{JSON.stringify(record.value, null, 2)}</pre>
-          </article>
-        {:else}
-          <Empty.Root
-            ><Empty.Header><Empty.Title>{m.observation_no_debug_records()}</Empty.Title></Empty.Header></Empty.Root>
-        {/each}
-      </div>
     </Tabs.Content>
   </Tabs.Root>
 {/if}
@@ -640,15 +584,6 @@ pre {
   line-height: 1.4;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-}
-.debug-record {
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-}
-.debug-record > pre {
-  max-height: 32rem;
-  margin: 0;
-  border-radius: 0 0 calc(var(--radius) - 1px) calc(var(--radius) - 1px);
 }
 @media (max-width: 767px) {
   .usage-line {

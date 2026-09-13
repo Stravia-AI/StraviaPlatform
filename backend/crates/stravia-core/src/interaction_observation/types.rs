@@ -260,7 +260,32 @@ pub struct ObservationEvent {
 #[derive(Debug, Clone)]
 pub enum ObservationUpdate {
     Event(ObservationEvent),
-    ResetRequired { snapshot_sequence: i64 },
+    ResetRequired {
+        snapshot_sequence: i64,
+    },
+    LiveContent(LiveContentBlock),
+    LiveSnapshot {
+        blocks: Vec<LiveContentBlock>,
+    },
+    LiveGap {
+        interaction_id: String,
+        run_id: String,
+        reason: String,
+    },
+}
+
+/// 未提交的观察内容；revision 不得用作持久化 SSE cursor。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LiveContentBlock {
+    pub block_id: String,
+    pub interaction_id: String,
+    pub run_id: String,
+    pub kind: String,
+    pub model_turn_id: Option<String>,
+    pub attempt_id: Option<String>,
+    pub occurred_at: i64,
+    pub revision: u64,
+    pub text: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -269,6 +294,8 @@ pub enum ObservationQueryError {
     IncompleteWindow,
     #[error("observation window must have end_at after start_at and span at most 24 hours")]
     InvalidWindow,
+    #[error("invalid observation event page")]
+    InvalidEventPage,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -357,7 +384,13 @@ pub struct RunDetail {
     pub usage: ConfirmedUsage,
     pub events: Vec<ObservationEvent>,
     pub trace: Option<TraceManifest>,
-    pub debug_events: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InteractionSnapshot {
+    pub interaction: InteractionSummary,
+    pub root: ForestRoot,
+    pub snapshot_sequence: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -366,6 +399,22 @@ pub struct InteractionDetail {
     pub root: ForestRoot,
     pub runs: Vec<RunDetail>,
     pub snapshot_sequence: i64,
+    pub older_events_cursor: Option<i64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct InteractionEventsQuery {
+    pub after_sequence: Option<i64>,
+    pub before_sequence: Option<i64>,
+    pub through_sequence: Option<i64>,
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InteractionEventsPage {
+    pub runs: Vec<RunDetail>,
+    pub snapshot_sequence: i64,
+    pub next_cursor: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -405,7 +454,6 @@ pub struct RejectionDetail {
     pub rejection: RejectionSummary,
     pub events: Vec<ObservationEvent>,
     pub trace: Option<TraceManifest>,
-    pub debug_events: Vec<Value>,
     pub snapshot_sequence: i64,
 }
 

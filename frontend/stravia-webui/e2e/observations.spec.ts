@@ -103,14 +103,19 @@ function runFor(item: InteractionSummary): RunDetail {
       event,
     ],
     trace: null,
-    debug_events: [],
   }
 }
 
 interface ObservationFixture {
   emit(event: ObservationEvent, visibleTail?: string): void
   releaseRemainingRoots(): void
+  holdNextRead(id: string): () => void
+  addInteraction(item: InteractionSummary): void
+  reset(): void
   forestRequests: URL[]
+  summaryRequests: URL[]
+  detailRequests: URL[]
+  eventRequests: URL[]
   debugWrites: Array<{ enabled: boolean; confirmed: boolean }>
 }
 
@@ -160,6 +165,11 @@ async function installObservationFixture(
   ]
   const recordedRuns = new Map(roots.flatMap((root) => root.interactions).map((item) => [item.id, runFor(item)]))
   const forestRequests: URL[] = []
+  const summaryRequests: URL[] = []
+  const detailRequests: URL[] = []
+  const eventRequests: URL[] = []
+  const heldDetails = new Map<string, Promise<void>>()
+  let resetRequired = false
   const debugWrites: Array<{ enabled: boolean; confirmed: boolean }> = []
   const streamEvents: ObservationEvent[] = []
   let debugEnabled = false
@@ -179,7 +189,16 @@ async function installObservationFixture(
     const path = url.pathname.replace('/api/v1', '')
 
     if (path === '/observations/events') {
-      const event = streamEvents.shift()
+      if (resetRequired) {
+        resetRequired = false
+        streamEvents.length = 0
+        await route.fulfill({
+          contentType: 'text/event-stream',
+          body: `event: reset_required\ndata: ${JSON.stringify({ snapshot_sequence: snapshotSequence })}\n\n`,
+        })
+        return
+      }
+      const event = streamEvents.find((item) => item.sequence > Number(url.searchParams.get('after')))
       const body = event ? `id: ${event.sequence}\nevent: observation\ndata: ${JSON.stringify(event)}\n\n` : ''
       await route.fulfill({ contentType: 'text/event-stream', body })
       return
@@ -206,8 +225,22 @@ async function installObservationFixture(
       return
     }
 
-    const detailMatch = path.match(/^\/observations\/interactions\/([^/]+)$/)
+    const summaryMatch = path.match(/^\/observations\/interactions\/([^/]+)\/summary$/)
+    if (summaryMatch) {
+      summaryRequests.push(url)
+      const id = decodeURIComponent(summaryMatch[1])
+      const root = rootFor(id, url.searchParams.get('status'))
+      await route.fulfill({
+        json: { data: { interaction: root.interactions.find((item) => item.id === id)!, root, snapshot_sequence: snapshotSequence } },
+      })
+      return
+    }
+
+    const detailMatch = path.match(/^\/observations\/interactions\/([^/]+)(\/events)?$/)
     if (detailMatch) {
+      const eventsOnly = Boolean(detailMatch[2])
+      if (eventsOnly) eventRequests.push(url)
+      else detailRequests.push(url)
       const id = decodeURIComponent(detailMatch[1])
       const status = url.searchParams.get('status')
       const root = rootFor(id, status)
@@ -219,13 +252,31 @@ async function installObservationFixture(
           {
             ...recordedRuns.get(selected.id)!,
             debug_enabled: captureDebug,
-            debug_events: captureDebug ? [{ fixture: 'retained diagnostic record' }] : [],
           },
         ],
         snapshot_sequence: snapshotSequence,
+        older_events_cursor: null,
       }
       transformDetail?.(detail)
-      await route.fulfill({ json: { data: detail } })
+      snapshotSequence = Math.max(snapshotSequence, ...detail.runs.flatMap((run) => run.events.map((event) => event.sequence)))
+      detail.snapshot_sequence = snapshotSequence
+      const through = Number(url.searchParams.get('through_sequence') ?? snapshotSequence)
+      const before = url.searchParams.get('before_sequence')
+      const after = url.searchParams.get('after_sequence')
+      const limit = Number(url.searchParams.get('limit') ?? 200)
+      const candidates = detail.runs.flatMap((run) => run.events).filter((event) => event.sequence <= through &&
+        (before === null || event.sequence < Number(before)) && (after === null || event.sequence > Number(after))).sort((a, b) => a.sequence - b.sequence)
+      const chosen = after === null ? candidates.slice(-limit) : candidates.slice(0, limit)
+      const sequences = new Set(chosen.map((event) => event.sequence))
+      const cursor = candidates.length > chosen.length ? (after === null ? chosen[0].sequence : chosen.at(-1)!.sequence) : null
+      detail.runs = detail.runs.map((run) => ({ ...run, events: run.events.filter((event) => sequences.has(event.sequence)) }))
+      detail.older_events_cursor = cursor
+      const data = eventsOnly ? { runs: detail.runs, snapshot_sequence: through, next_cursor: cursor } : detail
+      const body = JSON.stringify({ data })
+      const held = heldDetails.get(id)
+      heldDetails.delete(id)
+      if (held) await held
+      await route.fulfill({ contentType: 'application/json', body })
       return
     }
 
@@ -265,12 +316,30 @@ async function installObservationFixture(
 
   return {
     releaseRemainingRoots,
+    holdNextRead(id) {
+      let release!: () => void
+      heldDetails.set(id, new Promise<void>((resolve) => { release = resolve }))
+      return release
+    },
+    addInteraction(item) {
+      const root = roots.find((candidate) => candidate.id === item.root_id)
+      if (root) {
+        root.interactions.push(item)
+        root.last_active_at = Math.max(root.last_active_at, item.last_active_at)
+      } else roots.push({ id: item.root_id, last_active_at: item.last_active_at, interactions: [item] })
+      recordedRuns.set(item.id, runFor(item))
+    },
+    reset() {
+      resetRequired = true
+    },
     emit(event, visibleTail) {
       snapshotSequence = Math.max(snapshotSequence, event.sequence)
       const known = roots.flatMap((root) => root.interactions).find((item) => item.id === event.interaction_id)
       if (known) {
         known.last_event_sequence = event.sequence
         known.last_active_at = event.occurred_at
+        const root = roots.find((item) => item.id === known.root_id)!
+        root.last_active_at = Math.max(...root.interactions.map((item) => item.last_active_at))
         const run = recordedRuns.get(known.id)!
         run.events.push(event)
         if (event.kind === 'client_visible_content_delta') {
@@ -288,8 +357,45 @@ async function installObservationFixture(
       streamEvents.push(event)
     },
     forestRequests,
+    summaryRequests,
+    detailRequests,
+    eventRequests,
     debugWrites,
   }
+}
+
+async function installPersistentObservationStream(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const original = window.fetch.bind(window)
+    window.fetch = async (input, init) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (!url.includes('/observations/events?')) return original(input, init)
+      let remove = () => {}
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          const encoder = new TextEncoder()
+          const receive = (event: Event) => {
+            if (!(event instanceof CustomEvent)) return
+            if (event.detail === 'disconnect') {
+              remove()
+              controller.close()
+            } else controller.enqueue(encoder.encode(String(event.detail)))
+          }
+          remove = () => window.removeEventListener('observation-fixture', receive)
+          window.addEventListener('observation-fixture', receive)
+          init?.signal?.addEventListener('abort', () => { remove(); controller.close() }, { once: true })
+          controller.enqueue(encoder.encode('event: live_snapshot\ndata: {"blocks":[]}\n\n'))
+        },
+        cancel() { remove() },
+      })
+      return new Response(body, { headers: { 'Content-Type': 'text/event-stream' } })
+    }
+  })
+}
+
+async function sendObservation(page: Page, name: string, data: unknown, sequence?: number): Promise<void> {
+  const message = `${sequence === undefined ? '' : `id: ${sequence}\n`}event: ${name}\ndata: ${JSON.stringify(data)}\n\n`
+  await page.evaluate((detail) => window.dispatchEvent(new CustomEvent('observation-fixture', { detail })), message)
 }
 
 function node(page: Page, name: string, status: string): Locator {
@@ -306,6 +412,367 @@ async function viewportTransform(page: Page): Promise<{ x: number; y: number; zo
 test.describe('Interaction Observation canvas', () => {
   test.beforeEach(async ({ page }) => {
     await prepareApp(page)
+  })
+
+  test('a large chain mounts only its viewport instead of measuring every card at the origin', async ({ page }) => {
+    const fixture = await installObservationFixture(page)
+    for (let index = 0; index < 300; index++) {
+      fixture.addInteraction(interaction(
+        `large-${index}`, 'root-a', index ? `large-${index - 1}` : 'interaction-cinder',
+        `Large ${index}`, routeIds.cinder, index === 299 ? 'running' : 'completed', 150_000 + index,
+      ))
+    }
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    await page.addInitScript(() => {
+      const probe = { peak: 0 }
+      Object.assign(window, { canvasMountProbe: probe })
+      new MutationObserver(() => {
+        probe.peak = Math.max(probe.peak, document.querySelectorAll('.svelte-flow__node').length)
+      }).observe(document, { childList: true, subtree: true })
+    })
+    await page.goto('/logs')
+    await expect(node(page, 'Large 299', 'running')).toBeVisible()
+    const peak = await page.evaluate(() =>
+      (window as unknown as { canvasMountProbe: { peak: number } }).canvasMountProbe.peak)
+    expect(peak).toBeLessThan(80)
+    await node(page, 'Large 299', 'running').click()
+    await expect(page.getByRole('complementary', { name: 'Observation details' })
+      .getByRole('heading', { name: 'Large 299', exact: true, level: 2 })).toBeVisible()
+    await page.getByRole('button', { name: 'Close', exact: true }).click()
+    for (let index = 300; index < 600; index++) {
+      fixture.addInteraction(interaction(
+        `large-${index}`, 'root-a', `large-${index - 1}`,
+        `Large ${index}`, routeIds.cinder, index === 599 ? 'running' : 'completed', 150_000 + index,
+      ))
+    }
+    fixture.emit({
+      sequence: 11, occurred_at: startedAt + 299_000, interaction_id: 'large-599',
+      run_id: 'run-large-599', rejection_id: null, kind: 'model_turn_started', payload: {},
+    })
+    await expect.poll(() => fixture.summaryRequests.some((url) => url.pathname.includes('large-599'))).toBe(true)
+    await page.getByRole('button', { name: 'Return to running interaction', exact: true }).click()
+    await expect(node(page, 'Large 599', 'running')).toBeVisible()
+    await expect(node(page, 'Large 299', 'running')).toHaveCount(0)
+    expect(await page.evaluate(() =>
+      (window as unknown as { canvasMountProbe: { peak: number } }).canvasMountProbe.peak)).toBeLessThan(80)
+  })
+
+  test('live revisions render before saving, commit once, and clear on snapshot or disconnect', async ({ page }) => {
+    const fixture = await installObservationFixture(page)
+    await installPersistentObservationStream(page)
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    await page.goto('/logs?interaction=interaction-cinder')
+    const inspector = page.getByRole('complementary', { name: 'Observation details' })
+    const conversation = inspector.getByRole('log', { name: 'Conversation' })
+    await expect(conversation).toContainText('Cinder client-visible answer')
+    await expect.poll(() => fixture.eventRequests.length).toBe(1)
+    const reads = fixture.eventRequests.length
+    const block = { block_id: 'live-table', interaction_id: 'interaction-cinder', run_id: 'run-interaction-cinder', kind: 'client_visible_content_delta', model_turn_id: 'turn', attempt_id: 'attempt', occurred_at: startedAt + 299_000, revision: 1, text: '\n\n| A | B |\n' }
+    await sendObservation(page, 'live_content', block)
+    await expect(conversation.getByText('Not yet saved', { exact: true })).toBeVisible()
+    const completed = { ...block, revision: 2, text: `${block.text}|---|---|\n| live-cell | other |` }
+    await sendObservation(page, 'live_content', completed)
+    await expect(conversation.getByRole('cell', { name: 'live-cell', exact: true })).toBeVisible()
+    const renderedTable = await conversation.getByRole('table').elementHandle()
+    await sendObservation(page, 'live_content', block)
+    await expect(conversation.getByRole('cell', { name: 'live-cell', exact: true })).toHaveCount(1)
+    expect(fixture.eventRequests).toHaveLength(reads)
+    expect(fixture.detailRequests).toHaveLength(1)
+    const durable: ObservationEvent = { sequence: 11, occurred_at: block.occurred_at, interaction_id: block.interaction_id, run_id: block.run_id, rejection_id: null, kind: block.kind, payload: { text: completed.text, block_id: block.block_id } }
+    fixture.emit(durable)
+    await sendObservation(page, 'observation', durable, durable.sequence)
+    await expect(conversation.getByText('Not yet saved', { exact: true })).toHaveCount(0)
+    await expect(conversation.getByRole('cell', { name: 'live-cell', exact: true })).toHaveCount(1)
+    expect(await renderedTable!.evaluate((element) => element.isConnected)).toBe(true)
+    expect(fixture.detailRequests).toHaveLength(1)
+    await sendObservation(page, 'live_content', { ...block, block_id: 'transient', text: '\n\ntransient-unsaved' })
+    await expect(conversation).toContainText('transient-unsaved')
+    await sendObservation(page, 'live_snapshot', { blocks: [] })
+    await expect(conversation).not.toContainText('transient-unsaved')
+    await sendObservation(page, 'live_content', { ...block, block_id: 'failed', text: '\n\nfailed-unsaved' })
+    await sendObservation(page, 'live_gap', { interaction_id: block.interaction_id, run_id: block.run_id, reason: 'live_capacity' })
+    await expect(inspector.getByRole('alert')).toContainText('Live preview is incomplete')
+    await expect(inspector).not.toContainText('could not be saved')
+    await sendObservation(page, 'live_gap', { interaction_id: block.interaction_id, run_id: block.run_id, reason: 'persistence_failed' })
+    await expect(inspector.getByRole('alert').filter({ hasText: 'could not be saved' })).toBeVisible()
+    await page.evaluate(() => window.dispatchEvent(new CustomEvent('observation-fixture', { detail: 'disconnect' })))
+    await expect(conversation).not.toContainText('failed-unsaved')
+    await expect(conversation.getByRole('cell', { name: 'live-cell', exact: true })).toHaveCount(1)
+  })
+
+  test('incremental pages keep one upper bound and retry a failed read without dropping or duplicating text', async ({ page }) => {
+    const fixture = await installObservationFixture(page)
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    await page.goto('/logs?interaction=interaction-cinder')
+    const conversation = page.getByRole('log', { name: 'Conversation' })
+    await expect(conversation).toContainText('Cinder client-visible answer')
+    await expect.poll(() => fixture.eventRequests.length).toBe(1)
+    let failures = 0
+    await page.route('**/observations/interactions/interaction-cinder/events?**', async (route) => {
+      if (failures++ === 0) await route.fulfill({ status: 503, json: { error: { message: 'Temporary read failure' } } })
+      else await route.fallback()
+    })
+    for (let index = 1; index <= 450; index++) fixture.emit({ sequence: index + 10, occurred_at: startedAt + 299_000, interaction_id: 'interaction-cinder', run_id: 'run-interaction-cinder', rejection_id: null, kind: 'client_visible_content_delta', payload: { text: `\n\nIncrement ${index}` } })
+    await expect(conversation.getByText('Increment 450', { exact: true })).toHaveCount(1)
+    await expect(conversation.getByText('Increment 1', { exact: true })).toHaveCount(1)
+    await expect(conversation.getByText('Increment 201', { exact: true })).toHaveCount(1)
+    const pages = fixture.eventRequests.slice(1)
+    expect(pages.map((url) => url.searchParams.get('after_sequence'))).toEqual(['10', '210', '410'])
+    expect(pages.map((url) => url.searchParams.get('through_sequence'))).toEqual([null, '460', '460'])
+    expect(fixture.detailRequests).toHaveLength(1)
+  })
+
+  test('latest details load bounded history and prepend earlier events without moving the reading anchor', async ({ page }) => {
+    const fixture = await installObservationFixture(page, false, false, false, (detail) => {
+      if (detail.interaction.id !== 'interaction-cinder') return
+      detail.runs[0].events = Array.from({ length: 450 }, (_, index) => ({ sequence: index + 1, occurred_at: startedAt + index, interaction_id: detail.interaction.id, run_id: detail.runs[0].id, rejection_id: null, kind: 'client_visible_content_delta', payload: { text: `Paragraph ${index + 1}\n\n` } }))
+    })
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    await page.goto('/logs?interaction=interaction-cinder')
+    const conversation = page.getByRole('log', { name: 'Conversation' })
+    await expect(conversation).toContainText('Paragraph 251')
+    await expect(conversation.getByText('Paragraph 250', { exact: true })).toHaveCount(0)
+    const earlier = conversation.getByRole('button', { name: 'Load earlier events', exact: true })
+    await earlier.scrollIntoViewIfNeeded()
+    const anchor = conversation.getByText('Paragraph 251', { exact: true })
+    const before = await anchor.evaluate((element) => element.getBoundingClientRect().top)
+    await earlier.click()
+    await expect(conversation.getByText('Paragraph 51', { exact: true })).toHaveCount(1)
+    await expect.poll(async () => Math.abs(await anchor.evaluate((element) => element.getBoundingClientRect().top) - before)).toBeLessThan(3)
+    await earlier.scrollIntoViewIfNeeded()
+    await earlier.click()
+    await expect(conversation.getByText('Paragraph 1', { exact: true })).toHaveCount(1)
+    await expect(earlier).toHaveCount(0)
+    expect(fixture.detailRequests).toHaveLength(1)
+    expect(fixture.eventRequests.filter((url) => url.searchParams.has('before_sequence')).map((url) => url.searchParams.get('before_sequence'))).toEqual(['251', '51'])
+  })
+
+  test('refreshes unopened previews and new interactions through summaries without fetching details', async ({ page }) => {
+    const fixture = await installObservationFixture(page)
+    await page.goto('/logs')
+    await expect(node(page, 'Cinder', 'running')).toBeVisible()
+    fixture.emit({
+      sequence: 11,
+      occurred_at: startedAt + 299_000,
+      interaction_id: 'interaction-cinder',
+      run_id: 'run-interaction-cinder',
+      rejection_id: null,
+      kind: 'client_visible_content_delta',
+      payload: { text: ' Summary-only live answer' },
+    })
+    await expect(node(page, 'Cinder', 'running').locator('article')).toContainText('Summary-only live answer')
+    expect(fixture.summaryRequests.map((url) => url.pathname)).toEqual([
+      '/api/v1/observations/interactions/interaction-cinder/summary',
+    ])
+    const query = fixture.summaryRequests[0].searchParams
+    expect(Number(query.get('end_at')) - Number(query.get('start_at'))).toBe(DAY)
+    expect(fixture.detailRequests).toEqual([])
+
+    fixture.addInteraction(interaction('interaction-nova', 'root-a', 'interaction-cinder', 'Nova', routeIds.cinder, 'running', 298_000))
+    fixture.emit({
+      sequence: 12,
+      occurred_at: startedAt + 299_100,
+      interaction_id: 'interaction-nova',
+      run_id: 'run-interaction-nova',
+      rejection_id: null,
+      kind: 'client_visible_content_delta',
+      payload: { text: ' New child preview' },
+    })
+    await expect(node(page, 'Nova', 'running').locator('article')).toContainText('New child preview')
+    await expect(node(page, 'Atlas', 'completed')).toHaveCount(1)
+    expect(fixture.summaryRequests.at(-1)?.pathname).toBe('/api/v1/observations/interactions/interaction-nova/summary')
+    expect(fixture.detailRequests).toEqual([])
+    await expect(page.getByRole('complementary', { name: 'Observation details' })).toHaveCount(0)
+  })
+
+  test('updates the selected conversation through event pages without fetching detail again', async ({ page }) => {
+    const fixture = await installObservationFixture(page)
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    await page.goto('/logs?interaction=interaction-cinder')
+    const inspector = page.getByRole('complementary', { name: 'Observation details' })
+    const conversation = inspector.getByRole('log', { name: 'Conversation' })
+    await expect(conversation).toContainText('Cinder client-visible answer')
+    fixture.emit({
+      sequence: 11,
+      occurred_at: startedAt + 299_000,
+      interaction_id: 'interaction-cinder',
+      run_id: 'run-interaction-cinder',
+      rejection_id: null,
+      kind: 'client_visible_content_delta',
+      payload: { text: ' Ordinary live continuation' },
+    })
+    await expect(conversation).toContainText('Ordinary live continuation')
+    await expect(node(page, 'Cinder', 'running').locator('article')).toContainText('Ordinary live continuation')
+    expect(fixture.detailRequests).toHaveLength(1)
+    expect(fixture.summaryRequests).toHaveLength(1)
+    expect(fixture.eventRequests.at(-1)?.searchParams.get('after_sequence')).toBe('10')
+
+    fixture.emit({
+      sequence: 12,
+      occurred_at: startedAt + 299_100,
+      interaction_id: 'interaction-boreal',
+      run_id: 'run-interaction-boreal',
+      rejection_id: null,
+      kind: 'client_visible_content_delta',
+      payload: { text: ' Sibling summary update' },
+    })
+    await expect(node(page, 'Boreal', 'waiting_client').locator('article')).toContainText('Sibling summary update')
+    await expect(conversation).toContainText('Ordinary live continuation')
+    expect(fixture.detailRequests).toHaveLength(1)
+    expect(fixture.summaryRequests).toHaveLength(2)
+  })
+
+  for (const pending of ['initial', 'live'] as const) {
+    for (const action of ['switch', 'close'] as const) {
+      test(`${action} prevents a pending ${pending} detail from restoring the previous selection`, async ({ page }) => {
+        const fixture = await installObservationFixture(page)
+        await page.goto('/logs')
+        const inspector = page.getByRole('complementary', { name: 'Observation details' })
+        let release: () => void
+        if (pending === 'initial') {
+          release = fixture.holdNextRead('interaction-cinder')
+          await node(page, 'Cinder', 'running').getByRole('heading', { name: 'Cinder', exact: true }).click()
+        } else {
+          await node(page, 'Cinder', 'running').getByRole('heading', { name: 'Cinder', exact: true }).click()
+          await expect(inspector.getByRole('log', { name: 'Conversation' })).toContainText('Cinder client-visible answer')
+          await expect.poll(() => fixture.eventRequests.length).toBe(1)
+          release = fixture.holdNextRead('interaction-cinder')
+          fixture.emit({
+            sequence: 11,
+            occurred_at: startedAt + 299_000,
+            interaction_id: 'interaction-cinder',
+            run_id: 'run-interaction-cinder',
+            rejection_id: null,
+            kind: 'client_visible_content_delta',
+            payload: { text: ' Delayed Cinder update' },
+          })
+        }
+        await expect.poll(() => pending === 'initial' ? fixture.detailRequests.length : fixture.eventRequests.length).toBe(pending === 'initial' ? 1 : 2)
+        if (action === 'switch') {
+          await node(page, 'Atlas', 'completed').getByRole('heading', { name: 'Atlas', exact: true }).click()
+          await expect(inspector.getByRole('log', { name: 'Conversation' })).toContainText('Atlas client-visible answer')
+        } else await inspector.getByRole('button', { name: 'Close', exact: true }).click()
+        const response = page.waitForResponse((item) => new URL(item.url()).pathname === `/api/v1/observations/interactions/interaction-cinder${pending === 'live' ? '/events' : ''}`)
+        release()
+        await (await response).finished()
+        if (pending === 'live') await expect(node(page, 'Cinder', 'running').locator('article')).toContainText('Delayed Cinder update')
+        if (action === 'switch') {
+          await expect(inspector.getByRole('heading', { name: 'Atlas', exact: true, level: 2 })).toBeVisible()
+          await expect(inspector.getByRole('log', { name: 'Conversation' })).toContainText('Atlas client-visible answer')
+          await expect(inspector.getByRole('log', { name: 'Conversation' })).not.toContainText('Cinder client-visible answer')
+        } else await expect(inspector).toHaveCount(0)
+      })
+    }
+  }
+
+  test('removes a filtered root only when its final matching interaction stops matching', async ({ page }) => {
+    const fixture = await installObservationFixture(page)
+    await page.goto('/logs')
+    await page.getByRole('button', { name: 'Filters' }).click()
+    await page.getByLabel('Status', { exact: true }).click()
+    await page.getByRole('option', { name: 'Running', exact: true }).click()
+    await page.getByRole('button', { name: 'Apply filters' }).click()
+    await expect(node(page, 'Cinder', 'running')).toBeVisible()
+    await expect(node(page, 'Atlas', 'completed')).toBeVisible()
+    fixture.emit({
+      sequence: 11,
+      occurred_at: startedAt + 299_000,
+      interaction_id: 'interaction-cinder',
+      run_id: 'run-interaction-cinder',
+      rejection_id: null,
+      kind: 'delivery_terminal',
+      payload: { delivered: true },
+    })
+    await expect(page.getByText('No interaction chains match', { exact: true })).toBeVisible()
+    expect(fixture.summaryRequests.at(-1)?.searchParams.get('status')).toBe('running')
+    expect(fixture.detailRequests).toEqual([])
+  })
+
+  test('keeps a historical root updated through summaries and exposes its migration when inspected', async ({ page }) => {
+    const fixture = await installObservationFixture(page)
+    await page.goto('/logs')
+    await expect(node(page, 'Cinder', 'running')).toBeVisible()
+    await page.getByRole('button', { name: 'Choose date and time range', exact: true }).click()
+    await page.getByRole('dialog', { name: 'Date and time range', exact: true }).getByRole('button', { name: 'Apply', exact: true }).click()
+    await expect(node(page, 'Cinder', 'running')).toBeVisible()
+    fixture.emit({
+      sequence: 11,
+      occurred_at: startedAt + 301_000,
+      interaction_id: 'interaction-cinder',
+      run_id: 'run-interaction-cinder',
+      rejection_id: null,
+      kind: 'client_visible_content_delta',
+      payload: { text: ' Historical chain advanced' },
+    })
+    await expect(node(page, 'Cinder', 'running').locator('article')).toContainText('Historical chain advanced')
+    expect(fixture.detailRequests).toEqual([])
+    expect(Number(fixture.summaryRequests[0].searchParams.get('end_at'))).toBe(startedAt + 300_000)
+    await node(page, 'Cinder', 'running').getByRole('heading', { name: 'Cinder', exact: true }).click()
+    const inspector = page.getByRole('complementary', { name: 'Observation details' })
+    await expect(inspector.getByRole('button', { name: 'This chain moved to a newer time page · Open latest', exact: true })).toBeVisible()
+    await expect(inspector.getByRole('log', { name: 'Conversation' })).toContainText('Historical chain advanced')
+    expect(fixture.detailRequests).toHaveLength(1)
+  })
+
+  test('a pending direct link cannot override a later canvas selection', async ({ page }) => {
+    const fixture = await installObservationFixture(page)
+    const release = fixture.holdNextRead('interaction-ember')
+    await page.goto('/logs?interaction=interaction-ember')
+    await expect.poll(() => fixture.detailRequests.length).toBe(1)
+    await node(page, 'Atlas', 'completed').getByRole('heading', { name: 'Atlas', exact: true }).click()
+    const inspector = page.getByRole('complementary', { name: 'Observation details' })
+    await expect(inspector.getByRole('log', { name: 'Conversation' })).toContainText('Atlas client-visible answer')
+    const response = page.waitForResponse((item) => new URL(item.url()).pathname === '/api/v1/observations/interactions/interaction-ember')
+    release()
+    await (await response).finished()
+    await expect(inspector.getByRole('heading', { name: 'Atlas', exact: true, level: 2 })).toBeVisible()
+    await expect(inspector.getByRole('log', { name: 'Conversation' })).toContainText('Atlas client-visible answer')
+  })
+
+  test('reset recovery refreshes an open conversation as well as the forest', async ({ page }) => {
+    const fixture = await installObservationFixture(page)
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    await page.goto('/logs?interaction=interaction-cinder')
+    const conversation = page.getByRole('complementary', { name: 'Observation details' }).getByRole('log', { name: 'Conversation' })
+    await expect(conversation).toContainText('Cinder client-visible answer')
+    fixture.emit({
+      sequence: 11,
+      occurred_at: startedAt + 299_000,
+      interaction_id: 'interaction-cinder',
+      run_id: 'run-interaction-cinder',
+      rejection_id: null,
+      kind: 'client_visible_content_delta',
+      payload: { text: ' Recovered after replay gap' },
+    })
+    fixture.reset()
+    await expect(conversation).toContainText('Recovered after replay gap')
+    await expect(node(page, 'Cinder', 'running').locator('article')).toContainText('Recovered after replay gap')
+    expect(fixture.detailRequests).toHaveLength(2)
+    expect(fixture.summaryRequests).toEqual([])
+  })
+
+  test('a failed summary leaves the stream cursor replayable and recovers the preview without details', async ({ page }) => {
+    const fixture = await installObservationFixture(page)
+    let attempts = 0
+    await page.route('**/api/v1/observations/interactions/interaction-cinder/summary?**', async (route) => {
+      attempts += 1
+      if (attempts === 1) await route.fulfill({ status: 503, json: { error: 'Summary unavailable' } })
+      else await route.fallback()
+    })
+    await page.goto('/logs')
+    await expect(node(page, 'Cinder', 'running')).toBeVisible()
+    fixture.emit({
+      sequence: 11,
+      occurred_at: startedAt + 299_000,
+      interaction_id: 'interaction-cinder',
+      run_id: 'run-interaction-cinder',
+      rejection_id: null,
+      kind: 'client_visible_content_delta',
+      payload: { text: ' Replayed summary answer' },
+    })
+    await expect(node(page, 'Cinder', 'running').locator('article')).toContainText('Replayed summary answer')
+    expect(attempts).toBe(2)
+    expect(fixture.detailRequests).toEqual([])
   })
 
   test('fills remaining window space in both tabs and scrolls rejected requests only inside the list', async ({
@@ -507,8 +974,7 @@ test.describe('Interaction Observation canvas', () => {
     await expect(diagnostics.getByText('run-interaction-cinder', { exact: true })).toBeVisible()
     await inspector.getByRole('tab', { name: 'Conversation', exact: true }).click()
     await expect(inspector.getByRole('log', { name: 'Conversation' })).toContainText('Cinder client-visible answer')
-    await inspector.getByRole('tab', { name: 'Debug records', exact: true }).click()
-    await expect(inspector.getByText('retained diagnostic record', { exact: false })).toBeVisible()
+    await expect(inspector.getByRole('tab')).toHaveText(['Conversation', 'Diagnostics'])
     await diagnosticsTab.click()
     await expect(rawButtons).toHaveCount(6)
 
@@ -692,26 +1158,13 @@ test.describe('Interaction Observation canvas', () => {
   })
 
   for (const captureDebug of [false, true]) {
-    test(`expands ${captureDebug ? 'legacy Debug' : 'ordinary'} thinking and tool details without storing content`, async ({
+    test(`expands ordinary thinking and tool details with Debug ${captureDebug ? 'on' : 'off'} without storing content`, async ({
       page,
     }) => {
       let completed = false
       const fixture = await installObservationFixture(page, false, captureDebug, false, (detail) => {
         if (detail.interaction.id !== 'interaction-cinder') return
         const parent = detail.runs[0]
-        const trace = (runId: string, sequence: number, stage: string, payload: unknown) => ({
-          schema_version: 1,
-          sequence,
-          recorded_at: startedAt + 299_000 + sequence,
-          interaction_id: detail.interaction.id,
-          run_id: runId,
-          model_turn_id: 'activity-turn',
-          attempt_id: stage === 'canonical_delta' ? 'activity-attempt' : null,
-          layer: 'canonical',
-          payload_encoding: 'json',
-          stage,
-          payload,
-        })
         parent.status = 'waiting_client'
         parent.finished_at = startedAt + 299_005
         parent.events = [
@@ -726,33 +1179,9 @@ test.describe('Interaction Observation canvas', () => {
             payload: {
               tool_id: 'call-bash',
               name: 'Bash',
-              ...(!captureDebug ? { input: { command: 'printf "tool-output-sentinel"' } } : {}),
+              input: { command: 'printf "tool-output-sentinel"' },
             },
           },
-        ]
-        parent.debug_events = [
-          trace(parent.id, 1, 'canonical_delta', { kind: 'thinking_delta', data: 'Inspect the environment. ' }),
-          trace(parent.id, 2, 'canonical_delta', { kind: 'thinking_delta', data: 'Then run the command.' }),
-          trace(parent.id, 3, 'response_after_hook', {
-            items: [
-              {
-                role: 'assistant',
-                content: [
-                  {
-                    type: 'thinking',
-                    thinking: 'Inspect the environment. Then run the command.',
-                    signature: 'opaque-signature-sentinel',
-                  },
-                  {
-                    type: 'tool_use',
-                    id: 'call-bash',
-                    name: 'Bash',
-                    input: { command: 'printf "tool-output-sentinel"' },
-                  },
-                ],
-              },
-            ],
-          }),
         ]
         const ordinary = (sequence: number, kind: string, payload: unknown, runId = parent.id): ObservationEvent => ({
           sequence,
@@ -763,45 +1192,41 @@ test.describe('Interaction Observation canvas', () => {
           rejection_id: null,
           occurred_at: startedAt + 299_000 + sequence,
         })
-        if (!captureDebug) {
-          parent.debug_events = []
+        parent.events.push(
+          ordinary(1, 'model_thinking_delta', {
+            model_turn_id: 'activity-turn',
+            attempt_id: 'activity-attempt',
+            text: 'Inspect the environment. ',
+          }),
+          ordinary(2, 'model_thinking_delta', {
+            model_turn_id: 'activity-turn',
+            attempt_id: 'activity-attempt',
+            text: 'Then run the command.',
+          }),
+        )
+        if (completed)
           parent.events.push(
-            ordinary(1, 'model_thinking_delta', {
+            ordinary(13, 'model_thinking_finished', {
               model_turn_id: 'activity-turn',
               attempt_id: 'activity-attempt',
-              text: 'Inspect the environment. ',
             }),
-            ordinary(2, 'model_thinking_delta', {
+            ordinary(14, 'platform_tool_started', {
               model_turn_id: 'activity-turn',
-              attempt_id: 'activity-attempt',
-              text: 'Then run the command.',
+              tool_id: 'call-search',
+              name: 'Web search',
+              input: { query: 'fixture' },
+            }),
+            ordinary(15, 'platform_tool_finished', {
+              model_turn_id: 'activity-turn',
+              tool_id: 'call-search',
+              status: 'completed',
+              content: { answer: 'platform-output-sentinel' },
             }),
           )
-          if (completed)
-            parent.events.push(
-              ordinary(3, 'model_thinking_finished', {
-                model_turn_id: 'activity-turn',
-                attempt_id: 'activity-attempt',
-              }),
-              ordinary(4, 'platform_tool_started', {
-                model_turn_id: 'activity-turn',
-                tool_id: 'call-search',
-                name: 'Web search',
-                input: { query: 'fixture' },
-              }),
-              ordinary(5, 'platform_tool_finished', {
-                model_turn_id: 'activity-turn',
-                tool_id: 'call-search',
-                status: 'completed',
-                content: { answer: 'platform-output-sentinel' },
-              }),
-            )
-        }
         if (!completed) {
           parent.status = 'running'
           parent.finished_at = null
           parent.events = parent.events.filter((event) => event.kind !== 'client_tool_handoff')
-          parent.debug_events = parent.debug_events.slice(0, 2)
           return
         }
         const childId = 'run-cinder-tool-return'
@@ -813,39 +1238,18 @@ test.describe('Interaction Observation canvas', () => {
           started_at: startedAt + 299_006,
           status: 'running',
           finished_at: null,
-          events: captureDebug
-            ? []
-            : [
-                ordinary(
-                  6,
-                  'client_tool_result',
-                  { tool_id: 'call-bash', content: 'tool-output-sentinel\n', is_error: false },
-                  childId,
-                ),
-              ],
-          debug_events: captureDebug
-            ? [
-                trace(childId, 6, 'decoded_request', {
-                  items: [
-                    {
-                      role: 'user',
-                      content: [
-                        {
-                          type: 'tool_result',
-                          tool_use_id: 'call-bash',
-                          content: 'tool-output-sentinel\n',
-                          is_error: false,
-                        },
-                      ],
-                    },
-                  ],
-                }),
-              ]
-            : [],
+          events: [
+            ordinary(
+              16,
+              'client_tool_result',
+              { tool_id: 'call-bash', content: 'tool-output-sentinel\n', is_error: false },
+              childId,
+            ),
+          ],
         })
       })
       await page.goto('/logs?interaction=interaction-cinder')
-      if (!captureDebug) await expect(page.getByRole('tab', { name: 'Debug records', exact: true })).toHaveCount(0)
+      await expect(page.getByRole('tab', { name: 'Debug records', exact: true })).toHaveCount(0)
       const conversation = page.getByRole('log', { name: 'Conversation' })
       const thinking = conversation.getByRole('button', { name: /^Thinking(?:…)?$/ })
       const tool = conversation.getByRole('button', { name: 'Tool call Bash', exact: true })
@@ -867,8 +1271,8 @@ test.describe('Interaction Observation canvas', () => {
         interaction_id: 'interaction-cinder',
         run_id: 'run-interaction-cinder',
         rejection_id: null,
-        kind: captureDebug ? 'checkpoint' : 'model_thinking_finished',
-        payload: { stage: 'response_after_hook', model_turn_id: 'activity-turn', attempt_id: 'activity-attempt' },
+        kind: 'model_thinking_finished',
+        payload: { model_turn_id: 'activity-turn', attempt_id: 'activity-attempt' },
       })
       await expect(thinking).toHaveAccessibleName('Thinking')
       await expect(thinking).toHaveAttribute('aria-expanded', 'true')
@@ -877,19 +1281,16 @@ test.describe('Interaction Observation canvas', () => {
       const responseTime = conversation.getByRole('article', { name: 'Cinder', exact: true }).locator('time')
       await expect(responseTime).toHaveCount(1)
       await expect(responseTime).toHaveAttribute('datetime', new Date(startedAt + 299_006).toISOString())
-      expect(await page.evaluate(() => document.body.innerText)).not.toContain('opaque-signature-sentinel')
       await tool.press('Enter')
       await expect(conversation.getByRole('heading', { name: 'Tool input', exact: true })).toBeVisible()
       await expect(conversation.getByText('Client result', { exact: true })).toBeVisible()
       await expect(conversation.getByText(/printf/)).toBeVisible()
       await expect(conversation.getByText('tool-output-sentinel', { exact: true })).toBeVisible()
-      if (!captureDebug) {
-        const platform = conversation.getByRole('button', { name: 'Tool call Web search', exact: true })
-        await expect(platform).toHaveAttribute('aria-expanded', 'false')
-        await platform.press('Enter')
-        await expect(conversation.getByText('Tool result', { exact: true })).toBeVisible()
-        await expect(conversation.getByText(/platform-output-sentinel/)).toBeVisible()
-      }
+      const platform = conversation.getByRole('button', { name: 'Tool call Web search', exact: true })
+      await expect(platform).toHaveAttribute('aria-expanded', 'false')
+      await platform.press('Enter')
+      await expect(conversation.getByText('Tool result', { exact: true })).toBeVisible()
+      await expect(conversation.getByText(/platform-output-sentinel/)).toBeVisible()
       await thinking.click()
       await expect(thinking).toHaveAttribute('aria-expanded', 'false')
       await page.reload()
@@ -1165,7 +1566,9 @@ test.describe('Interaction Observation canvas', () => {
     await page.goto('/logs')
     await node(page, 'Atlas', 'completed').getByRole('heading', { name: 'Atlas', exact: true }).click()
     const download = page.waitForEvent('download')
+    const ticketRequest = page.waitForRequest((request) => request.url().endsWith('/interaction-atlas/debug-bundle-tickets'))
     await page.getByRole('button', { name: 'Debug bundle', exact: true }).click()
+    expect((await ticketRequest).postDataJSON()).toEqual({})
     const completed = await download
     expect(completed.suggestedFilename()).toBe('observation.zip')
     expect(await completed.failure()).toBeNull()
@@ -1287,6 +1690,20 @@ test.describe('Interaction Observation canvas', () => {
     await expect(node(page, 'Atlas', 'completed').locator('article')).toHaveCSS('opacity', '1')
     await expect(node(page, 'Boreal', 'waiting_client').locator('article')).toHaveCSS('opacity', '0.42')
     await expect(node(page, 'Cinder', 'running').locator('article')).toHaveCSS('opacity', '0.42')
+    fixture.emit({
+      sequence: 12,
+      occurred_at: startedAt + 299_100,
+      interaction_id: 'interaction-cinder',
+      run_id: 'run-interaction-cinder',
+      rejection_id: null,
+      kind: 'delivery_terminal',
+      payload: { delivered: true },
+    }, 'Completed through a filtered summary')
+    await expect(node(page, 'Cinder', 'completed').locator('article')).toContainText('Completed through a filtered summary')
+    await expect(node(page, 'Cinder', 'completed').locator('article')).toHaveCSS('opacity', '1')
+    await expect(node(page, 'Boreal', 'waiting_client')).toBeVisible()
+    expect(fixture.summaryRequests.at(-1)?.searchParams.get('status')).toBe('completed')
+    expect(fixture.detailRequests).toHaveLength(1)
 
     expect(
       fixture.forestRequests.every((url) => url.searchParams.has('start_at') && url.searchParams.has('end_at')),
@@ -1405,20 +1822,20 @@ test.describe('Interaction Observation canvas', () => {
     await selectedNode.focus()
     await selectedNode.press('Enter')
     const desktop = page.getByRole('complementary', { name: 'Observation details' })
-    await desktop.getByRole('tab', { name: 'Debug records' }).click()
-    await expect(desktop.getByText('retained diagnostic record', { exact: false })).toBeVisible()
+    await desktop.getByRole('tab', { name: 'Diagnostics' }).click()
+    await expect(desktop.getByRole('tabpanel', { name: 'Diagnostics', exact: true })).toBeVisible()
 
     await page.setViewportSize({ width: 390, height: 740 })
     const mobile = page.getByRole('dialog', { name: 'Observation details' })
     await expect(mobile.getByRole('heading', { name: 'Atlas', exact: true, level: 2 })).toBeVisible()
-    await expect(mobile.getByRole('tab', { name: 'Debug records' })).toHaveAttribute('aria-selected', 'true')
-    await expect(mobile.getByText('retained diagnostic record', { exact: false })).toBeVisible()
+    await expect(mobile.getByRole('tab', { name: 'Diagnostics' })).toHaveAttribute('aria-selected', 'true')
+    await expect(mobile.getByRole('tabpanel', { name: 'Diagnostics', exact: true })).toBeVisible()
     await expect(desktop).toBeHidden()
 
     await page.setViewportSize({ width: 1280, height: 800 })
     await expect(desktop.getByRole('heading', { name: 'Atlas', exact: true, level: 2 })).toBeVisible()
-    await expect(desktop.getByRole('tab', { name: 'Debug records' })).toHaveAttribute('aria-selected', 'true')
-    await expect(desktop.getByText('retained diagnostic record', { exact: false })).toBeVisible()
+    await expect(desktop.getByRole('tab', { name: 'Diagnostics' })).toHaveAttribute('aria-selected', 'true')
+    await expect(desktop.getByRole('tabpanel', { name: 'Diagnostics', exact: true })).toBeVisible()
     await expect(mobile).toBeHidden()
     await desktop.getByRole('button', { name: 'Close', exact: true }).click()
     await expect(selectedNode).toBeFocused()

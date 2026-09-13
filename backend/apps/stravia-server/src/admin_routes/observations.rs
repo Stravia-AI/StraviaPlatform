@@ -10,8 +10,8 @@ use futures::StreamExt;
 use serde::Deserialize;
 use stravia_core::Gateway;
 use stravia_core::admin::{
-    BundleRequest, BundleResourceKind, ForestQuery, ObservationQueryError, ObservationUpdate,
-    RejectionQuery,
+    BundleRequest, BundleResourceKind, ForestQuery, InteractionEventsQuery, ObservationQueryError,
+    ObservationUpdate, RejectionQuery,
 };
 
 #[derive(Debug, Deserialize)]
@@ -42,12 +42,44 @@ pub(super) async fn interaction_forest(
     }
 }
 
+pub(super) async fn interaction_summary(
+    State(gateway): State<Gateway>,
+    Path(id): Path<String>,
+    Query(filters): Query<ForestQuery>,
+) -> Response {
+    match gateway
+        .admin()
+        .observation_interaction_summary(&id, filters)
+        .await
+    {
+        Ok(Some(data)) => Json(serde_json::json!({ "data": data })).into_response(),
+        Ok(None) => not_found(),
+        Err(error) => observation_query_error(error),
+    }
+}
+
 pub(super) async fn interaction_detail(
     State(gateway): State<Gateway>,
     Path(id): Path<String>,
     Query(filters): Query<ForestQuery>,
 ) -> Response {
     match gateway.admin().observation_interaction(&id, filters).await {
+        Ok(Some(data)) => Json(serde_json::json!({ "data": data })).into_response(),
+        Ok(None) => not_found(),
+        Err(error) => observation_query_error(error),
+    }
+}
+
+pub(super) async fn interaction_events(
+    State(gateway): State<Gateway>,
+    Path(id): Path<String>,
+    Query(query): Query<InteractionEventsQuery>,
+) -> Response {
+    match gateway
+        .admin()
+        .observation_interaction_events(&id, query)
+        .await
+    {
         Ok(Some(data)) => Json(serde_json::json!({ "data": data })).into_response(),
         Ok(None) => not_found(),
         Err(error) => observation_query_error(error),
@@ -90,6 +122,15 @@ pub(super) async fn observation_events(
                     .data(
                         serde_json::to_string(&observation).expect("ObservationEvent serializes"),
                     ),
+                ObservationUpdate::LiveContent(block) => Event::default()
+                    .event("live_content")
+                    .data(serde_json::to_string(&block).expect("LiveContentBlock serializes")),
+                ObservationUpdate::LiveSnapshot { blocks } => Event::default()
+                    .event("live_snapshot")
+                    .data(serde_json::json!({ "blocks": blocks }).to_string()),
+                ObservationUpdate::LiveGap { interaction_id, run_id, reason } => Event::default()
+                    .event("live_gap")
+                    .data(serde_json::json!({ "interaction_id": interaction_id, "run_id": run_id, "reason": reason }).to_string()),
                 ObservationUpdate::ResetRequired { snapshot_sequence } => {
                     Event::default().event("reset_required").data(
                         serde_json::json!({
@@ -247,7 +288,7 @@ fn observation_query_error(error: anyhow::Error) -> Response {
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
                 "error": error.to_string(),
-                "code": "invalid_observation_window",
+                "code": if matches!(error, ObservationQueryError::InvalidEventPage) { "invalid_observation_event_page" } else { "invalid_observation_window" },
             })),
         )
             .into_response();

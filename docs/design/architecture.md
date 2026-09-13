@@ -888,7 +888,7 @@ Canonical Model 只用作一次性模板：创建 Route 时，客户端请求使
 | PostgreSQL | Server 自托管实例 | `backend/crates/stravia-core/src/storage/postgres/` |
 | Memory | 测试 / mock | `backend/crates/stravia-core/src/storage/memory.rs` |
 
-统一接口定义在 `backend/crates/stravia-core/src/storage/traits.rs`，上层代码不感知具体后端。
+统一接口定义在 `backend/crates/stravia-core/src/storage/traits.rs`，上层代码不感知具体后端。`stravia-tools dump-schema` 在隔离数据库应用全部迁移后生成 PostgreSQL 与 SQLite 的最终结构，参考产物分别位于 `deploy/schema/postgres.sql`、`deploy/schema/sqlite.sql`，不包含业务数据或 SQLx 迁移历史。
 SQLite 与 PostgreSQL 通过 SQLx versioned migrations 演进。Server 未配置时先提供设置服务，选择并保存数据库配置后才运行 migration 和正常 Gateway；Desktop 直接打开本地 SQLite。当前受支持 schema 的增量迁移保留业务数据，不兼容 schema 明确失败且不自动清空。权威 Schema 文档为 [docs/database/schema.md](../database/schema.md)（含供审阅的 `deploy/schema/postgres.sql`）。
 
 ### 10.2 核心表结构（最终态，post-migration）

@@ -347,10 +347,39 @@ async fn platform_tool_roundtrip(websocket: bool, array_output: bool, debug: boo
             .all(|text| text == "Inspect the request and tool result.")
     );
     if debug {
-        let checkpoint = detail
-            .runs
+        use std::io::Read;
+
+        let ticket = gateway
+            .observation
+            .issue_bundle_ticket(crate::interaction_observation::BundleRequest {
+                kind: crate::interaction_observation::BundleResourceKind::Interaction,
+                resource_id: interaction_id.clone(),
+                through_sequence: None,
+            })
+            .await
+            .unwrap();
+        let token = ticket.download_url.rsplit('/').next().unwrap();
+        let mut stream = gateway
+            .observation
+            .consume_bundle_ticket(token)
+            .await
+            .unwrap();
+        let mut bytes = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            bytes.extend_from_slice(&chunk.unwrap());
+        }
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut records = Vec::<serde_json::Value>::new();
+        for index in 0..archive.len() {
+            let mut entry = archive.by_index(index).unwrap();
+            if entry.name().ends_with("/events.jsonl") {
+                let mut text = String::new();
+                entry.read_to_string(&mut text).unwrap();
+                records.extend(text.lines().map(|line| serde_json::from_str(line).unwrap()));
+            }
+        }
+        let checkpoint = records
             .iter()
-            .flat_map(|run| &run.debug_events)
             .find(|event| event["stage"] == "platform_tool_call")
             .expect("platform execution argument checkpoint");
         let recorded_arguments: serde_json::Value =
@@ -361,7 +390,7 @@ async fn platform_tool_roundtrip(websocket: bool, array_output: bool, debug: boo
             detail
                 .runs
                 .iter()
-                .all(|run| !run.debug_enabled && run.debug_events.is_empty())
+                .all(|run| !run.debug_enabled && run.trace.is_none())
         );
     }
     if array_output {

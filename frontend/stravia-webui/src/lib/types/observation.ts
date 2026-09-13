@@ -99,10 +99,41 @@ export interface RunDetail {
   usage: ConfirmedUsage
   events: ObservationEvent[]
   trace: TraceManifest | null
-  debug_events: unknown[]
+}
+
+export interface InteractionSnapshot {
+  interaction: InteractionSummary
+  root: ForestRoot
+  snapshot_sequence: number
+}
+
+export interface LiveContentBlock {
+  block_id: string
+  interaction_id: string
+  run_id: string
+  kind: string
+  model_turn_id: string | null
+  attempt_id: string | null
+  occurred_at: number
+  revision: number
+  text: string
+}
+
+export interface InteractionEventsQuery {
+  after_sequence?: number
+  before_sequence?: number
+  through_sequence?: number
+  limit?: number
+}
+
+export interface InteractionEventsPage {
+  runs: RunDetail[]
+  snapshot_sequence: number
+  next_cursor: number | null
 }
 
 export interface InteractionDetail {
+  older_events_cursor: number | null
   interaction: InteractionSummary
   root: ForestRoot
   runs: RunDetail[]
@@ -142,7 +173,6 @@ export interface RejectionDetail {
   rejection: RejectionSummary
   events: ObservationEvent[]
   trace: TraceManifest | null
-  debug_events: unknown[]
   snapshot_sequence: number
 }
 
@@ -176,4 +206,8 @@ export interface DownloadTicket {
 }
 
 export type ObservationStreamUpdate =
-  { type: 'event'; event: ObservationEvent } | { type: 'reset_required'; snapshot_sequence: number }
+  | { type: 'event'; event: ObservationEvent }
+  | { type: 'reset_required'; snapshot_sequence: number }
+  | { type: 'live_content'; block: LiveContentBlock }
+  | { type: 'live_snapshot'; blocks: LiveContentBlock[] }
+  | { type: 'live_gap'; interaction_id: string; run_id: string; reason: string }

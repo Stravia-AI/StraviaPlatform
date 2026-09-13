@@ -1,5 +1,7 @@
 mod bundle;
+mod codec;
 mod grouping;
+mod live;
 mod query;
 pub(crate) mod redaction;
 mod retention;
@@ -18,7 +20,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering},
     },
 };
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -41,6 +43,8 @@ struct Inner {
     writer: mpsc::Sender<WriterCommand>,
     writer_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     updates: broadcast::Sender<ObservationUpdate>,
+    live_content: Arc<live::LiveState>,
+    trace_sequence: Arc<AtomicI64>,
     debug: AtomicBool,
     retention_days: Arc<AtomicU32>,
     traces: TraceManager,
@@ -122,7 +126,15 @@ impl InteractionObservation {
             // 数据库不可读不等于没有保留记录，不能据此删除诊断文件。
             Err(_) => tracing::warn!("trace manifest reconciliation unavailable"),
         }
+        let trace_sequence = Arc::new(AtomicI64::new(match store.max_sequence().await {
+            Ok(sequence) => sequence,
+            Err(_) => {
+                tracing::warn!("observation sequence recovery unavailable");
+                0
+            }
+        }));
         let (updates, _) = broadcast::channel(2048);
+        let live_content = Arc::new(live::LiveState::default());
         let retention_days = Arc::new(AtomicU32::new(retention_days));
         let (_, partial_count) = store.debug_manifest_counts().await.unwrap_or((0, 0));
         let active_traces = Arc::new(Mutex::new(HashMap::new()));
@@ -132,10 +144,12 @@ impl InteractionObservation {
             store.clone(),
             Arc::clone(&retention_days),
             updates.clone(),
+            Arc::clone(&trace_sequence),
             traces.clone(),
             Arc::clone(&active_traces),
             Arc::clone(&partial_trace_count),
             Arc::clone(&unpersisted_gaps),
+            Arc::clone(&live_content),
         );
         Self {
             inner: Arc::new(Inner {
@@ -143,6 +157,8 @@ impl InteractionObservation {
                 writer,
                 writer_task: Mutex::new(Some(task)),
                 updates,
+                live_content,
+                trace_sequence,
                 debug: AtomicBool::new(false),
                 retention_days,
                 traces,
@@ -177,44 +193,26 @@ impl InteractionObservation {
     pub(crate) async fn query_forest(&self, q: ForestQuery) -> anyhow::Result<ForestPage> {
         self.inner.store.query_forest(q).await
     }
+    pub(crate) async fn get_interaction_summary(
+        &self,
+        id: &str,
+        filters: ForestQuery,
+    ) -> anyhow::Result<Option<InteractionSnapshot>> {
+        self.inner.store.get_interaction_summary(id, filters).await
+    }
     pub(crate) async fn get_interaction(
         &self,
         id: &str,
         filters: ForestQuery,
     ) -> anyhow::Result<Option<InteractionDetail>> {
-        self.flush().await?;
-        let Some(mut detail) = self.inner.store.get_interaction(id, filters).await? else {
-            return Ok(None);
-        };
-        for run in &mut detail.runs {
-            if !run.debug_enabled {
-                continue;
-            }
-            let active = {
-                self.inner
-                    .active_traces
-                    .lock()
-                    .expect("trace registry")
-                    .get(&run.id)
-                    .cloned()
-            };
-            let snapshot = if let Some(handle) = active {
-                run.trace = Some(handle.manifest());
-                handle.snapshot(detail.snapshot_sequence).await.ok()
-            } else if let Some(manifest) = &run.trace {
-                self.inner
-                    .traces
-                    .snapshot(&manifest.trace_id, detail.snapshot_sequence)
-                    .await
-                    .ok()
-            } else {
-                None
-            };
-            if let Some(snapshot) = snapshot {
-                run.debug_events = load_trace_values(snapshot).await?;
-            }
-        }
-        Ok(Some(detail))
+        self.inner.store.get_interaction(id, filters).await
+    }
+    pub(crate) async fn get_interaction_events(
+        &self,
+        id: &str,
+        query: InteractionEventsQuery,
+    ) -> anyhow::Result<Option<InteractionEventsPage>> {
+        self.inner.store.get_interaction_events(id, query).await
     }
     pub(crate) async fn query_rejections(
         &self,
@@ -223,20 +221,7 @@ impl InteractionObservation {
         self.inner.store.query_rejections(q).await
     }
     pub(crate) async fn get_rejection(&self, id: &str) -> anyhow::Result<Option<RejectionDetail>> {
-        let Some(mut detail) = self.inner.store.get_rejection(id).await? else {
-            return Ok(None);
-        };
-        if let Some(manifest) = &detail.trace {
-            if let Ok(snapshot) = self
-                .inner
-                .traces
-                .snapshot(&manifest.trace_id, detail.snapshot_sequence)
-                .await
-            {
-                detail.debug_events = load_trace_values(snapshot).await?;
-            }
-        }
-        Ok(Some(detail))
+        self.inner.store.get_rejection(id).await
     }
     pub(crate) fn debug_state(&self) -> DebugState {
         let active_partial = self
@@ -354,6 +339,7 @@ impl InteractionObservation {
     }
     pub(crate) fn subscribe(&self, after: i64) -> ObservationStream {
         let store = self.inner.store.clone();
+        let live_content = Arc::clone(&self.inner.live_content);
         let mut live = self.inner.updates.subscribe();
         let (tx, rx) = mpsc::channel(256);
         tokio::spawn(async move {
@@ -370,23 +356,22 @@ impl InteractionObservation {
                 return;
             }
             let mut last = after;
-            match store.replay(after).await {
-                Ok(events) => {
-                    for e in events {
-                        last = last.max(e.sequence);
-                        if tx.send(ObservationUpdate::Event(e)).await.is_err() {
-                            return;
-                        }
-                    }
-                }
-                Err(_) => {
-                    let _ = tx
-                        .send(ObservationUpdate::ResetRequired {
-                            snapshot_sequence: max,
-                        })
-                        .await;
-                    return;
-                }
+            if replay_to(&store, &tx, &mut last, max).await.is_err() {
+                let _ = tx
+                    .send(ObservationUpdate::ResetRequired {
+                        snapshot_sequence: max,
+                    })
+                    .await;
+                return;
+            }
+            if tx
+                .send(ObservationUpdate::LiveSnapshot {
+                    blocks: live_content.snapshot(),
+                })
+                .await
+                .is_err()
+            {
+                return;
             }
             loop {
                 match live.recv().await {
@@ -395,26 +380,20 @@ impl InteractionObservation {
                             continue;
                         }
                         if event.sequence > last.saturating_add(1) {
-                            match store.replay(last).await {
-                                Ok(events) => {
-                                    for event in events {
-                                        last = last.max(event.sequence);
-                                        if tx.send(ObservationUpdate::Event(event)).await.is_err() {
-                                            return;
-                                        }
-                                    }
-                                }
-                                Err(_) => {
-                                    let _ = tx
-                                        .send(ObservationUpdate::ResetRequired {
-                                            snapshot_sequence: store
-                                                .max_sequence()
-                                                .await
-                                                .unwrap_or(last),
-                                        })
-                                        .await;
-                                    return;
-                                }
+                            if replay_to(&store, &tx, &mut last, event.sequence)
+                                .await
+                                .is_err()
+                                || last < event.sequence
+                            {
+                                let _ = tx
+                                    .send(ObservationUpdate::ResetRequired {
+                                        snapshot_sequence: store
+                                            .max_sequence()
+                                            .await
+                                            .unwrap_or(last),
+                                    })
+                                    .await;
+                                return;
                             }
                             continue;
                         }
@@ -447,7 +426,20 @@ impl InteractionObservation {
         &self,
         request: BundleRequest,
     ) -> anyhow::Result<DownloadTicket> {
-        self.flush().await?;
+        if matches!(request.kind, BundleResourceKind::Interaction) {
+            let (done, receive) = oneshot::channel();
+            self.inner
+                .writer
+                .send(WriterCommand::FlushInteraction {
+                    interaction_id: request.resource_id.clone(),
+                    done,
+                })
+                .await
+                .map_err(|_| anyhow::anyhow!("observation writer unavailable"))?;
+            receive
+                .await
+                .map_err(|_| anyhow::anyhow!("observation writer unavailable"))?;
+        }
         let max = self.inner.store.max_sequence().await?;
         let through = request.through_sequence.unwrap_or(max).min(max);
         let exported_at = chrono::Utc::now().timestamp_millis();
@@ -456,7 +448,7 @@ impl InteractionObservation {
                 let detail = self
                     .inner
                     .store
-                    .get_interaction(&request.resource_id, ForestQuery::default())
+                    .get_interaction_for_bundle(&request.resource_id, through)
                     .await?
                     .ok_or_else(|| anyhow::anyhow!("interaction not found"))?;
                 let mut snapshot_events: Vec<ObservationEvent> = detail
@@ -677,6 +669,31 @@ impl InteractionObservation {
             let _ = tokio::fs::remove_dir_all(root).await;
         }
     }
+}
+
+async fn replay_to(
+    store: &ObservationStore,
+    sender: &mpsc::Sender<ObservationUpdate>,
+    last: &mut i64,
+    through: i64,
+) -> anyhow::Result<()> {
+    while *last < through {
+        let before = *last;
+        for event in store.replay(before).await? {
+            if event.sequence > through {
+                break;
+            }
+            *last = event.sequence;
+            sender
+                .send(ObservationUpdate::Event(event))
+                .await
+                .map_err(|_| anyhow::anyhow!("observation subscriber closed"))?;
+        }
+        if *last == before {
+            break;
+        }
+    }
+    Ok(())
 }
 
 pub(crate) struct IngressObserver {
@@ -931,9 +948,7 @@ impl RunObserver {
                 .lock()
                 .expect("tool result state"),
         );
-        for event in tool_results {
-            self.send_event(event);
-        }
+        self.send_tool_results(tool_results);
         let Some(text) = self
             .inner
             .pending_input
@@ -1135,7 +1150,40 @@ impl RunObserver {
             self.send_event(RunEvent::ClientVisibleContentDelta { text });
         }
     }
+    fn send_tool_results(&self, mut events: Vec<RunEvent>) {
+        if events.is_empty() {
+            return;
+        }
+        for event in &mut events {
+            self.inner.protected.event(event);
+            redaction::redact_run_event(event);
+        }
+        if self
+            .inner
+            .observation
+            .inner
+            .writer
+            .try_send(WriterCommand::ClientToolResults {
+                run_id: self.inner.run_id.clone(),
+                events,
+            })
+            .is_err()
+        {
+            self.inner.gap.store(true, Ordering::Release);
+            self.inner
+                .observation
+                .inner
+                .unpersisted_gaps
+                .lock()
+                .expect("observation gaps")
+                .record(&self.inner.run_id, writer::now());
+        }
+    }
     fn send_event(&self, mut event: RunEvent) {
+        if matches!(event, RunEvent::ClientToolResult { .. }) {
+            self.send_tool_results(vec![event]);
+            return;
+        }
         self.inner.protected.event(&mut event);
         redaction::redact_run_event(&mut event);
         if matches!(event, RunEvent::ObservationGap { .. }) {
@@ -1143,9 +1191,21 @@ impl RunObserver {
                 trace.mark_partial("observation_gap", false);
             }
         }
-        let trace = matches!(event, RunEvent::Checkpoint { .. } | RunEvent::Wire { .. })
-            .then(|| self.inner.trace.clone())
-            .flatten();
+        if matches!(event, RunEvent::Checkpoint { .. } | RunEvent::Wire { .. }) {
+            if let Some(trace) = &self.inner.trace {
+                // Trace owns its queue. The next durable observation boundary includes this
+                // record; already published snapshot cutoffs cannot include future capture.
+                let sequence = self
+                    .inner
+                    .observation
+                    .inner
+                    .trace_sequence
+                    .load(Ordering::Acquire)
+                    .saturating_add(1);
+                record_trace_at(trace, Some(&self.inner.run_id), None, event, sequence);
+            }
+            return;
+        }
         if self.inner.gap.swap(false, Ordering::AcqRel) {
             let _ = self
                 .inner
@@ -1157,7 +1217,6 @@ impl RunObserver {
                     event: RunEvent::ObservationGap {
                         reason: "writer_overflow".into(),
                     },
-                    trace: None,
                 });
         }
         if self
@@ -1168,7 +1227,6 @@ impl RunObserver {
             .try_send(WriterCommand::Event {
                 run_id: self.inner.run_id.clone(),
                 event,
-                trace,
             })
             .is_err()
         {
@@ -1244,7 +1302,6 @@ impl Drop for RunObserverInner {
                     .try_send(WriterCommand::Event {
                         run_id: self.run_id.clone(),
                         event,
-                        trace: None,
                     })
                     .is_err()
                 {
@@ -1265,7 +1322,6 @@ impl Drop for RunObserverInner {
                 .try_send(WriterCommand::Event {
                     run_id: self.run_id.clone(),
                     event: RunEvent::ClientVisibleContentDelta { text },
-                    trace: None,
                 })
                 .is_err()
             {
@@ -1630,6 +1686,200 @@ mod snapshot_tests {
     use serde_json::Value;
 
     use super::*;
+
+    #[tokio::test]
+    async fn committed_details_remain_readable_without_a_writer() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        crate::migrations::migrate_sqlite(&pool).await?;
+        let observation = InteractionObservation::new(
+            Some(pool.clone()),
+            None,
+            directory.path().to_owned(),
+            1,
+            true,
+        )
+        .await;
+        let observer = observation
+            .observe_ingress(IngressStart {
+                id: "read-only-ingress".into(),
+                method: "POST".into(),
+                path: "/responses".into(),
+                protocol: "responses".into(),
+            })
+            .admit(RunStart {
+                id: "read-only-run".into(),
+                principal: "test".into(),
+                api_key_id: None,
+                api_key_name: None,
+                generation_root_id: None,
+                generation_parent_id: None,
+                has_new_user: true,
+                has_matching_pending_tool_result: false,
+                ingress_received_at: 0,
+                canonical_fingerprint: "read-only".into(),
+                route_id: "route".into(),
+                model_display_name: None,
+                ingress_protocol: "responses".into(),
+            });
+        observer.record(RunEvent::ClientVisibleContentDelta {
+            text: "saved answer".into(),
+        });
+        drop(observer);
+        observation.shutdown().await;
+        sqlx::query("PRAGMA query_only=ON").execute(&pool).await?;
+        let id: String = sqlx::query_scalar(
+            "SELECT interaction_id FROM inference_run_observations WHERE id='read-only-run'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        let before = observation.inner.store.max_sequence().await?;
+        let detail = observation
+            .get_interaction(&id, ForestQuery::default())
+            .await?
+            .expect("committed interaction");
+        assert_eq!(detail.interaction.visible_tail, "saved answer");
+        let page = observation
+            .get_interaction_events(
+                &id,
+                InteractionEventsQuery {
+                    after_sequence: Some(0),
+                    ..Default::default()
+                },
+            )
+            .await?
+            .expect("committed events");
+        assert!(
+            page.runs
+                .iter()
+                .flat_map(|run| &run.events)
+                .any(|event| event.kind == "client_visible_content_delta"
+                    && event.payload["text"] == "saved answer")
+        );
+        assert_eq!(observation.inner.store.max_sequence().await?, before);
+        pool.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn trace_only_capture_flushes_at_durable_cutoffs_without_replay_gaps()
+    -> anyhow::Result<()> {
+        use tokio_stream::StreamExt;
+        let directory = tempfile::tempdir()?;
+        let pool = crate::db::init_pool(directory.path()).await?;
+        crate::migrations::migrate_sqlite(&pool).await?;
+        let observation = InteractionObservation::new(
+            Some(pool.clone()),
+            None,
+            directory.path().to_owned(),
+            1,
+            true,
+        )
+        .await;
+        for enabled in [true, false] {
+            observation.set_debug_enabled(enabled);
+            let run_id = format!("trace-{enabled}");
+            let observer = observation
+                .observe_ingress(IngressStart {
+                    id: format!("ingress-{enabled}"),
+                    method: "POST".into(),
+                    path: "/responses".into(),
+                    protocol: "responses".into(),
+                })
+                .admit(RunStart {
+                    id: run_id.clone(),
+                    principal: "test".into(),
+                    api_key_id: None,
+                    api_key_name: None,
+                    generation_root_id: None,
+                    generation_parent_id: None,
+                    has_new_user: true,
+                    has_matching_pending_tool_result: false,
+                    ingress_received_at: 0,
+                    canonical_fingerprint: run_id.clone(),
+                    route_id: "route".into(),
+                    model_display_name: None,
+                    ingress_protocol: "responses".into(),
+                });
+            observation.flush().await?;
+            let admitted = observation.inner.store.max_sequence().await?;
+            let checkpoint = |stage: &str| RunEvent::Checkpoint {
+                stage: stage.into(),
+                model_turn_id: None,
+                attempt_id: None,
+                payload: serde_json::json!({"stage":stage}),
+            };
+            observer.record(checkpoint("before-cutoff"));
+            observation.flush().await?;
+            let cutoff = observation.inner.store.max_sequence().await?;
+            observer.record(checkpoint("after-cutoff"));
+            let trace = observer.inner.trace.clone();
+            if let Some(trace) = &trace {
+                let old = load_trace_values(trace.snapshot(cutoff).await?).await?;
+                assert_eq!(
+                    old.iter()
+                        .filter_map(|record| record["stage"].as_str())
+                        .collect::<Vec<_>>(),
+                    ["before-cutoff"]
+                );
+                assert!(
+                    load_trace_values(trace.snapshot(admitted).await?)
+                        .await?
+                        .is_empty()
+                );
+            } else {
+                assert!(!enabled);
+                assert_eq!(cutoff, admitted);
+            }
+            drop(observer);
+            observation.flush().await?;
+            let terminal = observation.inner.store.max_sequence().await?;
+            if let Some(trace) = &trace {
+                let final_records = load_trace_values(trace.snapshot(terminal).await?).await?;
+                assert_eq!(
+                    final_records
+                        .iter()
+                        .filter_map(|record| record["stage"].as_str())
+                        .collect::<Vec<_>>(),
+                    ["before-cutoff", "after-cutoff"]
+                );
+                assert_eq!(trace.manifest().status, "complete");
+            }
+            let rows: Vec<(i64, String)> = sqlx::query_as(
+                "SELECT sequence,kind FROM observation_events WHERE sequence>? ORDER BY sequence",
+            )
+            .bind(admitted)
+            .fetch_all(&pool)
+            .await?;
+            assert!(
+                !rows
+                    .iter()
+                    .any(|(_, kind)| matches!(kind.as_str(), "wire" | "checkpoint"))
+            );
+            assert_eq!(
+                rows.iter()
+                    .map(|(sequence, _)| *sequence)
+                    .collect::<Vec<_>>(),
+                ((admitted + 1)..=terminal).collect::<Vec<_>>()
+            );
+            let mut replay = observation.subscribe(admitted);
+            for (sequence, kind) in rows {
+                let update = tokio::time::timeout(std::time::Duration::from_secs(2), replay.next())
+                    .await?
+                    .expect("persisted replay event");
+                let ObservationUpdate::Event(event) = update else {
+                    panic!("trace traffic must not cause a replay reset")
+                };
+                assert_eq!((event.sequence, event.kind), (sequence, kind));
+            }
+        }
+        observation.shutdown().await;
+        pool.close().await;
+        Ok(())
+    }
 
     #[tokio::test]
     async fn input_preview_is_nullable_and_owned_by_initial_run() -> anyhow::Result<()> {

@@ -2,13 +2,18 @@
 import * as m from '$lib/paraglide/messages.js'
 import { onDestroy } from 'svelte'
 import { MediaQuery } from 'svelte/reactivity'
-import type { InteractionDetail, RejectionDetail } from '$lib/types'
+import type { InteractionDetail, LiveContentBlock, RejectionDetail } from '$lib/types'
 import ObservationInspectorContent from '$lib/components/observation-inspector-content.svelte'
 import * as Sheet from '$lib/components/ui/sheet'
 
 interface Props {
   interaction?: InteractionDetail
   rejection?: RejectionDetail
+  liveBlocks?: LiveContentBlock[]
+  liveGap?: boolean
+  liveCapacity?: boolean
+  olderLoading?: boolean
+  onolder?: () => Promise<void>
   loading?: boolean
   width: number
   onwidthchange: (width: number) => void
@@ -21,6 +26,10 @@ interface Props {
 let {
   interaction,
   rejection,
+  liveBlocks = [],
+  liveGap = false, liveCapacity = false,
+  olderLoading = false,
+  onolder,
   loading = false,
   width,
   onwidthchange,
@@ -39,14 +48,6 @@ let stopResize: (() => void) | undefined
 $effect(() => {
   if (mobile.current) stopResize?.()
   else panel?.focus()
-})
-
-$effect(() => {
-  if (loading || activeTab !== 'debug') return
-  const hasDebug = interaction
-    ? interaction.runs.some((run) => run.debug_enabled)
-    : Boolean(rejection?.rejection.debug_enabled)
-  if (!hasDebug && activeTab === 'debug') activeTab = 'timeline'
 })
 
 onDestroy(() => {
@@ -97,7 +98,7 @@ function resizeWithKeyboard(event: KeyboardEvent): void {
 <svelte:window onkeydown={handleKey} />
 
 {#snippet content()}
-  <ObservationInspectorContent {interaction} {rejection} {loading} bind:activeTab {onclose} {onbundle} {onlatest} />
+  <ObservationInspectorContent {interaction} {rejection} {loading} {liveBlocks} {liveGap} {liveCapacity} {olderLoading} {onolder} bind:activeTab {onclose} {onbundle} {onlatest} />
 {/snippet}
 
 {#if mobile.current}

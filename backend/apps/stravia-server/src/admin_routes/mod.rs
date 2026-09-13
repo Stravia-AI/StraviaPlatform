@@ -218,6 +218,14 @@ fn create_router_inner(gateway: Gateway, auth: Option<AdminHttpState>) -> Router
         )
         .route("/observations/interactions", get(interaction_forest))
         .route("/observations/interactions/{id}", get(interaction_detail))
+        .route(
+            "/observations/interactions/{id}/events",
+            get(interaction_events),
+        )
+        .route(
+            "/observations/interactions/{id}/summary",
+            get(interaction_summary),
+        )
         .route("/observations/rejections", get(rejection_list))
         .route("/observations/rejections/{id}", get(rejection_detail))
         .route("/observations/events", get(observation_events))

@@ -2,8 +2,18 @@
 
 ## Unreleased
 
+### Changed
+
+- Observation canvases no longer mount every new card at the origin for measurement. Shared node and handle geometry enables viewport culling before the first mount; unchanged nodes retain their identity, and long-chain ancestry checks reuse traversed prefixes without changing causal links.
+
+- Streaming Observation now seals immutable text blocks at 16 KiB or approximately two seconds, batches event and summary writes, and compresses new blocks only when storage decreases. Existing rows remain unchanged. The inspector separates unsaved live previews from committed history, loads events incrementally, and pages older records. Ordinary detail reads no longer flush writers; Debug Bundle issuance flushes only the selected Interaction before fixing its complete snapshot. A process crash may lose pending observation text from the normal two-second window.
+
+- Live observation canvases load summary-only interaction/root snapshots and fetch ordinary Run details only for the selected inspector. Context links use bounded batch queries and migration 42's equivalent SQLite/PostgreSQL partial indexes; filters, complete causal roots, and fixed time windows retain their existing semantics.
+- Debug Wire and canonical checkpoints now enter Trace directly instead of adding an ordinary observation row per record. Four-direction ZIP capture, manifest updates, SSE replay, and fixed snapshot cutoffs remain available. Existing history is not rewritten or deleted.
+
 ### Fixed
 
+- Client-tool observations deduplicate replayed results only within a proven call boundary and retained, same-principal Run ancestry, comparing redacted contents and error state. New handoffs, sibling branches, changed results, and missing/null result boundaries remain distinct; migration 43 adds lookup indexes without copying stored bodies. Late inspector responses can no longer restore a closed or replaced selection.
 - Generation history discovery now ignores application and internal tracking metadata while preserving complete message semantics, tool-result associations, protected reasoning, and unclassified protocol extensions. Startup rebuilds older derived prefix indexes without rewriting original history or parent links.
 - Interaction Observation keeps exact pending-tool continuations in the same Interaction even when they include user reminders, without a time limit. Exact follow-ups received within two seconds of the parent response's complete delivery also stay together and can reactivate a completed Interaction; this diagnostic rule includes fast human follow-ups and does not alter model input or execution. Grouping reasons and immutable delivery timestamps survive observation delays and restarts.
 

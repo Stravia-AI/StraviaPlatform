@@ -8960,11 +8960,13 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sqlx",
  "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "url",
+ "urlencoding",
  "walkdir",
 ]
 

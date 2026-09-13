@@ -19,7 +19,7 @@ import time
 
 import pytest
 
-from tests.common.helpers import http_request
+from tests.common.helpers import download_observation_bundle, http_request, observation_bundle_events
 from tests.e2e.proxy.conftest import (
     STRAVIA_BASE_URL_PATH,
     PROTOCOLS,
@@ -231,7 +231,7 @@ def test_protocol_matrix(
                 and candidate["runs"][-1]["ingress_protocol"]
                 == OBSERVED_INGRESS_PROTOCOL[ingress_protocol]
                 and candidate["runs"][-1]["status"] != "running"
-                and candidate["runs"][-1]["debug_events"]
+                and (candidate["runs"][-1].get("trace") or {}).get("status") == "complete"
             ):
                 observed = candidate
                 break
@@ -246,7 +246,11 @@ def test_protocol_matrix(
     assert kinds.index("target_attempt_finished") < kinds.index("run_finished")
     assert run["client_output_committed"] is True
 
-    trace = run["debug_events"]
+    _, _, archive = download_observation_bundle(
+        {"admin": proxy_base, "auth": admin_headers}, observed,
+    )
+    # 入站抓包发生在 Run 准入之前，事件自身尚无 run_id；归属由 ZIP 的 Run 目录确定。
+    trace = observation_bundle_events(archive, run_id=run["id"])
     directions = {event.get("direction") for event in trace if isinstance(event, dict)}
     assert {
         "client_to_platform",

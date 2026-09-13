@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { observationConversationMessages } from '../src/lib/observation-conversation'
-import type { InteractionDetail, ObservationEvent, RunDetail } from '../src/lib/types/observation'
+import { mergeObservationRuns, retainLiveBlocks, withoutCommittedBlocks } from '../src/lib/observation-state'
+import type { InteractionDetail, LiveContentBlock, ObservationEvent, RunDetail } from '../src/lib/types/observation'
 
 const usage = {
   input_tokens: null,
@@ -39,7 +40,6 @@ function run(id: string, startedAt: number, events: ObservationEvent[]): RunDeta
     usage,
     events,
     trace: null,
-    debug_events: [{ content: 'private Debug payload' }],
   }
 }
 function detail(runs: RunDetail[], tail = ''): InteractionDetail {
@@ -67,11 +67,51 @@ function detail(runs: RunDetail[], tail = ''): InteractionDetail {
     root: { id: 'root', last_active_at: 10, interactions: [interaction] },
     runs,
     snapshot_sequence: 10,
+    older_events_cursor: null,
   }
 }
 
 describe('observation conversation', () => {
-  test('shows the user once and orders delivered text without exposing tool or Debug payloads', () => {
+  test('prepending and replaying overlapping event pages preserves causal text and existing messages', () => {
+    const first = run('first', 1, [event('first', 2, 'client_visible_content_delta', { text: 'Unchanged' })])
+    const latest = run('latest', 2, [event('latest', 5, 'client_visible_content_delta', { text: 'B' })])
+    const current = detail([first, latest])
+    const before = observationConversationMessages(current)
+    const older = { ...latest, events: [event('latest', 4, 'client_visible_content_delta', { text: 'A' }), latest.events[0]] }
+    const merged = mergeObservationRuns(current.runs, [older], true)
+    const replay = mergeObservationRuns(merged, [older], true)
+    const after = observationConversationMessages({ ...current, runs: replay }, [], before)
+    expect(after.map((message) => message.text)).toEqual(['Actual user question', 'Unchanged', 'AB'])
+    expect(after[1]).toBe(before[1])
+    expect(replay[0]).toBe(first)
+    expect(replay[1]).toBe(merged[1])
+  })
+
+  test('live blocks extend one Markdown message and commit removes only the matching overlay', () => {
+    const current = detail([run('first', 1, [event('first', 1, 'client_visible_content_delta', { text: '| A | B |\\n' })])])
+    const block: LiveContentBlock = { block_id: 'block-a', interaction_id: 'interaction', run_id: 'first', kind: 'client_visible_content_delta', model_turn_id: 'turn', attempt_id: 'attempt', occurred_at: 2, revision: 1, text: '|---|---|\\n| one | two |' }
+    const live = observationConversationMessages(current, [block])
+    expect(live[1].text).toBe('| A | B |\\n|---|---|\\n| one | two |')
+    expect(live[1].unsaved).toBe(true)
+    const committed = { ...current, runs: mergeObservationRuns(current.runs, [{ ...current.runs[0], events: [event('first', 2, block.kind, { text: block.text, block_id: block.block_id })] }]) }
+    const after = observationConversationMessages(committed, withoutCommittedBlocks([block], committed), live)
+    expect(after[1].text).toBe(live[1].text)
+    expect(after[1].unsaved).toBe(false)
+    expect(observationConversationMessages(current, [])[1].text).toBe('| A | B |\\n')
+  })
+
+  test('a bounded latest page never substitutes the full interaction tail', () => {
+    const current = { ...detail([run('latest', 2, [])], 'Unloaded historical output'), older_events_cursor: 50 }
+    expect(observationConversationMessages(current)[1].text).toBe('')
+  })
+
+  test('background live memory is bounded independently from the selected interaction', () => {
+    const blocks: LiveContentBlock[] = Array.from({ length: 100 }, (_, index) => ({ block_id: String(index), interaction_id: index === 0 ? 'selected' : 'background', run_id: String(index), kind: 'client_visible_content_delta', model_turn_id: null, attempt_id: null, occurred_at: index, revision: 1, text: 'x'.repeat(16_384) }))
+    const retained = retainLiveBlocks(blocks, 'selected')
+    expect(retained.find((block) => block.interaction_id === 'selected')).toBe(blocks[0])
+    expect(retained.filter((block) => block.interaction_id !== 'selected').reduce((bytes, block) => bytes + block.text.length * 2, 0)).toBeLessThanOrEqual(256 * 1024)
+  })
+  test('shows the user once and orders delivered text without exposing tool or checkpoint payloads', () => {
     const messages = observationConversationMessages(
       detail(
         [
