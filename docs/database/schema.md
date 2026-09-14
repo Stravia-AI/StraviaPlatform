@@ -21,7 +21,7 @@ reversible_redaction_mappings (principal-scoped persistent secret placeholders)
 agent_definition_revisions ──1:1── agent_definition_configs
 artifacts ──1:0..1── artifact_uploads ──1:N── artifact_upload_parts
     ├──1:N── artifact_download_grants
-    └──1:0..1── media_derivatives ──1:1── artifacts (JPEG derivative)
+    └──1:0..1── media_derivatives ──N:1── artifacts (JPEG derivative)
 admin_identity ──1:N── admin_sessions
 settings (key-value, including Web Access and revisioned Web Search configuration)
 ```
@@ -629,15 +629,15 @@ Interning serializes lookup and insertion within a database transaction (SQLite 
 
 ## artifacts
 
-API key principal-scoped 的不可变媒体／文件对象。上传完成前为 `staging`，完成后为 `ready`；公共稳定引用为 `https://stravia/artifact/<id>`，内部 Agent input 使用 opaque `ArtifactId`。引用不授予访问权。逻辑过期不能复活；已开始的读取与未过期下载授权只保护物理内容，不延长逻辑保留期。
+API key principal-scoped 的不可变媒体／文件对象。上传完成前使用内部随机身份，状态为 `staging`；完成时按 Principal、声明 MIME 与全部字节发布稳定内容身份，状态为 `ready`。公共稳定引用为 `https://stravia/artifact/<id>`，内部 Agent input 使用 opaque `ArtifactId`；引用不授予访问权。重复完整收存只延长、不缩短已有期限，过期内容须重新完整上传并校验才能再次保留；已开始的读取与未过期下载授权只保护物理内容，不延长逻辑保留期。
 
 | Column | Type | Default | Description |
 |---|---|---|---|
-| `id` | TEXT PK | — | opaque Artifact ID |
+| `id` | TEXT PK | — | opaque Artifact ID；新 ready 对象为 Principal/MIME/完整内容确定的身份，既有随机 ID 保持不变 |
 | `principal` | TEXT NOT NULL | — | 所属调用主体 |
 | `mime_type` | TEXT NOT NULL | — | 声明 MIME type |
 | `size` | BIGINT/INTEGER NOT NULL | — | 字节数 |
-| `backend_key` | TEXT NOT NULL | — | 本地/S3-compatible object key |
+| `backend_key` | TEXT NOT NULL | — | 本地/S3-compatible physical object key，独立于逻辑 `id`，不得从最终 ID 推导 |
 | `storage_backend` | TEXT NOT NULL | `'internal'` | `internal` 或 `s3`；既有对象保持内部存储 |
 | `storage_endpoint` | TEXT NULL | NULL | S3 对象所属 endpoint，内部存储为空 |
 | `storage_bucket` | TEXT NULL | NULL | S3 对象所属 bucket，内部存储为空 |
@@ -670,24 +670,26 @@ Media Understanding 源 Artifact 到内部 JPEG Media Derivative 的 principal-s
 |---|---|---|---|
 | `principal` | TEXT NOT NULL | — | source 与 derivative 共同所属调用主体 |
 | `source_artifact_id` | TEXT PK | — | 源 Artifact（FK → artifacts.id, ON DELETE CASCADE） |
-| `derivative_artifact_id` | TEXT NOT NULL UNIQUE | — | 内部 JPEG Artifact（FK → artifacts.id, ON DELETE CASCADE） |
+| `derivative_artifact_id` | TEXT NOT NULL | — | 可由多个 source 共享的内部 JPEG Artifact（FK → artifacts.id, ON DELETE CASCADE） |
 | `created_at` | BIGINT/INTEGER NOT NULL | — | 建立 write-once mapping 的时间（Unix 毫秒） |
 
-`source_artifact_id` 与 `derivative_artifact_id` 必须不同。任一 Artifact 删除时 mapping 级联删除；实现不会为已有 source identity 替换或重算 derivative。
+`source_artifact_id` 与 `derivative_artifact_id` 可以相同。任一 Artifact 删除时相应 mapping 级联删除；已有 mapping 不替换或重算 derivative，回收后重新收存可以建立新 mapping。`idx_media_derivatives_derivative` 为 derivative 外键清理保留非唯一索引。
+
+Report 证据只接受当前或祖先 Turn prompt 已声明、且正向映射到 transcript 中实际 JPEG 的 source；共享 JPEG 不扩大可引用源集合。并发竞争或 mapping 写入失败不能立即删除候选 Artifact，因为其他 source 可能已使用同一内容；未引用候选按正常保留期清理。
 
 ---
 
 
 ## artifact_uploads
 
-Artifact multipart 上传会话；只存 upload token hash，完成后删除。
+Artifact multipart 上传会话；只存 upload token hash，完成后删除。创建响应不公开暂存 `artifact_id`，最终文件身份只在完成后返回。
 
 同一 Principal 的未完成且未过期任务最多十六个，声明大小合计最多 400 MiB；单文件最多 100 MiB。完成任务不占暂存名额，不限制已保存对象的聚合容量。创建准入通过 SQLite 写事务或 PostgreSQL Principal advisory lock 协调。
 
 | Column | Type | Default | Description |
 |---|---|---|---|
 | `id` | TEXT PK | — | upload ID |
-| `artifact_id` | TEXT NOT NULL | — | Artifact（FK → artifacts.id, ON DELETE CASCADE） |
+| `artifact_id` | TEXT NOT NULL | — | 内部暂存 Artifact（FK → artifacts.id, ON DELETE CASCADE），不是最终文件 ID |
 | `principal` | TEXT NOT NULL | — | 所属调用主体 |
 | `token_hash` | TEXT NOT NULL | — | upload token SHA-256 |
 | `declared_size` | BIGINT/INTEGER NOT NULL | — | 声明总字节数 |
@@ -763,6 +765,8 @@ Route Display Name migration 30 把 `models.name` 原值逐字节迁移为 `mode
 SQLite 与 PostgreSQL 必须保持 API Key 字段默认值、Turn kind、settings identity、唯一约束和 Artifact 外键等价。
 
 `0040_interaction_input_preview` 保留主仓库已经应用的输入预览列迁移；`0041_artifact_transfers` 同时为两个后端增加存储位置元数据与下载授权表。迁移不扫描媒体正文、不抓取旧 URL、不改写旧历史／工具记录，也不续期或删除既有对象。SQLite 通过跨 Store 实例的文件锁保护进行中的读取，PostgreSQL 使用独立连接池中的事务 advisory lock；清理取得排他保护并重新检查逻辑过期和授权后才删除，失败不报告已删除。
+
+`0044_shared_media_derivatives` 在两个后端保留现有映射、source 主键和级联外键，移除 derivative 唯一约束及 source/derivative 不同的限制，以非唯一索引支持共享 JPEG 清理。稳定 Artifact 身份使用既有 `backend_key`，不重写历史 ID、内容或父链。
 
 首个 migration 直接使用最终表名 `models`、`model_backends` 和 `api_key_models`；后续 schema 变更通过 SQLite/PostgreSQL 对应版本的 migration 演进。MySQL 不受支持。
 

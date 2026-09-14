@@ -165,7 +165,6 @@ pub struct ArtifactDownload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtifactUpload {
     pub upload_id: String,
-    pub artifact_id: ArtifactId,
     pub upload_token: String,
     pub expires_at: i64,
 }
@@ -220,6 +219,7 @@ pub enum ArtifactError {
 #[async_trait]
 pub trait ArtifactStore: Send + Sync {
     async fn configure(&self, settings: &ArtifactSettings) -> Result<(), ArtifactError>;
+    /// 完整校验后按 Principal、MIME 与字节确定身份；重复内容复用并延长保留期。
     async fn ingest(
         &self,
         principal: &Principal,
@@ -242,6 +242,7 @@ pub trait ArtifactStore: Send + Sync {
         id: &ArtifactId,
         retention: Duration,
     ) -> Result<(ArtifactRef, Bytes), ArtifactError>;
+    /// 仅分配上传任务；接收并校验全部内容之前没有最终 Artifact ID。
     async fn create_upload(
         &self,
         principal: &Principal,
@@ -257,6 +258,7 @@ pub trait ArtifactStore: Send + Sync {
         bytes: ArtifactByteStream,
     ) -> Result<UploadedArtifactPart, ArtifactError>;
 
+    /// 按完整内容确定最终身份，不受分片边界影响；不缩短已有内容的保留期。
     async fn complete_upload(
         &self,
         principal: &Principal,

@@ -292,8 +292,7 @@ CREATE TABLE public.media_derivatives (
     principal text NOT NULL,
     source_artifact_id text NOT NULL,
     derivative_artifact_id text NOT NULL,
-    created_at bigint NOT NULL,
-    CONSTRAINT media_derivatives_check CHECK ((source_artifact_id <> derivative_artifact_id))
+    created_at bigint NOT NULL
 );
 
 
@@ -840,14 +839,6 @@ ALTER TABLE ONLY public.interaction_observations
 
 
 --
--- Name: media_derivatives media_derivatives_derivative_artifact_id_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.media_derivatives
-    ADD CONSTRAINT media_derivatives_derivative_artifact_id_key UNIQUE (derivative_artifact_id);
-
-
---
 -- Name: media_derivatives media_derivatives_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1082,6 +1073,13 @@ CREATE INDEX idx_history_markers_expiry ON public.history_markers USING btree (e
 --
 
 CREATE INDEX idx_history_markers_principal_reference ON public.history_markers USING btree (principal, reference);
+
+
+--
+-- Name: idx_media_derivatives_derivative; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_media_derivatives_derivative ON public.media_derivatives USING btree (derivative_artifact_id);
 
 
 --

@@ -181,9 +181,8 @@ CREATE TABLE interaction_observations (
 CREATE TABLE media_derivatives (
     principal              TEXT NOT NULL,
     source_artifact_id     TEXT PRIMARY KEY REFERENCES artifacts(id) ON DELETE CASCADE,
-    derivative_artifact_id TEXT NOT NULL UNIQUE REFERENCES artifacts(id) ON DELETE CASCADE,
-    created_at             INTEGER NOT NULL,
-    CHECK (source_artifact_id <> derivative_artifact_id)
+    derivative_artifact_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+    created_at             INTEGER NOT NULL
 );
 
 CREATE TABLE "model_backends" (
@@ -485,6 +484,8 @@ ON history_markers(expires_at);
 
 CREATE INDEX idx_history_markers_principal_reference
 ON history_markers(principal, reference);
+
+CREATE INDEX idx_media_derivatives_derivative ON media_derivatives(derivative_artifact_id);
 
 CREATE INDEX idx_model_backends_model_id ON model_backends(model_id);
 

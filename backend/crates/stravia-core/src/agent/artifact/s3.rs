@@ -177,16 +177,16 @@ impl LocalArtifactStore {
     pub(super) async fn object_location(
         &self,
         artifact_id: &str,
-    ) -> Result<Option<(String, Option<String>, Option<String>)>, ArtifactError> {
+    ) -> Result<Option<(String, Option<String>, Option<String>, String)>, ArtifactError> {
         match &self.database {
             ArtifactDatabase::Sqlite(pool) => sqlx::query_as(
-                "SELECT storage_backend,storage_endpoint,storage_bucket FROM artifacts WHERE id=?",
+                "SELECT storage_backend,storage_endpoint,storage_bucket,backend_key FROM artifacts WHERE id=?",
             )
             .bind(artifact_id)
             .fetch_optional(pool)
             .await,
             ArtifactDatabase::Postgres(pool) => sqlx::query_as(
-                "SELECT storage_backend,storage_endpoint,storage_bucket FROM artifacts WHERE id=$1",
+                "SELECT storage_backend,storage_endpoint,storage_bucket,backend_key FROM artifacts WHERE id=$1",
             )
             .bind(artifact_id)
             .fetch_optional(pool)
@@ -205,11 +205,14 @@ impl LocalArtifactStore {
     pub(super) async fn remove_object_at(
         &self,
         artifact_id: &str,
-        backend: Option<(String, Option<String>, Option<String>)>,
+        backend: Option<(String, Option<String>, Option<String>, String)>,
         settings: &ArtifactSettings,
     ) -> Result<(), ArtifactError> {
-        let id = ArtifactId::new(artifact_id);
-        if let Some((backend, endpoint, bucket)) = backend {
+        let id = match backend.as_ref() {
+            Some((_, _, _, key)) => ArtifactId::new(object_id_for_key(key)?),
+            None => ArtifactId::new(artifact_id),
+        };
+        if let Some((backend, endpoint, bucket, _)) = backend {
             if backend == "s3" {
                 let s3 = settings.s3.as_ref().ok_or_else(|| {
                     ArtifactError::Storage("S3 credentials are not configured".into())
@@ -244,7 +247,7 @@ impl LocalArtifactStore {
                 }
             }
         }
-        match tokio::fs::remove_file(self.object_path(artifact_id)).await {
+        match tokio::fs::remove_file(self.object_path(id.as_str())).await {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(storage_error(error)),

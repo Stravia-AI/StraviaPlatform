@@ -4,6 +4,9 @@
 
 ### Changed
 
+- **Breaking:** Artifact creation returns upload-session credentials only; the final Artifact ID is returned on completion. Identical complete bytes and exact MIME under the same Principal now keep one identity across ingestion paths, multipart boundaries, concurrent uploads, and restarts. Re-uploading never shortens retention and can retain expired content again after full validation. Legacy random IDs and stored histories are not rewritten.
+- Migration 44 allows multiple Media Understanding sources to share one JPEG derivative, including a source mapping to itself, while preserving existing mappings and cascade cleanup. Reports cite only declared current/ancestor sources with a displayed derivative; failed or losing mapping writes never delete shared content.
+
 - **Breaking:** Server and Desktop now keep managed local state beneath one resolved data root: SQLite at `db/gateway.db`, diagnostics under `diagnostics/`, rebuildable catalogs under `cache/`, and browser/host state under `state/`. SQLite configuration no longer accepts a separate path; `--config` does not redirect the data root. Existing layouts require the explicit, stopped-source `stravia-tools migrate-data` command, which plans by default and publishes a verified copy without deleting source data. Desktop restart and autostart retain the selected root.
 
 - Observation canvases no longer mount every new card at the origin for measurement. Shared node and handle geometry enables viewport culling before the first mount; unchanged nodes retain their identity, and long-chain ancestry checks reuse traversed prefixes without changing causal links.

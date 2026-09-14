@@ -143,8 +143,61 @@ mod tests {
         assert!(validate_media_report(many, &evidence, AgentCompletion::Completed).is_ok());
     }
 
+    fn prompt_declaring(source_ids: &[&ArtifactId]) -> String {
+        serde_json::json!({
+            "task": "describe",
+            "media": source_ids.iter().enumerate().map(|(index, id)| serde_json::json!({
+                "artifact_id": id.as_str(),
+                "ordinal": index + 1,
+            })).collect::<Vec<_>>(),
+            "report_contract": {
+                "marker_format": "[artifact:<full ArtifactId>]",
+                "source_artifact_ids_only": true,
+            }
+        })
+        .to_string()
+    }
+
+    fn turn(content: Vec<ContentBlock>) -> AiItem {
+        AiItem {
+            role: Role::User,
+            content: MessageContent::Blocks(content),
+            tool_calls: None,
+            tool_call_id: None,
+            meta: None,
+        }
+    }
+
+    fn prompt_block(source_ids: &[&ArtifactId]) -> ContentBlock {
+        ContentBlock::Text {
+            text: prompt_declaring(source_ids),
+            cache_control: None,
+        }
+    }
+
+    fn derivative_block(derivative_id: &ArtifactId) -> ContentBlock {
+        ContentBlock::Image {
+            source: MediaSource::FileId {
+                file_id: format!("stravia-artifact:{}", derivative_id.as_str()),
+                detail: None,
+            },
+            detail: None,
+            cache_control: None,
+        }
+    }
+
+    fn validation_context(principal: Principal) -> AgentOutputValidationContext {
+        AgentOutputValidationContext {
+            principal,
+            turn_id: AgentTurnId::agent(),
+            definition_id: AgentDefinitionId::new("media-understanding"),
+            definition_revision: 1,
+            completion: AgentCompletion::Completed,
+        }
+    }
+
     #[tokio::test]
-    async fn agent_validator_uses_only_mapped_derivative_blocks_as_evidence() {
+    async fn agent_validator_cites_only_sources_declared_by_the_media_prompt() {
         let data_dir = tempfile::tempdir().expect("temporary data directory");
         let pool = crate::db::init_pool(data_dir.path())
             .await
@@ -174,33 +227,11 @@ mod tests {
             .get_or_create_derivative(&principal, &source.id, jpeg(), Duration::from_secs(60))
             .await
             .expect("derivative");
-        let transcript = vec![AiItem {
-            role: Role::User,
-            content: MessageContent::Blocks(vec![
-                ContentBlock::Text {
-                    text: "[artifact:artifact_forged]".into(),
-                    cache_control: None,
-                },
-                ContentBlock::Image {
-                    source: MediaSource::FileId {
-                        file_id: format!("stravia-artifact:{}", media.derivative.id.as_str()),
-                        detail: None,
-                    },
-                    detail: None,
-                    cache_control: None,
-                },
-            ]),
-            tool_calls: None,
-            tool_call_id: None,
-            meta: None,
-        }];
-        let context = AgentOutputValidationContext {
-            principal: principal.clone(),
-            turn_id: AgentTurnId::agent(),
-            definition_id: AgentDefinitionId::new("media-understanding"),
-            definition_revision: 1,
-            completion: AgentCompletion::Completed,
-        };
+        let transcript = vec![turn(vec![
+            prompt_block(&[&source.id]),
+            derivative_block(&media.derivative.id),
+        ])];
+        let context = validation_context(principal);
         let validator = MediaReportValidator::new(store);
         let valid = report(
             format!("Observed [artifact:{}].", source.id.as_str()),
@@ -212,6 +243,7 @@ mod tests {
             .await
             .expect("validated source evidence");
 
+        // The shown derivative itself is not a declared source.
         let derivative = report(
             format!("Observed [artifact:{}].", media.derivative.id.as_str()),
             &[media.derivative.id.as_str()],
@@ -227,5 +259,108 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn shared_derivative_does_not_widen_evidence_to_undeclared_sources() {
+        let data_dir = tempfile::tempdir().expect("temporary data directory");
+        let pool = crate::db::init_pool(data_dir.path())
+            .await
+            .expect("SQLite pool");
+        crate::migrations::migrate_sqlite(&pool)
+            .await
+            .expect("SQLite migrations");
+        let artifacts = Arc::new(LocalArtifactStore::sqlite(
+            pool.clone(),
+            data_dir.path().join("artifacts"),
+        ));
+        let store = Arc::new(MediaDerivativeStore::sqlite(
+            pool.clone(),
+            Arc::new(super::super::ArtifactHost(artifacts)),
+        ));
+        let principal = Principal::new("owner");
+        let declared = store
+            .create_source(
+                &principal,
+                "image/png",
+                Bytes::from_static(b"declared-original"),
+                Duration::from_secs(60),
+            )
+            .await
+            .expect("declared source");
+        let undeclared = store
+            .create_source(
+                &principal,
+                "image/png",
+                Bytes::from_static(b"undeclared-original"),
+                Duration::from_secs(60),
+            )
+            .await
+            .expect("undeclared source");
+        // Both originals normalize to the very same JPEG Artifact.
+        let shared = jpeg();
+        let declared_media = store
+            .get_or_create_derivative(
+                &principal,
+                &declared.id,
+                shared.clone(),
+                Duration::from_secs(60),
+            )
+            .await
+            .expect("declared mapping");
+        let undeclared_media = store
+            .get_or_create_derivative(&principal, &undeclared.id, shared, Duration::from_secs(60))
+            .await
+            .expect("undeclared mapping");
+        assert_eq!(declared_media.derivative.id, undeclared_media.derivative.id);
+        let context = validation_context(principal.clone());
+        let validator = MediaReportValidator::new(store);
+
+        let root_turn = vec![turn(vec![
+            prompt_block(&[&declared.id]),
+            derivative_block(&declared_media.derivative.id),
+        ])];
+        let citing_declared = report(
+            format!("Observed [artifact:{}].", declared.id.as_str()),
+            &[declared.id.as_str()],
+            &[],
+        );
+        validator
+            .validate(
+                &context,
+                &root_turn,
+                serde_json::to_value(citing_declared).unwrap(),
+            )
+            .await
+            .expect("declared source is evidence");
+        let citing_undeclared = report(
+            format!("Observed [artifact:{}].", undeclared.id.as_str()),
+            &[undeclared.id.as_str()],
+            &[],
+        );
+        assert!(
+            validator
+                .validate(
+                    &context,
+                    &root_turn,
+                    serde_json::to_value(&citing_undeclared).unwrap(),
+                )
+                .await
+                .is_err(),
+            "an undeclared source must not ride along on a shared JPEG"
+        );
+
+        // A continuation may declare the second source while its JPEG is
+        // already in the parent context; the declaration restores citability.
+        let mut continuation = root_turn.clone();
+        continuation.push(turn(vec![prompt_block(&[&undeclared.id])]));
+        validator
+            .validate(
+                &context,
+                &continuation,
+                serde_json::to_value(&citing_undeclared).unwrap(),
+            )
+            .await
+            .expect("continuation declaration is evidence");
     }
 }

@@ -717,3 +717,258 @@ async fn artifact_upload_is_api_key_scoped_and_completes() {
         .expect("complete response");
     assert_eq!(response.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn artifact_create_upload_response_hides_the_artifact_identity() {
+    let data_dir = tempfile::tempdir().expect("temp data dir");
+    let gateway = Gateway::new(GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .expect("Gateway");
+    let api_key = gateway
+        .admin()
+        .create_api_key(crate::db::models::CreateApiKey {
+            key: None,
+            name: "Artifact create key".into(),
+            concurrency_limit: None,
+            expires_at: None,
+            mcp_access_enabled: false,
+            transparent_injection_enabled: false,
+            inject_web_search: false,
+            model_ids: vec![],
+            inject_media_understanding: false,
+        })
+        .await
+        .expect("API key");
+    let response = create_router(gateway)
+        .oneshot(
+            Request::post("/v1/artifacts/uploads")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {}", api_key.token))
+                .body(Body::from(r#"{"mime_type":"image/png","size":3}"#))
+                .expect("upload request"),
+        )
+        .await
+        .expect("upload response");
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body: serde_json::Value = serde_json::from_slice(
+        &to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("upload body"),
+    )
+    .expect("upload JSON");
+    let fields = body.as_object().expect("upload JSON object");
+    for required in ["upload_id", "upload_token", "expires_at"] {
+        assert!(
+            fields.contains_key(required),
+            "create upload must still return {required}: {body}"
+        );
+    }
+    assert!(
+        !fields.contains_key("artifact_id"),
+        "the final Artifact identity must not be exposed before completion"
+    );
+}
+
+#[tokio::test]
+async fn artifact_repeated_http_uploads_keep_one_identity_and_download() {
+    let bytes: &'static [u8] = include_bytes!("../../../tests/fixtures/media/transparent.png");
+    let data_dir = tempfile::tempdir().expect("temp data dir");
+    let gateway = Gateway::new(GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .expect("Gateway");
+    let api_key = gateway
+        .admin()
+        .create_api_key(crate::db::models::CreateApiKey {
+            key: None,
+            name: "Artifact identity key".into(),
+            concurrency_limit: None,
+            expires_at: None,
+            mcp_access_enabled: false,
+            transparent_injection_enabled: false,
+            inject_web_search: false,
+            model_ids: vec![],
+            inject_media_understanding: false,
+        })
+        .await
+        .expect("API key");
+    let auth = format!("Bearer {}", api_key.token);
+    let router = create_router(gateway.clone());
+
+    async fn create_upload_session(router: &Router, auth: &str, size: u64) -> (String, String) {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/v1/artifacts/uploads")
+                    .header("content-type", "application/json")
+                    .header("authorization", auth)
+                    .body(Body::from(
+                        serde_json::json!({"mime_type": "image/png", "size": size}).to_string(),
+                    ))
+                    .expect("upload request"),
+            )
+            .await
+            .expect("upload response");
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body: serde_json::Value = serde_json::from_slice(
+            &to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("upload body"),
+        )
+        .expect("upload JSON");
+        (
+            body["upload_id"].as_str().expect("upload_id").to_owned(),
+            body["upload_token"]
+                .as_str()
+                .expect("upload_token")
+                .to_owned(),
+        )
+    }
+
+    async fn put_part(
+        router: &Router,
+        auth: &str,
+        upload_id: &str,
+        upload_token: &str,
+        part_number: u32,
+        chunk: &'static [u8],
+    ) -> stravia_runtime_contract::artifact::UploadedArtifactPart {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::put(format!(
+                    "/v1/artifacts/uploads/{upload_id}/parts/{part_number}"
+                ))
+                .header("authorization", auth)
+                .header("x-upload-token", upload_token)
+                .body(Body::from(chunk.to_vec()))
+                .expect("part request"),
+            )
+            .await
+            .expect("part response");
+        assert_eq!(response.status(), StatusCode::OK);
+        serde_json::from_slice(
+            &to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("part body"),
+        )
+        .expect("part JSON")
+    }
+
+    async fn complete_upload_session(
+        router: &Router,
+        auth: &str,
+        upload_id: &str,
+        upload_token: &str,
+        parts: &[stravia_runtime_contract::artifact::UploadedArtifactPart],
+    ) -> serde_json::Value {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post(format!("/v1/artifacts/uploads/{upload_id}/complete"))
+                    .header("content-type", "application/json")
+                    .header("authorization", auth)
+                    .body(Body::from(
+                        serde_json::json!({
+                            "upload_token": upload_token,
+                            "parts": parts,
+                        })
+                        .to_string(),
+                    ))
+                    .expect("complete request"),
+            )
+            .await
+            .expect("complete response");
+        assert_eq!(response.status(), StatusCode::OK);
+        serde_json::from_slice(
+            &to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("complete body"),
+        )
+        .expect("complete JSON")
+    }
+
+    // First upload session: a single part carrying the whole picture.
+    let (first_upload, first_token) =
+        create_upload_session(&router, &auth, bytes.len() as u64).await;
+    let first_part = put_part(&router, &auth, &first_upload, &first_token, 1, bytes).await;
+    let first =
+        complete_upload_session(&router, &auth, &first_upload, &first_token, &[first_part]).await;
+
+    // Second upload session for the same picture: a fresh upload identity with
+    // different chunk boundaries.
+    let (second_upload, second_token) =
+        create_upload_session(&router, &auth, bytes.len() as u64).await;
+    assert_ne!(first_upload, second_upload, "upload sessions stay random");
+    let (head, tail) = bytes.split_at(bytes.len() / 2);
+    let part_one = put_part(&router, &auth, &second_upload, &second_token, 1, head).await;
+    let part_two = put_part(&router, &auth, &second_upload, &second_token, 2, tail).await;
+    let second = complete_upload_session(
+        &router,
+        &auth,
+        &second_upload,
+        &second_token,
+        &[part_one, part_two],
+    )
+    .await;
+
+    assert_eq!(
+        first["id"], second["id"],
+        "identical uploads must complete to one final Artifact identity: first={first} second={second}"
+    );
+    assert_eq!(
+        first["reference"], second["reference"],
+        "the shared identity must also serve one Artifact Reference"
+    );
+    assert_eq!(first["mime_type"], "image/png");
+    assert_eq!(first["size"], serde_json::json!(bytes.len()));
+
+    // The completed identity must still serve the stored bytes through the
+    // real download route; no production endpoint is contacted.
+    use stravia_runtime_contract::artifact::{ArtifactId, ArtifactSettings};
+    let principal = stravia_runtime_contract::Principal::new(api_key.id.clone());
+    let store = gateway.artifact_store.as_ref().expect("Artifact store");
+    let settings = ArtifactSettings {
+        client_base_url: "http://127.0.0.1:9".into(),
+        ..Default::default()
+    };
+    let id = ArtifactId::new(first["id"].as_str().expect("Artifact id"));
+    let download = store
+        .download(
+            &principal,
+            &id,
+            std::time::Duration::from_secs(3600),
+            &settings,
+        )
+        .await
+        .expect("issue download");
+    assert_eq!(download.artifact.id, id);
+    let token = download
+        .url
+        .rsplit('/')
+        .next()
+        .expect("download token")
+        .to_owned();
+    let response = router
+        .oneshot(
+            Request::get(format!("/v1/artifacts/downloads/{token}"))
+                .body(Body::empty())
+                .expect("download request"),
+        )
+        .await
+        .expect("download response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()["content-type"].to_str().unwrap(),
+        "image/png"
+    );
+    let downloaded = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("downloaded bytes");
+    assert_eq!(downloaded.as_ref(), bytes);
+}

@@ -141,7 +141,7 @@ impl MediaUnderstandingService {
             .iter()
             .map(|artifact| artifact.artifact_id.clone())
             .collect::<Vec<_>>();
-        let mut prepared = self
+        let prepared = self
             .preprocessor
             .preprocess_until(&principal, &source_ids, &cancellation, deadline)
             .await
@@ -154,16 +154,10 @@ impl MediaUnderstandingService {
                 .sum::<u64>(),
             "Media preprocessing completed"
         );
-        let ancestor_set = ancestor_derivatives.iter().collect::<HashSet<_>>();
-        // A stable Artifact URL can be questioned again in a continuation. Its
-        // retained derivative is already in the parent context, not a new attachment.
-        prepared.retain(|media| !ancestor_set.contains(&media.derivative.id));
+        let (media, appended) = media_attachments(&prepared, &ancestor_derivatives);
         let prompt = serde_json::json!({
             "task": input.prompt,
-            "media": prepared.iter().enumerate().map(|(index, media)| serde_json::json!({
-                "artifact_id": media.source.id,
-                "ordinal": index + 1,
-            })).collect::<Vec<_>>(),
+            "media": media,
             "report_contract": {
                 "marker_format": "[artifact:<full ArtifactId>]",
                 "source_artifact_ids_only": true,
@@ -175,10 +169,7 @@ impl MediaUnderstandingService {
             definition_id,
             parent_turn_id: input.previous_turn_id,
             prompt,
-            artifacts: prepared
-                .into_iter()
-                .map(|media| media.derivative.id)
-                .collect(),
+            artifacts: appended,
             cancellation,
         });
         while let Some(event) = events.next().await {
@@ -206,6 +197,37 @@ impl MediaUnderstandingService {
             "Media Understanding ended without a terminal result",
         ))
     }
+}
+
+/// Keeps every declared Source citable while deduplicating only the images
+/// physically appended to the Turn. Two Sources may share one normalized JPEG
+/// (or reuse an ancestor's); each still gets its own prompt declaration, but
+/// the shared JPEG is attached at most once per Turn and never re-attached
+/// when it is already in the parent context.
+fn media_attachments(
+    prepared: &[super::preprocessor::PreparedMedia],
+    ancestor_derivatives: &[stravia_runtime_contract::artifact::ArtifactId],
+) -> (
+    Vec<serde_json::Value>,
+    Vec<stravia_runtime_contract::artifact::ArtifactId>,
+) {
+    let media = prepared
+        .iter()
+        .enumerate()
+        .map(|(index, media)| {
+            serde_json::json!({
+                "artifact_id": media.source.id,
+                "ordinal": index + 1,
+            })
+        })
+        .collect();
+    let mut seen = ancestor_derivatives.iter().collect::<HashSet<_>>();
+    let appended = prepared
+        .iter()
+        .filter(|media| seen.insert(&media.derivative.id))
+        .map(|media| media.derivative.id.clone())
+        .collect();
+    (media, appended)
 }
 
 fn validate_input(input: &MediaUnderstandingInput) -> Result<(), MediaUnderstandingError> {
@@ -308,6 +330,7 @@ mod tests {
     use super::*;
     use stravia_runtime_contract::agent::AgentTurnId;
     use stravia_runtime_contract::artifact::ArtifactId;
+    use stravia_runtime_contract::artifact::ArtifactRef;
 
     fn input(
         prompt: String,
@@ -353,6 +376,69 @@ mod tests {
                 .code,
             "duplicate_media_artifact"
         );
+    }
+
+    #[test]
+    fn shared_derivatives_keep_declarations_and_deduplicate_appended_images() {
+        let prepared_media =
+            |source: &str, derivative: &str| super::super::preprocessor::PreparedMedia {
+                source: ArtifactRef {
+                    id: ArtifactId::new(source),
+                    mime_type: "image/png".into(),
+                    size: 64,
+                },
+                derivative: ArtifactRef {
+                    id: ArtifactId::new(derivative),
+                    mime_type: "image/jpeg".into(),
+                    size: 32,
+                },
+                derivative_bytes: bytes::Bytes::from_static(&[]),
+            };
+
+        // In one Turn, two fresh Sources normalize to the same JPEG: both stay
+        // citable, but the shared image is appended once.
+        let (media, appended) = media_attachments(
+            &[
+                prepared_media("source-a", "shared"),
+                prepared_media("source-c", "shared"),
+            ],
+            &[],
+        );
+        assert_eq!(
+            media
+                .iter()
+                .map(|entry| entry["artifact_id"].as_str())
+                .collect::<Vec<_>>(),
+            [Some("source-a"), Some("source-c")]
+        );
+        assert_eq!(
+            media
+                .iter()
+                .map(|entry| entry["ordinal"].as_u64())
+                .collect::<Vec<_>>(),
+            [Some(1), Some(2)]
+        );
+        assert_eq!(appended, vec![ArtifactId::new("shared")]);
+
+        // In a continuation, a Source whose JPEG is already in the parent
+        // context keeps its declaration while nothing is re-attached, and a
+        // sibling sharing that same JPEG adds no further image either.
+        let (media, appended) = media_attachments(
+            &[
+                prepared_media("source-a", "shared"),
+                prepared_media("source-b", "fresh"),
+                prepared_media("source-c", "shared"),
+            ],
+            &[ArtifactId::new("shared")],
+        );
+        assert_eq!(
+            media
+                .iter()
+                .map(|entry| entry["artifact_id"].as_str())
+                .collect::<Vec<_>>(),
+            [Some("source-a"), Some("source-b"), Some("source-c")]
+        );
+        assert_eq!(appended, vec![ArtifactId::new("fresh")]);
     }
 
     #[test]

@@ -303,12 +303,14 @@ async fn artifact_identity_participates_in_reusable_prefix_semantics() {
         )
         .await
         .expect("first Artifact");
+    // Stable Artifact identity reuses one final ID for identical content, so
+    // the distinct-identity case must upload genuinely different bytes.
     let second = artifacts
         .ingest(
             &owner,
             "image/png",
-            Some(10),
-            bytes_stream(bytes::Bytes::from_static(b"same image")),
+            Some(14),
+            bytes_stream(bytes::Bytes::from_static(b"distinct image")),
             Duration::from_secs(60),
         )
         .await
@@ -360,6 +362,168 @@ async fn artifact_identity_participates_in_reusable_prefix_semantics() {
             .err()
             .expect("missing Artifact must reject begin"),
         BeginError::ItemReferenceNotFound
+    );
+}
+
+// Re-uploading the same picture must keep one durable Artifact identity so the
+// next client round continues the previous response instead of forking a new
+// root, while different media still starts its own history.
+#[tokio::test]
+async fn reuploaded_identical_media_continues_the_persisted_generation() {
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("SQLite pool");
+    crate::migrations::migrate_sqlite(&pool)
+        .await
+        .expect("SQLite migrations");
+    let artifacts = Arc::new(crate::agent::LocalArtifactStore::sqlite(
+        pool,
+        data_dir.path().join("artifacts"),
+    ));
+    let owner = principal("owner");
+    let image = include_bytes!("../../../tests/fixtures/media/transparent.png");
+    let first = artifacts
+        .ingest(
+            &owner,
+            "image/png",
+            Some(image.len() as u64),
+            bytes_stream(bytes::Bytes::copy_from_slice(image)),
+            Duration::from_secs(3600),
+        )
+        .await
+        .expect("first Artifact");
+    // The second client round re-uploads the same picture with different chunk
+    // boundaries; only the final identity may react to the bytes.
+    let (head, tail) = image.split_at(image.len() / 2);
+    let chunks: Vec<Result<bytes::Bytes, stravia_runtime_contract::artifact::ArtifactError>> = vec![
+        Ok(bytes::Bytes::copy_from_slice(head)),
+        Ok(bytes::Bytes::copy_from_slice(tail)),
+    ];
+    let second = artifacts
+        .ingest(
+            &owner,
+            "image/png",
+            Some(image.len() as u64),
+            Box::pin(futures::stream::iter(chunks)),
+            Duration::from_secs(3600),
+        )
+        .await
+        .expect("second Artifact");
+
+    let image_item = |artifact_id: &stravia_runtime_contract::artifact::ArtifactId| AiItem {
+        role: Role::User,
+        content: MessageContent::Blocks(vec![ContentBlock::Image {
+            source: MediaSource::FileId {
+                file_id: format!("stravia-artifact:{}", artifact_id.as_str()),
+                detail: None,
+            },
+            detail: None,
+            cache_control: None,
+        }]),
+        tool_calls: None,
+        tool_call_id: None,
+        meta: None,
+    };
+    let artifact_store: Arc<dyn stravia_runtime_contract::artifact::ArtifactStore> =
+        artifacts.clone();
+    let chain = GenerationChain::from_turn_chain(
+        Arc::new(crate::turn_chain::test_store().await),
+        Duration::from_secs(60),
+        Some(artifact_store),
+    );
+
+    let mut round_one = chain
+        .begin(
+            owner.clone(),
+            responses_request(vec![image_item(&first.id)]),
+        )
+        .await
+        .expect("begin first client round");
+    let mut answer = AiResponse::new("upstream-a", "model");
+    answer.push_output_text("same answer");
+    round_one.stage(&mut answer, &generation_source(), None);
+    round_one.persist().await.expect("persist first round");
+
+    let mut round_two = chain
+        .begin(
+            owner.clone(),
+            responses_request(vec![
+                image_item(&second.id),
+                AiItem::output_text("same answer"),
+                user_message("next"),
+            ]),
+        )
+        .await
+        .expect("begin second client round");
+    assert_eq!(
+        round_two.parent_id(),
+        Some(round_one.id()),
+        "re-uploading identical media must continue the previous response"
+    );
+    assert_eq!(
+        round_two.request_delta().items.len(),
+        1,
+        "only the new user message may count as new input"
+    );
+    assert_eq!(round_two.request_delta().items[0].content.to_text(), "next");
+    let hydrated_references: Vec<String> = round_two
+        .request()
+        .items
+        .iter()
+        .filter_map(|item| match &item.content {
+            MessageContent::Blocks(blocks) => blocks.iter().find_map(|block| match block {
+                ContentBlock::Image {
+                    source: MediaSource::Url(url),
+                    ..
+                } => Some(url.clone()),
+                _ => None,
+            }),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        hydrated_references,
+        vec![first.reference()],
+        "the continued parent must serve the same stable Artifact reference"
+    );
+    assert_eq!(
+        first.id, second.id,
+        "identical bytes under one Principal must keep one final Artifact identity"
+    );
+
+    let mut follow_up = AiResponse::new("upstream-b", "model");
+    follow_up.push_output_text("follow through");
+    round_two.stage(&mut follow_up, &generation_source(), None);
+    round_two.persist().await.expect("persist second round");
+
+    let altered = artifacts
+        .ingest(
+            &owner,
+            "image/png",
+            Some(13),
+            bytes_stream(bytes::Bytes::from_static(b"mutated image")),
+            Duration::from_secs(3600),
+        )
+        .await
+        .expect("altered Artifact");
+    let fork = chain
+        .begin(
+            owner.clone(),
+            responses_request(vec![
+                image_item(&altered.id),
+                AiItem::output_text("same answer"),
+                user_message("next"),
+            ]),
+        )
+        .await
+        .expect("begin altered client round");
+    assert_eq!(
+        fork.parent_id(),
+        None,
+        "different media must not continue the previous response"
     );
 }
 

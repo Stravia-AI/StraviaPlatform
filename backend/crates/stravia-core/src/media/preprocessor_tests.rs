@@ -265,19 +265,72 @@ mod tests {
                 .map(|media| media.derivative.id.clone())
                 .collect::<Vec<_>>()
         );
-        assert_eq!(
-            preprocessor
-                .preprocess(&principal, std::slice::from_ref(&prepared[0].derivative.id),)
-                .await
-                .unwrap_err(),
-            MediaPreprocessError::Unavailable
-        );
+        // An Artifact that once served as a derivative is still a legitimate
+        // original: its ID no longer disqualifies it as a source.
+        let reprocessed = preprocessor
+            .preprocess(&principal, std::slice::from_ref(&prepared[0].derivative.id))
+            .await
+            .expect("derivative id reprocessed as source");
+        assert_eq!(reprocessed[0].source.id, prepared[0].derivative.id);
+        assert_eq!(reprocessed[0].derivative.mime_type, "image/jpeg");
         assert_eq!(
             preprocessor
                 .preprocess(&principal, &[first.id.clone(), first.id])
                 .await
                 .unwrap_err(),
             MediaPreprocessError::DuplicateArtifact
+        );
+    }
+
+    #[tokio::test]
+    async fn distinct_originals_may_share_one_jpeg_derivative() {
+        let data_dir = tempfile::tempdir().expect("temporary data directory");
+        let pool = crate::db::init_pool(data_dir.path())
+            .await
+            .expect("SQLite pool");
+        crate::migrations::migrate_sqlite(&pool)
+            .await
+            .expect("SQLite migrations");
+        let artifacts = Arc::new(LocalArtifactStore::sqlite(
+            pool.clone(),
+            data_dir.path().join("artifacts"),
+        ));
+        let store = Arc::new(MediaDerivativeStore::sqlite(
+            pool.clone(),
+            Arc::new(super::super::ArtifactHost(artifacts)),
+        ));
+        let principal = Principal::new("owner");
+        let preprocessor = MediaInputPreprocessor::new(Arc::clone(&store), Duration::from_secs(60));
+        // One image stored twice: opaque RGBA and grayscale encode the same
+        // black/white pixels, so both normalize to byte-identical JPEGs.
+        let rgba_source = store
+            .create_source(
+                &principal,
+                "image/png",
+                Bytes::from(encode_png(2, 1, &[0, 0, 0, 255, 255, 255, 255, 255])),
+                Duration::from_secs(60),
+            )
+            .await
+            .expect("rgba source");
+        let luma_source = store
+            .create_source(
+                &principal,
+                "image/png",
+                Bytes::from(encode_luma_png(2, 1, &[0, 255])),
+                Duration::from_secs(60),
+            )
+            .await
+            .expect("luma source");
+        let prepared = preprocessor
+            .preprocess(&principal, &[rgba_source.id, luma_source.id])
+            .await
+            .expect("prepared media");
+        assert_ne!(prepared[0].source.id, prepared[1].source.id);
+        assert_eq!(prepared[0].derivative.id, prepared[1].derivative.id);
+        assert!(
+            prepared
+                .iter()
+                .all(|media| media.derivative.mime_type == "image/jpeg")
         );
     }
 
@@ -302,8 +355,8 @@ mod tests {
         let preprocessor = MediaInputPreprocessor::new(Arc::clone(&store), Duration::from_secs(60));
 
         let mut oversized_sources = Vec::new();
-        for _ in 0..5 {
-            let mut bytes = TRANSPARENT_PNG.to_vec();
+        for index in 0..5 {
+            let mut bytes = encode_png(1, 1, &[index, 0, 0, 255]);
             bytes.resize(MAX_SOURCE_BYTES, 0);
             oversized_sources.push(
                 store
@@ -327,12 +380,12 @@ mod tests {
         );
 
         let mut derivative_sources = Vec::new();
-        for _ in 0..5 {
+        for index in 0..5 {
             let source = store
                 .create_source(
                     &principal,
                     "image/png",
-                    Bytes::from_static(TRANSPARENT_PNG),
+                    Bytes::from(encode_png(1, 1, &[index, 0, 0, 255])),
                     Duration::from_secs(60),
                 )
                 .await

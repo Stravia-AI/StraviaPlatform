@@ -8,7 +8,9 @@ use serde_json::Value;
 use stravia_runtime_contract::agent::{
     AgentCompletion, AgentOutputValidationContext, AgentOutputValidator, AgentRunError,
 };
-use stravia_runtime_contract::protocol::ir::{AiItem, ContentBlock, MediaSource, MessageContent};
+use stravia_runtime_contract::protocol::ir::{
+    AiItem, ContentBlock, MediaSource, MessageContent, Role,
+};
 
 use super::store::MediaDerivativeStore;
 use super::types::MediaReport;
@@ -62,6 +64,23 @@ pub fn validate_media_report(
     Ok(report)
 }
 
+/// Only Media service-authored User prompts declare citable sources.
+fn declared_sources(text: &str, declared: &mut HashSet<ArtifactId>) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return;
+    };
+    let Some(media) = value.get("media").and_then(|media| media.as_array()) else {
+        return;
+    };
+    declared.extend(
+        media
+            .iter()
+            .filter_map(|entry| entry.get("artifact_id"))
+            .filter_map(|id| id.as_str())
+            .map(ArtifactId::new),
+    );
+}
+
 fn answer_markers(answer: &str) -> Result<Vec<&str>, String> {
     let mut markers = Vec::new();
     let mut rest = answer;
@@ -99,9 +118,23 @@ impl MediaReportValidator {
         principal: &stravia_runtime_contract::Principal,
         transcript: &[AiItem],
     ) -> Result<(HashSet<ArtifactId>, Vec<ArtifactId>), AgentRunError> {
-        let mut evidence = HashSet::new();
-        let mut retained = HashSet::new();
+        let mut shown = HashSet::new();
+        let mut declared = HashSet::new();
         for message in transcript {
+            // Declarations are request-authored: only the Turn prompts built by
+            // the Media service carry the declared source list.
+            if message.role == Role::User {
+                match &message.content {
+                    MessageContent::Blocks(blocks) => {
+                        for block in blocks {
+                            if let ContentBlock::Text { text, .. } = block {
+                                declared_sources(text, &mut declared);
+                            }
+                        }
+                    }
+                    MessageContent::Text(text) => declared_sources(text, &mut declared),
+                }
+            }
             let MessageContent::Blocks(blocks) = &message.content else {
                 continue;
             };
@@ -123,23 +156,31 @@ impl MediaReportValidator {
                         "Media transcript evidence is invalid",
                     )
                 })?;
-                let source_id = self
-                    .store
-                    .source_for_derivative(principal, &derivative_id)
-                    .await
-                    .map_err(|_| {
-                        AgentRunError::new(
-                            "media_report_invalid",
-                            "Media transcript evidence is unavailable",
-                        )
-                    })?
-                    .ok_or_else(|| {
-                        AgentRunError::new(
-                            "media_report_invalid",
-                            "Media transcript evidence is invalid",
-                        )
-                    })?;
-                retained.insert(derivative_id);
+                shown.insert(derivative_id);
+            }
+        }
+        // Forward verification: a source is evidence only when it was actually
+        // declared in a Turn prompt and its mapped derivative is really present
+        // in the transcript. A shared JPEG never widens the citable set to
+        // sources the requests did not declare.
+        let mut evidence = HashSet::new();
+        let mut retained = HashSet::new();
+        for source_id in declared {
+            let Some(media) = self
+                .store
+                .find_derivative(principal, &source_id)
+                .await
+                .map_err(|_| {
+                    AgentRunError::new(
+                        "media_report_invalid",
+                        "Media transcript evidence is unavailable",
+                    )
+                })?
+            else {
+                continue;
+            };
+            if shown.contains(&media.derivative.id) {
+                retained.insert(media.derivative.id);
                 retained.insert(source_id.clone());
                 evidence.insert(source_id);
             }

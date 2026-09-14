@@ -74,13 +74,6 @@ impl MediaArtifactHost for ArtifactHost {
     ) -> Result<ArtifactReader, ArtifactError> {
         self.0.open(principal, id).await
     }
-    async fn delete_ready(
-        &self,
-        principal: &Principal,
-        id: &ArtifactId,
-    ) -> Result<(), ArtifactError> {
-        self.0.delete_ready(principal, id).await
-    }
     async fn extend_retention(
         &self,
         principal: &Principal,

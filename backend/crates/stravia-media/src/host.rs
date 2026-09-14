@@ -38,11 +38,6 @@ pub trait MediaArtifactHost: Send + Sync {
         principal: &Principal,
         id: &ArtifactId,
     ) -> Result<ArtifactReader, ArtifactError>;
-    async fn delete_ready(
-        &self,
-        principal: &Principal,
-        id: &ArtifactId,
-    ) -> Result<(), ArtifactError>;
     async fn extend_retention(
         &self,
         principal: &Principal,

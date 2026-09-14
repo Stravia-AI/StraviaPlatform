@@ -5,6 +5,7 @@ struct ObjectRow {
     principal: String,
     mime_type: String,
     size: i64,
+    backend_key: String,
     expires_at: i64,
     storage_backend: String,
     storage_endpoint: Option<String>,
@@ -44,8 +45,8 @@ impl LocalArtifactStore {
 
     async fn object_row(&self, id: &ArtifactId) -> Result<ObjectRow, ArtifactError> {
         let row = match &self.database {
-            ArtifactDatabase::Sqlite(pool) => sqlx::query_as::<_, ObjectRow>("SELECT principal,mime_type,size,expires_at,storage_backend,storage_endpoint,storage_bucket FROM artifacts WHERE id=? AND state='ready'").bind(id.as_str()).fetch_optional(pool).await,
-            ArtifactDatabase::Postgres(pool) => sqlx::query_as::<_, ObjectRow>("SELECT principal,mime_type,size,expires_at,storage_backend,storage_endpoint,storage_bucket FROM artifacts WHERE id=$1 AND state='ready'").bind(id.as_str()).fetch_optional(pool).await,
+            ArtifactDatabase::Sqlite(pool) => sqlx::query_as::<_, ObjectRow>("SELECT principal,mime_type,size,backend_key,expires_at,storage_backend,storage_endpoint,storage_bucket FROM artifacts WHERE id=? AND state='ready'").bind(id.as_str()).fetch_optional(pool).await,
+            ArtifactDatabase::Postgres(pool) => sqlx::query_as::<_, ObjectRow>("SELECT principal,mime_type,size,backend_key,expires_at,storage_backend,storage_endpoint,storage_bucket FROM artifacts WHERE id=$1 AND state='ready'").bind(id.as_str()).fetch_optional(pool).await,
         }.map_err(storage_error)?;
         row.ok_or(ArtifactError::NotFound)
     }
@@ -68,14 +69,20 @@ impl LocalArtifactStore {
                 tokio::fs::create_dir_all(&directory)
                     .await
                     .map_err(storage_error)?;
-                let file = std::fs::OpenOptions::new()
-                    .create(true)
-                    .truncate(false)
-                    .read(true)
-                    .write(true)
-                    .open(directory.join(id.as_str()))
-                    .map_err(storage_error)?;
-                file.try_lock_shared().map_err(storage_error)?;
+                let path = directory.join(id.as_str());
+                let file = tokio::task::spawn_blocking(move || {
+                    let file = std::fs::OpenOptions::new()
+                        .create(true)
+                        .truncate(false)
+                        .read(true)
+                        .write(true)
+                        .open(path)?;
+                    file.lock_shared()?;
+                    Ok::<_, std::io::Error>(file)
+                })
+                .await
+                .map_err(storage_error)?
+                .map_err(storage_error)?;
                 Ok(Arc::new(file))
             }
             ArtifactDatabase::Postgres(_) => {
@@ -143,7 +150,9 @@ impl LocalArtifactStore {
                 path: cache,
                 _hold: guard,
             });
-            self.fetch_s3(s3, id, &cache.path, row.size as u64).await?;
+            let object_id = ArtifactId::new(object_id_for_key(&row.backend_key)?);
+            self.fetch_s3(s3, &object_id, &cache.path, row.size as u64)
+                .await?;
             return Ok(ArtifactReader {
                 artifact: ArtifactRef {
                     id: id.clone(),
@@ -154,7 +163,7 @@ impl LocalArtifactStore {
                 guard: cache,
             });
         } else if row.storage_backend == "internal" {
-            self.object_path(id.as_str())
+            self.object_path(object_id_for_key(&row.backend_key)?)
         } else {
             return Err(ArtifactError::Storage(
                 "unknown Artifact storage backend".into(),
@@ -223,13 +232,14 @@ impl LocalArtifactStore {
                 ));
             }
             // The public endpoint is signed as-is, never substituted after signing.
+            let object_id = ArtifactId::new(object_id_for_key(&row.backend_key)?);
             self.s3_url(
                 s3,
                 settings
                     .file_public_base_url
                     .as_deref()
                     .unwrap_or(&s3.endpoint),
-                id,
+                &object_id,
                 "GET",
                 Duration::from_secs((expires_at.div_euclid(1000) - now.div_euclid(1000)) as u64),
                 std::time::UNIX_EPOCH + Duration::from_millis(now as u64),
@@ -316,9 +326,9 @@ impl LocalArtifactStore {
                             .execute(&mut *transaction)
                             .await
                             .map_err(storage_error)?;
-                        sqlx::query("UPDATE artifacts SET size=? WHERE id=?")
+                        sqlx::query("UPDATE artifacts SET size=? WHERE id=(SELECT artifact_id FROM artifact_uploads WHERE id=?)")
                             .bind(part.size as i64)
-                            .bind(upload.artifact_id.as_str())
+                            .bind(&upload.upload_id)
                             .execute(&mut *transaction)
                             .await
                             .map_err(storage_error)?;
@@ -332,9 +342,9 @@ impl LocalArtifactStore {
                             .execute(&mut *transaction)
                             .await
                             .map_err(storage_error)?;
-                        sqlx::query("UPDATE artifacts SET size=$1 WHERE id=$2")
+                        sqlx::query("UPDATE artifacts SET size=$1 WHERE id=(SELECT artifact_id FROM artifact_uploads WHERE id=$2)")
                             .bind(part.size as i64)
-                            .bind(upload.artifact_id.as_str())
+                            .bind(&upload.upload_id)
                             .execute(&mut *transaction)
                             .await
                             .map_err(storage_error)?;
@@ -354,7 +364,11 @@ impl LocalArtifactStore {
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                     Err(error) => return Err(storage_error(error)),
                 }
-                self.delete_ready(principal, &upload.artifact_id).await
+                if let Some(row) = self.load_upload(&upload.upload_id).await? {
+                    self.delete_ready(principal, &ArtifactId::new(row.artifact_id))
+                        .await?;
+                }
+                Ok::<_, ArtifactError>(())
             }
             .await;
             if let Err(cleanup) = cleanup {

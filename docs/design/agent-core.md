@@ -240,9 +240,11 @@ Runner 消费 canonical stream，并在唯一 `Completed` 后立即停止。该�
 
 ### 5.6 Artifact
 
-`Artifact` 是不可变、principal-scoped 的媒体或大对象。公共引用为 `https://stravia/artifact/<opaque-id>`，不授予访问权，也不走 DNS／公网抓取。同 Principal 可跨对话使用；签名下载授权和仅限上传的授权分别具有固定期限，不与文件保留期合并。上传重试不承诺内容去重或幂等。
+`Artifact` 是不可变、principal-scoped 的媒体或大对象。公共引用为 `https://stravia/artifact/<opaque-id>`，不授予访问权，也不走 DNS／公网抓取。同 Principal 可跨对话使用；签名下载授权和仅限上传的授权分别具有固定期限，不与文件保留期合并。相同 Principal、逐字节相同的声明 MIME 与完整内容确定同一最终 ID，不受收存入口、分片边界、并发或重启影响；上传会话不具备幂等语义。
 
-`ArtifactStore` 是保存／读取 bytes 的 seam，隐藏内部文件与 S3 后端，复用同一 multipart、暂存配额和完整收存规则。SQL 保存 metadata、owner、MIME、size、state、TTL、后端位置和下载授权 hash。Reader guard 与持久化下载授权协调物理清理；逻辑过期文件不能因这些保护复活。Runner 与新历史保留稳定引用，只有实际 Target 调用前生成签名 URL／base64。
+完整收存时，以版本域 `stravia-artifact-v1`、带长度前缀的 Principal/MIME 和全部内容计算 SHA-256，最终 ID 为 `artifact_` 加完整摘要。随机暂存身份及物理 `backend_key` 与逻辑 ID 分离，发布在同一内容身份下串行化；上传发布锁和读取／清理锁使用不同命名空间，发布与既有 Reader 的对象锁兼容。旧随机 ID 仍按原位置读取，不扫描或重写旧历史。
+
+`ArtifactStore` 是保存／读取 bytes 的 seam，隐藏内部文件与 S3 后端，复用同一 multipart、暂存配额和完整收存规则。SQL 保存 metadata、owner、MIME、size、state、TTL、后端位置和下载授权 hash。重复完整收存取已有期限与本次上传保留期限的较大值；过期或已清理内容也可经完整校验重新保留同一身份。Reader guard 与持久化下载授权只协调物理清理，不能单独恢复过期内容。Runner 与新历史保留稳定引用，只有实际 Target 调用前生成签名 URL／base64。
 
 ---
 
@@ -615,8 +617,8 @@ generic `agent_<slug>` 本身不增加 per-key capability allowlist；产品 cap
 | Agent Definition Revision | definition_id、slug、version、spec_hash、spec_json、created_at | 程序注册的 immutable spec |
 | Agent Definition Config | definition_id、enabled、model_id、thinking_level、updated_at | Admin 唯一可改字段 |
 | Turn Chain Node | node_id、kind、parent_id、principal、payload_version、payload、expires_at | kind 至少 response/agent |
-| Artifact | artifact_id、principal、mime、size、backend_key、state、expires_at | opaque public ID；当前 backend 为 LocalFS |
-| Artifact Upload | upload_id、artifact_id、principal、token_hash、declared/received size、expires_at | authenticated multipart staging |
+| Artifact | artifact_id、principal、mime、size、backend_key、state、expires_at | opaque public ID；LocalFS/S3；物理 key 独立于最终 ID |
+| Artifact Upload | upload_id、artifact_id、principal、token_hash、declared/received size、expires_at | authenticated multipart staging；artifact_id 仅为内部暂存身份，不公开 |
 
 当前不持久化运行中的 Agent Run、失败尝试、instance lease 或 event chunks。只有成功/预算收束成功的 Turn 会进入 Turn Chain；失败、取消或进程退出不会产生可续接节点。
 
@@ -703,6 +705,7 @@ POST /v1/artifacts/uploads/{upload_id}/complete
 - 单 Artifact 100 MiB absolute limit，per-principal 16 个/400 MiB staging reservation，并叠加 Definition size/count/declared MIME policy；
 - upload token 只授权同 principal、同 upload；part 流式写盘并计算 SHA-256 etag；
 - replacement delta、aggregate size、part manifest、owner 与完整内容 digest 在完成前校验；
+- 创建只返回 `upload_id`、`upload_token`、`expires_at`；完成才返回最终 `ArtifactRef.id` 与 `reference`，不接受客户端声明的最终内容摘要作为身份依据；
 - upload idle TTL 在每次成功 part 后刷新，Gateway sweeper 清理过期 staging 与 metadata。
 
 当前不提供 S3 presigned multipart、客户端 URL ingest 或 content-based MIME sniffing；这些能力必须在对应 backend/validator 实施后再开放。

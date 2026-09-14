@@ -169,7 +169,9 @@ Media Understanding 通过 `StraviaRead` 读取静态 JPEG、PNG 与 WebP 图片
 
 ### 文件存储与临时传输
 
-未配置 S3 时直接使用内部存储。可选 S3 沿用相同上传步骤：`POST /v1/artifacts/uploads` 创建，携带 `x-upload-token` 调用 `PUT /v1/artifacts/uploads/{upload_id}/parts/{part_number}`，最后调用 `POST /v1/artifacts/uploads/{upload_id}/complete`。完成结果保留原有文件元数据，并增加形如 `https://stravia/artifact/<opaque-id>` 的 `reference`。这是稳定、Principal-scoped 的文件身份，不是网络下载地址或凭据。同一 API Key 可跨对话使用，其他 Principal 无权解析。
+未配置 S3 时直接使用内部存储。可选 S3 沿用相同上传步骤：`POST /v1/artifacts/uploads` 创建，携带 `x-upload-token` 调用 `PUT /v1/artifacts/uploads/{upload_id}/parts/{part_number}`，最后调用 `POST /v1/artifacts/uploads/{upload_id}/complete`。创建结果只返回 `upload_id`、`upload_token` 和 `expires_at`，不再返回 `artifact_id`；只有完成结果返回最终文件 `id`、元数据和形如 `https://stravia/artifact/<opaque-id>` 的 `reference`。这是稳定、Principal-scoped 的文件身份，不是网络下载地址或凭据。同一 API Key 可跨对话使用，其他 Principal 无权解析。
+
+同一 Principal 下，声明 MIME 和完整字节完全相同的内容，在直接收存、不同分片边界、并发上传及重启后使用同一 Artifact ID；上传会话仍各自独立。Principal、MIME 或字节不同则保持不同身份，视觉相似不算相同内容。重复上传不缩短已有保留期。旧随机 ID 在到期前仍可读取，但不会合并或改写为新身份。Media Understanding 可以让不同源文件共享规范化 JPEG，但只允许引用当前 Turn 或祖先 Turn 已声明的源文件。
 
 结构化内联媒体和远程附件 URL 必须先保存成功，模型调用才会开始。普通文本链接和类似 base64 的文本不会自动下载或改写。`StraviaRead` 导入普通文件 URL，返回引用、MIME、大小、文件名（或不透明回退值）和临时下载地址，不自动解压、执行或理解文件。
 
@@ -185,7 +187,7 @@ Media Understanding 通过 `StraviaRead` 读取静态 JPEG、PNG 与 WebP 图片
 
 上传提示词注入提供真实的分片上传 curl 流程。模型只见 `<stravia-upload-key>`；仅交付给客户端的普通回答和客户端工具参数会替换为临时上传凭据，思考和平台工具参数不签发。同一响应复用仍有效的凭据；每个凭据固定有效十五分钟，支持多文件且只授权上传。关闭注入不撤销已有凭据，但撤销所属 API Key 仍会拒绝上传。客户端回传的凭据，包括过期凭据，在发送给 Provider 或平台持久化前均恢复为占位符，不依赖一般凭据保护开关。
 
-单文件上限为 100 MiB。每个 Principal 最多保留十六个未完成且未过期的上传任务，声明大小合计最多 400 MiB；完成上传释放暂存名额。不设已保存文件总容量上限。鉴权后的文件使用按请求保留期续期；签名下载和文本提及不续期。过期引用不能复活；进行中读取和未过期下载授权只延迟物理清理，不延长逻辑保留期。签名 URL 是可转交的临时凭据：持有者在有效期内可下载对应文件。
+单文件上限为 100 MiB。每个 Principal 最多保留十六个未完成且未过期的上传任务，声明大小合计最多 400 MiB；完成上传释放暂存名额。不设已保存文件总容量上限。鉴权后的文件使用按请求保留期续期；签名下载和文本提及不续期。仅凭过期引用不能恢复文件；重新完整上传并通过校验后，即使内容已被清理，也能重新保留同一内容身份。进行中读取和未过期下载授权只延迟物理清理，不延长逻辑保留期。签名 URL 是可转交的临时凭据：持有者在有效期内可下载对应文件。
 
 新历史和诊断以引用与元数据外置结构化媒体，不把媒体捕获称为原始 wire 字节；缺失或过期正文明确标为不可恢复。升级不回填、改写或续期旧历史。修改或移除 S3 endpoint／bucket 凭据不会迁移现有对象；对象仍在使用时，应保留匹配的存储配置。
 

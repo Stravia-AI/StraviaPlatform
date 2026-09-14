@@ -164,7 +164,7 @@ Turn Chain 是由持久化不可变历史节点组成、归属于一个认证主
 
 ## Artifact
 
-Artifact 是归属于一个认证主体的不可变媒体或大对象。外部以 opaque ArtifactId 引用它；内容身份、保留期和历史引用由平台管理。
+Artifact 是归属于一个认证主体的不可变媒体或大对象；同一主体下，声明媒体类型与完整内容完全相同的文件具有同一身份，而非按上传次数区分。外部以 opaque ArtifactId 引用它，保留期与内容身份相互独立。
 
 ## Artifact Store
 
@@ -557,7 +557,7 @@ Media Report 是 Media Understanding 返回的强校验工具结果，由 Markdo
 
 ## Media Derivative
 
-Media Derivative 是 Media Understanding 为一个源 Artifact 生成并复用的内部、write-once 规范化表示。Media Report 始终引用源 Artifact；同一源 Artifact 的 Derivative 内容不会被重算或替换。
+Media Derivative 是 Media Understanding 为源 Artifact 生成并复用的内部、write-once 规范化表示，不同源可以共享同一表示，源与表示也可以是同一 Artifact。Media Report 始终引用当前或祖先 Turn 已声明的源 Artifact；仍在保留期内的源映射不会被重算或替换。
 
 ## Web Search
 

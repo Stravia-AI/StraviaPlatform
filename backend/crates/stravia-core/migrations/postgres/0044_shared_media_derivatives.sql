@@ -1,0 +1,5 @@
+ALTER TABLE media_derivatives
+DROP CONSTRAINT media_derivatives_derivative_artifact_id_key,
+DROP CONSTRAINT media_derivatives_check;
+
+CREATE INDEX idx_media_derivatives_derivative ON media_derivatives(derivative_artifact_id);

@@ -88,15 +88,6 @@ impl MediaInputPreprocessor {
             if !seen.insert(source_id.clone()) {
                 return Err(MediaPreprocessError::DuplicateArtifact);
             }
-            let derivative_source = self
-                .store
-                .source_for_derivative(principal, source_id)
-                .await
-                .map_err(MediaPreprocessError::from)?;
-            check_normalization_budget(cancellation, deadline)?;
-            if derivative_source.is_some() {
-                return Err(MediaPreprocessError::Unavailable);
-            }
             let source = self
                 .store
                 .inspect_artifact(principal, source_id)

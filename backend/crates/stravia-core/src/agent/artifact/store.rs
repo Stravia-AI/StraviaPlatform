@@ -30,6 +30,17 @@ struct UploadRow {
     expires_at: i64,
     created_at: i64,
     mime_type: String,
+    artifact_expires_at: i64,
+}
+
+enum UploadLock {
+    Local(std::fs::File),
+    Postgres(sqlx::Transaction<'static, sqlx::Postgres>),
+}
+
+struct PublicationGuard {
+    _upload: Option<(OwnedMutexGuard<()>, UploadLock)>,
+    _read: Option<Arc<dyn ArtifactReadGuard>>,
 }
 
 impl LocalArtifactStore {
@@ -78,7 +89,7 @@ impl LocalArtifactStore {
     async fn lock_upload(
         &self,
         upload_id: &str,
-    ) -> Result<(OwnedMutexGuard<()>, Arc<dyn ArtifactReadGuard>), ArtifactError> {
+    ) -> Result<(OwnedMutexGuard<()>, UploadLock), ArtifactError> {
         if upload_id.is_empty()
             || !upload_id
                 .bytes()
@@ -95,9 +106,10 @@ impl LocalArtifactStore {
             )
         };
         let local = lock.lock_owned().await;
-        let persistent: Arc<dyn ArtifactReadGuard> = match &self.database {
+        let persistent = match &self.database {
             ArtifactDatabase::Sqlite(_) => {
-                let directory = self.root.join("locks");
+                // 发布互斥与对象读锁必须分开，完成上传会同时持有两者。
+                let directory = self.root.join("locks").join("uploads");
                 tokio::fs::create_dir_all(&directory)
                     .await
                     .map_err(storage_error)?;
@@ -115,7 +127,7 @@ impl LocalArtifactStore {
                 .await
                 .map_err(storage_error)?
                 .map_err(storage_error)?;
-                Arc::new(file)
+                UploadLock::Local(file)
             }
             ArtifactDatabase::Postgres(_) => {
                 let mut transaction = self
@@ -130,10 +142,44 @@ impl LocalArtifactStore {
                     .execute(&mut *transaction)
                     .await
                     .map_err(storage_error)?;
-                Arc::new(Mutex::new(transaction))
+                UploadLock::Postgres(transaction)
             }
         };
         Ok((local, persistent))
+    }
+
+    async fn lock_publication(
+        &self,
+        upload: &mut UploadLock,
+        artifact_id: &ArtifactId,
+    ) -> Result<PublicationGuard, ArtifactError> {
+        match upload {
+            UploadLock::Postgres(transaction) => {
+                // 复用上传已持有的连接；并发完成不能各占一条连接再等第二条而耗尽锁池。
+                sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 2))")
+                    .bind(artifact_id.as_str())
+                    .execute(&mut **transaction)
+                    .await
+                    .map_err(storage_error)?;
+                sqlx::query("SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 1))")
+                    .bind(artifact_id.as_str())
+                    .execute(&mut **transaction)
+                    .await
+                    .map_err(storage_error)?;
+                Ok(PublicationGuard {
+                    _upload: None,
+                    _read: None,
+                })
+            }
+            UploadLock::Local(_file) => {
+                let upload = self.lock_upload(artifact_id.as_str()).await?;
+                let read = self.read_guard(artifact_id).await?;
+                Ok(PublicationGuard {
+                    _upload: Some(upload),
+                    _read: Some(read),
+                })
+            }
+        }
     }
 
     async fn load_upload(&self, upload_id: &str) -> Result<Option<UploadRow>, ArtifactError> {
@@ -141,7 +187,7 @@ impl LocalArtifactStore {
             ArtifactDatabase::Sqlite(pool) => {
                 sqlx::query_as(
                     "SELECT u.artifact_id, u.principal, u.token_hash, u.declared_size, \
-                     u.expires_at, a.mime_type, u.created_at \
+                     u.expires_at, a.mime_type, u.created_at, a.expires_at AS artifact_expires_at \
                      FROM artifact_uploads u JOIN artifacts a ON a.id = u.artifact_id WHERE u.id = ?",
                 )
                 .bind(upload_id)
@@ -151,7 +197,7 @@ impl LocalArtifactStore {
             ArtifactDatabase::Postgres(pool) => {
                 sqlx::query_as(
                     "SELECT u.artifact_id, u.principal, u.token_hash, u.declared_size, \
-                     u.expires_at, a.mime_type, u.created_at \
+                     u.expires_at, a.mime_type, u.created_at, a.expires_at AS artifact_expires_at \
                      FROM artifact_uploads u JOIN artifacts a ON a.id = u.artifact_id WHERE u.id = $1",
                 )
                 .bind(upload_id)
@@ -361,7 +407,6 @@ impl ArtifactStore for LocalArtifactStore {
             .map_err(storage_error)?;
         Ok(ArtifactUpload {
             upload_id,
-            artifact_id,
             upload_token,
             expires_at: upload_expires_at,
         })
@@ -507,7 +552,7 @@ impl ArtifactStore for LocalArtifactStore {
         upload_token: &str,
         parts: &[UploadedArtifactPart],
     ) -> Result<ArtifactRef, ArtifactError> {
-        let _upload_guard = self.lock_upload(upload_id).await?;
+        let mut upload_guard = self.lock_upload(upload_id).await?;
         let row = self
             .load_upload(upload_id)
             .await?
@@ -547,10 +592,18 @@ impl ArtifactStore for LocalArtifactStore {
             .await
             .map_err(storage_error)?;
         let final_path = self.object_path(&row.artifact_id);
-        let temporary = final_path.with_extension("tmp");
+        let temporary = self.staging_dir(upload_id).join("assembled.tmp");
         let mut output = tokio::fs::File::create(&temporary)
             .await
             .map_err(storage_error)?;
+        // 长度分帧避免 Principal/MIME 的拼接歧义；分片信息不属于内容身份。
+        let mut content_digest = Sha256::new();
+        content_digest.update(b"stravia-artifact-v1\0");
+        for value in [&row.principal, &row.mime_type] {
+            content_digest.update((value.len() as u64).to_be_bytes());
+            content_digest.update(value.as_bytes());
+        }
+        let mut buffer = vec![0_u8; 64 * 1024];
         for part in &stored {
             let part_path = self
                 .staging_dir(upload_id)
@@ -560,7 +613,6 @@ impl ArtifactStore for LocalArtifactStore {
                 .map_err(storage_error)?;
             let mut digest = Sha256::new();
             let mut copied = 0_u64;
-            let mut buffer = vec![0_u8; 64 * 1024];
             loop {
                 let read = input.read(&mut buffer).await.map_err(storage_error)?;
                 if read == 0 {
@@ -568,6 +620,7 @@ impl ArtifactStore for LocalArtifactStore {
                 }
                 let chunk = &buffer[..read];
                 digest.update(chunk);
+                content_digest.update(chunk);
                 copied = copied.checked_add(read as u64).ok_or_else(|| {
                     ArtifactError::Invalid("Artifact upload size overflow".into())
                 })?;
@@ -583,33 +636,52 @@ impl ArtifactStore for LocalArtifactStore {
         }
         output.flush().await.map_err(storage_error)?;
         drop(output);
-        tokio::fs::rename(&temporary, &final_path)
-            .await
-            .map_err(storage_error)?;
-        {
-            let settings = self.transfer_settings(None).await?;
-            if let Some(s3) = &settings.s3 {
-                self.persist_s3_location(&row.artifact_id, s3).await?;
-                self.upload_s3(
-                    s3,
-                    &ArtifactId::new(&row.artifact_id),
-                    &final_path,
-                    total_size,
-                    &row.mime_type,
-                )
+        let artifact_id = ArtifactId::new(format!(
+            "artifact_{}",
+            hex_bytes(&content_digest.finalize())
+        ));
+        // 发布锁串行化独立上传/进程；共享读取锁阻止 sweeper 删除将复用的对象，
+        // 不阻塞已经在读取相同内容的客户端。
+        let publication_guard = self
+            .lock_publication(&mut upload_guard.1, &artifact_id)
+            .await?;
+        if self.reuse_ready(&row, &artifact_id).await? {
+            tokio::fs::remove_file(&temporary)
+                .await
+                .map_err(storage_error)?;
+            self.delete_ready(principal, &ArtifactId::new(&row.artifact_id))
                 .await?;
+        } else {
+            tokio::fs::rename(&temporary, &final_path)
+                .await
+                .map_err(storage_error)?;
+            {
+                let settings = self.transfer_settings(None).await?;
+                if let Some(s3) = &settings.s3 {
+                    self.persist_s3_location(&row.artifact_id, s3).await?;
+                    self.upload_s3(
+                        s3,
+                        &ArtifactId::new(&row.artifact_id),
+                        &final_path,
+                        total_size,
+                        &row.mime_type,
+                    )
+                    .await?;
+                }
             }
+            self.mark_ready(&row.artifact_id, &artifact_id).await?;
         }
-        self.mark_ready(upload_id, &row.artifact_id).await?;
+        drop(publication_guard);
+        self.upload_locks.lock().await.remove(artifact_id.as_str());
         if let Err(error) = tokio::fs::remove_dir_all(self.staging_dir(upload_id)).await
             && error.kind() != std::io::ErrorKind::NotFound
         {
             tracing::warn!(upload_id, error = %error, "completed Artifact staging cleanup failed");
         }
-        drop(_upload_guard);
+        drop(upload_guard);
         self.upload_locks.lock().await.remove(upload_id);
         Ok(ArtifactRef {
-            id: ArtifactId::new(row.artifact_id),
+            id: artifact_id,
             mime_type: row.mime_type,
             size: total_size,
         })
@@ -816,7 +888,6 @@ impl LocalArtifactStore {
         artifact_id: &str,
         now: i64,
     ) -> Result<u64, ArtifactError> {
-        let location = self.object_location(artifact_id).await?;
         let settings = self.transfer_settings(None).await?;
         let directory = self.root.join("locks");
         tokio::fs::create_dir_all(&directory)
@@ -834,6 +905,7 @@ impl LocalArtifactStore {
             Err(std::fs::TryLockError::WouldBlock) => return Ok(0),
             Err(error) => return Err(storage_error(error)),
         }
+        let location = self.object_location(artifact_id).await?;
         let mut transaction = pool.begin().await.map_err(storage_error)?;
         let claimed = sqlx::query(
             "UPDATE artifacts SET expires_at = expires_at WHERE id = ? AND state = 'ready' AND expires_at <= ? AND NOT EXISTS (SELECT 1 FROM artifact_download_grants g WHERE g.artifact_id=artifacts.id AND g.expires_at>?)",
@@ -870,7 +942,6 @@ impl LocalArtifactStore {
         artifact_id: &str,
         now: i64,
     ) -> Result<u64, ArtifactError> {
-        let location = self.object_location(artifact_id).await?;
         let settings = self.transfer_settings(None).await?;
         let mut transaction = pool.begin().await.map_err(storage_error)?;
         let locked: bool =
@@ -882,6 +953,7 @@ impl LocalArtifactStore {
         if !locked {
             return Ok(0);
         }
+        let location = self.object_location(artifact_id).await?;
         let claimed = sqlx::query(
             "UPDATE artifacts SET expires_at = expires_at WHERE id = $1 AND state = 'ready' AND expires_at <= $2 AND NOT EXISTS (SELECT 1 FROM artifact_download_grants g WHERE g.artifact_id=artifacts.id AND g.expires_at>$2)",
         )
@@ -947,17 +1019,67 @@ impl LocalArtifactStore {
             .collect()
     }
 
-    async fn mark_ready(&self, upload_id: &str, artifact_id: &str) -> Result<(), ArtifactError> {
+    async fn reuse_ready(
+        &self,
+        upload: &UploadRow,
+        id: &ArtifactId,
+    ) -> Result<bool, ArtifactError> {
+        // 只有已重新上传并校验完整字节的调用可以重新保留过期内容。
+        // 普通引用和 extend_retention 仍不能复活过期 Artifact。
+        let affected = match &self.database {
+            ArtifactDatabase::Sqlite(pool) => sqlx::query(
+                "UPDATE artifacts SET expires_at = MAX(expires_at, ?) \
+                 WHERE id = ? AND principal = ? AND mime_type = ? AND size = ? AND state = 'ready'",
+            )
+            .bind(upload.artifact_expires_at)
+            .bind(id.as_str())
+            .bind(&upload.principal)
+            .bind(&upload.mime_type)
+            .bind(upload.declared_size)
+            .execute(pool)
+            .await
+            .map_err(storage_error)?
+            .rows_affected(),
+            ArtifactDatabase::Postgres(pool) => sqlx::query(
+                "UPDATE artifacts SET expires_at = GREATEST(expires_at, $1) \
+                 WHERE id = $2 AND principal = $3 AND mime_type = $4 AND size = $5 AND state = 'ready'",
+            )
+            .bind(upload.artifact_expires_at)
+            .bind(id.as_str())
+            .bind(&upload.principal)
+            .bind(&upload.mime_type)
+            .bind(upload.declared_size)
+            .execute(pool)
+            .await
+            .map_err(storage_error)?
+            .rows_affected(),
+        };
+        Ok(affected == 1)
+    }
+
+    async fn mark_ready(
+        &self,
+        staging_id: &str,
+        artifact_id: &ArtifactId,
+    ) -> Result<(), ArtifactError> {
         match &self.database {
             ArtifactDatabase::Sqlite(pool) => {
                 let mut transaction = pool.begin().await.map_err(storage_error)?;
-                sqlx::query("UPDATE artifacts SET state = 'ready' WHERE id = ?")
-                    .bind(artifact_id)
+                sqlx::query(
+                    "INSERT INTO artifacts \
+                     (id, principal, mime_type, size, backend_key, state, expires_at, created_at, \
+                      storage_backend, storage_endpoint, storage_bucket) \
+                     SELECT ?, principal, mime_type, size, backend_key, 'ready', expires_at, created_at, \
+                            storage_backend, storage_endpoint, storage_bucket \
+                     FROM artifacts WHERE id = ? AND state = 'staging'",
+                )
+                    .bind(artifact_id.as_str())
+                    .bind(staging_id)
                     .execute(&mut *transaction)
                     .await
                     .map_err(storage_error)?;
-                sqlx::query("DELETE FROM artifact_uploads WHERE id = ?")
-                    .bind(upload_id)
+                sqlx::query("DELETE FROM artifacts WHERE id = ? AND state = 'staging'")
+                    .bind(staging_id)
                     .execute(&mut *transaction)
                     .await
                     .map_err(storage_error)?;
@@ -965,13 +1087,21 @@ impl LocalArtifactStore {
             }
             ArtifactDatabase::Postgres(pool) => {
                 let mut transaction = pool.begin().await.map_err(storage_error)?;
-                sqlx::query("UPDATE artifacts SET state = 'ready' WHERE id = $1")
-                    .bind(artifact_id)
+                sqlx::query(
+                    "INSERT INTO artifacts \
+                     (id, principal, mime_type, size, backend_key, state, expires_at, created_at, \
+                      storage_backend, storage_endpoint, storage_bucket) \
+                     SELECT $1, principal, mime_type, size, backend_key, 'ready', expires_at, created_at, \
+                            storage_backend, storage_endpoint, storage_bucket \
+                     FROM artifacts WHERE id = $2 AND state = 'staging'",
+                )
+                    .bind(artifact_id.as_str())
+                    .bind(staging_id)
                     .execute(&mut *transaction)
                     .await
                     .map_err(storage_error)?;
-                sqlx::query("DELETE FROM artifact_uploads WHERE id = $1")
-                    .bind(upload_id)
+                sqlx::query("DELETE FROM artifacts WHERE id = $1 AND state = 'staging'")
+                    .bind(staging_id)
                     .execute(&mut *transaction)
                     .await
                     .map_err(storage_error)?;
@@ -1106,6 +1236,19 @@ fn now_millis() -> i64 {
 
 fn sha256_hex(bytes: &[u8]) -> String {
     hex_bytes(&Sha256::digest(bytes))
+}
+
+fn object_id_for_key(key: &str) -> Result<&str, ArtifactError> {
+    let id = key
+        .strip_prefix("objects/")
+        .filter(|id| {
+            !id.is_empty()
+                && id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        })
+        .ok_or_else(|| ArtifactError::Storage("invalid Artifact object key".into()))?;
+    Ok(id)
 }
 
 fn hex_bytes(bytes: &[u8]) -> String {

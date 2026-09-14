@@ -127,45 +127,6 @@ impl MediaDerivativeStore {
         Ok(Some(MediaDerivative { derivative }))
     }
 
-    pub async fn source_for_derivative(
-        &self,
-        principal: &Principal,
-        derivative_id: &ArtifactId,
-    ) -> Result<Option<ArtifactId>, MediaStoreError> {
-        let principal_key = principal.continuation_key();
-        let source_id = match &self.database {
-            MediaDatabase::Sqlite(pool) => {
-                sqlx::query_scalar::<_, String>(
-                    "SELECT source_artifact_id FROM media_derivatives WHERE principal = ? AND derivative_artifact_id = ?",
-                )
-                .bind(&principal_key)
-                .bind(derivative_id.as_str())
-                .fetch_optional(pool)
-                .await
-            }
-            MediaDatabase::Postgres(pool) => {
-                sqlx::query_scalar::<_, String>(
-                    "SELECT source_artifact_id FROM media_derivatives WHERE principal = $1 AND derivative_artifact_id = $2",
-                )
-                .bind(&principal_key)
-                .bind(derivative_id.as_str())
-                .fetch_optional(pool)
-                .await
-            }
-        }
-        .map_err(|error| MediaStoreError::Storage(error.to_string()))?
-        .map(ArtifactId::new);
-        let Some(source_id) = source_id else {
-            return Ok(None);
-        };
-        self.artifacts
-            .open(principal, &source_id)
-            .await
-            .map_err(|_| MediaStoreError::Corrupt)?;
-        self.verified_derivative(principal, derivative_id).await?;
-        Ok(Some(source_id))
-    }
-
     pub async fn get_or_create_derivative(
         &self,
         principal: &Principal,
@@ -190,6 +151,10 @@ impl MediaDerivativeStore {
             .create_ready_bytes(principal, "image/jpeg", bytes, retention)
             .await
             .map_err(MediaStoreError::from)?;
+        // Artifact identity is content-addressed and shared, so the candidate
+        // may already back the winner's or another source's mapping. A loser
+        // never deletes it; unreferenced candidates are left to retention
+        // cleanup.
         let created_at = chrono::Utc::now().timestamp_millis();
         let principal_key = principal.continuation_key();
         let insertion = match &self.database {
@@ -220,13 +185,7 @@ impl MediaDerivativeStore {
         };
         let won = match insertion {
             Ok(rows_affected) => rows_affected == 1,
-            Err(error) => {
-                self.artifacts
-                    .delete_ready(principal, &candidate.id)
-                    .await
-                    .map_err(MediaStoreError::from)?;
-                return Err(MediaStoreError::Storage(error.to_string()));
-            }
+            Err(error) => return Err(MediaStoreError::Storage(error.to_string())),
         };
         if won {
             return Ok(MediaDerivative {
@@ -234,10 +193,6 @@ impl MediaDerivativeStore {
             });
         }
 
-        self.artifacts
-            .delete_ready(principal, &candidate.id)
-            .await
-            .map_err(MediaStoreError::from)?;
         let derivative_id = self
             .mapped_derivative(principal, source_id)
             .await?

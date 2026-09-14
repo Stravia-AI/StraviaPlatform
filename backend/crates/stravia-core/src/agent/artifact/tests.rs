@@ -318,6 +318,23 @@ async fn postgres_download_lifecycle_survives_reconstruction() {
         )
         .await
         .unwrap();
+    // 超过单个锁池容量的并发完成不得因重复内容发布而等待另一条锁连接。
+    let uploads = (0..12).map(|_| {
+        store.ingest(
+            &owner,
+            "application/octet-stream",
+            Some(3),
+            bytes_stream(Bytes::from_static(b"abc")),
+            Duration::from_secs(60),
+        )
+    });
+    let duplicates =
+        tokio::time::timeout(Duration::from_secs(30), futures::future::join_all(uploads))
+            .await
+            .expect("concurrent PostgreSQL publication must not exhaust its own lock pool");
+    for duplicate in duplicates {
+        assert_eq!(duplicate.unwrap().id, artifact.id);
+    }
     let settings = ArtifactSettings {
         client_base_url: "https://client.example/base".into(),
         ..Default::default()
@@ -620,7 +637,14 @@ async fn failed_ready_artifact_file_cleanup_keeps_its_database_record() {
         )
         .await
         .expect("ready Artifact");
-    let object_path = store.object_path(artifact.id.as_str());
+    let reader = store
+        .open(&owner, &artifact.id)
+        .await
+        .expect("open ready Artifact");
+    let ArtifactSource::LocalPath(object_path) = reader.source.clone() else {
+        panic!("expected local Artifact");
+    };
+    drop(reader);
     tokio::fs::remove_file(&object_path)
         .await
         .expect("remove object fixture");
@@ -725,6 +749,12 @@ async fn sweep_expired_upload_removes_staging_before_upload_metadata() {
         .await
         .expect("create upload");
     let staging = store.staging_dir(&upload.upload_id);
+    let staging_artifact_id: String =
+        sqlx::query_scalar("SELECT artifact_id FROM artifact_uploads WHERE id = ?")
+            .bind(&upload.upload_id)
+            .fetch_one(&pool)
+            .await
+            .expect("staging Artifact fixture");
     tokio::fs::write(staging.join("partial.tmp"), b"abc")
         .await
         .expect("write partial upload");
@@ -751,7 +781,7 @@ async fn sweep_expired_upload_removes_staging_before_upload_metadata() {
     assert_eq!(artifact_count, 1);
 
     sqlx::query("UPDATE artifacts SET expires_at = 0 WHERE id = ?")
-        .bind(upload.artifact_id.as_str())
+        .bind(&staging_artifact_id)
         .execute(&pool)
         .await
         .expect("expire staging artifact");
@@ -859,4 +889,600 @@ async fn concurrent_parts_cannot_exceed_the_declared_upload_size() {
         ArtifactError::Invalid(message)
             if message == "Artifact part exceeds the declared upload size"
     ));
+}
+
+#[tokio::test]
+async fn stable_artifact_id_is_shared_by_ingest_chunkings_and_store_reconstruction() {
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let pool = crate::db::init_pool(data_dir.path())
+        .await
+        .expect("SQLite pool");
+    crate::migrations::migrate_sqlite(&pool)
+        .await
+        .expect("SQLite migrations");
+    let root = data_dir.path().join("artifacts");
+    let store = LocalArtifactStore::sqlite(pool.clone(), &root);
+    let owner = Principal::new("stable-owner");
+    let payload = Bytes::from_static(b"ABCdef");
+
+    let direct = store
+        .ingest(
+            &owner,
+            "image/png",
+            Some(6),
+            bytes_stream(payload.clone()),
+            Duration::from_secs(60),
+        )
+        .await
+        .expect("direct ingestion");
+    let repeated = store
+        .ingest(
+            &owner,
+            "image/png",
+            Some(6),
+            bytes_stream(payload.clone()),
+            Duration::from_secs(60),
+        )
+        .await
+        .expect("repeated ingestion");
+    assert_eq!(direct.id, repeated.id);
+
+    let two_parts = store
+        .create_upload(
+            &owner,
+            ArtifactUploadRequest {
+                mime_type: "image/png".into(),
+                size: 6,
+                idle_ttl: Duration::from_secs(60),
+                retention_ttl: Duration::from_secs(60),
+                policy: policy(),
+            },
+        )
+        .await
+        .expect("create two-part upload");
+    let first_part = store
+        .upload_part(
+            &owner,
+            &two_parts.upload_id,
+            &two_parts.upload_token,
+            1,
+            bytes_stream(Bytes::from_static(b"AB")),
+        )
+        .await
+        .expect("upload first part");
+    let second_part = store
+        .upload_part(
+            &owner,
+            &two_parts.upload_id,
+            &two_parts.upload_token,
+            2,
+            bytes_stream(Bytes::from_static(b"Cdef")),
+        )
+        .await
+        .expect("upload second part");
+    let assembled = store
+        .complete_upload(
+            &owner,
+            &two_parts.upload_id,
+            &two_parts.upload_token,
+            &[first_part, second_part],
+        )
+        .await
+        .expect("complete two-part upload");
+    assert_eq!(direct.id, assembled.id);
+
+    let reconstructed = LocalArtifactStore::sqlite(pool.clone(), &root);
+    let restored = reconstructed
+        .ingest(
+            &owner,
+            "image/png",
+            Some(6),
+            bytes_stream(payload.clone()),
+            Duration::from_secs(60),
+        )
+        .await
+        .expect("ingestion after store reconstruction");
+    assert_eq!(direct.id, restored.id);
+    let (_, bytes) = reconstructed
+        .read_bytes(&owner, &direct.id, Duration::from_secs(60))
+        .await
+        .expect("read reconstructed Artifact");
+    assert_eq!(bytes, payload);
+}
+
+#[tokio::test]
+async fn legacy_random_identity_remains_readable_after_identical_reupload() {
+    let directory = tempfile::tempdir().unwrap();
+    let pool = crate::db::init_pool(directory.path()).await.unwrap();
+    crate::migrations::migrate_sqlite(&pool).await.unwrap();
+    let store = LocalArtifactStore::sqlite(pool.clone(), directory.path().join("artifacts"));
+    let owner = Principal::new("owner");
+    let bytes = Bytes::from_static(b"legacy image");
+    let staged = store
+        .ingest(
+            &owner,
+            "image/png",
+            Some(bytes.len() as u64),
+            bytes_stream(bytes.clone()),
+            Duration::from_secs(3600),
+        )
+        .await
+        .unwrap();
+    // 旧版本以物理对象的随机 ID 作为公开身份，升级不能改写该行或引用。
+    let backend_key: String = sqlx::query_scalar("SELECT backend_key FROM artifacts WHERE id = ?")
+        .bind(staged.id.as_str())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let legacy = ArtifactId::new(backend_key.strip_prefix("objects/").unwrap());
+    sqlx::query("UPDATE artifacts SET id = ? WHERE id = ?")
+        .bind(legacy.as_str())
+        .bind(staged.id.as_str())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let uploaded = store
+        .ingest(
+            &owner,
+            "image/png",
+            Some(bytes.len() as u64),
+            bytes_stream(bytes.clone()),
+            Duration::from_secs(3600),
+        )
+        .await
+        .unwrap();
+    assert_ne!(legacy, uploaded.id);
+    for id in [&legacy, &uploaded.id] {
+        let (_, readable) = store
+            .read_bytes(&owner, id, Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert_eq!(readable, bytes);
+    }
+}
+
+#[tokio::test]
+async fn stable_artifact_id_scopes_to_owner_mime_and_bytes() {
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let pool = crate::db::init_pool(data_dir.path())
+        .await
+        .expect("SQLite pool");
+    crate::migrations::migrate_sqlite(&pool)
+        .await
+        .expect("SQLite migrations");
+    let store = LocalArtifactStore::sqlite(pool, data_dir.path().join("artifacts"));
+    let owner = Principal::new("scope-owner");
+    let stranger = Principal::new("scope-stranger");
+    let payload = Bytes::from_static(b"payload");
+
+    let base = store
+        .ingest(
+            &owner,
+            "image/png",
+            Some(7),
+            bytes_stream(payload.clone()),
+            Duration::from_secs(60),
+        )
+        .await
+        .expect("base ingestion");
+    let foreign = store
+        .ingest(
+            &stranger,
+            "image/png",
+            Some(7),
+            bytes_stream(payload.clone()),
+            Duration::from_secs(60),
+        )
+        .await
+        .expect("foreign ingestion");
+    assert_ne!(base.id, foreign.id);
+    assert!(matches!(
+        store.open(&stranger, &base.id).await,
+        Err(ArtifactError::NotFound)
+    ));
+    assert!(matches!(
+        store.open(&owner, &foreign.id).await,
+        Err(ArtifactError::NotFound)
+    ));
+
+    let relabelled = store
+        .ingest(
+            &owner,
+            "image/jpeg",
+            Some(7),
+            bytes_stream(payload.clone()),
+            Duration::from_secs(60),
+        )
+        .await
+        .expect("relabelled ingestion");
+    assert_ne!(base.id, relabelled.id);
+    let mutated = store
+        .ingest(
+            &owner,
+            "image/png",
+            Some(8),
+            bytes_stream(Bytes::from_static(b"payload2")),
+            Duration::from_secs(60),
+        )
+        .await
+        .expect("mutated ingestion");
+    assert_ne!(base.id, mutated.id);
+
+    let (_, base_bytes) = store
+        .read_bytes(&owner, &base.id, Duration::from_secs(60))
+        .await
+        .expect("read base");
+    assert_eq!(base_bytes, payload);
+    let (_, relabelled_bytes) = store
+        .read_bytes(&owner, &relabelled.id, Duration::from_secs(60))
+        .await
+        .expect("read relabelled");
+    assert_eq!(relabelled_bytes, payload);
+    let (_, mutated_bytes) = store
+        .read_bytes(&owner, &mutated.id, Duration::from_secs(60))
+        .await
+        .expect("read mutated");
+    assert_eq!(mutated_bytes, Bytes::from_static(b"payload2"));
+    let (_, foreign_bytes) = store
+        .read_bytes(&stranger, &foreign.id, Duration::from_secs(60))
+        .await
+        .expect("read foreign");
+    assert_eq!(foreign_bytes, payload);
+}
+
+#[tokio::test]
+async fn concurrent_identical_uploads_converge_on_one_artifact_id() {
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let pool = crate::db::init_pool(data_dir.path())
+        .await
+        .expect("SQLite pool");
+    crate::migrations::migrate_sqlite(&pool)
+        .await
+        .expect("SQLite migrations");
+    let root = data_dir.path().join("artifacts");
+    let owner = Principal::new("converge-owner");
+    let barrier = Arc::new(tokio::sync::Barrier::new(8));
+    let mut tasks = Vec::with_capacity(8);
+    for index in 0..8 {
+        let store = LocalArtifactStore::sqlite(pool.clone(), &root);
+        let owner = owner.clone();
+        let barrier = Arc::clone(&barrier);
+        let payload = Bytes::from_static(b"converge");
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            if index % 2 == 0 {
+                store
+                    .ingest(
+                        &owner,
+                        "image/png",
+                        Some(payload.len() as u64),
+                        bytes_stream(payload),
+                        Duration::from_secs(60),
+                    )
+                    .await
+            } else {
+                let upload = store
+                    .create_upload(
+                        &owner,
+                        ArtifactUploadRequest {
+                            mime_type: "image/png".into(),
+                            size: payload.len() as u64,
+                            idle_ttl: Duration::from_secs(60),
+                            retention_ttl: Duration::from_secs(60),
+                            policy: policy(),
+                        },
+                    )
+                    .await?;
+                let part = store
+                    .upload_part(
+                        &owner,
+                        &upload.upload_id,
+                        &upload.upload_token,
+                        1,
+                        bytes_stream(payload),
+                    )
+                    .await?;
+                store
+                    .complete_upload(&owner, &upload.upload_id, &upload.upload_token, &[part])
+                    .await
+            }
+        }));
+    }
+
+    let results = futures::future::join_all(tasks).await;
+    let ids: Vec<ArtifactId> = results
+        .into_iter()
+        .map(|result| {
+            result
+                .expect("upload task")
+                .expect("concurrent identical upload")
+                .id
+        })
+        .collect();
+    let converged = &ids[0];
+    assert!(
+        ids.iter().all(|id| id == converged),
+        "concurrent identical uploads diverged: {ids:?}"
+    );
+
+    let reader = LocalArtifactStore::sqlite(pool.clone(), &root);
+    let (_, bytes) = reader
+        .read_bytes(&owner, converged, Duration::from_secs(60))
+        .await
+        .expect("read converged Artifact");
+    assert_eq!(bytes, Bytes::from_static(b"converge"));
+}
+
+#[tokio::test]
+async fn duplicate_upload_extends_retention_without_shortening_it() {
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let pool = crate::db::init_pool(data_dir.path())
+        .await
+        .expect("SQLite pool");
+    crate::migrations::migrate_sqlite(&pool)
+        .await
+        .expect("SQLite migrations");
+    let root = data_dir.path().join("artifacts");
+    let time = Arc::new(std::sync::atomic::AtomicI64::new(1_800_000_000_000));
+    let controlled = time.clone();
+    let clock: Arc<dyn Fn() -> i64 + Send + Sync> =
+        Arc::new(move || controlled.load(std::sync::atomic::Ordering::SeqCst));
+    let store = LocalArtifactStore::sqlite(pool, &root).with_clock(clock);
+    let owner = Principal::new("retention-owner");
+    let payload = Bytes::from_static(b"retained");
+
+    let long = store
+        .ingest(
+            &owner,
+            "image/png",
+            Some(8),
+            bytes_stream(payload.clone()),
+            Duration::from_secs(3600),
+        )
+        .await
+        .expect("long ingestion");
+    time.fetch_add(60_000, std::sync::atomic::Ordering::SeqCst);
+    let short = store
+        .ingest(
+            &owner,
+            "image/png",
+            Some(8),
+            bytes_stream(payload.clone()),
+            Duration::from_secs(60),
+        )
+        .await
+        .expect("short duplicate ingestion");
+    assert_eq!(long.id, short.id);
+    // The short duplicate must not pull the retention horizon back with it.
+    time.fetch_add(2_000_000, std::sync::atomic::Ordering::SeqCst);
+    drop(
+        store
+            .open(&owner, &long.id)
+            .await
+            .expect("Artifact survives past the short retention window"),
+    );
+
+    // A longer duplicate extends the horizon from its own upload time.
+    let extended = store
+        .ingest(
+            &owner,
+            "image/png",
+            Some(8),
+            bytes_stream(payload),
+            Duration::from_secs(3600),
+        )
+        .await
+        .expect("extending ingestion");
+    assert_eq!(long.id, extended.id);
+    time.fetch_add(2_000_000, std::sync::atomic::Ordering::SeqCst);
+    drop(
+        store
+            .open(&owner, &long.id)
+            .await
+            .expect("duplicate extends beyond the original retention window"),
+    );
+    // Retention is max(existing, now + ttl), never an accumulation of duplicates.
+    time.fetch_add(2_000_000, std::sync::atomic::Ordering::SeqCst);
+    assert!(matches!(
+        store.open(&owner, &long.id).await,
+        Err(ArtifactError::NotFound)
+    ));
+}
+
+#[tokio::test]
+async fn duplicate_upload_while_reader_held_neither_hangs_nor_corrupts() {
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let pool = crate::db::init_pool(data_dir.path())
+        .await
+        .expect("SQLite pool");
+    crate::migrations::migrate_sqlite(&pool)
+        .await
+        .expect("SQLite migrations");
+    let store = LocalArtifactStore::sqlite(pool, data_dir.path().join("artifacts"));
+    let owner = Principal::new("held-owner");
+    let payload = Bytes::from_static(b"held-payload");
+
+    let first = store
+        .ingest(
+            &owner,
+            "image/png",
+            Some(12),
+            bytes_stream(payload.clone()),
+            Duration::from_secs(3600),
+        )
+        .await
+        .expect("initial ingestion");
+    let reader = store
+        .open(&owner, &first.id)
+        .await
+        .expect("open held reader");
+    let ArtifactSource::LocalPath(path) = &reader.source else {
+        panic!("expected local Artifact");
+    };
+
+    let duplicate_store = store.clone();
+    let duplicate_owner = owner.clone();
+    let duplicate = tokio::time::timeout(
+        Duration::from_secs(10),
+        duplicate_store.ingest(
+            &duplicate_owner,
+            "image/png",
+            Some(12),
+            bytes_stream(payload.clone()),
+            Duration::from_secs(3600),
+        ),
+    )
+    .await
+    .expect("duplicate upload must not hang while a reader is held")
+    .expect("duplicate upload");
+    assert_eq!(first.id, duplicate.id);
+
+    assert_eq!(
+        Bytes::from(tokio::fs::read(path).await.expect("held reader content")),
+        payload
+    );
+    drop(reader);
+    let (_, bytes) = store
+        .read_bytes(&owner, &first.id, Duration::from_secs(60))
+        .await
+        .expect("read after duplicate upload");
+    assert_eq!(bytes, payload);
+}
+
+#[tokio::test]
+async fn reupload_after_expiry_sweep_restores_the_same_artifact_id() {
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let pool = crate::db::init_pool(data_dir.path())
+        .await
+        .expect("SQLite pool");
+    crate::migrations::migrate_sqlite(&pool)
+        .await
+        .expect("SQLite migrations");
+    let root = data_dir.path().join("artifacts");
+    let time = Arc::new(std::sync::atomic::AtomicI64::new(1_800_000_000_000));
+    let controlled = time.clone();
+    let clock: Arc<dyn Fn() -> i64 + Send + Sync> =
+        Arc::new(move || controlled.load(std::sync::atomic::Ordering::SeqCst));
+    let store = LocalArtifactStore::sqlite(pool, &root).with_clock(clock);
+    let owner = Principal::new("revive-owner");
+    let payload = Bytes::from_static(b"revived");
+
+    let original = store
+        .ingest(
+            &owner,
+            "image/png",
+            Some(7),
+            bytes_stream(payload.clone()),
+            Duration::from_secs(60),
+        )
+        .await
+        .expect("original ingestion");
+    let (_, bytes) = store
+        .read_bytes(&owner, &original.id, Duration::from_secs(60))
+        .await
+        .expect("read original");
+    assert_eq!(bytes, payload);
+
+    time.fetch_add(61_000, std::sync::atomic::Ordering::SeqCst);
+    assert!(matches!(
+        store.open(&owner, &original.id).await,
+        Err(ArtifactError::NotFound)
+    ));
+    assert_eq!(
+        store.sweep_expired().await.expect("sweep expired Artifact"),
+        1
+    );
+    assert!(matches!(
+        store.open(&owner, &original.id).await,
+        Err(ArtifactError::NotFound)
+    ));
+
+    let revived = store
+        .ingest(
+            &owner,
+            "image/png",
+            Some(7),
+            bytes_stream(payload.clone()),
+            Duration::from_secs(60),
+        )
+        .await
+        .expect("re-ingestion after sweep");
+    assert_eq!(original.id, revived.id);
+    let (_, bytes) = store
+        .read_bytes(&owner, &revived.id, Duration::from_secs(60))
+        .await
+        .expect("read revived");
+    assert_eq!(bytes, payload);
+}
+
+#[tokio::test]
+async fn failed_duplicate_complete_upload_keeps_existing_ready_artifact() {
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let pool = crate::db::init_pool(data_dir.path())
+        .await
+        .expect("SQLite pool");
+    crate::migrations::migrate_sqlite(&pool)
+        .await
+        .expect("SQLite migrations");
+    let store = LocalArtifactStore::sqlite(pool, data_dir.path().join("artifacts"));
+    let owner = Principal::new("failed-duplicate-owner");
+    let payload = Bytes::from_static(b"existing");
+
+    let ready = store
+        .ingest(
+            &owner,
+            "image/png",
+            Some(8),
+            bytes_stream(payload.clone()),
+            Duration::from_secs(3600),
+        )
+        .await
+        .expect("ready ingestion");
+
+    let upload = store
+        .create_upload(
+            &owner,
+            ArtifactUploadRequest {
+                mime_type: "image/png".into(),
+                size: 8,
+                idle_ttl: Duration::from_secs(60),
+                retention_ttl: Duration::from_secs(60),
+                policy: policy(),
+            },
+        )
+        .await
+        .expect("create duplicate upload");
+    let part = store
+        .upload_part(
+            &owner,
+            &upload.upload_id,
+            &upload.upload_token,
+            1,
+            bytes_stream(payload),
+        )
+        .await
+        .expect("stage duplicate part");
+    // Corrupt the staged bytes so assembly fails verification against the manifest.
+    tokio::fs::write(
+        store
+            .staging_dir(&upload.upload_id)
+            .join(format!("{:08}.part", part.part_number)),
+        b"corrupted",
+    )
+    .await
+    .expect("corrupt staged part");
+
+    assert!(matches!(
+        store
+            .complete_upload(&owner, &upload.upload_id, &upload.upload_token, &[part])
+            .await,
+        Err(ArtifactError::Invalid(_))
+    ));
+    // The pre-existing ready Artifact must survive the failed duplicate untouched.
+    let (_, bytes) = store
+        .read_bytes(&owner, &ready.id, Duration::from_secs(60))
+        .await
+        .expect("existing Artifact still readable");
+    assert_eq!(bytes, Bytes::from_static(b"existing"));
 }
