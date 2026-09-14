@@ -19,13 +19,35 @@ pub struct WebSearchInput {
     pub deadline: Instant,
 }
 
+// Historical Search Turn payloads may still carry a removed `blocked_domains`
+// field; deserialization intentionally ignores unknown fields so persisted
+// chains keep resolving. New public inputs reject the field at their own
+// deny_unknown_fields boundary instead.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct WebSearchRunPolicy {
     #[serde(default)]
     pub allowed_domains: Vec<String>,
-    #[serde(default)]
-    pub blocked_domains: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn historical_policy_payloads_ignore_the_removed_blocked_domains_field() {
+        let policy: WebSearchRunPolicy = serde_json::from_value(serde_json::json!({
+            "allowed_domains": ["example.com"],
+            "blocked_domains": ["legacy.example"]
+        }))
+        .expect("historical Search Turn payloads must keep deserializing");
+
+        assert_eq!(
+            policy,
+            WebSearchRunPolicy {
+                allowed_domains: vec!["example.com".to_owned()]
+            }
+        );
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

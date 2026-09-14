@@ -906,7 +906,7 @@ Web Search 已作为首个生产 vertical slice 实施。上层 `WebSearchRunner
 
 完整 interface、clean cutover、迁移与验收见 [`web-search.md`](web-search.md) 和 [`ADR-0017`](../adr/0017-rename-web-research-to-web-search-and-split-tool-identities.md)。
 
-Media Understanding 通过 `StraviaRead` 的 Artifact `question` 分流调用 internal-only Agent Definition，在 AgentRunner 前执行显式 Media preprocessing，并直接复用 Agent Turn。完整 contract、JPEG normalization、Gate、Admin surface 与验收见 [`media-understanding.md`](media-understanding.md)、[`ADR-0009`](../adr/0009-add-media-understanding-as-capability-tool.md) 和 [`ADR-0051`](../adr/0051-disambiguate-artifact-download-and-understanding.md)。
+Media Understanding 通过 `StraviaRead` 的图片 path 分流调用 internal-only Agent Definition：裸图片默认描述与 OCR，`#stravia?question=` 指定问题，在 AgentRunner 前执行显式 Media preprocessing，并直接复用 Agent Turn。搜索和媒体完整报告先验证、持久化，再对长 answer 的工具交付副本分页；文本续页不创建 Turn 或重复执行模型。完整 contract、JPEG normalization、Gate、Admin surface 与验收见 [`media-understanding.md`](media-understanding.md)、[`ADR-0009`](../adr/0009-add-media-understanding-as-capability-tool.md) 和 [`ADR-0051`](../adr/0051-disambiguate-artifact-download-and-understanding.md)。
 
 ---
 

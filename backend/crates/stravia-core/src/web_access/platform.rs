@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use serde::Deserialize;
 use serde_json::Value;
 
 use stravia_runtime_contract::hook::{
@@ -10,6 +9,7 @@ use stravia_runtime_contract::hook::{
 use stravia_runtime_contract::protocol::ir::ContentBlock;
 use stravia_web_access_contract::{
     DEFAULT_SEARCH_RESULTS, STRAVIA_READ_TOOL_ID, STRAVIA_READ_TOOL_NAME,
+    read_path::{ReadInput, ReadTarget, input_schema, parse_read_path},
 };
 
 use super::{SearchRequest, WebAccessError};
@@ -24,24 +24,6 @@ struct InternalReadTool {
     gateway: crate::Gateway,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ReadRequest {
-    url: String,
-}
-
-pub(crate) fn decode_query_url(url: &str) -> Option<String> {
-    let query = url.strip_prefix("query://")?;
-    // Encode delimiters before using form decoding: the entire suffix is search text.
-    let encoded = format!("q={}", query.replace('&', "%26"));
-    Some(
-        url::form_urlencoded::parse(encoded.as_bytes())
-            .next()
-            .map(|(_, value)| value.into_owned())
-            .unwrap_or_default(),
-    )
-}
-
 #[async_trait]
 impl PlatformTool for InternalReadTool {
     fn id(&self) -> ToolId {
@@ -54,17 +36,12 @@ impl PlatformTool for InternalReadTool {
 
     fn description(&self) -> Option<&str> {
         Some(
-            "Read a URL. query:// followed by URL-encoded search text performs basic public web retrieval, never a research Agent. Public HTTP(S) pages return Markdown; images and files follow platform artifact rules. Artifact references support download or an explicit question parameter.",
+            "Read a single path. search:// followed by percent-encoded search text performs basic public web retrieval, never a research Agent. Public HTTP(S) pages return Markdown; images and files follow platform artifact rules. Resource options use #stravia?question= or #stravia?download=1.",
         )
     }
 
     fn parameters(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": { "url": { "type": "string" } },
-            "required": ["url"],
-            "additionalProperties": false
-        })
+        input_schema()
     }
 
     fn parallel_safe(&self) -> bool {
@@ -86,7 +63,7 @@ impl PlatformTool for InternalReadTool {
         arguments: Value,
         context: ToolExecutionContext,
     ) -> Result<PlatformToolOutput, PlatformToolError> {
-        let request: ReadRequest = match serde_json::from_value(arguments) {
+        let request: ReadInput = match serde_json::from_value(arguments) {
             Ok(request) => request,
             Err(error) => {
                 return Ok(web_access_error_output(WebAccessError::invalid(format!(
@@ -94,10 +71,17 @@ impl PlatformTool for InternalReadTool {
                 ))));
             }
         };
-        let Some(query) = decode_query_url(&request.url) else {
-            return crate::mcp::read::execute_internal_read(&self.gateway, request.url, context)
+        let target = parse_read_path(&request.path)
+            .map_err(|error| PlatformToolError::new(error.to_string()))?;
+        let ReadTarget::Search(search) = target else {
+            return crate::mcp::read::execute_internal_read(&self.gateway, request.path, context)
                 .await;
         };
+        if search.previous_turn_id.is_some() {
+            return Err(PlatformToolError::new(
+                "Internal retrieval does not accept previous_turn_id",
+            ));
+        }
         if !crate::mcp::read::networking_available(&self.gateway, &context.principal).await {
             return Err(PlatformToolError::new(
                 "Networking capability is unavailable",
@@ -110,10 +94,9 @@ impl PlatformTool for InternalReadTool {
                 &context.run_id,
                 context.principal.api_key_id(),
                 SearchRequest {
-                    query,
+                    query: search.query,
                     max_results: DEFAULT_SEARCH_RESULTS,
-                    allowed_domains: Vec::new(),
-                    blocked_domains: Vec::new(),
+                    allowed_domains: search.allowed_domains.unwrap_or_default(),
                 },
             )
             .await
@@ -157,20 +140,5 @@ fn output_value(output: PlatformToolOutput) -> Result<Value, PlatformToolError> 
         Err(PlatformToolError::new(raw.to_string()))
     } else {
         Ok(raw)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn query_urls_decode_search_text_without_interpreting_url_parameters() {
-        assert_eq!(
-            decode_query_url("query://Rust%20%26%20C%2B%2B?year=2026"),
-            Some("Rust & C++?year=2026".into())
-        );
-        assert_eq!(decode_query_url("query://a&b"), Some("a&b".into()));
-        assert_eq!(decode_query_url("https://example.com/?question=test"), None);
     }
 }

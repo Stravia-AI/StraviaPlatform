@@ -1099,7 +1099,7 @@ async fn serve_media_parent(
                                     "function": {
                                         "name": "StraviaRead",
                                         "arguments": serde_json::json!({
-                                            "url": format!("https://stravia/artifact/{id}?question=Describe%20the%20image")
+                                            "path": format!("https://stravia/artifact/{id}#stravia?question=Describe%20the%20image")
                                         }).to_string()
                                     }
                                 }]
@@ -1140,8 +1140,7 @@ async fn serve_media_parent(
                                     "function": {
                                         "name": "StraviaRead",
                                         "arguments": serde_json::json!({
-                                            "url": format!("https://stravia/artifact/{id}?question=Identify%20the%20subject"),
-                                            "previous_turn_id": turn_id
+                                            "path": format!("https://stravia/artifact/{id}#stravia?question=Identify%20the%20subject&previous_turn_id={turn_id}")
                                         }).to_string()
                                     }
                                 }]

@@ -1,3 +1,7 @@
+#[cfg(test)]
+mod tests;
+mod text;
+
 use std::{
     collections::HashMap,
     sync::Arc,
@@ -6,11 +10,11 @@ use std::{
 
 use super::{McpContext, McpTool, McpToolError, McpToolOutput};
 use async_trait::async_trait;
-use serde::Deserialize;
+use bytes::Bytes;
 use serde_json::{Value, json};
 use stravia_runtime_contract::{
     CancellationToken, Principal,
-    artifact::{ArtifactId, ArtifactSettings, bytes_stream},
+    artifact::{ArtifactId, ArtifactRef, ArtifactSettings, ArtifactSource, bytes_stream},
     hook::{
         ActionBatch, EventKind, Hook, HookAction, HookDescriptor, HookEvent, HookId, HookSession,
         PlatformTool, PlatformToolError, PlatformToolOutput, ReadExposureScope, RequestKind,
@@ -18,34 +22,18 @@ use stravia_runtime_contract::{
     },
     protocol::ir::ContentBlock,
 };
+use stravia_web_access::fetch::{FetchErrorCode, ReadText, convert_read_bytes};
+use stravia_web_access_contract::read_path::{
+    ReadInput, ReadOptions, ReadTarget, input_schema, parse_read_path,
+};
 use stravia_web_search::host::PublicSearchHost;
+use tokio::io::AsyncReadExt;
 
 pub(crate) const TOOL_ID: &str = "stravia-read";
 pub(crate) const TOOL_NAME: &str = "StraviaRead";
-const DOWNLOAD_DESCRIPTION: &str = "Read an owned https://stravia/artifact/<id> reference to obtain a temporary download URL and file metadata without model execution.";
-const NETWORK_DESCRIPTION: &str = "Use query://<URL-encoded query> for a complete sourced research report, or a public HTTP(S) URL for webpage Markdown or file import. Search continuation accepts previous_turn_id and domain filters.";
-const MEDIA_DESCRIPTION: &str = "Ask about a static JPEG, PNG or WebP Artifact with ?question=<URL-encoded question>. Public image URLs are stored, then described with readable text extracted.";
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ReadInput {
-    url: String,
-    #[serde(default)]
-    previous_turn_id: Option<String>,
-    #[serde(default)]
-    allowed_domains: Option<Vec<String>>,
-    #[serde(default)]
-    blocked_domains: Option<Vec<String>>,
-}
-
-pub(crate) fn input_schema() -> Value {
-    json!({"type":"object", "properties": {
-        "url":{"type":"string","minLength":1,"description":"Artifact Reference, public HTTP(S) URL, or query://<URL-encoded search query>. Only Artifact URLs interpret question."},
-        "previous_turn_id":{"type":["string","null"],"description":"Prior Search Turn for query://, or prior Media Understanding Turn for an Artifact URL with question."},
-        "allowed_domains":{"type":["array","null"],"items":{"type":"string"},"maxItems":20},
-        "blocked_domains":{"type":["array","null"],"items":{"type":"string"},"maxItems":20}
-    },"required":["url"],"additionalProperties":false})
-}
+const DOWNLOAD_DESCRIPTION: &str = "Read content from an owned https://stravia/artifact/<id> path. Add #stravia?download=1 to obtain download information without model execution.";
+const NETWORK_DESCRIPTION: &str = "Use search://<percent-encoded query> for a complete sourced research report; allowed_domains and previous_turn_id are search query parameters. Public HTTP(S) paths read content; resource options use #stravia?.";
+const MEDIA_DESCRIPTION: &str = "Read static JPEG, PNG or WebP images for description and readable text. Add #stravia?question=<encoded question> for a specific question and previous_turn_id for explicit continuation.";
 
 #[derive(Clone)]
 pub(crate) struct ReadTool {
@@ -136,7 +124,67 @@ impl ReadTool {
             .handlers
             .get(&domain)
             .ok_or_else(|| PlatformToolError::new("StraviaRead handler unavailable"))?;
-        handler.execute_result(arguments, context).await
+        let output = handler.execute_result(arguments, context.clone()).await?;
+        self.paginate_report(output, &context).await
+    }
+
+    async fn paginate_report(
+        &self,
+        mut result: PlatformToolOutput,
+        context: &ToolExecutionContext,
+    ) -> Result<PlatformToolOutput, PlatformToolError> {
+        if result.is_error {
+            return Ok(result);
+        }
+        let mut paginated = false;
+        for block in &mut result.content {
+            let ContentBlock::Unknown { raw } = block else {
+                continue;
+            };
+            let Some(answer) = raw
+                .get("report")
+                .and_then(|report| report.get("answer"))
+                .and_then(Value::as_str)
+            else {
+                continue;
+            };
+            if !text::exceeds_page(answer) {
+                continue;
+            }
+            let Value::String(answer) = raw["report"]["answer"].take() else {
+                unreachable!("checked answer")
+            };
+            // Domain 已完成完整报告的验证与落盘；这里只裁剪工具交付副本。
+            let page = text_output(
+                &self.gateway,
+                ReadText {
+                    text: answer,
+                    representation: "text".into(),
+                    title: None,
+                    limitations: Vec::new(),
+                    source_truncated: false,
+                },
+                None,
+                &ReadOptions::default(),
+                context,
+            )
+            .await?;
+            let (mut value, _) = crate::hook::tool::blocks_to_value(page.content)?;
+            let metadata = value
+                .as_object_mut()
+                .ok_or_else(|| PlatformToolError::new("Invalid text page"))?;
+            raw["report"]["answer"] = metadata
+                .remove("content")
+                .ok_or_else(|| PlatformToolError::new("Text page is missing content"))?;
+            raw["pagination"] = value;
+            paginated = true;
+        }
+        if paginated && result.metadata.contains_key("stravia_media") {
+            if let Some(ContentBlock::Unknown { raw }) = result.content.first() {
+                result.metadata.insert("stravia_media".into(), raw.clone());
+            }
+        }
+        Ok(result)
     }
 
     async fn read(
@@ -154,67 +202,32 @@ impl ReadTool {
                 .map_err(|_| PlatformToolError::new("Principal authorization failed"))
         })
         .await??;
-        if let Some(query) = crate::web_access::decode_query_url(&input.url) {
-            require(
-                context.read_scope.networking(),
-                "Networking was not exposed for this run",
-            )?;
-            require(
-                before_execution(
-                    &context.cancellation,
-                    networking_available(&self.gateway, &context.principal),
-                )
-                .await?,
-                "Networking is unavailable",
-            )?;
-            return self.dispatch(StraviaReadDomain::Query, json!({"query":query,"previous_turn_id":input.previous_turn_id,"allowed_domains":input.allowed_domains,"blocked_domains":input.blocked_domains}), context).await;
-        }
-        require(
-            input.allowed_domains.is_none() && input.blocked_domains.is_none(),
-            "Search domain filters require query://",
-        )?;
-        let parsed =
-            url::Url::parse(&input.url).map_err(|_| PlatformToolError::new("Invalid read URL"))?;
-        if parsed.host_str() == Some("stravia") {
-            let id = ArtifactId::from_reference(&input.url).map_err(artifact_error)?;
-            let mut question = None;
-            for (name, value) in parsed.query_pairs() {
+        let target = parse_read_path(&input.path)
+            .map_err(|error| PlatformToolError::new(error.to_string()))?;
+        let resource_path = match target {
+            ReadTarget::Search(search) => {
                 require(
-                    name == "question" && question.is_none(),
-                    "Artifact URLs accept one question parameter only",
+                    context.read_scope.networking(),
+                    "Networking was not exposed for this run",
                 )?;
                 require(
-                    !value.trim().is_empty(),
-                    "Artifact question cannot be empty",
-                )?;
-                question = Some(value.into_owned());
-            }
-            return match question {
-                Some(question) => {
-                    self.understand(id, question, input.previous_turn_id, context)
-                        .await
-                }
-                None => {
-                    require(
-                        input.previous_turn_id.is_none(),
-                        "A download does not accept continuation metadata",
-                    )?;
                     before_execution(
                         &context.cancellation,
-                        download(&self.gateway, &context.principal, &id, None),
+                        networking_available(&self.gateway, &context.principal),
                     )
-                    .await?
-                }
-            };
+                    .await?,
+                    "Networking is unavailable",
+                )?;
+                return self.dispatch(StraviaReadDomain::Query, json!({"query":search.query,"previous_turn_id":search.previous_turn_id,"allowed_domains":search.allowed_domains}), context).await;
+            }
+            ReadTarget::Resource(resource) => resource,
+        };
+        let parsed = url::Url::parse(&resource_path.url)
+            .map_err(|_| PlatformToolError::new("Invalid read URL"))?;
+        if parsed.host_str() == Some("stravia") {
+            let id = ArtifactId::from_reference(&resource_path.url).map_err(artifact_error)?;
+            return self.read_artifact(id, resource_path.options, context).await;
         }
-        require(
-            input.previous_turn_id.is_none(),
-            "Continuation requires query:// or an Artifact question",
-        )?;
-        require(
-            matches!(parsed.scheme(), "http" | "https"),
-            "Only Artifact, query:// and public HTTP(S) URLs are supported",
-        )?;
         let enabled =
             before_execution(&context.cancellation, self.capabilities(&context.principal)).await?;
         require(
@@ -222,55 +235,200 @@ impl ReadTool {
                 || (context.read_scope.media() && enabled.media()),
             "External reading is unavailable in this run",
         )?;
-        let resource =
-            crate::media::ingest::fetch_public_read_resource(&input.url, &context.cancellation)
-                .await
-                .map_err(|error| PlatformToolError::new(error.to_string()))?;
-        let (mime, bytes) = match resource {
-            crate::media::ingest::PublicReadResource::Html => {
+        let resource = crate::media::ingest::fetch_public_read_resource(
+            &resource_path.url,
+            &context.cancellation,
+            !resource_path.options.raw && !resource_path.options.download,
+        )
+        .await
+        .map_err(|error| PlatformToolError::new(error.to_string()))?;
+        match resource {
+            crate::media::ingest::PublicReadResource::Html { .. } => {
                 require(
                     context.read_scope.networking() && enabled.networking(),
                     "Networking is unavailable in this run",
                 )?;
-                if self.internal {
-                    return fetch_page(&self.gateway, input.url, &context).await;
-                }
-                return self
-                    .dispatch(
+                require(
+                    resource_path.options.previous_turn_id.is_none(),
+                    "HTML does not accept media continuation",
+                )?;
+                let result = if self.internal {
+                    fetch_page(&self.gateway, resource_path.url, &context).await?
+                } else {
+                    self.dispatch(
                         StraviaReadDomain::WebPage,
-                        json!({"url":input.url}),
-                        context,
+                        json!({"url":resource_path.url}),
+                        context.clone(),
                     )
-                    .await;
+                    .await?
+                };
+                if result.is_error {
+                    return Ok(result);
+                }
+                let (value, _) = crate::hook::tool::blocks_to_value(result.content)?;
+                let fetched: crate::web_access::FetchResponse = serde_json::from_value(value)
+                    .map_err(|_| PlatformToolError::new("Invalid webpage result"))?;
+                let page = fetched
+                    .results
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| PlatformToolError::new("Webpage result is empty"))?;
+                let text = ReadText {
+                    text: page
+                        .content
+                        .ok_or_else(|| PlatformToolError::new("Webpage has no readable content"))?,
+                    representation: "markdown".into(),
+                    title: page.title,
+                    limitations: page.limitations,
+                    source_truncated: page.truncated,
+                };
+                text_output(
+                    &self.gateway,
+                    text,
+                    Some(page.url),
+                    &resource_path.options,
+                    &context,
+                )
+                .await
             }
-            crate::media::ingest::PublicReadResource::File(mime, bytes) => (mime, bytes),
-        };
-        let image = mime
-            .split(';')
-            .next()
-            .unwrap_or(&mime)
-            .trim()
-            .starts_with("image/");
-        if image {
-            require(
-                context.read_scope.media() && enabled.media(),
-                "Media Understanding is unavailable in this run",
-            )?;
-        } else {
-            require(
-                context.read_scope.networking() && enabled.networking(),
-                "Networking is unavailable in this run",
-            )?;
+            crate::media::ingest::PublicReadResource::File {
+                content_type,
+                final_url,
+                bytes,
+            } => {
+                let image = image_mime(&content_type);
+                require(
+                    if image && !resource_path.options.download {
+                        context.read_scope.media() && enabled.media()
+                    } else {
+                        context.read_scope.networking() && enabled.networking()
+                    },
+                    "The required reading capability is unavailable in this run",
+                )?;
+                self.read_bytes(
+                    content_type,
+                    bytes,
+                    Some(final_url),
+                    None,
+                    resource_path.options,
+                    context,
+                )
+                .await
+            }
         }
+    }
+
+    async fn read_artifact(
+        &self,
+        id: ArtifactId,
+        options: ReadOptions,
+        context: ToolExecutionContext,
+    ) -> Result<PlatformToolOutput, PlatformToolError> {
         let store = self
             .gateway
             .artifact_store()
             .ok_or_else(|| PlatformToolError::new("Artifact storage is unavailable"))?;
-        let artifact = before_execution(&context.cancellation, async {
+        let reader = before_execution(&context.cancellation, async {
+            store
+                .extend_retention(&context.principal, &id, retention(&self.gateway).await?)
+                .await
+                .map_err(artifact_error)?;
+            store
+                .open(&context.principal, &id)
+                .await
+                .map_err(artifact_error)
+        })
+        .await??;
+        let artifact = reader.artifact.clone();
+        if base_mime(&artifact.mime_type) == text::SNAPSHOT_MIME {
+            require(
+                options.previous_turn_id.is_none(),
+                "Text snapshots do not accept media continuation",
+            )?;
+            if options.download {
+                let exported = before_execution(&context.cancellation, async {
+                    text::export(
+                        store.as_ref(),
+                        &context.principal,
+                        retention(&self.gateway).await?,
+                        reader,
+                    )
+                    .await
+                })
+                .await??;
+                return before_execution(
+                    &context.cancellation,
+                    download(&self.gateway, &context.principal, &exported.id, None),
+                )
+                .await?;
+            }
+            return before_execution(&context.cancellation, text::read(reader, &options))
+                .await?
+                .map(output);
+        }
+        require(options.cursor.is_none(), "Cursor requires a text snapshot")?;
+        if options.download {
+            drop(reader);
+            return before_execution(
+                &context.cancellation,
+                download(&self.gateway, &context.principal, &id, None),
+            )
+            .await?;
+        }
+        if image_mime(&artifact.mime_type) {
+            drop(reader);
+            return self
+                .read_image(id, &artifact.mime_type, options, context)
+                .await;
+        }
+        let ArtifactSource::LocalPath(path) = &reader.source else {
+            return Err(PlatformToolError::new(
+                "Artifact content is not locally readable",
+            ));
+        };
+        require(
+            artifact.size <= stravia_runtime_contract::artifact::MAX_ARTIFACT_BYTES,
+            "Artifact exceeds the content size limit",
+        )?;
+        let bytes = before_execution(&context.cancellation, async {
+            let file = tokio::fs::File::open(path).await?;
+            let mut bytes = Vec::with_capacity(artifact.size as usize);
+            file.take(artifact.size + 1).read_to_end(&mut bytes).await?;
+            Ok::<_, std::io::Error>(bytes)
+        })
+        .await?
+        .map_err(|error| PlatformToolError::new(error.to_string()))?;
+        require(
+            bytes.len() as u64 == artifact.size,
+            "Artifact size changed while reading",
+        )?;
+        drop(reader);
+        self.read_bytes(
+            artifact.mime_type.clone(),
+            Bytes::from(bytes),
+            None,
+            Some(artifact),
+            options,
+            context,
+        )
+        .await
+    }
+
+    async fn store_bytes(
+        &self,
+        content_type: &str,
+        bytes: Bytes,
+        context: &ToolExecutionContext,
+    ) -> Result<ArtifactRef, PlatformToolError> {
+        let store = self
+            .gateway
+            .artifact_store()
+            .ok_or_else(|| PlatformToolError::new("Artifact storage is unavailable"))?;
+        before_execution(&context.cancellation, async {
             store
                 .ingest(
                     &context.principal,
-                    &mime,
+                    content_type,
                     Some(bytes.len() as u64),
                     bytes_stream(bytes),
                     retention(&self.gateway).await?,
@@ -278,27 +436,104 @@ impl ReadTool {
                 .await
                 .map_err(artifact_error)
         })
-        .await??;
-        if image {
-            self.understand(
-                artifact.id,
-                "Describe the image content and extract all readable text.".into(),
-                None,
-                context,
-            )
-            .await
-        } else {
-            let filename = parsed
-                .path_segments()
-                .and_then(|mut paths| paths.next_back())
-                .filter(|name| !name.is_empty())
-                .map(str::to_owned);
-            before_execution(
-                &context.cancellation,
-                download(&self.gateway, &context.principal, &artifact.id, filename),
-            )
-            .await?
+        .await?
+    }
+
+    async fn read_bytes(
+        &self,
+        content_type: String,
+        bytes: Bytes,
+        source_url: Option<String>,
+        artifact: Option<ArtifactRef>,
+        options: ReadOptions,
+        context: ToolExecutionContext,
+    ) -> Result<PlatformToolOutput, PlatformToolError> {
+        let image = image_mime(&content_type);
+        if image && !options.download {
+            require(
+                !options.raw && options.lines.is_none(),
+                "Images do not support raw or lines",
+            )?;
+            require(supported_image(&content_type), "Unsupported image type")?;
+            let artifact = match artifact {
+                Some(artifact) => artifact,
+                None => self.store_bytes(&content_type, bytes, &context).await?,
+            };
+            return self
+                .read_image(artifact.id, &content_type, options, context)
+                .await;
         }
+        if !options.download {
+            require(
+                options.previous_turn_id.is_none(),
+                "Text and binary files do not accept media continuation",
+            )?;
+            let base = source_url
+                .as_deref()
+                .and_then(|value| url::Url::parse(value).ok());
+            match convert_read_bytes(&bytes, &content_type, base.as_ref(), options.raw) {
+                Ok(text) => {
+                    return text_output(&self.gateway, text, source_url, &options, &context).await;
+                }
+                Err(error)
+                    if error.code() == FetchErrorCode::UnsupportedMediaType
+                        && options.question.is_none()
+                        && !options.raw
+                        && options.lines.is_none() => {}
+                Err(error) => return Err(PlatformToolError::new(error.to_string())),
+            }
+        }
+        let artifact = match artifact {
+            Some(artifact) => artifact,
+            None => self.store_bytes(&content_type, bytes, &context).await?,
+        };
+        let filename = source_url
+            .as_deref()
+            .and_then(|value| url::Url::parse(value).ok())
+            .and_then(|url| {
+                url.path_segments()
+                    .and_then(|mut paths| paths.next_back())
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_owned)
+            });
+        let mut result = before_execution(
+            &context.cancellation,
+            download(&self.gateway, &context.principal, &artifact.id, filename),
+        )
+        .await??;
+        if !options.download {
+            for block in &mut result.content {
+                if let ContentBlock::Unknown { raw } = block {
+                    raw["limitations"] = json!([
+                        "The file content was not read; use the download URL to retrieve it."
+                    ]);
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    async fn read_image(
+        &self,
+        id: ArtifactId,
+        content_type: &str,
+        options: ReadOptions,
+        context: ToolExecutionContext,
+    ) -> Result<PlatformToolOutput, PlatformToolError> {
+        require(
+            !options.raw && options.lines.is_none() && options.cursor.is_none(),
+            "Images do not support raw, lines or cursor",
+        )?;
+        require(supported_image(content_type), "Unsupported image type")?;
+        self.understand(
+            id,
+            options.question.unwrap_or_else(|| {
+                "Describe the image content and extract all readable text.".into()
+            }),
+            options.previous_turn_id,
+            context,
+        )
+        .await
     }
 
     async fn understand(
@@ -365,6 +600,47 @@ impl ReadTool {
         }
         Ok(output)
     }
+}
+
+fn base_mime(content_type: &str) -> &str {
+    content_type.split(';').next().unwrap_or_default().trim()
+}
+
+fn image_mime(content_type: &str) -> bool {
+    base_mime(content_type)
+        .get(..6)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("image/"))
+}
+
+fn supported_image(content_type: &str) -> bool {
+    ["image/jpeg", "image/png", "image/webp"]
+        .iter()
+        .any(|mime| base_mime(content_type).eq_ignore_ascii_case(mime))
+}
+
+async fn text_output(
+    gateway: &crate::Gateway,
+    text: ReadText,
+    source_url: Option<String>,
+    options: &ReadOptions,
+    context: &ToolExecutionContext,
+) -> Result<PlatformToolOutput, PlatformToolError> {
+    let store = gateway
+        .artifact_store()
+        .ok_or_else(|| PlatformToolError::new("Artifact storage is unavailable"))?;
+    before_execution(&context.cancellation, async {
+        text::create(
+            store.as_ref(),
+            &context.principal,
+            retention(gateway).await?,
+            text,
+            source_url,
+            options,
+        )
+        .await
+        .map(output)
+    })
+    .await?
 }
 
 pub(crate) async fn networking_available(gateway: &crate::Gateway, principal: &Principal) -> bool {
@@ -455,15 +731,7 @@ impl PlatformTool for ReadTool {
         Some(DOWNLOAD_DESCRIPTION)
     }
     fn parameters(&self) -> Value {
-        let mut schema = input_schema();
-        // Strict 模型工具以 null 表示可选值；MCP 仍允许省略这些字段。
-        schema["required"] = json!([
-            "url",
-            "previous_turn_id",
-            "allowed_domains",
-            "blocked_domains"
-        ]);
-        schema
+        input_schema()
     }
     fn parallel_safe(&self) -> bool {
         true
@@ -508,13 +776,8 @@ impl McpTool for ReadTool {
     fn input_schema(&self) -> Value {
         input_schema()
     }
-    async fn input_schema_for(&self, context: &McpContext) -> Value {
-        let mut schema = input_schema();
-        schema["description"] = json!(description(
-            self.capabilities(&Principal::new(context.api_key_id.clone()))
-                .await
-        ));
-        schema
+    async fn input_schema_for(&self, _context: &McpContext) -> Value {
+        input_schema()
     }
     fn deadline(&self) -> Duration {
         Duration::from_secs(15 * 60)
@@ -637,7 +900,7 @@ async fn fetch_page(
     url: String,
     context: &ToolExecutionContext,
 ) -> Result<PlatformToolOutput, PlatformToolError> {
-    let request = serde_json::from_value(json!({"urls":[url],"max_characters":50000}))
+    let request = serde_json::from_value(json!({"urls":[url],"max_characters":500000}))
         .map_err(|error| PlatformToolError::new(error.to_string()))?;
     let result = before_execution(&context.cancellation, async {
         gateway
@@ -657,7 +920,7 @@ async fn fetch_page(
 
 pub(crate) async fn execute_internal_read(
     gateway: &crate::Gateway,
-    url: String,
+    path: String,
     mut context: ToolExecutionContext,
 ) -> Result<PlatformToolOutput, PlatformToolError> {
     context.read_scope = ReadExposureScope::FULL;
@@ -665,7 +928,7 @@ pub(crate) async fn execute_internal_read(
     let mut router = ReadTool::new(gateway, &mut tools)
         .map_err(|error| PlatformToolError::new(error.to_string()))?;
     router.internal = true;
-    router.read(json!({"url":url}), context).await
+    router.read(json!({"path":path}), context).await
 }
 
 fn description(scope: ReadExposureScope) -> String {

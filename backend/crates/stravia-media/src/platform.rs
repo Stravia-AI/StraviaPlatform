@@ -91,7 +91,9 @@ pub fn output_schema() -> Value {
         "properties": {
             "turn_id": { "type": "string" },
             "completion": { "type": "string", "enum": ["complete", "partial"] },
-            "report": super::definition::media_report_schema()
+            "report": super::definition::media_report_schema(),
+            "artifact_reference": {"type":"string"},
+            "pagination": stravia_web_access::read_path::pagination_schema()
         },
         "required": ["turn_id", "completion", "report"],
         "additionalProperties": false

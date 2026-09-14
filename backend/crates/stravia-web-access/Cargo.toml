@@ -31,7 +31,7 @@ parking_lot = { workspace = true }
 numbat = { workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }
-reqwest = { workspace = true, features = ["http2", "rustls"] }
+reqwest = { workspace = true, features = ["http2", "rustls", "stream"] }
 rustls-platform-verifier = { workspace = true }
 rmcp = { workspace = true, features = ["client", "transport-streamable-http-client-reqwest"] }
 scraper = { workspace = true }

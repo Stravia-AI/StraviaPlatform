@@ -11,6 +11,8 @@ use rmcp::{ClientLifecycleMode, ClientServiceExt, RoleClient};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+mod snapshots;
+
 struct EchoTool;
 
 #[async_trait]
@@ -231,7 +233,7 @@ async fn read_tool_responses_schema_supports_strict_optional_arguments() {
     let exposed = registry
         .expose(&ToolId::new(read::TOOL_ID), &Default::default())
         .expect("expose read tool");
-    let mut input = AiItem::output_text("Read query://Rust");
+    let mut input = AiItem::output_text("Read search://Rust");
     input.role = Role::User;
     let mut request = AiRequest::new("gpt-6-astra", vec![input]);
     request.tools = Some(vec![exposed.spec]);
@@ -250,21 +252,15 @@ async fn read_tool_responses_schema_supports_strict_optional_arguments() {
     }
     assert_eq!(schema["additionalProperties"], false);
     let validator = jsonschema::validator_for(schema).expect("valid schema");
-    let arguments = json!({
-        "url": "query://Rust",
-        "previous_turn_id": null,
-        "allowed_domains": null,
-        "blocked_domains": null
-    });
+    let arguments = json!({"path": "search://Rust"});
     assert!(validator.is_valid(&arguments));
-    assert!(!validator.is_valid(&json!({
-        "url": "query://Rust",
-        "previous_turn_id": 42,
-        "allowed_domains": null,
-        "blocked_domains": null
-    })));
+    assert!(!validator.is_valid(&json!({"path": 42})));
+    assert!(
+        !validator.is_valid(&json!({"path": "search://Rust", "previous_turn_id": "wst_turn"})),
+        "StraviaRead must expose only the single required path property"
+    );
     let mcp_validator = jsonschema::validator_for(&mcp_schema).expect("valid MCP schema");
-    assert!(mcp_validator.is_valid(&json!({"url": "query://Rust"})));
+    assert!(mcp_validator.is_valid(&json!({"path": "search://Rust"})));
 }
 
 async fn test_app() -> TestApp {
@@ -341,6 +337,7 @@ async fn set_concurrency_limit(app: &TestApp, limit: i32) {
 
 async fn serve_media_report(
     source_id: stravia_runtime_contract::artifact::ArtifactId,
+    answer_prefix: String,
 ) -> (String, Arc<AtomicUsize>) {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
@@ -359,11 +356,11 @@ async fn serve_media_report(
                 "Media Model must receive the JPEG derivative"
             );
             let report = json!({
-            "answer": format!("Direct MCP understood the image [artifact:{}]", source_id.as_str()),
-            "artifacts": [{"artifact_id": source_id}],
-            "limitations": []
-        })
-        .to_string();
+                "answer": format!("{answer_prefix} [artifact:{}]", source_id.as_str()),
+                "artifacts": [{"artifact_id": source_id}],
+                "limitations": []
+            })
+            .to_string();
             let body = json!({
                 "id": "chatcmpl-media",
                 "object": "chat.completion",
@@ -391,6 +388,16 @@ async fn serve_media_report(
 }
 
 async fn media_test_app() -> (
+    TestApp,
+    stravia_runtime_contract::artifact::ArtifactId,
+    Arc<AtomicUsize>,
+) {
+    media_test_app_with_answer("Direct MCP understood the image").await
+}
+
+async fn media_test_app_with_answer(
+    answer_prefix: &str,
+) -> (
     TestApp,
     stravia_runtime_contract::artifact::ArtifactId,
     Arc<AtomicUsize>,
@@ -433,7 +440,8 @@ async fn media_test_app() -> (
             )
             .await
             .expect("source Artifact");
-    let (provider_url, calls) = serve_media_report(source.id.clone()).await;
+    let (provider_url, calls) =
+        serve_media_report(source.id.clone(), answer_prefix.to_owned()).await;
     let provider = gateway
         .admin()
         .create_provider(crate::db::models::CreateProvider {
@@ -794,7 +802,7 @@ async fn official_client_calls_media_with_a_principal_owned_artifact() {
         ));
     }
     let arguments = json!({
-        "url": format!("https://stravia/artifact/{}?question=Describe%20the%20image", source_id.as_str())
+        "path": format!("https://stravia/artifact/{}", source_id.as_str())
     })
     .as_object()
     .expect("Media arguments")
@@ -827,8 +835,7 @@ async fn official_client_calls_media_with_a_principal_owned_artifact() {
     let continued = client
         .call_tool(CallToolRequestParams::new("StraviaRead").with_arguments(
             json!({
-                "url": format!("https://stravia/artifact/{}?question=What%20else%20is%20visible", source_id.as_str()),
-                "previous_turn_id": previous_turn_id,
+                "path": format!("https://stravia/artifact/{}#stravia?question=What%20else%20is%20visible&previous_turn_id={previous_turn_id}", source_id.as_str()),
             }).as_object().expect("continuation arguments").clone(),
         ))
         .await
@@ -861,6 +868,106 @@ async fn official_client_calls_media_with_a_principal_owned_artifact() {
 }
 
 #[tokio::test]
+async fn official_client_reads_html_and_raw_text_without_media_execution() {
+    let (app, _, calls) = media_test_app().await;
+    let client = connect(&app).await;
+    let principal = stravia_runtime_contract::Principal::new(app.key_id.clone());
+    let store = app.gateway.artifact_store().expect("Artifact store");
+    let html = Bytes::from_static(b"<p>caf\xe9 &amp; th\xe9</p>");
+    let source = store
+        .ingest(
+            &principal,
+            "text/html; charset=iso-8859-1",
+            Some(html.len() as u64),
+            stravia_runtime_contract::artifact::bytes_stream(html),
+            Duration::from_secs(3600),
+        )
+        .await
+        .expect("HTML source");
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("StraviaRead").with_arguments(
+                json!({"path": format!("{}#stravia?question=Explain", source.reference())})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("read HTML");
+    assert_ne!(
+        result.is_error,
+        Some(true),
+        "{:?}",
+        result.structured_content
+    );
+    let result = result.structured_content.unwrap();
+    assert_eq!(result["content"], "café & thé");
+    assert_eq!(result["representation"], "markdown");
+    assert_eq!(result["question_applied"], false);
+    assert!(result.get("download_url").is_none());
+    let raw = client
+        .call_tool(
+            CallToolRequestParams::new("StraviaRead").with_arguments(
+                json!({"path": format!("{}#stravia?raw=1", source.reference())})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("read raw HTML");
+    assert_ne!(raw.is_error, Some(true), "{:?}", raw.structured_content);
+    let raw = raw.structured_content.unwrap();
+    assert_eq!(raw["content"], "<p>café &amp; thé</p>");
+    assert_eq!(raw["representation"], "raw");
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn official_client_rejects_invalid_raw_and_unsupported_content_operations() {
+    let (app, _, calls) = media_test_app().await;
+    let client = connect(&app).await;
+    let principal = stravia_runtime_contract::Principal::new(app.key_id.clone());
+    let store = app.gateway.artifact_store().expect("Artifact store");
+    for (mime, bytes, options) in [
+        ("text/plain; charset=utf-8", &b"\xff"[..], "raw=1"),
+        ("application/zip", &b"PK\x03\x04"[..], "question=Explain"),
+        ("image/gif", &b"GIF89a"[..], ""),
+    ] {
+        let source = store
+            .ingest(
+                &principal,
+                mime,
+                Some(bytes.len() as u64),
+                stravia_runtime_contract::artifact::bytes_stream(Bytes::copy_from_slice(bytes)),
+                Duration::from_secs(3600),
+            )
+            .await
+            .expect("source");
+        let path = if options.is_empty() {
+            source.reference()
+        } else {
+            format!("{}#stravia?{options}", source.reference())
+        };
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("StraviaRead")
+                    .with_arguments(json!({"path":path}).as_object().unwrap().clone()),
+            )
+            .await
+            .expect("structured rejection");
+        assert_eq!(
+            result.is_error,
+            Some(true),
+            "{mime}: {:?}",
+            result.structured_content
+        );
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn artifact_download_remains_available_without_media_and_rejects_other_principals() {
     let (app, source_id, media_calls) = media_test_app().await;
     let current = app
@@ -881,7 +988,7 @@ async fn artifact_download_remains_available_without_media_and_rejects_other_pri
 
     let client = connect(&app).await;
     let reference = format!("https://stravia/artifact/{}", source_id.as_str());
-    let read_arguments = json!({"url": reference})
+    let read_arguments = json!({"path": format!("{reference}#stravia?download=1")})
         .as_object()
         .expect("read arguments")
         .clone();
@@ -910,7 +1017,7 @@ async fn artifact_download_remains_available_without_media_and_rejects_other_pri
     let understanding = client
         .call_tool(
             CallToolRequestParams::new("StraviaRead").with_arguments(
-                json!({"url": format!("{reference}?question=Describe")})
+                json!({"path": format!("{reference}#stravia?question=Describe")})
                     .as_object()
                     .expect("question arguments")
                     .clone(),
@@ -1050,7 +1157,7 @@ async fn web_search_requires_mcp_access_independently_from_transparent_injection
     let listed = client.list_tools(None).await.expect("tools/list");
     assert!(listed.tools.iter().all(|tool| tool.name != "StraviaRead"));
     let mut arguments = serde_json::Map::new();
-    arguments.insert("url".into(), json!("query://Search%20the%20claim"));
+    arguments.insert("path".into(), json!("search://Search%20the%20claim"));
     let unavailable = client
         .call_tool(CallToolRequestParams::new("StraviaRead").with_arguments(arguments))
         .await

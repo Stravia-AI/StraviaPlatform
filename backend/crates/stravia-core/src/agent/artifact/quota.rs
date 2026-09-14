@@ -3,9 +3,9 @@ use super::*;
 pub(super) fn validate_upload_request(
     request: &ArtifactUploadRequest,
 ) -> Result<(), ArtifactError> {
-    if request.size == 0 || request.size > MAX_ARTIFACT_BYTES {
+    if request.size > MAX_ARTIFACT_BYTES {
         return Err(ArtifactError::Invalid(format!(
-            "Artifact size must be between 1 and {MAX_ARTIFACT_BYTES} bytes"
+            "Artifact size cannot exceed {MAX_ARTIFACT_BYTES} bytes"
         )));
     }
     if request.policy.max_artifacts == 0

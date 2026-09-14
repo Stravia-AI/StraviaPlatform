@@ -93,9 +93,6 @@ impl WebProviderAdapter for ExaAdapter {
         if !request.allowed_domains.is_empty() {
             body["includeDomains"] = json!(request.allowed_domains);
         }
-        if !request.blocked_domains.is_empty() {
-            body["excludeDomains"] = json!(request.blocked_domains);
-        }
         let payload = send_json(
             self.client
                 .post("https://api.exa.ai/search")
@@ -562,7 +559,6 @@ mod tests {
             query: "Rust".into(),
             max_results: 3,
             allowed_domains: vec!["rust-lang.org".into()],
-            blocked_domains: vec!["private.rust-lang.org".into()],
         };
         let arguments = zhipu_search_arguments(&request);
         assert_eq!(arguments["search_query"], "Rust");
@@ -570,7 +566,6 @@ mod tests {
         assert_eq!(arguments["search_recency_filter"], "noLimit");
         assert_eq!(arguments["content_size"], "medium");
         assert_eq!(arguments["location"], "us");
-        assert!(!arguments.contains_key("blocked_domains"));
 
         let mut multiple_domains = request;
         multiple_domains.allowed_domains.push("docs.rs".into());
@@ -603,7 +598,6 @@ mod tests {
                 query: "Rust".into(),
                 max_results: 1,
                 allowed_domains: vec![],
-                blocked_domains: vec![],
             },
             &payload,
         )

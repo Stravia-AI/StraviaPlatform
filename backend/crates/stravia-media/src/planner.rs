@@ -164,7 +164,7 @@ impl HookSession for MediaPlanningSession {
                     )))),
                     HookAction::ExposeRead {
                         scope: ReadExposureScope::new(false, true),
-                        description: "Read an Artifact Reference with ?question= to understand its media content.".into(),
+                        description: "Read an image Artifact path; add #stravia?question= for a specific media question.".into(),
                     },
                 ],
             });
@@ -253,7 +253,7 @@ impl HookSession for MediaPlanningSession {
                 )))),
                 HookAction::ExposeRead {
                         scope: ReadExposureScope::new(false, true),
-                        description: "Read an Artifact Reference with ?question= to understand its media content.".into(),
+                        description: "Read an image Artifact path; add #stravia?question= for a specific media question.".into(),
                     },
             ],
         })

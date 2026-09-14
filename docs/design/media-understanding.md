@@ -8,11 +8,11 @@
 
 实现归属独立 `stravia-media` crate，包含 Definition、配置策略、媒体预处理、Derivative 存储、报告校验、ingest/snapshot、bridge 规划及 Platform Tool 行为。`stravia-core` 在编译期注入 `MediaHost`、`MediaAgentHost`、`MediaArtifactHost`，并保留 MCP/管理面 Adapter；能力不依赖 Gateway 类型。共享 IR、Agent、Artifact、Hook 与身份契约来自 `stravia-runtime-contract`，不复制类型或通过 JSON 往返 canonical 数据。
 
-Media Understanding 是由独立平台开关控制的 Advanced Capability，通过 `StraviaRead` 的 Artifact URL `question` 参数调用；普通模型请求和 MCP 共用同一个 Media Report contract。统一入口的授权、收存、下载和路由归 core，媒体理解仍由本能力执行。参见 [ADR-0048](../adr/0048-separate-artifact-references-from-transfer-grants.md) 至 [ADR-0051](../adr/0051-disambiguate-artifact-download-and-understanding.md)。
+Media Understanding 是由独立平台开关控制的 Advanced Capability，通过 `StraviaRead` 的图片 path 调用；默认描述与 OCR，指定问题放在 `#stravia?question=` 中。普通模型请求和 MCP 共用同一个 Media Report contract。统一入口的授权、收存、下载和路由归 core，媒体理解仍由本能力执行。参见 [ADR-0048](../adr/0048-separate-artifact-references-from-transfer-grants.md) 至 [ADR-0051](../adr/0051-disambiguate-artifact-download-and-understanding.md)。
 
 用户可见名称采用“多模态理解”，为未来 PDF、视频和音频扩展保留产品语义。本 Revision 的运行时仍只支持静态 JPEG、PNG 与 WebP 图片；页面不展示或承诺未来格式。
 
-平台 Gate 开启后，每个有效 API Key 都能通过统一入口显式请求理解。关闭后，该分流不可调用，但裸 Artifact 下载不受媒体开关影响。API Key 的 Transparent Injection 只选择本次自动暴露的能力，不承担显式授权；执行层仍检查本次暴露范围。
+平台 Gate 开启后，每个有效 API Key 都能通过统一入口显式请求理解。关闭后，该分流不可调用，但所属 Artifact 的 `#stravia?download=1` 不受媒体开关影响。API Key 的 Transparent Injection 只选择本次自动暴露的能力，不承担显式授权；执行层仍检查本次暴露范围。
 
 ## 2. 公开 contract
 
@@ -26,12 +26,13 @@ StraviaRead
 
 ```json
 {
-  "url": "https://stravia/artifact/artifact_...?question=Describe%20the%20image",
-  "previous_turn_id": "agt_..."
+  "path": "https://stravia/artifact/artifact_example#stravia?question=Describe%20the%20image&previous_turn_id=agt_example"
 }
 ```
 
-`question` 只解释于 Artifact Reference。裸引用返回下载信息；外部图片 URL 先收存，再执行描述和文字提取，其原始 query 完整保留。`previous_turn_id` 保留同 Principal 的续接与分支，已经在祖先中保留的 source 复用，不重复附加；同次调用的重复 source 仍拒绝。旧平台调用别名不注册，旧持久化记录不批量改写。
+唯一顶层输入是 `path`。所属 Artifact 与公网图片默认都描述内容并提取文字，公网图片先收存；`question` 和 `previous_turn_id` 均位于资源工具 fragment，源 query 完整保留。`previous_turn_id` 保留同 Principal 的续接与分支，必须重新指定图片及问题；已在祖先中保留的 source 复用，不重复附加。图片不支持 raw、lines 或文本 cursor。显式 download 不调用模型；能力关闭或格式不支持不能以下载冒充理解。旧平台调用别名、顶层 url 和 Artifact query 问题形式不再执行，旧持久化记录不批量改写。
+
+长答案的工具交付在完整报告校验与落盘之后分页：首包保留 artifacts、limitations、turn_id、completion，顶层 pagination 给出 next_path；续页只读取不可变文本快照，不增加模型 Turn。完整契约见 [Web Search 设计的统一资源读取与文本分页](web-search.md#统一资源读取与文本分页)。
 
 结果：
 
@@ -162,7 +163,7 @@ Media Definition、Agent Turn、Artifact 与 `media_derivatives` 继续使用既
 
 ## 10. 验证边界
 
-- Gate 开／关对 `StraviaRead` 媒体分流和 MCP 调用的影响，裸 Artifact 下载独立可用；
+- Gate 开／关对 `StraviaRead` 媒体分流和 MCP 调用的影响，所属 Artifact 显式下载独立可用；
 - Transparent Injection 关闭时显式 MCP 仍可用；
 - Gate 关闭时保存的注入选择保留但不生效；
 - native vision Target 优先于 bridge；

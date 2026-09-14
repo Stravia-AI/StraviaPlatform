@@ -14,6 +14,8 @@ use stravia_runtime_contract::hook::{
 };
 use stravia_runtime_contract::protocol::ir::{ContentBlock, ProtocolExt, ToolChoice};
 
+use stravia_web_access_contract::read_path::{ReadTarget, format_search_path, parse_read_path};
+
 use super::{SearchTurnId, WebSearchEvent, WebSearchInput, WebSearchRunPolicy, WebSearchRunner};
 
 pub const PUBLIC_WEB_SEARCH_TOOL_ID: &str = "stravia-read";
@@ -41,8 +43,6 @@ struct PublicSearchInput {
     previous_turn_id: Option<String>,
     #[serde(default)]
     allowed_domains: Option<Vec<String>>,
-    #[serde(default)]
-    blocked_domains: Option<Vec<String>>,
 }
 
 pub fn input_schema() -> Value {
@@ -64,14 +64,9 @@ pub fn input_schema() -> Value {
                 "type": ["array", "null"],
                 "maxItems": 20,
                 "items": { "type": "string" }
-            },
-            "blocked_domains": {
-                "type": ["array", "null"],
-                "maxItems": 20,
-                "items": { "type": "string" }
             }
         },
-        "required": ["query", "previous_turn_id", "allowed_domains", "blocked_domains"],
+        "required": ["query", "previous_turn_id", "allowed_domains"],
         "additionalProperties": false
     })
 }
@@ -113,13 +108,9 @@ pub async fn execute(
         })
     })?;
     let runner: WebSearchRunner = gateway.runner().await.map_err(|_| unavailable_error())?;
-    let policy = match (request.allowed_domains, request.blocked_domains) {
-        (None, None) => None,
-        (allowed_domains, blocked_domains) => Some(WebSearchRunPolicy {
-            allowed_domains: allowed_domains.unwrap_or_default(),
-            blocked_domains: blocked_domains.unwrap_or_default(),
-        }),
-    };
+    let policy = request
+        .allowed_domains
+        .map(|allowed_domains| WebSearchRunPolicy { allowed_domains });
     let mut stream = runner.run(WebSearchInput {
         principal,
         query: request.query,
@@ -305,6 +296,10 @@ impl HookSession for WebSearchHookSession {
                     }
                     _ => None,
                 };
+                let filters = match native.map(DomainFilters::from_hosted_tool).transpose() {
+                    Ok(filters) => filters,
+                    Err(message) => return Ok(reject(400, "invalid_input", &message)),
+                };
                 if let Some(batch) = client_web_search_precedence(current) {
                     return Ok(batch);
                 }
@@ -325,11 +320,8 @@ impl HookSession for WebSearchHookSession {
                     return Ok(ActionBatch::default());
                 }
                 let mut actions = Vec::with_capacity(2);
-                if let Some(native) = native {
-                    self.native_filters = match DomainFilters::from_hosted_tool(native) {
-                        Ok(filters) => Some(filters),
-                        Err(message) => return Ok(reject(400, "invalid_input", &message)),
-                    };
+                if native.is_some() {
+                    self.native_filters = filters;
                     if matches!(
                         &current.tool_choice,
                         Some(ToolChoice::Raw(value)) if is_native_web_search_choice(value)
@@ -345,7 +337,7 @@ impl HookSession for WebSearchHookSession {
                 }
                 actions.push(HookAction::ExposeRead {
                     scope: stravia_runtime_contract::hook::ReadExposureScope::new(true, false),
-                    description: "Use query://<URL-encoded query> for complete sourced research, or public HTTP(S) URLs for webpage Markdown and file import.".into(),
+                    description: "Use StraviaRead with a single path: search://<URL-encoded query> for complete sourced research, or public HTTP(S) URLs for webpage Markdown and file import.".into(),
                 });
                 Ok(ActionBatch { actions })
             }
@@ -376,21 +368,13 @@ impl HookSession for WebSearchHookSession {
                     ) else {
                         continue;
                     };
-                    if !arguments
-                        .get("url")
-                        .and_then(Value::as_str)
-                        .is_some_and(|url| url.starts_with("query://"))
-                    {
+                    let Some(path) = arguments.get("path").and_then(Value::as_str) else {
                         continue;
-                    }
-                    if let Some(allowed_domains) = filters.allowed_domains.as_ref() {
-                        arguments
-                            .insert("allowed_domains".into(), serde_json::json!(allowed_domains));
-                    }
-                    if let Some(blocked_domains) = filters.blocked_domains.as_ref() {
-                        arguments
-                            .insert("blocked_domains".into(), serde_json::json!(blocked_domains));
-                    }
+                    };
+                    let Some(path) = rewritten_search_path(path, filters) else {
+                        continue;
+                    };
+                    arguments.insert("path".into(), serde_json::json!(path));
                     actions.push(HookAction::PatchResponse(ResponsePatch::SetToolArguments {
                         call_id: platform_call.call.id.clone(),
                         arguments: Value::Object(arguments).to_string(),
@@ -458,24 +442,35 @@ fn client_web_search_precedence(
 #[derive(Default)]
 struct DomainFilters {
     allowed_domains: Option<Vec<String>>,
-    blocked_domains: Option<Vec<String>>,
+}
+
+/// Re-encodes a recognized search path with the native allowed domains
+/// replacing the model's own list. Returns `None` when the path is not a
+/// valid search target or the native declaration carries no domain override.
+/// No extra top-level fields are injected into the tool arguments.
+fn rewritten_search_path(path: &str, filters: &DomainFilters) -> Option<String> {
+    let ReadTarget::Search(mut search) = parse_read_path(path).ok()? else {
+        return None;
+    };
+    search.allowed_domains = Some(filters.allowed_domains.clone()?);
+    Some(format_search_path(&search))
 }
 
 impl DomainFilters {
     fn from_hosted_tool(tool: &Value) -> Result<Self, String> {
-        let allowed_domains = normalized_hosted_domain_list(tool, "allowed_domains")?;
-        let blocked_domains = normalized_hosted_domain_list(tool, "blocked_domains")?;
-        if allowed_domains.as_ref().is_some_and(|allowed| {
-            blocked_domains
-                .as_ref()
-                .is_some_and(|blocked| allowed.iter().any(|domain| blocked.contains(domain)))
-        }) {
-            return Err("domain appears in allowed_domains and blocked_domains".into());
+        if tool.get("blocked_domains").is_some()
+            || tool
+                .get("filters")
+                .and_then(|filters| filters.get("blocked_domains"))
+                .is_some()
+        {
+            return Err("blocked_domains is not supported".into());
         }
-        Ok(Self {
-            allowed_domains,
-            blocked_domains,
-        })
+        let allowed_domains = normalized_hosted_domain_list(tool, "allowed_domains")?;
+        if allowed_domains.as_ref().is_some_and(Vec::is_empty) {
+            return Err("allowed_domains cannot be empty".into());
+        }
+        Ok(Self { allowed_domains })
     }
 }
 
@@ -537,12 +532,7 @@ mod tests {
 
         assert_eq!(
             schema["required"],
-            serde_json::json!([
-                "query",
-                "previous_turn_id",
-                "allowed_domains",
-                "blocked_domains"
-            ])
+            serde_json::json!(["query", "previous_turn_id", "allowed_domains"])
         );
         assert_eq!(
             properties["previous_turn_id"]["type"],
@@ -552,9 +542,81 @@ mod tests {
             properties["allowed_domains"]["type"],
             serde_json::json!(["array", "null"])
         );
+        assert!(properties.get("blocked_domains").is_none());
+    }
+
+    #[test]
+    fn public_search_input_rejects_blocked_domains_as_an_unknown_field() {
+        assert!(
+            serde_json::from_value::<PublicSearchInput>(serde_json::json!({
+                "query": "Search the claim",
+                "previous_turn_id": None::<String>,
+                "allowed_domains": None::<Vec<String>>,
+                "blocked_domains": []
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn native_blocked_domain_filters_are_rejected_as_unsupported() {
+        for tool in [
+            serde_json::json!({
+                "type": "web_search",
+                "filters": {"allowed_domains": ["example.com"], "blocked_domains": ["spam.org"]}
+            }),
+            serde_json::json!({"type": "web_search", "blocked_domains": ["spam.org"]}),
+            serde_json::json!({"type": "web_search", "filters": {"blocked_domains": []}}),
+            serde_json::json!({"type": "web_search", "blocked_domains": null}),
+            serde_json::json!({"type": "web_search", "filters": {"blocked_domains": "ignored?"}}),
+        ] {
+            assert!(DomainFilters::from_hosted_tool(&tool).is_err());
+        }
+    }
+
+    #[test]
+    fn native_empty_allowed_domain_filters_are_rejected() {
+        for tool in [
+            serde_json::json!({"type": "web_search", "filters": {"allowed_domains": []}}),
+            serde_json::json!({"type": "web_search", "allowed_domains": []}),
+        ] {
+            assert!(DomainFilters::from_hosted_tool(&tool).is_err());
+        }
+    }
+
+    #[test]
+    fn native_allowed_domains_replace_the_model_search_path() {
+        let filters = DomainFilters::from_hosted_tool(&serde_json::json!({
+            "type": "web_search",
+            "filters": {"allowed_domains": ["Example.COM", "example.com"]}
+        }))
+        .expect("native allowed domains");
+        let rewritten = rewritten_search_path(
+            "search://climate%20policy?allowed_domains=other.org&previous_turn_id=wst_turn",
+            &filters,
+        )
+        .expect("search path override");
+        let ReadTarget::Search(search) =
+            parse_read_path(&rewritten).expect("rewritten path must reparse")
+        else {
+            unreachable!("re-encoded search path must parse as a search target")
+        };
+        assert_eq!(search.query, "climate policy");
+        assert_eq!(search.allowed_domains, Some(vec!["example.com".to_owned()]));
+        assert_eq!(search.previous_turn_id.as_deref(), Some("wst_turn"));
+
+        // Without a native override the model path is left untouched.
         assert_eq!(
-            properties["blocked_domains"]["type"],
-            serde_json::json!(["array", "null"])
+            rewritten_search_path("search://plain", &DomainFilters::default()),
+            None
+        );
+        // Non-search paths are never rewritten.
+        let override_filters = DomainFilters {
+            allowed_domains: Some(vec!["example.com".to_owned()]),
+        };
+        assert_eq!(
+            rewritten_search_path("https://example.com/page", &override_filters),
+            None
         );
     }
 
@@ -632,7 +694,8 @@ pub fn output_schema() -> Value {
         "properties": {
             "turn_id": { "type": "string" },
             "completion": { "type": "string", "enum": ["complete", "partial"] },
-            "report": crate::local::search_report_schema()
+            "report": crate::local::search_report_schema(),
+            "pagination": stravia_web_access_contract::read_path::pagination_schema()
         },
         "required": ["turn_id", "completion", "report"],
         "additionalProperties": false

@@ -47,6 +47,7 @@ async fn report_rejects_a_source_without_verified_evidence() {
             None,
             report,
             &evidence,
+            &[],
         )
         .await
         .expect_err("invented URL must be rejected");
@@ -86,6 +87,7 @@ async fn partial_report_accepts_a_localized_limitation() {
             Some(stravia_web_search::SearchPartialCause::WorkingBudgetExhausted),
             report,
             &evidence,
+            &[],
         )
         .await
         .expect("localized limitation is structural partial disclosure");
@@ -117,11 +119,76 @@ async fn report_rejects_an_oversized_source_title() {
             None,
             report,
             &evidence,
+            &[],
         )
         .await
         .expect_err("oversized title must be rejected");
 
     assert_eq!(error.code, "invalid_report");
+}
+
+#[tokio::test]
+async fn report_rejects_a_verified_source_outside_the_allowed_domains() {
+    let turn_id = SearchTurnId::new("wst_outside");
+    let report = SearchReport {
+        answer: "A claim [source-wst_outside-1]".into(),
+        sources: vec![SearchSource {
+            id: "source-wst_outside-1".into(),
+            url: "https://8.8.8.8/search".into(),
+            title: Some("Verified".into()),
+        }],
+        limitations: vec![],
+    };
+    let evidence = SearchEvidenceSet::from_evidence([SearchEvidence {
+        url: "https://8.8.8.8/search".into(),
+        title: Some("Verified".into()),
+    }]);
+
+    let error = SearchReportValidator
+        .validate(
+            &turn_id,
+            SearchCompletion::Complete,
+            None,
+            report,
+            &evidence,
+            &["8.8.4.4".to_owned()],
+        )
+        .await
+        .expect_err("a verified but out-of-policy source must be rejected");
+
+    assert_eq!(error.code, "source_outside_allowed_domains");
+}
+
+#[tokio::test]
+async fn report_accepts_verified_sources_matching_the_allowed_domains() {
+    let turn_id = SearchTurnId::new("wst_inside");
+    let report = SearchReport {
+        answer: "A claim [source-wst_inside-1]".into(),
+        sources: vec![SearchSource {
+            id: "source-wst_inside-1".into(),
+            url: "https://8.8.8.8/search".into(),
+            title: Some("Verified".into()),
+        }],
+        limitations: vec![],
+    };
+    let evidence = SearchEvidenceSet::from_evidence([SearchEvidence {
+        url: "https://8.8.8.8/search".into(),
+        title: Some("Verified".into()),
+    }]);
+
+    let validated = SearchReportValidator
+        .validate(
+            &turn_id,
+            SearchCompletion::Complete,
+            None,
+            report,
+            &evidence,
+            &["8.8.8.8".to_owned()],
+        )
+        .await
+        .expect("a verified source on an allowed host is accepted");
+
+    assert_eq!(validated.sources[0].url, "https://8.8.8.8/search");
 }
 
 struct CountingBackend {
@@ -172,6 +239,12 @@ impl SearchBackend for CountingBackend {
         self.inputs.lock().expect("inputs").push(input.clone());
         tokio::time::sleep(self.delay).await;
         let id = format!("source-{}-1", input.turn_id);
+        // The fixture backend searches within the resolved policy, so its
+        // reports must validate under the runner's allowed-domains check.
+        let source_url = match input.policy.allowed_domains.first() {
+            Some(domain) => format!("https://{domain}/search"),
+            None => "https://8.8.8.8/search".to_owned(),
+        };
         Ok(BackendOutput {
             completion: SearchCompletion::Complete,
             partial_cause: None,
@@ -179,13 +252,13 @@ impl SearchBackend for CountingBackend {
                 answer: format!("Verified claim [{id}]"),
                 sources: vec![SearchSource {
                     id,
-                    url: "https://8.8.8.8/search".into(),
+                    url: source_url.clone(),
                     title: Some("Verified".into()),
                 }],
                 limitations: vec![],
             },
             evidence: SearchEvidenceSet::from_evidence([SearchEvidence {
-                url: "https://8.8.8.8/search".into(),
+                url: source_url,
                 title: Some("Verified".into()),
             }]),
             usage: Default::default(),
@@ -385,8 +458,7 @@ async fn continuation_uses_the_exact_parent_snapshot_and_supports_sibling_branch
         query: "Root question".into(),
         previous_turn_id: None,
         policy: Some(WebSearchRunPolicy {
-            allowed_domains: vec!["EXAMPLE.COM.".into()],
-            blocked_domains: vec![],
+            allowed_domains: vec!["8.8.8.8.".into()],
         }),
         cancellation: CancellationToken::new(),
         deadline: Instant::now() + Duration::from_secs(30),
@@ -409,8 +481,7 @@ async fn continuation_uses_the_exact_parent_snapshot_and_supports_sibling_branch
         query: "Replacement branch".into(),
         previous_turn_id: Some(root.turn_id.clone()),
         policy: Some(WebSearchRunPolicy {
-            allowed_domains: vec![],
-            blocked_domains: vec!["blocked.example".into()],
+            allowed_domains: vec!["8.8.4.4".into()],
         }),
         cancellation: CancellationToken::new(),
         deadline: Instant::now() + Duration::from_secs(30),
@@ -427,9 +498,8 @@ async fn continuation_uses_the_exact_parent_snapshot_and_supports_sibling_branch
             inputs[1].local_limits.map(|limits| limits.max_turns),
             Some(12)
         );
-        assert_eq!(inputs[1].policy.allowed_domains, ["example.com"]);
-        assert_eq!(inputs[2].policy.allowed_domains, Vec::<String>::new());
-        assert_eq!(inputs[2].policy.blocked_domains, ["blocked.example"]);
+        assert_eq!(inputs[1].policy.allowed_domains, ["8.8.8.8"]);
+        assert_eq!(inputs[2].policy.allowed_domains, ["8.8.4.4"]);
     }
     assert_eq!(
         turns
@@ -512,6 +582,144 @@ async fn continuation_is_principal_scoped_and_never_uses_an_implicit_latest_turn
     assert_eq!(backend.calls.load(Ordering::SeqCst), 2);
     let inputs = backend.inputs.lock().expect("inputs");
     assert!(inputs[1].ancestors.is_empty());
+}
+
+/// Returns an in-policy source on the first call so the root Turn commits,
+/// then offers a verified source outside the inherited policy to prove that
+/// continuation validation cannot be relaxed by the backend.
+struct RelaxingBackend {
+    calls: AtomicUsize,
+    inputs: Mutex<Vec<SearchBackendInput>>,
+}
+
+#[async_trait]
+impl SearchBackend for RelaxingBackend {
+    fn kind(&self) -> WebSearchBackendKind {
+        WebSearchBackendKind::Local
+    }
+
+    async fn run(
+        &self,
+        input: SearchBackendInput,
+    ) -> Result<BackendOutput, stravia_web_search::WebSearchError> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        self.inputs.lock().expect("inputs").push(input.clone());
+        let source_url = if call == 0 {
+            match input.policy.allowed_domains.first() {
+                Some(domain) => format!("https://{domain}/search"),
+                None => "https://8.8.8.8/search".to_owned(),
+            }
+        } else {
+            "https://8.8.8.8/search".to_owned()
+        };
+        let id = format!("source-{}-1", input.turn_id);
+        Ok(BackendOutput {
+            completion: SearchCompletion::Complete,
+            partial_cause: None,
+            report: SearchReport {
+                answer: format!("Verified claim [{id}]"),
+                sources: vec![SearchSource {
+                    id,
+                    url: source_url.clone(),
+                    title: Some("Verified".into()),
+                }],
+                limitations: vec![],
+            },
+            evidence: SearchEvidenceSet::from_evidence([SearchEvidence {
+                url: source_url,
+                title: Some("Verified".into()),
+            }]),
+            usage: Default::default(),
+            model_turns: 1,
+            tool_calls: 2,
+        })
+    }
+}
+
+#[tokio::test]
+async fn continuation_report_cannot_relax_the_inherited_allowed_domains() {
+    let backend = Arc::new(RelaxingBackend {
+        calls: AtomicUsize::new(0),
+        inputs: Mutex::new(Vec::new()),
+    });
+    let turns = Arc::new(crate::turn_chain::test_store().await);
+    let runner = WebSearchRunner::new(
+        Arc::new(MemoryWebSearchConfigStore::new(enabled_local_config())),
+        turns.clone(),
+        backend.clone(),
+        Arc::new(CountingBackend::codex()),
+        Arc::new(SearchReportValidator),
+        Duration::from_secs(7 * 24 * 60 * 60),
+        Arc::new(stravia_web_search::AllowSearchRun),
+    );
+    let principal = Principal::new("owner");
+    let root = completed(runner.run(WebSearchInput {
+        principal: principal.clone(),
+        query: "Root question".into(),
+        previous_turn_id: None,
+        policy: Some(WebSearchRunPolicy {
+            allowed_domains: vec!["8.8.4.4".into()],
+        }),
+        cancellation: CancellationToken::new(),
+        deadline: Instant::now() + Duration::from_secs(30),
+    }))
+    .await;
+
+    let events = runner
+        .run(WebSearchInput {
+            principal: principal.clone(),
+            query: "Relaxed branch".into(),
+            previous_turn_id: Some(root.turn_id.clone()),
+            policy: None,
+            cancellation: CancellationToken::new(),
+            deadline: Instant::now() + Duration::from_secs(30),
+        })
+        .collect::<Vec<_>>()
+        .await;
+    let failed_turn_id = events
+        .iter()
+        .find_map(|event| match event {
+            WebSearchEvent::RunStarted { turn_id } => Some(turn_id.clone()),
+            _ => None,
+        })
+        .expect("started continuation turn");
+    let error = events
+        .into_iter()
+        .find_map(|event| match event {
+            WebSearchEvent::Failed(error) => Some(error),
+            _ => None,
+        })
+        .expect("out-of-policy continuation failure");
+
+    assert_eq!(error.code, "source_outside_allowed_domains");
+    assert_eq!(backend.calls.load(Ordering::SeqCst), 2);
+    {
+        let inputs = backend.inputs.lock().expect("inputs");
+        assert_eq!(inputs[1].policy.allowed_domains, ["8.8.4.4"]);
+    }
+    assert!(
+        turns
+            .materialize(
+                &principal,
+                stravia_runtime_contract::turn_chain::TurnNodeKind::WebSearch,
+                &failed_turn_id,
+            )
+            .await
+            .is_err(),
+        "a failed continuation must not commit a Search Turn"
+    );
+    assert_eq!(
+        turns
+            .materialize(
+                &principal,
+                stravia_runtime_contract::turn_chain::TurnNodeKind::WebSearch,
+                &root.turn_id,
+            )
+            .await
+            .expect("root Search Turn survives")
+            .len(),
+        1
+    );
 }
 
 struct FailingBackend;

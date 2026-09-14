@@ -521,6 +521,7 @@ impl WebSearchRunner {
                     output.partial_cause,
                     output.report,
                     &evidence,
+                    &policy.allowed_domains,
                 ),
                 |error| error,
             )
@@ -583,7 +584,7 @@ async fn send_event(
 }
 
 fn normalize_policy(mut policy: WebSearchRunPolicy) -> Result<WebSearchRunPolicy, WebSearchError> {
-    if policy.allowed_domains.len() > 20 || policy.blocked_domains.len() > 20 {
+    if policy.allowed_domains.len() > 20 {
         return Err(WebSearchError::new(
             "invalid_input",
             "Domain filters cannot contain more than 20 entries",
@@ -591,18 +592,6 @@ fn normalize_policy(mut policy: WebSearchRunPolicy) -> Result<WebSearchRunPolicy
     }
     policy.allowed_domains = stravia_web_access_contract::normalize_domains(policy.allowed_domains)
         .map_err(|_| WebSearchError::new("invalid_input", "Invalid allowed domain policy"))?;
-    policy.blocked_domains = stravia_web_access_contract::normalize_domains(policy.blocked_domains)
-        .map_err(|_| WebSearchError::new("invalid_input", "Invalid blocked domain policy"))?;
-    if policy
-        .allowed_domains
-        .iter()
-        .any(|domain| policy.blocked_domains.contains(domain))
-    {
-        return Err(WebSearchError::new(
-            "invalid_input",
-            "A domain cannot be both allowed and blocked",
-        ));
-    }
     Ok(policy)
 }
 

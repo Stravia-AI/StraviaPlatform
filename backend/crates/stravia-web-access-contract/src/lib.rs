@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod read_path;
+
 /// 未指定时每次搜索最多返回的结果数。
 pub const DEFAULT_SEARCH_RESULTS: usize = 5;
 /// 未指定时每次页面访问最多请求的字符数。
@@ -21,8 +23,6 @@ pub struct SearchRequest {
     pub max_results: usize,
     #[serde(default)]
     pub allowed_domains: Vec<String>,
-    #[serde(default)]
-    pub blocked_domains: Vec<String>,
 }
 
 fn default_search_results() -> usize {
@@ -326,4 +326,73 @@ pub fn normalize_domains(domains: Vec<String>) -> Result<Vec<String>, WebAccessE
         normalized.push(hostname);
     }
     Ok(normalized)
+}
+
+/// 判断 URL 主机名是否落在允许域名列表内。
+///
+/// 空 `allowed` 表示不限制；否则要求精确域名或以 `.` 分隔的直接子域匹配。
+/// 域名应为 [`normalize_domains`] 输出的小写形式；本函数只做研究来源过滤，
+/// 不承担网络安全授权。
+pub fn url_matches_allowed_domains(url: &str, allowed: &[String]) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    allowed.is_empty()
+        || allowed.iter().any(|domain| {
+            host == domain.as_str()
+                || host
+                    .strip_suffix(domain.as_str())
+                    .is_some_and(|prefix| prefix.ends_with('.'))
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn url_matches_allowed_domains_accepts_exact_and_dot_subdomains() {
+        let allowed = vec!["docs.rs".to_string()];
+        assert!(url_matches_allowed_domains("https://docs.rs/", &allowed));
+        assert!(url_matches_allowed_domains(
+            "https://guide.docs.rs/start",
+            &allowed
+        ));
+        assert!(url_matches_allowed_domains("https://DOCS.RS/", &allowed));
+    }
+
+    #[test]
+    fn url_matches_allowed_domains_rejects_suffix_lookalikes() {
+        let allowed = vec!["docs.rs".to_string()];
+        assert!(!url_matches_allowed_domains(
+            "https://evil-docs.rs/",
+            &allowed
+        ));
+        assert!(!url_matches_allowed_domains(
+            "https://notdocs.rs/",
+            &allowed
+        ));
+        assert!(!url_matches_allowed_domains(
+            "https://docs.rs.evil.com/",
+            &allowed
+        ));
+        assert!(!url_matches_allowed_domains(
+            "https://example.com/",
+            &allowed
+        ));
+        assert!(!url_matches_allowed_domains("docs.rs", &allowed));
+    }
+
+    #[test]
+    fn url_matches_allowed_domains_empty_list_is_unrestricted() {
+        assert!(url_matches_allowed_domains("https://example.com/", &[]));
+        assert!(!url_matches_allowed_domains("not-a-url", &[]));
+        assert!(!url_matches_allowed_domains(
+            "not-a-url",
+            &["example.com".to_string()]
+        ));
+    }
 }

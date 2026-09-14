@@ -599,12 +599,17 @@ Internal Web Fetch Leaf 是内部 Agent 读取网页正文的基础能力，通�
 
 ## StraviaRead
 
-StraviaRead 是客户端、外层模型与内部 Agent 的统一读取工具入口，覆盖 Artifact 下载与理解、网页读取及搜索。搜索语义由平台确定的执行环境区分为外层完整研究与内部基础检索，统一入口不合并两者的执行身份。
+StraviaRead 是客户端、外层模型与内部 Agent 的统一内容读取工具入口，覆盖文件、网页、图片理解与搜索。搜索语义由平台确定的执行环境区分为外层完整研究与内部基础检索，统一入口不合并两者的执行身份。
 _避免使用_：Artifact Store、无上下文的全局工具执行器
+
+## Read Snapshot
+
+Read Snapshot 是所属 Principal 一次读取结果的不可变文本表示，可独立于原始资源或模型执行继续读取。它固定已取得的内容，不表示上游一定交付了完整来源，也不把来源注记升级为已验证研究证据。
+_避免使用_：新的 Search Turn、可重新抓取的页面缓存
 
 ## Fetched Page
 
-Fetched Page 是一次公网 HTTP(S) URL 的完整主内容抽取结果，包含请求 URL、最终 URL、title 和 Markdown 正文。抽取不足时仍返回较好的一份 Markdown，并附带 limitations。给模型看的字符窗口由 Web Access 截断，不属于 Fetched Page，也不通过 Artifact 或续接身份读取剩余。
+Fetched Page 是一次公网 HTTP(S) URL 的主内容抽取结果，包含来源、标题、正文与提取限制。它不同于读取工具交付的 Read Snapshot；快照可以继续读取已取得的文本，但不能恢复来源未交付的内容。
 _避免使用_：Artifact、Document、Markdown Document、Article
 
 ## Static Extraction

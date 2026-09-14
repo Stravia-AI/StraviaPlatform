@@ -189,9 +189,6 @@ fn codex_payload(input: &SearchBackendInput, model: &str) -> Value {
             "report": ancestor.report,
         })).collect::<Vec<_>>(),
         "query": input.query,
-        "policy": {
-            "blocked_domains": input.policy.blocked_domains,
-        },
     });
     json!({
         "model": model,
@@ -550,14 +547,13 @@ mod tests {
     }
 
     #[test]
-    fn payload_maps_allowed_domains_and_advises_blocked_domains() {
+    fn payload_maps_allowed_domains_without_a_policy_container() {
         let input = SearchBackendInput {
             turn_id: super::super::SearchTurnId::new("wst_codex"),
             principal: stravia_runtime_contract::Principal::new("owner"),
             query: "Search the claim".into(),
             policy: super::super::WebSearchRunPolicy {
                 allowed_domains: vec!["allowed.example".into()],
-                blocked_domains: vec!["blocked.example".into()],
             },
             ancestors: Vec::new(),
             binding: super::super::ResolvedWebSearchBackend::Codex {
@@ -577,9 +573,10 @@ mod tests {
         let context: Value =
             serde_json::from_str(payload["input"][0]["content"][0]["text"].as_str().unwrap())
                 .unwrap();
-        assert_eq!(
-            context["policy"]["blocked_domains"],
-            json!(["blocked.example"])
+        assert_eq!(context["query"], json!("Search the claim"));
+        assert!(
+            context.get("policy").is_none(),
+            "the removed blocked-domains policy container must not be sent"
         );
     }
 

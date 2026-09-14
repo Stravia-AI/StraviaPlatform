@@ -57,33 +57,146 @@ pub(super) fn classify(content_type: &str, decoded: &str) -> ContentKind {
         ContentKind::Unsupported
     } else if matches!(mime.as_str(), "application/xml" | "text/xml") || mime.ends_with("+xml") {
         ContentKind::Xml
+    } else if mime.starts_with("text/") {
+        ContentKind::Plain
     } else {
         ContentKind::Unsupported
     }
 }
 
-pub(super) fn decode(body: &[u8], content_type: &str) -> String {
-    let charset = content_type
-        .split(';')
-        .skip(1)
-        .find_map(|parameter| {
-            let (name, value) = parameter.trim().split_once('=')?;
-            name.eq_ignore_ascii_case("charset")
-                .then(|| value.trim_matches(['\'', '"']).to_ascii_lowercase())
-        })
-        .or_else(|| sniff_html_charset(body));
-    match charset.as_deref() {
-        Some("iso-8859-1" | "latin1" | "latin-1") => decode_latin1(body),
-        Some("windows-1252" | "cp1252") => decode_windows_1252(body),
-        Some("utf-16le") => decode_utf16(body, u16::from_le_bytes),
-        Some("utf-16be") => decode_utf16(body, u16::from_be_bytes),
-        _ => String::from_utf8_lossy(body).into_owned(),
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum TextCharset {
+    Utf8,
+    Latin1,
+    Windows1252,
+    Utf16Le,
+    Utf16Be,
+}
+
+pub(super) struct DecodedText {
+    pub text: String,
+    pub lossy: bool,
+}
+
+pub(super) fn decode_lossy(body: &[u8], content_type: &str) -> DecodedText {
+    let resolved = resolve_charset(body, content_type);
+    let unknown_charset = resolved.is_err();
+    let (charset, bom) = resolved.unwrap_or((TextCharset::Utf8, 0));
+    let payload = &body[bom..];
+    let mut decoded = match charset {
+        TextCharset::Utf8 => match std::str::from_utf8(payload) {
+            Ok(text) => DecodedText {
+                text: text.to_owned(),
+                lossy: false,
+            },
+            Err(_) => DecodedText {
+                text: String::from_utf8_lossy(payload).into_owned(),
+                lossy: true,
+            },
+        },
+        TextCharset::Latin1 => DecodedText {
+            text: decode_latin1(payload),
+            lossy: false,
+        },
+        TextCharset::Windows1252 => DecodedText {
+            text: decode_windows_1252(payload),
+            lossy: false,
+        },
+        TextCharset::Utf16Le => utf16_text(payload, u16::from_le_bytes),
+        TextCharset::Utf16Be => utf16_text(payload, u16::from_be_bytes),
+    };
+    decoded.lossy |= unknown_charset;
+    decoded
+}
+
+pub(super) fn decode_strict(body: &[u8], content_type: &str) -> Result<String, FetchError> {
+    let (charset, bom) =
+        resolve_charset(body, content_type).map_err(|charset| unsupported_charset(&charset))?;
+    let payload = &body[bom..];
+    match charset {
+        TextCharset::Utf8 => std::str::from_utf8(payload)
+            .map(|text| text.to_owned())
+            .map_err(|_| invalid_charset_bytes("utf-8")),
+        TextCharset::Latin1 => Ok(decode_latin1(payload)),
+        TextCharset::Windows1252 => Ok(decode_windows_1252(payload)),
+        TextCharset::Utf16Le => strict_utf16(payload, u16::from_le_bytes),
+        TextCharset::Utf16Be => strict_utf16(payload, u16::from_be_bytes),
     }
 }
 
-pub(super) fn extract_html(html: &str, base_url: &Url) -> Result<HtmlExtract, FetchError> {
+fn resolve_charset(body: &[u8], content_type: &str) -> Result<(TextCharset, usize), String> {
+    if body.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        return Ok((TextCharset::Utf8, 3));
+    }
+    if body.starts_with(&[0xFF, 0xFE]) {
+        return Ok((TextCharset::Utf16Le, 2));
+    }
+    if body.starts_with(&[0xFE, 0xFF]) {
+        return Ok((TextCharset::Utf16Be, 2));
+    }
+    let declared = content_type_charset(content_type).or_else(|| sniff_html_charset(body));
+    match declared.as_deref() {
+        None | Some("utf-8" | "utf8" | "us-ascii" | "ascii") => Ok((TextCharset::Utf8, 0)),
+        Some("iso-8859-1" | "latin1" | "latin-1") => Ok((TextCharset::Latin1, 0)),
+        Some("windows-1252" | "cp1252") => Ok((TextCharset::Windows1252, 0)),
+        Some("utf-16le") => Ok((TextCharset::Utf16Le, 0)),
+        Some("utf-16be") => Ok((TextCharset::Utf16Be, 0)),
+        Some(unknown) => Err(unknown.to_string()),
+    }
+}
+
+fn content_type_charset(content_type: &str) -> Option<String> {
+    content_type.split(';').skip(1).find_map(|parameter| {
+        let (name, value) = parameter.trim().split_once('=')?;
+        name.eq_ignore_ascii_case("charset")
+            .then(|| value.trim_matches(['\'', '"']).to_ascii_lowercase())
+    })
+}
+
+fn utf16_text(payload: &[u8], decode: fn([u8; 2]) -> u16) -> DecodedText {
+    let units = payload
+        .chunks_exact(2)
+        .map(|chunk| decode([chunk[0], chunk[1]]))
+        .collect::<Vec<_>>();
+    if payload.len() % 2 == 0 {
+        if let Ok(text) = String::from_utf16(&units) {
+            return DecodedText { text, lossy: false };
+        }
+    }
+    DecodedText {
+        text: String::from_utf16_lossy(&units),
+        lossy: true,
+    }
+}
+
+fn strict_utf16(payload: &[u8], decode: fn([u8; 2]) -> u16) -> Result<String, FetchError> {
+    if payload.len() % 2 != 0 {
+        return Err(invalid_charset_bytes("utf-16"));
+    }
+    let units = payload
+        .chunks_exact(2)
+        .map(|chunk| decode([chunk[0], chunk[1]]))
+        .collect::<Vec<_>>();
+    String::from_utf16(&units).map_err(|_| invalid_charset_bytes("utf-16"))
+}
+
+fn unsupported_charset(charset: &str) -> FetchError {
+    FetchError::new(
+        FetchErrorCode::UnsupportedMediaType,
+        format!("unsupported source character set: {charset}"),
+    )
+}
+
+fn invalid_charset_bytes(charset: &str) -> FetchError {
+    FetchError::new(
+        FetchErrorCode::UnsupportedMediaType,
+        format!("source bytes are not valid {charset}"),
+    )
+}
+
+pub(super) fn extract_html(html: &str, base_url: Option<&Url>) -> Result<HtmlExtract, FetchError> {
     let fallback_title = html_title(html);
-    match Readability::new(html, Some(base_url.as_str()), None)
+    match Readability::new(html, base_url.map(Url::as_str), None)
         .and_then(|mut reader| reader.parse())
     {
         Ok(article) => {
@@ -218,12 +331,4 @@ fn decode_windows_1252(body: &[u8]) -> String {
             _ => char::from(*byte),
         })
         .collect()
-}
-
-fn decode_utf16(body: &[u8], decode: fn([u8; 2]) -> u16) -> String {
-    let units = body
-        .chunks_exact(2)
-        .map(|chunk| decode([chunk[0], chunk[1]]))
-        .collect::<Vec<_>>();
-    String::from_utf16_lossy(&units)
 }

@@ -104,6 +104,40 @@ async fn download_grants_and_readers_survive_expiry_and_store_reconstruction() {
 }
 
 #[tokio::test]
+async fn empty_text_artifacts_remain_readable_and_owner_scoped() {
+    let directory = tempfile::tempdir().unwrap();
+    let pool = crate::db::init_pool(directory.path()).await.unwrap();
+    crate::migrations::migrate_sqlite(&pool).await.unwrap();
+    let store = LocalArtifactStore::sqlite(pool, directory.path().join("artifacts"));
+    let principal = Principal::new("empty-text-owner");
+    let artifact = store
+        .ingest(
+            &principal,
+            "text/plain",
+            Some(0),
+            bytes_stream(Bytes::new()),
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+    let (_, bytes) = store
+        .read_bytes(&principal, &artifact.id, Duration::from_secs(60))
+        .await
+        .unwrap();
+    assert_eq!(bytes.as_ref(), b"");
+    assert!(
+        store
+            .read_bytes(
+                &Principal::new("another-owner"),
+                &artifact.id,
+                Duration::from_secs(60)
+            )
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn common_ingestion_reserves_staging_and_releases_completed_slots() {
     let directory = tempfile::tempdir().unwrap();
     let pool = crate::db::init_pool(directory.path()).await.unwrap();

@@ -1,5 +1,7 @@
 # OpenAI Web Search / Deep Research × Stravia Agent Definition 一手研究
 
+> 本文保留研究日期时的供应商事实与本地方案建议，不是当前工具契约。后续实现已按 [ADR-0051](../adr/0051-disambiguate-artifact-download-and-understanding.md) 切换为单 `path` 的 StraviaRead，并删除 Stravia 管理的域名黑名单；当前输入、来源约束和分页规则见 [Web Search 设计](../design/web-search.md)。
+
 | 项 | 值 |
 |---|---|
 | 研究日期 | 2026-08-10（按此日期截断官方文档事实） |
@@ -151,7 +153,7 @@ Responses 的 `text.format` 支持普通 text、旧 JSON mode 和 `json_schema` 
 本地代码对应的现有 seam（用于实现时复核，不是 OpenAI 来源）如下：
 
 - `AgentDefinitionSpec`：[`backend/crates/stravia-core/src/agent/definition.rs`](../../backend/crates/stravia-core/src/agent/definition.rs) 定义 `instructions`、`output_schema`、`tools`、`budgets` 和 `repair_attempts`。
-- `AgentRunner`：[`backend/crates/stravia-core/src/agent/runner/mod.rs`](../../backend/crates/stravia-core/src/agent/runner.rs) 负责 model/tool loop、events、budget/cancellation、output parsing。
+- `AgentRunner`：[`backend/crates/stravia-core/src/agent/runner/mod.rs`](../../backend/crates/stravia-core/src/agent/runner/mod.rs) 负责 model/tool loop、events、budget/cancellation、output parsing。
 - `AgentTool`：[`backend/crates/stravia-core/src/agent/tool.rs`](../../backend/crates/stravia-core/src/agent/tool.rs) 暴露 `description`、`input_schema`、`execute`；工具 allowlist 转为严格参数 schema。
 - 本地 Web Access schema：[`backend/crates/stravia-core/src/web_access/mod.rs`](../../backend/crates/stravia-core/src/web_access/mod.rs) 的 `search_input_schema` / `fetch_input_schema` / output schema 是当前 Web Search/Web Fetch 的本地边界；不要因 OpenAI domain-filter 上限更大而放宽本地 schema。
 - OpenAI Responses 的 native web search 只应由 [`web_access/platform.rs`](../../backend/crates/stravia-core/src/web_access/platform.rs) 这类 adapter/hook 消费；它不应穿透为 core Agent Tool 的 provider-specific union。

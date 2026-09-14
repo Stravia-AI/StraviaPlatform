@@ -134,7 +134,7 @@ impl WebAccessEngine {
 
         let effective_limit = request
             .max_characters
-            .min(MAX_FETCH_TOTAL_CHARACTERS / request.urls.len());
+            .min(MAX_FETCH_TOTAL_CHARACTERS.max(request.max_characters) / request.urls.len());
         let mut pending: Vec<usize> = (0..request.urls.len()).collect();
         let mut completed: Vec<Option<FetchResult>> = vec![None; request.urls.len()];
 
