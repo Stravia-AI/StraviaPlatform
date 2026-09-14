@@ -272,6 +272,7 @@ export async function focusLatest(): Promise<void> {
     bind:nodes
     bind:edges
     {nodeTypes}
+    proOptions={{ hideAttribution: true }}
     nodesDraggable={false}
     nodesConnectable={false}
     elementsSelectable

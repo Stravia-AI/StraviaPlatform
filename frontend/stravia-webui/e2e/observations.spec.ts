@@ -432,6 +432,7 @@ test.describe('Interaction Observation canvas', () => {
     })
     await page.goto('/logs')
     await expect(node(page, 'Large 299', 'running')).toBeVisible()
+    await expect(page.getByRole('link', { name: 'Svelte Flow' })).toHaveCount(0)
     const peak = await page.evaluate(() =>
       (window as unknown as { canvasMountProbe: { peak: number } }).canvasMountProbe.peak)
     expect(peak).toBeLessThan(80)
