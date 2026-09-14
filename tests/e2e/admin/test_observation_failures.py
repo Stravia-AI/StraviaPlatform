@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import io
+import json
 import sqlite3
 import tempfile
 import threading
 import time
+import uuid
+import zipfile
 from contextlib import closing
 from pathlib import Path
 from typing import Any, Callable
@@ -12,6 +16,7 @@ import pytest
 
 from tests.common.helpers import (
     WebSession,
+    download_observation_bundle,
     find_free_port,
     http_bytes,
     http_request,
@@ -440,7 +445,7 @@ def test_startup_reconciliation_completes_trace_tombstone(stravia_binary: Path) 
 
 @pytest.mark.e2e
 @pytest.mark.admin
-def test_restart_interrupts_running_activity_but_preserves_waiting_client(
+def test_restart_interrupts_running_activity_and_pending_client_tools(
     stravia_binary: Path,
 ) -> None:
     mock_port = find_free_port()
@@ -568,11 +573,177 @@ def test_restart_interrupts_running_activity_but_preserves_waiting_client(
                 )
 
                 waiting = _detail(restarted_env, waiting_id)
-                assert waiting["interaction"]["status"] == "waiting_client"
-                assert waiting["runs"][0]["status"] == "waiting_client"
-                assert waiting["runs"][0]["terminal_reason"] is None
+                assert waiting["interaction"]["status"] == "interrupted"
+                assert waiting["runs"][0]["status"] == "interrupted"
+                assert waiting["runs"][0]["terminal_reason"] == "process_restarted"
             finally:
                 stop_stravia_server(restarted, restarted_logs)
+    finally:
+        mock_server.shutdown()
+        mock_server.server_close()
+
+
+def _seed_resolved_waiting_siblings(data_dir: Path, interaction_id: str) -> str:
+    """仅在已停止的隔离实例中注入旧版本投影；也供 Desktop 烟测复用。"""
+    database = data_dir / "db" / "gateway.db"
+    assert data_dir.is_absolute() and database.is_file()
+    with closing(sqlite3.connect(database)) as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        root = dict(connection.execute(
+            "SELECT * FROM inference_run_observations WHERE interaction_id = ?",
+            (interaction_id,),
+        ).fetchone())
+        assert root["status"] == "completed"
+        waiting_id = f"req-{uuid.uuid4()}"
+        result_id = f"req-{uuid.uuid4()}"
+        sequence = connection.execute(
+            "SELECT next_sequence FROM observation_sequence WHERE singleton_id = 1"
+        ).fetchone()[0]
+        for run_id, run_status, records in (
+            (waiting_id, "waiting_client", [
+                ("run_admitted", {"parent_run_id": root["id"]}),
+                ("client_tool_handoff", {"tool_id": "restart-a", "name": "local_probe", "input": {}}),
+                ("client_tool_handoff", {"tool_id": "restart-b", "name": "local_probe", "input": {}}),
+                ("run_finished", {"status": "waiting_client", "delivery_completed_at": root["finished_at"]}),
+            ]),
+            (result_id, "completed", [
+                ("run_admitted", {"parent_run_id": root["id"]}),
+                ("client_tool_result", {"tool_id": "restart-a", "content": "ok", "is_error": False}),
+                ("client_tool_result", {"tool_id": "restart-b", "content": "tool failed", "is_error": True}),
+                ("run_finished", {"status": "completed", "delivery_completed_at": root["finished_at"]}),
+            ]),
+        ):
+            run = {**root, "id": run_id, "parent_run_id": root["id"],
+                   "generation_node_id": None, "generation_parent_id": root["generation_node_id"],
+                   "status": run_status, "last_event_sequence": sequence + len(records) - 1}
+            columns = ", ".join(run)
+            placeholders = ", ".join("?" for _ in run)
+            connection.execute(
+                f"INSERT INTO inference_run_observations ({columns}) VALUES ({placeholders})",
+                tuple(run.values()),
+            )
+            for kind, payload in records:
+                connection.execute(
+                    "INSERT INTO observation_events "
+                    "(sequence, occurred_at, interaction_id, run_id, kind, payload, expires_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (sequence, root["last_active_at"], interaction_id, run_id,
+                     kind, json.dumps(payload), root["expires_at"]),
+                )
+                sequence += 1
+        connection.execute(
+            "UPDATE observation_sequence SET next_sequence = ? WHERE singleton_id = 1",
+            (sequence,),
+        )
+        connection.execute(
+            "UPDATE interaction_observations SET status = 'waiting_client', last_event_sequence = ? WHERE id = ?",
+            (sequence - 1, interaction_id),
+        )
+        connection.commit()
+    return waiting_id
+
+
+@pytest.mark.e2e
+@pytest.mark.admin
+def test_restart_reconciles_waiting_interactions(stravia_binary: Path) -> None:
+    mock_port = find_free_port()
+    mock_server, _ = minimal_mock_provider(mock_port)
+    try:
+        with tempfile.TemporaryDirectory(prefix="stravia-wait-recovery-e2e-") as temporary:
+            data_dir = Path(temporary).resolve()
+            env, process, logs = _start_initialized(
+                stravia_binary, data_dir, f"http://127.0.0.1:{mock_port}"
+            )
+            try:
+                route_id, api_key = _create_route(env, "observation-recovery-completed")
+                status, response = _proxy(env, api_key, "observation-recovery-completed", [
+                    {"role": "user", "content": "final response before restart"},
+                ])
+                assert status == 200, response
+                completed = _wait_for("completed seed", lambda: next((
+                    item for item in _route_interactions(env, route_id)
+                    if item["status"] == "completed"
+                ), None))
+                pending_route, pending_key = _create_route(env, "observation-branch-recovery")
+
+                def create_waiting(current_env: dict[str, Any], prompt: str) -> dict[str, Any]:
+                    status, response = http_request(
+                        "POST", f"{current_env['proxy']}/v1/chat/completions",
+                        payload={"model": "observation-branch-recovery",
+                                 "messages": [{"role": "user", "content": prompt}],
+                                 "tools": [{"type": "function", "function": {
+                                     "name": "local_probe", "parameters": {"type": "object"},
+                                 }}]},
+                        headers={"authorization": f"Bearer {pending_key}"},
+                    )
+                    assert status == 200, response
+                    return _wait_for("pending tool interaction", lambda: next((
+                        item for item in _route_interactions(current_env, pending_route)
+                        if item["status"] == "waiting_client"
+                    ), None))
+
+                pending = create_waiting(env, "observation-branch pending before restart")
+                before = _detail(env, pending["id"])["runs"][0]
+            finally:
+                stop_stravia_server(process, logs)
+
+            resolved_run = _seed_resolved_waiting_siblings(data_dir, completed["id"])
+            recovery_events: list[dict[str, Any]] | None = None
+            for restart_index in range(2):
+                port = find_free_port()
+                process, logs = start_stravia_server(stravia_binary=stravia_binary, args=[
+                    "--host", "127.0.0.1", "--port", str(port), "--data-dir", str(data_dir),
+                ])
+                base = f"http://127.0.0.1:{port}"
+                try:
+                    wait_until_ready(f"{base}/api/v1/auth/state", timeout=40.0)
+                    session = WebSession(base)
+                    status, login = session.request("POST", "/api/v1/auth/login", {
+                        "username": "admin", "password": "correct horse battery staple",
+                    })
+                    assert status == 200, login
+                    current = {**env, "admin": base, "proxy": base, "auth": session.auth_headers()}
+                    for interaction_id, expected in ((completed["id"], "completed"), (pending["id"], "interrupted")):
+                        detail = _detail(current, interaction_id)
+                        assert detail["interaction"]["status"] == expected
+                        forest = _forest(current, limit=100)
+                        projected = {item["id"]: item for root in forest["roots"] for item in root["interactions"]}
+                        assert projected[interaction_id]["status"] == expected
+                        _, _, archive = download_observation_bundle(current, detail)
+                        with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
+                            exported = json.loads(bundle.read("interaction.json"))
+                        assert exported["status"] == expected
+                    resolved = _detail(current, completed["id"])
+                    historical = next(run for run in resolved["runs"] if run["id"] == resolved_run)
+                    assert historical["status"] == "waiting_client"
+                    assert not any(event["kind"] == "process_restarted" for event in historical["events"])
+                    recovered = _detail(current, pending["id"])["runs"][0]
+                    assert recovered["status"] == "interrupted"
+                    assert recovered["terminal_reason"] == "process_restarted"
+                    for field in ("generation_node_id", "generation_parent_id", "finished_at", "client_output_committed"):
+                        assert recovered[field] == before[field]
+                    assert [event for event in recovered["events"] if event["kind"] == "run_finished"] == [
+                        event for event in before["events"] if event["kind"] == "run_finished"
+                    ]
+                    events = [event for event in recovered["events"] if event["kind"] == "process_restarted"]
+                    assert len(events) == 1
+                    assert events[0]["payload"] == {"status": "interrupted", "reason": "process_restarted"}
+                    if recovery_events is not None:
+                        assert events == recovery_events
+                    recovery_events = events
+                    if restart_index == 1:
+                        live = create_waiting(current, "observation-branch live after restart")
+                        status, cleared = http_request(
+                            "DELETE", f"{base}/api/v1/observations/history", headers=current["auth"],
+                        )
+                        assert status == 200, cleared
+                        assert cleared["data"]["skipped_active"] == 1
+                        assert _detail(current, live["id"])["interaction"]["status"] == "waiting_client"
+                        assert not _route_interactions(current, route_id)
+                        assert {item["id"] for item in _route_interactions(current, pending_route)} == {live["id"]}
+                finally:
+                    stop_stravia_server(process, logs)
     finally:
         mock_server.shutdown()
         mock_server.server_close()

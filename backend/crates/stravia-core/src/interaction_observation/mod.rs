@@ -1466,10 +1466,28 @@ fn project_bundle_status(events: &[ObservationEvent]) -> String {
     if !active.is_empty() {
         return "running".into();
     }
-    grouping::rollup_status(
-        runs.into_iter()
-            .map(|(run, status)| (status, !parents.contains(run))),
-    )
+    let resolved = grouping::resolved_client_tool_runs(events.iter().filter_map(|event| {
+        let is_handoff = match event.kind.as_str() {
+            "client_tool_handoff" => true,
+            "client_tool_result" => false,
+            _ => return None,
+        };
+        Some(grouping::ClientToolEvidence {
+            sequence: event.sequence,
+            run_id: event.run_id.as_deref()?,
+            tool_id: event
+                .payload
+                .get("tool_id")
+                .and_then(serde_json::Value::as_str),
+            is_handoff,
+        })
+    }));
+    grouping::rollup_status(runs.into_iter().map(|(run, status)| {
+        (
+            status,
+            !parents.contains(run) && !(status == "waiting_client" && resolved.contains(run)),
+        )
+    }))
     .into()
 }
 
@@ -2766,6 +2784,71 @@ mod snapshot_tests {
         observation.shutdown().await;
         pool.close().await;
         Ok(())
+    }
+
+    #[test]
+    fn snapshot_tool_results_release_only_fully_returned_waiting_branches() {
+        let records = [
+            ("p", "run_admitted", serde_json::json!({})),
+            ("p", "run_finished", serde_json::json!({"status":"failed"})),
+            (
+                "w",
+                "run_admitted",
+                serde_json::json!({"parent_run_id":"p"}),
+            ),
+            (
+                "w",
+                "client_tool_handoff",
+                serde_json::json!({"tool_id":"a"}),
+            ),
+            (
+                "w",
+                "client_tool_handoff",
+                serde_json::json!({"tool_id":"b"}),
+            ),
+            (
+                "w",
+                "run_finished",
+                serde_json::json!({"status":"waiting_client"}),
+            ),
+            (
+                "r",
+                "run_admitted",
+                serde_json::json!({"parent_run_id":"p"}),
+            ),
+            (
+                "r",
+                "client_tool_result",
+                serde_json::json!({"tool_id":"a"}),
+            ),
+            (
+                "r",
+                "run_finished",
+                serde_json::json!({"status":"completed"}),
+            ),
+            (
+                "r",
+                "client_tool_result",
+                serde_json::json!({"tool_id":"b","is_error":true}),
+            ),
+        ];
+        let mut events: Vec<_> = records
+            .into_iter()
+            .enumerate()
+            .map(|(index, (run, kind, payload))| ObservationEvent {
+                sequence: index as i64 + 1,
+                occurred_at: index as i64,
+                interaction_id: Some("interaction".into()),
+                run_id: Some(run.into()),
+                rejection_id: None,
+                kind: kind.into(),
+                payload,
+            })
+            .collect();
+        assert_eq!(project_bundle_status(&events[..9]), "waiting_client");
+        assert_eq!(project_bundle_status(&events), "completed");
+        events[8].payload["status"] = "failed".into();
+        assert_eq!(project_bundle_status(&events), "interrupted");
     }
 
     #[test]

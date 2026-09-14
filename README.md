@@ -95,6 +95,8 @@ When a client switches models and updates its leading instructions, an unchanged
 
 When a WebSocket client disconnects while an Interaction is waiting for its tool results, Request Records changes the affected waiting leaf branches to **Disconnected**. Successfully delivered responses and their Generation Chain remain available for later continuation. Normal HTTP/SSE response completion does not prove that the client is offline; older records without a known connection association are not backfilled.
 
+Once every client tool call from a waiting branch has an unambiguous later result within the same Interaction, that branch no longer blocks completion, even when the results arrive on a sibling Run. On restart, Request Records reconciles these completed waits and marks unresolved waiting leaves from the previous process **Interrupted** (`process_restarted`), without deleting history or changing delivered responses. Valid later continuations remain supported.
+
 ### Providers and model routing
 
 Built-in provider metadata currently covers:

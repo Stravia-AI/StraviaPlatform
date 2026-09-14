@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::types::RunStart;
 
@@ -186,6 +186,53 @@ pub(super) fn rollup_status<'a>(
     }
 }
 
+pub(super) struct ClientToolEvidence<'a> {
+    pub sequence: i64,
+    pub run_id: &'a str,
+    pub tool_id: Option<&'a str>,
+    pub is_handoff: bool,
+}
+
+/// 输入为同一交互按 sequence 排序的证据；重复 handoff ID 不能证明分支归属。
+pub(super) fn resolved_client_tool_runs<'a>(
+    events: impl IntoIterator<Item = ClientToolEvidence<'a>>,
+) -> HashSet<&'a str> {
+    let mut runs = HashMap::new();
+    let mut calls = HashMap::<&str, (&str, i64, bool)>::new();
+    for event in events {
+        if event.is_handoff {
+            runs.entry(event.run_id).or_insert(true);
+            let Some(id) = event.tool_id.filter(|id| !id.is_empty()) else {
+                runs.insert(event.run_id, false);
+                continue;
+            };
+            match calls.entry(id) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert((event.run_id, event.sequence, false));
+                }
+                std::collections::hash_map::Entry::Occupied(entry) => {
+                    runs.insert(entry.get().0, false);
+                    runs.insert(event.run_id, false);
+                }
+            }
+        } else if let Some((owner, sequence, returned)) =
+            event.tool_id.and_then(|id| calls.get_mut(id))
+        {
+            if *owner != event.run_id && event.sequence > *sequence {
+                *returned = true;
+            }
+        }
+    }
+    for (run, _, returned) in calls.into_values() {
+        if !returned {
+            runs.insert(run, false);
+        }
+    }
+    runs.into_iter()
+        .filter_map(|(run, resolved)| resolved.then_some(run))
+        .collect()
+}
+
 pub(super) fn add_usage(total: &mut Option<i64>, incoming: Option<i64>) {
     *total = total
         .zip(incoming)
@@ -195,6 +242,56 @@ pub(super) fn add_usage(total: &mut Option<i64>, incoming: Option<i64>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn tool_evidence_requires_complete_unambiguous_later_returns() {
+        let evidence = |sequence, run_id, tool_id, is_handoff| ClientToolEvidence {
+            sequence,
+            run_id,
+            tool_id,
+            is_handoff,
+        };
+        assert_eq!(
+            resolved_client_tool_runs([
+                evidence(1, "waiting", Some("a"), true),
+                evidence(2, "waiting", Some("b"), true),
+                evidence(3, "sibling", Some("a"), false),
+                evidence(4, "sibling", Some("b"), false),
+                evidence(5, "sibling", Some("b"), false),
+            ]),
+            HashSet::from(["waiting"])
+        );
+        for events in [
+            vec![evidence(1, "w", Some("a"), true)],
+            vec![evidence(1, "r", Some("a"), false)],
+            vec![
+                evidence(1, "r", Some("a"), false),
+                evidence(2, "w", Some("a"), true),
+            ],
+            vec![evidence(1, "w", None, true), evidence(2, "r", None, false)],
+            vec![
+                evidence(1, "w", Some(""), true),
+                evidence(2, "r", Some(""), false),
+            ],
+            vec![
+                evidence(1, "w", Some("a"), true),
+                evidence(2, "w", Some("a"), false),
+            ],
+            vec![
+                evidence(1, "w", Some("a"), true),
+                evidence(2, "r", Some("a"), false),
+                evidence(3, "other", Some("a"), true),
+                evidence(4, "r", Some("a"), false),
+            ],
+            vec![
+                evidence(1, "w", Some("a"), true),
+                evidence(2, "w", Some("b"), true),
+                evidence(3, "r", Some("a"), false),
+            ],
+        ] {
+            assert!(resolved_client_tool_runs(events).is_empty());
+        }
+    }
+
     #[test]
     fn missing_attempt_usage_remains_unknown_after_known_attempts() {
         let mut total = Some(0);
