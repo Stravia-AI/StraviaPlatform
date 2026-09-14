@@ -725,6 +725,104 @@ async fn chat_full_history_uses_upstream_websocket_and_longest_reusable_prefix()
 }
 
 #[tokio::test]
+async fn edited_history_reaches_websocket_without_reusing_stale_upstream_state() {
+    use stravia_runtime_contract::protocol::ir::{AiItem, Role, ToolCall};
+
+    let (base_url, _, requests) = serve_responses_websocket_sequence(vec![
+        "original answer",
+        "tool edit accepted",
+        "user edit accepted",
+        "answer edit accepted",
+    ])
+    .await;
+    let data_dir = tempfile::tempdir().unwrap();
+    let gateway = Gateway::new(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    configure_route_with_protocol(
+        &gateway,
+        "history-edit-route",
+        &[base_url],
+        "openai",
+        "openai-compatible",
+    )
+    .await;
+    let headers = authorized_headers(&gateway).await;
+    let user = |text: &str| {
+        let mut item = AiItem::output_text(text);
+        item.role = Role::User;
+        item
+    };
+    let history = |question: &str, result: &str| {
+        vec![
+            user(question),
+            AiItem::function_call(ToolCall {
+                id: "lookup-history".into(),
+                name: "lookup".into(),
+                arguments: "{}".into(),
+            }),
+            AiItem::function_call_output("lookup-history", serde_json::json!(result)),
+        ]
+    };
+    let response = execute_non_stream_request_with_headers(
+        gateway.clone(),
+        headers.clone(),
+        AiRequest::new(
+            "history-edit-route",
+            history("original question", "original result"),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let _ = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+
+    for (question, result, answer, changed, obsolete) in [
+        (
+            "original question",
+            "edited result",
+            "original answer",
+            "edited result",
+            "original result",
+        ),
+        (
+            "edited question",
+            "original result",
+            "original answer",
+            "edited question",
+            "original question",
+        ),
+        (
+            "original question",
+            "original result",
+            "edited answer",
+            "edited answer",
+            "original answer",
+        ),
+    ] {
+        let mut items = history(question, result);
+        items.extend([AiItem::output_text(answer), user("new task")]);
+        let response = execute_non_stream_request_with_headers(
+            gateway.clone(),
+            headers.clone(),
+            AiRequest::new("history-edit-route", items),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let _ = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let requests = requests.lock().unwrap();
+        let upstream = requests.last().unwrap();
+        assert!(upstream.get("previous_response_id").is_none(), "{upstream}");
+        let sent = upstream["input"].to_string();
+        assert!(sent.contains(changed), "{sent}");
+        assert!(!sent.contains(obsolete), "{sent}");
+        assert!(sent.contains("new task"), "{sent}");
+    }
+}
+
+#[tokio::test]
 async fn store_false_chat_chain_generates_a_stable_prompt_cache_key() {
     let (base_url, connections, requests) =
         serve_responses_websocket_sequence(vec!["first answer", "second answer"]).await;

@@ -627,8 +627,11 @@ async fn execute_inner(
             )
             .await
             {
-                Ok(prepared) => {
+                Ok(mut prepared) => {
                     protected_thinking_sent = prepared.protected_thinking_replayed;
+                    let timeout_signal = (target.first_token_timeout_ms != 0)
+                        .then(|| prepared.provider_call.first_token_timeout_signal())
+                        .flatten();
                     let attempt = begin_attempt(
                         gateway,
                         &route,
@@ -642,20 +645,27 @@ async fn execute_inner(
                     let result = if target.first_token_timeout_ms == 0 {
                         attempt.await
                     } else {
+                        // timeout 只借用 future；先标记原因，再让其中的观察器随取消释放。
+                        tokio::pin!(attempt);
                         match tokio::time::timeout(
                             Duration::from_millis(target.first_token_timeout_ms as u64),
-                            attempt,
+                            attempt.as_mut(),
                         )
                         .await
                         {
                             Ok(result) => result,
-                            Err(_) => Err(AttemptFailure::upstream(
-                                stravia_runtime_contract::protocol::ir::AiErrorKind::Timeout,
-                                None,
-                                "first_token_timeout",
-                                "Target did not produce a First Token before its timeout",
-                                None,
-                            )),
+                            Err(_) => {
+                                if let Some(signal) = timeout_signal {
+                                    signal.store(true, std::sync::atomic::Ordering::Release);
+                                }
+                                Err(AttemptFailure::upstream(
+                                    stravia_runtime_contract::protocol::ir::AiErrorKind::Timeout,
+                                    None,
+                                    "first_token_timeout",
+                                    "Target did not produce a First Token before its timeout",
+                                    None,
+                                ))
+                            }
                         }
                     };
                     result

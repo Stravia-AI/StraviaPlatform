@@ -15,6 +15,62 @@ pub struct ConfirmedUsage {
     pub cache_read_tokens: Option<i64>,
     pub cache_write_tokens: Option<i64>,
     pub reasoning_tokens: Option<i64>,
+    /// 聚合值只累计已确认用量；单次上游用量事件不携带聚合覆盖信息。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<UsageCoverage>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, sqlx::FromRow)]
+pub struct UsageCoverage {
+    pub attempt_count: i64,
+    pub missing_input_tokens: i64,
+    pub missing_output_tokens: i64,
+    pub missing_cache_read_tokens: i64,
+    pub missing_cache_write_tokens: i64,
+    pub missing_reasoning_tokens: i64,
+}
+
+impl ConfirmedUsage {
+    pub(super) fn aggregate<'a>(attempts: impl Iterator<Item = &'a Self>) -> Self {
+        let mut sums = [None::<i128>; 5];
+        let mut missing = [0; 5];
+        let mut attempt_count = 0;
+        for attempt in attempts {
+            attempt_count += 1;
+            for (index, incoming) in [
+                attempt.input_tokens,
+                attempt.output_tokens,
+                attempt.cache_read_tokens,
+                attempt.cache_write_tokens,
+                attempt.reasoning_tokens,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                if let Some(value) = incoming {
+                    sums[index] = Some(sums[index].unwrap_or_default() + i128::from(value));
+                } else {
+                    missing[index] += 1;
+                }
+            }
+        }
+        let sums = sums.map(|value| value.and_then(|sum| i64::try_from(sum).ok()));
+        Self {
+            input_tokens: sums[0],
+            output_tokens: sums[1],
+            cache_read_tokens: sums[2],
+            cache_write_tokens: sums[3],
+            reasoning_tokens: sums[4],
+            coverage: Some(UsageCoverage {
+                attempt_count,
+                missing_input_tokens: missing[0],
+                missing_output_tokens: missing[1],
+                missing_cache_read_tokens: missing[2],
+                missing_cache_write_tokens: missing[3],
+                missing_reasoning_tokens: missing[4],
+            }),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

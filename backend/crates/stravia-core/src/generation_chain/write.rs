@@ -31,12 +31,17 @@ impl GenerationChainWrite {
 
     /// Observation evidence only; never changes history, execution lineage or input.
     pub(crate) fn has_matching_pending_tool_result(&self) -> bool {
+        // 历史编辑可使父节点退回早期工具调用；后续 Assistant 之前的结果是历史，
+        // 不能把它当成本次工具续接，从而吞掉独立的新用户输入。
+        let tail_start = self
+            .request_delta
+            .items
+            .iter()
+            .rposition(|item| item.role == stravia_runtime_contract::protocol::ir::Role::Assistant)
+            .map_or(0, |index| index + 1);
+        let tail = &self.request_delta.items[tail_start..];
         if self.parent.parent_id.is_none()
-            || !self
-                .request_delta
-                .items
-                .iter()
-                .any(|item| result_ids(item).next().is_some())
+            || !tail.iter().any(|item| result_ids(item).next().is_some())
         {
             return false;
         }
@@ -70,9 +75,7 @@ impl GenerationChainWrite {
             &self.parent.parent_client_items,
             &self.parent.parent_client_items,
         );
-        self.request_delta
-            .items
-            .iter()
+        tail.iter()
             .flat_map(result_ids)
             .any(|id| pending.contains(aliases.get(id).copied().unwrap_or(id)))
     }

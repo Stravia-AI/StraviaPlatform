@@ -7,9 +7,34 @@ use super::{store::ObservationStore, types::*};
 const DAY_MS: i64 = 86_400_000;
 const DEFAULT_LIMIT: u32 = 50;
 const MAX_LIMIT: u32 = 200;
-const INTERACTION_SELECT: &str = "SELECT i.id,i.root_id,i.parent_interaction_id,i.generation_root_id,i.first_route_id,i.first_model_display_name,i.status,i.started_at,i.last_active_at,i.input_preview,i.visible_tail,i.input_tokens,i.output_tokens,i.cache_read_tokens,i.cache_write_tokens,i.reasoning_tokens,i.observation_gap,i.last_event_sequence,CASE WHEN SUM(CASE WHEN r.debug_enabled THEN 1 ELSE 0 END)=0 THEN 'none' WHEN SUM(CASE WHEN r.debug_enabled THEN 1 ELSE 0 END)=COUNT(*) AND COUNT(m.trace_id)=COUNT(*) AND SUM(CASE WHEN m.status='complete' THEN 1 ELSE 0 END)=COUNT(*) THEN 'complete' ELSE 'partial' END debug_status FROM interaction_observations i JOIN inference_run_observations r ON r.interaction_id=i.id LEFT JOIN debug_trace_manifests m ON m.run_id=r.id ";
+// 直接从当前窗口的 attempts 派生累计与覆盖信息，旧版持久化的 NULL 汇总无需回填。
+const INTERACTION_SELECT: &str = "SELECT i.id,i.root_id,i.parent_interaction_id,i.generation_root_id,i.first_route_id,i.first_model_display_name,i.status,i.started_at,i.last_active_at,i.input_preview,i.visible_tail,
+CAST(SUM(a.input_tokens) AS BIGINT) input_tokens,
+CAST(SUM(a.output_tokens) AS BIGINT) output_tokens,
+CAST(SUM(a.cache_read_tokens) AS BIGINT) cache_read_tokens,
+CAST(SUM(a.cache_write_tokens) AS BIGINT) cache_write_tokens,
+CAST(SUM(a.reasoning_tokens) AS BIGINT) reasoning_tokens,
+COUNT(a.id) attempt_count,
+COUNT(a.id)-COUNT(a.input_tokens) missing_input_tokens,
+COUNT(a.id)-COUNT(a.output_tokens) missing_output_tokens,
+COUNT(a.id)-COUNT(a.cache_read_tokens) missing_cache_read_tokens,
+COUNT(a.id)-COUNT(a.cache_write_tokens) missing_cache_write_tokens,
+COUNT(a.id)-COUNT(a.reasoning_tokens) missing_reasoning_tokens,
+i.observation_gap,i.last_event_sequence,CASE WHEN SUM(CASE WHEN r.debug_enabled THEN 1 ELSE 0 END)=0 THEN 'none' WHEN SUM(CASE WHEN r.debug_enabled THEN 1 ELSE 0 END)=COUNT(*) AND COUNT(m.trace_id)=COUNT(*) AND SUM(CASE WHEN m.status='complete' THEN 1 ELSE 0 END)=COUNT(*) THEN 'complete' ELSE 'partial' END debug_status FROM interaction_observations i JOIN inference_run_observations r ON r.interaction_id=i.id LEFT JOIN debug_trace_manifests m ON m.run_id=r.id LEFT JOIN target_attempt_observations a ON a.run_id=r.id ";
 // PostgreSQL promotes SUM(BIGINT) to NUMERIC; keep the public usage contract i64.
-const RUN_SELECT: &str = "SELECT r.id,r.parent_run_id,r.generation_node_id,r.generation_parent_id,r.route_id,r.model_display_name,r.ingress_protocol,r.status,r.terminal_reason,r.user_interrupted,r.debug_enabled,r.client_output_committed,r.started_at,r.finished_at,CASE WHEN COUNT(a.id)=COUNT(a.input_tokens) THEN CAST(SUM(a.input_tokens) AS BIGINT) END input_tokens,CASE WHEN COUNT(a.id)=COUNT(a.output_tokens) THEN CAST(SUM(a.output_tokens) AS BIGINT) END output_tokens,CASE WHEN COUNT(a.id)=COUNT(a.cache_read_tokens) THEN CAST(SUM(a.cache_read_tokens) AS BIGINT) END cache_read_tokens,CASE WHEN COUNT(a.id)=COUNT(a.cache_write_tokens) THEN CAST(SUM(a.cache_write_tokens) AS BIGINT) END cache_write_tokens,CASE WHEN COUNT(a.id)=COUNT(a.reasoning_tokens) THEN CAST(SUM(a.reasoning_tokens) AS BIGINT) END reasoning_tokens FROM inference_run_observations r LEFT JOIN target_attempt_observations a ON a.run_id=r.id WHERE r.interaction_id=";
+const RUN_SELECT: &str = "SELECT r.id,r.parent_run_id,r.generation_node_id,r.generation_parent_id,r.route_id,r.model_display_name,r.ingress_protocol,r.status,r.terminal_reason,r.user_interrupted,r.debug_enabled,r.client_output_committed,r.started_at,r.finished_at,
+CAST(SUM(a.input_tokens) AS BIGINT) input_tokens,
+CAST(SUM(a.output_tokens) AS BIGINT) output_tokens,
+CAST(SUM(a.cache_read_tokens) AS BIGINT) cache_read_tokens,
+CAST(SUM(a.cache_write_tokens) AS BIGINT) cache_write_tokens,
+CAST(SUM(a.reasoning_tokens) AS BIGINT) reasoning_tokens,
+COUNT(a.id) attempt_count,
+COUNT(a.id)-COUNT(a.input_tokens) missing_input_tokens,
+COUNT(a.id)-COUNT(a.output_tokens) missing_output_tokens,
+COUNT(a.id)-COUNT(a.cache_read_tokens) missing_cache_read_tokens,
+COUNT(a.id)-COUNT(a.cache_write_tokens) missing_cache_write_tokens,
+COUNT(a.id)-COUNT(a.reasoning_tokens) missing_reasoning_tokens
+FROM inference_run_observations r LEFT JOIN target_attempt_observations a ON a.run_id=r.id WHERE r.interaction_id=";
 
 struct QueryWindow {
     anchor: i64,
@@ -74,6 +99,8 @@ struct InteractionRow {
     cache_read_tokens: Option<i64>,
     cache_write_tokens: Option<i64>,
     reasoning_tokens: Option<i64>,
+    #[sqlx(flatten)]
+    coverage: UsageCoverage,
     observation_gap: bool,
     last_event_sequence: i64,
     debug_status: String,
@@ -99,6 +126,8 @@ struct RunRow {
     cache_read_tokens: Option<i64>,
     cache_write_tokens: Option<i64>,
     reasoning_tokens: Option<i64>,
+    #[sqlx(flatten)]
+    coverage: UsageCoverage,
 }
 #[derive(FromRow)]
 struct RejectionRow {
@@ -546,6 +575,7 @@ impl ObservationStore {
                     cache_read_tokens: run.cache_read_tokens,
                     cache_write_tokens: run.cache_write_tokens,
                     reasoning_tokens: run.reasoning_tokens,
+                    coverage: Some(run.coverage),
                 },
                 events: run_events,
                 trace,
@@ -1103,6 +1133,7 @@ fn summary(r: InteractionRow, matched: bool) -> InteractionSummary {
             cache_read_tokens: r.cache_read_tokens,
             cache_write_tokens: r.cache_write_tokens,
             reasoning_tokens: r.reasoning_tokens,
+            coverage: Some(r.coverage),
         },
         debug_status: r.debug_status,
         observation_gap: r.observation_gap,

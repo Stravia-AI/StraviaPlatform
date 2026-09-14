@@ -4,6 +4,16 @@ export interface ConfirmedUsage {
   cache_read_tokens: number | null
   cache_write_tokens: number | null
   reasoning_tokens: number | null
+  coverage?: UsageCoverage
+}
+
+export interface UsageCoverage {
+  attempt_count: number
+  missing_input_tokens: number
+  missing_output_tokens: number
+  missing_cache_read_tokens: number
+  missing_cache_write_tokens: number
+  missing_reasoning_tokens: number
 }
 
 export interface ObservationEvent {

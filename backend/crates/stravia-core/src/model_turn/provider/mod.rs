@@ -113,6 +113,17 @@ impl ArtifactTransfers {
 }
 
 impl ProviderCall {
+    pub(crate) fn first_token_timeout_signal(&mut self) -> Option<Arc<AtomicBool>> {
+        let signal = self
+            .adapter
+            .binding
+            .observer
+            .as_ref()
+            .map(|_| Arc::new(AtomicBool::new(false)));
+        self.adapter.first_token_timed_out = signal.clone();
+        signal
+    }
+
     pub(crate) fn set_artifact_transfers(
         &mut self,
         principal: stravia_runtime_contract::Principal,
@@ -202,6 +213,7 @@ pub(crate) struct ProviderAdapter {
     vendor: Arc<dyn Vendor>,
     binding: ProviderBinding,
     normalizes_raw_stream_chunks: bool,
+    first_token_timed_out: Option<Arc<AtomicBool>>,
 }
 
 #[derive(Clone)]
@@ -272,6 +284,7 @@ pub(crate) struct AttemptObservation {
     usage_confirmed: AtomicBool,
     thinking_active: AtomicBool,
     thinking_layout: Mutex<ObservedThinkingLayout>,
+    first_token_timed_out: Option<Arc<AtomicBool>>,
 }
 
 impl AttemptObservation {
@@ -311,6 +324,7 @@ impl AttemptObservation {
             usage_confirmed: AtomicBool::new(false),
             thinking_active: AtomicBool::new(false),
             thinking_layout: Mutex::new(ObservedThinkingLayout::default()),
+            first_token_timed_out: adapter.first_token_timed_out.clone(),
         };
         attempt
     }
@@ -506,7 +520,16 @@ impl AttemptObservation {
 
 impl Drop for AttemptObservation {
     fn drop(&mut self) {
-        self.finish("failed", None, Some("attempt_aborted".into()), None);
+        let reason = if self
+            .first_token_timed_out
+            .as_ref()
+            .is_some_and(|signal| signal.load(Ordering::Acquire))
+        {
+            "first_token_timeout"
+        } else {
+            "attempt_aborted"
+        };
+        self.finish("failed", None, Some(reason.into()), None);
     }
 }
 
@@ -558,6 +581,7 @@ fn confirmed_usage(usage: &stravia_runtime_contract::protocol::ir::Usage) -> Con
         cache_read_tokens: usage.cache_read_tokens.map(i64::from),
         cache_write_tokens: usage.cache_creation_tokens.map(i64::from),
         reasoning_tokens: usage.reasoning_tokens.map(i64::from),
+        coverage: None,
     }
 }
 
@@ -567,6 +591,7 @@ impl ProviderAdapter {
             vendor,
             binding,
             normalizes_raw_stream_chunks: false,
+            first_token_timed_out: None,
         };
         adapter.normalizes_raw_stream_chunks =
             crate::provider::common::pipeline::normalizes_stream_raw_chunks(
@@ -861,6 +886,7 @@ mod tests {
             usage_confirmed: AtomicBool::new(false),
             thinking_active: AtomicBool::new(false),
             thinking_layout: Mutex::new(ObservedThinkingLayout::default()),
+            first_token_timed_out: None,
         };
         let summary = |output, part, text: &str| AiStreamDelta::ReasoningSummaryDelta {
             text: text.into(),
@@ -991,6 +1017,7 @@ mod tests {
             usage_confirmed: AtomicBool::new(false),
             thinking_active: AtomicBool::new(false),
             thinking_layout: Mutex::new(ObservedThinkingLayout::default()),
+            first_token_timed_out: None,
         };
         let attempt = make_attempt("attempt");
         attempt.observe_delta(&AiStreamDelta::ThinkingDelta("readable PLAIN_THINK".into()));

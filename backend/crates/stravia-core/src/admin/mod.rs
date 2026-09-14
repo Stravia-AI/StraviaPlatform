@@ -43,7 +43,7 @@ pub use crate::interaction_observation::{
     DownloadTicket, ForestPage, ForestQuery, ForestRoot, InteractionDetail, InteractionEventsPage,
     InteractionEventsQuery, InteractionSnapshot, InteractionSummary, ObservationEvent,
     ObservationQueryError, ObservationStream, ObservationUpdate, RejectionDetail, RejectionPage,
-    RejectionQuery, RejectionSummary, RunDetail, TraceManifest,
+    RejectionQuery, RejectionSummary, RunDetail, TraceManifest, UsageCoverage,
 };
 pub use routes::{BindRouteInput, UnbindRouteInput};
 

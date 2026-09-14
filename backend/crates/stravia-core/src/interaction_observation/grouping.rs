@@ -233,12 +233,6 @@ pub(super) fn resolved_client_tool_runs<'a>(
         .collect()
 }
 
-pub(super) fn add_usage(total: &mut Option<i64>, incoming: Option<i64>) {
-    *total = total
-        .zip(incoming)
-        .and_then(|(current, value)| current.checked_add(value));
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,13 +286,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn missing_attempt_usage_remains_unknown_after_known_attempts() {
-        let mut total = Some(0);
-        add_usage(&mut total, None);
-        add_usage(&mut total, Some(12));
-        assert_eq!(total, None);
-    }
     fn start(id: &str, principal: &str, fingerprint: &str) -> RunStart {
         RunStart {
             id: id.into(),

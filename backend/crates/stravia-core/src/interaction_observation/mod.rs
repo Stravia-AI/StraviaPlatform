@@ -1497,7 +1497,7 @@ fn project_bundle_summary(
     through: i64,
     status: &str,
 ) -> serde_json::Value {
-    let mut attempts = HashMap::<&str, ConfirmedUsage>::new();
+    let mut attempts = HashMap::<&str, Option<ConfirmedUsage>>::new();
     let mut visible_tail = String::new();
     let mut observation_gap = false;
     for event in events {
@@ -1517,14 +1517,18 @@ fn project_bundle_summary(
                     .get("attempt_id")
                     .and_then(serde_json::Value::as_str)
                 {
+                    let recorded = attempts.entry(id).or_default();
+                    if recorded.is_some() {
+                        continue;
+                    }
                     match serde_json::from_value(
                         event.payload.get("usage").cloned().unwrap_or_default(),
                     ) {
                         Ok(usage) => {
-                            attempts.insert(id, usage);
+                            *recorded = Some(usage);
                         }
                         Err(_) => {
-                            attempts.insert(id, ConfirmedUsage::default());
+                            *recorded = Some(ConfirmedUsage::default());
                             observation_gap = true;
                         }
                     }
@@ -1546,23 +1550,12 @@ fn project_bundle_summary(
             _ => {}
         }
     }
-    let mut usage = ConfirmedUsage::default();
-    if !attempts.is_empty() {
-        usage = ConfirmedUsage {
-            input_tokens: Some(0),
-            output_tokens: Some(0),
-            cache_read_tokens: Some(0),
-            cache_write_tokens: Some(0),
-            reasoning_tokens: Some(0),
-        };
-        for attempt in attempts.values() {
-            grouping::add_usage(&mut usage.input_tokens, attempt.input_tokens);
-            grouping::add_usage(&mut usage.output_tokens, attempt.output_tokens);
-            grouping::add_usage(&mut usage.cache_read_tokens, attempt.cache_read_tokens);
-            grouping::add_usage(&mut usage.cache_write_tokens, attempt.cache_write_tokens);
-            grouping::add_usage(&mut usage.reasoning_tokens, attempt.reasoning_tokens);
-        }
-    }
+    let unknown = ConfirmedUsage::default();
+    let usage = ConfirmedUsage::aggregate(
+        attempts
+            .values()
+            .map(|usage| usage.as_ref().unwrap_or(&unknown)),
+    );
     let admission = events.iter().find(|event| event.kind == "run_admitted");
     let run_ids: Vec<_> = events
         .iter()

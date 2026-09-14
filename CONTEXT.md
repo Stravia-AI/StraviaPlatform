@@ -29,6 +29,7 @@ _避免使用_：Agent（当指这些工具）、接入 Agent、把 Desktop 和 
 ## Connect Client Interaction
 
 Connect Client Interaction 通常由一次新 User 输入发起，包含随后推进同一任务的一个或多个 Inference Run；无法归入已有 Interaction、且不含 User item 的合法根请求也开启新的 Interaction。同一 Principal 下精确续接父响应时，没有新增 User 的请求继续原 Interaction；提交父历史中待完成工具调用结果的请求即使夹带新增 User 也继续原 Interaction，不限时间；请求在父响应完整交付后两秒内到达时，即使包含新增 User 或父 Interaction 已完成，也归入原 Interaction。两秒快速续接是诊断归并规则，不证明输入来自 harness；真人快速追问同样可能归并。其他新增 User 开启新的 Interaction，原执行分支尚未得到最终响应时标记为由用户中断。同一父响应的并发续接可以在 Interaction 内形成 Run 子树并产生多个最终生成响应，已完成 Interaction 可以被合法续接重新激活。失败的 Inference Run 不会单独结束 Interaction：合法续接可以恢复原 Interaction 并保留失败记录。没有父节点的根 Run 仅在同 Principal、canonical request fingerprint 精确相同、前次 Run 已失败且从未发生 Client Output Commit、并在失败后两分钟内开始时，才在 Interaction Observation 中归并为同一 Interaction；诊断归并不建立 Generation Chain 关系，也不改变输入、权限或执行。
+历史回放中的旧工具结果不证明当前请求是工具续接；已经经过后续模型答复的结果不用于吞并新的独立 User 输入。
 _避免使用_：Agent Turn、Model Turn、Inference Run、Agent Loop
 
 ## Interaction Observation
@@ -58,7 +59,7 @@ _避免使用_：完整抓包（当存在未捕获或不完整的 Inference Run�
 
 ## Confirmed Upstream Usage
 
-Confirmed Upstream Usage 是上游在某次模型调用中明确报告、Stravia 已收到的 token 用量。Connect Client Interaction 的用量是其中所有 Inference Run、隐藏 Model Turn、重试和 Target failover 已报告用量的累计值；尚未报告或永不报告的消耗保持未知，不能记为零或用本地估算冒充精确值。
+Confirmed Upstream Usage 是上游在某次模型调用中明确报告、Stravia 已收到的 token 用量。Connect Client Interaction 的用量是其中所有 Inference Run、隐藏 Model Turn、重试和 Target failover 已报告用量的累计值；尚未报告或永不报告的消耗保持未知，但不遮蔽其他已确认用量，累计值与各项用量的报告覆盖程度分别表达，不能把未知记为零或用本地估算冒充精确值。
 _避免使用_：Agent Token、Estimated Usage、仅最终回答 Token
 
 ## Connect Client Apply

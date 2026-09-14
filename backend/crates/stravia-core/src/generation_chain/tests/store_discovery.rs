@@ -191,6 +191,71 @@ async fn observation_tool_result_evidence_requires_a_pending_parent_call() {
 }
 
 #[tokio::test]
+async fn edited_tool_history_does_not_merge_a_later_user_into_tool_continuation() {
+    let chain = GenerationChain::from_turn_chain(
+        Arc::new(crate::turn_chain::test_store().await),
+        Duration::from_secs(60),
+        None,
+    );
+    let owner = principal("owner");
+    let question = user_message("question");
+    let call = AiItem::function_call(stravia_runtime_contract::protocol::ir::ToolCall {
+        id: "lookup-call".into(),
+        name: "lookup".into(),
+        arguments: "{}".into(),
+    });
+    let mut root = chain
+        .begin(owner.clone(), responses_request(vec![question.clone()]))
+        .await
+        .unwrap();
+    let mut response = AiResponse::new("upstream-call", "model");
+    response.items = vec![call.clone()];
+    root.stage(&mut response, &generation_source(), None);
+    root.persist().await.unwrap();
+    let mut completed = chain
+        .begin(
+            owner.clone(),
+            responses_request(vec![
+                question.clone(),
+                call.clone(),
+                AiItem::function_call_output("lookup-call", serde_json::json!("original result")),
+            ]),
+        )
+        .await
+        .unwrap();
+    let mut answer = AiResponse::new("upstream-answer", "model");
+    answer.push_output_text("finished");
+    completed.stage(&mut answer, &generation_source(), None);
+    completed.persist().await.unwrap();
+
+    let edited = AiItem::function_call_output("lookup-call", serde_json::json!("edited result"));
+    let followup = user_message("new task");
+    let resumed = chain
+        .begin(
+            owner,
+            responses_request(vec![
+                question,
+                call,
+                edited.clone(),
+                AiItem::output_text("finished"),
+                followup.clone(),
+            ]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resumed.parent.parent_id.as_deref(), Some(root.id()));
+    assert!(!resumed.has_matching_pending_tool_result());
+    assert_eq!(
+        serde_json::to_value(&resumed.request().items[2]).unwrap(),
+        serde_json::to_value(&edited).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(resumed.request().items.last().unwrap()).unwrap(),
+        serde_json::to_value(&followup).unwrap()
+    );
+}
+
+#[tokio::test]
 async fn materialization_cache_never_serves_an_expired_durable_chain() {
     let backend = Arc::new(ImmediatelyExpiredTurnChainStore {
         inner: crate::turn_chain::test_store().await,

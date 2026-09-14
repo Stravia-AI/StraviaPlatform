@@ -1427,7 +1427,7 @@ async fn usage_sqlite(
 ) -> anyhow::Result<()> {
     let changed=sqlx::query("UPDATE target_attempt_observations SET input_tokens=?,output_tokens=?,cache_read_tokens=?,cache_write_tokens=?,reasoning_tokens=?,usage_recorded=1,last_event_sequence=? WHERE id=? AND usage_recorded=0").bind(u.input_tokens).bind(u.output_tokens).bind(u.cache_read_tokens).bind(u.cache_write_tokens).bind(u.reasoning_tokens).bind(seq).bind(aid).execute(&mut **tx).await?.rows_affected();
     if changed > 0 {
-        sqlx::query("UPDATE model_turn_observations SET input_tokens=(SELECT CASE WHEN COUNT(*)=COUNT(input_tokens) THEN SUM(input_tokens) END FROM target_attempt_observations WHERE model_turn_id=model_turn_observations.id),output_tokens=(SELECT CASE WHEN COUNT(*)=COUNT(output_tokens) THEN SUM(output_tokens) END FROM target_attempt_observations WHERE model_turn_id=model_turn_observations.id),cache_read_tokens=(SELECT CASE WHEN COUNT(*)=COUNT(cache_read_tokens) THEN SUM(cache_read_tokens) END FROM target_attempt_observations WHERE model_turn_id=model_turn_observations.id),cache_write_tokens=(SELECT CASE WHEN COUNT(*)=COUNT(cache_write_tokens) THEN SUM(cache_write_tokens) END FROM target_attempt_observations WHERE model_turn_id=model_turn_observations.id),reasoning_tokens=(SELECT CASE WHEN COUNT(*)=COUNT(reasoning_tokens) THEN SUM(reasoning_tokens) END FROM target_attempt_observations WHERE model_turn_id=model_turn_observations.id) WHERE id=(SELECT model_turn_id FROM target_attempt_observations WHERE id=?)").bind(aid).execute(&mut **tx).await?;
+        sqlx::query("UPDATE model_turn_observations SET (input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens)=(SELECT SUM(input_tokens),SUM(output_tokens),SUM(cache_read_tokens),SUM(cache_write_tokens),SUM(reasoning_tokens) FROM target_attempt_observations WHERE model_turn_id=model_turn_observations.id) WHERE id=(SELECT model_turn_id FROM target_attempt_observations WHERE id=?)").bind(aid).execute(&mut **tx).await?;
         recompute_usage_sqlite(tx, iid).await?;
     }
     Ok(())
@@ -1441,7 +1441,7 @@ async fn usage_postgres(
 ) -> anyhow::Result<()> {
     let changed=sqlx::query("UPDATE target_attempt_observations SET input_tokens=$1,output_tokens=$2,cache_read_tokens=$3,cache_write_tokens=$4,reasoning_tokens=$5,usage_recorded=TRUE,last_event_sequence=$6 WHERE id=$7 AND usage_recorded=FALSE").bind(u.input_tokens).bind(u.output_tokens).bind(u.cache_read_tokens).bind(u.cache_write_tokens).bind(u.reasoning_tokens).bind(seq).bind(aid).execute(&mut **tx).await?.rows_affected();
     if changed > 0 {
-        sqlx::query("UPDATE model_turn_observations SET (input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens)=(SELECT CASE WHEN COUNT(*)=COUNT(input_tokens) THEN SUM(input_tokens) END,CASE WHEN COUNT(*)=COUNT(output_tokens) THEN SUM(output_tokens) END,CASE WHEN COUNT(*)=COUNT(cache_read_tokens) THEN SUM(cache_read_tokens) END,CASE WHEN COUNT(*)=COUNT(cache_write_tokens) THEN SUM(cache_write_tokens) END,CASE WHEN COUNT(*)=COUNT(reasoning_tokens) THEN SUM(reasoning_tokens) END FROM target_attempt_observations WHERE model_turn_id=(SELECT model_turn_id FROM target_attempt_observations WHERE id=$1)) WHERE id=(SELECT model_turn_id FROM target_attempt_observations WHERE id=$1)").bind(aid).execute(&mut **tx).await?;
+        sqlx::query("UPDATE model_turn_observations SET (input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens)=(SELECT SUM(input_tokens),SUM(output_tokens),SUM(cache_read_tokens),SUM(cache_write_tokens),SUM(reasoning_tokens) FROM target_attempt_observations WHERE model_turn_id=(SELECT model_turn_id FROM target_attempt_observations WHERE id=$1)) WHERE id=(SELECT model_turn_id FROM target_attempt_observations WHERE id=$1)").bind(aid).execute(&mut **tx).await?;
         recompute_usage_postgres(tx, iid).await?;
     }
     Ok(())
@@ -1450,14 +1450,14 @@ async fn recompute_usage_sqlite(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     iid: &str,
 ) -> anyhow::Result<()> {
-    sqlx::query("UPDATE interaction_observations SET input_tokens=(SELECT CASE WHEN COUNT(*)=COUNT(input_tokens) THEN SUM(input_tokens) END FROM target_attempt_observations WHERE interaction_id=?),output_tokens=(SELECT CASE WHEN COUNT(*)=COUNT(output_tokens) THEN SUM(output_tokens) END FROM target_attempt_observations WHERE interaction_id=?),cache_read_tokens=(SELECT CASE WHEN COUNT(*)=COUNT(cache_read_tokens) THEN SUM(cache_read_tokens) END FROM target_attempt_observations WHERE interaction_id=?),cache_write_tokens=(SELECT CASE WHEN COUNT(*)=COUNT(cache_write_tokens) THEN SUM(cache_write_tokens) END FROM target_attempt_observations WHERE interaction_id=?),reasoning_tokens=(SELECT CASE WHEN COUNT(*)=COUNT(reasoning_tokens) THEN SUM(reasoning_tokens) END FROM target_attempt_observations WHERE interaction_id=?) WHERE id=?").bind(iid).bind(iid).bind(iid).bind(iid).bind(iid).bind(iid).execute(&mut **tx).await?;
+    sqlx::query("UPDATE interaction_observations SET (input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens)=(SELECT SUM(input_tokens),SUM(output_tokens),SUM(cache_read_tokens),SUM(cache_write_tokens),SUM(reasoning_tokens) FROM target_attempt_observations WHERE interaction_id=?) WHERE id=?").bind(iid).bind(iid).execute(&mut **tx).await?;
     Ok(())
 }
 async fn recompute_usage_postgres(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     iid: &str,
 ) -> anyhow::Result<()> {
-    sqlx::query("UPDATE interaction_observations SET (input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens)=(SELECT CASE WHEN COUNT(*)=COUNT(input_tokens) THEN SUM(input_tokens) END,CASE WHEN COUNT(*)=COUNT(output_tokens) THEN SUM(output_tokens) END,CASE WHEN COUNT(*)=COUNT(cache_read_tokens) THEN SUM(cache_read_tokens) END,CASE WHEN COUNT(*)=COUNT(cache_write_tokens) THEN SUM(cache_write_tokens) END,CASE WHEN COUNT(*)=COUNT(reasoning_tokens) THEN SUM(reasoning_tokens) END FROM target_attempt_observations WHERE interaction_id=$1) WHERE id=$1").bind(iid).execute(&mut **tx).await?;
+    sqlx::query("UPDATE interaction_observations SET (input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens)=(SELECT SUM(input_tokens),SUM(output_tokens),SUM(cache_read_tokens),SUM(cache_write_tokens),SUM(reasoning_tokens) FROM target_attempt_observations WHERE interaction_id=$1) WHERE id=$1").bind(iid).execute(&mut **tx).await?;
     Ok(())
 }
 fn resolved_evidence(
@@ -1618,6 +1618,158 @@ mod tests {
 
     use super::*;
     use crate::interaction_observation::types::ForestQuery;
+
+    async fn confirmed_usage_scenario(store: &ObservationStore) -> anyhow::Result<()> {
+        use crate::interaction_observation::types::UsageCoverage;
+
+        let id = "partial-usage";
+        admit_tool_run(store, id, None, "alice").await?;
+        store
+            .persist_run_event(
+                id,
+                id,
+                &RunEvent::ModelTurnStarted {
+                    model_turn_id: id.into(),
+                    route_id: "route".into(),
+                    model_display_name: None,
+                },
+                2,
+                i64::MAX,
+            )
+            .await?;
+        for attempt in ["unknown", "reported", "reported-failure"] {
+            store
+                .persist_run_event(
+                    id,
+                    id,
+                    &RunEvent::TargetAttemptStarted {
+                        model_turn_id: id.into(),
+                        attempt_id: format!("{id}-{attempt}"),
+                        target_id: "target".into(),
+                        provider_id: "provider".into(),
+                        provider_name: "provider".into(),
+                        upstream_model: "model".into(),
+                        protocol: "responses".into(),
+                        upstream_url: "http://localhost".into(),
+                    },
+                    3,
+                    i64::MAX,
+                )
+                .await?;
+        }
+        let before = store
+            .get_interaction(id, ForestQuery::default())
+            .await?
+            .unwrap();
+        assert_eq!(before.interaction.usage.input_tokens, None);
+        assert_eq!(
+            before
+                .interaction
+                .usage
+                .coverage
+                .as_ref()
+                .unwrap()
+                .missing_input_tokens,
+            3
+        );
+
+        for attempt in ["reported", "reported-failure"] {
+            let event = RunEvent::UsageConfirmed {
+                model_turn_id: id.into(),
+                attempt_id: format!("{id}-{attempt}"),
+                usage: ConfirmedUsage {
+                    input_tokens: Some(12),
+                    output_tokens: Some(3),
+                    cache_read_tokens: Some(0),
+                    cache_write_tokens: None,
+                    reasoning_tokens: Some(1),
+                    coverage: None,
+                },
+            };
+            store.persist_run_event(id, id, &event, 4, i64::MAX).await?;
+            store.persist_run_event(id, id, &event, 5, i64::MAX).await?;
+        }
+        for (attempt, status) in [
+            ("unknown", "failed"),
+            ("reported", "completed"),
+            ("reported-failure", "failed"),
+        ] {
+            store
+                .persist_run_event(
+                    id,
+                    id,
+                    &RunEvent::TargetAttemptFinished {
+                        model_turn_id: id.into(),
+                        attempt_id: format!("{id}-{attempt}"),
+                        status: status.into(),
+                        status_code: None,
+                        error_code: (status == "failed").then(|| "attempt_aborted".into()),
+                        duration_ms: 10,
+                        first_token_ms: None,
+                    },
+                    6,
+                    i64::MAX,
+                )
+                .await?;
+        }
+        let detail = store
+            .get_interaction(id, ForestQuery::default())
+            .await?
+            .unwrap();
+        let expected = ConfirmedUsage {
+            input_tokens: Some(24),
+            output_tokens: Some(6),
+            cache_read_tokens: Some(0),
+            cache_write_tokens: None,
+            reasoning_tokens: Some(2),
+            coverage: Some(UsageCoverage {
+                attempt_count: 3,
+                missing_input_tokens: 1,
+                missing_output_tokens: 1,
+                missing_cache_read_tokens: 1,
+                missing_cache_write_tokens: 3,
+                missing_reasoning_tokens: 1,
+            }),
+        };
+        assert_eq!(detail.interaction.usage, expected);
+        assert_eq!(detail.runs[0].usage, expected);
+        let events = &detail.runs[0].events;
+        let bundle = crate::interaction_observation::project_bundle_summary(
+            &detail,
+            events,
+            detail.snapshot_sequence,
+            "completed",
+        );
+        assert_eq!(bundle["usage"], serde_json::to_value(&expected)?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn confirmed_usage_survives_unknown_and_failed_attempts() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let pool = crate::db::init_pool(directory.path()).await?;
+        crate::migrations::migrate_sqlite(&pool).await?;
+        let store = ObservationStore::Sqlite(pool.clone());
+        confirmed_usage_scenario(&store).await?;
+        // 旧版本持久化的未知总计不能遮住仍然存在的 attempt 用量。
+        sqlx::query(
+            "UPDATE interaction_observations SET input_tokens=NULL WHERE id='partial-usage'",
+        )
+        .execute(&pool)
+        .await?;
+        assert_eq!(
+            store
+                .get_interaction("partial-usage", ForestQuery::default())
+                .await?
+                .unwrap()
+                .interaction
+                .usage
+                .input_tokens,
+            Some(24)
+        );
+        pool.close().await;
+        Ok(())
+    }
 
     async fn admit_tool_run(
         store: &ObservationStore,
@@ -2212,6 +2364,7 @@ mod tests {
             let result = async {
                 crate::migrations::migrate_postgres(&pool).await?;
                 let store = ObservationStore::Postgres(pool.clone());
+                confirmed_usage_scenario(&store).await?;
                 sibling_result_scenario(&store, "failed-sibling", "failed").await?;
                 restart_reconciliation_scenario(&store).await?;
                 close_and_priority_scenario(&store).await

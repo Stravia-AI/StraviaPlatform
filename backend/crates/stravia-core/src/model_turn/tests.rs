@@ -405,6 +405,115 @@ async fn execute_distinguishes_cancellation_from_deadline() {
 }
 
 #[tokio::test]
+async fn first_token_timeout_records_one_precise_attempt_terminal_without_usage() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+    let upstream = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = vec![0_u8; 16 * 1024];
+        socket.read(&mut request).await.unwrap();
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let _ = tokio::io::copy(&mut socket, &mut tokio::io::sink()).await;
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let gateway = Gateway::new(GatewayConfig {
+        data_dir: directory.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let admin = gateway.admin();
+    let provider = admin
+        .create_provider(CreateProvider {
+            name: Some("Timeout fixture".into()),
+            source: ProviderSourceInput::Custom {
+                vendor: Some("test-http".into()),
+                protocol: "openai-compatible".into(),
+                base_url,
+                models_source: None,
+                static_models: None,
+            },
+            credential: ProviderCredentialInput::ApiKey {
+                value: "test-key".into(),
+            },
+            use_proxy: false,
+        })
+        .await
+        .unwrap();
+    add_test_provider_model(&gateway, &provider.id).await;
+    let model = admin
+        .create_model(CreateRoute {
+            model_id: "timeout-model".into(),
+            display_name: None,
+            balance: None,
+            target_provider: String::new(),
+            target_model: String::new(),
+            targets: vec![CreateTarget {
+                enabled: true,
+                provider_id: provider.id,
+                model: "upstream-model".into(),
+                priority: None,
+                first_token_timeout_ms: Some(1000),
+                target_retry_budget: Some(0),
+                target_cooldown_ms: None,
+                thinking_level_map: Vec::new(),
+            }],
+        })
+        .await
+        .unwrap();
+    let key = admin
+        .create_api_key(crate::db::models::CreateApiKey {
+            key: None,
+            name: "Timeout fixture".into(),
+            concurrency_limit: None,
+            expires_at: None,
+            mcp_access_enabled: true,
+            transparent_injection_enabled: false,
+            inject_web_search: false,
+            model_ids: vec![model.id],
+            inject_media_understanding: false,
+        })
+        .await
+        .unwrap();
+    let principal = Principal::new(key.id);
+    let observer = credential_observer(&gateway, &principal);
+    let mut request = AiRequest::new("timeout-model", Vec::new());
+    request.stream.enabled = true;
+    let result = gateway
+        .model_turn
+        .execute(TurnInput::new(principal, request).with_observer(observer))
+        .await;
+    assert!(
+        matches!(result, Err(ModelTurnError { ref code, .. }) if code == "first_token_timeout")
+    );
+    gateway.observation.flush().await.unwrap();
+    let events: Vec<String> = sqlx::query_scalar(
+        "SELECT payload FROM observation_events WHERE kind='target_attempt_finished'",
+    )
+    .fetch_all(gateway._sqlite_pool.as_ref().unwrap())
+    .await
+    .unwrap();
+    assert_eq!(events.len(), 1);
+    let terminal: serde_json::Value = serde_json::from_str(&events[0]).unwrap();
+    assert_eq!(terminal["error_code"], "first_token_timeout");
+    assert_eq!(terminal["status"], "failed");
+    assert!(terminal["first_token_ms"].is_null());
+    let usages: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM observation_events WHERE kind='usage_confirmed'")
+            .fetch_one(gateway._sqlite_pool.as_ref().unwrap())
+            .await
+            .unwrap();
+    assert_eq!(usages, 0);
+    upstream.abort();
+    let _ = upstream.await;
+}
+
+#[tokio::test]
 async fn execute_fails_over_before_canonical_output_and_returns_the_locked_target() {
     let (failed_url, failed_calls) =
         serve_openai_status(500, serde_json::json!({"error": {"message": "retry"}})).await;

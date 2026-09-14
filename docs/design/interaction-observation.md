@@ -31,7 +31,7 @@
 
 1. 一条新的 canonical `User` item 通常开启新的 Connect Client Interaction；精确父响应的工具续接与两秒快速续接按以下规则归并。
 2. 无法归入已有 Interaction、且不含 User item 的合法根请求也开启新的 Interaction。
-3. 客户端公开工具调用结束当前 Inference Run。同一 Principal 下精确续接父响应、没有新增 User item 的请求继续原 Interaction；请求 delta 提交父历史中尚未得到结果的工具调用所对应的结果时，即使夹带新增 User item 也继续原 Interaction，不限时间。完整历史中的旧工具结果不构成归并证据。
+3. 客户端公开工具调用结束当前 Inference Run。同一 Principal 下精确续接父响应、没有新增 User item 的请求继续原 Interaction；请求 delta 的当前输入尾段提交父历史中尚未得到结果的工具调用所对应的结果时，即使夹带新增 User item 也继续原 Interaction，不限时间。当前尾段从 delta 最后一个 Assistant item 之后开始；顶层工具返回与 User 内容块中的 ToolResult 使用相同判定。完整历史中的旧工具结果不构成归并证据，历史编辑导致父节点退回更早位置也不例外。
 4. 同一父响应的并发续接属于同一 Interaction，并在详情中形成 Run 子树。
 5. 同一 Principal 下精确续接父响应的新请求，其 ingress 接收时间距父响应完整交付时间在 `[0, 2000]` 毫秒内时，即使包含新增 User item 或父 Interaction 已完成，也继续原 Interaction；已完成交互重新进入活动状态。时间不取 admission 处理时间或可变的 `last_active_at`。这项规则仅表示快速续接，不识别或信任 harness hook，真人快速追问同样归并。其他新增 User item 开启新 Interaction；仅此时原 Interaction 中尚无最终响应的执行分支标记为 `user_interrupted`。
 6. 有明确 Generation Chain parent、无新 User item 的失败重试恢复原 Interaction，并保留失败 Run。
@@ -77,7 +77,12 @@ Interaction 卡片、详情与用量分析共享 `Confirmed Upstream Usage`：
 - 每个实际上游 attempt 的 usage 最多记一次；
 - Target attempt 成功与明确报告的 usage 不因随后还原或映射发布失败而改写；Model Turn 的唯一终态由内部完成 gate 记录，只有发布完成且未被取消或超时抢占才记成功；
 - 上游尚未报告或永不报告时保持 `unknown`，不显示为零，不用本地 tokenizer 估算；
+- 聚合按字段累计已报告部分；某次 attempt 的未知值不抹掉其他 attempt 的已确认值。全部未报告时该字段保持 `null`，明确报告的零保留为零。失败但已报告的用量同样累计，重复报告不重复计数；
+- Interaction、Run 与 Bundle 的聚合 `usage.coverage` 包含 `attempt_count` 和五项 `missing_*_tokens`，分别表示尝试总数及对应字段未报告的尝试数。单个 `usage_confirmed` 事件不携带聚合 coverage；正在运行与终态未报告的区别仍由 attempt 状态表达。coverage 不替代 `observation_gap`，无法记录的 attempt 不计入已观察尝试总数；
+- 查询从现存 attempt 记录派生已确认累计与覆盖信息，旧版保存的 `null` 汇总不遮蔽仍然存在的用量；无需改写旧事件或自动拆分历史 Interaction。界面沿用既有文案和布局；
 - 收到新的上游 usage 后更新持久化投影并推送 SSE。
+
+首内容超时在取消执行 future 前标记原因，未正常结束的 attempt 记录 `first_token_timeout`；`attempt_aborted` 仅作为没有明确结束原因的释放兜底。两者均不伪造 usage，也不改变原有超时配置、重试预算或调度策略，每个 attempt 仍只有一个终态。
 
 ### 3.4 Observation 不影响执行
 
