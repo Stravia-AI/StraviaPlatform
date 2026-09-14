@@ -34,6 +34,7 @@ const TITLES: Record<string, () => string> = {
   run_finished: m.observation_event_run_finished,
   run_state_changed: m.observation_event_run_state_changed,
   request_rejected: m.observation_event_request_rejected,
+  request_failed: m.observation_request_failed,
   observation_gap: m.observation_event_observation_gap,
   usage_confirmed: m.observation_event_usage_confirmed,
   client_visible_content_delta: m.observation_event_client_visible_content_delta,
@@ -131,9 +132,9 @@ export function observationEventSummary(
   const duration = (key: string, label: string) => {
     if (count(payload[key])) add(label, formatDuration(payload[key]))
   }
-  const httpStatus = () => {
-    if (count(payload.status_code) && payload.status_code >= 100 && payload.status_code <= 599) {
-      add(m.observation_http_status(), String(payload.status_code))
+  const httpStatus = (from: Record<string, unknown> = payload) => {
+    if (count(from.status_code) && from.status_code >= 100 && from.status_code <= 599) {
+      add(m.observation_http_status(), String(from.status_code))
     }
   }
   const result = () => {
@@ -239,6 +240,23 @@ export function observationEventSummary(
       add(m.observation_error_code(), payload.code)
       add(m.observation_rejected_stage(), payload.stage)
       break
+    case 'request_failed': {
+      // 请求级终态失败：上游与平台诊断同源展示；来源或字段缺失不补造。
+      const error = record(payload.error)
+      summary.tone = 'error'
+      add(
+        m.failed_request_origin(),
+        error.source === 'platform'
+          ? m.failed_request_platform()
+          : error.source === 'upstream'
+            ? m.failed_request_upstream()
+            : error.source,
+      )
+      httpStatus(error)
+      add(m.observation_error_code(), error.code)
+      add(m.failed_request_error(), error.message)
+      break
+    }
     case 'observation_gap':
       summary.tone = 'warning'
       summary.note = m.observation_event_gap_note()

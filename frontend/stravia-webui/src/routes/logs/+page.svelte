@@ -19,7 +19,7 @@ import { localizeBackendErrorMessage } from '$lib/backend-error'
 import { formatLogTime } from '$lib/format'
 import { visualParent } from '$lib/interaction-canvas-links'
 import { eventBlockId, mergeObservationRuns, retainLiveBlocks, withoutCommittedBlocks } from '$lib/observation-state'
-import { observationDebugStatusLabel, observationStatusLabel } from '$lib/observation-labels'
+import { observationStatusLabel } from '$lib/observation-labels'
 import { navigateToBundle, subscribeToObservations, type ObservationSubscription } from '$lib/observation-stream'
 import type {
   ForestPage,
@@ -29,17 +29,17 @@ import type {
   InteractionSummary,
   LiveContentBlock,
   ObservationStreamUpdate,
-  RejectionDetail,
-  RejectionSummary,
+  FailedRequestDetail,
+  FailedRequestSummary,
 } from '$lib/types'
 import InteractionCanvas from '$lib/components/interaction-canvas.svelte'
 import ObservationInspector from '$lib/components/observation-inspector.svelte'
+import FailedRequestTable from '$lib/components/failed-request-table.svelte'
 import PageHeader from '$lib/components/page-header.svelte'
 import StatusIndicator from '$lib/components/status-indicator.svelte'
 import RequestFailure from '$lib/components/request-failure.svelte'
 import * as Alert from '$lib/components/ui/alert'
 import * as AlertDialog from '$lib/components/ui/alert-dialog'
-import { Badge } from '$lib/components/ui/badge'
 import { Button } from '$lib/components/ui/button'
 import * as Dialog from '$lib/components/ui/dialog'
 import * as Empty from '$lib/components/ui/empty'
@@ -78,14 +78,14 @@ let loadingMore = $state(false)
 let rootBatchRequest: Promise<void> | undefined
 let loadError = $state<unknown>()
 let selectedInteraction = $state<InteractionSummary>()
-let selectedRejection = $state<RejectionSummary>()
+let selectedFailure = $state<FailedRequestSummary>()
 let interactionDetail = $state.raw<InteractionDetail>()
 let liveBlocks = $state.raw<LiveContentBlock[]>([])
 let liveGaps = $state.raw<string[]>([])
 let liveCapacityGaps = $state.raw<string[]>([])
 let olderLoading = $state(false)
 const selectedLiveBlocks = $derived(liveBlocks.filter((block) => block.interaction_id === selectedInteraction?.id))
-let rejectionDetail = $state<RejectionDetail>()
+let failureDetail = $state<FailedRequestDetail>()
 let detailLoading = $state(false)
 let inspectorWidth = $state(46)
 let canvas = $state<InteractionCanvas>()
@@ -105,10 +105,13 @@ let fitProgress = $state<number>()
 let followPaused = $state(false)
 let hasNewActivity = $state(false)
 let migratedRoots = $state.raw(new Set<string>())
-let rejections = $state.raw<RejectionSummary[]>([])
-let rejectionTotal = $state(0)
-let rejectionCursor = $state<string | null>()
-let rejectionLoading = $state(false)
+let failures = $state.raw<FailedRequestSummary[]>([])
+let failureTotal = $state(0)
+let failureCursor = $state<string | null>()
+let failureLoading = $state(false)
+let failureError = $state<unknown>()
+let failureDetailError = $state<unknown>()
+let failureRequestVersion = 0
 
 const providersQuery = createQuery(() => ({ queryKey: ['providers'], queryFn: admin.providers.list }))
 const modelsQuery = createQuery(() => ({ queryKey: ['models'], queryFn: admin.models.list }))
@@ -117,7 +120,9 @@ const debugQuery = createQuery(() => ({ queryKey: ['observation-debug'], queryFn
 
 const interactions = $derived(roots.flatMap((root) => root.interactions))
 const activeFilterCount = $derived(
-  [providerFilter, modelFilter, apiKeyFilter, statusFilter].filter((value) => value !== 'all').length,
+  [providerFilter, modelFilter, apiKeyFilter, ...(activeTab === 'interactions' ? [statusFilter] : [])].filter(
+    (value) => value !== 'all',
+  ).length,
 )
 const latestInteraction = $derived.by(
   () =>
@@ -169,8 +174,8 @@ onMount(() => {
     if (!loading && !loadingMore && roots.some((root) => root.last_active_at < windowStart)) {
       void loadForest(true)
     }
-    if (activeTab === 'rejections' && !rejectionLoading && rejections.some((item) => item.occurred_at < windowStart)) {
-      void loadRejections()
+    if (activeTab === 'failures' && !failureLoading && failures.some((item) => item.started_at < windowStart)) {
+      void loadFailures()
     }
   }, 1000)
   return () => {
@@ -222,9 +227,9 @@ async function reloadWindow(): Promise<void> {
   migratedRoots = new Set()
   followPaused = !liveWindow
   hasNewActivity = false
-  rejections = []
-  rejectionCursor = undefined
-  await Promise.all([loadForest(true), activeTab === 'rejections' ? loadRejections() : Promise.resolve()])
+  failures = []
+  failureCursor = undefined
+  await Promise.all([loadForest(true), activeTab === 'failures' ? loadFailures() : Promise.resolve()])
 }
 
 async function choosePreset(value: string): Promise<void> {
@@ -299,14 +304,10 @@ function applyPage(page: ForestPage, replace: boolean, advanceStream: boolean): 
   snapshotSequence = page.snapshot_sequence
   if (replace && advanceStream) stream?.setCursor(page.snapshot_sequence)
   if (!stream) {
-    stream = subscribeToObservations(
-      page.snapshot_sequence,
-      handleObservationUpdate,
-      (connected) => {
-        streamConnected = connected
-        if (!connected) liveBlocks = []
-      },
-    )
+    stream = subscribeToObservations(page.snapshot_sequence, handleObservationUpdate, (connected) => {
+      streamConnected = connected
+      if (!connected) liveBlocks = []
+    })
   }
 }
 
@@ -344,7 +345,11 @@ async function reloadForFilters(): Promise<void> {
   followPaused = !liveWindow
   hasNewActivity = false
   migratedRoots = new Set()
-  await loadForest(true)
+  // 先推进实时窗口再查询，两次推进之间完成的失败不会被旧 end_at 排除。
+  if (activeTab === 'failures') {
+    updateLiveBounds()
+    await loadFailures()
+  } else await loadForest(true)
 }
 
 function loadNextRootBatch(): Promise<void> {
@@ -389,8 +394,18 @@ async function refreshSelectedEvents(id: string, selection: number): Promise<voi
     const page = await admin.observations.interactionEvents(id, { after_sequence: after, through_sequence: through })
     if (selection !== selectionVersion || !interactionDetail) return
     through ??= page.snapshot_sequence
-    interactionDetail = { ...interactionDetail, runs: mergeObservationRuns(interactionDetail.runs, page.runs, page.snapshot_sequence < interactionDetail.snapshot_sequence),
-      snapshot_sequence: page.next_cursor === null ? Math.max(through, interactionDetail.snapshot_sequence) : interactionDetail.snapshot_sequence }
+    interactionDetail = {
+      ...interactionDetail,
+      runs: mergeObservationRuns(
+        interactionDetail.runs,
+        page.runs,
+        page.snapshot_sequence < interactionDetail.snapshot_sequence,
+      ),
+      snapshot_sequence:
+        page.next_cursor === null
+          ? Math.max(through, interactionDetail.snapshot_sequence)
+          : interactionDetail.snapshot_sequence,
+    }
     liveBlocks = withoutCommittedBlocks(liveBlocks, interactionDetail)
     if (page.next_cursor === null) return
     after = page.next_cursor
@@ -408,7 +423,11 @@ async function loadOlderEvents(): Promise<void> {
       through_sequence: interactionDetail.snapshot_sequence,
     })
     if (selection !== selectionVersion || !interactionDetail) return
-    interactionDetail = { ...interactionDetail, runs: mergeObservationRuns(interactionDetail.runs, page.runs, true), older_events_cursor: page.next_cursor }
+    interactionDetail = {
+      ...interactionDetail,
+      runs: mergeObservationRuns(interactionDetail.runs, page.runs, true),
+      older_events_cursor: page.next_cursor,
+    }
     liveBlocks = withoutCommittedBlocks(liveBlocks, interactionDetail)
   } catch (error) {
     if (selection === selectionVersion) toast.error(localizeBackendErrorMessage(error))
@@ -433,16 +452,16 @@ async function selectInteraction(interaction: InteractionSummary): Promise<void>
   }
 }
 
-async function selectRejection(rejection: RejectionSummary): Promise<void> {
+async function selectFailure(failure: FailedRequestSummary): Promise<void> {
   closeInspector()
   const selection = selectionVersion
-  selectedRejection = rejection
+  selectedFailure = failure
   detailLoading = true
   try {
-    const detail = await admin.observations.rejection(rejection.id)
-    if (selection === selectionVersion) rejectionDetail = detail
+    const detail = await admin.observations.failure(failure.kind, failure.id)
+    if (selection === selectionVersion) failureDetail = detail
   } catch (error) {
-    if (selection === selectionVersion) toast.error(localizeBackendErrorMessage(error))
+    if (selection === selectionVersion) failureDetailError = error
   } finally {
     if (selection === selectionVersion) detailLoading = false
   }
@@ -453,9 +472,10 @@ function closeInspector(): void {
   olderLoading = false
   liveBlocks = retainLiveBlocks(liveBlocks)
   selectedInteraction = undefined
-  selectedRejection = undefined
+  selectedFailure = undefined
   interactionDetail = undefined
-  rejectionDetail = undefined
+  failureDetail = undefined
+  failureDetailError = undefined
   detailLoading = false
 }
 
@@ -463,7 +483,12 @@ function applyLiveBlocks(blocks: LiveContentBlock[]): void {
   const retained = retainLiveBlocks(blocks, selectedInteraction?.id)
   if (retained.length !== blocks.length) {
     const ids = new Set(retained.map((block) => block.block_id))
-    liveCapacityGaps = [...new Set([...liveCapacityGaps, ...blocks.filter((block) => !ids.has(block.block_id)).map((block) => block.interaction_id)])].slice(-64)
+    liveCapacityGaps = [
+      ...new Set([
+        ...liveCapacityGaps,
+        ...blocks.filter((block) => !ids.has(block.block_id)).map((block) => block.interaction_id),
+      ]),
+    ].slice(-64)
   }
   liveBlocks = retained
 }
@@ -473,7 +498,7 @@ async function handleObservationUpdate(update: ObservationStreamUpdate): Promise
     const previous = liveBlocks.find((block) => block.block_id === update.block.block_id)
     if (previous && previous.revision >= update.block.revision) return
     let blocks = previous
-      ? liveBlocks.map((block) => block.block_id === update.block.block_id ? update.block : block)
+      ? liveBlocks.map((block) => (block.block_id === update.block.block_id ? update.block : block))
       : [...liveBlocks, update.block]
     if (interactionDetail) blocks = withoutCommittedBlocks(blocks, interactionDetail)
     applyLiveBlocks(blocks)
@@ -485,7 +510,10 @@ async function handleObservationUpdate(update: ObservationStreamUpdate): Promise
   }
   if (update.type === 'live_gap') {
     if (update.reason === 'live_capacity') {
-      liveCapacityGaps = [...liveCapacityGaps.filter((id) => id !== update.interaction_id), update.interaction_id].slice(-64)
+      liveCapacityGaps = [
+        ...liveCapacityGaps.filter((id) => id !== update.interaction_id),
+        update.interaction_id,
+      ].slice(-64)
     } else {
       liveGaps = [...liveGaps.filter((id) => id !== update.interaction_id), update.interaction_id].slice(-64)
     }
@@ -502,16 +530,20 @@ async function handleObservationUpdate(update: ObservationStreamUpdate): Promise
     interactionDetail = undefined
     const selection = selectionVersion
     const interactionId = selectedInteraction?.id
-    const rejectionId = selectedRejection?.id
+    const failure = selectedFailure
+    detailLoading = Boolean(interactionId || failure)
+    failureDetailError = undefined
     try {
       await Promise.all([
         loadForest(true, false),
-        activeTab === 'rejections' ? loadRejections() : Promise.resolve(),
+        activeTab === 'failures' ? loadFailures() : Promise.resolve(),
         interactionId
-          ? admin.observations.interaction(interactionId, currentQuery).then((detail) => applySelectedDetail(detail, selection))
-          : rejectionId
-            ? admin.observations.rejection(rejectionId).then((detail) => {
-                if (selection === selectionVersion) rejectionDetail = detail
+          ? admin.observations
+              .interaction(interactionId, currentQuery)
+              .then((detail) => applySelectedDetail(detail, selection))
+          : failure
+            ? admin.observations.failure(failure.kind, failure.id).then((detail) => {
+                if (selection === selectionVersion) failureDetail = detail
               })
             : Promise.resolve(),
       ])
@@ -520,8 +552,11 @@ async function handleObservationUpdate(update: ObservationStreamUpdate): Promise
       stream?.setCursor(snapshotSequence)
     } catch (error) {
       if (version !== rangeVersion) return
+      if (failure && selection === selectionVersion) failureDetailError = error
       loadError = error
       throw error
+    } finally {
+      if (selection === selectionVersion) detailLoading = false
     }
     return
   }
@@ -530,7 +565,8 @@ async function handleObservationUpdate(update: ObservationStreamUpdate): Promise
     if (blockId) liveBlocks = liveBlocks.filter((block) => block.block_id !== blockId)
   }
   snapshotSequence = Math.max(snapshotSequence, update.event.sequence)
-  if (liveWindow && activeTab === 'rejections' && update.event.rejection_id) await loadRejections()
+  if (liveWindow && activeTab === 'failures' && ['request_rejected', 'run_finished'].includes(update.event.kind))
+    await loadFailures()
   if (followPaused) hasNewActivity = true
   if (!liveWindow && update.event.interaction_id && update.event.occurred_at >= windowEnd) {
     const root = roots.find((item) =>
@@ -569,7 +605,8 @@ async function handleObservationUpdate(update: ObservationStreamUpdate): Promise
       }
       if (selected && selection === selectionVersion) {
         selectedInteraction = snapshot.interaction
-        if (interactionDetail) interactionDetail = { ...interactionDetail, interaction: snapshot.interaction, root: snapshot.root }
+        if (interactionDetail)
+          interactionDetail = { ...interactionDetail, interaction: snapshot.interaction, root: snapshot.root }
       }
       loadError = undefined
     } catch (error) {
@@ -612,31 +649,59 @@ async function refreshAnchor(focusId?: string): Promise<void> {
   }
 }
 
-async function loadRejections(replace = true): Promise<void> {
+async function loadFailures(replace = true): Promise<void> {
+  if (!replace && failureLoading) return
   const version = rangeVersion
-  rejectionLoading = true
+  const requestVersion = ++failureRequestVersion
+  failureLoading = true
+  failureError = undefined
   try {
-    const page = await admin.observations.rejections({
+    const page = await admin.observations.failures({
       start_at: windowStart,
       end_at: windowEnd,
       limit: 30,
-      cursor: replace ? undefined : (rejectionCursor ?? undefined),
+      cursor: replace ? undefined : (failureCursor ?? undefined),
+      provider: currentQuery.provider,
+      model: currentQuery.model,
+      api_key: currentQuery.api_key,
     })
-    if (version !== rangeVersion) return
-    rejections = replace ? page.items : [...rejections, ...page.items]
-    rejectionTotal = page.total
-    rejectionCursor = page.next_cursor
+    if (version !== rangeVersion || requestVersion !== failureRequestVersion) return
+    failures = replace ? page.items : [...failures, ...page.items]
+    failureTotal = page.total
+    failureCursor = page.next_cursor
   } catch (error) {
-    if (version === rangeVersion) toast.error(localizeBackendErrorMessage(error))
+    if (version === rangeVersion && requestVersion === failureRequestVersion) failureError = error
   } finally {
-    if (version === rangeVersion) rejectionLoading = false
+    if (version === rangeVersion && requestVersion === failureRequestVersion) failureLoading = false
+  }
+}
+
+async function openFailureInteraction(): Promise<void> {
+  const id = failureDetail?.request.interaction_id
+  if (!id) return
+  const selection = selectionVersion
+  try {
+    const snapshot = await admin.observations.interactionSummary(id)
+    if (selection !== selectionVersion) return
+    closeInspector()
+    activeTab = 'interactions'
+    followPaused = true
+    roots = [...roots.filter((root) => root.id !== snapshot.root.id), snapshot.root]
+    await tick()
+    await canvas?.focusNode(id)
+  } catch (error) {
+    toast.error(localizeBackendErrorMessage(error))
   }
 }
 
 async function tabChanged(value: string): Promise<void> {
   activeTab = value
   closeInspector()
-  if (value === 'rejections' && rejections.length === 0) await loadRejections()
+  // 先推进实时窗口再查询，两次推进之间完成的失败不会被旧 end_at 排除。
+  if (value === 'failures') {
+    updateLiveBounds()
+    await loadFailures()
+  } else await loadForest(true)
 }
 
 async function disableDebug(): Promise<void> {
@@ -670,7 +735,7 @@ async function clearHistory(): Promise<void> {
     const result = await admin.observations.clearHistory()
     clearResult = result
     clearOpen = false
-    await Promise.all([loadForest(true), activeTab === 'rejections' ? loadRejections() : Promise.resolve()])
+    await Promise.all([loadForest(true), activeTab === 'failures' ? loadFailures() : Promise.resolve()])
     toast.success(
       m.observation_history_cleared({
         interactions: result.deleted_interactions,
@@ -686,8 +751,8 @@ async function clearHistory(): Promise<void> {
 }
 
 async function downloadBundle(): Promise<void> {
-  const kind = interactionDetail ? 'interaction' : 'rejected_request'
-  const id = interactionDetail?.interaction.id ?? rejectionDetail?.rejection.id
+  const kind = interactionDetail || failureDetail?.request.interaction_id ? 'interaction' : 'rejected_request'
+  const id = interactionDetail?.interaction.id ?? failureDetail?.request.interaction_id ?? failureDetail?.request.id
   if (!id) return
   try {
     await navigateToBundle(await admin.observations.issueBundleTicket(kind, id))
@@ -736,7 +801,7 @@ function formatBytes(value: number | undefined): string {
         disabled={changingDebug || debugQuery.isPending || !debugQuery.data}
         aria-label={m.observation_debug()} />
     </div>
-    <Button variant="outline" onclick={() => (filterOpen = true)} disabled={activeTab !== 'interactions'}
+    <Button variant="outline" onclick={() => (filterOpen = true)}
       ><SlidersHorizontalIcon data-icon="inline-start" />{m.observation_filters()}{#if activeFilterCount}<span
           >· {activeFilterCount}</span
         >{/if}</Button>
@@ -776,7 +841,7 @@ function formatBytes(value: number | undefined): string {
       <Tabs.Root value={activeTab} onValueChange={(value) => void tabChanged(value)}>
         <Tabs.List
           ><Tabs.Trigger value="interactions">{m.observation_interaction_chains()}</Tabs.Trigger><Tabs.Trigger
-            value="rejections">{m.observation_rejected_requests()}</Tabs.Trigger
+            value="failures">{m.observation_failed_requests()}</Tabs.Trigger
           ></Tabs.List>
       </Tabs.Root>
       <div class="window-controls">
@@ -905,46 +970,41 @@ function formatBytes(value: number | undefined): string {
         {/if}
       </div>
     {:else}
-      <div class="rejections-view">
+      <div class="failures-view">
         <header class="flex items-center justify-between gap-3 border-b p-4">
-          <div>
-            <h2 class="font-structural text-lg font-semibold">{m.observation_rejected_requests()}</h2>
-            <p class="text-sm text-muted-foreground">{m.observation_rejections_description()}</p>
-          </div>
-          <span class="font-technical text-xs text-muted-foreground">{rejections.length} / {rejectionTotal}</span>
+          <h2 class="sr-only">{m.observation_failed_requests()}</h2>
+          <span class="font-technical text-xs text-muted-foreground">{failures.length} / {failureTotal}</span>
         </header>
-        {#if rejectionLoading && rejections.length === 0}<div class="stage-state">
-            {m.observation_loading_rejections()}
-          </div>
-        {:else if rejections.length === 0}<Empty.Root class="py-16"
+        {#if failureError}
+          <RequestFailure
+            message={localizeBackendErrorMessage(failureError)}
+            retry={() => loadFailures()}
+            retrying={failureLoading} />
+        {/if}
+        {#if failureLoading && failures.length === 0}
+          <div class="stage-state" role="status">{m.observation_loading_failures()}</div>
+        {:else if failures.length === 0 && !failureError}<Empty.Root class="flex-1"
             ><Empty.Header
-              ><Empty.Title>{m.observation_no_rejections()}</Empty.Title><Empty.Description
-                >{m.observation_no_rejections_description()}</Empty.Description
+              ><Empty.Title>{m.observation_no_failures()}</Empty.Title><Empty.Description
+                >{m.observation_no_failures_description()}</Empty.Description
               ></Empty.Header
             ></Empty.Root>
-        {:else}<ol class="rejection-list">
-            {#each rejections as rejection (rejection.id)}<li>
-                <button
-                  class={selectedRejection?.id === rejection.id ? 'selected' : undefined}
-                  onclick={() => void selectRejection(rejection)}
-                  ><span class="font-technical text-xs text-muted-foreground"
-                    >{formatLogTime(rejection.occurred_at)}</span
-                  ><span class="min-w-0 flex-1"
-                    ><strong>{rejection.method} {rejection.path}</strong><small
-                      >{rejection.stage} · {rejection.code} · HTTP {rejection.status_code}</small
-                    ></span
-                  ><Badge variant={rejection.debug_status === 'partial' ? 'destructive' : 'outline'}
-                    >{observationDebugStatusLabel(rejection.debug_status)}</Badge
-                  ></button>
-              </li>{/each}
-          </ol>{/if}
-        {#if rejectionCursor}<div class="border-t p-3 text-center">
-            <Button variant="outline" disabled={rejectionLoading} onclick={() => void loadRejections(false)}
-              >{rejectionLoading ? m.observation_loading_more() : m.observation_load_more()}</Button>
+        {:else if failures.length > 0}
+          <FailedRequestTable
+            items={failures}
+            loading={failureLoading}
+            onselect={(failure) => void selectFailure(failure)} />
+        {/if}
+        {#if failureCursor}<div class="border-t p-3 text-center">
+            <Button variant="outline" disabled={failureLoading} onclick={() => void loadFailures(false)}
+              >{failureLoading ? m.observation_loading_more() : m.observation_load_more()}</Button>
           </div>{/if}
-        {#if selectedRejection}<ObservationInspector
+        {#if selectedFailure}<ObservationInspector
             portalTarget={fullscreen ? workspace : undefined}
-            rejection={rejectionDetail}
+            failure={failureDetail}
+            error={failureDetailError ? localizeBackendErrorMessage(failureDetailError) : undefined}
+            onretry={() => selectedFailure && void selectFailure(selectedFailure)}
+            oninteraction={failureDetail?.request.interaction_id ? () => void openFailureInteraction() : undefined}
             loading={detailLoading}
             width={inspectorWidth}
             onwidthchange={(value) => (inspectorWidth = value)}
@@ -1059,21 +1119,22 @@ function formatBytes(value: number | undefined): string {
               ></Select.Content
             ></Select.Root
           ></Field.Field>
-        <Field.Field
-          ><Field.FieldLabel for="observation-status">{m.common_status()}</Field.FieldLabel><Select.Root
-            type="single"
-            bind:value={statusFilter}
-            ><Select.Trigger id="observation-status" class="w-full"
-              >{statusFilter === 'all' ? m.observation_all() : observationStatusLabel(statusFilter)}</Select.Trigger
-            ><Select.Content
-              ><Select.Group
-                >{#each ['all', 'running', 'waiting_client', 'completed', 'interrupted'] as status (status)}<Select.Item
-                    value={status}
-                    >{status === 'all' ? m.observation_all() : observationStatusLabel(status)}</Select.Item
-                  >{/each}</Select.Group
-              ></Select.Content
-            ></Select.Root
-          ></Field.Field>
+        {#if activeTab === 'interactions'}<Field.Field
+            ><Field.FieldLabel for="observation-status">{m.common_status()}</Field.FieldLabel><Select.Root
+              type="single"
+              bind:value={statusFilter}
+              ><Select.Trigger id="observation-status" class="w-full"
+                >{statusFilter === 'all' ? m.observation_all() : observationStatusLabel(statusFilter)}</Select.Trigger
+              ><Select.Content
+                ><Select.Group
+                  >{#each ['all', 'running', 'waiting_client', 'completed', 'interrupted'] as status (status)}<Select.Item
+                      value={status}
+                      >{status === 'all' ? m.observation_all() : observationStatusLabel(status)}</Select.Item
+                    >{/each}</Select.Group
+                ></Select.Content
+              ></Select.Root
+            ></Field.Field
+          >{/if}
       </Field.FieldGroup>
     </div>
     <Sheet.Footer
@@ -1210,50 +1271,22 @@ function formatBytes(value: number | undefined): string {
 .debug-toggle > :global(svg) {
   width: 1rem;
 }
-.rejections-view {
+.failures-view {
   position: relative;
   display: flex;
   flex: 1;
   flex-direction: column;
   min-height: 0;
-  overflow-y: auto;
+  overflow: hidden;
 }
-.rejections-view > header,
-.rejections-view > .border-t {
+.failures-view > header,
+.failures-view > .border-t {
   flex-shrink: 0;
 }
-.rejections-view > .stage-state {
+.failures-view > .stage-state {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-}
-.rejection-list {
-  flex-shrink: 0;
-}
-.rejection-list button {
-  display: flex;
-  width: 100%;
-  align-items: center;
-  gap: 1rem;
-  border-bottom: 1px solid var(--border);
-  padding: 0.8rem 1rem;
-  text-align: start;
-}
-.rejection-list button:hover,
-.rejection-list button.selected {
-  background: var(--muted);
-}
-.rejection-list strong,
-.rejection-list small {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.rejection-list small {
-  margin-top: 0.2rem;
-  color: var(--muted-foreground);
-  font-size: 0.72rem;
 }
 @media (max-width: 767px) {
   .observation-page {

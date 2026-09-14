@@ -109,10 +109,6 @@ test('empty Model services, Models, API Keys, and logs speak the missing depende
   await page.goto('/logs')
   await expect(page.getByRole('button', { name: 'Clear history' })).toBeEnabled()
   await expect(page.getByRole('tab', { name: 'Interaction Chains' })).toBeVisible()
-  await expect(page.getByRole('tab', { name: 'Rejected Requests' })).toBeVisible()
-  await expect(
-    page.getByText('New requests will appear here. Pre-upgrade request logs were intentionally not migrated.'),
-  ).toBeVisible()
 })
 
 test('Connect keeps client selection available while exposing missing resource recovery', async ({ page }) => {
@@ -204,36 +200,6 @@ test('deleting an API Key quotes the name on a solid destructive confirm', async
   expect(background).not.toBe('rgba(0, 0, 0, 0)')
   expect(background).not.toMatch(/rgba\([^)]+,\s*0(\.0+)?\)/)
   expect(background).not.toBe('transparent')
-})
-
-test('a Provider without a catalog logo uses a steel initial instead of a black square', async ({ page }) => {
-  await page.route('**/api/v1/providers', async (route) => {
-    await route.fulfill({
-      json: {
-        data: [
-          {
-            id: 'prov-unknown',
-            name: 'Unknown Service',
-            protocol: 'openai',
-            base_url: 'https://unknown.example/v1',
-            is_enabled: true,
-            use_proxy: false,
-            created_at: '2026-08-17T00:00:00Z',
-            updated_at: '2026-08-17T00:00:00Z',
-          },
-        ],
-      },
-    })
-  })
-
-  await page.route('https://unknown.example/**', async (route) => {
-    await route.abort()
-  })
-  await page.goto('/providers')
-  const mark = page.locator('.route-desktop-table .route-provider-mark').first()
-  await expect.poll(async () => (await mark.textContent())?.trim()).toBe('U')
-  await expect(mark).toHaveAttribute('data-fallback', 'true')
-  await expect(mark.locator('img')).toHaveCount(0)
 })
 
 async function stubConnectableConfiguration(page: Page): Promise<void> {

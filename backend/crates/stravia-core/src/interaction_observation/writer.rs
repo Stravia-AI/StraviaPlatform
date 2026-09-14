@@ -40,6 +40,7 @@ pub(super) enum WriterCommand {
     },
     Admit {
         start: RunStart,
+        metadata: super::RequestMetadata,
         debug_enabled: bool,
         trace: Option<super::trace::TraceHandle>,
         discarded_trace: Option<super::trace::TraceHandle>,
@@ -51,17 +52,21 @@ pub(super) enum WriterCommand {
     Finish {
         run_id: String,
         outcome: RunOutcome,
+        finished_at: i64,
     },
     Reject {
         ingress: IngressStart,
         outcome: RejectedOutcome,
+        metadata: super::RequestMetadata,
         debug_enabled: bool,
+        started_at: i64,
+        duration_ms: i64,
     },
     Finalize {
         run_id: Option<String>,
         rejection_id: Option<String>,
         trace: Option<super::trace::TraceHandle>,
-        pending_finish: Option<RunOutcome>,
+        pending_finish: Option<(RunOutcome, i64)>,
         gap: bool,
     },
     FlushInteraction {
@@ -314,6 +319,7 @@ pub(super) fn spawn(
                 }
                 Some(WriterCommand::Admit {
                     start,
+                    metadata,
                     debug_enabled,
                     trace,
                     discarded_trace,
@@ -365,6 +371,7 @@ pub(super) fn spawn(
                     match store
                         .admit(Admission {
                             start: &start,
+                            metadata: Some(&metadata),
                             interaction_id: &assignment.interaction_id,
                             parent_run_id: assignment.parent_run_id.as_deref(),
                             parent_interaction_id: assignment.parent_interaction_id.as_deref(),
@@ -569,7 +576,11 @@ pub(super) fn spawn(
                         }
                     }
                 }
-                Some(WriterCommand::Finish { run_id, outcome }) => {
+                Some(WriterCommand::Finish {
+                    run_id,
+                    outcome,
+                    finished_at,
+                }) => {
                     persist_finish(
                         &store,
                         &mut grouping,
@@ -579,18 +590,31 @@ pub(super) fn spawn(
                         &mut pending_text,
                         &run_id,
                         &outcome,
+                        finished_at,
                     )
                     .await;
                 }
                 Some(WriterCommand::Reject {
                     ingress,
                     outcome,
+                    metadata,
                     debug_enabled,
+                    started_at,
+                    duration_ms,
                 }) => {
                     let at = now();
                     let expiry = expires(at, retention_days.load(Ordering::Relaxed));
                     match store
-                        .reject(&ingress, &outcome, debug_enabled, at, expiry)
+                        .reject(super::store::Rejection {
+                            ingress: &ingress,
+                            outcome: &outcome,
+                            metadata: &metadata,
+                            debug_enabled,
+                            occurred_at: at,
+                            expires_at: expiry,
+                            started_at,
+                            duration_ms,
+                        })
                         .await
                     {
                         Ok(value) => {
@@ -643,7 +667,7 @@ pub(super) fn spawn(
                                 }
                             }
                         }
-                        if let Some(outcome) = pending_finish {
+                        if let Some((outcome, finished_at)) = pending_finish {
                             persist_finish(
                                 &store,
                                 &mut grouping,
@@ -653,6 +677,7 @@ pub(super) fn spawn(
                                 &mut pending_text,
                                 run_id,
                                 &outcome,
+                                finished_at,
                             )
                             .await;
                         }
@@ -892,6 +917,7 @@ async fn persist_finish(
     pending_text: &mut TextBuffer,
     run_id: &str,
     outcome: &RunOutcome,
+    at: i64,
 ) {
     flush_one(
         store,
@@ -903,7 +929,6 @@ async fn persist_finish(
         run_id,
     )
     .await;
-    let at = now();
     if let Some(interaction) = grouping.interaction_for_run(run_id) {
         let expiry = expires(at, retention.load(Ordering::Relaxed));
         match store

@@ -819,6 +819,11 @@ mod tests {
         ))
         .execute(&pool)
         .await?;
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/sqlite/0044_failed_request_diagnostics.sql"
+        ))
+        .execute(&pool)
+        .await?;
         let observation = InteractionObservation::new(
             Some(pool.clone()),
             None,
@@ -944,6 +949,11 @@ mod tests {
         .await?;
         sqlx::raw_sql(include_str!(
             "../../../migrations/sqlite/0040_interaction_input_preview.sql"
+        ))
+        .execute(&pool)
+        .await?;
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/sqlite/0044_failed_request_diagnostics.sql"
         ))
         .execute(&pool)
         .await?;

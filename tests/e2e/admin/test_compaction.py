@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 
 from tests.common.helpers import http_request
-from tests.e2e.admin.test_observations import _detail, _route_interactions, _wait_for
+from tests.e2e.admin.test_observations import _detail, _failed_requests, _route_interactions, _wait_for
 
 
 def _window_semantics(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -427,7 +427,7 @@ def test_unknown_compaction_capability_is_forwarded(admin_env, compaction_provid
 @pytest.mark.parametrize("mode", ["standalone", "controls", "trigger"])
 def test_compaction_upstream_error_is_returned_without_retry_or_failover(admin_env, compaction_provider, mode):
     model = f"compaction-error-{mode}"
-    _route, key = _native_route(admin_env, compaction_provider[0], model)
+    route, key = _native_route(admin_env, compaction_provider[0], model)
     _native_route(admin_env, compaction_provider[0], f"{model}-fallback")
     _fallback_target(admin_env, model, f"{model}-fallback")
     items = [{"role": "user", "content": "do not retry this operation"}]
@@ -446,6 +446,13 @@ def test_compaction_upstream_error_is_returned_without_retry_or_failover(admin_e
         "details": {"retryable": True},
     }}
     assert len(compaction_provider[2]) == 1, "neither the current nor fallback Target may retry compaction"
+    failure = _wait_for(
+        "upstream compaction failure",
+        lambda: next(iter(_failed_requests(admin_env, model=route)["items"]), None),
+    )
+    assert failure["error"]["source"] == "upstream"
+    assert failure["error"]["status_code"] == 503
+    assert failure["error"]["message"] == "Compaction capacity is exhausted."
 
 
 @pytest.mark.e2e

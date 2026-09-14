@@ -1,12 +1,14 @@
-import { expect, test, type Locator, type Page } from '@playwright/test'
+import { expect, test, type Locator, type Page, type Route } from '@playwright/test'
 
 import type {
   ConfirmedUsage,
+  FailedRequestSummary,
   ForestRoot,
   InteractionDetail,
   InteractionSummary,
   ObservationEvent,
   RunDetail,
+  TraceManifest,
 } from '../src/lib/types'
 import { prepareApp } from './prepare-app'
 
@@ -106,16 +108,61 @@ function runFor(item: InteractionSummary): RunDetail {
   }
 }
 
+function failedRequest(
+  id: string,
+  kind: FailedRequestSummary['kind'],
+  occurredAt: number,
+  overrides: Partial<FailedRequestSummary> = {},
+): FailedRequestSummary {
+  return {
+    id,
+    kind,
+    request_id: `req-${id}`,
+    started_at: occurredAt,
+    duration_ms: null,
+    api_key_id: null,
+    api_key_name: null,
+    client: null,
+    model: null,
+    model_display_name: null,
+    services: [],
+    error: { source: null, code: null, message: null, status_code: null },
+    interaction_id: null,
+    root_id: null,
+    run_id: null,
+    debug_status: 'none',
+    observation_gap: false,
+    ...overrides,
+  }
+}
+
+const logTime = (timestamp: number) =>
+  `${new Intl.DateTimeFormat('en-US', { month: 'numeric', day: 'numeric', year: 'numeric' }).format(new Date(timestamp))} ${new Intl.DateTimeFormat('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).format(new Date(timestamp))}`
+
+// Only minute-precise offsets survive the round trip through a datetime-local input.
+const localRangeValue = (offset: number) => {
+  const date = new Date(startedAt + offset)
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
 interface ObservationFixture {
   emit(event: ObservationEvent, visibleTail?: string): void
   releaseRemainingRoots(): void
   holdNextRead(id: string): () => void
   addInteraction(item: InteractionSummary): void
+  addFailure(
+    request: FailedRequestSummary,
+    detail?: { events?: ObservationEvent[]; trace?: TraceManifest | null },
+  ): void
+  holdNextFailureRead(): () => void
   reset(): void
   forestRequests: URL[]
   summaryRequests: URL[]
   detailRequests: URL[]
   eventRequests: URL[]
+  failureRequests: URL[]
+  failureDetailRequests: URL[]
   debugWrites: Array<{ enabled: boolean; confirmed: boolean }>
 }
 
@@ -174,6 +221,11 @@ async function installObservationFixture(
   const streamEvents: ObservationEvent[] = []
   let debugEnabled = false
   let snapshotSequence = 10
+  const failures: FailedRequestSummary[] = []
+  const failureDetails = new Map<string, { events: ObservationEvent[]; trace: TraceManifest | null }>()
+  const failureRequests: URL[] = []
+  const failureDetailRequests: URL[] = []
+  let heldFailureList: Promise<void> | undefined
 
   const rootFor = (id: string, status?: string | null): ForestRoot => {
     const root = roots.find((candidate) => candidate.interactions.some((item) => item.id === id))!
@@ -225,13 +277,78 @@ async function installObservationFixture(
       return
     }
 
+    if (path === '/observations/failed-requests') {
+      failureRequests.push(url)
+      const heldList = heldFailureList
+      heldFailureList = undefined
+      if (heldList) await heldList
+      const start = Number(url.searchParams.get('start_at'))
+      const end = Number(url.searchParams.get('end_at'))
+      const limit = Number(url.searchParams.get('limit') ?? 30)
+      const cursor = url.searchParams.get('cursor')
+      const sorted = failures
+        .filter((item) => item.started_at >= start && item.started_at < end)
+        .toSorted((a, b) => b.started_at - a.started_at || a.kind.localeCompare(b.kind) || a.id.localeCompare(b.id))
+      let offset = 0
+      if (cursor) {
+        const marker = JSON.parse(cursor) as { kind: string; id: string }
+        offset = sorted.findIndex((item) => item.kind === marker.kind && item.id === marker.id) + 1
+      }
+      const items = sorted.slice(offset, offset + limit)
+      const last = items.at(-1)
+      await route.fulfill({
+        json: {
+          data: {
+            items,
+            total: sorted.length,
+            next_cursor:
+              last && offset + limit < sorted.length
+                ? JSON.stringify({ started_at: last.started_at, kind: last.kind, id: last.id })
+                : null,
+            snapshot_sequence: snapshotSequence,
+          },
+        },
+      })
+      return
+    }
+
+    const failureDetailMatch = path.match(/^\/observations\/failed-requests\/([^/]+)\/([^/]+)$/)
+    if (failureDetailMatch) {
+      failureDetailRequests.push(url)
+      const kind = decodeURIComponent(failureDetailMatch[1])
+      const id = decodeURIComponent(failureDetailMatch[2])
+      const matched = failures.find((item) => item.kind === kind && item.id === id)
+      if (!matched) {
+        await route.fulfill({ status: 404, json: { error: 'Failed request not found' } })
+        return
+      }
+      const detail = failureDetails.get(`${kind}:${id}`)
+      await route.fulfill({
+        json: {
+          data: {
+            request: matched,
+            events: detail?.events ?? [],
+            trace: detail?.trace ?? null,
+            snapshot_sequence: snapshotSequence,
+          },
+        },
+      })
+      return
+    }
+
     const summaryMatch = path.match(/^\/observations\/interactions\/([^/]+)\/summary$/)
     if (summaryMatch) {
       summaryRequests.push(url)
       const id = decodeURIComponent(summaryMatch[1])
       const root = rootFor(id, url.searchParams.get('status'))
       await route.fulfill({
-        json: { data: { interaction: root.interactions.find((item) => item.id === id)!, root, snapshot_sequence: snapshotSequence } },
+        json: {
+          data: {
+            interaction: root.interactions.find((item) => item.id === id)!,
+            root,
+            snapshot_sequence: snapshotSequence,
+          },
+        },
       })
       return
     }
@@ -248,28 +365,37 @@ async function installObservationFixture(
       const detail: InteractionDetail = {
         interaction: selected,
         root,
-        runs: [
-          {
-            ...recordedRuns.get(selected.id)!,
-            debug_enabled: captureDebug,
-          },
-        ],
+        runs: [{ ...recordedRuns.get(selected.id)!, debug_enabled: captureDebug }],
         snapshot_sequence: snapshotSequence,
         older_events_cursor: null,
       }
       transformDetail?.(detail)
-      snapshotSequence = Math.max(snapshotSequence, ...detail.runs.flatMap((run) => run.events.map((event) => event.sequence)))
+      snapshotSequence = Math.max(
+        snapshotSequence,
+        ...detail.runs.flatMap((run) => run.events.map((event) => event.sequence)),
+      )
       detail.snapshot_sequence = snapshotSequence
       const through = Number(url.searchParams.get('through_sequence') ?? snapshotSequence)
       const before = url.searchParams.get('before_sequence')
       const after = url.searchParams.get('after_sequence')
       const limit = Number(url.searchParams.get('limit') ?? 200)
-      const candidates = detail.runs.flatMap((run) => run.events).filter((event) => event.sequence <= through &&
-        (before === null || event.sequence < Number(before)) && (after === null || event.sequence > Number(after))).sort((a, b) => a.sequence - b.sequence)
+      const candidates = detail.runs
+        .flatMap((run) => run.events)
+        .filter(
+          (event) =>
+            event.sequence <= through &&
+            (before === null || event.sequence < Number(before)) &&
+            (after === null || event.sequence > Number(after)),
+        )
+        .sort((a, b) => a.sequence - b.sequence)
       const chosen = after === null ? candidates.slice(-limit) : candidates.slice(0, limit)
       const sequences = new Set(chosen.map((event) => event.sequence))
-      const cursor = candidates.length > chosen.length ? (after === null ? chosen[0].sequence : chosen.at(-1)!.sequence) : null
-      detail.runs = detail.runs.map((run) => ({ ...run, events: run.events.filter((event) => sequences.has(event.sequence)) }))
+      const cursor =
+        candidates.length > chosen.length ? (after === null ? chosen[0].sequence : chosen.at(-1)!.sequence) : null
+      detail.runs = detail.runs.map((run) => ({
+        ...run,
+        events: run.events.filter((event) => sequences.has(event.sequence)),
+      }))
       detail.older_events_cursor = cursor
       const data = eventsOnly ? { runs: detail.runs, snapshot_sequence: through, next_cursor: cursor } : detail
       const body = JSON.stringify({ data })
@@ -318,7 +444,12 @@ async function installObservationFixture(
     releaseRemainingRoots,
     holdNextRead(id) {
       let release!: () => void
-      heldDetails.set(id, new Promise<void>((resolve) => { release = resolve }))
+      heldDetails.set(
+        id,
+        new Promise<void>((resolve) => {
+          release = resolve
+        }),
+      )
       return release
     },
     addInteraction(item) {
@@ -328,6 +459,20 @@ async function installObservationFixture(
         root.last_active_at = Math.max(root.last_active_at, item.last_active_at)
       } else roots.push({ id: item.root_id, last_active_at: item.last_active_at, interactions: [item] })
       recordedRuns.set(item.id, runFor(item))
+    },
+    addFailure(request, detail) {
+      failures.push(request)
+      failureDetails.set(`${request.kind}:${request.id}`, {
+        events: detail?.events ?? [],
+        trace: detail?.trace ?? null,
+      })
+    },
+    holdNextFailureRead() {
+      let release!: () => void
+      heldFailureList = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      return release
     },
     reset() {
       resetRequired = true
@@ -360,6 +505,8 @@ async function installObservationFixture(
     summaryRequests,
     detailRequests,
     eventRequests,
+    failureRequests,
+    failureDetailRequests,
     debugWrites,
   }
 }
@@ -383,10 +530,19 @@ async function installPersistentObservationStream(page: Page): Promise<void> {
           }
           remove = () => window.removeEventListener('observation-fixture', receive)
           window.addEventListener('observation-fixture', receive)
-          init?.signal?.addEventListener('abort', () => { remove(); controller.close() }, { once: true })
+          init?.signal?.addEventListener(
+            'abort',
+            () => {
+              remove()
+              controller.close()
+            },
+            { once: true },
+          )
           controller.enqueue(encoder.encode('event: live_snapshot\ndata: {"blocks":[]}\n\n'))
         },
-        cancel() { remove() },
+        cancel() {
+          remove()
+        },
       })
       return new Response(body, { headers: { 'Content-Type': 'text/event-stream' } })
     }
@@ -400,6 +556,20 @@ async function sendObservation(page: Page, name: string, data: unknown, sequence
 
 function node(page: Page, name: string, status: string): Locator {
   return page.getByRole('button', { name: `${name}, ${statusLabels[status] ?? status}`, exact: true })
+}
+
+async function scrollListToBottom(target: Locator): Promise<void> {
+  await target.evaluate((element) => {
+    let candidate: HTMLElement | null = element.parentElement
+    while (candidate) {
+      const overflowY = getComputedStyle(candidate).overflowY
+      if ((overflowY === 'auto' || overflowY === 'scroll') && candidate.scrollHeight > candidate.clientHeight) {
+        candidate.scrollTop = candidate.scrollHeight
+        return
+      }
+      candidate = candidate.parentElement
+    }
+  })
 }
 
 async function viewportTransform(page: Page): Promise<{ x: number; y: number; zoom: number }> {
@@ -417,10 +587,17 @@ test.describe('Interaction Observation canvas', () => {
   test('a large chain mounts only its viewport instead of measuring every card at the origin', async ({ page }) => {
     const fixture = await installObservationFixture(page)
     for (let index = 0; index < 300; index++) {
-      fixture.addInteraction(interaction(
-        `large-${index}`, 'root-a', index ? `large-${index - 1}` : 'interaction-cinder',
-        `Large ${index}`, routeIds.cinder, index === 299 ? 'running' : 'completed', 150_000 + index,
-      ))
+      fixture.addInteraction(
+        interaction(
+          `large-${index}`,
+          'root-a',
+          index ? `large-${index - 1}` : 'interaction-cinder',
+          `Large ${index}`,
+          routeIds.cinder,
+          index === 299 ? 'running' : 'completed',
+          150_000 + index,
+        ),
+      )
     }
     await page.emulateMedia({ reducedMotion: 'reduce' })
     await page.addInitScript(() => {
@@ -432,29 +609,46 @@ test.describe('Interaction Observation canvas', () => {
     })
     await page.goto('/logs')
     await expect(node(page, 'Large 299', 'running')).toBeVisible()
-    const peak = await page.evaluate(() =>
-      (window as unknown as { canvasMountProbe: { peak: number } }).canvasMountProbe.peak)
+    const peak = await page.evaluate(
+      () => (window as unknown as { canvasMountProbe: { peak: number } }).canvasMountProbe.peak,
+    )
     expect(peak).toBeLessThan(80)
     await node(page, 'Large 299', 'running').click()
-    await expect(page.getByRole('complementary', { name: 'Observation details' })
-      .getByRole('heading', { name: 'Large 299', exact: true, level: 2 })).toBeVisible()
+    await expect(
+      page
+        .getByRole('complementary', { name: 'Observation details' })
+        .getByRole('heading', { name: 'Large 299', exact: true, level: 2 }),
+    ).toBeVisible()
     await page.getByRole('button', { name: 'Close', exact: true }).click()
     for (let index = 300; index < 600; index++) {
-      fixture.addInteraction(interaction(
-        `large-${index}`, 'root-a', `large-${index - 1}`,
-        `Large ${index}`, routeIds.cinder, index === 599 ? 'running' : 'completed', 150_000 + index,
-      ))
+      fixture.addInteraction(
+        interaction(
+          `large-${index}`,
+          'root-a',
+          `large-${index - 1}`,
+          `Large ${index}`,
+          routeIds.cinder,
+          index === 599 ? 'running' : 'completed',
+          150_000 + index,
+        ),
+      )
     }
     fixture.emit({
-      sequence: 11, occurred_at: startedAt + 299_000, interaction_id: 'large-599',
-      run_id: 'run-large-599', rejection_id: null, kind: 'model_turn_started', payload: {},
+      sequence: 11,
+      occurred_at: startedAt + 299_000,
+      interaction_id: 'large-599',
+      run_id: 'run-large-599',
+      rejection_id: null,
+      kind: 'model_turn_started',
+      payload: {},
     })
     await expect.poll(() => fixture.summaryRequests.some((url) => url.pathname.includes('large-599'))).toBe(true)
     await page.getByRole('button', { name: 'Return to running interaction', exact: true }).click()
     await expect(node(page, 'Large 599', 'running')).toBeVisible()
     await expect(node(page, 'Large 299', 'running')).toHaveCount(0)
-    expect(await page.evaluate(() =>
-      (window as unknown as { canvasMountProbe: { peak: number } }).canvasMountProbe.peak)).toBeLessThan(80)
+    expect(
+      await page.evaluate(() => (window as unknown as { canvasMountProbe: { peak: number } }).canvasMountProbe.peak),
+    ).toBeLessThan(80)
   })
 
   test('live revisions render before saving, commit once, and clear on snapshot or disconnect', async ({ page }) => {
@@ -467,7 +661,17 @@ test.describe('Interaction Observation canvas', () => {
     await expect(conversation).toContainText('Cinder client-visible answer')
     await expect.poll(() => fixture.eventRequests.length).toBe(1)
     const reads = fixture.eventRequests.length
-    const block = { block_id: 'live-table', interaction_id: 'interaction-cinder', run_id: 'run-interaction-cinder', kind: 'client_visible_content_delta', model_turn_id: 'turn', attempt_id: 'attempt', occurred_at: startedAt + 299_000, revision: 1, text: '\n\n| A | B |\n' }
+    const block = {
+      block_id: 'live-table',
+      interaction_id: 'interaction-cinder',
+      run_id: 'run-interaction-cinder',
+      kind: 'client_visible_content_delta',
+      model_turn_id: 'turn',
+      attempt_id: 'attempt',
+      occurred_at: startedAt + 299_000,
+      revision: 1,
+      text: '\n\n| A | B |\n',
+    }
     await sendObservation(page, 'live_content', block)
     await expect(conversation.getByText('Not yet saved', { exact: true })).toBeVisible()
     const completed = { ...block, revision: 2, text: `${block.text}|---|---|\n| live-cell | other |` }
@@ -478,7 +682,15 @@ test.describe('Interaction Observation canvas', () => {
     await expect(conversation.getByRole('cell', { name: 'live-cell', exact: true })).toHaveCount(1)
     expect(fixture.eventRequests).toHaveLength(reads)
     expect(fixture.detailRequests).toHaveLength(1)
-    const durable: ObservationEvent = { sequence: 11, occurred_at: block.occurred_at, interaction_id: block.interaction_id, run_id: block.run_id, rejection_id: null, kind: block.kind, payload: { text: completed.text, block_id: block.block_id } }
+    const durable: ObservationEvent = {
+      sequence: 11,
+      occurred_at: block.occurred_at,
+      interaction_id: block.interaction_id,
+      run_id: block.run_id,
+      rejection_id: null,
+      kind: block.kind,
+      payload: { text: completed.text, block_id: block.block_id },
+    }
     fixture.emit(durable)
     await sendObservation(page, 'observation', durable, durable.sequence)
     await expect(conversation.getByText('Not yet saved', { exact: true })).toHaveCount(0)
@@ -490,17 +702,27 @@ test.describe('Interaction Observation canvas', () => {
     await sendObservation(page, 'live_snapshot', { blocks: [] })
     await expect(conversation).not.toContainText('transient-unsaved')
     await sendObservation(page, 'live_content', { ...block, block_id: 'failed', text: '\n\nfailed-unsaved' })
-    await sendObservation(page, 'live_gap', { interaction_id: block.interaction_id, run_id: block.run_id, reason: 'live_capacity' })
+    await sendObservation(page, 'live_gap', {
+      interaction_id: block.interaction_id,
+      run_id: block.run_id,
+      reason: 'live_capacity',
+    })
     await expect(inspector.getByRole('alert')).toContainText('Live preview is incomplete')
     await expect(inspector).not.toContainText('could not be saved')
-    await sendObservation(page, 'live_gap', { interaction_id: block.interaction_id, run_id: block.run_id, reason: 'persistence_failed' })
+    await sendObservation(page, 'live_gap', {
+      interaction_id: block.interaction_id,
+      run_id: block.run_id,
+      reason: 'persistence_failed',
+    })
     await expect(inspector.getByRole('alert').filter({ hasText: 'could not be saved' })).toBeVisible()
     await page.evaluate(() => window.dispatchEvent(new CustomEvent('observation-fixture', { detail: 'disconnect' })))
     await expect(conversation).not.toContainText('failed-unsaved')
     await expect(conversation.getByRole('cell', { name: 'live-cell', exact: true })).toHaveCount(1)
   })
 
-  test('incremental pages keep one upper bound and retry a failed read without dropping or duplicating text', async ({ page }) => {
+  test('incremental pages keep one upper bound and retry a failed read without dropping or duplicating text', async ({
+    page,
+  }) => {
     const fixture = await installObservationFixture(page)
     await page.emulateMedia({ reducedMotion: 'reduce' })
     await page.goto('/logs?interaction=interaction-cinder')
@@ -512,7 +734,16 @@ test.describe('Interaction Observation canvas', () => {
       if (failures++ === 0) await route.fulfill({ status: 503, json: { error: { message: 'Temporary read failure' } } })
       else await route.fallback()
     })
-    for (let index = 1; index <= 450; index++) fixture.emit({ sequence: index + 10, occurred_at: startedAt + 299_000, interaction_id: 'interaction-cinder', run_id: 'run-interaction-cinder', rejection_id: null, kind: 'client_visible_content_delta', payload: { text: `\n\nIncrement ${index}` } })
+    for (let index = 1; index <= 450; index++)
+      fixture.emit({
+        sequence: index + 10,
+        occurred_at: startedAt + 299_000,
+        interaction_id: 'interaction-cinder',
+        run_id: 'run-interaction-cinder',
+        rejection_id: null,
+        kind: 'client_visible_content_delta',
+        payload: { text: `\n\nIncrement ${index}` },
+      })
     await expect(conversation.getByText('Increment 450', { exact: true })).toHaveCount(1)
     await expect(conversation.getByText('Increment 1', { exact: true })).toHaveCount(1)
     await expect(conversation.getByText('Increment 201', { exact: true })).toHaveCount(1)
@@ -522,10 +753,20 @@ test.describe('Interaction Observation canvas', () => {
     expect(fixture.detailRequests).toHaveLength(1)
   })
 
-  test('latest details load bounded history and prepend earlier events without moving the reading anchor', async ({ page }) => {
+  test('latest details load bounded history and prepend earlier events without moving the reading anchor', async ({
+    page,
+  }) => {
     const fixture = await installObservationFixture(page, false, false, false, (detail) => {
       if (detail.interaction.id !== 'interaction-cinder') return
-      detail.runs[0].events = Array.from({ length: 450 }, (_, index) => ({ sequence: index + 1, occurred_at: startedAt + index, interaction_id: detail.interaction.id, run_id: detail.runs[0].id, rejection_id: null, kind: 'client_visible_content_delta', payload: { text: `Paragraph ${index + 1}\n\n` } }))
+      detail.runs[0].events = Array.from({ length: 450 }, (_, index) => ({
+        sequence: index + 1,
+        occurred_at: startedAt + index,
+        interaction_id: detail.interaction.id,
+        run_id: detail.runs[0].id,
+        rejection_id: null,
+        kind: 'client_visible_content_delta',
+        payload: { text: `Paragraph ${index + 1}\n\n` },
+      }))
     })
     await page.emulateMedia({ reducedMotion: 'reduce' })
     await page.goto('/logs?interaction=interaction-cinder')
@@ -538,16 +779,24 @@ test.describe('Interaction Observation canvas', () => {
     const before = await anchor.evaluate((element) => element.getBoundingClientRect().top)
     await earlier.click()
     await expect(conversation.getByText('Paragraph 51', { exact: true })).toHaveCount(1)
-    await expect.poll(async () => Math.abs(await anchor.evaluate((element) => element.getBoundingClientRect().top) - before)).toBeLessThan(3)
+    await expect
+      .poll(async () => Math.abs((await anchor.evaluate((element) => element.getBoundingClientRect().top)) - before))
+      .toBeLessThan(3)
     await earlier.scrollIntoViewIfNeeded()
     await earlier.click()
     await expect(conversation.getByText('Paragraph 1', { exact: true })).toHaveCount(1)
     await expect(earlier).toHaveCount(0)
     expect(fixture.detailRequests).toHaveLength(1)
-    expect(fixture.eventRequests.filter((url) => url.searchParams.has('before_sequence')).map((url) => url.searchParams.get('before_sequence'))).toEqual(['251', '51'])
+    expect(
+      fixture.eventRequests
+        .filter((url) => url.searchParams.has('before_sequence'))
+        .map((url) => url.searchParams.get('before_sequence')),
+    ).toEqual(['251', '51'])
   })
 
-  test('refreshes unopened previews and new interactions through summaries without fetching details', async ({ page }) => {
+  test('refreshes unopened previews and new interactions through summaries without fetching details', async ({
+    page,
+  }) => {
     const fixture = await installObservationFixture(page)
     await page.goto('/logs')
     await expect(node(page, 'Cinder', 'running')).toBeVisible()
@@ -568,7 +817,9 @@ test.describe('Interaction Observation canvas', () => {
     expect(Number(query.get('end_at')) - Number(query.get('start_at'))).toBe(DAY)
     expect(fixture.detailRequests).toEqual([])
 
-    fixture.addInteraction(interaction('interaction-nova', 'root-a', 'interaction-cinder', 'Nova', routeIds.cinder, 'running', 298_000))
+    fixture.addInteraction(
+      interaction('interaction-nova', 'root-a', 'interaction-cinder', 'Nova', routeIds.cinder, 'running', 298_000),
+    )
     fixture.emit({
       sequence: 12,
       occurred_at: startedAt + 299_100,
@@ -634,7 +885,9 @@ test.describe('Interaction Observation canvas', () => {
           await node(page, 'Cinder', 'running').getByRole('heading', { name: 'Cinder', exact: true }).click()
         } else {
           await node(page, 'Cinder', 'running').getByRole('heading', { name: 'Cinder', exact: true }).click()
-          await expect(inspector.getByRole('log', { name: 'Conversation' })).toContainText('Cinder client-visible answer')
+          await expect(inspector.getByRole('log', { name: 'Conversation' })).toContainText(
+            'Cinder client-visible answer',
+          )
           await expect.poll(() => fixture.eventRequests.length).toBe(1)
           release = fixture.holdNextRead('interaction-cinder')
           fixture.emit({
@@ -647,19 +900,32 @@ test.describe('Interaction Observation canvas', () => {
             payload: { text: ' Delayed Cinder update' },
           })
         }
-        await expect.poll(() => pending === 'initial' ? fixture.detailRequests.length : fixture.eventRequests.length).toBe(pending === 'initial' ? 1 : 2)
+        await expect
+          .poll(() => (pending === 'initial' ? fixture.detailRequests.length : fixture.eventRequests.length))
+          .toBe(pending === 'initial' ? 1 : 2)
         if (action === 'switch') {
           await node(page, 'Atlas', 'completed').getByRole('heading', { name: 'Atlas', exact: true }).click()
-          await expect(inspector.getByRole('log', { name: 'Conversation' })).toContainText('Atlas client-visible answer')
+          await expect(inspector.getByRole('log', { name: 'Conversation' })).toContainText(
+            'Atlas client-visible answer',
+          )
         } else await inspector.getByRole('button', { name: 'Close', exact: true }).click()
-        const response = page.waitForResponse((item) => new URL(item.url()).pathname === `/api/v1/observations/interactions/interaction-cinder${pending === 'live' ? '/events' : ''}`)
+        const response = page.waitForResponse(
+          (item) =>
+            new URL(item.url()).pathname ===
+            `/api/v1/observations/interactions/interaction-cinder${pending === 'live' ? '/events' : ''}`,
+        )
         release()
         await (await response).finished()
-        if (pending === 'live') await expect(node(page, 'Cinder', 'running').locator('article')).toContainText('Delayed Cinder update')
+        if (pending === 'live')
+          await expect(node(page, 'Cinder', 'running').locator('article')).toContainText('Delayed Cinder update')
         if (action === 'switch') {
           await expect(inspector.getByRole('heading', { name: 'Atlas', exact: true, level: 2 })).toBeVisible()
-          await expect(inspector.getByRole('log', { name: 'Conversation' })).toContainText('Atlas client-visible answer')
-          await expect(inspector.getByRole('log', { name: 'Conversation' })).not.toContainText('Cinder client-visible answer')
+          await expect(inspector.getByRole('log', { name: 'Conversation' })).toContainText(
+            'Atlas client-visible answer',
+          )
+          await expect(inspector.getByRole('log', { name: 'Conversation' })).not.toContainText(
+            'Cinder client-visible answer',
+          )
         } else await expect(inspector).toHaveCount(0)
       })
     }
@@ -688,12 +954,17 @@ test.describe('Interaction Observation canvas', () => {
     expect(fixture.detailRequests).toEqual([])
   })
 
-  test('keeps a historical root updated through summaries and exposes its migration when inspected', async ({ page }) => {
+  test('keeps a historical root updated through summaries and exposes its migration when inspected', async ({
+    page,
+  }) => {
     const fixture = await installObservationFixture(page)
     await page.goto('/logs')
     await expect(node(page, 'Cinder', 'running')).toBeVisible()
     await page.getByRole('button', { name: 'Choose date and time range', exact: true }).click()
-    await page.getByRole('dialog', { name: 'Date and time range', exact: true }).getByRole('button', { name: 'Apply', exact: true }).click()
+    await page
+      .getByRole('dialog', { name: 'Date and time range', exact: true })
+      .getByRole('button', { name: 'Apply', exact: true })
+      .click()
     await expect(node(page, 'Cinder', 'running')).toBeVisible()
     fixture.emit({
       sequence: 11,
@@ -709,7 +980,9 @@ test.describe('Interaction Observation canvas', () => {
     expect(Number(fixture.summaryRequests[0].searchParams.get('end_at'))).toBe(startedAt + 300_000)
     await node(page, 'Cinder', 'running').getByRole('heading', { name: 'Cinder', exact: true }).click()
     const inspector = page.getByRole('complementary', { name: 'Observation details' })
-    await expect(inspector.getByRole('button', { name: 'This chain moved to a newer time page · Open latest', exact: true })).toBeVisible()
+    await expect(
+      inspector.getByRole('button', { name: 'This chain moved to a newer time page · Open latest', exact: true }),
+    ).toBeVisible()
     await expect(inspector.getByRole('log', { name: 'Conversation' })).toContainText('Historical chain advanced')
     expect(fixture.detailRequests).toHaveLength(1)
   })
@@ -722,7 +995,9 @@ test.describe('Interaction Observation canvas', () => {
     await node(page, 'Atlas', 'completed').getByRole('heading', { name: 'Atlas', exact: true }).click()
     const inspector = page.getByRole('complementary', { name: 'Observation details' })
     await expect(inspector.getByRole('log', { name: 'Conversation' })).toContainText('Atlas client-visible answer')
-    const response = page.waitForResponse((item) => new URL(item.url()).pathname === '/api/v1/observations/interactions/interaction-ember')
+    const response = page.waitForResponse(
+      (item) => new URL(item.url()).pathname === '/api/v1/observations/interactions/interaction-ember',
+    )
     release()
     await (await response).finished()
     await expect(inspector.getByRole('heading', { name: 'Atlas', exact: true, level: 2 })).toBeVisible()
@@ -733,7 +1008,9 @@ test.describe('Interaction Observation canvas', () => {
     const fixture = await installObservationFixture(page)
     await page.emulateMedia({ reducedMotion: 'reduce' })
     await page.goto('/logs?interaction=interaction-cinder')
-    const conversation = page.getByRole('complementary', { name: 'Observation details' }).getByRole('log', { name: 'Conversation' })
+    const conversation = page
+      .getByRole('complementary', { name: 'Observation details' })
+      .getByRole('log', { name: 'Conversation' })
     await expect(conversation).toContainText('Cinder client-visible answer')
     fixture.emit({
       sequence: 11,
@@ -751,7 +1028,9 @@ test.describe('Interaction Observation canvas', () => {
     expect(fixture.summaryRequests).toEqual([])
   })
 
-  test('a failed summary leaves the stream cursor replayable and recovers the preview without details', async ({ page }) => {
+  test('a failed summary leaves the stream cursor replayable and recovers the preview without details', async ({
+    page,
+  }) => {
     const fixture = await installObservationFixture(page)
     let attempts = 0
     await page.route('**/api/v1/observations/interactions/interaction-cinder/summary?**', async (route) => {
@@ -775,31 +1054,26 @@ test.describe('Interaction Observation canvas', () => {
     expect(fixture.detailRequests).toEqual([])
   })
 
-  test('fills remaining window space in both tabs and scrolls rejected requests only inside the list', async ({
+  test('fills remaining window space in both tabs and keeps failed request rows and footer actions reachable', async ({
     page,
   }) => {
-    await installObservationFixture(page)
-    await page.route('**/api/v1/observations/rejections?*', (route) =>
-      route.fulfill({
-        json: {
-          data: {
-            items: Array.from({ length: 30 }, (_, index) => ({
-              id: `rejection-${index}`,
-              occurred_at: startedAt,
-              method: 'POST',
-              path: `/v1/responses/${index}`,
-              stage: 'decode',
-              code: 'invalid_request',
-              status_code: 400,
-              debug_status: 'disabled',
-            })),
-            total: 31,
-            next_cursor: 'more',
-            snapshot_sequence: 0,
+    const fixture = await installObservationFixture(page)
+    for (let index = 0; index < 31; index++) {
+      fixture.addFailure(
+        failedRequest(`list-${index}`, index % 2 === 0 ? 'run' : 'rejection', startedAt + 10_000 + index * 1_000, {
+          api_key_name: 'Ops key',
+          model_display_name: `Model ${index}`,
+          services: [{ id: 'provider-fixture', name: 'Fixture Provider' }],
+          error: {
+            source: 'upstream',
+            code: 'upstream_error',
+            message: `Upstream request ${index} closed the connection before the response completed`,
+            status_code: 502,
           },
-        },
-      }),
-    )
+          duration_ms: 1_500 + index,
+        }),
+      )
+    }
     await page.goto('/logs')
     await expect(node(page, 'Atlas', 'completed')).toBeVisible()
 
@@ -810,7 +1084,7 @@ test.describe('Interaction Observation canvas', () => {
       { width: 320, height: 740 },
     ]) {
       await page.setViewportSize(viewport)
-      for (const tab of ['Interaction Chains', 'Rejected Requests']) {
+      for (const tab of ['Interaction Chains', 'Failed Requests']) {
         await page.getByRole('tab', { name: tab, exact: true }).click()
         await expect
           .poll(() =>
@@ -826,14 +1100,557 @@ test.describe('Interaction Observation canvas', () => {
           )
           .toEqual({ gap: 0, overflow: 0, horizontalOverflow: 0 })
       }
-      const list = page.locator('.rejection-list')
-      await expect(list).toBeVisible()
-      await page.locator('.rejections-view').evaluate((element) => {
-        element.scrollTop = element.scrollHeight
-      })
-      await expect(list.getByRole('button').last()).toBeInViewport()
+      const table = page.getByRole('table', { name: 'Failed Requests', exact: true })
+      await expect(table).toBeVisible()
+      const lastRowTime = table.getByRole('button').last()
+      await scrollListToBottom(lastRowTime)
+      await expect(lastRowTime).toBeInViewport()
       await expect(page.getByRole('button', { name: 'Load more', exact: true })).toBeInViewport()
     }
+  })
+
+  test('renders the seven failure columns with resolved and unknown values without widening the page', async ({
+    page,
+  }) => {
+    const fixture = await installObservationFixture(page)
+    const longMessage = `Upstream stream terminated after HTTP 200: ${'unexpected connection reset while streaming '.repeat(30)}end of transcript`
+    fixture.addFailure(
+      failedRequest('run-platform', 'run', startedAt + 250_000, {
+        duration_ms: 2_500,
+        api_key_id: 'key-ops',
+        api_key_name: 'Ops key',
+        model: 'ember-pro',
+        model_display_name: 'Ember Pro',
+        services: [
+          { id: 'provider-ember', name: 'Ember Provider' },
+          { id: 'provider-fallback', name: 'Fallback Provider' },
+        ],
+        error: {
+          source: 'platform',
+          code: 'run_failed',
+          message: 'Model turn ended in failure before any output was committed',
+          status_code: null,
+        },
+        interaction_id: 'interaction-delta',
+        root_id: 'root-b',
+        run_id: 'run-interaction-delta',
+      }),
+    )
+    fixture.addFailure(
+      failedRequest('rejection-decode', 'rejection', startedAt + 200_000, {
+        error: { source: null, code: 'invalid_request', message: null, status_code: 400 },
+      }),
+    )
+    fixture.addFailure(
+      failedRequest('run-upstream', 'run', startedAt + 150_000, {
+        duration_ms: 12_000,
+        client: 'codex',
+        model: 'zhipu/glm-4.7',
+        error: { source: 'upstream', code: 'upstream_error', message: longMessage, status_code: 200 },
+      }),
+    )
+    await page.goto('/logs')
+    await page.getByRole('tab', { name: 'Failed Requests', exact: true }).click()
+    const table = page.getByRole('table', { name: 'Failed Requests', exact: true })
+    await expect(table.getByRole('columnheader')).toHaveText([
+      'Time',
+      'Client / API Key',
+      'Model',
+      'Model service',
+      'Error source',
+      'Error',
+      'Duration',
+    ])
+
+    const rowByTime = (timestamp: number) =>
+      table.getByRole('button', { name: logTime(timestamp), exact: true }).locator('xpath=ancestor::tr[1]')
+    const platformRow = rowByTime(startedAt + 250_000)
+    await expect(platformRow).toContainText('Ops key')
+    await expect(platformRow).toContainText('Ember Pro')
+    await expect(platformRow).toContainText('Ember Provider, Fallback Provider')
+    await expect(platformRow).toContainText('Platform')
+    await expect(platformRow).toContainText('Model turn ended in failure before any output was committed')
+    await expect(platformRow).toContainText('2.5 s')
+    await expect(platformRow).not.toContainText('HTTP')
+
+    const rejectionRow = rowByTime(startedAt + 200_000)
+    await expect(rejectionRow).toContainText('Unauthenticated')
+    await expect(rejectionRow).toContainText('invalid_request')
+    await expect(rejectionRow).toContainText('HTTP 400')
+    await expect(rejectionRow.getByText('—', { exact: true })).toHaveCount(4)
+
+    const upstreamRow = rowByTime(startedAt + 150_000)
+    await expect(upstreamRow).toContainText('codex')
+    await expect(upstreamRow).toContainText('zhipu/glm-4.7')
+    await expect(upstreamRow).toContainText('Upstream')
+    await expect(upstreamRow).toContainText('HTTP 200')
+    await expect(upstreamRow).toContainText('12 s')
+
+    await expect(table.getByRole('button').first()).toHaveText(logTime(startedAt + 250_000))
+    await expect(table.getByRole('button').last()).toHaveText(logTime(startedAt + 150_000))
+    const boundedRow = await rejectionRow.boundingBox()
+    const longRow = await upstreamRow.boundingBox()
+    expect(Math.abs(longRow!.height - boundedRow!.height)).toBeLessThanOrEqual(1)
+
+    await page.setViewportSize({ width: 320, height: 740 })
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(320)
+    await table.getByRole('button').last().click()
+    const dialog = page.getByRole('dialog', { name: 'Observation details' })
+    await expect(dialog.getByRole('heading', { name: 'Request failed', exact: true, level: 2 })).toBeVisible()
+    await expect(dialog.getByText(longMessage, { exact: true })).toBeVisible()
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(320)
+    await dialog.getByRole('button', { name: 'Close', exact: true }).click()
+    await expect(dialog).toHaveCount(0)
+  })
+
+  test('opens an unassociated failure detail with the complete error and no fabricated jump', async ({ page }) => {
+    const fixture = await installObservationFixture(page)
+    const longError = `Decoding stopped at byte 512: ${'malformed UTF-8 continuation sequence '.repeat(28)}buffer exhausted`
+    fixture.addFailure(
+      failedRequest('rejection-decode', 'rejection', startedAt + 220_000, {
+        error: { source: null, code: 'invalid_request', message: longError, status_code: 400 },
+      }),
+      {
+        events: [
+          {
+            sequence: 21,
+            occurred_at: startedAt + 220_004,
+            interaction_id: null,
+            run_id: null,
+            rejection_id: 'rejection-decode',
+            kind: 'request_rejected',
+            payload: { stage: 'decode', status_code: 400 },
+          },
+        ],
+      },
+    )
+    await page.goto('/logs')
+    await page.getByRole('tab', { name: 'Failed Requests', exact: true }).click()
+    const rowTime = page
+      .getByRole('table', { name: 'Failed Requests', exact: true })
+      .getByRole('button', { name: logTime(startedAt + 220_000), exact: true })
+    await rowTime.click()
+    const inspector = page.getByRole('complementary', { name: 'Observation details' })
+    await expect(inspector.getByText('Failed request details', { exact: true })).toBeVisible()
+    await expect(inspector.getByRole('heading', { name: 'Request failed', exact: true, level: 2 })).toBeVisible()
+    await expect(inspector.getByText(longError, { exact: true })).toBeVisible()
+    await expect(inspector.getByText('req-rejection-decode', { exact: true })).toBeVisible()
+    await expect(inspector.getByText('HTTP 400', { exact: true })).toBeVisible()
+    await expect(inspector.getByText('Not captured', { exact: true })).toBeVisible()
+    await expect(inspector.getByText('Request rejected', { exact: true })).toBeVisible()
+    await expect(inspector.getByRole('button', { name: 'Open interaction node', exact: true })).toHaveCount(0)
+    await expect(inspector.getByRole('button', { name: 'Debug bundle', exact: true })).toBeVisible()
+    await inspector.getByRole('button', { name: 'Close', exact: true }).click()
+    await expect(inspector).toHaveCount(0)
+
+    let detailAttempts = 0
+    const failDetail = async (route: Route) => {
+      detailAttempts += 1
+      if (detailAttempts === 1) await route.fulfill({ status: 503, json: { error: 'Failure detail unavailable' } })
+      else await route.fallback()
+    }
+    await page.route('**/api/v1/observations/failed-requests/rejection/**', failDetail)
+    await rowTime.click()
+    const detailError = page.getByRole('alert').filter({ hasText: 'Failure detail unavailable' })
+    await expect(detailError).toBeVisible()
+    await expect(inspector.getByText(longError, { exact: true })).toHaveCount(0)
+    await detailError.getByRole('button', { name: 'Retry', exact: true }).click()
+    await expect(inspector.getByText(longError, { exact: true })).toBeVisible()
+    expect(detailAttempts).toBe(2)
+    await page.unroute('**/api/v1/observations/failed-requests/rejection/**', failDetail)
+  })
+
+  test('returns from a failure to its linked interaction node even after the interaction completed', async ({
+    page,
+  }) => {
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    const fixture = await installObservationFixture(page)
+    fixture.addFailure(
+      failedRequest('run-ember', 'run', startedAt + 245_000, {
+        duration_ms: 4_800,
+        api_key_name: 'Ops key',
+        client: 'codex',
+        model_display_name: 'Ember',
+        services: [{ id: 'provider-ember', name: 'Ember Provider' }],
+        error: {
+          source: 'upstream',
+          code: 'upstream_timeout',
+          message: 'Upstream request timed out after 4800 ms',
+          status_code: 504,
+        },
+        interaction_id: 'interaction-ember',
+        root_id: 'root-c',
+        run_id: 'run-interaction-ember',
+        debug_status: 'partial',
+      }),
+      {
+        events: [
+          {
+            sequence: 31,
+            occurred_at: startedAt + 240_200,
+            interaction_id: 'interaction-ember',
+            run_id: 'run-interaction-ember',
+            rejection_id: null,
+            kind: 'run_finished',
+            payload: { status: 'failed', reason: 'upstream_timeout' },
+          },
+        ],
+        trace: {
+          trace_id: 'trace-ember',
+          enabled: true,
+          status: 'partial',
+          bytes_written: 4_096,
+          event_count: 12,
+          reasons: ['Trace stopped when the process restarted.'],
+        },
+      },
+    )
+    await page.goto('/logs')
+    await page.getByRole('tab', { name: 'Failed Requests', exact: true }).click()
+    await page
+      .getByRole('table', { name: 'Failed Requests', exact: true })
+      .getByRole('button', { name: logTime(startedAt + 245_000), exact: true })
+      .click()
+    const inspector = page.getByRole('complementary', { name: 'Observation details' })
+    await expect(inspector.getByText('Upstream request timed out after 4800 ms', { exact: true })).toBeVisible()
+    await expect(inspector.getByText('Partial', { exact: true })).toBeVisible()
+    await expect(inspector.getByText('Trace stopped when the process restarted.', { exact: true })).toBeVisible()
+    await inspector.getByRole('button', { name: 'Open interaction node', exact: true }).click()
+    await expect(page.getByRole('tab', { name: 'Interaction Chains', exact: true })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    )
+    await expect(inspector).toHaveCount(0)
+    const emberNode = node(page, 'Ember', 'completed')
+    await expect(emberNode).toBeVisible()
+    await expect(emberNode).toBeInViewport()
+    await expect
+      .poll(async () => {
+        const target = await emberNode.boundingBox()
+        const viewport = await page.locator('.svelte-flow__pane').boundingBox()
+        if (!target || !viewport) return Number.POSITIVE_INFINITY
+        return Math.hypot(
+          target.x + target.width / 2 - viewport.x - viewport.width / 2,
+          target.y + target.height / 2 - viewport.y - viewport.height / 2,
+        )
+      })
+      .toBeLessThan(32)
+    await emberNode.click()
+    await expect(inspector.getByRole('heading', { name: 'Ember', exact: true, level: 2 })).toBeVisible()
+    await expect(inspector.getByRole('log', { name: 'Conversation' })).toContainText('Ember client-visible answer')
+  })
+
+  test('pages and refreshes failed requests without duplicating equal-timestamp rows', async ({ page }) => {
+    const fixture = await installObservationFixture(page)
+    for (let index = 0; index < 29; index++) {
+      fixture.addFailure(
+        failedRequest(`page-${index}`, 'run', startedAt + 60_000 + index * 1_000, {
+          api_key_name: 'Ops key',
+          error: {
+            source: 'platform',
+            code: 'run_failed',
+            message: `Platform request ${index} failed`,
+            status_code: null,
+          },
+          duration_ms: 3_000 + index,
+        }),
+      )
+    }
+    fixture.addFailure(
+      failedRequest('boundary-rejection', 'rejection', startedAt + 50_000, {
+        error: {
+          source: null,
+          code: 'invalid_request',
+          message: 'Boundary rejection failed before admission',
+          status_code: 400,
+        },
+      }),
+    )
+    fixture.addFailure(
+      failedRequest('boundary-run', 'run', startedAt + 50_000, {
+        client: 'codex',
+        error: {
+          source: 'upstream',
+          code: 'upstream_error',
+          message: 'Boundary run failed after admission',
+          status_code: 500,
+        },
+        duration_ms: 9_000,
+      }),
+    )
+    await page.goto('/logs')
+    await page.getByRole('tab', { name: 'Failed Requests', exact: true }).click()
+    const table = page.getByRole('table', { name: 'Failed Requests', exact: true })
+    await expect(table.getByRole('button')).toHaveCount(30)
+    await expect(page.getByText('30 / 31', { exact: true })).toBeVisible()
+    await expect(table.getByRole('button', { name: logTime(startedAt + 50_000), exact: true })).toHaveCount(1)
+
+    await page.getByRole('button', { name: 'Load more', exact: true }).click()
+    await expect(table.getByRole('button')).toHaveCount(31)
+    await expect(page.getByText('31 / 31', { exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Load more', exact: true })).toHaveCount(0)
+    const boundaryRows = table
+      .getByRole('row')
+      .filter({ has: page.getByRole('button', { name: logTime(startedAt + 50_000), exact: true }) })
+    await expect(boundaryRows).toHaveCount(2)
+    await expect(boundaryRows.filter({ hasText: 'Unauthenticated' })).toHaveCount(1)
+    await expect(boundaryRows.filter({ hasText: 'codex' })).toHaveCount(1)
+
+    await page.getByRole('button', { name: 'Refresh and anchor a new current window' }).click()
+    await expect(table.getByRole('button')).toHaveCount(30)
+    await expect(page.getByText('30 / 31', { exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Load more', exact: true })).toBeInViewport()
+  })
+
+  test('separates the empty, failed, and loading states of the failed request list', async ({ page }) => {
+    const fixture = await installObservationFixture(page)
+    await page.goto('/logs')
+    await page.getByRole('tab', { name: 'Failed Requests', exact: true }).click()
+    await expect(page.getByText('No failed requests', { exact: true })).toBeVisible()
+    await expect(
+      page.getByText('No final request failures match this time range and these filters.', { exact: true }),
+    ).toBeVisible()
+    await expect(page.getByRole('table', { name: 'Failed Requests', exact: true })).toHaveCount(0)
+
+    fixture.addFailure(
+      failedRequest('state-run', 'run', startedAt + 90_000, {
+        client: 'codex',
+        error: {
+          source: 'upstream',
+          code: 'upstream_error',
+          message: 'Only failure while checking states',
+          status_code: 500,
+        },
+        duration_ms: 2_000,
+      }),
+    )
+    let listAttempts = 0
+    const failList = async (route: Route) => {
+      listAttempts += 1
+      if (listAttempts === 1) await route.fulfill({ status: 503, json: { error: 'Failed requests unavailable' } })
+      else await route.fallback()
+    }
+    await page.route('**/api/v1/observations/failed-requests?**', failList)
+    await page.getByRole('button', { name: 'Refresh and anchor a new current window' }).click()
+    const listError = page.getByRole('alert').filter({ hasText: 'Failed requests unavailable' })
+    await expect(listError).toBeVisible()
+    await expect(page.getByText('No failed requests', { exact: true })).toHaveCount(0)
+    await listError.getByRole('button', { name: 'Retry', exact: true }).click()
+    const table = page.getByRole('table', { name: 'Failed Requests', exact: true })
+    await expect(table.getByRole('button')).toHaveCount(1)
+    await expect(listError).toHaveCount(0)
+    await page.unroute('**/api/v1/observations/failed-requests?**', failList)
+
+    const release = fixture.holdNextFailureRead()
+    await page.getByRole('button', { name: 'Refresh and anchor a new current window' }).click()
+    await expect(page.getByText('Loading failed requests…', { exact: true })).toBeVisible()
+    await expect(page.getByText('No failed requests', { exact: true })).toHaveCount(0)
+    await expect(table.getByRole('button')).toHaveCount(0)
+    release()
+    await expect(table.getByRole('button')).toHaveCount(1)
+  })
+
+  test('a failure between clock ticks becomes visible live without moving an applied fixed range', async ({ page }) => {
+    const fixture = await installObservationFixture(page)
+    fixture.addFailure(
+      failedRequest('run-steady', 'run', startedAt + 150_000, {
+        client: 'codex',
+        error: {
+          source: 'upstream',
+          code: 'upstream_error',
+          message: 'Steady failure already inside the window',
+          status_code: 502,
+        },
+        duration_ms: 4_000,
+      }),
+    )
+    await page.goto('/logs')
+    await page.getByRole('tab', { name: 'Failed Requests', exact: true }).click()
+    const table = page.getByRole('table', { name: 'Failed Requests', exact: true })
+    const rowByTime = (timestamp: number) =>
+      table.getByRole('button', { name: logTime(timestamp), exact: true }).locator('xpath=ancestor::tr[1]')
+    await expect(table.getByRole('button', { name: logTime(startedAt + 150_000), exact: true })).toBeVisible()
+
+    // The browser clock advances into the gap between two window advances; the rejection starts
+    // and ends between two clock ticks, still at or before the browser's current time.
+    await page.clock.setFixedTime(startedAt + 301_500)
+    const rejectedAt = startedAt + 300_400
+    fixture.addFailure(
+      failedRequest('rejection-fresh', 'rejection', rejectedAt, {
+        error: {
+          source: null,
+          code: 'rate_limited',
+          message: 'Fresh rejection between two clock ticks',
+          status_code: 429,
+        },
+      }),
+    )
+    fixture.emit({
+      sequence: 11,
+      occurred_at: rejectedAt,
+      interaction_id: null,
+      run_id: null,
+      rejection_id: 'rejection-fresh',
+      kind: 'request_rejected',
+      payload: { stage: 'admission', status_code: 429 },
+    })
+    await expect(table.getByRole('button', { name: logTime(rejectedAt), exact: true })).toBeVisible()
+    await expect(rowByTime(rejectedAt)).toContainText('Fresh rejection between two clock ticks')
+    await expect(page.getByText('2 / 2', { exact: true })).toBeVisible()
+
+    // An applied fixed range keeps its exact bounds and never absorbs newer failures.
+    await page.getByRole('button', { name: 'Choose date and time range', exact: true }).click()
+    const dialog = page.getByRole('dialog', { name: 'Date and time range', exact: true })
+    await dialog.getByLabel('Start time', { exact: true }).fill(localRangeValue(60_000))
+    await dialog.getByLabel('End time', { exact: true }).fill(localRangeValue(180_000))
+    await dialog.getByRole('button', { name: 'Apply', exact: true }).click()
+    await expect(dialog).toBeHidden()
+    await expect
+      .poll(() => {
+        const params = fixture.failureRequests.at(-1)?.searchParams
+        return [Number(params?.get('start_at')), Number(params?.get('end_at'))]
+      })
+      .toEqual([startedAt + 60_000, startedAt + 180_000])
+    await expect(table.getByRole('button', { name: logTime(startedAt + 150_000), exact: true })).toBeVisible()
+    await expect(table.getByRole('button', { name: logTime(rejectedAt), exact: true })).toHaveCount(0)
+
+    const failedAt = startedAt + 301_000
+    fixture.addFailure(
+      failedRequest('run-fresh', 'run', failedAt, {
+        error: {
+          source: 'platform',
+          code: 'run_failed',
+          message: 'Later failure must not move the fixed range',
+          status_code: null,
+        },
+      }),
+    )
+    fixture.emit({
+      sequence: 12,
+      occurred_at: failedAt,
+      interaction_id: 'interaction-cinder',
+      run_id: 'run-interaction-cinder',
+      rejection_id: null,
+      kind: 'run_finished',
+      payload: { status: 'failed', reason: 'upstream_timeout' },
+    })
+    await expect
+      .poll(() => fixture.summaryRequests.some((url) => url.pathname.includes('interaction-cinder')))
+      .toBe(true)
+    await expect(table.getByRole('button', { name: logTime(failedAt), exact: true })).toHaveCount(0)
+    await expect(table.getByRole('button', { name: logTime(rejectedAt), exact: true })).toHaveCount(0)
+  })
+
+  test('switching tabs or filters reloads failed requests from the advanced clock without moving a fixed range', async ({
+    page,
+  }) => {
+    const fixture = await installObservationFixture(page)
+    fixture.addFailure(
+      failedRequest('run-baseline', 'run', startedAt + 150_000, {
+        client: 'codex',
+        error: {
+          source: 'upstream',
+          code: 'upstream_error',
+          message: 'Baseline failure inside the loaded window',
+          status_code: 502,
+        },
+        duration_ms: 3_000,
+      }),
+    )
+    // Pausing before the first load freezes the one-second interval: the live window cannot advance itself.
+    await page.clock.pauseAt(startedAt + 300_000)
+    await page.goto('/logs')
+    await expect.poll(() => fixture.forestRequests.length).toBeGreaterThanOrEqual(1)
+
+    // The browser clock moves between two ticks; a rejection finishes before the browser's now, without any stream event.
+    await page.clock.setSystemTime(startedAt + 301_000)
+    const rejectedAt = startedAt + 300_400
+    fixture.addFailure(
+      failedRequest('rejection-tab', 'rejection', rejectedAt, {
+        error: {
+          source: null,
+          code: 'rate_limited',
+          message: 'Rejection that finished between two clock ticks',
+          status_code: 429,
+        },
+      }),
+    )
+    await page.getByRole('tab', { name: 'Failed Requests', exact: true }).click()
+    const table = page.getByRole('table', { name: 'Failed Requests', exact: true })
+    await expect(table.getByRole('button', { name: logTime(rejectedAt), exact: true })).toBeVisible()
+    await expect(page.getByText('2 / 2', { exact: true })).toBeVisible()
+    expect(Number(fixture.failureRequests[0].searchParams.get('end_at'))).toBeGreaterThan(rejectedAt)
+
+    // Re-applying filters re-queries from the same advanced clock, not the stale window end.
+    await page.clock.setSystemTime(startedAt + 302_000)
+    const filteredAt = startedAt + 301_600
+    fixture.addFailure(
+      failedRequest('run-filter', 'run', filteredAt, {
+        error: {
+          source: 'platform',
+          code: 'run_failed',
+          message: 'Failure that finished after the tab switch',
+          status_code: null,
+        },
+      }),
+    )
+    await page.getByRole('button', { name: 'Filters' }).click()
+    await page.getByRole('button', { name: 'Apply filters' }).click()
+    await expect(table.getByRole('button', { name: logTime(filteredAt), exact: true })).toBeVisible()
+    await expect(page.getByText('3 / 3', { exact: true })).toBeVisible()
+    // Freshness is proven with timers paused; let the filter sheet finish closing.
+    await page.clock.resume()
+
+    // An applied fixed range keeps its exact bounds and never absorbs newer failures.
+    await page.getByRole('button', { name: 'Choose date and time range', exact: true }).click()
+    const dialog = page.getByRole('dialog', { name: 'Date and time range', exact: true })
+    await dialog.getByLabel('Start time', { exact: true }).fill(localRangeValue(60_000))
+    await dialog.getByLabel('End time', { exact: true }).fill(localRangeValue(180_000))
+    await dialog.getByRole('button', { name: 'Apply', exact: true }).click()
+    await expect(dialog).toBeHidden()
+    await expect
+      .poll(() => {
+        const params = fixture.failureRequests.at(-1)?.searchParams
+        return [Number(params?.get('start_at')), Number(params?.get('end_at'))]
+      })
+      .toEqual([startedAt + 60_000, startedAt + 180_000])
+    await expect(table.getByRole('button', { name: logTime(startedAt + 150_000), exact: true })).toBeVisible()
+    await expect(table.getByRole('button', { name: logTime(rejectedAt), exact: true })).toHaveCount(0)
+    await expect(table.getByRole('button', { name: logTime(filteredAt), exact: true })).toHaveCount(0)
+  })
+
+  test('opens and closes failure details by keyboard and inside fullscreen', async ({ page }) => {
+    const fixture = await installObservationFixture(page)
+    fixture.addFailure(
+      failedRequest('run-keyboard', 'run', startedAt + 130_000, {
+        client: 'codex',
+        error: { source: 'upstream', code: 'upstream_error', message: 'Keyboard navigation failure', status_code: 502 },
+        duration_ms: 2_000,
+      }),
+    )
+    await page.goto('/logs')
+    await page.getByRole('tab', { name: 'Failed Requests', exact: true }).click()
+    const rowTime = page
+      .getByRole('table', { name: 'Failed Requests', exact: true })
+      .getByRole('button', { name: logTime(startedAt + 130_000), exact: true })
+    const inspector = page.getByRole('complementary', { name: 'Observation details' })
+    await rowTime.focus()
+    await page.keyboard.press('Enter')
+    await expect(inspector.getByRole('heading', { name: 'Request failed', exact: true, level: 2 })).toBeVisible()
+    await expect(inspector.getByText('Keyboard navigation failure', { exact: true })).toBeVisible()
+    await page.keyboard.press('Escape')
+    await expect(inspector).toHaveCount(0)
+    await expect(rowTime).toBeFocused()
+
+    await page.getByRole('button', { name: 'Enter fullscreen', exact: true }).click()
+    await expect(page.getByRole('button', { name: 'Exit fullscreen', exact: true })).toBeVisible()
+    await rowTime.click()
+    await expect(inspector.getByRole('heading', { name: 'Request failed', exact: true, level: 2 })).toBeVisible()
+    await inspector.getByRole('button', { name: 'Close', exact: true }).click()
+    await expect(inspector).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Exit fullscreen', exact: true })).toBeVisible()
+    await page.keyboard.press('Escape')
+    await expect(page.getByRole('button', { name: 'Enter fullscreen', exact: true })).toBeVisible()
   })
 
   test('opens readable conversation bubbles while retaining raw events in diagnostics', async ({ page }) => {
@@ -1176,11 +1993,7 @@ test.describe('Interaction Observation canvas', () => {
             run_id: parent.id,
             rejection_id: null,
             kind: 'client_tool_handoff',
-            payload: {
-              tool_id: 'call-bash',
-              name: 'Bash',
-              input: { command: 'printf "tool-output-sentinel"' },
-            },
+            payload: { tool_id: 'call-bash', name: 'Bash', input: { command: 'printf "tool-output-sentinel"' } },
           },
         ]
         const ordinary = (sequence: number, kind: string, payload: unknown, runId = parent.id): ObservationEvent => ({
@@ -1206,10 +2019,7 @@ test.describe('Interaction Observation canvas', () => {
         )
         if (completed)
           parent.events.push(
-            ordinary(13, 'model_thinking_finished', {
-              model_turn_id: 'activity-turn',
-              attempt_id: 'activity-attempt',
-            }),
+            ordinary(13, 'model_thinking_finished', { model_turn_id: 'activity-turn', attempt_id: 'activity-attempt' }),
             ordinary(14, 'platform_tool_started', {
               model_turn_id: 'activity-turn',
               tool_id: 'call-search',
@@ -1320,10 +2130,7 @@ test.describe('Interaction Observation canvas', () => {
     emit(11, 'model_thinking_delta', { ...scope, text: '**Selecting top ' })
     await thinking.click()
     emit(12, 'model_thinking_delta', { ...scope, text: 'five candidate features**' })
-    emit(13, 'model_thinking_delta', {
-      ...scope,
-      text: '\n\n**Implementing temp path and timestamp retrieval**',
-    })
+    emit(13, 'model_thinking_delta', { ...scope, text: '\n\n**Implementing temp path and timestamp retrieval**' })
     const content = conversation.locator('.markdown-content').filter({ hasText: 'Selecting top' })
     const assertParagraphs = async () => {
       await expect(content.locator('p')).toHaveCount(2)
@@ -1606,7 +2413,9 @@ test.describe('Interaction Observation canvas', () => {
     await page.goto('/logs')
     await node(page, 'Atlas', 'completed').getByRole('heading', { name: 'Atlas', exact: true }).click()
     const download = page.waitForEvent('download')
-    const ticketRequest = page.waitForRequest((request) => request.url().endsWith('/interaction-atlas/debug-bundle-tickets'))
+    const ticketRequest = page.waitForRequest((request) =>
+      request.url().endsWith('/interaction-atlas/debug-bundle-tickets'),
+    )
     await page.getByRole('button', { name: 'Debug bundle', exact: true }).click()
     expect((await ticketRequest).postDataJSON()).toEqual({})
     const completed = await download
@@ -1730,16 +2539,21 @@ test.describe('Interaction Observation canvas', () => {
     await expect(node(page, 'Atlas', 'completed').locator('article')).toHaveCSS('opacity', '1')
     await expect(node(page, 'Boreal', 'waiting_client').locator('article')).toHaveCSS('opacity', '0.42')
     await expect(node(page, 'Cinder', 'running').locator('article')).toHaveCSS('opacity', '0.42')
-    fixture.emit({
-      sequence: 12,
-      occurred_at: startedAt + 299_100,
-      interaction_id: 'interaction-cinder',
-      run_id: 'run-interaction-cinder',
-      rejection_id: null,
-      kind: 'delivery_terminal',
-      payload: { delivered: true },
-    }, 'Completed through a filtered summary')
-    await expect(node(page, 'Cinder', 'completed').locator('article')).toContainText('Completed through a filtered summary')
+    fixture.emit(
+      {
+        sequence: 12,
+        occurred_at: startedAt + 299_100,
+        interaction_id: 'interaction-cinder',
+        run_id: 'run-interaction-cinder',
+        rejection_id: null,
+        kind: 'delivery_terminal',
+        payload: { delivered: true },
+      },
+      'Completed through a filtered summary',
+    )
+    await expect(node(page, 'Cinder', 'completed').locator('article')).toContainText(
+      'Completed through a filtered summary',
+    )
     await expect(node(page, 'Cinder', 'completed').locator('article')).toHaveCSS('opacity', '1')
     await expect(node(page, 'Boreal', 'waiting_client')).toBeVisible()
     expect(fixture.summaryRequests.at(-1)?.searchParams.get('status')).toBe('completed')

@@ -362,6 +362,27 @@ class _MinimalMockHandler(BaseHTTPRequestHandler):
         messages = body.get("messages", [])
         scenario = json.dumps(messages, sort_keys=True, separators=(",", ":"))
 
+        if "observation-final-stream-error" in scenario or "observation-stream-disconnect" in scenario:
+            self.send_response(200)
+            self.send_header("content-type", "text/event-stream")
+            self.send_header("connection", "close")
+            self.end_headers()
+            first = {
+                "id": "chatcmpl-final-stream-error",
+                "object": "chat.completion.chunk",
+                "model": model,
+                "choices": [{"index": 0, "delta": {"role": "assistant", "content": "partial"}, "finish_reason": None}],
+            }
+            self.wfile.write(b"data: " + json.dumps(first).encode() + b"\n\n")
+            self.wfile.flush()
+            if self.server.stream_error_release.wait(timeout=15):
+                code = "cancelled" if "observation-final-stream-error-cancelled" in scenario else "stream_failed"
+                error = {"error": {"type": "server_error", "code": code, "message": "upstream failed after output"}}
+                self.wfile.write(b"data: " + json.dumps(error).encode() + b"\n\n")
+                self.wfile.flush()
+            self.close_connection = True
+            return
+
         if "observation-visible-credential" in scenario and body.get("stream") is True:
             sentinel = "VISIBLE_RESPONSE_SECRET_7c91"
             fragments = [
@@ -403,6 +424,20 @@ class _MinimalMockHandler(BaseHTTPRequestHandler):
 
         if "observation-delay" in scenario:
             time.sleep(3.0)
+
+        if "observation-always-failed" in scenario:
+            message = (
+                json.dumps({"detail": r'{"api\u005fkey":"nested-diagnostic-secret","hint":"provider detail"}'})
+                if "structured-error" in scenario
+                else "All attempts failed: " + "long detail " * 200 + "Bearer upstream-secret"
+            )
+            self._write_json(503, {
+                "error": {
+                    "type": "upstream_unavailable",
+                    "message": message,
+                }
+            })
+            return
 
         if "observation-root-retry" in scenario:
             with self._attempts_lock:
@@ -492,6 +527,7 @@ class _MinimalMockHandler(BaseHTTPRequestHandler):
 def minimal_mock_provider(port: int) -> tuple[ThreadingHTTPServer, threading.Thread]:
     """Start a minimal OpenAI-compatible mock on *port*; return (server, thread)."""
     server = ThreadingHTTPServer(("127.0.0.1", port), _MinimalMockHandler)
+    server.stream_error_release = threading.Event()
     t = threading.Thread(target=server.serve_forever, name="mock-provider", daemon=True)
     t.start()
     return server, t

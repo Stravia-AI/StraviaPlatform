@@ -370,10 +370,11 @@ pub(super) async fn orchestrate(
         ingress,
         context: mut ctx,
     } = input;
-    let ingress_observer = ctx
+    let mut ingress_observer = ctx
         .extensions
         .take::<IngressObserver>()
         .expect("Inference Run ingress observer");
+    ingress_observer.set_model(&request.model);
     ingress_observer.record_debug(|| RunEvent::Checkpoint {
         stage: "decoded_request".into(),
         model_turn_id: None,
@@ -440,6 +441,7 @@ pub(super) async fn orchestrate(
     let concurrency_limit = authenticated_principal.concurrency_limit;
     let api_key_name = authenticated_principal.api_key_name;
     let principal = authenticated_principal.principal;
+    ingress_observer.set_authenticated_source(principal.api_key_id(), &api_key_name);
     if let Err(error) =
         crate::media::ingest::normalize_request(&gw, &principal, &mut request, &ctx.cancellation)
             .await

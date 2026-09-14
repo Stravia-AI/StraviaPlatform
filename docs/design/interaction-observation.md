@@ -257,6 +257,8 @@ SQLite 与 PostgreSQL 使用等价 schema 和索引。具体 SQL 由各自迁移
 - `generation_parent_id`（nullable）
 - `ingress_protocol`
 - `route_id` / `model_display_name`
+- `request_model`（请求的路由 model_id 快照，可空）
+- `failure_json`（最终失败诊断快照，可空）
 - `status` / `terminal_reason`
 - `debug_enabled`
 - `client_output_committed`
@@ -277,7 +279,7 @@ SQLite 与 PostgreSQL 使用等价 schema 和索引。具体 SQL 由各自迁移
 
 #### `rejected_request_observations`
 
-保存无法形成 Inference Run 的请求时间、method、脱敏 path、ingress 协议、失败阶段、稳定错误 code、HTTP status、Debug Trace manifest 关联和过期时间。它不保存 Principal，也不伪造 Interaction ID。
+保存无法形成 Inference Run 的请求时间、method、脱敏 path、ingress 协议、失败阶段、稳定错误 code、HTTP status、Debug Trace manifest 关联和过期时间。Migration 0044 起额外保存可空的 `started_at`、`duration_ms`、`failure_json` 与来源快照 `request_model`、`api_key_id`、`api_key_name`，供失败请求投影使用；这些列全部可空、不回填历史，也不引入新的 Principal 外键。它不保存 Principal，也不伪造 Interaction ID。
 
 #### `debug_trace_manifests`
 
@@ -402,6 +404,8 @@ GET    /api/v1/observations/interactions/{id}
 GET    /api/v1/observations/interactions/{id}/events
 GET    /api/v1/observations/rejections
 GET    /api/v1/observations/rejections/{id}
+GET    /api/v1/observations/failed-requests
+GET    /api/v1/observations/failed-requests/{kind}/{id}
 GET    /api/v1/observations/events?after=<sequence>
 GET    /api/v1/observations/debug
 PUT    /api/v1/observations/debug
@@ -413,7 +417,7 @@ GET    /api/v1/observations/debug-bundles/{ticket}
 
 Interaction forest 查询参数：
 
-- `start_at` / `end_at`：Unix 毫秒时间，必须同时提供，且 `0 < end_at - start_at <= 86400000`；按 `[start_at, end_at)` 查询，包含起点、不含终点，显式边界优先于旧参数；Interaction forest 与 Rejected Requests 使用相同约束；
+- `start_at` / `end_at`：Unix 毫秒时间，必须同时提供，且 `0 < end_at - start_at <= 86400000`；按 `[start_at, end_at)` 查询，包含起点、不含终点，显式边界优先于旧参数；Interaction forest、Rejected Requests 与 Failed Requests 使用相同约束；
 - `anchor_at` / `window_index`：仅为现有 API 调用者保留的旧窗口参数；未提供显式边界时，0 为下界固定在 `anchor-24h`、无上界的实时页，后续历史页按 24 小时分段。WebUI 始终发送显式边界，包括实时预设；
 - `cursor` / `limit`：同一时间页内按根链游标分批加载；
 - `provider`、`model`、`api_key`、`status`：匹配任一 Interaction/Run 后返回完整根 DAG；
@@ -425,6 +429,15 @@ SSE 通过普通 `fetch` 携带 Admin Bearer header，并由 `eventsource-parser
 
 普通详情只返回整个 Interaction 最新 200 条事件及 `older_events_cursor`。事件分页使用互斥的 `after_sequence` / `before_sequence`，以及固定快照上界 `through_sequence`；`limit` 默认 200、最大 500。负游标、超出快照的游标及无效 limit 返回 400。返回 `runs`、`snapshot_sequence`、`next_cursor`，每个 Run 包含本页事件，页内按 sequence 升序；仅在仍有后续页时返回游标。增量读取固定同一上界直至分页完成，历史加载向前翻页。诊断包独立读取完整截止历史，不受详情窗口限制。
 
+失败请求列表 `GET /api/v1/observations/failed-requests` 合并准入前 Rejected Request 与最终 `status=failed` 的 Inference Run，是既有观察数据的查询投影，不新建执行记录或重复累计用量：
+
+- 查询参数沿用 Interaction forest 的 `start_at` / `end_at`（或兼容的 `anchor_at` / `window_index`）与 `cursor` / `limit`（默认 50、最大 200），另支持 `provider`、`model`、`api_key` 筛选；`model` 匹配模型路由 UUID，`api_key` 匹配 key ID 或名称，`provider` 匹配该 Run 实际调用过的模型服务；
+- 排序为 `started_at` DESC、`kind` ASC、`id` ASC，`next_cursor` 是不透明的 JSON keyset 游标，相同时间记录跨页不重复、不遗漏；`total` 为当前时间范围与筛选条件下的总数；
+- 响应为 `{ data: { items, total, next_cursor, snapshot_sequence } }`；每项 `FailedRequestSummary` 包含 `id`、`kind`（`rejection | run`）、`request_id`、`started_at`、`duration_ms`、`api_key_id`、`api_key_name`、`client`、`model`、`model_display_name`、`services`（实际调用过的模型服务去重列表）、`error`（`source` 取 `platform | upstream | null`，附 `code`、`message`、`status_code`）、`interaction_id`、`root_id`、`run_id`、`debug_status`（`none`、`partial` 或 manifest 状态）与 `observation_gap`；
+- 分类以一次客户端请求的最终结果为准：内部重试或切换模型服务后最终成功的请求不进入列表；单纯主动取消或断线（含 499、`request_aborted`、`cancelled`、`client_disconnected`、`websocket_delivery_dropped`）被排除；后来重新发起并成功的请求不抹掉早先失败行；
+- 失败 Run 的开始时间取 ingress 接收时间，结束时间在终止方截取，不使用 writer 入队时间；历史记录缺少的字段如实表达缺口：0044 之前的 Rejected Request 无 `started_at` 时回退按 `occurred_at` 排序并置 `observation_gap=true`，缺失诊断保持未知，不能补回；
+- `GET /api/v1/observations/failed-requests/{kind}/{id}` 返回 `{ data: { request, events, trace, snapshot_sequence } }`；`trace` 是既有 Debug manifest 元数据。诊断包仍通过既有 Interaction/Rejection ticket 与下载入口获取，该列表不新增 Debug 捕获，也不改变脱敏与保留期规则。
+
 ## 10. 请求记录页面
 
 ### 10.1 信息架构
@@ -432,29 +445,27 @@ SSE 通过普通 `fetch` 携带 Admin Bearer header，并由 `eventsource-parser
 页面标题和导航继续使用“请求记录”，主体分为：
 
 - `交互链路`：默认页签，Interaction forest 无限画布；
-- `拒绝的请求`：独立时间列表与详情，不伪造画布节点。
+- `失败的请求`：Failed Requests 表格列表与详情，不伪造画布节点。
 
 页面 header 包含实时状态、时间预设、精确日期时间范围、全屏切换、筛选、Debug switch 和“清除历史记录”。全屏保留当前筛选、选中节点及检查器，支持工具栏退出和 Esc 退出。普通 CSV 导出删除。Debug Bundle 按选中的 Interaction/Rejected Request 提供。
 
-#### 失败请求列表调整（已确认设计，待实现）
+#### 失败请求列表
 
-“拒绝的请求”页签改为“失败的请求 / Failed Requests”，使用传统表格列表，不使用卡片或拓扑。失败口径遵循 `CONTEXT.md` 的 Failed Request 定义，以每次客户端请求的最终结果判断，而非仅按 HTTP 状态码或内部上游尝试判断。
+“失败的请求 / Failed Requests”页签使用传统表格列表，不使用卡片或拓扑。失败口径遵循 `CONTEXT.md` 的 Failed Request 定义，以每次客户端请求的最终结果判断，而非仅按 HTTP 状态码或内部上游尝试判断：准入前拒绝与最终 `status=failed` 的 Run 进入列表；内部重试或切换模型服务后最终成功的请求，以及单纯由客户端主动取消或断线终止的请求不进入列表；后来重新发起并成功的请求不抹掉早先失败行。已归属 Interaction 的失败 Run 仍保留在原交互链路中，准入前失败只在失败列表展示，不伪造交互关联。
 
-失败列表与交互链路是同一请求的两个查看入口，不复制执行记录或重复计算用量。已经归属交互的失败请求仍保留在原链路中，列表详情提供对应节点入口；准入前失败只在失败列表展示，不伪造交互关联。
-
-列表按请求开始时间倒序，每次失败请求一行，默认列为：
+列表按请求开始时间倒序（`started_at` DESC、`kind` ASC、`id` ASC，契约见第 9 节），每次失败请求一行，默认七列为：
 
 | 列 | 内容 |
 | --- | --- |
-| 时间 | 请求开始时间。 |
-| 客户端 / API Key | 请求来源；未认证时显示“未认证”。 |
-| 模型 | 请求的模型；无法解析时显示“—”。 |
-| 模型服务 | 实际调用的服务；未调用上游时显示“—”。 |
-| 错误来源 | 平台错误或上游错误。 |
-| 错误 | 简短原因及可用的 HTTP 状态码。 |
-| 耗时 | 本次请求持续时间。 |
+| 时间 | 请求开始时间；缺少开始时间的旧拒绝记录回退按 ingress 时间排序并标记 `observation_gap`。 |
+| 客户端 / API Key | API Key 名称或客户端来源；未认证时显示“未认证”，不可得时显示“—”。 |
+| 模型 | 请求的路由模型；无法解析时显示“—”。 |
+| 模型服务 | 实际调用的模型服务；未调用上游时显示“—”。 |
+| 错误来源 | 平台错误或上游错误；未知时显示“—”。 |
+| 错误 | 简短原因及可用的 HTTP 状态码，完整内容进入详情。 |
+| 耗时 | 请求开始到终止的持续时间；不可得时显示“—”。 |
 
-点击行打开详情，查看完整错误、请求标识及已有 Debug 记录；有关联交互时提供跳转。列表不展开大段错误。
+点击行打开失败请求详情，查看完整错误、请求标识、事件与已有 Debug manifest 状态；存在所属 Interaction 时提供跳转对应交互节点的入口，否则不生成无效跳转。列表不展开大段错误。历史缺失的来源快照与失败诊断不能补回，缺失字段如实显示，不虚构数据。诊断包沿用既有 Interaction/Rejection 下载入口，不新增 Debug 捕获；Debug 保留期与脱敏规则不变。
 
 ### 10.2 画布
 
@@ -482,7 +493,7 @@ SSE 通过普通 `fetch` 携带 Admin Bearer header，并由 `eventsource-parser
 
 ### 10.3 时间页与迁移
 
-实时预设包括 5、10、30 分钟以及 1、4、12、24 小时；前端随当前时间推进起止边界并发送显式 `[start_at, end_at)`，窗口宽度始终保持所选时长，不会因长时间打开而扩大。自定义范围通过本地日期时间输入转换为 Unix 毫秒，应用后保持固定边界，起点必须早于终点且跨度不得超过 24 小时；恰好 24 小时有效，超限不能应用。Interaction Chains 与 Rejected Requests 使用相同时间窗语义。时间边界只决定根链成员资格，不截断返回的因果上下文，也不限制详情中的完整 DAG。
+实时预设包括 5、10、30 分钟以及 1、4、12、24 小时；前端随当前时间推进起止边界并发送显式 `[start_at, end_at)`，窗口宽度始终保持所选时长，不会因长时间打开而扩大。自定义范围通过本地日期时间输入转换为 Unix 毫秒，应用后保持固定边界，起点必须早于终点且跨度不得超过 24 小时；恰好 24 小时有效，超限不能应用。Interaction Chains、Rejected Requests 与 Failed Requests 使用相同时间窗语义。时间边界只决定根链成员资格，不截断返回的因果上下文，也不限制详情中的完整 DAG。
 
 根链若因新活动跨入更新的时间页：
 

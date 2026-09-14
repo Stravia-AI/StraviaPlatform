@@ -440,6 +440,34 @@ async fn post_text_marker_failures_abort_stream_and_skip_generation_commit() {
         assert_eq!(generation_count, 0);
     }
     assert_eq!(provider_calls.load(Ordering::SeqCst), 2);
+    assert_marker_failure_diagnostics(&gateway).await;
+}
+
+async fn assert_marker_failure_diagnostics(gateway: &Gateway) {
+    gateway.observation.flush().await.expect("flush failures");
+    let failures = gateway
+        .observation
+        .failed_requests(Default::default())
+        .await
+        .expect("failed requests");
+    assert_eq!(failures.items.len(), 2);
+    for cause in [
+        "injected Thinking persistence failure",
+        "injected Thinking publish failure",
+    ] {
+        assert!(
+            failures.items.iter().any(|failure| {
+                failure.error.source.as_deref() == Some("platform")
+                    && failure
+                        .error
+                        .message
+                        .as_deref()
+                        .is_some_and(|message| message.contains(cause))
+            }),
+            "missing hook cause {cause}: {:?}",
+            failures.items
+        );
+    }
 }
 
 #[tokio::test]
@@ -521,6 +549,7 @@ async fn non_stream_post_text_marker_persistence_failure_is_typed_error() {
         let body = String::from_utf8_lossy(&body);
         assert!(body.contains("hook_failed"), "{body}");
     }
+    assert_marker_failure_diagnostics(&gateway).await;
     assert_eq!(provider_calls.load(Ordering::SeqCst), 3);
 }
 

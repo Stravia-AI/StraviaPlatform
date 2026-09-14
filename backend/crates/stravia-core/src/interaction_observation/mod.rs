@@ -228,6 +228,7 @@ impl InteractionObservation {
         IngressObserver {
             observation: self.clone(),
             received_at,
+            metadata: RequestMetadata::default(),
             start: Some(start),
             debug_enabled: debug,
             trace,
@@ -742,8 +743,16 @@ async fn replay_to(
     Ok(())
 }
 
+#[derive(Default)]
+pub(super) struct RequestMetadata {
+    model: Option<String>,
+    api_key_id: Option<String>,
+    api_key_name: Option<String>,
+}
+
 pub(crate) struct IngressObserver {
     received_at: i64,
+    metadata: RequestMetadata,
     observation: InteractionObservation,
     start: Option<IngressStart>,
     debug_enabled: bool,
@@ -771,6 +780,15 @@ impl IngressCapture {
 }
 
 impl IngressObserver {
+    pub(crate) fn set_model(&mut self, model: &str) {
+        self.metadata.model = Some(redaction::redact_text(model));
+    }
+
+    pub(crate) fn set_authenticated_source(&mut self, key_id: &str, key_name: &str) {
+        self.metadata.api_key_id = Some(key_id.to_owned());
+        self.metadata.api_key_name = Some(redaction::redact_text(key_name));
+    }
+
     pub(crate) fn is_websocket(&self) -> bool {
         self.websocket
     }
@@ -833,6 +851,7 @@ impl IngressObserver {
             gap: AtomicBool::new(false),
             finalization: Mutex::new(self.finalization.take()),
             pending_finish: Mutex::new(None),
+            failure: Mutex::new(None),
             pending_input: Mutex::new(None),
             pending_tool_results: Mutex::new(Vec::new()),
             thinking_redaction: Mutex::new(HashMap::new()),
@@ -847,6 +866,7 @@ impl IngressObserver {
             .writer
             .try_send(WriterCommand::Admit {
                 start,
+                metadata: std::mem::take(&mut self.metadata),
                 debug_enabled,
                 trace: inner.trace.clone(),
                 discarded_trace,
@@ -877,7 +897,10 @@ impl IngressObserver {
                 .try_send(WriterCommand::Reject {
                     ingress: start.clone(),
                     outcome,
+                    metadata: std::mem::take(&mut self.metadata),
                     debug_enabled: self.debug_enabled,
+                    started_at: self.received_at,
+                    duration_ms: writer::now().saturating_sub(self.received_at),
                 })
                 .is_err()
             {
@@ -894,6 +917,7 @@ impl Drop for IngressObserver {
                 stage: "ingress".into(),
                 code: "request_aborted".into(),
                 status_code: 499,
+                failure: None,
             });
         }
         if let Some(permit) = self.finalization.take() {
@@ -921,7 +945,8 @@ struct RunObserverInner {
     terminal: AtomicBool,
     gap: AtomicBool,
     finalization: Mutex<Option<mpsc::OwnedPermit<WriterCommand>>>,
-    pending_finish: Mutex<Option<RunOutcome>>,
+    pending_finish: Mutex<Option<(RunOutcome, i64)>>,
+    failure: Mutex<Option<FailureDiagnostic>>,
     // Canonical user text remains memory-only until Model Turn protection succeeds.
     pending_input: Mutex<Option<String>>,
     pending_tool_results: Mutex<Vec<RunEvent>>,
@@ -1069,6 +1094,22 @@ impl RunObserver {
     }
     pub(crate) fn debug_enabled(&self) -> bool {
         self.inner.debug_enabled
+    }
+    pub(crate) fn record_failure(&self, error: FailureDiagnostic) {
+        self.record(RunEvent::RequestFailed { error });
+    }
+
+    pub(crate) fn record_response_failure(&self, error: FailureDiagnostic) {
+        // 最终 Target 或流处理边界比 HTTP 错误转换保留更准确的上游事实。
+        if self
+            .inner
+            .failure
+            .lock()
+            .expect("request failure")
+            .is_none()
+        {
+            self.record_failure(error);
+        }
     }
     pub(crate) fn record_debug(&self, event: impl FnOnce() -> RunEvent) {
         if self.inner.debug_enabled {
@@ -1232,6 +1273,9 @@ impl RunObserver {
         }
         self.inner.protected.event(&mut event);
         redaction::redact_run_event(&mut event);
+        if let RunEvent::RequestFailed { error } = &event {
+            *self.inner.failure.lock().expect("request failure") = Some(error.clone());
+        }
         if matches!(event, RunEvent::ObservationGap { .. }) {
             if let Some(trace) = &self.inner.trace {
                 trace.mark_partial("observation_gap", false);
@@ -1286,6 +1330,13 @@ impl RunObserver {
         }
     }
     pub(crate) fn finish(&self, mut outcome: RunOutcome) {
+        let finished_at = writer::now();
+        if !matches!(outcome.status.as_str(), "completed" | "waiting_client")
+            && let Some(error) = self.inner.failure.lock().expect("request failure").as_ref()
+        {
+            outcome.status = "failed".into();
+            outcome.terminal_reason.clone_from(&error.code);
+        }
         self.flush_visible();
         self.finish_thinking();
         self.inner.protected.text(&mut outcome.status);
@@ -1302,10 +1353,17 @@ impl RunObserver {
                     .try_send(WriterCommand::Finish {
                         run_id: self.inner.run_id.clone(),
                         outcome,
+                        finished_at,
                     })
             {
-                if let WriterCommand::Finish { outcome, .. } = error.into_inner() {
-                    *self.inner.pending_finish.lock().expect("terminal state") = Some(outcome);
+                if let WriterCommand::Finish {
+                    outcome,
+                    finished_at,
+                    ..
+                } = error.into_inner()
+                {
+                    *self.inner.pending_finish.lock().expect("terminal state") =
+                        Some((outcome, finished_at));
                     self.inner.gap.store(true, Ordering::Release);
                     self.inner
                         .observation
@@ -1380,13 +1438,16 @@ impl Drop for RunObserverInner {
             .expect("terminal state")
             .take();
         if !*self.terminal.get_mut() {
-            pending_finish = Some(RunOutcome {
-                delivery_completed_at: None,
-                status: "interrupted".into(),
-                terminal_reason: Some("observer_dropped".into()),
-                generation_node_id: None,
-                generation_root_id: None,
-            });
+            pending_finish = Some((
+                RunOutcome {
+                    delivery_completed_at: None,
+                    status: "interrupted".into(),
+                    terminal_reason: Some("observer_dropped".into()),
+                    generation_node_id: None,
+                    generation_root_id: None,
+                },
+                writer::now(),
+            ));
         }
         let command = WriterCommand::Finalize {
             run_id: Some(self.run_id.clone()),
@@ -2252,6 +2313,11 @@ mod snapshot_tests {
         ))
         .execute(&pool)
         .await?;
+        sqlx::raw_sql(include_str!(
+            "../../migrations/sqlite/0044_failed_request_diagnostics.sql"
+        ))
+        .execute(&pool)
+        .await?;
         let mut observation = InteractionObservation::new(
             Some(pool.clone()),
             None,
@@ -2480,6 +2546,11 @@ mod snapshot_tests {
         ))
         .execute(&pool)
         .await?;
+        sqlx::raw_sql(include_str!(
+            "../../migrations/sqlite/0044_failed_request_diagnostics.sql"
+        ))
+        .execute(&pool)
+        .await?;
         let observation = InteractionObservation::new(
             Some(pool.clone()),
             None,
@@ -2626,6 +2697,11 @@ mod snapshot_tests {
         .await?;
         sqlx::raw_sql(include_str!(
             "../../migrations/sqlite/0040_interaction_input_preview.sql"
+        ))
+        .execute(&pool)
+        .await?;
+        sqlx::raw_sql(include_str!(
+            "../../migrations/sqlite/0044_failed_request_diagnostics.sql"
         ))
         .execute(&pool)
         .await?;

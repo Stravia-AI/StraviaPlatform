@@ -329,8 +329,10 @@ One row per Connect Client Interaction. `root_id` and `parent_interaction_id` pr
 | `ingress_protocol` | TEXT NOT NULL | — | Client protocol snapshot |
 | `route_id` | TEXT NOT NULL | — | Effective Route ID |
 | `model_display_name` | TEXT | NULL | Display-name snapshot |
+| `request_model` | TEXT | NULL | Requested route model ID snapshot |
 | `status` | TEXT NOT NULL | — | Run lifecycle state |
 | `terminal_reason` | TEXT | NULL | Stable terminal reason |
+| `failure_json` | TEXT | NULL | Final failure diagnostic snapshot (`source`, `code`, `message`, `status_code`); NULL when no diagnostic was recorded or for pre-0044 runs |
 | `user_interrupted` | BOOLEAN / INTEGER | `false` / `0` | Superseded by later User input |
 | `background_active` | BIGINT / INTEGER | `0` | Active internal work count |
 | `debug_enabled` | BOOLEAN / INTEGER NOT NULL | — | Process Debug state snapshotted at admission |
@@ -339,7 +341,7 @@ One row per Connect Client Interaction. `root_id` and `parent_interaction_id` pr
 | `last_event_sequence` | BIGINT / INTEGER | `0` | Last applied persisted event |
 | `expires_at` | BIGINT / INTEGER | — | Retention boundary |
 
-**索引**：`inference_runs_interaction_idx`、`inference_runs_generation_idx`、`inference_runs_status_idx`
+**索引**：`inference_runs_interaction_idx`、`inference_runs_generation_idx`、`inference_runs_status_idx`、`inference_runs_failed_window_idx`（partial, `status = 'failed'`, `(started_at DESC, id)`)
 
 ### model_turn_observations
 
@@ -383,21 +385,26 @@ One row per real upstream Target attempt, including retries and failovers.
 
 ### rejected_request_observations
 
-Pre-admission decode, protocol, or authentication failures remain outside Principal and Generation Chain.
+Pre-admission decode, protocol, or authentication failures remain outside Principal and Generation Chain. Migration 0044 added the nullable failure diagnostics and caller snapshots below for the failed-requests projection; they are optional, never backfilled, and introduce no new Principal foreign key — missing values stay unknown instead of being reconstructed.
 
 | Column | Type | Default | Description |
 |---|---|---|---|
 | `id` | TEXT PK | — | Rejected Request UUID |
 | `occurred_at` | BIGINT / INTEGER NOT NULL | — | Ingress time |
+| `started_at` | BIGINT / INTEGER | NULL | Request start time; NULL rows fall back to `occurred_at` ordering and are reported as `observation_gap` |
+| `duration_ms` | BIGINT / INTEGER | NULL | Request duration captured at termination |
 | `method`, `path`, `ingress_protocol` | TEXT NOT NULL | — | Minimal ingress identity |
 | `stage`, `code` | TEXT NOT NULL | — | Rejection classification |
 | `status_code` | BIGINT / INTEGER NOT NULL | — | Client HTTP status |
+| `request_model` | TEXT | NULL | Requested route model ID snapshot |
+| `api_key_id`, `api_key_name` | TEXT | NULL | Authenticated caller snapshot; NULL for unauthenticated requests |
+| `failure_json` | TEXT | NULL | Failure diagnostic snapshot (`source`, `code`, `message`, `status_code`) |
 | `debug_enabled` | BOOLEAN / INTEGER NOT NULL | — | Debug state snapshotted at ingress |
 | `debug_status` | TEXT NOT NULL | — | Capture result |
 | `last_event_sequence` | BIGINT / INTEGER NOT NULL | — | Last applied persisted event |
 | `expires_at` | BIGINT / INTEGER NOT NULL | — | Retention boundary |
 
-**索引**：`rejected_requests_window_idx`、`rejected_requests_expiry_idx`
+**索引**：`rejected_requests_window_idx`、`rejected_requests_expiry_idx`、`rejected_requests_started_idx` (`started_at DESC, id`)
 
 ### debug_trace_manifests
 
@@ -753,6 +760,8 @@ Layer Route Target Selection migration 31 删除 `model_backends.weight`，把�
 Route Target Enabled migration 32 为 `model_backends` 增加缺省为已启用的 `enabled`；既有 Target 全部保持参与选择，写入省略该字段时也按已启用处理。
 
 Interaction Observation migration 34 是 clean cutover：SQLite 与 PostgreSQL 都先删除 `request_logs` 及其全部历史行，不从 Generation Chain 回填，再创建 Interaction、Inference Run、Model Turn、Target attempt、Rejected Request、Debug manifest、event 与单调 event sequence schema。升级后 Request Records、usage analytics 与 Route scheduling 只读取 Observation；没有旧日志别名或 dual-write。升级前若需要旧日志必须另行备份；仅回退应用二进制不能恢复已删除行。
+
+Failed Request diagnostics migration 44 为两个后端的 `inference_run_observations` 新增可空 `failure_json` 与 `request_model`，为 `rejected_request_observations` 新增可空 `failure_json`、`request_model`、`api_key_id`、`api_key_name`、`started_at` 与 `duration_ms`，并建立 `inference_runs_failed_window_idx`（`status='failed'` 部分索引）与 `rejected_requests_started_idx`。全部新列可空且不回填历史；来源快照不引入新的 Principal 外键，失败的请求列表按可取得的数据呈现，缺失诊断保持未知、不能补回。
 
 Allowance Samples migration 29 新增 `provider_allowance_samples`。样本随 Provider 删除而级联删除；应用按 14 天 TTL 清理，预报只读取当前重置窗口内且语义一致的样本。
 

@@ -28,13 +28,14 @@ import type {
   GatewayStatus,
   ForestPage,
   ForestQuery,
+  FailedRequestQuery,
+  FailedRequestPage,
+  FailedRequestDetail,
+  FailedRequestSummary,
   InteractionDetail,
   InteractionEventsQuery,
   InteractionEventsPage,
   InteractionSnapshot,
-  RejectionPage,
-  RejectionQuery,
-  RejectionDetail,
   DebugState,
   ClearHistoryResult,
   DownloadTicket,
@@ -297,13 +298,13 @@ function mapRequest(command: string, args?: Record<string, unknown>): RequestMap
     case 'deleteApiKey':
       return { method: 'DELETE', path: `/api-keys/${args?.id}` }
     case 'queryObservationForest':
-    case 'queryObservationRejections': {
+    case 'queryFailedRequests': {
       const params = new URLSearchParams()
-      for (const [key, value] of Object.entries((args?.query as ForestQuery | RejectionQuery | undefined) ?? {})) {
+      for (const [key, value] of Object.entries((args?.query as ForestQuery | undefined) ?? {})) {
         if (value != null && value !== '') params.set(key, String(value))
       }
       const suffix = params.size > 0 ? `?${params}` : ''
-      const resource = command === 'queryObservationForest' ? 'interactions' : 'rejections'
+      const resource = command === 'queryObservationForest' ? 'interactions' : 'failed-requests'
       return { method: 'GET', path: `/observations/${resource}${suffix}` }
     }
     case 'getObservationInteractionSummary': {
@@ -312,7 +313,10 @@ function mapRequest(command: string, args?: Record<string, unknown>): RequestMap
         if (value != null && value !== '') params.set(key, String(value))
       }
       const suffix = params.size > 0 ? `?${params}` : ''
-      return { method: 'GET', path: `/observations/interactions/${encodeURIComponent(String(args?.id))}/summary${suffix}` }
+      return {
+        method: 'GET',
+        path: `/observations/interactions/${encodeURIComponent(String(args?.id))}/summary${suffix}`,
+      }
     }
     case 'getObservationInteraction': {
       const params = new URLSearchParams()
@@ -328,10 +332,16 @@ function mapRequest(command: string, args?: Record<string, unknown>): RequestMap
       for (const [key, value] of Object.entries((args?.query as InteractionEventsQuery | undefined) ?? {})) {
         if (value != null) params.set(key, String(value))
       }
-      return { method: 'GET', path: `/observations/interactions/${encodeURIComponent(String(args?.id))}/events?${params}` }
+      return {
+        method: 'GET',
+        path: `/observations/interactions/${encodeURIComponent(String(args?.id))}/events?${params}`,
+      }
     }
-    case 'getObservationRejection':
-      return { method: 'GET', path: `/observations/rejections/${encodeURIComponent(String(args?.id))}` }
+    case 'getFailedRequest':
+      return {
+        method: 'GET',
+        path: `/observations/failed-requests/${encodeURIComponent(String(args?.kind))}/${encodeURIComponent(String(args?.id))}`,
+      }
     case 'getObservationDebug':
       return { method: 'GET', path: '/observations/debug' }
     case 'setObservationDebug':
@@ -543,6 +553,9 @@ export const admin = {
     delete: (id: string) => request<void>('deleteApiKey', { id }),
   },
   observations: {
+    failures: (query: FailedRequestQuery) => request<FailedRequestPage>('queryFailedRequests', { query }),
+    failure: (kind: FailedRequestSummary['kind'], id: string) =>
+      request<FailedRequestDetail>('getFailedRequest', { kind, id }),
     forest: (query: ForestQuery) => request<ForestPage>('queryObservationForest', { query }),
     interactionSummary: (id: string, query?: ForestQuery) =>
       request<InteractionSnapshot>('getObservationInteractionSummary', { id, query }),
@@ -550,8 +563,6 @@ export const admin = {
       request<InteractionDetail>('getObservationInteraction', { id, query }),
     interactionEvents: (id: string, query: InteractionEventsQuery) =>
       request<InteractionEventsPage>('getObservationInteractionEvents', { id, query }),
-    rejections: (query: RejectionQuery) => request<RejectionPage>('queryObservationRejections', { query }),
-    rejection: (id: string) => request<RejectionDetail>('getObservationRejection', { id }),
     debug: () => request<DebugState>('getObservationDebug'),
     setDebug: (enabled: boolean) => request<DebugState>('setObservationDebug', { enabled }),
     clearHistory: () => request<ClearHistoryResult>('clearObservationHistory'),

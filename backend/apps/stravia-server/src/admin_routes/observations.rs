@@ -10,8 +10,8 @@ use futures::StreamExt;
 use serde::Deserialize;
 use stravia_core::Gateway;
 use stravia_core::admin::{
-    BundleRequest, BundleResourceKind, ForestQuery, InteractionEventsQuery, ObservationQueryError,
-    ObservationUpdate, RejectionQuery,
+    BundleRequest, BundleResourceKind, FailedRequestQuery, ForestQuery, InteractionEventsQuery,
+    ObservationQueryError, ObservationUpdate, RejectionQuery,
 };
 
 #[derive(Debug, Deserialize)]
@@ -92,6 +92,27 @@ pub(super) async fn rejection_list(
 ) -> Response {
     match gateway.admin().observation_rejections(query).await {
         Ok(data) => Json(serde_json::json!({ "data": data })).into_response(),
+        Err(error) => observation_query_error(error),
+    }
+}
+
+pub(super) async fn failed_request_list(
+    State(gateway): State<Gateway>,
+    Query(query): Query<FailedRequestQuery>,
+) -> Response {
+    match gateway.admin().failed_requests(query).await {
+        Ok(data) => Json(serde_json::json!({ "data": data })).into_response(),
+        Err(error) => observation_query_error(error),
+    }
+}
+
+pub(super) async fn failed_request_detail(
+    State(gateway): State<Gateway>,
+    Path((kind, id)): Path<(String, String)>,
+) -> Response {
+    match gateway.admin().failed_request_detail(&kind, &id).await {
+        Ok(Some(data)) => Json(serde_json::json!({ "data": data })).into_response(),
+        Ok(None) => not_found(),
         Err(error) => observation_query_error(error),
     }
 }
