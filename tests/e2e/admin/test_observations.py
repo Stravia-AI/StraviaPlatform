@@ -847,6 +847,14 @@ def test_observation_http_sse_usage_and_legacy_cutover(admin_env: dict[str, Any]
         "cache_read_tokens": None,
         "cache_write_tokens": None,
         "reasoning_tokens": None,
+        "coverage": {
+            "attempt_count": 1,
+            "missing_input_tokens": 0,
+            "missing_output_tokens": 0,
+            "missing_cache_read_tokens": 1,
+            "missing_cache_write_tokens": 1,
+            "missing_reasoning_tokens": 1,
+        },
     }
 
     detail = _detail(admin_env, summary["id"])

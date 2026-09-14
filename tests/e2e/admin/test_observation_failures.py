@@ -678,10 +678,20 @@ def test_restart_reconciles_waiting_interactions(stravia_binary: Path) -> None:
                         headers={"authorization": f"Bearer {pending_key}"},
                     )
                     assert status == 200, response
-                    return _wait_for("pending tool interaction", lambda: next((
-                        item for item in _route_interactions(current_env, pending_route)
-                        if item["status"] == "waiting_client"
-                    ), None))
+
+                    def finished_waiting() -> dict[str, Any] | None:
+                        item = next((
+                            item for item in _route_interactions(current_env, pending_route)
+                            if item["status"] == "waiting_client"
+                        ), None)
+                        if item is None:
+                            return None
+                        run = _detail(current_env, item["id"])["runs"][0]
+                        return item if any(
+                            event["kind"] == "run_finished" for event in run["events"]
+                        ) else None
+
+                    return _wait_for("pending tool interaction", finished_waiting)
 
                 pending = create_waiting(env, "observation-branch pending before restart")
                 before = _detail(env, pending["id"])["runs"][0]
