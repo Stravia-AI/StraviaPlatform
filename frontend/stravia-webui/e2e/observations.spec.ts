@@ -533,14 +533,16 @@ test.describe('Interaction Observation canvas', () => {
     await expect(conversation).toContainText('Paragraph 251')
     await expect(conversation.getByText('Paragraph 250', { exact: true })).toHaveCount(0)
     const earlier = conversation.getByRole('button', { name: 'Load earlier events', exact: true })
-    await earlier.scrollIntoViewIfNeeded()
+    await expect(earlier).toHaveCount(0)
     const anchor = conversation.getByText('Paragraph 251', { exact: true })
-    const before = await anchor.evaluate((element) => element.getBoundingClientRect().top)
-    await earlier.click()
+    const before = await conversation.evaluate((element) => {
+      element.scrollTop = 40
+      return [...element.querySelectorAll('p')].find((paragraph) => paragraph.textContent === 'Paragraph 251')!.getBoundingClientRect().top
+    })
     await expect(conversation.getByText('Paragraph 51', { exact: true })).toHaveCount(1)
     await expect.poll(async () => Math.abs(await anchor.evaluate((element) => element.getBoundingClientRect().top) - before)).toBeLessThan(3)
-    await earlier.scrollIntoViewIfNeeded()
-    await earlier.click()
+    await conversation.focus()
+    await page.keyboard.press('Home')
     await expect(conversation.getByText('Paragraph 1', { exact: true })).toHaveCount(1)
     await expect(earlier).toHaveCount(0)
     expect(fixture.detailRequests).toHaveLength(1)

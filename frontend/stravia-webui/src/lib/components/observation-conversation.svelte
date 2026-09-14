@@ -23,7 +23,7 @@ let viewportElement: HTMLElement | undefined
 let prepending = false
 async function loadOlder(): Promise<void> {
   const viewport = viewportElement
-  if (!viewport || !onolder || olderLoading) return
+  if (!viewport || !onolder || olderLoading || prepending || detail.older_events_cursor === null) return
   inspectActivity?.()
   prepending = true
   const height = viewport.scrollHeight
@@ -78,17 +78,25 @@ function followConversation(viewport: HTMLElement): () => void {
     }
     const onScroll = () => {
       const top = viewport.scrollTop
+      const scrollingUp = top < previousTop
       if (top < previousTop || atBottom()) {
         following = atBottom()
         if (following) hasNewActivity = false
       }
       previousTop = top
+      if (scrollingUp && top <= 80) void loadOlder()
     }
     const onWheel = (event: WheelEvent) => {
-      if (event.deltaY < 0) following = false
+      if (event.deltaY < 0) {
+        following = false
+        if (viewport.scrollTop <= 80) void loadOlder()
+      }
     }
     const onKey = (event: KeyboardEvent) => {
-      if (['ArrowUp', 'PageUp', 'Home'].includes(event.key)) following = false
+      if (['ArrowUp', 'PageUp', 'Home'].includes(event.key)) {
+        following = false
+        if (viewport.scrollTop <= 80) void loadOlder()
+      }
     }
     const resize = new ResizeObserver(() => {
       if (following) scrollToLatest()
@@ -140,12 +148,10 @@ function followConversation(viewport: HTMLElement): () => void {
     role="log"
     aria-label={m.observation_conversation()}
     aria-live="off"
+    aria-busy={olderLoading}
     tabindex="0"
     {@attach followConversation}>
     <div class="conversation-messages">
-      {#if detail.older_events_cursor !== null && onolder}
-        <Button variant="outline" disabled={olderLoading} aria-busy={olderLoading} onclick={loadOlder}>{m.observation_load_earlier()}</Button>
-      {/if}
       {#each groups as group (group[0].id)}
         {@const user = group[0].role === 'user'}
         {@const actor = user ? m.observation_chat_you() : group[0].model || m.observation_chat_model()}
