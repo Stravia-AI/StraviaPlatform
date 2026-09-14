@@ -49,7 +49,6 @@ import {
 import * as DropdownMenu from '$lib/components/ui/dropdown-menu'
 import * as InputGroup from '$lib/components/ui/input-group'
 import * as Empty from '$lib/components/ui/empty'
-import * as Alert from '$lib/components/ui/alert'
 import RequestFailure from '$lib/components/request-failure.svelte'
 import { allCatalogFilterValue, catalogFilterOptions } from './provider-model-catalog/filter-options'
 import { Spinner } from '$lib/components/ui/spinner'
@@ -105,7 +104,6 @@ let lastSyncedAt = $state<Date>()
 let loadedQueryModel = $state('')
 let editor = $state<{ submit: () => void }>()
 let addingRouteModelId = $state('')
-let addedModel = $state<{ id: string; existingRoute: boolean }>()
 
 const modelsQuery = createQuery(() => ({
   queryKey: ['provider-models', providerId],
@@ -303,7 +301,6 @@ async function addModelToRoute(model: ProviderModelSummary): Promise<void> {
   try {
     const existingRoute = routeForModel(model.id)
     await admin.models.bind({ provider_id: providerId, provider_model_id: model.id })
-    addedModel = { id: model.id, existingRoute: Boolean(existingRoute) }
     if (existingRoute) {
       toast.success(m.provider_model_catalog_model_target_added({ id: model.id }))
     } else {
@@ -767,17 +764,6 @@ async function deleteManualModel(): Promise<void> {
         </Button>
       </div>
     </div>
-
-    {#if addedModel}
-      <Alert.Root role="status" aria-live="polite">
-        <Alert.Description>
-          {addedModel.existingRoute
-            ? m.provider_model_catalog_model_target_added({ id: addedModel.id })
-            : m.provider_model_catalog_model_route_created({ id: addedModel.id })}
-          <Button href="/connect" variant="outline">{m.connect_connect_apps()}</Button>
-        </Alert.Description>
-      </Alert.Root>
-    {/if}
 
     {#if modelsQuery.isError && modelsQuery.data}
       <RequestFailure

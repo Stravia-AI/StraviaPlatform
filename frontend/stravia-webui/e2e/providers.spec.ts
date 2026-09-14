@@ -1823,14 +1823,19 @@ test('visible provider model actions bind exact IDs and keep inventory open', as
   await expect(existingAction).toHaveText('Add to existing model')
 
   await existingAction.click()
-  await expect(page.getByRole('status').getByText('Added this service to model gpt-existing.')).toBeVisible()
-  await expect(page.getByRole('main').getByRole('link', { name: 'Connect clients' })).toBeVisible()
+  const existingToast = page.locator('[data-sonner-toast]').filter({
+    hasText: 'Added this service to model gpt-existing.',
+  })
+  await expect(existingToast).toBeVisible()
+  await expect(page.locator('.route-page').getByText('Added this service to model gpt-existing.')).toHaveCount(0)
   expect(bindBodies[0]).toEqual({ provider_id: provider.id, provider_model_id: 'gpt-existing' })
 
   const newAction = page.getByRole('button', { name: 'Add gpt-new to a model' })
   await expect(newAction).toHaveText('Add model')
   await newAction.click()
-  await expect(page.getByRole('status').getByText('Created model gpt-new.')).toBeVisible()
+  const createdToast = page.locator('[data-sonner-toast]').filter({ hasText: 'Created model gpt-new.' })
+  await expect(createdToast).toBeVisible()
+  await expect(page.locator('.route-page').getByText('Created model gpt-new.')).toHaveCount(0)
   await expect(page).toHaveURL(`/providers/${provider.id}?view=models`)
   expect(bindBodies[1]).toEqual({ provider_id: provider.id, provider_model_id: 'gpt-new' })
 
