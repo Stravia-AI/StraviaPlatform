@@ -1740,7 +1740,7 @@ async fn codex_native_compaction_uses_unary_and_replayable_responses_websocket()
                     socket.send(Message::Text(json!({"type":"response.output_item.done","output_index":index,"item":item}).to_string().into())).await.unwrap();
                 }
                 let completed = crate::protocol::codec::open_responses::formatter::response_resource_snapshot(
-                    response_id, "upstream-model", "completed", output,
+                    response_id, "upstream-model", "completed", if triggered { Vec::new() } else { output },
                     Value::Null, Value::Null,
                     json!({"input_tokens":3,"output_tokens":1,"total_tokens":4,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}),
                 );

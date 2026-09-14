@@ -7,6 +7,7 @@ import { createQuery, useQueryClient } from '@tanstack/svelte-query'
 import ArrowLeftIcon from '@lucide/svelte/icons/arrow-left'
 import PlusIcon from '@lucide/svelte/icons/plus'
 import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw'
+import { toast } from 'svelte-sonner'
 
 import { admin } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
@@ -70,6 +71,13 @@ async function syncModels(): Promise<ProviderModelSyncSummary | undefined> {
       replaceState: true,
       noScroll: true,
       keepFocus: true,
+    })
+    toast.success(m.providers_model_list_updated(), {
+      description: m.providers_value_new_value_no_longer_offered_value_available({
+        added: summary.added,
+        missing: summary.missing,
+        restored: summary.restored,
+      }),
     })
     return summary
   } catch (error) {
@@ -144,7 +152,7 @@ async function syncModels(): Promise<ProviderModelSyncSummary | undefined> {
     {#if view === 'connection'}
       <ProviderConnectionView {provider} onSaved={(saved) => (savedProvider = saved)} />
     {:else if view === 'models'}
-      {#if syncStatus !== 'idle'}
+      {#if syncStatus === 'syncing' || syncStatus === 'error'}
         <section class="rounded-xl border p-4" aria-live="polite">
           {#if syncStatus === 'syncing'}
             <div class="flex items-center gap-3">
@@ -153,19 +161,6 @@ async function syncModels(): Promise<ProviderModelSyncSummary | undefined> {
                 <p class="font-medium">{m.providers_syncing_models()}</p>
                 <p class="text-sm text-muted-foreground">
                   {m.providers_checking_service_latest_models_keep_using_page()}
-                </p>
-              </div>
-            </div>
-          {:else if syncStatus === 'success' && syncSummary}
-            <div>
-              <div>
-                <p class="font-medium">{m.providers_model_list_updated()}</p>
-                <p class="mt-1 text-sm text-muted-foreground">
-                  {m.providers_value_new_value_no_longer_offered_value_available({
-                    added: syncSummary.added,
-                    missing: syncSummary.missing,
-                    restored: syncSummary.restored,
-                  })}
                 </p>
               </div>
             </div>

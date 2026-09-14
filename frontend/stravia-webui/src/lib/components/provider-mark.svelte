@@ -1,4 +1,5 @@
 <script lang="ts">
+import PlugIcon from '@lucide/svelte/icons/plug'
 import { icons } from '../../assets/icons'
 import { catalogLogoUrl } from '$lib/admin-client'
 
@@ -36,6 +37,8 @@ function endpointFaviconUrl(endpoint: string | null | undefined): string | undef
 {#snippet fallback()}
   {#if svgSource}
     <img src={svgSource} alt="" />
+  {:else if isCustom}
+    <PlugIcon class="size-4" />
   {:else}
     <span class="font-structural text-[0.7rem] font-semibold">{(name.trim().slice(0, 1) || '?').toUpperCase()}</span>
   {/if}
