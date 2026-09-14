@@ -458,7 +458,7 @@ SSE 通过普通 `fetch` 携带 Admin Bearer header，并由 `eventsource-parser
 
 一个时间页先加载最新一批根链的完整子树；横向接近已加载边缘时按 cursor 加载下一批。未加载完时显示 `loaded / total`。“适配全部”先加载剩余根链并显示进度，再计算完整 bounds。
 
-实时更新使用 `GET /api/v1/observations/interactions/{id}/summary`，返回 `InteractionSnapshot { interaction, root, snapshot_sequence }`。该接口保留原详情的筛选、完整根链和时间参数校验，但只读取已持久化的摘要与关联事件，不读取 Run、普通事件正文或 Trace，也不等待 Trace flush。检查器初次加载有界详情，之后按 sequence 增量读取；“加载更早记录”向前分页并保持滚动锚点，未变更 Run 与消息沿用原引用。易失通知只更新文本预览，不触发 HTTP 请求。选择、关闭或时间范围变化后，旧请求不得覆盖新的检查器状态。Forest、summary 与 detail 共用有界批量关联事件查询，按交互分组并保持 sequence 顺序及快照上界。点击下载时不沿用页面的旧截止序号，由服务端完成目标屏障后固定票据快照。
+实时更新使用 `GET /api/v1/observations/interactions/{id}/summary`，返回 `InteractionSnapshot { interaction, root, snapshot_sequence }`。该接口保留原详情的筛选、完整根链和时间参数校验，但只读取已持久化的摘要与关联事件，不读取 Run、普通事件正文或 Trace，也不等待 Trace flush。检查器初次加载有界详情，之后按 sequence 增量读取；向上滚动接近对话顶部时自动向前分页并保持滚动锚点，不再显示手动加载按钮，未变更 Run 与消息沿用原引用。易失通知只更新文本预览，不触发 HTTP 请求。选择、关闭或时间范围变化后，旧请求不得覆盖新的检查器状态。Forest、summary 与 detail 共用有界批量关联事件查询，按交互分组并保持 sequence 顺序及快照上界。点击下载时不沿用页面的旧截止序号，由服务端完成目标屏障后固定票据快照。
 
 ### 10.3 时间页与迁移
 
