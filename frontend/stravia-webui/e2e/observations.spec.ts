@@ -1301,6 +1301,46 @@ test.describe('Interaction Observation canvas', () => {
     })
   }
 
+  test('renders multiple thinking Markdown paragraphs live and after reload', async ({ page }) => {
+    const fixture = await installObservationFixture(page, false, false, true)
+    await page.goto('/logs?interaction=interaction-cinder')
+    const conversation = page.getByRole('log', { name: 'Conversation' })
+    const thinking = conversation.getByRole('button', { name: /^Thinking(?:…)?$/ })
+    const scope = { model_turn_id: 'paragraph-turn', attempt_id: 'paragraph-attempt' }
+    const emit = (sequence: number, kind: string, payload: unknown) =>
+      fixture.emit({
+        sequence,
+        occurred_at: startedAt + 299_000 + sequence,
+        interaction_id: 'interaction-cinder',
+        run_id: 'run-interaction-cinder',
+        rejection_id: null,
+        kind,
+        payload,
+      })
+    emit(11, 'model_thinking_delta', { ...scope, text: '**Selecting top ' })
+    await thinking.click()
+    emit(12, 'model_thinking_delta', { ...scope, text: 'five candidate features**' })
+    emit(13, 'model_thinking_delta', {
+      ...scope,
+      text: '\n\n**Implementing temp path and timestamp retrieval**',
+    })
+    const content = conversation.locator('.markdown-content').filter({ hasText: 'Selecting top' })
+    const assertParagraphs = async () => {
+      await expect(content.locator('p')).toHaveCount(2)
+      await expect(content.locator('strong')).toHaveText([
+        'Selecting top five candidate features',
+        'Implementing temp path and timestamp retrieval',
+      ])
+      await expect(content).not.toContainText('****')
+    }
+    await assertParagraphs()
+    emit(14, 'model_thinking_finished', scope)
+    await expect(thinking).toHaveAccessibleName('Thinking')
+    await page.reload()
+    await thinking.click()
+    await assertParagraphs()
+  })
+
   test('reveals only received live graphemes and respects paused reading and reduced motion', async ({ page }) => {
     const fixture = await installObservationFixture(page, false, false, true)
     await page.goto('/logs')

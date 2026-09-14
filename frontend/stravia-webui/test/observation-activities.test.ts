@@ -77,6 +77,40 @@ function tools(value: InteractionDetail, id: string): ToolActivity[] {
 }
 
 describe('observation activities', () => {
+  test('preserves thinking paragraphs across live, durable and mixed delivery', () => {
+    const root = run('root')
+    const value = detail([root])
+    const scope = { model_turn_id: 'turn', attempt_id: 'attempt' }
+    const chunks = [
+      '**Selecting top ',
+      'five candidate features**',
+      '\n',
+      '\n**Implementing temp path and timestamp retrieval**',
+    ]
+    const blocks = chunks.map((text, index) => ({
+      ...scope,
+      block_id: `thinking-${index}`,
+      interaction_id: 'interaction',
+      run_id: root.id,
+      kind: 'model_thinking_delta' as const,
+      occurred_at: index,
+      revision: 1,
+      text,
+    }))
+    const expected = '**Selecting top five candidate features**\n\n**Implementing temp path and timestamp retrieval**'
+    const text = (remaining = blocks) =>
+      observationConversationActivities(value, remaining)
+        .get('assistant:root')!
+        .filter((activity) => activity.kind === 'thinking')
+        .map((activity) => activity.text)
+    expect(text()).toEqual([expected])
+    for (let index = 0; index < chunks.length; index++) {
+      event(root, index + 1, 'model_thinking_delta', { ...scope, text: chunks[index] })
+      expect(text(blocks.slice(index + 1))).toEqual([expected])
+    }
+    expect(text([])).toEqual([expected])
+  })
+
   test('accumulates ordinary thinking without Debug and stops failed attempts and runs before summary refresh', () => {
     const root = run('root')
     root.debug_enabled = false
