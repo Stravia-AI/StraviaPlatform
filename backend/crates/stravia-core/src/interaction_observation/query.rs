@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+mod failed;
 
 use sqlx::{FromRow, QueryBuilder, Row};
 
@@ -1175,6 +1176,131 @@ fn map_sqlite_events(rows: Vec<sqlx::sqlite::SqliteRow>) -> anyhow::Result<Vec<O
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn failed_requests_page_equal_start_times_across_record_kinds() -> anyhow::Result<()> {
+        use crate::interaction_observation::store::{Admission, Rejection};
+
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        crate::migrations::migrate_sqlite(&pool).await?;
+        let store = ObservationStore::Sqlite(pool);
+        let at = chrono::Utc::now().timestamp_millis();
+        let metadata = crate::interaction_observation::RequestMetadata::default();
+        // HTTP 到达时间由真实时钟决定；仅在存储边界固定同毫秒，验证跨来源的平局顺序。
+        for id in ["b", "a"] {
+            let start = RunStart {
+                id: id.into(),
+                principal: "owner".into(),
+                api_key_id: None,
+                api_key_name: None,
+                generation_root_id: None,
+                generation_parent_id: None,
+                has_new_user: true,
+                has_matching_pending_tool_result: false,
+                ingress_received_at: at,
+                canonical_fingerprint: id.into(),
+                route_id: "route".into(),
+                model_display_name: None,
+                ingress_protocol: "openai".into(),
+            };
+            store
+                .admit(Admission {
+                    start: &start,
+                    metadata: None,
+                    interaction_id: id,
+                    parent_run_id: None,
+                    parent_interaction_id: None,
+                    debug_enabled: false,
+                    inferred_retry: false,
+                    grouping_reason: "new_root",
+                    now: at,
+                    expires_at: i64::MAX,
+                })
+                .await?;
+            store
+                .finish_run(
+                    id,
+                    id,
+                    &RunOutcome {
+                        status: "failed".into(),
+                        terminal_reason: Some("historical_failure".into()),
+                        delivery_completed_at: None,
+                        generation_node_id: None,
+                        generation_root_id: None,
+                    },
+                    at + 20,
+                    i64::MAX,
+                )
+                .await?;
+            store
+                .reject(Rejection {
+                    ingress: &IngressStart {
+                        id: id.into(),
+                        method: "POST".into(),
+                        path: "/v1/responses".into(),
+                        protocol: "openai".into(),
+                    },
+                    outcome: &RejectedOutcome {
+                        stage: "decode".into(),
+                        code: "invalid_request".into(),
+                        status_code: 400,
+                        failure: None,
+                    },
+                    metadata: &metadata,
+                    debug_enabled: false,
+                    occurred_at: at,
+                    expires_at: i64::MAX,
+                    started_at: at,
+                    duration_ms: 0,
+                })
+                .await?;
+        }
+        let mut cursor = None;
+        let mut seen = Vec::new();
+        loop {
+            let page = store
+                .failed_requests(FailedRequestQuery {
+                    start_at: Some(at),
+                    end_at: Some(at + 1),
+                    cursor,
+                    limit: Some(1),
+                    ..Default::default()
+                })
+                .await?;
+            assert_eq!(page.total, 4);
+            let row = page
+                .items
+                .into_iter()
+                .next()
+                .expect("remaining failed request");
+            if row.kind == "run" {
+                assert_eq!(row.duration_ms, Some(20));
+                assert_eq!(row.error.source, None);
+                assert_eq!(row.error.message, None);
+                assert!(row.observation_gap);
+            }
+            seen.push((row.kind, row.id));
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+            assert!(seen.len() < 4);
+        }
+        assert_eq!(
+            seen,
+            [
+                ("rejection", "a"),
+                ("rejection", "b"),
+                ("run", "a"),
+                ("run", "b")
+            ]
+            .map(|(kind, id)| (kind.to_owned(), id.to_owned())),
+        );
+        Ok(())
+    }
 
     #[tokio::test]
     async fn context_batches_preserve_groups_order_and_watermark() -> anyhow::Result<()> {

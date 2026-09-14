@@ -74,7 +74,14 @@ const { setViewport, setCenter, zoomIn, zoomOut, getViewport, getNode } = useSve
 const nodeTypes = { interaction: InteractionNode }
 const interactionNodeHandles: NodeHandle[] = [
   { type: 'target', position: Position.Top, x: interactionNodeWidth / 2 - 0.5, y: -0.5, width: 1, height: 1 },
-  { type: 'source', position: Position.Bottom, x: interactionNodeWidth / 2 - 0.5, y: interactionNodeHeight - 0.5, width: 1, height: 1 },
+  {
+    type: 'source',
+    position: Position.Bottom,
+    x: interactionNodeWidth / 2 - 0.5,
+    y: interactionNodeHeight - 0.5,
+    width: 1,
+    height: 1,
+  },
 ]
 let positions = $state.raw(new Map<string, LayoutPosition>())
 let canvasElement = $state<HTMLDivElement>()
@@ -99,28 +106,36 @@ let nodes = $derived.by<FlowInteractionNode[]>(() => {
       const onSelectedPath = selectedPath.has(interaction.id)
       const subdued = (selectedId != null && !onSelectedPath) || (!interaction.matched && hasMatches)
       const ariaLabel = `${interaction.first_model_display_name || interaction.first_route_id}, ${observationStatusLabel(interaction.status)}`
-      if (current &&
+      if (
+        current &&
         current.data.interaction === interaction &&
-        current.position.x === position.x && current.position.y === position.y &&
-        current.selected === selected && current.data.onSelectedPath === onSelectedPath &&
-        current.data.subdued === subdued && current.ariaLabel === ariaLabel) return [current]
-      return [{
-        id: interaction.id,
-        type: 'interaction' as const,
-        position,
-        width: interactionNodeWidth,
-        height: interactionNodeHeight,
-        handles: interactionNodeHandles,
-        measured: current?.measured,
-        data: { interaction, onSelectedPath, subdued },
-        selected,
-        draggable: false,
-        connectable: false,
-        deletable: false,
-        focusable: true,
-        ariaRole: 'button' as const,
-        ariaLabel,
-      }]
+        current.position.x === position.x &&
+        current.position.y === position.y &&
+        current.selected === selected &&
+        current.data.onSelectedPath === onSelectedPath &&
+        current.data.subdued === subdued &&
+        current.ariaLabel === ariaLabel
+      )
+        return [current]
+      return [
+        {
+          id: interaction.id,
+          type: 'interaction' as const,
+          position,
+          width: interactionNodeWidth,
+          height: interactionNodeHeight,
+          handles: interactionNodeHandles,
+          measured: current?.measured,
+          data: { interaction, onSelectedPath, subdued },
+          selected,
+          draggable: false,
+          connectable: false,
+          deletable: false,
+          focusable: true,
+          ariaRole: 'button' as const,
+          ariaLabel,
+        },
+      ]
     }),
   )
 })
@@ -198,7 +213,12 @@ async function fitLoaded(): Promise<void> {
   await waitForRenderedLayout()
   if (!canvasElement || nodes.length === 0) return
   const viewport = getViewportForBounds(
-    getNodesBounds(nodes), canvasElement.clientWidth, canvasElement.clientHeight, 0.18, 1, 0.16,
+    getNodesBounds(nodes),
+    canvasElement.clientWidth,
+    canvasElement.clientHeight,
+    0.18,
+    1,
+    0.16,
   )
   internalMove = true
   try {
@@ -209,7 +229,9 @@ async function fitLoaded(): Promise<void> {
   }
 }
 
-async function focusNode(id: string): Promise<void> {
+export async function focusNode(id: string): Promise<void> {
+  // 显式定位优先于首轮自动取景，避免新挂载画布覆盖目标节点。
+  initialized = true
   await pendingLayout
   await waitForRenderedLayout()
   const target = positions.get(id)

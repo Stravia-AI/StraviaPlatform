@@ -82,6 +82,18 @@ enum ProjectedDeliveryFailure {
     Marker(crate::history_marker::HistoryMarkerError),
 }
 
+fn record_marker_failure(
+    observer: &crate::interaction_observation::RunObserver,
+    error: &crate::history_marker::HistoryMarkerError,
+) {
+    observer.record_response_failure(crate::interaction_observation::FailureDiagnostic {
+        source: Some("platform".into()),
+        code: Some("marker_publish_failed".into()),
+        message: Some(error.to_string()),
+        status_code: None,
+    });
+}
+
 async fn deliver_projected(
     delivery: &mut DeliveryAdapter,
     projection: &mut ClientProjectionSession,
@@ -114,7 +126,10 @@ async fn deliver_projected(
     let published = projection
         .report_delivery(batch, outcome)
         .await
-        .map_err(ProjectedDeliveryFailure::Marker)?;
+        .map_err(|error| {
+            record_marker_failure(observer, &error);
+            ProjectedDeliveryFailure::Marker(error)
+        })?;
     if progress == DeliveryProgress::Sent {
         if observe_delivery {
             observer.record_debug(|| crate::interaction_observation::RunEvent::Checkpoint {
@@ -253,6 +268,30 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                         });
                         if terminal_deltas_failed(&terminal) {
                             aborted = true;
+                            if let Some(error) = terminal.iter().find_map(|delta| {
+                                if let AiStreamDelta::StreamError { error } = delta {
+                                    Some(error)
+                                } else {
+                                    None
+                                }
+                            }) {
+                                observer.record_failure(
+                                    crate::interaction_observation::FailureDiagnostic {
+                                        source: Some("upstream".into()),
+                                        code: Some(
+                                            error
+                                                .raw
+                                                .as_ref()
+                                                .and_then(|raw| raw.pointer("/error/code"))
+                                                .and_then(serde_json::Value::as_str)
+                                                .unwrap_or("upstream_stream_error")
+                                                .into(),
+                                        ),
+                                        message: Some(error.message.clone()),
+                                        status_code: error.status_code,
+                                    },
+                                );
+                            }
                             preflight_failure = terminal
                                 .iter()
                                 .find_map(|delta| {
@@ -781,6 +820,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                                                     DeliveryProgress::Sent => {}
                                                 },
                                                 Err(error) => {
+                                                    record_marker_failure(&observer, &error);
                                                     tracing::error!(
                                                         "failed to publish Hook response markers: {error}"
                                                     );
@@ -818,21 +858,17 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                             staged_delivery = Some(projection.take_staged_delivery());
                         }
                         Err(failure) => {
-                            if commit == ClientOutputCommit::Pending {
-                                preflight_failure = Some(buffered_response(
-                                    render_completion_failure(failure, ingress, true),
-                                ));
-                            }
+                            preflight_failure = Some(buffered_response(render_completion_failure(
+                                failure, ingress, true,
+                            )));
                             response = completion_context.empty_response();
                             aborted = true;
                         }
                     },
                     CompletionOutcome::Failed(failure) => {
-                        if commit == ClientOutputCommit::Pending {
-                            preflight_failure = Some(buffered_response(render_completion_failure(
-                                failure, ingress, true,
-                            )));
-                        }
+                        preflight_failure = Some(buffered_response(render_completion_failure(
+                            failure, ingress, true,
+                        )));
                         response = completion_context.empty_response();
                         aborted = true;
                     }
@@ -990,6 +1026,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                             }
                             Ok(_) => {}
                             Err(error) => {
+                                record_marker_failure(&observer, &error);
                                 tracing::error!("failed to publish terminal Hook markers: {error}");
                                 aborted = true;
                             }
@@ -1016,6 +1053,14 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
             }
 
             let preflight_failed = if let Some(outcome) = preflight_failure.take() {
+                if let RoundOutcome::Deliver { response, .. } = &outcome
+                    && response.status().as_u16() != 499
+                    && let Some(error) = response
+                        .extensions()
+                        .get::<crate::interaction_observation::FailureDiagnostic>()
+                {
+                    observer.record_response_failure(error.clone());
+                }
                 let outcome = match (owned_run.take(), owned_phase.take()) {
                     (Some(run), Some(phase)) => outcome.with_lifecycle(run, phase),
                     _ => outcome,
@@ -1023,6 +1068,14 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                 delivery.fail_before_commit(outcome)
             } else if cancelled {
                 let response = if request_context.deadline.is_exceeded() {
+                    observer.record_response_failure(
+                        crate::interaction_observation::FailureDiagnostic {
+                            source: Some("platform".into()),
+                            code: Some("request_deadline_exceeded".into()),
+                            message: Some("request deadline exceeded".into()),
+                            status_code: None,
+                        },
+                    );
                     error_response(504, "request deadline exceeded")
                 } else {
                     error_response(499, "request cancelled")

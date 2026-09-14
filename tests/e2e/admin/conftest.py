@@ -52,6 +52,7 @@ def admin_env(stravia_binary: Path) -> dict[str, Any]:
                     "admin": admin_base,
                     "proxy": proxy_base,
                     "mock": f"http://127.0.0.1:{mock_port}",
+                    "mock_server": mock_server,
                     "auth": session.auth_headers(),
                     "username": "admin",
                     "password": "correct horse battery staple",

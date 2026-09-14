@@ -15,12 +15,13 @@ from tests.common.helpers import (
     find_free_port,
     http_request,
     initialize_server,
+    minimal_mock_provider,
     start_stravia_server,
     stop_stravia_server,
     wait_for_setup_token,
     wait_until_ready,
 )
-from tests.e2e.admin.test_observations import _create_route, _proxy
+from tests.e2e.admin.test_observations import _create_route, _detail, _failed_requests, _proxy, _wait_for
 from tests.e2e.admin.test_reversible_redaction import REFERENCE, SECRET, echo_provider, set_enabled
 
 
@@ -46,6 +47,75 @@ def test_storage_backend_equivalence(storage_runtime: dict[str, object], backend
     assert "stats_total_requests=" in output
     assert "proxy_status_ok=200" in output
     assert "proxy_status_no_key=401" in output
+
+
+@pytest.mark.e2e
+@pytest.mark.storage
+@pytest.mark.parametrize("backend", ["sqlite", "postgres"], ids=["sqlite", "postgres"])
+def test_failed_request_projection_survives_restart_and_clear(
+    stravia_binary: Path, storage_runtime: dict[str, object], tmp_path: Path, backend: str,
+) -> None:
+    pg_url = storage_runtime["pg_url"]
+    if backend == "postgres" and not pg_url:
+        pytest.skip("postgres backend requires DB_URL")
+    schema = None
+    database = {"backend": "sqlite"}
+    if backend == "postgres":
+        schema = storage_runtime["make_isolated_schema"]("stravia_failed_requests")
+        storage_runtime["run_schema_action"]("create", work_dir=storage_runtime["work_dir"], pg_url=pg_url, schema=schema)
+        database = {"backend": "postgres", "url": storage_runtime["postgres_dsn_for_schema"](pg_url, schema)}
+    mock_port = find_free_port()
+    mock, _ = minimal_mock_provider(mock_port)
+    port = find_free_port()
+    base = f"http://127.0.0.1:{port}"
+    args = ["--data-dir", str(tmp_path), "--host", "127.0.0.1", "--port", str(port)]
+    process = None
+    logs = []
+    try:
+        process, logs = start_stravia_server(stravia_binary=stravia_binary, args=args)
+        wait_until_ready(f"{base}/api/v1/auth/state", timeout=30)
+        session = initialize_server(base, wait_for_setup_token(logs, process), database)
+        env = {"admin": base, "proxy": base, "auth": session.auth_headers(), "mock": f"http://127.0.0.1:{mock_port}"}
+        model = f"observation-always-failed-storage-{backend}"
+        route_id, key = _create_route(env, model, retry_budget=1)
+        status, _ = _proxy(env, key, model, [{"role": "user", "content": model}])
+        assert status >= 500
+        status, _ = http_request("POST", f"{base}/v1/chat/completions", payload={"model": model, "messages": []})
+        assert status == 401
+        before = _wait_for(
+            "both failed request sources",
+            lambda: page if (page := _failed_requests(env))["total"] == 2 else None,
+        )
+        identities = [(item["kind"], item["id"]) for item in before["items"]]
+        assert {kind for kind, _ in identities} == {"run", "rejection"}
+        run = next(item for item in before["items"] if item["kind"] == "run")
+        assert run["error"]["source"] == "upstream"
+        assert "upstream-secret" not in json.dumps(before)
+        assert [(item["kind"], item["id"]) for item in _failed_requests(env, model=route_id)["items"]] == identities
+        usage = _detail(env, run["interaction_id"])["interaction"]["usage"]
+        stop_stravia_server(process, logs)
+        process = None
+        process, logs = start_stravia_server(stravia_binary=stravia_binary, args=args)
+        wait_until_ready(f"{base}/api/v1/auth/state", timeout=30)
+        session = WebSession(base)
+        status, _ = session.request("POST", "/api/v1/auth/login", {"username": "admin", "password": "correct horse battery staple"})
+        assert status == 200
+        env["auth"] = session.auth_headers()
+        first = _failed_requests(env, limit=1)
+        second = _failed_requests(env, limit=1, cursor=first["next_cursor"])
+        assert [(item["kind"], item["id"]) for item in first["items"] + second["items"]] == identities
+        assert second["next_cursor"] is None
+        assert _detail(env, run["interaction_id"])["interaction"]["usage"] == usage
+        status, _ = http_request("DELETE", f"{base}/api/v1/observations/history", headers=env["auth"])
+        assert status == 200
+        assert _failed_requests(env)["items"] == []
+    finally:
+        if process is not None:
+            stop_stravia_server(process, logs)
+        mock.shutdown()
+        mock.server_close()
+        if schema is not None:
+            storage_runtime["run_schema_action"]("drop", work_dir=storage_runtime["work_dir"], pg_url=pg_url, schema=schema)
 
 
 def _prepare_legacy_sqlite(database: Path, migrations: Path) -> None:

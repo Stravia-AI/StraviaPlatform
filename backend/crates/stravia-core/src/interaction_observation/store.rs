@@ -14,6 +14,7 @@ pub(super) enum ObservationStore {
 
 pub(super) struct Admission<'a> {
     pub start: &'a RunStart,
+    pub metadata: Option<&'a super::RequestMetadata>,
     pub interaction_id: &'a str,
     pub parent_run_id: Option<&'a str>,
     pub parent_interaction_id: Option<&'a str>,
@@ -22,6 +23,17 @@ pub(super) struct Admission<'a> {
     pub grouping_reason: &'a str,
     pub now: i64,
     pub expires_at: i64,
+}
+
+pub(super) struct Rejection<'a> {
+    pub ingress: &'a IngressStart,
+    pub outcome: &'a RejectedOutcome,
+    pub metadata: &'a super::RequestMetadata,
+    pub debug_enabled: bool,
+    pub occurred_at: i64,
+    pub expires_at: i64,
+    pub started_at: i64,
+    pub duration_ms: i64,
 }
 
 impl ObservationStore {
@@ -75,10 +87,11 @@ impl ObservationStore {
                     .bind(admission.start.generation_root_id.as_deref().unwrap_or(admission.interaction_id)).bind(&admission.start.id)
                     .bind(&admission.start.route_id).bind(&admission.start.model_display_name).bind(admission.now).bind(admission.now).bind(sequence).bind(admission.expires_at).execute(&mut *tx).await?;
                 sqlx::query("UPDATE interaction_observations SET status='running',last_active_at=?,last_event_sequence=?,expires_at=? WHERE id=?").bind(admission.now).bind(sequence).bind(admission.expires_at).bind(admission.interaction_id).execute(&mut *tx).await?;
-                sqlx::query("INSERT INTO inference_run_observations (id,interaction_id,parent_run_id,generation_parent_id,ingress_protocol,route_id,model_display_name,status,debug_enabled,started_at,last_active_at,last_event_sequence,expires_at) VALUES (?,?,?,?,?,?,?,'running',?,?,?,?,?)")
+                sqlx::query("INSERT INTO inference_run_observations (id,interaction_id,parent_run_id,generation_parent_id,ingress_protocol,route_id,model_display_name,status,debug_enabled,started_at,last_active_at,last_event_sequence,expires_at,request_model) VALUES (?,?,?,?,?,?,?,'running',?,?,?,?,?,?)")
                     .bind(&admission.start.id).bind(admission.interaction_id).bind(admission.parent_run_id).bind(&admission.start.generation_parent_id)
                     .bind(&admission.start.ingress_protocol).bind(&admission.start.route_id).bind(&admission.start.model_display_name)
-                    .bind(admission.debug_enabled).bind(admission.now).bind(admission.now).bind(sequence).bind(admission.expires_at).execute(&mut *tx).await?;
+                    .bind(admission.debug_enabled).bind(admission.start.ingress_received_at).bind(admission.now).bind(sequence).bind(admission.expires_at)
+                    .bind(admission.metadata.and_then(|metadata| metadata.model.as_deref())).execute(&mut *tx).await?;
                 let payload = serde_json::json!({"route_id": admission.start.route_id, "model_display_name": admission.start.model_display_name, "debug_enabled": admission.debug_enabled, "inferred_retry": admission.inferred_retry, "grouping_reason": admission.grouping_reason, "ingress_received_at": admission.start.ingress_received_at, "parent_run_id": admission.parent_run_id, "generation_parent_id": admission.start.generation_parent_id, "has_new_user": admission.start.has_new_user, "parent_interaction_id": admission.parent_interaction_id, "root_id": admission.start.generation_root_id.as_deref().unwrap_or(admission.interaction_id)});
                 insert_event_sqlite(
                     &mut tx,
@@ -118,10 +131,11 @@ impl ObservationStore {
                     .bind(admission.start.generation_root_id.as_deref().unwrap_or(admission.interaction_id)).bind(&admission.start.id)
                     .bind(&admission.start.route_id).bind(&admission.start.model_display_name).bind(admission.now).bind(admission.now).bind(sequence).bind(admission.expires_at).execute(&mut *tx).await?;
                 sqlx::query("UPDATE interaction_observations SET status='running',last_active_at=$1,last_event_sequence=$2,expires_at=$3 WHERE id=$4").bind(admission.now).bind(sequence).bind(admission.expires_at).bind(admission.interaction_id).execute(&mut *tx).await?;
-                sqlx::query("INSERT INTO inference_run_observations (id,interaction_id,parent_run_id,generation_parent_id,ingress_protocol,route_id,model_display_name,status,debug_enabled,started_at,last_active_at,last_event_sequence,expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7,'running',$8,$9,$10,$11,$12)")
+                sqlx::query("INSERT INTO inference_run_observations (id,interaction_id,parent_run_id,generation_parent_id,ingress_protocol,route_id,model_display_name,status,debug_enabled,started_at,last_active_at,last_event_sequence,expires_at,request_model) VALUES ($1,$2,$3,$4,$5,$6,$7,'running',$8,$9,$10,$11,$12,$13)")
                     .bind(&admission.start.id).bind(admission.interaction_id).bind(admission.parent_run_id).bind(&admission.start.generation_parent_id)
                     .bind(&admission.start.ingress_protocol).bind(&admission.start.route_id).bind(&admission.start.model_display_name)
-                    .bind(admission.debug_enabled).bind(admission.now).bind(admission.now).bind(sequence).bind(admission.expires_at).execute(&mut *tx).await?;
+                    .bind(admission.debug_enabled).bind(admission.start.ingress_received_at).bind(admission.now).bind(sequence).bind(admission.expires_at)
+                    .bind(admission.metadata.and_then(|metadata| metadata.model.as_deref())).execute(&mut *tx).await?;
                 let payload = serde_json::json!({"route_id": admission.start.route_id, "model_display_name": admission.start.model_display_name, "debug_enabled": admission.debug_enabled, "inferred_retry": admission.inferred_retry, "grouping_reason": admission.grouping_reason, "ingress_received_at": admission.start.ingress_received_at, "parent_run_id": admission.parent_run_id, "generation_parent_id": admission.start.generation_parent_id, "has_new_user": admission.start.has_new_user, "parent_interaction_id": admission.parent_interaction_id, "root_id": admission.start.generation_root_id.as_deref().unwrap_or(admission.interaction_id)});
                 insert_event_postgres(
                     &mut tx,
@@ -785,13 +799,14 @@ impl ObservationStore {
             Self::Sqlite(pool) => {
                 let mut tx = pool.begin().await?;
                 let seq = next_sqlite(&mut tx).await?;
-                let interrupted: bool = sqlx::query_scalar("UPDATE inference_run_observations SET status=CASE WHEN user_interrupted=1 THEN 'user_interrupted' ELSE ? END,terminal_reason=CASE WHEN user_interrupted=1 THEN 'user_interrupted' ELSE ? END,generation_node_id=COALESCE(?,generation_node_id),finished_at=?,last_active_at=?,last_event_sequence=? WHERE id=? RETURNING user_interrupted").bind(&outcome.status).bind(&outcome.terminal_reason).bind(&outcome.generation_node_id).bind(now).bind(now).bind(seq).bind(run_id).fetch_one(&mut *tx).await?;
+                // 耗时采用实际结束时刻；终态事件不能排到延迟记录的前序事件之前。
+                let (interrupted, recorded_at): (bool, i64) = sqlx::query_as("UPDATE inference_run_observations SET status=CASE WHEN user_interrupted=1 AND ?1!='failed' THEN 'user_interrupted' ELSE ?1 END,terminal_reason=CASE WHEN user_interrupted=1 AND ?1!='failed' THEN 'user_interrupted' ELSE ?2 END,generation_node_id=COALESCE(?3,generation_node_id),finished_at=?4,last_active_at=MAX(last_active_at,?5),last_event_sequence=?6 WHERE id=?7 RETURNING user_interrupted,last_active_at").bind(&outcome.status).bind(&outcome.terminal_reason).bind(&outcome.generation_node_id).bind(now).bind(now).bind(seq).bind(run_id).fetch_one(&mut *tx).await?;
                 let payload = finish_payload(outcome, interrupted)?;
-                recompute_status_sqlite(&mut tx, interaction_id, now, seq).await?;
+                recompute_status_sqlite(&mut tx, interaction_id, recorded_at, seq).await?;
                 insert_event_sqlite(
                     &mut tx,
                     seq,
-                    now,
+                    recorded_at,
                     Some(interaction_id),
                     Some(run_id),
                     None,
@@ -803,7 +818,7 @@ impl ObservationStore {
                 tx.commit().await?;
                 Ok(event(
                     seq,
-                    now,
+                    recorded_at,
                     Some(interaction_id),
                     Some(run_id),
                     None,
@@ -816,13 +831,13 @@ impl ObservationStore {
                 let seq: i64 = sqlx::query_scalar("SELECT nextval('observation_event_sequence')")
                     .fetch_one(&mut *tx)
                     .await?;
-                let interrupted: bool = sqlx::query_scalar("UPDATE inference_run_observations SET status=CASE WHEN user_interrupted THEN 'user_interrupted' ELSE $1 END,terminal_reason=CASE WHEN user_interrupted THEN 'user_interrupted' ELSE $2 END,generation_node_id=COALESCE($3,generation_node_id),finished_at=$4,last_active_at=$5,last_event_sequence=$6 WHERE id=$7 RETURNING user_interrupted").bind(&outcome.status).bind(&outcome.terminal_reason).bind(&outcome.generation_node_id).bind(now).bind(now).bind(seq).bind(run_id).fetch_one(&mut *tx).await?;
+                let (interrupted, recorded_at): (bool, i64) = sqlx::query_as("UPDATE inference_run_observations SET status=CASE WHEN user_interrupted AND $1!='failed' THEN 'user_interrupted' ELSE $1 END,terminal_reason=CASE WHEN user_interrupted AND $1!='failed' THEN 'user_interrupted' ELSE $2 END,generation_node_id=COALESCE($3,generation_node_id),finished_at=$4,last_active_at=GREATEST(last_active_at,$5),last_event_sequence=$6 WHERE id=$7 RETURNING user_interrupted,last_active_at").bind(&outcome.status).bind(&outcome.terminal_reason).bind(&outcome.generation_node_id).bind(now).bind(now).bind(seq).bind(run_id).fetch_one(&mut *tx).await?;
                 let payload = finish_payload(outcome, interrupted)?;
-                recompute_status_postgres(&mut tx, interaction_id, now, seq).await?;
+                recompute_status_postgres(&mut tx, interaction_id, recorded_at, seq).await?;
                 insert_event_postgres(
                     &mut tx,
                     seq,
-                    now,
+                    recorded_at,
                     Some(interaction_id),
                     Some(run_id),
                     None,
@@ -834,7 +849,7 @@ impl ObservationStore {
                 tx.commit().await?;
                 Ok(event(
                     seq,
-                    now,
+                    recorded_at,
                     Some(interaction_id),
                     Some(run_id),
                     None,
@@ -845,20 +860,30 @@ impl ObservationStore {
         }
     }
 
-    pub async fn reject(
-        &self,
-        ingress: &IngressStart,
-        outcome: &RejectedOutcome,
-        debug: bool,
-        now: i64,
-        expires_at: i64,
-    ) -> anyhow::Result<ObservationEvent> {
+    pub async fn reject(&self, rejection: Rejection<'_>) -> anyhow::Result<ObservationEvent> {
+        let Rejection {
+            ingress,
+            outcome,
+            metadata,
+            debug_enabled: debug,
+            occurred_at: now,
+            expires_at,
+            started_at,
+            duration_ms,
+        } = rejection;
         let payload = serde_json::to_value(outcome)?;
+        let failure = outcome
+            .failure
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
         match self {
             Self::Sqlite(pool) => {
                 let mut tx = pool.begin().await?;
                 let seq = next_sqlite(&mut tx).await?;
-                sqlx::query("INSERT INTO rejected_request_observations (id,occurred_at,method,path,ingress_protocol,stage,code,status_code,debug_enabled,debug_status,last_event_sequence,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)").bind(&ingress.id).bind(now).bind(&ingress.method).bind(&ingress.path).bind(&ingress.protocol).bind(&outcome.stage).bind(&outcome.code).bind(outcome.status_code).bind(debug).bind(if debug{"complete"}else{"none"}).bind(seq).bind(expires_at).execute(&mut *tx).await?;
+                sqlx::query("INSERT INTO rejected_request_observations (id,occurred_at,method,path,ingress_protocol,stage,code,status_code,debug_enabled,debug_status,last_event_sequence,expires_at,started_at,duration_ms,failure_json,request_model,api_key_id,api_key_name) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+                    .bind(&ingress.id).bind(now).bind(&ingress.method).bind(&ingress.path).bind(&ingress.protocol).bind(&outcome.stage).bind(&outcome.code).bind(outcome.status_code).bind(debug).bind(if debug{"complete"}else{"none"}).bind(seq).bind(expires_at)
+                    .bind(started_at).bind(duration_ms).bind(&failure).bind(&metadata.model).bind(&metadata.api_key_id).bind(&metadata.api_key_name).execute(&mut *tx).await?;
                 insert_event_sqlite(
                     &mut tx,
                     seq,
@@ -887,7 +912,9 @@ impl ObservationStore {
                 let seq: i64 = sqlx::query_scalar("SELECT nextval('observation_event_sequence')")
                     .fetch_one(&mut *tx)
                     .await?;
-                sqlx::query("INSERT INTO rejected_request_observations (id,occurred_at,method,path,ingress_protocol,stage,code,status_code,debug_enabled,debug_status,last_event_sequence,expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)").bind(&ingress.id).bind(now).bind(&ingress.method).bind(&ingress.path).bind(&ingress.protocol).bind(&outcome.stage).bind(&outcome.code).bind(i64::from(outcome.status_code)).bind(debug).bind(if debug{"complete"}else{"none"}).bind(seq).bind(expires_at).execute(&mut *tx).await?;
+                sqlx::query("INSERT INTO rejected_request_observations (id,occurred_at,method,path,ingress_protocol,stage,code,status_code,debug_enabled,debug_status,last_event_sequence,expires_at,started_at,duration_ms,failure_json,request_model,api_key_id,api_key_name) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)")
+                    .bind(&ingress.id).bind(now).bind(&ingress.method).bind(&ingress.path).bind(&ingress.protocol).bind(&outcome.stage).bind(&outcome.code).bind(i64::from(outcome.status_code)).bind(debug).bind(if debug{"complete"}else{"none"}).bind(seq).bind(expires_at)
+                    .bind(started_at).bind(duration_ms).bind(&failure).bind(&metadata.model).bind(&metadata.api_key_id).bind(&metadata.api_key_name).execute(&mut *tx).await?;
                 insert_event_postgres(
                     &mut tx,
                     seq,
@@ -1098,7 +1125,7 @@ impl ObservationStore {
 
 fn finish_payload(outcome: &RunOutcome, interrupted: bool) -> anyhow::Result<Value> {
     let mut payload = serde_json::to_value(outcome)?;
-    if interrupted {
+    if interrupted && outcome.status != "failed" {
         payload["status"] = Value::String("user_interrupted".into());
         payload["terminal_reason"] = Value::String("user_interrupted".into());
     }
@@ -1229,6 +1256,13 @@ async fn apply_sqlite(
     now: i64,
 ) -> anyhow::Result<()> {
     match e {
+        RunEvent::RequestFailed { error } => {
+            sqlx::query("UPDATE inference_run_observations SET failure_json=? WHERE id=?")
+                .bind(serde_json::to_string(error)?)
+                .bind(rid)
+                .execute(&mut **tx)
+                .await?;
+        }
         RunEvent::GenerationAssociated {
             root_id, parent_id, ..
         } => {
@@ -1326,6 +1360,13 @@ async fn apply_postgres(
     now: i64,
 ) -> anyhow::Result<()> {
     match e {
+        RunEvent::RequestFailed { error } => {
+            sqlx::query("UPDATE inference_run_observations SET failure_json=$1 WHERE id=$2")
+                .bind(serde_json::to_string(error)?)
+                .bind(rid)
+                .execute(&mut **tx)
+                .await?;
+        }
         RunEvent::GenerationAssociated {
             root_id, parent_id, ..
         } => {
@@ -1509,7 +1550,7 @@ async fn recompute_status_sqlite(
                 *leaf && !(status == "waiting_client" && resolved.contains(id.as_str())),
             )
         }));
-    sqlx::query("UPDATE interaction_observations SET status=?,last_active_at=?,last_event_sequence=? WHERE id=?")
+    sqlx::query("UPDATE interaction_observations SET status=?,last_active_at=MAX(last_active_at,?),last_event_sequence=? WHERE id=?")
         .bind(status).bind(now).bind(seq).bind(iid).execute(&mut **tx).await?;
     Ok(())
 }
@@ -1550,7 +1591,7 @@ async fn recompute_status_postgres(
                 *leaf && !(status == "waiting_client" && resolved.contains(id.as_str())),
             )
         }));
-    sqlx::query("UPDATE interaction_observations SET status=$1,last_active_at=$2,last_event_sequence=$3 WHERE id=$4")
+    sqlx::query("UPDATE interaction_observations SET status=$1,last_active_at=GREATEST(last_active_at,$2),last_event_sequence=$3 WHERE id=$4")
         .bind(status).bind(now).bind(seq).bind(iid).execute(&mut **tx).await?;
     Ok(())
 }
@@ -1617,7 +1658,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::interaction_observation::types::ForestQuery;
+    use crate::interaction_observation::types::{FailedRequestQuery, ForestQuery};
 
     async fn confirmed_usage_scenario(store: &ObservationStore) -> anyhow::Result<()> {
         use crate::interaction_observation::types::UsageCoverage;
@@ -1779,6 +1820,7 @@ mod tests {
     ) -> anyhow::Result<()> {
         store
             .admit(Admission {
+                metadata: None,
                 start: &RunStart {
                     id: id.into(),
                     principal: principal.into(),
@@ -1807,6 +1849,116 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn queued_observations_preserve_terminal_order_without_inflating_duration()
+    -> anyhow::Result<()> {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        crate::migrations::migrate_sqlite(&pool).await?;
+        let store = ObservationStore::Sqlite(pool);
+        admit_tool_run(&store, "queued", None, "owner").await?;
+        // writer 在请求结束后才记录排队事件；耗时仍应使用真实结束时刻。
+        let failure = store
+            .persist_run_event(
+                "queued",
+                "queued",
+                &RunEvent::RequestFailed {
+                    error: crate::interaction_observation::FailureDiagnostic::platform(
+                        "provider_unavailable",
+                        "provider unavailable",
+                        503,
+                    ),
+                },
+                20,
+                i64::MAX,
+            )
+            .await?
+            .expect("failure event");
+        let finished = store
+            .finish_run(
+                "queued",
+                "queued",
+                &RunOutcome {
+                    status: "failed".into(),
+                    terminal_reason: Some("provider_unavailable".into()),
+                    delivery_completed_at: None,
+                    generation_node_id: None,
+                    generation_root_id: None,
+                },
+                10,
+                i64::MAX,
+            )
+            .await?;
+        assert!(finished.sequence > failure.sequence);
+        assert!(finished.occurred_at >= failure.occurred_at);
+        let page = store
+            .failed_requests(FailedRequestQuery {
+                start_at: Some(0),
+                end_at: Some(30),
+                ..Default::default()
+            })
+            .await?;
+        assert_eq!(page.items[0].duration_ms, Some(10));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn final_failure_survives_user_interruption_but_pure_cancellation_does_not()
+    -> anyhow::Result<()> {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        crate::migrations::migrate_sqlite(&pool).await?;
+        let store = ObservationStore::Sqlite(pool.clone());
+        // 固定中断与终态写入的先后顺序，避免用 HTTP 并发时序制造偶发测试。
+        for (id, status) in [("failed", "failed"), ("cancelled", "cancelled")] {
+            admit_tool_run(&store, id, None, "owner").await?;
+            let mut tx = pool.begin().await?;
+            interrupt_predecessors_sqlite(&mut tx, id, 2).await?;
+            tx.commit().await?;
+            store
+                .finish_run(
+                    id,
+                    id,
+                    &RunOutcome {
+                        status: status.into(),
+                        terminal_reason: Some(
+                            if status == "failed" {
+                                "upstream_error"
+                            } else {
+                                "client_disconnected"
+                            }
+                            .into(),
+                        ),
+                        delivery_completed_at: None,
+                        generation_node_id: None,
+                        generation_root_id: None,
+                    },
+                    3,
+                    i64::MAX,
+                )
+                .await?;
+        }
+        let page = store
+            .failed_requests(FailedRequestQuery {
+                start_at: Some(0),
+                end_at: Some(10),
+                ..Default::default()
+            })
+            .await?;
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            ["failed"]
+        );
+        Ok(())
+    }
+
     async fn admit_waiting_scenario_run(
         store: &ObservationStore,
         interaction: &str,
@@ -1815,6 +1967,7 @@ mod tests {
     ) -> anyhow::Result<()> {
         store
             .admit(Admission {
+                metadata: None,
                 start: &RunStart {
                     id: id.into(),
                     principal: "alice".into(),
@@ -2692,6 +2845,7 @@ mod tests {
         };
         store
             .admit(Admission {
+                metadata: None,
                 start: &start("parent-run"),
                 interaction_id: "parent",
                 parent_run_id: None,
@@ -2713,6 +2867,7 @@ mod tests {
             started_tx.send(()).expect("signal admission start");
             child_store
                 .admit(Admission {
+                    metadata: None,
                     start: &child_start,
                     interaction_id: "child",
                     parent_run_id: Some("parent-run"),

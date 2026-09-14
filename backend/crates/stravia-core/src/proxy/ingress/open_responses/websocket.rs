@@ -345,6 +345,13 @@ async fn serve(
                             stage: "decode".into(),
                             code: "invalid_request".into(),
                             status_code: 400,
+                            failure: Some(
+                                crate::interaction_observation::FailureDiagnostic::platform(
+                                    "invalid_request",
+                                    "WebSocket message must be valid JSON.",
+                                    400,
+                                ),
+                            ),
                         });
                         continue;
                     };
@@ -376,6 +383,13 @@ async fn serve(
                             stage: "protocol".into(),
                             code: "invalid_request".into(),
                             status_code: 400,
+                            failure: Some(
+                                crate::interaction_observation::FailureDiagnostic::platform(
+                                    "invalid_request",
+                                    "WebSocket message type must be response.create.",
+                                    400,
+                                ),
+                            ),
                         });
                         continue;
                     }
@@ -418,6 +432,13 @@ async fn serve(
                             stage: "admission".into(),
                             code: "response_in_progress".into(),
                             status_code: 409,
+                            failure: Some(
+                                crate::interaction_observation::FailureDiagnostic::platform(
+                                    "response_in_progress",
+                                    "A response is already in progress on this connection.",
+                                    409,
+                                ),
+                            ),
                         });
                         continue;
                     }
@@ -451,6 +472,13 @@ async fn serve(
                             stage: "decode".into(),
                             code: "invalid_request".into(),
                             status_code: 400,
+                            failure: Some(
+                                crate::interaction_observation::FailureDiagnostic::platform(
+                                    "invalid_request",
+                                    "response.create must be an object.",
+                                    400,
+                                ),
+                            ),
                         });
                         continue;
                     };
@@ -623,6 +651,11 @@ async fn serve(
                         stage: "decode".into(),
                         code: "invalid_request".into(),
                         status_code: 400,
+                        failure: Some(crate::interaction_observation::FailureDiagnostic::platform(
+                            "invalid_request",
+                            "WebSocket request messages must be text.",
+                            400,
+                        )),
                     });
                 }
             }

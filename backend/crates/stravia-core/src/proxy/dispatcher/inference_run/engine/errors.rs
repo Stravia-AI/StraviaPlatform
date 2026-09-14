@@ -35,16 +35,7 @@ pub(super) fn render_hook_control(
         stravia_runtime_contract::hook::HookControl::Reject(rejection) => {
             let status =
                 StatusCode::from_u16(rejection.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            (
-                status,
-                axum::Json(serde_json::json!({
-                    "error": {
-                        "code": rejection.code,
-                        "message": rejection.message,
-                    }
-                })),
-            )
-                .into_response()
+            coded_error_response(status, &rejection.code, &rejection.message)
         }
         stravia_runtime_contract::hook::HookControl::StreamAbort { message } => {
             error_response(500, &message)
@@ -53,7 +44,7 @@ pub(super) fn render_hook_control(
 }
 
 pub(super) fn coded_error_response(status: StatusCode, code: &str, message: &str) -> Response {
-    (
+    let mut response = (
         status,
         axum::Json(serde_json::json!({
             "error": {
@@ -62,7 +53,15 @@ pub(super) fn coded_error_response(status: StatusCode, code: &str, message: &str
             }
         })),
     )
-        .into_response()
+        .into_response();
+    response
+        .extensions_mut()
+        .insert(crate::interaction_observation::FailureDiagnostic::platform(
+            code,
+            message,
+            status.as_u16(),
+        ));
+    response
 }
 
 pub(super) fn parameter_error_response(
@@ -71,7 +70,7 @@ pub(super) fn parameter_error_response(
     param: &str,
     message: &str,
 ) -> Response {
-    (
+    let mut response = (
         status,
         axum::Json(serde_json::json!({
             "error": {
@@ -82,7 +81,15 @@ pub(super) fn parameter_error_response(
             }
         })),
     )
-        .into_response()
+        .into_response();
+    response
+        .extensions_mut()
+        .insert(crate::interaction_observation::FailureDiagnostic::platform(
+            code,
+            message,
+            status.as_u16(),
+        ));
+    response
 }
 
 pub(super) fn inference_access_error_response(error: GatewayError) -> Response {
@@ -123,7 +130,15 @@ pub(crate) fn error_response(status: u16, message: &str) -> Response {
 
 pub(crate) fn hook_failure_response(error: impl std::fmt::Display) -> Response {
     tracing::error!(error = %error, "inference hook failed");
-    error_response(500, "hook_failed")
+    let mut response = error_response(500, "hook_failed");
+    response
+        .extensions_mut()
+        .insert(crate::interaction_observation::FailureDiagnostic::platform(
+            "hook_failed",
+            error.to_string(),
+            500,
+        ));
+    response
 }
 
 pub(super) fn model_turn_error_outcome(

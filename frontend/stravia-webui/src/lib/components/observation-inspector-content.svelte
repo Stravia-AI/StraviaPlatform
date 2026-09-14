@@ -6,9 +6,10 @@ import ChevronRightIcon from '@lucide/svelte/icons/chevron-right'
 
 import { formatDuration, formatLogTime, formatTime, formatTokenCount } from '$lib/format'
 import ObservationConversation from '$lib/components/observation-conversation.svelte'
+import RequestFailure from '$lib/components/request-failure.svelte'
 import { observationDebugStatusLabel, observationStatusLabel } from '$lib/observation-labels'
 import { observationAttemptOutputTokens, observationEventSummary } from '$lib/observation-event-summary'
-import type { InteractionDetail, LiveContentBlock, ObservationEvent, RejectionDetail, RunDetail } from '$lib/types'
+import type { InteractionDetail, LiveContentBlock, ObservationEvent, RunDetail, FailedRequestDetail } from '$lib/types'
 import { Badge } from '$lib/components/ui/badge'
 import { Button } from '$lib/components/ui/button'
 import * as Empty from '$lib/components/ui/empty'
@@ -18,7 +19,10 @@ import * as Collapsible from '$lib/components/ui/collapsible'
 
 interface Props {
   interaction?: InteractionDetail
-  rejection?: RejectionDetail
+  failure?: FailedRequestDetail
+  error?: string
+  onretry?: () => void
+  oninteraction?: () => void
   liveBlocks?: LiveContentBlock[]
   liveGap?: boolean
   liveCapacity?: boolean
@@ -31,7 +35,23 @@ interface Props {
   onlatest?: () => void
 }
 
-let { interaction, rejection, liveBlocks = [], liveGap = false, liveCapacity = false, olderLoading = false, onolder, loading = false, activeTab = $bindable(), onclose, onbundle, onlatest }: Props = $props()
+let {
+  interaction,
+  failure,
+  error,
+  onretry,
+  oninteraction,
+  liveBlocks = [],
+  liveGap = false,
+  liveCapacity = false,
+  olderLoading = false,
+  onolder,
+  loading = false,
+  activeTab = $bindable(),
+  onclose,
+  onbundle,
+  onlatest,
+}: Props = $props()
 const orderedRuns = $derived([...(interaction?.runs ?? [])].sort((a, b) => a.started_at - b.started_at))
 const runIds = $derived(new Set(orderedRuns.map((run) => run.id)))
 
@@ -41,7 +61,7 @@ const title = $derived(
         orderedRuns.at(-1)?.route_id ||
         interaction.interaction.first_model_display_name?.trim() ||
         interaction.interaction.first_route_id
-    : rejection
+    : failure
       ? m.observation_request_failed()
       : m.observation_details(),
 )
@@ -88,7 +108,6 @@ function usageRows(run: RunDetail): ReadonlyArray<readonly [string, number | nul
     [m.observation_usage_reasoning(), run.usage.reasoning_tokens],
   ]
 }
-
 </script>
 
 {#snippet timeline(events: ObservationEvent[], compact = true, outputs?: ReadonlyMap<string, number | null>)}
@@ -163,7 +182,7 @@ function usageRows(run: RunDetail): ReadonlyArray<readonly [string, number | nul
 <header class="flex items-start justify-between gap-3 border-b p-4">
   <div class="min-w-0">
     <p class="font-structural text-xs font-semibold tracking-wider text-primary uppercase">
-      {interaction ? m.observation_interaction_details() : m.observation_rejection_details()}
+      {interaction ? m.observation_interaction_details() : m.observation_failed_request_details()}
     </p>
     <h2 class="font-structural mt-1 truncate text-xl font-semibold">{title}</h2>
   </div>
@@ -189,7 +208,63 @@ function usageRows(run: RunDetail): ReadonlyArray<readonly [string, number | nul
   <div class="grid flex-1 place-items-center">
     <p class="text-sm text-muted-foreground">{m.observation_loading_details()}</p>
   </div>
-{:else if !interaction && !rejection}
+{:else if error}
+  <RequestFailure message={error} retry={onretry} />
+{:else if failure}
+  <div class="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-4">
+    <Alert.Root variant="destructive">
+      <Alert.Title>{failure.request.error.code ?? m.observation_request_failed()}</Alert.Title>
+      <Alert.Description>
+        <p class="whitespace-pre-wrap break-words">
+          {failure.request.error.message ?? m.observation_failure_diagnostic_missing()}
+        </p>
+        {#if failure.request.error.status_code !== null}<p>HTTP {failure.request.error.status_code}</p>{/if}
+      </Alert.Description>
+    </Alert.Root>
+    <dl class="run-facts">
+      <div>
+        <dt>{m.failed_request_request_id()}</dt>
+        <dd>{failure.request.request_id}</dd>
+      </div>
+      <div>
+        <dt>{m.failed_request_origin()}</dt>
+        <dd>
+          {failure.request.error.source === 'platform'
+            ? m.failed_request_platform()
+            : failure.request.error.source === 'upstream'
+              ? m.failed_request_upstream()
+              : '—'}
+        </dd>
+      </div>
+      <div>
+        <dt>{m.failed_request_time()}</dt>
+        <dd>{formatLogTime(failure.request.started_at)}</dd>
+      </div>
+      <div>
+        <dt>{m.failed_request_duration()}</dt>
+        <dd>{failure.request.duration_ms === null ? '—' : formatDuration(failure.request.duration_ms)}</dd>
+      </div>
+      <div>
+        <dt>{m.observation_debug()}</dt>
+        <dd>{observationDebugStatusLabel(failure.request.debug_status)}</dd>
+      </div>
+    </dl>
+    {#if failure.request.observation_gap}
+      <p role="status">{m.observation_failure_diagnostic_missing()}</p>
+    {/if}
+    {#each failure.trace?.reasons ?? [] as reason (reason)}
+      <p class="whitespace-pre-wrap break-words">{reason}</p>
+    {/each}
+    <div class="flex flex-wrap gap-3">
+      {#if oninteraction}<Button variant="outline" onclick={oninteraction}>{m.observation_open_interaction()}</Button
+        >{/if}
+      <Button variant="outline" onclick={onbundle}
+        ><DownloadIcon data-icon="inline-start" />{m.observation_bundle()}</Button>
+    </div>
+    <h3 class="font-structural font-semibold">{m.observation_diagnostics()}</h3>
+    {@render timeline(orderedEvents(failure.events))}
+  </div>
+{:else if !interaction}
   <Empty.Root class="flex-1"
     ><Empty.Header><Empty.Title>{m.observation_details_unavailable()}</Empty.Title></Empty.Header></Empty.Root>
 {:else}
@@ -207,14 +282,6 @@ function usageRows(run: RunDetail): ReadonlyArray<readonly [string, number | nul
         {#key interaction.interaction.id}
           <ObservationConversation detail={interaction} {liveBlocks} {olderLoading} {onolder} />
         {/key}
-      {:else if rejection}
-        <div class="p-4">
-          <Alert.Root variant="destructive">
-            <Alert.Title>{m.observation_request_failed()}</Alert.Title>
-            <Alert.Description
-              >{m.observation_rejection_summary({ status: rejection.rejection.status_code })}</Alert.Description>
-          </Alert.Root>
-        </div>
       {/if}
     </Tabs.Content>
     <Tabs.Content value="diagnostics" class="min-h-0 flex-1 overflow-y-auto p-4">
@@ -327,42 +394,6 @@ function usageRows(run: RunDetail): ReadonlyArray<readonly [string, number | nul
           {/snippet}
           {@render runBranch(null)}
         </div>
-      {:else if rejection}
-        <dl class="rejection-facts">
-          <div>
-            <dt>{m.observation_request()}</dt>
-            <dd class="font-technical">{rejection.rejection.method} {rejection.rejection.path}</dd>
-          </div>
-          <div>
-            <dt>{m.observation_rejected_stage()}</dt>
-            <dd>{rejection.rejection.stage}</dd>
-          </div>
-          <div>
-            <dt>{m.observation_error_code()}</dt>
-            <dd class="font-technical">{rejection.rejection.code}</dd>
-          </div>
-          <div>
-            <dt>{m.observation_http_status()}</dt>
-            <dd>{rejection.rejection.status_code}</dd>
-          </div>
-          <div>
-            <dt>{m.observation_protocol()}</dt>
-            <dd>{rejection.rejection.ingress_protocol}</dd>
-          </div>
-          <div>
-            <dt>{m.observation_debug()}</dt>
-            <dd>{observationDebugStatusLabel(rejection.rejection.debug_status)}</dd>
-          </div>
-        </dl>
-        {#if rejection.trace?.status === 'partial' || (rejection.rejection.debug_enabled && !rejection.trace)}
-          <Alert.Root variant="warning" role="status" class="mx-3 mt-3 w-auto"
-            ><Alert.Description>
-              {m.observation_partial_trace({
-                reasons: rejection.trace?.reasons.join(', ') || m.observation_trace_missing(),
-              })}
-            </Alert.Description></Alert.Root>
-        {/if}
-        {@render timeline(orderedEvents(rejection.events))}
       {/if}
     </Tabs.Content>
   </Tabs.Root>
@@ -497,20 +528,17 @@ function usageRows(run: RunDetail): ReadonlyArray<readonly [string, number | nul
   border-bottom: 1px solid var(--border);
   padding: 0.8rem;
 }
-.run-facts,
-.rejection-facts {
+.run-facts {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 8rem), 1fr));
   gap: 0.65rem 1rem;
   padding: 0.8rem;
   font-size: 0.75rem;
 }
-.run-facts dt,
-.rejection-facts dt {
+.run-facts dt {
   color: var(--muted-foreground);
 }
-.run-facts dd,
-.rejection-facts dd {
+.run-facts dd {
   overflow-wrap: anywhere;
   font-weight: 500;
 }

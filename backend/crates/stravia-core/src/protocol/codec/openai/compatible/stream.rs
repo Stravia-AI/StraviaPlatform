@@ -276,6 +276,21 @@ impl OpenAIStreamParser {
 
 impl OpenAIStreamParser {
     fn parse_openai_chunk(&mut self, chunk: &Value, deltas: &mut Vec<AiStreamDelta>) {
+        if let Some(error) = chunk.get("error").filter(|error| !error.is_null()) {
+            deltas.extend(self.flush_pending_text());
+            self.done = true;
+            deltas.push(AiStreamDelta::StreamError {
+                error: stravia_runtime_contract::protocol::ir::AiError::new(
+                    stravia_runtime_contract::protocol::ir::AiErrorKind::StreamMidError,
+                    error
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("upstream stream error"),
+                )
+                .with_raw(chunk.clone()),
+            });
+            return;
+        }
         if !self.started
             && let (Some(id), Some(model)) = (
                 chunk.get("id").and_then(|v| v.as_str()),

@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { observationAttemptOutputTokens, observationEventSummary } from '../src/lib/observation-event-summary'
 import * as m from '../src/lib/paraglide/messages.js'
+import { getLocale, overwriteGetLocale } from '../src/lib/paraglide/runtime.js'
 import type { ObservationEvent } from '../src/lib/types'
 
 function event(sequence: number, kind: string, payload: unknown): ObservationEvent {
@@ -49,5 +50,80 @@ describe('observation attempt output speed', () => {
         event(3, 'usage_confirmed', { attempt_id: 'current', usage: { output_tokens: null } }),
       ]),
     ).toBe('–')
+  })
+})
+
+describe('observation request failed event summary', () => {
+  const requestFailed = (error: Record<string, unknown>) =>
+    observationEventSummary(event(20, 'request_failed', { error }))
+
+  function factValue(facts: Array<{ label: string; value: string }>, label: string): string | undefined {
+    return facts.find((fact) => fact.label === label)?.value
+  }
+
+  test('upstream terminal error renders as a regular error event with readable failure facts', () => {
+    const summary = requestFailed({
+      source: 'upstream',
+      code: 'upstream_timeout',
+      message: 'upstream connection reset while streaming',
+      status_code: 504,
+    })
+    expect(summary.title).not.toBe(m.observation_event_unknown())
+    expect(summary.title).toBeTruthy()
+    expect(summary.note).toBeUndefined()
+    expect(summary.tone).toBe('error')
+    expect(factValue(summary.facts, m.failed_request_origin())).toBe(m.failed_request_upstream())
+    expect(factValue(summary.facts, m.observation_http_status())).toBe('504')
+    expect(factValue(summary.facts, m.observation_error_code())).toBe('upstream_timeout')
+    expect(factValue(summary.facts, m.failed_request_error())).toBe('upstream connection reset while streaming')
+  })
+
+  test('platform terminal error renders without inventing an HTTP status', () => {
+    const summary = requestFailed({
+      source: 'platform',
+      code: 'request_deadline_exceeded',
+      message: 'request deadline exceeded',
+    })
+    expect(summary.title).not.toBe(m.observation_event_unknown())
+    expect(summary.tone).toBe('error')
+    expect(factValue(summary.facts, m.failed_request_origin())).toBe(m.failed_request_platform())
+    expect(factValue(summary.facts, m.observation_error_code())).toBe('request_deadline_exceeded')
+    expect(factValue(summary.facts, m.failed_request_error())).toBe('request deadline exceeded')
+    expect(summary.facts.some((fact) => fact.label === m.observation_http_status())).toBe(false)
+  })
+
+  test('missing error source keeps the error event without fabricating an origin', () => {
+    const summary = requestFailed({ code: 'bad_gateway', message: 'gateway closed the connection' })
+    expect(summary.title).not.toBe(m.observation_event_unknown())
+    expect(summary.tone).toBe('error')
+    expect(summary.facts.some((fact) => fact.label === m.failed_request_origin())).toBe(false)
+    expect(factValue(summary.facts, m.observation_error_code())).toBe('bad_gateway')
+    expect(factValue(summary.facts, m.failed_request_error())).toBe('gateway closed the connection')
+  })
+
+  test('zh-CN renders a localized title and origin while failure facts stay readable', () => {
+    const payload = {
+      source: 'upstream',
+      code: 'upstream_timeout',
+      message: 'upstream connection reset while streaming',
+      status_code: 504,
+    }
+    const english = requestFailed(payload)
+    const original = getLocale
+    overwriteGetLocale(() => 'zh-CN')
+    try {
+      const summary = requestFailed(payload)
+      expect(summary.title).not.toBe(m.observation_event_unknown())
+      expect(summary.title).not.toBe(english.title)
+      expect(summary.tone).toBe('error')
+      expect(factValue(summary.facts, m.failed_request_origin())).not.toBe(
+        m.failed_request_upstream({}, { locale: 'en-US' }),
+      )
+      expect(factValue(summary.facts, m.observation_http_status())).toBe('504')
+      expect(factValue(summary.facts, m.observation_error_code())).toBe('upstream_timeout')
+      expect(factValue(summary.facts, m.failed_request_error())).toBe('upstream connection reset while streaming')
+    } finally {
+      overwriteGetLocale(original)
+    }
   })
 })

@@ -37,6 +37,11 @@ _避免使用_：Agent Turn、Model Turn、Inference Run、Agent Loop
 Interaction Observation 是管理面用于查看 Connect Client Interaction 及其 Inference Run、Model Turn、工具调用、Target attempt、交付状态和 Confirmed Upstream Usage 的可持久化诊断投影。它可以实时变化并保留失败、取消或断线记录，但不是推理执行、Generation Chain 或模型历史的事实源；观察记录失败或丢失不得改变请求结果。
 _避免使用_：Generation Chain、Request Log、Execution State Store
 
+## 失败的请求（Failed Request）
+
+失败的请求是最终因平台或上游错误而失败的一次客户端请求，涵盖准入前拒绝、超时、连接上游失败和 HTTP 200 之后的流式错误；内部重试或切换服务后最终成功的请求，以及单纯由客户端主动取消或断线终止的请求，不属于此类。每次请求独立判定，后续新请求成功不改变前一次请求的失败事实。
+_避免使用_：拒绝的请求（当指全部失败请求）、失败的上游尝试、失败的交互
+
 ## Rejected Request Observation
 
 Rejected Request Observation 是请求在形成 Inference Run 之前因解码、协议或认证错误被拒绝时形成的独立诊断投影。它不属于 Principal、Generation Chain 或 Connect Client Interaction。请求进入 Gateway 时 Debug 已开启的，可以附带只覆盖客户端请求与平台错误响应的 Rejected Request Debug Trace；没有上游方向不得表示为缺失抓包。

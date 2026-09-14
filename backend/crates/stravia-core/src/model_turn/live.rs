@@ -680,7 +680,7 @@ async fn execute_inner(
                 Err(failure) => failure,
             };
             if native_compaction_requested {
-                return Err(failure.error);
+                return Err(failure.finish(input.observer.as_ref()));
             }
             if !omit_protected_thinking
                 && protected_thinking_sent
@@ -691,11 +691,11 @@ async fn execute_inner(
                 continue;
             }
             let Some(kind) = failure.kind.clone() else {
-                return Err(failure.error);
+                return Err(failure.finish(input.observer.as_ref()));
             };
             if !failure.record_health {
                 attempts.skip_current();
-                last_error = Some(failure.error);
+                last_error = Some(failure);
                 break;
             }
             match attempts.record_failure(
@@ -711,16 +711,21 @@ async fn execute_inner(
                     tokio::time::sleep(delay).await;
                 }
                 AttemptFailureDisposition::TryNextTarget => {
-                    last_error = Some(failure.error);
+                    last_error = Some(failure);
                     break;
                 }
-                AttemptFailureDisposition::Stop => return Err(failure.error),
+                AttemptFailureDisposition::Stop => {
+                    return Err(failure.finish(input.observer.as_ref()));
+                }
             }
         }
     }
 
     Err(last_error
-        .unwrap_or_else(|| ModelTurnError::new("provider_unavailable", "all Model Targets failed")))
+        .unwrap_or_else(|| {
+            AttemptFailure::terminal("provider_unavailable", "all Model Targets failed")
+        })
+        .finish(input.observer.as_ref()))
 }
 
 async fn load_scheduling_snapshot(
@@ -797,6 +802,7 @@ struct PreparedAttempt {
 
 struct AttemptFailure {
     error: ModelTurnError,
+    diagnostic: crate::interaction_observation::FailureDiagnostic,
     kind: Option<stravia_runtime_contract::protocol::ir::AiErrorKind>,
     record_health: bool,
     retry_after: Option<Duration>,
@@ -804,9 +810,17 @@ struct AttemptFailure {
 }
 
 impl AttemptFailure {
+    fn upstream_origin(mut self) -> Self {
+        self.diagnostic.source = Some("upstream".into());
+        self
+    }
     fn retryable(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             error: ModelTurnError::new(code, message),
+            diagnostic: crate::interaction_observation::FailureDiagnostic {
+                source: Some("platform".into()),
+                ..Default::default()
+            },
             kind: Some(stravia_runtime_contract::protocol::ir::AiErrorKind::ServiceUnavailable),
             record_health: true,
             retry_after: None,
@@ -827,6 +841,11 @@ impl AttemptFailure {
         );
         Self {
             error: ModelTurnError::new(code, message),
+            diagnostic: crate::interaction_observation::FailureDiagnostic {
+                source: Some("upstream".into()),
+                status_code: status,
+                ..Default::default()
+            },
             kind: Some(kind),
             record_health,
             retry_after,
@@ -840,6 +859,12 @@ impl AttemptFailure {
         status: Option<u16>,
         body: Option<serde_json::Value>,
     ) -> Self {
+        self.diagnostic.status_code = status;
+        self.diagnostic.message = body
+            .as_ref()
+            .and_then(|body| body.get("error").unwrap_or(body).get("message"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
         self.protected_reasoning_rejected = matches!(status, None | Some(400 | 422))
             && body.as_ref().is_some_and(protected_reasoning_rejected);
         if !passthrough {
@@ -859,6 +884,10 @@ impl AttemptFailure {
     fn terminal(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             error: ModelTurnError::new(code, message),
+            diagnostic: crate::interaction_observation::FailureDiagnostic {
+                source: Some("platform".into()),
+                ..Default::default()
+            },
             kind: None,
             record_health: false,
             retry_after: None,
@@ -869,11 +898,31 @@ impl AttemptFailure {
     fn ineligible(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             error: ModelTurnError::new(code, message),
+            diagnostic: crate::interaction_observation::FailureDiagnostic {
+                source: Some("platform".into()),
+                ..Default::default()
+            },
             kind: Some(stravia_runtime_contract::protocol::ir::AiErrorKind::ModelNotAvailable),
             record_health: false,
             retry_after: None,
             protected_reasoning_rejected: false,
         }
+    }
+
+    fn finish(
+        mut self,
+        observer: Option<&crate::interaction_observation::RunObserver>,
+    ) -> ModelTurnError {
+        if self.error.code != "cancelled" {
+            self.diagnostic.code = Some(self.error.code.clone());
+            if self.diagnostic.message.is_none() {
+                self.diagnostic.message = Some(self.error.message.clone());
+            }
+            if let Some(observer) = observer {
+                observer.record_failure(self.diagnostic);
+            }
+        }
+        self.error
     }
 }
 
@@ -1503,9 +1552,11 @@ async fn begin_attempt(
                         "upstream_error",
                         String::from_utf8_lossy(&decode.body).into_owned(),
                     )
+                    .upstream_origin()
                     .with_upstream_body(true, Some(decode.status), None)
                 } else {
                     AttemptFailure::terminal("upstream_execution_uncertain", error.to_string())
+                        .upstream_origin()
                 }
             })?;
         if status >= 400 {
@@ -1514,6 +1565,7 @@ async fn begin_attempt(
                 "upstream_error",
                 format!("upstream returned HTTP {status}"),
             )
+            .upstream_origin()
             .with_upstream_body(native_compaction_requested, Some(status), Some(raw)));
         }
         let response =
@@ -1565,7 +1617,7 @@ async fn begin_attempt(
                         None,
                     )
                 } else {
-                    AttemptFailure::retryable("upstream_error", error.to_string())
+                    AttemptFailure::retryable("upstream_error", error.to_string()).upstream_origin()
                 }
             })?;
         if call.status >= 400 {
@@ -1663,7 +1715,9 @@ async fn begin_attempt(
         .provider_call
         .call_stream()
         .await
-        .map_err(|error| AttemptFailure::retryable("upstream_error", error.to_string()))?;
+        .map_err(|error| {
+            AttemptFailure::retryable("upstream_error", error.to_string()).upstream_origin()
+        })?;
     let mut provider_stream = match response {
         ProviderStreamResponse::Stream(stream) => stream,
         ProviderStreamResponse::Error {
@@ -1685,10 +1739,9 @@ async fn begin_attempt(
             .with_upstream_body(native_compaction_requested, Some(status), body.ok()));
         }
         ProviderStreamResponse::Uncertain { message } => {
-            return Err(AttemptFailure::terminal(
-                "upstream_acceptance_unknown",
-                message,
-            ));
+            return Err(
+                AttemptFailure::terminal("upstream_acceptance_unknown", message).upstream_origin(),
+            );
         }
     };
     target_identity.response_continuation_available =
@@ -1786,6 +1839,7 @@ async fn begin_attempt(
     let target = target.clone();
     let cancellation = input.cancellation.clone();
     let deadline = input.deadline;
+    let failure_observer = input.observer.clone();
     tokio::spawn(async move {
         let mut accumulator = StreamResponseAccumulator::default();
         let terminal_error = handle_terminal_stream_error(
@@ -1882,7 +1936,9 @@ async fn begin_attempt(
                         Some(failure.error.code.clone()),
                         None,
                     );
-                    let _ = tx.send(Err(failure.error)).await;
+                    let _ = tx
+                        .send(Err(failure.finish(failure_observer.as_ref())))
+                        .await;
                     return;
                 }
             }
@@ -1924,7 +1980,9 @@ async fn begin_attempt(
                     Some(failure.error.code.clone()),
                     None,
                 );
-                let _ = tx.send(Err(failure.error)).await;
+                let _ = tx
+                    .send(Err(failure.finish(failure_observer.as_ref())))
+                    .await;
                 return;
             }
         }
@@ -2066,10 +2124,10 @@ fn handle_terminal_stream_error(
 fn stream_failure(error: ProviderStreamError) -> AttemptFailure {
     match error {
         ProviderStreamError::Transport(message) => {
-            AttemptFailure::retryable("upstream_stream_error", message)
+            AttemptFailure::retryable("upstream_stream_error", message).upstream_origin()
         }
         ProviderStreamError::Uncertain(message) => {
-            AttemptFailure::terminal("upstream_acceptance_unknown", message)
+            AttemptFailure::terminal("upstream_acceptance_unknown", message).upstream_origin()
         }
         ProviderStreamError::Decode(error) => {
             AttemptFailure::terminal("protocol_lossy_rejected", error.to_string())

@@ -265,7 +265,29 @@ impl GatewayError {
         if let Some(id) = request_id {
             error_obj["request_id"] = serde_json::Value::String(id.to_string());
         }
-        (status, Json(serde_json::json!({ "error": error_obj }))).into_response()
+        let mut response =
+            (status, Json(serde_json::json!({ "error": error_obj }))).into_response();
+        response
+            .extensions_mut()
+            .insert(crate::interaction_observation::FailureDiagnostic {
+                source: Some(
+                    if matches!(
+                        self,
+                        Self::UpstreamStatus { .. }
+                            | Self::UpstreamTimeout { .. }
+                            | Self::StreamParseError { .. }
+                    ) {
+                        "upstream"
+                    } else {
+                        "platform"
+                    }
+                    .into(),
+                ),
+                code: Some(self.stable_code().into()),
+                message: Some(self.message()),
+                status_code: Some(numeric_status),
+            });
+        response
     }
 
     /// Render with a `RequestContext` — injects `request_id` automatically.

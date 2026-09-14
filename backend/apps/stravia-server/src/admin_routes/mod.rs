@@ -227,6 +227,11 @@ fn create_router_inner(gateway: Gateway, auth: Option<AdminHttpState>) -> Router
             get(interaction_summary),
         )
         .route("/observations/rejections", get(rejection_list))
+        .route("/observations/failed-requests", get(failed_request_list))
+        .route(
+            "/observations/failed-requests/{kind}/{id}",
+            get(failed_request_detail),
+        )
         .route("/observations/rejections/{id}", get(rejection_detail))
         .route("/observations/events", get(observation_events))
         .route(

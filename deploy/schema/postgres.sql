@@ -249,7 +249,9 @@ CREATE TABLE public.inference_run_observations (
     last_active_at bigint NOT NULL,
     finished_at bigint,
     last_event_sequence bigint DEFAULT 0 NOT NULL,
-    expires_at bigint NOT NULL
+    expires_at bigint NOT NULL,
+    failure_json text,
+    request_model text
 );
 
 
@@ -583,7 +585,13 @@ CREATE TABLE public.rejected_request_observations (
     debug_enabled boolean NOT NULL,
     debug_status text NOT NULL,
     last_event_sequence bigint NOT NULL,
-    expires_at bigint NOT NULL
+    expires_at bigint NOT NULL,
+    failure_json text,
+    request_model text,
+    api_key_id text,
+    api_key_name text,
+    started_at bigint,
+    duration_ms bigint
 );
 
 
@@ -1244,6 +1252,13 @@ CREATE UNIQUE INDEX idx_web_providers_local_singleton ON public.web_providers US
 
 
 --
+-- Name: inference_runs_failed_window_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX inference_runs_failed_window_idx ON public.inference_run_observations USING btree (started_at DESC, id) WHERE (status = 'failed'::text);
+
+
+--
 -- Name: inference_runs_generation_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -1339,6 +1354,13 @@ CREATE INDEX observation_events_run_idx ON public.observation_events USING btree
 --
 
 CREATE INDEX rejected_requests_expiry_idx ON public.rejected_request_observations USING btree (expires_at);
+
+
+--
+-- Name: rejected_requests_started_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX rejected_requests_started_idx ON public.rejected_request_observations USING btree (started_at DESC, id);
 
 
 --

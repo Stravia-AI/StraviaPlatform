@@ -775,6 +775,8 @@ impl Stream for ObservedDeliveryStream {
                             .confirm_native_receipts(&self.observer, receipts);
                     }
                     self.finish("delivered", None);
+                } else if self.status_code == 499 {
+                    self.finish("cancelled", Some("request_cancelled".into()));
                 } else {
                     let reason = format!("http_status_{}", self.status_code);
                     self.finish("delivery_failed", Some(reason));
@@ -886,6 +888,15 @@ async fn execute_observed(input: RunInput) -> Response {
     }
     .execute()
     .await;
+    if response.status().as_u16() >= 400
+        && response.status().as_u16() != 499
+        && let Some(observer) = extensions.get::<RunObserver>()
+        && let Some(error) = response
+            .extensions()
+            .get::<crate::interaction_observation::FailureDiagnostic>()
+    {
+        observer.record_response_failure(error.clone());
+    }
     match (
         extensions.get::<RunObserver>(),
         extensions.get::<RunTerminalContext>(),

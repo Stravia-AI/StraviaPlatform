@@ -3,6 +3,21 @@ use super::*;
 impl AdminService {
     // ── Interaction Observation ──
 
+    pub async fn failed_requests(
+        &self,
+        query: FailedRequestQuery,
+    ) -> anyhow::Result<FailedRequestPage> {
+        self.gw.observation.failed_requests(query).await
+    }
+
+    pub async fn failed_request_detail(
+        &self,
+        kind: &str,
+        id: &str,
+    ) -> anyhow::Result<Option<FailedRequestDetail>> {
+        self.gw.observation.failed_request_detail(kind, id).await
+    }
+
     pub async fn observation_forest(&self, query: ForestQuery) -> anyhow::Result<ForestPage> {
         self.gw.observation.query_forest(query).await
     }

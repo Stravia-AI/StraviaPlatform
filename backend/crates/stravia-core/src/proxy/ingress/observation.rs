@@ -41,6 +41,10 @@ pub(crate) fn reject(
         stage: stage.to_owned(),
         code: code.to_owned(),
         status_code,
+        failure: response
+            .extensions()
+            .get::<crate::interaction_observation::FailureDiagnostic>()
+            .cloned(),
     });
     if observer.is_websocket() {
         response

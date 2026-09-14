@@ -40,10 +40,11 @@ mod web_search;
 pub use crate::interaction_observation::{
     BundleRequest, BundleResourceKind, BundleStream, ClearHistoryResult, ConfirmedUsage,
     CredentialDiscoveryPage, CredentialDiscoveryQuery, CredentialDiscoverySummary, DebugState,
-    DownloadTicket, ForestPage, ForestQuery, ForestRoot, InteractionDetail, InteractionEventsPage,
-    InteractionEventsQuery, InteractionSnapshot, InteractionSummary, ObservationEvent,
-    ObservationQueryError, ObservationStream, ObservationUpdate, RejectionDetail, RejectionPage,
-    RejectionQuery, RejectionSummary, RunDetail, TraceManifest, UsageCoverage,
+    DownloadTicket, FailedRequestDetail, FailedRequestPage, FailedRequestQuery,
+    FailedRequestSummary, ForestPage, ForestQuery, ForestRoot, InteractionDetail,
+    InteractionEventsPage, InteractionEventsQuery, InteractionSnapshot, InteractionSummary,
+    ObservationEvent, ObservationQueryError, ObservationStream, ObservationUpdate, RejectionDetail,
+    RejectionPage, RejectionQuery, RejectionSummary, RunDetail, TraceManifest, UsageCoverage,
 };
 pub use routes::{BindRouteInput, UnbindRouteInput};
 

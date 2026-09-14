@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::types::{IngressStart, RejectedOutcome, RunEvent, RunOutcome};
+use super::types::{FailureDiagnostic, IngressStart, RejectedOutcome, RunEvent, RunOutcome};
 
 pub(crate) const REDACTED: &str = "***";
 
@@ -147,6 +147,11 @@ impl ProtectedSecrets {
 
     pub(crate) fn event(&self, event: &mut RunEvent) {
         match event {
+            RunEvent::RequestFailed { error } => {
+                for value in [&mut error.code, &mut error.message].into_iter().flatten() {
+                    self.text(value);
+                }
+            }
             RunEvent::ClientVisibleContentDelta { text }
             | RunEvent::ModelThinkingDelta { text, .. } => self.text(text),
             RunEvent::ClientToolHandoff {
@@ -615,6 +620,9 @@ pub(crate) fn redact_rejected_outcome(outcome: &mut RejectedOutcome) -> Redactio
     let mut report = RedactionReport::default();
     redact_string(&mut outcome.stage, &mut report);
     redact_string(&mut outcome.code, &mut report);
+    if let Some(failure) = &mut outcome.failure {
+        redact_failure(failure, &mut report);
+    }
     report
 }
 
@@ -630,6 +638,7 @@ pub(crate) fn redact_run_outcome(outcome: &mut RunOutcome) -> RedactionReport {
 pub(crate) fn redact_run_event(event: &mut RunEvent) -> RedactionReport {
     let mut report = RedactionReport::default();
     match event {
+        RunEvent::RequestFailed { error } => redact_failure(error, &mut report),
         RunEvent::TargetAttemptStarted { upstream_url, .. } => {
             let (redacted, url_report) = redact_url(upstream_url);
             *upstream_url = redacted;
@@ -683,6 +692,31 @@ fn redact_string(value: &mut String, report: &mut RedactionReport) {
     let (redacted, text_report) = redact_text_with_report(value);
     *value = redacted;
     report.merge(text_report);
+}
+
+fn redact_failure(error: &mut FailureDiagnostic, report: &mut RedactionReport) {
+    for value in [&mut error.code, &mut error.message].into_iter().flatten() {
+        redact_structured_text(value, report);
+    }
+}
+
+fn redact_structured_text(text: &mut String, report: &mut RedactionReport) {
+    if let Some((redacted, embedded_report)) =
+        redact_embedded_json(text).or_else(|| redact_sse_json(text))
+    {
+        *text = redacted;
+        report.merge(embedded_report);
+        return;
+    }
+    let (redacted_url, url_report) = redact_url(text);
+    if !url_report.kinds.is_empty() {
+        *text = redacted_url;
+        report.merge(url_report);
+    } else {
+        let (redacted, text_report) = redact_text_with_report(text);
+        *text = redacted;
+        report.merge(text_report);
+    }
 }
 
 fn text_may_need_redaction(value: &str) -> bool {
@@ -1318,24 +1352,7 @@ fn redact_value_node(value: &mut Value, report: &mut RedactionReport) {
                 }
             }
             Value::Array(values) => pending.extend(values.iter_mut()),
-            Value::String(text) => {
-                if let Some((redacted, embedded_report)) =
-                    redact_embedded_json(text).or_else(|| redact_sse_json(text))
-                {
-                    *text = redacted;
-                    report.merge(embedded_report);
-                    continue;
-                }
-                let (redacted_url, url_report) = redact_url(text);
-                if !url_report.kinds.is_empty() {
-                    *text = redacted_url;
-                    report.merge(url_report);
-                } else {
-                    let (redacted, text_report) = redact_text_with_report(text);
-                    *text = redacted;
-                    report.merge(text_report);
-                }
-            }
+            Value::String(text) => redact_structured_text(text, report),
             _ => {}
         }
     }

@@ -105,6 +105,86 @@ pub(crate) struct RejectedOutcome {
     pub stage: String,
     pub code: String,
     pub status_code: u16,
+    pub failure: Option<FailureDiagnostic>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FailureDiagnostic {
+    pub source: Option<String>,
+    pub code: Option<String>,
+    pub message: Option<String>,
+    pub status_code: Option<u16>,
+}
+
+impl FailureDiagnostic {
+    pub(crate) fn platform(
+        code: impl Into<String>,
+        message: impl Into<String>,
+        status: u16,
+    ) -> Self {
+        Self {
+            source: Some("platform".into()),
+            code: Some(code.into()),
+            message: Some(message.into()),
+            status_code: Some(status),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FailedRequestQuery {
+    pub start_at: Option<i64>,
+    pub end_at: Option<i64>,
+    pub anchor_at: Option<i64>,
+    pub window_index: Option<u32>,
+    pub cursor: Option<String>,
+    pub limit: Option<u32>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub api_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FailedRequestService {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FailedRequestSummary {
+    pub id: String,
+    pub kind: String,
+    pub request_id: String,
+    pub started_at: i64,
+    pub duration_ms: Option<i64>,
+    pub api_key_id: Option<String>,
+    pub api_key_name: Option<String>,
+    pub client: Option<String>,
+    pub model: Option<String>,
+    pub model_display_name: Option<String>,
+    pub services: Vec<FailedRequestService>,
+    pub error: FailureDiagnostic,
+    pub interaction_id: Option<String>,
+    pub root_id: Option<String>,
+    pub run_id: Option<String>,
+    pub debug_status: String,
+    pub observation_gap: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FailedRequestPage {
+    pub items: Vec<FailedRequestSummary>,
+    pub total: i64,
+    pub next_cursor: Option<String>,
+    pub snapshot_sequence: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FailedRequestDetail {
+    pub request: FailedRequestSummary,
+    pub events: Vec<ObservationEvent>,
+    pub trace: Option<TraceManifest>,
+    pub snapshot_sequence: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -169,6 +249,9 @@ pub(crate) enum CompactionPhase {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum RunEvent {
+    RequestFailed {
+        error: FailureDiagnostic,
+    },
     CredentialMappingsCreated {
         discoveries: Vec<CredentialDiscovery>,
     },

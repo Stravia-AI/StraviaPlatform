@@ -1,3 +1,46 @@
+export interface FailureDiagnostic {
+  source: 'platform' | 'upstream' | null
+  code: string | null
+  message: string | null
+  status_code: number | null
+}
+
+export type FailedRequestQuery = Omit<ForestQuery, 'status'>
+
+export interface FailedRequestSummary {
+  id: string
+  kind: 'rejection' | 'run'
+  request_id: string
+  started_at: number
+  duration_ms: number | null
+  api_key_id: string | null
+  api_key_name: string | null
+  client: string | null
+  model: string | null
+  model_display_name: string | null
+  services: { id: string; name: string }[]
+  error: FailureDiagnostic
+  interaction_id: string | null
+  root_id: string | null
+  run_id: string | null
+  debug_status: string
+  observation_gap: boolean
+}
+
+export interface FailedRequestPage {
+  items: FailedRequestSummary[]
+  total: number
+  next_cursor: string | null
+  snapshot_sequence: number
+}
+
+export interface FailedRequestDetail {
+  request: FailedRequestSummary
+  events: ObservationEvent[]
+  trace: TraceManifest | null
+  snapshot_sequence: number
+}
+
 export interface ConfirmedUsage {
   input_tokens: number | null
   output_tokens: number | null
@@ -147,42 +190,6 @@ export interface InteractionDetail {
   interaction: InteractionSummary
   root: ForestRoot
   runs: RunDetail[]
-  snapshot_sequence: number
-}
-
-export interface RejectionQuery {
-  start_at?: number
-  end_at?: number
-  anchor_at?: number
-  window_index?: number
-  cursor?: string
-  limit?: number
-}
-
-export interface RejectionSummary {
-  id: string
-  occurred_at: number
-  method: string
-  path: string
-  ingress_protocol: string
-  stage: string
-  code: string
-  status_code: number
-  debug_enabled: boolean
-  debug_status: string
-}
-
-export interface RejectionPage {
-  items: RejectionSummary[]
-  total: number
-  next_cursor: string | null
-  snapshot_sequence: number
-}
-
-export interface RejectionDetail {
-  rejection: RejectionSummary
-  events: ObservationEvent[]
-  trace: TraceManifest | null
   snapshot_sequence: number
 }
 

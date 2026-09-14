@@ -2,13 +2,16 @@
 import * as m from '$lib/paraglide/messages.js'
 import { onDestroy } from 'svelte'
 import { MediaQuery } from 'svelte/reactivity'
-import type { InteractionDetail, LiveContentBlock, RejectionDetail } from '$lib/types'
+import type { InteractionDetail, LiveContentBlock, FailedRequestDetail } from '$lib/types'
 import ObservationInspectorContent from '$lib/components/observation-inspector-content.svelte'
 import * as Sheet from '$lib/components/ui/sheet'
 
 interface Props {
   interaction?: InteractionDetail
-  rejection?: RejectionDetail
+  failure?: FailedRequestDetail
+  error?: string
+  onretry?: () => void
+  oninteraction?: () => void
   liveBlocks?: LiveContentBlock[]
   liveGap?: boolean
   liveCapacity?: boolean
@@ -25,9 +28,13 @@ interface Props {
 
 let {
   interaction,
-  rejection,
+  failure,
+  error,
+  onretry,
+  oninteraction,
   liveBlocks = [],
-  liveGap = false, liveCapacity = false,
+  liveGap = false,
+  liveCapacity = false,
   olderLoading = false,
   onolder,
   loading = false,
@@ -98,7 +105,22 @@ function resizeWithKeyboard(event: KeyboardEvent): void {
 <svelte:window onkeydown={handleKey} />
 
 {#snippet content()}
-  <ObservationInspectorContent {interaction} {rejection} {loading} {liveBlocks} {liveGap} {liveCapacity} {olderLoading} {onolder} bind:activeTab {onclose} {onbundle} {onlatest} />
+  <ObservationInspectorContent
+    {interaction}
+    {failure}
+    {error}
+    {onretry}
+    {oninteraction}
+    {loading}
+    {liveBlocks}
+    {liveGap}
+    {liveCapacity}
+    {olderLoading}
+    {onolder}
+    bind:activeTab
+    {onclose}
+    {onbundle}
+    {onlatest} />
 {/snippet}
 
 {#if mobile.current}
