@@ -1278,7 +1278,9 @@ impl ResponsesStreamParser {
                     .and_then(Value::as_array)
                     .expect("validated output");
                 for (index, previous) in &self.completed_native_items {
-                    if output.get(*index) != Some(previous) {
+                    // Codex V2 可只在 output_item.done 交付压缩状态，终态不再重复。
+                    // 已完成的条目仍有效；显式重复的条目则必须保持一致。
+                    if output.get(*index).is_some_and(|item| item != previous) {
                         anyhow::bail!(
                             "terminal native compaction state differs from the completed item"
                         );

@@ -461,6 +461,10 @@ Open Responses `2026-04-24` 定义 canonical baseline；Ingress 可以接受其 
 
 Target 能力未知时仍尝试转发，由上游裁决；Target 协议无法承载请求时返回 `compaction_unsupported`。不为寻找压缩能力而跳过当前 Target，不因压缩失败而重试或切换 Target；上游成功和错误均返回客户端，不降级成普通生成或本地摘要。独立 compact 返回完整下一窗口及 opaque state，不形成空 Generation；后续回放保留既有 Principal 隔离、原生状态来源和 Target 绑定约束。WebSocket 上不新增独立 compact 操作。
 
+流式压缩以 `response.output_item.done` 的完整原生条目作为已完成状态。Codex V2 的终态 `response.completed.output` 可以不重复该条目，Stravia 保留此前完成的状态用于交付和回放；若终态在同一 output index 显式提供条目，则必须与已完成条目一致。未完成的 item/content part 仍阻止成功终态，不完整或被改写的密文不能借此通过校验。
+
+Codex 官方客户端已[移除旧 `/responses/compact` 实现](https://github.com/openai/codex/commit/1ac689cc7de0e637d35271edbbc132d1553d1767)，改用普通 Responses 上的 V2 压缩。独立 compact 仍按当前 Target 的原生端点转发；端点不可用时原样返回上游错误，包括 404，不在平台内把 V1 改写成 V2。
+
 ---
 
 ## 13. Error lifecycle

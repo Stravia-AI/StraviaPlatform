@@ -182,6 +182,68 @@ fn native_stream_publishes_state_only_as_complete_typed_item() {
 }
 
 #[test]
+fn native_stream_keeps_completed_state_when_terminal_output_omits_it() {
+    let native = serde_json::json!({
+        "type": "compaction", "id": "cmp_native", "encrypted_content": "opaque-state",
+        "metadata": {"turn_id": "turn_native"}
+    });
+    let mut parser = ResponsesStreamParser::new();
+    let mut deltas = Vec::new();
+    for (event, payload) in [
+        (
+            "response.created",
+            serde_json::json!({
+                "type": "response.created",
+                "response": {"id": "r", "model": "codex", "status": "in_progress"}
+            }),
+        ),
+        (
+            "response.output_item.added",
+            serde_json::json!({
+                "type": "response.output_item.added", "output_index": 0,
+                "item": {"type": "compaction", "id": "cmp_native"}
+            }),
+        ),
+        (
+            "response.output_item.done",
+            serde_json::json!({
+                "type": "response.output_item.done", "output_index": 0, "item": native
+            }),
+        ),
+        (
+            "response.completed",
+            serde_json::json!({
+                "type": "response.completed",
+                "response": {"id": "r", "model": "codex", "status": "completed", "output": []}
+            }),
+        ),
+    ] {
+        deltas.extend(
+            parser
+                .parse_chunk(&sse_event(event, &payload.to_string()))
+                .expect("completed item remains authoritative when terminal output omits it"),
+        );
+    }
+    deltas.extend(parser.finish().unwrap());
+    let mut response = AiResponse::new("r", "codex");
+    response.items = deltas
+        .iter()
+        .filter_map(|delta| match delta {
+            AiStreamDelta::ItemDone { item, .. } => Some(item.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        super::super::formatter::ResponsesResponseFormatter.format_response(&response)["output"],
+        serde_json::json!([native])
+    );
+    assert!(deltas.iter().any(|delta| matches!(
+        delta,
+        AiStreamDelta::Done { stop_reason } if stop_reason == "stop"
+    )));
+}
+
+#[test]
 fn stream_rejects_partial_response_resource_snapshots() {
     let error = ResponsesStreamParser::new()
             .parse_chunk(
