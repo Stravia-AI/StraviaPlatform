@@ -45,6 +45,22 @@ let actingModelId = $state<string>()
 
 const models = $derived(sortLogicalModels(modelsQuery.data ?? []))
 const providers = $derived(providersQuery.data ?? [])
+// 先读取全部查询状态，避免短路跳过订阅后错过先完成的依赖。
+const resourcesPending = $derived.by(() => {
+  const models = modelsQuery.isPending
+  const providers = providersQuery.isPending
+  return models || providers
+})
+const resourcesFetching = $derived.by(() => {
+  const models = modelsQuery.isFetching
+  const providers = providersQuery.isFetching
+  return models || providers
+})
+const resourceError = $derived.by(() => {
+  const models = modelsQuery.error
+  const providers = providersQuery.error
+  return models ?? providers
+})
 const apiKeys = $derived(apiKeysQuery.data ?? [])
 const tableLabels = $derived(getDataTableLabels())
 const modelColumnHelper = createDataTableColumnHelper<Route>()
@@ -271,15 +287,15 @@ async function deleteModel(): Promise<void> {
   <section class="route-section" aria-labelledby="model-route-table-title">
     <h2 id="model-route-table-title" class="sr-only">{m.models_configured_models()}</h2>
 
-    {#if modelsQuery.isError || providersQuery.isError}
+    {#if resourceError}
       <RequestFailure
         title={m.models_models_not_loaded()}
-        message={localizeBackendErrorMessage(modelsQuery.error ?? providersQuery.error)}
+        message={localizeBackendErrorMessage(resourceError)}
         retry={() => Promise.all([modelsQuery.refetch(), providersQuery.refetch()])}
-        retrying={modelsQuery.isFetching || providersQuery.isFetching} />
+        retrying={resourcesFetching} />
     {/if}
 
-    {#if modelsQuery.isPending || providersQuery.isPending}
+    {#if resourcesPending}
       <div class="flex flex-col border-y" aria-label={m.models_loading_models()}>
         {#each Array(5) as _, index (index)}<div
             class="grid grid-cols-[2fr_1fr_3fr_1fr] gap-4 border-b p-3 last:border-b-0">

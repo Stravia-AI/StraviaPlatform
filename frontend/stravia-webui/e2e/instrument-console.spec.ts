@@ -91,6 +91,119 @@ test('Usage analytics separates cache tokens and shows first-token and total lat
   await expect(latency.getByLabel('Latency chart')).toBeVisible()
 })
 
+test('Usage analytics finishes its first load when breakdowns arrive before the summary', async ({ page }) => {
+  await stubTraffic(page, { requests: 12, errors: 0 })
+  let releaseOverview!: () => void
+  const overviewGate = new Promise<void>((resolve) => {
+    releaseOverview = resolve
+  })
+  await page.route('**/api/v1/stats/overview**', async (route) => {
+    await overviewGate
+    await route.fallback()
+  })
+  const breakdowns = ['hourly', 'providers', 'api-keys', 'models'].map((name) =>
+    page.waitForResponse((response) => new URL(response.url()).pathname === `/api/v1/stats/${name}`),
+  )
+  await page.goto('/stats')
+  await Promise.all(breakdowns)
+  await expect(page.locator('[data-slot="skeleton"]').first()).toBeVisible()
+  // 让已返回的分项查询完成订阅通知，再交付汇总，模拟桌面 IPC 的乱序完成。
+  await page.evaluate(
+    () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))),
+  )
+  releaseOverview()
+  await expect(page.getByLabel('Token usage chart')).toBeVisible()
+  await expect(page.locator('[data-slot="skeleton"]')).toHaveCount(0)
+})
+
+test('Usage analytics exposes an initial query failure and recovers on retry', async ({ page }) => {
+  await stubTraffic(page, { requests: 12, errors: 0 })
+  let hourlyFails = true
+  await page.route('**/api/v1/stats/hourly**', async (route) => {
+    if (hourlyFails) {
+      await route.fulfill({ status: 500, json: { error: 'Time series unavailable' } })
+      return
+    }
+    await route.fallback()
+  })
+  await page.goto('/stats')
+
+  const retryAll = page.getByRole('button', { name: 'Retry all' })
+  await expect(retryAll).toBeEnabled()
+  await expect(page.locator('.route-metric-strip__item').filter({ hasText: 'Total requests' })).toContainText('12')
+  await expect(page.getByLabel('Token usage chart')).toHaveCount(0)
+
+  hourlyFails = false
+  await retryAll.click()
+  await expect(page.getByLabel('Token usage chart')).toBeVisible()
+  await expect(retryAll).toHaveCount(0)
+})
+
+for (const scenario of [
+  { path: '/api-keys', primary: '/api-keys', dependency: '/models', action: 'Create first API Key' },
+  { path: '/models', primary: '/models', dependency: '/providers', action: 'Go to model services' },
+]) {
+  test(`${scenario.path} finishes its first load when dependencies arrive first`, async ({ page }) => {
+    let releasePrimary!: () => void
+    const primaryGate = new Promise<void>((resolve) => {
+      releasePrimary = resolve
+    })
+    await page.route(`**/api/v1${scenario.primary}`, async (route) => {
+      await primaryGate
+      await route.fallback()
+    })
+    const dependency = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === `/api/v1${scenario.dependency}`,
+    )
+    await page.goto(scenario.path)
+    await (await dependency).finished()
+    await expect(page.locator('[data-slot="skeleton"]').first()).toBeVisible()
+    // 先交付依赖并完成订阅通知，再让列表请求结束，防止偶然的响应顺序掩盖回归。
+    await page.evaluate(
+      () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))),
+    )
+    const primary = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === `/api/v1${scenario.primary}`,
+    )
+    releasePrimary()
+    await (await primary).finished()
+    await expect(page.getByText(scenario.action, { exact: true })).toBeVisible()
+    await expect(page.locator('[data-slot="skeleton"]')).toHaveCount(0)
+  })
+
+  test(`${scenario.path} recovers from a dependency failure after an ordered retry`, async ({ page }) => {
+    let failing = true
+    let releaseDependency!: () => void
+    const dependencyGate = new Promise<void>((resolve) => {
+      releaseDependency = resolve
+    })
+    await page.route(`**/api/v1${scenario.dependency}`, async (route) => {
+      if (failing) {
+        await route.fulfill({ status: 500, json: { error: 'Dependency unavailable' } })
+        return
+      }
+      await dependencyGate
+      await route.fallback()
+    })
+    await page.goto(scenario.path)
+    const retry = page.getByRole('button', { name: 'Retry', exact: true })
+    await expect(retry).toBeEnabled()
+    await expect(page.getByText(scenario.action, { exact: true })).toHaveCount(0)
+
+    failing = false
+    const primary = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === `/api/v1${scenario.primary}`,
+    )
+    await retry.click()
+    await (await primary).finished()
+    await expect(page.getByText(scenario.action, { exact: true })).toHaveCount(0)
+    releaseDependency()
+    await expect(page.getByText(scenario.action, { exact: true })).toBeVisible()
+    await expect(retry).toHaveCount(0)
+    await expect(page.locator('[data-slot="skeleton"]')).toHaveCount(0)
+  })
+}
+
 test('empty Model services, Models, API Keys, and logs speak the missing dependency', async ({ page }) => {
   await page.goto('/providers')
   await expect(page.getByText('A Model has nowhere to go until you connect a Provider.')).toBeVisible()

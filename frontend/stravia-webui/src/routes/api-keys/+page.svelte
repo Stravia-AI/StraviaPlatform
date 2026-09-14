@@ -54,6 +54,22 @@ let actingKeyId = $state<string>()
 
 const apiKeys = $derived(apiKeysQuery.data ?? [])
 const models = $derived(modelsQuery.data ?? [])
+// 先读取全部查询状态，避免短路跳过订阅后错过先完成的依赖。
+const resourcesPending = $derived.by(() => {
+  const apiKeys = apiKeysQuery.isPending
+  const models = modelsQuery.isPending
+  return apiKeys || models
+})
+const resourcesFetching = $derived.by(() => {
+  const apiKeys = apiKeysQuery.isFetching
+  const models = modelsQuery.isFetching
+  return apiKeys || models
+})
+const resourceError = $derived.by(() => {
+  const apiKeys = apiKeysQuery.error
+  const models = modelsQuery.error
+  return apiKeys ?? models
+})
 const tableLabels = $derived(getDataTableLabels())
 const apiKeyColumnHelper = createDataTableColumnHelper<ApiKey>()
 const apiKeyColumns = apiKeyColumnHelper.columns([
@@ -252,15 +268,15 @@ async function deleteKey(): Promise<void> {
   <section class="route-section" aria-labelledby="api-key-table-title">
     <h2 id="api-key-table-title" class="sr-only">{m.api_keys_client_credentials()}</h2>
 
-    {#if apiKeysQuery.isError || modelsQuery.isError}
+    {#if resourceError}
       <RequestFailure
         title={m.api_keys_api_keys_not_loaded()}
-        message={localizeBackendErrorMessage(apiKeysQuery.error ?? modelsQuery.error)}
+        message={localizeBackendErrorMessage(resourceError)}
         retry={() => Promise.all([apiKeysQuery.refetch(), modelsQuery.refetch()])}
-        retrying={apiKeysQuery.isFetching || modelsQuery.isFetching} />
+        retrying={resourcesFetching} />
     {/if}
 
-    {#if apiKeysQuery.isPending || modelsQuery.isPending}
+    {#if resourcesPending}
       <div class="flex flex-col border-y" aria-label={m.api_keys_loading_api_keys()}>
         {#each Array(5) as _, index (index)}<div
             class="grid grid-cols-[2fr_2fr_3fr_1fr] gap-4 border-b p-3 last:border-b-0">

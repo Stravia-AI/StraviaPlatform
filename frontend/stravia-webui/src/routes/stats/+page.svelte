@@ -165,20 +165,23 @@ const metrics = $derived([
 const anyError = $derived(
   overviewQuery.error ?? hourlyQuery.error ?? providersQuery.error ?? apiKeysQuery.error ?? modelsQuery.error,
 )
-const analyticsPending = $derived(
-  overviewQuery.isPending ||
-    hourlyQuery.isPending ||
-    providersQuery.isPending ||
-    apiKeysQuery.isPending ||
-    modelsQuery.isPending,
-)
-const analyticsFetching = $derived(
-  overviewQuery.isFetching ||
-    hourlyQuery.isFetching ||
-    providersQuery.isFetching ||
-    apiKeysQuery.isFetching ||
-    modelsQuery.isFetching,
-)
+// 先读取每个查询状态，避免短路跳过 TanStack 属性订阅后错过先完成的查询。
+const analyticsPending = $derived.by(() => {
+  const overview = overviewQuery.isPending
+  const hourly = hourlyQuery.isPending
+  const providers = providersQuery.isPending
+  const apiKeys = apiKeysQuery.isPending
+  const models = modelsQuery.isPending
+  return overview || hourly || providers || apiKeys || models
+})
+const analyticsFetching = $derived.by(() => {
+  const overview = overviewQuery.isFetching
+  const hourly = hourlyQuery.isFetching
+  const providers = providersQuery.isFetching
+  const apiKeys = apiKeysQuery.isFetching
+  const models = modelsQuery.isFetching
+  return overview || hourly || providers || apiKeys || models
+})
 const failedAnalyticsLabels = $derived.by(() => {
   const labels: string[] = []
   if (overviewQuery.error) labels.push(m.stats_summary())

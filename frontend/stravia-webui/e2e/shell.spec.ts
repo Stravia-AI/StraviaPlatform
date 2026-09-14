@@ -6,6 +6,38 @@ test.beforeEach(async ({ page }) => {
   await prepareApp(page)
 })
 
+test('current navigation stays highlighted without hover across routes and sidebar modes', async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 800 })
+  await page.goto('/connect')
+  const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
+  const connect = navigation.locator('a[href="/connect"]')
+  const models = navigation.locator('a[href="/models"]')
+
+  for (const colorScheme of ['light', 'dark'] as const) {
+    await page.emulateMedia({ colorScheme })
+    await expect(page.locator('html')).toHaveClass(colorScheme === 'dark' ? /\bdark\b/ : /^(?!.*\bdark\b)/)
+    await page.mouse.move(1000, 700)
+    await expect(connect).toHaveAttribute('aria-current', 'page')
+    await expect(connect).not.toHaveCSS('background-color', 'rgba(0, 0, 0, 0)')
+    await expect(models).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)')
+  }
+
+  await page.getByRole('button', { name: 'Collapse navigation' }).click()
+  await expect(connect).not.toHaveCSS('background-color', 'rgba(0, 0, 0, 0)')
+  await models.click()
+  await page.mouse.move(1000, 700)
+  await expect(models).toHaveAttribute('aria-current', 'page')
+  await expect(models).not.toHaveCSS('background-color', 'rgba(0, 0, 0, 0)')
+  await expect(connect).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)')
+
+  await page.setViewportSize({ width: 500, height: 800 })
+  await page.getByRole('button', { name: 'Open navigation' }).click()
+  await expect(page.getByRole('dialog').locator('a[href="/models"]')).not.toHaveCSS(
+    'background-color',
+    'rgba(0, 0, 0, 0)',
+  )
+})
+
 test('sidebar stays usable in expanded and compact modes', async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 800 })
   await page.goto('/settings')

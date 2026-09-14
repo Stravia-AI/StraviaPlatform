@@ -90,9 +90,6 @@ pub fn run() {
 
     builder
         .on_window_event(|window, event| {
-            if matches!(event, tauri::WindowEvent::ThemeChanged(_)) {
-                desktop_icons::theme_changed(window.app_handle());
-            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = window.hide();
@@ -219,8 +216,6 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            #[cfg(feature = "desktop-e2e")]
-            desktop_icons::get_desktop_icon_theme,
             commands::get_admin_session,
             commands::get_server_port,
             commands::get_desktop_port_state,
@@ -238,9 +233,6 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while running Stravia application")
         .run(|app, event| {
-            if matches!(&event, tauri::RunEvent::Exit) {
-                desktop_icons::shutdown(app);
-            }
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen {
                 has_visible_windows,
@@ -292,11 +284,7 @@ fn setup_tray(
     let menu = Menu::with_items(app, &[&show, &copy_url, &quit])?;
 
     let tray = TrayIconBuilder::new()
-        .icon(desktop_icons::tray_image(if cfg!(target_os = "macos") {
-            tauri::Theme::Light
-        } else {
-            desktop_icons::current_theme(app.handle())
-        }))
+        .icon(desktop_icons::tray_image())
         .icon_as_template(cfg!(target_os = "macos"))
         .tooltip(format!("Stravia Agent infra — :{server_port}"))
         .menu(&menu)

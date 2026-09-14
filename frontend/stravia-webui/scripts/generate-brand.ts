@@ -21,11 +21,8 @@ writeFileSync(
   ),
 )
 const appIcon = document(body.replaceAll('currentColor', '#000000'))
-const darkAppIcon = document(body.replaceAll('currentColor', '#ffffff'))
 const appIconPath = join(staticRoot, 'stravia-app-icon.svg')
 writeFileSync(appIconPath, appIcon)
-const darkAppIconPath = join(staticRoot, 'stravia-app-icon-dark.svg')
-writeFileSync(darkAppIconPath, darkAppIcon)
 
 // Tauri's native window, tray and bundle icons need raster/container formats.
 const scratchRoot = join(repositoryRoot, '.scratch')
@@ -45,12 +42,6 @@ try {
   const nativeRoot = join(repositoryRoot, 'backend/apps/stravia-desktop/icons')
   for (const file of ['32x32.png', '64x64.png', '128x128.png', '128x128@2x.png', 'icon.png', 'icon.ico', 'icon.icns']) {
     cpSync(join(temporary, file), join(nativeRoot, file))
-  }
-  const darkOutput = join(temporary, 'dark')
-  generate(darkAppIconPath, darkOutput)
-  for (const size of [32, 128]) {
-    cpSync(join(temporary, `${size}x${size}.png`), join(nativeRoot, `system-light-${size}.png`))
-    cpSync(join(darkOutput, `${size}x${size}.png`), join(nativeRoot, `system-dark-${size}.png`))
   }
 } finally {
   rmSync(temporary, { recursive: true })

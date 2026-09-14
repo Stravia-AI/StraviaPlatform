@@ -15,6 +15,7 @@
 
 ### Fixed
 
+- Usage analytics, API Key lists, and Model lists now complete their first load when dependency queries finish before the main query. Loading, refresh, and list error states read every participating query before combining results, preventing stale snapshots from leaving pages on skeletons or losing retry feedback.
 - Codex V2 remote compaction now preserves native states completed by `response.output_item.done` when the terminal response omits them, instead of failing with `protocol_lossy_rejected`. Explicitly conflicting terminal states remain rejected, and legacy standalone compact errors are still forwarded without a local summary or implicit V2 conversion.
 - Interaction status now accounts for unambiguous client-tool results on sibling Runs, without rewriting historical Run outcomes or masking genuinely pending branches. Database projections and Debug Bundles use the same evidence rule. Startup reconciles stale aggregates and marks unresolved waiting leaves **Interrupted** (`process_restarted`), preserving delivered history, retention, and later continuation.
 - Waiting-client Interaction branches now become **Disconnected** when their WebSocket connection closes, without changing successful delivery or Generation Chain history. WebSocket finalization uses the stream task's final tool-handoff state, including closure races; later valid continuations can resume the same Interaction. Normal HTTP/SSE completion and older records without connection ownership are not treated as evidence of disconnection.
