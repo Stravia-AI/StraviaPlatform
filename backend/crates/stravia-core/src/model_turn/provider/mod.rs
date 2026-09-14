@@ -8,7 +8,7 @@ use transport_responses_websocket::{ResponsesWebSocketCall, ResponsesWebSocketSt
 
 use std::borrow::Cow;
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::Instant;
@@ -219,6 +219,47 @@ pub(crate) struct ProviderBinding {
     pub(crate) provider_name: String,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ObservedThinkingPart {
+    Unindexed,
+    Thinking {
+        output_index: Option<usize>,
+        content_index: Option<usize>,
+    },
+    Summary {
+        output_index: Option<usize>,
+        content_index: Option<usize>,
+    },
+}
+
+#[derive(Default)]
+struct ObservedThinkingLayout {
+    last_part: Option<ObservedThinkingPart>,
+    has_text: bool,
+}
+
+impl ObservedThinkingLayout {
+    fn text(&mut self, part: ObservedThinkingPart, text: &str) -> String {
+        use ObservedThinkingPart::*;
+        let boundary = self.has_text
+            && match self.last_part {
+                None => true,
+                // 普通增量可以在同一正文中开始携带元数据，不能拆开跨 chunk 内容。
+                Some(Unindexed) if matches!(part, Thinking { .. }) => false,
+                Some(Thinking { .. }) if part == Unindexed => false,
+                Some(previous) => previous != part,
+            };
+        self.last_part = Some(part);
+        self.has_text = true;
+        let mut observed = String::with_capacity(text.len() + if boundary { 2 } else { 0 });
+        if boundary {
+            observed.push_str("\n\n");
+        }
+        observed.push_str(text);
+        observed
+    }
+}
+
 pub(crate) struct AttemptObservation {
     observer: Option<RunObserver>,
     pub(crate) id: String,
@@ -230,6 +271,7 @@ pub(crate) struct AttemptObservation {
     finished: AtomicBool,
     usage_confirmed: AtomicBool,
     thinking_active: AtomicBool,
+    thinking_layout: Mutex<ObservedThinkingLayout>,
 }
 
 impl AttemptObservation {
@@ -268,6 +310,7 @@ impl AttemptObservation {
             finished: AtomicBool::new(false),
             usage_confirmed: AtomicBool::new(false),
             thinking_active: AtomicBool::new(false),
+            thinking_layout: Mutex::new(ObservedThinkingLayout::default()),
         };
         attempt
     }
@@ -354,11 +397,32 @@ impl AttemptObservation {
             | AiStreamDelta::ReasoningSummaryDelta { text, .. }
                 if !text.is_empty() =>
             {
+                let part = match delta {
+                    AiStreamDelta::ThinkingDelta(_) => ObservedThinkingPart::Unindexed,
+                    AiStreamDelta::ThinkingDeltaWithMetadata {
+                        output_index,
+                        content_index,
+                        ..
+                    } => ObservedThinkingPart::Thinking {
+                        output_index: *output_index,
+                        content_index: *content_index,
+                    },
+                    AiStreamDelta::ReasoningSummaryDelta {
+                        output_index,
+                        content_index,
+                        ..
+                    } => ObservedThinkingPart::Summary {
+                        output_index: *output_index,
+                        content_index: *content_index,
+                    },
+                    _ => unreachable!(),
+                };
+                let mut layout = self.thinking_layout.lock().expect("thinking layout lock");
                 self.thinking_active.store(true, Ordering::Release);
                 observer.record(RunEvent::ModelThinkingDelta {
                     model_turn_id: self.model_turn_id.clone(),
                     attempt_id: self.id.clone(),
-                    text: text.clone(),
+                    text: layout.text(part, text),
                 });
             }
             AiStreamDelta::TextDelta(text)
@@ -381,9 +445,11 @@ impl AttemptObservation {
     }
 
     fn finish_thinking(&self) {
+        let mut layout = self.thinking_layout.lock().expect("thinking layout lock");
         if !self.thinking_active.swap(false, Ordering::AcqRel) {
             return;
         }
+        layout.last_part = None;
         if let Some(observer) = &self.observer {
             observer.record(RunEvent::ModelThinkingFinished {
                 model_turn_id: self.model_turn_id.clone(),
@@ -735,6 +801,133 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test]
+    async fn ordinary_thinking_preserves_part_boundaries() -> anyhow::Result<()> {
+        use crate::interaction_observation::{IngressStart, InteractionObservation, RunStart};
+
+        let directory = tempfile::tempdir()?;
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/sqlite/0034_interaction_observation.sql"
+        ))
+        .execute(&pool)
+        .await?;
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/sqlite/0040_interaction_input_preview.sql"
+        ))
+        .execute(&pool)
+        .await?;
+        let observation = InteractionObservation::new(
+            Some(pool.clone()),
+            None,
+            directory.path().to_path_buf(),
+            1,
+            true,
+        )
+        .await;
+        let observer = observation
+            .observe_ingress(IngressStart {
+                id: "ingress".into(),
+                method: "POST".into(),
+                path: "/responses".into(),
+                protocol: "responses".into(),
+            })
+            .admit(RunStart {
+                id: "run".into(),
+                principal: "api-key:test".into(),
+                api_key_id: None,
+                api_key_name: None,
+                generation_root_id: None,
+                generation_parent_id: None,
+                has_new_user: true,
+                has_matching_pending_tool_result: false,
+                ingress_received_at: 0,
+                canonical_fingerprint: "thinking-boundaries".into(),
+                route_id: "route".into(),
+                model_display_name: None,
+                ingress_protocol: "responses".into(),
+            });
+        let make_attempt = |id: &str| AttemptObservation {
+            observer: Some(observer.clone()),
+            id: id.into(),
+            model_turn_id: "turn".into(),
+            transport: String::new(),
+            protocol: String::new(),
+            url: String::new(),
+            started_at: Instant::now(),
+            finished: AtomicBool::new(false),
+            usage_confirmed: AtomicBool::new(false),
+            thinking_active: AtomicBool::new(false),
+            thinking_layout: Mutex::new(ObservedThinkingLayout::default()),
+        };
+        let summary = |output, part, text: &str| AiStreamDelta::ReasoningSummaryDelta {
+            text: text.into(),
+            obfuscation: None,
+            output_index: Some(output),
+            content_index: Some(part),
+        };
+        let attempt = make_attempt("headings");
+        let deltas = [
+            summary(0, 0, "**Selecting top "),
+            summary(9, 9, ""),
+            summary(0, 0, "five candidate features**"),
+            summary(0, 1, "**Implementing temp path and timestamp retrieval**"),
+        ];
+        let original = serde_json::to_value(&deltas)?;
+        for delta in &deltas {
+            attempt.observe_delta(delta);
+        }
+        assert_eq!(serde_json::to_value(&deltas)?, original);
+        drop(attempt);
+
+        let attempt = make_attempt("transitions");
+        for delta in [
+            summary(0, 0, "first"),
+            summary(0, 0, " "),
+            summary(0, 0, "\n"),
+            summary(0, 0, "continued"),
+            summary(1, 0, "second"),
+            AiStreamDelta::TextDelta("answer".into()),
+            summary(1, 0, ""),
+            summary(1, 0, "resumed"),
+        ] {
+            attempt.observe_delta(&delta);
+        }
+        let isolated = make_attempt("isolated");
+        isolated.observe_delta(&summary(7, 8, "independent"));
+        drop(isolated);
+        drop(attempt);
+        drop(observer);
+        observation.shutdown().await;
+        let rows: Vec<String> = sqlx::query_scalar(
+            "SELECT payload FROM observation_events WHERE kind = 'model_thinking_delta' ORDER BY sequence",
+        ).fetch_all(&pool).await?;
+        let events: Vec<Value> = rows
+            .iter()
+            .map(|payload| serde_json::from_str(payload).expect("event payload"))
+            .collect();
+        for (id, expected) in [
+            (
+                "headings",
+                "**Selecting top five candidate features**\n\n**Implementing temp path and timestamp retrieval**",
+            ),
+            ("transitions", "first \ncontinued\n\nsecond\n\nresumed"),
+            ("isolated", "independent"),
+        ] {
+            let text: String = events
+                .iter()
+                .filter(|event| event["attempt_id"] == id)
+                .filter_map(|event| event["text"].as_str())
+                .collect();
+            assert_eq!(text, expected, "{id}");
+        }
+        pool.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn ordinary_thinking_excludes_protected_state_and_closes_each_segment()
     -> anyhow::Result<()> {
         use crate::interaction_observation::{IngressStart, InteractionObservation, RunStart};
@@ -797,6 +990,7 @@ mod tests {
             finished: AtomicBool::new(false),
             usage_confirmed: AtomicBool::new(false),
             thinking_active: AtomicBool::new(false),
+            thinking_layout: Mutex::new(ObservedThinkingLayout::default()),
         };
         let attempt = make_attempt("attempt");
         attempt.observe_delta(&AiStreamDelta::ThinkingDelta("readable PLAIN_THINK".into()));
@@ -881,7 +1075,7 @@ mod tests {
             .map(|(kind, payload)| (kind, serde_json::from_str(&payload).expect("event payload")))
             .collect();
         for (id, expected) in [
-            ("attempt", "readable *** content summary"),
+            ("attempt", "readable *** content\n\n summary"),
             ("interleaved", "isolated"),
             ("tool", "tool"),
             ("done", "done"),

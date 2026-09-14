@@ -235,6 +235,8 @@ The observation inspector opens as a read-only conversation: user messages on th
 
 New request records capture readable model thinking, client and platform tool inputs, and tool results even when Debug is off. These contents use the existing credential-redaction and request-record retention policies; they can still contain sensitive business data and increase storage use. Model thinking signatures and encrypted reasoning are excluded from ordinary thinking capture. Older records without captured contents are not backfilled.
 
+Recorded thinking separates identified parts and resumed thinking segments with Markdown paragraph breaks, consistently in live display and history. Deltas within the same part remain contiguous; display spacing does not change canonical reasoning. Older records that lost part boundaries are not rewritten.
+
 Debug Trace contents are available only through **Debug bundle** downloads, not an inline Debug records tab. Interaction and rejected-request detail responses contain ordinary observation events and capture metadata, but do not read Trace segments or return `debug_events`. Turning Debug off does not prevent downloading previously captured records.
 
 Live canvas updates use a summary-only query containing the affected interaction and its complete root tree; Run events and tool bodies are fetched only for the selected inspector. Context links are loaded in bounded batches rather than with one database query per interaction. Filtering and causal context remain unchanged.
