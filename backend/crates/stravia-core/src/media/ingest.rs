@@ -20,14 +20,7 @@ pub(crate) async fn fetch_public_file(
     stravia_media::ingest::fetch_public_file(url, cancellation).await
 }
 
-pub(crate) use stravia_media::ingest::PublicReadResource;
-
-pub(crate) async fn fetch_public_read_resource(
-    url: &str,
-    cancellation: &CancellationToken,
-) -> Result<PublicReadResource, stravia_media::ingest::MediaBridgeError> {
-    stravia_media::ingest::fetch_public_read_resource(url, cancellation).await
-}
+pub(crate) use stravia_media::ingest::{PublicReadResource, fetch_public_read_resource};
 
 pub(crate) async fn settings(gateway: &crate::Gateway) -> Result<ArtifactSettings, ArtifactError> {
     gateway

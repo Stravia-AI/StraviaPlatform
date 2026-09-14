@@ -1,6 +1,7 @@
 mod extract;
 mod http;
 pub(crate) mod policy;
+pub mod resource;
 
 use std::{future::Future, net::IpAddr, pin::Pin, time::Duration};
 
@@ -18,6 +19,7 @@ const MAX_REDIRECTS: usize = 10;
 const RENDER_TIMEOUT: Duration = Duration::from_secs(15);
 const LOW_QUALITY_LIMITATION: &str =
     "The extracted content may be a page shell, login wall, or challenge page.";
+const LOSSY_DECODE_LIMITATION: &str = "The source encoding could not be decoded reliably; the returned text may contain substitutions. Use download=1 for the original bytes.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -75,6 +77,84 @@ impl FetchError {
 
     fn unavailable(message: impl Into<String>) -> Self {
         Self::new(FetchErrorCode::Unavailable, message)
+    }
+}
+
+/// Text produced by the pure in-memory read conversion pipeline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadText {
+    pub text: String,
+    pub representation: String,
+    pub title: Option<String>,
+    pub limitations: Vec<String>,
+    pub source_truncated: bool,
+}
+
+/// Converts already-downloaded bytes into readable text without any network,
+/// script, or secondary resource access.
+///
+/// HTML uses the same Readability plus Markdown pipeline as the provider fetch
+/// path, with absolute links only when a trusted base URL is supplied. JSON,
+/// XML, and text are returned verbatim. `raw` bypasses Readability, Markdown,
+/// and reformatting entirely and strictly decodes the source bytes, failing on
+/// unknown or invalid character sets instead of substituting replacement
+/// characters.
+#[must_use]
+pub fn convert_read_bytes(
+    body: &[u8],
+    content_type: &str,
+    base_url: Option<&Url>,
+    raw: bool,
+) -> Result<ReadText, FetchError> {
+    if raw {
+        let decoded = extract::decode_strict(body, content_type)?;
+        return match extract::classify(content_type, &decoded) {
+            ContentKind::Unsupported => Err(extract::unsupported(content_type)),
+            ContentKind::Html
+            | ContentKind::Markdown
+            | ContentKind::Plain
+            | ContentKind::Json
+            | ContentKind::Xml => Ok(ReadText {
+                text: decoded,
+                representation: "raw".into(),
+                title: None,
+                limitations: Vec::new(),
+                source_truncated: false,
+            }),
+        };
+    }
+    let decoded = extract::decode_lossy(body, content_type);
+    let limitations = decoded
+        .lossy
+        .then(|| LOSSY_DECODE_LIMITATION.to_string())
+        .into_iter()
+        .collect::<Vec<_>>();
+    match extract::classify(content_type, &decoded.text) {
+        ContentKind::Html => {
+            let extract = extract::extract_html(&decoded.text, base_url)?;
+            Ok(ReadText {
+                text: extract.markdown,
+                representation: "markdown".into(),
+                title: extract.title,
+                limitations,
+                source_truncated: false,
+            })
+        }
+        ContentKind::Markdown => Ok(ReadText {
+            text: decoded.text,
+            representation: "markdown".into(),
+            title: None,
+            limitations,
+            source_truncated: false,
+        }),
+        ContentKind::Plain | ContentKind::Json | ContentKind::Xml => Ok(ReadText {
+            text: decoded.text,
+            representation: "text".into(),
+            title: None,
+            limitations,
+            source_truncated: false,
+        }),
+        ContentKind::Unsupported => Err(extract::unsupported(content_type)),
     }
 }
 
@@ -171,7 +251,8 @@ async fn fetch_with(
     renderer: &impl RenderBackend,
 ) -> Result<FetchedPage, FetchError> {
     let requested_url = policy::validate_url(value)?;
-    let (final_url, response) = get_with_redirects(requested_url.clone(), http).await?;
+    let (final_url, response) =
+        get_with_redirects(requested_url.clone(), http, MAX_REDIRECTS).await?;
     if !(200..300).contains(&response.status) {
         return Err(FetchError::unavailable(format!(
             "HTTP request returned status {}",
@@ -180,31 +261,38 @@ async fn fetch_with(
     }
 
     let content_type = response.content_type.as_deref().unwrap_or("");
-    let decoded = extract::decode(&response.body, content_type);
-    match extract::classify(content_type, &decoded) {
-        ContentKind::Html => fetch_html(requested_url, final_url, decoded, http, renderer).await,
-        ContentKind::Markdown | ContentKind::Plain => {
-            Ok(page_from_text(requested_url, final_url, decoded))
+    let decoded = extract::decode_lossy(&response.body, content_type);
+    let mut page = match extract::classify(content_type, &decoded.text) {
+        ContentKind::Html => {
+            fetch_html(requested_url, final_url, decoded.text, http, renderer).await?
         }
-        ContentKind::Json => Ok(page_from_text(
+        ContentKind::Markdown | ContentKind::Plain => {
+            page_from_text(requested_url, final_url, decoded.text)
+        }
+        ContentKind::Json => page_from_text(
             requested_url,
             final_url,
-            extract::json_markdown(&decoded),
-        )),
-        ContentKind::Xml => Ok(page_from_text(
+            extract::json_markdown(&decoded.text),
+        ),
+        ContentKind::Xml => page_from_text(
             requested_url,
             final_url,
-            extract::xml_markdown(&decoded),
-        )),
-        ContentKind::Unsupported => Err(extract::unsupported(content_type)),
+            extract::xml_markdown(&decoded.text),
+        ),
+        ContentKind::Unsupported => return Err(extract::unsupported(content_type)),
+    };
+    if decoded.lossy && page.extraction_path == ExtractionPath::Static {
+        page.limitations.push(LOSSY_DECODE_LIMITATION.into());
     }
+    Ok(page)
 }
 
 async fn get_with_redirects(
     mut url: Url,
     http: &impl HttpBackend,
+    redirect_limit: usize,
 ) -> Result<(Url, HttpResponse), FetchError> {
-    for redirect_count in 0..=MAX_REDIRECTS {
+    for redirect_count in 0..=redirect_limit {
         policy::validate_parsed_url(&url)?;
         let addresses = if http.pins_origin(&url) {
             resolve_public_addresses(&url, http).await?
@@ -215,7 +303,7 @@ async fn get_with_redirects(
         if !(300..400).contains(&response.status) {
             return Ok((url, response));
         }
-        if redirect_count == MAX_REDIRECTS {
+        if redirect_count == redirect_limit {
             return Err(FetchError::unavailable("HTTP redirect limit exceeded"));
         }
         let location = response
@@ -257,7 +345,7 @@ async fn fetch_html(
     http: &impl HttpBackend,
     renderer: &impl RenderBackend,
 ) -> Result<FetchedPage, FetchError> {
-    let static_extract = extract::extract_html(&html, &final_url)?;
+    let static_extract = extract::extract_html(&html, Some(&final_url))?;
     if !extract::is_low_quality(&static_extract.markdown) {
         return Ok(page_from_extract(
             requested_url,
@@ -288,7 +376,7 @@ async fn fetch_html(
 
     let rendered_url = policy::validate_url(&rendered.final_url)?;
     resolve_public_addresses(&rendered_url, http).await?;
-    let rendered_extract = extract::extract_html(&rendered.html, &rendered_url)?;
+    let rendered_extract = extract::extract_html(&rendered.html, Some(&rendered_url))?;
     let rendered_low_quality = extract::is_low_quality(&rendered_extract.markdown);
     let (selected_url, selected_extract, selected_path) = if !rendered_low_quality
         || extract::score(&rendered_extract.markdown) > extract::score(&static_extract.markdown)
@@ -365,15 +453,16 @@ mod tests {
 
     use super::*;
 
-    struct StubBackend {
-        responses: Mutex<VecDeque<HttpResponse>>,
-        rendered: Mutex<Option<Result<RenderedResponse, FetchError>>>,
-        requests: AtomicUsize,
-        renders: AtomicUsize,
+    pub(super) struct StubBackend {
+        pub(super) responses: Mutex<VecDeque<HttpResponse>>,
+        pub(super) rendered: Mutex<Option<Result<RenderedResponse, FetchError>>>,
+        pub(crate) requests: AtomicUsize,
+        pub(crate) renders: AtomicUsize,
+        pub(crate) requested_urls: Mutex<Vec<String>>,
     }
 
     impl StubBackend {
-        fn response(content_type: &str, body: impl Into<Vec<u8>>) -> Self {
+        pub(crate) fn response(content_type: &str, body: impl Into<Vec<u8>>) -> Self {
             Self {
                 responses: Mutex::new(VecDeque::from([HttpResponse {
                     status: 200,
@@ -384,10 +473,11 @@ mod tests {
                 rendered: Mutex::new(None),
                 requests: AtomicUsize::new(0),
                 renders: AtomicUsize::new(0),
+                requested_urls: Mutex::new(Vec::new()),
             }
         }
 
-        fn with_rendered(self, html: impl Into<String>) -> Self {
+        pub(crate) fn with_rendered(self, html: impl Into<String>) -> Self {
             *self.rendered.lock().expect("stub renderer lock") = Some(Ok(RenderedResponse {
                 final_url: "https://example.com/article".into(),
                 html: html.into(),
@@ -412,10 +502,14 @@ mod tests {
 
         fn get<'a>(
             &'a self,
-            _url: &'a Url,
+            url: &'a Url,
             _addresses: &'a [IpAddr],
         ) -> BackendFuture<'a, Result<HttpResponse, FetchError>> {
             self.requests.fetch_add(1, Ordering::Relaxed);
+            self.requested_urls
+                .lock()
+                .expect("stub requested URL lock")
+                .push(url.as_str().to_string());
             Box::pin(async move {
                 self.responses
                     .lock()
@@ -621,6 +715,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn default_html_fetch_reports_lossy_source_decoding() {
+        let mut body = format!(
+            "<html><body><article><p>{}",
+            "This article explains how a gateway validates requests and preserves complete content. ".repeat(30)
+        ).into_bytes();
+        body.extend_from_slice(b"\xff</p></article></body></html>");
+        let backend = StubBackend::response("text/html; charset=utf-8", body);
+        let page = fetch_with("https://example.com/article", &backend, &backend)
+            .await
+            .unwrap();
+        assert_eq!(page.extraction_path, ExtractionPath::Static);
+        assert!(page.markdown.contains('\u{fffd}'));
+        assert!(!page.limitations.is_empty());
+    }
+
+    #[tokio::test]
     async fn passes_text_and_markdown_through_and_pretty_prints_json() {
         for content_type in ["text/plain", "text/markdown"] {
             let backend = StubBackend::response(content_type, "# Exact body\n\nKeep me.");
@@ -703,6 +813,7 @@ mod tests {
             rendered: Mutex::new(None),
             requests: AtomicUsize::new(0),
             renders: AtomicUsize::new(0),
+            requested_urls: Mutex::new(Vec::new()),
         };
 
         let error = fetch_with("https://example.com/redirect", &backend, &backend)
@@ -798,5 +909,341 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code(), FetchErrorCode::InvalidUrl);
         assert_eq!(backend.requests.load(Ordering::Relaxed), 1);
+    }
+
+    fn utf16_bytes(text: &str, to_bytes: fn(u16) -> [u8; 2], bom: [u8; 2]) -> Vec<u8> {
+        let mut bytes = bom.to_vec();
+        bytes.extend(text.encode_utf16().flat_map(to_bytes));
+        bytes
+    }
+
+    #[test]
+    fn reads_utf8_text_with_bom_in_both_modes() {
+        let text = "你好 🌆 plain utf8 text";
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice(text.as_bytes());
+
+        let readable = convert_read_bytes(&bytes, "text/plain; charset=utf-8", None, false)
+            .expect("default utf8 read with BOM succeeds");
+        assert_eq!(readable.text, text);
+        assert_eq!(readable.representation, "text");
+        assert!(readable.limitations.is_empty());
+        assert!(!readable.source_truncated);
+
+        let raw = convert_read_bytes(&bytes, "text/plain; charset=utf-8", None, true)
+            .expect("raw utf8 read with BOM succeeds");
+        assert_eq!(raw.text, text);
+        assert_eq!(raw.representation, "raw");
+        assert_eq!(raw.title, None);
+    }
+
+    #[test]
+    fn bom_overrides_a_contradictory_declared_charset() {
+        let text = "中文内容必须按字节序标记解码";
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice(text.as_bytes());
+
+        let raw = convert_read_bytes(&bytes, "text/plain; charset=iso-8859-1", None, true)
+            .expect("BOM must win over the declared charset");
+        assert_eq!(raw.text, text);
+    }
+
+    #[test]
+    fn reads_utf16_with_bom_in_both_modes() {
+        let text = "Grüße 中文 🌍";
+        for (charset, to_bytes, bom) in [
+            (
+                "text/plain; charset=utf-16le",
+                u16::to_le_bytes as fn(u16) -> [u8; 2],
+                [0xFF, 0xFE],
+            ),
+            (
+                "text/plain; charset=utf-16be",
+                u16::to_be_bytes as fn(u16) -> [u8; 2],
+                [0xFE, 0xFF],
+            ),
+        ] {
+            let bytes = utf16_bytes(text, to_bytes, bom);
+            for raw in [false, true] {
+                let read = convert_read_bytes(&bytes, charset, None, raw)
+                    .unwrap_or_else(|error| panic!("{charset} raw={raw}: {error}"));
+                assert_eq!(read.text, text, "{charset} raw={raw}");
+            }
+
+            let bom_only =
+                convert_read_bytes(&bytes, "text/plain", None, true).expect("BOM alone decodes");
+            assert_eq!(bom_only.text, text);
+        }
+    }
+
+    #[test]
+    fn reads_declared_charsets_without_a_bom() {
+        for charset in ["iso-8859-1", "latin1", "latin-1"] {
+            let content_type = format!("text/plain; charset={charset}");
+            let raw = convert_read_bytes(b"Caf\xe9", &content_type, None, true)
+                .unwrap_or_else(|error| panic!("{charset}: {error}"));
+            assert_eq!(raw.text, "Café", "{charset}");
+        }
+
+        let raw = convert_read_bytes(
+            b"\x80 and \x93quotes\x94",
+            "text/plain; charset=windows-1252",
+            None,
+            true,
+        )
+        .expect("windows-1252 strict decode");
+        assert!(raw.text.starts_with('€'));
+        assert!(raw.text.contains('“'));
+
+        let readable = convert_read_bytes(b"\x80", "text/plain; charset=cp1252", None, false)
+            .expect("cp1252 alias decodes");
+        assert_eq!(readable.text, "€");
+
+        for (charset, to_bytes) in [
+            (
+                "text/plain; charset=utf-16le",
+                u16::to_le_bytes as fn(u16) -> [u8; 2],
+            ),
+            (
+                "text/plain; charset=utf-16be",
+                u16::to_be_bytes as fn(u16) -> [u8; 2],
+            ),
+        ] {
+            let bytes: Vec<u8> = "Hi".encode_utf16().flat_map(to_bytes).collect();
+            let raw = convert_read_bytes(&bytes, charset, None, true)
+                .unwrap_or_else(|error| panic!("{charset}: {error}"));
+            assert_eq!(raw.text, "Hi", "{charset}");
+        }
+    }
+
+    #[test]
+    fn converts_html_to_markdown_with_meta_charset_and_absolute_links() {
+        let mut html = b"<html><head><meta charset=\"windows-1252\"><title>Caf\xe9 menu</title></head><body><nav>Nav</nav><article><h1>Caf\xe9 menu</h1>".to_vec();
+        for index in 0..6 {
+            html.extend_from_slice(b"<p>Caf");
+            html.push(0xE9);
+            html.extend_from_slice(
+                format!(
+                    " paragraph {index} keeps enough prose for the extractor to keep this article content.</p>"
+                )
+                .as_bytes(),
+            );
+        }
+        html.extend_from_slice(b"<a href='/order'>Order</a></article></body></html>");
+        let base = Url::parse("https://example.com/cafe").expect("base URL parses");
+
+        let readable = convert_read_bytes(&html, "text/html", Some(&base), false)
+            .expect("windows-1252 HTML converts");
+        assert_eq!(readable.title.as_deref(), Some("Café menu"));
+        assert_eq!(readable.representation, "markdown");
+        assert!(readable.text.contains("Café paragraph"));
+        assert!(
+            readable.text.contains("https://example.com/order"),
+            "links must be absolutized against the trusted base: {}",
+            readable.text
+        );
+        assert!(readable.limitations.is_empty());
+    }
+
+    #[test]
+    fn html_without_a_trusted_base_keeps_relative_links() {
+        let paragraphs = (0..6)
+            .map(|index| {
+                format!("<p>Detached paragraph {index} with enough words that the article stays the extracted main content without any origin.</p>")
+            })
+            .collect::<String>();
+        let html = format!(
+            "<html><head><title>Detached</title></head><body><article><h1>Detached doc</h1>{paragraphs}<a href='/source'>Source</a></article></body></html>"
+        );
+
+        let readable = convert_read_bytes(html.as_bytes(), "text/html", None, false)
+            .expect("base-less HTML converts");
+        assert!(
+            readable.text.contains("](/source)"),
+            "relative link must survive without a fabricated origin: {}",
+            readable.text
+        );
+        assert!(!readable.text.contains("://"));
+        assert!(!readable.text.contains("example.com"));
+    }
+
+    #[test]
+    fn raw_html_returns_the_exact_source_without_decoration() {
+        let html = "<html><head><title>Raw doc</title></head><body><nav>Nav stays</nav><article><p>Body</p></article></body></html>\n";
+
+        let raw = convert_read_bytes(html.as_bytes(), "text/html; charset=utf-8", None, true)
+            .expect("raw HTML strict decode");
+        assert_eq!(raw.text, html);
+        assert_eq!(raw.representation, "raw");
+        assert_eq!(raw.title, None);
+    }
+
+    #[test]
+    fn json_and_xml_are_read_verbatim_without_reformatting() {
+        let json = r#"{"b":1,"a":[true,null]}"#;
+        for raw in [false, true] {
+            let read = convert_read_bytes(json.as_bytes(), "application/json", None, raw)
+                .unwrap_or_else(|error| panic!("json raw={raw}: {error}"));
+            assert_eq!(read.text, json, "json raw={raw}");
+            assert_eq!(read.representation, if raw { "raw" } else { "text" });
+            assert_eq!(read.title, None);
+        }
+
+        let xml = "<root><item>1</item>  <item>2</item></root>\n";
+        for raw in [false, true] {
+            let read = convert_read_bytes(xml.as_bytes(), "application/xml", None, raw)
+                .unwrap_or_else(|error| panic!("xml raw={raw}: {error}"));
+            assert_eq!(read.text, xml, "xml raw={raw}");
+        }
+    }
+
+    #[test]
+    fn markdown_and_explicit_text_subtypes_are_read_verbatim() {
+        let markdown = "# Heading\n\n- item\n";
+        let read = convert_read_bytes(markdown.as_bytes(), "text/markdown", None, false)
+            .expect("markdown source reads");
+        assert_eq!(read.text, markdown);
+        assert_eq!(read.representation, "markdown");
+
+        let csv = "a,b\r\n1,2\r\n";
+        for content_type in ["text/csv", "text/tab-separated-values"] {
+            let read = convert_read_bytes(csv.as_bytes(), content_type, None, false)
+                .unwrap_or_else(|error| panic!("{content_type}: {error}"));
+            assert_eq!(read.text, csv, "{content_type}");
+            assert_eq!(read.representation, "text");
+        }
+    }
+
+    #[test]
+    fn empty_text_reads_successfully_in_both_modes() {
+        for content_type in ["text/plain", ""] {
+            for raw in [false, true] {
+                let read = convert_read_bytes(b"", content_type, None, raw)
+                    .unwrap_or_else(|error| panic!("{content_type} raw={raw}: {error}"));
+                assert_eq!(read.text, "", "{content_type} raw={raw}");
+                assert!(read.limitations.is_empty());
+                assert!(!read.source_truncated);
+            }
+        }
+    }
+
+    #[test]
+    fn raw_rejects_invalid_utf8_while_default_reads_lossily() {
+        let bytes = b"valid start then \xc3\x28 invalid tail";
+
+        let error = convert_read_bytes(bytes, "text/plain", None, true)
+            .expect_err("raw must reject invalid utf-8");
+        assert_eq!(error.code(), FetchErrorCode::UnsupportedMediaType);
+
+        let readable = convert_read_bytes(bytes, "text/plain", None, false)
+            .expect("default mode degrades lossily");
+        assert!(readable.text.contains("valid start then"));
+        assert!(readable.text.contains("invalid tail"));
+        assert!(!readable.limitations.is_empty());
+    }
+
+    #[test]
+    fn raw_rejects_unknown_charsets_in_declaration_and_meta() {
+        let error = convert_read_bytes(b"ascii only", "text/plain; charset=euc-kr", None, true)
+            .expect_err("raw must reject unknown declared charsets");
+        assert_eq!(error.code(), FetchErrorCode::UnsupportedMediaType);
+
+        let readable = convert_read_bytes(b"ascii only", "text/plain; charset=euc-kr", None, false)
+            .expect("default mode still reads the ascii subset");
+        assert_eq!(readable.text, "ascii only");
+        assert!(!readable.limitations.is_empty());
+
+        let html = b"<html><head><meta charset=\"shift_jis\"><title>t</title></head><body><article><p>ascii</p></article></body></html>";
+        let error = convert_read_bytes(html, "text/html", None, true)
+            .expect_err("raw must reject unknown meta charsets");
+        assert_eq!(error.code(), FetchErrorCode::UnsupportedMediaType);
+    }
+
+    #[test]
+    fn raw_rejects_broken_utf16_payloads() {
+        let odd: Vec<u8> = "hi"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .chain([0x41])
+            .collect();
+        let error = convert_read_bytes(&odd, "text/plain; charset=utf-16le", None, true)
+            .expect_err("raw must reject an odd utf-16 length");
+        assert_eq!(error.code(), FetchErrorCode::UnsupportedMediaType);
+        let readable = convert_read_bytes(&odd, "text/plain; charset=utf-16le", None, false)
+            .expect("default mode drops the dangling unit lossily");
+        assert!(readable.text.starts_with("hi"));
+        assert!(!readable.limitations.is_empty());
+
+        let mut lone_surrogate = Vec::new();
+        for unit in [0xD800_u16, 0x0041] {
+            lone_surrogate.extend_from_slice(&unit.to_le_bytes());
+        }
+        let error = convert_read_bytes(&lone_surrogate, "text/plain; charset=utf-16le", None, true)
+            .expect_err("raw must reject a lone utf-16 surrogate");
+        assert_eq!(error.code(), FetchErrorCode::UnsupportedMediaType);
+        let readable =
+            convert_read_bytes(&lone_surrogate, "text/plain; charset=utf-16le", None, false)
+                .expect("default mode replaces the surrogate lossily");
+        assert!(readable.text.ends_with('A'));
+        assert!(!readable.limitations.is_empty());
+    }
+
+    #[test]
+    fn binary_media_types_are_rejected_by_both_read_modes() {
+        for content_type in ["image/png", "image/jpeg", "application/pdf"] {
+            for raw in [false, true] {
+                let error = convert_read_bytes(b"pretend bytes", content_type, None, raw)
+                    .expect_err(&format!("{content_type} raw={raw} must be rejected"));
+                assert_eq!(
+                    error.code(),
+                    FetchErrorCode::UnsupportedMediaType,
+                    "{content_type} raw={raw}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn enforces_the_redirect_budget_passed_by_the_caller() {
+        let redirect = |location: String| HttpResponse {
+            status: 302,
+            content_type: None,
+            location: Some(location),
+            body: Vec::new(),
+        };
+        let ok = HttpResponse {
+            status: 200,
+            content_type: Some("text/plain".into()),
+            location: None,
+            body: b"done".to_vec(),
+        };
+        let stub = |responses: VecDeque<HttpResponse>| StubBackend {
+            responses: Mutex::new(responses),
+            rendered: Mutex::new(None),
+            requests: AtomicUsize::new(0),
+            renders: AtomicUsize::new(0),
+            requested_urls: Mutex::new(Vec::new()),
+        };
+
+        let mut within_budget: VecDeque<HttpResponse> = (0..MAX_REDIRECTS)
+            .map(|index| redirect(format!("https://example.com/hop/{index}")))
+            .collect();
+        within_budget.push_back(ok);
+        let backend = stub(within_budget);
+        let page = fetch_with("https://example.com/start", &backend, &backend)
+            .await
+            .expect("exactly MAX_REDIRECTS hops fit the budget");
+        assert_eq!(page.markdown, "done");
+        assert_eq!(backend.requests.load(Ordering::Relaxed), MAX_REDIRECTS + 1);
+
+        let over_budget: VecDeque<HttpResponse> = (0..=MAX_REDIRECTS)
+            .map(|index| redirect(format!("https://example.com/hop/{index}")))
+            .collect();
+        let backend = stub(over_budget);
+        let error = fetch_with("https://example.com/start", &backend, &backend)
+            .await
+            .expect_err("one hop over the budget fails");
+        assert_eq!(error.code(), FetchErrorCode::Unavailable);
+        assert_eq!(backend.requests.load(Ordering::Relaxed), MAX_REDIRECTS + 1);
     }
 }

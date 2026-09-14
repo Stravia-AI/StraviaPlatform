@@ -4,6 +4,8 @@ status: accepted
 
 # Put Web Search and Web Fetch behind one Web Access seam
 
+> ADR-0051 的当前修订取代下述历史工具输入、域名黑名单和读取窗口约定：统一入口使用 `path`/`search://`，仅保留允许来源约束，并通过不可变文本快照续读。当前上限与输出契约见 [Web Search 设计](../design/web-search.md)；本文件保留最初决策背景。
+
 Stravia 将 Web Search 与 Web Fetch 收进独立的 Web Access deep module；其小 interface 只接受统一请求并返回统一结果，Codex OAuth、Exa API、Brave API、Tavily API 与智谱 Coding Plan Remote MCP 作为 Web Provider adapter 隐藏在 module 内。Platform Tool、通用 MCP Server 与 OpenAI Responses adapter 分别处理自己的可见性和 wire 语义，但都调用同一个 Web Access interface；不创建同时承担模型循环、MCP 协议和供应商细节的通用 Tool abstraction。
 
 ## Considered options

@@ -25,6 +25,7 @@ impl SearchReportValidator {
         partial_cause: Option<SearchPartialCause>,
         mut report: SearchReport,
         evidence: &SearchEvidenceSet,
+        allowed_domains: &[String],
     ) -> Result<SearchReport, WebSearchError> {
         if (completion == SearchCompletion::Partial) != partial_cause.is_some() {
             return Err(WebSearchError::new(
@@ -97,6 +98,15 @@ impl SearchReportValidator {
             }
             let normalized = normalize_public_url(&source.url)?;
             validate_public_dns(&normalized).await?;
+            if !stravia_web_access_contract::url_matches_allowed_domains(
+                &normalized,
+                allowed_domains,
+            ) {
+                return Err(WebSearchError::new(
+                    "source_outside_allowed_domains",
+                    "Search Source is outside the allowed domains",
+                ));
+            }
             let Some(verified_title) = evidence.by_url.get(&normalized) else {
                 return Err(WebSearchError::new(
                     "unverified_source",

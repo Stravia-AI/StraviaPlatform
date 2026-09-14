@@ -191,7 +191,6 @@ impl WebAccessService {
                     query: "Stravia connectivity test".into(),
                     max_results: 1,
                     allowed_domains: vec![],
-                    blocked_domains: vec![],
                 })
                 .await
                 .map_err(|failure| WebAccessError::from_code(failure.code, failure.message))?;

@@ -303,9 +303,6 @@ impl LocalArtifactStore {
             let part = self
                 .upload_part(principal, &upload.upload_id, &upload.upload_token, 1, bytes)
                 .await?;
-            if part.size == 0 {
-                return Err(ArtifactError::Invalid("Artifact is empty".into()));
-            }
             if size.is_none() {
                 match &self.database {
                     ArtifactDatabase::Sqlite(pool) => {

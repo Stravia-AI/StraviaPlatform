@@ -4,6 +4,8 @@
 
 ### Changed
 
+- **Breaking:** `StraviaRead` now accepts only `path`: `search://` replaces `query://`, search filters/continuation move into the search query, and resource options use `#stravia?`. Stravia-managed domain blacklists are removed; allowed domains constrain final report sources. Owned and public images default to understanding, HTML/text default to readable content, and explicit `download=1` avoids model execution. Strict raw decoding, line selections, and immutable 32 KiB/200-line text pages support complete long-line continuation. Long search/media answers paginate only their delivery copy; full history remains intact. Local Search uses Revision 3 and rejects incompatible old continuations. Empty text Artifacts are supported without changing the database schema.
+
 - **Breaking:** Server and Desktop now keep managed local state beneath one resolved data root: SQLite at `db/gateway.db`, diagnostics under `diagnostics/`, rebuildable catalogs under `cache/`, and browser/host state under `state/`. SQLite configuration no longer accepts a separate path; `--config` does not redirect the data root. Existing layouts require the explicit, stopped-source `stravia-tools migrate-data` command, which plans by default and publishes a verified copy without deleting source data. Desktop restart and autostart retain the selected root.
 
 - Observation canvases no longer mount every new card at the origin for measurement. Shared node and handle geometry enables viewport culling before the first mount; unchanged nodes retain their identity, and long-chain ancestry checks reuse traversed prefixes without changing causal links.

@@ -50,7 +50,7 @@ Windows 任务栏与托盘采用透明底「节律」图形，随系统颜色模
 
 - **平台自有工具执行：** 向兼容的模型请求暴露工具，在 Stravia 内执行平台工具调用，并携带结果继续模型轮次。客户端自有工具仍由客户端负责执行。
 - **有界 Agent 循环：** 在时间、轮次、token 和工具预算内协调模型与工具轮次，支持受控工具并发、取消和输出校验。
-- **内置能力：** `StraviaRead` 统一读取文件与网页，通过 `query://` 返回带来源的 Search Report，并回答受支持图片的问题。搜索与媒体结果保留 `previous_turn_id` 显式续接与分支。
+- **内置能力：** `StraviaRead` 用唯一 `path` 读取文件、网页、`search://` 研究与受支持图片。文本支持不可变快照分页；搜索与媒体通过 path 内的 `previous_turn_id` 显式续接。
 - **MCP 与透明注入：** 将已启用能力提供给 MCP 客户端，或按配置将所选能力注入兼容的模型请求。
 - **执行管理：** 将请求及嵌套执行归属于调用方 Principal，实施访问与并发限制，并记录历史、上游确认用量和诊断。
 
@@ -139,7 +139,13 @@ Route Builder 使用独立页面。选择 Provider 后会自动加载其可用 P
 
 ### 联网搜索与 MCP
 
-可选的联网搜索通过 `StraviaRead` 调用，输入为 `{"url":"query://URL-encoded%20question"}`，返回终态、带来源的 Search Report，而不是单页搜索结果。成功结果包含答案、已引用的公网 HTTP(S) 来源、限制、完成状态、用量和稳定 `turn_id`。将该 ID 作为 `previous_turn_id` 传入，可从同一 Principal 的完整祖先链续接或创建独立分支；Stravia 不会隐式选择“最新”Turn。网页 URL 返回 Markdown，不启动研究 Agent。内部搜索 Agent 使用相同工具名，但其 `query://` 只执行基础检索，不递归启动研究。
+可选联网搜索使用 `StraviaRead`，输入为 `{"path":"search://URL-encoded%20question"}`，返回包含答案、公网 HTTP(S) 来源、限制、完成状态和稳定 `turn_id` 的 Search Report。通过 `search://Follow-up?previous_turn_id=<id>` 显式续接或分支，不隐式选择最新 Turn。在搜索 query 中重复 `allowed_domains` 可约束报告来源，例如 `search://Rust?allowed_domains=rust-lang.org&allowed_domains=docs.rs`。续接时省略域名则继承父策略，非空列表整体替换；需要无限制研究时启动新根。内部 Agent 使用相同工具名和 `path` schema，但只做基础检索，不递归研究或续接完整研究。
+
+唯一顶层参数是必填字符串 `path`。旧 `url` 字段、`query://`、顶层续接与域名参数，以及 Stravia 管理的 `blocked_domains` 均拒绝。原生 web-search 声明转为 StraviaRead 时也明确拒绝已移除的黑名单字段。域名列表约束研究来源，不替代 SSRF 检查。
+
+资源选项放在独立 fragment 中：`https://example.com/page?signature=...#stravia?raw=1&lines=10-30`。源站 query 保持原样，资源选项不发送给源站。HTML 默认转换为 Markdown；`raw=1` 返回严格解码的原文，不转 Markdown、不插入行号，未知编码或无效字节明确失败。`lines` 支持 `N`（到 EOF）、`N-M`、`N%2BK`（共 K 行）、`-K` 和逗号多段。`download=1` 与其他选项互斥，显式请求下载而非内容读取。
+
+文本结果包含 `content`、`read_path`、`returned_ranges`、`has_more`、`source_truncated` 和可选 `next_path`。将 `next_path` 原样放入下次调用的 `path` 即可续读。每页最多 32KiB UTF-8、200 个源行，超长单行也能完整读完。快照固定首次文本表示，后续页不重新联网或调用模型。源截断与分页分开：上游限量结果的最后一页仍可能是 `has_more=false`、`source_truncated=true`。搜索／媒体长答案首包保留来源等报告字段，在 `pagination` 中给出续读信息；持久化报告保持完整。
 
 在 WebUI 中配置一个 Search Backend。Local Search 使用有界 Agent 编排有序的内部 Web Access Search/Fetch 来源：自动创建的进程内 Local Provider、Exa 或智谱。每个 Web Provider 都可独立选择是否使用 Gateway 代理。Codex Agentic Search 固定到一个精确且兼容的 Codex OAuth Responses Provider/model，不使用 Local budget。Local 与 Codex 之间不做 fallback。
 
@@ -161,7 +167,7 @@ Local Fetch 和浏览器出站检查会拒绝去除主机尾随点后成为非�
 
 ### Media Understanding
 
-Media Understanding 通过 `StraviaRead` 读取静态 JPEG、PNG 与 WebP 图片，例如 `{"url":"https://stravia/artifact/<id>?question=Describe%20the%20image"}`。裸 Artifact Reference 只返回下载信息，不调用模型。外部图片 URL 先收存，再描述内容并提取可读文字；原 URL 的查询参数完整保留，不作为平台指令。若父 Route 存在支持图片的 Target，Stravia 会原生交付已保存的图片；否则，支持工具的父 Model 可调用已配置的隐藏视觉 Model，并获得包含 source ArtifactId 与可分支 `turn_id` 的强校验 Media Report。新 Artifact 问题可同时携带 `previous_turn_id` 续接。原生视觉 Route 失败后不会 fallback 到隐藏 Model。
+Media Understanding 通过 `{"path":"https://stravia/artifact/<id>"}` 读取静态 JPEG、PNG 与 WebP 图片。所属图片引用和公网图片 URL 默认描述内容并提取可读文字，公网图片先收存。添加 `#stravia?question=Describe%20the%20image` 提出指定问题，在同一 fragment 中添加 `&previous_turn_id=<id>` 续接或分支。显式 `#stravia?download=1` 只下载、不调用模型。HTML 附问题仍返回 Markdown，并标记 `question_applied=false`。若父 Route 有支持图片的 Target，Stravia 原生交付已保存的图片；否则支持工具的父 Model 可使用配置的隐藏视觉 Model。原生视觉 Route 失败后不 fallback 到隐藏 Model。
 
 在**多模态理解**页面启用平台能力、选择逻辑 Model 并设置思考等级。选择器只列出所有 Target 都明确声明图片输入能力的已启用 Model；思考等级选择器只列出每个 Target 都支持的等级。启用后，所有有效 API Key 都能通过 `StraviaRead` 请求理解；MCP 访问和透明注入仍由每个 Key 独立控制。隐藏调用计入调用方配额，但不会授予所选 Model 的直接访问权。外部文件仅允许公网 HTTP(S)，校验 DNS、固定实际连接地址并逐跳校验重定向。预处理始终生成有界的有损 JPEG derivative，忽略 ICC profile，因此精确颜色或细小文本 OCR 可能不准确。
 
@@ -169,7 +175,7 @@ Media Understanding 通过 `StraviaRead` 读取静态 JPEG、PNG 与 WebP 图片
 
 未配置 S3 时直接使用内部存储。可选 S3 沿用相同上传步骤：`POST /v1/artifacts/uploads` 创建，携带 `x-upload-token` 调用 `PUT /v1/artifacts/uploads/{upload_id}/parts/{part_number}`，最后调用 `POST /v1/artifacts/uploads/{upload_id}/complete`。完成结果保留原有文件元数据，并增加形如 `https://stravia/artifact/<opaque-id>` 的 `reference`。这是稳定、Principal-scoped 的文件身份，不是网络下载地址或凭据。同一 API Key 可跨对话使用，其他 Principal 无权解析。
 
-结构化内联媒体和远程附件 URL 必须先保存成功，模型调用才会开始。普通文本链接和类似 base64 的文本不会自动下载或改写。`StraviaRead` 导入普通文件 URL，返回引用、MIME、大小、文件名（或不透明回退值）和临时下载地址，不自动解压、执行或理解文件。
+结构化内联媒体和远程附件 URL 必须先保存成功，模型调用才会开始。普通文本链接和类似 base64 的文本不会自动下载或改写。`StraviaRead` 读取 HTML 与文本文件，JSON/XML 不重排；未知二进制返回文件／下载信息并明确说明未读取内容，不自动解压或执行。空文本合法。内容读取成功时不自动签发下载 grant；下载文本快照仅导出 UTF-8 正文。快照沿用既有 Principal 归属和保留规则，过期后明确失败，不回源补读。
 
 在初始化或设置中保存完整的**客户端访问地址**，包括协议、端口与部署路径前缀。保存值始终有效，后续 Host 和转发头不能替换它。**外部签名下载**和**上传提示词注入**分别默认关闭：
 

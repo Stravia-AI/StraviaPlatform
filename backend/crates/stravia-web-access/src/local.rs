@@ -286,7 +286,6 @@ mod tests {
                 query: "quiet query".into(),
                 max_results: 5,
                 allowed_domains: Vec::new(),
-                blocked_domains: Vec::new(),
             })
             .await
             .expect("empty Local Search is successful");

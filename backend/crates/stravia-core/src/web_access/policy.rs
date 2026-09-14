@@ -18,66 +18,27 @@ pub(super) fn validate_search_request(
             "max_results must be between 1 and 20",
         ));
     }
-    if request.allowed_domains.len() > 20 || request.blocked_domains.len() > 20 {
+    if request.allowed_domains.len() > 20 {
         return Err(WebAccessError::invalid(
             "domain filters cannot contain more than 20 entries",
         ));
     }
 
     request.allowed_domains = normalize_domains(request.allowed_domains)?;
-    request.blocked_domains = normalize_domains(request.blocked_domains)?;
-    let blocked: HashSet<&str> = request.blocked_domains.iter().map(String::as_str).collect();
-    if let Some(conflict) = request
-        .allowed_domains
-        .iter()
-        .find(|domain| blocked.contains(domain.as_str()))
-    {
-        return Err(WebAccessError::invalid(format!(
-            "domain appears in allowed_domains and blocked_domains: {conflict}"
-        )));
-    }
     Ok(request)
 }
 
-use stravia_web_access_contract::normalize_domains;
+use stravia_web_access_contract::{normalize_domains, url_matches_allowed_domains};
 
 pub(super) fn apply_domain_filters(request: &SearchRequest, response: &mut SearchResponse) {
-    response.results.retain(|result| {
-        url_matches_domain_filters(
-            &result.url,
-            &request.allowed_domains,
-            &request.blocked_domains,
-        )
-    });
+    response
+        .results
+        .retain(|result| url_matches_allowed_domains(&result.url, &request.allowed_domains));
     if let Some(citations) = response.citations.as_mut() {
         citations.retain(|citation| {
-            url_matches_domain_filters(
-                &citation.url,
-                &request.allowed_domains,
-                &request.blocked_domains,
-            )
+            url_matches_allowed_domains(&citation.url, &request.allowed_domains)
         });
     }
-}
-
-fn url_matches_domain_filters(url: &str, allowed: &[String], blocked: &[String]) -> bool {
-    let Ok(parsed) = reqwest::Url::parse(url) else {
-        return false;
-    };
-    let Some(hostname) = parsed.host_str() else {
-        return false;
-    };
-    let hostname = hostname.to_ascii_lowercase();
-    if blocked
-        .iter()
-        .any(|domain| hostname == *domain || hostname.ends_with(&format!(".{domain}")))
-    {
-        return false;
-    }
-    allowed.is_empty()
-        || allowed
-            .iter()
-            .any(|domain| hostname == *domain || hostname.ends_with(&format!(".{domain}")))
 }
 
 pub(super) async fn validate_fetch_request(
@@ -88,9 +49,9 @@ pub(super) async fn validate_fetch_request(
             "urls must contain between 1 and 20 entries",
         ));
     }
-    if !(1_000..=50_000).contains(&request.max_characters) {
+    if !(1_000..=500_000).contains(&request.max_characters) {
         return Err(WebAccessError::invalid(
-            "max_characters must be between 1,000 and 50,000",
+            "max_characters must be between 1,000 and 500,000",
         ));
     }
     for value in &mut request.urls {

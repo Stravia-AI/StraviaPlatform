@@ -209,7 +209,7 @@ pub(crate) async fn upload_instructions(
         .trim_end_matches('/')
         .replace('\'', "'\\''");
     Ok(Some(format!(
-        r#"When a client needs to submit a local file, explain or execute this client-side multipart upload workflow. The temporary upload credential below grants only uploads for fifteen minutes and can upload multiple files. Never send a local path for Stravia to fetch. Use the returned reference in a structured attachment or StraviaRead.
+        r#"When a client needs to submit a local file, explain or execute this client-side multipart upload workflow. The temporary upload credential below grants only uploads for fifteen minutes and can upload multiple files. Never send a local path for Stravia to fetch. Use the returned reference in a structured attachment or as the StraviaRead path to read its content.
 Requires curl, jq and a POSIX shell. Set FILE to the local file and MIME to its actual media type.
 ```sh
 FILE='/path/to/file'

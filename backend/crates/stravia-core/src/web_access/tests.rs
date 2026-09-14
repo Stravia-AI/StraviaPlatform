@@ -2,29 +2,14 @@ use super::service::AdapterFactory;
 use super::*;
 
 #[test]
-fn search_contract_normalizes_domains_and_rejects_overlap() {
+fn search_contract_normalizes_allowed_domains() {
     let normalized = validate_search_request(SearchRequest {
         query: "Rust 1.90".into(),
         max_results: 5,
         allowed_domains: vec!["Docs.RS".into()],
-        blocked_domains: vec![],
     })
     .expect("valid request");
     assert_eq!(normalized.allowed_domains, ["docs.rs"]);
-
-    let conflict = validate_search_request(SearchRequest {
-        query: "Rust".into(),
-        max_results: 5,
-        allowed_domains: vec!["docs.rs".into()],
-        blocked_domains: vec!["DOCS.RS".into()],
-    });
-    assert!(matches!(
-        conflict,
-        Err(WebAccessError {
-            code: WebAccessErrorCode::InvalidInput,
-            ..
-        })
-    ));
 }
 #[test]
 fn request_schemas_reject_unknown_fields() {
@@ -34,6 +19,14 @@ fn request_schemas_reject_unknown_fields() {
             "unexpected": true,
         }))
         .is_err()
+    );
+    assert!(
+        serde_json::from_value::<SearchRequest>(serde_json::json!({
+            "query": "Rust",
+            "blocked_domains": [],
+        }))
+        .is_err(),
+        "removed blocked_domains input must be rejected as an unknown field"
     );
     assert!(
         serde_json::from_value::<FetchRequest>(serde_json::json!({
@@ -397,7 +390,6 @@ async fn configured_local_adapter_observes_proxy_snapshot_empty_success_and_fail
                 query: "Rust".into(),
                 max_results: 5,
                 allowed_domains: vec![],
-                blocked_domains: vec![],
             },
         )
         .await
@@ -465,7 +457,6 @@ async fn configured_local_adapter_observes_proxy_snapshot_empty_success_and_fail
                 query: "Rust".into(),
                 max_results: 5,
                 allowed_domains: vec![],
-                blocked_domains: vec![],
             },
         )
         .await
@@ -515,7 +506,6 @@ async fn search_fails_over_once_and_empty_results_stop_the_chain() {
             query: "Rust".into(),
             max_results: 5,
             allowed_domains: vec![],
-            blocked_domains: vec![],
         })
         .await
         .expect("second provider succeeds");
@@ -539,7 +529,6 @@ async fn search_exhaustion_returns_provider_neutral_error_message() {
             query: "Rust".into(),
             max_results: 5,
             allowed_domains: vec![],
-            blocked_domains: vec![],
         })
         .await
         .expect_err("search should fail");
@@ -550,7 +539,7 @@ async fn search_exhaustion_returns_provider_neutral_error_message() {
 }
 
 #[tokio::test]
-async fn search_strictly_filters_allowed_and_blocked_subdomains() {
+async fn search_strictly_filters_sources_outside_allowed_domains() {
     let provider = Arc::new(FakeSearchProvider {
         response: Ok(SearchResponse {
             mode: SearchMode::Index,
@@ -558,12 +547,21 @@ async fn search_strictly_filters_allowed_and_blocked_subdomains() {
             results: vec![
                 SearchResult {
                     url: "https://guide.docs.rs/start".into(),
-
                     title: None,
                     snippet: None,
                 },
                 SearchResult {
-                    url: "https://blocked.docs.rs/".into(),
+                    url: "https://docs.rs/".into(),
+                    title: None,
+                    snippet: None,
+                },
+                SearchResult {
+                    url: "https://evil-docs.rs/".into(),
+                    title: None,
+                    snippet: None,
+                },
+                SearchResult {
+                    url: "https://docs.rs.evil.com/".into(),
                     title: None,
                     snippet: None,
                 },
@@ -585,13 +583,13 @@ async fn search_strictly_filters_allowed_and_blocked_subdomains() {
             query: "Rust".into(),
             max_results: 5,
             allowed_domains: vec!["docs.rs".into()],
-            blocked_domains: vec!["blocked.docs.rs".into()],
         })
         .await
         .expect("provider succeeds");
 
-    assert_eq!(response.results.len(), 1);
+    assert_eq!(response.results.len(), 2);
     assert_eq!(response.results[0].url, "https://guide.docs.rs/start");
+    assert_eq!(response.results[1].url, "https://docs.rs/");
 }
 #[tokio::test]
 async fn embedded_local_runtime_is_available_and_remains_optional() {
@@ -971,6 +969,27 @@ async fn configured_local_fetch_retries_only_failed_urls_on_zhipu() {
         zhipu_fetch.calls.lock().expect("calls lock").as_slice(),
         &[vec!["https://8.8.8.8/b".to_string()]]
     );
+}
+
+#[tokio::test]
+async fn fetch_read_budget_preserves_content_above_the_default_batch_ceiling() {
+    let provider = Arc::new(FakeFetchProvider {
+        fail_url: None,
+        content_characters: 120_000,
+        calls: std::sync::Mutex::new(vec![]),
+    });
+    let response = WebAccessEngine::new(vec![], vec![provider])
+        .fetch(FetchRequest {
+            urls: vec!["https://8.8.8.8/article".into()],
+            max_characters: 500_000,
+        })
+        .await
+        .expect("full read budget");
+    assert_eq!(
+        response.results[0].content.as_deref(),
+        Some("x".repeat(120_000).as_str())
+    );
+    assert!(!response.results[0].truncated);
 }
 
 #[tokio::test]
