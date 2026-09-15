@@ -254,6 +254,7 @@ impl TailIndex {
         runs
     }
 
+    #[cfg(test)]
     pub(super) fn current_tool_source(
         &self,
         input: &Window,
