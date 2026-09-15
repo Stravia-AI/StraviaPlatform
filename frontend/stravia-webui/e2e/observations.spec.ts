@@ -776,17 +776,31 @@ test.describe('Interaction Observation canvas', () => {
     await expect(conversation.getByText('Paragraph 250', { exact: true })).toHaveCount(0)
     const earlier = conversation.getByRole('button', { name: 'Load earlier events', exact: true })
     await expect(earlier).toHaveCount(0)
-    const anchor = conversation.getByText('Paragraph 251', { exact: true })
-    const before = await conversation.evaluate((element) => {
-      element.scrollTop = 40
-      return [...element.querySelectorAll('p')].find((paragraph) => paragraph.textContent === 'Paragraph 251')!.getBoundingClientRect().top
+    const userPreview = conversation.getByText('Cinder user question', { exact: true })
+    await conversation.evaluate((element) => {
+      element.scrollTop = 0
+      element.dispatchEvent(new Event('scroll'))
     })
+    const userBefore = await userPreview.evaluate((element) => element.getBoundingClientRect().top)
+    await conversation.getByText('Paragraph 51', { exact: true }).waitFor({ state: 'attached', timeout: 1000 }).catch(() => undefined)
+    expect(
+      Math.abs((await userPreview.evaluate((element) => element.getBoundingClientRect().top)) - userBefore),
+    ).toBeLessThan(3)
+    await expect(userPreview).toBeInViewport()
+    const alignOlderSentinel = () =>
+      conversation.evaluate((element) => {
+        const sentinel = element.querySelector('[data-conversation-older-sentinel]')
+        if (!(sentinel instanceof HTMLElement)) throw new Error('missing older-events sentinel')
+        element.scrollTop += sentinel.getBoundingClientRect().top - element.getBoundingClientRect().top
+        return [...element.querySelectorAll('p')].find((paragraph) => paragraph.textContent === 'Paragraph 251')!.getBoundingClientRect().top
+      })
+    const anchor = conversation.getByText('Paragraph 251', { exact: true })
+    const before = await alignOlderSentinel()
     await expect(conversation.getByText('Paragraph 51', { exact: true })).toHaveCount(1)
     await expect
       .poll(async () => Math.abs((await anchor.evaluate((element) => element.getBoundingClientRect().top)) - before))
       .toBeLessThan(3)
-    await conversation.focus()
-    await page.keyboard.press('Home')
+    await alignOlderSentinel()
     await expect(conversation.getByText('Paragraph 1', { exact: true })).toHaveCount(1)
     await expect(earlier).toHaveCount(0)
     expect(fixture.detailRequests).toHaveLength(1)

@@ -71,6 +71,8 @@ Stravia 支持 JSON、SSE 与 Open Responses WebSocket 交付、跨协议工具�
 
 Open Responses 推理正文使用当前客户端采用的 rolling `response.reasoning_text.delta` / `response.reasoning_text.done` 事件名流式交付；reasoning item 与 dated `2026-04-24` 语义保持不变。
 
+通用 Thinking 输出在流式与非流式 Responses 中均通过 `reasoning.content` 交付，保存的客户端历史使用相同表示，使精确的工具结果回放续接直接前驱，而不是拆分 Interaction 或从更早的响应分叉。原生推理的摘要与正文仍严格区分；既有历史与观察记录中的关联不回写。
+
 隐藏的 Platform Tool 续跑通过 HTML comment 形式的 History Marker 投影到客户端历史。OpenAI-compatible Chat Completions 在首个非空 `content` delta 前继续通过 `reasoning_content` 交付 Thinking；未请求 encrypted reasoning 时，Open Responses 的公开 summary delta 会保持实时交付，而在 item 开始时已明确标记的 protected reasoning 也会流式交付公开 summary，并把 opaque 字节保留在 Marker 后。之后的 Thinking 通过 `content` 以 Markdown 引用 Preview 流式交付，后续 Thinking Marker 与 Platform Marker 也使用 `content`，从而在客户端按字段聚合时保持顺序。纯文本客户端可能直接显示这些 Marker comment。Open Responses、Anthropic Messages 与 Gemini 保留原生有序 reasoning/thinking carrier；若所选协议无法表示已观察到的顺序，Stravia 会显式失败，而不会延迟普通 Text。
 
 OpenAI-compatible Thinking Preview 使用 Markdown 空行分隔独立块及 summary/content part；同一 part 内的 delta 保持连续。每个权威 Thinking block 各有一个 History Marker，包括公开的无签名 Thinking；同一块中的多个 part 共享该 Marker。段落空白只属于 Preview，不改变原始 Thinking。流式与非流式交付产生相同的可见排版。

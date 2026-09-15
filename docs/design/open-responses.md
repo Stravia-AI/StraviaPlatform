@@ -181,6 +181,8 @@ Wire-only state留在目标 stream session：`output_index`、`content_index`、
 
 Reasoning content 保持 dated reasoning item 结构，但 wire delta/done 使用 rolling `response.reasoning_text.delta` 与 `response.reasoning_text.done` 名称，以兼容当前 OpenAI Responses 客户端。Decoder 同时接受 dated `response.reasoning.delta` / `response.reasoning.done` 与 rolling 名称；reasoning summary lifecycle 不变。
 
+通用 canonical `Thinking` 输出通过 Responses 的 `reasoning.content` 承载，`summary` 为空；同步响应与流式终态使用相同语义。Generation Chain 的 ingress 历史投影将该输出转换为对应的 `Reasoning`，保留文本、签名和 item 元数据，使完整历史回放可以精确匹配直接父节点。Effective Model Request 与权威输出仍保留原始 Thinking；原生 `Reasoning.summary` 和 `Reasoning.content` 不合并，不放宽跨协议历史比较，也不回写既有历史节点或观察父边。
+
 ---
 
 ## 6. HTTP 与 response object

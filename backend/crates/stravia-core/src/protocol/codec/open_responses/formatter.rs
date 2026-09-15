@@ -80,11 +80,14 @@ impl ResponsesResponseFormatter {
                     "id": item.id_ref().map(str::to_owned).unwrap_or_else(|| {
                         gateway_item_id("rs", &resp_id, output.len())
                     }),
-                    "summary": [{
-                        "type": "summary_text",
-                        "text": text
-                    }]
+                    "summary": []
                 });
+                if !text.is_empty() {
+                    reasoning["content"] = serde_json::json!([{
+                        "type": "reasoning_text",
+                        "text": text
+                    }]);
+                }
                 if let Some(signature) = signature {
                     reasoning["encrypted_content"] = Value::String(signature.to_owned());
                 }

@@ -22,9 +22,33 @@ pub(crate) fn project_client_history(
     use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
     if ingress == OPEN_RESPONSES_2026_04_24 {
         let _ = prefix;
-        return Ok(
-            crate::protocol::codec::open_responses::formatter::stamp_output_graph_ids(response),
-        );
+        let mut output =
+            crate::protocol::codec::open_responses::formatter::stamp_output_graph_ids(response);
+        // Thinking 经 Responses 交付的是正文，不是摘要；历史身份必须与客户端回放一致。
+        // 只改写 ingress 投影，保留 effective Thinking 与原生 Reasoning 的语义。
+        for item in &mut output {
+            if let MessageContent::Blocks(blocks) = &mut item.content
+                && let [
+                    ContentBlock::Thinking {
+                        thinking,
+                        signature,
+                    },
+                ] = blocks.as_mut_slice()
+            {
+                let content = if thinking.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![std::mem::take(thinking)]
+                };
+                let encrypted_content = signature.take();
+                blocks[0] = ContentBlock::Reasoning {
+                    summary: Vec::new(),
+                    content,
+                    encrypted_content,
+                };
+            }
+        }
+        return Ok(output);
     }
     if ingress == OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1 {
         let _ = prefix;

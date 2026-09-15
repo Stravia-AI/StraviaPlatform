@@ -1,6 +1,107 @@
 use super::*;
 
 #[tokio::test]
+async fn responses_thinking_tool_replay_discovers_immediate_parent() {
+    use crate::protocol::codec::open_responses::decoder::ResponsesDecoder;
+    use crate::protocol::codec::open_responses::formatter::ResponsesResponseFormatter;
+    use crate::protocol::codec::open_responses::stream::ResponsesStreamFormatter;
+    use stravia_runtime_contract::protocol::ir::AiStreamDelta;
+
+    for streaming in [true, false] {
+        for seed_without_thinking in [false, true] {
+            let chain = generation_chain().await;
+            let owner = principal("owner");
+            let mut input = vec![serde_json::json!({
+                "role": "user", "content": "investigate the project",
+            })];
+            let mut expected_parent = None;
+            let mut expected_root = None;
+            for turn in 0..4 {
+                let request = ResponsesDecoder
+                    .decode_request(serde_json::json!({
+                        "model": "model", "input": input, "stream": streaming,
+                    }))
+                    .expect("decode client replay");
+                let mut write = chain.begin(owner.clone(), request).await.expect("begin");
+                assert_eq!(
+                    write.parent_id(),
+                    expected_parent.as_deref(),
+                    "streaming={streaming}, seed_without_thinking={seed_without_thinking}, turn={turn}",
+                );
+                if let Some(root) = expected_root.as_deref() {
+                    assert_eq!(write.root_id(), root);
+                    assert!(write.has_matching_pending_tool_result());
+                } else {
+                    expected_root = Some(write.root_id().to_owned());
+                }
+                let call = ToolCall {
+                    id: format!("call_{turn}"),
+                    name: "read".into(),
+                    arguments: "{}".into(),
+                };
+                let mut response = AiResponse::new(write.id(), "model");
+                let mut deltas = vec![AiStreamDelta::MessageStart {
+                    id: write.id().to_owned(),
+                    model: "model".into(),
+                }];
+                if turn != 0 || !seed_without_thinking {
+                    let thinking = format!("Inspect step {turn}.\n\nKeep the full reasoning.");
+                    response.push_reasoning(thinking.clone(), None);
+                    deltas.push(AiStreamDelta::ThinkingDelta(thinking));
+                }
+                response.items.push(AiItem::function_call(call.clone()));
+                response.stop_reason = Some("tool_calls".into());
+                deltas.extend([
+                    AiStreamDelta::ToolCallStart {
+                        index: 0,
+                        id: call.id.clone(),
+                        name: call.name.clone(),
+                    },
+                    AiStreamDelta::ToolCallDelta {
+                        index: 0,
+                        arguments: call.arguments.clone(),
+                    },
+                    AiStreamDelta::ToolCallComplete {
+                        index: 0,
+                        tool_call: call.clone(),
+                    },
+                    AiStreamDelta::Done {
+                        stop_reason: "tool_calls".into(),
+                    },
+                ]);
+                let wire_response = if streaming {
+                    ResponsesStreamFormatter::new()
+                        .format_deltas(&deltas)
+                        .into_iter()
+                        .find(|event| event.event.as_deref() == Some("response.completed"))
+                        .map(|event| {
+                            serde_json::from_str::<serde_json::Value>(&event.data)
+                                .expect("terminal SSE")["response"]
+                                .clone()
+                        })
+                        .expect("completed response")
+                } else {
+                    ResponsesResponseFormatter.format_response(&response)
+                };
+                assert!(write.stage(&mut response, &generation_source(), None));
+                write.persist().await.expect("persist delivered response");
+                expected_parent = Some(write.id().to_owned());
+                input.extend(
+                    wire_response["output"]
+                        .as_array()
+                        .expect("client-visible output")
+                        .iter()
+                        .cloned(),
+                );
+                input.push(serde_json::json!({
+                    "type": "function_call_output", "call_id": call.id, "output": "file contents",
+                }));
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn generation_parent_prefers_its_target_without_native_continuation() {
     let chain = generation_chain().await;
     let owner = principal("owner");
