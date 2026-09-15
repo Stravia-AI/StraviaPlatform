@@ -8933,7 +8933,6 @@ dependencies = [
  "tiktoken-rs",
  "tokio",
  "toml 1.1.5+spec-1.1.0",
- "uuid",
 ]
 
 [[package]]
@@ -9020,13 +9019,13 @@ dependencies = [
  "async-trait",
  "bytes",
  "futures",
+ "rand 0.10.2",
  "reqwest",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "thiserror 2.0.20",
  "tokio",
- "uuid",
 ]
 
 [[package]]

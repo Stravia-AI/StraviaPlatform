@@ -76,7 +76,8 @@ async fn public_model_input_snapshots_media_without_scanning_text() {
     let router = crate::proxy::server::create_router(gateway.clone());
     let bytes = include_bytes!("../../tests/fixtures/media/transparent.png");
     let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
-    let ordinary = "Do not fetch http://127.0.0.1/private or https://stravia/artifact/not-a-file; YWJjZA== is ordinary text.";
+    let ordinary =
+        "Do not fetch http://127.0.0.1/private or sa:not-a-file; YWJjZA== is ordinary text.";
     let upload_grant = gateway
         .upload_grants
         .issue(&Principal::new(key.id.clone()))
@@ -343,7 +344,7 @@ async fn public_gemini_generated_media_is_reusable_without_inline_history() {
         let reference = payloads
             .iter()
             .find_map(|payload| {
-                let start = payload.find("https://stravia/artifact/")?;
+                let start = payload.find("sa:")?;
                 let suffix = &payload[start..];
                 Some(suffix.split('"').next().unwrap().to_owned())
             })

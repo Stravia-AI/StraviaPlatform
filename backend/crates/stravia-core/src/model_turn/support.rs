@@ -89,7 +89,7 @@ pub(crate) fn ai_response_to_deltas(
     }
     deltas.push(AiStreamDelta::MessageStart {
         id: if resp.id.is_empty() {
-            format!("chatcmpl-{}", uuid::Uuid::new_v4().simple())
+            stravia_runtime_contract::identifier::new_id()
         } else {
             resp.id.clone()
         },

@@ -34,21 +34,34 @@ struct SchemaRepairModel {
 #[async_trait]
 impl ModelTurnExecutor for SchemaRepairModel {
     async fn execute(&self, input: TurnInput) -> Result<crate::agent::ModelTurn, ModelTurnError> {
-        let search_turn_id = input
+        let search_input = input
             .request
             .items
             .iter()
             .find(|message| message.role == Role::User)
             .and_then(message_text)
             .and_then(|text| serde_json::from_str::<Value>(text).ok())
-            .and_then(|input| input["turn_id"].as_str().map(SearchTurnId::new))
+            .ok_or_else(|| ModelTurnError::new("invalid_test_input", "missing Search input"))?;
+        let search_turn_id = search_input["turn_id"]
+            .as_str()
+            .map(SearchTurnId::new)
             .ok_or_else(|| ModelTurnError::new("invalid_test_input", "missing Search Turn"))?;
+        let source_id_prefix = format!("{search_turn_id}:");
+        let marker_prefix = format!("[sc:{search_turn_id}:");
+        assert_eq!(
+            search_input["report_contract"]["source_id_prefix"].as_str(),
+            Some(source_id_prefix.as_str())
+        );
+        assert_eq!(
+            search_input["report_contract"]["marker_prefix"].as_str(),
+            Some(marker_prefix.as_str())
+        );
         let turn = self.turns.fetch_add(1, Ordering::SeqCst);
-        let marker = format!("source-{search_turn_id}-1");
+        let source_id = format!("{search_turn_id}:1");
         let invalid_report = serde_json::json!({
-            "answer": format!("Verified claim [{marker}]"),
+            "answer": format!("Verified claim [sc:{source_id}]"),
             "sources": [{
-                "id": marker,
+                "id": source_id,
                 "url": "https://8.8.8.8/source",
                 "title": "Verified"
             }]
@@ -188,7 +201,7 @@ async fn local_backend_repairs_schema_without_native_structured_outputs() {
         )),
     );
     let backend = LocalSearchBackend::new(Arc::new(super::host::LocalAgentHost(runner)), evidence);
-    let turn_id = SearchTurnId::new("wst_schema_prompt");
+    let turn_id = SearchTurnId::new("abcdefghijklmnopqrstuvwxyzab");
 
     let output = backend
         .run(SearchBackendInput {
@@ -213,5 +226,13 @@ async fn local_backend_repairs_schema_without_native_structured_outputs() {
     assert_eq!(turns.load(Ordering::SeqCst), 3);
     assert_eq!(output.completion, SearchCompletion::Complete);
     assert!(output.report.limitations.is_empty());
+    assert_eq!(
+        output.report.sources[0].id,
+        "abcdefghijklmnopqrstuvwxyzab:1"
+    );
+    assert_eq!(
+        output.report.answer,
+        "Verified claim [sc:abcdefghijklmnopqrstuvwxyzab:1]"
+    );
     assert_eq!(output.report.sources[0].url, "https://8.8.8.8/source");
 }

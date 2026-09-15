@@ -2,7 +2,7 @@ use super::*;
 
 const SECRET: &str = "ghp_8Dq7mP2vL9sX4aR6tK3nF5wH1jB0cYzUeIoG";
 const TOOL_SECRET: &str = "ghp_3Jt8cR2pX6mQ9wK1vH5nL7aD4sF0bYzUeIoG";
-const UNKNOWN: &str = "<!-- stravia-redaction-marker:rm_00000000000000000000000000000000 -->";
+const UNKNOWN: &str = "<!--sr:aaaaaaaaaaaaaaaaaaaaaaaaaaaa-->";
 
 struct CredentialFileTool {
     path: std::path::PathBuf,
@@ -245,14 +245,32 @@ async fn platform_tool_roundtrip(websocket: bool, array_output: bool, debug: boo
         assert_eq!(status, StatusCode::OK, "{response}");
         if array_output {
             response_id = Some(response["id"].as_str().unwrap().to_owned());
-            response["output"]
-                .as_array()
-                .unwrap()
+            let output = response["output"].as_array().expect("Responses output");
+            let hidden_carriers = output
                 .iter()
+                .filter(|item| item["type"] == "reasoning")
+                .collect::<Vec<_>>();
+            let hidden_wire = serde_json::to_string(&hidden_carriers).unwrap();
+            assert!(
+                hidden_wire.contains(crate::history_marker::HISTORY_MARKER_PREFIX),
+                "platform history must use a typed hidden carrier: {output:?}"
+            );
+            assert!(!hidden_wire.contains(SECRET) && !hidden_wire.contains(TOOL_SECRET));
+
+            let output_text = output
+                .iter()
+                .filter(|item| item["type"] == "message")
                 .filter_map(|item| item["content"].as_array())
                 .flatten()
+                .filter(|part| part["type"] == "output_text")
                 .filter_map(|part| part["text"].as_str())
-                .collect()
+                .collect::<String>();
+            assert!(
+                !output_text.contains(crate::history_marker::HISTORY_MARKER_PREFIX)
+                    && !output_text.contains(crate::history_marker::PROJECTION_DELIMITER_PREFIX),
+                "private carriers must remain outside client output text: {output:?}"
+            );
+            output_text
         } else {
             response["choices"][0]["message"]["content"]
                 .as_str()
@@ -282,8 +300,7 @@ async fn platform_tool_roundtrip(websocket: bool, array_output: bool, debug: boo
         assert!(!wire.contains(TOOL_SECRET));
     }
     let second = request_snapshot[1].to_string();
-    let references =
-        regex::Regex::new(r"<!-- stravia-redaction-marker:rm_[0-9a-f]{32} -->").unwrap();
+    let references = regex::Regex::new(r"<!--sr:[a-z]{28}-->").unwrap();
     assert_eq!(
         references
             .find_iter(&second)

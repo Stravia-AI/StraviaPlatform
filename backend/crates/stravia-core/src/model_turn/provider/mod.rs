@@ -293,7 +293,7 @@ impl AttemptObservation {
         let id = binding
             .observer
             .as_ref()
-            .map(|_| uuid::Uuid::new_v4().to_string())
+            .map(|_| stravia_runtime_contract::identifier::new_id())
             .unwrap_or_default();
         if let Some(observer) = &binding.observer {
             observer.record(RunEvent::TargetAttemptStarted {

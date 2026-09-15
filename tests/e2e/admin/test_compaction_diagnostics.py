@@ -146,7 +146,10 @@ def diagnostic_provider(admin_env: dict[str, Any]):
                     "object": "chat.completion.chunk",
                     "model": body["model"],
                     "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-                    "usage": {"prompt_tokens": 31, "completion_tokens": 17, "total_tokens": 48},
+                    "usage": {
+                        "prompt_tokens": 31, "completion_tokens": 17, "total_tokens": 48,
+                        "prompt_tokens_details": {"cached_tokens": 0},
+                    },
                 })
                 self._write_sse(chunks)
                 return
@@ -156,7 +159,10 @@ def diagnostic_provider(admin_env: dict[str, Any]):
                 "created": 1_783_000_000,
                 "model": body["model"],
                 "choices": [{"index": 0, "message": expected, "finish_reason": "tool_calls" if expected.get("tool_calls") else "stop"}],
-                "usage": {"prompt_tokens": 31, "completion_tokens": 17, "total_tokens": 48},
+                "usage": {
+                    "prompt_tokens": 31, "completion_tokens": 17, "total_tokens": 48,
+                    "prompt_tokens_details": {"cached_tokens": 0},
+                },
             })
 
     server.RequestHandlerClass = Provider
@@ -251,7 +257,7 @@ def test_projected_reasoning_links_diagnostics_after_model_instruction_change(di
                     returned[field] += choice.get("delta", {}).get(field) or ""
     else:
         returned = body["choices"][0]["message"]
-    assert "stravia-history-marker:" in returned["reasoning_content"]
+    assert "<!--sh:" in returned["reasoning_content"]
 
     def source_finished() -> dict[str, Any] | None:
         for item in _all_interactions(conversation.env, conversation.route_id):
@@ -431,11 +437,14 @@ def test_retained_block_before_appended_tool_result_does_not_enable_execution_pa
         return detail if len(detail["runs"]) == 2 and detail["interaction"]["status"] == "completed" else None
     finished = _wait_for("completed tool Interaction with two Runs", completed_tool_interaction)
     assert len(_route_interactions(ordinary.env, ordinary.route_id)) == 1
+    parent = next(run for run in finished["runs"] if run["id"] == started["runs"][0]["id"])
     child = next(run for run in finished["runs"] if run["id"] != started["runs"][0]["id"])
-    assert child["parent_run_id"] == started["runs"][0]["id"]
-    assert child["generation_parent_id"] == started["runs"][0]["generation_node_id"]
+    assert child["parent_run_id"] == parent["id"]
+    assert parent["generation_node_id"] is not None
+    assert child["generation_parent_id"] == parent["generation_node_id"]
     assert finished["interaction"]["usage"]["input_tokens"] == 62
     assert finished["interaction"]["usage"]["output_tokens"] == 34
+    assert finished["interaction"]["usage"]["cache_read_tokens"] == 0
     assert finished["interaction"]["usage"]["reasoning_tokens"] is None
 
 

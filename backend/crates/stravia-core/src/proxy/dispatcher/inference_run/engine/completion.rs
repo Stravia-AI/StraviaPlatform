@@ -426,7 +426,7 @@ pub(super) async fn prepare_platform_markers(
                 },
             )
             .await?;
-        let owner_id = format!("execution-{}", uuid::Uuid::new_v4());
+        let owner_id = stravia_runtime_contract::identifier::new_id();
         pending.push((
             PreparedPlatformMarker {
                 call_id: execution.call().call.id.clone(),
@@ -754,7 +754,7 @@ fn response_preserves_upstream(original: &AiResponse, candidate: &AiResponse) ->
 
 fn fill_canonical_defaults(context: &CompletionContext, response: &mut AiResponse) {
     if response.id.is_empty() {
-        response.id = format!("chatcmpl-{}", uuid::Uuid::new_v4().simple());
+        response.id = stravia_runtime_contract::identifier::new_id();
     }
     if response.model.is_empty() {
         response.model.clone_from(&context.actual_model);

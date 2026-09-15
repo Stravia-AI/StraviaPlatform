@@ -81,7 +81,7 @@ impl RouteStore for SqliteRouteStore {
         let route_storage_id = route
             .id
             .clone()
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            .unwrap_or_else(|| stravia_runtime_contract::identifier::new_id());
         let mut connection = self.pool.acquire().await?;
         let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
         let conflict = sqlx::query_scalar::<_, String>(
@@ -140,7 +140,7 @@ impl RouteStore for SqliteRouteStore {
                     row.provider_id == target.provider_id.trim() && row.model == target.model.trim()
                 })
                 .map(|row| row.id.clone())
-                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                .unwrap_or_else(|| stravia_runtime_contract::identifier::new_id());
             sqlx::query(
                 "INSERT INTO model_backends (id, model_id, provider_id, model, enabled, priority, first_token_timeout_ms, target_retry_budget, target_cooldown_ms, thinking_level_map) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )

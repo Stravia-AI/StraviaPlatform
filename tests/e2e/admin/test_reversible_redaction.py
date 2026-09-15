@@ -17,7 +17,7 @@ from tests.e2e.admin.test_observations import _create_route, _proxy
 
 
 SECRET = "ghp_8Dq7mP2vL9sX4aR6tK3nF5wH1jB0cYzUeIoG"
-REFERENCE = re.compile(r"<!-- stravia-redaction-marker:rm_[0-9a-f]{32} -->")
+REFERENCE = re.compile(r"<!--sr:[a-z]{28}-->")
 
 
 @contextmanager
@@ -218,9 +218,15 @@ def test_redaction_dictionary_isolation_concurrency_and_switches(admin_env: dict
             assert reference is not None
             reference = reference.group()
             assert protected == later.replace(secret, reference)
-            system_text = received[-1]["body"]["messages"][0]["content"]
-            assert earlier.replace(secret, reference) in system_text
-            assert secret not in system_text
+            system_messages = [
+                message for message in received[-1]["body"]["messages"]
+                if message["role"] == "system"
+            ]
+            assert any(
+                message.get("content") == earlier.replace(secret, reference)
+                for message in system_messages
+            )
+            assert secret not in json.dumps(system_messages)
             assert send(first_key, secret) == secret
             assert received[-1]["body"]["messages"][-1]["content"] == reference
             assert send(first_key, reference) == secret
@@ -245,7 +251,7 @@ def test_redaction_dictionary_isolation_concurrency_and_switches(admin_env: dict
             set_enabled(env, True)
             assert send(first_key, secret) == secret
             assert received[-1]["body"]["messages"][-1]["content"] == reference
-            unknown = "<!-- stravia-redaction-marker:rm_00000000000000000000000000000000 -->"
+            unknown = "<!--sr:aaaaaaaaaaaaaaaaaaaaaaaaaaaa-->"
             assert send(first_key, unknown) == unknown
             for key_name in [f"{model}-key", "isolated-second-key"]:
                 rows = _wait_for("isolated first mapping discovery", lambda: key_discoveries(env, key_name))
@@ -285,7 +291,7 @@ def test_redaction_storage_failures_never_bypass_protection(
                 BEGIN SELECT RAISE(FAIL, 'injected mapping failure'); END
             """)
         try:
-            text = SECRET if failure != "read" else "<!-- stravia-redaction-marker:rm_00000000000000000000000000000000 -->"
+            text = SECRET if failure != "read" else "<!--sr:aaaaaaaaaaaaaaaaaaaaaaaaaaaa-->"
             if failure == "publish-stream":
                 status, _, raw = http_bytes(
                     "POST", f"{env['proxy']}/v1/chat/completions",
@@ -672,9 +678,27 @@ def test_redaction_covers_system_history_and_client_tool_result(admin_env: dict[
             references = set(REFERENCE.findall(json.dumps(actual)))
             assert len(references) == 1
             reference = references.pop()
-            assert actual[0]["content"] == f"Use token {reference}"
-            assert json.loads(actual[2]["tool_calls"][0]["function"]["arguments"]) == {"api_key": reference}
-            assert actual[3]["content"] == f"Result: {reference}"
+            assert any(
+                message["role"] == "system" and message.get("content") == f"Use token {reference}"
+                for message in actual
+            )
+            assert [
+                message["content"] for message in actual if message["role"] == "user"
+            ] == [f"Historical token {reference}", f"Now confirm {reference}"]
+            actual_call = next(
+                tool_call
+                for message in actual if message["role"] == "assistant"
+                for tool_call in message.get("tool_calls", [])
+                if tool_call["id"] == call["id"]
+            )
+            assert actual_call["function"]["name"] == call["function"]["name"]
+            assert json.loads(actual_call["function"]["arguments"]) == {"api_key": reference}
+            assert any(
+                message["role"] == "tool"
+                and message.get("tool_call_id") == actual_call["id"]
+                and message.get("content") == f"Result: {reference}"
+                for message in actual
+            )
             assert body["choices"][0]["message"]["content"] == f"Now confirm {SECRET}"
         finally:
             set_enabled(env, False)

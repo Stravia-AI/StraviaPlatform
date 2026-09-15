@@ -672,15 +672,15 @@ pub fn restore_response(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::marker::{PREFIX, SUFFIX};
+    use crate::marker::{IDENTIFIER_LEN, PREFIX, SUFFIX};
     use stravia_runtime_contract::hook::{ContextCompleteness, ContextSnapshot};
 
     #[test]
     fn outbound_replacement_preserves_reference_atoms_when_identifiers_are_known_secrets() {
-        let identifier = "65ecadffe021442ab611243aca232c08";
+        let identifier = "abcdefghijklmnopqrstuvwxyzab";
         let reference = format!("{PREFIX}{identifier}{SUFFIX}");
         let mapping = Mapping {
-            reference: format!("{PREFIX}{}{SUFFIX}", "b".repeat(32)),
+            reference: format!("{PREFIX}{}{SUFFIX}", "b".repeat(IDENTIFIER_LEN)),
             secret: identifier.into(),
             expires_at: i64::MAX,
         };
@@ -702,7 +702,7 @@ mod tests {
     #[test]
     fn encoded_tool_media_stays_opaque_after_context_rebuilds() {
         let mapping = Mapping {
-            reference: format!("{PREFIX}{}{SUFFIX}", "b".repeat(32)),
+            reference: format!("{PREFIX}{}{SUFFIX}", "b".repeat(IDENTIFIER_LEN)),
             secret: "Q8n4Vk7sT2p9X5a3Lc6D0h1R".into(),
             expires_at: i64::MAX,
         };
@@ -740,7 +740,7 @@ mod tests {
     #[test]
     fn legacy_encoded_tool_results_fail_closed_and_restore_without_guessing() {
         let mapping = Mapping {
-            reference: format!("{PREFIX}{}{SUFFIX}", "c".repeat(32)),
+            reference: format!("{PREFIX}{}{SUFFIX}", "c".repeat(IDENTIFIER_LEN)),
             secret: "Q8n4Vk7sT2p9X5a3Lc6D0h1R".into(),
             expires_at: i64::MAX,
         };
@@ -787,7 +787,7 @@ mod tests {
     #[test]
     fn fresh_tool_text_is_not_reinterpreted_as_media() {
         let mapping = Mapping {
-            reference: format!("{PREFIX}{}{SUFFIX}", "d".repeat(32)),
+            reference: format!("{PREFIX}{}{SUFFIX}", "d".repeat(IDENTIFIER_LEN)),
             secret: "Q8n4Vk7sT2p9X5a3Lc6D0h1R".into(),
             expires_at: i64::MAX,
         };
@@ -815,7 +815,7 @@ mod tests {
         // A loaded mapping can expire after detection/intern and before replacement.
         // Pin that boundary instead of racing a wall-clock sleep.
         let mapping = Mapping {
-            reference: format!("{PREFIX}{}{SUFFIX}", "a".repeat(32)),
+            reference: format!("{PREFIX}{}{SUFFIX}", "a".repeat(IDENTIFIER_LEN)),
             secret: "synthetic snapshot secret".into(),
             expires_at: 0,
         };

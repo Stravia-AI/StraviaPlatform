@@ -18,12 +18,14 @@ async fn search_report_delivery_keeps_sources_and_continues_only_the_answer() {
         cancellation: CancellationToken::new(),
         progress: None,
     };
-    let answer = format!("{} [source-wst_delivery-1]", "verified fact\n".repeat(220));
+    let turn_id = "abcdefghijklmnopqrstuvwxyzab";
+    let source_id = format!("{turn_id}:1");
+    let answer = format!("{} [sc:{source_id}]", "verified fact\n".repeat(220));
     let complete = json!({
-        "turn_id":"wst_delivery", "completion":"complete",
+        "turn_id":turn_id, "completion":"complete",
         "report":{
             "answer":answer,
-            "sources":[{"id":"source-wst_delivery-1","url":"https://8.8.8.8/article","title":"Source"}],
+            "sources":[{"id":source_id,"url":"https://8.8.8.8/article","title":"Source"}],
             "limitations":["The source describes only the current version."]
         }
     });

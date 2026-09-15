@@ -1,4 +1,4 @@
-use crate::{Principal, agent::ArtifactPolicy};
+use crate::{Principal, agent::ArtifactPolicy, identifier::valid_digest_id};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::Stream;
@@ -23,23 +23,18 @@ impl ArtifactId {
     }
 
     pub fn from_reference(reference: &str) -> Result<Self, ArtifactError> {
-        let identity = reference
-            .split_once('?')
-            .map_or(reference, |(identity, _)| identity);
-        let id = identity
-            .strip_prefix("https://stravia/artifact/")
-            .filter(|id| {
-                !id.is_empty()
-                    && id
-                        .bytes()
-                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
-            })
-            .ok_or_else(|| ArtifactError::Invalid("invalid Artifact Reference".into()))?;
         if reference.contains('#') {
             return Err(ArtifactError::Invalid(
                 "Artifact Reference fragments are not supported".into(),
             ));
         }
+        let identity = reference
+            .split_once('?')
+            .map_or(reference, |(identity, _)| identity);
+        let id = identity
+            .strip_prefix("sa:")
+            .filter(|id| valid_digest_id(id))
+            .ok_or_else(|| ArtifactError::Invalid("invalid Artifact Reference".into()))?;
         Ok(Self::new(id))
     }
 }
@@ -53,7 +48,7 @@ pub struct ArtifactRef {
 
 impl ArtifactRef {
     pub fn reference(&self) -> String {
-        format!("https://stravia/artifact/{}", self.id.as_str())
+        format!("sa:{}", self.id.as_str())
     }
 }
 

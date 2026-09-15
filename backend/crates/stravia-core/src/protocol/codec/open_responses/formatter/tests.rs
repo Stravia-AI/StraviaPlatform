@@ -260,8 +260,8 @@ fn encodes_function_output_arrays_with_dated_content_shapes() {
 #[test]
 fn recovers_response_ids_from_function_call_output_item_ids() {
     assert_eq!(
-        response_id_from_gateway_item_id("fco_abc_3"),
-        Some("resp_abc".into())
+        response_id_from_gateway_item_id("fco_responseid_3"),
+        Some("responseid".into())
     );
 }
 

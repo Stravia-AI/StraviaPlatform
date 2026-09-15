@@ -306,14 +306,35 @@ impl ObservationStore {
         expires_at: i64,
     ) -> anyhow::Result<Option<ObservationEvent>> {
         let kind = "input_preview_recorded";
-        let payload = serde_json::json!({"kind": kind});
+        let payload = serde_json::json!({"kind": kind, "text": preview});
         let sequence = match self {
             Self::Sqlite(pool) => {
-                let mut tx = pool.begin().await?;
-                let changed = sqlx::query("UPDATE interaction_observations SET input_preview=? WHERE id=? AND root_run_id=? AND input_preview IS NULL")
-                    .bind(preview).bind(interaction_id).bind(run_id).execute(&mut *tx).await?.rows_affected();
-                if changed == 0 {
+                // 没有 schema 级唯一约束，必须与所有事件写入串行化查询，事务锁即每个 run 的幂等边界。
+                let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+                let root_run_id: Option<String> = sqlx::query_scalar(
+                    "SELECT i.root_run_id FROM inference_run_observations r JOIN interaction_observations i ON i.id=r.interaction_id WHERE r.id=? AND i.id=?",
+                )
+                .bind(run_id)
+                .bind(interaction_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+                let Some(root_run_id) = root_run_id else {
                     return Ok(None);
+                };
+                let recorded: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM observation_events WHERE interaction_id=? AND run_id=? AND kind=?)",
+                )
+                .bind(interaction_id)
+                .bind(run_id)
+                .bind(kind)
+                .fetch_one(&mut *tx)
+                .await?;
+                if recorded {
+                    return Ok(None);
+                }
+                if root_run_id == run_id {
+                    sqlx::query("UPDATE interaction_observations SET input_preview=? WHERE id=? AND input_preview IS NULL")
+                        .bind(preview).bind(interaction_id).execute(&mut *tx).await?;
                 }
                 let sequence = next_sqlite(&mut tx).await?;
                 sqlx::query("UPDATE interaction_observations SET last_event_sequence=? WHERE id=?")
@@ -338,10 +359,31 @@ impl ObservationStore {
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                let changed = sqlx::query("UPDATE interaction_observations SET input_preview=$1 WHERE id=$2 AND root_run_id=$3 AND input_preview IS NULL")
-                    .bind(preview).bind(interaction_id).bind(run_id).execute(&mut *tx).await?.rows_affected();
-                if changed == 0 {
+                // 只锁已持久化且属于该 interaction 的 run，再查事件，避免并发发布同时判定为空。
+                let root_run_id: Option<String> = sqlx::query_scalar(
+                    "SELECT i.root_run_id FROM inference_run_observations r JOIN interaction_observations i ON i.id=r.interaction_id WHERE r.id=$1 AND i.id=$2 FOR UPDATE OF r",
+                )
+                .bind(run_id)
+                .bind(interaction_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+                let Some(root_run_id) = root_run_id else {
                     return Ok(None);
+                };
+                let recorded: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM observation_events WHERE interaction_id=$1 AND run_id=$2 AND kind=$3)",
+                )
+                .bind(interaction_id)
+                .bind(run_id)
+                .bind(kind)
+                .fetch_one(&mut *tx)
+                .await?;
+                if recorded {
+                    return Ok(None);
+                }
+                if root_run_id == run_id {
+                    sqlx::query("UPDATE interaction_observations SET input_preview=$1 WHERE id=$2 AND input_preview IS NULL")
+                        .bind(preview).bind(interaction_id).execute(&mut *tx).await?;
                 }
                 let sequence = sqlx::query_scalar("SELECT nextval('observation_event_sequence')")
                     .fetch_one(&mut *tx)

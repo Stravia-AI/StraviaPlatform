@@ -269,7 +269,7 @@ impl ResponsesWebSocketRegistry {
                 .and_then(|value| value.to_str().ok())
                 .filter(|value| !value.is_empty())
                 .map(str::to_owned)
-                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+                .unwrap_or_else(stravia_runtime_contract::identifier::new_id)
         };
         let session_id = connection_value("session-id");
         let thread_id = connection_value("thread-id");
@@ -336,7 +336,7 @@ impl ResponsesWebSocketRegistry {
             self.mark_transient_failure(namespace, trace);
             ResponsesWebSocketAcquireError::Transport(error.to_string())
         })?;
-        let connection_id = uuid::Uuid::new_v4().to_string();
+        let connection_id = stravia_runtime_contract::identifier::new_id();
         let connection =
             std::sync::Arc::new(tokio::sync::Mutex::new(ResponsesWebSocketConnection {
                 socket,

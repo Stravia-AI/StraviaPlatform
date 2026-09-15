@@ -61,7 +61,7 @@ impl AllowanceSampleStore {
                     .or(allowance.used.as_ref())
                     .or(allowance.limit.as_ref());
                 AllowanceSample {
-                    id: uuid::Uuid::new_v4().to_string(),
+                    id: stravia_runtime_contract::identifier::new_id(),
                     provider_id: snapshot.provider_id.clone(),
                     allowance_key: allowance.key.clone(),
                     sampled_at,

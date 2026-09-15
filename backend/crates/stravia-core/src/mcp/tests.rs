@@ -356,7 +356,7 @@ async fn serve_media_report(
                 "Media Model must receive the JPEG derivative"
             );
             let report = json!({
-                "answer": format!("{answer_prefix} [artifact:{}]", source_id.as_str()),
+                "answer": format!("{answer_prefix} [sa:{}]", source_id.as_str()),
                 "artifacts": [{"artifact_id": source_id}],
                 "limitations": []
             })
@@ -802,7 +802,7 @@ async fn official_client_calls_media_with_a_principal_owned_artifact() {
         ));
     }
     let arguments = json!({
-        "path": format!("https://stravia/artifact/{}", source_id.as_str())
+        "path": format!("sa:{}", source_id.as_str())
     })
     .as_object()
     .expect("Media arguments")
@@ -835,7 +835,7 @@ async fn official_client_calls_media_with_a_principal_owned_artifact() {
     let continued = client
         .call_tool(CallToolRequestParams::new("StraviaRead").with_arguments(
             json!({
-                "path": format!("https://stravia/artifact/{}#stravia?question=What%20else%20is%20visible&previous_turn_id={previous_turn_id}", source_id.as_str()),
+                "path": format!("sa:{}?question=What%20else%20is%20visible&previous_turn_id={previous_turn_id}", source_id.as_str()),
             }).as_object().expect("continuation arguments").clone(),
         ))
         .await
@@ -860,9 +860,7 @@ async fn official_client_calls_media_with_a_principal_owned_artifact() {
     assert!(
         continued["report"]["answer"]
             .as_str()
-            .is_some_and(|answer| {
-                answer.contains(&format!("[artifact:{}]", source_id.as_str()))
-            })
+            .is_some_and(|answer| { answer.contains(&format!("[sa:{}]", source_id.as_str())) })
     );
     assert_eq!(media_calls.load(Ordering::SeqCst), 2);
 }
@@ -887,7 +885,7 @@ async fn official_client_reads_html_and_raw_text_without_media_execution() {
     let result = client
         .call_tool(
             CallToolRequestParams::new("StraviaRead").with_arguments(
-                json!({"path": format!("{}#stravia?question=Explain", source.reference())})
+                json!({"path": format!("{}?question=Explain", source.reference())})
                     .as_object()
                     .unwrap()
                     .clone(),
@@ -909,7 +907,7 @@ async fn official_client_reads_html_and_raw_text_without_media_execution() {
     let raw = client
         .call_tool(
             CallToolRequestParams::new("StraviaRead").with_arguments(
-                json!({"path": format!("{}#stravia?raw=1", source.reference())})
+                json!({"path": format!("{}?raw=1", source.reference())})
                     .as_object()
                     .unwrap()
                     .clone(),
@@ -948,7 +946,7 @@ async fn official_client_rejects_invalid_raw_and_unsupported_content_operations(
         let path = if options.is_empty() {
             source.reference()
         } else {
-            format!("{}#stravia?{options}", source.reference())
+            format!("{}?{options}", source.reference())
         };
         let result = client
             .call_tool(
@@ -987,8 +985,8 @@ async fn artifact_download_remains_available_without_media_and_rejects_other_pri
         .expect("disable Media Understanding");
 
     let client = connect(&app).await;
-    let reference = format!("https://stravia/artifact/{}", source_id.as_str());
-    let read_arguments = json!({"path": format!("{reference}#stravia?download=1")})
+    let reference = format!("sa:{}", source_id.as_str());
+    let read_arguments = json!({"path": format!("{reference}?download=1")})
         .as_object()
         .expect("read arguments")
         .clone();
@@ -1017,7 +1015,7 @@ async fn artifact_download_remains_available_without_media_and_rejects_other_pri
     let understanding = client
         .call_tool(
             CallToolRequestParams::new("StraviaRead").with_arguments(
-                json!({"path": format!("{reference}#stravia?question=Describe")})
+                json!({"path": format!("{reference}?question=Describe")})
                     .as_object()
                     .expect("question arguments")
                     .clone(),

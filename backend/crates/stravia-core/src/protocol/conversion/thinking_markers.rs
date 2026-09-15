@@ -2,9 +2,9 @@ use super::*;
 
 #[test]
 fn all_generation_request_codecs_restore_thinking_marker_carriers() {
-    let marker = "<!-- stravia-projection:hm_0123456789abcdefghij:text:0:start -->visible\
-                  <!-- stravia-projection:hm_0123456789abcdefghij:text:0:end -->\
-                  <!-- stravia-history-marker:hm_0123456789abcdefghij -->";
+    let marker = "<!--sp:abcdefghijklmnopqrstuvwxyzab:t:0:s-->visible\
+                  <!--sp:abcdefghijklmnopqrstuvwxyzab:t:0:e-->\
+                  <!--sh:abcdefghijklmnopqrstuvwxyzab-->";
     let cases = [
         (
             OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
@@ -108,17 +108,8 @@ fn all_generation_request_codecs_restore_thinking_marker_carriers() {
 
         assert_eq!(
             crate::history_marker::history_marker_references(&request.items),
-            vec!["hm_0123456789abcdefghij".to_string()],
+            vec!["abcdefghijklmnopqrstuvwxyzab".to_string()],
             "{protocol} must decode a native reasoning carrier as Thinking"
-        );
-        assert!(
-            request.items.iter().all(|item| match &item.content {
-                IrMessageContent::Text(text) => !text.contains("stravia-history-marker"),
-                IrMessageContent::Blocks(blocks) => blocks.iter().all(|block| {
-                    !matches!(block, IrContentBlock::Text { text, .. } if text.contains("stravia-history-marker"))
-                }),
-            }),
-            "{protocol} must not decode the marker as ordinary Text"
         );
         let decoded = serde_json::to_string(&request.items).expect("serialize decoded items");
         assert!(

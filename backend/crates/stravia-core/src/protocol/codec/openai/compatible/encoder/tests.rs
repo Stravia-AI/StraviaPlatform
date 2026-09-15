@@ -54,6 +54,124 @@ fn internal_artifact_identity_is_not_sent_upstream() {
 }
 
 #[test]
+fn synthetic_tool_ids_are_distinct_correlated_and_skip_supplied_ids() {
+    let request = AiRequest::new(
+        "model",
+        vec![
+            AiItem {
+                role: Role::Assistant,
+                content: MessageContent::Text(String::new()),
+                tool_calls: Some(vec![
+                    ToolCall {
+                        id: String::new(),
+                        name: "first".into(),
+                        arguments: "{}".into(),
+                    },
+                    ToolCall {
+                        id: "tc_1".into(),
+                        name: "external".into(),
+                        arguments: "{}".into(),
+                    },
+                    ToolCall {
+                        id: String::new(),
+                        name: "second".into(),
+                        arguments: "{}".into(),
+                    },
+                ]),
+                tool_call_id: None,
+                meta: None,
+            },
+            AiItem {
+                role: Role::Tool,
+                content: MessageContent::Text("first result".into()),
+                tool_calls: None,
+                tool_call_id: None,
+                meta: None,
+            },
+            AiItem {
+                role: Role::Tool,
+                content: MessageContent::Text("external result".into()),
+                tool_calls: None,
+                tool_call_id: None,
+                meta: None,
+            },
+            AiItem {
+                role: Role::Tool,
+                content: MessageContent::Text("second result".into()),
+                tool_calls: None,
+                tool_call_id: None,
+                meta: None,
+            },
+        ],
+    );
+
+    let (first, _) = OpenAIEncoder.encode_request(&request).expect("encode");
+    let (repeated, _) = OpenAIEncoder.encode_request(&request).expect("encode");
+    let result_ids: Vec<&str> = first["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|message| message["role"] == "tool")
+        .map(|message| message["tool_call_id"].as_str().unwrap())
+        .collect();
+
+    assert_eq!(result_ids, ["tc_2", "tc_1", "tc_3"]);
+    assert_eq!(repeated["messages"], first["messages"]);
+}
+
+#[test]
+fn duplicate_external_tool_calls_remain_distinct_and_correlated() {
+    let request = AiRequest::new(
+        "model",
+        vec![
+            AiItem {
+                role: Role::Assistant,
+                content: MessageContent::Text(String::new()),
+                tool_calls: Some(vec![
+                    ToolCall {
+                        id: "external".into(),
+                        name: "first".into(),
+                        arguments: "{}".into(),
+                    },
+                    ToolCall {
+                        id: "external".into(),
+                        name: "second".into(),
+                        arguments: "{}".into(),
+                    },
+                ]),
+                tool_call_id: None,
+                meta: None,
+            },
+            AiItem {
+                role: Role::Tool,
+                content: MessageContent::Text("second result".into()),
+                tool_calls: None,
+                tool_call_id: Some("external".into()),
+                meta: None,
+            },
+            AiItem {
+                role: Role::Tool,
+                content: MessageContent::Text("first result".into()),
+                tool_calls: None,
+                tool_call_id: Some("external".into()),
+                meta: None,
+            },
+        ],
+    );
+
+    let (body, _) = OpenAIEncoder.encode_request(&request).expect("encode");
+    let result_ids: Vec<&str> = body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|message| message["role"] == "tool")
+        .map(|message| message["tool_call_id"].as_str().unwrap())
+        .collect();
+
+    assert_eq!(result_ids, ["tc_1", "external"]);
+}
+
+#[test]
 fn responses_reasoning_effort_maps_to_chat_without_loss() {
     use crate::protocol::codec::open_responses::decoder::ResponsesDecoder;
 

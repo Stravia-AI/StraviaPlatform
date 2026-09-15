@@ -902,7 +902,10 @@ fn open_responses_projects_stamped_graph_ids_and_resolves_them() {
     let output =
         project_client_history(OPEN_RESPONSES_2026_04_24, &response, &mut []).expect("project");
     let id = output[0].id_ref().expect("stamped id").to_owned();
-    assert!(id.starts_with("msg_saved") || id.starts_with("msg_"));
+    assert_eq!(
+        crate::protocol::codec::open_responses::formatter::response_id_from_gateway_item_id(&id),
+        Some(response.id.clone())
+    );
 
     let mut request_items = vec![AiItem {
         role: Role::User,
@@ -995,7 +998,7 @@ fn gemini_rewrites_tool_ids_across_the_client_prefix() {
     let ContentBlock::ToolUse { id, .. } = &blocks[0] else {
         panic!("expected tool use");
     };
-    assert!(id.starts_with("gemini_call_"));
+    assert!(stravia_runtime_contract::identifier::valid_digest_id(id));
     assert_eq!(prefix[0].tool_calls.as_ref().unwrap()[0].id, *id);
     assert_eq!(output.len(), 1);
 }

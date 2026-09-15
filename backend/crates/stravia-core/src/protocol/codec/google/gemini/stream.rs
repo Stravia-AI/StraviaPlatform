@@ -53,7 +53,7 @@ impl GoogleResponseParser {
                         .get("args")
                         .cloned()
                         .unwrap_or(Value::Object(Default::default()));
-                    let call_id = format!("call_{}", uuid::Uuid::new_v4().simple());
+                    let call_id = stravia_runtime_contract::identifier::new_id();
                     let arguments = args.to_string();
                     tool_calls.push(ToolCall {
                         id: call_id.clone(),
@@ -100,7 +100,7 @@ impl GoogleResponseParser {
             .get("responseId")
             .and_then(|v| v.as_str())
             .map(str::to_string)
-            .unwrap_or_else(|| format!("gen-{}", uuid::Uuid::new_v4().simple()));
+            .unwrap_or_else(|| stravia_runtime_contract::identifier::new_id());
 
         let mut ai_resp = AiResponse::new(response_id, model);
         ai_resp.items = items;
@@ -250,7 +250,7 @@ fn parse_gemini_chunk(
     if *first {
         *first = false;
         deltas.push(AiStreamDelta::MessageStart {
-            id: format!("gen-{}", uuid::Uuid::new_v4().simple()),
+            id: stravia_runtime_contract::identifier::new_id(),
             model: chunk.model_version.unwrap_or_default(),
         });
     }
@@ -290,7 +290,7 @@ fn parse_gemini_chunk(
                     let id = function_call
                         .id
                         .clone()
-                        .unwrap_or_else(|| format!("call_{}", uuid::Uuid::new_v4().simple()));
+                        .unwrap_or_else(|| stravia_runtime_contract::identifier::new_id());
                     deltas.push(AiStreamDelta::ToolCallStart {
                         index: 0,
                         id,

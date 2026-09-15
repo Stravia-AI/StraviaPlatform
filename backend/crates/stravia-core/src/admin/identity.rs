@@ -331,7 +331,7 @@ impl AdminAuth {
         let session_expires_at = now
             .checked_add(SESSION_LIFETIME_SECONDS)
             .ok_or_else(|| AuthError::Storage(anyhow::anyhow!("system clock is out of range")))?;
-        let session_id = uuid::Uuid::new_v4().to_string();
+        let session_id = stravia_runtime_contract::identifier::new_id();
         let refresh_token = random_token();
         let refresh_hash = hash_refresh_token(&refresh_token);
         let created = self

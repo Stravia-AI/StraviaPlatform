@@ -36,7 +36,7 @@ impl PlatformTool for InternalReadTool {
 
     fn description(&self) -> Option<&str> {
         Some(
-            "Read a single path. search:// followed by percent-encoded search text performs basic public web retrieval, never a research Agent. Public HTTP(S) pages return Markdown; images and files follow platform artifact rules. Resource options use #stravia?question= or #stravia?download=1.",
+            "Read a single path. search:// followed by percent-encoded search text performs basic public web retrieval, never a research Agent. Public HTTP(S) pages return Markdown; images and files follow platform artifact rules. HTTP(S) resource options use #stravia?, while Artifact Reference options use ?question= or ?download=1.",
         )
     }
 

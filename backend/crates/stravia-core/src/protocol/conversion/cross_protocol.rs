@@ -724,7 +724,7 @@ fn anthropic_encoder_merges_consecutive_roles_and_drops_empty_text() {
     );
 }
 #[test]
-fn anthropic_encoder_normalizes_tool_use_ids_for_tool_and_result() {
+fn anthropic_encoder_preserves_correlated_external_tool_ids() {
     let messages = vec![
         AiItem {
             role: IrRole::Assistant,
@@ -791,7 +791,7 @@ fn anthropic_encoder_normalizes_tool_use_ids_for_tool_and_result() {
         .and_then(|b| b.get("tool_use_id"))
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    assert!(tool_use_id.starts_with("toolu_"));
+    assert_eq!(tool_use_id, "call_function_abc_1");
     assert_eq!(tool_use_id, tool_result_id);
 }
 #[test]

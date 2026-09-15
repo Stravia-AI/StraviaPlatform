@@ -426,7 +426,7 @@ fn normalize_response(
                     "Codex Search returned too many cited sources",
                 ));
             }
-            let id = format!("source-{}-{}", turn_id, sources.len() + 1);
+            let id = format!("{}:{}", turn_id, sources.len() + 1);
             source_ids.insert(annotation.url.clone(), id.clone());
             sources.push(SearchSource {
                 id,
@@ -440,7 +440,7 @@ fn normalize_response(
         .map(|annotation| {
             (
                 annotation.end,
-                format!(" [{}]", source_ids[&annotation.url]),
+                format!(" [sc:{}]", source_ids[&annotation.url]),
             )
         })
         .collect::<Vec<_>>();
@@ -536,20 +536,29 @@ mod tests {
             ]
         });
 
-        let (report, _) =
-            normalize_response(&super::super::SearchTurnId::new("wst_codex"), &response)
-                .expect("normalized report");
+        let (report, _) = normalize_response(
+            &super::super::SearchTurnId::new("abcdefghijklmnopqrstuvwxyzab"),
+            &response,
+        )
+        .expect("normalized report");
 
         assert_eq!(report.sources.len(), 1);
+        assert_eq!(report.sources[0].id, "abcdefghijklmnopqrstuvwxyzab:1");
         assert_eq!(report.sources[0].url, "https://8.8.8.8/source");
         assert!(!report.answer.contains("consulted"));
-        assert_eq!(report.answer.matches("[source-wst_codex-1]").count(), 2);
+        assert_eq!(
+            report
+                .answer
+                .matches("[sc:abcdefghijklmnopqrstuvwxyzab:1]")
+                .count(),
+            2
+        );
     }
 
     #[test]
     fn payload_maps_allowed_domains_without_a_policy_container() {
         let input = SearchBackendInput {
-            turn_id: super::super::SearchTurnId::new("wst_codex"),
+            turn_id: super::super::SearchTurnId::new("abcdefghijklmnopqrstuvwxyzab"),
             principal: stravia_runtime_contract::Principal::new("owner"),
             query: "Search the claim".into(),
             policy: super::super::WebSearchRunPolicy {
@@ -596,8 +605,11 @@ mod tests {
             }]
         });
 
-        let error = normalize_response(&super::super::SearchTurnId::new("wst_codex"), &response)
-            .expect_err("invalid span must fail");
+        let error = normalize_response(
+            &super::super::SearchTurnId::new("abcdefghijklmnopqrstuvwxyzab"),
+            &response,
+        )
+        .expect_err("invalid span must fail");
 
         assert_eq!(error.code, "invalid_annotation");
     }
@@ -618,10 +630,15 @@ mod tests {
             }]
         });
 
-        let (report, _) =
-            normalize_response(&super::super::SearchTurnId::new("wst_unicode"), &response)
-                .expect("Unicode annotation");
+        let (report, _) = normalize_response(
+            &super::super::SearchTurnId::new("bcdefghijklmnopqrstuvwxyzabc"),
+            &response,
+        )
+        .expect("Unicode annotation");
 
-        assert_eq!(report.answer, "研究 [source-wst_unicode-1]结论");
+        assert_eq!(
+            report.answer,
+            "研究 [sc:bcdefghijklmnopqrstuvwxyzabc:1]结论"
+        );
     }
 }

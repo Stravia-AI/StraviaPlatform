@@ -1,6 +1,5 @@
 use anyhow::Result;
 use serde_json::Value;
-use uuid::Uuid;
 
 use crate::protocol::*;
 use stravia_runtime_contract::protocol::ir::AiItem;
@@ -418,7 +417,7 @@ impl AnthropicStreamFormatter {
     pub fn new() -> Self {
         Self {
             usage: Usage::default(),
-            id: format!("msg_{}", Uuid::new_v4().simple()),
+            id: stravia_runtime_contract::identifier::new_id(),
             model: String::new(),
             block_index: 0,
             in_thinking_block: false,
@@ -462,7 +461,9 @@ impl AnthropicStreamFormatter {
         for delta in deltas {
             match delta {
                 AiStreamDelta::MessageStart { id, model } => {
-                    self.id = id.clone();
+                    if !id.is_empty() {
+                        self.id = id.clone();
+                    }
                     self.model = model.clone();
                     self.ensure_message_start(&mut events);
                 }
@@ -541,7 +542,7 @@ impl AnthropicStreamFormatter {
                     self.close_text_block_if_open(&mut events);
                     self.close_tool_block_if_open(&mut events);
                     let tool_use_id = if id.trim().is_empty() {
-                        format!("toolu_{}", Uuid::new_v4().simple())
+                        stravia_runtime_contract::identifier::new_id()
                     } else {
                         id.clone()
                     };

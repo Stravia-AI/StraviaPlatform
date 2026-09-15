@@ -488,17 +488,15 @@ mod tests {
 
     #[test]
     fn inline_marker_restoration_preserves_paths_at_every_split() {
-        let reference = "<!-- stravia-redaction-marker:rm_0123456789abcdef0123456789abcdef -->";
-        let unknown = "<!-- stravia-redaction-marker:rm_ffffffffffffffffffffffffffffffff -->";
+        let reference = "<!--sr:abcdefghijklmnopqrstuvwxyzab-->";
+        let unknown = "<!--sr:zzzzzzzzzzzzzzzzzzzzzzzzzzzz-->";
         let legacy = "~stravia-secret:0123456789abcdef0123456789abcdef~";
         let mappings = [Mapping {
             reference: reference.into(),
             secret: "stravia".into(),
             expires_at: i64::MAX,
         }];
-        let input = format!(
-            "前缀<<backend/crates/{reference}-core/src {unknown} {legacy} <!-- stravia-redaction"
-        );
+        let input = format!("前缀<<backend/crates/{reference}-core/src {unknown} {legacy} <!--sr:");
         let expected = input.replace(reference, "stravia");
         for split in input
             .char_indices()

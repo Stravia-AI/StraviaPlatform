@@ -28,13 +28,21 @@ settings (key-value, including Web Access and revisioned Web Search configuratio
 
 ---
 
+## Identifier encodings
+
+平台生成的随机不透明 ID 固定为 28 位 ASCII 小写字母，由密码学安全随机生成器在 `a`–`z` 中均匀采样（约 131.6 bit）。完整 SHA-256 派生身份使用 55 位 ASCII 小写字母的定长 base-26 编码，不截断 256-bit 摘要。协议外壳分别为 Artifact `sa:<55 位 ID>`（只允许可选 query，不允许 fragment）、History Marker `<!--sh:<28 位 ID>-->`、Projection Delimiter `<!--sp:<28 位 ID>:<t|p>:<ordinal>:<s|e>-->` 与可逆脱敏引用 `<!--sr:<28 位 ID>-->`；外壳不授予访问权。外部 Provider／客户端 ID 和真实凭据 token 不采用此平台格式。
+
+该格式仅面向新部署和全新数据库，没有旧平台 ID 的就地迁移或兼容读取，也不回写不可变历史或外部客户端、上游历史。旧数据库及用户数据必须另外保留，不得为切换而删除；新进程应使用全新数据库并开始新对话。
+
+---
+
 ## providers
 
 AI 模型供应商配置（API endpoint、密钥、认证方式等）。
 
 | Column | Type | Default | Description |
 |---|---|---|---|
-| `id` | TEXT PK | — | 主键，UUID |
+| `id` | TEXT PK | — | 主键，28 位 ASCII 小写字母的随机不透明 ID |
 | `name` | TEXT NOT NULL | — | 显示名称 |
 | `vendor` | TEXT | NULL | 供应商标识（如 `openai`、`anthropic`） |
 | `protocol` | TEXT NOT NULL | — | 默认通信协议（如 `openai-compatible`） |
@@ -65,7 +73,7 @@ Route 记录。`model_id` 保存客户端请求使用的 Route ID，`display_nam
 
 | Column | Type | Default | Description |
 |---|---|---|---|
-| `id` | TEXT PK | — | 主键，UUID |
+| `id` | TEXT PK | — | 主键，28 位 ASCII 小写字母的随机不透明 ID |
 | `model_id` | TEXT NOT NULL | — | Route ID；客户端模型 ID，精确且大小写敏感匹配 |
 | `display_name` | TEXT NULL | `NULL` | 可选展示名称；空值由应用层回退为 `model_id` |
 | `balance` | TEXT | `'traffic_equalization'` | Route Scheduling Strategy：`traffic_equalization` 或 `latency_preference`；管理接口对旧值做写入归一化，读取只返回新值 |
@@ -83,7 +91,7 @@ Target 列表；一条 Route 对应一个或多个 Provider + Provider Model 组
 
 | Column | Type | Default | Description |
 |---|---|---|---|
-| `id` | TEXT PK | — | 主键，UUID |
+| `id` | TEXT PK | — | 主键，28 位 ASCII 小写字母的随机不透明 ID |
 | `model_id` | TEXT NOT NULL | — | 所属 Route 的存储主键（FK → models.id, ON DELETE CASCADE） |
 | `provider_id` | TEXT NOT NULL | — | 供应商 ID（FK → providers.id） |
 | `model` | TEXT NOT NULL | — | 上游模型名（发送给 provider 的模型标识） |
@@ -105,7 +113,7 @@ API 密钥管理，用于代理端口和 MCP 的访问认证及并发执行数�
 
 | Column | Type | Default | Description |
 |---|---|---|---|
-| `id` | TEXT PK | — | 主键，UUID |
+| `id` | TEXT PK | — | 主键，28 位 ASCII 小写字母的随机不透明 ID |
 | `token` | TEXT NOT NULL UNIQUE | — | 完整密钥值；创建时可由系统生成或由管理员自定义，之后可修改 |
 | `name` | TEXT NOT NULL | — | 显示名称 |
 | `concurrency_limit` | INTEGER CHECK (`> 0`) | NULL | 此 API Key 允许同时运行的最大根执行数；NULL 表示不限 |
@@ -159,7 +167,7 @@ API Key 与模型的访问绑定关系（M:N 关联表）。所有模型请求�
 
 | Column | Type | Default | Description |
 |---|---|---|---|
-| `id` | TEXT PK | — | 会话 UUID，同时写入访问 JWT |
+| `id` | TEXT PK | — | 28 位 ASCII 小写字母的随机会话 ID，同时写入访问 JWT |
 | `identity_id` | SMALLINT / INTEGER | `1` | 固定为 `1`，FK → `admin_identity.singleton_id`，ON DELETE CASCADE |
 | `credential_revision` | BIGINT / INTEGER NOT NULL | — | 创建会话时的凭据 revision |
 | `refresh_hash` | TEXT NOT NULL UNIQUE | — | 当前 refresh token 的不可逆摘要 |
@@ -177,7 +185,7 @@ OAuth 凭据存储，用于需要 OAuth 认证的供应商（如 Google Vertex A
 | Column | Type | Default | Description |
 |---|---|---|---|
 | `provider_id` | TEXT PK | — | 供应商 ID（FK → providers.id, ON DELETE CASCADE） |
-| `connection_id` | TEXT NOT NULL UNIQUE | — | OAuth 连接 generation 标识；新连接/重连时写入 UUID，token refresh 不变（历史行由 migration 填充唯一 legacy ID） |
+| `connection_id` | TEXT NOT NULL UNIQUE | — | OAuth 连接 generation 标识；新连接／重连时写入 28 位 ASCII 小写字母的随机不透明 ID，token refresh 不变 |
 | `scheme` | TEXT | `''` | 认证方案 |
 | `access_token` | TEXT | `''` | OAuth access token |
 | `refresh_token` | TEXT | NULL | OAuth refresh token |
@@ -262,7 +270,7 @@ Provider 账户级额度的历史样本，用于估算当前重置窗口内的�
 
 | Column | Type | Default | Description |
 |---|---|---|---|
-| `id` | TEXT PK | — | 样本 ID，UUID |
+| `id` | TEXT PK | — | 28 位 ASCII 小写字母的随机样本 ID |
 | `provider_id` | TEXT NOT NULL | — | Provider ID（FK → `providers.id`, ON DELETE CASCADE） |
 | `allowance_key` | TEXT NOT NULL | — | Provider 快照内稳定的账户级额度键 |
 | `sampled_at` | BIGINT / INTEGER NOT NULL | — | 采样时间，Unix 毫秒时间戳 |
@@ -299,7 +307,7 @@ One row per Connect Client Interaction. `root_id` and `parent_interaction_id` pr
 
 | Column | Type | Default | Description |
 |---|---|---|---|
-| `id` | TEXT PK | — | Interaction UUID |
+| `id` | TEXT PK | — | Interaction 的 28 位 ASCII 小写字母随机 ID |
 | `principal` | TEXT NOT NULL | — | Authenticated Principal |
 | `api_key_id`, `api_key_name` | TEXT | NULL | API-key identity/name snapshot |
 | `generation_root_id` | TEXT | NULL | Confirmed Generation Chain root when present |
@@ -322,7 +330,7 @@ One row per Connect Client Interaction. `root_id` and `parent_interaction_id` pr
 
 | Column | Type | Default | Description |
 |---|---|---|---|
-| `id` | TEXT PK | — | Inference Run UUID |
+| `id` | TEXT PK | — | Inference Run 的 28 位 ASCII 小写字母随机 ID |
 | `interaction_id` | TEXT FK NOT NULL | — | Owner Interaction; ON DELETE CASCADE |
 | `parent_run_id` | TEXT FK | NULL | Run branch parent; ON DELETE SET NULL |
 | `generation_node_id`, `generation_parent_id` | TEXT | NULL | Confirmed Generation Chain associations |
@@ -347,7 +355,7 @@ One row per Connect Client Interaction. `root_id` and `parent_interaction_id` pr
 
 | Column | Type | Default | Description |
 |---|---|---|---|
-| `id` | TEXT PK | — | Model Turn UUID |
+| `id` | TEXT PK | — | Model Turn 的 28 位 ASCII 小写字母随机 ID |
 | `run_id` | TEXT FK NOT NULL | — | Owner Run; ON DELETE CASCADE |
 | `interaction_id` | TEXT FK NOT NULL | — | Owner Interaction; ON DELETE CASCADE |
 | `route_id` | TEXT NOT NULL | — | Effective Route |
@@ -366,7 +374,7 @@ One row per real upstream Target attempt, including retries and failovers.
 
 | Column | Type | Default | Description |
 |---|---|---|---|
-| `id` | TEXT PK | — | Attempt UUID |
+| `id` | TEXT PK | — | Target Attempt 的 28 位 ASCII 小写字母随机 ID |
 | `model_turn_id`, `run_id`, `interaction_id` | TEXT FK NOT NULL | — | Owner Turn, Run, and Interaction; ON DELETE CASCADE |
 | `target_id` | TEXT NOT NULL | — | Actual Target ID |
 | `provider_id`, `provider_name` | TEXT NOT NULL | — | Provider identity/name snapshot |
@@ -389,7 +397,7 @@ Pre-admission decode, protocol, or authentication failures remain outside Princi
 
 | Column | Type | Default | Description |
 |---|---|---|---|
-| `id` | TEXT PK | — | Rejected Request UUID |
+| `id` | TEXT PK | — | Rejected Request 的 28 位 ASCII 小写字母随机 ID |
 | `occurred_at` | BIGINT / INTEGER NOT NULL | — | Ingress time |
 | `started_at` | BIGINT / INTEGER | NULL | Request start time; NULL rows fall back to `occurred_at` ordering and are reported as `observation_gap` |
 | `duration_ms` | BIGINT / INTEGER | NULL | Request duration captured at termination |
@@ -410,7 +418,7 @@ Pre-admission decode, protocol, or authentication failures remain outside Princi
 
 | Column | Type | Default | Description |
 |---|---|---|---|
-| `trace_id` | TEXT PK | — | Opaque managed Trace identity |
+| `trace_id` | TEXT PK | — | 28 位 ASCII 小写字母的随机 managed Trace identity |
 | `run_id` | TEXT FK | NULL | Owner Run; ON DELETE CASCADE |
 | `rejection_id` | TEXT FK | NULL | Owner Rejected Request; ON DELETE CASCADE |
 | `relative_directory` | TEXT UNIQUE NOT NULL | — | Managed relative identity beneath the data directory; never an absolute path |
@@ -472,7 +480,7 @@ Local Web Search 的内部 Search 与 Fetch 上游配置。每个部署恰好有
 
 | Column | Type | Default | Description |
 |---|---|---|---|
-| `id` | TEXT PK | — | 主键，UUID |
+| `id` | TEXT PK | — | 主键，28 位 ASCII 小写字母的随机不透明 ID |
 | `name` | TEXT NOT NULL UNIQUE | — | 管理员可见名称 |
 | `kind` | TEXT NOT NULL | — | `local`、`exa` 或 `zhipu`；`local` 由唯一部分索引约束为单例 |
 | `api_key` | TEXT | NULL | Exa/智谱必填；Local 必须为空；Admin API 不回显 |
@@ -493,7 +501,7 @@ Generation Chain（其 Responses 投影为 Response Chain）、Agent Turn 与 Se
 
 | Column | Type | Default | Description |
 |---|---|---|---|
-| `id` | TEXT PK | — | opaque Turn ID |
+| `id` | TEXT PK | — | 28 位 ASCII 小写字母的随机 opaque Turn ID |
 | `kind` | TEXT NOT NULL | — | `response`、`agent` 或 `web_search` |
 | `parent_id` | TEXT | NULL | 父节点（FK → turn_chain_nodes.id, ON DELETE RESTRICT） |
 | `principal` | TEXT NOT NULL | — | 所属调用主体 |
@@ -557,7 +565,7 @@ History Marker Store 的持久化事实源。每行只保存一个受保护 Thin
 
 | Column | Type | Default | Description |
 |---|---|---|---|
-| `reference` | TEXT PK | — | 客户端 Markdown 中可见的 opaque Marker reference |
+| `reference` | TEXT PK | — | 客户端 Markdown 中可见的 `<!--sh:<28 位 ASCII 小写字母>-->`；内部随机 ID 约 131.6 bit |
 | `principal` | TEXT NOT NULL | — | 所属认证 Principal；跨 Principal 查询按不存在处理 |
 | `kind` | TEXT NOT NULL | — | `platform` 或 `thinking` |
 | `activity` | TEXT NOT NULL | — | 注册元数据提供的安全英文活动说明 |
@@ -587,7 +595,7 @@ Persistent reversible secret mappings, isolated solely by the API Key's authenti
 
 | Column | Type | Default | Description |
 |---|---|---|---|
-| `reference` | TEXT PK NOT NULL | — | Opaque `<!-- stravia-redaction-marker:rm_<32 lowercase UUID hex digits> -->` marker; never rebound to a different secret |
+| `reference` | TEXT PK NOT NULL | — | Opaque fixed-length `<!--sr:<28 lowercase ASCII letters>-->` marker; the identifier is sampled uniformly with a CSPRNG (~131.6 bits) and is never rebound to a different secret |
 | `principal` | TEXT NOT NULL | — | Existing `api-key:<API Key ID>` Principal identity; foreign Principal lookups reveal no mapping |
 | `secret` | TEXT NOT NULL | — | Exact secret plaintext, including multiline values |
 | `published_at` | BIGINT / INTEGER | NULL | First publication time, Unix milliseconds |
@@ -597,11 +605,11 @@ Persistent reversible secret mappings, isolated solely by the API Key's authenti
 
 **Indexes**: `idx_reversible_redaction_mappings_principal_expiry` on `(principal, expires_at)` and `idx_reversible_redaction_mappings_expiry` on `expires_at`.
 
-Migration 0046 converts strictly valid legacy `~stravia-secret:<32 lowercase UUID hex digits>~` references to the new marker format, preserving the identifier and every other column. It does not rewrite immutable history or client/upstream state. Legacy references are no longer parsed or restored after the cutover.
+Migration 0046 remains the historical conversion of strictly valid `~stravia-secret:<32 lowercase UUID hex digits>~` references to the former long HTML-comment format; it is unchanged. The compact marker format is a clean cutover for new deployments and clean databases. Neither former reference format is parsed or restored, and immutable Stravia history and external client/upstream history are not rewritten. Databases or conversations that depend on former references should not be reused directly; retain the old database and user data separately rather than deleting them, then use a clean database and start a new conversation.
 
 Creation retains an unpublished mapping for one hour. Publication extends it to at least seven days; Generation Chain retention only extends still-live published mappings and never shortens their lifetime. Expired mappings neither participate in restoration or known-secret detection nor revive through publication or renewal. Cleanup deletes expired rows. Disabling new redaction does not delete mappings or prevent restoration of live references.
 
-Interning serializes lookup and insertion within a database transaction (SQLite `BEGIN IMMEDIATE`; PostgreSQL Principal-scoped advisory transaction lock). Concurrent requests therefore reuse the same live mapping for identical plaintext within one Principal. Expired rows are not reused, and a fresh UUID is allocated instead. Secret plaintext is not B-tree indexed, avoiding PostgreSQL index-size limits for long private keys; Principal and validity indexes bound the lookup scope.
+Interning serializes lookup and insertion within a database transaction (SQLite `BEGIN IMMEDIATE`; PostgreSQL Principal-scoped advisory transaction lock). Concurrent requests therefore reuse the same live mapping for identical plaintext within one Principal. Expired rows are not reused, and a fresh 28-letter random identifier is allocated instead. Secret plaintext is not B-tree indexed, avoiding PostgreSQL index-size limits for long private keys; Principal and validity indexes bound the lookup scope.
 
 ---
 
@@ -638,11 +646,11 @@ Interning serializes lookup and insertion within a database transaction (SQLite 
 
 ## artifacts
 
-API key principal-scoped 的不可变媒体／文件对象。上传完成前使用内部随机身份，状态为 `staging`；完成时按 Principal、声明 MIME 与全部字节发布稳定内容身份，状态为 `ready`。公共稳定引用为 `https://stravia/artifact/<id>`，内部 Agent input 使用 opaque `ArtifactId`；引用不授予访问权。重复完整收存只延长、不缩短已有期限，过期内容须重新完整上传并校验才能再次保留；已开始的读取与未过期下载授权只保护物理内容，不延长逻辑保留期。
+API key principal-scoped 的不可变媒体／文件对象。上传完成前使用 28 位 ASCII 小写字母的内部随机身份，状态为 `staging`；完成时按 Principal、声明 MIME 与全部字节的完整 SHA-256 摘要发布 55 位 ASCII 小写字母的稳定内容身份，状态为 `ready`。公共稳定引用为 `sa:<55 位 ID>`，可以带 query、禁止 fragment；内部 Agent input 使用 opaque `ArtifactId`。定长 base-26 编码不截断 256-bit 摘要，引用本身不授予访问权。重复完整收存只延长、不缩短已有期限，过期内容须重新完整上传并校验才能再次保留；已开始的读取与未过期下载授权只保护物理内容，不延长逻辑保留期。旧 Artifact ID 不兼容读取；旧数据库和对象应另行保留而不是删除。
 
 | Column | Type | Default | Description |
 |---|---|---|---|
-| `id` | TEXT PK | — | opaque Artifact ID；新 ready 对象为 Principal/MIME/完整内容确定的身份，既有随机 ID 保持不变 |
+| `id` | TEXT PK | — | `staging` 为 28 位随机 ID；`ready` 为 Principal／MIME／完整内容 SHA-256 派生的 55 位 ID，外壳为 `sa:` |
 | `principal` | TEXT NOT NULL | — | 所属调用主体 |
 | `mime_type` | TEXT NOT NULL | — | 声明 MIME type |
 | `size` | BIGINT/INTEGER NOT NULL | — | 字节数 |
@@ -697,7 +705,7 @@ Artifact multipart 上传会话；只存 upload token hash，完成后删除。�
 
 | Column | Type | Default | Description |
 |---|---|---|---|
-| `id` | TEXT PK | — | upload ID |
+| `id` | TEXT PK | — | 28 位 ASCII 小写字母的随机 upload ID |
 | `artifact_id` | TEXT NOT NULL | — | 内部暂存 Artifact（FK → artifacts.id, ON DELETE CASCADE），不是最终文件 ID |
 | `principal` | TEXT NOT NULL | — | 所属调用主体 |
 | `token_hash` | TEXT NOT NULL | — | upload token SHA-256 |

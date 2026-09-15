@@ -97,7 +97,9 @@ fn test_generated_id_for_empty_tool_call_id() {
         },
         tool_result_no_id(),
     ]);
+    let mut repeated = req.clone();
     normalize_request_tool_results(&mut req);
+    normalize_request_tool_results(&mut repeated);
 
     let asst = req
         .items
@@ -105,9 +107,11 @@ fn test_generated_id_for_empty_tool_call_id() {
         .find(|m| m.role == Role::Assistant)
         .unwrap();
     let tc_id = &asst.tool_calls.as_ref().unwrap()[0].id;
-    assert!(
-        !tc_id.is_empty(),
-        "blank tool_call_id must be replaced with generated id"
+    assert_eq!(tc_id, "tc_1");
+    assert_eq!(
+        repeated.items[0].tool_calls.as_ref().unwrap()[0].id,
+        *tc_id,
+        "repairing identical input must generate the same correlation id"
     );
 
     let tool_msg = req.items.iter().find(|m| m.role == Role::Tool).unwrap();
@@ -116,6 +120,38 @@ fn test_generated_id_for_empty_tool_call_id() {
         Some(tc_id.as_str()),
         "tool result id must match the generated assistant tool_call id"
     );
+}
+
+#[test]
+fn generated_ids_skip_supplied_ids_without_breaking_fifo() {
+    let mut req = make_req(vec![
+        AiItem {
+            role: Role::Assistant,
+            content: MessageContent::Text(String::new()),
+            tool_calls: Some(vec![
+                ToolCall {
+                    id: String::new(),
+                    name: "generated".to_string(),
+                    arguments: "{}".to_string(),
+                },
+                ToolCall {
+                    id: "tc_1".to_string(),
+                    name: "external".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            ]),
+            tool_call_id: None,
+            meta: None,
+        },
+        tool_result_no_id(),
+    ]);
+
+    normalize_request_tool_results(&mut req);
+
+    let calls = req.items[0].tool_calls.as_ref().unwrap();
+    assert_eq!(calls[0].id, "tc_2");
+    assert_eq!(calls[1].id, "tc_1");
+    assert_eq!(req.items[1].tool_call_id.as_deref(), Some("tc_2"));
 }
 
 #[test]

@@ -10,6 +10,8 @@ Stravia 定位为本地运行、可自托管的 **Agent infra（智能体基础�
 
 Stravia 可作为**桌面应用**在本地运行，也可作为**独立服务端**自托管，管理与配置由部署者控制。自托管不代表请求数据始终留在本机：模型调用和外部工具访问仍会发送至配置的上游服务。
 
+平台生成的随机不透明 ID 固定为 28 位 ASCII 小写字母，由密码学安全随机生成器在 `a`–`z` 中均匀采样（约 131.6 bit）。完整 SHA-256 派生身份使用 55 位 ASCII 小写字母的定长 base-26 编码，不截断 256-bit 摘要。协议外壳各自独立：Artifact 引用为 `sa:<55 位 ID>`，可带 query、禁止 fragment；History Marker 为 `<!--sh:<28 位 ID>-->`；Projection Delimiter 为 `<!--sp:<28 位 ID>:<t|p>:<ordinal>:<s|e>-->`；可逆脱敏引用为 `<!--sr:<28 位 ID>-->`。外壳不授予访问权；外部 Provider／客户端 ID、Codex UUID 请求／连接元数据和真实凭据 token 保持其协议格式。协议修复保留请求内确定性定位符，不额外为临时序号计算内容摘要。Open Responses item 保留 `<type>_<原样 response ID>_<ordinal>` 的可逆定位结构；搜索正文为 `[sc:<turn ID>:<ordinal>]`，媒体正文为 `[sa:<Artifact ID>]`，媒体 bridge 使用 `sm`／`st` 短提示（详见媒体设计），不另创建实体身份。该契约面向新部署和全新数据库，不迁移或兼容读取旧平台 ID，也不回写不可变历史或外部历史。旧数据库与用户数据应另外保留，不得通过删除数据完成切换；新会话使用全新数据库。
+
 ```
 Claude Code · Codex CLI · Gemini CLI · OpenCode
      OpenAI SDK · Anthropic SDK · Gemini SDK
@@ -569,9 +571,9 @@ Trace segment 位于 data directory 下的托管 `diagnostics/observation-debug`
 
 Kingfisher 移植范围是模型文本的离线规则检测，不包含其文件发现、可选解码、Tree-sitter、数据库 URI 解析、用户安全列表、内联忽略指令或联网验证。字节正则产生的非 UTF-8 字符边界片段不作文本替换。离线快照不保留 `validation`、`revocation` 或用于联网验证的依赖绑定。开发期导入方式、来源逐文件散列和许可记录见 `backend/crates/stravia-credential-protection/tools/import_kingfisher.py` 与 `src/detection/UPSTREAM.kingfisher.json`；管理规则目录、匹配测试与正式保护使用同一个合并检测器。
 
-SQL 映射以 Principal 为唯一访问边界，引用格式为 `<!-- stravia-redaction-marker:rm_<32 位随机小写十六进制> -->`，不附加换行。共享的完整标记识别供检测、精确替换、流式还原和诊断脱敏使用；与 History Marker 统一外形，不混合恢复语义。同 Key 并发请求及重启后复用仍有效映射，其他 Key 的映射不参加匹配或还原。新映射可靠持久化后才能发往 Provider；未发布保留一小时。Model Turn 内部 gate 在还原器尾部 delta 已交出后读取共享 trace 当前引用并发布，将有效期延长至至少七天，然后才交出唯一 `Completed`；无本地映射或不提交 Agent Turn 也不绕过发布。取消与 deadline 可抢占发布等待，但不保证数据库尚未提交，也不撤销已发布映射。Generation Chain 写入按自身 TTL 延长仍有效的已发布引用，不缩短已有期限，也不复活过期行。清理复用既有历史维护任务，映射不随某一来源对话删除而级联消失。
+SQL 映射以 Principal 为唯一访问边界，引用格式为固定长度短 HTML 注释 `<!--sr:<28 位 ASCII 小写字母>-->`，不附加换行。新标识符由密码学安全随机生成器在 `a`–`z` 中均匀采样，标识符空间约为 131.6 bit。共享的完整标记识别供检测、精确替换、流式还原和诊断脱敏使用；其恢复语义与 History Marker 分离。同 Key 并发请求及重启后复用仍有效映射，其他 Key 的映射不参加匹配或还原。新映射可靠持久化后才能发往 Provider；未发布保留一小时。Model Turn 内部 gate 在还原器尾部 delta 已交出后读取共享 trace 当前引用并发布，将有效期延长至至少七天，然后才交出唯一 `Completed`；无本地映射或不提交 Agent Turn 也不绕过发布。取消与 deadline 可抢占发布等待，但不保证数据库尚未提交，也不撤销已发布映射。Generation Chain 写入按自身 TTL 延长仍有效的已发布引用，不缩短已有期限，也不复活过期行。清理复用既有历史维护任务，映射不随某一来源对话删除而级联消失。
 
-当前请求含本 Principal 的有效引用时，`protect` 在替换后追加一次系统说明：`Preserve Stravia redaction markers verbatim when used; Stravia restores their values.` 关闭新增保护但仍有可恢复引用时也适用；无引用、仅未知或跨 Principal 引用的请求不追加。说明仅属于当前模型请求，不写回客户端历史。迁移 0046 保留旧映射随机标识与所有生命周期字段，将引用转换为新格式；不保留旧语法读取，也不重写外部或不可变历史，依赖旧引用的会话需重开。
+当前请求含本 Principal 的有效引用时，`protect` 在替换后追加一次系统说明：`Preserve Stravia redaction markers verbatim when used; Stravia restores their values.` 关闭新增保护但仍有可恢复引用时也适用；无引用、仅未知或跨 Principal 引用的请求不追加。说明仅属于当前模型请求，不写回客户端历史。本次为面向新部署和全新数据库的干净切换；迁移 0046 仍是从 `~stravia-secret:…~` 转到旧长 HTML 注释格式的历史迁移，本次不修改。两种旧格式均不再读取或还原，也不重写 Stravia 的不可变历史或外部客户端、上游历史；不应直接复用依赖旧引用的数据库；旧数据库与用户数据应另行保留而不是删除，并在全新数据库上新开会话。
 
 工具结果由生产者通过 `ToolResultContentKind` 明确声明为业务 JSON 或 content blocks，不根据业务字段 `type` 猜测。Platform Tool、Agent Tool adapter、Hook 重建和历史保存共同保留该语义；业务 JSON 遍历字符串值，content blocks 只遍历已知可读字段，媒体与不透明数据保持原样。`AgentToolOutput` 携带内容及语义，平台与 Agent 路径共用可失败的内容块转换，序列化失败作为工具错误交付而不是 panic。
 
@@ -800,7 +802,7 @@ Route ID 存于 `name`，客户端请求中的 `model` 值以大小写敏感的�
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `id` | TEXT PK | UUID |
+| `id` | TEXT PK | 28 位 ASCII 小写字母的随机不透明 ID |
 | `name` | TEXT | Route ID，同时是客户端模型 ID |
 | `balance` | TEXT | Route Scheduling Strategy：`traffic_equalization` / `latency_preference` |
 | `is_enabled` | BOOL | Route 启用状态，默认 true |

@@ -240,9 +240,9 @@ Runner 消费 canonical stream，并在唯一 `Completed` 后立即停止。该�
 
 ### 5.6 Artifact
 
-`Artifact` 是不可变、principal-scoped 的媒体或大对象。公共引用为 `https://stravia/artifact/<opaque-id>`，不授予访问权，也不走 DNS／公网抓取。同 Principal 可跨对话使用；签名下载授权和仅限上传的授权分别具有固定期限，不与文件保留期合并。相同 Principal、逐字节相同的声明 MIME 与完整内容确定同一最终 ID，不受收存入口、分片边界、并发或重启影响；上传会话不具备幂等语义。
+`Artifact` 是不可变、principal-scoped 的媒体或大对象。公共引用为 `sa:<55-letter-content-id>`，不授予访问权，也不走 DNS／公网抓取；读取选项使用引用后的查询参数，fragment 一律拒绝。同 Principal 可跨对话使用；签名下载授权和仅限上传的授权分别具有固定期限，不与文件保留期合并。相同 Principal、逐字节相同的声明 MIME 与完整内容确定同一最终 ID，不受收存入口、分片边界、并发或重启影响；上传会话不具备幂等语义。
 
-完整收存时，以版本域 `stravia-artifact-v1`、带长度前缀的 Principal/MIME 和全部内容计算 SHA-256，最终 ID 为 `artifact_` 加完整摘要。随机暂存身份及物理 `backend_key` 与逻辑 ID 分离，发布在同一内容身份下串行化；上传发布锁和读取／清理锁使用不同命名空间，发布与既有 Reader 的对象锁兼容。旧随机 ID 仍按原位置读取，不扫描或重写旧历史。
+完整收存时，以版本域 `stravia-artifact-v1`、带长度前缀的 Principal/MIME 和全部内容计算 SHA-256，最终 ID 是完整 256 bit 摘要按大端整数编码并左补齐的 55 位小写 base26 字母。28 位小写字母随机暂存身份及物理 `backend_key` 与逻辑 ID 分离，发布在同一内容身份下串行化；上传发布锁和读取／清理锁使用不同命名空间，发布与既有 Reader 的对象锁兼容。系统按全新数据库契约运行，不接受或兼容旧随机 Artifact ID。
 
 `ArtifactStore` 是保存／读取 bytes 的 seam，隐藏内部文件与 S3 后端，复用同一 multipart、暂存配额和完整收存规则。SQL 保存 metadata、owner、MIME、size、state、TTL、后端位置和下载授权 hash。重复完整收存取已有期限与本次上传保留期限的较大值；过期或已清理内容也可经完整校验重新保留同一身份。Reader guard 与持久化下载授权只协调物理清理，不能单独恢复过期内容。Runner 与新历史保留稳定引用，只有实际 Target 调用前生成签名 URL／base64。
 
@@ -724,9 +724,9 @@ Agent Runner 的内部 `AgentTool::execute` 返回 `AgentToolOutput`，同时提
 {
   "prompt": "继续核对结论中的时间线",
   "artifacts": [
-    { "artifact_id": "artifact_..." }
+    { "artifact_id": "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabc" }
   ],
-  "previous_turn_id": "aturn_..."
+  "previous_turn_id": "abcdefghijklmnopqrstuvwxyzab"
 }
 ```
 
@@ -736,7 +736,7 @@ Agent Runner 的内部 `AgentTool::execute` 返回 `AgentToolOutput`，同时提
 
 ```json
 {
-  "turn_id": "aturn_...",
+  "turn_id": "abcdefghijklmnopqrstuvwxyzab",
   "completion": "complete",
   "output": {}
 }
@@ -906,7 +906,7 @@ Web Search 已作为首个生产 vertical slice 实施。上层 `WebSearchRunner
 
 完整 interface、clean cutover、迁移与验收见 [`web-search.md`](web-search.md) 和 [`ADR-0017`](../adr/0017-rename-web-research-to-web-search-and-split-tool-identities.md)。
 
-Media Understanding 通过 `StraviaRead` 的图片 path 分流调用 internal-only Agent Definition：裸图片默认描述与 OCR，`#stravia?question=` 指定问题，在 AgentRunner 前执行显式 Media preprocessing，并直接复用 Agent Turn。搜索和媒体完整报告先验证、持久化，再对长 answer 的工具交付副本分页；文本续页不创建 Turn 或重复执行模型。完整 contract、JPEG normalization、Gate、Admin surface 与验收见 [`media-understanding.md`](media-understanding.md)、[`ADR-0009`](../adr/0009-add-media-understanding-as-capability-tool.md) 和 [`ADR-0051`](../adr/0051-disambiguate-artifact-download-and-understanding.md)。
+Media Understanding 通过 `StraviaRead` 的图片 path 分流调用 internal-only Agent Definition：裸图片默认描述与 OCR，Artifact Reference 的 `?question=` 指定问题，在 AgentRunner 前执行显式 Media preprocessing，并直接复用 Agent Turn。搜索和媒体完整报告先验证、持久化，再对长 answer 的工具交付副本分页；文本续页不创建 Turn 或重复执行模型。完整 contract、JPEG normalization、Gate、Admin surface 与验收见 [`media-understanding.md`](media-understanding.md)、[`ADR-0009`](../adr/0009-add-media-understanding-as-capability-tool.md) 和 [`ADR-0051`](../adr/0051-disambiguate-artifact-download-and-understanding.md)。
 
 ---
 

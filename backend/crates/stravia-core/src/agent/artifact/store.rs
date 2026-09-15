@@ -90,11 +90,7 @@ impl LocalArtifactStore {
         &self,
         upload_id: &str,
     ) -> Result<(OwnedMutexGuard<()>, UploadLock), ArtifactError> {
-        if upload_id.is_empty()
-            || !upload_id
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-        {
+        if !valid_id(upload_id) && !valid_digest_id(upload_id) {
             return Err(ArtifactError::NotFound);
         }
         let lock = {
@@ -290,8 +286,8 @@ impl ArtifactStore for LocalArtifactStore {
         request: ArtifactUploadRequest,
     ) -> Result<ArtifactUpload, ArtifactError> {
         validate_upload_request(&request)?;
-        let artifact_id = ArtifactId::new(format!("artifact_{}", uuid::Uuid::new_v4().simple()));
-        let upload_id = format!("upload_{}", uuid::Uuid::new_v4().simple());
+        let artifact_id = ArtifactId::new(new_id());
+        let upload_id = new_id();
         let upload_token = hex_bytes(&rand::random::<[u8; 32]>());
         let token_hash = sha256_hex(upload_token.as_bytes());
         let created_at = self.now();
@@ -420,6 +416,9 @@ impl ArtifactStore for LocalArtifactStore {
         part_number: u32,
         mut bytes: ArtifactByteStream,
     ) -> Result<UploadedArtifactPart, ArtifactError> {
+        if !valid_id(upload_id) {
+            return Err(ArtifactError::NotFound);
+        }
         if part_number == 0 {
             return Err(ArtifactError::Invalid(
                 "part number must be greater than zero".into(),
@@ -552,6 +551,9 @@ impl ArtifactStore for LocalArtifactStore {
         upload_token: &str,
         parts: &[UploadedArtifactPart],
     ) -> Result<ArtifactRef, ArtifactError> {
+        if !valid_id(upload_id) {
+            return Err(ArtifactError::NotFound);
+        }
         let mut upload_guard = self.lock_upload(upload_id).await?;
         let row = self
             .load_upload(upload_id)
@@ -636,10 +638,8 @@ impl ArtifactStore for LocalArtifactStore {
         }
         output.flush().await.map_err(storage_error)?;
         drop(output);
-        let artifact_id = ArtifactId::new(format!(
-            "artifact_{}",
-            hex_bytes(&content_digest.finalize())
-        ));
+        let content_digest: [u8; 32] = content_digest.finalize().into();
+        let artifact_id = ArtifactId::new(encode_digest(&content_digest));
         // 发布锁串行化独立上传/进程；共享读取锁阻止 sweeper 删除将复用的对象，
         // 不阻塞已经在读取相同内容的客户端。
         let publication_guard = self
@@ -1241,12 +1241,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 fn object_id_for_key(key: &str) -> Result<&str, ArtifactError> {
     let id = key
         .strip_prefix("objects/")
-        .filter(|id| {
-            !id.is_empty()
-                && id
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-        })
+        .filter(|id| valid_id(id))
         .ok_or_else(|| ArtifactError::Storage("invalid Artifact object key".into()))?;
     Ok(id)
 }

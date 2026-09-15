@@ -35,7 +35,7 @@ impl WebProviderStore for SqliteWebProviderStore {
     }
 
     async fn create(&self, input: CreateWebProvider) -> anyhow::Result<WebProvider> {
-        let id = uuid::Uuid::new_v4().to_string();
+        let id = stravia_runtime_contract::identifier::new_id();
         sqlx::query(
             "INSERT INTO web_providers (id, name, kind, api_key, use_proxy, local_engines)
              VALUES (?, ?, ?, ?, ?, ?)",

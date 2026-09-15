@@ -78,14 +78,14 @@ impl GroupingIndex {
                 grouping_reason = "new_user";
                 parent_interaction_id = Some(parent.interaction_id.clone());
                 (
-                    uuid::Uuid::new_v4().to_string(),
+                    stravia_runtime_contract::identifier::new_id(),
                     Some(parent.run_id.clone()),
                     false,
                 )
             }
         } else if start.generation_parent_id.is_some() {
             grouping_reason = "unmatched_parent";
-            (uuid::Uuid::new_v4().to_string(), None, false)
+            (stravia_runtime_contract::identifier::new_id(), None, false)
         } else {
             let candidate = self
                 .runs
@@ -114,10 +114,10 @@ impl GroupingIndex {
                         true,
                     )
                 } else {
-                    (uuid::Uuid::new_v4().to_string(), None, false)
+                    (stravia_runtime_contract::identifier::new_id(), None, false)
                 }
             } else {
-                (uuid::Uuid::new_v4().to_string(), None, false)
+                (stravia_runtime_contract::identifier::new_id(), None, false)
             }
         };
         self.runs.insert(

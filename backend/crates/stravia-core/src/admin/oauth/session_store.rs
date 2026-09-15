@@ -28,7 +28,7 @@ impl AdminService {
             listener_port: options.listener_port,
             redirect_uri: options.redirect_uri,
             fallback_reason: options.fallback_reason,
-            id: uuid::Uuid::new_v4().to_string(),
+            id: stravia_runtime_contract::identifier::new_id(),
             provider_id: input.provider_id,
             driver_key: input.driver_key,
             scheme: input.scheme,

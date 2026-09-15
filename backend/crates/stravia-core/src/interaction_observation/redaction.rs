@@ -1084,10 +1084,18 @@ fn structured_value_end(bytes: &[u8], start: usize) -> usize {
 }
 
 fn redact_form_encoded(value: &str) -> (String, RedactionReport) {
-    let mut report = RedactionReport::default();
+    let report = RedactionReport::default();
     if !value.contains('=') || value.contains(char::is_whitespace) {
         return (value.to_owned(), report);
     }
+    if marker::find_reference(value).is_some() {
+        return redact_form_encoded_with_markers(value);
+    }
+    redact_form_encoded_without_markers(value)
+}
+
+fn redact_form_encoded_without_markers(value: &str) -> (String, RedactionReport) {
+    let mut report = RedactionReport::default();
     let Ok(mut url) = reqwest::Url::parse(&format!("http://redaction.invalid/?{value}")) else {
         return (value.to_owned(), report);
     };
@@ -1111,6 +1119,114 @@ fn redact_form_encoded(value: &str) -> (String, RedactionReport) {
         }
     }
     (url.query().unwrap_or_default().to_owned(), report)
+}
+
+fn redact_form_encoded_with_markers(value: &str) -> (String, RedactionReport) {
+    let mut output = String::with_capacity(value.len());
+    let mut report = RedactionReport::default();
+    for component in value.split_inclusive('&') {
+        let (component, separator) = component
+            .strip_suffix('&')
+            .map_or((component, ""), |component| (component, "&"));
+        let (redacted, component_report) = redact_form_component_with_markers(component);
+        output.push_str(&redacted);
+        output.push_str(separator);
+        report.merge(component_report);
+    }
+    (output, report)
+}
+
+fn redact_form_component_with_markers(component: &str) -> (String, RedactionReport) {
+    if marker::find_reference(component).is_none() {
+        return redact_form_encoded_without_markers(component);
+    }
+    let mut report = RedactionReport::default();
+    let Some((raw_key, raw_value)) = component.split_once('=') else {
+        return (component.to_owned(), report);
+    };
+    let Ok(url) = reqwest::Url::parse(&format!("http://redaction.invalid/?{raw_key}=")) else {
+        return (component.to_owned(), report);
+    };
+    let Some((key, _)) = url.query_pairs().next() else {
+        return (component.to_owned(), report);
+    };
+    if !is_credential_key(&key) {
+        return (component.to_owned(), report);
+    }
+
+    let redacted = redact_credential_value_with_markers(
+        raw_value,
+        &mut report,
+        RedactionKind::CredentialField,
+    );
+    (format!("{raw_key}={redacted}"), report)
+}
+
+fn redact_credential_value_with_markers(
+    value: &str,
+    report: &mut RedactionReport,
+    kind: RedactionKind,
+) -> String {
+    let Some((first_offset, first_reference)) = marker::find_reference(value) else {
+        return REDACTED.to_owned();
+    };
+    let mut output = String::with_capacity(value.len());
+    append_redacted_credential_fragment(&mut output, &value[..first_offset], report, kind);
+    output.push_str(first_reference);
+    let mut cursor = first_offset + first_reference.len();
+
+    while cursor < value.len() {
+        let next_marker = marker::find_reference(&value[cursor..]);
+        let segment_end = next_marker.map_or(value.len(), |(offset, _)| cursor + offset);
+        let segment = &value[cursor..segment_end];
+        let adjacent = credential_adjacent_fragment_len(segment);
+        append_redacted_credential_fragment(&mut output, &segment[..adjacent], report, kind);
+        output.push_str(&segment[adjacent..]);
+        cursor = segment_end;
+        let Some((_, reference)) = next_marker else {
+            break;
+        };
+        output.push_str(reference);
+        cursor += reference.len();
+    }
+    output
+}
+
+fn credential_adjacent_fragment_len(value: &str) -> usize {
+    let mut cursor = 0usize;
+    while cursor < value.len() {
+        if marker::reference_prefix(&value[cursor..]).is_some() {
+            break;
+        }
+        let character = value[cursor..]
+            .chars()
+            .next()
+            .expect("credential value character");
+        if character.is_whitespace()
+            || matches!(
+                character,
+                '/' | '?' | '#' | '&' | ',' | ';' | '}' | ']' | ')' | '"' | '\''
+            )
+        {
+            break;
+        }
+        cursor += character.len_utf8();
+    }
+    cursor
+}
+
+fn append_redacted_credential_fragment(
+    output: &mut String,
+    fragment: &str,
+    report: &mut RedactionReport,
+    kind: RedactionKind,
+) {
+    if fragment.is_empty() || fragment == REDACTED {
+        output.push_str(fragment);
+    } else {
+        output.push_str(REDACTED);
+        report.record(kind);
+    }
 }
 
 fn redact_header_node(value: &mut Value, report: &mut RedactionReport) {
@@ -1386,7 +1502,9 @@ fn externalize_media(value: &mut Value, report: &mut RedactionReport) {
         let reference = source
             .as_str()
             .or_else(|| source.get("url").and_then(Value::as_str))
-            .filter(|url| url.starts_with("https://stravia/artifact/"))
+            .filter(|url| {
+                stravia_runtime_contract::artifact::ArtifactId::from_reference(url).is_ok()
+            })
             .map(str::to_owned);
         let mut metadata = serde_json::Map::new();
         if let Some(fields) = source.as_object() {
@@ -1630,7 +1748,7 @@ fn redact_credential_text(input: &str, report: &mut RedactionReport) -> String {
 }
 
 fn redact_header_credential_with_marker(token: &str, report: &mut RedactionReport) -> String {
-    let Some((offset, reference)) = marker::find_reference(token) else {
+    let Some((offset, _)) = marker::find_reference(token) else {
         return REDACTED.to_owned();
     };
     let mut output = String::with_capacity(token.len());
@@ -1641,10 +1759,10 @@ fn redact_header_credential_with_marker(token: &str, report: &mut RedactionRepor
         output.push_str(REDACTED);
         report.record(RedactionKind::CredentialText);
     }
-    output.push_str(reference);
-    output.push_str(&redact_text_token(
-        &token[offset + reference.len()..],
+    output.push_str(&redact_credential_value_with_markers(
+        &token[offset..],
         report,
+        RedactionKind::CredentialText,
     ));
     output
 }
@@ -1686,6 +1804,7 @@ fn redact_text_token(token: &str, report: &mut RedactionReport) -> String {
 
     let mut output = String::with_capacity(token.len());
     let mut cursor = 0usize;
+    let mut marker_is_credential_value = false;
     let mut next_marker = Some(first_marker);
     while let Some((offset, reference)) = next_marker {
         let marker_start = cursor + offset;
@@ -1696,11 +1815,23 @@ fn redact_text_token(token: &str, report: &mut RedactionReport) -> String {
                 report,
             ));
             output.push_str(&before[component_start..]);
+            marker_is_credential_value = true;
         } else {
             output.push_str(&redact_text_token_without_markers(before, report));
         }
         output.push_str(reference);
         cursor = marker_start + reference.len();
+        if marker_is_credential_value {
+            let adjacent = credential_adjacent_fragment_len(&token[cursor..]);
+            append_redacted_credential_fragment(
+                &mut output,
+                &token[cursor..cursor + adjacent],
+                report,
+                RedactionKind::CredentialText,
+            );
+            cursor += adjacent;
+            marker_is_credential_value = marker::reference_prefix(&token[cursor..]).is_some();
+        }
         next_marker = marker::find_reference(&token[cursor..]);
     }
     output.push_str(&redact_text_token_without_markers(&token[cursor..], report));
@@ -2053,7 +2184,7 @@ mod tests {
         format!(
             "{}{}{}",
             marker::PREFIX,
-            "0123456789abcdef0123456789abcdef",
+            "abcdefghijklmnopqrstuvwxyzab",
             marker::SUFFIX
         )
     }
@@ -2061,10 +2192,11 @@ mod tests {
     #[test]
     fn protected_literals_preserve_only_complete_redaction_markers() {
         let marker = redaction_marker();
-        let id = "0123456789abcdef0123456789abcdef";
+        let id = "abcdefghijklmnopqrstuvwxyzab";
+        let legacy_id = "0123456789abcdef0123456789abcdef";
         let protected = ProtectedSecrets::default();
-        protected.register(["stravia", id, "REAL_SECRET"]);
-        let mut text = format!("before/{marker}/after stravia {id} {marker}REAL_SECRET");
+        protected.register(["sr", id, "stravia", legacy_id, "REAL_SECRET"]);
+        let mut text = format!("before/{marker}/after sr {id} {marker}REAL_SECRET");
 
         protected.text(&mut text);
 
@@ -2083,10 +2215,11 @@ mod tests {
             format!(
                 "{}{}{}",
                 marker::PREFIX,
-                "0123456789ABCDEF0123456789ABCDEF",
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZAB",
                 marker::SUFFIX
             ),
-            format!("~stravia-secret:{id}~"),
+            format!("<!-- stravia-redaction-marker:rm_{legacy_id} -->"),
+            format!("~stravia-secret:{legacy_id}~"),
         ] {
             let mut invalid = candidate.clone();
             protected.text(&mut invalid);
@@ -2114,12 +2247,24 @@ mod tests {
         let sse =
             format!("data:{{\"message\":\"before/{marker}/after api_key={marker}/models\"}}\n\n");
         assert_eq!(redact_text(&sse), sse);
+
+        let adjacent = format!(
+            "api_key=LEADING{marker}/models&token={marker}TRAILING/tail Authorization: Bearer {marker}HEADER/path"
+        );
+        assert_eq!(
+            redact_text(&adjacent),
+            format!(
+                "api_key=***{marker}/models&token={marker}***/tail Authorization: Bearer {marker}***/path"
+            )
+        );
+        let encoded = format!("api%5Fkey={marker}ENCODED/end");
+        assert_eq!(redact_text(&encoded), format!("api%5Fkey={marker}***/end"));
     }
 
     #[test]
     fn visible_redaction_preserves_markers_at_every_fragment_boundary() {
         let marker = redaction_marker();
-        let id = "0123456789abcdef0123456789abcdef";
+        let id = "abcdefghijklmnopqrstuvwxyzab";
         let input = format!(
             "data:{{\"message\":\"before/{marker}/after api_key={marker}/models {marker}REAL_SECRET api_key=LEADING_SECRET{marker}/tail authorization=REAL_HEADER\"}}\n\n"
         );
@@ -2129,13 +2274,7 @@ mod tests {
 
         for split in 0..=input.len() {
             let protected = ProtectedSecrets::default();
-            protected.register([
-                "stravia",
-                id,
-                "REAL_SECRET",
-                "LEADING_SECRET",
-                "REAL_HEADER",
-            ]);
+            protected.register(["sr", id, "REAL_SECRET", "LEADING_SECRET", "REAL_HEADER"]);
             let mut redactor = VisibleTextRedactor::with_protected(protected);
             let mut observed = String::new();
             for fragment in [&input[..split], &input[split..]] {
@@ -2150,13 +2289,7 @@ mod tests {
         }
 
         let protected = ProtectedSecrets::default();
-        protected.register([
-            "stravia",
-            id,
-            "REAL_SECRET",
-            "LEADING_SECRET",
-            "REAL_HEADER",
-        ]);
+        protected.register(["sr", id, "REAL_SECRET", "LEADING_SECRET", "REAL_HEADER"]);
         let mut redactor = VisibleTextRedactor::with_protected(protected);
         let mut observed = String::new();
         for byte in input.bytes() {
@@ -2195,10 +2328,12 @@ mod tests {
 
     #[test]
     fn incomplete_and_legacy_markers_receive_no_credential_exemption() {
-        let id = "0123456789abcdef0123456789abcdef";
+        let id = "abcdefghijklmnopqrstuvwxyzab";
+        let legacy_id = "0123456789abcdef0123456789abcdef";
         for candidate in [
             format!("{}{}", marker::PREFIX, id),
-            format!("~stravia-secret:{id}~"),
+            format!("<!-- stravia-redaction-marker:rm_{legacy_id} -->"),
+            format!("~stravia-secret:{legacy_id}~"),
         ] {
             let redacted = redact_text(&format!("api_key={candidate}"));
             assert_ne!(redacted, format!("api_key={candidate}"));

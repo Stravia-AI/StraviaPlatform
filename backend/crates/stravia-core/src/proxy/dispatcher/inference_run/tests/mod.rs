@@ -539,10 +539,7 @@ async fn platform_only_stream_continues_with_marker_impl() {
         body.contains(crate::history_marker::HISTORY_MARKER_PREFIX),
         "{body}"
     );
-    assert!(
-        !body.contains(r#""content":"\n\n<!-- stravia-history-marker:"#),
-        "{body}"
-    );
+    assert!(!body.contains(r#""content":"\n\n<!--sh:"#), "{body}");
     assert_eq!(
         body.matches(crate::history_marker::HISTORY_MARKER_PREFIX)
             .count(),
@@ -1036,9 +1033,9 @@ fn marker_artifact_id(request: &str) -> Option<String> {
     fn visit(value: &serde_json::Value) -> Option<String> {
         match value {
             serde_json::Value::String(text) => {
-                let marker = text.split_once("stravia_media artifact_reference=\"")?.1;
+                let marker = text.split_once("[sm:")?.1;
                 let id = stravia_runtime_contract::artifact::ArtifactId::from_reference(
-                    marker.split_once('"')?.0,
+                    marker.split_once(' ')?.0,
                 )
                 .ok()?;
                 Some(id.as_str().to_owned())
@@ -1052,15 +1049,28 @@ fn marker_artifact_id(request: &str) -> Option<String> {
 }
 
 fn media_turn_id(request: &str) -> Option<String> {
-    let suffix = request
-        .split_once("[stravia_media_turn turn_id=\\\"aturn_")
-        .map(|(_, suffix)| suffix)
-        .or_else(|| {
-            request
-                .split_once("\\\"turn_id\\\":\\\"aturn_")
-                .map(|(_, suffix)| suffix)
-        })?;
-    Some(format!("aturn_{}", suffix.split_once("\\\"")?.0))
+    fn visit(value: &serde_json::Value) -> Option<String> {
+        match value {
+            serde_json::Value::String(text) => {
+                if let Some((_, marker)) = text.split_once("[st:") {
+                    let id = marker.split_once(' ')?.0;
+                    return stravia_runtime_contract::identifier::valid_id(id)
+                        .then(|| id.to_owned());
+                }
+                serde_json::from_str(text).ok().as_ref().and_then(visit)
+            }
+            serde_json::Value::Array(values) => values.iter().find_map(visit),
+            serde_json::Value::Object(values) => values
+                .get("turn_id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|id| stravia_runtime_contract::identifier::valid_id(id))
+                .map(str::to_owned)
+                .or_else(|| values.values().find_map(visit)),
+            _ => None,
+        }
+    }
+    let body = request.split_once("\r\n\r\n")?.1;
+    visit(&serde_json::from_str(body).ok()?)
 }
 
 async fn serve_media_parent(
@@ -1099,7 +1109,7 @@ async fn serve_media_parent(
                                     "function": {
                                         "name": "StraviaRead",
                                         "arguments": serde_json::json!({
-                                            "path": format!("https://stravia/artifact/{id}#stravia?question=Describe%20the%20image")
+                                            "path": format!("sa:{id}?question=Describe%20the%20image")
                                         }).to_string()
                                     }
                                 }]
@@ -1140,7 +1150,7 @@ async fn serve_media_parent(
                                     "function": {
                                         "name": "StraviaRead",
                                         "arguments": serde_json::json!({
-                                            "path": format!("https://stravia/artifact/{id}#stravia?question=Identify%20the%20subject&previous_turn_id={turn_id}")
+                                            "path": format!("sa:{id}?question=Identify%20the%20subject&previous_turn_id={turn_id}")
                                         }).to_string()
                                     }
                                 }]
@@ -1195,9 +1205,9 @@ async fn serve_media_model(
                 );
             }
             let answer = if ordinal == 0 {
-                format!("The image is understood [artifact:{id}]")
+                format!("The image is understood [sa:{id}]")
             } else {
-                format!("The same image is understood [artifact:{id}]")
+                format!("The same image is understood [sa:{id}]")
             };
             let report = serde_json::json!({
                 "answer": answer,
@@ -2190,7 +2200,7 @@ async fn mixed_tool_continuation_replays_impl() {
         .expect("History Marker")
         + crate::history_marker::HISTORY_MARKER_PREFIX.len();
     let reference_end = first_body[reference_start..]
-        .find(" -->")
+        .find("-->")
         .expect("History Marker suffix")
         + reference_start;
     let marker =

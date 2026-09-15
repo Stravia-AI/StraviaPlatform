@@ -21,7 +21,7 @@ impl OAuthCredentialStore for PostgresOAuthCredentialStore {
         provider_id: &str,
         input: UpsertOAuthCredential,
     ) -> anyhow::Result<OAuthCredential> {
-        let connection_id = uuid::Uuid::new_v4().to_string();
+        let connection_id = stravia_runtime_contract::identifier::new_id();
         sqlx::query(
             "INSERT INTO provider_oauth_credentials (provider_id, connection_id, driver_key, scheme, access_token, refresh_token, expires_at, resource_url, subject_id, scopes, meta, status, status_version, last_error) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'connected', 0, NULL) ON CONFLICT(provider_id) DO UPDATE SET connection_id=EXCLUDED.connection_id, driver_key=EXCLUDED.driver_key, scheme=EXCLUDED.scheme, access_token=EXCLUDED.access_token, refresh_token=EXCLUDED.refresh_token, expires_at=EXCLUDED.expires_at, resource_url=EXCLUDED.resource_url, subject_id=EXCLUDED.subject_id, scopes=EXCLUDED.scopes, meta=EXCLUDED.meta, status='connected', status_version=provider_oauth_credentials.status_version+1, last_error=NULL, updated_at=CURRENT_TIMESTAMP",
         )

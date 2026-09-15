@@ -25,7 +25,7 @@ impl ProviderStore for SqliteProviderStore {
     }
 
     async fn create(&self, input: CreateProviderRecord) -> anyhow::Result<Provider> {
-        let id = uuid::Uuid::new_v4().to_string();
+        let id = stravia_runtime_contract::identifier::new_id();
         let vendor = normalize_provider_vendor(input.vendor.as_deref());
         let models_source = input.effective_models_source().map(ToString::to_string);
         if !is_valid_provider_auth_mode(&input.auth_mode) {

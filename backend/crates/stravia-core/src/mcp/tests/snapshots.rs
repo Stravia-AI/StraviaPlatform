@@ -137,7 +137,7 @@ async fn selected_crlf_ranges_share_the_line_budget_without_context_or_phantom_l
     let source = put(&app, "text/plain", lines.concat().into_bytes()).await;
     let first = page(
         &client,
-        &format!("{}#stravia?lines=1-150,201-260", source.reference()),
+        &format!("{}?lines=1-150,201-260", source.reference()),
     )
     .await;
     assert_eq!(
@@ -150,13 +150,13 @@ async fn selected_crlf_ranges_share_the_line_budget_without_context_or_phantom_l
     assert_eq!(last["returned_ranges"][0]["start_line"], 251);
     assert_eq!(last["has_more"], false);
     let snapshot = first["read_path"].as_str().unwrap();
-    let selected = page(&client, &format!("{snapshot}#stravia?lines=-1")).await;
+    let selected = page(&client, &format!("{snapshot}?lines=-1")).await;
     assert_eq!(selected["content"], "line 260\r\n");
-    let counted = page(&client, &format!("{snapshot}#stravia?lines=259%2B2")).await;
+    let counted = page(&client, &format!("{snapshot}?lines=259%2B2")).await;
     assert_eq!(counted["content"], "line 259\r\nline 260\r\n");
     for range in ["0", "-0", "-+1", "261", "18446744073709551615%2B2"] {
         assert_eq!(
-            call(&client, &format!("{snapshot}#stravia?lines={range}"))
+            call(&client, &format!("{snapshot}?lines={range}"))
                 .await
                 .is_error,
             Some(true)
@@ -175,12 +175,12 @@ async fn empty_snapshot_reads_and_downloads_exactly_empty_text() {
     assert_eq!(empty["has_more"], false);
     let reference = empty["read_path"].as_str().unwrap();
     assert_eq!(
-        call(&client, &format!("{reference}#stravia?lines=1"))
+        call(&client, &format!("{reference}?lines=1"))
             .await
             .is_error,
         Some(true)
     );
-    let download = page(&client, &format!("{reference}#stravia?download=1")).await;
+    let download = page(&client, &format!("{reference}?download=1")).await;
     let response = reqwest::get(download["download_url"].as_str().unwrap())
         .await
         .unwrap();
@@ -221,19 +221,16 @@ async fn cursor_validation_and_expiry_cannot_bypass_snapshot_ownership() {
         let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(serde_json::to_vec(&mutation).unwrap());
         assert_eq!(
-            call(&client, &format!("{reference}#stravia?cursor={encoded}"))
+            call(&client, &format!("{reference}?cursor={encoded}"))
                 .await
                 .is_error,
             Some(true)
         );
     }
     assert_eq!(
-        call(
-            &client,
-            &format!("{}#stravia?cursor={encoded}", source.reference())
-        )
-        .await
-        .is_error,
+        call(&client, &format!("{}?cursor={encoded}", source.reference()))
+            .await
+            .is_error,
         Some(true)
     );
     let other = app
@@ -278,12 +275,8 @@ async fn media_answer_pagination_preserves_full_history_without_another_model_tu
     let prefix = "图像内容🙂".repeat(3000);
     let (app, source, calls) = media_test_app_with_answer(&prefix).await;
     let client = connect(&app).await;
-    let first = page(
-        &client,
-        &format!("https://stravia/artifact/{}", source.as_str()),
-    )
-    .await;
-    let original = format!("{prefix} [artifact:{}]", source.as_str());
+    let first = page(&client, &format!("sa:{}", source.as_str())).await;
+    let original = format!("{prefix} [sa:{}]", source.as_str());
     let mut assembled = first["report"]["answer"].as_str().unwrap().to_owned();
     assert!(assembled.len() <= 32 * 1024);
     assert_eq!(
@@ -361,11 +354,7 @@ async fn untrusted_snapshot_envelopes_are_validated_and_source_truncation_surviv
     assert_eq!(last["source_truncated"], true);
     assert_eq!(last["has_more"], false);
     assert!(last.get("next_path").is_none());
-    let download = page(
-        &client,
-        &format!("{}#stravia?download=1", source.reference()),
-    )
-    .await;
+    let download = page(&client, &format!("{}?download=1", source.reference())).await;
     let response = reqwest::get(download["download_url"].as_str().unwrap())
         .await
         .unwrap();

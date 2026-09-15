@@ -33,7 +33,7 @@ impl ApiKeyStore for PostgresApiKeyStore {
     }
 
     async fn create(&self, input: CreateApiKey) -> anyhow::Result<ApiKeyWithBindings> {
-        let id = uuid::Uuid::new_v4().to_string();
+        let id = stravia_runtime_contract::identifier::new_id();
         let key = input
             .key
             .unwrap_or_else(|| format!("sk-{}", uuid::Uuid::new_v4().simple()));

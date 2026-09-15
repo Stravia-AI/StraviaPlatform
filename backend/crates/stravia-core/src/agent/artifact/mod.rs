@@ -11,9 +11,12 @@ use sqlx::{Connection, PgPool, SqlitePool};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
-use stravia_runtime_contract::Principal;
 #[cfg(test)]
 use stravia_runtime_contract::agent::ArtifactPolicy;
+use stravia_runtime_contract::{
+    Principal,
+    identifier::{encode_digest, new_id, valid_digest_id, valid_id},
+};
 
 pub use stravia_runtime_contract::artifact::*;
 const MAX_PRINCIPAL_STAGING_BYTES: u64 = 4 * MAX_ARTIFACT_BYTES;

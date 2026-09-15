@@ -8,10 +8,10 @@ use stravia_runtime_contract::protocol::ir::Role;
 
 use super::*;
 
-pub const HISTORY_MARKER_PREFIX: &str = "<!-- stravia-history-marker:";
-const HISTORY_MARKER_SUFFIX: &str = " -->";
-pub const PROJECTION_DELIMITER_PREFIX: &str = "<!-- stravia-projection:";
-const PROJECTION_DELIMITER_SUFFIX: &str = " -->";
+pub const HISTORY_MARKER_PREFIX: &str = "<!--sh:";
+const HISTORY_MARKER_SUFFIX: &str = "-->";
+pub const PROJECTION_DELIMITER_PREFIX: &str = "<!--sp:";
+const PROJECTION_DELIMITER_SUFFIX: &str = "-->";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProjectionMode {
@@ -22,8 +22,8 @@ enum ProjectionMode {
 impl ProjectionMode {
     fn as_str(self) -> &'static str {
         match self {
-            Self::Text => "text",
-            Self::Preview => "preview",
+            Self::Text => "t",
+            Self::Preview => "p",
         }
     }
 }
@@ -37,8 +37,8 @@ enum ProjectionBoundary {
 impl ProjectionBoundary {
     fn as_str(self) -> &'static str {
         match self {
-            Self::Start => "start",
-            Self::End => "end",
+            Self::Start => "s",
+            Self::End => "e",
         }
     }
 }
@@ -162,31 +162,25 @@ pub(crate) fn render_preview_projection_end(reference: &str, ordinal: usize) -> 
 }
 
 pub(crate) fn new_reference() -> String {
-    let random = uuid::Uuid::new_v4().simple().to_string();
-    format!("hm_{}", &random[..20])
+    stravia_runtime_contract::identifier::new_id()
 }
 
 pub(crate) fn valid_reference(reference: &str) -> bool {
-    reference.strip_prefix("hm_").is_some_and(|opaque| {
-        opaque.len() == 20
-            && opaque
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-    })
+    stravia_runtime_contract::identifier::valid_id(reference)
 }
 
 fn parse_projection_delimiter(payload: &str) -> Option<ProjectionDelimiter> {
-    let mut parts = payload.trim().split(':');
+    let mut parts = payload.split(':');
     let reference = parts.next()?;
     let mode = match parts.next()? {
-        "text" => ProjectionMode::Text,
-        "preview" => ProjectionMode::Preview,
+        "t" => ProjectionMode::Text,
+        "p" => ProjectionMode::Preview,
         _ => return None,
     };
     let ordinal = parts.next()?.parse().ok()?;
     let boundary = match parts.next()? {
-        "start" => ProjectionBoundary::Start,
-        "end" => ProjectionBoundary::End,
+        "s" => ProjectionBoundary::Start,
+        "e" => ProjectionBoundary::End,
         _ => return None,
     };
     if parts.next().is_some() || !valid_reference(reference) {
@@ -225,30 +219,6 @@ fn consume_malformed_private_syntax(text: &str) -> &str {
     text.find('\n').map_or("", |line_end| &text[line_end + 1..])
 }
 
-fn legacy_marker_decoration_len(text: &str, reference: &str) -> Option<usize> {
-    let after_newline = text.strip_prefix('\n')?;
-    let first_line_end = after_newline.find('\n')?;
-    let activity = &after_newline[..first_line_end];
-    if !activity.starts_with("> **Stravia activity:** ") {
-        return None;
-    }
-    let after_activity = &after_newline[first_line_end + 1..];
-    let after_spacer = after_activity.strip_prefix(">\n")?;
-    let reference_line = format!("> **History reference:** `{reference}`");
-    if !after_spacer.starts_with(&reference_line) {
-        return None;
-    }
-    let after_reference = &after_spacer[reference_line.len()..];
-    if !after_reference.is_empty() && !after_reference.starts_with('\n') {
-        return None;
-    }
-    let mut consumed = 1 + first_line_end + 1 + 2 + reference_line.len();
-    if after_reference.starts_with('\n') {
-        consumed += 1;
-    }
-    Some(consumed)
-}
-
 fn tokenize_private_syntax(text: &str) -> Vec<PrivateToken> {
     let mut tokens = Vec::new();
     let mut remaining = text;
@@ -262,15 +232,12 @@ fn tokenize_private_syntax(text: &str) -> Vec<PrivateToken> {
                 remaining = consume_malformed_private_syntax(payload);
                 continue;
             };
-            let reference = payload[..comment_end].trim();
+            let reference = &payload[..comment_end];
             if valid_reference(reference) {
                 tokens.push(PrivateToken::Marker(reference.to_owned()));
             }
             let mut consumed = comment_end + HISTORY_MARKER_SUFFIX.len();
-            let after_comment = &payload[consumed..];
-            if let Some(legacy_len) = legacy_marker_decoration_len(after_comment, reference) {
-                consumed += legacy_len;
-            } else if after_comment.starts_with('\n') {
+            if payload[consumed..].starts_with('\n') {
                 consumed += 1;
             }
             remaining = &payload[consumed..];
@@ -837,40 +804,64 @@ pub async fn resolve_request_markers(
 mod tests {
     use super::*;
 
+    const REFERENCE: &str = "abcdefghijklmnopqrstuvwxyzab";
+
+    #[test]
+    fn generated_reference_uses_shared_identifier_contract() {
+        let reference = new_reference();
+        assert_eq!(
+            reference.len(),
+            stravia_runtime_contract::identifier::ID_LEN
+        );
+        assert!(valid_reference(&reference));
+    }
+
+    #[test]
+    fn references_require_exactly_twenty_eight_lowercase_letters() {
+        assert!(valid_reference(REFERENCE));
+        for invalid in [
+            "abcdefghijklmnopqrstuvwxyza",
+            "abcdefghijklmnopqrstuvwxyzabc",
+            "abcdefghijklmnopqrstuvwxyza1",
+            "Abcdefghijklmnopqrstuvwxyzab",
+        ] {
+            assert!(!valid_reference(invalid));
+        }
+
+        let old = "<!-- stravia-history-marker:hm_0123456789abcdefabcd -->";
+        assert_eq!(strip_markers(old), (old.into(), Vec::new()));
+    }
+
     #[test]
     fn marker_reference_is_machine_readable_and_invisible() {
         let marker = HistoryMarker {
-            reference: "hm_0123456789abcdefabcd".into(),
+            reference: REFERENCE.into(),
             kind: HistoryMarkerKind::Platform,
             activity: "Searching the web".into(),
         };
         let rendered = render_history_marker(&marker);
-        assert_eq!(
-            rendered,
-            "<!-- stravia-history-marker:hm_0123456789abcdefabcd -->\n"
-        );
+        assert_eq!(rendered, "<!--sh:abcdefghijklmnopqrstuvwxyzab-->\n");
         assert_eq!(
             strip_markers(&rendered),
-            (String::new(), vec!["hm_0123456789abcdefabcd".into()])
+            (String::new(), vec![REFERENCE.into()])
         );
     }
 
     #[test]
-    fn legacy_visible_marker_block_is_stripped_with_comment() {
-        let text = "<!-- stravia-history-marker:hm_0123456789abcdefabcd -->\n\
-                    > **Stravia activity:** Searching the web\n\
-                    >\n\
-                    > **History reference:** `hm_0123456789abcdefabcd`\n\
-                    public text";
+    fn projection_delimiters_use_compact_fields() {
         assert_eq!(
-            strip_markers(text),
-            ("public text".into(), vec!["hm_0123456789abcdefabcd".into()])
+            render_text_projection_span(REFERENCE, 12, "visible"),
+            "<!--sp:abcdefghijklmnopqrstuvwxyzab:t:12:s-->visible<!--sp:abcdefghijklmnopqrstuvwxyzab:t:12:e-->"
+        );
+        assert_eq!(
+            render_preview_projection_span(REFERENCE, 3, "preview"),
+            "<!--sp:abcdefghijklmnopqrstuvwxyzab:p:3:s-->preview<!--sp:abcdefghijklmnopqrstuvwxyzab:p:3:e-->"
         );
     }
 
     #[test]
     fn marker_preserves_extra_newlines_and_public_blockquotes() {
-        let marker = "<!-- stravia-history-marker:hm_0123456789abcdefabcd -->";
+        let marker = "<!--sh:abcdefghijklmnopqrstuvwxyzab-->";
         assert_eq!(
             strip_markers(&format!("before{marker}\n\npublic text")).0,
             "before\npublic text"
@@ -883,7 +874,7 @@ mod tests {
 
     #[test]
     fn malformed_private_marker_is_removed() {
-        let text = "before\n<!-- stravia-history-marker:not-private\npreserved after";
+        let text = "before\n<!--sh:not-private\npreserved after";
         let (cleaned, references) = strip_markers(text);
         assert_eq!(cleaned, "before\npreserved after");
         assert!(references.is_empty());

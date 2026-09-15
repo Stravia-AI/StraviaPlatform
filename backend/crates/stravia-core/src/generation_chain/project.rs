@@ -203,11 +203,8 @@ fn stable_gemini_tool_id(name: &str, arguments: &serde_json::Value) -> String {
         "arguments": arguments,
     }))
     .expect("Gemini tool identity is JSON serializable");
-    format!(
-        "gemini_call_{}",
-        stravia_runtime_contract::protocol::ir::canonical::hash_hex(
-            &stravia_runtime_contract::protocol::ir::canonical::hash_bytes(&identity)
-        )
+    stravia_runtime_contract::identifier::encode_digest(
+        &stravia_runtime_contract::protocol::ir::canonical::hash_bytes(&identity),
     )
 }
 

@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use anyhow::Result;
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::Value;
@@ -43,12 +45,18 @@ impl AnthropicEncoder {
         let messages_val: Value = if let Some(v) = ingress.get("__anthropic_raw_messages") {
             v.clone()
         } else {
+            let supplied_tool_ids = supplied_anthropic_tool_ids(&req.items);
+            let mut generated_tool_id_seq = 0;
             let mut raw_messages = Vec::new();
             for msg in &req.items {
                 if matches!(msg.role, Role::System | Role::Developer) {
                     continue;
                 }
-                raw_messages.push(encode_message(msg)?);
+                raw_messages.push(encode_message(
+                    msg,
+                    &mut generated_tool_id_seq,
+                    &supplied_tool_ids,
+                )?);
             }
             Value::Array(normalize_anthropic_messages(raw_messages))
         };
@@ -355,7 +363,11 @@ fn validate_anthropic_payload(body: &Value) -> Result<()> {
 
 // ── Message encoding helpers ──────────────────────────────────────────────────
 
-fn encode_message(msg: &AiItem) -> Result<Value> {
+fn encode_message(
+    msg: &AiItem,
+    generated_tool_id_seq: &mut usize,
+    supplied_tool_ids: &HashSet<String>,
+) -> Result<Value> {
     let role = match msg.role {
         Role::User | Role::Tool => "user",
         Role::Assistant => "assistant",
@@ -363,14 +375,21 @@ fn encode_message(msg: &AiItem) -> Result<Value> {
     };
 
     if msg.role == Role::Tool {
-        let (tool_content, hinted_tool_use_id) = anthropic_tool_result_payload(msg);
+        let (tool_content, hinted_tool_use_id) =
+            anthropic_tool_result_payload(msg, generated_tool_id_seq, supplied_tool_ids);
         let tool_use_id = msg
             .tool_call_id
-            .clone()
-            .filter(|v| !v.trim().is_empty())
-            .or(hinted_tool_use_id)
-            .map(|v| normalize_anthropic_tool_id(&v))
-            .unwrap_or_else(|| normalize_anthropic_tool_id("tool_result"));
+            .as_deref()
+            .filter(|id| !id.trim().is_empty())
+            .or_else(|| {
+                hinted_tool_use_id
+                    .as_deref()
+                    .filter(|id| !id.trim().is_empty())
+            })
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                next_synthetic_anthropic_tool_id(generated_tool_id_seq, supplied_tool_ids)
+            });
         return Ok(serde_json::json!({
             "role": role,
             "content": [{
@@ -414,9 +433,14 @@ fn encode_message(msg: &AiItem) -> Result<Value> {
                     for tc in tcs {
                         let input: Value = serde_json::from_str(&tc.arguments)
                             .unwrap_or(Value::Object(Default::default()));
+                        let id = normalized_anthropic_tool_id(
+                            &tc.id,
+                            generated_tool_id_seq,
+                            supplied_tool_ids,
+                        );
                         blocks.push(serde_json::json!({
                             "type": "tool_use",
-                            "id": normalize_anthropic_tool_id(&tc.id),
+                            "id": id,
                             "name": tc.name,
                             "input": input,
                         }));
@@ -430,7 +454,13 @@ fn encode_message(msg: &AiItem) -> Result<Value> {
         MessageContent::Blocks(blocks) => {
             let arr: Vec<Value> = blocks
                 .iter()
-                .map(encode_content_block_for_anthropic)
+                .map(|block| {
+                    encode_content_block_for_anthropic_with_ids(
+                        block,
+                        generated_tool_id_seq,
+                        supplied_tool_ids,
+                    )
+                })
                 .collect();
             Value::Array(arr)
         }
@@ -442,7 +472,17 @@ fn encode_message(msg: &AiItem) -> Result<Value> {
     }))
 }
 
+#[cfg(test)]
 fn encode_content_block_for_anthropic(b: &ContentBlock) -> Value {
+    let mut generated_tool_id_seq = 0;
+    encode_content_block_for_anthropic_with_ids(b, &mut generated_tool_id_seq, &HashSet::new())
+}
+
+fn encode_content_block_for_anthropic_with_ids(
+    b: &ContentBlock,
+    generated_tool_id_seq: &mut usize,
+    supplied_tool_ids: &HashSet<String>,
+) -> Value {
     match b {
         ContentBlock::Text {
             text,
@@ -505,9 +545,10 @@ fn encode_content_block_for_anthropic(b: &ContentBlock) -> Value {
             input,
             cache_control,
         } => {
+            let id = normalized_anthropic_tool_id(id, generated_tool_id_seq, supplied_tool_ids);
             let mut block = serde_json::json!({
                 "type": "tool_use",
-                "id": normalize_anthropic_tool_id(id),
+                "id": id,
                 "name": name,
                 "input": input,
             });
@@ -523,9 +564,11 @@ fn encode_content_block_for_anthropic(b: &ContentBlock) -> Value {
             cache_control,
             ..
         } => {
+            let tool_use_id =
+                normalized_anthropic_tool_id(tool_use_id, generated_tool_id_seq, supplied_tool_ids);
             let mut block = serde_json::json!({
                 "type": "tool_result",
-                "tool_use_id": normalize_anthropic_tool_id(tool_use_id),
+                "tool_use_id": tool_use_id,
                 "content": content,
             });
             if let Some(err) = is_error {
@@ -576,7 +619,11 @@ fn encode_content_block_for_anthropic(b: &ContentBlock) -> Value {
     }
 }
 
-fn anthropic_tool_result_payload(msg: &AiItem) -> (Value, Option<String>) {
+fn anthropic_tool_result_payload(
+    msg: &AiItem,
+    generated_tool_id_seq: &mut usize,
+    supplied_tool_ids: &HashSet<String>,
+) -> (Value, Option<String>) {
     match &msg.content {
         MessageContent::Text(t) => (Value::String(t.clone()), None),
         MessageContent::Blocks(blocks) => {
@@ -599,7 +646,13 @@ fn anthropic_tool_result_payload(msg: &AiItem) -> (Value, Option<String>) {
                 Value::Array(
                     blocks
                         .iter()
-                        .map(encode_content_block_for_anthropic)
+                        .map(|block| {
+                            encode_content_block_for_anthropic_with_ids(
+                                block,
+                                generated_tool_id_seq,
+                                supplied_tool_ids,
+                            )
+                        })
                         .collect(),
                 ),
                 msg.tool_call_id.clone(),
@@ -608,29 +661,69 @@ fn anthropic_tool_result_payload(msg: &AiItem) -> (Value, Option<String>) {
     }
 }
 
-fn normalize_anthropic_tool_id(raw: &str) -> String {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return "toolu_stravia".to_string();
-    }
-    if trimmed.starts_with("toolu_")
-        && trimmed
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
-    {
-        return trimmed.to_string();
-    }
-    let sanitized: String = trimmed
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
-                ch
-            } else {
-                '_'
+fn supplied_anthropic_tool_ids(messages: &[AiItem]) -> HashSet<String> {
+    let mut ids = HashSet::new();
+    for msg in messages {
+        if let Some(tool_calls) = &msg.tool_calls {
+            ids.extend(
+                tool_calls
+                    .iter()
+                    .map(|call| call.id.trim())
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_owned),
+            );
+        }
+        if let Some(id) = msg
+            .tool_call_id
+            .as_deref()
+            .filter(|id| !id.trim().is_empty())
+        {
+            ids.insert(id.to_owned());
+        }
+        if let MessageContent::Blocks(blocks) = &msg.content {
+            for block in blocks {
+                let id = match block {
+                    ContentBlock::ToolUse { id, .. } | ContentBlock::ServerToolUse { id, .. } => {
+                        Some(id.as_str())
+                    }
+                    ContentBlock::ToolResult { tool_use_id, .. }
+                    | ContentBlock::ServerToolResult { tool_use_id, .. } => {
+                        Some(tool_use_id.as_str())
+                    }
+                    _ => None,
+                };
+                if let Some(id) = id.filter(|id| !id.trim().is_empty()) {
+                    ids.insert(id.to_owned());
+                }
             }
-        })
-        .collect();
-    format!("toolu_{sanitized}")
+        }
+    }
+    ids
+}
+
+fn next_synthetic_anthropic_tool_id(
+    sequence: &mut usize,
+    supplied_ids: &HashSet<String>,
+) -> String {
+    loop {
+        *sequence += 1;
+        let id = format!("tc_{}", *sequence);
+        if !supplied_ids.contains(&id) {
+            return id;
+        }
+    }
+}
+
+fn normalized_anthropic_tool_id(
+    raw: &str,
+    generated_tool_id_seq: &mut usize,
+    supplied_tool_ids: &HashSet<String>,
+) -> String {
+    if raw.trim().is_empty() {
+        next_synthetic_anthropic_tool_id(generated_tool_id_seq, supplied_tool_ids)
+    } else {
+        raw.to_owned()
+    }
 }
 
 fn normalize_anthropic_messages(messages: Vec<Value>) -> Vec<Value> {

@@ -13,7 +13,7 @@ pub struct ContextItemId(String);
 
 impl ContextItemId {
     pub fn new() -> Self {
-        Self(format!("ctx-{}", uuid::Uuid::new_v4()))
+        Self(crate::identifier::new_id())
     }
 
     pub fn as_str(&self) -> &str {
@@ -25,7 +25,7 @@ impl ContextItemId {
         hasher.update(b"stravia-context-item-v1\0");
         hasher.update(canonical);
         hasher.update((occurrence as u64).to_be_bytes());
-        Self(format!("ctx-{}", hex_digest(hasher.finalize())))
+        Self(encode_hasher_digest(hasher))
     }
 }
 
@@ -617,6 +617,11 @@ fn initial_digest(system: Option<&str>) -> String {
     hex_digest(hasher.finalize())
 }
 
+fn encode_hasher_digest(hasher: Sha256) -> String {
+    let digest: [u8; 32] = hasher.finalize().into();
+    crate::identifier::encode_digest(&digest)
+}
+
 fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
     use std::fmt::Write;
 
@@ -660,6 +665,7 @@ mod tests {
 
         let short_m7 = short.items[6].id();
         let long_m7 = long.items[6].id();
+        assert!(crate::identifier::valid_digest_id(short_m7.as_str()));
         assert_eq!(short_m7, long_m7);
         assert_eq!(
             short.checkpoint_after(short_m7).unwrap().digest,

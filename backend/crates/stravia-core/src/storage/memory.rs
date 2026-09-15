@@ -103,7 +103,7 @@ impl ProviderStore for MemoryStorage {
     async fn create(&self, input: CreateProviderRecord) -> anyhow::Result<Provider> {
         let now = now_rfc3339();
         let provider = Provider {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: stravia_runtime_contract::identifier::new_id(),
             name: input.name,
             vendor: input.vendor,
             protocol: input.protocol,
@@ -251,7 +251,7 @@ impl RouteStore for MemoryStorage {
         let storage_id = input
             .id
             .clone()
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            .unwrap_or_else(|| stravia_runtime_contract::identifier::new_id());
         anyhow::ensure!(
             !routes
                 .iter()
@@ -279,7 +279,7 @@ impl RouteStore for MemoryStorage {
                         current.provider_id == target.provider_id && current.model == target.model
                     })
                     .map(|current| current.id.clone())
-                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                    .unwrap_or_else(|| stravia_runtime_contract::identifier::new_id()),
                 model_id: storage_id.clone(),
                 provider_id: target.provider_id,
                 model: target.model,
@@ -583,7 +583,7 @@ impl OAuthCredentialStore for MemoryOAuthCredentialStore {
             .unwrap_or(0);
         let cred = OAuthCredential {
             provider_id: provider_id.to_string(),
-            connection_id: uuid::Uuid::new_v4().to_string(),
+            connection_id: stravia_runtime_contract::identifier::new_id(),
             driver_key: input.driver_key,
             scheme: input.scheme,
             access_token: input.access_token,

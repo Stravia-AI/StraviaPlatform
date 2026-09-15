@@ -1,5 +1,4 @@
-use std::collections::VecDeque;
-
+use std::collections::{HashSet, VecDeque};
 use stravia_runtime_contract::protocol::ir::request::AiItem;
 use stravia_runtime_contract::protocol::ir::request::AiRequest;
 use stravia_runtime_contract::protocol::ir::request::ContentBlock;
@@ -8,6 +7,29 @@ use stravia_runtime_contract::protocol::ir::request::Role;
 use stravia_runtime_contract::protocol::ir::request::ToolCall;
 
 pub fn normalize_request_tool_results(req: &mut AiRequest) {
+    let mut supplied_ids = HashSet::new();
+    for msg in &req.items {
+        if let Some(tool_calls) = &msg.tool_calls {
+            supplied_ids.extend(
+                tool_calls
+                    .iter()
+                    .map(|call| call.id.trim())
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_owned),
+            );
+        }
+        if let Some(id) = msg
+            .tool_call_id
+            .as_deref()
+            .filter(|id| !id.trim().is_empty())
+        {
+            supplied_ids.insert(id.to_owned());
+        }
+        if let Some(id) = extract_tool_result_hint(&msg.content) {
+            supplied_ids.insert(id);
+        }
+    }
+
     let inherits_tool_calls = matches!(
         req.ext.as_ref(),
         Some(stravia_runtime_contract::protocol::ir::ProtocolExt::OpenResponses(extension))
@@ -28,8 +50,7 @@ pub fn normalize_request_tool_results(req: &mut AiRequest) {
             if let Some(tool_calls) = &mut msg.tool_calls {
                 for tc in tool_calls.iter_mut() {
                     if tc.id.trim().is_empty() {
-                        generated_id_seq += 1;
-                        tc.id = format!("call_stravia_{generated_id_seq}");
+                        tc.id = next_synthetic_tool_call_id(&mut generated_id_seq, &supplied_ids);
                     }
                     pending_calls.push_back((tc.id.clone(), tc.name.clone()));
                 }
@@ -99,8 +120,10 @@ pub fn normalize_request_tool_results(req: &mut AiRequest) {
         }
 
         if resolved_id.is_none() {
-            generated_id_seq += 1;
-            resolved_id = Some(format!("call_stravia_synth_{generated_id_seq}"));
+            resolved_id = Some(next_synthetic_tool_call_id(
+                &mut generated_id_seq,
+                &supplied_ids,
+            ));
         }
 
         let final_id = resolved_id.expect("final tool_call_id should always exist");
@@ -124,6 +147,16 @@ pub fn normalize_request_tool_results(req: &mut AiRequest) {
     }
 
     req.items = normalized_messages;
+}
+
+fn next_synthetic_tool_call_id(sequence: &mut usize, supplied_ids: &HashSet<String>) -> String {
+    loop {
+        *sequence += 1;
+        let id = format!("tc_{}", *sequence);
+        if !supplied_ids.contains(&id) {
+            return id;
+        }
+    }
 }
 
 fn extract_tool_result_hint(content: &MessageContent) -> Option<String> {

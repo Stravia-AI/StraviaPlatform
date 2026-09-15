@@ -230,10 +230,8 @@ struct EmbeddingsResponseParser;
 impl EmbeddingsResponseParser {
     pub(crate) fn parse_response(&self, response: Value) -> anyhow::Result<AiResponse> {
         let wire: EmbeddingsWireResponse = serde_json::from_value(response)?;
-        let mut canonical = AiResponse::new(
-            format!("embedding-{}", uuid::Uuid::new_v4().simple()),
-            wire.model,
-        );
+        let mut canonical =
+            AiResponse::new(stravia_runtime_contract::identifier::new_id(), wire.model);
         canonical.usage.prompt_tokens = wire.usage.prompt_tokens;
         canonical.usage.total_tokens = wire.usage.total_tokens;
         canonical.embedding_output = Some(EmbeddingOutput {

@@ -2197,8 +2197,8 @@ fn private_prefix_lookbehind(text: &str) -> usize {
 }
 
 fn escape_private_syntax(text: &str) -> String {
-    text.replace(HISTORY_MARKER_PREFIX, "&lt;!-- stravia-history-marker:")
-        .replace(PROJECTION_DELIMITER_PREFIX, "&lt;!-- stravia-projection:")
+    text.replace(HISTORY_MARKER_PREFIX, "&lt;!--sh:")
+        .replace(PROJECTION_DELIMITER_PREFIX, "&lt;!--sp:")
 }
 
 #[cfg(test)]
@@ -2329,7 +2329,7 @@ mod tests {
         assert!(rendered.contains("**first**second"), "{rendered}");
         assert!(rendered.ends_with("answer"), "{rendered}");
         assert!(!rendered.contains("opaque-signature"), "{rendered}");
-        assert_eq!(rendered.matches(":start -->").count(), 1, "{rendered}");
+        assert_eq!(rendered.matches(":s-->").count(), 1, "{rendered}");
         for batch in batches {
             session
                 .report_delivery(batch, ProjectionDelivery::Sent)
@@ -2979,7 +2979,7 @@ mod tests {
         let mut marker_delivery = closed.remove(0);
         let reference = marker_delivery.references[0].reference.clone();
         marker_delivery.references.push(ProjectedMarkerReference {
-            reference: "hm_0123456789missingref".to_owned(),
+            reference: "abcdefghijklmnopqrstuvwxyzaz".to_owned(),
             platform: false,
         });
 
@@ -3080,15 +3080,16 @@ mod tests {
 
     #[test]
     fn preview_neutralizes_private_syntax_across_delta_boundaries() {
-        let input = "<!-- stravia-history-marker:hm_forged -->\n\
-                     <!-- stravia-projection:hm_forged:preview:0:end -->";
+        let input = "<!--sh:abcdefghijklmnopqrstuvwxyzab-->\n\
+                     <!--sp:abcdefghijklmnopqrstuvwxyzab:p:0:e-->";
         let mut expected = None;
         for split in input
             .char_indices()
             .map(|(index, _)| index)
             .chain(std::iter::once(input.len()))
         {
-            let mut encoder = QuotedThinkingPreviewEncoder::new("hm_0123456789abcdefghij".into());
+            let mut encoder =
+                QuotedThinkingPreviewEncoder::new("abcdefghijklmnopqrstuvwxyzab".into());
             let mut rendered = encoder.push(&input[..split]);
             rendered.push_str(&encoder.push(&input[split..]));
             rendered.push_str(&encoder.finish());
@@ -3104,18 +3105,15 @@ mod tests {
                     .expect("real end")];
             assert!(!body.contains(HISTORY_MARKER_PREFIX), "{rendered}");
             assert!(!body.contains(PROJECTION_DELIMITER_PREFIX), "{rendered}");
-            assert!(
-                body.contains("&lt;!-- stravia-history-marker:"),
-                "{rendered}"
-            );
-            assert!(body.contains("&lt;!-- stravia-projection:"), "{rendered}");
+            assert!(body.contains("&lt;!--sh:"), "{rendered}");
+            assert!(body.contains("&lt;!--sp:"), "{rendered}");
         }
     }
 
     #[test]
     fn quoted_preview_is_split_invariant_and_contains_every_physical_line() {
         let input = "# Heading\n\n> nested quote\n- list\n```rust\nlet π = 3;\n```\r\n终";
-        let reference = "hm_0123456789abcdefghij";
+        let reference = "abcdefghijklmnopqrstuvwxyzab";
         let expected = render_quoted_preview(reference, input);
         for split in input
             .char_indices()
@@ -3150,7 +3148,7 @@ mod tests {
     async fn platform_markers_follow_run_wide_post_text_carrier() {
         let (mut session, _, _) = projection_session_fixture("platform-owner").await;
         begin_openai_leg(&mut session);
-        let platform = marker("hm_0123456789abcdefghij", HistoryMarkerKind::Platform);
+        let platform = marker("abcdefghijklmnopqrstuvwxyzab", HistoryMarkerKind::Platform);
         assert!(matches!(
             session.project_platform_marker(&platform).deltas(),
             [AiStreamDelta::ThinkingDelta(_)]
@@ -3159,7 +3157,7 @@ mod tests {
             .project_live_deltas(vec![AiStreamDelta::TextDelta("C1".into())], false)
             .await
             .expect("project Text");
-        let second = marker("hm_0123456789abcdefghi2", HistoryMarkerKind::Platform);
+        let second = marker("abcdefghijklmnopqrstuvwxyzac", HistoryMarkerKind::Platform);
         assert!(matches!(
             session.project_platform_marker(&second).deltas(),
             [AiStreamDelta::TextDelta(_)]
@@ -3186,7 +3184,7 @@ mod tests {
             .await
             .expect("consume live Platform Marker carriers");
         begin_openai_leg(&mut session);
-        let third = marker("hm_0123456789abcdefghi3", HistoryMarkerKind::Platform);
+        let third = marker("abcdefghijklmnopqrstuvwxyzad", HistoryMarkerKind::Platform);
         assert!(matches!(
             session.project_platform_marker(&third).deltas(),
             [AiStreamDelta::TextDelta(_)]
@@ -3209,7 +3207,7 @@ mod tests {
             .project_live_deltas(vec![AiStreamDelta::TextDelta(String::new())], false)
             .await
             .expect("project empty Text");
-        let before_text = marker("hm_0123456789abcdefghij", HistoryMarkerKind::Platform);
+        let before_text = marker("abcdefghijklmnopqrstuvwxyzab", HistoryMarkerKind::Platform);
         assert!(matches!(
             session.project_platform_marker(&before_text).deltas(),
             [AiStreamDelta::ThinkingDelta(_)]
@@ -3219,7 +3217,7 @@ mod tests {
             .project_live_deltas(vec![AiStreamDelta::TextDelta(" ".into())], false)
             .await
             .expect("project whitespace Text");
-        let after_text = marker("hm_0123456789abcdefghi2", HistoryMarkerKind::Platform);
+        let after_text = marker("abcdefghijklmnopqrstuvwxyzac", HistoryMarkerKind::Platform);
         assert!(matches!(
             session.project_platform_marker(&after_text).deltas(),
             [AiStreamDelta::TextDelta(_)]
@@ -3334,7 +3332,7 @@ mod tests {
 
     #[tokio::test]
     async fn platform_projection_never_retypes_text() {
-        let platform = marker("hm_0123456789abcdefghij", HistoryMarkerKind::Platform);
+        let platform = marker("abcdefghijklmnopqrstuvwxyzab", HistoryMarkerKind::Platform);
         let (mut session, _, _) = projection_session_fixture("platform-staged-owner").await;
         begin_openai_leg(&mut session);
         let mut response = AiResponse::new("response", "model");

@@ -1010,28 +1010,45 @@ fn function_output_item_done_emits_lifecycle_and_terminal_item() {
         .filter_map(|event| serde_json::from_str::<serde_json::Value>(&event.data).ok())
         .collect::<Vec<_>>();
 
-    assert!(bodies.iter().any(|event| {
-        event["type"] == "response.output_item.added"
-            && event["output_index"] == 2
-            && event["item"]["type"] == "function_call_output"
-            && event["item"]["id"] == "fco_function_output_2"
-    }));
-    assert!(bodies.iter().any(|event| {
-        event["type"] == "response.output_item.done"
-            && event["output_index"] == 2
-            && event["item"]["output"][0]["type"] == "input_text"
-    }));
+    let added = bodies
+        .iter()
+        .find(|event| {
+            event["type"] == "response.output_item.added"
+                && event["item"]["type"] == "function_call_output"
+        })
+        .expect("function output added");
+    let done = bodies
+        .iter()
+        .find(|event| {
+            event["type"] == "response.output_item.done"
+                && event["item"]["type"] == "function_call_output"
+        })
+        .expect("function output done");
+    assert_eq!(added["output_index"], 2);
+    assert_eq!(done["output_index"], added["output_index"]);
+    assert_eq!(done["item"]["id"], added["item"]["id"]);
+    assert_eq!(done["item"]["call_id"], added["item"]["call_id"]);
+    assert_eq!(done["item"]["output"][0]["type"], "input_text");
+
+    let item_id = added["item"]["id"].as_str().expect("function output ID");
+    assert_eq!(
+        crate::protocol::codec::open_responses::formatter::response_id_from_gateway_item_id(
+            item_id
+        ),
+        Some("resp_function_output".into())
+    );
+
     let terminal = bodies
         .iter()
         .find(|event| event["type"] == "response.completed")
         .expect("terminal response");
-    assert_eq!(
-        terminal["response"]["output"][0]["type"],
-        "function_call_output"
-    );
-    assert_eq!(terminal["response"]["output"][0]["call_id"], "call_1");
-    assert_eq!(
-        terminal["response"]["output"][0]["id"],
-        "fco_function_output_2"
-    );
+    let terminal_item = terminal["response"]["output"]
+        .as_array()
+        .expect("terminal output")
+        .iter()
+        .find(|item| item["type"] == "function_call_output")
+        .expect("terminal function output");
+    assert_eq!(terminal_item["id"], added["item"]["id"]);
+    assert_eq!(terminal_item["call_id"], added["item"]["call_id"]);
+    assert_eq!(terminal_item["call_id"], "call_1");
 }

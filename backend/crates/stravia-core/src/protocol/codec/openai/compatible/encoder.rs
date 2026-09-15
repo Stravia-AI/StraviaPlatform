@@ -1,8 +1,7 @@
 use anyhow::Result;
 use reqwest::header::HeaderMap;
 use serde_json::Value;
-use std::collections::HashMap;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
 
 use stravia_runtime_contract::protocol::ir::AiRequest;
@@ -160,11 +159,14 @@ fn normalize_messages_for_openai(
     system: Option<&str>,
     tools: Option<&[ToolSpec]>,
 ) -> Vec<AiItem> {
-    let preprocessed = remap_duplicate_tool_call_ids(messages, system);
+    let supplied_tool_ids = collect_supplied_tool_ids(messages);
+    let preprocessed = remap_duplicate_tool_call_ids(messages, system, &supplied_tool_ids);
+    let mut unavailable_tool_ids = collect_supplied_tool_ids(&preprocessed);
 
     let mut out: Vec<AiItem> = Vec::with_capacity(preprocessed.len() + 2);
     let mut seen_tool_call_ids: HashSet<String> = HashSet::new();
     let mut consumed_tool_result_ids: HashSet<String> = HashSet::new();
+    let mut pending_tool_call_ids: VecDeque<String> = VecDeque::new();
     let mut generated_seq: usize = 0;
     let fallback_tool_name = tools
         .and_then(|defs| defs.first())
@@ -179,13 +181,16 @@ fn normalize_messages_for_openai(
             if let Some(tool_calls) = &mut msg.tool_calls {
                 for tc in tool_calls.iter_mut() {
                     if tc.id.trim().is_empty() {
-                        generated_seq += 1;
-                        tc.id = format!("call_enc_{generated_seq}");
+                        tc.id = next_synthetic_tool_call_id(
+                            &mut generated_seq,
+                            &mut unavailable_tool_ids,
+                        );
                     }
                     if tc.name.trim().is_empty() {
                         tc.name = fallback_tool_name.clone();
                     }
                     seen_tool_call_ids.insert(tc.id.clone());
+                    pending_tool_call_ids.push_back(tc.id.clone());
                 }
             }
             out.push(msg);
@@ -204,14 +209,25 @@ fn normalize_messages_for_openai(
             .filter(|v| !v.trim().is_empty())
             .or_else(|| hinted_id.clone().filter(|v| !v.trim().is_empty()));
 
+        if let Some(id) = resolved_id.as_ref()
+            && !consumed_tool_result_ids.contains(id)
+            && let Some(pos) = pending_tool_call_ids
+                .iter()
+                .position(|pending_id| pending_id == id)
+        {
+            pending_tool_call_ids.remove(pos);
+        } else if resolved_id.is_none() {
+            resolved_id = pending_tool_call_ids.pop_front();
+        }
         if resolved_id.is_none() {
-            generated_seq += 1;
-            resolved_id = Some(format!("call_enc_{generated_seq}"));
+            resolved_id = Some(next_synthetic_tool_call_id(
+                &mut generated_seq,
+                &mut unavailable_tool_ids,
+            ));
         }
         let mut final_id = resolved_id.expect("tool_call_id should always exist");
         if consumed_tool_result_ids.contains(&final_id) {
-            generated_seq += 1;
-            final_id = format!("call_enc_{generated_seq}");
+            final_id = next_synthetic_tool_call_id(&mut generated_seq, &mut unavailable_tool_ids);
         }
 
         let has_adjacent_matching_call = out
@@ -232,8 +248,8 @@ fn normalize_messages_for_openai(
                 seen_tool_call_ids.insert(final_id.clone());
             } else if !make_matching_call_adjacent(&mut out, &final_id) {
                 if seen_tool_call_ids.contains(&final_id) {
-                    generated_seq += 1;
-                    final_id = format!("call_enc_{generated_seq}");
+                    final_id =
+                        next_synthetic_tool_call_id(&mut generated_seq, &mut unavailable_tool_ids);
                 }
                 let synth_name = hinted_id
                     .as_deref()
@@ -312,6 +328,59 @@ fn prune_orphan_assistant_tool_calls(messages: Vec<AiItem>) -> Vec<AiItem> {
     out
 }
 
+fn collect_supplied_tool_ids(messages: &[AiItem]) -> HashSet<String> {
+    let mut ids = HashSet::new();
+    for msg in messages {
+        if let Some(tool_calls) = &msg.tool_calls {
+            ids.extend(
+                tool_calls
+                    .iter()
+                    .map(|call| call.id.trim())
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_owned),
+            );
+        }
+        if let Some(id) = msg
+            .tool_call_id
+            .as_deref()
+            .filter(|id| !id.trim().is_empty())
+        {
+            ids.insert(id.to_owned());
+        }
+        if let MessageContent::Blocks(blocks) = &msg.content {
+            for block in blocks {
+                let id = match block {
+                    ContentBlock::ToolUse { id, .. } | ContentBlock::ServerToolUse { id, .. } => {
+                        Some(id.as_str())
+                    }
+                    ContentBlock::ToolResult { tool_use_id, .. }
+                    | ContentBlock::ServerToolResult { tool_use_id, .. } => {
+                        Some(tool_use_id.as_str())
+                    }
+                    _ => None,
+                };
+                if let Some(id) = id.filter(|id| !id.trim().is_empty()) {
+                    ids.insert(id.to_owned());
+                }
+            }
+        }
+    }
+    ids
+}
+
+fn next_synthetic_tool_call_id(
+    sequence: &mut usize,
+    unavailable_ids: &mut HashSet<String>,
+) -> String {
+    loop {
+        *sequence += 1;
+        let id = format!("tc_{}", *sequence);
+        if unavailable_ids.insert(id.clone()) {
+            return id;
+        }
+    }
+}
+
 fn assistant_has_tool_call_id(msg: &AiItem, tool_call_id: &str) -> bool {
     if msg.role != Role::Assistant {
         return false;
@@ -323,7 +392,11 @@ fn assistant_has_tool_call_id(msg: &AiItem, tool_call_id: &str) -> bool {
     })
 }
 
-fn remap_duplicate_tool_call_ids(messages: &[AiItem], system: Option<&str>) -> Vec<AiItem> {
+fn remap_duplicate_tool_call_ids(
+    messages: &[AiItem],
+    system: Option<&str>,
+    supplied_tool_ids: &HashSet<String>,
+) -> Vec<AiItem> {
     let mut out = Vec::with_capacity(messages.len() + usize::from(system.is_some()));
     if let Some(system) = system {
         out.push(AiItem {
@@ -337,6 +410,7 @@ fn remap_duplicate_tool_call_ids(messages: &[AiItem], system: Option<&str>) -> V
     out.extend_from_slice(messages);
     let mut seen_counts: HashMap<String, usize> = HashMap::new();
     let mut pending_by_original: HashMap<String, Vec<String>> = HashMap::new();
+    let mut unavailable_tool_ids = supplied_tool_ids.clone();
     let mut generated_seq: usize = 0;
 
     for msg in &mut out {
@@ -344,8 +418,7 @@ fn remap_duplicate_tool_call_ids(messages: &[AiItem], system: Option<&str>) -> V
             if let Some(tool_calls) = &mut msg.tool_calls {
                 for tc in tool_calls.iter_mut() {
                     let original = if tc.id.trim().is_empty() {
-                        generated_seq += 1;
-                        format!("call_enc_{generated_seq}")
+                        next_synthetic_tool_call_id(&mut generated_seq, &mut unavailable_tool_ids)
                     } else {
                         tc.id.clone()
                     };
@@ -355,7 +428,7 @@ fn remap_duplicate_tool_call_ids(messages: &[AiItem], system: Option<&str>) -> V
                     let unique = if *count == 1 {
                         original.clone()
                     } else {
-                        format!("{}_dup{}", original, *count)
+                        next_synthetic_tool_call_id(&mut generated_seq, &mut unavailable_tool_ids)
                     };
                     tc.id = unique.clone();
                     pending_by_original

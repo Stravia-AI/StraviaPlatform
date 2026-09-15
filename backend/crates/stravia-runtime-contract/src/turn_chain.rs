@@ -15,15 +15,15 @@ impl TurnNodeId {
     }
 
     pub fn response() -> Self {
-        Self(format!("resp_{}", uuid::Uuid::new_v4().simple()))
+        Self(crate::identifier::new_id())
     }
 
     pub fn agent() -> Self {
-        Self(format!("aturn_{}", uuid::Uuid::new_v4().simple()))
+        Self(crate::identifier::new_id())
     }
 
     pub fn web_search() -> Self {
-        Self(format!("wst_{}", uuid::Uuid::new_v4().simple()))
+        Self(crate::identifier::new_id())
     }
 
     pub fn as_str(&self) -> &str {

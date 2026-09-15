@@ -239,11 +239,18 @@ async fn delivered_terminal_publishes_response_chain() {
         .expect("complete stream body");
     let body = String::from_utf8(body.to_vec()).expect("UTF-8 stream body");
     assert!(body.contains("response.completed"));
-    let response_id_start = body.find("resp_").expect("gateway response ID");
-    let response_id: String = body[response_id_start..]
-        .chars()
-        .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
-        .collect();
+    let response_id = body
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+        .find_map(|event| {
+            event
+                .pointer("/response/id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .expect("gateway response ID");
+    assert!(stravia_runtime_contract::identifier::valid_id(&response_id));
 
     let mut continuation = AiRequest::new("delivered-terminal", Vec::new());
     continuation.stream.enabled = true;

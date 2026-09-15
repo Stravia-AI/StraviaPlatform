@@ -62,13 +62,13 @@ mod tests {
     fn report_allows_repeated_citations_and_requires_marker_list_evidence_bijection() {
         let evidence = HashSet::from([id("artifact_a"), id("artifact_b")]);
         let valid = report(
-            "Compare [artifact:artifact_a] with [artifact:artifact_b].".into(),
+            "Compare [sa:artifact_a] with [sa:artifact_b].".into(),
             &["artifact_a", "artifact_b"],
             &[],
         );
         assert!(validate_media_report(valid, &evidence, AgentCompletion::Completed).is_ok());
         let repeated = report(
-            "First [artifact:artifact_a], then again [artifact:artifact_a].".into(),
+            "First [sa:artifact_a], then again [sa:artifact_a].".into(),
             &["artifact_a"],
             &[],
         );
@@ -76,16 +76,16 @@ mod tests {
 
         for invalid in [
             report(
-                "Only [artifact:artifact_a].".into(),
+                "Only [sa:artifact_a].".into(),
                 &["artifact_a", "artifact_b"],
                 &[],
             ),
             report(
-                "Forged [artifact:artifact_foreign].".into(),
+                "Forged [sa:artifact_foreign].".into(),
                 &["artifact_foreign"],
                 &[],
             ),
-            report("Broken [artifact:artifact_a".into(), &["artifact_a"], &[]),
+            report("Broken [sa:artifact_a".into(), &["artifact_a"], &[]),
         ] {
             assert!(validate_media_report(invalid, &evidence, AgentCompletion::Completed).is_err());
         }
@@ -94,14 +94,10 @@ mod tests {
     #[test]
     fn partial_and_size_limits_are_enforced_without_reference_count_limit() {
         let evidence = HashSet::from([id("artifact_a")]);
-        let partial = report(
-            "Observed [artifact:artifact_a].".into(),
-            &["artifact_a"],
-            &[],
-        );
+        let partial = report("Observed [sa:artifact_a].".into(), &["artifact_a"], &[]);
         assert!(validate_media_report(partial, &evidence, AgentCompletion::Partial).is_err());
 
-        let marker = "[artifact:artifact_a]";
+        let marker = "[sa:artifact_a]";
         let at_limit = report(
             format!(
                 "{marker}{}",
@@ -126,7 +122,7 @@ mod tests {
             .collect::<Vec<_>>();
         let answer = ids
             .iter()
-            .map(|value| format!("[artifact:{value}]"))
+            .map(|value| format!("[sa:{value}]"))
             .collect::<Vec<_>>()
             .join(" ");
         let many = MediaReport {
@@ -151,7 +147,7 @@ mod tests {
                 "ordinal": index + 1,
             })).collect::<Vec<_>>(),
             "report_contract": {
-                "marker_format": "[artifact:<full ArtifactId>]",
+                "marker_format": "[sa:<full ArtifactId>]",
                 "source_artifact_ids_only": true,
             }
         })
@@ -178,7 +174,7 @@ mod tests {
     fn derivative_block(derivative_id: &ArtifactId) -> ContentBlock {
         ContentBlock::Image {
             source: MediaSource::FileId {
-                file_id: format!("stravia-artifact:{}", derivative_id.as_str()),
+                file_id: format!("sa:{}", derivative_id.as_str()),
                 detail: None,
             },
             detail: None,
@@ -234,7 +230,7 @@ mod tests {
         let context = validation_context(principal);
         let validator = MediaReportValidator::new(store);
         let valid = report(
-            format!("Observed [artifact:{}].", source.id.as_str()),
+            format!("Observed [sa:{}].", source.id.as_str()),
             &[source.id.as_str()],
             &[],
         );
@@ -245,7 +241,7 @@ mod tests {
 
         // The shown derivative itself is not a declared source.
         let derivative = report(
-            format!("Observed [artifact:{}].", media.derivative.id.as_str()),
+            format!("Observed [sa:{}].", media.derivative.id.as_str()),
             &[media.derivative.id.as_str()],
             &[],
         );
@@ -321,7 +317,7 @@ mod tests {
             derivative_block(&declared_media.derivative.id),
         ])];
         let citing_declared = report(
-            format!("Observed [artifact:{}].", declared.id.as_str()),
+            format!("Observed [sa:{}].", declared.id.as_str()),
             &[declared.id.as_str()],
             &[],
         );
@@ -334,7 +330,7 @@ mod tests {
             .await
             .expect("declared source is evidence");
         let citing_undeclared = report(
-            format!("Observed [artifact:{}].", undeclared.id.as_str()),
+            format!("Observed [sa:{}].", undeclared.id.as_str()),
             &[undeclared.id.as_str()],
             &[],
         );

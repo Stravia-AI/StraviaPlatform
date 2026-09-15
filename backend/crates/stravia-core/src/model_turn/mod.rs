@@ -147,7 +147,7 @@ impl ModelTurn {
     ) -> Self {
         let events = events.into_iter().collect::<Vec<_>>();
         Self {
-            model_turn_id: uuid::Uuid::new_v4().to_string(),
+            model_turn_id: stravia_runtime_contract::identifier::new_id(),
             target: TargetIdentity {
                 actual_model: request.model.clone(),
                 provider_id: route.provider_id.clone(),

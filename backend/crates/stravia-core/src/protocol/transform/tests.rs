@@ -1100,14 +1100,22 @@ fn donor_responses_multimodal_function_output_maps_to_anthropic_tool_result() {
     let request = pair
         .decode_request(json!({
             "model": "claude-sonnet",
-            "input": [{
-                "type": "function_call_output",
-                "call_id": "call_123",
-                "output": [
-                    {"type": "input_text", "text": "chart"},
-                    {"type": "input_image", "image_url": "https://example.test/chart.png"}
-                ]
-            }],
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_123",
+                    "name": "render_chart",
+                    "arguments": "{}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_123",
+                    "output": [
+                        {"type": "input_text", "text": "chart"},
+                        {"type": "input_image", "image_url": "https://example.test/chart.png"}
+                    ]
+                }
+            ],
             "max_output_tokens": 128
         }))
         .expect("valid Responses function output");
@@ -1115,10 +1123,24 @@ fn donor_responses_multimodal_function_output_maps_to_anthropic_tool_result() {
     let encoded = pair
         .encode_request(&request)
         .expect("representable Anthropic tool result");
-    let result = &encoded.body["messages"][0]["content"][0];
+    let blocks = encoded.body["messages"]
+        .as_array()
+        .expect("Anthropic messages")
+        .iter()
+        .filter_map(|message| message["content"].as_array())
+        .flatten()
+        .collect::<Vec<_>>();
+    let call = blocks
+        .iter()
+        .find(|block| block["type"] == "tool_use")
+        .expect("Anthropic tool use");
+    let result = blocks
+        .iter()
+        .find(|block| block["type"] == "tool_result")
+        .expect("Anthropic tool result");
 
-    assert_eq!(result["type"], "tool_result");
-    assert_eq!(result["tool_use_id"], "toolu_call_123");
+    assert_eq!(call["id"], "call_123");
+    assert_eq!(result["tool_use_id"], call["id"]);
     assert_eq!(result["content"][0]["type"], "text");
     assert_eq!(result["content"][1]["type"], "image");
 }

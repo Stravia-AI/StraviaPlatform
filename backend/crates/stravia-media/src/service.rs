@@ -159,7 +159,7 @@ impl MediaUnderstandingService {
             "task": input.prompt,
             "media": media,
             "report_contract": {
-                "marker_format": "[artifact:<full ArtifactId>]",
+                "marker_format": "[sa:<full ArtifactId>]",
                 "source_artifact_ids_only": true,
             }
         })

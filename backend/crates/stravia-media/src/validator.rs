@@ -84,8 +84,8 @@ fn declared_sources(text: &str, declared: &mut HashSet<ArtifactId>) {
 fn answer_markers(answer: &str) -> Result<Vec<&str>, String> {
     let mut markers = Vec::new();
     let mut rest = answer;
-    while let Some(start) = rest.find("[artifact:") {
-        let marker = &rest[start + "[artifact:".len()..];
+    while let Some(start) = rest.find("[sa:") {
+        let marker = &rest[start + "[sa:".len()..];
         let end = marker
             .find(']')
             .ok_or_else(|| "Media Report contains a malformed Artifact marker".to_owned())?;
@@ -144,10 +144,7 @@ impl MediaReportValidator {
                 };
                 let derivative_id = match source {
                     MediaSource::Url(reference) => ArtifactId::from_reference(reference).ok(),
-                    // Existing committed histories retain their original representation.
-                    MediaSource::FileId { file_id, .. } => file_id
-                        .strip_prefix("stravia-artifact:")
-                        .map(ArtifactId::new),
+                    MediaSource::FileId { file_id, .. } => ArtifactId::from_reference(file_id).ok(),
                     _ => None,
                 }
                 .ok_or_else(|| {

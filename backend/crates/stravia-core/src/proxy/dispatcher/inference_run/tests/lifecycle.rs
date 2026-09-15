@@ -60,8 +60,8 @@ async fn edited_visible_reasoning_restores_the_authoritative_protected_block() {
         first_body["choices"][0]["message"]["content"],
         "first answer"
     );
-    assert!(projected.contains("stravia-history-marker:"), "{projected}");
-    assert_eq!(projected.matches("stravia-history-marker:").count(), 2);
+    assert!(projected.contains("<!--sh:"), "{projected}");
+    assert_eq!(projected.matches("<!--sh:").count(), 2);
     let references = crate::history_marker::history_marker_references(&[
         stravia_runtime_contract::protocol::ir::AiItem::thinking(projected, None),
     ]);
@@ -619,9 +619,7 @@ async fn signed_reasoning_stream_replay_uses_one_preview_and_authoritative_marke
         1,
         "{projected}"
     );
-    let preview_end = projected
-        .find(":preview:0:end -->")
-        .expect("preview delimiter end");
+    let preview_end = projected.find(":p:0:e-->").expect("preview delimiter end");
     let marker_start = projected
         .find(crate::history_marker::HISTORY_MARKER_PREFIX)
         .expect("History Marker carrier");
@@ -753,11 +751,11 @@ async fn protected_reasoning_replay_preserves_parallel_public_tool_calls() {
     first_request.tools = Some(tools.clone());
     let marker_from_stream = |body: &str| {
         let marker_start = body
-            .find("<!-- stravia-history-marker:")
+            .find("<!--sh:")
             .unwrap_or_else(|| panic!("projected marker content: {body}"));
         let marker_end = body[marker_start..]
-            .find(" -->")
-            .map(|offset| marker_start + offset + " -->".len())
+            .find("-->")
+            .map(|offset| marker_start + offset + "-->".len())
             .expect("marker suffix");
         body[marker_start..marker_end].to_owned()
     };
@@ -973,7 +971,7 @@ async fn open_responses_owns_response_identity_and_logical_model() {
     assert!(
         body["id"]
             .as_str()
-            .is_some_and(|response_id| response_id.starts_with("resp_")),
+            .is_some_and(stravia_runtime_contract::identifier::valid_id),
         "{body}"
     );
     assert_eq!(body["model"], "logical-model", "{body}");
@@ -1122,7 +1120,7 @@ async fn hidden_rounds_are_iterative_and_platform_tools_keep_response_order() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body.contains("final response"), "{body}");
     assert_eq!(
-        body.matches("stravia-history-marker:").count(),
+        body.matches("<!--sh:").count(),
         2,
         "each Platform execution must retain an independent Marker"
     );

@@ -63,6 +63,47 @@ fn decodes_thought_signature_and_function_ids() {
 }
 
 #[test]
+fn missing_function_ids_are_compact_deterministic_and_skip_supplied_ids() {
+    let body = serde_json::json!({
+        "contents": [
+            {
+                "role": "model",
+                "parts": [
+                    {"functionCall": {"name": "first", "args": {}}},
+                    {"functionCall": {"id": "tc_1", "name": "external", "args": {}}}
+                ]
+            },
+            {
+                "role": "model",
+                "parts": [
+                    {"functionCall": {"name": "second", "args": {}}}
+                ]
+            }
+        ]
+    });
+
+    let first = GoogleDecoder
+        .decode_request(body.clone())
+        .expect("Gemini request");
+    let repeated = GoogleDecoder.decode_request(body).expect("Gemini request");
+    let first_ids: Vec<&str> = first
+        .items
+        .iter()
+        .flat_map(|item| item.tool_calls.iter().flatten())
+        .map(|call| call.id.as_str())
+        .collect();
+    let repeated_ids: Vec<&str> = repeated
+        .items
+        .iter()
+        .flat_map(|item| item.tool_calls.iter().flatten())
+        .map(|call| call.id.as_str())
+        .collect();
+
+    assert_eq!(first_ids, ["tc_2", "tc_1", "tc_3"]);
+    assert_eq!(repeated_ids, first_ids);
+}
+
+#[test]
 fn include_thoughts_enables_reasoning_without_budget() {
     let request = GoogleDecoder
         .decode_request(serde_json::json!({

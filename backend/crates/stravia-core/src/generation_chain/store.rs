@@ -77,9 +77,11 @@ pub(crate) async fn hydrate_response_artifact_references(
                     source: MediaSource::FileId { file_id, .. },
                     detail,
                     ..
-                } => file_id
-                    .strip_prefix("stravia-artifact:")
-                    .map(|artifact_id| (artifact_id.to_owned(), detail.clone())),
+                } if file_id.starts_with("sa:") => Some((
+                    stravia_runtime_contract::artifact::ArtifactId::from_reference(file_id)
+                        .map_err(|_| "item_reference_not_found".to_string())?,
+                    detail.clone(),
+                )),
                 _ => None,
             };
             let Some((artifact_id, detail)) = artifact else {
@@ -87,10 +89,7 @@ pub(crate) async fn hydrate_response_artifact_references(
             };
             let store = artifacts.ok_or_else(|| "item_reference_not_found".to_string())?;
             let reader = store
-                .open(
-                    principal,
-                    &stravia_runtime_contract::artifact::ArtifactId::new(artifact_id.clone()),
-                )
+                .open(principal, &artifact_id)
                 .await
                 .map_err(|_| "item_reference_not_found".to_string())?;
             *block = ContentBlock::Image {

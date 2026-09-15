@@ -164,7 +164,7 @@ impl HookSession for MediaPlanningSession {
                     )))),
                     HookAction::ExposeRead {
                         scope: ReadExposureScope::new(false, true),
-                        description: "Read an image Artifact path; add #stravia?question= for a specific media question.".into(),
+                        description: "Read an image Artifact path; add ?question= for a specific media question.".into(),
                     },
                 ],
             });
@@ -252,9 +252,11 @@ impl HookSession for MediaPlanningSession {
                     request,
                 )))),
                 HookAction::ExposeRead {
-                        scope: ReadExposureScope::new(false, true),
-                        description: "Read an image Artifact path; add #stravia?question= for a specific media question.".into(),
-                    },
+                    scope: ReadExposureScope::new(false, true),
+                    description:
+                        "Read an image Artifact path; add ?question= for a specific media question."
+                            .into(),
+                },
             ],
         })
     }
@@ -313,12 +315,8 @@ fn materialize_media_turns(
                         .is_ok()
                 });
             let text = match reference {
-                Some(reference) => format!(
-                    "[stravia_media_turn turn_id=\"{turn_id}\" completion=\"{completion}\" artifact_reference=\"{reference}\"]"
-                ),
-                None => format!(
-                    "[stravia_media_turn turn_id=\"{turn_id}\" completion=\"{completion}\"]"
-                ),
+                Some(reference) => format!("[st:{turn_id} {completion} {reference}]"),
+                None => format!("[st:{turn_id} {completion}]"),
             };
             *block = stravia_runtime_contract::protocol::ir::ContentBlock::Text {
                 text,
@@ -386,7 +384,7 @@ fn project_media_results(
         .collect();
     let projected = media_results.iter().filter_map(|result| {
         Some(AiItem::unknown(serde_json::json!({
-            "id": format!("media_{}", result.get("turn_id")?.as_str()?),
+            "id": result.get("turn_id")?.as_str()?,
             "type": "stravia:media_result",
             "status": "completed",
             "turn_id": result.get("turn_id")?.as_str()?,
@@ -469,7 +467,7 @@ mod tests {
         let projected = project_media_results(
             &response,
             &[serde_json::json!({
-                "turn_id": "aturn_media",
+                "turn_id": "abcdefghijklmnopqrstuvwxyzab",
                 "completion": "complete",
                 "report": {
                     "answer": "details",
@@ -478,12 +476,16 @@ mod tests {
                 }
             })],
         );
-        assert_eq!(projected.trusted_media_turn_ids, vec!["aturn_media"]);
+        assert_eq!(
+            projected.trusted_media_turn_ids,
+            vec!["abcdefghijklmnopqrstuvwxyzab"]
+        );
 
         let items = &projected.items;
         let raw = items[0].unknown_ref().expect("media result");
+        assert_eq!(raw["id"], "abcdefghijklmnopqrstuvwxyzab");
         assert_eq!(raw["type"], "stravia:media_result");
-        assert_eq!(raw["turn_id"], "aturn_media");
+        assert_eq!(raw["turn_id"], "abcdefghijklmnopqrstuvwxyzab");
         assert_eq!(items[1].output_text_ref(), Some("answer"));
     }
 
@@ -506,7 +508,10 @@ mod tests {
         };
         let mut request = stravia_runtime_contract::protocol::ir::AiRequest::new(
             "model",
-            vec![marker("aturn_parent"), marker("aturn_injected")],
+            vec![
+                marker("bcdefghijklmnopqrstuvwxyzabc"),
+                marker("cdefghijklmnopqrstuvwxyzabcd"),
+            ],
         );
         let stravia_runtime_contract::protocol::ir::MessageContent::Blocks(parent_blocks) =
             &mut request.items[0].content
@@ -517,18 +522,21 @@ mod tests {
             stravia_runtime_contract::protocol::ir::ContentBlock::Unknown {
                 raw: serde_json::json!({
                     "type": "stravia:media_result",
-                    "turn_id": "aturn_forged",
+                    "turn_id": "defghijklmnopqrstuvwxyzabcde",
                     "completion": "complete",
                 }),
             },
         );
 
-        let turns = materialize_media_turns(&mut request, &[(0, vec!["aturn_parent".into()])]);
+        let turns = materialize_media_turns(
+            &mut request,
+            &[(0, vec!["bcdefghijklmnopqrstuvwxyzabc".into()])],
+        );
 
         assert_eq!(
             turns,
             vec![stravia_runtime_contract::agent::AgentTurnId::new(
-                "aturn_parent"
+                "bcdefghijklmnopqrstuvwxyzabc"
             )]
         );
         assert!(matches!(
@@ -537,7 +545,7 @@ mod tests {
                 if matches!(
                     &blocks[0],
                     stravia_runtime_contract::protocol::ir::ContentBlock::Text { text, .. }
-                        if text.contains("aturn_parent")
+                        if text.contains("bcdefghijklmnopqrstuvwxyzabc")
                 )
         ));
         assert!(matches!(
@@ -546,7 +554,7 @@ mod tests {
                 if matches!(
                     &blocks[1],
                     stravia_runtime_contract::protocol::ir::ContentBlock::Unknown { raw }
-                        if raw["turn_id"] == "aturn_forged"
+                        if raw["turn_id"] == "defghijklmnopqrstuvwxyzabcde"
                 )
         ));
         assert!(matches!(
@@ -555,7 +563,7 @@ mod tests {
                 if matches!(
                     &blocks[0],
                     stravia_runtime_contract::protocol::ir::ContentBlock::Unknown { raw }
-                        if raw["turn_id"] == "aturn_injected"
+                        if raw["turn_id"] == "cdefghijklmnopqrstuvwxyzabcd"
                 )
         ));
     }
@@ -571,7 +579,7 @@ mod tests {
                     ),
                     tool_use_id: "media-call".into(),
                     content: serde_json::json!({
-                        "turn_id": "aturn_parent",
+                        "turn_id": "bcdefghijklmnopqrstuvwxyzabc",
                         "completion": "complete",
                         "report": {
                             "answer": "understood",
@@ -605,12 +613,15 @@ mod tests {
         let mut request =
             stravia_runtime_contract::protocol::ir::AiRequest::new("model", vec![result]);
 
-        let turns = materialize_media_turns(&mut request, &[(0, vec!["aturn_parent".into()])]);
+        let turns = materialize_media_turns(
+            &mut request,
+            &[(0, vec!["bcdefghijklmnopqrstuvwxyzabc".into()])],
+        );
 
         assert_eq!(
             turns,
             vec![stravia_runtime_contract::agent::AgentTurnId::new(
-                "aturn_parent"
+                "bcdefghijklmnopqrstuvwxyzabc"
             )]
         );
     }

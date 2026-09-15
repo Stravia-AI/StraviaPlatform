@@ -386,7 +386,7 @@ async fn artifact_identity_participates_in_reusable_prefix_semantics() {
             role: Role::User,
             content: MessageContent::Blocks(vec![ContentBlock::Image {
                 source: MediaSource::FileId {
-                    file_id: format!("stravia-artifact:{}", artifact_id.as_str()),
+                    file_id: format!("sa:{}", artifact_id.as_str()),
                     detail: None,
                 },
                 detail: None,
@@ -482,7 +482,7 @@ async fn reuploaded_identical_media_continues_the_persisted_generation() {
         role: Role::User,
         content: MessageContent::Blocks(vec![ContentBlock::Image {
             source: MediaSource::FileId {
-                file_id: format!("stravia-artifact:{}", artifact_id.as_str()),
+                file_id: format!("sa:{}", artifact_id.as_str()),
                 detail: None,
             },
             detail: None,

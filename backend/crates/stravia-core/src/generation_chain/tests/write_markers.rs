@@ -242,7 +242,7 @@ async fn native_compaction_source_keeps_reference_and_artifact_resolution() {
     let mut image = user_message("");
     image.content = MessageContent::Blocks(vec![ContentBlock::Image {
         source: MediaSource::FileId {
-            file_id: format!("stravia-artifact:{}", artifact.id.as_str()),
+            file_id: artifact.reference(),
             detail: None,
         },
         detail: None,
@@ -414,7 +414,7 @@ async fn native_window_excludes_only_verified_items_from_new_input() {
 async fn observe_effective_preserves_marker_without_repeating_public_tool_call() {
     let chain = generation_chain().await;
     let owner = principal("owner");
-    let marker = "<!-- stravia-history-marker:hm_0123456789abcdefabcd -->";
+    let marker = "<!--sh:abcdefghijklmnopqrstuvwxyzab-->";
     let public_call = ToolCall {
         id: "call_public".into(),
         name: "glob".into(),
@@ -484,7 +484,7 @@ async fn observe_effective_preserves_marker_without_repeating_public_tool_call()
     );
     assert_eq!(
         crate::history_marker::history_marker_references(&write.request.items),
-        vec!["hm_0123456789abcdefabcd"]
+        vec!["abcdefghijklmnopqrstuvwxyzab"]
     );
     let marker_item = write
         .request
@@ -542,7 +542,7 @@ async fn observe_effective_persists_marker_at_ordered_projection_atom() {
     let chain =
         GenerationChain::from_turn_chain(Arc::clone(&backend), Duration::from_secs(60), None)
             .with_history_markers(Arc::clone(&marker_store));
-    let unknown_reference = "hm_abcdefghijklmnopqrst";
+    let unknown_reference = "bcdefghijklmnopqrstuvwxyzabc";
     let projected = format!(
         "R1{}{}R2",
         crate::history_marker::render_text_projection_span(&marker.reference, 0, "C1"),
@@ -697,7 +697,7 @@ async fn persisted_unavailable_marker_text_does_not_poison_a_continuation() {
     .with_history_markers(marker_store);
     let owner = principal("owner");
     let unavailable =
-        crate::history_marker::render_history_marker_reference("hm_abcdefghijklmnopqrst");
+        crate::history_marker::render_history_marker_reference("bcdefghijklmnopqrstuvwxyzabc");
     let mut root = chain
         .begin(
             owner.clone(),

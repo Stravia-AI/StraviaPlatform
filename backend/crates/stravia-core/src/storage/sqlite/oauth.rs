@@ -26,7 +26,7 @@ impl OAuthCredentialStore for SqliteOAuthCredentialStore {
         provider_id: &str,
         input: UpsertOAuthCredential,
     ) -> anyhow::Result<OAuthCredential> {
-        let connection_id = uuid::Uuid::new_v4().to_string();
+        let connection_id = stravia_runtime_contract::identifier::new_id();
         sqlx::query(
             r#"INSERT INTO provider_oauth_credentials
                    (provider_id, connection_id, driver_key, scheme, access_token, refresh_token,

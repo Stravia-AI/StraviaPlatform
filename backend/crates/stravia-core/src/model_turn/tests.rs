@@ -219,7 +219,12 @@ async fn serve_openai_capture_text(text: &'static str) -> (String, Arc<Mutex<Vec
                 "message": {"role": "assistant", "content": text},
                 "finish_reason": "stop"
             }],
-            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+            "usage": {
+                "prompt_tokens": 1,
+                "completion_tokens": 1,
+                "total_tokens": 2,
+                "prompt_tokens_details": {"cached_tokens": 0}
+            }
         })
         .to_string();
         let response = format!(
@@ -1209,7 +1214,7 @@ fn credential_observer(
     gateway: &Gateway,
     principal: &Principal,
 ) -> crate::interaction_observation::RunObserver {
-    let id = uuid::Uuid::new_v4().to_string();
+    let id = stravia_runtime_contract::identifier::new_id();
     gateway
         .observation
         .observe_ingress(crate::interaction_observation::IngressStart {
@@ -1228,7 +1233,7 @@ fn credential_observer(
             has_new_user: true,
             has_matching_pending_tool_result: false,
             ingress_received_at: 0,
-            canonical_fingerprint: uuid::Uuid::new_v4().to_string(),
+            canonical_fingerprint: stravia_runtime_contract::identifier::new_id(),
             route_id: "discovery-model".into(),
             model_display_name: None,
             ingress_protocol: "openai-compatible".into(),
@@ -1506,12 +1511,8 @@ async fn held_publication_turn(
     CancellationToken,
     i64,
 ) {
-    let (directory, mut gateway, _, key) = gateway_with_captured_text(
-        "publication-model",
-        true,
-        "answer <!-- stravia-redaction-marker:",
-    )
-    .await;
+    let (directory, mut gateway, _, key) =
+        gateway_with_captured_text("publication-model", true, "answer <!--sr:").await;
     let principal = Principal::new(key.id);
     let store = Arc::new(HeldPublicationStore {
         inner: gateway.redaction.mappings.clone(),
@@ -1553,7 +1554,7 @@ async fn held_publication_turn(
     let cancellation = CancellationToken::new();
     let executor =
         LiveModelTurnExecutor::new(gateway.clone(), continuation::ScriptedContinuation::miss());
-    let run_id = uuid::Uuid::new_v4().to_string();
+    let run_id = stravia_runtime_contract::identifier::new_id();
     let observer = gateway
         .observation
         .observe_ingress(crate::interaction_observation::IngressStart {
@@ -1639,7 +1640,7 @@ async fn canonical_completion_publishes_after_trailing_output_and_is_permanently
         held_publication_turn(false, false).await;
     assert_eq!(
         consume_until_publication(&mut turn, &store).await,
-        "answer <!-- stravia-redaction-marker:"
+        "answer <!--sr:"
     );
     // The select above dropped a pending next() future. Publication must survive
     // that pause and resume rather than issuing a second write.
@@ -1647,10 +1648,7 @@ async fn canonical_completion_publishes_after_trailing_output_and_is_permanently
     store.release.notify_one();
     match turn.output.next().await.unwrap().unwrap() {
         CanonicalEvent::Completed(response) => {
-            assert_eq!(
-                response.output_text(),
-                "answer <!-- stravia-redaction-marker:"
-            )
+            assert_eq!(response.output_text(), "answer <!--sr:")
         }
         CanonicalEvent::Delta(_) | CanonicalEvent::Compacted(_) => {
             panic!("expected generation completion")
@@ -1671,7 +1669,7 @@ async fn canonical_completion_publishes_current_shared_trace_with_empty_local_ma
         held_publication_turn(false, true).await;
     assert_eq!(
         consume_until_publication(&mut turn, &store).await,
-        "answer <!-- stravia-redaction-marker:"
+        "answer <!--sr:"
     );
     assert!(store.inner.active(&principal).await.unwrap()[0].expires_at > pending_expiry);
     store.release.notify_one();
@@ -1687,7 +1685,7 @@ async fn canonical_completion_reports_publication_failure_without_success_or_ups
     let (_directory, gateway, mut turn, store, _, _, _) = held_publication_turn(true, false).await;
     assert_eq!(
         consume_until_publication(&mut turn, &store).await,
-        "answer <!-- stravia-redaction-marker:"
+        "answer <!--sr:"
     );
     store.release.notify_one();
     assert_eq!(

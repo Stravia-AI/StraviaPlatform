@@ -465,7 +465,7 @@ pub(super) async fn read(
         if encoded.len() > CURSOR_LIMIT {
             return Err(invalid("Generated text cursor exceeds its size limit"));
         }
-        value["next_path"] = json!(format!("{read_path}#stravia?cursor={encoded}"));
+        value["next_path"] = json!(format!("{read_path}?cursor={encoded}"));
     }
     Ok(value)
 }

@@ -1208,11 +1208,18 @@ async fn post_commit_hook_failures_end_the_stream_without_retry_or_response_chai
         assert_eq!(first_calls.load(Ordering::SeqCst), 1, "{}", failure.id());
         assert_eq!(fallback_calls.load(Ordering::SeqCst), 0, "{}", failure.id());
 
-        let response_id_start = body.find("resp_").expect("gateway response ID");
-        let response_id: String = body[response_id_start..]
-            .chars()
-            .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
-            .collect();
+        let response_id = body
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+            .find_map(|event| {
+                event
+                    .pointer("/response/id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
+            .expect("gateway response ID");
+        assert!(stravia_runtime_contract::identifier::valid_id(&response_id));
         let mut continuation = AiRequest::new(failure.id(), Vec::new());
         continuation.ext = Some(
             stravia_runtime_contract::protocol::ir::ProtocolExt::OpenResponses(

@@ -4,6 +4,8 @@
 //! path by the ingress shell handler, since Google embeds the model in the path
 //! rather than the request body.
 
+use std::collections::HashSet;
+
 use anyhow::Result;
 use serde_json::Value;
 
@@ -98,10 +100,30 @@ impl GoogleDecoder {
         });
 
         // ── Messages ──────────────────────────────────────────────────────────
+        let supplied_tool_ids: HashSet<String> = req
+            .contents
+            .iter()
+            .flat_map(|content| &content.parts)
+            .filter_map(|part| match part {
+                GooglePart::FunctionCall { function_call, .. } => function_call.id.as_deref(),
+                GooglePart::FunctionResponse { function_response } => {
+                    function_response.id.as_deref()
+                }
+                _ => None,
+            })
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+            .collect();
+        let mut generated_tool_id_seq = 0;
         let mut messages: Vec<AiItem> = Vec::new();
 
         for content in req.contents {
-            messages.push(decode_content(content)?);
+            messages.push(decode_content(
+                content,
+                &mut generated_tool_id_seq,
+                &supplied_tool_ids,
+            )?);
         }
 
         // ── Tools ─────────────────────────────────────────────────────────────
@@ -310,7 +332,11 @@ impl GoogleDecoder {
 
 // ── Content decoding ──────────────────────────────────────────────────────────
 
-fn decode_content(content: GoogleContent) -> Result<AiItem> {
+fn decode_content(
+    content: GoogleContent,
+    generated_tool_id_seq: &mut usize,
+    supplied_tool_ids: &HashSet<String>,
+) -> Result<AiItem> {
     let mut role = match content.role.as_deref() {
         Some("user") | None => Role::User,
         Some("model") => Role::Assistant,
@@ -368,7 +394,10 @@ fn decode_content(content: GoogleContent) -> Result<AiItem> {
                 }
                 let id = function_call
                     .id
-                    .unwrap_or_else(|| format!("call_{}", uuid::Uuid::new_v4().simple()));
+                    .filter(|id| !id.trim().is_empty())
+                    .unwrap_or_else(|| {
+                        next_synthetic_tool_call_id(generated_tool_id_seq, supplied_tool_ids)
+                    });
                 tool_calls.push(ToolCall {
                     id: id.clone(),
                     name: function_call.name.clone(),
@@ -462,6 +491,16 @@ fn decode_content(content: GoogleContent) -> Result<AiItem> {
         tool_call_id: (tool_result_ids.len() == 1).then(|| tool_result_ids.remove(0)),
         meta: None,
     })
+}
+
+fn next_synthetic_tool_call_id(sequence: &mut usize, supplied_ids: &HashSet<String>) -> String {
+    loop {
+        *sequence += 1;
+        let id = format!("tc_{}", *sequence);
+        if !supplied_ids.contains(&id) {
+            return id;
+        }
+    }
 }
 
 #[cfg(test)]

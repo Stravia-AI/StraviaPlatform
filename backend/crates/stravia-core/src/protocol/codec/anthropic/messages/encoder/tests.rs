@@ -34,6 +34,48 @@ fn server_tool_uses_keep_the_anthropic_wire_discriminator() {
 }
 
 #[test]
+fn synthetic_tool_ids_are_request_local_distinct_and_skip_supplied_ids() {
+    let request = AiRequest::new(
+        "model",
+        vec![AiItem {
+            role: Role::Assistant,
+            content: MessageContent::Text(String::new()),
+            tool_calls: Some(vec![
+                stravia_runtime_contract::protocol::ir::ToolCall {
+                    id: String::new(),
+                    name: "first".into(),
+                    arguments: "{}".into(),
+                },
+                stravia_runtime_contract::protocol::ir::ToolCall {
+                    id: "tc_1".into(),
+                    name: "external".into(),
+                    arguments: "{}".into(),
+                },
+                stravia_runtime_contract::protocol::ir::ToolCall {
+                    id: String::new(),
+                    name: "second".into(),
+                    arguments: "{}".into(),
+                },
+            ]),
+            tool_call_id: None,
+            meta: None,
+        }],
+    );
+
+    let (first, _) = AnthropicEncoder.encode_request(&request).expect("encode");
+    let (repeated, _) = AnthropicEncoder.encode_request(&request).expect("encode");
+    let ids: Vec<&str> = first["messages"][0]["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|block| block["id"].as_str().unwrap())
+        .collect();
+
+    assert_eq!(ids, ["tc_2", "tc_1", "tc_3"]);
+    assert_eq!(repeated["messages"], first["messages"]);
+}
+
+#[test]
 fn rejects_unrepresentable_none_tool_choice() {
     let mut request = AiRequest::new(
         "model",

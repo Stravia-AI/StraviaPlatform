@@ -9,10 +9,9 @@
 //! - 搜索：`search://<percent-encoded-text>?allowed_domains=a&allowed_domains=b&previous_turn_id=<id>`。
 //!   首个未编码 `?` 分隔文本与参数；文本严格 percent-decode（`+` 不转换为空格），
 //!   参数按 form 解码（`+` 视为空格）；所有 `%` 转义与 UTF-8 均先验证。
-//! - 资源：`<HTTP(S) URL 或 Artifact Reference>#stravia?<options>`。只有以
-//!   `#stravia?` 开头的 fragment 是工具选项；普通 fragment 保留源 URL 语义；
-//!   不支持嵌套第二级 fragment。Artifact 引用必须是裸身份，旧 `?question=` 形式
-//!   明确拒绝。
+//! - 资源：HTTP(S) URL 的工具选项使用 `#stravia?<options>`；Artifact Reference
+//!   使用 `sa:<digest>?<options>`。HTTP(S) 的普通 fragment 保留源 URL 语义，
+//!   Artifact fragment 一律拒绝；不支持旧 Artifact wrapper。
 //! - 选项为 `question`、`raw`、`lines`、`download`、`previous_turn_id`、`cursor`，
 //!   互斥规则见 [`parse_read_path`]。
 //!
@@ -30,10 +29,10 @@ pub const MAX_ALLOWED_DOMAINS: usize = 20;
 /// `lines` 选项允许的最大分段数。
 pub const MAX_LINE_SELECTIONS: usize = 16;
 
-/// Artifact Reference 裸身份前缀；与 runtime-contract 的
-/// `ArtifactId::from_reference` 保持语法一致，本 crate 只做语法镜像，
-/// 不引入对该 crate 的依赖。
-const ARTIFACT_REFERENCE_PREFIX: &str = "https://stravia/artifact/";
+/// Artifact Reference 前缀与 digest 长度；镜像 runtime-contract 的语法，
+/// 本 crate 不引入对该 crate 的依赖。
+const ARTIFACT_REFERENCE_PREFIX: &str = "sa:";
+const ARTIFACT_DIGEST_LEN: usize = 55;
 
 /// StraviaRead 工具的唯一输入：单个必填 `path`。
 ///
@@ -68,8 +67,8 @@ pub struct SearchPath {
 
 /// 一次资源读取：HTTP(S) URL 或 Artifact Reference，附工具选项。
 ///
-/// `url` 保留原始字符串（源站 path/query 与普通 fragment 原样保留，不重排序、
-/// 不重编码）；工具选项 fragment `#stravia?...` 已在解析时剥离。
+/// `url` 保留 HTTP(S) 源站 path/query 与普通 fragment；工具选项已剥离。
+/// Artifact 的 `url` 是不含查询选项的裸 `sa:<digest>`。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ResourcePath {
     pub url: String,
@@ -223,8 +222,8 @@ pub fn pagination_schema() -> serde_json::Value {
 ///   拒绝空白文本、未知参数、重复单值参数、空域名与超过
 ///   [`MAX_ALLOWED_DOMAINS`] 个原始条目；域名经 [`crate::normalize_domains`]
 ///   规范化去重。
-/// - 资源先剥离 `#stravia?` 工具 fragment，再做 URL/Artifact 身份校验；
-///   普通 fragment 不是工具选项；Artifact 必须是裸身份。
+/// - HTTP(S) 资源从 `#stravia?` 读取工具选项；Artifact 从 `?` 读取工具选项；
+///   Artifact 必须是 `sa:` 加 55 位小写 digest，并拒绝所有 fragment。
 /// - 选项约束：`question` 与 `previous_turn_id` 非空；`raw`/`download` 只接受
 ///   `1`；`raw` 与 `question` 互斥；`download` 与其他所有选项互斥；
 ///   `previous_turn_id` 仅媒体问题（资源侧需伴随 `question`）或搜索允许；
@@ -363,27 +362,40 @@ fn parse_search(rest: &str) -> Result<ReadTarget, ReadPathError> {
 }
 
 fn parse_resource(path: &str) -> Result<ReadTarget, ReadPathError> {
-    if path
-        .split_once('#')
-        .is_some_and(|(_, fragment)| fragment.contains('#'))
-    {
-        return Err(ReadPathError::MalformedParameter {
-            reason: "nested fragments are not supported in read options",
-        });
-    }
-    // 先拆工具 fragment，再做 URL/Artifact 身份校验；只解释 `#stravia?` 前缀，
-    // 裸 `#stravia` 与普通 fragment 均按源 URL 语义保留。
-    let (url, options_raw) = match path.split_once('#') {
-        Some((base, fragment)) => match fragment.strip_prefix("stravia?") {
-            Some(options) => (base, Some(options)),
+    let is_artifact = path.starts_with(ARTIFACT_REFERENCE_PREFIX);
+    let (url, options_raw) = if is_artifact {
+        if path.contains('#') {
+            return Err(ReadPathError::InvalidArtifactReference {
+                reason: "fragments are not supported",
+            });
+        }
+        path.split_once('?')
+            .map_or((path, None), |(identity, options)| {
+                (identity, Some(options))
+            })
+    } else {
+        if path
+            .split_once('#')
+            .is_some_and(|(_, fragment)| fragment.contains('#'))
+        {
+            return Err(ReadPathError::MalformedParameter {
+                reason: "nested fragments are not supported in read options",
+            });
+        }
+        // HTTP(S) tool options stay in the reserved fragment so source queries retain
+        // their original signed-URL semantics.
+        match path.split_once('#') {
+            Some((base, fragment)) => match fragment.strip_prefix("stravia?") {
+                Some(options) => (base, Some(options)),
+                None => (path, None),
+            },
             None => (path, None),
-        },
-        None => (path, None),
+        }
     };
     if let Some(options) = options_raw {
         if options.is_empty() {
             return Err(ReadPathError::MalformedParameter {
-                reason: "read options must contain at least one entry after '#stravia?'",
+                reason: "read options must contain at least one entry",
             });
         }
         if options.contains('#') {
@@ -392,7 +404,6 @@ fn parse_resource(path: &str) -> Result<ReadTarget, ReadPathError> {
             });
         }
     }
-    let is_artifact = url.starts_with(ARTIFACT_REFERENCE_PREFIX);
     if is_artifact {
         validate_artifact_reference(url)?;
     } else {
@@ -418,30 +429,17 @@ fn parse_resource(path: &str) -> Result<ReadTarget, ReadPathError> {
     }))
 }
 
-/// 校验 Artifact 裸身份：镜像 `ArtifactId::from_reference` 的语法（非空、
-/// ASCII 字母数字/`_`/`-`），并在保留位置上额外拒绝旧 `?` 查询与普通
-/// fragment，不放宽全局解析器。
+/// 校验 Artifact 裸身份：完整 SHA-256 的 55 位小写 base26 编码。
 fn validate_artifact_reference(url: &str) -> Result<(), ReadPathError> {
     let identity = &url[ARTIFACT_REFERENCE_PREFIX.len()..];
-    if identity.is_empty() {
-        return Err(ReadPathError::InvalidArtifactReference {
-            reason: "identity must not be empty",
-        });
-    }
-    if identity
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    if identity.len() == ARTIFACT_DIGEST_LEN
+        && identity.bytes().all(|byte| byte.is_ascii_lowercase())
     {
         return Ok(());
     }
-    let reason = if identity.contains('?') {
-        "references must be bare identities; options belong in the '#stravia?' fragment"
-    } else if identity.contains('#') {
-        "fragments other than '#stravia?' are not supported"
-    } else {
-        "identity may only contain ASCII letters, digits, '_' and '-'"
-    };
-    Err(ReadPathError::InvalidArtifactReference { reason })
+    Err(ReadPathError::InvalidArtifactReference {
+        reason: "identity must contain exactly 55 lowercase ASCII letters",
+    })
 }
 
 fn validate_http_url(url: &str) -> Result<(), ReadPathError> {
@@ -449,7 +447,9 @@ fn validate_http_url(url: &str) -> Result<(), ReadPathError> {
     if parsed.scheme() != "http" && parsed.scheme() != "https" {
         return Err(ReadPathError::InvalidScheme);
     }
-    if parsed.host_str().map_or(true, |host| host.is_empty()) {
+    if parsed.host_str().map_or(true, |host| host.is_empty())
+        || parsed.host_str() == Some("stravia")
+    {
         return Err(ReadPathError::InvalidScheme);
     }
     Ok(())
@@ -793,6 +793,18 @@ mod tests {
 
     #[test]
     fn invalid_legacy_and_ambiguous_inputs_fail_closed() {
+        let digest = "a".repeat(ARTIFACT_DIGEST_LEN);
+        let ReadTarget::Resource(resource) =
+            parse_read_path(&format!("sa:{digest}?question=Private%20question")).unwrap()
+        else {
+            panic!("Artifact resource")
+        };
+        assert_eq!(resource.url, format!("sa:{digest}"));
+        assert_eq!(
+            resource.options.question.as_deref(),
+            Some("Private question")
+        );
+
         for path in [
             "",
             " ",
@@ -830,6 +842,17 @@ mod tests {
             assert!(
                 parse_read_path(path).is_err(),
                 "accepted invalid path: {path}"
+            );
+        }
+        for path in [
+            format!("sa:{}", "a".repeat(54)),
+            format!("sa:{}", "A".repeat(55)),
+            format!("sa:{digest}#stravia?question=q"),
+            format!("sa:{digest}?question=q#fragment"),
+        ] {
+            assert!(
+                parse_read_path(&path).is_err(),
+                "accepted invalid Artifact path: {path}"
             );
         }
         for value in [

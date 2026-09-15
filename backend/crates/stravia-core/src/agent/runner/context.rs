@@ -46,10 +46,9 @@ impl AgentRunner {
                 };
                 let id = match source {
                     MediaSource::Url(reference) => ArtifactId::from_reference(&reference).ok(),
-                    // Existing persisted Agent turns keep their original representation.
-                    MediaSource::FileId { file_id, .. } => file_id
-                        .strip_prefix("stravia-artifact:")
-                        .map(ArtifactId::new),
+                    MediaSource::FileId { file_id, .. } => {
+                        ArtifactId::from_reference(&file_id).ok()
+                    }
                     MediaSource::Base64 { .. } => None,
                 };
                 let Some(id) = id else {
@@ -159,7 +158,7 @@ impl AgentRunner {
                 let MediaSource::FileId { file_id, .. } = source else {
                     continue;
                 };
-                let Some(artifact_id) = file_id.strip_prefix("stravia-artifact:") else {
+                let Ok(artifact_id) = ArtifactId::from_reference(file_id) else {
                     continue;
                 };
                 let store = self.artifacts.as_ref().ok_or_else(|| {
@@ -168,12 +167,9 @@ impl AgentRunner {
                         "Agent Turn references Artifacts but no ArtifactStore is configured",
                     )
                 })?;
-                let reader = store
-                    .open(principal, &ArtifactId::new(artifact_id))
-                    .await
-                    .map_err(|error| {
-                        AgentRunError::new("artifact_unavailable", error.to_string())
-                    })?;
+                let reader = store.open(principal, &artifact_id).await.map_err(|error| {
+                    AgentRunError::new("artifact_unavailable", error.to_string())
+                })?;
                 *source = MediaSource::Url(reader.artifact.reference());
             }
         }

@@ -478,7 +478,12 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("responses_websockets=2026-02-06")
         );
-        assert!(headers.get("x-client-request-id").is_some());
+        assert!(
+            headers
+                .get("x-client-request-id")
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| uuid::Uuid::parse_str(value).is_ok())
+        );
         assert_eq!(
             headers
                 .get("x-codex-routing-hint")
@@ -539,7 +544,11 @@ mod tests {
             websocket_request["client_metadata"]["x-codex-window-id"],
             "window"
         );
-        assert!(websocket_request["client_metadata"]["turn_id"].is_string());
+        assert!(
+            websocket_request["client_metadata"]["turn_id"]
+                .as_str()
+                .is_some_and(|value| uuid::Uuid::parse_str(value).is_ok())
+        );
         let continuation = OpenAiCodexChannel
             .responses_websocket_request(
                 &context,

@@ -671,7 +671,7 @@ async fn resolver_removes_unknown_and_unauthorized_private_markers() {
         .await
         .unwrap();
     let unknown = HistoryMarker {
-        reference: "hm_ffffffffffffffffffff".into(),
+        reference: "ffffffffffffffffffffffffffff".into(),
         kind: HistoryMarkerKind::Thinking,
         activity: "Preserving protected reasoning".into(),
     };
@@ -935,7 +935,7 @@ async fn reserved_thinking_reference_is_in_memory_until_atomic_creation() {
 async fn resolver_keeps_content_preview_as_text_after_marker_deletion() {
     let store = sqlite_store().await;
     let owner = principal("owner");
-    let reference = "hm_0123456789abcdefghij";
+    let reference = "abcdefghijklmnopqrstuvwxyzab";
     let edited_preview = render_preview_projection_span(reference, 0, "\n> retained client text\n");
     let mut request = AiRequest::new("model", vec![AiItem::output_text(edited_preview)]);
 
@@ -1275,7 +1275,7 @@ async fn resolver_strips_unpublished_and_expired_markers_without_losing_visible_
 async fn resolver_leaves_private_syntax_inside_tool_output_unchanged() {
     let store = sqlite_store().await;
     let owner = principal("owner");
-    let reference = "hm_0123456789abcdefghij";
+    let reference = "abcdefghijklmnopqrstuvwxyzab";
     let fixture = format!(
         "let marker = \"{}{}\";",
         render_text_projection_span(reference, 0, "visible"),

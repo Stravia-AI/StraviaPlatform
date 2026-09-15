@@ -301,7 +301,7 @@ impl TraceManager {
     }
 
     pub(crate) fn create(&self) -> TraceHandle {
-        let trace_id = uuid::Uuid::new_v4().simple().to_string();
+        let trace_id = stravia_runtime_contract::identifier::new_id();
         let state = Arc::new(TraceState {
             queued_sequence: std::sync::Mutex::new(0),
             wire_pending: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -959,10 +959,7 @@ fn directory_size(directory: &Path) -> io::Result<u64> {
 }
 
 fn validate_trace_id(trace_id: &str) -> io::Result<()> {
-    if trace_id.len() == 32
-        && trace_id.bytes().all(|byte| byte.is_ascii_hexdigit())
-        && !trace_id.contains(['/', '\\'])
-    {
+    if stravia_runtime_contract::identifier::valid_id(trace_id) {
         Ok(())
     } else {
         Err(io::Error::new(

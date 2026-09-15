@@ -335,7 +335,7 @@ fn stabilize_media_generation_chain(
         return false;
     }
     plan.source_artifact_ids.iter().all(|source_id| {
-        let identity = format!("artifact_reference=\"https://stravia/artifact/{source_id}\"");
+        let identity = format!("[sm:sa:{source_id} ");
         rewritten
             .items
             .iter()
@@ -350,7 +350,7 @@ fn stabilize_media_generation_chain(
                 matches!(
                     block,
                     stravia_runtime_contract::protocol::ir::ContentBlock::Text { text, .. }
-                        if text.starts_with("[stravia_media ") && text.contains(&identity)
+                        if text.starts_with(&identity)
                 )
             })
     })
@@ -852,7 +852,7 @@ pub(super) async fn orchestrate(
     let session_context = stravia_runtime_contract::hook::SessionContext {
         tools_fixed: false,
         request_id: ctx.request_id.clone(),
-        run_id: format!("run-{}", uuid::Uuid::new_v4()),
+        run_id: stravia_runtime_contract::identifier::new_id(),
         request_kind,
         ingress,
         transport: stravia_runtime_contract::hook::TransportKind::Http,

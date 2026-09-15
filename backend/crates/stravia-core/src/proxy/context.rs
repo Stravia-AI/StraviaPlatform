@@ -3,7 +3,7 @@
 //! `RequestContext` is created once per inbound request (in an axum middleware)
 //! and propagated through all layers via `axum::Extension`.  It carries:
 //!
-//! - **Identity** – a stable UUID `request_id` for log correlation.
+//! - **Identity** – a stable platform `request_id` for log correlation.
 //! - **Deadline** – an `Instant` after which any new I/O should abort.
 //! - **Cancellation** – a shared flag; set when the client disconnects or the
 //!   deadline fires.
@@ -22,8 +22,6 @@ use std::task::{Context as TaskContext, Poll};
 use std::time::{Duration, Instant};
 
 use futures::Stream;
-use uuid::Uuid;
-
 use stravia_runtime_contract::protocol::ids::ProtocolId;
 
 // ── Deadline ──────────────────────────────────────────────────────────────────
@@ -236,7 +234,7 @@ impl std::fmt::Debug for ContextBag {
 /// - `outcome` — written once by `dispatcher` or `StreamBridge::Drop`
 #[derive(Clone, Debug)]
 pub struct RequestContext {
-    /// Stable UUID for log correlation (e.g. "req-<uuid-v4>").
+    /// Stable platform ID for log correlation.
     pub request_id: String,
     /// When this request entered the gateway.
     pub started_at: Instant,
@@ -269,7 +267,7 @@ impl RequestContext {
     /// Create a fresh context for an inbound request.
     pub fn new(ingress_protocol: ProtocolId, timeout: Duration) -> Self {
         Self {
-            request_id: format!("req-{}", Uuid::new_v4()),
+            request_id: stravia_runtime_contract::identifier::new_id(),
             started_at: Instant::now(),
             deadline: Deadline::from_now(timeout),
             cancellation: CancellationToken::new(),
@@ -418,7 +416,12 @@ mod tests {
             Duration::from_secs(30),
         );
         assert_ne!(a.request_id, b.request_id);
-        assert!(a.request_id.starts_with("req-"));
+        assert!(stravia_runtime_contract::identifier::valid_id(
+            &a.request_id
+        ));
+        assert!(stravia_runtime_contract::identifier::valid_id(
+            &b.request_id
+        ));
     }
 
     #[test]

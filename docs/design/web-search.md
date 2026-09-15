@@ -1,7 +1,7 @@
 # Web Search 设计
 
 > 状态：已实施
-> 更新：2026-09-10
+> 更新：2026-09-15
 > 相关决策：[ADR-0016](../adr/0016-gate-advanced-capabilities-and-separate-transparent-injection.md)、[ADR-0017](../adr/0017-rename-web-research-to-web-search-and-split-tool-identities.md)
 
 ## 1. 结论
@@ -18,7 +18,7 @@ Web Search 是一个由平台总开关控制的 Advanced Capability。普通模�
 
 ```json
 {
-  "path": "search://question%20or%20topic?allowed_domains=example.com&previous_turn_id=wst_..."
+  "path": "search://question%20or%20topic?allowed_domains=example.com&previous_turn_id=abcdefghijklmnopqrstuvwxyzab"
 }
 ```
 
@@ -30,13 +30,13 @@ Web Search 是一个由平台总开关控制的 Advanced Capability。普通模�
 
 ```json
 {
-  "turn_id": "wst_...",
+  "turn_id": "abcdefghijklmnopqrstuvwxyzab",
   "completion": "complete",
   "report": {
-    "answer": "Verified answer [source-wst_...-1]",
+    "answer": "Verified answer [sc:abcdefghijklmnopqrstuvwxyzab:1]",
     "sources": [
       {
-        "id": "source-wst_...-1",
+        "id": "abcdefghijklmnopqrstuvwxyzab:1",
         "url": "https://example.com/source",
         "title": "Source title"
       }
@@ -49,14 +49,14 @@ Web Search 是一个由平台总开关控制的 Advanced Capability。普通模�
 `SearchReportValidator` 保证：
 
 - answer、sources、limitations 满足大小和数量边界；
-- 每个 source ID 由当前完整 `SearchTurnId` 限定；
-- answer 中的 marker 与 sources 一一对应；
+- 每个 source ID 为当前完整 `SearchTurnId`、冒号和十进制 ordinal（`{turn_id}:{ordinal}`）；
+- answer 以 `[sc:{turn_id}:{ordinal}]` 引用 source，且 marker 与 sources 一一对应；
 - URL 是规范化后的公网 HTTP(S) URL；
 - source 满足本次研究已解析的允许域名策略，越界报 `source_outside_allowed_domains`，不删来源后伪装完整报告；
 - source 必须来自当前或祖先 Turn 的已验证 evidence；
 - partial 结果必须说明预算或超时限制。
 
-`SearchTurn` 是 principal-scoped、不可变的 continuation point。根 Turn 固定 backend、binding、配置 revision 和 Local budget snapshot；子 Turn 可继续或从任一可访问父节点分支。当前持久化 identity 为 `kind = "web_search"`，ID 前缀为 `wst_`。
+`SearchTurn` 是 principal-scoped、不可变的 continuation point。根 Turn 固定 backend、binding、配置 revision 和 Local budget snapshot；子 Turn 可继续或从任一可访问父节点分支。当前持久化 identity 为 `kind = "web_search"`；ID 使用平台统一的 28 位小写字母裸格式，不带类型前缀。
 
 ### 统一资源读取与文本分页
 
@@ -186,7 +186,7 @@ core 保留输入修整、错误映射、准入与异步解析调度；adapter �
 
 - Admin API：配置读写、Local/Codex validation、旧字段拒绝；
 - Gateway public contract：Gate、有效 Key、显式调用、Transparent Injection 与 MCP 组合；
-- Search contract：Search Report provenance、continuation、branch 和 `wst_` identity；
+- Search contract：Search Report provenance、continuation、branch、28 位裸 Turn ID，以及 `{turn_id}:{ordinal}` / `[sc:{turn_id}:{ordinal}]` 的 Source 对应关系；
 - registry：三个 source Tool ID 不同，public composite 不进入 Agent registry，internal leaves 不进入 MCP；
 - migration：SQLite/PostgreSQL schema parity、settings 值迁移和旧 Turn 失效；
 - WebUI：Advanced Features 导航、独立页面、Codex 条件隐藏和 Local 值恢复。

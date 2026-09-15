@@ -73,6 +73,10 @@ Open Responses 推理正文使用当前客户端采用的 rolling `response.reas
 
 通用 Thinking 输出在流式与非流式 Responses 中均通过 `reasoning.content` 交付，保存的客户端历史使用相同表示，使精确的工具结果回放续接直接前驱，而不是拆分 Interaction 或从更早的响应分叉。原生推理的摘要与正文仍严格区分；既有历史与观察记录中的关联不回写。
 
+平台生成的随机不透明 ID 固定为 28 位 ASCII 小写字母，由密码学安全随机生成器均匀采样（约 131.6 bit）；完整 SHA-256 派生身份使用 55 位 ASCII 小写字母，不截断 256 bit 摘要。不同协议外壳严格分离：Artifact 引用为 `sa:<55 位 ID>`，可带 query、禁止 fragment；History Marker 为 `<!--sh:<28 位 ID>-->`；Projection Delimiter 为 `<!--sp:<28 位 ID>:<t|p>:<ordinal>:<s|e>-->`；可逆脱敏引用为 `<!--sr:<28 位 ID>-->`。外壳本身不授予访问权。外部 Provider／客户端 ID、Codex UUID 请求／连接元数据与真实凭据 token 沿用各自协议格式。这是面向新部署的全新数据库干净切换，不是就地迁移：旧平台 ID 与外壳不兼容，不回写不可变历史或外部历史。应另外保留旧数据库与用户数据，不得通过删除数据完成切换，并在全新数据库上开始新对话。
+
+协议修复使用请求内确定性定位符，不将其提升为持久身份或内容摘要。结构化定位符保留关联所需字段：Open Responses item 使用 `<type>_<原样 response ID>_<ordinal>`，搜索正文引用使用 `[sc:<turn ID>:<ordinal>]`。媒体正文引用为 `[sa:<Artifact ID>]`；bridge 提示为 `[sm:sa:<Artifact ID> <MIME> <ordinal>]` 与 `[st:<turn ID> <completion>]`，后者可在 completion 后附加一个 `sa:<Artifact ID>`。这些定位符不另分配身份，也不授予访问权限。
+
 隐藏的 Platform Tool 续跑通过 HTML comment 形式的 History Marker 投影到客户端历史。OpenAI-compatible Chat Completions 在首个非空 `content` delta 前继续通过 `reasoning_content` 交付 Thinking；未请求 encrypted reasoning 时，Open Responses 的公开 summary delta 会保持实时交付，而在 item 开始时已明确标记的 protected reasoning 也会流式交付公开 summary，并把 opaque 字节保留在 Marker 后。之后的 Thinking 通过 `content` 以 Markdown 引用 Preview 流式交付，后续 Thinking Marker 与 Platform Marker 也使用 `content`，从而在客户端按字段聚合时保持顺序。纯文本客户端可能直接显示这些 Marker comment。Open Responses、Anthropic Messages 与 Gemini 保留原生有序 reasoning/thinking carrier；若所选协议无法表示已观察到的顺序，Stravia 会显式失败，而不会延迟普通 Text。
 
 OpenAI-compatible Thinking Preview 使用 Markdown 空行分隔独立块及 summary/content part；同一 part 内的 delta 保持连续。每个权威 Thinking block 各有一个 History Marker，包括公开的无签名 Thinking；同一块中的多个 part 共享该 Marker。段落空白只属于 Preview，不改变原始 Thinking。流式与非流式交付产生相同的可见排版。
@@ -171,15 +175,15 @@ Local Fetch 和浏览器出站检查会拒绝去除主机尾随点后成为非�
 
 ### Media Understanding
 
-Media Understanding 通过 `{"path":"https://stravia/artifact/<id>"}` 读取静态 JPEG、PNG 与 WebP 图片。所属图片引用和公网图片 URL 默认描述内容并提取可读文字，公网图片先收存。添加 `#stravia?question=Describe%20the%20image` 提出指定问题，在同一 fragment 中添加 `&previous_turn_id=<id>` 续接或分支。显式 `#stravia?download=1` 只下载、不调用模型。HTML 附问题仍返回 Markdown，并标记 `question_applied=false`。若父 Route 有支持图片的 Target，Stravia 原生交付已保存的图片；否则支持工具的父 Model 可使用配置的隐藏视觉 Model。原生视觉 Route 失败后不 fallback 到隐藏 Model。
+Media Understanding 通过 `{"path":"sa:<55 位 ID>"}` 读取静态 JPEG、PNG 与 WebP 图片。所属图片引用和公网图片 URL 默认描述内容并提取可读文字，公网图片先收存。添加 `?question=Describe%20the%20image` 提出指定问题，在同一 query 中添加 `&previous_turn_id=<id>` 续接或分支。显式 `?download=1` 只下载、不调用模型；Artifact 引用拒绝 fragment。HTML 附问题仍返回 Markdown，并标记 `question_applied=false`。若父 Route 有支持图片的 Target，Stravia 原生交付已保存的图片；否则支持工具的父 Model 可使用配置的隐藏视觉 Model。原生视觉 Route 失败后不 fallback 到隐藏 Model。
 
 在**多模态理解**页面启用平台能力、选择逻辑 Model 并设置思考等级。选择器只列出所有 Target 都明确声明图片输入能力的已启用 Model；思考等级选择器只列出每个 Target 都支持的等级。启用后，所有有效 API Key 都能通过 `StraviaRead` 请求理解；MCP 访问和透明注入仍由每个 Key 独立控制。隐藏调用计入调用方配额，但不会授予所选 Model 的直接访问权。外部文件仅允许公网 HTTP(S)，校验 DNS、固定实际连接地址并逐跳校验重定向。预处理始终生成有界的有损 JPEG derivative，忽略 ICC profile，因此精确颜色或细小文本 OCR 可能不准确。
 
 ### 文件存储与临时传输
 
-未配置 S3 时直接使用内部存储。可选 S3 沿用相同上传步骤：`POST /v1/artifacts/uploads` 创建，携带 `x-upload-token` 调用 `PUT /v1/artifacts/uploads/{upload_id}/parts/{part_number}`，最后调用 `POST /v1/artifacts/uploads/{upload_id}/complete`。创建结果只返回 `upload_id`、`upload_token` 和 `expires_at`，不再返回 `artifact_id`；只有完成结果返回最终文件 `id`、元数据和形如 `https://stravia/artifact/<opaque-id>` 的 `reference`。这是稳定、Principal-scoped 的文件身份，不是网络下载地址或凭据。同一 API Key 可跨对话使用，其他 Principal 无权解析。
+未配置 S3 时直接使用内部存储。可选 S3 沿用相同上传步骤：`POST /v1/artifacts/uploads` 创建，携带 `x-upload-token` 调用 `PUT /v1/artifacts/uploads/{upload_id}/parts/{part_number}`，最后调用 `POST /v1/artifacts/uploads/{upload_id}/complete`。创建结果只返回 `upload_id`、`upload_token` 和 `expires_at`，不再返回 `artifact_id`；只有完成结果返回最终文件 `id`、元数据和形如 `sa:<55 位 ASCII 小写字母>` 的 `reference`。这 55 位 ID 是 Principal／MIME／完整内容 SHA-256 摘要的定长 base-26 编码，保留完整 256 bit。引用可以带可选 query，但拒绝 fragment；它是稳定、Principal-scoped 的文件身份，不是网络下载地址或凭据。同一 API Key 可跨对话使用，其他 Principal 无权解析。
 
-同一 Principal 下，声明 MIME 和完整字节完全相同的内容，在直接收存、不同分片边界、并发上传及重启后使用同一 Artifact ID；上传会话仍各自独立。Principal、MIME 或字节不同则保持不同身份，视觉相似不算相同内容。重复上传不缩短已有保留期。旧随机 ID 在到期前仍可读取，但不会合并或改写为新身份。Media Understanding 可以让不同源文件共享规范化 JPEG，但只允许引用当前 Turn 或祖先 Turn 已声明的源文件。
+同一 Principal 下，声明 MIME 和完整字节完全相同的内容，在直接收存、不同分片边界、并发上传及重启后使用同一 Artifact ID；上传会话仍各自独立。Principal、MIME 或字节不同则保持不同身份，视觉相似不算相同内容。重复上传不缩短已有保留期。旧 Artifact ID 不再解析、合并或改写为新身份；应另外保留旧数据库与对象而不是删除用户数据，新格式使用全新数据库。Media Understanding 可以让不同源文件共享规范化 JPEG，但只允许引用当前 Turn 或祖先 Turn 已声明的源文件。
 
 结构化内联媒体和远程附件 URL 必须先保存成功，模型调用才会开始。普通文本链接和类似 base64 的文本不会自动下载或改写。`StraviaRead` 读取 HTML 与文本文件，JSON/XML 不重排；未知二进制返回文件／下载信息并明确说明未读取内容，不自动解压或执行。空文本合法。内容读取成功时不自动签发下载 grant；下载文本快照仅导出 UTF-8 正文。快照沿用既有 Principal 归属和保留规则，过期后明确失败，不回源补读。
 
@@ -211,9 +215,9 @@ Media Understanding 通过 `{"path":"https://stravia/artifact/<id>"}` 读取静�
 
 返回的有效占位符会在回答、客户端工具参数及平台工具执行参数中还原为明文，流式响应同样支持。启用期间，工具结果再次进入模型请求前会重新受保护。映射按 API Key 隔离，重启后仍保留；同一 Key 下相同秘密在映射有效期内跨对话、跨分支复用占位符，共享 Key 就共享此访问边界。保留期沿用 History Marker 规则：发布前一小时，发布时延长至至少七天，随后随保留的历史续期，但不能复活过期映射。未知、过期或属于其他 Key 的占位符保持原样。检测、替换或映射存储故障会明确使请求失败或终止已经开始的流，不能绕过保护。
 
-引用使用 `<!-- stravia-redaction-marker:rm_<32 位小写十六进制字符> -->`，与 History Marker 属于同一语法家族，但支持内联使用并保持独立的还原语义。完整标记不参与凭据检测，在诊断业务文本中作为原子保留；真实凭据 header 和结构化凭据字段仍会脱敏。请求中存在当前 API Key 的有效引用时，模型会收到一句系统说明：“Preserve Stravia redaction markers verbatim when used; Stravia restores their values.”
+引用使用 `<!--sr:<28 位 ASCII 小写字母>-->`，是固定长度的短 HTML 注释，还原语义与 History Marker 分离。新标识符由密码学安全随机生成器在 `a`–`z` 中均匀采样，标识符空间约为 131.6 bit。完整标记不参与凭据检测，在诊断业务文本中作为原子保留；真实凭据 header 和结构化凭据字段仍会脱敏。请求中存在当前 API Key 的有效引用时，模型会收到一句系统说明：“Preserve Stravia redaction markers verbatim when used; Stravia restores their values.”
 
-**标记格式升级：** 迁移 0046 将存量旧引用转换为新格式，保留标识符、秘密、Principal 和保留期状态。客户端或上游历史中的旧 `~stravia-secret:…~` 引用不再还原，也不会回写这些历史；仍依赖旧引用的对话需要重新开始。
+**标记格式干净切换：** 迁移 0046 仍是从 `~stravia-secret:…~` 引用转换到旧长 HTML 注释格式的历史迁移，本次不修改。紧凑格式面向新部署和全新数据库；两种旧格式均不再解析或还原，Stravia 的不可变历史以及外部客户端或上游历史也不会回写。不要直接复用仍依赖旧引用的数据库或对话；应另外保留旧数据库与用户数据而不是删除，再使用全新数据库并开始新对话。
 
 **关闭只停止新的检测与替换，不停止还原。** 映射不会被删除：已有有效占位符仍会在回答、客户端工具参数和平台工具参数中还原，直至过期。关闭期间，新的出站文本（包括含还原原文的工具结果）不再受本功能保护。
 
@@ -247,7 +251,7 @@ Desktop 点击 **Debug 诊断包**后，通过一次性下载票据交由系统�
 
 Interaction 卡片在缩小的模型名下分别展示用户输入与模型输出预览。悬停或键盘聚焦任一预览可查看更多内容；触控设备点按预览即可打开。两个预览均使用经过安全过滤的 Markdown，不加载图片或嵌入资源。输入展示用户消息开头，输出在内容更新时持续显示最新一行。卡片保持统一固定高度，底部不显示 Debug 捕获或筛选命中标签。
 
-新交互随请求记录保存最多 4,096 字符的凭据脱敏用户输入文本，无需开启 Debug。该预览不包含系统指令、历史消息或工具结果，工具续跑不会覆盖原始输入。旧记录、没有文本的消息，以及输入保护完成前就终止的请求，在卡片预览中说明未记录文本。展开的输出预览展示已保留的输出尾部，不保证包含完整回答。
+每个带有新增用户输入的 Run 随请求记录保存最多 4,096 字符的凭据脱敏用户输入文本，无需开启 Debug。归入同一 Interaction 的追加输入在所属 Run 回复前显示于用户一侧，卡片仍保留初始输入预览。该预览不包含系统指令、历史消息或工具结果，工具续跑不会覆盖原始输入。旧记录、没有文本的消息，以及输入保护完成前就终止的请求，在卡片预览中说明未记录文本；此前未采集的追加输入不回填。展开的输出预览展示已保留的输出尾部，不保证包含完整回答。
 
 观察侧栏默认显示只读对话：用户消息靠右、模型回复靠左，正文安全渲染 Markdown，包括 GFM 表格。连续同一模型的回复共用一次头像和名称，只在整块末尾保留最后一条消息的时间。对话时间旁不重复显示预览说明或执行状态，缺少正文时不生成空白气泡。**诊断**仍保留可读事件时间线、已记录的结果、原始事件数据和技术标识。历史消息直接显示，实时新增文本逐字呈现，不拆分 emoji 或组合字符。向上翻阅时暂停自动跟随，点击**回到最新**恢复；减少动态效果开启时直接显示新文本。回复气泡仍只来自已保留的客户端可见输出事件，不把思考或工具 payload 当作模型回复，既有观察更新频率不变。
 

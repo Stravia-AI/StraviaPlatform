@@ -31,9 +31,9 @@ use tokio::io::AsyncReadExt;
 
 pub(crate) const TOOL_ID: &str = "stravia-read";
 pub(crate) const TOOL_NAME: &str = "StraviaRead";
-const DOWNLOAD_DESCRIPTION: &str = "Read content from an owned https://stravia/artifact/<id> path. Add #stravia?download=1 to obtain download information without model execution.";
-const NETWORK_DESCRIPTION: &str = "Use search://<percent-encoded query> for a complete sourced research report; allowed_domains and previous_turn_id are search query parameters. Public HTTP(S) paths read content; resource options use #stravia?.";
-const MEDIA_DESCRIPTION: &str = "Read static JPEG, PNG or WebP images for description and readable text. Add #stravia?question=<encoded question> for a specific question and previous_turn_id for explicit continuation.";
+const DOWNLOAD_DESCRIPTION: &str = "Read content from an owned sa:<artifact-id> path. Add ?download=1 to obtain download information without model execution.";
+const NETWORK_DESCRIPTION: &str = "Use search://<percent-encoded query> for a complete sourced research report; allowed_domains and previous_turn_id are search query parameters. Public HTTP(S) resource options use #stravia?.";
+const MEDIA_DESCRIPTION: &str = "Read static JPEG, PNG or WebP images for description and readable text. Add ?question=<encoded question> to an Artifact Reference for a specific question and previous_turn_id for explicit continuation.";
 
 #[derive(Clone)]
 pub(crate) struct ReadTool {
@@ -222,9 +222,7 @@ impl ReadTool {
             }
             ReadTarget::Resource(resource) => resource,
         };
-        let parsed = url::Url::parse(&resource_path.url)
-            .map_err(|_| PlatformToolError::new("Invalid read URL"))?;
-        if parsed.host_str() == Some("stravia") {
+        if resource_path.url.starts_with("sa:") {
             let id = ArtifactId::from_reference(&resource_path.url).map_err(artifact_error)?;
             return self.read_artifact(id, resource_path.options, context).await;
         }
@@ -814,7 +812,7 @@ impl McpTool for ReadTool {
                 Instant::now() + Duration::from_secs(900),
             )
         });
-        let run_id = uuid::Uuid::new_v4().to_string();
+        let run_id = stravia_runtime_contract::identifier::new_id();
         let context = ToolExecutionContext {
             request_id: run_id.clone(),
             run_id,
@@ -878,7 +876,7 @@ impl PlatformTool for WebPageTool {
         arguments: Value,
         mut context: ToolExecutionContext,
     ) -> Result<PlatformToolOutput, PlatformToolError> {
-        context.run_id = uuid::Uuid::new_v4().to_string();
+        context.run_id = stravia_runtime_contract::identifier::new_id();
         let url = arguments
             .get("url")
             .and_then(Value::as_str)

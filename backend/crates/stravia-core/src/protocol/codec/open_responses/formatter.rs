@@ -1,5 +1,4 @@
 use serde_json::Value;
-use uuid::Uuid;
 
 use stravia_runtime_contract::protocol::ir::AiItem;
 use stravia_runtime_contract::protocol::ir::AiItemAudience;
@@ -15,7 +14,7 @@ pub struct ResponsesResponseFormatter;
 impl ResponsesResponseFormatter {
     pub(crate) fn format_response(&self, resp: &AiResponse) -> Value {
         let resp_id = if resp.id.is_empty() {
-            format!("resp_{}", Uuid::new_v4().simple())
+            stravia_runtime_contract::identifier::new_id()
         } else {
             resp.id.clone()
         };
@@ -290,13 +289,12 @@ pub(crate) fn function_output_value(content: &MessageContent) -> Value {
 }
 
 pub(crate) fn gateway_item_id(prefix: &str, response_id: &str, output_index: usize) -> String {
-    let response_id = response_id.strip_prefix("resp_").unwrap_or(response_id);
     format!("{prefix}_{response_id}_{output_index}")
 }
 
 pub(crate) fn stamp_output_graph_ids(resp: &AiResponse) -> Vec<AiItem> {
     let resp_id = if resp.id.is_empty() {
-        format!("resp_{}", Uuid::new_v4().simple())
+        stravia_runtime_contract::identifier::new_id()
     } else {
         resp.id.clone()
     };
@@ -349,7 +347,7 @@ pub(crate) fn response_id_from_gateway_item_id(item_id: &str) -> Option<String> 
     }
     let (response_id, output_index) = remainder.rsplit_once('_')?;
     (!response_id.is_empty() && output_index.parse::<usize>().is_ok())
-        .then(|| format!("resp_{response_id}"))
+        .then(|| response_id.to_owned())
 }
 
 pub(crate) fn response_resource_snapshot(

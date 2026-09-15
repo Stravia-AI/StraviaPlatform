@@ -1,7 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
 
-use uuid::Uuid;
-
 use super::formatter::{gateway_item_id, response_resource_snapshot};
 use crate::protocol::SseEvent;
 use stravia_runtime_contract::protocol::ir::AiItemStatus;
@@ -81,7 +79,7 @@ impl Default for ResponsesStreamFormatter {
 impl ResponsesStreamFormatter {
     pub fn new() -> Self {
         Self {
-            resp_id: format!("resp_{}", Uuid::new_v4().simple()),
+            resp_id: stravia_runtime_contract::identifier::new_id(),
             msg_id: String::new(),
             message_output_index: None,
             model: String::new(),
@@ -1422,7 +1420,7 @@ impl ResponsesStreamFormatter {
                     self.next_output_index += 1;
                     let item_id = gateway_item_id("fc", &self.resp_id, output_index);
                     let call_id = if id.is_empty() {
-                        format!("call_{}", Uuid::new_v4().simple())
+                        stravia_runtime_contract::identifier::new_id()
                     } else {
                         id.clone()
                     };

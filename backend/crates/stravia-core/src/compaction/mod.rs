@@ -157,7 +157,7 @@ impl Compaction {
             }
         }
         let record = CompactionRecord {
-            id: format!("compact_{}", uuid::Uuid::new_v4().simple()),
+            id: stravia_runtime_contract::identifier::new_id(),
             source_generation_id: input.source_generation_id,
             source_record_ids: input.source_record_ids,
             operation_id: input.operation_id,

@@ -100,13 +100,13 @@ async fn responses_thinking_paragraphs_replay_original_parts_through_chat() {
     // visible Markdown and also permits comparing independently generated references.
     fn visible(mut carrier: &str) -> String {
         let mut result = String::new();
-        while let Some(start) = carrier.find("<!-- stravia-") {
+        while let Some(start) = carrier.find("<!--s") {
             result.push_str(&carrier[..start]);
             let end = carrier[start..]
-                .find(" -->")
+                .find("-->")
                 .expect("closed private comment")
                 + start
-                + 4;
+                + 3;
             carrier = &carrier[end..];
         }
         result.push_str(carrier);

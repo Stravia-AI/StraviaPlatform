@@ -1079,9 +1079,8 @@ struct TextBlock {
 }
 impl TextBlock {
     fn new(event: RunEvent, interaction: String, run: String) -> Self {
-        static NEXT: AtomicU64 = AtomicU64::new(1);
         Self {
-            id: format!("{}-{}-{}", run, now(), NEXT.fetch_add(1, Ordering::Relaxed)),
+            id: stravia_runtime_contract::identifier::new_id(),
             interaction,
             run,
             event,

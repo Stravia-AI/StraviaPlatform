@@ -13,7 +13,7 @@
 //! | `fix_orphan_tool_results` | Synthesizes a ghost assistant message for orphaned `Role::Tool` messages |
 //! | `patch_broken_conversation` | Ensures the conversation starts with `user` or `system` (not `assistant`) |
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 use crate::protocol::ir::request::{
     AiItem, AiRequest, ContentBlock, MessageContent, Role, ToolCall,
@@ -26,6 +26,29 @@ use crate::protocol::ir::request::{
 ///
 /// Also generates IDs for blank assistant `ToolCall.id` fields.
 pub fn fill_tool_call_ids(req: &mut AiRequest) {
+    let mut supplied_ids = HashSet::new();
+    for msg in &req.items {
+        if let Some(tool_calls) = &msg.tool_calls {
+            supplied_ids.extend(
+                tool_calls
+                    .iter()
+                    .map(|call| call.id.trim())
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_owned),
+            );
+        }
+        if let Some(id) = msg
+            .tool_call_id
+            .as_deref()
+            .filter(|id| !id.trim().is_empty())
+        {
+            supplied_ids.insert(id.to_owned());
+        }
+        if let Some(id) = extract_tool_result_hint(&msg.content) {
+            supplied_ids.insert(id);
+        }
+    }
+
     let mut pending_calls: VecDeque<(String, String)> = VecDeque::new();
     let mut generated_id_seq: usize = 0;
     let mut normalized: Vec<AiItem> = Vec::with_capacity(req.items.len());
@@ -35,8 +58,7 @@ pub fn fill_tool_call_ids(req: &mut AiRequest) {
             if let Some(tool_calls) = &mut msg.tool_calls {
                 for tc in tool_calls.iter_mut() {
                     if tc.id.trim().is_empty() {
-                        generated_id_seq += 1;
-                        tc.id = format!("call_stravia_{generated_id_seq}");
+                        tc.id = next_synthetic_tool_call_id(&mut generated_id_seq, &supplied_ids);
                     }
                     pending_calls.push_back((tc.id.clone(), tc.name.clone()));
                 }
@@ -104,8 +126,10 @@ pub fn fill_tool_call_ids(req: &mut AiRequest) {
         }
 
         if resolved_id.is_none() {
-            generated_id_seq += 1;
-            resolved_id = Some(format!("call_stravia_synth_{generated_id_seq}"));
+            resolved_id = Some(next_synthetic_tool_call_id(
+                &mut generated_id_seq,
+                &supplied_ids,
+            ));
         }
 
         let final_id = resolved_id.unwrap();
@@ -153,6 +177,16 @@ pub fn patch_broken_conversation(req: &mut AiRequest) {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+fn next_synthetic_tool_call_id(sequence: &mut usize, supplied_ids: &HashSet<String>) -> String {
+    loop {
+        *sequence += 1;
+        let id = format!("tc_{}", *sequence);
+        if !supplied_ids.contains(&id) {
+            return id;
+        }
+    }
+}
 
 fn extract_tool_result_hint(content: &MessageContent) -> Option<String> {
     let MessageContent::Blocks(blocks) = content else {
@@ -223,6 +257,38 @@ mod tests {
         fill_tool_call_ids(&mut req);
         let tool_msg = req.items.iter().find(|m| m.role == Role::Tool).unwrap();
         assert_eq!(tool_msg.tool_call_id.as_deref(), Some("call_abc"));
+    }
+
+    #[test]
+    fn blank_call_ids_are_deterministic_and_correlated() {
+        let mut first = ai_req(vec![asst_with_tool("", "lookup"), tool_result(None)]);
+        let mut repeated = first.clone();
+
+        fill_tool_call_ids(&mut first);
+        fill_tool_call_ids(&mut repeated);
+
+        let id = &first.items[0].tool_calls.as_ref().unwrap()[0].id;
+        assert_eq!(id, "tc_1");
+        assert_eq!(repeated.items[0].tool_calls.as_ref().unwrap()[0].id, *id);
+        assert_eq!(first.items[1].tool_call_id.as_deref(), Some(id.as_str()));
+    }
+
+    #[test]
+    fn generated_call_ids_skip_supplied_ids() {
+        let mut assistant = asst_with_tool("", "lookup");
+        assistant.tool_calls.as_mut().unwrap().push(ToolCall {
+            id: "tc_1".to_string(),
+            name: "other".to_string(),
+            arguments: "{}".to_string(),
+        });
+        let mut req = ai_req(vec![assistant, tool_result(None)]);
+
+        fill_tool_call_ids(&mut req);
+
+        let calls = req.items[0].tool_calls.as_ref().unwrap();
+        assert_eq!(calls[0].id, "tc_2");
+        assert_eq!(calls[1].id, "tc_1");
+        assert_eq!(req.items[1].tool_call_id.as_deref(), Some("tc_2"));
     }
 
     #[test]

@@ -1,6 +1,5 @@
 use anyhow::Result;
 use serde_json::Value;
-use uuid::Uuid;
 
 use crate::protocol::*;
 use stravia_runtime_contract::protocol::ir::AiItem;
@@ -457,7 +456,7 @@ impl OpenAIStreamFormatter {
     pub fn new() -> Self {
         Self {
             usage: Usage::default(),
-            id: format!("chatcmpl-{}", Uuid::new_v4()),
+            id: stravia_runtime_contract::identifier::new_id(),
             model: String::new(),
             saw_tool_call: false,
         }
@@ -470,7 +469,9 @@ impl OpenAIStreamFormatter {
         for delta in deltas {
             match delta {
                 AiStreamDelta::MessageStart { id, model } => {
-                    self.id = id.clone();
+                    if !id.is_empty() {
+                        self.id = id.clone();
+                    }
                     self.model = model.clone();
                     let chunk = serde_json::json!({
                         "id": self.id,

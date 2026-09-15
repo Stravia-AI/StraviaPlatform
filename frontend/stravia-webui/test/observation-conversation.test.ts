@@ -135,6 +135,55 @@ describe('observation conversation', () => {
     ])
   })
 
+  test('places each recorded run input before its response without inventing tool-run users', () => {
+    const current = detail([
+      run('root-run', 1, [
+        event('root-run', 1, 'run_admitted', { has_new_user: true }),
+        event('root-run', 2, 'input_preview_recorded', { kind: 'input_preview_recorded', text: 'Actual user question' }),
+        event('root-run', 3, 'client_visible_content_delta', { text: 'First response' }),
+      ]),
+      run('tool-continuation', 2, [
+        event('tool-continuation', 4, 'run_admitted', { has_new_user: false }),
+        event('tool-continuation', 5, 'input_preview_recorded', { kind: 'input_preview_recorded' }),
+        event('tool-continuation', 6, 'client_visible_content_delta', { text: 'Tool continuation' }),
+      ]),
+      run('pending-tool-result-with-user', 3, [
+        event('pending-tool-result-with-user', 7, 'run_admitted', { has_new_user: true, grouping_reason: 'pending_tool_result' }),
+        event('pending-tool-result-with-user', 8, 'input_preview_recorded', { kind: 'input_preview_recorded', text: 'Actual user question' }),
+        event('pending-tool-result-with-user', 9, 'client_visible_content_delta', { text: 'Follow-up response' }),
+      ]),
+    ])
+    const messages = observationConversationMessages(current)
+    expect(messages.map(({ role, text }) => ({ role, text }))).toEqual([
+      { role: 'user', text: 'Actual user question' },
+      { role: 'assistant', text: 'First response' },
+      { role: 'assistant', text: 'Tool continuation' },
+      { role: 'user', text: 'Actual user question' },
+      { role: 'assistant', text: 'Follow-up response' },
+    ])
+    const replayed = observationConversationMessages(current, [], messages)
+    expect(replayed.every((message, index) => message === messages[index])).toBe(true)
+  })
+
+  test('keeps the root preview while its paged event is outside the loaded window', () => {
+    const current = {
+      ...detail([
+        run('root-run', 1, [event('root-run', 3, 'client_visible_content_delta', { text: 'First response' })]),
+        run('follow-up', 2, [
+          event('follow-up', 4, 'input_preview_recorded', { kind: 'input_preview_recorded', text: 'Visible follow-up' }),
+          event('follow-up', 5, 'client_visible_content_delta', { text: 'Follow-up response' }),
+        ]),
+      ]),
+      older_events_cursor: 3,
+    }
+    expect(observationConversationMessages(current).map(({ role, text }) => ({ role, text }))).toEqual([
+      { role: 'user', text: 'Actual user question' },
+      { role: 'assistant', text: 'First response' },
+      { role: 'user', text: 'Visible follow-up' },
+      { role: 'assistant', text: 'Follow-up response' },
+    ])
+  })
+
   test('uses the retained tail only once when no run has delivered text events', () => {
     const messages = observationConversationMessages(
       detail([run('first', 1, []), run('child', 2, [])], 'Retained ending'),

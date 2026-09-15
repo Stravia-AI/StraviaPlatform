@@ -15,6 +15,8 @@
 
 本设计同时适用于 SQLite 和 PostgreSQL 存储，但实时状态与 Debug 开关只承诺单 Gateway 实例。多实例聚合不在本设计范围内。
 
+Observation 使用统一平台身份契约：随机不透明 ID 是由密码学安全随机生成器均匀采样的 28 位 ASCII 小写字母（约 131.6 bit），完整 SHA-256 派生身份则用 55 位 ASCII 小写字母保留全部 256 bit。Artifact 引用为 `sa:<55 位 ID>`，可带 query、禁止 fragment；History Marker 为 `<!--sh:<28 位 ID>-->`；Projection Delimiter 为 `<!--sp:<28 位 ID>:<t|p>:<ordinal>:<s|e>-->`；可逆脱敏引用为 `<!--sr:<28 位 ID>-->`。这些外壳不授予访问权，外部 Provider／客户端 ID 与真实凭据 token 不变。新格式只用于新部署和全新数据库，不兼容读取旧平台 ID，也不回写不可变或外部历史；旧数据库与用户数据应另外保留而非删除，新会话使用全新数据库。
+
 ## 2. 非目标
 
 - 不记录 TLS、TCP、HTTP/2 frame 或操作系统 packet capture。
@@ -181,7 +183,7 @@ clear_history() -> ClearHistoryResult
 - `run_finished`
 - `interaction_relinked`
 - `observation_gap`
-- `input_preview_recorded`：仅通知用户输入预览已更新，不在事件 payload 中重复保存输入正文。
+- `input_preview_recorded`：每个带有新增用户输入的 Run 至多记录一次，`payload.text` 保存完成凭据保护后的最多 4,096 字符输入预览。同一 Interaction 的追加输入也记录事件，但只有初始 Run 更新卡片的 `input_preview`；重复发布不覆盖已有正文。旧事件缺少 `text` 时不推断或补录输入。
 
 `platform_tool_started.input` 和 `client_tool_handoff.input` 保存工具输入，`platform_tool_finished.content` 保存平台工具返回；输入为可解析的 JSON 时保留其类型，否则保留原始参数字符串。旧事件缺少这些可选字段时表示未采集，字段值为 `null` 则表示实际采集到 JSON null。`client_tool_result` 保存收到的客户端返回及其调用 ID、错误标记，兼容显式 `tool_result` 块和 `role=tool` 消息；只采集收到的 canonical 窗口，不从恢复后的模型历史重新提取。客户端返回先留在内存，凭据映射注册完成后与输入预览共用发布边界，没有新用户文本的工具续跑也会发布。
 
@@ -352,7 +354,7 @@ Observation、Rejected Request、Debug manifest 与 Trace 文件跟随 `log_rete
 - credential header（含 Authorization、API key、Cookie、Set-Cookie、Proxy Authorization）值永久替换为 `***`；
 - URL userinfo 与 key/token/signature/credential 类 query 值永久替换为 `***`；
 - JSON/form 等结构化 body 中明确的 key/token/secret/password/credential 字段递归替换为 `***`；
-- 业务文本中的完整 `<!-- stravia-redaction-marker:rm_<32 位小写十六进制> -->` 是机器原子，不拆开匹配其内部文字或吞掉后续路径；真实 credential header 和结构化凭据字段不因此获得豁免，无效或不完整标记仍按普通文本处理；
+- 业务文本中的完整 `<!--sr:<28 位 ASCII 小写字母>-->` 是固定长度的短 HTML 注释和机器原子；新标识符由密码学安全随机生成器在 `a`–`z` 中均匀采样，标识符空间约为 131.6 bit。诊断脱敏不拆开匹配标记内部文字或吞掉后续路径；真实 credential header 和结构化凭据字段不因此获得豁免，无效、不完整或旧格式标记仍按普通文本处理；新格式面向全新数据库，两种旧格式均不读取，也不回写不可变或外部历史，依赖旧引用时必须开始新对话；
 - Debug 识别协议凭据字段与单条应用消息内的完整凭据模式，不承诺拼接多条消息后再识别业务文本中的凭据；这类跨消息内容仍需按敏感数据处理；
 - 其他 prompt、工具参数、工具结果和业务内容在 Debug Trace 中保留，因此开启确认必须明确敏感风险；
 - redaction 在写入前完成；原始凭据不得先落临时文件、数据库或异步队列；
@@ -439,7 +441,7 @@ SSE 通过普通 `fetch` 携带 Admin Bearer header，并由 `eventsource-parser
 
 失败请求列表 `GET /api/v1/observations/failed-requests` 合并准入前 Rejected Request 与最终 `status=failed` 的 Inference Run，是既有观察数据的查询投影，不新建执行记录或重复累计用量：
 
-- 查询参数沿用 Interaction forest 的 `start_at` / `end_at`（或兼容的 `anchor_at` / `window_index`）与 `cursor` / `limit`（默认 50、最大 200），另支持 `provider`、`model`、`api_key` 筛选；`model` 匹配模型路由 UUID，`api_key` 匹配 key ID 或名称，`provider` 匹配该 Run 实际调用过的模型服务；
+- 查询参数沿用 Interaction forest 的 `start_at` / `end_at`（或兼容的 `anchor_at` / `window_index`）与 `cursor` / `limit`（默认 50、最大 200），另支持 `provider`、`model`、`api_key` 筛选；`model` 匹配模型路由的 28 位 ASCII 小写字母不透明 ID，`api_key` 匹配 key ID 或名称，`provider` 匹配该 Run 实际调用过的模型服务；
 - 排序为 `started_at` DESC、`kind` ASC、`id` ASC，`next_cursor` 是不透明的 JSON keyset 游标，相同时间记录跨页不重复、不遗漏；`total` 为当前时间范围与筛选条件下的总数；
 - 响应为 `{ data: { items, total, next_cursor, snapshot_sequence } }`；每项 `FailedRequestSummary` 包含 `id`、`kind`（`rejection | run`）、`request_id`、`started_at`、`duration_ms`、`api_key_id`、`api_key_name`、`client`、`model`、`model_display_name`、`services`（实际调用过的模型服务去重列表）、`error`（`source` 取 `platform | upstream | null`，附 `code`、`message`、`status_code`）、`interaction_id`、`root_id`、`run_id`、`debug_status`（`none`、`partial` 或 manifest 状态）与 `observation_gap`；
 - 分类以一次客户端请求的最终结果为准：内部重试或切换模型服务后最终成功的请求不进入列表；单纯主动取消或断线（含 499、`request_aborted`、`cancelled`、`client_disconnected`、`websocket_delivery_dropped`）被排除；后来重新发起并成功的请求不抹掉早先失败行；
@@ -535,7 +537,7 @@ SSE 通过普通 `fetch` 携带 Admin Bearer header，并由 `eventsource-parser
 
 桌面使用可调宽、可关闭的右侧检查器，默认约占 40–55%；画布保留选中节点及其因果路径。窄屏使用全屏详情。
 
-默认「对话」页以只读消息气泡展示当前 Interaction：用户靠右使用 primary 色，模型靠左使用中性底色。连续同一模型的 Run 共用一组头像与名称，正文和工具继续追加在同一块内，只在末尾显示最后一条消息的时间；换模型或出现用户消息时重新分组。时间旁不显示任何执行状态或预览说明，执行状态仍在画布与诊断中保留。用户消息取已脱敏的 `input_preview`，每个 Run 的回复只拼接按 sequence 排序的 `client_visible_content_delta.text`，不把 Debug 内容当作回复。没有公开文本事件的旧记录只回退一次到 `visible_tail`。没有用户正文时不生成用户消息，没有助手正文时隐藏气泡，但保留流式组件实例，保证首个实时增量仍可逐字显示。
+默认「对话」页以只读消息气泡展示当前 Interaction：用户靠右使用 primary 色，模型靠左使用中性底色。连续同一模型的 Run 共用一组头像与名称，正文和工具继续追加在同一块内，只在末尾显示最后一条消息的时间；换模型或出现用户消息时重新分组。时间旁不显示任何执行状态或预览说明，执行状态仍在画布与诊断中保留。初始用户消息取已脱敏的 `input_preview`，缺失时可用初始 Run 的 `input_preview_recorded.text` 补足；后续 Run 的输入事件在所属回复前生成独立用户消息，不因文本相同而去重。每个 Run 的回复只拼接按 sequence 排序的 `client_visible_content_delta.text`，不把 Debug 内容当作回复。没有公开文本事件的旧记录只回退一次到 `visible_tail`。没有用户正文时不生成用户消息，没有助手正文时隐藏气泡，但保留流式组件实例，保证首个实时增量仍可逐字显示。
 
 思考和工具使用官方 shadcn-svelte Marker，默认折叠；有真实详情才提供展开操作，没有可读思考则不显示条目，只有工具名称时显示静态行，不增加「未记录」说明。思考置于所属 Run 正文前，工具置于正文后；展开显示普通观察事件记录的可读思考、工具输入和返回，无需开启 Debug。详情与对话不读取 Debug Trace，也不从旧 Trace 补充内容或补录未采集的历史。签名、密文不进入普通思考正文。
 

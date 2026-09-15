@@ -55,12 +55,7 @@ impl LocalArtifactStore {
         &self,
         id: &ArtifactId,
     ) -> Result<Arc<dyn ArtifactReadGuard>, ArtifactError> {
-        if id.as_str().is_empty()
-            || !id
-                .as_str()
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-        {
+        if !valid_digest_id(id.as_str()) {
             return Err(ArtifactError::NotFound);
         }
         match &self.database {

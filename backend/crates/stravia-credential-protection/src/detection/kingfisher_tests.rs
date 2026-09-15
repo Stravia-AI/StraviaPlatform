@@ -294,7 +294,7 @@ fn inline_ignore_comments_do_not_disable_protection() {
 
 #[tokio::test]
 async fn references_are_atomic_and_do_not_hide_neighboring_credentials() {
-    let reference = "<!-- stravia-redaction-marker:rm_65ecadffe021442ab611243aca232c08 -->";
+    let reference = "<!--sr:abcdefghijklmnopqrstuvwxyzab-->";
     for text in [reference.to_owned(), format!("api_key={reference}")] {
         assert!(test_text(text).await.unwrap().is_empty());
     }

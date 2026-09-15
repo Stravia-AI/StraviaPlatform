@@ -134,6 +134,7 @@ impl ProviderCall {
                 .body
                 .get("previous_response_id")
                 .and_then(Value::as_str);
+            // Keep the UUID wire shape Codex uses for external thread/session/window identities.
             let session_id = uuid::Uuid::new_v4().to_string();
             let thread_id = uuid::Uuid::new_v4().to_string();
             let window_id = uuid::Uuid::new_v4().to_string();

@@ -77,7 +77,7 @@ impl HookSession for AgentDefinitionHookSession {
                     .items
                     .extend(self.turn_ids.drain(..).map(|turn_id| {
                         stravia_runtime_contract::protocol::ir::AiItem::unknown(serde_json::json!({
-                            "id": format!("agent_{turn_id}"),
+                            "id": turn_id,
                             "type": "stravia:agent_result",
                             "status": "completed",
                             "turn_id": turn_id,

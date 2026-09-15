@@ -165,7 +165,7 @@ def test_sqlite_upgrade_removes_legacy_logs_and_installs_observation_schema(
     _prepare_legacy_sqlite(
         database, repo_root / "backend" / "crates" / "stravia-core" / "migrations" / "sqlite"
     )
-    orphan = tmp_path / "diagnostics" / "observation-debug" / "00000000000040008000000000000001"
+    orphan = tmp_path / "diagnostics" / "observation-debug" / "abcdefghijklmnopqrstuvwxyzab"
     orphan.mkdir(parents=True)
     (orphan / "segment-000001.jsonl").write_text('{"orphan":true}\n', encoding="utf-8")
     server_port = find_free_port()

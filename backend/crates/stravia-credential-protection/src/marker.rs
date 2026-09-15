@@ -1,8 +1,8 @@
 //! 可逆引用的保留语法。完整标记是协议原子，不代表持有者获得了还原权限。
 
-pub const PREFIX: &str = "<!-- stravia-redaction-marker:rm_";
-pub const SUFFIX: &str = " -->";
-pub const IDENTIFIER_LEN: usize = 32;
+pub const PREFIX: &str = "<!--sr:";
+pub const SUFFIX: &str = "-->";
+pub const IDENTIFIER_LEN: usize = stravia_runtime_contract::identifier::ID_LEN;
 pub const REFERENCE_LEN: usize = PREFIX.len() + IDENTIFIER_LEN + SUFFIX.len();
 
 /// 检查标记指定字节位置的合法性；超出完整标记长度时返回 false。
@@ -10,7 +10,7 @@ pub fn matches_byte(index: usize, byte: u8) -> bool {
     if index < PREFIX.len() {
         byte == PREFIX.as_bytes()[index]
     } else if index < PREFIX.len() + IDENTIFIER_LEN {
-        byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+        byte.is_ascii_lowercase()
     } else {
         SUFFIX
             .as_bytes()
@@ -42,5 +42,8 @@ pub fn find_reference(value: &str) -> Option<(usize, &str)> {
 }
 
 pub(crate) fn new_reference() -> String {
-    format!("{PREFIX}{}{SUFFIX}", uuid::Uuid::new_v4().simple())
+    format!(
+        "{PREFIX}{}{SUFFIX}",
+        stravia_runtime_contract::identifier::new_id()
+    )
 }

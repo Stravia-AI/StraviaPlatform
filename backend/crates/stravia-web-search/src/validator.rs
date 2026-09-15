@@ -74,7 +74,7 @@ impl SearchReportValidator {
             ));
         }
 
-        let expected_prefix = format!("source-{}-", turn_id.as_str());
+        let expected_prefix = format!("{}:", turn_id.as_str());
         let mut sources = HashMap::with_capacity(report.sources.len());
         for source in &mut report.sources {
             if !source.id.starts_with(&expected_prefix)
@@ -163,8 +163,8 @@ impl SearchReportValidator {
 fn answer_markers(answer: &str) -> Result<Vec<&str>, WebSearchError> {
     let mut markers = Vec::new();
     let mut rest = answer;
-    while let Some(start) = rest.find("[source-") {
-        let marker_start = start + 1;
+    while let Some(start) = rest.find("[sc:") {
+        let marker_start = start + "[sc:".len();
         let tail = &rest[marker_start..];
         let Some(end) = tail.find(']') else {
             return Err(WebSearchError::new(

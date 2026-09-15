@@ -4,6 +4,7 @@ pub mod agent;
 pub mod artifact;
 mod cancellation;
 pub mod hook;
+pub mod identifier;
 mod identity;
 pub mod model_turn;
 pub mod protocol;

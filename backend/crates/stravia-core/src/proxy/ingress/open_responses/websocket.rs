@@ -76,7 +76,7 @@ fn handshake_ingress(
         gateway
             .observation
             .observe_ingress(crate::interaction_observation::IngressStart {
-                id: format!("ws-handshake-{}", uuid::Uuid::new_v4()),
+                id: stravia_runtime_contract::identifier::new_id(),
                 method: "GET".into(),
                 path: "/v1/responses".into(),
                 protocol: OPEN_RESPONSES_2026_04_24.to_string(),
@@ -110,13 +110,12 @@ fn websocket_ingress(
     gateway: &Gateway,
     headers: &HeaderMap,
     handshake_response: &Value,
-    suffix: &str,
 ) -> crate::interaction_observation::IngressObserver {
     let observer =
         gateway
             .observation
             .observe_ingress(crate::interaction_observation::IngressStart {
-                id: format!("ws-{suffix}-{}", uuid::Uuid::new_v4()),
+                id: stravia_runtime_contract::identifier::new_id(),
                 method: "WEBSOCKET".into(),
                 path: "/v1/responses".into(),
                 protocol: OPEN_RESPONSES_2026_04_24.to_string(),
@@ -308,8 +307,7 @@ async fn serve(
                     request_context
                         .extensions
                         .insert(connection_observation.clone());
-                    let ingress =
-                        websocket_ingress(&gateway, &headers, &handshake_response, "message");
+                    let ingress = websocket_ingress(&gateway, &headers, &handshake_response);
                     ingress.record_debug(|| {
                         ws_wire(
                             "client_to_platform",
@@ -617,8 +615,7 @@ async fn serve(
                     break;
                 }
                 Message::Binary(payload) => {
-                    let ingress =
-                        websocket_ingress(&gateway, &headers, &handshake_response, "binary");
+                    let ingress = websocket_ingress(&gateway, &headers, &handshake_response);
                     ingress.record_debug(|| ws_wire(
                         "client_to_platform",
                         "binary",

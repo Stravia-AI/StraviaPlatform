@@ -1,18 +1,19 @@
 use super::*;
 
 #[test]
-fn artifact_reference_identity_ignores_question_without_accepting_foreign_urls() {
-    let id = ArtifactId::from_reference("https://stravia/artifact/artifact_abc?question=what%3F")
-        .unwrap();
-    assert_eq!(id.as_str(), "artifact_abc");
+fn artifact_reference_identity_ignores_question_and_rejects_non_digest_identities() {
+    let digest = "a".repeat(stravia_runtime_contract::identifier::DIGEST_ID_LEN);
+    let id = ArtifactId::from_reference(&format!("sa:{digest}?question=what%3F")).unwrap();
+    assert_eq!(id.as_str(), digest);
     for reference in [
-        "https://stravia.example/artifact/artifact_abc",
-        "http://stravia/artifact/artifact_abc",
-        "https://stravia@evil.example/artifact/artifact_abc",
-        "https://stravia/artifact/../secret",
-        "https://stravia/artifact/artifact_abc#fragment",
+        format!("https://stravia/artifact/{digest}"),
+        format!("sa:{}", "a".repeat(54)),
+        format!("sa:{}", "a".repeat(56)),
+        format!("sa:{}", "A".repeat(55)),
+        format!("sa:{}", "0".repeat(55)),
+        format!("sa:{digest}#fragment"),
     ] {
-        assert!(ArtifactId::from_reference(reference).is_err());
+        assert!(ArtifactId::from_reference(&reference).is_err());
     }
 }
 
@@ -949,6 +950,10 @@ async fn stable_artifact_id_is_shared_by_ingest_chunkings_and_store_reconstructi
         )
         .await
         .expect("direct ingestion");
+    assert!(stravia_runtime_contract::identifier::valid_digest_id(
+        direct.id.as_str()
+    ));
+    assert_eq!(direct.reference(), format!("sa:{}", direct.id.as_str()));
     let repeated = store
         .ingest(
             &owner,
@@ -1022,58 +1027,6 @@ async fn stable_artifact_id_is_shared_by_ingest_chunkings_and_store_reconstructi
         .await
         .expect("read reconstructed Artifact");
     assert_eq!(bytes, payload);
-}
-
-#[tokio::test]
-async fn legacy_random_identity_remains_readable_after_identical_reupload() {
-    let directory = tempfile::tempdir().unwrap();
-    let pool = crate::db::init_pool(directory.path()).await.unwrap();
-    crate::migrations::migrate_sqlite(&pool).await.unwrap();
-    let store = LocalArtifactStore::sqlite(pool.clone(), directory.path().join("artifacts"));
-    let owner = Principal::new("owner");
-    let bytes = Bytes::from_static(b"legacy image");
-    let staged = store
-        .ingest(
-            &owner,
-            "image/png",
-            Some(bytes.len() as u64),
-            bytes_stream(bytes.clone()),
-            Duration::from_secs(3600),
-        )
-        .await
-        .unwrap();
-    // 旧版本以物理对象的随机 ID 作为公开身份，升级不能改写该行或引用。
-    let backend_key: String = sqlx::query_scalar("SELECT backend_key FROM artifacts WHERE id = ?")
-        .bind(staged.id.as_str())
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    let legacy = ArtifactId::new(backend_key.strip_prefix("objects/").unwrap());
-    sqlx::query("UPDATE artifacts SET id = ? WHERE id = ?")
-        .bind(legacy.as_str())
-        .bind(staged.id.as_str())
-        .execute(&pool)
-        .await
-        .unwrap();
-
-    let uploaded = store
-        .ingest(
-            &owner,
-            "image/png",
-            Some(bytes.len() as u64),
-            bytes_stream(bytes.clone()),
-            Duration::from_secs(3600),
-        )
-        .await
-        .unwrap();
-    assert_ne!(legacy, uploaded.id);
-    for id in [&legacy, &uploaded.id] {
-        let (_, readable) = store
-            .read_bytes(&owner, id, Duration::from_secs(60))
-            .await
-            .unwrap();
-        assert_eq!(readable, bytes);
-    }
 }
 
 #[tokio::test]

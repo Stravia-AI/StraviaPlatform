@@ -149,8 +149,12 @@ impl InteractionObservation {
         if store.recover_after_restart().await.is_err() {
             tracing::warn!("observation restart recovery unavailable");
         }
-        let ephemeral_root =
-            (!persistent).then(|| data_dir.join(format!(".ephemeral-{}", uuid::Uuid::new_v4())));
+        let ephemeral_root = (!persistent).then(|| {
+            data_dir.join(format!(
+                ".ephemeral-{}",
+                stravia_runtime_contract::identifier::new_id()
+            ))
+        });
         let trace_data_dir = ephemeral_root.clone().unwrap_or(data_dir);
         let traces = TraceManager::new(trace_data_dir).unwrap_or_else(|_| {
             tracing::warn!("observation trace storage unavailable");
@@ -640,8 +644,13 @@ impl InteractionObservation {
         if !references.is_empty() {
             let mut media = Vec::with_capacity(references.len());
             for reference in references {
-                let id = reference.trim_start_matches("https://stravia/artifact/");
-                let available = self.inner.store.artifact_available(id, exported_at).await?;
+                let id = stravia_runtime_contract::artifact::ArtifactId::from_reference(&reference)
+                    .map_err(anyhow::Error::new)?;
+                let available = self
+                    .inner
+                    .store
+                    .artifact_available(id.as_str(), exported_at)
+                    .await?;
                 media.push(serde_json::json!({
                     "artifact_reference": reference,
                     "media_externalized": true,
@@ -2088,7 +2097,7 @@ mod snapshot_tests {
     }
 
     #[tokio::test]
-    async fn input_preview_is_nullable_and_owned_by_initial_run() -> anyhow::Result<()> {
+    async fn input_preview_is_root_owned_and_recorded_once_per_run() -> anyhow::Result<()> {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
@@ -2112,27 +2121,52 @@ mod snapshot_tests {
         .fetch_one(&pool)
         .await?;
         assert_eq!(preview, None);
-        sqlx::query("INSERT INTO inference_run_observations(id,interaction_id,ingress_protocol,route_id,status,debug_enabled,started_at,last_active_at,expires_at) VALUES ('initial','historical','openai','route','running',0,?,?,?)")
-            .bind(at).bind(at).bind(at + 86_400_000).execute(&pool).await?;
+        sqlx::query("INSERT INTO inference_run_observations(id,interaction_id,parent_run_id,ingress_protocol,route_id,status,debug_enabled,started_at,last_active_at,expires_at) VALUES ('initial','historical',NULL,'openai','route','running',0,?,?,?),('child','historical','initial','openai','route','running',0,?,?,?)")
+            .bind(at).bind(at).bind(at + 86_400_000)
+            .bind(at + 1).bind(at + 1).bind(at + 86_400_000).execute(&pool).await?;
         let store = store::ObservationStore::Sqlite(pool.clone());
         assert!(
             store
-                .persist_input_preview("historical", "child", "tool-secret", at, at + 86_400_000)
+                .persist_input_preview("historical", "missing", "not owned", at, at + 86_400_000)
                 .await?
                 .is_none()
         );
-        store
+        let initial = store
             .persist_input_preview("historical", "initial", "first input", at, at + 86_400_000)
-            .await?;
+            .await?
+            .expect("initial run input event");
         assert!(
             store
-                .persist_input_preview("historical", "initial", "later round", at, at + 86_400_000)
+                .persist_input_preview(
+                    "historical",
+                    "initial",
+                    "ignored duplicate",
+                    at,
+                    at + 86_400_000
+                )
                 .await?
                 .is_none()
         );
+        let child = store
+            .persist_input_preview(
+                "historical",
+                "child",
+                "follow-up input",
+                at + 1,
+                at + 86_400_000,
+            )
+            .await?
+            .expect("child run input event");
+        assert!(initial.sequence < child.sequence);
         assert!(
             store
-                .persist_input_preview("historical", "child", "tool-secret", at, at + 86_400_000)
+                .persist_input_preview(
+                    "historical",
+                    "child",
+                    "ignored duplicate",
+                    at + 1,
+                    at + 86_400_000
+                )
                 .await?
                 .is_none()
         );
@@ -2142,12 +2176,28 @@ mod snapshot_tests {
         .fetch_one(&pool)
         .await?;
         assert_eq!(preview.as_deref(), Some("first input"));
-        let payload: String = sqlx::query_scalar(
-            "SELECT payload FROM observation_events WHERE kind='input_preview_recorded'",
+        let events: Vec<(String, String)> = sqlx::query_as(
+            "SELECT run_id,payload FROM observation_events WHERE kind='input_preview_recorded' ORDER BY sequence",
         )
-        .fetch_one(&pool)
+        .fetch_all(&pool)
         .await?;
-        assert!(!payload.contains("first input"));
+        assert_eq!(
+            events
+                .iter()
+                .map(|(run_id, _)| run_id.as_str())
+                .collect::<Vec<_>>(),
+            ["initial", "child"]
+        );
+        assert_eq!(
+            events
+                .iter()
+                .map(|(_, payload)| serde_json::from_str::<serde_json::Value>(payload))
+                .collect::<Result<Vec<_>, _>>()?,
+            [
+                serde_json::json!({"kind": "input_preview_recorded", "text": "first input"}),
+                serde_json::json!({"kind": "input_preview_recorded", "text": "follow-up input"}),
+            ]
+        );
         pool.close().await;
         Ok(())
     }

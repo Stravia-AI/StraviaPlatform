@@ -1696,6 +1696,36 @@ test.describe('Interaction Observation canvas', () => {
     await expect(page.getByRole('button', { name: 'Enter fullscreen', exact: true })).toBeVisible()
   })
 
+  test('keeps an interjected user input on the user side before the next model response', async ({ page }) => {
+    const input = '<system-notice>\nUser interjection during work: priority; supersedes conflicting prior instructions. Re-read; ensure current work reflects user intent.\n</system-notice>\n所有平台id 统一更换，包括 artifact id，所有 agent 可见id 以及外壳一起改'
+    await installObservationFixture(page, false, false, false, (detail) => {
+      if (detail.interaction.id !== 'interaction-atlas') return
+      const first = detail.runs[0]
+      detail.runs.push({
+        ...first,
+        id: 'run-interjection',
+        parent_run_id: first.id,
+        started_at: first.started_at + 1000,
+        events: [
+          { sequence: 20, occurred_at: first.started_at + 1000, interaction_id: detail.interaction.id, run_id: 'run-interjection', rejection_id: null, kind: 'input_preview_recorded', payload: { text: input } },
+          { sequence: 21, occurred_at: first.started_at + 1001, interaction_id: detail.interaction.id, run_id: 'run-interjection', rejection_id: null, kind: 'client_visible_content_delta', payload: { text: '范围扩大为所有平台生成的 ID。' } },
+        ],
+      })
+    })
+    await page.goto('/logs?interaction=interaction-atlas')
+    const conversation = page.getByRole('log', { name: 'Conversation' })
+    const users = conversation.getByRole('article', { name: 'You', exact: true })
+    await expect(users).toHaveCount(2)
+    await expect(users.last()).toContainText('所有平台id 统一更换，包括 artifact id，所有 agent 可见id 以及外壳一起改')
+    await expect(conversation.getByRole('article', { name: 'Atlas', exact: true }).last()).toContainText('范围扩大为所有平台生成的 ID。')
+    expect(await conversation.getByRole('article').evaluateAll((articles) => articles.map((article) => article.getAttribute('aria-label')))).toEqual(['You', 'Atlas', 'You', 'Atlas'])
+    await page.setViewportSize({ width: 390, height: 740 })
+    await page.emulateMedia({ colorScheme: 'dark' })
+    await users.last().scrollIntoViewIfNeeded()
+    await expect(users.last()).toBeVisible()
+    await expect(users.last()).toContainText('所有平台id 统一更换，包括 artifact id，所有 agent 可见id 以及外壳一起改')
+  })
+
   test('opens readable conversation bubbles while retaining raw events in diagnostics', async ({ page }) => {
     await installObservationFixture(page, false, true)
     await page.goto('/logs')

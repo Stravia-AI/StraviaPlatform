@@ -20,7 +20,6 @@ sha2 = { workspace = true }
 sqlx = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync"] }
 toml = { workspace = true }
-uuid = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

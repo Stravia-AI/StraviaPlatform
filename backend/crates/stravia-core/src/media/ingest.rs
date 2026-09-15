@@ -329,10 +329,10 @@ async fn normalize_source(
                 store(gateway)?
                     .extend_retention(principal, &id, retention)
                     .await?;
-                *url = format!("https://stravia/artifact/{}", id.as_str());
+                *url = format!("sa:{}", id.as_str());
                 return Ok(());
             }
-            if url.starts_with("https://stravia/") {
+            if url.starts_with("sa:") || url.starts_with("https://stravia/") {
                 return Err(ArtifactError::Invalid("Invalid Artifact Reference".into()));
             }
             fetch_public_file(url, cancellation)

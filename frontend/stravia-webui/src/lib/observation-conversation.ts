@@ -23,14 +23,22 @@ function runText(run: RunDetail): string {
   return text
 }
 
+function runInputText(run: RunDetail): string | undefined {
+  const payload = run.events.find((event) => event.kind === 'input_preview_recorded' && event.run_id === run.id)?.payload
+  return payload && typeof payload === 'object' && 'text' in payload && typeof payload.text === 'string' ? payload.text : undefined
+}
+
 export function observationConversationMessages(detail: InteractionDetail, blocks: LiveContentBlock[] = [], previous: ObservationChatMessage[] = []): ObservationChatMessage[] {
   const interaction = detail.interaction
   const model = interaction.first_model_display_name?.trim() || interaction.first_route_id
-  const messages: ObservationChatMessage[] = [{ id: `user:${interaction.id}`, role: 'user', text: interaction.input_preview ?? '', at: interaction.started_at, model: '', live: false, unsaved: false }]
   const runs = detail.runs.toSorted((a, b) => a.started_at - b.started_at)
+  const firstInput = runs[0] && runInputText(runs[0])
+  const messages: ObservationChatMessage[] = [{ id: `user:${interaction.id}`, role: 'user', text: interaction.input_preview ?? firstInput ?? '', at: interaction.started_at, model: '', live: false, unsaved: false }]
   const pendingBlocks = blocks.filter((block) => block.interaction_id === interaction.id)
   const visible = pendingBlocks.filter((block) => block.kind === 'client_visible_content_delta')
-  for (const run of runs) {
+  for (const [index, run] of runs.entries()) {
+    const input = index === 0 ? firstInput : runInputText(run)
+    if (index > 0 && input !== undefined) messages.push({ id: `user:${run.id}`, role: 'user', text: input, at: run.started_at, model: '', live: false, unsaved: false })
     const pending = visible.filter((block) => block.run_id === run.id)
     messages.push({ id: `assistant:${run.id}`, role: 'assistant', text: runText(run) + pending.map((block) => block.text).join(''), at: run.started_at,
       model: run.model_display_name?.trim() || run.route_id, live: run.status === 'running', unsaved: pendingBlocks.some((block) => block.run_id === run.id) })

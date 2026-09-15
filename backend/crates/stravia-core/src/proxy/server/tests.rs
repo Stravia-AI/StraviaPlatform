@@ -766,6 +766,9 @@ async fn artifact_create_upload_response_hides_the_artifact_identity() {
             "create upload must still return {required}: {body}"
         );
     }
+    assert!(stravia_runtime_contract::identifier::valid_id(
+        fields["upload_id"].as_str().expect("upload_id string")
+    ));
     assert!(
         !fields.contains_key("artifact_id"),
         "the final Artifact identity must not be exposed before completion"

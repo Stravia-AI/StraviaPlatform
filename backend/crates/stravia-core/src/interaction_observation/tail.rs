@@ -60,7 +60,7 @@ impl Window {
             for mut value in values {
                 if private_control(&value) && !public_thinking_projection(&value) {
                     // A nonmatching boundary preserves continuity without retaining private state.
-                    value = serde_json::json!({"diagnostic_boundary": uuid::Uuid::new_v4().to_string()});
+                    value = serde_json::json!({"diagnostic_boundary": stravia_runtime_contract::identifier::new_id()});
                 }
                 let encoded = serde_json::to_vec(&value).ok()?;
                 bytes += encoded.len();
@@ -364,7 +364,7 @@ mod tests {
 
     #[test]
     fn projected_thinking_preserves_complete_interaction_tail() {
-        let reference = "hm_0123456789abcdefghij";
+        let reference = "abcdefghijklmnopqrstuvwxyzab";
         let projected = format!(
             "{}{}",
             crate::history_marker::render_preview_projection_span(reference, 0, "公开思考预览"),
@@ -382,7 +382,7 @@ mod tests {
         for replay in [
             AiItem::thinking(projected.replace("公开思考预览", "修改后的预览"), None),
             AiItem::thinking(
-                projected.replace(reference, "hm_abcdefghijklmnopqrst"),
+                projected.replace(reference, "abcdefghijklmnopqrstuvwxyzac"),
                 None,
             ),
         ] {
@@ -494,10 +494,12 @@ mod tests {
         for thinking in [
             AiItem::thinking("未投影的原始思考", None),
             AiItem::thinking(
-                crate::history_marker::render_history_marker_reference("hm_0123456789abcdefghij"),
+                crate::history_marker::render_history_marker_reference(
+                    "abcdefghijklmnopqrstuvwxyzab",
+                ),
                 Some("protected-signature".into()),
             ),
-            AiItem::thinking("<!-- stravia-history-marker:invalid -->", None),
+            AiItem::thinking("<!--sh:invalid-->", None),
         ] {
             assert!(matches!(
                 association(thinking.clone(), thinking),

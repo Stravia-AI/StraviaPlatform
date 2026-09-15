@@ -368,10 +368,57 @@ fn media_turn_id(segment: &crate::history_marker::HiddenHistorySegment) -> Optio
     else {
         return None;
     };
-    content.get("report").filter(|report| report.is_object())?;
+    let report = content.get("report")?.as_object()?;
+    report.get("answer")?.as_str()?;
+    report.get("artifacts")?.as_array()?;
+    report.get("limitations")?.as_array()?;
     content.get("completion")?.as_str()?;
     content
         .get("turn_id")?
         .as_str()
-        .filter(|turn_id| turn_id.starts_with("aturn_"))
+        .filter(|turn_id| stravia_runtime_contract::identifier::valid_id(turn_id))
+}
+
+#[cfg(test)]
+mod media_turn_tests {
+    use super::*;
+
+    fn segment(report: serde_json::Value) -> crate::history_marker::HiddenHistorySegment {
+        crate::history_marker::HiddenHistorySegment::Platform {
+            call: stravia_runtime_contract::protocol::ir::ToolCall {
+                id: "external-call".into(),
+                name: "StraviaRead".into(),
+                arguments: "{}".into(),
+            },
+            result: ContentBlock::ToolResult {
+                tool_use_id: "external-call".into(),
+                content: serde_json::json!({
+                    "turn_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "completion": "complete",
+                    "report": report,
+                }),
+                content_kind: Some(
+                    stravia_runtime_contract::protocol::ir::ToolResultContentKind::Json,
+                ),
+                is_error: None,
+                cache_control: None,
+            },
+        }
+    }
+
+    #[test]
+    fn media_turn_identity_uses_report_schema_not_shared_tool_name() {
+        let media = segment(serde_json::json!({
+            "answer": "description",
+            "artifacts": [],
+            "limitations": [],
+        }));
+        assert_eq!(media_turn_id(&media), Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+
+        let search = segment(serde_json::json!({
+            "answer": "result",
+            "sources": [],
+        }));
+        assert_eq!(media_turn_id(&search), None);
+    }
 }

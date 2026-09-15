@@ -62,7 +62,7 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
             _ = tokio::time::sleep_until(tokio::time::Instant::from_std(input.deadline)) => return Err(ModelTurnError::new("deadline_exceeded", "Model Turn deadline exceeded")),
             result = crate::media::ingest::normalize_request(&self.gateway, &input.principal, &mut input.request, &input.cancellation) => result.map_err(|error| ModelTurnError::new("attachment_ingest_failed", error.to_string()))?,
         }
-        let model_turn_id = uuid::Uuid::new_v4().to_string();
+        let model_turn_id = stravia_runtime_contract::identifier::new_id();
         let operation_started = Instant::now();
         let standalone = input.purpose == super::ModelTurnPurpose::Compact;
         let observer = input.observer.clone();
@@ -305,7 +305,7 @@ fn register_compaction_stream(
             let operation_id = if matches!(mode, CompactionMode::Standalone) {
                 model_turn_id.clone()
             } else {
-                uuid::Uuid::new_v4().to_string()
+                stravia_runtime_contract::identifier::new_id()
             };
             let operation_event =
                 |phase, registration_id, error_code| RunEvent::CompactionOperation {
@@ -1377,7 +1377,7 @@ async fn prepare_attempt(
             namespace: target_namespace.clone(),
             provider_id: provider.id.clone(),
             target_id: target_key.clone(),
-            transport_attempt: uuid::Uuid::new_v4().to_string(),
+            transport_attempt: stravia_runtime_contract::identifier::new_id(),
             require_affinity,
             session_affinity,
         })

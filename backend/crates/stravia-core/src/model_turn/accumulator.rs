@@ -203,7 +203,7 @@ impl StreamResponseAccumulator {
                     tc.arguments.push_str(arguments);
                 } else {
                     self.tool_calls[*index] = Some(ToolCall {
-                        id: format!("tool-{index}"),
+                        id: stravia_runtime_contract::identifier::new_id(),
                         name: String::new(),
                         arguments: arguments.clone(),
                     });
