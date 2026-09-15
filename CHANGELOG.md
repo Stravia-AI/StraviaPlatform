@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Windows NSIS installers now include English and Simplified Chinese. The first interactive install offers a language choice defaulting to the Windows UI language when it matches; later installs and uninstalls reuse the saved choice. Passive updater installs still skip wizard pages and reuse a saved installer language.
+
 ### Changed
 
 - **Breaking:** Artifact creation returns upload-session credentials only; the final Artifact ID is returned on completion. Identical complete bytes and exact MIME under the same Principal now keep one identity across ingestion paths, multipart boundaries, concurrent uploads, and restarts. Re-uploading never shortens retention and can retain expired content again after full validation. Legacy random IDs and stored histories are not rewritten.

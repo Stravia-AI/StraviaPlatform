@@ -22,5 +22,13 @@
         }
       }
     ]
+  },
+  "bundle": {
+    "windows": {
+      "nsis": {
+        "languages": ["English", "SimpChinese"],
+        "displayLanguageSelector": true
+      }
+    }
   }
 }

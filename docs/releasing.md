@@ -42,8 +42,8 @@ bunx tauri signer generate -- -w /secure/offline/stravia-updater.key
 
 使用非生产签名的旧版本到新版本矩阵，在每个平台记录检查、下载、验签、安装、重启和重启后版本：
 
-- Windows x86_64：确认仅出现 NSIS passive 原生进度窗。
-- Windows ARM64：确认仅出现 NSIS passive 原生进度窗。
+- Windows x86_64：确认仅出现 NSIS passive 原生进度窗。已保存安装语言时不得额外出现语言选择窗。
+- Windows ARM64：确认仅出现 NSIS passive 原生进度窗。已保存安装语言时不得额外出现语言选择窗。
 - Linux x86_64 AppImage：确认应用内安装进度、原地替换和 relaunch。
 - Linux ARM64 AppImage：确认应用内安装进度、原地替换和 relaunch。
 

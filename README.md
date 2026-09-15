@@ -322,7 +322,7 @@ Migration retains source data, replays copied WAL into a private SQLite snapshot
 Version tags publish Server archives and Desktop installers through [GitHub Releases](https://github.com/Stravia-AI/StraviaPlatform/releases), alongside a multi-architecture container image and Nix packages. Release outputs currently cover:
 
 - Server: Linux and Windows on x86_64 and ARM64; Linux provides both GNU and musl archives.
-- Desktop: signed Tauri updater artifacts and ordinary Linux AppImage or Windows NSIS downloads on x86_64 and ARM64.
+- Desktop: signed Tauri updater artifacts and ordinary Linux AppImage or Windows NSIS downloads on x86_64 and ARM64. The NSIS installer includes English and Simplified Chinese; first install offers a language choice defaulting to the Windows UI language when it matches.
 - Container: `linux/amd64` and `linux/arm64` under `ghcr.io/stravia-ai/straviaplatform`.
 - Nix: native `x86_64-linux` and `aarch64-linux` packages from the repository flake, published to the [`stravia-platform` Cachix cache](https://app.cachix.org/cache/stravia-platform).
 

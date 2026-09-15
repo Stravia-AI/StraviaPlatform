@@ -322,7 +322,7 @@ cargo run -p stravia-devtools -- migrate-data --from ./old-data --to ./data --ap
 版本 tag 会通过 [GitHub Releases](https://github.com/Stravia-AI/StraviaPlatform/releases) 发布 Server 压缩包和 Desktop 安装包，同时发布多架构容器镜像和 Nix package。当前发布范围：
 
 - Server：Linux 和 Windows 的 x86_64、ARM64 架构；Linux 同时提供 GNU 与 musl 压缩包。
-- Desktop：签名的 Tauri updater 产物，以及普通下载用的 Linux AppImage 和 Windows NSIS 安装包，均覆盖 x86_64 与 ARM64。
+- Desktop：签名的 Tauri updater 产物，以及普通下载用的 Linux AppImage 和 Windows NSIS 安装包，均覆盖 x86_64 与 ARM64。NSIS 安装包包含英文和简体中文；首次安装可选择语言，并在系统语言匹配时预选。
 - 容器：`ghcr.io/stravia-ai/straviaplatform` 下的 `linux/amd64` 与 `linux/arm64`。
 - Nix：仓库 flake 提供原生 `x86_64-linux` 和 `aarch64-linux` package，release 构建会推送到 [`stravia-platform` Cachix cache](https://app.cachix.org/cache/stravia-platform)。
 
