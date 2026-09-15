@@ -1,51 +1,16 @@
 <script lang="ts">
 import DOMPurify from 'dompurify'
-import { marked } from 'marked'
+import { MARKDOWN_SANITIZE, markdownBlocks } from '$lib/markdown'
 
 let { text }: { text: string } = $props()
 
 // 用原文起点区分重复段落，追加正文时不替换已经完成的块。
-const blocks = $derived.by(() => {
-  let offset = 0
-  return marked.lexer(text, { gfm: true, breaks: true }).map((token) => {
-    const id = offset
-    offset += token.raw.length
-    return {
-      id,
-      html: DOMPurify.sanitize(marked.parser([token], { async: false, gfm: true, breaks: true }), {
-        ALLOWED_TAGS: [
-          'p',
-          'br',
-          'strong',
-          'em',
-          'del',
-          'code',
-          'pre',
-          'blockquote',
-          'ul',
-          'ol',
-          'li',
-          'h1',
-          'h2',
-          'h3',
-          'h4',
-          'h5',
-          'h6',
-          'hr',
-          'table',
-          'thead',
-          'tbody',
-          'tr',
-          'th',
-          'td',
-        ],
-        ALLOWED_ATTR: ['start'],
-        ALLOW_DATA_ATTR: false,
-        ALLOW_ARIA_ATTR: false,
-      }),
-    }
-  })
-})
+const blocks = $derived.by(() =>
+  markdownBlocks(text).map((block) => ({
+    ...block,
+    html: DOMPurify.sanitize(block.html, MARKDOWN_SANITIZE),
+  })),
+)
 </script>
 
 <div class="markdown-content">
