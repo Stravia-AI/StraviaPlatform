@@ -8,6 +8,8 @@ use super::{store::ObservationStore, types::*};
 const DAY_MS: i64 = 86_400_000;
 const DEFAULT_LIMIT: u32 = 50;
 const MAX_LIMIT: u32 = 200;
+// 与卡片四项展示合计一致：未知分项按 0。按根 DAG（含子孙）合计，隐藏低于阈值的链路。
+const CHAIN_TOKEN_SUM: &str = "COALESCE((SELECT SUM(CASE WHEN a.input_tokens IS NULL OR a.cache_read_tokens IS NULL THEN 0 WHEN a.input_tokens > a.cache_read_tokens THEN a.input_tokens - a.cache_read_tokens ELSE 0 END + COALESCE(a.output_tokens,0) + COALESCE(a.cache_read_tokens,0) + COALESCE(a.cache_write_tokens,0)) FROM target_attempt_observations a WHERE a.interaction_id IN (SELECT id FROM interaction_observations WHERE root_id=i.root_id)),0)";
 // 直接从当前窗口的 attempts 派生累计与覆盖信息，旧版持久化的 NULL 汇总无需回填。
 const INTERACTION_SELECT: &str = "SELECT i.id,i.root_id,i.parent_interaction_id,i.generation_root_id,i.first_route_id,i.first_model_display_name,i.status,i.started_at,i.last_active_at,i.input_preview,i.visible_tail,
 CAST(SUM(CASE
@@ -885,9 +887,6 @@ fn add_root_filters_postgres(b: &mut QueryBuilder<sqlx::Postgres>, q: &ForestQue
     b.push(")");
     add_chain_token_filter_postgres(b, q);
 }
-
-// 与卡片四项展示合计一致：未知分项按 0。按根 DAG（含子孙）合计，隐藏低于阈值的链路。
-const CHAIN_TOKEN_SUM: &str = "COALESCE((SELECT SUM(CASE WHEN a.input_tokens IS NULL OR a.cache_read_tokens IS NULL THEN 0 WHEN a.input_tokens > a.cache_read_tokens THEN a.input_tokens - a.cache_read_tokens ELSE 0 END + COALESCE(a.output_tokens,0) + COALESCE(a.cache_read_tokens,0) + COALESCE(a.cache_write_tokens,0)) FROM target_attempt_observations a WHERE a.interaction_id IN (SELECT id FROM interaction_observations WHERE root_id=i.root_id)),0)";
 
 fn add_chain_token_filter_sqlite(b: &mut QueryBuilder<sqlx::Sqlite>, q: &ForestQuery) {
     let Some(min) = q.min_tokens.filter(|value| *value > 0) else {

@@ -1153,7 +1153,6 @@ function formatBytes(value: number | undefined): string {
             <div class="flex min-h-10 items-center gap-3">
               <Slider
                 id="observation-min-tokens"
-                type="single"
                 bind:value={minTokenStop}
                 min={0}
                 max={minTokenStops.length - 1}
