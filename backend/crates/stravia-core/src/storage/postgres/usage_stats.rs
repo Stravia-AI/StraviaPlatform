@@ -85,7 +85,10 @@ impl UsageStatsStore for PostgresUsageStatsStore {
              )
              SELECT
                  (SELECT COUNT(*)::BIGINT FROM turns) AS total_requests,
-                 (SELECT CASE WHEN COUNT(*) > 0 AND COUNT(input_tokens) = COUNT(*) THEN SUM(input_tokens)::BIGINT END FROM attempts) AS total_input_tokens,
+                 (SELECT CASE WHEN COUNT(*) > 0
+                              AND COUNT(input_tokens) = COUNT(*)
+                              AND COUNT(cache_read_tokens) = COUNT(*)
+                         THEN SUM(GREATEST(input_tokens - cache_read_tokens, 0))::BIGINT END FROM attempts) AS total_input_tokens,
                  (SELECT CASE WHEN COUNT(*) > 0 AND COUNT(output_tokens) = COUNT(*) THEN SUM(output_tokens)::BIGINT END FROM attempts) AS total_output_tokens,
                  (SELECT CASE WHEN COUNT(*) > 0 AND COUNT(cache_read_tokens) = COUNT(*) THEN SUM(cache_read_tokens)::BIGINT END FROM attempts) AS total_cache_read_tokens,
                  (SELECT CASE WHEN COUNT(*) > 0 AND COUNT(cache_write_tokens) = COUNT(*) THEN SUM(cache_write_tokens)::BIGINT END FROM attempts) AS total_cache_write_tokens,
@@ -112,7 +115,10 @@ impl UsageStatsStore for PostgresUsageStatsStore {
                  FROM turns GROUP BY hour
              ), attempt_stats AS (
                  SELECT t.hour,
-                        CASE WHEN COUNT(*) > 0 AND COUNT(a.input_tokens) = COUNT(*) THEN SUM(a.input_tokens)::BIGINT END AS total_input_tokens,
+                        CASE WHEN COUNT(*) > 0
+                                  AND COUNT(a.input_tokens) = COUNT(*)
+                                  AND COUNT(a.cache_read_tokens) = COUNT(*)
+                             THEN SUM(GREATEST(a.input_tokens - a.cache_read_tokens, 0))::BIGINT END AS total_input_tokens,
                         CASE WHEN COUNT(*) > 0 AND COUNT(a.output_tokens) = COUNT(*) THEN SUM(a.output_tokens)::BIGINT END AS total_output_tokens,
                         CASE WHEN COUNT(*) > 0 AND COUNT(a.cache_read_tokens) = COUNT(*) THEN SUM(a.cache_read_tokens)::BIGINT END AS total_cache_read_tokens,
                         CASE WHEN COUNT(*) > 0 AND COUNT(a.cache_write_tokens) = COUNT(*) THEN SUM(a.cache_write_tokens)::BIGINT END AS total_cache_write_tokens,
@@ -143,7 +149,10 @@ impl UsageStatsStore for PostgresUsageStatsStore {
                  FROM turns GROUP BY model
              ), attempt_stats AS (
                  SELECT t.model,
-                        CASE WHEN COUNT(*) > 0 AND COUNT(a.input_tokens) = COUNT(*) THEN SUM(a.input_tokens)::BIGINT END AS total_input_tokens,
+                        CASE WHEN COUNT(*) > 0
+                                  AND COUNT(a.input_tokens) = COUNT(*)
+                                  AND COUNT(a.cache_read_tokens) = COUNT(*)
+                             THEN SUM(GREATEST(a.input_tokens - a.cache_read_tokens, 0))::BIGINT END AS total_input_tokens,
                         CASE WHEN COUNT(*) > 0 AND COUNT(a.output_tokens) = COUNT(*) THEN SUM(a.output_tokens)::BIGINT END AS total_output_tokens,
                         CASE WHEN COUNT(*) > 0 AND COUNT(a.reasoning_tokens) = COUNT(*) THEN SUM(a.reasoning_tokens)::BIGINT END AS total_reasoning_tokens
                  FROM turns t JOIN target_attempt_observations a ON a.model_turn_id = t.id GROUP BY t.model
@@ -181,7 +190,10 @@ impl UsageStatsStore for PostgresUsageStatsStore {
             "SELECT t.api_key_id,
                     COALESCE(MAX(NULLIF(t.api_key_name, '')), t.api_key_id) AS api_key_name,
                     COUNT(DISTINCT t.id)::BIGINT AS request_count,
-                    CASE WHEN COUNT(a.id) > 0 AND COUNT(a.input_tokens) = COUNT(a.id) THEN SUM(a.input_tokens)::BIGINT END AS total_input_tokens,
+                    CASE WHEN COUNT(a.id) > 0
+                              AND COUNT(a.input_tokens) = COUNT(a.id)
+                              AND COUNT(a.cache_read_tokens) = COUNT(a.id)
+                         THEN SUM(GREATEST(a.input_tokens - a.cache_read_tokens, 0))::BIGINT END AS total_input_tokens,
                     CASE WHEN COUNT(a.id) > 0 AND COUNT(a.output_tokens) = COUNT(a.id) THEN SUM(a.output_tokens)::BIGINT END AS total_output_tokens,
                     CASE WHEN COUNT(a.id) > 0 AND COUNT(a.cache_read_tokens) = COUNT(a.id) THEN SUM(a.cache_read_tokens)::BIGINT END AS cache_read_tokens,
                     CASE WHEN COUNT(a.id) > 0 AND COUNT(a.cache_write_tokens) = COUNT(a.id) THEN SUM(a.cache_write_tokens)::BIGINT END AS cache_write_tokens,
@@ -196,5 +208,192 @@ impl UsageStatsStore for PostgresUsageStatsStore {
         .bind(cutoff)
         .fetch_all(&self.pool)
         .await?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn insert_turn(
+        pool: &Pool<Postgres>,
+        id: &str,
+        started_at: i64,
+        model: &str,
+        api_key_id: &str,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            "INSERT INTO interaction_observations
+             (id,principal,api_key_id,api_key_name,root_id,root_run_id,first_route_id,status,started_at,last_active_at,expires_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+        )
+        .bind(id)
+        .bind("owner")
+        .bind(api_key_id)
+        .bind("Test key")
+        .bind(id)
+        .bind(id)
+        .bind("route")
+        .bind("completed")
+        .bind(started_at)
+        .bind(started_at)
+        .bind(i64::MAX)
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO inference_run_observations
+             (id,interaction_id,ingress_protocol,route_id,status,debug_enabled,started_at,last_active_at,finished_at,last_event_sequence,expires_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+        )
+        .bind(id)
+        .bind(id)
+        .bind("responses")
+        .bind("route")
+        .bind("completed")
+        .bind(false)
+        .bind(started_at)
+        .bind(started_at)
+        .bind(started_at + 10)
+        .bind(0_i64)
+        .bind(i64::MAX)
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO model_turn_observations
+             (id,run_id,interaction_id,route_id,model_display_name,api_key_id,api_key_name,status,started_at,finished_at,last_event_sequence)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+        )
+        .bind(id)
+        .bind(id)
+        .bind(id)
+        .bind("route")
+        .bind(model)
+        .bind(api_key_id)
+        .bind("Test key")
+        .bind("completed")
+        .bind(started_at)
+        .bind(started_at + 10)
+        .bind(0_i64)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn insert_attempt(
+        pool: &Pool<Postgres>,
+        id: &str,
+        turn_id: &str,
+        started_at: i64,
+        input_tokens: i64,
+        cache_read_tokens: Option<i64>,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            "INSERT INTO target_attempt_observations
+             (id,model_turn_id,run_id,interaction_id,target_id,provider_id,provider_name,upstream_model,protocol,status,started_at,finished_at,duration_ms,input_tokens,output_tokens,cache_read_tokens,reasoning_tokens,usage_recorded,last_event_sequence)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)",
+        )
+        .bind(id)
+        .bind(turn_id)
+        .bind(turn_id)
+        .bind(turn_id)
+        .bind("target")
+        .bind("provider")
+        .bind("Provider")
+        .bind("upstream")
+        .bind("responses")
+        .bind("completed")
+        .bind(started_at)
+        .bind(started_at + 10)
+        .bind(10_i64)
+        .bind(input_tokens)
+        .bind(3_i64)
+        .bind(cache_read_tokens)
+        .bind(1_i64)
+        .bind(true)
+        .bind(0_i64)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn postgres_management_stats_project_net_input_per_attempt() -> anyhow::Result<()> {
+        let Ok(url) = std::env::var("DB_URL") else {
+            eprintln!("skip PostgreSQL usage stats verification: DB_URL is not set");
+            return Ok(());
+        };
+        let admin = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await?;
+        let schema = format!("stravia_usage_stats_test_{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+            .execute(&admin)
+            .await?;
+        let result = async {
+            let options: sqlx::postgres::PgConnectOptions = url.parse()?;
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect_with(options.options([("search_path", schema.as_str())]))
+                .await?;
+            let result = async {
+                crate::migrations::migrate_postgres(&pool).await?;
+                let now = chrono::Utc::now().timestamp_millis();
+                let recent = now - 1_000;
+                let old = now - 2 * 60 * 60 * 1_000;
+                insert_turn(&pool, "recent", recent, "model", "key").await?;
+                insert_attempt(&pool, "recent-a", "recent", recent, 12, Some(5)).await?;
+                insert_attempt(&pool, "recent-b", "recent", recent, 3, Some(9)).await?;
+                insert_turn(&pool, "old", old, "unknown-cache", "old-key").await?;
+                insert_attempt(&pool, "old-a", "old", old, 8, None).await?;
+
+                let store = PostgresUsageStatsStore {
+                    pool: pool.clone(),
+                    last_route_snapshot: Arc::new(std::sync::RwLock::new(Vec::new())),
+                };
+                let overview = store.stats_overview(Some(1)).await?;
+                assert_eq!(overview.total_input_tokens, Some(7));
+                assert_eq!(overview.total_output_tokens, Some(6));
+                assert_eq!(overview.total_reasoning_tokens, Some(2));
+                assert_eq!(store.stats_overview(None).await?.total_input_tokens, None);
+
+                let hourly = store.stats_hourly(1).await?;
+                assert_eq!(hourly.len(), 1);
+                assert_eq!(hourly[0].total_input_tokens, Some(7));
+                assert_eq!(hourly[0].total_output_tokens, Some(6));
+                assert_eq!(hourly[0].total_reasoning_tokens, Some(2));
+
+                let models = store.stats_by_model(Some(1)).await?;
+                assert_eq!(models.len(), 1);
+                assert_eq!(models[0].total_input_tokens, Some(7));
+                assert_eq!(models[0].total_output_tokens, Some(6));
+                assert_eq!(models[0].total_reasoning_tokens, Some(2));
+
+                let api_keys = store.stats_by_api_key(Some(1)).await?;
+                assert_eq!(api_keys.len(), 1);
+                assert_eq!(api_keys[0].total_input_tokens, Some(7));
+                assert_eq!(api_keys[0].total_output_tokens, Some(6));
+                assert_eq!(api_keys[0].reasoning_tokens, Some(2));
+
+                let raw_input: Option<i64> = sqlx::query_scalar(
+                    "SELECT SUM(input_tokens)::BIGINT FROM target_attempt_observations WHERE model_turn_id='recent'",
+                )
+                .fetch_one(&pool)
+                .await?;
+                assert_eq!(raw_input, Some(15));
+                Ok::<_, anyhow::Error>(())
+            }
+            .await;
+            pool.close().await;
+            result
+        }
+        .await;
+        let cleanup = sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+            .execute(&admin)
+            .await;
+        admin.close().await;
+        result?;
+        cleanup?;
+        Ok(())
     }
 }

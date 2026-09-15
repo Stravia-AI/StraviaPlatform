@@ -73,13 +73,15 @@ WebSocket 同样等待流生产任务的最终结果，再记录成功交付与�
 Interaction 卡片、详情与用量分析共享 `Confirmed Upstream Usage`：
 
 - 汇总所有 Inference Run、隐藏 Model Turn、重试和 Target failover 中上游明确报告的 usage；
-- input、output、cache read、cache write、reasoning 等字段分别累计，不把 cache 重复加进 total；
+- 管理面 input 在每个 attempt 上计算 `max(input_tokens - cache_read_tokens, 0)` 后累计；任一操作数未知时，该 attempt 的净输入未知，`missing_input_tokens` 同时计数。缓存写入不在此扣除范围内；
+- output 已包含 reasoning，不再累加或单列思考指标；cache read 与 cache write 保留独立展示。概览按输入、输出分别呈现，不以缺少缓存分项的相加结果冒充总 Token；
+- 原始 IR、attempt 用量、持久化事件与 wire debug trace 保留上游口径及 reasoning 子项；列表、详情、事件查询、实时 SSE、重放 SSE 与 Bundle 的管理汇总和事件均在读取或发布边界转换，历史数据无需改写，也不得将管理投影再次写入原始用量；
 - 每个实际上游 attempt 的 usage 最多记一次；
 - Target attempt 成功与明确报告的 usage 不因随后还原或映射发布失败而改写；Model Turn 的唯一终态由内部完成 gate 记录，只有发布完成且未被取消或超时抢占才记成功；
 - 上游尚未报告或永不报告时保持 `unknown`，不显示为零，不用本地 tokenizer 估算；
-- 聚合按字段累计已报告部分；某次 attempt 的未知值不抹掉其他 attempt 的已确认值。全部未报告时该字段保持 `null`，明确报告的零保留为零。失败但已报告的用量同样累计，重复报告不重复计数；
+- Interaction、Run 与 Bundle 聚合按字段累计已报告部分；某次 attempt 的未知值不抹掉其他 attempt 的已确认值。全部未报告时该字段保持 `null`，明确报告的零保留为零。失败但已报告的用量同样累计，重复报告不重复计数；用量分析的 overview、hourly、model、API Key 汇总沿用完整覆盖要求，组内任一 attempt 的输入或缓存读取未知时，组内净输入为 `null`；
 - Interaction、Run 与 Bundle 的聚合 `usage.coverage` 包含 `attempt_count` 和五项 `missing_*_tokens`，分别表示尝试总数及对应字段未报告的尝试数。单个 `usage_confirmed` 事件不携带聚合 coverage；正在运行与终态未报告的区别仍由 attempt 状态表达。coverage 不替代 `observation_gap`，无法记录的 attempt 不计入已观察尝试总数；
-- 查询从现存 attempt 记录派生已确认累计与覆盖信息，旧版保存的 `null` 汇总不遮蔽仍然存在的用量；无需改写旧事件或自动拆分历史 Interaction。界面沿用既有文案和布局；
+- 查询从现存 attempt 记录派生已确认累计与覆盖信息，旧版保存的 `null` 汇总不遮蔽仍然存在的用量；无需改写旧事件或自动拆分历史 Interaction。SQLite 与 PostgreSQL 使用相同计量规则，Route Scheduling 与成本计算仍读取原始用量；
 - 收到新的上游 usage 后更新持久化投影并推送 SSE。
 
 首内容超时在取消执行 future 前标记原因，未正常结束的 attempt 记录 `first_token_timeout`；`attempt_aborted` 仅作为没有明确结束原因的释放兜底。两者均不伪造 usage，也不改变原有超时配置、重试预算或调度策略，每个 attempt 仍只有一个终态。

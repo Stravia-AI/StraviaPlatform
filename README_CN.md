@@ -232,6 +232,7 @@ SvelteKit WebUI 可管理：
 - 在**额度总览**矩阵中查看 Provider 上报的配额、请求额度和余额，并按条件筛选、查看重置时间轴及基于 30 分钟采样的当前窗口耗尽预报；现场读取仍支持三分钟缓存、单个 Provider 刷新，并在刷新失败时保留上次成功结果
 - 运行时设置
 - 观察用量保留已确认的 token 累计，不因其他尝试未报告而全部变为未知；聚合 API 与调试包同时提供按字段的报告覆盖信息，不把未知消耗记为零。历史工具结果回放不会把后续独立用户输入误并为工具续接。
+- 请求详情、概览与用量分析统一展示扣除缓存读取后的输入 Token，以及包含思考的输出 Token。思考不再作为独立指标重复计量，缓存读取与缓存写入仍分别展示；输入或缓存读取未报告时，该次尝试的净输入保持未知。旧记录读取时采用相同口径，不改写原始上游用量。
 - SDK 与 AI 编码工具的可复制集成示例
 
 Interaction Observation 在 Debug 与 Release 构建中均可用。进程级 **Debug** 开关每次重启后默认为关闭，启用前必须确认；每个新准入的 Inference Run 独立快照当时开关，因此切换只影响之后准入的 Run。Debug 记录 canonical checkpoint 与有序 HTTP、SSE、WebSocket 应用协议消息，不是 TLS record、TCP packet、HTTP/2 frame，也不保证应用 adapter 以下的 packet/chunk 保真。凭据 header、URL userinfo、疑似凭据的 query value 和结构化凭据字段会在持久化前永久脱敏；提示词、业务正文及工具输入/输出仍可能属于敏感数据。

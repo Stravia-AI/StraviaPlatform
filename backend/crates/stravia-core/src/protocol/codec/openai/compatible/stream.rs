@@ -611,6 +611,21 @@ fn extract_usage(v: &Value) -> Usage {
         })
         .or_else(|| u.get("cached_content_token_count").and_then(Value::as_u64));
 
+    // 已报告的 0 必须保留为 Some(0)。prompt_tokens_details.reasoning_tokens 是输入侧字段，忽略。
+    let cache_write = first_u64(
+        u,
+        &[
+            "prompt_cache_write_tokens",
+            "cache_creation_input_tokens",
+            "cache_creation_tokens",
+        ],
+    );
+    let reasoning = u
+        .get("completion_tokens_details")
+        .and_then(|d| d.get("reasoning_tokens"))
+        .and_then(Value::as_u64)
+        .or_else(|| first_u64(u, &["completion_thinking_tokens"]));
+
     Usage {
         prompt_tokens: input.unwrap_or(0) as u32,
         completion_tokens: output.unwrap_or(0) as u32,
@@ -620,6 +635,8 @@ fn extract_usage(v: &Value) -> Usage {
             .unwrap_or(0) as u32,
         required_components_known: input.is_some() && output.is_some(),
         cache_read_tokens: cache_read.map(|v| v as u32),
+        cache_creation_tokens: cache_write.map(|v| v as u32),
+        reasoning_tokens: reasoning.map(|v| v as u32),
         ..Usage::default()
     }
 }

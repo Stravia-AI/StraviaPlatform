@@ -53,6 +53,29 @@ describe('observation attempt output speed', () => {
   })
 })
 
+describe('observation usage event summary', () => {
+  test('keeps cache counters separate without exposing reasoning as another output counter', () => {
+    const summary = observationEventSummary(
+      event(5, 'usage_confirmed', {
+        usage: {
+          input_tokens: 920,
+          output_tokens: 86,
+          cache_read_tokens: 320,
+          cache_write_tokens: 12,
+          reasoning_tokens: 4_444,
+        },
+      }),
+    )
+
+    expect(summary.facts).toEqual([
+      { label: m.observation_event_tokens_input(), value: '920' },
+      { label: m.observation_event_tokens_output(), value: '86' },
+      { label: m.observation_event_tokens_cache_read(), value: '320' },
+      { label: m.observation_event_tokens_cache_write(), value: '12' },
+    ])
+  })
+})
+
 describe('observation request failed event summary', () => {
   const requestFailed = (error: Record<string, unknown>) =>
     observationEventSummary(event(20, 'request_failed', { error }))

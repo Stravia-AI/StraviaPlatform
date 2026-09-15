@@ -3,7 +3,7 @@ use sqlx::{Connection, PgPool, Row, SqlitePool};
 
 use super::types::{
     ConfirmedUsage, IngressStart, ObservationEvent, RejectedOutcome, RunEvent, RunOutcome,
-    RunStart, TraceManifest,
+    RunStart, TraceManifest, project_event_for_management,
 };
 
 #[derive(Clone)]
@@ -1622,7 +1622,7 @@ async fn load_events_sqlite(
     let rows=sqlx::query("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload FROM observation_events WHERE sequence > ? ORDER BY sequence LIMIT 512").bind(after).fetch_all(pool).await?;
     rows.into_iter()
         .map(|r| {
-            Ok(ObservationEvent {
+            Ok(project_event_for_management(ObservationEvent {
                 sequence: r.try_get(0)?,
                 occurred_at: r.try_get(1)?,
                 interaction_id: r.try_get(2)?,
@@ -1632,7 +1632,7 @@ async fn load_events_sqlite(
                 payload: super::codec::decode_payload(serde_json::from_str(
                     &r.try_get::<String, _>(6)?,
                 )?)?,
-            })
+            }))
         })
         .collect()
 }
@@ -1640,7 +1640,7 @@ async fn load_events_postgres(pool: &PgPool, after: i64) -> anyhow::Result<Vec<O
     let rows=sqlx::query("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload FROM observation_events WHERE sequence > $1 ORDER BY sequence LIMIT 512").bind(after).fetch_all(pool).await?;
     rows.into_iter()
         .map(|r| {
-            Ok(ObservationEvent {
+            Ok(project_event_for_management(ObservationEvent {
                 sequence: r.try_get(0)?,
                 occurred_at: r.try_get(1)?,
                 interaction_id: r.try_get(2)?,
@@ -1648,7 +1648,7 @@ async fn load_events_postgres(pool: &PgPool, after: i64) -> anyhow::Result<Vec<O
                 rejection_id: r.try_get(4)?,
                 kind: r.try_get(5)?,
                 payload: super::codec::decode_payload(r.try_get(6)?)?,
-            })
+            }))
         })
         .collect()
 }
@@ -1678,7 +1678,7 @@ mod tests {
                 i64::MAX,
             )
             .await?;
-        for attempt in ["unknown", "reported", "reported-failure"] {
+        for attempt in ["unknown", "reported", "overcached", "unknown-cache"] {
             store
                 .persist_run_event(
                     id,
@@ -1711,17 +1711,21 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .missing_input_tokens,
-            3
+            4
         );
 
-        for attempt in ["reported", "reported-failure"] {
+        for (attempt, input_tokens, cache_read_tokens) in [
+            ("reported", 12, Some(5)),
+            ("overcached", 3, Some(9)),
+            ("unknown-cache", 8, None),
+        ] {
             let event = RunEvent::UsageConfirmed {
                 model_turn_id: id.into(),
                 attempt_id: format!("{id}-{attempt}"),
                 usage: ConfirmedUsage {
-                    input_tokens: Some(12),
+                    input_tokens: Some(input_tokens),
                     output_tokens: Some(3),
-                    cache_read_tokens: Some(0),
+                    cache_read_tokens,
                     cache_write_tokens: None,
                     reasoning_tokens: Some(1),
                     coverage: None,
@@ -1733,7 +1737,8 @@ mod tests {
         for (attempt, status) in [
             ("unknown", "failed"),
             ("reported", "completed"),
-            ("reported-failure", "failed"),
+            ("overcached", "failed"),
+            ("unknown-cache", "completed"),
         ] {
             store
                 .persist_run_event(
@@ -1758,23 +1763,54 @@ mod tests {
             .await?
             .unwrap();
         let expected = ConfirmedUsage {
-            input_tokens: Some(24),
-            output_tokens: Some(6),
-            cache_read_tokens: Some(0),
+            // Management input is projected per attempt: (12 - 5) + max(3 - 9, 0).
+            // The attempt with unknown cache reads remains unknown instead of assuming zero.
+            input_tokens: Some(7),
+            // Output already includes reasoning; reasoning remains a diagnostic breakdown only.
+            output_tokens: Some(9),
+            cache_read_tokens: Some(14),
             cache_write_tokens: None,
-            reasoning_tokens: Some(2),
+            reasoning_tokens: Some(3),
             coverage: Some(UsageCoverage {
-                attempt_count: 3,
-                missing_input_tokens: 1,
+                attempt_count: 4,
+                missing_input_tokens: 2,
                 missing_output_tokens: 1,
-                missing_cache_read_tokens: 1,
-                missing_cache_write_tokens: 3,
+                missing_cache_read_tokens: 2,
+                missing_cache_write_tokens: 4,
                 missing_reasoning_tokens: 1,
             }),
         };
         assert_eq!(detail.interaction.usage, expected);
         assert_eq!(detail.runs[0].usage, expected);
         let events = &detail.runs[0].events;
+        let reported_usage = events
+            .iter()
+            .find(|event| {
+                event.kind == "usage_confirmed"
+                    && event.payload["attempt_id"] == "partial-usage-reported"
+            })
+            .expect("reported management usage event");
+        assert_eq!(reported_usage.payload["usage"]["input_tokens"], 7);
+        assert_eq!(reported_usage.payload["usage"]["cache_read_tokens"], 5);
+        let overcached_usage = events
+            .iter()
+            .find(|event| {
+                event.kind == "usage_confirmed"
+                    && event.payload["attempt_id"] == "partial-usage-overcached"
+            })
+            .expect("overcached management usage event");
+        assert_eq!(overcached_usage.payload["usage"]["input_tokens"], 0);
+        let unknown_cache_usage = events
+            .iter()
+            .find(|event| {
+                event.kind == "usage_confirmed"
+                    && event.payload["attempt_id"] == "partial-usage-unknown-cache"
+            })
+            .expect("unknown-cache management usage event");
+        assert_eq!(
+            unknown_cache_usage.payload["usage"]["input_tokens"],
+            Value::Null
+        );
         let bundle = crate::interaction_observation::project_bundle_summary(
             &detail,
             events,
@@ -1792,6 +1828,16 @@ mod tests {
         crate::migrations::migrate_sqlite(&pool).await?;
         let store = ObservationStore::Sqlite(pool.clone());
         confirmed_usage_scenario(&store).await?;
+        let raw_usage: (i64, i64) = sqlx::query_as(
+            "SELECT json_extract(payload,'$.usage.input_tokens'),
+                    json_extract(payload,'$.usage.cache_read_tokens')
+             FROM observation_events
+             WHERE kind='usage_confirmed'
+               AND json_extract(payload,'$.attempt_id')='partial-usage-reported'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(raw_usage, (12, 5));
         // 旧版本持久化的未知总计不能遮住仍然存在的 attempt 用量。
         sqlx::query(
             "UPDATE interaction_observations SET input_tokens=NULL WHERE id='partial-usage'",
@@ -1806,7 +1852,7 @@ mod tests {
                 .interaction
                 .usage
                 .input_tokens,
-            Some(24)
+            Some(7)
         );
         pool.close().await;
         Ok(())

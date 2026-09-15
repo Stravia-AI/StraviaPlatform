@@ -898,7 +898,9 @@ fn publish(
     event: ObservationEvent,
 ) {
     trace_sequence.fetch_max(event.sequence, Ordering::AcqRel);
-    let _ = updates.send(ObservationUpdate::Event(event));
+    let _ = updates.send(ObservationUpdate::Event(project_event_for_management(
+        event,
+    )));
 }
 
 fn manifests_match(left: &TraceManifest, right: &TraceManifest) -> bool {

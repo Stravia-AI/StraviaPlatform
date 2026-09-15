@@ -29,7 +29,7 @@ const statusLabels: Record<string, string> = {
 }
 
 const usage: ConfirmedUsage = {
-  input_tokens: 1_240,
+  input_tokens: 920,
   output_tokens: 86,
   cache_read_tokens: 320,
   cache_write_tokens: null,
@@ -1674,7 +1674,15 @@ test.describe('Interaction Observation canvas', () => {
   test('opens readable conversation bubbles while retaining raw events in diagnostics', async ({ page }) => {
     await installObservationFixture(page, false, true)
     await page.goto('/logs')
-    await node(page, 'Atlas', 'completed').getByRole('heading', { name: 'Atlas', exact: true }).click()
+    const atlas = node(page, 'Atlas', 'completed')
+    const cardUsage = atlas.getByLabel('Confirmed usage')
+    await expect(cardUsage.getByTitle('IN')).toContainText('920')
+    await expect(cardUsage.getByTitle('OUT')).toContainText('86')
+    await expect(cardUsage.getByTitle('C·R')).toContainText('320')
+    await expect(cardUsage.getByTitle('C·W')).toContainText('–')
+    await expect(cardUsage).not.toContainText('RSN')
+
+    await atlas.getByRole('heading', { name: 'Atlas', exact: true }).click()
     const inspector = page.getByRole('complementary', { name: 'Observation details' })
     const conversation = inspector.getByRole('log', { name: 'Conversation' })
     await expect(conversation.getByRole('article', { name: 'You', exact: true })).toContainText('Atlas user question')
@@ -1684,6 +1692,12 @@ test.describe('Interaction Observation canvas', () => {
     await expect(inspector.getByText('run-interaction-atlas', { exact: true })).toBeHidden()
     await expect(inspector.getByText('retained diagnostic record', { exact: false })).toBeHidden()
     await inspector.getByRole('tab', { name: 'Diagnostics', exact: true }).click()
+    const runUsage = inspector.getByLabel('Confirmed usage')
+    await expect(runUsage).toContainText('IN920')
+    await expect(runUsage).toContainText('OUT86')
+    await expect(runUsage).toContainText('C·R320')
+    await expect(runUsage).toContainText('C·WNot reported')
+    await expect(runUsage).not.toContainText('RSN')
     await expect(inspector.getByText('run-interaction-atlas', { exact: true })).toBeHidden()
     for (const disclosure of await inspector
       .getByRole('button', { name: 'Technical identifiers', exact: true })

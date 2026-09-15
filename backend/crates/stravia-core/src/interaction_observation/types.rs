@@ -73,6 +73,29 @@ impl ConfirmedUsage {
     }
 }
 
+pub(super) fn project_event_for_management(mut event: ObservationEvent) -> ObservationEvent {
+    if event.kind != "usage_confirmed" {
+        return event;
+    }
+    let Some(usage) = event
+        .payload
+        .get_mut("usage")
+        .and_then(Value::as_object_mut)
+    else {
+        return event;
+    };
+    let projected_input = usage
+        .get("input_tokens")
+        .and_then(Value::as_i64)
+        .zip(usage.get("cache_read_tokens").and_then(Value::as_i64))
+        .map(|(input, cache_read)| input.saturating_sub(cache_read).max(0));
+    usage.insert(
+        "input_tokens".into(),
+        projected_input.map(Value::from).unwrap_or(Value::Null),
+    );
+    event
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct IngressStart {
     pub id: String,

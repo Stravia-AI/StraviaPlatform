@@ -269,7 +269,6 @@ export function observationEventSummary(
         ['output_tokens', m.observation_event_tokens_output],
         ['cache_read_tokens', m.observation_event_tokens_cache_read],
         ['cache_write_tokens', m.observation_event_tokens_cache_write],
-        ['reasoning_tokens', m.observation_event_tokens_reasoning],
       ]
       for (const [key, label] of fields) {
         if (count(usage[key])) add(label(), formatNumber(usage[key]))

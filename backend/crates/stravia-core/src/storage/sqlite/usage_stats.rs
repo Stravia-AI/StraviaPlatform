@@ -90,7 +90,10 @@ impl UsageStatsStore for SqliteUsageStatsStore {
              )
              SELECT
                  (SELECT COUNT(*) FROM turns) AS total_requests,
-                 (SELECT CASE WHEN COUNT(*) > 0 AND COUNT(input_tokens) = COUNT(*) THEN SUM(input_tokens) END FROM attempts) AS total_input_tokens,
+                 (SELECT CASE WHEN COUNT(*) > 0
+                              AND COUNT(input_tokens) = COUNT(*)
+                              AND COUNT(cache_read_tokens) = COUNT(*)
+                         THEN SUM(MAX(input_tokens - cache_read_tokens, 0)) END FROM attempts) AS total_input_tokens,
                  (SELECT CASE WHEN COUNT(*) > 0 AND COUNT(output_tokens) = COUNT(*) THEN SUM(output_tokens) END FROM attempts) AS total_output_tokens,
                  (SELECT CASE WHEN COUNT(*) > 0 AND COUNT(cache_read_tokens) = COUNT(*) THEN SUM(cache_read_tokens) END FROM attempts) AS total_cache_read_tokens,
                  (SELECT CASE WHEN COUNT(*) > 0 AND COUNT(cache_write_tokens) = COUNT(*) THEN SUM(cache_write_tokens) END FROM attempts) AS total_cache_write_tokens,
@@ -118,7 +121,10 @@ impl UsageStatsStore for SqliteUsageStatsStore {
                  FROM turns GROUP BY hour
              ), attempt_stats AS (
                  SELECT t.hour,
-                        CASE WHEN COUNT(*) > 0 AND COUNT(a.input_tokens) = COUNT(*) THEN SUM(a.input_tokens) END AS total_input_tokens,
+                        CASE WHEN COUNT(*) > 0
+                                  AND COUNT(a.input_tokens) = COUNT(*)
+                                  AND COUNT(a.cache_read_tokens) = COUNT(*)
+                             THEN SUM(MAX(a.input_tokens - a.cache_read_tokens, 0)) END AS total_input_tokens,
                         CASE WHEN COUNT(*) > 0 AND COUNT(a.output_tokens) = COUNT(*) THEN SUM(a.output_tokens) END AS total_output_tokens,
                         CASE WHEN COUNT(*) > 0 AND COUNT(a.cache_read_tokens) = COUNT(*) THEN SUM(a.cache_read_tokens) END AS total_cache_read_tokens,
                         CASE WHEN COUNT(*) > 0 AND COUNT(a.cache_write_tokens) = COUNT(*) THEN SUM(a.cache_write_tokens) END AS total_cache_write_tokens,
@@ -149,7 +155,10 @@ impl UsageStatsStore for SqliteUsageStatsStore {
                  FROM turns GROUP BY model
              ), attempt_stats AS (
                  SELECT t.model,
-                        CASE WHEN COUNT(*) > 0 AND COUNT(a.input_tokens) = COUNT(*) THEN SUM(a.input_tokens) END AS total_input_tokens,
+                        CASE WHEN COUNT(*) > 0
+                                  AND COUNT(a.input_tokens) = COUNT(*)
+                                  AND COUNT(a.cache_read_tokens) = COUNT(*)
+                             THEN SUM(MAX(a.input_tokens - a.cache_read_tokens, 0)) END AS total_input_tokens,
                         CASE WHEN COUNT(*) > 0 AND COUNT(a.output_tokens) = COUNT(*) THEN SUM(a.output_tokens) END AS total_output_tokens,
                         CASE WHEN COUNT(*) > 0 AND COUNT(a.reasoning_tokens) = COUNT(*) THEN SUM(a.reasoning_tokens) END AS total_reasoning_tokens
                  FROM turns t JOIN target_attempt_observations a ON a.model_turn_id = t.id GROUP BY t.model
@@ -189,7 +198,10 @@ impl UsageStatsStore for SqliteUsageStatsStore {
             "SELECT t.api_key_id,
                     COALESCE(MAX(NULLIF(t.api_key_name, '')), t.api_key_id) AS api_key_name,
                     COUNT(DISTINCT t.id) AS request_count,
-                    CASE WHEN COUNT(a.id) > 0 AND COUNT(a.input_tokens) = COUNT(a.id) THEN SUM(a.input_tokens) END AS total_input_tokens,
+                    CASE WHEN COUNT(a.id) > 0
+                              AND COUNT(a.input_tokens) = COUNT(a.id)
+                              AND COUNT(a.cache_read_tokens) = COUNT(a.id)
+                         THEN SUM(MAX(a.input_tokens - a.cache_read_tokens, 0)) END AS total_input_tokens,
                     CASE WHEN COUNT(a.id) > 0 AND COUNT(a.output_tokens) = COUNT(a.id) THEN SUM(a.output_tokens) END AS total_output_tokens,
                     CASE WHEN COUNT(a.id) > 0 AND COUNT(a.cache_read_tokens) = COUNT(a.id) THEN SUM(a.cache_read_tokens) END AS cache_read_tokens,
                     CASE WHEN COUNT(a.id) > 0 AND COUNT(a.cache_write_tokens) = COUNT(a.id) THEN SUM(a.cache_write_tokens) END AS cache_write_tokens,
@@ -205,5 +217,165 @@ impl UsageStatsStore for SqliteUsageStatsStore {
         .bind(cutoff)
         .fetch_all(&self.pool)
         .await?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn insert_turn(
+        pool: &SqlitePool,
+        id: &str,
+        started_at: i64,
+        model: &str,
+        api_key_id: &str,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            "INSERT INTO interaction_observations
+             (id,principal,api_key_id,api_key_name,root_id,root_run_id,first_route_id,status,started_at,last_active_at,expires_at)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        )
+        .bind(id)
+        .bind("owner")
+        .bind(api_key_id)
+        .bind("Test key")
+        .bind(id)
+        .bind(id)
+        .bind("route")
+        .bind("completed")
+        .bind(started_at)
+        .bind(started_at)
+        .bind(i64::MAX)
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO inference_run_observations
+             (id,interaction_id,ingress_protocol,route_id,status,debug_enabled,started_at,last_active_at,finished_at,last_event_sequence,expires_at)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        )
+        .bind(id)
+        .bind(id)
+        .bind("responses")
+        .bind("route")
+        .bind("completed")
+        .bind(false)
+        .bind(started_at)
+        .bind(started_at)
+        .bind(started_at + 10)
+        .bind(0_i64)
+        .bind(i64::MAX)
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO model_turn_observations
+             (id,run_id,interaction_id,route_id,model_display_name,api_key_id,api_key_name,status,started_at,finished_at,last_event_sequence)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        )
+        .bind(id)
+        .bind(id)
+        .bind(id)
+        .bind("route")
+        .bind(model)
+        .bind(api_key_id)
+        .bind("Test key")
+        .bind("completed")
+        .bind(started_at)
+        .bind(started_at + 10)
+        .bind(0_i64)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn insert_attempt(
+        pool: &SqlitePool,
+        id: &str,
+        turn_id: &str,
+        started_at: i64,
+        input_tokens: i64,
+        cache_read_tokens: Option<i64>,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            "INSERT INTO target_attempt_observations
+             (id,model_turn_id,run_id,interaction_id,target_id,provider_id,provider_name,upstream_model,protocol,status,started_at,finished_at,duration_ms,input_tokens,output_tokens,cache_read_tokens,reasoning_tokens,usage_recorded,last_event_sequence)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        )
+        .bind(id)
+        .bind(turn_id)
+        .bind(turn_id)
+        .bind(turn_id)
+        .bind("target")
+        .bind("provider")
+        .bind("Provider")
+        .bind("upstream")
+        .bind("responses")
+        .bind("completed")
+        .bind(started_at)
+        .bind(started_at + 10)
+        .bind(10_i64)
+        .bind(input_tokens)
+        .bind(3_i64)
+        .bind(cache_read_tokens)
+        .bind(1_i64)
+        .bind(true)
+        .bind(0_i64)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn management_stats_project_net_input_per_attempt() -> anyhow::Result<()> {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        crate::migrations::migrate_sqlite(&pool).await?;
+        let now = chrono::Utc::now().timestamp_millis();
+        let recent = now - 1_000;
+        let old = now - 2 * 60 * 60 * 1_000;
+        insert_turn(&pool, "recent", recent, "model", "key").await?;
+        insert_attempt(&pool, "recent-a", "recent", recent, 12, Some(5)).await?;
+        insert_attempt(&pool, "recent-b", "recent", recent, 3, Some(9)).await?;
+        insert_turn(&pool, "old", old, "unknown-cache", "old-key").await?;
+        insert_attempt(&pool, "old-a", "old", old, 8, None).await?;
+
+        let store = SqliteUsageStatsStore {
+            pool: pool.clone(),
+            last_route_snapshot: Arc::new(std::sync::RwLock::new(Vec::new())),
+        };
+        let overview = store.stats_overview(Some(1)).await?;
+        assert_eq!(overview.total_input_tokens, Some(7));
+        assert_eq!(overview.total_output_tokens, Some(6));
+        assert_eq!(overview.total_reasoning_tokens, Some(2));
+        assert_eq!(store.stats_overview(None).await?.total_input_tokens, None);
+
+        let hourly = store.stats_hourly(1).await?;
+        assert_eq!(hourly.len(), 1);
+        assert_eq!(hourly[0].total_input_tokens, Some(7));
+        assert_eq!(hourly[0].total_output_tokens, Some(6));
+        assert_eq!(hourly[0].total_reasoning_tokens, Some(2));
+
+        let models = store.stats_by_model(Some(1)).await?;
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].total_input_tokens, Some(7));
+        assert_eq!(models[0].total_output_tokens, Some(6));
+        assert_eq!(models[0].total_reasoning_tokens, Some(2));
+
+        let api_keys = store.stats_by_api_key(Some(1)).await?;
+        assert_eq!(api_keys.len(), 1);
+        assert_eq!(api_keys[0].total_input_tokens, Some(7));
+        assert_eq!(api_keys[0].total_output_tokens, Some(6));
+        assert_eq!(api_keys[0].reasoning_tokens, Some(2));
+
+        let raw_input: Option<i64> = sqlx::query_scalar(
+            "SELECT SUM(input_tokens) FROM target_attempt_observations WHERE model_turn_id='recent'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(raw_input, Some(15));
+        pool.close().await;
+        Ok(())
     }
 }

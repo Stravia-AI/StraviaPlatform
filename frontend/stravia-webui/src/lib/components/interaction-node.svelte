@@ -24,7 +24,6 @@ const usage = $derived([
   [m.observation_usage_output(), interaction.usage.output_tokens],
   [m.observation_usage_cache_read(), interaction.usage.cache_read_tokens],
   [m.observation_usage_cache_write(), interaction.usage.cache_write_tokens],
-  [m.observation_usage_reasoning(), interaction.usage.reasoning_tokens],
 ] as const)
 </script>
 
@@ -132,7 +131,7 @@ const usage = $derived([
 }
 .usage-grid {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   border-block: 1px solid var(--border);
   padding-block: 0.4rem;
 }

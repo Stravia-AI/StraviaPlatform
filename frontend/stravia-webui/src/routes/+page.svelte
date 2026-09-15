@@ -58,10 +58,6 @@ const overview = $derived(overviewQuery.data)
 const modelStats = $derived(modelStatsQuery.data ?? [])
 const providerStats = $derived(providerStatsQuery.data ?? [])
 const tableLabels = $derived(getDataTableLabels())
-const modelTokenTotal = (model: ModelStats): number | null =>
-  model.total_input_tokens == null || model.total_output_tokens == null
-    ? null
-    : model.total_input_tokens + model.total_output_tokens
 const modelStatsColumnHelper = createDataTableColumnHelper<ModelStats>()
 const modelStatsColumns = modelStatsColumnHelper.columns([
   modelStatsColumnHelper.accessor('model', {
@@ -73,11 +69,15 @@ const modelStatsColumns = modelStatsColumnHelper.columns([
     cell: (context) => formatCompactCount(context.getValue()),
     meta: { label: () => m.common_request_count_label(), align: 'end', cellClass: 'font-technical tabular-nums' },
   }),
-  modelStatsColumnHelper.accessor((model) => modelTokenTotal(model), {
-    id: 'tokens',
-    header: () => m.common_token(),
+  modelStatsColumnHelper.accessor('total_input_tokens', {
+    header: () => m.stats_input_tokens(),
     cell: (context) => formatCompactCount(context.getValue()),
-    meta: { label: () => m.common_token(), align: 'end', cellClass: 'font-technical tabular-nums' },
+    meta: { label: () => m.stats_input_tokens(), align: 'end', cellClass: 'font-technical tabular-nums' },
+  }),
+  modelStatsColumnHelper.accessor('total_output_tokens', {
+    header: () => m.stats_output_tokens(),
+    cell: (context) => formatCompactCount(context.getValue()),
+    meta: { label: () => m.stats_output_tokens(), align: 'end', cellClass: 'font-technical tabular-nums' },
   }),
   modelStatsColumnHelper.accessor('avg_duration_ms', {
     header: () => m.common_latency(),
@@ -195,11 +195,12 @@ const dash = '–'
 const metrics = $derived([
   { label: m.common_total_requests(), value: hasTraffic ? formatCompactCount(overview?.total_requests ?? 0) : dash },
   {
-    label: m.overview_total_tokens(),
-    value:
-      hasTraffic && overview?.total_input_tokens != null && overview.total_output_tokens != null
-        ? formatCompactCount(overview.total_input_tokens + overview.total_output_tokens)
-        : dash,
+    label: m.stats_input_tokens(),
+    value: hasTraffic ? formatCompactCount(overview?.total_input_tokens) : dash,
+  },
+  {
+    label: m.stats_output_tokens(),
+    value: hasTraffic ? formatCompactCount(overview?.total_output_tokens) : dash,
   },
   { label: m.common_avg_latency(), value: hasTraffic ? formatDuration(overview?.avg_duration_ms) : dash },
   {
@@ -296,7 +297,7 @@ function retryConfiguration(): void {
     currentPath="/" />
 
   {#if overviewQuery.isPending && overview === undefined}
-    <MetricStrip loading loadingLabel={m.overview_loading_overview_metrics()} placeholderCount={6} />
+    <MetricStrip loading loadingLabel={m.overview_loading_overview_metrics()} placeholderCount={7} />
     <div class="grid gap-6 min-[1280px]:grid-cols-12">
       <Skeleton class="h-80 min-[1280px]:col-span-7" />
       <Skeleton class="h-80 min-[1280px]:col-span-5" />
@@ -434,8 +435,9 @@ function retryConfiguration(): void {
                   <div class="min-w-0">
                     <p class="font-technical truncate font-medium">{model.model}</p>
                     <p class="mt-1 text-xs text-muted-foreground">
-                      {formatDuration(model.avg_duration_ms)} · {formatCompactCount(modelTokenTotal(model))}
-                      {m.common_token()}
+                      {m.observation_usage_input()} {formatCompactCount(model.total_input_tokens)} ·
+                      {m.observation_usage_output()} {formatCompactCount(model.total_output_tokens)} ·
+                      {formatDuration(model.avg_duration_ms)}
                     </p>
                   </div>
                   <p class="font-technical tabular-nums">{formatCompactCount(model.request_count)}</p>

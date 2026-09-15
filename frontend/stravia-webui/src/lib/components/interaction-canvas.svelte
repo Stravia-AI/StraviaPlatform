@@ -183,7 +183,11 @@ async function acceptLayout(
 
 function requestLayout(): void {
   if (!worker) return
-  const layoutRoots = roots.map((root) => ({ id: root.id, interactions: root.interactions.map(({ id }) => ({ id })) }))
+  const layoutRoots = roots.map((root) => ({
+    id: root.id,
+    startedAt: Math.min(...root.interactions.map((interaction) => interaction.started_at)),
+    interactions: root.interactions.map(({ id }) => ({ id })),
+  }))
   const layoutEdges = edges.map(({ source, target }) => ({ source, target }))
   const topology = JSON.stringify({ roots: layoutRoots, edges: layoutEdges })
   if (topology === requestedTopology) return

@@ -105,7 +105,6 @@ function usageRows(run: RunDetail): ReadonlyArray<readonly [string, number | nul
     [m.observation_usage_output(), run.usage.output_tokens],
     [m.observation_usage_cache_read(), run.usage.cache_read_tokens],
     [m.observation_usage_cache_write(), run.usage.cache_write_tokens],
-    [m.observation_usage_reasoning(), run.usage.reasoning_tokens],
   ]
 }
 </script>
@@ -544,7 +543,7 @@ function usageRows(run: RunDetail): ReadonlyArray<readonly [string, number | nul
 }
 .usage-line {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   border-block: 1px solid var(--border);
   padding: 0.55rem 0.8rem;
   font-family: var(--font-technical);
@@ -615,7 +614,7 @@ pre {
 }
 @media (max-width: 767px) {
   .usage-line {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     row-gap: 0.55rem;
   }
 }

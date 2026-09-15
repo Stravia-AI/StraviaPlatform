@@ -842,14 +842,14 @@ def test_observation_http_sse_usage_and_legacy_cutover(admin_env: dict[str, Any]
     assert summary["input_preview"] == "observation contract"
     assert summary["visible_tail"] == "mock-ok-0"
     assert summary["usage"] == {
-        "input_tokens": 3,
+        "input_tokens": None,
         "output_tokens": 2,
         "cache_read_tokens": None,
         "cache_write_tokens": None,
         "reasoning_tokens": None,
         "coverage": {
             "attempt_count": 1,
-            "missing_input_tokens": 0,
+            "missing_input_tokens": 1,
             "missing_output_tokens": 0,
             "missing_cache_read_tokens": 1,
             "missing_cache_write_tokens": 1,

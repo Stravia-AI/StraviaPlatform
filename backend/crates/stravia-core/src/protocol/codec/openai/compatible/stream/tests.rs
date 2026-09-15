@@ -116,6 +116,63 @@ fn extract_usage_no_cache_field_yields_none() {
     let u = extract_usage(&resp);
     assert_eq!(u.prompt_tokens, 500);
     assert_eq!(u.cache_read_tokens, None);
+    assert_eq!(u.cache_creation_tokens, None);
+    assert_eq!(u.reasoning_tokens, None);
+}
+
+#[test]
+fn extract_usage_deepseek_reports_reasoning_and_cache_write() {
+    // 来自 openai-compatible DeepSeek v4.1 Flash 终包；prompt_tokens_details.reasoning_tokens
+    // 是输入侧字段，不能当成输出思考用量。
+    let resp = serde_json::json!({
+        "usage": {
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cached_tokens": 0,
+            "completion_thinking_tokens": 251,
+            "completion_tokens": 264,
+            "completion_tokens_details": {
+                "accepted_prediction_tokens": 0,
+                "audio_tokens": 0,
+                "cached_tokens": 0,
+                "reasoning_tokens": 251,
+                "rejected_prediction_tokens": 0
+            },
+            "prompt_cache_hit_tokens": 0,
+            "prompt_cache_miss_tokens": 531,
+            "prompt_cache_write_tokens": 0,
+            "prompt_tokens": 531,
+            "prompt_tokens_details": {
+                "accepted_prediction_tokens": 0,
+                "audio_tokens": 0,
+                "cached_tokens": 0,
+                "reasoning_tokens": 0,
+                "rejected_prediction_tokens": 0
+            },
+            "total_tokens": 795
+        }
+    });
+    let u = extract_usage(&resp);
+    assert_eq!(u.prompt_tokens, 531);
+    assert_eq!(u.completion_tokens, 264);
+    assert_eq!(u.total_tokens, 795);
+    assert_eq!(u.cache_read_tokens, Some(0));
+    assert_eq!(u.cache_creation_tokens, Some(0));
+    assert_eq!(u.reasoning_tokens, Some(251));
+}
+
+#[test]
+fn extract_usage_openai_completion_tokens_details_reasoning() {
+    let resp = serde_json::json!({
+        "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 20,
+            "completion_tokens_details": { "reasoning_tokens": 7 }
+        }
+    });
+    let u = extract_usage(&resp);
+    assert_eq!(u.reasoning_tokens, Some(7));
+    assert_eq!(u.cache_creation_tokens, None);
 }
 
 // ── OpenAIResponseParser ──

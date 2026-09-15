@@ -10,13 +10,19 @@ const DEFAULT_LIMIT: u32 = 50;
 const MAX_LIMIT: u32 = 200;
 // 直接从当前窗口的 attempts 派生累计与覆盖信息，旧版持久化的 NULL 汇总无需回填。
 const INTERACTION_SELECT: &str = "SELECT i.id,i.root_id,i.parent_interaction_id,i.generation_root_id,i.first_route_id,i.first_model_display_name,i.status,i.started_at,i.last_active_at,i.input_preview,i.visible_tail,
-CAST(SUM(a.input_tokens) AS BIGINT) input_tokens,
+CAST(SUM(CASE
+    WHEN a.input_tokens IS NULL OR a.cache_read_tokens IS NULL THEN NULL
+    WHEN a.input_tokens > a.cache_read_tokens THEN a.input_tokens - a.cache_read_tokens
+    ELSE 0
+END) AS BIGINT) input_tokens,
 CAST(SUM(a.output_tokens) AS BIGINT) output_tokens,
 CAST(SUM(a.cache_read_tokens) AS BIGINT) cache_read_tokens,
 CAST(SUM(a.cache_write_tokens) AS BIGINT) cache_write_tokens,
 CAST(SUM(a.reasoning_tokens) AS BIGINT) reasoning_tokens,
 COUNT(a.id) attempt_count,
-COUNT(a.id)-COUNT(a.input_tokens) missing_input_tokens,
+COUNT(a.id)-COUNT(CASE
+    WHEN a.input_tokens IS NOT NULL AND a.cache_read_tokens IS NOT NULL THEN 1
+END) missing_input_tokens,
 COUNT(a.id)-COUNT(a.output_tokens) missing_output_tokens,
 COUNT(a.id)-COUNT(a.cache_read_tokens) missing_cache_read_tokens,
 COUNT(a.id)-COUNT(a.cache_write_tokens) missing_cache_write_tokens,
@@ -24,13 +30,19 @@ COUNT(a.id)-COUNT(a.reasoning_tokens) missing_reasoning_tokens,
 i.observation_gap,i.last_event_sequence,CASE WHEN SUM(CASE WHEN r.debug_enabled THEN 1 ELSE 0 END)=0 THEN 'none' WHEN SUM(CASE WHEN r.debug_enabled THEN 1 ELSE 0 END)=COUNT(*) AND COUNT(m.trace_id)=COUNT(*) AND SUM(CASE WHEN m.status='complete' THEN 1 ELSE 0 END)=COUNT(*) THEN 'complete' ELSE 'partial' END debug_status FROM interaction_observations i JOIN inference_run_observations r ON r.interaction_id=i.id LEFT JOIN debug_trace_manifests m ON m.run_id=r.id LEFT JOIN target_attempt_observations a ON a.run_id=r.id ";
 // PostgreSQL promotes SUM(BIGINT) to NUMERIC; keep the public usage contract i64.
 const RUN_SELECT: &str = "SELECT r.id,r.parent_run_id,r.generation_node_id,r.generation_parent_id,r.route_id,r.model_display_name,r.ingress_protocol,r.status,r.terminal_reason,r.user_interrupted,r.debug_enabled,r.client_output_committed,r.started_at,r.finished_at,
-CAST(SUM(a.input_tokens) AS BIGINT) input_tokens,
+CAST(SUM(CASE
+    WHEN a.input_tokens IS NULL OR a.cache_read_tokens IS NULL THEN NULL
+    WHEN a.input_tokens > a.cache_read_tokens THEN a.input_tokens - a.cache_read_tokens
+    ELSE 0
+END) AS BIGINT) input_tokens,
 CAST(SUM(a.output_tokens) AS BIGINT) output_tokens,
 CAST(SUM(a.cache_read_tokens) AS BIGINT) cache_read_tokens,
 CAST(SUM(a.cache_write_tokens) AS BIGINT) cache_write_tokens,
 CAST(SUM(a.reasoning_tokens) AS BIGINT) reasoning_tokens,
 COUNT(a.id) attempt_count,
-COUNT(a.id)-COUNT(a.input_tokens) missing_input_tokens,
+COUNT(a.id)-COUNT(CASE
+    WHEN a.input_tokens IS NOT NULL AND a.cache_read_tokens IS NOT NULL THEN 1
+END) missing_input_tokens,
 COUNT(a.id)-COUNT(a.output_tokens) missing_output_tokens,
 COUNT(a.id)-COUNT(a.cache_read_tokens) missing_cache_read_tokens,
 COUNT(a.id)-COUNT(a.cache_write_tokens) missing_cache_write_tokens,
@@ -1159,7 +1171,7 @@ fn rejection_summary(r: RejectionRow) -> RejectionSummary {
 fn map_sqlite_events(rows: Vec<sqlx::sqlite::SqliteRow>) -> anyhow::Result<Vec<ObservationEvent>> {
     rows.into_iter()
         .map(|r| {
-            Ok(ObservationEvent {
+            Ok(project_event_for_management(ObservationEvent {
                 sequence: r.try_get(0)?,
                 occurred_at: r.try_get(1)?,
                 interaction_id: r.try_get(2)?,
@@ -1169,7 +1181,7 @@ fn map_sqlite_events(rows: Vec<sqlx::sqlite::SqliteRow>) -> anyhow::Result<Vec<O
                 payload: super::codec::decode_payload(serde_json::from_str(
                     &r.try_get::<String, _>(6)?,
                 )?)?,
-            })
+            }))
         })
         .collect()
 }
@@ -1360,7 +1372,7 @@ mod tests {
 fn map_postgres_events(rows: Vec<sqlx::postgres::PgRow>) -> anyhow::Result<Vec<ObservationEvent>> {
     rows.into_iter()
         .map(|r| {
-            Ok(ObservationEvent {
+            Ok(project_event_for_management(ObservationEvent {
                 sequence: r.try_get(0)?,
                 occurred_at: r.try_get(1)?,
                 interaction_id: r.try_get(2)?,
@@ -1370,7 +1382,7 @@ fn map_postgres_events(rows: Vec<sqlx::postgres::PgRow>) -> anyhow::Result<Vec<O
                 payload: super::codec::decode_payload(serde_json::from_str(
                     &r.try_get::<String, _>(6)?,
                 )?)?,
-            })
+            }))
         })
         .collect()
 }
