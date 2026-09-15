@@ -221,6 +221,57 @@ fn tool_only_stream_does_not_emit_an_empty_message_item() {
 }
 
 #[test]
+fn empty_name_tool_call_starts_on_same_index_merge() {
+    let mut formatter = ResponsesStreamFormatter::new();
+    let events = formatter.format_deltas(&[
+        AiStreamDelta::MessageStart {
+            id: "resp-merge".into(),
+            model: "logical-model".into(),
+        },
+        AiStreamDelta::ToolCallStart {
+            index: 0,
+            id: "call_00_read".into(),
+            name: "read".into(),
+        },
+        AiStreamDelta::ToolCallStart {
+            index: 0,
+            id: String::new(),
+            name: String::new(),
+        },
+        AiStreamDelta::ToolCallDelta {
+            index: 0,
+            arguments: r#"{"path":"."}"#.into(),
+        },
+        AiStreamDelta::Done {
+            stop_reason: "tool_calls".into(),
+        },
+    ]);
+    let bodies = events
+        .iter()
+        .filter_map(|event| serde_json::from_str::<serde_json::Value>(&event.data).ok())
+        .collect::<Vec<_>>();
+    let added: Vec<_> = bodies
+        .iter()
+        .filter(|body| {
+            body["type"] == "response.output_item.added" && body["item"]["type"] == "function_call"
+        })
+        .collect();
+    assert_eq!(added.len(), 1, "same index must stay one function_call");
+    assert_eq!(added[0]["item"]["call_id"], "call_00_read");
+    assert_eq!(added[0]["item"]["name"], "read");
+
+    let done = bodies
+        .iter()
+        .find(|body| {
+            body["type"] == "response.output_item.done" && body["item"]["type"] == "function_call"
+        })
+        .expect("function call done");
+    assert_eq!(done["item"]["name"], "read");
+    assert_eq!(done["item"]["arguments"], r#"{"path":"."}"#);
+    assert_eq!(done["item"]["call_id"], "call_00_read");
+}
+
+#[test]
 fn function_call_item_done_preserves_incomplete_status() {
     let mut formatter = ResponsesStreamFormatter::new();
     let completed = stravia_runtime_contract::protocol::ir::AiItem::function_call(

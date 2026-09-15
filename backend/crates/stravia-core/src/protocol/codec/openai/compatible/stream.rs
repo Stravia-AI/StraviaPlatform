@@ -330,15 +330,13 @@ impl OpenAIStreamParser {
                 for tc in tcs {
                     let idx = tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
                     if let Some(func) = tc.get("function") {
-                        if let Some(name) = func.get("name").and_then(|v| v.as_str()) {
-                            let id = tc
-                                .get("id")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
+                        let name = func.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                        let id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                        // 续包常把未出现的 name/id 写成空字符串；空值不是新的 tool call。
+                        if !name.is_empty() || !id.is_empty() {
                             deltas.push(AiStreamDelta::ToolCallStart {
                                 index: idx,
-                                id,
+                                id: id.to_string(),
                                 name: name.to_string(),
                             });
                         }

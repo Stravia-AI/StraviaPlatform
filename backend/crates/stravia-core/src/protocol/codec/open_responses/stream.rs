@@ -1410,6 +1410,14 @@ impl ResponsesStreamFormatter {
                 ),
                 AiStreamDelta::ToolCallStart { index, id, name } => {
                     self.ensure_started(&mut events);
+                    if let Some(pos) = self.tool_index_map.get(index).copied()
+                        && let Some(call) = self.tool_calls.get_mut(pos)
+                    {
+                        if call.name.is_empty() && !name.is_empty() {
+                            call.name = name.clone();
+                        }
+                        continue;
+                    }
                     let output_index = self.next_output_index;
                     self.next_output_index += 1;
                     let item_id = gateway_item_id("fc", &self.resp_id, output_index);

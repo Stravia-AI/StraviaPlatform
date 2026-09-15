@@ -203,6 +203,51 @@ fn test_stream_tool_call_fragments() {
 }
 
 #[test]
+fn empty_name_continuations_stay_one_tool_call() {
+    // DeepSeek 兼容网关会在同一 index 的续包里重复 "name":""，这不是新的 tool call。
+    let chunks = [
+            data_sse(r#"{"id":"chatcmpl-ds","model":"deepseek-v4.1-flash","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}"#),
+            data_sse(r#"{"id":"chatcmpl-ds","model":"deepseek-v4.1-flash","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_00_read","type":"function","function":{"name":"read","arguments":""}}]},"finish_reason":null}]}"#),
+            data_sse(r#"{"id":"chatcmpl-ds","model":"deepseek-v4.1-flash","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{","name":""}}]},"finish_reason":null}]}"#),
+            data_sse(r#"{"id":"chatcmpl-ds","model":"deepseek-v4.1-flash","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"path\"","name":""}}]},"finish_reason":null}]}"#),
+            data_sse(r#"{"id":"chatcmpl-ds","model":"deepseek-v4.1-flash","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":":\".\"}","name":""}}]},"finish_reason":null}]}"#),
+            data_sse(r#"{"id":"chatcmpl-ds","model":"deepseek-v4.1-flash","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#),
+            data_sse("[DONE]"),
+        ]
+        .concat();
+
+    let mut parser = OpenAIStreamParser::new();
+    let deltas = parser.parse_chunk(&chunks).unwrap();
+
+    let starts: Vec<_> = deltas
+        .iter()
+        .filter_map(|delta| match delta {
+            AiStreamDelta::ToolCallStart { index, id, name } => {
+                Some((*index, id.as_str(), name.as_str()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        starts,
+        vec![(0, "call_00_read", "read")],
+        "empty name continuations must not start new tool calls: {deltas:?}"
+    );
+
+    let args: String = deltas
+        .iter()
+        .filter_map(|delta| match delta {
+            AiStreamDelta::ToolCallDelta {
+                index: 0,
+                arguments,
+            } => Some(arguments.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(args, r#"{"path":"."}"#);
+}
+
+#[test]
 fn test_stream_think_tags_across_chunks() {
     // <think> and </think> may span chunk boundaries.
     let chunks = [
