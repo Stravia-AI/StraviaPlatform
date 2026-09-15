@@ -2542,7 +2542,8 @@ test.describe('Interaction Observation canvas', () => {
       expect(atlasBox!.y).toBeLessThan(borealBox!.y)
       expect(Math.abs(borealBox!.y - cinderBox!.y)).toBeLessThan(8)
       expect(Math.abs(borealBox!.x - cinderBox!.x)).toBeGreaterThan(35)
-      expect(deltaBox!.x).toBeGreaterThan(Math.max(borealBox!.right, cinderBox!.right))
+      // Newest roots occupy left columns; Delta started after Atlas's tree.
+      expect(deltaBox!.right).toBeLessThan(Math.min(borealBox!.x, cinderBox!.x))
     }).toPass({ timeout: 5_000 })
 
     await node(page, 'Atlas', 'completed').getByRole('heading', { name: 'Atlas', exact: true }).click()

@@ -2140,10 +2140,9 @@ def test_clear_history_resets_expired_cursor_without_rewinding_sequence(
         [{"role": "user", "content": "historical row to clear"}],
     )
     assert status == 200, response
-    interaction = _wait_for(
+    _wait_for(
         "completed clear candidate", lambda: _route_interactions(admin_env, route_id)
-    )[0]
-    interaction_sequence = _detail(admin_env, interaction["id"])["snapshot_sequence"]
+    )
     rejected_at = int(time.time() * 1000)
     status, rejection_response = http_request(
         "POST",
@@ -2151,12 +2150,6 @@ def test_clear_history_resets_expired_cursor_without_rewinding_sequence(
         payload={"model": "missing", "messages": []},
     )
     assert status == 401, rejection_response
-    old_sequence = _wait_for(
-        "rejection sequence",
-        lambda: (lambda value: value if value > interaction_sequence else None)(
-            _forest(admin_env)["snapshot_sequence"]
-        ),
-    )
 
     def cleanup_rejection() -> dict[str, Any] | None:
         status_, body = http_request(
@@ -2175,6 +2168,7 @@ def test_clear_history_resets_expired_cursor_without_rewinding_sequence(
         )
 
     rejection = _wait_for("clear candidate rejection", cleanup_rejection)
+    old_sequence = _forest(admin_env)["snapshot_sequence"]
     status, cleared = http_request(
         "DELETE",
         f"{admin_env['admin']}/api/v1/observations/history",

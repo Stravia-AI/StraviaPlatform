@@ -899,7 +899,7 @@ def test_proxy_request_updates_usage_analytics(admin_env: dict[str, str]) -> Non
             )
             if (
                 attributed_usage is not None
-                and attributed_usage.get("total_input_tokens") is not None
+                and attributed_usage.get("request_count")
                 and attributed_usage.get("total_output_tokens") is not None
             ):
                 break
@@ -908,9 +908,9 @@ def test_proxy_request_updates_usage_analytics(admin_env: dict[str, str]) -> Non
     assert attributed_usage is not None
     assert attributed_usage["api_key_name"] == "test-key-log"
     assert attributed_usage["request_count"] >= 1
-    assert attributed_usage["total_input_tokens"] is not None
+    # Mock omits cache_read; analytics net input stays unknown until every attempt reports both.
+    assert attributed_usage["total_input_tokens"] is None
     assert attributed_usage["total_output_tokens"] is not None
-    assert attributed_usage["total_input_tokens"] >= 3
     assert attributed_usage["total_output_tokens"] >= 2
     assert attributed_usage["cache_read_tokens"] is None
     assert attributed_usage["cache_write_tokens"] is None
@@ -946,16 +946,15 @@ def test_stats_overview_incremented(admin_env: dict[str, str]) -> None:
         assert status == 200, resp
         data = resp["data"]
         if all(data.get(field) is not None for field in (
-            "total_input_tokens", "total_output_tokens", "avg_duration_ms",
+            "total_output_tokens", "avg_duration_ms",
         )):
             break
         time.sleep(0.3)
 
-    assert data.get("total_input_tokens") is not None, data
+    assert data.get("total_input_tokens") is None, data
     assert data.get("total_output_tokens") is not None, data
     assert data.get("avg_duration_ms") is not None, data
     assert data.get("total_requests", 0) >= 1
-    assert data.get("total_input_tokens", 0) >= 3
     assert data.get("total_output_tokens", 0) >= 2
     assert data["total_cache_read_tokens"] is None
     assert data["total_cache_write_tokens"] is None
