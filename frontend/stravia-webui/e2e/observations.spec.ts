@@ -973,13 +973,24 @@ test.describe('Interaction Observation canvas', () => {
   })
 
   test('hides chains below the default token total and can show all', async ({ page }) => {
+    await page.emulateMedia({ colorScheme: 'dark' })
     const fixture = await installObservationFixture(page)
     await page.goto('/logs')
     await expect.poll(() => fixture.forestRequests.at(-1)?.searchParams.get('min_tokens')).toBe('10000')
     await page.getByRole('button', { name: 'Filters' }).click()
     const slider = page.getByRole('slider', { name: 'Minimum chain tokens' })
     await expect(slider).toBeVisible()
+    const track = page.locator('[data-slot="slider-track"]')
+    await expect(track).toBeVisible()
+    await expect(page.locator('[data-slot="slider-range"]')).toBeVisible()
     await expect(slider).toHaveAttribute('aria-valuenow', '4')
+    await slider.press('ArrowRight')
+    await expect(slider).toHaveAttribute('aria-valuenow', '5')
+    await expect(page.getByText('20K', { exact: true })).toBeVisible()
+    await page.emulateMedia({ colorScheme: 'light' })
+    await expect(track).toBeVisible()
+    await track.click({ position: { x: 1, y: 2 } })
+    await expect(slider).toHaveAttribute('aria-valuenow', '0')
     await page.getByRole('button', { name: 'Clear filters' }).click()
     await expect(slider).toHaveAttribute('aria-valuenow', '0')
     await page.getByRole('button', { name: 'Apply filters' }).click()
@@ -2739,6 +2750,47 @@ test.describe('Interaction Observation canvas', () => {
     await expect(mobile).toBeHidden()
     await desktop.getByRole('button', { name: 'Close', exact: true }).click()
     await expect(selectedNode).toBeFocused()
+  })
+
+  test('refreshes retained Debug bytes after clearing history', async ({ page }) => {
+    await installObservationFixture(page)
+    let retainedBytes = 1_181_116_006
+    await page.route('**/api/v1/observations/**', async (route) => {
+      const request = route.request()
+      const path = new URL(request.url()).pathname.replace('/api/v1', '')
+      if (path === '/observations/debug' && request.method() === 'GET') {
+        await route.fulfill({
+          json: {
+            data: {
+              enabled: false,
+              run_limit_bytes: 67_108_864,
+              total_limit_bytes: 2_147_483_648,
+              retained_bytes: retainedBytes,
+              partial_trace_count: 0,
+              retention_days: 7,
+            },
+          },
+        })
+        return
+      }
+      if (path === '/observations/history' && request.method() === 'DELETE') {
+        retainedBytes = 0
+        await route.fulfill({
+          json: { data: { deleted_interactions: 3, deleted_rejections: 0, skipped_active: 0 } },
+        })
+        return
+      }
+      await route.fallback()
+    })
+
+    await page.goto('/logs')
+    await page.getByRole('button', { name: 'Clear history', exact: true }).click()
+    await page
+      .getByRole('alertdialog', { name: 'Clear history' })
+      .getByRole('button', { name: 'Clear history', exact: true })
+      .click()
+    await page.getByRole('switch', { name: 'Debug' }).click()
+    await expect(page.getByRole('alertdialog', { name: 'Enable Debug' })).toContainText('Currently retained: 0 MiB.')
   })
 
   test.describe('touch input', () => {

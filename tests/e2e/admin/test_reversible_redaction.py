@@ -17,7 +17,7 @@ from tests.e2e.admin.test_observations import _create_route, _proxy
 
 
 SECRET = "ghp_8Dq7mP2vL9sX4aR6tK3nF5wH1jB0cYzUeIoG"
-REFERENCE = re.compile(r"~stravia-secret:[0-9a-f]{32}~")
+REFERENCE = re.compile(r"<!-- stravia-redaction-marker:rm_[0-9a-f]{32} -->")
 
 
 @contextmanager
@@ -218,7 +218,9 @@ def test_redaction_dictionary_isolation_concurrency_and_switches(admin_env: dict
             assert reference is not None
             reference = reference.group()
             assert protected == later.replace(secret, reference)
-            assert received[-1]["body"]["messages"][0]["content"] == earlier.replace(secret, reference)
+            system_text = received[-1]["body"]["messages"][0]["content"]
+            assert earlier.replace(secret, reference) in system_text
+            assert secret not in system_text
             assert send(first_key, secret) == secret
             assert received[-1]["body"]["messages"][-1]["content"] == reference
             assert send(first_key, reference) == secret
@@ -243,7 +245,7 @@ def test_redaction_dictionary_isolation_concurrency_and_switches(admin_env: dict
             set_enabled(env, True)
             assert send(first_key, secret) == secret
             assert received[-1]["body"]["messages"][-1]["content"] == reference
-            unknown = "~stravia-secret:00000000000000000000000000000000~"
+            unknown = "<!-- stravia-redaction-marker:rm_00000000000000000000000000000000 -->"
             assert send(first_key, unknown) == unknown
             for key_name in [f"{model}-key", "isolated-second-key"]:
                 rows = _wait_for("isolated first mapping discovery", lambda: key_discoveries(env, key_name))
@@ -283,7 +285,7 @@ def test_redaction_storage_failures_never_bypass_protection(
                 BEGIN SELECT RAISE(FAIL, 'injected mapping failure'); END
             """)
         try:
-            text = SECRET if failure != "read" else "~stravia-secret:00000000000000000000000000000000~"
+            text = SECRET if failure != "read" else "<!-- stravia-redaction-marker:rm_00000000000000000000000000000000 -->"
             if failure == "publish-stream":
                 status, _, raw = http_bytes(
                     "POST", f"{env['proxy']}/v1/chat/completions",

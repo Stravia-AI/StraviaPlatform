@@ -437,10 +437,7 @@ impl AdminService {
             };
             let discovered = if let Some(source) = catalog_source {
                 DiscoveredModelSource {
-                    metadata: ProviderModelMetadata::from_source_value(
-                        &model_id,
-                        source.metadata,
-                    )?,
+                    metadata: ProviderModelMetadata::from_source_value(&model_id, source.metadata)?,
                     metadata_source_provider_id: Some(source.provider_id),
                 }
             } else if let Some(template) = self

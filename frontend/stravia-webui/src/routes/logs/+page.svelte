@@ -750,7 +750,11 @@ async function clearHistory(): Promise<void> {
     const result = await admin.observations.clearHistory()
     clearResult = result
     clearOpen = false
-    await Promise.all([loadForest(true), activeTab === 'failures' ? loadFailures() : Promise.resolve()])
+    await Promise.all([
+      loadForest(true),
+      activeTab === 'failures' ? loadFailures() : Promise.resolve(),
+      queryClient.invalidateQueries({ queryKey: ['observation-debug'] }),
+    ])
     toast.success(
       m.observation_history_cleared({
         interactions: result.deleted_interactions,

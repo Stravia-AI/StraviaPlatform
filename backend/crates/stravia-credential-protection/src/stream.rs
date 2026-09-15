@@ -1,7 +1,7 @@
 //! Incremental restoration. Only an incomplete reference and JSON escape are retained.
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{RedactionError, store::Mapping, text};
+use super::{RedactionError, marker, store::Mapping, text};
 use stravia_runtime_contract::protocol::ir::AiStreamDelta;
 
 #[derive(Default)]
@@ -28,17 +28,11 @@ impl ReferenceScanner {
         output: &mut String,
     ) -> Result<(), RedactionError> {
         let position = self.pending.len();
-        let matches = if position < text::PREFIX.len() {
-            ch == char::from(text::PREFIX.as_bytes()[position])
-        } else if position < text::REFERENCE_LEN - 1 {
-            ch.is_ascii_digit() || ('a'..='f').contains(&ch)
-        } else {
-            ch == '~'
-        };
+        let matches = ch.is_ascii() && marker::matches_byte(position, ch as u8);
         if matches {
             self.pending.push(ch);
             self.spelling.push_str(raw);
-            if self.pending.len() == text::REFERENCE_LEN {
+            if self.pending.len() == marker::REFERENCE_LEN {
                 if let Some(mapping) = mappings
                     .iter()
                     .find(|mapping| mapping.reference == self.pending && text::active(mapping))
@@ -59,9 +53,9 @@ impl ReferenceScanner {
             }
         } else {
             self.flush(output);
-            // A valid unfinished reference contains no second '~', so only
+            // A valid unfinished reference contains no second '<', so only
             // the current character can begin an overlapping candidate.
-            if ch == '~' {
+            if ch == '<' {
                 self.pending.push(ch);
                 self.spelling.push_str(raw);
             } else {
@@ -485,5 +479,53 @@ impl StreamRestorer {
         self.flush_where(|_| true, &mut output);
         self.tool_ids.clear();
         Ok(output)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inline_marker_restoration_preserves_paths_at_every_split() {
+        let reference = "<!-- stravia-redaction-marker:rm_0123456789abcdef0123456789abcdef -->";
+        let unknown = "<!-- stravia-redaction-marker:rm_ffffffffffffffffffffffffffffffff -->";
+        let legacy = "~stravia-secret:0123456789abcdef0123456789abcdef~";
+        let mappings = [Mapping {
+            reference: reference.into(),
+            secret: "stravia".into(),
+            expires_at: i64::MAX,
+        }];
+        let input = format!(
+            "前缀<<backend/crates/{reference}-core/src {unknown} {legacy} <!-- stravia-redaction"
+        );
+        let expected = input.replace(reference, "stravia");
+        for split in input
+            .char_indices()
+            .map(|(index, _)| index)
+            .chain(std::iter::once(input.len()))
+        {
+            let mut restorer = StreamRestorer::new();
+            let mut output = String::new();
+            for chunk in [&input[..split], &input[split..]] {
+                for delta in restorer
+                    .push(AiStreamDelta::TextDelta(chunk.into()), &mappings)
+                    .unwrap()
+                {
+                    let AiStreamDelta::TextDelta(text) = delta else {
+                        panic!("unexpected delta");
+                    };
+                    output.push_str(&text);
+                }
+            }
+            for delta in restorer.finish(&mappings).unwrap() {
+                let AiStreamDelta::TextDelta(text) = delta else {
+                    panic!("unexpected trailing delta");
+                };
+                output.push_str(&text);
+            }
+            assert_eq!(output, expected, "split at {split}");
+            assert_eq!(restorer.take_restored_references(), [reference]);
+        }
     }
 }

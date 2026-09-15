@@ -892,14 +892,20 @@ fn add_chain_token_filter_sqlite(b: &mut QueryBuilder<sqlx::Sqlite>, q: &ForestQ
     let Some(min) = q.min_tokens.filter(|value| *value > 0) else {
         return;
     };
-    b.push(" AND ").push(CHAIN_TOKEN_SUM).push(">=").push_bind(min);
+    b.push(" AND ")
+        .push(CHAIN_TOKEN_SUM)
+        .push(">=")
+        .push_bind(min);
 }
 
 fn add_chain_token_filter_postgres(b: &mut QueryBuilder<sqlx::Postgres>, q: &ForestQuery) {
     let Some(min) = q.min_tokens.filter(|value| *value > 0) else {
         return;
     };
-    b.push(" AND ").push(CHAIN_TOKEN_SUM).push(">=").push_bind(min);
+    b.push(" AND ")
+        .push(CHAIN_TOKEN_SUM)
+        .push(">=")
+        .push_bind(min);
 }
 
 async fn forest_roots_sqlite(
@@ -1419,7 +1425,11 @@ mod tests {
                 parent_interaction_id: parent,
                 debug_enabled: false,
                 inferred_retry: false,
-                grouping_reason: if parent.is_some() { "new_user" } else { "new_root" },
+                grouping_reason: if parent.is_some() {
+                    "new_user"
+                } else {
+                    "new_root"
+                },
                 now,
                 expires_at: i64::MAX,
             })

@@ -2,7 +2,7 @@ use super::*;
 
 const SECRET: &str = "ghp_8Dq7mP2vL9sX4aR6tK3nF5wH1jB0cYzUeIoG";
 const TOOL_SECRET: &str = "ghp_3Jt8cR2pX6mQ9wK1vH5nL7aD4sF0bYzUeIoG";
-const UNKNOWN: &str = "~stravia-secret:00000000000000000000000000000000~";
+const UNKNOWN: &str = "<!-- stravia-redaction-marker:rm_00000000000000000000000000000000 -->";
 
 struct CredentialFileTool {
     path: std::path::PathBuf,
@@ -76,8 +76,8 @@ async fn platform_tool_roundtrip(websocket: bool, array_output: bool, debug: boo
                 let mut response = if !body["messages"].as_array().unwrap().iter()
                     .any(|message| message["role"] == "tool") {
                     let wire = serde_json::to_string(&body["messages"]).unwrap();
-                    let reference = regex::Regex::new(r"~stravia-secret:[0-9a-f]{32}~")
-                        .unwrap().find(&wire).map(|value| value.as_str()).unwrap_or("unprotected");
+                    let reference = stravia_credential_protection::marker::find_reference(&wire)
+                        .map(|(_, reference)| reference).unwrap_or("unprotected");
                     serde_json::json!({
                         "id": "chatcmpl-tool", "object": "chat.completion", "model": "provider-model",
                         "choices": [{"index": 0, "message": {
@@ -282,7 +282,8 @@ async fn platform_tool_roundtrip(websocket: bool, array_output: bool, debug: boo
         assert!(!wire.contains(TOOL_SECRET));
     }
     let second = request_snapshot[1].to_string();
-    let references = regex::Regex::new(r"~stravia-secret:[0-9a-f]{32}~").unwrap();
+    let references =
+        regex::Regex::new(r"<!-- stravia-redaction-marker:rm_[0-9a-f]{32} -->").unwrap();
     assert_eq!(
         references
             .find_iter(&second)

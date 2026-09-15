@@ -444,7 +444,11 @@ async fn manual_provider_models_are_partial_and_do_not_mutate_routes() -> anyhow
     assert_eq!(prepared_by_id.metadata.family.as_deref(), Some("glm"));
     assert_eq!(prepared_by_id.metadata.tool_call, Some(true));
     assert_eq!(
-        prepared_by_id.metadata.limit.as_ref().map(|limit| limit.context),
+        prepared_by_id
+            .metadata
+            .limit
+            .as_ref()
+            .map(|limit| limit.context),
         Some(Some(200_000))
     );
 
@@ -638,7 +642,10 @@ async fn custom_provider_sync_applies_unique_canonical_templates() -> anyhow::Re
     server.await??;
     assert_eq!(summary.added, 2);
 
-    let glm = gw.admin().get_provider_model(&provider.id, "glm-5.1").await?;
+    let glm = gw
+        .admin()
+        .get_provider_model(&provider.id, "glm-5.1")
+        .await?;
     assert_eq!(glm.metadata.name.as_deref(), Some("GLM-5.1"));
     assert_eq!(glm.metadata.family.as_deref(), Some("glm"));
     assert_eq!(glm.metadata.tool_call, Some(true));
@@ -709,17 +716,27 @@ async fn custom_provider_resync_fills_bare_discovered_canonical_templates() -> a
         })
         .await?;
 
-    let listed = gw.admin().get_provider_model(&provider.id, "glm-5.1").await?;
+    let listed = gw
+        .admin()
+        .get_provider_model(&provider.id, "glm-5.1")
+        .await?;
     assert!(listed.metadata.lacks_registered_specification());
 
     let summary = gw.admin().sync_provider_models(&provider.id).await?;
     server.await??;
     assert_eq!(summary.added, 0);
 
-    let filled = gw.admin().get_provider_model(&provider.id, "glm-5.1").await?;
+    let filled = gw
+        .admin()
+        .get_provider_model(&provider.id, "glm-5.1")
+        .await?;
     assert_eq!(filled.metadata.name.as_deref(), Some("GLM-5.1"));
     assert_eq!(
-        filled.metadata.limit.as_ref().and_then(|limit| limit.context),
+        filled
+            .metadata
+            .limit
+            .as_ref()
+            .and_then(|limit| limit.context),
         Some(200_000)
     );
     assert!(!filled.metadata.lacks_registered_specification());

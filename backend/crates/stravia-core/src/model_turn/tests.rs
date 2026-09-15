@@ -1332,7 +1332,7 @@ async fn committed_discovery_survives_dropped_protection_before_intern_acknowled
     assert_eq!(page.items[0].source_types, ["system_or_history"]);
     let encoded = serde_json::to_string(&page).unwrap();
     assert!(!encoded.contains("Q8n4Vk7sT2p9X5a3Lc6D0h1R"));
-    assert!(!encoded.contains("~stravia-secret:"));
+    assert!(!encoded.contains(stravia_credential_protection::marker::PREFIX));
     let reused_observer = credential_observer(&gateway, &principal);
     held.release.notify_one();
     gateway
@@ -1410,7 +1410,7 @@ async fn committed_discovery_survives_replacement_failure_but_failed_intern_crea
     assert_eq!(store.inner.active(&principal).await.unwrap().len(), 1);
     let encoded = serde_json::to_string(&page).unwrap();
     assert!(!encoded.contains("Q8n4Vk7sT2p9X5a3Lc6D0h1R"));
-    assert!(!encoded.contains("~stravia-secret:"));
+    assert!(!encoded.contains(stravia_credential_protection::marker::PREFIX));
 
     let pool = gateway._sqlite_pool.as_ref().unwrap();
     sqlx::query("CREATE TRIGGER reject_discovery_mapping BEFORE INSERT ON reversible_redaction_mappings BEGIN SELECT RAISE(FAIL, 'injected mapping failure'); END").execute(pool).await.unwrap();
@@ -1506,8 +1506,12 @@ async fn held_publication_turn(
     CancellationToken,
     i64,
 ) {
-    let (directory, mut gateway, _, key) =
-        gateway_with_captured_text("publication-model", true, "answer ~stravia-secret:").await;
+    let (directory, mut gateway, _, key) = gateway_with_captured_text(
+        "publication-model",
+        true,
+        "answer <!-- stravia-redaction-marker:",
+    )
+    .await;
     let principal = Principal::new(key.id);
     let store = Arc::new(HeldPublicationStore {
         inner: gateway.redaction.mappings.clone(),
@@ -1635,7 +1639,7 @@ async fn canonical_completion_publishes_after_trailing_output_and_is_permanently
         held_publication_turn(false, false).await;
     assert_eq!(
         consume_until_publication(&mut turn, &store).await,
-        "answer ~stravia-secret:"
+        "answer <!-- stravia-redaction-marker:"
     );
     // The select above dropped a pending next() future. Publication must survive
     // that pause and resume rather than issuing a second write.
@@ -1643,7 +1647,10 @@ async fn canonical_completion_publishes_after_trailing_output_and_is_permanently
     store.release.notify_one();
     match turn.output.next().await.unwrap().unwrap() {
         CanonicalEvent::Completed(response) => {
-            assert_eq!(response.output_text(), "answer ~stravia-secret:")
+            assert_eq!(
+                response.output_text(),
+                "answer <!-- stravia-redaction-marker:"
+            )
         }
         CanonicalEvent::Delta(_) | CanonicalEvent::Compacted(_) => {
             panic!("expected generation completion")
@@ -1664,7 +1671,7 @@ async fn canonical_completion_publishes_current_shared_trace_with_empty_local_ma
         held_publication_turn(false, true).await;
     assert_eq!(
         consume_until_publication(&mut turn, &store).await,
-        "answer ~stravia-secret:"
+        "answer <!-- stravia-redaction-marker:"
     );
     assert!(store.inner.active(&principal).await.unwrap()[0].expires_at > pending_expiry);
     store.release.notify_one();
@@ -1680,7 +1687,7 @@ async fn canonical_completion_reports_publication_failure_without_success_or_ups
     let (_directory, gateway, mut turn, store, _, _, _) = held_publication_turn(true, false).await;
     assert_eq!(
         consume_until_publication(&mut turn, &store).await,
-        "answer ~stravia-secret:"
+        "answer <!-- stravia-redaction-marker:"
     );
     store.release.notify_one();
     assert_eq!(

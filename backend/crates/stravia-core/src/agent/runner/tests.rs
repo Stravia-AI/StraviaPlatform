@@ -211,7 +211,9 @@ async fn platform_agent_typed_media_preserves_opaque_secret_and_redacts_readable
     assert_eq!(content[0]["source"]["data"], SECRET);
     let text = content[1]["text"].as_str().unwrap();
     assert!(!text.contains(SECRET));
-    assert!(text.starts_with("credential: ~stravia-secret:"));
+    assert!(stravia_credential_protection::marker::valid_reference(
+        text.strip_prefix("credential: ").unwrap()
+    ));
     assert_eq!(
         content[2]["source"]["content"][0]["text"],
         text.strip_prefix("credential: ").unwrap()

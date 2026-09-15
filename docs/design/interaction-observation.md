@@ -352,6 +352,7 @@ Observation、Rejected Request、Debug manifest 与 Trace 文件跟随 `log_rete
 - credential header（含 Authorization、API key、Cookie、Set-Cookie、Proxy Authorization）值永久替换为 `***`；
 - URL userinfo 与 key/token/signature/credential 类 query 值永久替换为 `***`；
 - JSON/form 等结构化 body 中明确的 key/token/secret/password/credential 字段递归替换为 `***`；
+- 业务文本中的完整 `<!-- stravia-redaction-marker:rm_<32 位小写十六进制> -->` 是机器原子，不拆开匹配其内部文字或吞掉后续路径；真实 credential header 和结构化凭据字段不因此获得豁免，无效或不完整标记仍按普通文本处理；
 - Debug 识别协议凭据字段与单条应用消息内的完整凭据模式，不承诺拼接多条消息后再识别业务文本中的凭据；这类跨消息内容仍需按敏感数据处理；
 - 其他 prompt、工具参数、工具结果和业务内容在 Debug Trace 中保留，因此开启确认必须明确敏感风险；
 - redaction 在写入前完成；原始凭据不得先落临时文件、数据库或异步队列；

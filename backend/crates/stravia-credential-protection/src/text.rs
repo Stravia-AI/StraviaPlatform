@@ -3,32 +3,15 @@ use std::collections::BTreeSet;
 
 use serde_json::Value;
 
-use super::{RedactionError, store::Mapping};
+use super::{RedactionError, marker, store::Mapping};
 use stravia_runtime_contract::protocol::ir::{
     AiItem, AiRequest, AiResponse, ContentBlock, DocumentSource, EmbeddingInput, MessageContent,
     ProtocolExt, ResponseFormat, TOOL_RESULT_CONTENT_KIND_META, ToolResultContentKind,
 };
 
-pub(super) const PREFIX: &str = "~stravia-secret:";
-pub(super) const REFERENCE_LEN: usize = PREFIX.len() + 32 + 1;
-
-pub(super) fn valid_reference(value: &str) -> bool {
-    value.len() == REFERENCE_LEN
-        && value.starts_with(PREFIX)
-        && value.ends_with('~')
-        && value.as_bytes()[PREFIX.len()..REFERENCE_LEN - 1]
-            .iter()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
-}
-
-pub(super) fn reference_prefix(value: &str) -> Option<&str> {
-    let reference = value.get(..REFERENCE_LEN)?;
-    valid_reference(reference).then_some(reference)
-}
-
 pub(super) fn active(mapping: &Mapping) -> bool {
     mapping.expires_at > chrono::Utc::now().timestamp_millis()
-        && valid_reference(&mapping.reference)
+        && marker::valid_reference(&mapping.reference)
 }
 
 /// Single pass over original bytes: inserted secrets/references are never scanned again.
@@ -58,7 +41,7 @@ pub(super) fn replace(
     while position < text.len() {
         // References are protocol atoms. Neither a broad detector nor a known
         // secret matching their identifier may nest another reference inside one.
-        if !restore && let Some(reference) = reference_prefix(&text[position..]) {
+        if !restore && let Some(reference) = marker::reference_prefix(&text[position..]) {
             result.push_str(reference);
             position += reference.len();
             continue;
@@ -689,14 +672,15 @@ pub fn restore_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::marker::{PREFIX, SUFFIX};
     use stravia_runtime_contract::hook::{ContextCompleteness, ContextSnapshot};
 
     #[test]
     fn outbound_replacement_preserves_reference_atoms_when_identifiers_are_known_secrets() {
         let identifier = "65ecadffe021442ab611243aca232c08";
-        let reference = format!("{PREFIX}{identifier}~");
+        let reference = format!("{PREFIX}{identifier}{SUFFIX}");
         let mapping = Mapping {
-            reference: format!("{PREFIX}{}~", "b".repeat(32)),
+            reference: format!("{PREFIX}{}{SUFFIX}", "b".repeat(32)),
             secret: identifier.into(),
             expires_at: i64::MAX,
         };
@@ -718,7 +702,7 @@ mod tests {
     #[test]
     fn encoded_tool_media_stays_opaque_after_context_rebuilds() {
         let mapping = Mapping {
-            reference: format!("{PREFIX}{}~", "b".repeat(32)),
+            reference: format!("{PREFIX}{}{SUFFIX}", "b".repeat(32)),
             secret: "Q8n4Vk7sT2p9X5a3Lc6D0h1R".into(),
             expires_at: i64::MAX,
         };
@@ -756,7 +740,7 @@ mod tests {
     #[test]
     fn legacy_encoded_tool_results_fail_closed_and_restore_without_guessing() {
         let mapping = Mapping {
-            reference: format!("{PREFIX}{}~", "c".repeat(32)),
+            reference: format!("{PREFIX}{}{SUFFIX}", "c".repeat(32)),
             secret: "Q8n4Vk7sT2p9X5a3Lc6D0h1R".into(),
             expires_at: i64::MAX,
         };
@@ -803,7 +787,7 @@ mod tests {
     #[test]
     fn fresh_tool_text_is_not_reinterpreted_as_media() {
         let mapping = Mapping {
-            reference: format!("{PREFIX}{}~", "d".repeat(32)),
+            reference: format!("{PREFIX}{}{SUFFIX}", "d".repeat(32)),
             secret: "Q8n4Vk7sT2p9X5a3Lc6D0h1R".into(),
             expires_at: i64::MAX,
         };
@@ -831,7 +815,7 @@ mod tests {
         // A loaded mapping can expire after detection/intern and before replacement.
         // Pin that boundary instead of racing a wall-clock sleep.
         let mapping = Mapping {
-            reference: format!("{PREFIX}{}~", "a".repeat(32)),
+            reference: format!("{PREFIX}{}{SUFFIX}", "a".repeat(32)),
             secret: "synthetic snapshot secret".into(),
             expires_at: 0,
         };

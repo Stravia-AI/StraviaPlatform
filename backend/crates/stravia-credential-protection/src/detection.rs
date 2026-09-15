@@ -522,9 +522,9 @@ impl Detector {
             self.find_betterleaks(raw, index)?
         };
         let references: Vec<_> = raw
-            .match_indices(super::text::PREFIX)
+            .match_indices(super::marker::PREFIX)
             .filter_map(|(start, _)| {
-                super::text::reference_prefix(&raw[start..])
+                super::marker::reference_prefix(&raw[start..])
                     .map(|reference| start..start + reference.len())
             })
             .collect();

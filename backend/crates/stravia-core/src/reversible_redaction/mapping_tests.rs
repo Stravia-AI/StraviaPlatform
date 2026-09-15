@@ -65,6 +65,9 @@ async fn assert_store_contract(store: &SqlMappingStore) -> (Principal, String, S
             .is_empty()
     );
     assert_eq!(first.reference, concurrent.reference);
+    assert!(stravia_credential_protection::marker::valid_reference(
+        &first.reference
+    ));
     assert_eq!(first.secret, secrets[0]);
     assert_eq!(first.expires_at, concurrent.expires_at);
     assert!(store.active(&other).await.unwrap().is_empty());
@@ -163,6 +166,175 @@ async fn sqlite_mapping_concurrency_lifecycle_isolation_and_restart() {
     assert_eq!(restored[0].reference, reference);
     assert_eq!(restored[0].secret, secret);
     reopened.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_redaction_marker_format_migrates_strict_legacy_references_without_data_loss() {
+    const OWNER_ID: &str = "0123456789abcdef0123456789abcdef";
+    const OTHER_ID: &str = "fedcba9876543210fedcba9876543210";
+    const ALREADY_NEW: &str =
+        "<!-- stravia-redaction-marker:rm_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb -->";
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../migrations/sqlite/0035_reversible_redaction.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let expires_at = now() + 24 * 60 * 60 * 1_000;
+    let owner_legacy = format!("~stravia-secret:{OWNER_ID}~");
+    let other_legacy = format!("~stravia-secret:{OTHER_ID}~");
+    for (reference, principal, secret, published_at, created_at, updated_at) in [
+        (
+            owner_legacy.as_str(),
+            "migration-owner",
+            "owner-value",
+            Some(41_i64),
+            11_i64,
+            31_i64,
+        ),
+        (
+            other_legacy.as_str(),
+            "migration-other",
+            "other-value",
+            None,
+            12,
+            32,
+        ),
+        (
+            "~stravia-secret:0123456789abcdef0123456789abcdeF~",
+            "uppercase",
+            "uppercase-value",
+            None,
+            13,
+            33,
+        ),
+        (
+            "~stravia-secret:0123456789abcdef0123456789abcdeg~",
+            "non-hex",
+            "non-hex-value",
+            None,
+            14,
+            34,
+        ),
+        (ALREADY_NEW, "already-new", "new-value", None, 15, 35),
+    ] {
+        sqlx::query(
+            "INSERT INTO reversible_redaction_mappings
+             (reference, principal, secret, published_at, created_at, updated_at, expires_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(reference)
+        .bind(Principal::new(principal).continuation_key())
+        .bind(secret)
+        .bind(published_at)
+        .bind(created_at)
+        .bind(updated_at)
+        .bind(expires_at)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let migration = include_str!("../../migrations/sqlite/0046_redaction_marker_format.sql");
+    sqlx::raw_sql(migration).execute(&pool).await.unwrap();
+    sqlx::raw_sql(migration).execute(&pool).await.unwrap();
+
+    let owner_reference = format!("<!-- stravia-redaction-marker:rm_{OWNER_ID} -->");
+    let other_reference = format!("<!-- stravia-redaction-marker:rm_{OTHER_ID} -->");
+    let migrated: (String, String, String, Option<i64>, i64, i64, i64) = sqlx::query_as(
+        "SELECT reference, principal, secret, published_at, created_at, updated_at, expires_at
+         FROM reversible_redaction_mappings WHERE principal = 'api-key:migration-owner'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(migrated.0, owner_reference);
+    assert_eq!(
+        migrated.1,
+        Principal::new("migration-owner").continuation_key()
+    );
+    assert!(migrated.2 == "owner-value", "secret must be preserved");
+    assert_eq!(migrated.3, Some(41));
+    assert_eq!((migrated.4, migrated.5, migrated.6), (11, 31, expires_at));
+    let pending: (Option<i64>, i64, i64, i64) = sqlx::query_as(
+        "SELECT published_at, created_at, updated_at, expires_at
+         FROM reversible_redaction_mappings WHERE principal = 'api-key:migration-other'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(pending, (None, 12, 32, expires_at));
+
+    for (principal, unchanged) in [
+        (
+            "uppercase",
+            "~stravia-secret:0123456789abcdef0123456789abcdeF~",
+        ),
+        (
+            "non-hex",
+            "~stravia-secret:0123456789abcdef0123456789abcdeg~",
+        ),
+        ("already-new", ALREADY_NEW),
+    ] {
+        let reference: String = sqlx::query_scalar(
+            "SELECT reference FROM reversible_redaction_mappings WHERE principal = ?",
+        )
+        .bind(Principal::new(principal).continuation_key())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(reference, unchanged);
+    }
+
+    let store = SqlMappingStore::sqlite(pool.clone());
+    let owner = Principal::new("migration-owner");
+    let other = Principal::new("migration-other");
+    let owner_mappings = store.active(&owner).await.unwrap();
+    let other_mappings = store.active(&other).await.unwrap();
+    assert_eq!(owner_mappings.len(), 1);
+    assert_eq!(owner_mappings[0].reference, owner_reference);
+    assert!(
+        owner_mappings[0].secret == "owner-value",
+        "secret must remain readable"
+    );
+    assert_eq!(other_mappings.len(), 1);
+    assert_eq!(other_mappings[0].reference, other_reference);
+    assert!(
+        store
+            .active(&Principal::new("migration-unrelated"))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let long = Duration::from_secs(30 * 24 * 60 * 60);
+    store
+        .extend_retention(&other, std::slice::from_ref(&owner_reference), long)
+        .await
+        .unwrap();
+    assert_eq!(
+        store.active(&owner).await.unwrap()[0].expires_at,
+        expires_at
+    );
+    store
+        .extend_retention(&owner, std::slice::from_ref(&owner_reference), long)
+        .await
+        .unwrap();
+    assert!(store.active(&owner).await.unwrap()[0].expires_at > expires_at);
+    let publication: Option<i64> = sqlx::query_scalar(
+        "SELECT published_at FROM reversible_redaction_mappings WHERE reference = ?",
+    )
+    .bind(&owner_reference)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(publication, Some(41));
 }
 
 #[tokio::test]

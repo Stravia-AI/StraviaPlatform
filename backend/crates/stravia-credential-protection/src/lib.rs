@@ -1,4 +1,5 @@
 mod detection;
+pub mod marker;
 pub mod store;
 mod stream;
 mod text;
@@ -22,6 +23,8 @@ use stravia_runtime_contract::redaction::{RedactionError, RedactionTrace};
 
 pub const SETTING_KEY: &str = "reversible_redaction_enabled";
 const PUBLISHED_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+const MARKER_INSTRUCTION: &str =
+    "Preserve Stravia redaction markers verbatim when used; Stravia restores their values.";
 
 /// Runtime settings boundary. Invalid or unavailable settings fail closed in the host.
 #[async_trait::async_trait]
@@ -119,12 +122,25 @@ impl ReversibleRedaction {
         }
         if !mappings.is_empty() {
             let (texts, _) = text::request_texts(request, enabled)?;
-            request.meta.redaction.record(
-                mappings
-                    .iter()
-                    .filter(|mapping| texts.iter().any(|text| text.contains(&mapping.reference)))
-                    .map(|mapping| mapping.reference.clone()),
-            )?;
+            let references: Vec<_> = mappings
+                .iter()
+                .filter(|mapping| {
+                    text::active(mapping)
+                        && texts.iter().any(|text| text.contains(&mapping.reference))
+                })
+                .map(|mapping| mapping.reference.clone())
+                .collect();
+            if !references.is_empty() {
+                request.meta.redaction.record(references)?;
+                // 只影响当前模型请求；无引用的请求与客户端历史不携带平台说明。
+                let instructions = request.instructions.get_or_insert_with(String::new);
+                if !instructions.lines().any(|line| line == MARKER_INSTRUCTION) {
+                    if !instructions.is_empty() {
+                        instructions.push_str("\n\n");
+                    }
+                    instructions.push_str(MARKER_INSTRUCTION);
+                }
+            }
         }
         request.meta.redaction.set_tracking(!mappings.is_empty())?;
         Ok(mappings)

@@ -294,8 +294,10 @@ fn inline_ignore_comments_do_not_disable_protection() {
 
 #[tokio::test]
 async fn references_are_atomic_and_do_not_hide_neighboring_credentials() {
-    let reference = "~stravia-secret:65ecadffe021442ab611243aca232c08~";
-    assert!(test_text(reference.into()).await.unwrap().is_empty());
+    let reference = "<!-- stravia-redaction-marker:rm_65ecadffe021442ab611243aca232c08 -->";
+    for text in [reference.to_owned(), format!("api_key={reference}")] {
+        assert!(test_text(text).await.unwrap().is_empty());
+    }
     let key = "7b2d9f4a0c6e3a8b1d5f9c2e4a6b8d0f.Q7m2Z9v4K0r6T3x8";
     let text = format!("{reference} {key} {reference}");
     let matches = test_text(text.clone()).await.unwrap();

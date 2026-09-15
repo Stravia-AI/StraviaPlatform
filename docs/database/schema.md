@@ -587,7 +587,7 @@ Persistent reversible secret mappings, isolated solely by the API Key's authenti
 
 | Column | Type | Default | Description |
 |---|---|---|---|
-| `reference` | TEXT PK NOT NULL | — | Opaque `~stravia-secret:<32 lowercase UUID hex digits>~` placeholder; never rebound |
+| `reference` | TEXT PK NOT NULL | — | Opaque `<!-- stravia-redaction-marker:rm_<32 lowercase UUID hex digits> -->` marker; never rebound to a different secret |
 | `principal` | TEXT NOT NULL | — | Existing `api-key:<API Key ID>` Principal identity; foreign Principal lookups reveal no mapping |
 | `secret` | TEXT NOT NULL | — | Exact secret plaintext, including multiline values |
 | `published_at` | BIGINT / INTEGER | NULL | First publication time, Unix milliseconds |
@@ -596,6 +596,8 @@ Persistent reversible secret mappings, isolated solely by the API Key's authenti
 | `expires_at` | BIGINT / INTEGER NOT NULL | — | Exclusive validity boundary, Unix milliseconds |
 
 **Indexes**: `idx_reversible_redaction_mappings_principal_expiry` on `(principal, expires_at)` and `idx_reversible_redaction_mappings_expiry` on `expires_at`.
+
+Migration 0046 converts strictly valid legacy `~stravia-secret:<32 lowercase UUID hex digits>~` references to the new marker format, preserving the identifier and every other column. It does not rewrite immutable history or client/upstream state. Legacy references are no longer parsed or restored after the cutover.
 
 Creation retains an unpublished mapping for one hour. Publication extends it to at least seven days; Generation Chain retention only extends still-live published mappings and never shortens their lifetime. Expired mappings neither participate in restoration or known-secret detection nor revive through publication or renewal. Cleanup deletes expired rows. Disabling new redaction does not delete mappings or prevent restoration of live references.
 

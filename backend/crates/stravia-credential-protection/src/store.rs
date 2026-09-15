@@ -205,8 +205,7 @@ impl MappingStore for SqlMappingStore {
                         Some(mapping) => mapping,
                         None => {
                             created.push(mappings.len());
-                            let reference =
-                                format!("~stravia-secret:{}~", uuid::Uuid::new_v4().simple());
+                            let reference = super::marker::new_reference();
                             sqlx::query(
                                 "INSERT INTO reversible_redaction_mappings \
                                  (reference, principal, secret, created_at, updated_at, expires_at) \
@@ -248,8 +247,7 @@ impl MappingStore for SqlMappingStore {
                         Some(mapping) => mapping,
                         None => {
                             created.push(mappings.len());
-                            let reference =
-                                format!("~stravia-secret:{}~", uuid::Uuid::new_v4().simple());
+                            let reference = super::marker::new_reference();
                             sqlx::query(
                                 "INSERT INTO reversible_redaction_mappings \
                                  (reference, principal, secret, created_at, updated_at, expires_at) \
