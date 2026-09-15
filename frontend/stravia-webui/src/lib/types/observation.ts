@@ -80,6 +80,7 @@ export interface ForestQuery {
   model?: string
   api_key?: string
   status?: string
+  min_tokens?: number
 }
 
 export interface InteractionNodeData extends Record<string, unknown> {

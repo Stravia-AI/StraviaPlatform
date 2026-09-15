@@ -972,6 +972,19 @@ test.describe('Interaction Observation canvas', () => {
     expect(fixture.detailRequests).toEqual([])
   })
 
+  test('hides chains below the default token total and can show all', async ({ page }) => {
+    const fixture = await installObservationFixture(page)
+    await page.goto('/logs')
+    await expect.poll(() => fixture.forestRequests.at(-1)?.searchParams.get('min_tokens')).toBe('10000')
+    await page.getByRole('button', { name: 'Filters' }).click()
+    await expect(page.getByRole('slider', { name: 'Minimum chain tokens' })).toBeVisible()
+    await expect(page.getByText('10.0K', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Clear filters' }).click()
+    await expect(page.getByText('All', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Apply filters' }).click()
+    await expect.poll(() => fixture.forestRequests.at(-1)?.searchParams.has('min_tokens')).toBe(false)
+  })
+
   test('keeps a historical root updated through summaries and exposes its migration when inspected', async ({
     page,
   }) => {

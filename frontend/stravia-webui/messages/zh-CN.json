@@ -1445,6 +1445,8 @@
 
   "observation_filters": "筛选",
   "observation_filters_description": "命中任一节点时返回完整根 DAG；未命中的祖先以弱化的因果上下文保留。",
+  "observation_min_tokens": "最小合计 Token",
+  "observation_min_tokens_hint": "合计包含根节点与子节点的输入、输出、缓存读和缓存写。低于此值的整条链路不显示。滑到 0 显示全部。",
   "observation_fit_all": "加载并适配全部根链",
   "observation_hide_minimap": "隐藏小地图",
   "observation_history_cleared": "已清除 {interactions} 个交互和 {rejections} 条独立请求记录；保留 {skipped} 个活动交互。",

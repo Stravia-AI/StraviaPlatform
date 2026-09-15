@@ -16,7 +16,7 @@ import { toast } from 'svelte-sonner'
 
 import { admin } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
-import { formatLogTime } from '$lib/format'
+import { formatCompactCount, formatLogTime } from '$lib/format'
 import { visualParent } from '$lib/interaction-canvas-links'
 import { eventBlockId, mergeObservationRuns, retainLiveBlocks, withoutCommittedBlocks } from '$lib/observation-state'
 import { observationStatusLabel } from '$lib/observation-labels'
@@ -47,12 +47,15 @@ import * as Field from '$lib/components/ui/field'
 import { Input } from '$lib/components/ui/input'
 import * as Select from '$lib/components/ui/select'
 import * as Sheet from '$lib/components/ui/sheet'
+import { Slider } from '$lib/components/ui/slider'
 import { Switch } from '$lib/components/ui/switch'
 import * as Tabs from '$lib/components/ui/tabs'
 
 const batchSize = 12
 const maxWindowMs = 86_400_000
 const presetMinutes = [5, 10, 30, 60, 240, 720, 1440]
+const minTokenStops = [0, 1_000, 2_000, 5_000, 10_000, 20_000, 50_000, 100_000, 200_000, 500_000, 1_000_000]
+const defaultMinTokenStop = 4
 const queryClient = useQueryClient()
 let activeTab = $state('interactions')
 let anchorAt = $state(Date.now())
@@ -96,6 +99,7 @@ let providerFilter = $state('all')
 let modelFilter = $state('all')
 let apiKeyFilter = $state('all')
 let statusFilter = $state('all')
+let minTokenStop = $state(defaultMinTokenStop)
 let clearOpen = $state(false)
 let clearing = $state(false)
 let clearResult = $state<{ skipped_active: number }>()
@@ -119,10 +123,11 @@ const keysQuery = createQuery(() => ({ queryKey: ['api-keys'], queryFn: admin.ap
 const debugQuery = createQuery(() => ({ queryKey: ['observation-debug'], queryFn: admin.observations.debug }))
 
 const interactions = $derived(roots.flatMap((root) => root.interactions))
+const minTokensFilter = $derived(minTokenStops[minTokenStop] ?? 0)
 const activeFilterCount = $derived(
   [providerFilter, modelFilter, apiKeyFilter, ...(activeTab === 'interactions' ? [statusFilter] : [])].filter(
     (value) => value !== 'all',
-  ).length,
+  ).length + Number(activeTab === 'interactions' && minTokensFilter > 0),
 )
 const latestInteraction = $derived.by(
   () =>
@@ -148,6 +153,7 @@ const currentQuery = $derived<ForestQuery>({
   model: modelFilter === 'all' ? undefined : modelFilter,
   api_key: apiKeyFilter === 'all' ? undefined : apiKeyFilter,
   status: statusFilter === 'all' ? undefined : statusFilter,
+  min_tokens: activeTab === 'interactions' && minTokensFilter > 0 ? minTokensFilter : undefined,
 })
 const liveWindow = $derived(!customRange && windowIndex === 0)
 const draftStartMs = $derived(new Date(draftStart).getTime())
@@ -219,6 +225,15 @@ function updateLiveBounds(): void {
   if (!liveWindow) return
   windowEnd = Date.now()
   windowStart = windowEnd - durationMs
+}
+
+function clearFilters(): void {
+  providerFilter = 'all'
+  modelFilter = 'all'
+  apiKeyFilter = 'all'
+  statusFilter = 'all'
+  // 滑到 0 才显示被默认 10k 阈值隐藏的小链路。
+  minTokenStop = 0
 }
 
 async function reloadWindow(): Promise<void> {
@@ -917,12 +932,9 @@ function formatBytes(value: number | undefined): string {
                   ><Button
                     variant="outline"
                     onclick={() => {
-                      providerFilter = 'all'
-                      modelFilter = 'all'
-                      apiKeyFilter = 'all'
-                      statusFilter = 'all'
+                      clearFilters()
                       void reloadForFilters()
-                    }}>{m.observation_clear_filters()}</Button
+                    }}>{m.observation_clear_filters()}</Button>
                   ></Empty.Content
                 >{/if}</Empty.Root>
           </div>
@@ -1134,18 +1146,31 @@ function formatBytes(value: number | undefined): string {
                 ></Select.Content
               ></Select.Root
             ></Field.Field
-          >{/if}
+          >
+          <Field.Field>
+            <Field.FieldLabel for="observation-min-tokens" hint={m.observation_min_tokens_hint()}
+              >{m.observation_min_tokens()}</Field.FieldLabel>
+            <div class="flex min-h-10 items-center gap-3">
+              <Slider
+                id="observation-min-tokens"
+                type="single"
+                bind:value={minTokenStop}
+                min={0}
+                max={minTokenStops.length - 1}
+                step={1}
+                class="flex-1"
+                aria-label={m.observation_min_tokens()} />
+              <span class="font-technical w-14 shrink-0 text-right text-sm tabular-nums" aria-live="polite"
+                >{minTokensFilter > 0 ? formatCompactCount(minTokensFilter) : m.observation_all()}</span>
+            </div>
+          </Field.Field>
+          {/if}
       </Field.FieldGroup>
     </div>
     <Sheet.Footer
       ><Button
         variant="ghost"
-        onclick={() => {
-          providerFilter = 'all'
-          modelFilter = 'all'
-          apiKeyFilter = 'all'
-          statusFilter = 'all'
-        }}>{m.observation_clear_filters()}</Button
+        onclick={clearFilters}>{m.observation_clear_filters()}</Button
       ><Button
         onclick={() => {
           filterOpen = false

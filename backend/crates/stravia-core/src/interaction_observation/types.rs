@@ -472,6 +472,8 @@ pub struct ForestQuery {
     pub model: Option<String>,
     pub api_key: Option<String>,
     pub status: Option<String>,
+    /// 隐藏根 DAG 合计 Token（展示口径的输入+输出+缓存读+缓存写，含子孙）低于此值的链路；0 或缺省表示不过滤。
+    pub min_tokens: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

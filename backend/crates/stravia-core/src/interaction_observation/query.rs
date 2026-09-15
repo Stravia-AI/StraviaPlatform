@@ -822,6 +822,7 @@ fn add_filters_sqlite(b: &mut QueryBuilder<sqlx::Sqlite>, q: &ForestQuery) {
     if let Some(v) = &q.provider {
         b.push(" AND EXISTS (SELECT 1 FROM target_attempt_observations ta WHERE ta.interaction_id=i.id AND (ta.provider_id=").push_bind(v).push(" OR ta.provider_name=").push_bind(v).push("))");
     }
+    add_chain_token_filter_sqlite(b, q);
 }
 fn add_filters_postgres(b: &mut QueryBuilder<sqlx::Postgres>, q: &ForestQuery) {
     if let Some(v) = &q.status {
@@ -840,6 +841,7 @@ fn add_filters_postgres(b: &mut QueryBuilder<sqlx::Postgres>, q: &ForestQuery) {
     if let Some(v) = &q.provider {
         b.push(" AND EXISTS (SELECT 1 FROM target_attempt_observations ta WHERE ta.interaction_id=i.id AND (ta.provider_id=").push_bind(v).push(" OR ta.provider_name=").push_bind(v).push("))");
     }
+    add_chain_token_filter_postgres(b, q);
 }
 fn add_root_filters_sqlite(b: &mut QueryBuilder<sqlx::Sqlite>, q: &ForestQuery) {
     b.push(" AND i.root_id IN (SELECT f.root_id FROM interaction_observations f WHERE 1=1");
@@ -860,6 +862,7 @@ fn add_root_filters_sqlite(b: &mut QueryBuilder<sqlx::Sqlite>, q: &ForestQuery) 
         b.push(" AND EXISTS (SELECT 1 FROM target_attempt_observations ta WHERE ta.interaction_id=f.id AND (ta.provider_id=").push_bind(v).push(" OR ta.provider_name=").push_bind(v).push("))");
     }
     b.push(")");
+    add_chain_token_filter_sqlite(b, q);
 }
 fn add_root_filters_postgres(b: &mut QueryBuilder<sqlx::Postgres>, q: &ForestQuery) {
     b.push(" AND i.root_id IN (SELECT f.root_id FROM interaction_observations f WHERE TRUE");
@@ -880,6 +883,24 @@ fn add_root_filters_postgres(b: &mut QueryBuilder<sqlx::Postgres>, q: &ForestQue
         b.push(" AND EXISTS (SELECT 1 FROM target_attempt_observations ta WHERE ta.interaction_id=f.id AND (ta.provider_id=").push_bind(v).push(" OR ta.provider_name=").push_bind(v).push("))");
     }
     b.push(")");
+    add_chain_token_filter_postgres(b, q);
+}
+
+// 与卡片四项展示合计一致：未知分项按 0。按根 DAG（含子孙）合计，隐藏低于阈值的链路。
+const CHAIN_TOKEN_SUM: &str = "COALESCE((SELECT SUM(CASE WHEN a.input_tokens IS NULL OR a.cache_read_tokens IS NULL THEN 0 WHEN a.input_tokens > a.cache_read_tokens THEN a.input_tokens - a.cache_read_tokens ELSE 0 END + COALESCE(a.output_tokens,0) + COALESCE(a.cache_read_tokens,0) + COALESCE(a.cache_write_tokens,0)) FROM target_attempt_observations a WHERE a.interaction_id IN (SELECT id FROM interaction_observations WHERE root_id=i.root_id)),0)";
+
+fn add_chain_token_filter_sqlite(b: &mut QueryBuilder<sqlx::Sqlite>, q: &ForestQuery) {
+    let Some(min) = q.min_tokens.filter(|value| *value > 0) else {
+        return;
+    };
+    b.push(" AND ").push(CHAIN_TOKEN_SUM).push(">=").push_bind(min);
+}
+
+fn add_chain_token_filter_postgres(b: &mut QueryBuilder<sqlx::Postgres>, q: &ForestQuery) {
+    let Some(min) = q.min_tokens.filter(|value| *value > 0) else {
+        return;
+    };
+    b.push(" AND ").push(CHAIN_TOKEN_SUM).push(">=").push_bind(min);
 }
 
 async fn forest_roots_sqlite(
@@ -1188,6 +1209,7 @@ fn map_sqlite_events(rows: Vec<sqlx::sqlite::SqliteRow>) -> anyhow::Result<Vec<O
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::interaction_observation::store::Admission;
 
     #[tokio::test]
     async fn failed_requests_page_equal_start_times_across_record_kinds() -> anyhow::Result<()> {
@@ -1365,6 +1387,172 @@ mod tests {
                     .all(|event| event.interaction_id.as_ref() == Some(id))
             );
         }
+        Ok(())
+    }
+
+    async fn admit_chain_node(
+        store: &ObservationStore,
+        id: &str,
+        root_id: &str,
+        parent: Option<&str>,
+        now: i64,
+    ) -> anyhow::Result<()> {
+        store
+            .admit(Admission {
+                metadata: None,
+                start: &RunStart {
+                    id: id.into(),
+                    principal: "owner".into(),
+                    api_key_id: None,
+                    api_key_name: None,
+                    generation_root_id: (root_id != id).then(|| root_id.to_owned()),
+                    generation_parent_id: None,
+                    has_new_user: true,
+                    has_matching_pending_tool_result: false,
+                    ingress_received_at: now,
+                    canonical_fingerprint: id.into(),
+                    route_id: "route".into(),
+                    model_display_name: None,
+                    ingress_protocol: "responses".into(),
+                },
+                interaction_id: id,
+                parent_run_id: parent,
+                parent_interaction_id: parent,
+                debug_enabled: false,
+                inferred_retry: false,
+                grouping_reason: if parent.is_some() { "new_user" } else { "new_root" },
+                now,
+                expires_at: i64::MAX,
+            })
+            .await?;
+        Ok(())
+    }
+
+    async fn confirm_displayed_tokens(
+        store: &ObservationStore,
+        id: &str,
+        input: i64,
+        output: i64,
+        cache_read: i64,
+        cache_write: i64,
+        at: i64,
+    ) -> anyhow::Result<()> {
+        store
+            .persist_run_event(
+                id,
+                id,
+                &RunEvent::ModelTurnStarted {
+                    model_turn_id: id.into(),
+                    route_id: "route".into(),
+                    model_display_name: None,
+                },
+                at,
+                i64::MAX,
+            )
+            .await?;
+        store
+            .persist_run_event(
+                id,
+                id,
+                &RunEvent::TargetAttemptStarted {
+                    model_turn_id: id.into(),
+                    attempt_id: format!("{id}-a"),
+                    target_id: "target".into(),
+                    provider_id: "provider".into(),
+                    provider_name: "provider".into(),
+                    upstream_model: "model".into(),
+                    protocol: "responses".into(),
+                    upstream_url: "http://localhost".into(),
+                },
+                at,
+                i64::MAX,
+            )
+            .await?;
+        store
+            .persist_run_event(
+                id,
+                id,
+                &RunEvent::UsageConfirmed {
+                    model_turn_id: id.into(),
+                    attempt_id: format!("{id}-a"),
+                    usage: ConfirmedUsage {
+                        input_tokens: Some(input),
+                        output_tokens: Some(output),
+                        cache_read_tokens: Some(cache_read),
+                        cache_write_tokens: Some(cache_write),
+                        reasoning_tokens: None,
+                        coverage: None,
+                    },
+                },
+                at,
+                i64::MAX,
+            )
+            .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn forest_hides_roots_below_chain_token_total() -> anyhow::Result<()> {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        crate::migrations::migrate_sqlite(&pool).await?;
+        let store = ObservationStore::Sqlite(pool);
+        admit_chain_node(&store, "small", "small", None, 1).await?;
+        confirm_displayed_tokens(&store, "small", 1_000, 1_000, 0, 0, 2).await?;
+        admit_chain_node(&store, "large", "large", None, 1).await?;
+        confirm_displayed_tokens(&store, "large", 9_000, 2_000, 0, 0, 2).await?;
+        admit_chain_node(&store, "split", "split", None, 1).await?;
+        confirm_displayed_tokens(&store, "split", 3_000, 2_000, 0, 0, 2).await?;
+        admit_chain_node(&store, "split-child", "split", Some("split"), 3).await?;
+        confirm_displayed_tokens(&store, "split-child", 4_000, 2_000, 0, 0, 4).await?;
+
+        let window = ForestQuery {
+            start_at: Some(0),
+            end_at: Some(DAY_MS),
+            ..Default::default()
+        };
+        let unfiltered = store.query_forest(window.clone()).await?;
+        assert_eq!(unfiltered.root_total, 3);
+
+        let filtered = store
+            .query_forest(ForestQuery {
+                min_tokens: Some(10_000),
+                ..window.clone()
+            })
+            .await?;
+        let mut ids: Vec<_> = filtered.roots.iter().map(|root| root.id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, ["large", "split"]);
+        assert_eq!(filtered.root_total, 2);
+        let split = filtered
+            .roots
+            .iter()
+            .find(|root| root.id == "split")
+            .expect("split chain");
+        assert_eq!(split.interactions.len(), 2);
+
+        let stricter = store
+            .query_forest(ForestQuery {
+                min_tokens: Some(12_000),
+                ..window.clone()
+            })
+            .await?;
+        assert!(stricter.roots.is_empty());
+        assert_eq!(stricter.root_total, 0);
+
+        let snapshot = store
+            .get_interaction_summary(
+                "small",
+                ForestQuery {
+                    min_tokens: Some(10_000),
+                    ..window
+                },
+            )
+            .await?
+            .expect("small root still readable");
+        assert!(snapshot.root.interactions.iter().all(|item| !item.matched));
         Ok(())
     }
 }

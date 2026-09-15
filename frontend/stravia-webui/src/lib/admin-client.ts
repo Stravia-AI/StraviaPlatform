@@ -321,7 +321,7 @@ function mapRequest(command: string, args?: Record<string, unknown>): RequestMap
     case 'getObservationInteraction': {
       const params = new URLSearchParams()
       const query = (args?.query as ForestQuery | undefined) ?? {}
-      for (const key of ['provider', 'model', 'api_key', 'status'] as const) {
+      for (const key of ['provider', 'model', 'api_key', 'status', 'min_tokens'] as const) {
         if (query[key]) params.set(key, String(query[key]))
       }
       const suffix = params.size > 0 ? `?${params}` : ''
