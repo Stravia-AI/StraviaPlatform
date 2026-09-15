@@ -277,7 +277,6 @@
   "common_actions": "Actions",
   "common_add_model": "Add model",
   "common_added_manually": "Added manually",
-  "common_additional_model_ids": "Additional model IDs",
   "common_all_models": "All models",
   "common_always_allow": "Always allow",
   "common_api_key": "API Key",
@@ -757,7 +756,6 @@
   "provider_editor_model_service_connected": "Model service connected",
   "provider_editor_configuration_help": "Name this connection, enter its credentials, and review where requests will be sent.",
   "provider_editor_no_matching_services": "No matching services",
-  "provider_editor_one_model_id_per_line": "One model ID per line",
   "provider_editor_search_services_sign_methods": "Search services or sign-in methods",
   "provider_editor_catalog_refresh_summary": [
     {
@@ -822,7 +820,7 @@
   "provider_model_catalog_remove_list": "Remove from list",
   "provider_model_catalog_remove_manually_added_model": "Remove manually added model…",
   "provider_model_catalog_restore_details_service": "Restore details from service…",
-  "provider_model_catalog_search_model": "Search model",
+  "provider_model_catalog_search_model": "Search model template",
   "provider_model_catalog_search_models": "Search models",
   "provider_model_catalog_search_name_model_id": "Search by name or model ID",
   "provider_model_catalog_service_no_longer_offers_model": "This service no longer offers this model",

@@ -360,11 +360,62 @@ async fn catalog_commits_global_indexes_for_one_revision() -> anyhow::Result<()>
     assert_eq!(providers.generated_at, models.generated_at);
     assert_eq!(providers.providers[0].id, "demo");
     assert_eq!(models.models[0].id, "demo/chat");
+    assert_eq!(
+        catalog
+            .canonical_model_matching_upstream_id("chat")
+            .await
+            .expect("unique model segment")["id"],
+        "demo/chat"
+    );
+    assert_eq!(
+        catalog
+            .canonical_model_matching_upstream_id("demo/chat")
+            .await
+            .expect("canonical id")["name"],
+        "Demo Chat"
+    );
+    assert!(
+        catalog
+            .canonical_model_matching_upstream_id("missing")
+            .await
+            .is_none()
+    );
     assert_eq!(source.global_fetches().await, (1, 1));
 
     let unchanged = catalog.refresh().await?;
     assert!(!unchanged.changed);
     assert_eq!(source.global_fetches().await, (1, 1));
+    Ok(())
+}
+
+#[tokio::test]
+async fn canonical_upstream_id_match_skips_ambiguous_model_segments() -> anyhow::Result<()> {
+    let data_dir = tempfile::tempdir()?;
+    let source = source();
+    source
+        .set_canonical_models(
+            br#"{
+              "demo/chat": { "id": "demo/chat", "name": "Demo Chat" },
+              "other/chat": { "id": "other/chat", "name": "Other Chat" }
+            }"#
+            .to_vec(),
+        )
+        .await;
+    let catalog = ProviderCatalog::with_source(data_dir.path(), Arc::new(source))?;
+    catalog.refresh().await?;
+    assert!(
+        catalog
+            .canonical_model_matching_upstream_id("chat")
+            .await
+            .is_none()
+    );
+    assert_eq!(
+        catalog
+            .canonical_model_matching_upstream_id("demo/chat")
+            .await
+            .expect("exact canonical id")["name"],
+        "Demo Chat"
+    );
     Ok(())
 }
 

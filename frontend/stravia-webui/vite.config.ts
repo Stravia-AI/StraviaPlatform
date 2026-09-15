@@ -15,6 +15,13 @@ export default defineConfig(({ mode }) => {
   return {
     envDir: repositoryRoot,
     plugins: [tailwindcss(), sveltekit()],
+    build: {
+      rolldownOptions: {
+        checks: {
+          pluginTimings: false,
+        },
+      },
+    },
     optimizeDeps: {
       include: ['style-to-object'],
       // Styled Svelte libraries must stay eligible for prebundling or cold starts can expose component source as virtual CSS.

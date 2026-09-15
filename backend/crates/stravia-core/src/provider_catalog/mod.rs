@@ -134,6 +134,11 @@ impl ProviderCatalog {
             .ok_or_else(|| CatalogError::ModelNotFound { id: id.to_string() }.into())
     }
 
+    pub async fn canonical_model_matching_upstream_id(&self, model_id: &str) -> Option<Value> {
+        let snapshot = self.snapshot.read().await;
+        canonical_template_for_upstream_id(&snapshot.canonical_models, model_id)
+    }
+
     pub async fn provider_scope(&self, provider_id: &str) -> anyhow::Result<CatalogProviderScope> {
         validate_provider_id(provider_id)?;
         let snapshot = self.snapshot.read().await;
@@ -400,4 +405,32 @@ impl ProviderCatalog {
             changed,
         }
     }
+}
+
+/// 上游模型 ID 优先精确匹配 Canonical ID；否则仅在 lab/model 的 model 段唯一时采用该模板。
+fn canonical_template_for_upstream_id(
+    canonical_models: &BTreeMap<String, Value>,
+    model_id: &str,
+) -> Option<Value> {
+    let model_id = model_id.trim();
+    if model_id.is_empty() {
+        return None;
+    }
+    if let Some(value) = canonical_models.get(model_id) {
+        return Some(value.clone());
+    }
+    let mut matched = None;
+    for (id, value) in canonical_models {
+        let Some((_, segment)) = id.split_once('/') else {
+            continue;
+        };
+        if segment != model_id {
+            continue;
+        }
+        if matched.is_some() {
+            return None;
+        }
+        matched = Some(value.clone());
+    }
+    matched
 }

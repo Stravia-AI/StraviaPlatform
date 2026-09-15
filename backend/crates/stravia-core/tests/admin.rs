@@ -10,8 +10,9 @@ use stravia_core::provider_catalog::{
     CatalogError, CatalogSource, CatalogVersion, ProviderCatalog,
 };
 use stravia_core::provider_models::{
-    CreateManualProviderModel, ProviderModelSelectionPolicy, UpdateProviderModel,
-    UpdateProviderModelSelection,
+    CreateManualProviderModel, NewProviderModelRecord, ProviderModelMetadata,
+    ProviderModelPresence, ProviderModelSelectionPolicy, ProviderModelSourceKind,
+    UpdateProviderModel, UpdateProviderModelSelection,
 };
 use stravia_core::storage::Storage as _;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -434,6 +435,19 @@ async fn manual_provider_models_are_partial_and_do_not_mutate_routes() -> anyhow
     assert_eq!(prepared.id, "private/model");
     assert!(prepared.metadata.description.is_none());
 
+    let prepared_by_id = gw
+        .admin()
+        .prepare_provider_model(&provider.id, "glm-5.1", None)
+        .await?;
+    assert_eq!(prepared_by_id.id, "glm-5.1");
+    assert_eq!(prepared_by_id.metadata.name.as_deref(), Some("GLM-5.1"));
+    assert_eq!(prepared_by_id.metadata.family.as_deref(), Some("glm"));
+    assert_eq!(prepared_by_id.metadata.tool_call, Some(true));
+    assert_eq!(
+        prepared_by_id.metadata.limit.as_ref().map(|limit| limit.context),
+        Some(Some(200_000))
+    );
+
     let prepared_template = gw
         .admin()
         .prepare_provider_model(
@@ -575,6 +589,140 @@ async fn discovered_models_are_persisted_and_enriched_without_expanding_ids() ->
         endpoint_only.metadata.name.as_deref(),
         Some("endpoint-only-model")
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn custom_provider_sync_applies_unique_canonical_templates() -> anyhow::Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await?;
+        let mut request = [0_u8; 4096];
+        let _ = socket.read(&mut request).await?;
+        let body = serde_json::json!({
+            "data": [
+                {"id": "glm-5.1"},
+                {"id": "unknown-local-model"}
+            ]
+        })
+        .to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        socket.write_all(response.as_bytes()).await?;
+        anyhow::Ok(())
+    });
+
+    let gw = build_gateway().await?;
+    let provider = gw
+        .storage
+        .providers()
+        .create(CreateProviderRecord {
+            name: "custom-canonical-sync".to_string(),
+            vendor: Some("custom".to_string()),
+            protocol: "openai-compatible".to_string(),
+            base_url: format!("http://{address}/v1"),
+            preset_key: None,
+            channel: None,
+            models_source: Some(format!("http://{address}/v1/models")),
+            static_models: None,
+            api_key: "sk-test".to_string(),
+            adapter_credentials: r#"{"apiKey":"sk-test"}"#.to_string(),
+            auth_mode: "apikey".to_string(),
+            use_proxy: false,
+        })
+        .await?;
+    let summary = gw.admin().sync_provider_models(&provider.id).await?;
+    server.await??;
+    assert_eq!(summary.added, 2);
+
+    let glm = gw.admin().get_provider_model(&provider.id, "glm-5.1").await?;
+    assert_eq!(glm.metadata.name.as_deref(), Some("GLM-5.1"));
+    assert_eq!(glm.metadata.family.as_deref(), Some("glm"));
+    assert_eq!(glm.metadata.tool_call, Some(true));
+    assert_eq!(
+        glm.metadata.limit.as_ref().and_then(|limit| limit.context),
+        Some(200_000)
+    );
+    assert!(!glm.can_reimport);
+
+    let unknown = gw
+        .admin()
+        .get_provider_model(&provider.id, "unknown-local-model")
+        .await?;
+    assert_eq!(
+        unknown.metadata.name.as_deref(),
+        Some("unknown-local-model")
+    );
+    assert!(unknown.metadata.limit.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn custom_provider_resync_fills_bare_discovered_canonical_templates() -> anyhow::Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await?;
+        let mut request = [0_u8; 4096];
+        let _ = socket.read(&mut request).await?;
+        let body = r#"{"data":[{"id":"glm-5.1"}]}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        socket.write_all(response.as_bytes()).await?;
+        anyhow::Ok(())
+    });
+
+    let gw = build_gateway().await?;
+    let provider = gw
+        .storage
+        .providers()
+        .create(CreateProviderRecord {
+            name: "custom-canonical-resync".to_string(),
+            vendor: Some("custom".to_string()),
+            protocol: "openai-compatible".to_string(),
+            base_url: format!("http://{address}/v1"),
+            preset_key: None,
+            channel: None,
+            models_source: Some(format!("http://{address}/v1/models")),
+            static_models: None,
+            api_key: "sk-test".to_string(),
+            adapter_credentials: r#"{"apiKey":"sk-test"}"#.to_string(),
+            auth_mode: "apikey".to_string(),
+            use_proxy: false,
+        })
+        .await?;
+    gw.storage
+        .provider_models()
+        .create(NewProviderModelRecord {
+            provider_id: provider.id.clone(),
+            model_id: "glm-5.1".to_string(),
+            source_kind: ProviderModelSourceKind::Discovered,
+            metadata_source_provider_id: None,
+            presence: ProviderModelPresence::Present,
+            selection_policy: ProviderModelSelectionPolicy::Auto,
+            metadata: ProviderModelMetadata::bare("glm-5.1"),
+        })
+        .await?;
+
+    let listed = gw.admin().get_provider_model(&provider.id, "glm-5.1").await?;
+    assert!(listed.metadata.lacks_registered_specification());
+
+    let summary = gw.admin().sync_provider_models(&provider.id).await?;
+    server.await??;
+    assert_eq!(summary.added, 0);
+
+    let filled = gw.admin().get_provider_model(&provider.id, "glm-5.1").await?;
+    assert_eq!(filled.metadata.name.as_deref(), Some("GLM-5.1"));
+    assert_eq!(
+        filled.metadata.limit.as_ref().and_then(|limit| limit.context),
+        Some(200_000)
+    );
+    assert!(!filled.metadata.lacks_registered_specification());
     Ok(())
 }
 

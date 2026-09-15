@@ -449,10 +449,16 @@ impl ProviderModelStore for MemoryStorage {
                     && item.source_kind == ProviderModelSourceKind::Discovered
             }) {
                 let changed = item.presence != update.presence
-                    || item.metadata.status != update.lifecycle_status;
+                    || item.metadata.status != update.lifecycle_status
+                    || update.metadata.is_some();
                 if changed {
                     item.presence = update.presence;
-                    item.metadata.status = update.lifecycle_status;
+                    if let Some(metadata) = update.metadata {
+                        item.metadata = metadata;
+                        item.cost_rules = item.metadata.cost_rules();
+                    } else {
+                        item.metadata.status = update.lifecycle_status;
+                    }
                     item.revision += 1;
                     item.updated_at = now.clone();
                 }

@@ -17,7 +17,6 @@ import { Input } from '$lib/components/ui/input'
 import * as Select from '$lib/components/ui/select'
 import { Spinner } from '$lib/components/ui/spinner'
 import { Switch } from '$lib/components/ui/switch'
-import { Textarea } from '$lib/components/ui/textarea'
 
 interface Props {
   provider: Provider
@@ -35,7 +34,6 @@ let form = $state({
   apiKey: '',
   useProxy: initialProvider.use_proxy,
   modelsSource: initialProvider.models_source ?? '',
-  staticModels: initialProvider.static_models ?? '',
 })
 let saving = $state(false)
 let testing = $state(false)
@@ -76,7 +74,6 @@ async function save(): Promise<void> {
           protocol: form.protocol,
           base_url: form.baseUrl.trim(),
           models_source: form.modelsSource.trim() || undefined,
-          static_models: form.staticModels.trim() || undefined,
         }
       : {}),
   }
@@ -198,10 +195,6 @@ async function save(): Promise<void> {
         <Field.Field>
           <Field.Label for="provider-models-source">{m.common_model_list_url()}</Field.Label>
           <Input id="provider-models-source" class="font-technical" bind:value={form.modelsSource} type="url" />
-        </Field.Field>
-        <Field.Field>
-          <Field.Label for="provider-static-models">{m.common_additional_model_ids()}</Field.Label>
-          <Textarea id="provider-static-models" class="min-h-28 font-technical" bind:value={form.staticModels} />
         </Field.Field>
       {/if}
     </Field.Group>

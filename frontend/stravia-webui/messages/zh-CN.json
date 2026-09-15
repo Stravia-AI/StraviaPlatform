@@ -277,7 +277,6 @@
   "common_actions": "操作",
   "common_add_model": "添加模型",
   "common_added_manually": "手动添加",
-  "common_additional_model_ids": "额外模型 ID",
   "common_all_models": "全部模型",
   "common_always_allow": "始终允许使用",
   "common_api_key": "API 密钥",
@@ -757,7 +756,6 @@
   "provider_editor_model_service_connected": "模型服务已连接",
   "provider_editor_configuration_help": "设置连接名称和凭据，并确认请求发送地址。",
   "provider_editor_no_matching_services": "没有匹配的服务",
-  "provider_editor_one_model_id_per_line": "每行一个模型 ID",
   "provider_editor_search_services_sign_methods": "搜索服务或登录方式",
   "provider_editor_catalog_refresh_summary": [
     {
@@ -822,7 +820,7 @@
   "provider_model_catalog_remove_list": "从列表中移除",
   "provider_model_catalog_remove_manually_added_model": "移除手动添加的模型…",
   "provider_model_catalog_restore_details_service": "从服务恢复信息…",
-  "provider_model_catalog_search_model": "搜索模型",
+  "provider_model_catalog_search_model": "搜索模型模板",
   "provider_model_catalog_search_models": "搜索模型",
   "provider_model_catalog_search_name_model_id": "按名称或模型 ID 搜索",
   "provider_model_catalog_service_no_longer_offers_model": "此服务已不再提供此模型",

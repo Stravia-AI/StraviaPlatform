@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
-use crate::provider_catalog::{CatalogError, CatalogModelSource};
+use crate::provider_catalog::CatalogError;
 use crate::provider_models::{
     CreateManualProviderModel, NewProviderModelRecord, ProviderModelDetail, ProviderModelMetadata,
     ProviderModelMutation, ProviderModelPresence, ProviderModelPresenceUpdate,
@@ -93,18 +93,22 @@ impl AdminService {
         }
         let metadata = match template_id {
             Some(template_id) => {
-                let mut template = self
+                let template = self
                     .gw
                     .provider_catalog
                     .canonical_model(template_id)
                     .await?;
-                template
-                    .as_object_mut()
-                    .expect("ProviderCatalog validates Canonical Model objects")
-                    .insert("id".to_string(), Value::String(model_id.clone()));
-                ProviderModelMetadata::from_source_value(&model_id, template)?
+                metadata_from_canonical_template(&model_id, template)?
             }
-            None => ProviderModelMetadata::bare(&model_id),
+            None => match self
+                .gw
+                .provider_catalog
+                .canonical_model_matching_upstream_id(&model_id)
+                .await
+            {
+                Some(template) => metadata_from_canonical_template(&model_id, template)?,
+                None => ProviderModelMetadata::bare(&model_id),
+            },
         };
         let extensions = metadata.extension_value();
         Ok(PreparedProviderModel {
@@ -302,7 +306,7 @@ impl AdminService {
         };
 
         for (model_id, source) in sources {
-            let metadata = metadata_from_source(&model_id, source.as_ref())?;
+            let metadata = source.metadata;
             if let Some(current) = existing_by_id.get(model_id.as_str()) {
                 if current.source_kind == ProviderModelSourceKind::Manual {
                     continue;
@@ -315,13 +319,17 @@ impl AdminService {
                 {
                     summary.deprecated += 1;
                 }
+                let fill_specification = current.metadata.lacks_registered_specification()
+                    && !metadata.lacks_registered_specification();
                 if current.presence != ProviderModelPresence::Present
                     || current.metadata.status != metadata.status
+                    || fill_specification
                 {
                     reconciliation.updates.push(ProviderModelPresenceUpdate {
                         model_id,
                         presence: ProviderModelPresence::Present,
-                        lifecycle_status: metadata.status,
+                        lifecycle_status: metadata.status.clone(),
+                        metadata: fill_specification.then_some(metadata),
                     });
                 }
                 continue;
@@ -334,9 +342,7 @@ impl AdminService {
                 provider_id: provider_id.to_string(),
                 model_id,
                 source_kind: ProviderModelSourceKind::Discovered,
-                metadata_source_provider_id: source
-                    .as_ref()
-                    .map(|source| source.provider_id.clone()),
+                metadata_source_provider_id: source.metadata_source_provider_id,
                 presence: ProviderModelPresence::Present,
                 selection_policy: ProviderModelSelectionPolicy::Auto,
                 metadata,
@@ -355,6 +361,7 @@ impl AdminService {
                     model_id: current.model_id.clone(),
                     presence: ProviderModelPresence::Missing,
                     lifecycle_status: current.metadata.status.clone(),
+                    metadata: None,
                 });
             }
         }
@@ -370,7 +377,7 @@ impl AdminService {
     async fn discover_provider_model_sources(
         &self,
         provider: &Provider,
-    ) -> anyhow::Result<BTreeMap<String, Option<CatalogModelSource>>> {
+    ) -> anyhow::Result<BTreeMap<String, DiscoveredModelSource>> {
         if uses_catalog_inventory(provider) {
             let provider_id = provider
                 .preset_key
@@ -391,7 +398,15 @@ impl AdminService {
                         .and_then(Value::as_str)
                         .ok_or_else(|| anyhow::anyhow!("Provider Catalog Entry is missing id"))?
                         .to_string();
-                    Ok((model_id, Some(source)))
+                    let metadata =
+                        ProviderModelMetadata::from_source_value(&model_id, source.metadata)?;
+                    Ok((
+                        model_id,
+                        DiscoveredModelSource {
+                            metadata,
+                            metadata_source_provider_id: Some(source.provider_id),
+                        },
+                    ))
                 })
                 .collect();
         }
@@ -400,7 +415,7 @@ impl AdminService {
         let mut sources = BTreeMap::new();
         for id in ids {
             let model_id = normalize_model_id(&id)?;
-            let source = match provider.preset_key.as_deref() {
+            let catalog_source = match provider.preset_key.as_deref() {
                 Some(catalog_provider_id) => match self
                     .gw
                     .provider_catalog
@@ -420,20 +435,50 @@ impl AdminService {
                 },
                 None => None,
             };
-            sources.insert(model_id, source);
+            let discovered = if let Some(source) = catalog_source {
+                DiscoveredModelSource {
+                    metadata: ProviderModelMetadata::from_source_value(
+                        &model_id,
+                        source.metadata,
+                    )?,
+                    metadata_source_provider_id: Some(source.provider_id),
+                }
+            } else if let Some(template) = self
+                .gw
+                .provider_catalog
+                .canonical_model_matching_upstream_id(&model_id)
+                .await
+            {
+                DiscoveredModelSource {
+                    metadata: metadata_from_canonical_template(&model_id, template)?,
+                    metadata_source_provider_id: None,
+                }
+            } else {
+                DiscoveredModelSource {
+                    metadata: ProviderModelMetadata::bare(&model_id),
+                    metadata_source_provider_id: None,
+                }
+            };
+            sources.insert(model_id, discovered);
         }
         Ok(sources)
     }
 }
 
-fn metadata_from_source(
+struct DiscoveredModelSource {
+    metadata: ProviderModelMetadata,
+    metadata_source_provider_id: Option<String>,
+}
+
+fn metadata_from_canonical_template(
     model_id: &str,
-    source: Option<&CatalogModelSource>,
+    mut template: Value,
 ) -> anyhow::Result<ProviderModelMetadata> {
-    match source {
-        Some(source) => ProviderModelMetadata::from_source_value(model_id, source.metadata.clone()),
-        None => Ok(ProviderModelMetadata::bare(model_id)),
-    }
+    template
+        .as_object_mut()
+        .expect("ProviderCatalog validates Canonical Model objects")
+        .insert("id".to_string(), Value::String(model_id.to_string()));
+    ProviderModelMetadata::from_source_value(model_id, template)
 }
 
 fn apply_provider_model_mutation(

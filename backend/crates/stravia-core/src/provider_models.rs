@@ -168,6 +168,17 @@ impl ProviderModelMetadata {
         }
     }
 
+    /// 规格芯片依赖这些字段。全空时视为「未登记」，后续同步可按模型 ID 补模板。
+    pub fn lacks_registered_specification(&self) -> bool {
+        self.limit.is_none()
+            && self.modalities.is_none()
+            && self.reasoning.is_none()
+            && self.tool_call.is_none()
+            && self.structured_output.is_none()
+            && self.attachment.is_none()
+            && self.temperature.is_none()
+    }
+
     pub fn to_value(&self) -> anyhow::Result<Value> {
         serde_json::to_value(self).context("encode Provider Model metadata")
     }
@@ -498,6 +509,7 @@ pub struct ProviderModelPresenceUpdate {
     pub model_id: String,
     pub presence: ProviderModelPresence,
     pub lifecycle_status: Option<String>,
+    pub metadata: Option<ProviderModelMetadata>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -655,6 +667,23 @@ mod tests {
     use serde_json::json;
 
     use super::ProviderModelMetadata;
+
+    #[test]
+    fn lacks_registered_specification_matches_bare_metadata() {
+        let bare = ProviderModelMetadata::bare("glm-5.1");
+        assert!(bare.lacks_registered_specification());
+
+        let specified = ProviderModelMetadata::from_value(
+            "glm-5.1",
+            json!({
+                "name": "GLM-5.1",
+                "tool_call": true,
+                "limit": { "context": 200000, "output": 131072 }
+            }),
+        )
+        .expect("specified metadata");
+        assert!(!specified.lacks_registered_specification());
+    }
 
     #[test]
     fn reasoning_option_types_are_unique() {

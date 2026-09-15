@@ -10,8 +10,8 @@ use super::PostgresStorage;
 use crate::provider_models::{
     NewProviderModelRecord, PriceComponents, ProviderModelCostRule, ProviderModelCostRuleKind,
     ProviderModelMetadata, ProviderModelMutation, ProviderModelPresence,
-    ProviderModelReconciliation, ProviderModelRecord, ProviderModelSelectionPolicy,
-    ProviderModelSourceKind,
+    ProviderModelPresenceUpdate, ProviderModelReconciliation, ProviderModelRecord,
+    ProviderModelSelectionPolicy, ProviderModelSourceKind,
 };
 use crate::storage::traits::ProviderModelStore;
 
@@ -86,6 +86,10 @@ impl ProviderModelStore for PostgresStorage {
     ) -> anyhow::Result<()> {
         let mut tx = self.pool.begin().await?;
         for update in reconciliation.updates {
+            if update.metadata.is_some() {
+                apply_discovered_metadata_update(&mut tx, provider_id, &update).await?;
+                continue;
+            }
             let metadata_json = sqlx::query_scalar::<_, String>(
                 "SELECT metadata_json::text FROM provider_models WHERE provider_id = $1 AND model_id = $2 AND source_kind = 'discovered'",
             )
@@ -326,6 +330,57 @@ fn decode_rule(row: CostRuleRow) -> anyhow::Result<ProviderModelCostRule> {
             output_audio: row.cost_output_audio,
         },
     })
+}
+
+async fn apply_discovered_metadata_update(
+    tx: &mut Transaction<'_, Postgres>,
+    provider_id: &str,
+    update: &ProviderModelPresenceUpdate,
+) -> anyhow::Result<()> {
+    let Some(metadata) = update.metadata.as_ref() else {
+        return Ok(());
+    };
+    let limit = metadata.limit.as_ref();
+    let prices = metadata.cost.as_ref().map(|cost| &cost.prices);
+    let result = sqlx::query(
+        r#"UPDATE provider_models SET
+               presence = $1, lifecycle_status = $2, name = $3, family = $4, attachment = $5, reasoning = $6,
+               tool_call = $7, open_weights = $8, structured_output = $9, temperature = $10,
+               limit_context = $11, limit_input = $12, limit_output = $13,
+               cost_input = $14, cost_output = $15, cost_reasoning = $16, cost_cache_read = $17,
+               cost_cache_write = $18, cost_input_audio = $19, cost_output_audio = $20,
+               metadata_json = $21::jsonb, revision = revision + 1, updated_at = NOW()
+           WHERE provider_id = $22 AND model_id = $23 AND source_kind = 'discovered'"#,
+    )
+    .bind(update.presence.as_str())
+    .bind(&metadata.status)
+    .bind(&metadata.name)
+    .bind(&metadata.family)
+    .bind(metadata.attachment)
+    .bind(metadata.reasoning)
+    .bind(metadata.tool_call)
+    .bind(metadata.open_weights)
+    .bind(metadata.structured_output)
+    .bind(metadata.temperature)
+    .bind(limit.and_then(|limit| to_i64(limit.context)).transpose()?)
+    .bind(limit.and_then(|limit| to_i64(limit.input)).transpose()?)
+    .bind(limit.and_then(|limit| to_i64(limit.output)).transpose()?)
+    .bind(prices.and_then(|prices| prices.input))
+    .bind(prices.and_then(|prices| prices.output))
+    .bind(prices.and_then(|prices| prices.reasoning))
+    .bind(prices.and_then(|prices| prices.cache_read))
+    .bind(prices.and_then(|prices| prices.cache_write))
+    .bind(prices.and_then(|prices| prices.input_audio))
+    .bind(prices.and_then(|prices| prices.output_audio))
+    .bind(serde_json::to_string(metadata)?)
+    .bind(provider_id)
+    .bind(&update.model_id)
+    .execute(&mut **tx)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Ok(());
+    }
+    replace_cost_rules(tx, provider_id, &update.model_id, &metadata.cost_rules()).await
 }
 
 async fn insert_record(

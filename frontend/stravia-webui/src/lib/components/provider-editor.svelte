@@ -47,7 +47,6 @@ interface ProviderForm {
   presetKey: string
   channel: string
   modelsSource: string
-  staticModels: string
 }
 
 interface Props {
@@ -72,7 +71,6 @@ let form = $state<ProviderForm>({
   presetKey: 'custom',
   channel: 'default',
   modelsSource: '',
-  staticModels: '',
 })
 let oauthSessionId = $state<string>()
 let oauthReady = $state(false)
@@ -164,7 +162,6 @@ async function chooseOption(option: ProviderOption): Promise<void> {
     presetKey: option.presetKey,
     channel: option.channelKey,
     modelsSource: option.isCustom ? '' : 'catalog',
-    staticModels: '',
   }
   adapterCredentials = {}
   step = 'configure'
@@ -259,7 +256,6 @@ async function saveProvider(): Promise<void> {
           protocol: form.protocol,
           base_url: form.baseUrl.trim(),
           models_source: form.modelsSource.trim() || undefined,
-          static_models: form.staticModels.trim() || undefined,
         }
       : {
           type: 'catalog',
@@ -488,14 +484,6 @@ async function saveProvider(): Promise<void> {
                   bind:value={form.modelsSource}
                   type="url"
                   placeholder="https://api.example.com/v1/models" />
-              </Field.Field>
-              <Field.Field size="fill">
-                <Field.Label for="provider-static-models">{m.common_additional_model_ids()}</Field.Label>
-                <Textarea
-                  id="provider-static-models"
-                  class="min-h-28 font-technical"
-                  bind:value={form.staticModels}
-                  placeholder={m.provider_editor_one_model_id_per_line()} />
               </Field.Field>
             {:else if form.authMode === 'apikey'}
               {#if selectedOption.channel.base_url.trim().length === 0 && !previewsBaseUrl}
