@@ -98,7 +98,7 @@ describe('canvas links', () => {
     const forked = interaction('glm-fork', 'glm-first', 30, [inferred('glm-first')])
     expect(canvasLinks([first, switched, forked])).toEqual([
       { id: 'inferred-glm-first-gpt-switch', source: 'glm-first', target: 'gpt-switch', kind: 'inferred' },
-      { id: 'confirmed-glm-first-glm-fork', source: 'glm-first', target: 'glm-fork', kind: 'confirmed' },
+      { id: 'inferred-glm-first-glm-fork', source: 'glm-first', target: 'glm-fork', kind: 'inferred' },
     ])
   })
 
@@ -139,6 +139,15 @@ describe('canvas links', () => {
     ])
     expect(canvasLinks([root, child])).toEqual([
       { id: 'native-root-child', source: 'root', target: 'child', kind: 'native' },
+    ])
+  })
+
+  test('keeps a diagnostic parent link inferred even when parent_interaction_id is set', () => {
+    const source = interaction('source', null, 10)
+    const child = interaction('child', 'source', 20, [inferred('source')])
+    expect(visualParent(child, [source, child])).toEqual({ id: 'source', kind: 'inferred' })
+    expect(canvasLinks([source, child])).toEqual([
+      { id: 'inferred-source-child', source: 'source', target: 'child', kind: 'inferred' },
     ])
   })
 })

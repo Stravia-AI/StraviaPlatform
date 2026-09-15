@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use super::types::RunStart;
 
 const RETRY_WINDOW_MS: i64 = 120_000;
+pub(super) const TAIL_MERGE_WINDOW_MS: i64 = 300_000;
 
 #[derive(Debug, Clone)]
 pub(super) struct GroupAssignment {
@@ -11,6 +12,33 @@ pub(super) struct GroupAssignment {
     pub inferred_retry: bool,
     pub grouping_reason: &'static str,
     pub parent_interaction_id: Option<String>,
+    pub diagnostic_source_run_id: Option<String>,
+    pub interrupt_parent: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DiagnosticKind {
+    CurrentTool,
+    RetainedTail,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct DiagnosticSource {
+    pub run_id: String,
+    pub interaction_id: String,
+    pub delivery_completed_at: Option<i64>,
+    pub kind: DiagnosticKind,
+    pub user_after_match: bool,
+}
+
+impl DiagnosticSource {
+    pub(super) fn tail_merge_eligible(&self, ingress_received_at: i64) -> bool {
+        self.delivery_completed_at.is_some_and(|delivered_at| {
+            ingress_received_at
+                .checked_sub(delivered_at)
+                .is_some_and(|elapsed| (0..=TAIL_MERGE_WINDOW_MS).contains(&elapsed))
+        })
+    }
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -49,9 +77,12 @@ impl GroupingIndex {
         start: &RunStart,
         now: i64,
         parent: Option<&ObservedParent>,
+        diagnostic: Option<&DiagnosticSource>,
     ) -> GroupAssignment {
         let mut grouping_reason = "new_root";
         let mut parent_interaction_id = None;
+        let mut diagnostic_source_run_id = None;
+        let mut interrupt_parent = false;
         let (interaction_id, parent_run_id, inferred_retry) = if let Some(parent) = parent {
             let continuation = if !start.has_new_user {
                 Some("exact_continuation")
@@ -77,6 +108,7 @@ impl GroupingIndex {
             } else {
                 grouping_reason = "new_user";
                 parent_interaction_id = Some(parent.interaction_id.clone());
+                interrupt_parent = true;
                 (
                     stravia_runtime_contract::identifier::new_id(),
                     Some(parent.run_id.clone()),
@@ -86,6 +118,32 @@ impl GroupingIndex {
         } else if start.generation_parent_id.is_some() {
             grouping_reason = "unmatched_parent";
             (stravia_runtime_contract::identifier::new_id(), None, false)
+        } else if let Some(source) = diagnostic {
+            diagnostic_source_run_id = Some(source.run_id.clone());
+            if source.kind == DiagnosticKind::CurrentTool
+                || (!source.user_after_match
+                    && source.tail_merge_eligible(start.ingress_received_at))
+            {
+                grouping_reason = if source.kind == DiagnosticKind::CurrentTool {
+                    "current_tool_continuation"
+                } else {
+                    "retained_tail_continuation"
+                };
+                (
+                    source.interaction_id.clone(),
+                    Some(source.run_id.clone()),
+                    false,
+                )
+            } else {
+                grouping_reason = "retained_tail_linked";
+                parent_interaction_id = Some(source.interaction_id.clone());
+                interrupt_parent = source.user_after_match;
+                (
+                    stravia_runtime_contract::identifier::new_id(),
+                    Some(source.run_id.clone()),
+                    false,
+                )
+            }
         } else {
             let candidate = self
                 .runs
@@ -138,6 +196,8 @@ impl GroupingIndex {
             inferred_retry,
             grouping_reason,
             parent_interaction_id,
+            diagnostic_source_run_id,
+            interrupt_parent,
         }
     }
 
@@ -306,43 +366,171 @@ mod tests {
     #[test]
     fn failed_root_retry_requires_every_exact_guard() {
         let mut index = GroupingIndex::default();
-        let first = index.assign(&start("one", "principal", "exact"), 1_000, None);
+        let first = index.assign(&start("one", "principal", "exact"), 1_000, None, None);
         index.finish("one", "failed", 2_000);
-        let retry = index.assign(&start("two", "principal", "exact"), 121_999, None);
+        let retry = index.assign(&start("two", "principal", "exact"), 121_999, None, None);
         assert_eq!(retry.interaction_id, first.interaction_id);
         assert!(retry.inferred_retry);
         index.finish("two", "failed", 123_000);
-        let late = index.assign(&start("three", "principal", "exact"), 243_000, None);
+        let late = index.assign(&start("three", "principal", "exact"), 243_000, None, None);
         assert_ne!(late.interaction_id, first.interaction_id);
-        let other = index.assign(&start("four", "other", "exact"), 243_002, None);
+        let other = index.assign(&start("four", "other", "exact"), 243_002, None, None);
         assert_ne!(other.interaction_id, first.interaction_id);
     }
     #[test]
     fn output_commit_and_concurrency_prevent_inferred_retry() {
         let mut committed = GroupingIndex::default();
-        let first = committed.assign(&start("one", "p", "f"), 0, None);
+        let first = committed.assign(&start("one", "p", "f"), 0, None, None);
         committed.output_committed("one");
         committed.finish("one", "failed", 1);
-        let retry = committed.assign(&start("two", "p", "f"), 2, None);
+        let retry = committed.assign(&start("two", "p", "f"), 2, None, None);
         assert_ne!(retry.interaction_id, first.interaction_id);
         let mut concurrent = GroupingIndex::default();
-        let active = concurrent.assign(&start("active", "p", "f"), 0, None);
-        let duplicate = concurrent.assign(&start("duplicate", "p", "f"), 1, None);
+        let active = concurrent.assign(&start("active", "p", "f"), 0, None, None);
+        let duplicate = concurrent.assign(&start("duplicate", "p", "f"), 1, None, None);
         assert_ne!(duplicate.interaction_id, active.interaction_id);
     }
     #[test]
     fn explicit_parent_never_uses_failed_root_inference() {
         let mut index = GroupingIndex::default();
-        let failed = index.assign(&start("failed", "p", "f"), 0, None);
+        let failed = index.assign(&start("failed", "p", "f"), 0, None, None);
         index.finish("failed", "failed", 1);
         let mut continuation = start("continuation", "p", "f");
         continuation.generation_parent_id = Some("unobserved-parent".into());
         continuation.has_new_user = false;
-        let assigned = index.assign(&continuation, 2, None);
+        let assigned = index.assign(&continuation, 2, None, None);
         assert_ne!(assigned.interaction_id, failed.interaction_id);
         assert!(!assigned.inferred_retry);
         assert_eq!(assigned.parent_run_id, None);
     }
+
+    fn source(
+        kind: DiagnosticKind,
+        user_after_match: bool,
+        delivered_at: Option<i64>,
+    ) -> DiagnosticSource {
+        DiagnosticSource {
+            run_id: "source-run".into(),
+            interaction_id: "source-interaction".into(),
+            delivery_completed_at: delivered_at,
+            kind,
+            user_after_match,
+        }
+    }
+
+    #[test]
+    fn current_tool_continuation_merges_without_window_or_user_split() {
+        let mut index = GroupingIndex::default();
+        let mut start = start("child", "p", "f");
+        start.has_new_user = true;
+        start.ingress_received_at = 400_000;
+        let assigned = index.assign(
+            &start,
+            400_000,
+            None,
+            Some(&source(DiagnosticKind::CurrentTool, true, Some(1))),
+        );
+        assert_eq!(assigned.interaction_id, "source-interaction");
+        assert_eq!(assigned.parent_run_id.as_deref(), Some("source-run"));
+        assert_eq!(assigned.grouping_reason, "current_tool_continuation");
+        assert_eq!(assigned.parent_interaction_id, None);
+        assert!(!assigned.interrupt_parent);
+        assert_eq!(
+            assigned.diagnostic_source_run_id.as_deref(),
+            Some("source-run")
+        );
+    }
+
+    #[test]
+    fn retained_tail_merges_on_inclusive_five_minute_window() {
+        let mut index = GroupingIndex::default();
+        for elapsed in [0_i64, TAIL_MERGE_WINDOW_MS] {
+            let mut start = start(&format!("child-{elapsed}"), "p", "f");
+            start.has_new_user = false;
+            start.ingress_received_at = 10_000 + elapsed;
+            let assigned = index.assign(
+                &start,
+                start.ingress_received_at,
+                None,
+                Some(&source(DiagnosticKind::RetainedTail, false, Some(10_000))),
+            );
+            assert_eq!(assigned.interaction_id, "source-interaction", "{elapsed}");
+            assert_eq!(assigned.grouping_reason, "retained_tail_continuation");
+            assert_eq!(assigned.parent_interaction_id, None);
+            assert!(!assigned.interrupt_parent);
+        }
+    }
+
+    #[test]
+    fn retained_tail_links_new_interaction_outside_window_or_without_time() {
+        let mut index = GroupingIndex::default();
+        let cases = [
+            (TAIL_MERGE_WINDOW_MS + 1, Some(10_000_i64)),
+            (1, None),
+            (-1, Some(10_000)),
+        ];
+        for (elapsed, delivered_at) in cases {
+            let mut start = start(&format!("child-{elapsed}-{delivered_at:?}"), "p", "f");
+            start.ingress_received_at = delivered_at.unwrap_or(10_000) + elapsed;
+            let assigned = index.assign(
+                &start,
+                start.ingress_received_at,
+                None,
+                Some(&source(DiagnosticKind::RetainedTail, false, delivered_at)),
+            );
+            assert_ne!(assigned.interaction_id, "source-interaction");
+            assert_eq!(
+                assigned.parent_interaction_id.as_deref(),
+                Some("source-interaction")
+            );
+            assert_eq!(assigned.grouping_reason, "retained_tail_linked");
+            assert!(!assigned.interrupt_parent);
+        }
+    }
+
+    #[test]
+    fn new_user_after_retained_tail_creates_child_and_interrupts() {
+        let mut index = GroupingIndex::default();
+        let mut start = start("child", "p", "f");
+        start.has_new_user = true;
+        start.ingress_received_at = 10_001;
+        let assigned = index.assign(
+            &start,
+            10_001,
+            None,
+            Some(&source(DiagnosticKind::RetainedTail, true, Some(10_000))),
+        );
+        assert_ne!(assigned.interaction_id, "source-interaction");
+        assert_eq!(
+            assigned.parent_interaction_id.as_deref(),
+            Some("source-interaction")
+        );
+        assert_eq!(assigned.grouping_reason, "retained_tail_linked");
+        assert!(assigned.interrupt_parent);
+    }
+
+    #[test]
+    fn confirmed_generation_parent_ignores_diagnostic_source() {
+        let mut index = GroupingIndex::default();
+        let mut start = start("child", "p", "f");
+        start.has_new_user = false;
+        start.generation_parent_id = Some("node".into());
+        let parent = ObservedParent {
+            interaction_id: "exec-interaction".into(),
+            run_id: "exec-run".into(),
+            delivery_completed_at: Some(1),
+        };
+        let assigned = index.assign(
+            &start,
+            2,
+            Some(&parent),
+            Some(&source(DiagnosticKind::CurrentTool, false, Some(1))),
+        );
+        assert_eq!(assigned.interaction_id, "exec-interaction");
+        assert_eq!(assigned.grouping_reason, "exact_continuation");
+        assert_eq!(assigned.diagnostic_source_run_id, None);
+    }
+
     #[test]
     fn status_rollup_is_activity_first() {
         assert_eq!(

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         Arc, Mutex,
         atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering},
@@ -10,8 +10,9 @@ use std::{
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use super::{
-    grouping::GroupingIndex,
+    grouping::{DiagnosticKind, DiagnosticSource, GroupingIndex},
     store::{Admission, ObservationStore},
+    tail::{MAX_CANDIDATES, TailIndex, Window},
     types::*,
 };
 
@@ -44,6 +45,8 @@ pub(super) enum WriterCommand {
         debug_enabled: bool,
         trace: Option<super::trace::TraceHandle>,
         discarded_trace: Option<super::trace::TraceHandle>,
+        input: Option<Window>,
+        input_overflow: bool,
     },
     Event {
         run_id: String,
@@ -91,7 +94,8 @@ pub(super) fn spawn(
     let (tx, mut rx) = mpsc::channel(2048);
     let handle = tokio::spawn(async move {
         let mut grouping = GroupingIndex::default();
-        let mut tail = super::tail::TailIndex::default();
+        let mut tail = TailIndex::default();
+        let mut attributed = HashSet::new();
         // 只合并同一 Run 中相邻且同作用域的正文或思考增量，不跨事件边界重排。
         let mut pending_text = TextBuffer {
             blocks: HashMap::new(),
@@ -291,15 +295,120 @@ pub(super) fn spawn(
                     let expiry = expires(at, retention_days.load(Ordering::Relaxed));
                     if completed {
                         if let Some(window) = window {
-                            tail.insert(run_id, window, expiry);
+                            if let Some(interaction) = grouping.interaction_for_run(&run_id) {
+                                let pending = window.pending_tool_ids().unwrap_or_default();
+                                if let Some(hash) = window.last_hash_hex() {
+                                    if let Err(error) = store
+                                        .persist_tail_source(
+                                            &run_id,
+                                            interaction,
+                                            &principal,
+                                            &hash,
+                                            &pending,
+                                            expiry,
+                                        )
+                                        .await
+                                    {
+                                        tracing::warn!(%run_id, %error, "tail source persistence failed");
+                                    }
+                                }
+                                tail.insert(
+                                    run_id,
+                                    window,
+                                    expiry,
+                                    principal,
+                                    interaction.to_owned(),
+                                );
+                            }
                         }
+                        continue;
+                    }
+                    if attributed.contains(&run_id) {
                         continue;
                     }
                     let Some(interaction) = grouping.interaction_for_run(&run_id) else {
                         continue;
                     };
-                    let event = match store.tail_candidates(&principal, &run_id, at).await {
-                        Ok(candidates) => tail.associate(window.as_ref(), &candidates),
+                    let event = match store
+                        .tail_sources_by_hashes(
+                            &principal,
+                            &run_id,
+                            &window
+                                .as_ref()
+                                .map(Window::unit_hash_hexes)
+                                .unwrap_or_default(),
+                            at,
+                        )
+                        .await
+                    {
+                        Ok(rows) if rows.len() > MAX_CANDIDATES => {
+                            RunEvent::RetainedTailAssociated {
+                                source_run_id: None,
+                                source_interaction_id: None,
+                                status: "resource_limit".into(),
+                                candidate_count: rows.len(),
+                                matched_units: 0,
+                                matched_bytes: 0,
+                                input_start: None,
+                            }
+                        }
+                        Ok(rows) => {
+                            let mut loaded = Vec::new();
+                            let mut unavailable = false;
+                            for (source_run, source_interaction, node) in &rows {
+                                if let Some(existing) = tail.window(source_run) {
+                                    loaded.push((
+                                        source_run.clone(),
+                                        source_interaction.clone(),
+                                        existing.clone(),
+                                    ));
+                                } else if let Some(node) = node {
+                                    match store
+                                        .rematerialize_client_items(&principal, node, at)
+                                        .await
+                                    {
+                                        Ok(Some(items)) => {
+                                            if let Some(existing) = Window::capture(&items) {
+                                                loaded.push((
+                                                    source_run.clone(),
+                                                    source_interaction.clone(),
+                                                    existing,
+                                                ));
+                                            } else {
+                                                unavailable = true;
+                                                break;
+                                            }
+                                        }
+                                        _ => {
+                                            unavailable = true;
+                                            break;
+                                        }
+                                    }
+                                } else {
+                                    unavailable = true;
+                                    break;
+                                }
+                            }
+                            if unavailable {
+                                RunEvent::RetainedTailAssociated {
+                                    source_run_id: None,
+                                    source_interaction_id: None,
+                                    status: "index_unavailable".into(),
+                                    candidate_count: 0,
+                                    matched_units: 0,
+                                    matched_bytes: 0,
+                                    input_start: None,
+                                }
+                            } else {
+                                let refs: Vec<_> = loaded
+                                    .iter()
+                                    .map(|(run, interaction, window)| {
+                                        (run.clone(), interaction.clone(), window)
+                                    })
+                                    .collect();
+                                TailIndex::associate_loaded(window.as_ref(), &refs)
+                            }
+                        }
                         Err(_) => RunEvent::ObservationGap {
                             reason: "tail_index_unavailable".into(),
                         },
@@ -323,6 +432,8 @@ pub(super) fn spawn(
                     debug_enabled,
                     trace,
                     discarded_trace,
+                    input,
+                    input_overflow,
                 }) => {
                     let now = now();
                     let persisted_parent = match start.generation_parent_id.as_deref() {
@@ -342,7 +453,24 @@ pub(super) fn spawn(
                         },
                         None => None,
                     };
-                    let assignment = grouping.assign(&start, now, persisted_parent.as_ref());
+                    if input.is_some() || input_overflow {
+                        attributed.insert(start.id.clone());
+                    }
+                    let (diagnostic, diagnostic_event) = discover_diagnostic(
+                        &tail,
+                        &store,
+                        &start,
+                        input.as_ref(),
+                        input_overflow,
+                        now,
+                    )
+                    .await;
+                    let assignment = grouping.assign(
+                        &start,
+                        now,
+                        persisted_parent.as_ref(),
+                        diagnostic.as_ref(),
+                    );
                     // 无关请求不应切碎活跃流；只刷新可能被本次准入中断的父链。
                     let affected: Vec<_> = pending_text
                         .blocks
@@ -378,6 +506,10 @@ pub(super) fn spawn(
                             debug_enabled,
                             inferred_retry: assignment.inferred_retry,
                             grouping_reason: assignment.grouping_reason,
+                            diagnostic_source_run_id: assignment
+                                .diagnostic_source_run_id
+                                .as_deref(),
+                            interrupt_parent: assignment.interrupt_parent,
                             now,
                             expires_at: expires,
                         })
@@ -407,6 +539,30 @@ pub(super) fn spawn(
                                 }
                             }
                             publish(&updates, &trace_sequence, event);
+                            if let Some(diagnostic_event) = diagnostic_event {
+                                match store
+                                    .persist_run_event(
+                                        &assignment.interaction_id,
+                                        &start.id,
+                                        &diagnostic_event,
+                                        now,
+                                        expires,
+                                    )
+                                    .await
+                                {
+                                    Ok(Some(event)) => {
+                                        publish(&updates, &trace_sequence, event);
+                                    }
+                                    Ok(None) => {}
+                                    Err(error) => {
+                                        tracing::warn!(
+                                            run_id=%start.id,
+                                            %error,
+                                            "tail observation persistence failed"
+                                        );
+                                    }
+                                }
+                            }
                         }
                         Err(error) => {
                             unpersisted_gaps
@@ -938,6 +1094,9 @@ async fn persist_finish(
             .await
         {
             Ok(value) => {
+                if let Some(node) = outcome.generation_node_id.as_deref() {
+                    let _ = store.set_tail_generation_node(run_id, node).await;
+                }
                 publish(&updates, &trace_sequence, value);
             }
             Err(_) => {
@@ -1224,6 +1383,185 @@ fn same_scope(left: &RunEvent, right: &RunEvent) -> bool {
         ) => l == r && a == b,
         _ => false,
     }
+}
+
+fn tail_status_event(status: &str) -> RunEvent {
+    RunEvent::RetainedTailAssociated {
+        source_run_id: None,
+        source_interaction_id: None,
+        status: status.into(),
+        candidate_count: 0,
+        matched_units: 0,
+        matched_bytes: 0,
+        input_start: None,
+    }
+}
+
+async fn current_tool_source(
+    tail: &TailIndex,
+    store: &ObservationStore,
+    start: &RunStart,
+    input: &Window,
+    now: i64,
+) -> Option<DiagnosticSource> {
+    let ids = input.current_tail_tool_ids()?;
+    let rows = store
+        .pending_tool_sources(&start.principal, &ids, now)
+        .await
+        .ok()?;
+    let mut source = None;
+    for id in &ids {
+        let mut matches: Vec<(String, String)> = tail.pending_runs(id, &start.principal);
+        for (tool_id, run, interaction) in &rows {
+            if tool_id == id && !matches.iter().any(|(existing, _)| existing == run) {
+                matches.push((run.clone(), interaction.clone()));
+            }
+        }
+        if matches.len() != 1 {
+            return None;
+        }
+        match &source {
+            None => source = Some(matches[0].clone()),
+            Some(existing) if existing.0 != matches[0].0 => return None,
+            Some(_) => {}
+        }
+    }
+    let (run_id, interaction_id) = source?;
+    let pending = if let Some(window) = tail.window(&run_id) {
+        window.pending_tool_ids()?
+    } else {
+        let node = store.tail_generation_node(&run_id).await.ok()?;
+        let node = node?;
+        let items = store
+            .rematerialize_client_items(&start.principal, &node, now)
+            .await
+            .ok()??;
+        Window::capture(&items)?.pending_tool_ids()?
+    };
+    if !ids
+        .iter()
+        .all(|id| pending.iter().any(|pending_id| pending_id == id))
+    {
+        return None;
+    }
+    let delivery_completed_at = store.delivery_completed_at(&run_id).await.ok()??;
+    if delivery_completed_at > start.ingress_received_at {
+        return None;
+    }
+    Some(DiagnosticSource {
+        run_id,
+        interaction_id,
+        delivery_completed_at: Some(delivery_completed_at),
+        kind: DiagnosticKind::CurrentTool,
+        user_after_match: false,
+    })
+}
+
+async fn discover_diagnostic(
+    tail: &TailIndex,
+    store: &ObservationStore,
+    start: &RunStart,
+    input: Option<&Window>,
+    input_overflow: bool,
+    now: i64,
+) -> (Option<DiagnosticSource>, Option<RunEvent>) {
+    if input_overflow {
+        return (None, Some(tail_status_event("resource_limit")));
+    }
+    let Some(input) = input else {
+        return (None, None);
+    };
+    if start.generation_parent_id.is_none() {
+        if let Some(source) = current_tool_source(tail, store, start, input, now).await {
+            return (Some(source), None);
+        }
+    }
+    let mut loaded = Vec::new();
+    let mut seen = HashSet::new();
+    for run in tail.fingerprint_runs(input, &start.principal) {
+        if !seen.insert(run.clone()) {
+            continue;
+        }
+        let Some(window) = tail.window(&run) else {
+            continue;
+        };
+        let Some(interaction) = tail.interaction(&run) else {
+            continue;
+        };
+        loaded.push((run, interaction.to_owned(), window.clone()));
+    }
+    match store
+        .tail_sources_by_hashes(&start.principal, &start.id, &input.unit_hash_hexes(), now)
+        .await
+    {
+        Ok(rows) if rows.len() > MAX_CANDIDATES => {
+            return (None, Some(tail_status_event("resource_limit")));
+        }
+        Ok(rows) => {
+            for (run, interaction, node) in rows {
+                if !seen.insert(run.clone()) {
+                    continue;
+                }
+                if let Some(window) = tail.window(&run) {
+                    loaded.push((run, interaction, window.clone()));
+                    continue;
+                }
+                let Some(node) = node else {
+                    return (None, Some(tail_status_event("index_unavailable")));
+                };
+                match store
+                    .rematerialize_client_items(&start.principal, &node, now)
+                    .await
+                {
+                    Ok(Some(items)) => match Window::capture(&items) {
+                        Some(window) => loaded.push((run, interaction, window)),
+                        None => return (None, Some(tail_status_event("resource_limit"))),
+                    },
+                    _ => return (None, Some(tail_status_event("index_unavailable"))),
+                }
+            }
+        }
+        Err(_) => {
+            if start.generation_parent_id.is_some() {
+                return (None, None);
+            }
+            return (None, Some(tail_status_event("index_unavailable")));
+        }
+    }
+    if loaded.len() > MAX_CANDIDATES {
+        return (None, Some(tail_status_event("resource_limit")));
+    }
+    let refs: Vec<_> = loaded
+        .iter()
+        .map(|(run, interaction, window)| (run.clone(), interaction.clone(), window))
+        .collect();
+    let event = TailIndex::associate_loaded(Some(input), &refs);
+    let diagnostic = if start.generation_parent_id.is_none() {
+        match &event {
+            RunEvent::RetainedTailAssociated {
+                status,
+                source_run_id: Some(run_id),
+                source_interaction_id: Some(interaction_id),
+                input_start: Some(start_idx),
+                matched_units,
+                ..
+            } if status == "inferred" => {
+                let delivery_completed_at =
+                    store.delivery_completed_at(run_id).await.ok().flatten();
+                Some(DiagnosticSource {
+                    run_id: run_id.clone(),
+                    interaction_id: interaction_id.clone(),
+                    delivery_completed_at,
+                    kind: DiagnosticKind::RetainedTail,
+                    user_after_match: input.user_after_match(*start_idx, *matched_units),
+                })
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+    (diagnostic, Some(event))
 }
 
 #[cfg(test)]

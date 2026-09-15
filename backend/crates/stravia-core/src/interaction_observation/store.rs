@@ -21,6 +21,8 @@ pub(super) struct Admission<'a> {
     pub debug_enabled: bool,
     pub inferred_retry: bool,
     pub grouping_reason: &'a str,
+    pub diagnostic_source_run_id: Option<&'a str>,
+    pub interrupt_parent: bool,
     pub now: i64,
     pub expires_at: i64,
 }
@@ -56,19 +58,268 @@ impl ObservationStore {
         })
     }
 
-    pub(super) async fn tail_candidates(
+    pub(super) async fn persist_tail_source(
+        &self,
+        run_id: &str,
+        interaction_id: &str,
+        principal: &str,
+        last_unit_hash: &str,
+        pending_tool_ids: &[String],
+        expires_at: i64,
+    ) -> anyhow::Result<()> {
+        match self {
+            Self::Sqlite(pool) => {
+                let mut tx = pool.begin().await?;
+                sqlx::query("INSERT INTO observation_tail_sources (run_id,interaction_id,principal,last_unit_hash,expires_at) VALUES (?,?,?,?,?) ON CONFLICT(run_id) DO UPDATE SET interaction_id=excluded.interaction_id,principal=excluded.principal,last_unit_hash=excluded.last_unit_hash,expires_at=excluded.expires_at")
+                    .bind(run_id).bind(interaction_id).bind(principal).bind(last_unit_hash).bind(expires_at).execute(&mut *tx).await?;
+                sqlx::query("DELETE FROM observation_pending_tools WHERE run_id=?")
+                    .bind(run_id)
+                    .execute(&mut *tx)
+                    .await?;
+                for tool_id in pending_tool_ids {
+                    sqlx::query("INSERT INTO observation_pending_tools (principal,tool_id,run_id,interaction_id,expires_at) VALUES (?,?,?,?,?)")
+                        .bind(principal).bind(tool_id).bind(run_id).bind(interaction_id).bind(expires_at).execute(&mut *tx).await?;
+                }
+                tx.commit().await?;
+            }
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                sqlx::query("INSERT INTO observation_tail_sources (run_id,interaction_id,principal,last_unit_hash,expires_at) VALUES ($1,$2,$3,$4,$5) ON CONFLICT(run_id) DO UPDATE SET interaction_id=EXCLUDED.interaction_id,principal=EXCLUDED.principal,last_unit_hash=EXCLUDED.last_unit_hash,expires_at=EXCLUDED.expires_at")
+                    .bind(run_id).bind(interaction_id).bind(principal).bind(last_unit_hash).bind(expires_at).execute(&mut *tx).await?;
+                sqlx::query("DELETE FROM observation_pending_tools WHERE run_id=$1")
+                    .bind(run_id)
+                    .execute(&mut *tx)
+                    .await?;
+                for tool_id in pending_tool_ids {
+                    sqlx::query("INSERT INTO observation_pending_tools (principal,tool_id,run_id,interaction_id,expires_at) VALUES ($1,$2,$3,$4,$5)")
+                        .bind(principal).bind(tool_id).bind(run_id).bind(interaction_id).bind(expires_at).execute(&mut *tx).await?;
+                }
+                tx.commit().await?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) async fn set_tail_generation_node(
+        &self,
+        run_id: &str,
+        generation_node_id: &str,
+    ) -> anyhow::Result<()> {
+        match self {
+            Self::Sqlite(pool) => {
+                sqlx::query(
+                    "UPDATE observation_tail_sources SET generation_node_id=? WHERE run_id=?",
+                )
+                .bind(generation_node_id)
+                .bind(run_id)
+                .execute(pool)
+                .await?;
+            }
+            Self::Postgres(pool) => {
+                sqlx::query(
+                    "UPDATE observation_tail_sources SET generation_node_id=$1 WHERE run_id=$2",
+                )
+                .bind(generation_node_id)
+                .bind(run_id)
+                .execute(pool)
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) async fn tail_sources_by_hashes(
         &self,
         principal: &str,
         excluding: &str,
+        hashes: &[String],
         now: i64,
-    ) -> anyhow::Result<Vec<(String, String)>> {
-        let limit = (super::tail::MAX_CANDIDATES + 1) as i64;
+    ) -> anyhow::Result<Vec<(String, String, Option<String>)>> {
+        if hashes.is_empty() {
+            return Ok(Vec::new());
+        }
         Ok(match self {
-            Self::Sqlite(pool) => sqlx::query_as("SELECT r.id,r.interaction_id FROM inference_run_observations r JOIN interaction_observations i ON i.id=r.interaction_id WHERE i.principal=? AND r.id<>? AND r.generation_node_id IS NOT NULL AND r.expires_at>? AND i.expires_at>? LIMIT ?")
-                .bind(principal).bind(excluding).bind(now).bind(now).bind(limit).fetch_all(pool).await?,
-            Self::Postgres(pool) => sqlx::query_as("SELECT r.id,r.interaction_id FROM inference_run_observations r JOIN interaction_observations i ON i.id=r.interaction_id WHERE i.principal=$1 AND r.id<>$2 AND r.generation_node_id IS NOT NULL AND r.expires_at>$3 AND i.expires_at>$3 LIMIT $4")
-                .bind(principal).bind(excluding).bind(now).bind(limit).fetch_all(pool).await?,
+            Self::Sqlite(pool) => {
+                let mut builder = sqlx::QueryBuilder::new(
+                    "SELECT run_id,interaction_id,generation_node_id FROM observation_tail_sources WHERE principal=",
+                );
+                builder.push_bind(principal);
+                builder.push(" AND run_id<>");
+                builder.push_bind(excluding);
+                builder.push(" AND expires_at>");
+                builder.push_bind(now);
+                builder.push(" AND last_unit_hash IN (");
+                let mut separated = builder.separated(", ");
+                for hash in hashes {
+                    separated.push_bind(hash);
+                }
+                separated.push_unseparated(")");
+                builder.build_query_as().fetch_all(pool).await?
+            }
+            Self::Postgres(pool) => {
+                let mut builder = sqlx::QueryBuilder::new(
+                    "SELECT run_id,interaction_id,generation_node_id FROM observation_tail_sources WHERE principal=",
+                );
+                builder.push_bind(principal);
+                builder.push(" AND run_id<>");
+                builder.push_bind(excluding);
+                builder.push(" AND expires_at>");
+                builder.push_bind(now);
+                builder.push(" AND last_unit_hash IN (");
+                let mut separated = builder.separated(", ");
+                for hash in hashes {
+                    separated.push_bind(hash);
+                }
+                separated.push_unseparated(")");
+                builder.build_query_as().fetch_all(pool).await?
+            }
         })
+    }
+
+    pub(super) async fn pending_tool_sources(
+        &self,
+        principal: &str,
+        tool_ids: &[String],
+        now: i64,
+    ) -> anyhow::Result<Vec<(String, String, String)>> {
+        if tool_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(match self {
+            Self::Sqlite(pool) => {
+                let mut builder = sqlx::QueryBuilder::new(
+                    "SELECT tool_id,run_id,interaction_id FROM observation_pending_tools WHERE principal=",
+                );
+                builder.push_bind(principal);
+                builder.push(" AND expires_at>");
+                builder.push_bind(now);
+                builder.push(" AND tool_id IN (");
+                let mut separated = builder.separated(", ");
+                for id in tool_ids {
+                    separated.push_bind(id);
+                }
+                separated.push_unseparated(")");
+                builder.build_query_as().fetch_all(pool).await?
+            }
+            Self::Postgres(pool) => {
+                let mut builder = sqlx::QueryBuilder::new(
+                    "SELECT tool_id,run_id,interaction_id FROM observation_pending_tools WHERE principal=",
+                );
+                builder.push_bind(principal);
+                builder.push(" AND expires_at>");
+                builder.push_bind(now);
+                builder.push(" AND tool_id IN (");
+                let mut separated = builder.separated(", ");
+                for id in tool_ids {
+                    separated.push_bind(id);
+                }
+                separated.push_unseparated(")");
+                builder.build_query_as().fetch_all(pool).await?
+            }
+        })
+    }
+
+    pub(super) async fn tail_generation_node(
+        &self,
+        run_id: &str,
+    ) -> anyhow::Result<Option<String>> {
+        Ok(match self {
+            Self::Sqlite(pool) => sqlx::query_scalar(
+                "SELECT generation_node_id FROM observation_tail_sources WHERE run_id=?",
+            )
+            .bind(run_id)
+            .fetch_optional(pool)
+            .await?
+            .flatten(),
+            Self::Postgres(pool) => sqlx::query_scalar(
+                "SELECT generation_node_id FROM observation_tail_sources WHERE run_id=$1",
+            )
+            .bind(run_id)
+            .fetch_optional(pool)
+            .await?
+            .flatten(),
+        })
+    }
+
+    pub(super) async fn delivery_completed_at(&self, run_id: &str) -> anyhow::Result<Option<i64>> {
+        Ok(match self {
+            Self::Sqlite(pool) => sqlx::query_scalar(
+                "SELECT json_extract(payload,'$.delivery_completed_at') FROM observation_events WHERE run_id=? AND kind='run_finished' ORDER BY sequence LIMIT 1",
+            )
+            .bind(run_id)
+            .fetch_optional(pool)
+            .await?
+            .flatten(),
+            Self::Postgres(pool) => sqlx::query_scalar(
+                "SELECT (payload->>'delivery_completed_at')::bigint FROM observation_events WHERE run_id=$1 AND kind='run_finished' ORDER BY sequence LIMIT 1",
+            )
+            .bind(run_id)
+            .fetch_optional(pool)
+            .await?
+            .flatten(),
+        })
+    }
+
+    pub(super) async fn rematerialize_client_items(
+        &self,
+        principal: &str,
+        generation_node_id: &str,
+        now: i64,
+    ) -> anyhow::Result<Option<Vec<stravia_runtime_contract::protocol::ir::AiItem>>> {
+        let chain_principal = format!("api-key:{principal}");
+        let payloads: Vec<Value> = match self {
+            Self::Sqlite(pool) => {
+                let rows: Vec<(String,)> = sqlx::query_as(
+                    "WITH RECURSIVE chain AS (
+                        SELECT id, parent_id, payload, 0 AS depth
+                        FROM turn_chain_nodes
+                        WHERE id=? AND principal=? AND expires_at>?
+                        UNION ALL
+                        SELECT n.id, n.parent_id, n.payload, c.depth+1
+                        FROM turn_chain_nodes n JOIN chain c ON n.id=c.parent_id
+                        WHERE n.expires_at>? AND c.depth<256
+                    )
+                    SELECT payload FROM chain ORDER BY depth DESC",
+                )
+                .bind(generation_node_id)
+                .bind(&chain_principal)
+                .bind(now)
+                .bind(now)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter()
+                    .map(|(payload,)| serde_json::from_str(&payload))
+                    .collect::<Result<Vec<_>, _>>()?
+            }
+            Self::Postgres(pool) => {
+                let rows: Vec<String> = sqlx::query_scalar(
+                    "WITH RECURSIVE chain AS (
+                        SELECT id, parent_id, payload, 0 AS depth
+                        FROM turn_chain_nodes
+                        WHERE id=$1 AND principal=$2 AND expires_at>$3
+                        UNION ALL
+                        SELECT n.id, n.parent_id, n.payload, c.depth+1
+                        FROM turn_chain_nodes n JOIN chain c ON n.id=c.parent_id
+                        WHERE n.expires_at>$3 AND c.depth<256
+                    )
+                    SELECT payload FROM chain ORDER BY depth DESC",
+                )
+                .bind(generation_node_id)
+                .bind(&chain_principal)
+                .bind(now)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter()
+                    .map(|payload| serde_json::from_str(&payload))
+                    .collect::<Result<Vec<_>, _>>()?
+            }
+        };
+        if payloads.is_empty() {
+            return Ok(None);
+        }
+        crate::generation_chain::client_items_from_payloads(payloads)
+            .map(Some)
+            .map_err(|error| anyhow::anyhow!(error))
     }
 
     pub async fn admit(&self, admission: Admission<'_>) -> anyhow::Result<ObservationEvent> {
@@ -77,8 +328,10 @@ impl ObservationStore {
                 // 先取得写锁，避免读取父状态后升级事务因并发写入而丢失子 Interaction。
                 let mut connection = pool.acquire().await?;
                 let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
-                if let Some(parent) = admission.parent_interaction_id {
-                    interrupt_predecessors_sqlite(&mut tx, parent, admission.now).await?;
+                if admission.interrupt_parent {
+                    if let Some(parent) = admission.parent_interaction_id {
+                        interrupt_predecessors_sqlite(&mut tx, parent, admission.now).await?;
+                    }
                 }
                 let sequence = next_sqlite(&mut tx).await?;
                 sqlx::query("INSERT OR IGNORE INTO interaction_observations (id,principal,api_key_id,api_key_name,generation_root_id,parent_interaction_id,root_id,root_run_id,first_route_id,first_model_display_name,status,started_at,last_active_at,last_event_sequence,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,'running',?,?,?,?)")
@@ -92,7 +345,7 @@ impl ObservationStore {
                     .bind(&admission.start.ingress_protocol).bind(&admission.start.route_id).bind(&admission.start.model_display_name)
                     .bind(admission.debug_enabled).bind(admission.start.ingress_received_at).bind(admission.now).bind(sequence).bind(admission.expires_at)
                     .bind(admission.metadata.and_then(|metadata| metadata.model.as_deref())).execute(&mut *tx).await?;
-                let payload = serde_json::json!({"route_id": admission.start.route_id, "model_display_name": admission.start.model_display_name, "debug_enabled": admission.debug_enabled, "inferred_retry": admission.inferred_retry, "grouping_reason": admission.grouping_reason, "ingress_received_at": admission.start.ingress_received_at, "parent_run_id": admission.parent_run_id, "generation_parent_id": admission.start.generation_parent_id, "has_new_user": admission.start.has_new_user, "parent_interaction_id": admission.parent_interaction_id, "root_id": admission.start.generation_root_id.as_deref().unwrap_or(admission.interaction_id)});
+                let payload = serde_json::json!({"route_id": admission.start.route_id, "model_display_name": admission.start.model_display_name, "debug_enabled": admission.debug_enabled, "inferred_retry": admission.inferred_retry, "grouping_reason": admission.grouping_reason, "ingress_received_at": admission.start.ingress_received_at, "parent_run_id": admission.parent_run_id, "generation_parent_id": admission.start.generation_parent_id, "diagnostic_source_run_id": admission.diagnostic_source_run_id, "has_new_user": admission.start.has_new_user, "parent_interaction_id": admission.parent_interaction_id, "root_id": admission.start.generation_root_id.as_deref().unwrap_or(admission.interaction_id)});
                 insert_event_sqlite(
                     &mut tx,
                     sequence,
@@ -118,8 +371,10 @@ impl ObservationStore {
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                if let Some(parent) = admission.parent_interaction_id {
-                    interrupt_predecessors_postgres(&mut tx, parent, admission.now).await?;
+                if admission.interrupt_parent {
+                    if let Some(parent) = admission.parent_interaction_id {
+                        interrupt_predecessors_postgres(&mut tx, parent, admission.now).await?;
+                    }
                 }
                 let sequence: i64 =
                     sqlx::query_scalar("SELECT nextval('observation_event_sequence')")
@@ -136,7 +391,7 @@ impl ObservationStore {
                     .bind(&admission.start.ingress_protocol).bind(&admission.start.route_id).bind(&admission.start.model_display_name)
                     .bind(admission.debug_enabled).bind(admission.start.ingress_received_at).bind(admission.now).bind(sequence).bind(admission.expires_at)
                     .bind(admission.metadata.and_then(|metadata| metadata.model.as_deref())).execute(&mut *tx).await?;
-                let payload = serde_json::json!({"route_id": admission.start.route_id, "model_display_name": admission.start.model_display_name, "debug_enabled": admission.debug_enabled, "inferred_retry": admission.inferred_retry, "grouping_reason": admission.grouping_reason, "ingress_received_at": admission.start.ingress_received_at, "parent_run_id": admission.parent_run_id, "generation_parent_id": admission.start.generation_parent_id, "has_new_user": admission.start.has_new_user, "parent_interaction_id": admission.parent_interaction_id, "root_id": admission.start.generation_root_id.as_deref().unwrap_or(admission.interaction_id)});
+                let payload = serde_json::json!({"route_id": admission.start.route_id, "model_display_name": admission.start.model_display_name, "debug_enabled": admission.debug_enabled, "inferred_retry": admission.inferred_retry, "grouping_reason": admission.grouping_reason, "ingress_received_at": admission.start.ingress_received_at, "parent_run_id": admission.parent_run_id, "generation_parent_id": admission.start.generation_parent_id, "diagnostic_source_run_id": admission.diagnostic_source_run_id, "has_new_user": admission.start.has_new_user, "parent_interaction_id": admission.parent_interaction_id, "root_id": admission.start.generation_root_id.as_deref().unwrap_or(admission.interaction_id)});
                 insert_event_postgres(
                     &mut tx,
                     sequence,
@@ -1930,6 +2185,8 @@ mod tests {
                 debug_enabled: false,
                 inferred_retry: false,
                 grouping_reason: "new_root",
+                diagnostic_source_run_id: None,
+                interrupt_parent: false,
                 now: 1,
                 expires_at: i64::MAX,
             })
@@ -2077,6 +2334,8 @@ mod tests {
                 debug_enabled: false,
                 inferred_retry: false,
                 grouping_reason: "exact_parent",
+                diagnostic_source_run_id: None,
+                interrupt_parent: false,
                 now: 1,
                 expires_at: i64::MAX,
             })
@@ -2941,6 +3200,8 @@ mod tests {
                 debug_enabled: false,
                 inferred_retry: false,
                 grouping_reason: "new_root",
+                diagnostic_source_run_id: None,
+                interrupt_parent: false,
                 now: 1,
                 expires_at: i64::MAX,
             })
@@ -2963,6 +3224,8 @@ mod tests {
                     debug_enabled: false,
                     inferred_retry: false,
                     grouping_reason: "new_root",
+                    diagnostic_source_run_id: None,
+                    interrupt_parent: true,
                     now: 2,
                     expires_at: i64::MAX,
                 })

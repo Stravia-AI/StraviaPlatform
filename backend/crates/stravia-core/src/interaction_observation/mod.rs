@@ -239,6 +239,7 @@ impl InteractionObservation {
             finalization,
             rejection_id: None,
             websocket,
+            client_items: None,
         }
     }
     pub(crate) async fn query_forest(&self, q: ForestQuery) -> anyhow::Result<ForestPage> {
@@ -769,6 +770,7 @@ pub(crate) struct IngressObserver {
     finalization: Option<mpsc::OwnedPermit<WriterCommand>>,
     rejection_id: Option<String>,
     websocket: bool,
+    client_items: Option<Vec<stravia_runtime_contract::protocol::ir::AiItem>>,
 }
 
 #[derive(Clone)]
@@ -791,6 +793,13 @@ impl IngressCapture {
 impl IngressObserver {
     pub(crate) fn set_model(&mut self, model: &str) {
         self.metadata.model = Some(redaction::redact_text(model));
+    }
+
+    pub(crate) fn set_client_input(
+        &mut self,
+        items: Vec<stravia_runtime_contract::protocol::ir::AiItem>,
+    ) {
+        self.client_items = Some(items);
     }
 
     pub(crate) fn set_authenticated_source(&mut self, key_id: &str, key_name: &str) {
@@ -869,6 +878,13 @@ impl IngressObserver {
             )),
             protected,
         });
+        let (input, input_overflow) = match self.client_items.take() {
+            Some(items) => match tail::Window::capture(&items) {
+                Some(window) => (Some(window), false),
+                None => (None, !items.is_empty()),
+            },
+            None => (None, false),
+        };
         if self
             .observation
             .inner
@@ -879,6 +895,8 @@ impl IngressObserver {
                 debug_enabled,
                 trace: inner.trace.clone(),
                 discarded_trace,
+                input,
+                input_overflow,
             })
             .is_err()
         {

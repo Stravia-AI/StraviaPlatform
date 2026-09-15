@@ -245,7 +245,9 @@ SvelteKit WebUI 可管理：
 
 Interaction Observation 在 Debug 与 Release 构建中均可用。进程级 **Debug** 开关每次重启后默认为关闭，启用前必须确认；每个新准入的 Inference Run 独立快照当时开关，因此切换只影响之后准入的 Run。Debug 记录 canonical checkpoint 与有序 HTTP、SSE、WebSocket 应用协议消息，不是 TLS record、TCP packet、HTTP/2 frame，也不保证应用 adapter 以下的 packet/chunk 保真。凭据 header、URL userinfo、疑似凭据的 query value 和结构化凭据字段会在持久化前永久脱敏；提示词、业务正文及工具输入/输出仍可能属于敏感数据。
 
-同一 API Key 下精确续接父响应的请求，在没有新增用户输入、返回待完成客户端工具调用的结果（不限时间），或于该父响应完整交付后两秒内到达时，继续归入原 Interaction。后两种情况允许夹带新增用户输入，已完成的 Interaction 也可重新激活。两秒规则同样会归并真人快速追问，不表示识别出了 harness hook，不丢弃输入，也不改变模型执行；其他新增用户输入开启新的 Interaction。
+同一 API Key 下精确续接父响应的请求，在没有新增用户输入、返回待完成客户端工具调用的结果（不限时间），或于该父响应完整交付后两秒内到达时，继续归入原 Interaction。后两种情况允许夹带新增用户输入，已完成的 Interaction 也可重新激活。两秒规则同样会归并真人快速追问，不表示识别出了 harness hook，不丢弃输入，也不改变模型执行。
+
+没有该执行父边时——常见于 Connect Client 裁剪或摘要历史——Request Records 仍根据当前客户端输入做诊断分组。唯一确认的当前工具续接归入来源 Interaction，即使夹带新增用户输入，也不受尾部五分钟窗口限制。唯一完整保留尾部且匹配之后没有新增用户时，若准入时间减去交付完成时间不超过五分钟，也归入同一 Interaction。其他唯一尾部在新 Interaction 上保留诊断父连接；证据不完整或有歧义则保持独立。这不会恢复已删除历史、写入 Generation 父边，或启用 Target Continuation。其他新增用户输入开启新的 Interaction。
 
 Desktop 点击 **Debug 诊断包**后，通过一次性下载票据交由系统浏览器下载，桌面检查器保持打开。WebUI 则由当前浏览器处理下载。
 

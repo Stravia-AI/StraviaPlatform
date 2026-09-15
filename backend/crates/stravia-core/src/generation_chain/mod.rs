@@ -27,7 +27,7 @@ use stravia_runtime_contract::turn_chain::TurnNodeId;
 use stravia_runtime_contract::turn_chain::TurnNodeKind;
 
 mod materialize;
-pub(crate) use materialize::rebuilt_prefix;
+pub(crate) use materialize::{client_items_from_payloads, rebuilt_prefix};
 mod project;
 mod store;
 mod write;

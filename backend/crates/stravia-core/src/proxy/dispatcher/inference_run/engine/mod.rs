@@ -718,6 +718,7 @@ pub(super) async fn orchestrate(
             )
         })
         .unwrap_or_else(|| (request.model.clone(), None));
+    ingress_observer.set_client_input(client_request.items.clone());
     let observer = ingress_observer.admit(RunStart {
         id: ctx.request_id.clone(),
         principal: principal.api_key_id().to_owned(),

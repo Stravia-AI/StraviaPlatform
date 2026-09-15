@@ -1255,6 +1255,8 @@ mod tests {
                     debug_enabled: false,
                     inferred_retry: false,
                     grouping_reason: "new_root",
+                    diagnostic_source_run_id: None,
+                    interrupt_parent: false,
                     now: at,
                     expires_at: i64::MAX,
                 })
@@ -1430,6 +1432,8 @@ mod tests {
                 } else {
                     "new_root"
                 },
+                diagnostic_source_run_id: None,
+                interrupt_parent: parent.is_some(),
                 now,
                 expires_at: i64::MAX,
             })

@@ -155,3 +155,25 @@ pub(super) fn materialization_size_bytes(materialized: &MaterializedGeneration) 
         .saturating_add(profile)
         .saturating_add(std::mem::size_of::<MaterializedGeneration>())
 }
+
+pub(crate) fn client_items_from_payloads(
+    payloads: Vec<serde_json::Value>,
+) -> Result<Vec<AiItem>, String> {
+    let mut client_items = Vec::new();
+    for payload in payloads {
+        let mut persisted: PersistedResponseNode = serde_json::from_value(payload)
+            .map_err(|_| "invalid generation payload".to_string())?;
+        match persisted.client_history_mutation {
+            Some(EffectiveHistoryMutation::Append { items }) => client_items.extend(items),
+            Some(EffectiveHistoryMutation::Replace { items }) => client_items = items,
+            None => client_items.extend(persisted.client_delta.messages.clone()),
+        }
+        client_items.extend(
+            persisted
+                .client_output
+                .take()
+                .unwrap_or_else(|| generic_client_history_output(&persisted.effective_output)),
+        );
+    }
+    Ok(client_items)
+}

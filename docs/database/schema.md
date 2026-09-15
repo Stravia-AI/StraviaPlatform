@@ -462,6 +462,33 @@ Credential discoveries use the ordinary `credential_mappings_created` event kind
 
 Migration `0036_credential_discovery_coverage` introduces no new tables or columns. It sets `interaction_observations.observation_gap` for retained pre-feature rows on both backends because they lack discovery metadata; it does not reconstruct discoveries from mapping storage or historical content. Discovery events follow the existing Observation retention and cascade boundaries. Clearing them does not alter `reversible_redaction_mappings` or make valid reuse a new discovery.
 
+Migration `0047_observation_tail_sources` adds fingerprint and pending-tool indexes for Interaction Observation diagnostic grouping. They filter candidate sources by last canonical unit hash or unresolved tool ID; uniqueness still requires full semantic verification. Missing in-memory windows rematerialize from retained Generation Chain `client_items` via `generation_node_id`. These tables are not execution parent edges and are not backfilled for rows admitted before the migration.
+
+### observation_tail_sources
+
+| Column | Type | Default | Description |
+|---|---|---|---|
+| `run_id` | TEXT PK | — | Completed Inference Run; FK `inference_run_observations(id)` ON DELETE CASCADE |
+| `interaction_id` | TEXT NOT NULL | — | Source Interaction; FK `interaction_observations(id)` ON DELETE CASCADE |
+| `principal` | TEXT NOT NULL | — | Same-principal lookup key |
+| `last_unit_hash` | TEXT NOT NULL | — | Hex SHA-256 of the last canonical client-shaped unit |
+| `generation_node_id` | TEXT | NULL | Retained Generation Chain node used to rematerialize the window |
+| `expires_at` | BIGINT / INTEGER NOT NULL | — | Retention boundary |
+
+**索引**：`observation_tail_sources_hash_idx (principal, last_unit_hash)`、`observation_tail_sources_expiry_idx`
+
+### observation_pending_tools
+
+| Column | Type | Default | Description |
+|---|---|---|---|
+| `principal` | TEXT NOT NULL | — | Same-principal lookup key |
+| `tool_id` | TEXT NOT NULL | — | Unresolved client tool call ID |
+| `run_id` | TEXT NOT NULL | — | Source Run; FK `inference_run_observations(id)` ON DELETE CASCADE |
+| `interaction_id` | TEXT NOT NULL | — | Source Interaction; FK `interaction_observations(id)` ON DELETE CASCADE |
+| `expires_at` | BIGINT / INTEGER NOT NULL | — | Retention boundary |
+
+主键 `(principal, tool_id, run_id)`。**索引**：`observation_pending_tools_lookup_idx (principal, tool_id)`、`observation_pending_tools_expiry_idx`
+
 ### Usage statistics and retention
 
 `UsageStatsStore` computes overview, hourly, model, provider, API-key, and Route-scheduling projections directly from `model_turn_observations` and `target_attempt_observations`; there is no separate `usage_stats` table. Provider-reported values are counted once per attempt, and a dimension remains NULL when any applicable attempt is unknown. Route scheduling uses 24-hour token totals and one-hour attempt success/latency from Target attempts; a failed refresh returns the last successful in-process snapshot marked stale.

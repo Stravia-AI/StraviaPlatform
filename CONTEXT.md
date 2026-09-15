@@ -28,8 +28,7 @@ _避免使用_：Agent（当指这些工具）、接入 Agent、把 Desktop 和 
 
 ## Connect Client Interaction
 
-Connect Client Interaction 通常由一次新 User 输入发起，包含随后推进同一任务的一个或多个 Inference Run；无法归入已有 Interaction、且不含 User item 的合法根请求也开启新的 Interaction。同一 Principal 下精确续接父响应时，没有新增 User 的请求继续原 Interaction；提交父历史中待完成工具调用结果的请求即使夹带新增 User 也继续原 Interaction，不限时间；请求在父响应完整交付后两秒内到达时，即使包含新增 User 或父 Interaction 已完成，也归入原 Interaction。两秒快速续接是诊断归并规则，不证明输入来自 harness；真人快速追问同样可能归并。其他新增 User 开启新的 Interaction，原执行分支尚未得到最终响应时标记为由用户中断。同一父响应的并发续接可以在 Interaction 内形成 Run 子树并产生多个最终生成响应，已完成 Interaction 可以被合法续接重新激活。失败的 Inference Run 不会单独结束 Interaction：合法续接可以恢复原 Interaction 并保留失败记录。没有父节点的根 Run 仅在同 Principal、canonical request fingerprint 精确相同、前次 Run 已失败且从未发生 Client Output Commit、并在失败后两分钟内开始时，才在 Interaction Observation 中归并为同一 Interaction；诊断归并不建立 Generation Chain 关系，也不改变输入、权限或执行。
-历史回放中的旧工具结果不证明当前请求是工具续接；已经经过后续模型答复的结果不用于吞并新的独立 User 输入。
+Connect Client Interaction 是归属于同一 Principal、由一个或多个 Inference Run 推进的同一次客户端交互，通常由新 User 输入发起，也可由无法归入已有交互的合法无 User 根请求发起。经充分证据确认的同一任务续接可跨多个 Generation Chain 根而共享交互归属、活动状态、Confirmed Upstream Usage 汇总与 Interaction Debug Bundle 范围；诊断归并不改变模型输入、权限或执行历史。
 _避免使用_：Agent Turn、Model Turn、Inference Run、Agent Loop
 
 ## Interaction Observation
@@ -276,9 +275,14 @@ _避免使用_：摘要文本匹配、Thinking History Marker、可变 Session h
 Remote Compaction Request 是客户端发起、由当前选中 Target 的上游执行的上下文压缩请求。能力未知时仍尝试转发，由上游裁决；协议无法承载时返回不支持，成功或错误直接返回客户端，不为完成压缩而重试或切换 Target。它不是平台主动压缩策略，没有平台配置或本地摘要。
 _避免使用_：Native Automatic Window、平台自动压缩、累计 token 限额
 
+## Current Tool Continuation
+
+Current Tool Continuation 是 Interaction Observation 在没有已确认执行父边时，用当前输入尾段中尚未得到结果的工具调用精确对应到唯一已交付来源的诊断判定。确认后归入来源 Interaction，即使夹带新增 User 或超过尾部五分钟窗口。旧结果回放、重复 ID 或冲突来源不能证明续接；它不写入 Generation parent，也不启用 Target Continuation。
+_避免使用_：Automatic Parent Discovery、Generation Chain parent、Retained Tail Association
+
 ## Retained Tail Association
 
-Retained Tail Association 是 Interaction Observation 对幸存完整连续交互与唯一历史候选的精确匹配所作的诊断推断；它不证明发生过压缩，也不建立执行父边或恢复历史。缺少、歧义或不完整的证据保持未关联。
+Retained Tail Association 是 Interaction Observation 对幸存完整连续交互与唯一历史候选的精确匹配所作的诊断推断，用于在当前工具续接不成立时确定跨 Generation Chain 根的交互续接或新交互的诊断来源。匹配之后没有新增 User 且准入相对交付完成不超过五分钟时归入来源 Interaction；其他唯一尾部只建立诊断父连接。它不证明发生过压缩，不建立执行父边或恢复历史；缺少、歧义或不完整的证据不能证明任务续接，时间接近也不能替代匹配证据。
 _避免使用_：Automatic Parent Discovery、Generation Chain parent、确认压缩
 
 ## Upstream Store Hint

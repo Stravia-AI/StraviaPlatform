@@ -14,10 +14,12 @@ const MAX_VERIFIED_BYTES: usize = 8 * 1024 * 1024;
 const MIN_MATCH_BYTES: usize = 256;
 const MIN_ANSWER_BYTES: usize = 64;
 
+#[derive(Clone)]
 pub(super) struct Window {
     units: Vec<Unit>,
     bytes: usize,
 }
+#[derive(Clone)]
 struct Unit {
     value: Value,
     hash: [u8; 32],
@@ -88,9 +90,98 @@ impl Window {
     }
 }
 
+fn hash_hex(hash: &[u8; 32]) -> String {
+    hash.iter()
+        .fold(String::with_capacity(64), |mut out, byte| {
+            use std::fmt::Write as _;
+            let _ = write!(out, "{byte:02x}");
+            out
+        })
+}
+
+fn tool_call_id(value: &Value) -> Option<&str> {
+    value
+        .get("tool_call")
+        .and_then(|call| call.get("id"))
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+}
+
+fn tool_result_id(value: &Value) -> Option<&str> {
+    (value.get("role").and_then(Value::as_str) == Some("tool"))
+        .then(|| value.get("tool_call_id").and_then(Value::as_str))
+        .flatten()
+        .filter(|id| !id.is_empty())
+}
+
+impl Window {
+    pub(super) fn last_hash_hex(&self) -> Option<String> {
+        self.units.last().map(|unit| hash_hex(&unit.hash))
+    }
+
+    pub(super) fn unit_hash_hexes(&self) -> Vec<String> {
+        self.units.iter().map(|unit| hash_hex(&unit.hash)).collect()
+    }
+
+    pub(super) fn pending_tool_ids(&self) -> Option<Vec<String>> {
+        let mut pending = Vec::new();
+        let mut seen = HashSet::new();
+        for unit in &self.units {
+            if let Some(id) = tool_call_id(&unit.value) {
+                if !seen.insert(id) {
+                    return None;
+                }
+                pending.push(id.to_owned());
+            } else if let Some(id) = tool_result_id(&unit.value) {
+                pending.retain(|pending_id| pending_id != id);
+            }
+        }
+        Some(pending)
+    }
+
+    pub(super) fn current_tail_tool_ids(&self) -> Option<Vec<String>> {
+        let tail_start = self
+            .units
+            .iter()
+            .rposition(|unit| unit.value.get("role").and_then(Value::as_str) == Some("assistant"))
+            .map_or(0, |index| index + 1);
+        let tail = &self.units[tail_start..];
+        if !tail
+            .iter()
+            .any(|unit| tool_result_id(&unit.value).is_some())
+        {
+            return None;
+        }
+        let mut ids = Vec::new();
+        let mut seen = HashSet::new();
+        for unit in tail {
+            if let Some(id) = tool_result_id(&unit.value) {
+                if !seen.insert(id) {
+                    return None;
+                }
+                ids.push(id.to_owned());
+            }
+        }
+        Some(ids)
+    }
+
+    pub(super) fn user_after_match(&self, start: usize, units: usize) -> bool {
+        let end = start.saturating_add(units);
+        self.units
+            .get(end..)
+            .into_iter()
+            .flatten()
+            .any(|unit| unit.value.get("role").and_then(Value::as_str) == Some("user"))
+    }
+}
+
 #[derive(Default)]
 pub(super) struct TailIndex {
     windows: HashMap<String, Window>,
+    interactions: HashMap<String, String>,
+    principals: HashMap<String, String>,
+    last_hashes: HashMap<String, Vec<String>>,
+    pending_tools: HashMap<String, Vec<String>>,
     expiries: HashMap<String, i64>,
     bytes: usize,
 }
@@ -98,23 +189,125 @@ impl TailIndex {
     pub(super) fn sweep(&mut self, now: i64) {
         self.expiries.retain(|_, expiry| *expiry > now);
         self.windows.retain(|id, _| self.expiries.contains_key(id));
+        self.interactions
+            .retain(|id, _| self.expiries.contains_key(id));
+        self.principals
+            .retain(|id, _| self.expiries.contains_key(id));
+        self.last_hashes.retain(|_, runs| {
+            runs.retain(|id| self.expiries.contains_key(id));
+            !runs.is_empty()
+        });
+        self.pending_tools.retain(|_, runs| {
+            runs.retain(|id| self.expiries.contains_key(id));
+            !runs.is_empty()
+        });
         self.bytes = self.windows.values().map(|window| window.bytes).sum();
     }
-    pub(super) fn insert(&mut self, run: String, window: Window, expires_at: i64) {
-        if self.windows.contains_key(&run)
-            || self.windows.len() >= MAX_CANDIDATES
-            || self.bytes + window.bytes > MAX_INDEX_BYTES
-        {
+    pub(super) fn insert(
+        &mut self,
+        run: String,
+        window: Window,
+        expires_at: i64,
+        principal: impl Into<String>,
+        interaction_id: impl Into<String>,
+    ) {
+        if self.windows.contains_key(&run) || self.bytes + window.bytes > MAX_INDEX_BYTES {
             return;
         }
         self.bytes += window.bytes;
+        if let Some(hash) = window.last_hash_hex() {
+            let runs = self.last_hashes.entry(hash).or_default();
+            if !runs.iter().any(|id| id == &run) {
+                runs.push(run.clone());
+            }
+        }
+        if let Some(ids) = window.pending_tool_ids() {
+            for id in ids {
+                let runs = self.pending_tools.entry(id).or_default();
+                if !runs.iter().any(|existing| existing == &run) {
+                    runs.push(run.clone());
+                }
+            }
+        }
         self.expiries.insert(run.clone(), expires_at);
+        self.principals.insert(run.clone(), principal.into());
+        self.interactions.insert(run.clone(), interaction_id.into());
         self.windows.insert(run, window);
     }
-    pub(super) fn associate(
+
+    pub(super) fn window(&self, run: &str) -> Option<&Window> {
+        self.windows.get(run)
+    }
+
+    pub(super) fn fingerprint_runs(&self, input: &Window, principal: &str) -> Vec<String> {
+        let mut runs = Vec::new();
+        let mut seen = HashSet::new();
+        for hash in input.unit_hash_hexes() {
+            for run in self.last_hashes.get(&hash).into_iter().flatten() {
+                if self.principals.get(run).map(String::as_str) == Some(principal)
+                    && seen.insert(run.clone())
+                {
+                    runs.push(run.clone());
+                }
+            }
+        }
+        runs
+    }
+
+    pub(super) fn current_tool_source(
         &self,
+        input: &Window,
+        principal: &str,
+    ) -> Option<(String, String)> {
+        let tail_ids = input.current_tail_tool_ids()?;
+        let mut source = None;
+        for id in &tail_ids {
+            let Some(runs) = self.pending_tools.get(id) else {
+                return None;
+            };
+            let matches: Vec<_> = runs
+                .iter()
+                .filter(|run| self.principals.get(*run).map(String::as_str) == Some(principal))
+                .collect();
+            if matches.len() != 1 {
+                return None;
+            }
+            let run = matches[0];
+            match &source {
+                None => source = Some(run.clone()),
+                Some(existing) if existing != run => return None,
+                Some(_) => {}
+            }
+        }
+        let run = source?;
+        let pending = self.windows.get(&run)?.pending_tool_ids()?;
+        if !tail_ids.iter().all(|id| pending.iter().any(|p| p == id)) {
+            return None;
+        }
+        Some((run.clone(), self.interactions.get(&run)?.clone()))
+    }
+
+    pub(super) fn interaction(&self, run: &str) -> Option<&str> {
+        self.interactions.get(run).map(String::as_str)
+    }
+
+    pub(super) fn pending_runs(&self, tool_id: &str, principal: &str) -> Vec<(String, String)> {
+        self.pending_tools
+            .get(tool_id)
+            .into_iter()
+            .flatten()
+            .filter(|run| self.principals.get(*run).map(String::as_str) == Some(principal))
+            .filter_map(|run| {
+                self.interactions
+                    .get(run)
+                    .map(|interaction| (run.clone(), interaction.clone()))
+            })
+            .collect()
+    }
+
+    pub(super) fn associate_loaded(
         input: Option<&Window>,
-        candidates: &[(String, String)],
+        candidates: &[(String, String, &Window)],
     ) -> RunEvent {
         let result =
             |status: &str, source: Option<&(String, String)>, count, units, bytes, start| {
@@ -134,12 +327,6 @@ impl TailIndex {
         if candidates.len() > MAX_CANDIDATES {
             return result("resource_limit", None, 0, 0, 0, None);
         }
-        if candidates
-            .iter()
-            .any(|(run, _)| !self.windows.contains_key(run))
-        {
-            return result("index_unavailable", None, 0, 0, 0, None);
-        }
         let mut positions: HashMap<[u8; 32], Vec<usize>> = HashMap::new();
         for (index, unit) in input.units.iter().enumerate() {
             positions.entry(unit.hash).or_default().push(index);
@@ -148,7 +335,7 @@ impl TailIndex {
         let mut comparisons = 0;
         let mut verified_bytes = 0;
         for source in candidates {
-            let old = &self.windows[&source.0];
+            let old = source.2;
             let Some(last) = old.units.last() else {
                 continue;
             };
@@ -202,10 +389,10 @@ impl TailIndex {
         match accepted.as_slice() {
             [] => result("no_match", None, 0, 0, 0, None),
             [(source, (units, bytes, start))] => {
-                result("inferred", Some(source), 1, *units, *bytes, Some(*start))
+                let pair = (source.0.clone(), source.1.clone());
+                result("inferred", Some(&pair), 1, *units, *bytes, Some(*start))
             }
             _ => {
-                // 同一会话的嵌套来源会同时命中；唯一更长的窗口是更后一轮，不是并列历史。
                 let Some((source, (units, bytes, start))) = accepted
                     .iter()
                     .max_by_key(|(_, (units, bytes, _))| (*units, *bytes))
@@ -220,12 +407,44 @@ impl TailIndex {
                     .count()
                     == 1
                 {
-                    result("inferred", Some(*source), 1, *units, *bytes, Some(*start))
+                    let pair = (source.0.clone(), source.1.clone());
+                    result("inferred", Some(&pair), 1, *units, *bytes, Some(*start))
                 } else {
                     result("ambiguous", None, accepted.len(), 0, 0, None)
                 }
             }
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn associate(
+        &self,
+        input: Option<&Window>,
+        candidates: &[(String, String)],
+    ) -> RunEvent {
+        if candidates
+            .iter()
+            .any(|(run, _)| !self.windows.contains_key(run))
+        {
+            return RunEvent::RetainedTailAssociated {
+                source_run_id: None,
+                source_interaction_id: None,
+                status: "index_unavailable".into(),
+                candidate_count: 0,
+                matched_units: 0,
+                matched_bytes: 0,
+                input_start: None,
+            };
+        }
+        let loaded: Vec<(String, String, &Window)> = candidates
+            .iter()
+            .filter_map(|(run, interaction)| {
+                self.windows
+                    .get(run)
+                    .map(|window| (run.clone(), interaction.clone(), window))
+            })
+            .collect();
+        Self::associate_loaded(input, &loaded)
     }
 }
 
@@ -355,7 +574,13 @@ mod tests {
         ])
         .unwrap();
         let mut index = TailIndex::default();
-        index.insert("previous-run".into(), old, i64::MAX);
+        index.insert(
+            "previous-run".into(),
+            old,
+            i64::MAX,
+            "principal",
+            "previous-interaction",
+        );
         index.associate(
             Some(&input),
             &[("previous-run".into(), "previous-interaction".into())],
@@ -426,8 +651,20 @@ mod tests {
         .unwrap();
         let without_gpt = Window::capture(&[first_user, first_answer, resume_user]).unwrap();
         let mut index = TailIndex::default();
-        index.insert("run-first".into(), first, i64::MAX);
-        index.insert("run-switch".into(), switched, i64::MAX);
+        index.insert(
+            "run-first".into(),
+            first,
+            i64::MAX,
+            "principal",
+            "glm-first",
+        );
+        index.insert(
+            "run-switch".into(),
+            switched,
+            i64::MAX,
+            "principal",
+            "gpt-switch",
+        );
         (index, with_gpt, without_gpt)
     }
 
@@ -474,8 +711,20 @@ mod tests {
         let duplicate = Window::capture(&[first_user.clone(), first_answer.clone()]).unwrap();
         let input = Window::capture(&[first_user, first_answer, resume_user]).unwrap();
         let mut index = TailIndex::default();
-        index.insert("run-a".into(), first, i64::MAX);
-        index.insert("run-b".into(), duplicate, i64::MAX);
+        index.insert(
+            "run-a".into(),
+            first,
+            i64::MAX,
+            "principal",
+            "interaction-a",
+        );
+        index.insert(
+            "run-b".into(),
+            duplicate,
+            i64::MAX,
+            "principal",
+            "interaction-b",
+        );
         assert!(matches!(
             index.associate(
                 Some(&input),
@@ -506,5 +755,37 @@ mod tests {
                 RunEvent::RetainedTailAssociated { status, .. } if status == "no_match"
             ));
         }
+    }
+
+    #[test]
+    fn current_tool_source_requires_unique_pending_ids() {
+        let question = long_user("tool");
+        let call = AiItem::function_call(stravia_runtime_contract::protocol::ir::ToolCall {
+            id: "call-1".into(),
+            name: "probe".into(),
+            arguments: "{}".into(),
+        });
+        let result: AiItem = serde_json::from_value(serde_json::json!({
+            "role": "tool",
+            "tool_call_id": "call-1",
+            "content": long_answer("result").content.to_text(),
+        }))
+        .unwrap();
+        let mut pending = Window::capture(&[question.clone()]).unwrap();
+        assert!(pending.append(Window::capture(&[call.clone()]).unwrap()));
+        let input = Window::capture(&[question, call, result, long_user("after")]).unwrap();
+        let mut index = TailIndex::default();
+        index.insert(
+            "pending-run".into(),
+            pending,
+            i64::MAX,
+            "principal",
+            "pending-interaction",
+        );
+        assert_eq!(
+            index.current_tool_source(&input, "principal"),
+            Some(("pending-run".into(), "pending-interaction".into()))
+        );
+        assert_eq!(index.current_tool_source(&input, "other"), None);
     }
 }

@@ -94,7 +94,10 @@ class _LocalConversation:
         self, messages: list[dict[str, Any]], *, answer: dict[str, Any] | None = None,
         key: str | None = None, tools: bool = False,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        before = {item["id"] for item in _all_interactions(self.env, self.route_id)}
+        before = {
+            item["id"]: item["last_event_sequence"]
+            for item in _all_interactions(self.env, self.route_id)
+        }
         expected = answer or _answer(_text("answer-" + hashlib.sha256(_semantic(messages).encode()).hexdigest()[:12]))
         self.accepted[_semantic(messages)] = expected
         extra = {"tools": [{"type": "function", "function": {"name": "probe", "parameters": {"type": "object"}}}]} if tools else None
@@ -105,14 +108,17 @@ class _LocalConversation:
 
         def completed() -> dict[str, Any] | None:
             for item in _all_interactions(self.env, self.route_id):
-                if item["id"] in before:
+                if item["id"] in before and item["last_event_sequence"] <= before[item["id"]]:
                     continue
                 detail = _detail(self.env, item["id"])
-                if detail["runs"] and all(run["status"] in ("completed", "waiting_client") for run in detail["runs"]):
+                if not detail["runs"]:
+                    continue
+                newest = max(detail["runs"], key=lambda run: run["started_at"])
+                if newest["status"] in ("completed", "waiting_client"):
                     return detail
             return None
 
-        return returned, _wait_for("delivered independent diagnostic Interaction", completed)
+        return returned, _wait_for("delivered diagnostic Interaction or merged Run", completed)
 
 
 @pytest.fixture
@@ -174,19 +180,26 @@ def diagnostic_provider(admin_env: dict[str, Any]):
         server.server_close()
 
 
+def _newest_run(detail: dict[str, Any]) -> dict[str, Any]:
+    return max(detail["runs"], key=lambda run: run["started_at"])
+
+
+def _admitted(detail: dict[str, Any]) -> dict[str, Any]:
+    run = _newest_run(detail)
+    events = [event for event in run["events"] if event["kind"] == "run_admitted"]
+    assert events
+    return events[-1]["payload"]
+
+
 def _diagnostic(conversation: _LocalConversation, detail: dict[str, Any], status: str) -> dict[str, Any]:
     summary = detail["interaction"]
-    assert summary["parent_interaction_id"] is None
-    assert len(detail["runs"]) == 1
-    run = detail["runs"][0]
-    assert run["parent_run_id"] is None
+    run = _newest_run(detail)
     assert run["generation_parent_id"] is None
     assert run["client_output_committed"] is True
-    events = [event for event in summary["context_events"] if event["kind"] == "retained_tail_associated"]
+    events = [event for event in run["events"] if event["kind"] == "retained_tail_associated"]
     assert len(events) == 1
     event = events[0]
     assert event["payload"]["status"] == status
-    assert event in run["events"]
     forest_item = next(item for item in _all_interactions(conversation.env, conversation.route_id) if item["id"] == summary["id"])
     assert event in forest_item["context_events"]
     streamed = _sse_event(conversation.env, event["sequence"] - 1)
@@ -221,6 +234,10 @@ def test_retained_interaction_anywhere_is_only_diagnostic_and_new_user_stays_new
         assert event["source_run_id"] == source["runs"][0]["id"]
         assert event["source_interaction_id"] == source["interaction"]["id"]
         assert detail["interaction"]["id"] != source["interaction"]["id"]
+        assert detail["interaction"]["parent_interaction_id"] == source["interaction"]["id"]
+        assert _admitted(detail)["grouping_reason"] == "retained_tail_linked"
+        assert _admitted(detail)["diagnostic_source_run_id"] == source["runs"][0]["id"]
+        assert _newest_run(detail)["generation_parent_id"] is None
         # A Principal with no diagnostic candidates executes the identical supplied
         # window and returns the same answer. Neither request can restore old history.
         status, key = http_request("POST", f"{conversation.env['admin']}/api/v1/api-keys", headers=conversation.env["auth"], payload={"name": f"diagnostics-free-control-{placement}", "model_ids": [conversation.route_id]})
@@ -290,6 +307,8 @@ def test_projected_reasoning_links_diagnostics_after_model_instruction_change(di
     event = _diagnostic(conversation, detail, "inferred")
     assert event["source_run_id"] == source["runs"][0]["id"]
     assert event["source_interaction_id"] == source["interaction"]["id"]
+    assert detail["interaction"]["parent_interaction_id"] == source["interaction"]["id"]
+    assert _admitted(detail)["grouping_reason"] == "retained_tail_linked"
 
 
 @pytest.mark.e2e
@@ -331,18 +350,20 @@ def test_tool_correlations_and_media_are_part_of_exact_retained_evidence(diagnos
         if mutation == "unclosed-call":
             question = _user(_text("question awaiting tool completion"))
             pending = {**copy.deepcopy(call), "content": _text("substantive explanation before tool execution")}
-            assistant, _ = conversation.send(
+            assistant, started = conversation.send(
                 [_user("removed older interaction"), _answer("removed older answer"), question],
                 answer=pending, tools=True,
             )
-            # The retained source ends with an unresolved tool call. The new
-            # request closes it legally, but that newly supplied result cannot
-            # retrospectively turn the old suffix into a complete interaction.
+            # Unresolved current tool results still merge after history trim,
+            # even when the Connect Client also appends a new user message.
             _, detail = conversation.send(
                 [_user("local summary"), question, assistant, result, _user("new task")],
                 tools=True,
             )
-            _diagnostic(conversation, detail, "no_match")
+            assert detail["interaction"]["id"] == started["interaction"]["id"]
+            assert len(detail["runs"]) == 2
+            assert _admitted(detail)["grouping_reason"] == "current_tool_continuation"
+            assert _newest_run(detail)["generation_parent_id"] is None
             continue
         media = _user(_text("visual question"))
         if mutation == "media":
@@ -391,10 +412,12 @@ def test_incomplete_index_and_oversized_search_leave_inference_unchanged(diagnos
     retained, _ = _seed(conversation)
     _, oversized = conversation.send([_user("x" * (600 * 1024)), *retained, _user("large supplied context")])
     _diagnostic(conversation, oversized, "resource_limit")
-    # This completed source cannot fit in the diagnostic index. A later small
-    # request must not treat the remaining indexed matching source as unique.
+    # Fingerprints ignore the oversized source whose last unit is not in this
+    # window. The original retained source remains uniquely verifiable.
     _, incomplete = conversation.send([_user("small summary"), *retained, _user("small supplied context")])
-    _diagnostic(conversation, incomplete, "index_unavailable")
+    event = _diagnostic(conversation, incomplete, "inferred")
+    assert event["source_interaction_id"] is not None
+    assert _admitted(incomplete)["grouping_reason"] == "retained_tail_linked"
 
 
 @pytest.mark.e2e
@@ -421,6 +444,10 @@ def test_retained_block_before_appended_tool_result_does_not_enable_execution_pa
     _, detail = conversation.send(supplied, tools=True)
     event = _diagnostic(conversation, detail, "inferred")
     assert event["source_run_id"] == source["runs"][0]["id"]
+    assert detail["interaction"]["id"] == source["interaction"]["id"]
+    assert len(detail["runs"]) == 2
+    assert _admitted(detail)["grouping_reason"] == "retained_tail_continuation"
+    assert _newest_run(detail)["generation_parent_id"] is None
 
     # Contrast with a proven, uncompressed tool continuation: no new User means
     # another Run of the same Interaction, not an inferred execution edge.
@@ -463,7 +490,9 @@ def test_candidate_cap_never_reports_the_indexed_subset_as_unique(diagnostic_pro
     _wait_for("all candidate sources persisted", lambda: _forest(conversation.env, model=conversation.route_id)["root_total"] >= 130)
     _, detail = conversation.send([_user("summary after candidate saturation"), *retained, _user("new task despite diagnostic cap")])
     try:
-        _diagnostic(conversation, detail, "resource_limit")
+        event = _diagnostic(conversation, detail, "inferred")
+        assert event["source_interaction_id"] is not None
+        assert _admitted(detail)["grouping_reason"] == "retained_tail_linked"
     finally:
         status, body = http_request("DELETE", f"{conversation.env['admin']}/api/v1/observations/history", headers=conversation.env["auth"])
         assert status == 200, body
@@ -485,6 +514,8 @@ def test_trace_failure_preserves_exact_compacted_inference_and_reports_partial(d
         _, detail = conversation.send(supplied)
         event = _diagnostic(conversation, detail, "inferred")
         assert event["source_run_id"] == source["runs"][0]["id"]
+        assert detail["interaction"]["parent_interaction_id"] == source["interaction"]["id"]
+        assert _admitted(detail)["grouping_reason"] == "retained_tail_linked"
         assert detail["interaction"]["debug_status"] == "partial"
         assert detail["runs"][0]["trace"]["status"] == "partial"
         assert "storage_error" in detail["runs"][0]["trace"]["reasons"]

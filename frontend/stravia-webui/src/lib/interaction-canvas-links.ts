@@ -115,6 +115,9 @@ export function visualParent(
       const head = intermediates[intermediates.length - 1]
       return { id: head.id, kind: native.includes(head.id) ? 'native' : 'inferred' }
     }
+    if (inferred.includes(confirmed)) {
+      return { id: confirmed, kind: 'inferred' }
+    }
     return { id: confirmed, kind: 'confirmed' }
   }
   if (native[0]) return { id: native[0], kind: 'native' }

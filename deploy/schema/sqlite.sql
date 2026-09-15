@@ -154,7 +154,7 @@ CREATE TABLE inference_run_observations (
     finished_at INTEGER,
     last_event_sequence INTEGER NOT NULL DEFAULT 0,
     expires_at INTEGER NOT NULL
-);
+, failure_json TEXT, request_model TEXT);
 
 CREATE TABLE interaction_observations (
     id TEXT PRIMARY KEY,
@@ -262,9 +262,27 @@ CREATE TABLE observation_events (
     kind TEXT NOT NULL, payload TEXT NOT NULL, expires_at INTEGER NOT NULL
 );
 
+CREATE TABLE observation_pending_tools (
+    principal TEXT NOT NULL,
+    tool_id TEXT NOT NULL,
+    run_id TEXT NOT NULL REFERENCES inference_run_observations(id) ON DELETE CASCADE,
+    interaction_id TEXT NOT NULL REFERENCES interaction_observations(id) ON DELETE CASCADE,
+    expires_at INTEGER NOT NULL,
+    PRIMARY KEY (principal, tool_id, run_id)
+);
+
 CREATE TABLE observation_sequence (
     singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
     next_sequence INTEGER NOT NULL
+);
+
+CREATE TABLE observation_tail_sources (
+    run_id TEXT PRIMARY KEY REFERENCES inference_run_observations(id) ON DELETE CASCADE,
+    interaction_id TEXT NOT NULL REFERENCES interaction_observations(id) ON DELETE CASCADE,
+    principal TEXT NOT NULL,
+    last_unit_hash TEXT NOT NULL,
+    generation_node_id TEXT,
+    expires_at INTEGER NOT NULL
 );
 
 CREATE TABLE provider_allowance_samples (
@@ -384,7 +402,7 @@ CREATE TABLE rejected_request_observations (
     ingress_protocol TEXT NOT NULL, stage TEXT NOT NULL, code TEXT NOT NULL, status_code INTEGER NOT NULL,
     debug_enabled INTEGER NOT NULL, debug_status TEXT NOT NULL, last_event_sequence INTEGER NOT NULL,
     expires_at INTEGER NOT NULL
-);
+, failure_json TEXT, request_model TEXT, api_key_id TEXT, api_key_name TEXT, started_at INTEGER, duration_ms INTEGER);
 
 CREATE TABLE reversible_redaction_mappings (
     reference TEXT PRIMARY KEY NOT NULL,
@@ -556,6 +574,9 @@ CREATE UNIQUE INDEX idx_web_providers_local_singleton
 ON web_providers(kind)
 WHERE kind = 'local';
 
+CREATE INDEX inference_runs_failed_window_idx
+    ON inference_run_observations(started_at DESC, id) WHERE status = 'failed';
+
 CREATE INDEX inference_runs_generation_idx ON inference_run_observations(generation_node_id, generation_parent_id);
 
 CREATE INDEX inference_runs_interaction_idx ON inference_run_observations(interaction_id, started_at, id);
@@ -582,7 +603,22 @@ CREATE INDEX observation_events_rejection_idx ON observation_events(rejection_id
 
 CREATE INDEX observation_events_run_idx ON observation_events(run_id, sequence);
 
+CREATE INDEX observation_pending_tools_expiry_idx
+    ON observation_pending_tools(expires_at);
+
+CREATE INDEX observation_pending_tools_lookup_idx
+    ON observation_pending_tools(principal, tool_id);
+
+CREATE INDEX observation_tail_sources_expiry_idx
+    ON observation_tail_sources(expires_at);
+
+CREATE INDEX observation_tail_sources_hash_idx
+    ON observation_tail_sources(principal, last_unit_hash);
+
 CREATE INDEX rejected_requests_expiry_idx ON rejected_request_observations(expires_at);
+
+CREATE INDEX rejected_requests_started_idx
+    ON rejected_request_observations(started_at DESC, id);
 
 CREATE INDEX rejected_requests_window_idx ON rejected_request_observations(occurred_at DESC, id);
 
