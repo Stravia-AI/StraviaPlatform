@@ -423,6 +423,132 @@ async fn route_ids_are_compared_exactly_when_binding() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn target_models_match_inventory_by_segment_and_case() -> anyhow::Result<()> {
+    let (_data_dir, gateway, provider) = route_fixture().await?;
+    let admin = gateway.admin();
+    admin
+        .create_manual_provider_model(
+            &provider.id,
+            "zhipuai/glm-4.6",
+            CreateManualProviderModel {
+                metadata: json!({
+                    "id": "zhipuai/glm-4.6",
+                    "name": "GLM-4.6",
+                    "limit": { "context": 131072, "output": 16384 },
+                    "modalities": { "input": ["text"], "output": ["text"] }
+                }),
+            },
+        )
+        .await?;
+    let create_target = |model: &str| CreateTarget {
+        enabled: true,
+        provider_id: provider.id.clone(),
+        model: model.into(),
+        priority: None,
+        first_token_timeout_ms: None,
+        target_retry_budget: None,
+        target_cooldown_ms: None,
+        thinking_level_map: Vec::new(),
+    };
+
+    // Target model 与清单 ID 仅在最右段与大小写上一致时也能命中
+    let route = admin
+        .create_model(CreateRoute {
+            model_id: "glm-4.6".into(),
+            display_name: None,
+            balance: None,
+            target_provider: String::new(),
+            target_model: String::new(),
+            targets: vec![create_target("GLM-4.6")],
+        })
+        .await?;
+    assert_eq!(route.targets.len(), 1);
+    assert_eq!(route.targets[0].model, "GLM-4.6");
+    // 能力元数据经宽松匹配解析成功
+    assert_eq!(route.context_window, Some(131_072));
+    assert_eq!(route.output_max_tokens, Some(16_384));
+    assert!(!route.supports_image_input);
+    Ok(())
+}
+
+#[tokio::test]
+async fn ambiguous_inventory_segments_keep_target_errors_visible() -> anyhow::Result<()> {
+    let (_data_dir, gateway, provider) = route_fixture().await?;
+    let admin = gateway.admin();
+    for model in ["openai/gpt-4o", "azure/gpt-4o"] {
+        admin
+            .create_manual_provider_model(
+                &provider.id,
+                model,
+                CreateManualProviderModel {
+                    metadata: json!({ "id": model, "name": model }),
+                },
+            )
+            .await?;
+    }
+    let create_target = |model: &str| CreateTarget {
+        enabled: true,
+        provider_id: provider.id.clone(),
+        model: model.into(),
+        priority: None,
+        first_token_timeout_ms: None,
+        target_retry_budget: None,
+        target_cooldown_ms: None,
+        thinking_level_map: Vec::new(),
+    };
+    let input = |target: CreateTarget| CreateRoute {
+        model_id: "gpt-4o-route".into(),
+        display_name: None,
+        balance: None,
+        target_provider: String::new(),
+        target_model: String::new(),
+        targets: vec![target],
+    };
+
+    // 两个清单 ID 的最右段相同，宽松匹配无法区分时保持报错而不是任意选择
+    let error = admin
+        .create_model(input(create_target("gpt-4o")))
+        .await
+        .expect_err("ambiguous segment must not bind");
+    assert!(
+        error.to_string().contains("PROVIDER_MODEL_NOT_FOUND"),
+        "unexpected error: {error:?}"
+    );
+    // 带命名空间的 ID 精确命中不受影响
+    admin
+        .create_model(input(create_target("openai/gpt-4o")))
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn bind_treats_case_variants_of_one_inventory_model_as_a_single_target() -> anyhow::Result<()>
+{
+    let (_data_dir, gateway, provider) = route_fixture().await?;
+    let admin = gateway.admin();
+    let routes = RouteModule::new(&admin);
+
+    for provider_model_id in ["upstream-model", "Upstream-Model"] {
+        routes
+            .bind(RouteBind::At {
+                route_id: "cased-route".into(),
+                provider_id: provider.id.clone(),
+                provider_model_id: provider_model_id.into(),
+                priority: 1,
+                first_token_timeout_ms: DEFAULT_FIRST_TOKEN_TIMEOUT_MS,
+                target_retry_budget: DEFAULT_TARGET_RETRY_BUDGET,
+                target_cooldown_ms: DEFAULT_TARGET_COOLDOWN_MS,
+            })
+            .await?;
+    }
+
+    let route = routes.get("cased-route").await?;
+    assert_eq!(route.targets.len(), 1);
+    assert_eq!(route.targets[0].model, "upstream-model");
+    Ok(())
+}
+
+#[tokio::test]
 async fn route_get_uses_exact_route_id_and_never_storage_id() -> anyhow::Result<()> {
     let (_data_dir, gateway, provider) = route_fixture().await?;
     let admin = gateway.admin();

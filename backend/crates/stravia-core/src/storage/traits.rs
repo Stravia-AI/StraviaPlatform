@@ -12,7 +12,7 @@ use crate::db::models::{
 };
 use crate::provider_models::{
     NewProviderModelRecord, ProviderModelMutation, ProviderModelReconciliation,
-    ProviderModelRecord, ProviderModelSelectionPolicy,
+    ProviderModelRecord, ProviderModelSelectionPolicy, model_id_match_key,
 };
 
 #[derive(Debug, Clone)]
@@ -148,6 +148,35 @@ pub trait ProviderModelStore: Send + Sync {
         provider_id: &str,
         model_id: &str,
     ) -> anyhow::Result<Option<ProviderModelRecord>>;
+    /// 按精确 model_id 查找；未命中时回退到“`/` 最右段 + 忽略大小写”的宽松匹配。
+    ///
+    /// `/v1/models` 同步的清单 ID 可能带命名空间前缀或大小写差异
+    /// （`zhipuai/glm-4.6` vs `glm-4.6`、`GLM-4.6`），而路由 Target 的 model
+    /// 保留用户输入，读取侧用宽松匹配提高命中率。多个清单 ID 归一到同一
+    /// 匹配键时视为歧义并返回 None，保持错误可见；写入路径仍走 `get` 保证身份精确。
+    async fn find(
+        &self,
+        provider_id: &str,
+        model_id: &str,
+    ) -> anyhow::Result<Option<ProviderModelRecord>> {
+        if let Some(record) = self.get(provider_id, model_id.trim()).await? {
+            return Ok(Some(record));
+        }
+        let needle = model_id_match_key(model_id);
+        if needle.is_empty() {
+            return Ok(None);
+        }
+        let mut matches = self
+            .list_for_provider(provider_id)
+            .await?
+            .into_iter()
+            .filter(|record| model_id_match_key(&record.model_id) == needle);
+        let matched = matches.next();
+        if matches.next().is_some() {
+            return Ok(None);
+        }
+        Ok(matched)
+    }
     async fn apply_reconciliation(
         &self,
         provider_id: &str,

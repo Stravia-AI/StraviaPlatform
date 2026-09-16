@@ -766,7 +766,7 @@ async fn load_scheduling_snapshot(
         let Some(provider_model) = gateway
             .storage
             .provider_models()
-            .get(&target.provider_id, &target.model)
+            .find(&target.provider_id, &target.model)
             .await?
         else {
             continue;
@@ -979,7 +979,7 @@ async fn prepare_attempt(
     let provider_model = gateway
         .storage
         .provider_models()
-        .get(&provider.id, &actual_model)
+        .find(&provider.id, &actual_model)
         .await
         .map_err(|error| {
             if metadata_required {

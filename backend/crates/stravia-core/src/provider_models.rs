@@ -639,6 +639,19 @@ pub fn normalize_model_id(model_id: &str) -> anyhow::Result<String> {
     Ok(model_id.to_string())
 }
 
+/// 读取侧匹配 `/v1/models` 清单 ID 使用的键：取 `/` 分隔的最右段并忽略大小写。
+///
+/// 清单 ID 可能带命名空间前缀或大小写差异（`zhipuai/glm-4.6` vs `glm-4.6`、
+/// `GLM-4.6`），而路由 Target 的 model 保留用户输入，因此用归一化键比较提高命中率。
+pub fn model_id_match_key(model_id: &str) -> String {
+    model_id
+        .trim()
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+}
+
 fn validate_string_values(field: &str, values: &[String]) -> anyhow::Result<()> {
     if values.len() > 128 {
         anyhow::bail!("too many Provider Model {field} values");
@@ -666,7 +679,17 @@ fn validate_optional_string_values(field: &str, values: &[Option<String>]) -> an
 mod tests {
     use serde_json::json;
 
-    use super::ProviderModelMetadata;
+    use super::{ProviderModelMetadata, model_id_match_key};
+
+    #[test]
+    fn match_key_takes_rightmost_segment_case_insensitively() {
+        assert_eq!(model_id_match_key("glm-4.6"), "glm-4.6");
+        assert_eq!(model_id_match_key("zhipuai/glm-4.6"), "glm-4.6");
+        assert_eq!(model_id_match_key("GLM-4.6"), "glm-4.6");
+        assert_eq!(model_id_match_key("Zhipu/GLM-4.6"), "glm-4.6");
+        assert_eq!(model_id_match_key("  glm-4.6  "), "glm-4.6");
+        assert_eq!(model_id_match_key(""), "");
+    }
 
     #[test]
     fn lacks_registered_specification_matches_bare_metadata() {

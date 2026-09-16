@@ -200,12 +200,10 @@ impl stravia_web_search::SearchRunAuthorizer for GatewayWebSearchAuthorizer {
                 let model_available = self
                     .storage
                     .provider_models()
-                    .get(provider_id, upstream_model)
+                    .find(provider_id, upstream_model)
                     .await
                     .map_err(|_| web_search_authorization_error())?
-                    .is_some_and(|model| {
-                        model.model_id == *upstream_model && model.effective_available()
-                    });
+                    .is_some_and(|model| model.effective_available());
                 let credential_available = self
                     .storage
                     .oauth_credentials()

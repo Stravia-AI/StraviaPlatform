@@ -290,6 +290,9 @@ pub(super) fn extract_ollama_embedding_length(
 }
 
 pub(super) fn parse_http_capability(json: &Value, model: &str) -> Option<ModelCapabilities> {
+    // OpenRouter 等能力源即 `/v1/models` 响应；清单 ID 可能带命名空间前缀或
+    // 大小写差异，与清单查找一致地用“最右段 + 忽略大小写”匹配。
+    let query_key = crate::provider_models::model_id_match_key(model);
     let item = json
         .get("data")
         .and_then(Value::as_array)?
@@ -298,7 +301,7 @@ pub(super) fn parse_http_capability(json: &Value, model: &str) -> Option<ModelCa
             entry
                 .get("id")
                 .and_then(Value::as_str)
-                .is_some_and(|id| id.eq_ignore_ascii_case(model))
+                .is_some_and(|id| crate::provider_models::model_id_match_key(id) == query_key)
         })?;
     let model_id = item.get("id").and_then(Value::as_str).unwrap_or(model);
     let context_window = item
@@ -386,6 +389,25 @@ pub(super) fn parse_maybe_price_per_token(value: &Value) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn http_capability_source_matches_by_segment_and_case() {
+        let response = serde_json::json!({
+            "data": [
+                {"id": "openai/GPT-4o", "context_length": 128000},
+                {"id": "anthropic/claude-sonnet-4-6", "context_length": 200000}
+            ]
+        });
+
+        let caps =
+            parse_http_capability(&response, "gpt-4o").expect("segment + case-insensitive hit");
+        assert_eq!(caps.model_id, "openai/GPT-4o");
+        assert_eq!(caps.context_window, 128000);
+        assert!(
+            parse_http_capability(&response, "gpt-4.1").is_none(),
+            "no inventory entry shares the match key"
+        );
+    }
 
     #[test]
     fn dynamic_model_discovery_excludes_hidden_picker_models() {

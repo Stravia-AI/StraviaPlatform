@@ -96,7 +96,7 @@ impl AdminService {
             .gw
             .storage
             .provider_models()
-            .get(provider_id, trimmed_model)
+            .find(provider_id, trimmed_model)
             .await?
         {
             let metadata = model.metadata;

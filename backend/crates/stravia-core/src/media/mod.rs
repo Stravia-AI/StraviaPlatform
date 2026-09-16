@@ -149,7 +149,7 @@ pub(crate) async fn route_metadata(
         let metadata = gateway
             .storage
             .provider_models()
-            .get(&target.provider_id, actual_model)
+            .find(&target.provider_id, actual_model)
             .await
             .ok()
             .flatten()

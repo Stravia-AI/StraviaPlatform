@@ -730,6 +730,7 @@ impl OAuthCredentialStore for MemoryOAuthCredentialStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider_models::ProviderModelPresence;
 
     fn provider(id: &str) -> Provider {
         Provider {
@@ -968,5 +969,86 @@ mod tests {
             .await
             .expect("reconnect credential");
         assert_ne!(reconnected.connection_id, connection_id);
+    }
+
+    fn new_provider_model_record(model_id: &str) -> NewProviderModelRecord {
+        NewProviderModelRecord {
+            provider_id: "provider".into(),
+            model_id: model_id.into(),
+            source_kind: ProviderModelSourceKind::Discovered,
+            metadata_source_provider_id: None,
+            presence: ProviderModelPresence::Present,
+            selection_policy: ProviderModelSelectionPolicy::Auto,
+            metadata: crate::provider_models::ProviderModelMetadata::bare(model_id),
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_model_find_matches_inventory_by_segment_and_case() {
+        let storage = MemoryStorage::new(vec![], vec![], vec![]);
+        let store = storage.provider_models();
+        for model_id in ["zhipuai/GLM-4.6", "gpt-4o-mini"] {
+            store
+                .create(new_provider_model_record(model_id))
+                .await
+                .expect("insert fixture model");
+        }
+
+        // 精确命中优先
+        assert_eq!(
+            store
+                .find("provider", "zhipuai/GLM-4.6")
+                .await
+                .expect("exact find")
+                .expect("exact hit")
+                .model_id,
+            "zhipuai/GLM-4.6"
+        );
+        // 最右段 + 忽略大小写：命名空间与大小写差异都能命中
+        for query in ["GLM-4.6", "glm-4.6", "vendor/GLM-4.6", "GPT-4O-MINI"] {
+            assert!(
+                store.find("provider", query).await.expect("find").is_some(),
+                "query `{query}` should match the inventory"
+            );
+        }
+        // 无法归一到任何清单 ID
+        assert!(
+            store
+                .find("provider", "glm-4.5")
+                .await
+                .expect("find")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_model_find_rejects_ambiguous_segment_matches() {
+        let storage = MemoryStorage::new(vec![], vec![], vec![]);
+        let store = storage.provider_models();
+        for model_id in ["openai/gpt-4o", "azure/gpt-4o"] {
+            store
+                .create(new_provider_model_record(model_id))
+                .await
+                .expect("insert fixture model");
+        }
+
+        // 多个清单 ID 归一到同一匹配键时视为歧义，保持 None 让错误可见
+        assert!(
+            store
+                .find("provider", "gpt-4o")
+                .await
+                .expect("find")
+                .is_none()
+        );
+        // 但带命名空间的精确匹配仍然命中
+        assert_eq!(
+            store
+                .find("provider", "openai/gpt-4o")
+                .await
+                .expect("find")
+                .expect("namespaced hit")
+                .model_id,
+            "openai/gpt-4o"
+        );
     }
 }

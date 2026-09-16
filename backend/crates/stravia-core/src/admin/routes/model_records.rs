@@ -1,5 +1,5 @@
 use super::*;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 struct ClientModelCapabilities {
     context_window: Option<u64>,
@@ -137,58 +137,51 @@ impl RouteModule<'_> {
         &self,
         routes: &mut [Route],
     ) -> anyhow::Result<()> {
-        let provider_ids = routes
-            .iter()
-            .flat_map(|route| {
-                route
-                    .targets
-                    .iter()
-                    .filter(|target| target.enabled)
-                    .map(|target| target.provider_id.clone())
-            })
-            .collect::<BTreeSet<_>>();
-        let mut capabilities_by_provider =
-            BTreeMap::<String, BTreeMap<String, ClientModelCapabilities>>::new();
+        let mut capabilities_by_target = BTreeMap::<String, ClientModelCapabilities>::new();
 
-        for provider_id in provider_ids {
-            let provider_capabilities = self
-                .admin
-                .gw
-                .storage
-                .provider_models()
-                .list_for_provider(&provider_id)
-                .await?
-                .into_iter()
-                .map(|record| {
-                    let limits = record.metadata.limit.unwrap_or_default();
-                    let modalities = record.metadata.modalities.unwrap_or_default();
-                    (
-                        record.model_id,
-                        ClientModelCapabilities {
-                            context_window: limits.context,
-                            output_max_tokens: limits.output,
-                            supports_image_input: modalities
-                                .input
-                                .iter()
-                                .any(|modality| modality == "image"),
-                        },
-                    )
-                })
-                .collect();
-            capabilities_by_provider.insert(provider_id, provider_capabilities);
+        for route in &mut *routes {
+            for target in route.targets.iter().filter(|target| target.enabled) {
+                let key = format!("{}\u{0}{}", target.provider_id, target.model);
+                if capabilities_by_target.contains_key(&key) {
+                    continue;
+                }
+                let Some(record) = self
+                    .admin
+                    .gw
+                    .storage
+                    .provider_models()
+                    .find(&target.provider_id, &target.model)
+                    .await?
+                else {
+                    continue;
+                };
+                let limits = record.metadata.limit.unwrap_or_default();
+                let modalities = record.metadata.modalities.unwrap_or_default();
+                capabilities_by_target.insert(
+                    key,
+                    ClientModelCapabilities {
+                        context_window: limits.context,
+                        output_max_tokens: limits.output,
+                        supports_image_input: modalities
+                            .input
+                            .iter()
+                            .any(|modality| modality == "image"),
+                    },
+                );
+            }
         }
 
         for route in routes {
             route.context_window =
-                common_target_limit(&route.targets, &capabilities_by_provider, |capabilities| {
+                common_target_limit(&route.targets, &capabilities_by_target, |capabilities| {
                     capabilities.context_window
                 });
             route.output_max_tokens =
-                common_target_limit(&route.targets, &capabilities_by_provider, |capabilities| {
+                common_target_limit(&route.targets, &capabilities_by_target, |capabilities| {
                     capabilities.output_max_tokens
                 });
             route.supports_image_input =
-                all_targets_support_image_input(&route.targets, &capabilities_by_provider);
+                all_targets_support_image_input(&route.targets, &capabilities_by_target);
         }
         Ok(())
     }
@@ -201,18 +194,23 @@ fn normalize_display_name(value: Option<&str>) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn target_capabilities<'a>(
+    target: &Target,
+    capabilities_by_target: &'a BTreeMap<String, ClientModelCapabilities>,
+) -> Option<&'a ClientModelCapabilities> {
+    capabilities_by_target.get(&format!("{}\u{0}{}", target.provider_id, target.model))
+}
+
 fn common_target_limit(
     targets: &[Target],
-    capabilities_by_provider: &BTreeMap<String, BTreeMap<String, ClientModelCapabilities>>,
+    capabilities_by_target: &BTreeMap<String, ClientModelCapabilities>,
     select: impl Fn(&ClientModelCapabilities) -> Option<u64>,
 ) -> Option<u64> {
     let mut limits = targets
         .iter()
         .filter(|target| target.enabled)
         .map(|target| {
-            capabilities_by_provider
-                .get(&target.provider_id)
-                .and_then(|models| models.get(&target.model))
+            target_capabilities(target, capabilities_by_target)
                 .and_then(&select)
                 .filter(|limit| *limit > 0)
         });
@@ -222,16 +220,14 @@ fn common_target_limit(
 
 fn all_targets_support_image_input(
     targets: &[Target],
-    capabilities_by_provider: &BTreeMap<String, BTreeMap<String, ClientModelCapabilities>>,
+    capabilities_by_target: &BTreeMap<String, ClientModelCapabilities>,
 ) -> bool {
     targets.iter().any(|target| target.enabled)
         && targets
             .iter()
             .filter(|target| target.enabled)
             .all(|target| {
-                capabilities_by_provider
-                    .get(&target.provider_id)
-                    .and_then(|models| models.get(&target.model))
+                target_capabilities(target, capabilities_by_target)
                     .is_some_and(|capabilities| capabilities.supports_image_input)
             })
 }

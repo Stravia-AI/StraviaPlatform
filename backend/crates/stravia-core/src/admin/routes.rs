@@ -2,7 +2,7 @@ use super::*;
 use crate::provider_models::{
     CreateManualProviderModel, NewProviderModelRecord, ProviderModelDetail, ProviderModelMutation,
     ProviderModelPresence, ProviderModelSelectionPolicy, ProviderModelSourceKind,
-    ProviderModelSyncSummary, normalize_model_id,
+    ProviderModelSyncSummary, model_id_match_key, normalize_model_id,
 };
 use crate::thinking::ThinkingMappingSource;
 use crate::thinking::generate_thinking_level_map;
@@ -166,7 +166,8 @@ impl<'a> RouteModule<'a> {
             let provider_id = target.provider_id.trim();
             let provider_model_id = normalize_model_id(&target.model)?;
             if existing.iter().any(|current| {
-                current.provider_id == provider_id && current.model == provider_model_id
+                current.provider_id == provider_id
+                    && model_id_match_key(&current.model) == model_id_match_key(&provider_model_id)
             }) {
                 continue;
             }
@@ -175,7 +176,7 @@ impl<'a> RouteModule<'a> {
                 .gw
                 .storage
                 .provider_models()
-                .get(provider_id, &provider_model_id)
+                .find(provider_id, &provider_model_id)
                 .await?
             else {
                 return Err(coded_error(
@@ -380,7 +381,8 @@ impl<'a> RouteModule<'a> {
         }
         if let Some(existing) = existing.as_ref()
             && existing.targets.iter().any(|target| {
-                target.provider_id == provider_id && target.model == provider_model_id
+                target.provider_id == provider_id
+                    && model_id_match_key(&target.model) == model_id_match_key(&provider_model_id)
             })
         {
             return Ok(existing.clone());
@@ -392,7 +394,7 @@ impl<'a> RouteModule<'a> {
             .gw
             .storage
             .provider_models()
-            .get(&provider_id, &provider_model_id)
+            .find(&provider_id, &provider_model_id)
             .await?
             .ok_or_else(|| {
                 coded_error(

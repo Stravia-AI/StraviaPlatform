@@ -19,7 +19,7 @@ impl RouteModule<'_> {
                             .gw
                             .storage
                             .provider_models()
-                            .get(target.provider_id.trim(), target.model.trim())
+                            .find(target.provider_id.trim(), target.model.trim())
                             .await?
                             .ok_or_else(|| anyhow::anyhow!("Provider Model not found"))?;
                         target.thinking_level_map =
@@ -74,7 +74,7 @@ impl RouteModule<'_> {
                 .gw
                 .storage
                 .provider_models()
-                .get(target.provider_id.trim(), target.model.trim())
+                .find(target.provider_id.trim(), target.model.trim())
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("Provider Model not found"))?;
             let generated = generate_thinking_level_map(&provider_model.metadata);
@@ -178,7 +178,7 @@ impl RouteModule<'_> {
             .gw
             .storage
             .provider_models()
-            .get(&target.provider_id, &target.model)
+            .find(&target.provider_id, &target.model)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Provider Model not found"))?;
         let generated = generate_thinking_level_map(&provider_model.metadata);

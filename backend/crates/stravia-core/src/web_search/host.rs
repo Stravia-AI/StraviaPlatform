@@ -133,7 +133,7 @@ impl CodexSession for ProviderSession {
         self.gateway
             .storage
             .provider_models()
-            .get(&self.provider.id, model_id)
+            .find(&self.provider.id, model_id)
             .await
             .map(|model| model.map(model_snapshot))
             .map_err(|_| {
@@ -285,7 +285,7 @@ impl SearchAdminHost for SearchHost {
         self.0
             .storage
             .provider_models()
-            .get(provider_id, model)
+            .find(provider_id, model)
             .await
             .map(|model| model.map(model_snapshot))
             .map_err(|_| ())

@@ -439,15 +439,12 @@ async function saveProvider(): Promise<void> {
               </Field.Field>
             {/if}
 
-            <Field.Field class="justify-end">
-              <div class="flex items-center justify-between gap-3 rounded-lg border px-3 py-2.5">
-                <div>
-                  <Field.Label
-                    for="provider-use-proxy"
-                    hint={m.common_send_requests_service_proxy_configured_settings()}>
-                    {m.common_use_proxy()}
-                  </Field.Label>
-                </div>
+            <!-- self-end + h-10 keep the switch box in the same 40px band as the sibling protocol Select trigger -->
+            <Field.Field class="self-end">
+              <div class="flex h-10 items-center justify-between gap-3 rounded-lg border px-3">
+                <Field.Label for="provider-use-proxy" hint={m.common_send_requests_service_proxy_configured_settings()}>
+                  {m.common_use_proxy()}
+                </Field.Label>
                 <Switch
                   id="provider-use-proxy"
                   checked={form.useProxy}
