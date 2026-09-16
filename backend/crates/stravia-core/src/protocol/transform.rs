@@ -170,10 +170,7 @@ impl ProtocolTransform {
 }
 
 impl ProtocolPair {
-    pub(crate) fn thinking_carrier_facts(
-        self,
-        encrypted_content_requested: bool,
-    ) -> ThinkingCarrierFacts {
+    pub(crate) fn thinking_carrier_facts(self) -> ThinkingCarrierFacts {
         let indexed = self.egress.protocol == Protocol::OpenResponses;
         let may_be_protected = matches!(
             self.egress.protocol,
@@ -182,7 +179,11 @@ impl ProtocolPair {
         ThinkingCarrierFacts {
             indexed,
             may_be_protected,
-            stream_unprotected_summaries: indexed && !encrypted_content_requested,
+            // Open Responses summaries are the public display carrier.
+            // Requesting `reasoning.encrypted_content` only asks for the
+            // opaque replay blob; it must not delay those deltas until
+            // item.done, where ciphertext may arrive.
+            stream_unprotected_summaries: indexed,
         }
     }
 

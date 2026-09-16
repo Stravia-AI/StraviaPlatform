@@ -14,7 +14,15 @@ import { toast } from 'svelte-sonner'
 
 import { admin } from '$lib/admin-client'
 import { modelIdFromCatalogId } from '$lib/catalog-model-id'
-import { localizeBackendErrorMessage } from '$lib/backend-error'
+import { localizeBackendErrorMessage, unrepresentableThinkingTarget } from '$lib/backend-error'
+import { formatList } from '$lib/format'
+import {
+  thinkingControlContext,
+  thinkingControlWritable,
+  unrepresentableThinkingLevels,
+  writableThinkingControlKinds,
+  type ThinkingControlKind,
+} from '$lib/thinking-control'
 import type {
   Provider,
   ProviderModelSummary,
@@ -263,8 +271,15 @@ function editTarget(target: RouteTargetForm, isNew = false): void {
 }
 
 function closeTargetEditor(save: boolean): void {
-  targetEditorClosing = true
   const target = targetEditorTarget
+  if (save && target?.enabled) {
+    const levels = unwritableThinkingLevels(target)
+    if (levels.length > 0) {
+      target.validationError = m.model_editor_thinking_enable_blocked({ levels: formatList(levels) })
+      return
+    }
+  }
+  targetEditorClosing = true
   if (target) {
     const index = targets.findIndex((candidate) => candidate.key === target.key)
     if (save && index >= 0) {
@@ -334,14 +349,26 @@ function targetConfigured(target: RouteTargetForm): boolean {
 function startTargetDrag(event: DragEvent, target: RouteTargetForm): void {
   draggedTargetKey = target.key
   event.dataTransfer?.setData('text/plain', target.key)
-  if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move'
+  if (event.dataTransfer) event.dataTransfer.effectAllowed = 'all'
+}
+
+function finishTargetDrag(): void {
+  // 部分浏览器会先派发 dragend 再 drop；延后清空以免空层 drop 丢失拖拽源。
+  setTimeout(() => {
+    draggedTargetKey = ''
+  }, 0)
+}
+
+function allowTargetDrop(event: DragEvent): void {
+  event.preventDefault()
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
 }
 
 function draggedKey(event: DragEvent): string {
   return draggedTargetKey || event.dataTransfer?.getData('text/plain') || ''
 }
 
-function dropOnLane(event: DragEvent, priority: number, beforeKey?: string): void {
+async function dropOnLane(event: DragEvent, priority: number, beforeKey?: string): Promise<void> {
   event.preventDefault()
   event.stopPropagation()
   const key = draggedKey(event)
@@ -352,6 +379,7 @@ function dropOnLane(event: DragEvent, priority: number, beforeKey?: string): voi
     draggedTargetKey = ''
     return
   }
+  if (!target.enabled && (await blockEnableForUnwritableThinking(target))) return
   if (!moveRouteTargetToLane(targets, key, priority)) {
     toast.error(m.model_editor_complete_target_before_enabling())
     return
@@ -359,7 +387,7 @@ function dropOnLane(event: DragEvent, priority: number, beforeKey?: string): voi
   draggedTargetKey = ''
 }
 
-function dropOnInsertion(event: DragEvent, insertion: RouteTargetInsertion): void {
+async function dropOnInsertion(event: DragEvent, insertion: RouteTargetInsertion): Promise<void> {
   event.preventDefault()
   event.stopPropagation()
   const key = draggedKey(event)
@@ -369,8 +397,19 @@ function dropOnInsertion(event: DragEvent, insertion: RouteTargetInsertion): voi
     toast.error(m.model_editor_complete_target_before_enabling())
     return
   }
+  if (!target.enabled && (await blockEnableForUnwritableThinking(target))) return
   if (!moveRouteTargetToInsertion(targets, key, insertion)) {
     toast.error(m.model_editor_cannot_create_priority_layer())
+    return
+  }
+  draggedTargetKey = ''
+}
+
+function dropInDock(event: DragEvent): void {
+  event.preventDefault()
+  const key = draggedKey(event)
+  if (!moveRouteTargetToDock(targets, key)) {
+    toast.error(m.model_editor_last_enabled_target_required())
     return
   }
   draggedTargetKey = ''
@@ -383,16 +422,6 @@ function insertionLabel(insertion: RouteTargetInsertion): string {
   return priority === undefined
     ? m.model_editor_insert_new_priority()
     : m.model_editor_insert_priority_value({ priority })
-}
-
-function dropInDock(event: DragEvent): void {
-  event.preventDefault()
-  const key = draggedKey(event)
-  if (!moveRouteTargetToDock(targets, key)) {
-    toast.error(m.model_editor_last_enabled_target_required())
-    return
-  }
-  draggedTargetKey = ''
 }
 
 function targetSupportsThinkingLevel(target: RouteTargetForm, level: ThinkingLevel): boolean {
@@ -419,6 +448,7 @@ function changeThinkingControlKind(row: ThinkingLevelMapping, type: TargetThinki
         ? { type, value: 1024 }
         : { type }
   row.source = 'overridden'
+  if (targetEditorTarget) targetEditorTarget.validationError = ''
 }
 
 function changeThinkingControlValue(row: ThinkingLevelMapping, value: string | number): void {
@@ -435,6 +465,45 @@ function thinkingControlLabel(type: TargetThinkingControl['type']): string {
     disabled: m.model_editor_thinking_disabled(),
     hidden: m.model_editor_thinking_hidden(),
   }[type]
+}
+
+function targetThinkingContext(target: RouteTargetForm) {
+  return thinkingControlContext(
+    providers.find((provider) => provider.id === target.providerId),
+    target.model,
+  )
+}
+
+function unwritableThinkingLevels(target: RouteTargetForm): ThinkingLevel[] {
+  return unrepresentableThinkingLevels(target.thinkingLevelMap, targetThinkingContext(target))
+}
+
+function thinkingRowWritable(target: RouteTargetForm, row: ThinkingLevelMapping): boolean {
+  return thinkingControlWritable(row.control, targetThinkingContext(target))
+}
+
+function thinkingControlOptions(target: RouteTargetForm, row: ThinkingLevelMapping): ThinkingControlKind[] {
+  const writable = writableThinkingControlKinds(targetThinkingContext(target))
+  return writable.includes(row.control.type) ? writable : [row.control.type, ...writable]
+}
+
+function thinkingRowHint(target: RouteTargetForm, row: ThinkingLevelMapping): string {
+  return m.model_editor_thinking_row_unwritable({
+    control: thinkingControlLabel(row.control.type),
+    supported: formatList(writableThinkingControlKinds(targetThinkingContext(target)).map(thinkingControlLabel)),
+  })
+}
+
+async function blockEnableForUnwritableThinking(target: RouteTargetForm): Promise<boolean> {
+  if (target.thinkingLevelMap.length === 0 && target.providerId && target.model.trim()) {
+    await loadThinkingMap(target)
+  }
+  const levels = unwritableThinkingLevels(target)
+  if (levels.length === 0) return false
+  toast.error(m.model_editor_thinking_enable_blocked({ levels: formatList(levels) }))
+  draggedTargetKey = ''
+  editTarget(target)
+  return true
 }
 
 async function resetThinkingRow(target: RouteTargetForm, level: ThinkingLevel): Promise<void> {
@@ -493,6 +562,15 @@ async function saveModel(): Promise<void> {
     return
   }
 
+  const blocked = targets.find((target) => target.enabled && unwritableThinkingLevels(target).length > 0)
+  if (blocked) {
+    toast.error(
+      m.model_editor_thinking_enable_blocked({ levels: formatList(unwritableThinkingLevels(blocked)) }),
+    )
+    editTarget(blocked)
+    return
+  }
+
   saving = true
   try {
     for (const target of targets) {
@@ -545,6 +623,16 @@ async function saveModel(): Promise<void> {
     if (!onSaved) await goto(resolve('/models'))
   } catch (error) {
     toast.error(localizeBackendErrorMessage(error))
+    const failed = unrepresentableThinkingTarget(error)
+    const target = failed
+      ? targets.find(
+          (candidate) => candidate.providerId === failed.providerId && candidate.model === failed.modelId,
+        )
+      : undefined
+    if (target) {
+      target.validationError = localizeBackendErrorMessage(error)
+      editTarget(target)
+    }
   } finally {
     saving = false
   }
@@ -555,6 +643,8 @@ async function saveModel(): Promise<void> {
   <div
     data-slot="target-priority-connector"
     data-position={position}
+    data-upper-priority={insertion.position === 'between' ? insertion.upperPriority : undefined}
+    data-lower-priority={insertion.position === 'between' ? insertion.lowerPriority : undefined}
     class={[
       'relative mx-auto flex w-full items-center justify-center overflow-hidden transition-[height,border-color,background-color,color] duration-150 motion-reduce:transition-none',
       isDraggingTarget
@@ -563,10 +653,14 @@ async function saveModel(): Promise<void> {
     ]}
     role="group"
     aria-label={insertionLabel(insertion)}
-    ondragover={(event) => event.preventDefault()}
+    ondragenter={allowTargetDrop}
+    ondragover={allowTargetDrop}
     ondrop={(event) => dropOnInsertion(event, insertion)}>
     <span
-      class={['absolute left-1/2 top-0 h-full w-px -translate-x-1/2', isDraggingTarget ? 'bg-primary/50' : 'bg-border']}
+      class={[
+        'pointer-events-none absolute left-1/2 top-0 h-full w-px -translate-x-1/2',
+        isDraggingTarget ? 'bg-primary/50' : 'bg-border',
+      ]}
       aria-hidden="true"></span>
     {#if isDraggingTarget}
       <span class="relative inline-flex items-center gap-2 rounded-md bg-background/90 px-3 py-1 text-sm shadow-xs">
@@ -666,10 +760,17 @@ async function saveModel(): Promise<void> {
         <div
           data-slot="target-lane-stack"
           class="relative min-w-0 px-1 sm:px-4"
-          aria-label={m.model_editor_enabled_targets()}>
+          role="group"
+          aria-label={m.model_editor_enabled_targets()}
+          ondragenter={targetLanes.length === 0 ? allowTargetDrop : undefined}
+          ondragover={targetLanes.length === 0 ? allowTargetDrop : undefined}
+          ondrop={targetLanes.length === 0 ? (event) => dropOnInsertion(event, { position: 'top' }) : undefined}>
           <div
             data-slot="target-entry-model"
-            class="mx-auto flex min-h-16 w-fit min-w-64 max-w-full items-center gap-3 rounded-xl bg-background px-4 py-3 shadow-sm ring-1 ring-border">
+            class={[
+              'mx-auto flex min-h-16 w-fit min-w-64 max-w-full items-center gap-3 rounded-xl bg-background px-4 py-3 shadow-sm ring-1 ring-border',
+              isDraggingTarget && 'pointer-events-none',
+            ]}>
             <span class="flex size-9 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
               <WaypointsIcon class="size-4" aria-hidden="true" />
             </span>
@@ -682,12 +783,32 @@ async function saveModel(): Promise<void> {
           </div>
 
           {#if targetLanes.length === 0}
-            {@render priorityConnector({ position: 'top' }, 'empty')}
+            <div
+              data-slot="target-priority-connector"
+              data-position="empty"
+              class={[
+                'relative mx-auto flex min-h-24 w-full items-center justify-center rounded-xl border border-dashed transition-[border-color,background-color,color] duration-150 motion-reduce:transition-none',
+                isDraggingTarget
+                  ? 'border-primary/60 bg-primary/5 text-primary'
+                  : 'border-border/80 bg-muted/20 text-muted-foreground',
+              ]}
+              role="group"
+              aria-label={m.model_editor_insert_higher_priority()}
+              ondragenter={allowTargetDrop}
+              ondragover={allowTargetDrop}
+              ondrop={(event) => dropOnInsertion(event, { position: 'top' })}>
+              <span class="inline-flex items-center gap-2 text-sm">
+                <PlusIcon class="size-4" aria-hidden="true" />
+                {m.model_editor_insert_higher_priority()}
+              </span>
+            </div>
           {:else}
             {@render priorityConnector({ position: 'top' }, 'top')}
             <div class="flex flex-col">
               {#each targetLanes as lane, laneIndex (lane.priority)}
                 <section
+                  data-slot="target-lane"
+                  data-priority={lane.priority}
                   class={[
                     'grid min-h-24 grid-cols-[3.5rem_minmax(0,1fr)] overflow-hidden rounded-xl border bg-background shadow-sm transition-[border-color,box-shadow,background-color] duration-150 motion-reduce:transition-none',
                     isDraggingTarget
@@ -695,7 +816,8 @@ async function saveModel(): Promise<void> {
                       : 'border-transparent ring-1 ring-border',
                   ]}
                   aria-label={m.model_editor_layer_value({ index: laneIndex + 1 })}
-                  ondragover={(event) => event.preventDefault()}
+                  ondragenter={allowTargetDrop}
+                  ondragover={allowTargetDrop}
                   ondrop={(event) => dropOnLane(event, lane.priority)}>
                   <div class="flex flex-col items-center justify-center bg-muted/55 px-2 text-center">
                     <span class="font-technical text-[0.65rem] uppercase tracking-[0.14em] text-muted-foreground">
@@ -707,13 +829,17 @@ async function saveModel(): Promise<void> {
                     {#each lane.targets as target (target.key)}
                       {@const summary = selectedSummary(target)}
                       <div
-                        draggable="true"
                         role="button"
                         tabindex="0"
                         aria-label={m.model_editor_edit_destination_value({ index: targetIndex(target) + 1 })}
                         data-slot="target-card"
                         data-enabled="true"
-                        class="group flex min-h-20 min-w-60 flex-1 cursor-grab select-none flex-col items-start rounded-lg bg-card p-3 text-left shadow-xs ring-1 ring-border transition-[box-shadow,transform] hover:-translate-y-0.5 hover:shadow-sm focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 active:cursor-grabbing motion-reduce:transform-none motion-reduce:transition-none"
+                        data-key={target.key}
+                        draggable="true"
+                        class={[
+                          'group flex min-h-20 min-w-60 flex-1 cursor-grab select-none flex-col items-start rounded-lg bg-card p-3 text-left shadow-xs ring-1 ring-border transition-opacity focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 active:cursor-grabbing motion-reduce:transition-none',
+                          draggedTargetKey === target.key && 'opacity-50',
+                        ]}
                         onclick={() => editTarget(target)}
                         onkeydown={(event) => {
                           if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) {
@@ -722,8 +848,9 @@ async function saveModel(): Promise<void> {
                           }
                         }}
                         ondragstart={(event) => startTargetDrag(event, target)}
-                        ondragend={() => (draggedTargetKey = '')}
-                        ondragover={(event) => event.preventDefault()}
+                        ondragend={finishTargetDrag}
+                        ondragenter={allowTargetDrop}
+                        ondragover={allowTargetDrop}
                         ondrop={(event) => dropOnLane(event, lane.priority, target.key)}>
                         <div class="flex w-full min-w-0 items-center gap-2 text-left">
                           <GripVerticalIcon class="size-4 shrink-0 text-muted-foreground" />
@@ -738,6 +865,9 @@ async function saveModel(): Promise<void> {
                         <div class="mt-auto flex flex-wrap gap-1.5 pl-6 pt-2">
                           {#if target.persisted && summary && !summary.available}
                             <Badge variant="destructive">{m.model_editor_model_no_longer_available()}</Badge>
+                          {/if}
+                          {#if unwritableThinkingLevels(target).length > 0}
+                            <Badge variant="destructive">{m.model_editor_thinking_map_unwritable()}</Badge>
                           {/if}
                           {#if summary}<ModelSpecification specification={summary.specification} />{/if}
                         </div>
@@ -763,7 +893,7 @@ async function saveModel(): Promise<void> {
             {@render priorityConnector({ position: 'bottom' }, 'bottom')}
           {/if}
 
-          <div class="flex flex-col items-center">
+          <div class={['flex flex-col items-center', isDraggingTarget && 'pointer-events-none']}>
             <span class="size-2.5 rounded-full bg-primary ring-4 ring-primary/10"></span>
             <span class="mt-1.5 text-xs text-muted-foreground">{m.model_editor_end()}</span>
           </div>
@@ -773,7 +903,8 @@ async function saveModel(): Promise<void> {
           data-slot="target-dock"
           class="min-w-0 rounded-2xl border border-dashed bg-muted/30 p-3"
           aria-label={m.model_editor_disabled_targets()}
-          ondragover={(event) => event.preventDefault()}
+          ondragenter={allowTargetDrop}
+          ondragover={allowTargetDrop}
           ondrop={dropInDock}>
           <div class="mb-3 flex items-center justify-between gap-3 px-1">
             <div>
@@ -790,8 +921,13 @@ async function saveModel(): Promise<void> {
                   role="button"
                   tabindex="0"
                   aria-label={m.model_editor_edit_destination_value({ index: targetIndex(target) + 1 })}
+                  data-slot="target-card"
+                  data-key={target.key}
                   draggable="true"
-                  class="group flex min-h-20 w-full cursor-grab select-none flex-col items-start rounded-lg border bg-background p-3 pr-12 text-left shadow-xs transition-[border-color,box-shadow,transform] hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-sm focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 active:cursor-grabbing"
+                  class={[
+                    'group flex min-h-20 w-full cursor-grab select-none flex-col items-start rounded-lg border bg-background p-3 pr-12 text-left shadow-xs transition-[border-color,opacity] hover:border-primary/40 focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 active:cursor-grabbing',
+                    draggedTargetKey === target.key && 'opacity-50',
+                  ]}
                   onclick={() => editTarget(target)}
                   onkeydown={(event) => {
                     if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) {
@@ -800,7 +936,7 @@ async function saveModel(): Promise<void> {
                     }
                   }}
                   ondragstart={(event) => startTargetDrag(event, target)}
-                  ondragend={() => (draggedTargetKey = '')}>
+                  ondragend={finishTargetDrag}>
                   <div class="flex w-full min-w-0 flex-col items-start text-left">
                     <span class="flex w-full min-w-0 items-center gap-2">
                       <GripVerticalIcon class="size-4 shrink-0 text-muted-foreground" />
@@ -817,6 +953,9 @@ async function saveModel(): Promise<void> {
                   <div class="mt-auto flex flex-wrap gap-1.5 pl-6 pt-2">
                     {#if target.persisted && summary && !summary.available}
                       <Badge variant="destructive">{m.model_editor_model_no_longer_available()}</Badge>
+                    {/if}
+                    {#if unwritableThinkingLevels(target).length > 0}
+                      <Badge variant="destructive">{m.model_editor_thinking_map_unwritable()}</Badge>
                     {/if}
                     {#if summary}<ModelSpecification specification={summary.specification} />{/if}
                   </div>
@@ -1005,6 +1144,7 @@ async function saveModel(): Promise<void> {
                   </div>
                   <div data-slot="thinking-map" class="divide-y border-y">
                     {#each target.thinkingLevelMap as row (row.level)}
+                      {@const rowWritable = thinkingRowWritable(target, row)}
                       <div
                         data-slot="thinking-map-row"
                         class="grid grid-cols-[minmax(0,1fr)_2.5rem] items-center gap-x-3 gap-y-2 py-2 sm:grid-cols-[minmax(8rem,0.8fr)_minmax(0,2.2fr)_2.5rem]">
@@ -1023,15 +1163,15 @@ async function saveModel(): Promise<void> {
                             onValueChange={(value) =>
                               value && changeThinkingControlKind(row, value as TargetThinkingControl['type'])}>
                             <Select.Trigger
-                              class="w-28 shrink-0 sm:w-32"
+                              class={['w-28 shrink-0 sm:w-32', !rowWritable && 'border-destructive']}
+                              aria-invalid={!rowWritable}
                               aria-label={`${row.level} ${m.model_editor_thinking_control()}`}>
                               {thinkingControlLabel(row.control.type)}
                             </Select.Trigger>
                             <Select.Content>
                               <Select.Group>
-                                {#each ['effort', 'budget', 'enabled', 'disabled', 'hidden'] as type (type)}
-                                  <Select.Item value={type}
-                                    >{thinkingControlLabel(type as TargetThinkingControl['type'])}</Select.Item>
+                                {#each thinkingControlOptions(target, row) as type (type)}
+                                  <Select.Item value={type}>{thinkingControlLabel(type)}</Select.Item>
                                 {/each}
                               </Select.Group>
                             </Select.Content>
@@ -1064,6 +1204,11 @@ async function saveModel(): Promise<void> {
                             onclick={() => void resetThinkingRow(target, row.level)}>
                             <RotateCcwIcon />
                           </Button>
+                        {/if}
+                        {#if !rowWritable}
+                          <p class="col-span-full text-sm text-destructive" role="status">
+                            {thinkingRowHint(target, row)}
+                          </p>
                         {/if}
                       </div>
                     {/each}

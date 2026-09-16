@@ -1,4 +1,5 @@
 import * as m from '$lib/paraglide/messages.js'
+import { formatList } from '$lib/format'
 import { getLocale, type Locale } from '$lib/paraglide/runtime.js'
 
 type ErrorPayload = { code?: string; message?: string; params?: Record<string, unknown> }
@@ -61,13 +62,63 @@ function extractString(params: Record<string, unknown> | undefined, key: string)
   return typeof value === 'string' ? value : ''
 }
 
-export function localizeBackendErrorMessage(error: unknown, locale: Locale = getLocale()): string {
+function extractStringArray(params: Record<string, unknown> | undefined, key: string): string[] {
+  const value = params?.[key]
+  if (!Array.isArray(value)) return []
+  return value.filter((item): item is string => typeof item === 'string' && item.length > 0)
+}
+
+function extractNamedStrings(
+  params: Record<string, unknown> | undefined,
+  listKey: string,
+  fallbackKey: string,
+): string[] {
+  const values = extractStringArray(params, listKey)
+  if (values.length > 0) return values
+  const fallback = extractString(params, fallbackKey)
+  return fallback ? [fallback] : []
+}
+
+function thinkingControlKindLabel(kind: string, locale: Locale): string {
+  const options = { locale }
+  switch (kind) {
+    case 'effort':
+      return m.model_editor_thinking_effort({}, options)
+    case 'budget':
+      return m.model_editor_thinking_budget({}, options)
+    case 'enabled':
+      return m.model_editor_thinking_enabled({}, options)
+    case 'disabled':
+      return m.model_editor_thinking_disabled({}, options)
+    case 'hidden':
+      return m.model_editor_thinking_hidden({}, options)
+    default:
+      return kind
+  }
+}
+
+function resolveErrorPayload(error: unknown): { raw: string; payload: ErrorPayload | null } {
   const raw = extractRawErrorMessage(error)
   const direct =
     error && typeof error === 'object' && typeof (error as ErrorPayload).code === 'string'
       ? (error as ErrorPayload)
       : null
-  const payload = direct ?? parseErrorPayload(raw)
+  return { raw, payload: direct ?? parseErrorPayload(raw) }
+}
+
+export function unrepresentableThinkingTarget(
+  error: unknown,
+): { providerId: string; modelId: string } | null {
+  const payload = resolveErrorPayload(error).payload
+  if (payload?.code !== 'THINKING_CONTROL_UNREPRESENTABLE') return null
+  const providerId = extractString(payload.params, 'provider_id')
+  const modelId = extractString(payload.params, 'model_id')
+  if (!providerId || !modelId) return null
+  return { providerId, modelId }
+}
+
+export function localizeBackendErrorMessage(error: unknown, locale: Locale = getLocale()): string {
+  const { raw, payload } = resolveErrorPayload(error)
   const options = { locale }
   if (!payload?.code) return m.backend_error_unknown({ message: raw }, options)
 
@@ -131,16 +182,30 @@ export function localizeBackendErrorMessage(error: unknown, locale: Locale = get
         },
         options,
       )
-    case 'THINKING_CONTROL_UNREPRESENTABLE':
+    case 'THINKING_CONTROL_UNREPRESENTABLE': {
+      const levels = extractNamedStrings(payload.params, 'levels', 'level')
+      const controls = extractNamedStrings(payload.params, 'controls', 'control')
+      const supported = extractStringArray(payload.params, 'supported_controls')
       return m.backend_error_thinking_control_unrepresentable(
         {
           provider_id: extractString(payload.params, 'provider_id'),
           model_id: extractString(payload.params, 'model_id'),
-          level: extractString(payload.params, 'level'),
-          protocol: extractString(payload.params, 'protocol'),
+          levels: formatList(levels, locale) || extractString(payload.params, 'level'),
+          controls:
+            formatList(
+              controls.map((kind) => thinkingControlKindLabel(kind, locale)),
+              locale,
+            ) || (locale === 'zh-CN' ? '当前控制' : 'the current control'),
+          supported: formatList(
+            (supported.length > 0 ? supported : ['effort', 'hidden']).map((kind) =>
+              thinkingControlKindLabel(kind, locale),
+            ),
+            locale,
+          ),
         },
         options,
       )
+    }
     case 'CATALOG_REFRESH_FAILED':
       return m.backend_error_catalog_refresh_failed({}, options)
     case 'CATALOG_SCOPE_REFRESH_FAILED':

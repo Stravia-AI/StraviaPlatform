@@ -21,9 +21,19 @@ import { toast } from 'svelte-sonner'
 import { admin } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
 import { getDataTableLabels } from '$lib/data-table-labels'
-import { formatLogTime } from '$lib/format'
+import { formatList, formatLogTime } from '$lib/format'
 import { localeState } from '$lib/localization.svelte'
 import { formatAllowanceAmount, formatAllowancePercent } from '$lib/provider-allowance-format'
+import {
+  effectiveAllowanceCondition,
+  exhaustedAllowances,
+  forecastBucket,
+  nextRelevantResetAt,
+  remainingPercent,
+  summarizeForecast,
+  usableRemainingPercent,
+  worstAllowanceCondition,
+} from '$lib/provider-allowance-summary'
 import type {
   Allowance,
   AllowanceCondition,
@@ -111,7 +121,7 @@ const visibleProviders = $derived.by((): VisibleProvider[] => {
     const allowances =
       conditionFilter === 'all'
         ? snapshot.allowances
-        : snapshot.allowances.filter((allowance) => effectiveCondition(allowance) === conditionFilter)
+        : snapshot.allowances.filter((allowance) => effectiveAllowanceCondition(allowance) === conditionFilter)
     if (conditionFilter !== 'all' && allowances.length === 0) return []
     return [{ snapshot, allowances }]
   })
@@ -164,11 +174,11 @@ const allowanceColumns = allowanceColumnHelper.columns([
 const allowanceGrouping = ['provider']
 const allowanceColumnVisibility = { provider: false }
 const overallCondition = $derived(
-  worstCondition(visibleAllowances.map(({ allowance }) => effectiveCondition(allowance))),
+  worstAllowanceCondition(visibleAllowances.map(({ allowance }) => effectiveAllowanceCondition(allowance))),
 )
 const lowestRemaining = $derived.by(() => {
   const values = visibleAllowances
-    .map(({ allowance }) => remainingPercent(allowance))
+    .map(({ allowance }) => usableRemainingPercent(allowance))
     .filter((value): value is number => value != null && Number.isFinite(value))
   return values.length ? Math.min(...values) : undefined
 })
@@ -185,30 +195,22 @@ const timeline = $derived.by(() =>
         collator.compare(allowanceLabel(left.allowance), allowanceLabel(right.allowance)),
     ),
 )
+const nextResetAt = $derived(nextRelevantResetAt(visibleAllowances.map(({ allowance }) => allowance)))
+const emptyWindows = $derived.by(() =>
+  visibleAllowances
+    .filter(({ allowance }) => effectiveAllowanceCondition(allowance) === 'exhausted')
+    .sort(
+      (left, right) =>
+        (left.allowance.reset_at ?? Number.POSITIVE_INFINITY) - (right.allowance.reset_at ?? Number.POSITIVE_INFINITY) ||
+        collator.compare(left.snapshot.provider_name, right.snapshot.provider_name) ||
+        collator.compare(allowanceLabel(left.allowance), allowanceLabel(right.allowance)),
+    ),
+)
 const forecastSummary = $derived.by(() => {
-  let noRisk = 0
-  let willExhaust = 0
-  let unknown = 0
-  const projected: number[] = []
-  const risks: VisibleAllowance[] = []
-  for (const item of timeline) {
-    if (item.allowance.forecast.projected_remaining_percent != null) {
-      projected.push(item.allowance.forecast.projected_remaining_percent)
-    }
-    switch (item.allowance.forecast.status) {
-      case 'no_risk':
-        noRisk += 1
-        break
-      case 'will_exhaust':
-        willExhaust += 1
-        risks.push(item)
-        break
-      case 'unknown':
-        unknown += 1
-        break
-    }
-  }
-  return { noRisk, willExhaust, unknown, lowestProjected: projected.length ? Math.min(...projected) : undefined, risks }
+  const counts = summarizeForecast(timeline.map(({ allowance }) => allowance))
+  const exhaustedItems = timeline.filter(({ allowance }) => forecastBucket(allowance) === 'exhausted')
+  const willExhaustItems = timeline.filter(({ allowance }) => forecastBucket(allowance) === 'will_exhaust')
+  return { ...counts, exhaustedItems, willExhaustItems }
 })
 const latestFetchedAt = $derived.by(() => {
   const timestamps = snapshots
@@ -289,32 +291,44 @@ function conditionTone(condition: AllowanceCondition | undefined): string {
   }
 }
 
-function effectiveCondition(allowance: Allowance): AllowanceCondition | undefined {
-  return allowance.condition === 'exhausted' && allowance.reset_at == null ? undefined : allowance.condition
+function providerEmptyHint(allowances: Allowance[]): string | undefined {
+  const empty = exhaustedAllowances(allowances)
+  if (empty.length === 0) return undefined
+  const items = formatList(
+    empty.map((allowance) => allowanceLabel(allowance)),
+    localeState.current,
+  )
+  const resetAt = nextRelevantResetAt(empty)
+  return resetAt == null
+    ? m.allowances_provider_empty({ items })
+    : m.allowances_provider_empty_resets({ items, time: formatLogTime(resetAt, localeState.current) })
 }
 
-function worstCondition(conditions: (AllowanceCondition | undefined)[]): AllowanceCondition | undefined {
-  let result: AllowanceCondition | undefined
-  const rank = { normal: 1, tight: 2, exhausted: 3 } satisfies Record<AllowanceCondition, number>
-  for (const condition of conditions) {
-    if (condition && (!result || rank[condition] > rank[result])) result = condition
+function forecastItemCopy(item: VisibleAllowance): string {
+  const provider = item.snapshot.provider_name
+  const label = allowanceLabel(item.allowance)
+  const reset = item.allowance.reset_at
+  if (forecastBucket(item.allowance) === 'exhausted') {
+    return item.allowance.forecast.exhausts_at == null
+      ? m.allowances_forecast_exhausted_item_resets({
+          provider,
+          item: label,
+          reset: formatLogTime(reset, localeState.current),
+        })
+      : m.allowances_forecast_exhausted_at_resets({
+          provider,
+          item: label,
+          time: formatLogTime(item.allowance.forecast.exhausts_at, localeState.current),
+          reset: formatLogTime(reset, localeState.current),
+        })
   }
-  return result
-}
-
-function remainingPercent(allowance: Allowance): number | undefined {
-  if (allowance.used_percent != null && Number.isFinite(allowance.used_percent)) {
-    return Math.max(0, 100 - allowance.used_percent)
-  }
-  if (
-    allowance.remaining &&
-    allowance.limit &&
-    Number.isFinite(allowance.remaining.value) &&
-    allowance.limit.value > 0
-  ) {
-    return Math.max(0, (allowance.remaining.value / allowance.limit.value) * 100)
-  }
-  return undefined
+  return item.allowance.forecast.exhausts_at == null
+    ? `${provider} · ${label}`
+    : m.allowances_forecast_exhausts_at({
+        provider,
+        item: label,
+        time: formatLogTime(item.allowance.forecast.exhausts_at, localeState.current),
+      })
 }
 
 function usedDisplay(allowance: Allowance): string {
@@ -390,7 +404,8 @@ function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
 
 {#snippet allowanceProviderSummary(snapshot: ProviderAllowanceSnapshot, allowances: Allowance[])}
   {@const presentation = statusPresentation(snapshot.status)}
-  {@const providerCondition = worstCondition(allowances.map(effectiveCondition))}
+  {@const providerCondition = worstAllowanceCondition(allowances.map(effectiveAllowanceCondition))}
+  {@const emptyHint = providerEmptyHint(allowances)}
   {@const refreshingProvider = refreshingProviderIds.has(snapshot.provider_id)}
   <div class="min-w-0">
     <div class="flex flex-wrap items-center gap-2">
@@ -400,6 +415,7 @@ function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
           >{conditionLabel(providerCondition)}</Badge
         >{/if}
       {#if snapshot.plan_label}<span class="text-xs text-muted-foreground">{snapshot.plan_label}</span>{/if}
+      {#if emptyHint}<span class="text-xs text-muted-foreground">{emptyHint}</span>{/if}
     </div>
     <p class="font-technical mt-1 text-xs text-muted-foreground">{snapshot.catalog_provider_id} / {snapshot.channel}</p>
     {#if snapshot.error}
@@ -472,7 +488,7 @@ function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
 {#snippet allowanceRemainingCell(context: DataTableCellContext<AllowanceMatrixRow>)}
   {@const allowance = context.row.original.allowance}
   {#if allowance}
-    {@const condition = effectiveCondition(allowance)}
+    {@const condition = effectiveAllowanceCondition(allowance)}
     <div class="flex min-w-0 items-center gap-2">
       {#if condition}<span
           class={[
@@ -495,7 +511,7 @@ function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
 {/snippet}
 
 {#snippet mobileAllowanceRow(allowance: Allowance)}
-  {@const condition = effectiveCondition(allowance)}
+  {@const condition = effectiveAllowanceCondition(allowance)}
   {@const percent = allowance.used_percent == null ? undefined : Math.min(100, Math.max(0, allowance.used_percent))}
   <div class="border-t px-3 py-2.5">
     <div class="flex min-w-0 items-start justify-between gap-3">
@@ -664,11 +680,25 @@ function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
             : m.allowances_lowest_remaining({ value: formatAllowancePercent(lowestRemaining, localeState.current) })}
         </p>
         <p class="font-technical text-sm tabular-nums">
-          {timeline[0]
-            ? m.allowances_next_reset({ time: formatLogTime(timeline[0].allowance.reset_at, localeState.current) })
-            : m.allowances_no_upcoming_reset()}
+          {nextResetAt == null
+            ? m.allowances_no_upcoming_reset()
+            : m.allowances_next_reset({ time: formatLogTime(nextResetAt, localeState.current) })}
         </p>
       </div>
+      {#if emptyWindows.length > 0}
+        <ul class="mt-3 grid gap-1 border-t pt-3 text-sm" data-testid="allowance-empty-windows">
+          {#each emptyWindows as item (`${item.snapshot.provider_id}:${item.allowance.key}`)}
+            <li>
+              {item.snapshot.provider_name} · {allowanceLabel(item.allowance)}
+              {#if item.allowance.reset_at != null}
+                <span class="font-technical text-muted-foreground">
+                  · {m.allowances_reset_at({ time: formatLogTime(item.allowance.reset_at, localeState.current) })}
+                </span>
+              {/if}
+            </li>
+          {/each}
+        </ul>
+      {/if}
     </section>
 
     <div class="grid min-w-0 items-start gap-3 xl:grid-cols-[minmax(0,2fr)_minmax(17rem,1fr)]">
@@ -755,44 +785,46 @@ function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
           </Card.Header>
           <Card.Content class="pt-3">
             <div class="grid grid-cols-3 gap-2 text-center">
-              <div class="rounded-lg bg-success/8 px-2 py-3">
-                <p class="font-technical text-lg font-semibold tabular-nums">{forecastSummary.noRisk}</p>
-                <p class="text-xs text-muted-foreground">
-                  {m.allowances_forecast_no_risk({ count: forecastSummary.noRisk })}
-                </p>
+              <div
+                class="rounded-lg bg-destructive/8 px-2 py-3"
+                data-testid="allowance-forecast-exhausted"
+                aria-label={m.allowances_forecast_exhausted_count({ count: forecastSummary.exhausted })}>
+                <p class="font-technical text-lg font-semibold tabular-nums">{forecastSummary.exhausted}</p>
+                <p class="text-xs text-muted-foreground">{m.allowances_forecast_exhausted()}</p>
               </div>
-              <div class="rounded-lg bg-destructive/8 px-2 py-3">
+              <div
+                class="rounded-lg bg-warning/8 px-2 py-3"
+                data-testid="allowance-forecast-will-exhaust"
+                aria-label={m.allowances_forecast_will_exhaust_count({ count: forecastSummary.willExhaust })}>
                 <p class="font-technical text-lg font-semibold tabular-nums">{forecastSummary.willExhaust}</p>
-                <p class="text-xs text-muted-foreground">
-                  {m.allowances_forecast_will_exhaust({ count: forecastSummary.willExhaust })}
-                </p>
+                <p class="text-xs text-muted-foreground">{m.allowances_forecast_will_exhaust()}</p>
               </div>
-              <div class="rounded-lg bg-muted px-2 py-3">
-                <p class="font-technical text-lg font-semibold tabular-nums">{forecastSummary.unknown}</p>
-                <p class="text-xs text-muted-foreground">
-                  {m.allowances_forecast_unknown({ count: forecastSummary.unknown })}
-                </p>
+              <div
+                class="rounded-lg bg-success/8 px-2 py-3"
+                data-testid="allowance-forecast-no-risk"
+                aria-label={m.allowances_forecast_no_risk_count({ count: forecastSummary.noRisk })}>
+                <p class="font-technical text-lg font-semibold tabular-nums">{forecastSummary.noRisk}</p>
+                <p class="text-xs text-muted-foreground">{m.allowances_forecast_no_risk()}</p>
               </div>
             </div>
+            {#if forecastSummary.unknown > 0}
+              <p class="mt-3 text-xs text-muted-foreground" data-testid="allowance-forecast-unknown">
+                {m.allowances_forecast_unknown_count({ count: forecastSummary.unknown })}
+              </p>
+            {/if}
             <p class="mt-4 border-t pt-4 text-sm text-muted-foreground">
-              {forecastSummary.lowestProjected == null
-                ? m.allowances_forecast_no_projection()
-                : m.allowances_forecast_lowest({
+              {forecastSummary.lowestProjected != null
+                ? m.allowances_forecast_lowest({
                     value: formatAllowancePercent(forecastSummary.lowestProjected, localeState.current),
-                  })}
+                  })
+                : forecastSummary.exhausted > 0
+                  ? m.allowances_forecast_windows_exhausted()
+                  : m.allowances_forecast_no_projection()}
             </p>
-            {#if forecastSummary.risks.length > 0}
+            {#if forecastSummary.exhaustedItems.length > 0 || forecastSummary.willExhaustItems.length > 0}
               <ul class="mt-4 grid gap-2 border-t pt-4">
-                {#each forecastSummary.risks as item (`${item.snapshot.provider_id}:${item.allowance.key}`)}
-                  <li class="text-sm">
-                    {item.allowance.forecast.exhausts_at == null
-                      ? `${item.snapshot.provider_name} · ${allowanceLabel(item.allowance)}`
-                      : m.allowances_forecast_exhausts_at({
-                          provider: item.snapshot.provider_name,
-                          item: allowanceLabel(item.allowance),
-                          time: formatLogTime(item.allowance.forecast.exhausts_at, localeState.current),
-                        })}
-                  </li>
+                {#each [...forecastSummary.exhaustedItems, ...forecastSummary.willExhaustItems] as item (`${item.snapshot.provider_id}:${item.allowance.key}`)}
+                  <li class="text-sm">{forecastItemCopy(item)}</li>
                 {/each}
               </ul>
             {/if}

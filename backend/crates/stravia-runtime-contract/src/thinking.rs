@@ -99,4 +99,14 @@ impl TargetThinkingControl {
     pub fn is_hidden(&self) -> bool {
         matches!(self, Self::Hidden)
     }
+
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Effort { .. } => "effort",
+            Self::Budget { .. } => "budget",
+            Self::Enabled => "enabled",
+            Self::Disabled => "disabled",
+            Self::Hidden => "hidden",
+        }
+    }
 }

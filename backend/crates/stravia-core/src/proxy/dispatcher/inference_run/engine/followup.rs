@@ -85,7 +85,7 @@ pub(super) async fn acquire_followup_model_turn(
                 response.id = write.id().to_owned();
             }
             projection.begin_model_leg(
-                super::thinking_carrier_facts(ingress, ingress, false),
+                super::thinking_carrier_facts(ingress, ingress),
                 inference_run.exposed_tool_names(),
                 None,
             );

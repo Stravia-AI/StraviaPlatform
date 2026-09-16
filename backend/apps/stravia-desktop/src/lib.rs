@@ -205,6 +205,7 @@ pub fn run() {
                 .find(|window| window.label == "main")
                 .ok_or_else(|| anyhow::anyhow!("main WebView configuration is missing"))?;
             std::fs::create_dir_all(paths.desktop_webview())?;
+            // dragDropEnabled:false 在窗口配置里：Windows 上 Tauri 默认 drop handler 会换掉 WebView2 的 HTML5 DnD。
             tauri::WebviewWindowBuilder::from_config(app, window_config)?
                 .data_directory(paths.desktop_webview())
                 .build()?;

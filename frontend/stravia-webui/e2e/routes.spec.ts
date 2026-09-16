@@ -755,6 +755,7 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
   await page.getByRole('button', { name: 'Confirm' }).click()
   await expect(page.getByRole('button', { name: 'Edit destination 2' })).toContainText('gpt-available')
 
+  await expect(page.getByRole('group', { name: 'Insert as the highest priority' })).toBeVisible()
   await page
     .getByRole('button', { name: 'Edit destination 1' })
     .getByRole('button', { name: /^Token limits:/ })

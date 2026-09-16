@@ -28,61 +28,70 @@ struct Unit {
 
 impl Window {
     pub(super) fn capture(items: &[AiItem]) -> Option<Self> {
-        if items.len() > MAX_UNITS {
-            return None;
-        }
-        // Bound serialization before constructing semantic projections; no payload reaches SQL.
-        struct Bound(usize);
-        impl std::io::Write for Bound {
-            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                self.0 = self
-                    .0
-                    .checked_add(bytes.len())
-                    .filter(|n| *n <= MAX_WINDOW_BYTES)
-                    .ok_or_else(|| std::io::Error::other("diagnostic window limit"))?;
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        serde_json::to_writer(&mut Bound(0), items).ok()?;
+        let start = items
+            .iter()
+            .position(|item| {
+                !matches!(
+                    item.role,
+                    stravia_runtime_contract::protocol::ir::Role::System
+                        | stravia_runtime_contract::protocol::ir::Role::Developer
+                )
+            })
+            .unwrap_or(items.len());
+        // Keep the newest suffix that fits. Clients that replay a rewritten full
+        // history after local compaction exceed 512 KiB; dropping the whole
+        // window leaves no last_unit_hash, so the follow-up cannot find a source.
+        // A single unit over the budget still fails closed.
         let mut units = Vec::new();
         let mut bytes = 0;
-        for item in items.iter().skip_while(|item| {
-            matches!(
-                item.role,
-                stravia_runtime_contract::protocol::ir::Role::System
-                    | stravia_runtime_contract::protocol::ir::Role::Developer
-            )
-        }) {
+        for item in items[start..].iter().rev() {
             let Value::Array(values) = canonical::item_value(item) else {
                 return None;
             };
+            let mut projected = Vec::with_capacity(values.len());
             for mut value in values {
                 if private_control(&value) && !public_thinking_projection(&value) {
                     // A nonmatching boundary preserves continuity without retaining private state.
                     value = serde_json::json!({"diagnostic_boundary": stravia_runtime_contract::identifier::new_id()});
                 }
                 let encoded = serde_json::to_vec(&value).ok()?;
-                bytes += encoded.len();
-                if bytes > MAX_WINDOW_BYTES || units.len() == MAX_UNITS {
-                    return None;
-                }
-                units.push(Unit {
+                projected.push(Unit {
                     hash: Sha256::digest(&encoded).into(),
                     bytes: encoded.len(),
                     value,
                 });
             }
+            for unit in projected.into_iter().rev() {
+                if units.len() == MAX_UNITS || bytes + unit.bytes > MAX_WINDOW_BYTES {
+                    if units.is_empty() {
+                        return None;
+                    }
+                    units.reverse();
+                    return Some(Self { units, bytes });
+                }
+                bytes += unit.bytes;
+                units.push(unit);
+            }
         }
+        units.reverse();
         Some(Self { units, bytes })
     }
     pub(super) fn append(&mut self, mut output: Self) -> bool {
+        while !self.units.is_empty()
+            && (self.bytes + output.bytes > MAX_WINDOW_BYTES
+                || self.units.len() + output.units.len() > MAX_UNITS)
+        {
+            let dropped = self.units.remove(0);
+            self.bytes = self.bytes.saturating_sub(dropped.bytes);
+        }
         if self.bytes + output.bytes > MAX_WINDOW_BYTES
             || self.units.len() + output.units.len() > MAX_UNITS
         {
-            return false;
+            if output.bytes > MAX_WINDOW_BYTES || output.units.len() > MAX_UNITS {
+                return false;
+            }
+            *self = output;
+            return true;
         }
         self.bytes += output.bytes;
         self.units.append(&mut output.units);
@@ -788,5 +797,119 @@ mod tests {
             Some(("pending-run".into(), "pending-interaction".into()))
         );
         assert_eq!(index.current_tool_source(&input, "other"), None);
+    }
+
+    fn bulky(tag: &str, bytes: usize) -> AiItem {
+        user(&format!("{tag} {}", "a".repeat(bytes)))
+    }
+
+    #[test]
+    fn oversized_received_history_keeps_newest_suffix() {
+        let prefix = bulky("old", 280_000);
+        let question = long_user("keep");
+        let answer = long_answer("keep");
+        let captured = Window::capture(&[
+            prefix.clone(),
+            bulky("older", 280_000),
+            question.clone(),
+            answer.clone(),
+        ])
+        .unwrap();
+        let expected = Window::capture(&[question, answer]).unwrap();
+        assert_eq!(captured.last_hash_hex(), expected.last_hash_hex());
+        assert!(captured.units.len() < 4);
+        assert!(captured.units.len() >= expected.units.len());
+        assert!(Window::capture(&[bulky("too-big", MAX_WINDOW_BYTES)]).is_none());
+    }
+
+    #[test]
+    fn unit_count_overflow_keeps_the_last_max_units() {
+        let items: Vec<_> = (0..=MAX_UNITS)
+            .map(|index| user(&format!("turn-{index}")))
+            .collect();
+        let captured = Window::capture(&items).unwrap();
+        assert_eq!(captured.units.len(), MAX_UNITS);
+        assert_eq!(
+            captured.last_hash_hex(),
+            Window::capture(std::slice::from_ref(items.last().unwrap()))
+                .unwrap()
+                .last_hash_hex()
+        );
+    }
+
+    #[test]
+    fn append_drops_oldest_units_to_keep_delivered_output() {
+        let items: Vec<_> = (0..MAX_UNITS)
+            .map(|index| user(&format!("prefix-{index}")))
+            .collect();
+        let mut window = Window::capture(&items).unwrap();
+        assert_eq!(window.units.len(), MAX_UNITS);
+        let output = Window::capture(&[long_answer("out")]).unwrap();
+        let out_hash = output.last_hash_hex();
+        assert!(window.append(output));
+        assert_eq!(window.last_hash_hex(), out_hash);
+        assert_eq!(window.units.len(), MAX_UNITS);
+    }
+
+    #[test]
+    fn compacted_resume_matches_source_indexed_from_oversized_history() {
+        let prefix = bulky("dropped", 280_000);
+        let question = long_user("retained");
+        let answer = long_answer("retained");
+        let mut source = Window::capture(&[
+            prefix,
+            bulky("also-dropped", 280_000),
+            question.clone(),
+            answer.clone(),
+        ])
+        .unwrap();
+        assert!(source.append(Window::capture(&[long_answer("final")]).unwrap()));
+        let input = Window::capture(&[
+            long_user("summary of earlier turns"),
+            question,
+            answer,
+            long_answer("final"),
+            long_user("resume after compaction"),
+        ])
+        .unwrap();
+        let mut index = TailIndex::default();
+        index.insert(
+            "source-run".into(),
+            source,
+            i64::MAX,
+            "principal",
+            "source-interaction",
+        );
+        assert!(matches!(
+            index.associate(
+                Some(&input),
+                &[("source-run".into(), "source-interaction".into())]
+            ),
+            RunEvent::RetainedTailAssociated {
+                status,
+                source_interaction_id: Some(source),
+                ..
+            } if status == "inferred" && source == "source-interaction"
+        ));
+    }
+
+    #[test]
+    fn pending_tools_survive_suffix_capture() {
+        let call = AiItem::function_call(stravia_runtime_contract::protocol::ir::ToolCall {
+            id: "call-tail".into(),
+            name: "probe".into(),
+            arguments: "{}".into(),
+        });
+        let window = Window::capture(&[
+            bulky("old", 280_000),
+            bulky("older", 280_000),
+            long_user("tool"),
+            call,
+        ])
+        .unwrap();
+        assert_eq!(
+            window.pending_tool_ids().as_deref(),
+            Some(["call-tail".to_owned()].as_slice())
+        );
     }
 }

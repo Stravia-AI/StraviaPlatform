@@ -200,11 +200,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
         let generation_committed = super::generation_commit_flag(&request_context);
         let mut projection = projection;
         'model_legs: loop {
-            let carrier_facts = super::thinking_carrier_facts(
-                ingress,
-                turn.route.egress,
-                turn.reasoning_encrypted_content_requested,
-            );
+            let carrier_facts = super::thinking_carrier_facts(ingress, turn.route.egress);
             projection.begin_model_leg(
                 carrier_facts,
                 inference_run.exposed_tool_names(),

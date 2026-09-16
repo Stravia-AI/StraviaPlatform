@@ -31,7 +31,7 @@ Observation 使用统一平台身份契约：随机不透明 ID 是由密码学�
 
 ### 3.1 Interaction 边界
 
-已确认的目标领域契约见 [ADR-0053](../adr/0053-keep-one-interaction-across-generation-roots.md)：充分证据确认的同一任务续接可以跨多个 Generation Chain 根，仍归入同一个 Interaction。该决策尚未实现；以下编号规则描述现有归并行为，不表示裁剪或压缩后的跨根归并已经生效。
+已确认的目标领域契约见 [ADR-0053](../adr/0053-keep-one-interaction-across-generation-roots.md)：充分证据确认的同一任务续接可以跨多个 Generation Chain 根，仍归入同一个 Interaction。新准入请求按该决策分组；已有 Observation 不重算。以下编号规则描述当前归并行为。
 
 1. 一条新的 canonical `User` item 通常开启新的 Connect Client Interaction；精确父响应的工具续接与两秒快速续接按以下规则归并。
 2. 无法归入已有 Interaction、且不含 User item 的合法根请求也开启新的 Interaction。
@@ -108,7 +108,7 @@ Observation 写入、SSE、Debug 分段文件、容量统计或导出失败不�
 
 ### 原生压缩与保留尾部关联
 
-目标契约按 [ADR-0053](../adr/0053-keep-one-interaction-across-generation-roots.md) 扩展：唯一、完整的保留尾部精确匹配在五分钟窗口内可以自动归入原 Interaction，即使本次没有当前工具结果。该行为尚未实现。
+目标契约按 [ADR-0053](../adr/0053-keep-one-interaction-across-generation-roots.md) 扩展：唯一、完整的保留尾部精确匹配在五分钟窗口内可以自动归入原 Interaction，即使本次没有当前工具结果。该行为对启用后准入的请求生效。
 
 已确认的当前工具续接优先：本次回传来源 Run 当前待完成工具调用的结果时，即使同时夹带额外的 User 输入，也继续原 Interaction，不受尾部归并五分钟窗口限制。历史回放中的旧工具结果不能作为当前续接证据；不能只在完整输入中找到相同工具 ID 就触发归并。
 
@@ -121,11 +121,9 @@ Observation 写入、SSE、Debug 分段文件、容量统计或导出失败不�
 
 归并窗口不限制诊断来源连接。来源记录仍须在保留期内，匹配仍须完整且唯一；不能先按归并窗口过滤较旧候选，再把剩余候选宣称为唯一来源。诊断连接不建立 Generation Chain 执行父边。
 
-下面描述的仅记录诊断关联而不改变分组，是现有行为。
-
 `compaction_operation` 保存 standalone/inline、所属 Model Turn、来源、登记 ID、阶段、耗时与错误分类；所选 Target/Provider 沿用 Target attempt，usage 仅沿用每 attempt 一次的 `usage_confirmed`。Standalone 是真实操作，不落空 Generation；回放旧 state 不再登记压缩操作。
 
-`native_compaction_associated` 表示原生状态跨越已登记边界，`retained_tail_associated` 仅表示客户端幸存上下文的诊断推断。两者与既有确定 Generation 关系在 `context_events`、forest/detail、SSE、详情及画布中分开；推断不改变父边、Target Continuation、有效输入或新 User 的 Interaction 分组。来源卡片已清理时不从核心存储复活。
+`native_compaction_associated` 表示原生状态跨越已登记边界，`retained_tail_associated` 仅表示客户端幸存上下文的诊断推断。两者与既有确定 Generation 关系在 `context_events`、forest/detail、SSE、详情及画布中分开；推断不改变父边、Target Continuation 或有效输入。分组按 ADR-0053 诊断规则，不恢复已删除历史。来源卡片已清理时不从核心存储复活。
 
 尾部索引只接收实际收到的规范化 client-shaped 输入和已交付公开输出。流式与非流式输出均复用 Generation Chain 拥有的 ingress 历史整形规则，使诊断索引与客户端回放采用相同分块；整形失败记录 observation gap，不能把交付前的 canonical 分块作为后备索引。指纹仅筛选候选，完整语义再次核验；匹配旧历史后缀与新请求任意连续区间。只有顶层 leading system/developer 可排除，内部差异不能删除后拼接。完整工具 ID、参数、结果、角色、媒体与控制保持语义身份。有 Generation parent 时仍对本次收到的 client 输入做尾部诊断。多个来源同时匹配时，若其中唯一一个匹配的语义单元与字节均严格更长，采用该更长来源；并列等长匹配仍为 `ambiguous`。
 
@@ -144,7 +142,7 @@ Observation 写入、SSE、Debug 分段文件、容量统计或导出失败不�
 
 重现时分别构造纯文本 User、Assistant `AiItem`，累加 `canonical::item_value` 返回的各个语义单元经 `serde_json::to_vec` 编码后的字节数。纯文本 User 单元包含 `role`、单元素 `content` 数组及值为 null 的 `tool_calls`、`tool_call_id`、`artifact_references`；Assistant 单元包含 `role` 和单个文本 `content` 对象。第二个数值是 Assistant 原文的 UTF-8 长度，中文不转义为 ASCII。资源预算用于限制候选集合、序列化和核验成本，不是从这些小样本推断出的性能保证；截断搜索必须保持未关联。
 
-每窗口最多 512 单元/512 KiB，进程索引最多 128 候选/16 MiB，单次最多 65,536 单元检查和 8 MiB 内容核验。超过资源预算返回 `resource_limit`；保留候选未完整索引（包括冷启动）返回 `index_unavailable`；多个来源成立返回 `ambiguous`。这些情况不影响正常推理。敏感比对内容只在易失索引中保存，隐藏 reasoning/native state 使用不匹配边界；持久 Observation 只保存来源与匹配元数据。核心原生登记的重启保证与诊断索引可用性不是同一承诺。
+每窗口最多 512 单元/512 KiB：超限时保留最新后缀，而不是丢弃整个窗口；单个语义单元超过字节上限仍返回 `resource_limit`。进程索引最多 128 候选/16 MiB，单次最多 65,536 单元检查和 8 MiB 内容核验。候选核验超过资源预算返回 `resource_limit`；保留候选未完整索引（包括冷启动）返回 `index_unavailable`；多个来源成立返回 `ambiguous`。这些情况不影响正常推理。敏感比对内容只在易失索引中保存，隐藏 reasoning/native state 使用不匹配边界；持久 Observation 只保存来源与匹配元数据。核心原生登记的重启保证与诊断索引可用性不是同一承诺。
 
 `stravia-core` 新增 crate-private 深模块 `interaction_observation/`。外部 seam 保持小：
 
@@ -338,7 +336,7 @@ diagnostics/observation-debug/
 - 容量按实际落盘字节计；
 - 达到上限后停止对应 Trace 写入，Inference Run 继续；
 - manifest 标记 `partial`，原因使用 `run_size_limit`、`global_size_limit`、`writer_overflow` 或 `storage_error`；
-- UI 在 Debug 开启但无法完整写入时显示常驻告警；
+- 不完整原因只出现在 Interaction 详情和诊断包中，请求记录页不显示常驻告警；
 - 不为释放额度提前删除尚在保留期内的旧 Trace。
 
 ### 6.4 保留与清理
@@ -652,7 +650,7 @@ Rust workspace 新增：
 - HTTP、SSE 与 upstream Responses WebSocket 覆盖四方向适用消息、顺序、时间和 attempt ID。
 - Debug Run 包含全部约定 canonical checkpoint；普通 Run 不持久化或返回隐藏 payload。
 - credential header、URL 与结构化 body 凭据在落盘前脱敏；ZIP、API 和错误不出现原值。
-- 单 Run 64 MiB 或全局 2 GiB 超限时请求继续、Trace partial、UI 告警。
+- 单 Run 64 MiB 或全局 2 GiB 超限时请求继续、Trace partial；不完整原因只出现在详情和诊断包中。
 - 运行中票据固定 sequence；ZIP manifest 与 events 一致。
 - 下载 ticket 60 秒、单次、固定资源；过期/重放/跨资源使用失败。
 - 清除历史只删除非活动 Observation 及 Trace，活动请求不中断。

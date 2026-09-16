@@ -837,14 +837,6 @@ function formatBytes(value: number | undefined): string {
     meta={liveMeta}
     actions={headerActions} />
 
-  {#if (debugQuery.data?.partial_trace_count ?? 0) > 0}
-    <Alert.Root variant="warning" role="status">
-      <Alert.Description
-        >{m.observation_partial_traces_warning({
-          count: debugQuery.data?.partial_trace_count ?? 0,
-        })}</Alert.Description>
-    </Alert.Root>
-  {/if}
   {#if clearResult?.skipped_active}
     <Alert.Root variant="warning" role="status">
       <Alert.Description>{m.observation_clear_skipped_active({ count: clearResult.skipped_active })}</Alert.Description>

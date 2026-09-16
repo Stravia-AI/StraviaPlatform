@@ -5,6 +5,7 @@
       {
         "label": "main",
         "create": false,
+        "dragDropEnabled": false,
         "title": "Stravia Agent infra",
         "width": 1280,
         "height": 800,

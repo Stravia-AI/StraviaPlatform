@@ -793,7 +793,6 @@ struct PreparedAttempt {
     model_turn_id: String,
     route: RouteContext,
     provider_call: ProviderCall,
-    reasoning_encrypted_content_requested: bool,
     protected_thinking_replayed: bool,
     force_stream: bool,
     actual_model: String,
@@ -1366,8 +1365,6 @@ async fn prepare_attempt(
         insert_default_prompt_cache_key(&mut outbound.body, prompt_cache_key);
         insert_default_prompt_cache_key(&mut full_outbound.body, prompt_cache_key);
     }
-    let reasoning_encrypted_content_requested =
-        requests_reasoning_encrypted_content(&outbound.body);
     let mut provider_call = if websocket_enabled {
         adapter.bind_responses_websocket(ResponsesWebSocketBinding {
             client,
@@ -1399,7 +1396,6 @@ async fn prepare_attempt(
             egress,
         },
         provider_call,
-        reasoning_encrypted_content_requested,
         protected_thinking_replayed,
         force_stream: !compact
             && (input.request.stream.enabled
@@ -1424,18 +1420,6 @@ fn protected_reasoning_rejected(body: &serde_json::Value) -> bool {
         || message.contains("invalid thinking signature")
 }
 
-fn requests_reasoning_encrypted_content(body: &serde_json::Value) -> bool {
-    body.get("include")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|include| {
-            include.iter().any(|value| {
-                value
-                    .as_str()
-                    .is_some_and(|value| value == "reasoning.encrypted_content")
-            })
-        })
-}
-
 fn insert_default_prompt_cache_key(body: &mut serde_json::Value, prompt_cache_key: &str) {
     if let Some(body) = body.as_object_mut() {
         body.entry("prompt_cache_key")
@@ -1445,10 +1429,7 @@ fn insert_default_prompt_cache_key(body: &mut serde_json::Value, prompt_cache_ke
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        handle_terminal_stream_error, insert_default_prompt_cache_key,
-        requests_reasoning_encrypted_content,
-    };
+    use super::{handle_terminal_stream_error, insert_default_prompt_cache_key};
     use stravia_runtime_contract::protocol::ir::AiError;
     use stravia_runtime_contract::protocol::ir::AiErrorKind;
     use stravia_runtime_contract::protocol::ir::AiStreamDelta;
@@ -1462,22 +1443,6 @@ mod tests {
         let mut explicit = serde_json::json!({"prompt_cache_key": "client-cache"});
         insert_default_prompt_cache_key(&mut explicit, "session-cache");
         assert_eq!(explicit["prompt_cache_key"], "client-cache");
-    }
-
-    #[test]
-    fn encrypted_reasoning_detection_uses_the_outbound_include_contract() {
-        assert!(requests_reasoning_encrypted_content(&serde_json::json!({
-            "include": [
-                "web_search_call.action.sources",
-                "reasoning.encrypted_content"
-            ]
-        })));
-        assert!(!requests_reasoning_encrypted_content(
-            &serde_json::json!({"include": ["web_search_call.action.sources"]})
-        ));
-        assert!(!requests_reasoning_encrypted_content(
-            &serde_json::json!({})
-        ));
     }
 
     #[test]
@@ -1590,7 +1555,6 @@ async fn begin_attempt(
             output: Box::pin(stream::once(async move {
                 Ok(CanonicalEvent::Compacted(Box::new(response)))
             })),
-            reasoning_encrypted_content_requested: false,
             streamed: false,
         });
     }
@@ -1705,7 +1669,6 @@ async fn begin_attempt(
             route: prepared.route,
             target: target_identity,
             output: Box::pin(stream::iter(events)),
-            reasoning_encrypted_content_requested: prepared.reasoning_encrypted_content_requested,
             streamed: false,
         });
     }
@@ -2038,7 +2001,6 @@ async fn begin_attempt(
         route: prepared.route,
         target: target_identity,
         output: Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)),
-        reasoning_encrypted_content_requested: prepared.reasoning_encrypted_content_requested,
         streamed: true,
     })
 }

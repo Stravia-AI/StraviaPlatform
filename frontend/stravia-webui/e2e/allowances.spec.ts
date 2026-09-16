@@ -123,7 +123,7 @@ test('renders the matrix, shared summary, timeline, forecast, model details, and
   await expect(matrix.getByText('Alpha account')).toBeVisible()
   await expect(matrix.getByText('Beta account')).toBeVisible()
   await expect(matrix.getByText('Gamma account')).toBeVisible()
-  await expect(matrix.getByText('Weekly window')).toHaveCount(2)
+  await expect(matrix.getByText('Weekly window', { exact: true })).toHaveCount(2)
   await expect(matrix.getByText('Fresh', { exact: true })).toBeVisible()
   await expect(matrix.getByText('Stale', { exact: true })).toBeVisible()
   await expect(matrix.getByText('Unavailable', { exact: true })).toBeVisible()
@@ -133,13 +133,28 @@ test('renders the matrix, shared summary, timeline, forecast, model details, and
   await expect(matrix.getByText('Reconnect this model service or update its credential.')).toBeVisible()
 
   const conditionSummary = page.getByRole('region', { name: 'Allowance condition' })
+  const forecastPanel = page
+    .locator('[data-slot="card"]')
+    .filter({ has: page.getByRole('heading', { name: 'Exhaustion forecast' }) })
   await expect(conditionSummary.getByText('Exhausted', { exact: true })).toBeVisible()
   await expect(conditionSummary.getByText(/Lowest remaining/)).toBeVisible()
+  const emptyWindows = page.getByTestId('allowance-empty-windows')
+  await expect(emptyWindows).toContainText('Beta account')
+  await expect(emptyWindows).toContainText('Weekly window')
+  await expect(emptyWindows).not.toContainText('Alpha account')
+  await expect(matrix.getByTestId('allowance-provider-provider-beta')).toContainText('Weekly window exhausted')
+  await expect(matrix.getByTestId('allowance-provider-provider-alpha')).not.toContainText('Weekly window exhausted')
   await expect(page.getByRole('heading', { name: 'Reset timeline' })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Exhaustion forecast' })).toBeVisible()
   await expect(page.getByText('Based on the current window')).toBeVisible()
-  await expect(page.getByText('Will exhaust 1')).toBeVisible()
-  await expect(page.getByText('Unknown 0')).toBeVisible()
+  await expect(forecastPanel.getByTestId('allowance-forecast-exhausted')).toHaveAttribute('aria-label', 'Exhausted 1')
+  await expect(forecastPanel.getByTestId('allowance-forecast-will-exhaust')).toHaveAttribute(
+    'aria-label',
+    'Will exhaust 0',
+  )
+  await expect(forecastPanel.getByTestId('allowance-forecast-no-risk')).toHaveAttribute('aria-label', 'No risk 1')
+  await expect(forecastPanel).toContainText('exhausted at')
+  await expect(forecastPanel).not.toContainText('may exhaust')
 
   await matrix.getByLabel('Show model allowances for Alpha account').click()
   await matrix.getByText('claude-opus-4-6').click()
@@ -198,20 +213,20 @@ test('keeps allowance details visible when refresh replaces provider snapshots',
   const posts = await mockAllowances(page, snapshots)
   await page.goto('/allowances')
   const matrix = page.getByRole('table', { name: 'Allowance matrix' })
-  await expect(matrix.getByText('Weekly window')).toHaveCount(2)
+  await expect(matrix.getByText('Weekly window', { exact: true })).toHaveCount(2)
   await expect(matrix.getByText('0 USD')).toBeVisible()
 
   snapshots[0].allowances[1].remaining!.value = 12
   await page.getByRole('button', { name: 'Refresh all' }).click()
   await expect.poll(() => posts).toContain('/api/v1/provider-allowances/refresh')
   await expect(matrix.getByText('12 USD')).toBeVisible()
-  await expect(matrix.getByText('Weekly window')).toHaveCount(2)
+  await expect(matrix.getByText('Weekly window', { exact: true })).toHaveCount(2)
 
   snapshots[0].allowances[1].remaining!.value = 24
   await matrix.getByRole('button', { name: 'Refresh Alpha account' }).click()
   await expect.poll(() => posts).toContain('/api/v1/provider-allowances/provider-alpha/refresh')
   await expect(matrix.getByText('24 USD')).toBeVisible()
-  await expect(matrix.getByText('Weekly window')).toHaveCount(2)
+  await expect(matrix.getByText('Weekly window', { exact: true })).toHaveCount(2)
 })
 
 test('does not treat an exhausted allowance without a reset date as exhausted', async ({ page }) => {
@@ -228,7 +243,9 @@ test('does not treat an exhausted allowance without a reset date as exhausted', 
   await expect(
     page.getByRole('region', { name: 'Allowance condition' }).getByText('Normal', { exact: true }),
   ).toBeVisible()
-  await expect(forecastPanel).toContainText('Unknown 0')
+  await expect(page.getByTestId('allowance-empty-windows')).toHaveCount(0)
+  await expect(forecastPanel.getByTestId('allowance-forecast-exhausted')).toHaveAttribute('aria-label', 'Exhausted 0')
+  await expect(forecastPanel.getByTestId('allowance-forecast-no-risk')).toHaveAttribute('aria-label', 'No risk 1')
 
   await selectFilter(page, 'Filter by allowance condition', 'Exhausted')
   await expect(page.getByText('No allowances match these filters.')).toBeVisible()
@@ -249,7 +266,8 @@ test('search and all filters drive the same visible collection', async ({ page }
   await expect(page.getByRole('table', { name: 'Allowance matrix' }).getByText('Alpha account')).toBeVisible()
   await expect(page.getByRole('table', { name: 'Allowance matrix' }).getByText('Beta account')).toHaveCount(0)
   await expect(timelinePanel).not.toContainText('Beta account')
-  await expect(forecastPanel).toContainText('Unknown 0')
+  await expect(forecastPanel.getByTestId('allowance-forecast-exhausted')).toHaveAttribute('aria-label', 'Exhausted 0')
+  await expect(forecastPanel.getByTestId('allowance-forecast-no-risk')).toHaveAttribute('aria-label', 'No risk 1')
 
   await search.fill('Weekly')
   await expect(page.getByText('No allowances match these filters.')).toBeVisible()
@@ -260,8 +278,12 @@ test('search and all filters drive the same visible collection', async ({ page }
   await expect(page.getByRole('table', { name: 'Allowance matrix' }).getByText('Alpha account')).toHaveCount(0)
   await expect(timelinePanel).toContainText('Beta account')
   await expect(timelinePanel).not.toContainText('Alpha account')
-  await expect(forecastPanel).toContainText('Will exhaust 1')
-  await expect(forecastPanel).toContainText('Unknown 0')
+  await expect(forecastPanel.getByTestId('allowance-forecast-exhausted')).toHaveAttribute('aria-label', 'Exhausted 1')
+  await expect(forecastPanel.getByTestId('allowance-forecast-will-exhaust')).toHaveAttribute(
+    'aria-label',
+    'Will exhaust 0',
+  )
+  await expect(forecastPanel).toContainText('Current windows are already exhausted')
 
   await selectFilter(page, 'Filter by service type', 'All')
   await selectFilter(page, 'Filter by allowance condition', 'Exhausted')
@@ -269,8 +291,11 @@ test('search and all filters drive the same visible collection', async ({ page }
   await expect(page.getByRole('table', { name: 'Allowance matrix' }).getByText('Beta account')).toBeVisible()
   await expect(timelinePanel).toContainText('Beta account')
   await expect(timelinePanel).not.toContainText('Alpha account')
-  await expect(forecastPanel).toContainText('Will exhaust 1')
-  await expect(forecastPanel).toContainText('Unknown 0')
+  await expect(forecastPanel.getByTestId('allowance-forecast-exhausted')).toHaveAttribute('aria-label', 'Exhausted 1')
+  await expect(forecastPanel.getByTestId('allowance-forecast-will-exhaust')).toHaveAttribute(
+    'aria-label',
+    'Will exhaust 0',
+  )
 
   await selectFilter(page, 'Filter by allowance condition', 'All')
   await selectFilter(page, 'Filter by data freshness', 'Unavailable')
@@ -278,9 +303,12 @@ test('search and all filters drive the same visible collection', async ({ page }
   await expect(page.getByRole('table', { name: 'Allowance matrix' }).getByText('Alpha account')).toHaveCount(0)
   await expect(timelinePanel).not.toContainText('Alpha account')
   await expect(timelinePanel).not.toContainText('Beta account')
-  await expect(forecastPanel).toContainText('No risk 0')
-  await expect(forecastPanel).toContainText('Will exhaust 0')
-  await expect(forecastPanel).toContainText('Unknown 0')
+  await expect(forecastPanel.getByTestId('allowance-forecast-exhausted')).toHaveAttribute('aria-label', 'Exhausted 0')
+  await expect(forecastPanel.getByTestId('allowance-forecast-will-exhaust')).toHaveAttribute(
+    'aria-label',
+    'Will exhaust 0',
+  )
+  await expect(forecastPanel.getByTestId('allowance-forecast-no-risk')).toHaveAttribute('aria-label', 'No risk 0')
 })
 
 test('renders the empty and request-error states with recovery guidance', async ({ page }) => {

@@ -278,6 +278,96 @@ async fn protected_reasoning_marker_failures_abort_after_live_summary() {
 }
 
 #[tokio::test]
+async fn open_responses_public_summaries_stream_before_late_encrypted_content() {
+    let (summary, completion) = openai_responses_late_encrypted_summary_sse_parts();
+    let (upstream_url, _calls, release_upstream) = serve_gated_sse(summary, completion).await;
+    let data_dir = tempfile::tempdir().expect("temp data dir");
+    let gateway = Gateway::new(crate::config::GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .expect("gateway init");
+    configure_route_with_protocol(
+        &gateway,
+        "late-encrypted-summary",
+        &[upstream_url],
+        "test-http",
+        "open-responses",
+    )
+    .await;
+
+    let request = crate::protocol::transform::ProtocolTransform::global()
+        .bind(OPEN_RESPONSES_2026_04_24, OPEN_RESPONSES_2026_04_24)
+        .expect("Open Responses pair")
+        .decode_request(serde_json::json!({
+            "model": "late-encrypted-summary",
+            "stream": true,
+            "include": ["reasoning.encrypted_content"],
+            "reasoning": {"effort": "high", "summary": "auto"},
+            "input": "test"
+        }))
+        .expect("Open Responses request");
+    let headers = authorized_headers(&gateway).await;
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        execute_request_with_headers(
+            gateway,
+            headers,
+            request,
+            OPEN_RESPONSES_2026_04_24,
+            "/v1/responses",
+        ),
+    )
+    .await
+    .expect("HTTP headers start when public summary deltas arrive");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let mut chunks = response.into_body().into_data_stream();
+    let prefix = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let mut prefix = String::new();
+        while !prefix.contains("response.reasoning_summary_text.delta")
+            || !prefix.contains("live protected")
+        {
+            let chunk = chunks
+                .next()
+                .await
+                .expect("stream ended before public summary")
+                .expect("stream chunk");
+            prefix.push_str(std::str::from_utf8(&chunk).expect("UTF-8 stream chunk"));
+        }
+        prefix
+    })
+    .await
+    .expect("public summary should stream before encrypted item.done");
+    assert!(
+        prefix.contains(r#""delta":"live protected "#)
+            || prefix.contains("live protected"),
+        "{prefix}"
+    );
+    assert!(
+        !prefix.contains("opaque-reasoning"),
+        "encrypted payload must not leak into live summary deltas: {prefix}"
+    );
+    assert!(
+        !prefix.contains("response.output_item.done"),
+        "summary must not wait for thinking item completion: {prefix}"
+    );
+
+    release_upstream
+        .send(())
+        .expect("release upstream completion after live summary");
+    let mut rest = prefix;
+    while let Some(chunk) = chunks.next().await {
+        rest.push_str(std::str::from_utf8(&chunk.expect("stream chunk")).expect("UTF-8"));
+    }
+    assert!(
+        rest.contains("opaque-reasoning"),
+        "encrypted content still arrives on item.done: {rest}"
+    );
+}
+
+#[tokio::test]
 async fn disconnect_during_post_text_preview_persists_no_marker_or_generation_node() {
     let first_events = [
         serde_json::json!({

@@ -254,12 +254,11 @@ fn enter_phase(phase: &mut PhaseTracker, next: Phase) -> Result<(), Box<Response
 fn thinking_carrier_facts(
     ingress: ProtocolId,
     egress: ProtocolId,
-    encrypted_content_requested: bool,
 ) -> crate::protocol::transform::ThinkingCarrierFacts {
     crate::protocol::transform::ProtocolTransform::global()
         .bind(ingress, egress)
         .expect("Inference Run uses a registered protocol pair")
-        .thinking_carrier_facts(encrypted_content_requested)
+        .thinking_carrier_facts()
 }
 
 /// Materialized Generation Chain state owned by the Inference Run while the
@@ -1033,7 +1032,7 @@ async fn dispatch_round(
                         .as_mut()
                         .expect("buffered Client Projection session");
                     projection_session.begin_model_leg(
-                        thinking_carrier_facts(ingress, ingress, false),
+                        thinking_carrier_facts(ingress, ingress),
                         run.exposed_tool_names(),
                         None,
                     );
@@ -1301,11 +1300,7 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
         .as_mut()
         .expect("buffered Client Projection session");
     projection_session.begin_model_leg(
-        thinking_carrier_facts(
-            ingress,
-            turn.route.egress,
-            turn.reasoning_encrypted_content_requested,
-        ),
+        thinking_carrier_facts(ingress, turn.route.egress),
         inference_run
             .as_ref()
             .expect("buffered Inference Run before projection")

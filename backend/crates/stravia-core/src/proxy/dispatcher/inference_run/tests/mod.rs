@@ -2939,7 +2939,10 @@ fn openai_responses_sse(content: &str) -> String {
     )
 }
 
-fn openai_responses_live_summary_sse_parts(encrypted_content: Option<&str>) -> (String, String) {
+fn openai_responses_live_summary_sse_parts(
+    added_encrypted_content: Option<&str>,
+    done_encrypted_content: Option<&str>,
+) -> (String, String) {
     let summary = "live protected summary";
     let summary_prefix = "live protected ";
     let summary_suffix = "summary";
@@ -2960,9 +2963,11 @@ fn openai_responses_live_summary_sse_parts(encrypted_content: Option<&str>) -> (
         }],
         "content": []
     });
-    if let Some(encrypted_content) = encrypted_content {
+    if let Some(encrypted_content) = added_encrypted_content {
         reasoning_in_progress["encrypted_content"] =
             serde_json::Value::String(encrypted_content.to_owned());
+    }
+    if let Some(encrypted_content) = done_encrypted_content {
         reasoning_completed["encrypted_content"] =
             serde_json::Value::String(encrypted_content.to_owned());
     }
@@ -3071,7 +3076,11 @@ fn openai_responses_live_summary_sse_parts(encrypted_content: Option<&str>) -> (
 }
 
 fn openai_responses_live_protected_summary_sse_parts() -> (String, String) {
-    openai_responses_live_summary_sse_parts(Some("opaque-reasoning"))
+    openai_responses_live_summary_sse_parts(Some("opaque-reasoning"), Some("opaque-reasoning"))
+}
+
+fn openai_responses_late_encrypted_summary_sse_parts() -> (String, String) {
+    openai_responses_live_summary_sse_parts(None, Some("opaque-reasoning"))
 }
 
 fn openai_responses_tool_sse(content: &str, call_id: &str) -> String {

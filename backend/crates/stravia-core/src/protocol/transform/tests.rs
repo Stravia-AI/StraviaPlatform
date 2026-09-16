@@ -431,17 +431,12 @@ fn thinking_carrier_facts_stay_behind_the_bound_protocol_pair() {
         )
         .expect("registered protocol pair");
     assert_eq!(
-        responses.thinking_carrier_facts(false),
+        responses.thinking_carrier_facts(),
         ThinkingCarrierFacts {
             indexed: true,
             may_be_protected: true,
             stream_unprotected_summaries: true,
         }
-    );
-    assert!(
-        !responses
-            .thinking_carrier_facts(true)
-            .stream_unprotected_summaries
     );
 
     let anthropic = ProtocolTransform::global()
@@ -451,7 +446,7 @@ fn thinking_carrier_facts_stay_behind_the_bound_protocol_pair() {
         )
         .expect("registered protocol pair");
     assert_eq!(
-        anthropic.thinking_carrier_facts(false),
+        anthropic.thinking_carrier_facts(),
         ThinkingCarrierFacts {
             indexed: false,
             may_be_protected: true,

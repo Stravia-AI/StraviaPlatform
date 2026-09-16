@@ -104,37 +104,40 @@ impl RouteModule<'_> {
     ) -> anyhow::Result<()> {
         for target in targets {
             let provider = self.admin.get_provider(target.provider_id.trim()).await?;
+            let registry = crate::protocol::registry::ProtocolRegistry::global();
+            let mut levels = Vec::new();
+            let mut controls = Vec::new();
             for row in &target.thinking_level_map {
-                let registry = crate::protocol::registry::ProtocolRegistry::global();
-                let representable = registry
-                    .protocol_represents_target_thinking_control(&provider.protocol, &row.control)
-                    || registry
-                        .parse_protocol(&provider.protocol)
-                        .is_some_and(|protocol| {
-                            protocol == stravia_runtime_contract::protocol::ids::Protocol::OpenAICompatible
-                            && matches!(
-                                row.control,
-                                stravia_runtime_contract::thinking::TargetThinkingControl::Enabled
-                                    | stravia_runtime_contract::thinking::TargetThinkingControl::Disabled
-                            )
-                            && crate::provider::common::openai_compatible_thinking::supports_toggle(
-                                &provider,
-                                &target.model,
-                            )
-                        });
-                if !representable {
-                    return Err(coded_error(
-                        "THINKING_CONTROL_UNREPRESENTABLE",
-                        "Target protocol cannot write this Target Thinking Control",
-                        serde_json::json!({
-                            "provider_id": target.provider_id,
-                            "model_id": target.model,
-                            "level": row.level.as_str(),
-                            "protocol": provider.protocol,
-                        }),
-                    ));
+                if thinking_control_writable(registry, &provider, &target.model, &row.control) {
+                    continue;
+                }
+                levels.push(row.level.as_str());
+                let kind = row.control.kind();
+                if !controls.contains(&kind) {
+                    controls.push(kind);
                 }
             }
+            if levels.is_empty() {
+                continue;
+            }
+            return Err(coded_error(
+                "THINKING_CONTROL_UNREPRESENTABLE",
+                "Target protocol cannot write this Target Thinking Control",
+                serde_json::json!({
+                    "provider_id": target.provider_id,
+                    "model_id": target.model,
+                    "level": levels[0],
+                    "levels": levels,
+                    "control": controls[0],
+                    "controls": controls,
+                    "supported_controls": writable_thinking_control_kinds(
+                        registry,
+                        &provider,
+                        &target.model,
+                    ),
+                    "protocol": provider.protocol,
+                }),
+            ));
         }
         Ok(())
     }
@@ -260,4 +263,55 @@ impl RouteModule<'_> {
         }
         Ok(())
     }
+}
+
+fn thinking_control_writable(
+    registry: &crate::protocol::registry::ProtocolRegistry,
+    provider: &crate::db::models::Provider,
+    model: &str,
+    control: &stravia_runtime_contract::thinking::TargetThinkingControl,
+) -> bool {
+    use stravia_runtime_contract::thinking::TargetThinkingControl;
+
+    registry.protocol_represents_target_thinking_control(&provider.protocol, control)
+        || registry
+            .parse_protocol(&provider.protocol)
+            .is_some_and(|protocol| {
+                protocol
+                    == stravia_runtime_contract::protocol::ids::Protocol::OpenAICompatible
+                    && matches!(
+                        control,
+                        TargetThinkingControl::Enabled | TargetThinkingControl::Disabled
+                    )
+                    && crate::provider::common::openai_compatible_thinking::supports_toggle(
+                        provider, model,
+                    )
+            })
+}
+
+fn writable_thinking_control_kinds(
+    registry: &crate::protocol::registry::ProtocolRegistry,
+    provider: &crate::db::models::Provider,
+    model: &str,
+) -> Vec<&'static str> {
+    use stravia_runtime_contract::thinking::TargetThinkingControl;
+
+    const KINDS: [(&str, TargetThinkingControl); 5] = [
+        (
+            "effort",
+            TargetThinkingControl::Effort {
+                value: String::new(),
+            },
+        ),
+        ("budget", TargetThinkingControl::Budget { value: 0 }),
+        ("enabled", TargetThinkingControl::Enabled),
+        ("disabled", TargetThinkingControl::Disabled),
+        ("hidden", TargetThinkingControl::Hidden),
+    ];
+    KINDS
+        .into_iter()
+        .filter_map(|(kind, control)| {
+            thinking_control_writable(registry, provider, model, &control).then_some(kind)
+        })
+        .collect()
 }

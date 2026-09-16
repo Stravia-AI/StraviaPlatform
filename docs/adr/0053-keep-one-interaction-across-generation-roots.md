@@ -22,4 +22,4 @@ status: accepted
 
 本次修复只改变启用新规则后准入请求的归属判定，不重新分配已有 Run 的 Interaction、不改写其已记录的来源关系，也不提供存量 Observation 重建工具。已发现的两次裁图和一次摘要替换断点用于隔离回归样本，不直接修改 release 数据库；已有错误分组不会因本次修复而自动纠正。
 
-本决策记录已确认的目标归属语义、受时间约束的尾部归并原则和新交互的诊断来源连接，不表示跨根归并已经实现。它扩展 [ADR-0040](0040-own-interaction-observation-outside-generation-chain.md) 的诊断归属语义，保持 [ADR-0020](0020-discover-generation-parents-from-strict-canonical-history.md) 的严格执行历史匹配契约不变。
+Observation 对启用后准入的请求按本决策分组；已有 Run 不重算。过长的收到窗口只保留最新后缀作为诊断索引，单个超限单元仍明确失败。它扩展 [ADR-0040](0040-own-interaction-observation-outside-generation-chain.md) 的诊断归属语义，保持 [ADR-0020](0020-discover-generation-parents-from-strict-canonical-history.md) 的严格执行历史匹配契约不变。

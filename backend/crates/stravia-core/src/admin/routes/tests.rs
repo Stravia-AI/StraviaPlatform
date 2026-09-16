@@ -801,11 +801,21 @@ async fn unknown_compatible_provider_does_not_guess_toggle_wire_shape() {
     let error = create_openai_compatible_toggle_route("openai-compatible", "custom-toggle-model")
         .await
         .unwrap_err();
+    let payload: serde_json::Value =
+        serde_json::from_str(&error.to_string()).expect("coded thinking-control error");
 
-    assert!(
-        error
-            .to_string()
-            .contains("THINKING_CONTROL_UNREPRESENTABLE")
+    assert_eq!(payload["code"], "THINKING_CONTROL_UNREPRESENTABLE");
+    assert_eq!(
+        payload["params"]["levels"],
+        serde_json::json!(["off", "medium"])
+    );
+    assert_eq!(
+        payload["params"]["controls"],
+        serde_json::json!(["disabled", "enabled"])
+    );
+    assert_eq!(
+        payload["params"]["supported_controls"],
+        serde_json::json!(["effort", "hidden"])
     );
 }
 
