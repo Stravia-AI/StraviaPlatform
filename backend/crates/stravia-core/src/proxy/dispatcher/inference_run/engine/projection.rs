@@ -2711,6 +2711,137 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unambiguous_client_tool_arguments_stream_without_waiting_for_complete() {
+        let (mut session, _, _) = projection_session_fixture("client-tool-stream-owner").await;
+        session.begin_model_leg(
+            ThinkingCarrierFacts {
+                indexed: false,
+                may_be_protected: false,
+                stream_unprotected_summaries: false,
+            },
+            vec!["StraviaRead".to_owned()],
+            None,
+        );
+
+        let started = session
+            .project_live_deltas(
+                vec![AiStreamDelta::ToolCallStart {
+                    index: 0,
+                    id: "call-eval".into(),
+                    name: "eval".into(),
+                }],
+                true,
+            )
+            .await
+            .expect("forward client tool start");
+        assert!(started.iter().any(|batch| {
+            batch.deltas().iter().any(|delta| {
+                matches!(
+                    delta,
+                    AiStreamDelta::ToolCallStart { name, .. } if name == "eval"
+                )
+            })
+        }));
+
+        let streamed = session
+            .project_live_deltas(
+                vec![AiStreamDelta::ToolCallDelta {
+                    index: 0,
+                    arguments: r#"{"language":"py"}"#.into(),
+                }],
+                true,
+            )
+            .await
+            .expect("forward client tool arguments");
+        assert!(streamed.iter().any(|batch| {
+            batch.deltas().iter().any(|delta| {
+                matches!(
+                    delta,
+                    AiStreamDelta::ToolCallDelta { arguments, .. }
+                        if arguments == r#"{"language":"py"}"#
+                )
+            })
+        }));
+    }
+
+    #[tokio::test]
+    async fn parallel_client_tools_stream_arguments_independently() {
+        let (mut session, _, _) = projection_session_fixture("parallel-client-tools-owner").await;
+        session.begin_model_leg(
+            ThinkingCarrierFacts {
+                indexed: false,
+                may_be_protected: false,
+                stream_unprotected_summaries: false,
+            },
+            vec!["StraviaRead".to_owned()],
+            None,
+        );
+
+        let first = session
+            .project_live_deltas(
+                vec![
+                    AiStreamDelta::ToolCallStart {
+                        index: 0,
+                        id: "call-read".into(),
+                        name: "read".into(),
+                    },
+                    AiStreamDelta::ToolCallDelta {
+                        index: 0,
+                        arguments: r#"{"path":"a"}"#.into(),
+                    },
+                ],
+                true,
+            )
+            .await
+            .expect("forward first client tool");
+        assert!(first.iter().any(|batch| {
+            batch
+                .deltas()
+                .iter()
+                .any(|delta| matches!(delta, AiStreamDelta::ToolCallDelta { index: 0, .. }))
+        }));
+
+        let second = session
+            .project_live_deltas(
+                vec![
+                    AiStreamDelta::ToolCallStart {
+                        index: 1,
+                        id: "call-grep".into(),
+                        name: "grep".into(),
+                    },
+                    AiStreamDelta::ToolCallDelta {
+                        index: 1,
+                        arguments: r#"{"pattern":"x"}"#.into(),
+                    },
+                ],
+                true,
+            )
+            .await
+            .expect("forward second client tool");
+        assert!(second.iter().any(|batch| {
+            batch
+                .deltas()
+                .iter()
+                .any(|delta| matches!(delta, AiStreamDelta::ToolCallDelta { index: 1, .. }))
+        }));
+        assert!(
+            session
+                .project_live_deltas(
+                    vec![AiStreamDelta::ToolCallStart {
+                        index: 2,
+                        id: "call-platform".into(),
+                        name: "StraviaRead".into(),
+                    }],
+                    true,
+                )
+                .await
+                .expect("hide platform tool")
+                .iter()
+                .all(|batch| batch.is_empty())
+        );
+    }
+
+    #[tokio::test]
     async fn protected_thinking_without_public_bytes_projects_only_its_marker() {
         let (mut session, _, _) = projection_session_fixture("marker-only-owner").await;
         session.begin_model_leg(

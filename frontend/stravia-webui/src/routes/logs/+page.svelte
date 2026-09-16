@@ -53,6 +53,7 @@ import * as Tabs from '$lib/components/ui/tabs'
 
 const batchSize = 12
 const maxWindowMs = 86_400_000
+const defaultWindowMs = 10 * 60_000
 const presetMinutes = [5, 10, 30, 60, 240, 720, 1440]
 const minTokenStops = [0, 1_000, 2_000, 5_000, 10_000, 20_000, 50_000, 100_000, 200_000, 500_000, 1_000_000]
 const defaultMinTokenStop = 4
@@ -60,7 +61,7 @@ const queryClient = useQueryClient()
 let activeTab = $state('interactions')
 let anchorAt = $state(Date.now())
 let windowIndex = $state(0)
-let durationMs = $state(maxWindowMs)
+let durationMs = $state(defaultWindowMs)
 let customRange = $state(false)
 let rangeOpen = $state(false)
 let draftStart = $state('')
@@ -74,7 +75,7 @@ let roots = $state.raw<ForestRoot[]>([])
 let rootTotal = $state(0)
 let nextCursor = $state<string | null>()
 let snapshotSequence = $state(0)
-let windowStart = $state(Date.now() - maxWindowMs)
+let windowStart = $state(Date.now() - defaultWindowMs)
 let windowEnd = $state(Date.now())
 let loading = $state(true)
 let loadingMore = $state(false)

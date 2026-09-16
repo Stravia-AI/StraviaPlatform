@@ -13,6 +13,7 @@ struct PendingFunctionCall {
     name: String,
     arguments: String,
     status: Option<AiItemStatus>,
+    done_emitted: bool,
 }
 
 struct PendingOutputItem {
@@ -857,6 +858,64 @@ impl ResponsesStreamFormatter {
         ));
     }
 
+    fn emit_function_call_done(
+        &mut self,
+        events: &mut Vec<SseEvent>,
+        ir_index: usize,
+        completed: Option<&stravia_runtime_contract::protocol::ir::ToolCall>,
+        status: Option<AiItemStatus>,
+    ) {
+        let Some(pos) = self.tool_index_map.get(&ir_index).copied() else {
+            return;
+        };
+        let Some(call) = self.tool_calls.get_mut(pos) else {
+            return;
+        };
+        if let Some(completed) = completed {
+            if !completed.id.is_empty() {
+                call.call_id.clone_from(&completed.id);
+            }
+            if !completed.name.is_empty() {
+                call.name.clone_from(&completed.name);
+            }
+            call.arguments.clone_from(&completed.arguments);
+        }
+        if status.is_some() {
+            call.status = status;
+        }
+        if call.done_emitted {
+            return;
+        }
+        call.done_emitted = true;
+        let call = &self.tool_calls[pos];
+        events.push(SseEvent::new(
+            Some("response.function_call_arguments.done"),
+            serde_json::json!({
+                "type": "response.function_call_arguments.done",
+                "item_id": call.item_id,
+                "output_index": call.output_index,
+                "arguments": call.arguments
+            })
+            .to_string(),
+        ));
+        events.push(SseEvent::new(
+            Some("response.output_item.done"),
+            serde_json::json!({
+                "type": "response.output_item.done",
+                "output_index": call.output_index,
+                "item": {
+                    "type": "function_call",
+                    "id": call.item_id,
+                    "call_id": call.call_id,
+                    "name": call.name,
+                    "arguments": call.arguments,
+                    "status": call.status.map(AiItemStatus::as_str).unwrap_or("completed")
+                }
+            })
+            .to_string(),
+        ));
+    }
+
     fn emit_terminal(
         &mut self,
         status: &str,
@@ -966,6 +1025,9 @@ impl ResponsesStreamFormatter {
         }
 
         for call in &self.tool_calls {
+            if call.done_emitted {
+                continue;
+            }
             let arguments_done = serde_json::json!({
                 "type": "response.function_call_arguments.done",
                 "item_id": call.item_id,
@@ -978,6 +1040,9 @@ impl ResponsesStreamFormatter {
             ));
         }
         for call in &self.tool_calls {
+            if call.done_emitted {
+                continue;
+            }
             let tool_done = serde_json::json!({
                 "type": "response.output_item.done",
                 "output_index": call.output_index,
@@ -1433,6 +1498,7 @@ impl ResponsesStreamFormatter {
                         name: name.clone(),
                         arguments: String::new(),
                         status: None,
+                        done_emitted: false,
                     });
 
                     let added = serde_json::json!({
@@ -1468,6 +1534,9 @@ impl ResponsesStreamFormatter {
                             ev.to_string(),
                         ));
                     }
+                }
+                AiStreamDelta::ToolCallComplete { index, tool_call } => {
+                    self.emit_function_call_done(&mut events, *index, Some(tool_call), None);
                 }
                 AiStreamDelta::Unknown { raw } => {
                     let Ok(mut item) = serde_json::from_str::<serde_json::Value>(raw) else {
@@ -1612,13 +1681,13 @@ impl ResponsesStreamFormatter {
                             .insert(*index, content.clone());
                     }
                     self.flush_pending_annotations(&mut events, *index);
-                    if item.function_call_ref().is_some()
-                        && let Some(call) = self
-                            .tool_calls
-                            .iter_mut()
-                            .find(|call| call.output_index == *index)
-                    {
-                        call.status = item.status();
+                    if let Some(call) = item.function_call_ref() {
+                        self.emit_function_call_done(
+                            &mut events,
+                            *index,
+                            Some(call),
+                            item.status(),
+                        );
                     }
                     if let Some((call_id, content)) = item.function_call_output_ref() {
                         self.ensure_started(&mut events);

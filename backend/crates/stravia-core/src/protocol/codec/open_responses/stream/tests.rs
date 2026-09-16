@@ -323,6 +323,209 @@ fn function_call_item_done_preserves_incomplete_status() {
     assert_eq!(terminal["response"]["output"][0]["status"], "incomplete");
 }
 
+fn event_bodies(events: &[SseEvent]) -> Vec<serde_json::Value> {
+    events
+        .iter()
+        .filter_map(|event| serde_json::from_str::<serde_json::Value>(&event.data).ok())
+        .collect()
+}
+
+fn function_call_item(
+    id: &str,
+    name: &str,
+    arguments: &str,
+) -> stravia_runtime_contract::protocol::ir::AiItem {
+    stravia_runtime_contract::protocol::ir::AiItem::function_call(
+        stravia_runtime_contract::protocol::ir::ToolCall {
+            id: id.into(),
+            name: name.into(),
+            arguments: arguments.into(),
+        },
+    )
+}
+
+#[test]
+fn function_call_item_done_emits_arguments_done_before_terminal() {
+    let mut formatter = ResponsesStreamFormatter::new();
+    let live = formatter.format_deltas(&[
+        AiStreamDelta::MessageStart {
+            id: "resp-live-tool".into(),
+            model: "logical-model".into(),
+        },
+        AiStreamDelta::ToolCallStart {
+            index: 0,
+            id: "call_1".into(),
+            name: "read".into(),
+        },
+        AiStreamDelta::ToolCallDelta {
+            index: 0,
+            arguments: r#"{"path":"a"}"#.into(),
+        },
+        AiStreamDelta::ItemDone {
+            index: 0,
+            item: function_call_item("call_1", "read", r#"{"path":"a"}"#),
+        },
+    ]);
+    let live_bodies = event_bodies(&live);
+    assert!(
+        live_bodies.iter().any(|body| {
+            body["type"] == "response.function_call_arguments.done"
+                && body["arguments"] == r#"{"path":"a"}"#
+        }),
+        "client tool arguments must complete as soon as ItemDone arrives: {live_bodies:?}"
+    );
+    assert!(
+        live_bodies.iter().any(|body| {
+            body["type"] == "response.output_item.done" && body["item"]["type"] == "function_call"
+        }),
+        "client tool item must close before the terminal response: {live_bodies:?}"
+    );
+    assert!(
+        !live_bodies
+            .iter()
+            .any(|body| body["type"] == "response.completed"),
+        "ItemDone must not wait for the terminal response"
+    );
+
+    let terminal = formatter.format_deltas(&[AiStreamDelta::ResponseTerminal {
+        status: "completed".into(),
+        incomplete_details: None,
+    }]);
+    let terminal_bodies = event_bodies(&terminal);
+    assert_eq!(
+        terminal_bodies
+            .iter()
+            .filter(|body| body["type"] == "response.function_call_arguments.done")
+            .count(),
+        0,
+        "already forwarded function-call done must not be repeated at terminal: {terminal_bodies:?}"
+    );
+    assert!(
+        terminal_bodies
+            .iter()
+            .any(|body| body["type"] == "response.completed")
+    );
+}
+
+#[test]
+fn multi_function_calls_emit_done_as_each_item_completes() {
+    let mut formatter = ResponsesStreamFormatter::new();
+    let first = formatter.format_deltas(&[
+        AiStreamDelta::MessageStart {
+            id: "resp-multi-tool".into(),
+            model: "logical-model".into(),
+        },
+        AiStreamDelta::ToolCallStart {
+            index: 1,
+            id: "call_1".into(),
+            name: "read".into(),
+        },
+        AiStreamDelta::ToolCallDelta {
+            index: 1,
+            arguments: r#"{"path":"a"}"#.into(),
+        },
+        AiStreamDelta::ItemDone {
+            index: 1,
+            item: function_call_item("call_1", "read", r#"{"path":"a"}"#),
+        },
+    ]);
+    let first_bodies = event_bodies(&first);
+    assert!(first_bodies.iter().any(|body| {
+        body["type"] == "response.function_call_arguments.done"
+            && body["arguments"] == r#"{"path":"a"}"#
+    }));
+    assert!(
+        !first_bodies
+            .iter()
+            .any(|body| body["type"] == "response.completed")
+    );
+
+    let second = formatter.format_deltas(&[
+        AiStreamDelta::ToolCallStart {
+            index: 2,
+            id: "call_2".into(),
+            name: "grep".into(),
+        },
+        AiStreamDelta::ToolCallDelta {
+            index: 2,
+            arguments: r#"{"pattern":"x"}"#.into(),
+        },
+    ]);
+    let second_bodies = event_bodies(&second);
+    assert!(second_bodies.iter().any(|body| {
+        body["type"] == "response.output_item.added"
+            && body["item"]["call_id"] == "call_2"
+            && body["item"]["name"] == "grep"
+    }));
+    assert!(
+        !second_bodies.iter().any(|body| {
+            body["type"] == "response.function_call_arguments.done"
+        }),
+        "the first client tool must already have completed before later tools start: {second_bodies:?}"
+    );
+
+    let tail = formatter.format_deltas(&[
+        AiStreamDelta::ItemDone {
+            index: 2,
+            item: function_call_item("call_2", "grep", r#"{"pattern":"x"}"#),
+        },
+        AiStreamDelta::ResponseTerminal {
+            status: "completed".into(),
+            incomplete_details: None,
+        },
+    ]);
+    let tail_bodies = event_bodies(&tail);
+    assert_eq!(
+        tail_bodies
+            .iter()
+            .filter(|body| body["type"] == "response.function_call_arguments.done")
+            .count(),
+        1,
+        "only the still-open client tool should complete in the tail: {tail_bodies:?}"
+    );
+    assert_eq!(tail_bodies.iter().find(|body| {
+        body["type"] == "response.function_call_arguments.done"
+    }).map(|body| body["arguments"].as_str()), Some(Some(r#"{"pattern":"x"}"#)));
+}
+
+#[test]
+fn tool_call_complete_emits_arguments_done_before_terminal() {
+    let mut formatter = ResponsesStreamFormatter::new();
+    let live = formatter.format_deltas(&[
+        AiStreamDelta::MessageStart {
+            id: "resp-complete-tool".into(),
+            model: "logical-model".into(),
+        },
+        AiStreamDelta::ToolCallStart {
+            index: 0,
+            id: "call_1".into(),
+            name: "eval".into(),
+        },
+        AiStreamDelta::ToolCallDelta {
+            index: 0,
+            arguments: r#"{"language":"py"}"#.into(),
+        },
+        AiStreamDelta::ToolCallComplete {
+            index: 0,
+            tool_call: stravia_runtime_contract::protocol::ir::ToolCall {
+                id: "call_1".into(),
+                name: "eval".into(),
+                arguments: r#"{"language":"py"}"#.into(),
+            },
+        },
+    ]);
+    let live_bodies = event_bodies(&live);
+    assert!(live_bodies.iter().any(|body| {
+        body["type"] == "response.function_call_arguments.done"
+            && body["arguments"] == r#"{"language":"py"}"#
+    }));
+    assert!(
+        !live_bodies
+            .iter()
+            .any(|body| body["type"] == "response.completed")
+    );
+}
+
 #[test]
 fn streams_platform_owned_result_as_indexed_output_item() {
     let mut formatter = ResponsesStreamFormatter::new();

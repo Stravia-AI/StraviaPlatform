@@ -831,7 +831,7 @@ test.describe('Interaction Observation canvas', () => {
       '/api/v1/observations/interactions/interaction-cinder/summary',
     ])
     const query = fixture.summaryRequests[0].searchParams
-    expect(Number(query.get('end_at')) - Number(query.get('start_at'))).toBe(DAY)
+    expect(Number(query.get('end_at')) - Number(query.get('start_at'))).toBe(600_000)
     expect(fixture.detailRequests).toEqual([])
 
     fixture.addInteraction(
@@ -2685,6 +2685,13 @@ test.describe('Interaction Observation canvas', () => {
   test('presets send bounded durations and custom local ranges reject more than 24 hours', async ({ page }) => {
     const fixture = await installObservationFixture(page)
     await page.goto('/logs')
+    await expect
+      .poll(() => {
+        const params = fixture.forestRequests.at(-1)?.searchParams
+        return Number(params?.get('end_at')) - Number(params?.get('start_at'))
+      })
+      .toBe(600_000)
+    await expect(page.getByRole('button', { name: 'Time window', exact: true })).toHaveText('10 minutes')
     const presets = [
       ['5 minutes', 300_000],
       ['10 minutes', 600_000],
