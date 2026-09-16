@@ -213,7 +213,7 @@ fn every_monitor_normalizes_its_response_fixture_and_rejects_schema_drift() {
             MonitorKind::DeepSeek,
             include_bytes!("fixtures/deepseek-success.json"),
             br#"{"is_available":true,"balance_infos":[]}"#,
-            "credits_balance",
+            "credits_balance_cny",
         ),
         (
             MonitorKind::NeuralWatt,
@@ -280,13 +280,61 @@ fn every_monitor_normalizes_its_response_fixture_and_rejects_schema_drift() {
         include_bytes!("fixtures/deepseek-success.json"),
     )
     .unwrap();
-    assert_eq!(
-        deepseek.allowances[0]
-            .remaining
-            .as_ref()
-            .and_then(|amount| amount.currency.as_deref()),
-        Some("USD")
-    );
+    // 双币种均有余额时各展示一条，key 带币种后缀
+    assert_eq!(deepseek.allowances.len(), 2);
+    assert_eq!(deepseek.allowances[0].key, "credits_balance_cny");
+    let cny = deepseek.allowances[0]
+        .remaining
+        .as_ref()
+        .expect("CNY balance");
+    assert_eq!(cny.currency.as_deref(), Some("CNY"));
+    assert_eq!(cny.value, 88.5);
+    let usd = deepseek.allowances[1]
+        .remaining
+        .as_ref()
+        .expect("USD balance");
+    assert_eq!(usd.currency.as_deref(), Some("USD"));
+    assert_eq!(usd.value, 12.25);
+}
+
+#[test]
+fn deepseek_lists_funded_currencies_and_hides_zero_balances() {
+    // 回归：真实 CNY 充值账户的响应，USD 记录恒为 0；
+    // 0 余额不上报，只展示非 0 币种，避免误报 0 USD。
+    let parsed = parse_monitor_response(
+        MonitorKind::DeepSeek,
+        br#"{"is_available":true,"balance_infos":[
+            {"currency":"CNY","total_balance":"9.99","granted_balance":"0.00","topped_up_balance":"9.99"},
+            {"currency":"USD","total_balance":"0.00","granted_balance":"0.00","topped_up_balance":"0.00"}
+        ]}"#,
+    )
+    .unwrap();
+    assert_eq!(parsed.allowances.len(), 1);
+    assert_eq!(parsed.allowances[0].key, "credits_balance_cny");
+    let remaining = parsed.allowances[0]
+        .remaining
+        .as_ref()
+        .expect("funded currency balance");
+    assert_eq!(remaining.currency.as_deref(), Some("CNY"));
+    assert_eq!(remaining.value, 9.99);
+
+    // 账户耗尽（全为 0）时保留一条，否则快照会被判定为无效响应
+    let exhausted = parse_monitor_response(
+        MonitorKind::DeepSeek,
+        br#"{"is_available":true,"balance_infos":[
+            {"currency":"CNY","total_balance":"0.00","granted_balance":"0.00","topped_up_balance":"0.00"},
+            {"currency":"USD","total_balance":"0.00","granted_balance":"0.00","topped_up_balance":"0.00"}
+        ]}"#,
+    )
+    .unwrap();
+    assert_eq!(exhausted.allowances.len(), 1);
+    assert_eq!(exhausted.allowances[0].key, "credits_balance_usd");
+    let remaining = exhausted.allowances[0]
+        .remaining
+        .as_ref()
+        .expect("exhausted balance");
+    assert_eq!(remaining.currency.as_deref(), Some("USD"));
+    assert_eq!(remaining.value, 0.0);
 }
 
 fn decode_hex(value: &str) -> Vec<u8> {

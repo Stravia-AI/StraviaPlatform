@@ -345,6 +345,10 @@ function remainingDisplay(allowance: Allowance): string {
 }
 
 function allowanceLabel(allowance: Allowance): string {
+  // DeepSeek 余额 key 带币种后缀（credits_balance_cny 等），统一显示同一标签
+  if (allowance.key === 'credits' || allowance.key.startsWith('credits_balance')) {
+    return m.allowances_label_credit_balance()
+  }
   switch (allowance.key) {
     case '5h':
       return m.allowances_label_five_hour()
@@ -357,9 +361,6 @@ function allowanceLabel(allowance: Allowance): string {
       return m.allowances_label_monthly()
     case 'billing_cycle':
       return m.allowances_label_billing_cycle()
-    case 'credits':
-    case 'credits_balance':
-      return m.allowances_label_credit_balance()
     case 'credits_unlimited':
       return m.allowances_label_unlimited_credits()
     case 'premium_interactions':

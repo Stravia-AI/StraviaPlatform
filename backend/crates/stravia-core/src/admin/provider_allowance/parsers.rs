@@ -784,32 +784,45 @@ fn parse_deepseek(payload: &Value) -> Result<ParsedAllowance, InvalidResponse> {
         .get("balance_infos")
         .and_then(Value::as_array)
         .ok_or(InvalidResponse)?;
-    let selected = ["USD", "CNY"]
-        .into_iter()
-        .find_map(|currency| {
-            balances.iter().find_map(|value| {
-                let object = value.as_object()?;
-                (object.get("currency").and_then(non_empty) == Some(currency)).then_some(object)
-            })
+    // DeepSeek 按单一币种计费，但响应总是同时返回 CNY 与 USD 两条记录，
+    // 未充值币种恒为 0：只上报非 0 余额，0 的不展示。
+    // 币种编进 key，保证采样与耗尽预测按币种隔离；全为 0（账户耗尽）时
+    // 保留一条，否则空 allowances 会被判定为无效响应。
+    let entries = balances
+        .iter()
+        .filter_map(|value| {
+            let object = value.as_object()?;
+            let balance = field_number(object, "total_balance")?;
+            let currency = object.get("currency").and_then(non_empty);
+            Some((balance, currency))
         })
-        .or_else(|| {
-            balances.iter().find_map(|value| {
-                let object = value.as_object()?;
-                field_number(object, "total_balance")
-                    .is_some()
-                    .then_some(object)
-            })
-        })
-        .ok_or(InvalidResponse)?;
-    let balance = field_number(selected, "total_balance").ok_or(InvalidResponse)?;
-    let currency = selected.get("currency").and_then(non_empty);
-    let mut item = allowance(
-        "credits_balance",
-        window_label("credits_balance"),
-        AllowanceKind::Balance,
-    );
+        .collect::<Vec<_>>();
+    if entries.is_empty() {
+        return Err(InvalidResponse);
+    }
+    let mut items = entries
+        .iter()
+        .filter(|(balance, _)| *balance > 0.0)
+        .map(|(balance, currency)| deepseek_balance_item(*balance, *currency))
+        .collect::<Vec<_>>();
+    if items.is_empty() {
+        let (balance, currency) = entries
+            .iter()
+            .find(|(_, currency)| *currency == Some("USD"))
+            .unwrap_or(&entries[0]);
+        items.push(deepseek_balance_item(*balance, *currency));
+    }
+    Ok(parsed(items))
+}
+
+fn deepseek_balance_item(balance: f64, currency: Option<&str>) -> Allowance {
+    let key = match currency {
+        Some(currency) => slug_key(&format!("credits_balance_{currency}")),
+        None => "credits_balance".to_string(),
+    };
+    let mut item = allowance(key, window_label("credits_balance"), AllowanceKind::Balance);
     item.remaining = Some(amount(balance, "currency", currency));
-    Ok(parsed(vec![item]))
+    item
 }
 
 fn parse_neuralwatt(payload: &Value) -> Result<ParsedAllowance, InvalidResponse> {
