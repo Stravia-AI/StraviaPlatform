@@ -64,7 +64,12 @@ impl ProviderModelDiscovery for HttpProviderModelDiscovery {
                 .preset_catalog_models_for_provider(&provider)
                 .await
                 .map_err(|error| RouteModelDiscoveryError::setup(provider_id, error))?
-                .map(|catalog| catalog.models.into_iter().map(|model| model.id).collect())
+                .map(|catalog| {
+                    retain_discovered_model_ids(
+                        &provider,
+                        catalog.models.into_iter().map(|model| model.id).collect(),
+                    )
+                })
                 .ok_or_else(|| RouteModelDiscoveryError::CatalogIdentityMissing {
                     provider_id: provider_id.to_string(),
                 });

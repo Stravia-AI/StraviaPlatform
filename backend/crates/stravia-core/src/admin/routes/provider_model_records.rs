@@ -389,31 +389,36 @@ impl AdminService {
                 .provider_catalog
                 .model_sources(provider_id, channel_id)
                 .await?;
-            return sources
-                .into_iter()
-                .map(|source| {
-                    let model_id = source
-                        .metadata
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| anyhow::anyhow!("Provider Catalog Entry is missing id"))?
-                        .to_string();
-                    let metadata =
-                        ProviderModelMetadata::from_source_value(&model_id, source.metadata)?;
-                    Ok((
-                        model_id,
-                        DiscoveredModelSource {
-                            metadata,
-                            metadata_source_provider_id: Some(source.provider_id),
-                        },
-                    ))
-                })
-                .collect();
+            let mut discovered = BTreeMap::new();
+            for source in sources {
+                let model_id = source
+                    .metadata
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow::anyhow!("Provider Catalog Entry is missing id"))?
+                    .to_string();
+                if !retain_discovered_model_id(provider, &model_id) {
+                    continue;
+                }
+                let metadata =
+                    ProviderModelMetadata::from_source_value(&model_id, source.metadata)?;
+                discovered.insert(
+                    model_id,
+                    DiscoveredModelSource {
+                        metadata,
+                        metadata_source_provider_id: Some(source.provider_id),
+                    },
+                );
+            }
+            return Ok(discovered);
         }
 
         let ids = self.test_provider_models(&provider.id).await?;
         let mut sources = BTreeMap::new();
         for id in ids {
+            if !retain_discovered_model_id(provider, &id) {
+                continue;
+            }
             let model_id = normalize_model_id(&id)?;
             let catalog_source = match provider.preset_key.as_deref() {
                 Some(catalog_provider_id) => match self

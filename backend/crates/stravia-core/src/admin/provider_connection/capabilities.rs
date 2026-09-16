@@ -19,20 +19,27 @@ impl AdminService {
     pub async fn get_provider_models(&self, id: &str) -> anyhow::Result<Vec<String>> {
         let provider = self.get_provider(id).await?;
         if let Some(catalog) = self.catalog_models_for_provider(&provider).await? {
-            return Ok(catalog.models.into_iter().map(|model| model.id).collect());
+            return Ok(retain_discovered_model_ids(
+                &provider,
+                catalog.models.into_iter().map(|model| model.id).collect(),
+            ));
         }
         let runtime = self.resolve_provider_runtime(&provider).await?;
         if let Some(static_list) = runtime.binding.static_models_override.as_deref() {
-            let models: Vec<String> = static_list
-                .iter()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
+            let models = retain_discovered_model_ids(
+                &provider,
+                static_list
+                    .iter()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect(),
+            );
             if !models.is_empty() {
                 return Ok(models);
             }
         }
-        let preset_static_models = preset_static_models(&provider);
+        let preset_static_models =
+            retain_discovered_model_ids(&provider, preset_static_models(&provider));
         if !preset_static_models.is_empty() {
             return Ok(preset_static_models);
         }
@@ -55,10 +62,13 @@ impl AdminService {
                 && resp.status().is_success()
             {
                 let json: Value = resp.json().await.unwrap_or_default();
-                let models = extract_models_from_response(
-                    &provider.protocol,
-                    provider.vendor.as_deref(),
-                    &json,
+                let models = retain_discovered_model_ids(
+                    &provider,
+                    extract_models_from_response(
+                        &provider.protocol,
+                        provider.vendor.as_deref(),
+                        &json,
+                    ),
                 );
                 if !models.is_empty() {
                     return Ok(models);
@@ -66,7 +76,10 @@ impl AdminService {
             }
         }
 
-        Ok(parse_static_models(provider.static_models.as_deref()))
+        Ok(retain_discovered_model_ids(
+            &provider,
+            parse_static_models(provider.static_models.as_deref()),
+        ))
     }
 
     pub async fn get_model_capabilities(

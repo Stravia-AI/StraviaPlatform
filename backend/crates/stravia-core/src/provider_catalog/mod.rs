@@ -24,6 +24,7 @@ mod source;
 
 use parse::*;
 use persist::*;
+pub(crate) use parse::opencode_zen_free_tier_model;
 pub use source::{CatalogSource, HttpCatalogSource};
 
 pub const CATALOG_BASE_URL: &str = "https://models.stravia.cn";
@@ -220,14 +221,7 @@ impl ProviderCatalog {
             .models
             .into_iter()
             .filter(|source| {
-                provider_id != "openai" || channel_id != "codex" || {
-                    let id = source
-                        .metadata
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default();
-                    codex_subscription_model(id)
-                }
+                catalog_model_included(provider_id, channel_id, catalog_source_model_id(source))
             })
             .map(|source| parse_catalog_model(provider_id, &provider.protocol, &source.metadata))
             .collect::<anyhow::Result<Vec<_>>>()?;
@@ -244,7 +238,13 @@ impl ProviderCatalog {
         channel_id: &str,
     ) -> anyhow::Result<Vec<CatalogModelSource>> {
         let (_, scope) = self.resolve_provider_scope(provider_id, channel_id).await?;
-        Ok(scope.models)
+        Ok(scope
+            .models
+            .into_iter()
+            .filter(|source| {
+                catalog_model_included(provider_id, channel_id, catalog_source_model_id(source))
+            })
+            .collect())
     }
 
     pub async fn model_source(

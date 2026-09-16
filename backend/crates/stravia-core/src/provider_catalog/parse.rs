@@ -655,6 +655,32 @@ pub(super) fn channel(
     }
 }
 
+/// OpenCode Zen 的 `*-free` 模型只能在 OpenCode 客户端里用；Stravia 作为第三方网关会收到 400。
+pub(crate) fn opencode_zen_free_tier_model(model_id: &str) -> bool {
+    model_id
+        .rsplit(['/', ':'])
+        .next()
+        .unwrap_or(model_id)
+        .to_ascii_lowercase()
+        .ends_with("-free")
+}
+
+pub(super) fn catalog_model_included(provider_id: &str, channel_id: &str, model_id: &str) -> bool {
+    match (provider_id, channel_id) {
+        ("openai", "codex") => codex_subscription_model(model_id),
+        ("opencode", _) => !opencode_zen_free_tier_model(model_id),
+        _ => true,
+    }
+}
+
+pub(super) fn catalog_source_model_id(source: &CatalogModelSource) -> &str {
+    source
+        .metadata
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+}
+
 pub(super) fn codex_subscription_model(model_id: &str) -> bool {
     const EXPLICIT: &[&str] = &["gpt-5.5", "gpt-5.3-codex-spark", "gpt-5.4", "gpt-5.4-mini"];
     const DENIED: &[&str] = &["gpt-5.5-pro"];
@@ -685,6 +711,38 @@ pub(super) fn codex_subscription_model(model_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opencode_zen_hides_free_tier_catalog_models() {
+        assert!(opencode_zen_free_tier_model("mimo-v2.5-free"));
+        assert!(opencode_zen_free_tier_model("GLM-5-Free"));
+        assert!(opencode_zen_free_tier_model("org/mimo-v2.5-free"));
+        assert!(!opencode_zen_free_tier_model("mimo-v2.5"));
+        assert!(!opencode_zen_free_tier_model("free"));
+        assert!(!opencode_zen_free_tier_model("mimo-v2-pro"));
+        assert!(catalog_model_included(
+            "opencode",
+            "default",
+            "claude-sonnet-4-6"
+        ));
+        assert!(!catalog_model_included(
+            "opencode",
+            "default",
+            "mimo-v2.5-free"
+        ));
+        assert!(catalog_model_included(
+            "opencode-go",
+            "default",
+            "mimo-v2.5-free"
+        ));
+        assert!(catalog_model_included(
+            "openai",
+            "default",
+            "mimo-v2.5-free"
+        ));
+        assert!(!catalog_model_included("openai", "codex", "gpt-5.5-pro"));
+        assert!(catalog_model_included("openai", "codex", "gpt-5.4"));
+    }
 
     #[test]
     fn xai_catalog_publishes_grok_oauth_channel() {

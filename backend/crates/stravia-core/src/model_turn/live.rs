@@ -958,6 +958,14 @@ async fn prepare_attempt(
     } else {
         target.model.clone()
     };
+    if provider.preset_key.as_deref() == Some("opencode")
+        && crate::provider_catalog::opencode_zen_free_tier_model(&actual_model)
+    {
+        return Err(AttemptFailure::ineligible(
+            "provider_model_unavailable",
+            "OpenCode Zen free-tier models can only be used in OpenCode",
+        ));
+    }
 
     let metadata_required = input.request.meta.media_routing.is_some()
         || stravia_web_search::native_web_search_requested(&input.request)

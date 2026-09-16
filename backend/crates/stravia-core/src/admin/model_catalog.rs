@@ -143,6 +143,20 @@ pub(super) fn parse_static_models(raw: Option<&str>) -> Vec<String> {
     models
 }
 
+pub(super) fn retain_discovered_model_id(provider: &Provider, model_id: &str) -> bool {
+    match provider.preset_key.as_deref() {
+        Some("opencode") => !crate::provider_catalog::opencode_zen_free_tier_model(model_id),
+        _ => true,
+    }
+}
+
+pub(super) fn retain_discovered_model_ids(provider: &Provider, models: Vec<String>) -> Vec<String> {
+    models
+        .into_iter()
+        .filter(|model_id| retain_discovered_model_id(provider, model_id))
+        .collect()
+}
+
 pub(super) fn uses_catalog_inventory(provider: &Provider) -> bool {
     if provider.models_source.as_deref() != Some("catalog")
         || provider
@@ -388,5 +402,54 @@ mod tests {
             extract_models_from_response("open-responses", Some("openai"), &response),
             vec!["legacy-model".to_string(), "visible-model".to_string()]
         );
+    }
+
+    #[test]
+    fn opencode_zen_discovery_drops_free_tier_models() {
+        let mut provider = Provider {
+            id: "provider".into(),
+            name: "OpenCode Zen".into(),
+            vendor: Some("openai-compatible".into()),
+            protocol: "openai-compatible".into(),
+            base_url: "https://opencode.ai/zen/v1".into(),
+            preset_key: Some("opencode".into()),
+            channel: Some("default".into()),
+            models_source: Some("catalog".into()),
+            static_models: None,
+            api_key: String::new(),
+            adapter_credentials: "{}".into(),
+            auth_mode: "apikey".into(),
+            use_proxy: false,
+            last_test_success: None,
+            last_test_at: None,
+            is_enabled: true,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        assert!(!retain_discovered_model_id(
+            &provider,
+            "mimo-v2.5-free"
+        ));
+        assert!(retain_discovered_model_id(
+            &provider,
+            "claude-sonnet-4-6"
+        ));
+        assert_eq!(
+            retain_discovered_model_ids(
+                &provider,
+                vec![
+                    "mimo-v2.5-free".into(),
+                    "claude-sonnet-4-6".into(),
+                    "glm-5-free".into(),
+                ]
+            ),
+            vec!["claude-sonnet-4-6".to_string()]
+        );
+
+        provider.preset_key = Some("opencode-go".into());
+        assert!(retain_discovered_model_id(
+            &provider,
+            "mimo-v2.5-free"
+        ));
     }
 }
