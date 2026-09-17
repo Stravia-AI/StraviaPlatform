@@ -39,6 +39,9 @@ tauri-plugin-wdio-webdriver = { version = "1", optional = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 tauri = { workspace = true, features = ["macos-private-api"] }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
+
 [build-dependencies]
 tauri-build = { workspace = true }
 

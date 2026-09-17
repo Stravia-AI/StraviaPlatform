@@ -19,17 +19,56 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
 };
 
+// 托盘语言标签与 WebUI messages/{locale}.json 的语言列表保持一致。
+#[derive(Clone, Copy)]
+enum TrayLocale {
+    EnUs,
+    ZhCn,
+}
+
+impl TrayLocale {
+    fn parse(value: &str) -> Self {
+        if value.to_ascii_lowercase().starts_with("zh") {
+            Self::ZhCn
+        } else {
+            Self::EnUs
+        }
+    }
+
+    fn show_dashboard(self) -> &'static str {
+        match self {
+            Self::EnUs => "Show Dashboard",
+            Self::ZhCn => "打开控制台",
+        }
+    }
+
+    fn quit_stravia(self) -> &'static str {
+        match self {
+            Self::EnUs => "Quit Stravia",
+            Self::ZhCn => "退出 Stravia",
+        }
+    }
+
+    fn tooltip(self) -> &'static str {
+        match self {
+            Self::EnUs => "Stravia Agent infra",
+            Self::ZhCn => "Stravia 智能体基础设施",
+        }
+    }
+}
+
 pub(crate) struct DesktopTray {
     tray: TrayIcon,
-    copy_url: MenuItem<tauri::Wry>,
+    show: MenuItem<tauri::Wry>,
+    quit: MenuItem<tauri::Wry>,
 }
 
 impl DesktopTray {
-    pub(crate) fn sync_port(&self, port: u16) -> tauri::Result<()> {
-        self.tray
-            .set_tooltip(Some(format!("Stravia Agent infra — :{port}")))?;
-        self.copy_url
-            .set_text(format!("Copy Proxy URL (:{port})"))?;
+    pub(crate) fn set_locale(&self, locale: &str) -> tauri::Result<()> {
+        let locale = TrayLocale::parse(locale);
+        self.show.set_text(locale.show_dashboard())?;
+        self.quit.set_text(locale.quit_stravia())?;
+        self.tray.set_tooltip(Some(locale.tooltip()))?;
         Ok(())
     }
 }
@@ -39,12 +78,7 @@ struct TauriPortSwitchPublisher {
 }
 
 impl PortSwitchPublisher for TauriPortSwitchPublisher {
-    fn publish(&self, port: u16) -> Result<(), String> {
-        let tray = self
-            .app
-            .try_state::<DesktopTray>()
-            .ok_or_else(|| "desktop tray state is unavailable".to_string())?;
-        tray.sync_port(port).map_err(|error| error.to_string())?;
+    fn publish(&self, _port: u16) -> Result<(), String> {
         let window = self
             .app
             .get_webview_window("main")
@@ -209,7 +243,7 @@ pub fn run() {
             tauri::WebviewWindowBuilder::from_config(app, window_config)?
                 .data_directory(paths.desktop_webview())
                 .build()?;
-            app.manage(setup_tray(app, server_port)?);
+            app.manage(setup_tray(app)?);
             desktop_icons::setup(app.handle())?;
             runtime.set_switch_publisher(Arc::new(TauriPortSwitchPublisher {
                 app: app.handle().clone(),
@@ -227,6 +261,7 @@ pub fn run() {
             commands::list_provider_allowances,
             commands::refresh_provider_allowances,
             commands::refresh_provider_allowance,
+            commands::set_desktop_locale,
             product_update::get_desktop_update_state,
             product_update::download_product_update,
             product_update::install_product_update,
@@ -269,26 +304,31 @@ pub fn run() {
         });
 }
 
-fn setup_tray(
-    app: &tauri::App,
-    server_port: u16,
-) -> Result<DesktopTray, Box<dyn std::error::Error>> {
-    let show = MenuItem::with_id(app, "show", "Show Dashboard", true, None::<&str>)?;
-    let copy_url = MenuItem::with_id(
-        app,
-        "copy_url",
-        format!("Copy Proxy URL (:{server_port})"),
-        true,
-        None::<&str>,
-    )?;
-    let quit = MenuItem::with_id(app, "quit", "Quit Stravia", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &copy_url, &quit])?;
+fn setup_tray(app: &tauri::App) -> Result<DesktopTray, Box<dyn std::error::Error>> {
+    // 托盘先于 WebView 就绪；读取上次持久化的界面语言，避免先英文再切换。
+    let locale = app
+        .try_state::<Gateway>()
+        .and_then(|gateway| {
+            tauri::async_runtime::block_on(gateway.storage.settings().get("ui_locale"))
+                .ok()
+                .flatten()
+        })
+        .as_deref()
+        .map_or(TrayLocale::EnUs, TrayLocale::parse);
+
+    let show = MenuItem::with_id(app, "show", locale.show_dashboard(), true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", locale.quit_stravia(), true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show, &quit])?;
+    #[cfg(target_os = "windows")]
+    remove_menu_check_gutter(&menu);
 
     let tray = TrayIconBuilder::new()
         .icon(desktop_icons::tray_image())
         .icon_as_template(cfg!(target_os = "macos"))
-        .tooltip(format!("Stravia Agent infra — :{server_port}"))
+        .tooltip(locale.tooltip())
         .menu(&menu)
+        // 左键只唤出主窗口；默认行为会连菜单一起弹出。
+        .show_menu_on_left_click(false)
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
@@ -310,17 +350,6 @@ fn setup_tray(
                     let _ = window.set_focus();
                 }
             }
-            "copy_url" => {
-                if let (Some(window), Some(runtime)) = (
-                    app.get_webview_window("main"),
-                    app.try_state::<Arc<DesktopGatewayRuntime>>(),
-                ) {
-                    let port = runtime.current_port();
-                    let _ = window.eval(format!(
-                        "navigator.clipboard.writeText('http://127.0.0.1:{port}')"
-                    ));
-                }
-            }
             "quit" => {
                 app.exit(0);
             }
@@ -328,5 +357,28 @@ fn setup_tray(
         })
         .build(app)?;
 
-    Ok(DesktopTray { tray, copy_url })
+    Ok(DesktopTray { tray, show, quit })
+}
+
+// Windows 弹出菜单默认在文字左侧预留勾选/图标列；菜单项没有图标，去掉这段空隙。
+#[cfg(target_os = "windows")]
+fn remove_menu_check_gutter(menu: &Menu<tauri::Wry>) {
+    use tauri::menu::ContextMenu;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetMenuInfo, MENUINFO, MIM_STYLE, MNS_CHECKORBMP, MNS_NOCHECK, SetMenuInfo,
+    };
+
+    let Ok(hmenu) = menu.hpopupmenu() else {
+        return;
+    };
+    unsafe {
+        let mut info: MENUINFO = std::mem::zeroed();
+        info.cbSize = std::mem::size_of::<MENUINFO>() as u32;
+        info.fMask = MIM_STYLE;
+        if GetMenuInfo(hmenu as _, &mut info) == 0 {
+            return;
+        }
+        info.dwStyle = (info.dwStyle & !MNS_CHECKORBMP) | MNS_NOCHECK;
+        SetMenuInfo(hmenu as _, &info);
+    }
 }

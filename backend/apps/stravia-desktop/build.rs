@@ -11,6 +11,7 @@ fn main() {
             "list_provider_allowances",
             "refresh_provider_allowances",
             "refresh_provider_allowance",
+            "set_desktop_locale",
             "get_desktop_update_state",
             "download_product_update",
             "install_product_update",

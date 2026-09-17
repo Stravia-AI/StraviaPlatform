@@ -24,6 +24,7 @@
     "allow-list-provider-allowances",
     "allow-refresh-provider-allowances",
     "allow-refresh-provider-allowance",
+    "allow-set-desktop-locale",
     "allow-get-desktop-update-state",
     "allow-download-product-update",
     "allow-install-product-update"
