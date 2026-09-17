@@ -495,6 +495,10 @@ struct ProjectedMarkerReference {
     platform: bool,
 }
 
+/// A projected delivery unit. A batch holding Marker references must reach
+/// `ClientProjectionSession::report_delivery` once its bytes are Sent;
+/// discarding it skips the publish, so the type is `#[must_use]`.
+#[must_use]
 pub(super) struct ProjectedDeltaBatch {
     deltas: Vec<AiStreamDelta>,
     references: Vec<ProjectedMarkerReference>,
@@ -544,7 +548,6 @@ pub(super) struct ClientProjectionSession {
     thinking_source: Option<crate::history_marker::ThinkingSource>,
     early_thinking: BTreeMap<usize, VecDeque<ProjectedThinkingMarker>>,
     live_platform_carriers: HashMap<String, bool>,
-    staged_delivery: Option<ProjectedDeltaBatch>,
     pending_prefix: Vec<AiStreamDelta>,
     pending_tool_deltas: HashMap<usize, Vec<AiStreamDelta>>,
     pending_tool_names: HashMap<usize, String>,
@@ -561,6 +564,7 @@ pub(super) struct ClientProjectionSession {
     next_unindexed_output_index: usize,
     current_unindexed_item_kind: Option<UnindexedItemKind>,
     client_output_started: bool,
+    client_output_committed: bool,
     response_started: bool,
     upload: UploadProjection,
     staged_upload_items: HashSet<usize>,
@@ -583,7 +587,6 @@ impl ClientProjectionSession {
             thinking_source: None,
             early_thinking: BTreeMap::new(),
             live_platform_carriers: HashMap::new(),
-            staged_delivery: None,
             pending_prefix: Vec::new(),
             pending_tool_deltas: HashMap::new(),
             pending_tool_names: HashMap::new(),
@@ -604,6 +607,7 @@ impl ClientProjectionSession {
             next_unindexed_output_index: 0,
             current_unindexed_item_kind: None,
             client_output_started: false,
+            client_output_committed: false,
             response_started: false,
             upload: UploadProjection::default(),
             staged_upload_items: HashSet::new(),
@@ -687,6 +691,10 @@ impl ClientProjectionSession {
         self.carrier_facts = carrier_facts;
         self.next_unindexed_output_index = 0;
         self.current_unindexed_item_kind = None;
+        // Client Output Commit scopes to one Model Leg: a follow-up Leg
+        // produces a new response whose output has not reached the client
+        // yet, so completion hooks may still rewrite it.
+        self.client_output_committed = false;
     }
 
     fn project_live_delta(
@@ -831,6 +839,16 @@ impl ClientProjectionSession {
             .await
     }
 
+    /// Whether the current Model Leg's client output has been committed.
+    ///
+    /// `report_delivery` is the only place this flips: a `Sent` batch that
+    /// carried visible deltas commits the current Model Leg's client output.
+    /// `Cancelled` deliveries, publish failures, and empty batches never
+    /// commit; `begin_model_leg` resets the flag for the next response.
+    pub(super) fn client_output_committed(&self) -> bool {
+        self.client_output_committed
+    }
+
     pub(super) async fn report_delivery(
         &mut self,
         batch: ProjectedDeltaBatch,
@@ -840,7 +858,9 @@ impl ClientProjectionSession {
             self.abandon_live_projection();
             return Ok(Vec::new());
         }
+        let has_visible = !batch.is_empty();
         if batch.references.is_empty() {
+            self.client_output_committed |= has_visible;
             return Ok(Vec::new());
         }
         let references = batch
@@ -852,6 +872,7 @@ impl ClientProjectionSession {
             self.abandon_live_projection();
             return Err(error);
         }
+        self.client_output_committed |= has_visible;
         Ok(batch
             .references
             .into_iter()
@@ -867,12 +888,6 @@ impl ClientProjectionSession {
         self.pending_protected_deltas.clear();
         self.pending_unindexed_thinking = None;
         self.pending_unindexed_signature = None;
-    }
-
-    pub(super) fn take_staged_delivery(&mut self) -> ProjectedDeltaBatch {
-        self.staged_delivery
-            .take()
-            .unwrap_or_else(|| ProjectedDeltaBatch::visible(Vec::new()))
     }
 
     pub(super) fn project_platform_marker(
@@ -1494,11 +1509,16 @@ impl ClientProjectionSession {
         visible
     }
 
+    /// Project a completed response into the staged client shape.
+    ///
+    /// Returns the Marker batch the caller must hand to `report_delivery` once
+    /// the projected bytes are confirmed Sent. The batch is a value, not
+    /// session state, so a settlement path cannot silently skip the publish.
     pub(super) async fn project_staged(
         &mut self,
         response: &mut AiResponse,
         platform: &[(&str, &HistoryMarker)],
-    ) -> Result<(), HistoryMarkerError> {
+    ) -> Result<ProjectedDeltaBatch, HistoryMarkerError> {
         let by_call_id = platform
             .iter()
             .copied()
@@ -1658,15 +1678,14 @@ impl ClientProjectionSession {
         self.retained_upload_items = projected
             .iter()
             .enumerate()
-            .filter(|(_, item)| super::completion::retain_hidden_round_item(item))
+            .filter(|(_, item)| super::ledger::retain_hidden_round_item(item))
             .map(|(index, _)| self.staged_upload_items.contains(&index))
             .collect();
         response.items = projected;
-        self.staged_delivery = Some(ProjectedDeltaBatch {
+        Ok(ProjectedDeltaBatch {
             deltas: staged_deltas,
             references: staged_references,
-        });
-        Ok(())
+        })
     }
 
     async fn persist_thinking_block(
@@ -3029,12 +3048,12 @@ mod tests {
                 arguments: "{}".into(),
             }),
         ];
-        session
+        let staged_batch = session
             .project_staged(&mut staged, &[("call-platform", &platform)])
             .await
             .expect("project staged response");
         assert!(
-            session.take_staged_delivery().references.is_empty(),
+            staged_batch.references.is_empty(),
             "staged projection must consume the live Markers"
         );
         let staged_text = staged
@@ -3135,7 +3154,7 @@ mod tests {
         begin_openai_leg(&mut session);
         let mut first_leg = AiResponse::new("first", "model");
         first_leg.items = vec![AiItem::output_text("visible answer")];
-        session
+        let _ = session
             .project_staged(&mut first_leg, &[])
             .await
             .expect("project first leg");
@@ -3143,11 +3162,10 @@ mod tests {
         begin_openai_leg(&mut session);
         let mut hidden_leg = AiResponse::new("hidden", "model");
         hidden_leg.items = vec![AiItem::thinking("later reasoning", None)];
-        session
+        let delivery = session
             .project_staged(&mut hidden_leg, &[])
             .await
             .expect("project hidden leg");
-        let delivery = session.take_staged_delivery();
 
         assert_eq!(delivery.references.len(), 1);
         assert!(
@@ -3307,7 +3325,7 @@ mod tests {
                 arguments: "{}".into(),
             }),
         ];
-        session
+        let _ = session
             .project_staged(
                 &mut staged,
                 &[("call-before", &platform), ("call-after", &second)],
@@ -3382,11 +3400,10 @@ mod tests {
             },
         ];
 
-        session
+        let delivery = session
             .project_staged(&mut response, &[])
             .await
             .expect("project protected Thinking");
-        let delivery = session.take_staged_delivery();
         let visible = response
             .items
             .iter()
@@ -3433,7 +3450,7 @@ mod tests {
             .expect("first marker");
         let mut first_response = AiResponse::new("first", "model");
         first_response.items = vec![AiItem::output_text("C1"), AiItem::thinking("R1", None)];
-        session
+        let _ = session
             .project_staged(&mut first_response, &[])
             .await
             .expect("consume first live projection");
@@ -3462,6 +3479,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn client_output_committed_flips_only_on_sent_delivery() {
+        let (mut session, _, _) = projection_session_fixture("commit-owner").await;
+        begin_openai_leg(&mut session);
+        assert!(!session.client_output_committed());
+
+        let mut cancelled = session
+            .project_live_deltas(vec![AiStreamDelta::TextDelta("lost".into())], false)
+            .await
+            .expect("project cancelled batch");
+        session
+            .report_delivery(cancelled.remove(0), ProjectionDelivery::Cancelled)
+            .await
+            .expect("report cancelled delivery");
+        assert!(!session.client_output_committed());
+
+        let mut sent = session
+            .project_live_deltas(vec![AiStreamDelta::TextDelta("answer".into())], false)
+            .await
+            .expect("project sent batch");
+        session
+            .report_delivery(sent.remove(0), ProjectionDelivery::Sent)
+            .await
+            .expect("report sent delivery");
+        assert!(session.client_output_committed());
+    }
+
+    #[tokio::test]
     async fn platform_projection_never_retypes_text() {
         let platform = marker("abcdefghijklmnopqrstuvwxyzab", HistoryMarkerKind::Platform);
         let (mut session, _, _) = projection_session_fixture("platform-staged-owner").await;
@@ -3475,7 +3519,7 @@ mod tests {
                 arguments: "{}".into(),
             }),
         ];
-        session
+        let _ = session
             .project_staged(&mut response, &[("call-1", &platform)])
             .await
             .expect("project Platform Marker");

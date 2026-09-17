@@ -4,7 +4,6 @@ use crate::history_marker::{
 };
 use crate::hook::DetachedPlatformExecution;
 use crate::model_turn::TargetIdentity;
-use crate::proxy::context::RequestContext;
 use stravia_runtime_contract::Principal;
 use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
 use stravia_runtime_contract::protocol::ir::AiItem;
@@ -15,8 +14,9 @@ use stravia_runtime_contract::protocol::ir::AiRequest;
 use stravia_runtime_contract::protocol::ir::AiResponse;
 use stravia_runtime_contract::protocol::ir::ContentBlock;
 use stravia_runtime_contract::protocol::ir::MessageContent;
-use stravia_runtime_contract::protocol::ir::Usage;
 
+use super::ledger::RunLedger;
+use super::projection::ProjectedDeltaBatch;
 use super::{ClientProjectionSession, Phase, PhaseTracker};
 
 /// Stream hooks may edit semantic deltas, but structural media events are
@@ -121,7 +121,6 @@ pub(super) struct CompletionContext {
     generation_chain: Option<GenerationChainCompletion>,
     model_turn_id: String,
     observer: crate::interaction_observation::RunObserver,
-    client_output_commit: ClientOutputCommit,
 }
 
 impl CompletionContext {
@@ -164,7 +163,6 @@ impl CompletionContext {
             generation_chain,
             model_turn_id,
             observer,
-            client_output_commit: ClientOutputCommit::Pending,
         }
     }
 
@@ -178,14 +176,6 @@ impl CompletionContext {
     pub(super) fn generation_chain_identity(&self) -> Option<(&str, &str)> {
         self.generation_chain_id()
             .map(|id| (id, self.logical_model.as_str()))
-    }
-
-    pub(super) fn mark_client_output_committed(&mut self) {
-        self.client_output_commit = ClientOutputCommit::Committed;
-    }
-
-    pub(super) fn client_output_commit(&self) -> ClientOutputCommit {
-        self.client_output_commit
     }
 
     pub(super) fn principal(&self) -> &Principal {
@@ -208,8 +198,24 @@ pub(super) enum ClientOutputCommit {
     Committed,
 }
 
+impl ClientOutputCommit {
+    /// Client Output Commit is owned by the projection session: it flips when
+    /// `report_delivery` confirms a `Sent` delivery, so the commit observed at
+    /// any completion stage is the session's current value.
+    pub(super) fn of(committed: bool) -> Self {
+        if committed {
+            Self::Committed
+        } else {
+            Self::Pending
+        }
+    }
+}
+
 pub(super) enum CompletionOutcome {
-    PlatformOnly(Box<PlatformOnlyContinuation>),
+    PlatformOnly {
+        continuation: Box<PlatformOnlyContinuation>,
+        staged_delivery: ProjectedDeltaBatch,
+    },
     Ready(Box<CompletionLease>),
     Failed(CompletionFailure),
 }
@@ -220,18 +226,19 @@ pub(super) struct PlatformOnlyContinuation {
     markers: Vec<PreparedPlatformMarker>,
     jobs: Vec<crate::HistoryMarkerExecutionJob>,
     started_executions: Vec<crate::StartedHistoryMarkerExecution>,
+    commit: ClientOutputCommit,
 }
 
 impl PlatformOnlyContinuation {
     pub(super) async fn finish(
         self,
         context: &CompletionContext,
-        request_context: &RequestContext,
+        ledger: &RunLedger,
         request: &mut AiRequest,
         run: &mut crate::hook::InferenceRun,
         phase: &mut PhaseTracker,
     ) -> Result<(), CompletionFailure> {
-        record_hidden_round(request_context, &self.projected_response);
+        ledger.record_hidden_round(&self.projected_response);
         context
             .gateway
             .run_history_marker_executions(context.principal.clone(), self.jobs, run)
@@ -242,13 +249,11 @@ impl PlatformOnlyContinuation {
             .await;
         let terminal = wait_platform_markers(context, &self.markers)
             .await
-            .map_err(|error| CompletionFailure::hook(error, context.client_output_commit))?;
+            .map_err(|error| CompletionFailure::hook(error, self.commit))?;
         append_restored_platform_round(request, &self.canonical_response, terminal);
-        if let Some(publications) = request_context
-            .extensions
-            .get::<crate::model_turn::CompactionPublications>()
         {
-            let states = publications
+            let states = ledger
+                .compaction_records
                 .lock()
                 .iter()
                 .filter(|publication| {
@@ -271,12 +276,13 @@ impl PlatformOnlyContinuation {
         run.next_round();
         phase
             .transition(Phase::HiddenRound)
-            .map_err(|error| CompletionFailure::hook(error, context.client_output_commit))
+            .map_err(|error| CompletionFailure::hook(error, self.commit))
     }
 }
 
 pub(super) struct CompletionLease {
     response: Box<AiResponse>,
+    staged_delivery: ProjectedDeltaBatch,
     pending_generation_chain: Option<Box<crate::generation_chain::GenerationChainWrite>>,
     background_executions: Vec<crate::HistoryMarkerExecutionJob>,
     started_executions: Vec<crate::StartedHistoryMarkerExecution>,
@@ -285,6 +291,7 @@ pub(super) struct CompletionLease {
 
 pub(super) struct PreparedDelivery {
     pub(super) response: AiResponse,
+    pub(super) staged_delivery: ProjectedDeltaBatch,
     pub(super) pending_generation_chain: Option<crate::generation_chain::GenerationChainWrite>,
     pub(super) background_executions: Vec<crate::HistoryMarkerExecutionJob>,
     pub(super) started_executions: Vec<crate::StartedHistoryMarkerExecution>,
@@ -300,6 +307,7 @@ impl CompletionLease {
             .map_err(|error| CompletionFailure::hook(error, self.commit))?;
         Ok(PreparedDelivery {
             response: *self.response,
+            staged_delivery: self.staged_delivery,
             pending_generation_chain: self.pending_generation_chain.map(|pending| *pending),
             background_executions: self.background_executions,
             started_executions: self.started_executions,
@@ -351,20 +359,7 @@ impl CompletionFailure {
     }
 }
 
-#[derive(Clone, Default)]
-pub(super) struct HiddenRoundState {
-    pub(super) items: Vec<stravia_runtime_contract::protocol::ir::AiItem>,
-    pub(super) usage: Usage,
-    pub(super) round_count: u32,
-}
-
-#[derive(Clone, Default)]
-pub(super) struct PublishedPlatformExecutions {
-    pub(super) references: Vec<String>,
-}
-
 pub(super) struct CompletionInput<'a> {
-    pub(super) request_context: &'a RequestContext,
     pub(super) request: &'a mut AiRequest,
     pub(super) run: &'a mut crate::hook::InferenceRun,
     pub(super) phase: &'a mut PhaseTracker,
@@ -372,6 +367,7 @@ pub(super) struct CompletionInput<'a> {
     pub(super) upstream_response_id: Option<String>,
     pub(super) early_platform_executions: Vec<EarlyPlatformExecution>,
     pub(super) projection: &'a mut ClientProjectionSession,
+    pub(super) ledger: &'a RunLedger,
 }
 
 pub(super) struct PreparedPlatformMarker {
@@ -545,7 +541,6 @@ pub(super) async fn complete_canonical_response(
     input: CompletionInput<'_>,
 ) -> CompletionOutcome {
     let CompletionInput {
-        request_context,
         request,
         run,
         phase,
@@ -553,8 +548,9 @@ pub(super) async fn complete_canonical_response(
         upstream_response_id,
         early_platform_executions,
         projection,
+        ledger,
     } = input;
-    let commit = context.client_output_commit;
+    let commit = ClientOutputCommit::of(projection.client_output_committed());
     context.thinking_source.stamp_response(&mut response);
     fill_canonical_defaults(context, &mut response);
     let upstream_response = response.clone();
@@ -588,10 +584,7 @@ pub(super) async fn complete_canonical_response(
             return CompletionOutcome::Failed(CompletionFailure::hook(error, commit));
         }
     }
-    let observer = request_context
-        .extensions
-        .get::<crate::interaction_observation::RunObserver>()
-        .expect("admitted Inference Run observer");
+    let observer = context.observer.clone();
     observer.record_debug(|| crate::interaction_observation::RunEvent::Checkpoint {
         stage: "response_after_hook".into(),
         model_turn_id: Some(context.model_turn_id.clone()),
@@ -613,13 +606,8 @@ pub(super) async fn complete_canonical_response(
             },
         );
     }
-    if has_client_calls
-        && let Some(mut terminal) = request_context
-            .extensions
-            .get::<super::super::RunTerminalContext>()
-    {
-        terminal.waiting_client = true;
-        request_context.extensions.insert(terminal);
+    if has_client_calls {
+        ledger.terminal.mark_waiting_client();
     }
     let canonical_response = response.clone();
     let mut started_executions = Vec::new();
@@ -661,9 +649,12 @@ pub(super) async fn complete_canonical_response(
         .iter()
         .map(|marker| (marker.call_id(), marker.marker()))
         .collect::<Vec<_>>();
-    if let Err(error) = projection.project_staged(&mut response, &platform).await {
-        return CompletionOutcome::Failed(CompletionFailure::hook(error, commit));
-    }
+    let staged_delivery = match projection.project_staged(&mut response, &platform).await {
+        Ok(batch) => batch,
+        Err(error) => {
+            return CompletionOutcome::Failed(CompletionFailure::hook(error, commit));
+        }
+    };
     observer.record_debug(|| crate::interaction_observation::RunEvent::Checkpoint {
         stage: "client_projection_event".into(),
         model_turn_id: Some(context.model_turn_id.clone()),
@@ -671,16 +662,20 @@ pub(super) async fn complete_canonical_response(
         payload: super::checkpoint_payload(&observer, &response),
     });
     if has_platform_calls && !has_client_calls {
-        return CompletionOutcome::PlatformOnly(Box::new(PlatformOnlyContinuation {
-            projected_response: response,
-            canonical_response,
-            markers: prepared_platform,
-            jobs: platform_jobs,
-            started_executions,
-        }));
+        return CompletionOutcome::PlatformOnly {
+            continuation: Box::new(PlatformOnlyContinuation {
+                projected_response: response,
+                canonical_response,
+                markers: prepared_platform,
+                jobs: platform_jobs,
+                started_executions,
+                commit,
+            }),
+            staged_delivery,
+        };
     }
     let background_executions = platform_jobs;
-    apply_hidden_rounds(request_context, &mut response);
+    ledger.apply_hidden_rounds(&mut response);
     if let Err(error) = phase.transition(Phase::SemanticComplete) {
         return CompletionOutcome::Failed(CompletionFailure::hook(error, commit));
     }
@@ -688,12 +683,9 @@ pub(super) async fn complete_canonical_response(
     let mut generation_chain = context.generation_chain.clone();
     if let Some(chain) = generation_chain.as_mut() {
         run.remove_exposed_tools(chain.write.request_mut());
-        if let Some(publications) = request_context
-            .extensions
-            .get::<crate::model_turn::CompactionPublications>()
-        {
-            chain.write.record_inline_publications(&publications.lock());
-        }
+        chain
+            .write
+            .record_inline_publications(&ledger.compaction_records.lock());
     }
     let reusable_upstream_id = generation_chain
         .as_ref()
@@ -721,6 +713,7 @@ pub(super) async fn complete_canonical_response(
     });
     CompletionOutcome::Ready(Box::new(CompletionLease {
         response: Box::new(response),
+        staged_delivery,
         commit,
         pending_generation_chain: pending_generation_chain.map(Box::new),
         background_executions,
@@ -819,112 +812,9 @@ fn response_item_default_status(response: &AiResponse) -> AiItemStatus {
         .unwrap_or(AiItemStatus::Completed)
 }
 
-fn record_hidden_round(context: &RequestContext, response: &AiResponse) {
-    let mut state = context
-        .extensions
-        .get::<HiddenRoundState>()
-        .unwrap_or_default();
-    state.items.extend(
-        response
-            .items
-            .iter()
-            .filter(|item| retain_hidden_round_item(item))
-            .cloned(),
-    );
-    if state.round_count == 0 {
-        state.usage = response.usage.clone();
-    } else {
-        add_usage(&mut state.usage, &response.usage);
-    }
-    state.round_count = state.round_count.saturating_add(1);
-    context.extensions.insert(state);
-}
-
-pub(super) fn retain_hidden_round_item(
-    item: &stravia_runtime_contract::protocol::ir::AiItem,
-) -> bool {
-    item.is_compaction()
-        || item.output_text_ref().is_some()
-        || item.thinking_ref().is_some()
-        || item.reasoning_ref().is_some()
-}
-
-pub(super) fn apply_hidden_rounds(context: &RequestContext, response: &mut AiResponse) {
-    let Some(state) = context.extensions.get::<HiddenRoundState>() else {
-        return;
-    };
-    if !state.items.is_empty() {
-        response.items.splice(0..0, state.items);
-    }
-    add_usage(&mut response.usage, &state.usage);
-}
-
-fn add_usage(total: &mut Usage, usage: &Usage) {
-    total.prompt_tokens = total.prompt_tokens.saturating_add(usage.prompt_tokens);
-    total.required_components_known =
-        total.required_components_known && usage.required_components_known;
-    total.completion_tokens = total
-        .completion_tokens
-        .saturating_add(usage.completion_tokens);
-    total.total_tokens = total.total_tokens.saturating_add(usage.total_tokens);
-    total.cache_read_tokens = sum_optional(total.cache_read_tokens, usage.cache_read_tokens);
-    total.cache_creation_tokens =
-        sum_optional(total.cache_creation_tokens, usage.cache_creation_tokens);
-    total.reasoning_tokens = sum_optional(total.reasoning_tokens, usage.reasoning_tokens);
-    match (&mut total.server_tool_use, &usage.server_tool_use) {
-        (Some(total), Some(usage)) => {
-            total.web_search_requests = total
-                .web_search_requests
-                .saturating_add(usage.web_search_requests);
-            total.web_fetch_requests = total
-                .web_fetch_requests
-                .saturating_add(usage.web_fetch_requests);
-        }
-        (None, Some(usage)) => total.server_tool_use = Some(usage.clone()),
-        _ => {}
-    }
-}
-
-fn sum_optional(left: Option<u32>, right: Option<u32>) -> Option<u32> {
-    match (left, right) {
-        (None, None) => None,
-        (left, right) => Some(left.unwrap_or(0).saturating_add(right.unwrap_or(0))),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn hidden_round_usage_accumulates_reasoning_tokens() {
-        let mut total = Usage {
-            reasoning_tokens: Some(3),
-            required_components_known: true,
-            ..Usage::default()
-        };
-        add_usage(
-            &mut total,
-            &Usage {
-                reasoning_tokens: Some(4),
-                required_components_known: true,
-                ..Usage::default()
-            },
-        );
-
-        assert_eq!(total.reasoning_tokens, Some(7));
-    }
-
-    #[test]
-    fn hidden_rounds_retain_typed_reasoning_items() {
-        let item = stravia_runtime_contract::protocol::ir::AiItem::reasoning(
-            vec!["summary".into()],
-            vec!["content".into()],
-            Some("opaque".into()),
-        );
-
-        assert!(retain_hidden_round_item(&item));
-    }
 
     #[test]
     fn incomplete_response_defaults_items_to_incomplete() {

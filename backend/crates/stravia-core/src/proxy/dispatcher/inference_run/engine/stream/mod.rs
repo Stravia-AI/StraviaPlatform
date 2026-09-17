@@ -22,10 +22,10 @@ use super::{
     ClientOutputCommit, ClientProjectionSession, CompletionContext, CompletionFailure,
     CompletionInput, CompletionOutcome, DeliveryAdapter, DeliveryProgress, EarlyPlatformExecution,
     FollowupLeg, FollowupModelTurn, PhaseTracker, ProjectedDeltaBatch, ProjectionDelivery,
-    PublishedPlatformExecutions, RoundOutcome, StreamResponseAccumulator,
-    acquire_followup_model_turn, ai_response_to_deltas, buffered_response,
-    complete_canonical_response, error_response, hook_failure_response, live_response,
-    prepare_platform_markers, render_completion_failure,
+    RoundOutcome, RunLedger, Settlement, StreamResponseAccumulator, acquire_followup_model_turn,
+    ai_response_to_deltas, buffered_response, complete_canonical_response, error_response,
+    hook_failure_response, live_response, prepare_platform_markers, render_completion_failure,
+    report_projected_delivery, settle,
 };
 
 pub(super) struct HookLegGuard<'a> {
@@ -77,6 +77,7 @@ pub(super) struct ModelTurnStreamInput {
     pub(super) inference_run: crate::hook::InferenceRun,
     pub(super) phase: PhaseTracker,
     pub(super) projection: ClientProjectionSession,
+    pub(super) ledger: RunLedger,
 }
 
 enum ProjectedDeliveryFailure {
@@ -99,11 +100,12 @@ fn record_marker_failure(
 async fn deliver_projected(
     delivery: &mut DeliveryAdapter,
     projection: &mut ClientProjectionSession,
+    ledger: &RunLedger,
     observer: &crate::interaction_observation::RunObserver,
     model_turn_id: &str,
     observe_delivery: bool,
     batch: ProjectedDeltaBatch,
-) -> Result<Vec<String>, ProjectedDeliveryFailure> {
+) -> Result<(), ProjectedDeliveryFailure> {
     let debug_payload = if observe_delivery && observer.debug_enabled() {
         super::checkpoint_payload(observer, batch.deltas())
     } else {
@@ -125,8 +127,7 @@ async fn deliver_projected(
     } else {
         ProjectionDelivery::Cancelled
     };
-    let published = projection
-        .report_delivery(batch, outcome)
+    report_projected_delivery(projection, ledger, batch, outcome)
         .await
         .map_err(|error| {
             record_marker_failure(observer, &error);
@@ -150,7 +151,7 @@ async fn deliver_projected(
                 }
             }
         }
-        Ok(published)
+        Ok(())
     } else {
         Err(ProjectedDeliveryFailure::Delivery(progress))
     }
@@ -169,6 +170,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
         mut inference_run,
         mut phase,
         projection,
+        ledger,
     } = input;
     let egress = turn.route.egress;
     let previous_response_id = generation.previous_response_id.clone();
@@ -182,7 +184,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
     let observe_delivery =
         !crate::proxy::dispatcher::is_websocket_delivery_deferred(&request_context);
     let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
-    let extensions = request_context.extensions.clone();
+    let completion_ledger = ledger.clone();
 
     tokio::spawn(async move {
         let mut delivery = DeliveryAdapter::live_stream(LiveStreamRequest {
@@ -199,7 +201,6 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
             .extensions
             .get::<crate::interaction_observation::RunObserver>()
             .expect("admitted Inference Run observer");
-        let generation_committed = super::generation_commit_flag(&request_context);
         let mut projection = projection;
         'model_legs: loop {
             let carrier_facts = super::thinking_carrier_facts(ingress, turn.route.egress);
@@ -213,7 +214,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                     target_id: turn.target.target_id.clone(),
                 }),
             );
-            let mut completion_context = CompletionContext::from_model_turn(
+            let completion_context = CompletionContext::from_model_turn(
                 gateway.clone(),
                 generation.clone(),
                 ingress,
@@ -235,7 +236,6 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
             let mut receiver_closed = false;
             let mut protocol_failed = false;
             let mut preflight_failure = None;
-            let mut leg_client_output_committed = false;
             let mut early_platform_executions = Vec::new();
 
             while !aborted && !cancelled && !receiver_closed && !protocol_failed {
@@ -346,7 +346,9 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                                         Some(buffered_response(render_completion_failure(
                                             CompletionFailure::hook(
                                                 error,
-                                                completion_context.client_output_commit(),
+                                                ClientOutputCommit::of(
+                                                    projection.client_output_committed(),
+                                                ),
                                             ),
                                             ingress,
                                             true,
@@ -355,10 +357,10 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                                 }
                             };
                             for batch in projected_batches {
-                                let has_visible = !batch.is_empty();
                                 match deliver_projected(
                                     &mut delivery,
                                     &mut projection,
+                                    &ledger,
                                     &observer,
                                     &turn.model_turn_id,
                                     observe_delivery,
@@ -366,7 +368,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                                 )
                                 .await
                                 {
-                                    Ok(_) => leg_client_output_committed |= has_visible,
+                                    Ok(()) => {}
                                     Err(ProjectedDeliveryFailure::Delivery(progress)) => {
                                         match progress {
                                             DeliveryProgress::Cancelled => cancelled = true,
@@ -446,7 +448,9 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                                             Some(buffered_response(render_completion_failure(
                                                 CompletionFailure::hook(
                                                     error,
-                                                    completion_context.client_output_commit(),
+                                                    ClientOutputCommit::of(
+                                                        projection.client_output_committed(),
+                                                    ),
                                                 ),
                                                 ingress,
                                                 true,
@@ -454,12 +458,12 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                                         break;
                                     }
                                 };
-                                let mut published_references = Vec::new();
                                 for marker in &markers {
                                     let batch = projection.project_platform_marker(marker.marker());
                                     match deliver_projected(
                                         &mut delivery,
                                         &mut projection,
+                                        &ledger,
                                         &observer,
                                         &turn.model_turn_id,
                                         observe_delivery,
@@ -467,10 +471,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                                     )
                                     .await
                                     {
-                                        Ok(references) => {
-                                            leg_client_output_committed = true;
-                                            published_references.extend(references);
-                                        }
+                                        Ok(()) => {}
                                         Err(ProjectedDeliveryFailure::Delivery(progress)) => {
                                             match progress {
                                                 DeliveryProgress::Cancelled => cancelled = true,
@@ -498,12 +499,6 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                                 if aborted || cancelled || receiver_closed || protocol_failed {
                                     break;
                                 }
-                                let mut published = request_context
-                                    .extensions
-                                    .get::<PublishedPlatformExecutions>()
-                                    .unwrap_or_default();
-                                published.references.extend(published_references);
-                                request_context.extensions.insert(published);
                                 let started = gateway.start_history_marker_executions(
                                     completion_context.principal().clone(),
                                     jobs,
@@ -551,10 +546,10 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                         match projection.project_live_deltas(flushed, true).await {
                             Ok(batches) => {
                                 for batch in batches {
-                                    let has_visible = !batch.is_empty();
                                     match deliver_projected(
                                         &mut delivery,
                                         &mut projection,
+                                        &ledger,
                                         &observer,
                                         &turn.model_turn_id,
                                         observe_delivery,
@@ -562,7 +557,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                                     )
                                     .await
                                     {
-                                        Ok(_) => leg_client_output_committed |= has_visible,
+                                        Ok(()) => {}
                                         Err(ProjectedDeliveryFailure::Delivery(progress)) => {
                                             match progress {
                                                 DeliveryProgress::Cancelled => cancelled = true,
@@ -594,7 +589,9 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                                     Some(buffered_response(render_completion_failure(
                                         CompletionFailure::hook(
                                             error,
-                                            completion_context.client_output_commit(),
+                                            ClientOutputCommit::of(
+                                                projection.client_output_committed(),
+                                            ),
                                         ),
                                         ingress,
                                         true,
@@ -639,14 +636,10 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
             let mut started_executions = Vec::new();
             let mut staged_delivery = None;
             if !aborted && !cancelled && !receiver_closed && !protocol_failed {
-                if leg_client_output_committed {
-                    completion_context.mark_client_output_committed();
-                }
-                let commit = completion_context.client_output_commit();
+                let commit = ClientOutputCommit::of(projection.client_output_committed());
                 match complete_canonical_response(
                     &completion_context,
                     CompletionInput {
-                        request_context: &request_context,
                         request: &mut request,
                         run: hook_leg.run_mut(),
                         phase: &mut phase,
@@ -654,16 +647,20 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                         upstream_response_id,
                         early_platform_executions,
                         projection: &mut projection,
+                        ledger: &ledger,
                     },
                 )
                 .await
                 {
-                    CompletionOutcome::PlatformOnly(continuation) => {
-                        let marker_delivery = projection.take_staged_delivery();
+                    CompletionOutcome::PlatformOnly {
+                        continuation,
+                        staged_delivery: marker_delivery,
+                    } => {
                         if !marker_delivery.is_empty() {
                             match deliver_projected(
                                 &mut delivery,
                                 &mut projection,
+                                &ledger,
                                 &observer,
                                 &turn.model_turn_id,
                                 observe_delivery,
@@ -671,14 +668,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                             )
                             .await
                             {
-                                Ok(references) => {
-                                    let mut published = request_context
-                                        .extensions
-                                        .get::<PublishedPlatformExecutions>()
-                                        .unwrap_or_default();
-                                    published.references.extend(references);
-                                    request_context.extensions.insert(published);
-                                }
+                                Ok(()) => {}
                                 Err(ProjectedDeliveryFailure::Delivery(progress)) => match progress
                                 {
                                     DeliveryProgress::Cancelled => cancelled = true,
@@ -701,7 +691,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                             if let Err(failure) = continuation
                                 .finish(
                                     &completion_context,
-                                    &request_context,
+                                    &ledger,
                                     &mut request,
                                     hook_leg.run_mut(),
                                     &mut phase,
@@ -725,6 +715,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                                 request: &mut request,
                                 ingress,
                                 request_context: &request_context,
+                                ledger: &ledger,
                                 inference_run: hook_leg.run_mut(),
                                 projection: &mut projection,
                                 phase: &mut phase,
@@ -739,12 +730,12 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                                 }
                                 Ok(FollowupModelTurn::HookResponse {
                                     response: hook_response,
+                                    staged_delivery: hook_marker_delivery,
                                     pending_generation_chain: hook_generation_chain,
                                 }) => {
                                     response = *hook_response;
                                     pending_generation_chain =
                                         hook_generation_chain.map(|chain| *chain);
-                                    let hook_marker_delivery = projection.take_staged_delivery();
                                     if !buffer_terminal_hooks {
                                         let delivered_response = match projection
                                             .prepare_upload_delivery(&response)
@@ -757,8 +748,10 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                                                     render_completion_failure(
                                                         CompletionFailure::hook(
                                                             error,
-                                                            completion_context
-                                                                .client_output_commit(),
+                                                            ClientOutputCommit::of(
+                                                                projection
+                                                                    .client_output_committed(),
+                                                            ),
                                                         ),
                                                         ingress,
                                                         true,
@@ -794,20 +787,15 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                                             } else {
                                                 ProjectionDelivery::Cancelled
                                             };
-                                            match projection
-                                                .report_delivery(hook_marker_delivery, outcome)
-                                                .await
+                                            match report_projected_delivery(
+                                                &mut projection,
+                                                &ledger,
+                                                hook_marker_delivery,
+                                                outcome,
+                                            )
+                                            .await
                                             {
-                                                Ok(references)
-                                                    if progress == DeliveryProgress::Sent =>
-                                                {
-                                                    let mut published = request_context
-                                                        .extensions
-                                                        .get::<PublishedPlatformExecutions>()
-                                                        .unwrap_or_default();
-                                                    published.references.extend(references);
-                                                    request_context.extensions.insert(published);
-                                                }
+                                                Ok(_) if progress == DeliveryProgress::Sent => {}
                                                 Ok(_) => match progress {
                                                     DeliveryProgress::Cancelled => cancelled = true,
                                                     DeliveryProgress::ReceiverClosed => {
@@ -854,7 +842,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                             pending_generation_chain = prepared.pending_generation_chain;
                             background_executions = prepared.background_executions;
                             started_executions = prepared.started_executions;
-                            staged_delivery = Some(projection.take_staged_delivery());
+                            staged_delivery = Some(prepared.staged_delivery);
                         }
                         Err(failure) => {
                             preflight_failure = Some(buffered_response(render_completion_failure(
@@ -891,6 +879,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                     match deliver_projected(
                         &mut delivery,
                         &mut projection,
+                        &ledger,
                         &observer,
                         &turn.model_turn_id,
                         observe_delivery,
@@ -898,14 +887,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                     )
                     .await
                     {
-                        Ok(references) => {
-                            let mut published = request_context
-                                .extensions
-                                .get::<PublishedPlatformExecutions>()
-                                .unwrap_or_default();
-                            published.references.extend(references);
-                            request_context.extensions.insert(published);
-                        }
+                        Ok(()) => {}
                         Err(ProjectedDeliveryFailure::Delivery(progress)) => match progress {
                             DeliveryProgress::Cancelled => cancelled = true,
                             DeliveryProgress::ReceiverClosed => receiver_closed = true,
@@ -926,6 +908,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                         match deliver_projected(
                             &mut delivery,
                             &mut projection,
+                            &ledger,
                             &observer,
                             &turn.model_turn_id,
                             observe_delivery,
@@ -989,7 +972,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                         preflight_failure = Some(buffered_response(render_completion_failure(
                             CompletionFailure::hook(
                                 error,
-                                completion_context.client_output_commit(),
+                                ClientOutputCommit::of(projection.client_output_committed()),
                             ),
                             ingress,
                             true,
@@ -1014,15 +997,14 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                         } else {
                             ProjectionDelivery::Cancelled
                         };
-                        match projection.report_delivery(marker_delivery, outcome).await {
-                            Ok(references) if progress == DeliveryProgress::Sent => {
-                                let mut published = request_context
-                                    .extensions
-                                    .get::<PublishedPlatformExecutions>()
-                                    .unwrap_or_default();
-                                published.references.extend(references);
-                                request_context.extensions.insert(published);
-                            }
+                        match report_projected_delivery(
+                            &mut projection,
+                            &ledger,
+                            marker_delivery,
+                            outcome,
+                        )
+                        .await
+                        {
                             Ok(_) => {}
                             Err(error) => {
                                 record_marker_failure(&observer, &error);
@@ -1036,19 +1018,24 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                 }
             }
 
-            if marker_output_delivered && !aborted && !background_executions.is_empty() {
-                started_executions.extend(gateway.start_history_marker_executions(
-                    completion_context.principal().clone(),
-                    background_executions,
-                ));
-            }
-            if marker_output_delivered && !aborted && !started_executions.is_empty() {
-                gateway.spawn_started_history_marker_executions(
-                    started_executions,
-                    owned_run
-                        .take()
-                        .expect("background Platform execution requires its Inference Run"),
-                );
+            if marker_output_delivered
+                && !aborted
+                && (!background_executions.is_empty() || !started_executions.is_empty())
+            {
+                settle(
+                    &gateway,
+                    &mut projection,
+                    &ledger,
+                    &observer,
+                    ingress,
+                    Settlement {
+                        background_executions: std::mem::take(&mut background_executions),
+                        started_executions: std::mem::take(&mut started_executions),
+                        run: owned_run.take(),
+                        ..Default::default()
+                    },
+                )
+                .await;
             }
 
             let preflight_failed = if let Some(outcome) = preflight_failure.take() {
@@ -1123,33 +1110,24 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
             }
 
             if delivery_completed_at.is_some() {
-                if let Some(mut terminal) = request_context
-                    .extensions
-                    .get::<super::super::RunTerminalContext>()
-                {
-                    terminal.delivery_completed_at = delivery_completed_at;
-                    terminal.stage_client_output(ingress, &response);
-                    request_context.extensions.insert(terminal);
-                }
-                if let Some(mut pending) = pending_generation_chain.take() {
-                    match pending.persist().await {
-                        Ok(()) => {
-                            generation_committed.store(true, std::sync::atomic::Ordering::Release);
-                        }
-                        Err(error) => {
-                            tracing::error!(
-                                "failed to commit Generation Chain node after terminal delivery: {error}"
-                            );
-                        }
-                    }
-                }
+                settle(
+                    &gateway,
+                    &mut projection,
+                    &ledger,
+                    &observer,
+                    ingress,
+                    Settlement {
+                        pending_generation_chain: pending_generation_chain.take(),
+                        delivery_completed_at,
+                        delivered_response: Some(response),
+                        ..Default::default()
+                    },
+                )
+                .await;
             }
-            let terminal = delivery_completed_at.is_some().then(|| {
-                request_context
-                    .extensions
-                    .get::<super::super::RunTerminalContext>()
-                    .expect("Inference Run terminal context")
-            });
+            let terminal = delivery_completed_at
+                .is_some()
+                .then(|| ledger.terminal.clone());
             let _ = completion_tx.send(terminal);
             if let Some(mut phase) = owned_phase.take() {
                 phase.finish();
@@ -1168,7 +1146,7 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
             ));
         }
     }
-    extensions.insert(super::super::StreamDeliveryCompletion(completion_rx));
+    completion_ledger.set_stream_completion(super::super::StreamDeliveryCompletion(completion_rx));
     live_response(DeliveryAdapter::response_from_receiver(
         rx,
         commit_tx,

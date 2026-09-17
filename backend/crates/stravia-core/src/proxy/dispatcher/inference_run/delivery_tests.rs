@@ -2,7 +2,6 @@ use super::*;
 use crate::compaction::{Compaction, CompactionRegistration, CompactionTarget};
 use crate::interaction_observation::{CompactionMode, InteractionObservation, RunStart};
 use crate::model_turn::{CompactionPublication, CompactionReceipt};
-use std::sync::{Arc, atomic::AtomicBool};
 
 #[tokio::test]
 async fn delivered_native_state_survives_later_failure_but_unexposed_states_expire() {
@@ -85,19 +84,14 @@ async fn delivered_native_state_survives_later_failure_but_unexposed_states_expi
         });
         states.push(item);
     }
-    let terminal = RunTerminalContext {
-        delivery_completed_at: None,
-        generation_node_id: None,
-        generation_root_id: None,
-        generation_committed: Arc::new(AtomicBool::new(false)),
-        waiting_client: false,
-        visible_text: Vec::new(),
-        client_input: Arc::new(Vec::new()),
-        client_output: None,
-        compaction: compaction.clone(),
-        principal: principal.clone(),
-        compaction_records: publications,
-    };
+    let terminal = RunTerminalContext::new(
+        None,
+        None,
+        Vec::new(),
+        compaction.clone(),
+        principal.clone(),
+        publications,
+    );
     let native = |index: usize| {
         stravia_runtime_contract::protocol::ir::canonical::native_compaction_item(&states[index])
             .unwrap()
