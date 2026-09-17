@@ -65,7 +65,8 @@ let {
   onlatest,
 }: Props = $props()
 const orderedRuns = $derived([...(interaction?.runs ?? [])].sort((a, b) => a.started_at - b.started_at))
-const runIds = $derived(new Set(orderedRuns.map((run) => run.id)))
+// Run 的父子关系表达续接与因果，不是包含：续接链按时间拍平展示，父 Run 仅以编号引用。
+const runIndex = $derived(new Map(orderedRuns.map((run, index) => [run.id, index + 1])))
 
 const title = $derived(
   interaction
@@ -150,10 +151,43 @@ function offsetLabel(at: number): string {
   return delta >= 0 ? `+${formatDuration(delta)}` : `−${formatDuration(-delta)}`
 }
 
-function childRuns(parentId: string | null): RunDetail[] {
-  return orderedRuns.filter((run) =>
-    parentId === null ? !run.parent_run_id || !runIds.has(run.parent_run_id) : run.parent_run_id === parentId,
-  )
+// 相邻请求之间的等待是一等事实：小于后端 rapid_continuation 窗口（2s）的间隔属于流水线噪声。
+const GAP_MIN_MS = 2_000
+
+function runEndAt(run: RunDetail): number {
+  if (run.finished_at != null) return run.finished_at
+  return timelines.get(run.id)?.at(-1)?.occurred_at ?? run.started_at
+}
+
+function lastHandoffTool(run: RunDetail): string | null {
+  const events = timelines.get(run.id) ?? []
+  for (let i = events.length - 1; i >= 0; i--) {
+    if (events[i].kind === 'client_tool_handoff') {
+      const name = toolName(events[i])
+      if (name) return name
+    }
+  }
+  return null
+}
+
+function gapLabel(prev: RunDetail, next: RunDetail): string | null {
+  const gap = next.started_at - runEndAt(prev)
+  if (gap < GAP_MIN_MS) return null
+  const tool = lastHandoffTool(prev)
+  const duration = formatDuration(gap)
+  return tool ? m.observation_gap_tool({ tool, duration }) : m.observation_gap_idle({ duration })
+}
+
+let flashRun = $state<string | null>(null)
+let flashTimer: ReturnType<typeof setTimeout> | undefined
+function jumpToRun(runId: string | null) {
+  if (!runId) return
+  document.getElementById(`obs-run-${runId}`)?.scrollIntoView({ block: 'nearest' })
+  flashRun = runId
+  clearTimeout(flashTimer)
+  flashTimer = setTimeout(() => {
+    if (flashRun === runId) flashRun = null
+  }, 1600)
 }
 
 function itemKey(item: StreamItem): number {
@@ -252,7 +286,7 @@ function usageRows(run: RunDetail): ReadonlyArray<readonly [string, number | nul
           <ChevronRightIcon size={14} class="stream-chev" aria-hidden="true" />
         </Collapsible.Trigger>
         <Collapsible.Content>
-          <ol class="branch">
+          <ol class="branch sub">
             {#each item.events as event (event.sequence)}
               {@render eventRow(event, outputs)}
             {/each}
@@ -263,32 +297,47 @@ function usageRows(run: RunDetail): ReadonlyArray<readonly [string, number | nul
   {/if}
 {/snippet}
 
-{#snippet runBlock(run: RunDetail)}
+{#snippet runBlock(run: RunDetail, ordinal: number)}
   {@const items = streams.get(run.id) ?? []}
-  {@const children = childRuns(run.id)}
   {@const duration = run.finished_at == null ? null : run.finished_at - run.started_at}
-  <li class="stream-run">
+  {@const parentIndex = run.parent_run_id ? (runIndex.get(run.parent_run_id) ?? null) : null}
+  <li class="stream-run" id="obs-run-{run.id}" data-flash={flashRun === run.id || null}>
     <Collapsible.Root>
-      <Collapsible.Trigger
-        class="stream-row run-head"
-        data-tone={observationStatusTone(run.status)}
-        data-run={run.id}>
-        <span class="stream-text">
-          <strong class="font-structural">{run.model_display_name?.trim() || run.route_id}</strong>
-          <Badge variant="outline">{observationStatusLabel(run.status)}</Badge>
-          {#if run.user_interrupted}<Badge variant="destructive">{m.observation_user_interrupted()}</Badge>{/if}
-          {#if run.debug_enabled}
-            <Badge variant={run.trace?.status === 'partial' ? 'destructive' : 'secondary'}
-              >{observationDebugStatusLabel(run.trace?.status ?? 'missing')}</Badge>
+      <div class="run-band">
+        <Collapsible.Trigger
+          class="stream-row run-head"
+          data-tone={observationStatusTone(run.status)}
+          data-run={run.id}>
+          <span class="stream-text">
+            <span class="run-idx font-technical">R{ordinal}</span>
+            <strong class="font-structural">{run.model_display_name?.trim() || run.route_id}</strong>
+            <Badge variant="outline">{observationStatusLabel(run.status)}</Badge>
+            {#if run.user_interrupted}<Badge variant="destructive">{m.observation_user_interrupted()}</Badge>{/if}
+            {#if run.debug_enabled}
+              <Badge variant={run.trace?.status === 'partial' ? 'destructive' : 'secondary'}
+                >{observationDebugStatusLabel(run.trace?.status ?? 'missing')}</Badge>
+            {/if}
+            <span class="run-stats"
+              >{#if duration != null}{formatDuration(duration)} · {/if}IN
+              {formatTokenCount(run.usage.input_tokens)} · OUT
+              {formatTokenCount(run.usage.output_tokens)}</span>
+          </span>
+          <time class="stream-time" title={formatLogTime(run.started_at)}>{offsetLabel(run.started_at)}</time>
+          <ChevronRightIcon size={14} class="stream-chev" aria-hidden="true" />
+        </Collapsible.Trigger>
+        {#if run.parent_run_id}
+          {#if parentIndex !== null}
+            <button
+              type="button"
+              class="run-parent"
+              title={m.observation_run_jump_to({ index: `R${parentIndex}` })}
+              onclick={() => jumpToRun(run.parent_run_id)}
+              >{m.observation_run_continued_from({ index: `R${parentIndex}` })}</button>
+          {:else}
+            <span class="run-parent" data-muted>{m.observation_run_continued_external()}</span>
           {/if}
-          <span class="run-stats"
-            >{#if duration != null}{formatDuration(duration)} · {/if}IN
-            {formatTokenCount(run.usage.input_tokens)} · OUT
-            {formatTokenCount(run.usage.output_tokens)}</span>
-        </span>
-        <time class="stream-time" title={formatLogTime(run.started_at)}>{offsetLabel(run.started_at)}</time>
-        <ChevronRightIcon size={14} class="stream-chev" aria-hidden="true" />
-      </Collapsible.Trigger>
+        {/if}
+      </div>
       <Collapsible.Content>
         <dl class="row-detail detail-grid">
           <div>
@@ -338,13 +387,10 @@ function usageRows(run: RunDetail): ReadonlyArray<readonly [string, number | nul
           })}
         </Alert.Description></Alert.Root>
     {/if}
-    {#if items.length || children.length}
+    {#if items.length}
       <ol class="branch">
         {#each items as item (itemKey(item))}
           {@render streamItem(item, attemptOutputs.get(run.id))}
-        {/each}
-        {#each children as child (child.id)}
-          {@render runBlock(child)}
         {/each}
       </ol>
     {/if}
@@ -485,8 +531,12 @@ function usageRows(run: RunDetail): ReadonlyArray<readonly [string, number | nul
           </div>
         </dl>
         <ol class="stream">
-          {#each childRuns(null) as run (run.id)}
-            {@render runBlock(run)}
+          {#each orderedRuns as run, index (run.id)}
+            {#if index > 0}
+              {@const gap = gapLabel(orderedRuns[index - 1], run)}
+              {#if gap}<li class="stream-gap" role="separator" aria-label={gap}><span>{gap}</span></li>{/if}
+            {/if}
+            {@render runBlock(run, index + 1)}
           {/each}
         </ol>
       {/if}
@@ -507,8 +557,8 @@ function usageRows(run: RunDetail): ReadonlyArray<readonly [string, number | nul
 .diagnostic-overview dd {
   min-width: 0;
 }
-/* 诊断流是一条带主干的列表：每个嵌套 ol 的左边线是该层级的引导线，
-   行内标记通过 ::before 落在各自层级的引导线上。 */
+/* 诊断流是一条带主干的列表：Run 按时间拍平为并列分段，左边线是唯一主干；
+   分组事件的下级列表使用虚线，层级最多两层。 */
 .stream,
 .branch {
   display: flex;
@@ -527,12 +577,89 @@ function usageRows(run: RunDetail): ReadonlyArray<readonly [string, number | nul
   gap: 0.15rem;
   margin-block-start: 0.15rem;
 }
+.branch.sub {
+  margin-inline-start: 0.15rem;
+  padding-inline-start: 0.85rem;
+  border-inline-start-style: dashed;
+}
+.branch.sub :global(.stream-row)::before {
+  inset-inline-start: calc(-0.85rem - 1px - 0.2rem);
+  width: 0.4rem;
+  height: 0.4rem;
+}
 .stream-item,
 .stream-run {
   min-width: 0;
 }
-.branch > .stream-run {
-  margin-block-start: 0.5rem;
+/* 相邻请求之间的等待间隔 */
+.stream-gap {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  color: var(--muted-foreground);
+  font-family: var(--font-technical);
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+}
+.stream-gap::before,
+.stream-gap::after {
+  content: '';
+  flex: 1;
+  border-top: 1px dashed var(--border);
+}
+.stream-gap span {
+  white-space: nowrap;
+}
+/* Run 分段带：触发区占满，续接跳转片是右侧独立命中区（不与触发器嵌套）。 */
+.run-band {
+  display: flex;
+  align-items: stretch;
+  gap: 0.25rem;
+  min-width: 0;
+}
+.run-band > :global(.stream-row) {
+  flex: 1;
+  width: auto;
+  min-width: 0;
+}
+.run-idx {
+  flex: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 0.3rem;
+  color: var(--muted-foreground);
+  font-size: 0.68rem;
+  line-height: 1.6;
+}
+.run-parent {
+  flex: none;
+  align-self: stretch;
+  display: inline-flex;
+  align-items: center;
+  min-height: 40px;
+  padding: 0 0.6rem;
+  border: 0;
+  border-inline-start: 1px dashed var(--border);
+  background: transparent;
+  color: var(--primary);
+  font-family: inherit;
+  font-size: 0.72rem;
+  white-space: nowrap;
+  cursor: pointer;
+}
+button.run-parent:hover {
+  background: var(--accent);
+}
+button.run-parent:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+}
+.run-parent[data-muted] {
+  color: var(--muted-foreground);
+}
+.stream-run[data-flash] .run-band :global(.stream-row) {
+  background: var(--accent);
+  box-shadow: inset 2px 0 0 var(--primary);
 }
 :global(.stream-row) {
   position: relative;
