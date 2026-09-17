@@ -150,7 +150,7 @@ async function syncModels(): Promise<ProviderModelSyncSummary | undefined> {
     </nav>
 
     {#if view === 'connection'}
-      <ProviderConnectionView {provider} onSaved={(saved) => (savedProvider = saved)} />
+      <ProviderConnectionView {provider} onSaved={(saved: Provider) => (savedProvider = saved)} />
     {:else if view === 'models'}
       {#if syncStatus === 'syncing' || syncStatus === 'error'}
         <section class="rounded-xl border p-4" aria-live="polite">

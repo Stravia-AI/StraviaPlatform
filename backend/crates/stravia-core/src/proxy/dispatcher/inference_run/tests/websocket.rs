@@ -259,9 +259,7 @@ async fn generation_ingresses_preserve_unary_and_stream_contracts_over_upstream_
     }
 
     assert_eq!(connections.load(Ordering::SeqCst), responses.len());
-    let requests = requests
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let requests = requests.lock();
     assert_eq!(requests.len(), responses.len());
     assert!(
         requests

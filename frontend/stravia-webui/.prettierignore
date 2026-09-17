@@ -3,3 +3,5 @@ dist/
 node_modules/
 src/lib/paraglide/
 test-results/
+project.inlang/.meta.json
+project.inlang/README.md

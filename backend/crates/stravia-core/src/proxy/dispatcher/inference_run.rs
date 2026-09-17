@@ -181,17 +181,13 @@ pub(crate) struct WebSocketRunDelivery {
 }
 
 impl WebSocketRunDelivery {
-    pub(crate) async fn complete(delivery: &std::sync::Mutex<Self>) {
-        let completion = delivery
-            .lock()
-            .expect("delivery lock")
-            .stream_completion
-            .take();
+    pub(crate) async fn complete(delivery: &parking_lot::Mutex<Self>) {
+        let completion = delivery.lock().stream_completion.take();
         let result = match completion {
             Some(completion) => Some(completion.0.await),
             None => None,
         };
-        let mut delivery = delivery.lock().expect("delivery lock");
+        let mut delivery = delivery.lock();
         match result {
             Some(Ok(Some(terminal))) => {
                 // 协议帧发送完不代表生产任务已提交生成链或确定工具交接状态。
@@ -547,17 +543,13 @@ impl RunTerminalContext {
     }
 
     fn has_pending_inline_publications(&self) -> bool {
-        self.compaction_records
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .iter()
-            .any(|record| {
-                record.receipt == crate::model_turn::CompactionReceipt::Pending
-                    && matches!(
-                        record.mode,
-                        crate::interaction_observation::CompactionMode::Inline
-                    )
-            })
+        self.compaction_records.lock().iter().any(|record| {
+            record.receipt == crate::model_turn::CompactionReceipt::Pending
+                && matches!(
+                    record.mode,
+                    crate::interaction_observation::CompactionMode::Inline
+                )
+        })
     }
 
     fn receive_native_items(
@@ -565,10 +557,7 @@ impl RunTerminalContext {
         items: &[serde_json::Value],
         standalone_window_delivered: bool,
     ) -> Vec<crate::model_turn::CompactionPublication> {
-        let mut records = self
-            .compaction_records
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut records = self.compaction_records.lock();
         records
             .iter_mut()
             .filter_map(|record| {
@@ -655,10 +644,7 @@ impl RunTerminalContext {
                 });
             }
         }
-        let records = self
-            .compaction_records
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let records = self.compaction_records.lock();
         for record in records
             .iter()
             .filter(|record| record.receipt == crate::model_turn::CompactionReceipt::Pending)

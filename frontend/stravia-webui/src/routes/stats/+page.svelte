@@ -385,7 +385,7 @@ function retryAll(): void {
             aria-label={m.overview_latency_chart()}>
             <LineChart
               data={latencyChart}
-              x={(item) => item.bucket}
+              x={(item: (typeof latencyChart)[number]) => item.bucket}
               series={[
                 { key: 'firstToken', label: m.stats_first_token_seconds(), color: 'var(--chart-2)' },
                 { key: 'duration', label: m.stats_duration_seconds(), color: 'var(--chart-1)' },
@@ -417,7 +417,7 @@ function retryAll(): void {
         {:else if hasTraffic && errorChart.length > 0}<div class="h-40 min-w-0">
             <BarChart
               data={errorChart}
-              x={(item) => item.bucket}
+              x={(item: (typeof errorChart)[number]) => item.bucket}
               series={[{ key: 'errors', label: m.common_errors_label(), color: 'var(--chart-5)' }]}
               props={{ xAxis: { ticks: 4 } }} />
           </div>{:else}<Empty.Root class="h-40 border-y"
@@ -588,10 +588,11 @@ function retryAll(): void {
                 <div class="min-w-0">
                   <p class="truncate font-medium">{apiKey.api_key_name || apiKey.api_key_id}</p>
                   <p class="font-technical mt-1 text-xs text-muted-foreground">
-                    IN {formatCompactCount(apiKey.total_input_tokens)} ·
-                    OUT {formatCompactCount(apiKey.total_output_tokens)} ·
-                    C·R {formatCompactCount(apiKey.cache_read_tokens)} ·
-                    C·W {formatCompactCount(apiKey.cache_write_tokens)}
+                    IN {formatCompactCount(apiKey.total_input_tokens)} · OUT {formatCompactCount(
+                      apiKey.total_output_tokens,
+                    )} · C·R {formatCompactCount(apiKey.cache_read_tokens)} · C·W {formatCompactCount(
+                      apiKey.cache_write_tokens,
+                    )}
                   </p>
                   <p class="font-technical mt-1 text-xs text-muted-foreground">{formatLogTime(apiKey.last_used_at)}</p>
                 </div>

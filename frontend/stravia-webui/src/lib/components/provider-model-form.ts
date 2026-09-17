@@ -60,10 +60,7 @@ export function providerModelCostFromMetadata(value: ProviderModelMetadata): Pro
   }
 }
 
-export function providerModelFormFingerprint(
-  metadata: ProviderModelMetadata,
-  cost: ProviderModelCostForm,
-): string {
+export function providerModelFormFingerprint(metadata: ProviderModelMetadata, cost: ProviderModelCostForm): string {
   return JSON.stringify({ metadata, cost })
 }
 

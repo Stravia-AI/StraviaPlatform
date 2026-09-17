@@ -7,10 +7,7 @@ export interface ProviderOptionLabel {
   hint?: string
 }
 
-type OptionLabelEntry = {
-  label: (locale: Locale) => string
-  hint?: (locale: Locale) => string
-}
+type OptionLabelEntry = { label: (locale: Locale) => string; hint?: (locale: Locale) => string }
 
 const VENDOR_OPTION_LABELS: Record<string, Record<string, OptionLabelEntry>> = {
   commandcode: {
@@ -26,11 +23,7 @@ const VENDOR_OPTION_LABELS: Record<string, Record<string, OptionLabelEntry>> = {
  * metadata remains the English fallback for a newer unknown option so an
  * older WebUI never selects a misleading translation.
  */
-export function providerOptionLabel(
-  vendorId: string,
-  field: VendorOptionField,
-  locale: Locale,
-): ProviderOptionLabel {
+export function providerOptionLabel(vendorId: string, field: VendorOptionField, locale: Locale): ProviderOptionLabel {
   const entry = VENDOR_OPTION_LABELS[vendorId]?.[field.key]
   if (!entry) {
     return { label: field.label }

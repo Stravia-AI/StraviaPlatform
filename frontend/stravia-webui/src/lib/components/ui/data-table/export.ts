@@ -1,10 +1,6 @@
 import type { Column, RowData } from '@tanstack/svelte-table'
 
-import {
-  dataTableFeatures,
-  type DataTable,
-  type DataTableExportOptions,
-} from './data-table.js'
+import { dataTableCellText, dataTableFeatures, type DataTable, type DataTableExportOptions } from './data-table.js'
 
 interface ExportDataTableCsvInput<TData extends RowData> {
   table: DataTable<TData>
@@ -16,7 +12,7 @@ interface ExportDataTableCsvInput<TData extends RowData> {
 }
 
 function csvCell(value: unknown): string {
-  const text = String(value ?? '')
+  const text = dataTableCellText(value)
   return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text
 }
 
@@ -47,7 +43,11 @@ export function exportDataTableCsv<TData extends RowData>({
     exportColumns
       .map((column) => {
         const value = row.getValue(column.id)
-        return csvCell(options.getValue?.(row.original, column.id, value) ?? getExportValue?.(row.original, column.id, value) ?? value)
+        return csvCell(
+          options.getValue?.(row.original, column.id, value) ??
+            getExportValue?.(row.original, column.id, value) ??
+            value,
+        )
       })
       .join(','),
   )

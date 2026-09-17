@@ -25,19 +25,13 @@ impl GatewayLifecycle {
 
     pub(crate) fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) {
         let handle = tokio::spawn(task);
-        let mut tasks = self
-            .tasks
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut tasks = self.tasks.lock();
         tasks.push(handle);
     }
 
     pub(super) fn abort_tasks(&self) {
         self.cancellation.cancel();
-        let tasks = self
-            .tasks
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let tasks = self.tasks.lock();
         for task in tasks.iter() {
             task.abort();
         }
@@ -46,14 +40,13 @@ impl GatewayLifecycle {
     pub(super) async fn shutdown(&self) {
         self.cancellation.cancel();
         let tasks = {
-            let mut tasks = self
-                .tasks
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut tasks = self.tasks.lock();
             std::mem::take(&mut *tasks)
         };
         for task in tasks {
-            let _ = task.await;
+            if let Err(error) = task.await {
+                tracing::debug!(%error, "gateway task failed during shutdown");
+            }
         }
     }
 }
@@ -61,10 +54,7 @@ impl GatewayLifecycle {
 impl Drop for GatewayLifecycle {
     fn drop(&mut self) {
         self.cancellation.cancel();
-        let tasks = self
-            .tasks
-            .get_mut()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let tasks = self.tasks.get_mut();
         for task in tasks.drain(..) {
             task.abort();
         }

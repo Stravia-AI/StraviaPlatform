@@ -8,12 +8,13 @@ use transport_responses_websocket::{ResponsesWebSocketCall, ResponsesWebSocketSt
 
 use std::borrow::Cow;
 use std::sync::{
-    Arc, Mutex,
+    Arc,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::Instant;
 
 use futures::{StreamExt, stream::BoxStream};
+use parking_lot::Mutex;
 use reqwest::header::HeaderMap;
 use serde_json::Value;
 
@@ -444,7 +445,7 @@ impl AttemptObservation {
                     },
                     _ => unreachable!(),
                 };
-                let mut layout = self.thinking_layout.lock().expect("thinking layout lock");
+                let mut layout = self.thinking_layout.lock();
                 self.thinking_active.store(true, Ordering::Release);
                 observer.record(RunEvent::ModelThinkingDelta {
                     model_turn_id: self.model_turn_id.clone(),
@@ -472,7 +473,7 @@ impl AttemptObservation {
     }
 
     fn finish_thinking(&self) {
-        let mut layout = self.thinking_layout.lock().expect("thinking layout lock");
+        let mut layout = self.thinking_layout.lock();
         if !self.thinking_active.swap(false, Ordering::AcqRel) {
             return;
         }

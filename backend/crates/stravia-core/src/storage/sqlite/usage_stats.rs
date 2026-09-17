@@ -6,7 +6,7 @@ use super::*;
 pub(super) struct SqliteUsageStatsStore {
     pub(super) pool: SqlitePool,
     pub(super) last_route_snapshot:
-        Arc<std::sync::RwLock<Vec<crate::router::TargetSchedulingSnapshot>>>,
+        Arc<parking_lot::RwLock<Vec<crate::router::TargetSchedulingSnapshot>>>,
 }
 
 fn cutoff_ms(hours: Option<i64>) -> Option<i64> {
@@ -57,9 +57,7 @@ impl UsageStatsStore for SqliteUsageStatsStore {
         .await;
         match result {
             Ok(targets) => {
-                if let Ok(mut cached) = self.last_route_snapshot.write() {
-                    *cached = targets.clone();
-                }
+                *self.last_route_snapshot.write() = targets.clone();
                 RouteSchedulingUsage {
                     targets,
                     stale: false,
@@ -67,11 +65,7 @@ impl UsageStatsStore for SqliteUsageStatsStore {
             }
             Err(error) => {
                 tracing::warn!(%error, "failed to refresh confirmed route scheduling usage");
-                let targets = self
-                    .last_route_snapshot
-                    .read()
-                    .map(|cached| cached.clone())
-                    .unwrap_or_default();
+                let targets = self.last_route_snapshot.read().clone();
                 RouteSchedulingUsage {
                     targets,
                     stale: true,
@@ -394,7 +388,7 @@ mod tests {
 
         let store = SqliteUsageStatsStore {
             pool: pool.clone(),
-            last_route_snapshot: Arc::new(std::sync::RwLock::new(Vec::new())),
+            last_route_snapshot: Arc::new(parking_lot::RwLock::new(Vec::new())),
         };
         let overview = store.stats_overview(Some(1)).await?;
         assert_eq!(overview.total_input_tokens, Some(7));

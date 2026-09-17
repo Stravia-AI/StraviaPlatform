@@ -26,7 +26,13 @@ import InfoIcon from '@lucide/svelte/icons/info'
 import { Badge } from '$lib/components/ui/badge'
 import * as Tabs from '$lib/components/ui/tabs'
 import * as Sheet from '$lib/components/ui/sheet'
-import { DataTable, createDataTableColumnHelper, type DataTableCellContext } from '$lib/components/ui/data-table'
+import {
+  DataTable,
+  createDataTableColumnHelper,
+  type DataTableCellContext,
+  type DataTableInstance,
+  type DataTableRowPointerEvent,
+} from '$lib/components/ui/data-table'
 import { getDataTableLabels } from '$lib/data-table-labels'
 import { Spinner } from '$lib/components/ui/spinner'
 import { Switch } from '$lib/components/ui/switch'
@@ -262,7 +268,7 @@ function selectMatch(match: CredentialMatch): void {
         {#if saving}<Spinner />{/if}
         <Switch
           id="reversible-redaction-enabled"
-          bind:checked={() => storedEnabled, (checked) => void setEnabled(checked)}
+          bind:checked={() => storedEnabled, (checked: boolean) => void setEnabled(checked)}
           disabled={!settingQuery.isSuccess || saving}
           aria-busy={saving}
           aria-labelledby="redaction-setting-title"
@@ -308,7 +314,7 @@ function selectMatch(match: CredentialMatch): void {
             data={rules}
             columns={ruleColumns}
             labels={tableLabels}
-            getRowId={(rule) => rule.id}
+            getRowId={(rule: CredentialRule) => rule.id}
             ariaLabel={m.credential_protection_catalog_title()}
             size="large"
             stickyHeader
@@ -321,8 +327,8 @@ function selectMatch(match: CredentialMatch): void {
             paginator
             pagination={{ pageIndex: 0, pageSize: 10 }}
             pageSizeOptions={[10, 25, 50]}
-            onRowClick={({ row }) => openRule(row.original)}>
-            {#snippet toolbar(table)}
+            onRowClick={({ row }: DataTableRowPointerEvent<CredentialRule>) => openRule(row.original)}>
+            {#snippet toolbar(table: DataTableInstance<CredentialRule>)}
               <p class="text-sm text-muted-foreground" role="status">
                 {m.credential_protection_rule_count({ count: formatNumber(table.getFilteredRowModel().rows.length) })}
               </p>

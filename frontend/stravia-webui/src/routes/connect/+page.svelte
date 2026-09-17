@@ -299,7 +299,7 @@ function cliModelName(modelId: string): string | undefined {
                   type="single"
                   bind:value={
                     () => selectedCliKey?.id ?? '',
-                    (value) => {
+                    (value: string) => {
                       cliKeyId = value
                     }
                   }
@@ -498,7 +498,7 @@ function cliModelName(modelId: string): string | undefined {
                   type="single"
                   bind:value={
                     () => selectedCodeKey?.id ?? '',
-                    (value) => {
+                    (value: string) => {
                       codeKeyId = value
                     }
                   }

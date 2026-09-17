@@ -1,6 +1,8 @@
 <script lang="ts">
-import type { ComponentProps, Snippet } from 'svelte'
-import { cn } from '$lib/utils.js'
+import type { Dialog as DialogPrimitive } from 'bits-ui'
+import type { Snippet } from 'svelte'
+
+import { cn, type WithoutChildrenOrChild } from '$lib/utils.js'
 import Content from './dialog-content.svelte'
 
 let {
@@ -11,10 +13,12 @@ let {
   children,
   showCloseButton = true,
   ...restProps
-}: Omit<ComponentProps<typeof Content>, 'children'> & {
+}: WithoutChildrenOrChild<DialogPrimitive.ContentProps> & {
+  portalProps?: WithoutChildrenOrChild<DialogPrimitive.PortalProps>
   header?: Snippet
   footer?: Snippet
   children?: Snippet
+  showCloseButton?: boolean
 } = $props()
 </script>
 

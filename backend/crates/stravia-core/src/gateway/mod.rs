@@ -19,11 +19,12 @@ use lifecycle::GatewayLifecycle;
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
+use parking_lot::Mutex;
 use sqlx::{Pool, Postgres, SqlitePool};
 
 use crate::auth::types::AuthSession;

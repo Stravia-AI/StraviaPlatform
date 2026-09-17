@@ -1,8 +1,8 @@
 //! Open Responses 2026-04-24 WebSocket transport.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::Json;
@@ -11,6 +11,7 @@ use axum::extract::{Extension, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use futures::{SinkExt, StreamExt};
+use parking_lot::Mutex;
 use serde_json::Value;
 use tokio::sync::mpsc;
 
@@ -200,7 +201,7 @@ pub async fn handler(
     let response = ws
         .max_message_size(MAX_MESSAGE_BYTES)
         .on_upgrade(move |socket| serve(socket, gateway, headers, serve_handshake_response));
-    *handshake_response.lock().expect("handshake response lock") = serde_json::json!({
+    *handshake_response.lock() = serde_json::json!({
         "status": response.status().as_u16(),
         "headers": response.headers().iter().filter_map(|(name, value)| {
             value.to_str().ok().map(|value| {
@@ -254,10 +255,7 @@ async fn serve(
     headers: HeaderMap,
     handshake_response: Arc<Mutex<Value>>,
 ) {
-    let handshake_response = handshake_response
-        .lock()
-        .expect("handshake response lock")
-        .clone();
+    let handshake_response = handshake_response.lock().clone();
     let (mut sink, mut source) = socket.split();
     let (outgoing, mut outgoing_rx) = mpsc::channel::<OutgoingMessage>(OUTGOING_QUEUE_CAPACITY);
     let terminal_started = Arc::new(AtomicBool::new(false));
@@ -494,8 +492,7 @@ async fn serve(
                     crate::proxy::dispatcher::defer_websocket_delivery(&request_context);
                     let request_cancellation = request_context.cancellation.clone();
                     let timeout_context = request_context.clone();
-                    *cancellation_slot.lock().expect("cancellation lock") =
-                        Some(request_cancellation.clone());
+                    *cancellation_slot.lock() = Some(request_cancellation.clone());
                     let progress = Arc::new(Mutex::new(StreamForwardProgress::default()));
                     let delivery_slot = active_delivery.clone();
                     tokio::spawn(async move {
@@ -517,19 +514,15 @@ async fn serve(
                         .await;
                         if result.is_err() {
                             request_cancellation.cancel();
-                            if active_observer
-                                .lock()
-                                .expect("active observer lock")
-                                .is_none()
+                            if active_observer.lock().is_none()
                                 && let Some(observer) = timeout_context
                                     .extensions
                                     .get::<crate::interaction_observation::RunObserver>(
                                 )
                             {
-                                *active_observer.lock().expect("active observer lock") =
-                                    Some(observer);
+                                *active_observer.lock() = Some(observer);
                             }
-                            let _ = tokio::time::timeout(
+                            if tokio::time::timeout(
                                 WRITER_SHUTDOWN_GRACE,
                                 send_run_timeout(
                                     &outgoing,
@@ -538,20 +531,23 @@ async fn serve(
                                     &active_observer,
                                 ),
                             )
-                            .await;
+                            .await
+                            .is_err()
+                            {
+                                tracing::debug!(
+                                    "run-timeout notification exceeded writer shutdown grace"
+                                );
+                            }
                         }
-                        *cancellation_slot.lock().expect("cancellation lock") = None;
-                        *active_observer.lock().expect("active observer lock") = None;
-                        *delivery_slot.lock().expect("delivery slot lock") = None;
+                        *cancellation_slot.lock() = None;
+                        *active_observer.lock() = None;
+                        *delivery_slot.lock() = None;
                         in_flight.store(false, Ordering::Release);
                         run_finished.notify_waiters();
                     });
                 }
                 Message::Ping(payload) => {
-                    let observer = active_observer
-                        .lock()
-                        .expect("active observer lock")
-                        .clone();
+                    let observer = active_observer.lock().clone();
                     let observed_payload = observer.as_ref().map(|_| payload.clone());
                     if let (Some(observer), Some(observed_payload)) =
                         (&observer, observed_payload.as_ref())
@@ -583,11 +579,7 @@ async fn serve(
                     }
                 }
                 Message::Pong(payload) => {
-                    if let Some(observer) = active_observer
-                        .lock()
-                        .expect("active observer lock")
-                        .clone()
-                    {
+                    if let Some(observer) = active_observer.lock().clone() {
                         observer.record_debug(|| ws_wire(
                             "client_to_platform",
                             "pong",
@@ -596,11 +588,7 @@ async fn serve(
                     }
                 }
                 Message::Close(frame) => {
-                    if let Some(observer) = active_observer
-                        .lock()
-                        .expect("active observer lock")
-                        .clone()
-                    {
+                    if let Some(observer) = active_observer.lock().clone() {
                         observer.record_debug(|| {
                             ws_wire(
                                 "client_to_platform",
@@ -675,11 +663,13 @@ async fn serve(
             WRITER_SHUTDOWN_GRACE,
         )
         .await;
-    } else if let Some(token) = cancellation.lock().expect("cancellation lock").take() {
+    } else if let Some(token) = cancellation.lock().take() {
         token.cancel();
     }
     drop(outgoing);
-    let _ = writer.await;
+    if let Err(error) = writer.await {
+        tracing::debug!(%error, "outgoing writer task failed during shutdown");
+    }
 }
 
 struct ResponseForwardSinks<'a> {
@@ -713,10 +703,9 @@ async fn forward_response(
         crate::proxy::ingress::observation::take_rejection_observer(&mut response);
     let delivery = crate::proxy::dispatcher::take_websocket_delivery(&context)
         .map(|delivery| Arc::new(Mutex::new(delivery)));
-    *delivery_slot.lock().expect("delivery slot lock") = delivery.clone();
+    *delivery_slot.lock() = delivery.clone();
     if let Some(delivery) = delivery.as_ref() {
-        *active_observer.lock().expect("active observer lock") =
-            Some(delivery.lock().expect("delivery lock").observer());
+        *active_observer.lock() = Some(delivery.lock().observer());
     }
     let status = response.status();
     let upstream_error = response
@@ -730,14 +719,13 @@ async fn forward_response(
             if send_error(outgoing, 500, "server_error", "Response stream failed.").await
                 && let Some(delivery) = delivery.as_ref()
             {
-                delivery.lock().expect("delivery lock").sent_error_text(
+                delivery.lock().sent_error_text(
                     &error_body(500, "server_error", "Response stream failed.").to_string(),
                 );
             }
             if let Some(delivery) = delivery.as_ref() {
                 delivery
                     .lock()
-                    .expect("delivery lock")
                     .finish("delivery_failed", Some("response_stream_failed".into()));
             }
             return;
@@ -752,14 +740,13 @@ async fn forward_response(
             .await
                 && let Some(delivery) = delivery.as_ref()
             {
-                delivery.lock().expect("delivery lock").sent_error_text(
+                delivery.lock().sent_error_text(
                     &error_body(500, "server_error", "Response stream was not UTF-8.").to_string(),
                 );
             }
             if let Some(delivery) = delivery.as_ref() {
                 delivery
                     .lock()
-                    .expect("delivery lock")
                     .finish("delivery_failed", Some("response_stream_not_utf8".into()));
             }
             return;
@@ -772,17 +759,10 @@ async fn forward_response(
         }
     }
     if status.is_success() {
-        let terminal_failure = progress
-            .lock()
-            .expect("stream progress lock")
-            .terminal_failure
-            .clone();
+        let terminal_failure = progress.lock().terminal_failure.clone();
         if let Some(delivery) = delivery.as_ref() {
             if let Some(reason) = terminal_failure {
-                delivery
-                    .lock()
-                    .expect("delivery lock")
-                    .finish("delivery_failed", Some(reason));
+                delivery.lock().finish("delivery_failed", Some(reason));
             } else {
                 crate::proxy::dispatcher::WebSocketRunDelivery::complete(delivery).await;
             }
@@ -824,17 +804,11 @@ async fn forward_response(
                 });
             }
             if let Some(delivery) = delivery.as_ref() {
-                delivery
-                    .lock()
-                    .expect("delivery lock")
-                    .sent_error_text(&error_text);
+                delivery.lock().sent_error_text(&error_text);
             }
         }
         if let Some(delivery) = delivery.as_ref() {
-            delivery
-                .lock()
-                .expect("delivery lock")
-                .finish("delivery_failed", Some(code));
+            delivery.lock().finish("delivery_failed", Some(code));
         }
     }
 }
@@ -868,18 +842,14 @@ async fn forward_sse_frames(
                 if let Some(delivery) = delivery {
                     delivery
                         .lock()
-                        .expect("delivery lock")
                         .finish("delivery_failed", Some("websocket_write_failed".into()));
                 }
                 return false;
             }
             if let Some(delivery) = delivery {
-                delivery.lock().expect("delivery lock").sent_text(data);
+                delivery.lock().sent_text(data);
             }
-            progress
-                .lock()
-                .expect("stream progress lock")
-                .observe_delivered(data);
+            progress.lock().observe_delivered(data);
         }
     }
     true
@@ -891,8 +861,8 @@ async fn send_run_timeout(
     delivery_slot: &SharedRunDelivery,
     active_observer: &Arc<Mutex<Option<crate::interaction_observation::RunObserver>>>,
 ) {
-    let delivery = delivery_slot.lock().expect("delivery slot lock").clone();
-    let progress = progress.lock().expect("stream progress lock").clone();
+    let delivery = delivery_slot.lock().clone();
+    let progress = progress.lock().clone();
     let Some(mut response) = progress.response else {
         if send_error(
             outgoing,
@@ -909,15 +879,8 @@ async fn send_run_timeout(
             )
             .to_string();
             if let Some(delivery) = delivery.as_ref() {
-                delivery
-                    .lock()
-                    .expect("delivery lock")
-                    .sent_error_text(&error_text);
-            } else if let Some(observer) = active_observer
-                .lock()
-                .expect("active observer lock")
-                .clone()
-            {
+                delivery.lock().sent_error_text(&error_text);
+            } else if let Some(observer) = active_observer.lock().clone() {
                 observer.record_debug(|| {
                     ws_wire("platform_to_client", "text", Value::String(error_text))
                 });
@@ -926,7 +889,6 @@ async fn send_run_timeout(
         if let Some(delivery) = delivery {
             delivery
                 .lock()
-                .expect("delivery lock")
                 .finish("delivery_failed", Some("request_timeout".into()));
         }
         return;
@@ -971,28 +933,19 @@ async fn send_run_timeout(
             if let Some(delivery) = delivery.as_ref() {
                 delivery
                     .lock()
-                    .expect("delivery lock")
                     .finish("delivery_failed", Some("websocket_write_failed".into()));
             }
             return;
         }
         if let Some(delivery) = delivery.as_ref() {
-            delivery
-                .lock()
-                .expect("delivery lock")
-                .sent_error_text(&text);
-        } else if let Some(observer) = active_observer
-            .lock()
-            .expect("active observer lock")
-            .clone()
-        {
+            delivery.lock().sent_error_text(&text);
+        } else if let Some(observer) = active_observer.lock().clone() {
             observer.record_debug(|| ws_wire("platform_to_client", "text", Value::String(text)));
         }
     }
     if let Some(delivery) = delivery {
         delivery
             .lock()
-            .expect("delivery lock")
             .finish("delivery_failed", Some("request_timeout".into()));
     }
 }
@@ -1015,23 +968,19 @@ async fn terminate_expired_connection(
             "The WebSocket connection exceeded the 60 minute limit.",
         )
         .to_string();
-        if let Some(delivery) = active_delivery.lock().expect("delivery slot lock").clone() {
-            let mut delivery = delivery.lock().expect("delivery lock");
+        if let Some(delivery) = active_delivery.lock().clone() {
+            let mut delivery = delivery.lock();
             delivery.sent_error_text(&error_text);
             delivery.finish(
                 "cancelled",
                 Some("websocket_connection_limit_reached".into()),
             );
-        } else if let Some(observer) = active_observer
-            .lock()
-            .expect("active observer lock")
-            .clone()
-        {
+        } else if let Some(observer) = active_observer.lock().clone() {
             observer
                 .record_debug(|| ws_wire("platform_to_client", "text", Value::String(error_text)));
         }
     }
-    if let Some(token) = cancellation.lock().expect("cancellation lock").take() {
+    if let Some(token) = cancellation.lock().take() {
         token.cancel();
     }
     writer.abort();

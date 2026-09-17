@@ -912,7 +912,9 @@ pub(super) async fn orchestrate(
             }
             lifecycle.spawn(async move {
                 for reference in references {
-                    let _ = store.wait_terminal(&principal, &reference).await;
+                    if let Err(error) = store.wait_terminal(&principal, &reference).await {
+                        tracing::debug!(%reference, %error, "background execution wait failed");
+                    }
                 }
                 drop(background_admission);
             });

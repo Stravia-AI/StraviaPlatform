@@ -61,7 +61,7 @@ pub(crate) enum CompactionReceipt {
     Delivered,
 }
 
-pub(crate) type CompactionPublications = Arc<std::sync::Mutex<Vec<CompactionPublication>>>;
+pub(crate) type CompactionPublications = Arc<parking_lot::Mutex<Vec<CompactionPublication>>>;
 
 pub struct TurnInput {
     pub purpose: ModelTurnPurpose,
@@ -188,23 +188,23 @@ use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
 #[derive(Clone)]
 pub(crate) struct InMemoryModelTurnExecutor {
     responses:
-        Arc<std::sync::Mutex<std::collections::VecDeque<Result<AiResponse, ModelTurnError>>>>,
-    requests: Arc<std::sync::Mutex<Vec<AiRequest>>>,
+        Arc<parking_lot::Mutex<std::collections::VecDeque<Result<AiResponse, ModelTurnError>>>>,
+    requests: Arc<parking_lot::Mutex<Vec<AiRequest>>>,
 }
 
 #[cfg(test)]
 impl InMemoryModelTurnExecutor {
     pub(crate) fn scripted(responses: impl IntoIterator<Item = AiResponse>) -> Self {
         Self {
-            responses: Arc::new(std::sync::Mutex::new(
+            responses: Arc::new(parking_lot::Mutex::new(
                 responses.into_iter().map(Ok).collect(),
             )),
-            requests: Arc::new(std::sync::Mutex::new(Vec::new())),
+            requests: Arc::new(parking_lot::Mutex::new(Vec::new())),
         }
     }
 
     pub(crate) fn requests(&self) -> Vec<AiRequest> {
-        self.requests.lock().expect("requests").clone()
+        self.requests.lock().clone()
     }
 }
 
@@ -213,14 +213,10 @@ impl InMemoryModelTurnExecutor {
 impl ModelTurnExecutor for InMemoryModelTurnExecutor {
     async fn execute(&self, input: TurnInput) -> Result<ModelTurn, ModelTurnError> {
         let request = input.request;
-        self.requests
-            .lock()
-            .expect("requests")
-            .push(request.clone());
+        self.requests.lock().push(request.clone());
         let response = self
             .responses
             .lock()
-            .expect("responses")
             .pop_front()
             .expect("scripted Model Turn")?;
         let route = RouteContext {

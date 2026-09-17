@@ -7,6 +7,9 @@ license = "AGPL-3.0-only"
 description = "Transport-neutral Web Access adapter contract"
 publish = false
 
+[lints]
+workspace = true
+
 [dependencies]
 async-trait = { workspace = true }
 serde = { workspace = true }

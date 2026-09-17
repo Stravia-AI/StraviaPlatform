@@ -39,7 +39,7 @@ pub(crate) fn input_preview(mut text: String, protected: &ProtectedSecrets) -> S
 
 // Shared only by a Run and its trace handles. Deliberately has no Debug implementation.
 #[derive(Clone, Default)]
-pub(crate) struct ProtectedSecrets(std::sync::Arc<std::sync::RwLock<Vec<ProtectedSecret>>>);
+pub(crate) struct ProtectedSecrets(std::sync::Arc<parking_lot::RwLock<Vec<ProtectedSecret>>>);
 
 struct ProtectedSecret {
     raw: String,
@@ -75,7 +75,7 @@ impl ProtectedSecret {
 
 impl ProtectedSecrets {
     pub(crate) fn register<'a>(&self, secrets: impl IntoIterator<Item = &'a str>) {
-        let mut values = self.0.write().expect("protected diagnostic text");
+        let mut values = self.0.write();
         for secret in secrets {
             if !secret.is_empty() && !values.iter().any(|value| value.raw == secret) {
                 let slot = values.len();
@@ -86,7 +86,7 @@ impl ProtectedSecrets {
     }
 
     pub(crate) fn text(&self, text: &mut String) {
-        if self.0.read().expect("protected diagnostic text").is_empty() {
+        if self.0.read().is_empty() {
             return;
         }
         self.text_inner(text, 0);
@@ -115,12 +115,12 @@ impl ProtectedSecrets {
                     .collect();
             }
         }
-        let values = self.0.read().expect("protected diagnostic text");
+        let values = self.0.read();
         redact_protected_literals(text, &values);
     }
 
     pub(crate) fn value(&self, value: &mut Value) {
-        if !self.0.read().expect("protected diagnostic text").is_empty() {
+        if !self.0.read().is_empty() {
             self.value_inner(value, 0);
         }
     }
@@ -269,7 +269,7 @@ struct ProtectedTextStream {
 
 impl ProtectedTextStream {
     fn push(&mut self, text: &str, protected: &ProtectedSecrets) -> String {
-        let values = protected.0.read().expect("protected diagnostic text");
+        let values = protected.0.read();
         self.matched.resize(values.len(), 0);
         let mut output = Vec::with_capacity(text.len());
         for character in text.chars() {
@@ -368,7 +368,7 @@ impl ProtectedTextStream {
     }
 
     fn finish(&mut self, protected: &ProtectedSecrets) -> String {
-        let values = protected.0.read().expect("protected diagnostic text");
+        let values = protected.0.read();
         let mut output = Vec::with_capacity(self.pending.len() + self.marker_pending.len());
         self.release_marker_candidate(&values);
         self.emit(self.pending.len(), &mut output);

@@ -6,6 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 description = "Compile-time credential detection, reversible protection and mapping persistence"
 
+[lints]
+workspace = true
+
 [dependencies]
 stravia-runtime-contract = { workspace = true }
 async-trait = { workspace = true }

@@ -106,9 +106,7 @@ function resolveErrorPayload(error: unknown): { raw: string; payload: ErrorPaylo
   return { raw, payload: direct ?? parseErrorPayload(raw) }
 }
 
-export function unrepresentableThinkingTarget(
-  error: unknown,
-): { providerId: string; modelId: string } | null {
+export function unrepresentableThinkingTarget(error: unknown): { providerId: string; modelId: string } | null {
   const payload = resolveErrorPayload(error).payload
   if (payload?.code !== 'THINKING_CONTROL_UNREPRESENTABLE') return null
   const providerId = extractString(payload.params, 'provider_id')

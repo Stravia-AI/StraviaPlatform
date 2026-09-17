@@ -141,7 +141,9 @@ pub(super) fn atomic_write(path: &Path, body: &[u8]) -> anyhow::Result<()> {
     ));
     std::fs::write(&temporary, body)?;
     if let Err(error) = replace_file_atomically(&temporary, path) {
-        let _ = std::fs::remove_file(&temporary);
+        if let Err(cleanup_error) = std::fs::remove_file(&temporary) {
+            tracing::debug!(%cleanup_error, "failed to remove stale provider cache file");
+        }
         return Err(error).with_context(|| format!("activate cache file {}", path.display()));
     }
     Ok(())

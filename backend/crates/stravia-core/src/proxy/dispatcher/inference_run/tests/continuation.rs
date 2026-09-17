@@ -52,7 +52,7 @@ async fn delivered_hidden_round_continuation_prefers_the_final_model_legs_target
     })
     .hook(Arc::new(hook))
     .platform_tool(Arc::new(OrderedTool {
-        calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+        calls: Arc::new(parking_lot::Mutex::new(Vec::new())),
     }))
     .build()
     .await
@@ -324,9 +324,7 @@ async fn anthropic_cache_breakpoint_on_reusable_history_keeps_target_continuatio
         String::from_utf8_lossy(&second_body)
     );
 
-    let requests = requests
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let requests = requests.lock();
     assert_eq!(requests.len(), 2);
     assert_eq!(
         requests[1]["previous_response_id"],
@@ -405,10 +403,7 @@ async fn anthropic_combined_assistant_turn_reuses_generation_chain() {
         StatusCode::OK,
         "{}; upstream requests: {}",
         String::from_utf8_lossy(&first_body),
-        requests
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .len()
+        requests.lock().len()
     );
     assert!(
         String::from_utf8_lossy(&first_body).contains("call-1"),
@@ -468,9 +463,7 @@ async fn anthropic_combined_assistant_turn_reuses_generation_chain() {
         String::from_utf8_lossy(&second_body)
     );
 
-    let requests = requests
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let requests = requests.lock();
     assert_eq!(requests.len(), 2);
     assert_eq!(
         requests[1]["previous_response_id"],
@@ -643,9 +636,7 @@ async fn chat_full_history_uses_upstream_websocket_and_longest_reusable_prefix()
         StatusCode::OK,
         "{first_body}; connections={}; requests={:?}",
         connections.load(Ordering::SeqCst),
-        requests
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        requests.lock()
     );
     assert_eq!(
         first_body["choices"][0]["message"]["content"],
@@ -703,9 +694,7 @@ async fn chat_full_history_uses_upstream_websocket_and_longest_reusable_prefix()
     .await;
     assert_eq!(third_response.status(), StatusCode::OK);
 
-    let requests = requests
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let requests = requests.lock();
     assert_eq!(requests.len(), 3);
     assert!(requests[0].get("previous_response_id").is_none());
     assert_eq!(requests[0]["input"].as_array().map(Vec::len), Some(1));
@@ -812,7 +801,7 @@ async fn edited_history_reaches_websocket_without_reusing_stale_upstream_state()
         .await;
         assert_eq!(response.status(), StatusCode::OK);
         let _ = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let requests = requests.lock().unwrap();
+        let requests = requests.lock();
         let upstream = requests.last().unwrap();
         assert!(upstream.get("previous_response_id").is_none(), "{upstream}");
         let sent = upstream["input"].to_string();
@@ -887,9 +876,7 @@ async fn store_false_chat_chain_generates_a_stable_prompt_cache_key() {
         .await
         .expect("second response body");
 
-    let requests = requests
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let requests = requests.lock();
     assert_eq!(requests.len(), 2);
     let prompt_cache_key = requests[0]["prompt_cache_key"]
         .as_str()
@@ -960,9 +947,7 @@ async fn missing_upstream_prefix_replays_full_history_once_on_the_same_socket() 
         String::from_utf8_lossy(&second_body)
     );
 
-    let requests = requests
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let requests = requests.lock();
     assert_eq!(requests.len(), 3);
     assert_eq!(connections.load(Ordering::SeqCst), 1);
     assert_eq!(
@@ -1031,10 +1016,7 @@ async fn missing_upstream_prefix_is_not_replayed_after_upstream_event() {
 
     assert_eq!(connections.load(Ordering::SeqCst), 1);
     assert_eq!(
-        requests
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .len(),
+        requests.lock().len(),
         2,
         "visible output forbids a full-history replay"
     );

@@ -13,7 +13,17 @@ import { Badge } from '$lib/components/ui/badge'
 import StreamingMarkdown from '$lib/components/streaming-markdown.svelte'
 import { Button } from '$lib/components/ui/button'
 
-let { detail, liveBlocks = [], olderLoading = false, onolder }: { detail: InteractionDetail; liveBlocks?: LiveContentBlock[]; olderLoading?: boolean; onolder?: () => Promise<void> } = $props()
+let {
+  detail,
+  liveBlocks = [],
+  olderLoading = false,
+  onolder,
+}: {
+  detail: InteractionDetail
+  liveBlocks?: LiveContentBlock[]
+  olderLoading?: boolean
+  onolder?: () => Promise<void>
+} = $props()
 let previousMessages: ObservationChatMessage[] = []
 const messages = $derived.by(() => {
   previousMessages = observationConversationMessages(detail, liveBlocks, previousMessages)
@@ -41,7 +51,8 @@ async function loadOlder(): Promise<void> {
   } finally {
     prepending = false
   }
-  if (olderSentinel && nearOlderSentinel(viewport, olderSentinel) && detail.older_events_cursor !== null) void loadOlder()
+  if (olderSentinel && nearOlderSentinel(viewport, olderSentinel) && detail.older_events_cursor !== null)
+    void loadOlder()
 }
 
 function nearOlderSentinel(viewport: HTMLElement, sentinel: HTMLElement): boolean {

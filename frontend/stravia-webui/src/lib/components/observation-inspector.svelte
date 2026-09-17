@@ -135,7 +135,7 @@ function resizeWithKeyboard(event: KeyboardEvent): void {
       class="w-full! max-w-none! gap-0"
       showCloseButton={false}
       aria-describedby={undefined}
-      onCloseAutoFocus={(event) => {
+      onCloseAutoFocus={(event: Event) => {
         event.preventDefault()
         if (mobile.current) restoreFocus()
         else panel?.focus()

@@ -225,8 +225,8 @@ pub(crate) struct TraceHandle {
 
 struct TraceState {
     // Segment snapshots are byte prefixes, so queued records must be sequence-ordered.
-    queued_sequence: std::sync::Mutex<i64>,
-    wire_pending: std::sync::Mutex<std::collections::HashMap<String, (String, TraceRecord)>>,
+    queued_sequence: parking_lot::Mutex<i64>,
+    wire_pending: parking_lot::Mutex<std::collections::HashMap<String, (String, TraceRecord)>>,
     protected: super::redaction::ProtectedSecrets,
     bytes_written: AtomicU64,
     event_count: AtomicU64,
@@ -300,8 +300,8 @@ impl TraceManager {
     pub(crate) fn create(&self) -> TraceHandle {
         let trace_id = stravia_runtime_contract::identifier::new_id();
         let state = Arc::new(TraceState {
-            queued_sequence: std::sync::Mutex::new(0),
-            wire_pending: std::sync::Mutex::new(std::collections::HashMap::new()),
+            queued_sequence: parking_lot::Mutex::new(0),
+            wire_pending: parking_lot::Mutex::new(std::collections::HashMap::new()),
             protected: super::redaction::ProtectedSecrets::default(),
             bytes_written: AtomicU64::new(0),
             event_count: AtomicU64::new(0),
@@ -396,8 +396,9 @@ impl TraceManager {
             .send(WriterCommand::Shutdown { response })
             .await
             .is_ok()
+            && let Err(error) = receive.await
         {
-            let _ = receive.await;
+            tracing::debug!(%error, "trace writer dropped shutdown acknowledgement");
         }
     }
 
@@ -453,11 +454,7 @@ impl TraceHandle {
                 record.attempt_id.as_deref().unwrap_or_default(),
                 record.message_type.as_deref().unwrap_or_default()
             );
-            let mut pending = self
-                .state
-                .wire_pending
-                .lock()
-                .expect("wire capture fragments");
+            let mut pending = self.state.wire_pending.lock();
             let (buffer, _) = pending.entry(key.clone()).or_insert_with(|| {
                 let mut template = record.clone();
                 template.payload = Value::Null;
@@ -503,7 +500,7 @@ impl TraceHandle {
                 self.mark_partial("media_unrecoverable", false);
             }
         }
-        let mut queued_sequence = self.state.queued_sequence.lock().expect("trace sequence");
+        let mut queued_sequence = self.state.queued_sequence.lock();
         record.sequence = record.sequence.max(*queued_sequence);
         *queued_sequence = record.sequence;
         let mut bytes = match serde_json::to_vec(&record) {
@@ -529,13 +526,7 @@ impl TraceHandle {
 
     pub(crate) async fn finish(&self) -> TraceManifest {
         if !self.state.finished.swap(true, Ordering::AcqRel) {
-            let pending = std::mem::take(
-                &mut *self
-                    .state
-                    .wire_pending
-                    .lock()
-                    .expect("wire capture fragments"),
-            );
+            let pending = std::mem::take(&mut *self.state.wire_pending.lock());
             for (_, (text, mut record)) in pending {
                 let trimmed = text.trim_start();
                 if trimmed.starts_with(['{', '[', '"', ':'])
@@ -718,7 +709,9 @@ async fn writer_loop(inner: Arc<ManagerInner>, mut rx: mpsc::Receiver<WriterComm
             WriterCommand::ClearAll { response } => {
                 for (_, mut writer) in writers.drain() {
                     // 先关闭句柄再删目录，Windows 上打开的文件无法删除。
-                    let _ = writer.shutdown().await;
+                    if let Err(error) = writer.shutdown().await {
+                        tracing::debug!(%error, "trace writer close failed during clear");
+                    }
                 }
                 let root = inner.root.clone();
                 let result = tokio::task::spawn_blocking(move || clear_managed_directories(&root))
@@ -732,7 +725,9 @@ async fn writer_loop(inner: Arc<ManagerInner>, mut rx: mpsc::Receiver<WriterComm
             }
             WriterCommand::Shutdown { response } => {
                 for writer in writers.values_mut() {
-                    let _ = writer.flush().await;
+                    if let Err(error) = writer.flush().await {
+                        tracing::debug!(%error, "trace writer flush failed during shutdown");
+                    }
                 }
                 let _ = response.send(());
                 break;

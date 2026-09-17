@@ -12,7 +12,7 @@ afterEach(() => {
 })
 
 describe('Vite development proxy', () => {
-  test('prefers the current STRAVIA_PORT over the repository .env value', async () => {
+  test('prefers the current STRAVIA_PORT over the repository .env value', () => {
     process.env.STRAVIA_PORT = '45678'
 
     expect(typeof config).toBe('function')
@@ -20,7 +20,7 @@ describe('Vite development proxy', () => {
       throw new Error('expected a mode-aware Vite config')
     }
 
-    const resolved = await config({ command: 'serve', mode: 'development', isSsrBuild: false, isPreview: false })
+    const resolved = config({ command: 'serve', mode: 'development', isSsrBuild: false, isPreview: false })
     const proxies = ['/api/v1', '/v1', '/v1beta'].map((path) => resolved.server?.proxy?.[path])
 
     for (const proxy of proxies) {

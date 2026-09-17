@@ -20,10 +20,7 @@ function setSelectedLocale(value: string): void {
   <Field.FieldLabel for="interface-language" hint={description ? m.locale_language_description() : undefined}>
     {m.locale_language_label()}
   </Field.FieldLabel>
-  <Select.Root
-    type="single"
-    value={localeState.current}
-    onValueChange={setSelectedLocale}>
+  <Select.Root type="single" value={localeState.current} onValueChange={setSelectedLocale}>
     <Select.Trigger id="interface-language" class="w-full" aria-label={m.locale_language_label()}>
       {localeState.current === 'zh-CN' ? m.locale_simplified_chinese_autonym() : m.locale_english_autonym()}
     </Select.Trigger>

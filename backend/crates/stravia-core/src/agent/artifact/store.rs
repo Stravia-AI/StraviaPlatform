@@ -458,7 +458,9 @@ impl ArtifactStore for LocalArtifactStore {
                 Ok(chunk) => chunk,
                 Err(error) => {
                     drop(file);
-                    let _ = tokio::fs::remove_file(&temporary).await;
+                    if let Err(cleanup_error) = tokio::fs::remove_file(&temporary).await {
+                        tracing::debug!(%cleanup_error, "failed to remove partial Artifact upload");
+                    }
                     return Err(error);
                 }
             };
@@ -469,7 +471,9 @@ impl ArtifactStore for LocalArtifactStore {
                 .ok_or_else(|| ArtifactError::Invalid("Artifact upload size overflow".into()))?;
             if chunk_size > MAX_ARTIFACT_BYTES || size > remaining_size {
                 drop(file);
-                let _ = tokio::fs::remove_file(&temporary).await;
+                if let Err(cleanup_error) = tokio::fs::remove_file(&temporary).await {
+                    tracing::debug!(%cleanup_error, "failed to remove partial Artifact upload");
+                }
                 return Err(ArtifactError::Invalid(
                     "Artifact part exceeds the declared upload size".into(),
                 ));
@@ -483,7 +487,9 @@ impl ArtifactStore for LocalArtifactStore {
             tokio::fs::remove_file(&path).await.map_err(storage_error)?;
         }
         if let Err(error) = tokio::fs::rename(&temporary, &path).await {
-            let _ = tokio::fs::remove_file(&temporary).await;
+            if let Err(cleanup_error) = tokio::fs::remove_file(&temporary).await {
+                tracing::debug!(%cleanup_error, "failed to remove partial Artifact upload");
+            }
             return Err(storage_error(error));
         }
         let etag = hex_bytes(&digest.finalize());
@@ -630,7 +636,9 @@ impl ArtifactStore for LocalArtifactStore {
             }
             if copied != part.size || hex_bytes(&digest.finalize()) != part.etag {
                 drop(output);
-                let _ = tokio::fs::remove_file(&temporary).await;
+                if let Err(cleanup_error) = tokio::fs::remove_file(&temporary).await {
+                    tracing::debug!(%cleanup_error, "failed to remove invalid Artifact part copy");
+                }
                 return Err(ArtifactError::Invalid(
                     "Artifact part content does not match its manifest".into(),
                 ));

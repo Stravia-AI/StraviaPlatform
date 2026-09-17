@@ -26,11 +26,7 @@ const compiler = Bun.spawn(
     '--emit-ts-declarations',
     '--no-emit-readme',
   ],
-  {
-    cwd: webuiRoot,
-    stdout: 'inherit',
-    stderr: 'inherit',
-  },
+  { cwd: webuiRoot, stdout: 'inherit', stderr: 'inherit' },
 )
 
 const exitCode = await compiler.exited
@@ -41,10 +37,7 @@ if (exitCode !== 0) {
 const requiredOutputs = ['messages.js', 'runtime.js']
 const missingOutputs = (
   await Promise.all(
-    requiredOutputs.map(async (name) => ({
-      name,
-      exists: await Bun.file(resolve(outputPath, name)).exists(),
-    })),
+    requiredOutputs.map(async (name) => ({ name, exists: await Bun.file(resolve(outputPath, name)).exists() })),
   )
 )
   .filter(({ exists }) => !exists)

@@ -1,10 +1,11 @@
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, Mutex};
 use std::task::{Context as TaskContext, Poll};
 
 use axum::response::Response;
 use futures::Stream;
+use parking_lot::Mutex;
 
 struct SharedAdmission {
     remaining: AtomicU8,
@@ -23,11 +24,7 @@ impl AdmissionHold {
         }
         self.active = false;
         if self.shared.remaining.fetch_sub(1, Ordering::AcqRel) == 1 {
-            self.shared
-                .lease
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .take();
+            self.shared.lease.lock().take();
         }
     }
 }

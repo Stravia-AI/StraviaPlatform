@@ -154,12 +154,16 @@ impl MediaInputPreprocessor {
                             result.map_err(|_| MediaPreprocessError::Decode)??
                         }
                         _ = cancellation.cancelled() => {
-                            let _ = normalization.await;
+                            if let Err(error) = normalization.await {
+                                tracing::debug!(%error, "image normalization task failed after cancellation");
+                            }
                             return Err(MediaPreprocessError::Cancelled);
                         }
                         _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
                             cancellation.cancel();
-                            let _ = normalization.await;
+                            if let Err(error) = normalization.await {
+                                tracing::debug!(%error, "image normalization task failed after deadline");
+                            }
                             return Err(MediaPreprocessError::DeadlineExceeded);
                         }
                     };

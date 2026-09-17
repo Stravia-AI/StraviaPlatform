@@ -6,12 +6,16 @@ rust-version.workspace = true
 license.workspace = true
 description = "Stravia Agent infra — Desktop Application"
 
+[lints]
+workspace = true
+
 [features]
 desktop-e2e = ["dep:tauri-plugin-wdio", "dep:tauri-plugin-wdio-webdriver"]
 
 [dependencies]
 anyhow = { workspace = true }
 axum = { workspace = true }
+parking_lot = { workspace = true }
 listeners = { workspace = true }
 local-ip-address = { workspace = true }
 stravia-core = { workspace = true }

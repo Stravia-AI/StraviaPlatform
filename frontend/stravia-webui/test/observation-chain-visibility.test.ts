@@ -41,16 +41,12 @@ describe('hiddenFailureNode', () => {
   })
 
   test('keeps nodes that delivered any client-visible byte', () => {
-    expect(
-      hiddenFailureNode(interaction({ failed_request: true, client_output_delivered: true })),
-    ).toBe(false)
+    expect(hiddenFailureNode(interaction({ failed_request: true, client_output_delivered: true }))).toBe(false)
   })
 
   test('keeps live interactions even when a run already failed', () => {
     expect(hiddenFailureNode(interaction({ failed_request: true, status: 'running' }))).toBe(false)
-    expect(
-      hiddenFailureNode(interaction({ failed_request: true, status: 'waiting_client' })),
-    ).toBe(false)
+    expect(hiddenFailureNode(interaction({ failed_request: true, status: 'waiting_client' }))).toBe(false)
   })
 
   test('keeps cancels, disconnects, and observation gaps that never failed', () => {
@@ -66,18 +62,14 @@ describe('interactionDisplayStatus', () => {
   })
 
   test('keeps process statuses while the interaction is still advancing', () => {
-    expect(interactionDisplayStatus(interaction({ failed_request: true, status: 'running' }))).toBe(
-      'running',
+    expect(interactionDisplayStatus(interaction({ failed_request: true, status: 'running' }))).toBe('running')
+    expect(interactionDisplayStatus(interaction({ failed_request: true, status: 'waiting_client' }))).toBe(
+      'waiting_client',
     )
-    expect(
-      interactionDisplayStatus(interaction({ failed_request: true, status: 'waiting_client' })),
-    ).toBe('waiting_client')
   })
 
   test('leaves non-failing statuses untouched', () => {
     expect(interactionDisplayStatus(interaction({ status: 'completed' }))).toBe('completed')
-    expect(interactionDisplayStatus(interaction({ status: 'user_interrupted' }))).toBe(
-      'user_interrupted',
-    )
+    expect(interactionDisplayStatus(interaction({ status: 'user_interrupted' }))).toBe('user_interrupted')
   })
 })

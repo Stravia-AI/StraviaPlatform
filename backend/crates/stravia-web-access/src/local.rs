@@ -225,7 +225,7 @@ impl LocalAdapterRuntime for LocalWeb {
 mod tests {
     use super::*;
     use crate::fetch::ExtractionPath;
-    use std::sync::Mutex;
+    use parking_lot::Mutex;
 
     struct FakeLocalRuntime {
         observed_config: Mutex<Option<Arc<Config>>>,
@@ -238,7 +238,7 @@ mod tests {
             request: &SearchRequest,
             config: Arc<Config>,
         ) -> Result<SearchResponse, ProviderFailure> {
-            *self.observed_config.lock().expect("observed config lock") = Some(config);
+            *self.observed_config.lock() = Some(config);
             Ok(SearchResponse {
                 mode: SearchMode::Index,
                 query: request.query.clone(),
@@ -293,7 +293,6 @@ mod tests {
         let config = runtime
             .observed_config
             .lock()
-            .expect("observed config lock")
             .clone()
             .expect("observed config");
         assert!(config.engines.get(Engine::Google).enabled);

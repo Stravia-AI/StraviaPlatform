@@ -74,18 +74,15 @@ async fn delivered_native_state_survives_later_failure_but_unexposed_states_expi
             )
             .await
             .unwrap();
-        publications
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(CompactionPublication {
-                record_id: record.id,
-                operation_id: name.into(),
-                model_turn_id: "turn".into(),
-                mode: CompactionMode::Inline,
-                source_generation_id: None,
-                state: item.clone(),
-                receipt: CompactionReceipt::Pending,
-            });
+        publications.lock().push(CompactionPublication {
+            record_id: record.id,
+            operation_id: name.into(),
+            model_turn_id: "turn".into(),
+            mode: CompactionMode::Inline,
+            source_generation_id: None,
+            state: item.clone(),
+            receipt: CompactionReceipt::Pending,
+        });
         states.push(item);
     }
     let terminal = RunTerminalContext {

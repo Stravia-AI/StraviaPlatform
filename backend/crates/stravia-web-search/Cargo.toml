@@ -6,6 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[lints]
+workspace = true
+
 [dependencies]
 stravia-runtime-contract = { workspace = true }
 stravia-web-access-contract = { workspace = true }
@@ -13,6 +16,7 @@ stravia-web-access = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true, features = ["clock", "std"] }
 futures = { workspace = true }
+parking_lot = { workspace = true }
 reqwest = { workspace = true, features = ["json", "stream"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

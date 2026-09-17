@@ -14,8 +14,8 @@ use super::{
     AllowanceTransport, ExhaustionForecastStatus, MonitorKind, ProviderAllowanceErrorCategory,
     ProviderAllowanceStatus, TransportFailure, fetch_monitor,
     get_provider_allowance_with_transport, list_provider_allowance_targets_with_transport,
-    list_provider_allowances_with_transport, monitor_for, monitor_requests,
-    parse_monitor_response, refresh_provider_allowance_with_transport,
+    list_provider_allowances_with_transport, monitor_for, monitor_requests, parse_monitor_response,
+    refresh_provider_allowance_with_transport,
 };
 
 #[test]
@@ -1222,19 +1222,15 @@ async fn target_list_returns_shells_immediately_and_get_coalesces_the_spawned_fe
 
     // 缓存新鲜后 targets 直接携带快照，不再标记 refreshing
     let cached_targets =
-        list_provider_allowance_targets_with_transport(&gateway.admin(), transport.clone())
-            .await?;
+        list_provider_allowance_targets_with_transport(&gateway.admin(), transport.clone()).await?;
     assert_eq!(cached_targets.len(), 1);
     assert_eq!(cached_targets[0].snapshot.as_ref(), Some(&snapshot));
     assert!(!cached_targets[0].refreshing);
     assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
 
-    let cached = get_provider_allowance_with_transport(
-        &gateway.admin(),
-        &provider.id,
-        transport.clone(),
-    )
-    .await?;
+    let cached =
+        get_provider_allowance_with_transport(&gateway.admin(), &provider.id, transport.clone())
+            .await?;
     assert_eq!(cached.as_ref(), Some(&snapshot));
     assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
     Ok(())
@@ -1270,8 +1266,7 @@ async fn target_list_keeps_the_stale_snapshot_while_refetching() -> anyhow::Resu
 
     // 缓存里有失败快照：targets 透传它并重新发起抓取
     let targets =
-        list_provider_allowance_targets_with_transport(&gateway.admin(), transport.clone())
-            .await?;
+        list_provider_allowance_targets_with_transport(&gateway.admin(), transport.clone()).await?;
     assert_eq!(targets.len(), 1);
     assert_eq!(targets[0].snapshot.as_ref(), Some(&stale));
     assert!(targets[0].refreshing);

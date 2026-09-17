@@ -127,6 +127,13 @@ export interface DataTableColumnMeta {
   exportHeader?: string | (() => string)
 }
 
+export function dataTableCellText(value: unknown): string {
+  if (value == null) return ''
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') return String(value)
+  return JSON.stringify(value) ?? ''
+}
+
 function isEmptyFilterValue(value: unknown): boolean {
   if (value == null || value === '') return true
   return Array.isArray(value) && value.every((entry) => entry == null || entry === '')
@@ -137,7 +144,7 @@ function matchesFilterConstraint(value: unknown, constraint: DataTableFilterCons
   if (isEmptyFilterValue(filterValue)) return true
 
   if (constraint.matchMode === 'between') {
-    const [minimum, maximum] = Array.isArray(filterValue) ? filterValue : []
+    const [minimum, maximum] = (Array.isArray(filterValue) ? filterValue : []) as unknown[]
     const numericValue = Number(value)
     return (
       Number.isFinite(numericValue) &&
@@ -161,7 +168,7 @@ function matchesFilterConstraint(value: unknown, constraint: DataTableFilterCons
     return numericValue >= numericFilter
   }
 
-  const candidate = String(value ?? '').toLocaleLowerCase()
+  const candidate = dataTableCellText(value).toLocaleLowerCase()
   const query = String(filterValue).toLocaleLowerCase()
   if (constraint.matchMode === 'startsWith') return candidate.startsWith(query)
   if (constraint.matchMode === 'endsWith') return candidate.endsWith(query)

@@ -1,5 +1,7 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 use std::time::Duration;
 
 use super::{
@@ -120,17 +122,11 @@ pub struct LocalSearchEvidenceStore {
 
 impl LocalSearchEvidenceStore {
     fn insert(&self, turn_id: SearchTurnId, evidence: SearchEvidenceSet) {
-        self.evidence
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(turn_id, evidence);
+        self.evidence.lock().insert(turn_id, evidence);
     }
 
     fn take(&self, turn_id: &SearchTurnId) -> Option<SearchEvidenceSet> {
-        self.evidence
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(turn_id)
+        self.evidence.lock().remove(turn_id)
     }
 }
 

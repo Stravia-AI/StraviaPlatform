@@ -8,13 +8,13 @@ export type WindowControlsMode = 'none' | 'custom' | 'native'
 export interface WindowChrome {
   readonly material: WindowMaterial
   readonly controls: WindowControlsMode
-  syncTheme(theme: 'light' | 'dark' | null): void
-  startDrag(event: MouseEvent): void
-  toggleMaximize(event?: MouseEvent): void
-  minimize(): void
-  close(): void
-  isMaximized(): Promise<boolean>
-  observeMaximized(listener: (maximized: boolean) => void): Promise<() => void>
+  syncTheme: (theme: 'light' | 'dark' | null) => void
+  startDrag: (event: MouseEvent) => void
+  toggleMaximize: (event?: MouseEvent) => void
+  minimize: () => void
+  close: () => void
+  isMaximized: () => Promise<boolean>
+  observeMaximized: (listener: (maximized: boolean) => void) => Promise<() => void>
 }
 
 const DRAG_SUPPRESSION_SELECTOR =
@@ -52,8 +52,8 @@ const webWindowChrome: WindowChrome = {
   toggleMaximize: () => {},
   minimize: () => {},
   close: () => {},
-  isMaximized: async () => false,
-  observeMaximized: async () => () => {},
+  isMaximized: () => Promise.resolve(false),
+  observeMaximized: () => Promise.resolve(() => {}),
 }
 
 function createDesktopWindowChrome(platform: ShellPlatform): WindowChrome {
@@ -105,8 +105,8 @@ function createDesktopWindowChrome(platform: ShellPlatform): WindowChrome {
           }
         }
 
-        unlistenResize = await current.onResized(notify)
-        unlistenMove = await current.onMoved(notify)
+        unlistenResize = await current.onResized(() => void notify())
+        unlistenMove = await current.onMoved(() => void notify())
         await notify()
       } catch (error) {
         unlistenResize?.()

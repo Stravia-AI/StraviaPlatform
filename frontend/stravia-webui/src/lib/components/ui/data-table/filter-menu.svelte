@@ -8,8 +8,9 @@ import { Button } from '$lib/components/ui/button'
 import { Input } from '$lib/components/ui/input'
 import * as Popover from '$lib/components/ui/popover'
 import * as Select from '$lib/components/ui/select'
-import { cn } from '$lib/utils.js'
+import { cn, inputValue } from '$lib/utils.js'
 import {
+  dataTableCellText,
   dataTableFeatures,
   type DataTableColumnFilter,
   type DataTableFilterConstraint,
@@ -137,11 +138,11 @@ let {
               </div>
               <Input
                 class="h-10"
-                value={String(constraint.value ?? '')}
+                value={dataTableCellText(constraint.value)}
                 placeholder={filter.placeholder ?? columnName}
                 aria-label={filter.placeholder ?? columnName}
-                oninput={(event) =>
-                  onUpdateConstraint(constraintIndex, { value: event.currentTarget.value || undefined })} />
+                oninput={(event: Event) =>
+                  onUpdateConstraint(constraintIndex, { value: inputValue(event) || undefined })} />
             </div>
           {/each}
           {#if draft.constraints.length < Math.max(1, Math.min(filter.maxConstraints ?? 3, 3))}
@@ -153,7 +154,7 @@ let {
           <Select.Root
             type="single"
             bind:value={
-              () => String(draft.constraints[0]?.value ?? allFilterValue),
+              () => dataTableCellText(draft.constraints[0]?.value ?? allFilterValue),
               (value) => onUpdateConstraint(0, { value: value === allFilterValue ? undefined : value })
             }>
             <Select.Trigger class="h-10 w-full" aria-label={filter.placeholder ?? columnName}>
@@ -179,14 +180,14 @@ let {
               value={range[0] ?? ''}
               placeholder={filter.minPlaceholder ?? labels.minimum}
               aria-label={filter.minPlaceholder ?? labels.minimum}
-              oninput={(event) => onUpdateNumber(0, 0, event.currentTarget.value)} />
+              oninput={(event: Event) => onUpdateNumber(0, 0, inputValue(event))} />
             <Input
               class="h-10 min-w-0"
               type="number"
               value={range[1] ?? ''}
               placeholder={filter.maxPlaceholder ?? labels.maximum}
               aria-label={filter.maxPlaceholder ?? labels.maximum}
-              oninput={(event) => onUpdateNumber(0, 1, event.currentTarget.value)} />
+              oninput={(event: Event) => onUpdateNumber(0, 1, inputValue(event))} />
           </div>
         {/if}
       </div>

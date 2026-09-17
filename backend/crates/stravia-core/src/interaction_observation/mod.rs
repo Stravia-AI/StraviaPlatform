@@ -14,12 +14,13 @@ mod writer;
 
 pub use types::*;
 
+use parking_lot::Mutex;
 use sqlx::{PgPool, SqlitePool};
 use std::{
     collections::HashMap,
     path::PathBuf,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering},
     },
 };
@@ -51,7 +52,7 @@ impl ClientConnectionObservation {
     }
 
     pub(crate) fn waiting(&self, observer: &RunObserver) {
-        let mut waiting = self.waiting.lock().expect("connection observation");
+        let mut waiting = self.waiting.lock();
         if let Some(runs) = waiting.as_mut() {
             runs.push(observer.inner.run_id.clone());
         } else {
@@ -60,7 +61,7 @@ impl ClientConnectionObservation {
     }
 
     pub(crate) fn close(&self) {
-        if let Some(runs) = self.waiting.lock().expect("connection observation").take() {
+        if let Some(runs) = self.waiting.lock().take() {
             self.disconnect(runs);
         }
     }
@@ -277,7 +278,6 @@ impl InteractionObservation {
             .inner
             .active_traces
             .lock()
-            .expect("trace registry")
             .values()
             .filter(|trace| trace.manifest().status == "partial")
             .count() as u64;
@@ -299,14 +299,8 @@ impl InteractionObservation {
     /// 删除全部已落盘 Debug Trace 与 manifest，不动请求记录；活动 Trace 标记 partial 后停止。
     pub(crate) async fn clear_debug(&self) -> anyhow::Result<DebugState> {
         {
-            let active: Vec<TraceHandle> = self
-                .inner
-                .active_traces
-                .lock()
-                .expect("trace registry")
-                .values()
-                .cloned()
-                .collect();
+            let active: Vec<TraceHandle> =
+                self.inner.active_traces.lock().values().cloned().collect();
             for trace in active {
                 trace.mark_partial("debug_data_cleared", true);
             }
@@ -328,19 +322,17 @@ impl InteractionObservation {
     pub(crate) async fn set_retention_days(&self, days: u32) -> anyhow::Result<DebugState> {
         self.inner.store.update_retention(days).await?;
         self.inner.retention_days.store(days, Ordering::Release);
-        let _ = self.inner.writer.send(WriterCommand::ClearTail).await;
+        if let Err(error) = self.inner.writer.send(WriterCommand::ClearTail).await {
+            tracing::debug!(%error, "observation writer unavailable during retention update");
+        }
         self.sweep().await?;
         Ok(self.debug_state())
     }
     pub(crate) async fn clear_history(&self) -> anyhow::Result<ClearHistoryResult> {
-        let covered = self
-            .inner
-            .unpersisted_gaps
-            .lock()
-            .expect("observation gaps")
-            .runs
-            .clone();
-        let _ = self.inner.writer.send(WriterCommand::ClearTail).await;
+        let covered = self.inner.unpersisted_gaps.lock().runs.clone();
+        if let Err(error) = self.inner.writer.send(WriterCommand::ClearTail).await {
+            tracing::debug!(%error, "observation writer unavailable during history clear");
+        }
         self.flush().await?;
         let mut known_runs = Vec::new();
         for run_id in covered.keys() {
@@ -369,7 +361,6 @@ impl InteractionObservation {
         self.inner
             .unpersisted_gaps
             .lock()
-            .expect("observation gaps")
             .clear_removed(&covered, &removed);
         let (_, partial) = self
             .inner
@@ -400,7 +391,6 @@ impl InteractionObservation {
         self.inner
             .unpersisted_gaps
             .lock()
-            .expect("observation gaps")
             .expire(now, self.inner.retention_days.load(Ordering::Acquire));
         let (_, partial) = self
             .inner
@@ -548,14 +538,7 @@ impl InteractionObservation {
                     project_bundle_summary(&detail, &snapshot_events, through, &projected_status);
                 let mut runs = Vec::with_capacity(admitted.len());
                 for run in detail.runs.iter().filter(|run| admitted.contains(&run.id)) {
-                    let active = {
-                        self.inner
-                            .active_traces
-                            .lock()
-                            .expect("trace registry")
-                            .get(&run.id)
-                            .cloned()
-                    };
+                    let active = { self.inner.active_traces.lock().get(&run.id).cloned() };
                     let (status, bytes, reasons, trace) = if let Some(handle) = active {
                         let manifest = handle.manifest();
                         let snap = handle.snapshot(through).await.ok();
@@ -731,7 +714,7 @@ impl InteractionObservation {
     }
     pub(crate) async fn shutdown(&self) {
         self.inner.stopped.store(true, Ordering::Release);
-        let task = { self.inner.writer_task.lock().expect("writer lock").take() };
+        let task = { self.inner.writer_task.lock().take() };
         if let Some(task) = task {
             let (tx, rx) = oneshot::channel();
             if self
@@ -740,14 +723,19 @@ impl InteractionObservation {
                 .send(WriterCommand::Shutdown(tx))
                 .await
                 .is_ok()
+                && let Err(error) = rx.await
             {
-                let _ = rx.await;
+                tracing::debug!(%error, "observation writer dropped shutdown acknowledgement");
             }
-            let _ = task.await;
+            if let Err(error) = task.await {
+                tracing::debug!(%error, "observation writer task failed during shutdown");
+            }
         }
         self.inner.traces.shutdown().await;
-        if let Some(root) = &self.inner.ephemeral_root {
-            let _ = tokio::fs::remove_dir_all(root).await;
+        if let Some(root) = &self.inner.ephemeral_root
+            && let Err(error) = tokio::fs::remove_dir_all(root).await
+        {
+            tracing::debug!(%error, root = %root.display(), "failed to remove ephemeral observation root");
         }
     }
 }
@@ -877,7 +865,6 @@ impl IngressObserver {
                 .inner
                 .active_traces
                 .lock()
-                .expect("trace registry")
                 .insert(start.id.clone(), trace.clone());
         }
         let protected = self.trace.as_ref().map_or_else(
@@ -930,7 +917,6 @@ impl IngressObserver {
                 .inner
                 .unpersisted_gaps
                 .lock()
-                .expect("observation gaps")
                 .record(&inner.run_id, writer::now());
         }
         drop(ingress);
@@ -1012,11 +998,7 @@ impl RunObserver {
         &self,
         input: &[stravia_runtime_contract::protocol::ir::AiItem],
     ) {
-        *self
-            .inner
-            .pending_input
-            .lock()
-            .expect("input preview state") = redaction::user_input_text(input);
+        *self.inner.pending_input.lock() = redaction::user_input_text(input);
     }
 
     /// 客户端返回先留在内存，和输入预览共用凭据映射完成后的发布边界。
@@ -1025,11 +1007,7 @@ impl RunObserver {
         input: &[stravia_runtime_contract::protocol::ir::AiItem],
     ) {
         use stravia_runtime_contract::protocol::ir::{ContentBlock, MessageContent, Role};
-        let mut pending = self
-            .inner
-            .pending_tool_results
-            .lock()
-            .expect("tool result state");
+        let mut pending = self.inner.pending_tool_results.lock();
         for item in input {
             let before = pending.len();
             if let MessageContent::Blocks(blocks) = &item.content {
@@ -1064,21 +1042,9 @@ impl RunObserver {
 
     /// Publish once, only after all active and newly discovered mappings are registered.
     pub(crate) fn publish_input_preview(&self) {
-        let tool_results = std::mem::take(
-            &mut *self
-                .inner
-                .pending_tool_results
-                .lock()
-                .expect("tool result state"),
-        );
+        let tool_results = std::mem::take(&mut *self.inner.pending_tool_results.lock());
         self.send_tool_results(tool_results);
-        let Some(text) = self
-            .inner
-            .pending_input
-            .lock()
-            .expect("input preview state")
-            .take()
-        else {
+        let Some(text) = self.inner.pending_input.lock().take() else {
             return;
         };
         let preview = redaction::input_preview(text, &self.inner.protected);
@@ -1099,7 +1065,6 @@ impl RunObserver {
                 .inner
                 .unpersisted_gaps
                 .lock()
-                .expect("observation gaps")
                 .record(&self.inner.run_id, writer::now());
         }
     }
@@ -1153,13 +1118,7 @@ impl RunObserver {
 
     pub(crate) fn record_response_failure(&self, error: FailureDiagnostic) {
         // 最终 Target 或流处理边界比 HTTP 错误转换保留更准确的上游事实。
-        if self
-            .inner
-            .failure
-            .lock()
-            .expect("request failure")
-            .is_none()
-        {
+        if self.inner.failure.lock().is_none() {
             self.record_failure(error);
         }
     }
@@ -1184,7 +1143,6 @@ impl RunObserver {
                 .inner
                 .thinking_redaction
                 .lock()
-                .expect("thinking redaction state")
                 .entry((model_turn_id.clone(), attempt_id.clone()))
                 .or_insert_with(|| {
                     redaction::VisibleTextRedactor::with_protected(self.inner.protected.clone())
@@ -1219,12 +1177,7 @@ impl RunObserver {
             });
         }
         if let RunEvent::ClientVisibleContentDelta { text } = event {
-            let ready = self
-                .inner
-                .visible_redaction
-                .lock()
-                .expect("visible redaction state")
-                .push(text);
+            let ready = self.inner.visible_redaction.lock().push(text);
             if let Some(text) = ready {
                 self.send_event(RunEvent::ClientVisibleContentDelta { text });
             }
@@ -1243,7 +1196,6 @@ impl RunObserver {
             .inner
             .thinking_redaction
             .lock()
-            .expect("thinking redaction state")
             .remove(&(model_turn_id.to_owned(), attempt_id.to_owned()));
         let Some(mut state) = state else { return false };
         if let Some(text) = state.finish() {
@@ -1256,13 +1208,7 @@ impl RunObserver {
         true
     }
     fn finish_thinking(&self) {
-        let pending = std::mem::take(
-            &mut *self
-                .inner
-                .thinking_redaction
-                .lock()
-                .expect("thinking redaction state"),
-        );
+        let pending = std::mem::take(&mut *self.inner.thinking_redaction.lock());
         for ((model_turn_id, attempt_id), mut state) in pending {
             if let Some(text) = state.finish() {
                 self.send_event(RunEvent::ModelThinkingDelta {
@@ -1278,12 +1224,7 @@ impl RunObserver {
         }
     }
     fn flush_visible(&self) {
-        let ready = self
-            .inner
-            .visible_redaction
-            .lock()
-            .expect("visible redaction state")
-            .finish();
+        let ready = self.inner.visible_redaction.lock().finish();
         if let Some(text) = ready {
             self.send_event(RunEvent::ClientVisibleContentDelta { text });
         }
@@ -1313,7 +1254,6 @@ impl RunObserver {
                 .inner
                 .unpersisted_gaps
                 .lock()
-                .expect("observation gaps")
                 .record(&self.inner.run_id, writer::now());
         }
     }
@@ -1325,7 +1265,7 @@ impl RunObserver {
         self.inner.protected.event(&mut event);
         redaction::redact_run_event(&mut event);
         if let RunEvent::RequestFailed { error } = &event {
-            *self.inner.failure.lock().expect("request failure") = Some(error.clone());
+            *self.inner.failure.lock() = Some(error.clone());
         }
         if matches!(event, RunEvent::ObservationGap { .. })
             && let Some(trace) = &self.inner.trace
@@ -1376,14 +1316,13 @@ impl RunObserver {
             observation
                 .unpersisted_gaps
                 .lock()
-                .expect("observation gaps")
                 .record(&self.inner.run_id, writer::now());
         }
     }
     pub(crate) fn finish(&self, mut outcome: RunOutcome) {
         let finished_at = writer::now();
         if !matches!(outcome.status.as_str(), "completed" | "waiting_client")
-            && let Some(error) = self.inner.failure.lock().expect("request failure").as_ref()
+            && let Some(error) = self.inner.failure.lock().as_ref()
         {
             outcome.status = "failed".into();
             outcome.terminal_reason.clone_from(&error.code);
@@ -1412,26 +1351,22 @@ impl RunObserver {
                 ..
             } = error.into_inner()
         {
-            *self.inner.pending_finish.lock().expect("terminal state") =
-                Some((outcome, finished_at));
+            *self.inner.pending_finish.lock() = Some((outcome, finished_at));
             self.inner.gap.store(true, Ordering::Release);
             self.inner
                 .observation
                 .inner
                 .unpersisted_gaps
                 .lock()
-                .expect("observation gaps")
                 .record(&self.inner.run_id, writer::now());
         }
     }
 }
 impl Drop for RunObserverInner {
     fn drop(&mut self) {
-        for ((model_turn_id, attempt_id), mut state) in std::mem::take(
-            self.thinking_redaction
-                .get_mut()
-                .expect("thinking redaction state"),
-        ) {
+        for ((model_turn_id, attempt_id), mut state) in
+            std::mem::take(self.thinking_redaction.get_mut())
+        {
             let delta = state.finish().map(|text| RunEvent::ModelThinkingDelta {
                 model_turn_id: model_turn_id.clone(),
                 attempt_id: attempt_id.clone(),
@@ -1461,11 +1396,7 @@ impl Drop for RunObserverInner {
                 }
             }
         }
-        if let Some(text) = self
-            .visible_redaction
-            .get_mut()
-            .expect("visible redaction state")
-            .finish()
+        if let Some(text) = self.visible_redaction.get_mut().finish()
             && self
                 .observation
                 .inner
@@ -1478,11 +1409,7 @@ impl Drop for RunObserverInner {
         {
             *self.gap.get_mut() = true;
         }
-        let mut pending_finish = self
-            .pending_finish
-            .get_mut()
-            .expect("terminal state")
-            .take();
+        let mut pending_finish = self.pending_finish.get_mut().take();
         if !*self.terminal.get_mut() {
             pending_finish = Some((
                 RunOutcome {
@@ -1502,12 +1429,7 @@ impl Drop for RunObserverInner {
             pending_finish,
             gap: *self.gap.get_mut(),
         };
-        if let Some(permit) = self
-            .finalization
-            .get_mut()
-            .expect("finalization permit")
-            .take()
-        {
+        if let Some(permit) = self.finalization.get_mut().take() {
             permit.send(command);
         } else if self.observation.inner.writer.try_send(command).is_err() {
             tracing::warn!(run_id=%self.run_id, "observation finalization unavailable");
@@ -2678,11 +2600,7 @@ mod snapshot_tests {
         });
         observation.flush().await?;
         {
-            let mut gaps = observation
-                .inner
-                .unpersisted_gaps
-                .lock()
-                .expect("observation gaps");
+            let mut gaps = observation.inner.unpersisted_gaps.lock();
             gaps.record("completed", writer::now());
         }
         observation.clear_history().await?;
@@ -2698,7 +2616,6 @@ mod snapshot_tests {
             .inner
             .unpersisted_gaps
             .lock()
-            .expect("observation gaps")
             .record("active", writer::now());
         observation.clear_history().await?;
         let page = observation
@@ -2729,7 +2646,6 @@ mod snapshot_tests {
             .inner
             .unpersisted_gaps
             .lock()
-            .expect("observation gaps")
             .record("lost-admission", writer::now());
         clearing.await?;
         assert!(

@@ -15,13 +15,7 @@ import {
   observationEventSummary,
   observationStatusTone,
 } from '$lib/observation-event-summary'
-import type {
-  InteractionDetail,
-  LiveContentBlock,
-  ObservationEvent,
-  RunDetail,
-  FailedRequestDetail,
-} from '$lib/types'
+import type { InteractionDetail, LiveContentBlock, ObservationEvent, RunDetail, FailedRequestDetail } from '$lib/types'
 import { Badge } from '$lib/components/ui/badge'
 import { Button } from '$lib/components/ui/button'
 import * as Empty from '$lib/components/ui/empty'
@@ -112,14 +106,10 @@ type StreamItem =
   | { type: 'tools'; name: string | null; events: ObservationEvent[] }
   | { type: 'process'; events: ObservationEvent[] }
 
-function streamItems(
-  events: readonly ObservationEvent[],
-  outputs?: ReadonlyMap<string, number | null>,
-): StreamItem[] {
+function streamItems(events: readonly ObservationEvent[], outputs?: ReadonlyMap<string, number | null>): StreamItem[] {
   const items: StreamItem[] = []
   for (const event of events) {
-    const process =
-      PROCESS_KINDS.has(event.kind) && observationEventSummary(event, outputs).tone === 'neutral'
+    const process = PROCESS_KINDS.has(event.kind) && observationEventSummary(event, outputs).tone === 'neutral'
     const name = toolName(event)
     const previous = items.at(-1)
     if (process) {
@@ -135,10 +125,12 @@ function streamItems(
   return items
 }
 
+function itemEvents(item: StreamItem): ObservationEvent[] {
+  return item.type === 'event' ? [item.event] : item.events
+}
+
 const streams = $derived(
-  new Map(
-    orderedRuns.map((run) => [run.id, streamItems(timelines.get(run.id) ?? [], attemptOutputs.get(run.id))]),
-  ),
+  new Map(orderedRuns.map((run) => [run.id, streamItems(timelines.get(run.id) ?? [], attemptOutputs.get(run.id))])),
 )
 const failureItems = $derived(failure ? streamItems(orderedEvents(failure.events)) : [])
 
@@ -194,7 +186,8 @@ function usageRows(run: RunDetail): ReadonlyArray<readonly [string, number | nul
         <span class="stream-text">
           <strong>{summary.title}</strong>
           {#each summary.facts as fact (fact.label)}
-            <span class="fact"><span class="fact-label">{fact.label}</span><span class="fact-value">{fact.value}</span></span>
+            <span class="fact"
+              ><span class="fact-label">{fact.label}</span><span class="fact-value">{fact.value}</span></span>
           {/each}
         </span>
         <time class="stream-time" title={formatLogTime(event.occurred_at)}>{offsetLabel(event.occurred_at)}</time>
@@ -225,35 +218,32 @@ function usageRows(run: RunDetail): ReadonlyArray<readonly [string, number | nul
 {/snippet}
 
 {#snippet streamItem(item: StreamItem, outputs?: ReadonlyMap<string, number | null>)}
+  {@const events = itemEvents(item)}
   {#if item.type === 'event'}
     {@render eventRow(item.event, outputs)}
-  {:else if item.events.length === 1}
-    {@render eventRow(item.events[0], outputs)}
+  {:else if events.length === 1}
+    {@render eventRow(events[0], outputs)}
   {:else}
-    {@const group = item.type === 'process' ? processGroup(item.events) : null}
+    {@const group = item.type === 'process' ? processGroup(events) : null}
     <li class="stream-item stream-group" data-group={item.type}>
       <Collapsible.Root>
         <Collapsible.Trigger class="stream-row" data-tone="neutral" data-group={item.type}>
           <span class="stream-text">
             <strong
               >{item.type === 'tools'
-                ? m.observation_tool_handoffs({
-                    tool: item.name ?? m.observation_event_tool(),
-                    count: item.events.length,
-                  })
+                ? m.observation_tool_handoffs({ tool: item.name ?? m.observation_event_tool(), count: events.length })
                 : group?.label}</strong>
             {#if group?.titles}<span class="group-titles">{group.titles}</span>{/if}
           </span>
           <time
             class="stream-time"
-            title="{formatLogTime(item.events[0].occurred_at)} – {formatLogTime(
-              item.events[item.events.length - 1].occurred_at,
-            )}">{offsetLabel(item.events[0].occurred_at)}</time>
+            title="{formatLogTime(events[0].occurred_at)} – {formatLogTime(events[events.length - 1].occurred_at)}"
+            >{offsetLabel(events[0].occurred_at)}</time>
           <ChevronRightIcon size={14} class="stream-chev" aria-hidden="true" />
         </Collapsible.Trigger>
         <Collapsible.Content>
           <ol class="branch">
-            {#each item.events as event (event.sequence)}
+            {#each events as event (event.sequence)}
               {@render eventRow(event, outputs)}
             {/each}
           </ol>
@@ -269,10 +259,7 @@ function usageRows(run: RunDetail): ReadonlyArray<readonly [string, number | nul
   {@const duration = run.finished_at == null ? null : run.finished_at - run.started_at}
   <li class="stream-run">
     <Collapsible.Root>
-      <Collapsible.Trigger
-        class="stream-row run-head"
-        data-tone={observationStatusTone(run.status)}
-        data-run={run.id}>
+      <Collapsible.Trigger class="stream-row run-head" data-tone={observationStatusTone(run.status)} data-run={run.id}>
         <span class="stream-text">
           <strong class="font-structural">{run.model_display_name?.trim() || run.route_id}</strong>
           <Badge variant="outline">{observationStatusLabel(run.status)}</Badge>
@@ -282,7 +269,8 @@ function usageRows(run: RunDetail): ReadonlyArray<readonly [string, number | nul
               >{observationDebugStatusLabel(run.trace?.status ?? 'missing')}</Badge>
           {/if}
           <span class="run-stats"
-            >{#if duration != null}{formatDuration(duration)} · {/if}IN
+            >{#if duration != null}{formatDuration(duration)} ·
+            {/if}IN
             {formatTokenCount(run.usage.input_tokens)} · OUT
             {formatTokenCount(run.usage.output_tokens)}</span>
         </span>
@@ -333,9 +321,7 @@ function usageRows(run: RunDetail): ReadonlyArray<readonly [string, number | nul
     {#if run.trace?.status === 'partial' || (run.debug_enabled && !run.trace)}
       <Alert.Root variant="warning" role="status" class="stream-alert"
         ><Alert.Description>
-          {m.observation_partial_trace({
-            reasons: run.trace?.reasons.join(', ') || m.observation_trace_missing(),
-          })}
+          {m.observation_partial_trace({ reasons: run.trace?.reasons.join(', ') || m.observation_trace_missing() })}
         </Alert.Description></Alert.Root>
     {/if}
     {#if items.length || children.length}

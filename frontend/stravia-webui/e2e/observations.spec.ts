@@ -270,14 +270,7 @@ async function installObservationFixture(
         debugDeletes.push(Date.now())
       }
       await route.fulfill({
-        json: {
-          data: {
-            enabled: debugEnabled,
-            retained_bytes: 0,
-            partial_trace_count: 0,
-            retention_days: 7,
-          },
-        },
+        json: { data: { enabled: debugEnabled, retained_bytes: 0, partial_trace_count: 0, retention_days: 7 } },
       })
       return
     }
@@ -702,7 +695,7 @@ test.describe('Interaction Observation canvas', () => {
     await sendObservation(page, 'observation', durable, durable.sequence)
     await expect(conversation.getByText('Not yet saved', { exact: true })).toHaveCount(0)
     await expect(conversation.getByRole('cell', { name: 'live-cell', exact: true })).toHaveCount(1)
-    expect(await renderedTable!.evaluate((element) => element.isConnected)).toBe(true)
+    expect(await renderedTable.evaluate((element) => element.isConnected)).toBe(true)
     expect(fixture.detailRequests).toHaveLength(1)
     await sendObservation(page, 'live_content', { ...block, block_id: 'transient', text: '\n\ntransient-unsaved' })
     await expect(conversation).toContainText('transient-unsaved')
@@ -788,7 +781,10 @@ test.describe('Interaction Observation canvas', () => {
       element.dispatchEvent(new Event('scroll'))
     })
     const userBefore = await userPreview.evaluate((element) => element.getBoundingClientRect().top)
-    await conversation.getByText('Paragraph 51', { exact: true }).waitFor({ state: 'attached', timeout: 1000 }).catch(() => undefined)
+    await conversation
+      .getByText('Paragraph 51', { exact: true })
+      .waitFor({ state: 'attached', timeout: 1000 })
+      .catch(() => undefined)
     expect(
       Math.abs((await userPreview.evaluate((element) => element.getBoundingClientRect().top)) - userBefore),
     ).toBeLessThan(3)
@@ -798,7 +794,9 @@ test.describe('Interaction Observation canvas', () => {
         const sentinel = element.querySelector('[data-conversation-older-sentinel]')
         if (!(sentinel instanceof HTMLElement)) throw new Error('missing older-events sentinel')
         element.scrollTop += sentinel.getBoundingClientRect().top - element.getBoundingClientRect().top
-        return [...element.querySelectorAll('p')].find((paragraph) => paragraph.textContent === 'Paragraph 251')!.getBoundingClientRect().top
+        return [...element.querySelectorAll('p')]
+          .find((paragraph) => paragraph.textContent === 'Paragraph 251')!
+          .getBoundingClientRect().top
       })
     const anchor = conversation.getByText('Paragraph 251', { exact: true })
     const before = await alignOlderSentinel()
@@ -1389,9 +1387,7 @@ test.describe('Interaction Observation canvas', () => {
     await expect(inspector.getByRole('log', { name: 'Conversation' })).toContainText('Ember client-visible answer')
   })
 
-  test('hides a zero-output terminal failure from chains and reveals it from the failed request', async ({
-    page,
-  }) => {
+  test('hides a zero-output terminal failure from chains and reveals it from the failed request', async ({ page }) => {
     await page.emulateMedia({ reducedMotion: 'reduce' })
     const fixture = await installObservationFixture(page)
     const flint = interaction(
@@ -1411,12 +1407,7 @@ test.describe('Interaction Observation canvas', () => {
       failedRequest('run-flint', 'run', startedAt + 280_000, {
         duration_ms: 1_334,
         client: 'codex',
-        error: {
-          source: 'upstream',
-          code: 'protocol_lossy_rejected',
-          message: null,
-          status_code: 422,
-        },
+        error: { source: 'upstream', code: 'protocol_lossy_rejected', message: null, status_code: 422 },
         interaction_id: 'interaction-flint',
         root_id: 'root-a',
         run_id: 'run-interaction-flint',
@@ -1835,7 +1826,8 @@ test.describe('Interaction Observation canvas', () => {
   })
 
   test('keeps an interjected user input on the user side before the next model response', async ({ page }) => {
-    const input = '<system-notice>\nUser interjection during work: priority; supersedes conflicting prior instructions. Re-read; ensure current work reflects user intent.\n</system-notice>\n所有平台id 统一更换，包括 artifact id，所有 agent 可见id 以及外壳一起改'
+    const input =
+      '<system-notice>\nUser interjection during work: priority; supersedes conflicting prior instructions. Re-read; ensure current work reflects user intent.\n</system-notice>\n所有平台id 统一更换，包括 artifact id，所有 agent 可见id 以及外壳一起改'
     await installObservationFixture(page, false, false, false, (detail) => {
       if (detail.interaction.id !== 'interaction-atlas') return
       const first = detail.runs[0]
@@ -1845,8 +1837,24 @@ test.describe('Interaction Observation canvas', () => {
         parent_run_id: first.id,
         started_at: first.started_at + 1000,
         events: [
-          { sequence: 20, occurred_at: first.started_at + 1000, interaction_id: detail.interaction.id, run_id: 'run-interjection', rejection_id: null, kind: 'input_preview_recorded', payload: { text: input } },
-          { sequence: 21, occurred_at: first.started_at + 1001, interaction_id: detail.interaction.id, run_id: 'run-interjection', rejection_id: null, kind: 'client_visible_content_delta', payload: { text: '范围扩大为所有平台生成的 ID。' } },
+          {
+            sequence: 20,
+            occurred_at: first.started_at + 1000,
+            interaction_id: detail.interaction.id,
+            run_id: 'run-interjection',
+            rejection_id: null,
+            kind: 'input_preview_recorded',
+            payload: { text: input },
+          },
+          {
+            sequence: 21,
+            occurred_at: first.started_at + 1001,
+            interaction_id: detail.interaction.id,
+            run_id: 'run-interjection',
+            rejection_id: null,
+            kind: 'client_visible_content_delta',
+            payload: { text: '范围扩大为所有平台生成的 ID。' },
+          },
         ],
       })
     })
@@ -1855,8 +1863,14 @@ test.describe('Interaction Observation canvas', () => {
     const users = conversation.getByRole('article', { name: 'You', exact: true })
     await expect(users).toHaveCount(2)
     await expect(users.last()).toContainText('所有平台id 统一更换，包括 artifact id，所有 agent 可见id 以及外壳一起改')
-    await expect(conversation.getByRole('article', { name: 'Atlas', exact: true }).last()).toContainText('范围扩大为所有平台生成的 ID。')
-    expect(await conversation.getByRole('article').evaluateAll((articles) => articles.map((article) => article.getAttribute('aria-label')))).toEqual(['You', 'Atlas', 'You', 'Atlas'])
+    await expect(conversation.getByRole('article', { name: 'Atlas', exact: true }).last()).toContainText(
+      '范围扩大为所有平台生成的 ID。',
+    )
+    expect(
+      await conversation
+        .getByRole('article')
+        .evaluateAll((articles) => articles.map((article) => article.getAttribute('aria-label'))),
+    ).toEqual(['You', 'Atlas', 'You', 'Atlas'])
     await page.setViewportSize({ width: 390, height: 740 })
     await page.emulateMedia({ colorScheme: 'dark' })
     await users.last().scrollIntoViewIfNeeded()
@@ -2197,10 +2211,7 @@ test.describe('Interaction Observation canvas', () => {
     await expect(groups.first()).toHaveAccessibleName(/^Bash × 4 · Sent to client/)
     await expect(groups.last()).toHaveAccessibleName(/^Bash × 2 · Sent to client/)
     await expect(diagnostics.getByText('Read', { exact: true })).toBeVisible()
-    const records = diagnostics
-      .locator('li[data-group="tools"]')
-      .first()
-      .locator('.stream-row[data-sequence]:visible')
+    const records = diagnostics.locator('li[data-group="tools"]').first().locator('.stream-row[data-sequence]:visible')
     await expect(records).toHaveCount(0)
     await groups.first().focus()
     await page.keyboard.press('Enter')
@@ -2952,22 +2963,13 @@ test.describe('Interaction Observation canvas', () => {
       const path = new URL(request.url()).pathname.replace('/api/v1', '')
       if (path === '/observations/debug' && request.method() === 'GET') {
         await route.fulfill({
-          json: {
-            data: {
-              enabled: false,
-              retained_bytes: retainedBytes,
-              partial_trace_count: 0,
-              retention_days: 7,
-            },
-          },
+          json: { data: { enabled: false, retained_bytes: retainedBytes, partial_trace_count: 0, retention_days: 7 } },
         })
         return
       }
       if (path === '/observations/history' && request.method() === 'DELETE') {
         retainedBytes = 0
-        await route.fulfill({
-          json: { data: { deleted_interactions: 3, deleted_rejections: 0, skipped_active: 0 } },
-        })
+        await route.fulfill({ json: { data: { deleted_interactions: 3, deleted_rejections: 0, skipped_active: 0 } } })
         return
       }
       await route.fallback()
@@ -2989,10 +2991,7 @@ test.describe('Interaction Observation canvas', () => {
     await expect(page.getByRole('button', { name: 'Clear debug data' })).toBeHidden()
 
     await page.getByRole('switch', { name: 'Debug' }).click()
-    await page
-      .getByRole('alertdialog', { name: 'Enable Debug' })
-      .getByRole('button', { name: 'Enable Debug' })
-      .click()
+    await page.getByRole('alertdialog', { name: 'Enable Debug' }).getByRole('button', { name: 'Enable Debug' }).click()
     const clearButton = page.getByRole('button', { name: 'Clear debug data' })
     await expect(clearButton).toBeVisible()
 

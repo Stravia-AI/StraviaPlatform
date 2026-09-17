@@ -36,7 +36,7 @@ const options = $derived(catalogFilterOptions())
 {#snippet availabilitySelect(id: string)}
   <Select.Root
     type="single"
-    bind:value={() => availability, (value) => onFilterChange('availability', value ?? allCatalogFilterValue)}>
+    bind:value={() => availability, (value: string) => onFilterChange('availability', value ?? allCatalogFilterValue)}>
     <Select.Trigger {id} class="h-10 w-full font-normal" aria-label={m.provider_model_catalog_model_availability()}>
       {options.availability.options.find((option) => option.value === availability)?.label ??
         options.availability.allLabel}
@@ -55,7 +55,7 @@ const options = $derived(catalogFilterOptions())
 {#snippet sourceSelect(id: string)}
   <Select.Root
     type="single"
-    bind:value={() => source, (value) => onFilterChange('source_kind', value ?? allCatalogFilterValue)}>
+    bind:value={() => source, (value: string) => onFilterChange('source_kind', value ?? allCatalogFilterValue)}>
     <Select.Trigger {id} class="h-10 w-full font-normal" aria-label={m.provider_model_catalog_how_models_were_added()}>
       {options.source.options.find((option) => option.value === source)?.label ?? options.source.allLabel}
     </Select.Trigger>
@@ -73,7 +73,7 @@ const options = $derived(catalogFilterOptions())
 {#snippet referenceSelect(id: string)}
   <Select.Root
     type="single"
-    bind:value={() => reference, (value) => onFilterChange('usage', value ?? allCatalogFilterValue)}>
+    bind:value={() => reference, (value: string) => onFilterChange('usage', value ?? allCatalogFilterValue)}>
     <Select.Trigger {id} class="h-10 w-full font-normal" aria-label={m.provider_model_catalog_model_usage()}>
       {options.reference.options.find((option) => option.value === reference)?.label ?? options.reference.allLabel}
     </Select.Trigger>

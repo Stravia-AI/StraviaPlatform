@@ -102,7 +102,7 @@ impl PostgresStorage {
         let oauth_credential_store = Arc::new(PostgresOAuthCredentialStore { pool: pool.clone() });
         let usage_stats_store = Arc::new(PostgresUsageStatsStore {
             pool: pool.clone(),
-            last_route_snapshot: Arc::new(std::sync::RwLock::new(Vec::new())),
+            last_route_snapshot: Arc::new(parking_lot::RwLock::new(Vec::new())),
         });
         let bootstrap = Arc::new(PostgresBootstrap { adapter });
         Ok(Self {

@@ -178,17 +178,12 @@ impl super::InteractionObservation {
     ) -> anyhow::Result<CredentialDiscoveryPage> {
         self.flush().await?;
         let mut page = self.inner.store.credential_discoveries(query).await?;
-        page.observation_gap |= self
-            .inner
-            .unpersisted_gaps
-            .lock()
-            .expect("observation gaps")
-            .visible(
-                chrono::Utc::now().timestamp_millis(),
-                self.inner
-                    .retention_days
-                    .load(std::sync::atomic::Ordering::Acquire),
-            );
+        page.observation_gap |= self.inner.unpersisted_gaps.lock().visible(
+            chrono::Utc::now().timestamp_millis(),
+            self.inner
+                .retention_days
+                .load(std::sync::atomic::Ordering::Acquire),
+        );
         Ok(page)
     }
 }
@@ -1427,10 +1422,12 @@ mod tests {
                 })
                 .await?;
             if committed {
-                sqlx::query("UPDATE inference_run_observations SET client_output_committed=1 WHERE id=?")
-                    .bind(id)
-                    .execute(&pool)
-                    .await?;
+                sqlx::query(
+                    "UPDATE inference_run_observations SET client_output_committed=1 WHERE id=?",
+                )
+                .bind(id)
+                .execute(&pool)
+                .await?;
             }
             store
                 .finish_run(
@@ -1460,7 +1457,8 @@ mod tests {
                 .unwrap_or_else(|| panic!("summary for {id}"));
             assert_eq!(snapshot.interaction.failed_request, failed_request, "{id}");
             assert_eq!(
-                snapshot.interaction.client_output_delivered, delivered, "{id}"
+                snapshot.interaction.client_output_delivered, delivered,
+                "{id}"
             );
         }
         Ok(())

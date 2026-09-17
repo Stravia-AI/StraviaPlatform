@@ -79,7 +79,7 @@ function toggle<T extends string>(selected: T[], key: T, checked: boolean): T[] 
         step="1"
         value={selected ?? ''}
         placeholder={m.model_specification_no_minimum()}
-        oninput={(event) => setLimit(limit.key, event.currentTarget)} />
+        oninput={(event: Event) => setLimit(limit.key, event.currentTarget as HTMLInputElement)} />
       <Field.FieldDescription>{m.model_specification_integer_required()}</Field.FieldDescription>
     </Field.Field>
   {/each}

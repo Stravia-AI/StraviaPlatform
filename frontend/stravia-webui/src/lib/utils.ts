@@ -9,3 +9,8 @@ export type WithoutChildrenOrChild<T> = WithoutChildren<WithoutChild<T>>
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
+
+/** Reads `.value` off an input/textarea/select `oninput` or `onchange` event. */
+export function inputValue(event: Event): string {
+  return (event.currentTarget as HTMLInputElement).value
+}

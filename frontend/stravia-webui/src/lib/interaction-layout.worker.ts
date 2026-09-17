@@ -7,9 +7,6 @@ export type { LayoutPosition, LayoutRequest, LayoutResponse } from './interactio
 const layouts = new Map<string, CachedLayout>()
 
 self.onmessage = (message: MessageEvent<LayoutRequest>) => {
-  const response: LayoutResponse = {
-    requestId: message.data.requestId,
-    positions: layoutForest(message.data, layouts),
-  }
+  const response: LayoutResponse = { requestId: message.data.requestId, positions: layoutForest(message.data, layouts) }
   self.postMessage(response)
 }

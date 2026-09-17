@@ -401,7 +401,9 @@ fn apply_planned_files(files: &[PlannedConnectClientFile]) -> Result<(), Connect
             .expect("each staged file is persisted once");
         if let Err(cause) = temporary.persist_noclobber(&staged[index].target) {
             for committed in &staged[..index] {
-                let _ = fs::remove_file(&committed.target);
+                if let Err(error) = fs::remove_file(&committed.target) {
+                    tracing::warn!(%error, target = %committed.target.display(), "failed to remove committed Connect Client file during rollback");
+                }
             }
             rollback_backups(&staged);
             return Err(io_error(
@@ -416,8 +418,10 @@ fn apply_planned_files(files: &[PlannedConnectClientFile]) -> Result<(), Connect
     }
 
     for file in staged {
-        if let Some(backup) = file.backup {
-            let _ = fs::remove_file(backup);
+        if let Some(backup) = file.backup
+            && let Err(error) = fs::remove_file(&backup)
+        {
+            tracing::warn!(%error, backup = %backup.display(), "failed to remove Connect Client backup file");
         }
     }
     Ok(())
@@ -425,8 +429,10 @@ fn apply_planned_files(files: &[PlannedConnectClientFile]) -> Result<(), Connect
 
 fn rollback_backups(files: &[StagedConnectClientFile]) {
     for file in files.iter().rev() {
-        if let Some(backup) = &file.backup {
-            let _ = fs::rename(backup, &file.target);
+        if let Some(backup) = &file.backup
+            && let Err(error) = fs::rename(backup, &file.target)
+        {
+            tracing::warn!(%error, backup = %backup.display(), target = %file.target.display(), "failed to restore Connect Client backup");
         }
     }
 }

@@ -261,7 +261,9 @@ impl WebProviderStore for SqliteWebProviderStore {
                 Ok(())
             }
             Err(error) => {
-                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                if let Err(rollback_error) = sqlx::query("ROLLBACK").execute(&mut *conn).await {
+                    tracing::debug!(%rollback_error, "transaction rollback failed");
+                }
                 Err(error)
             }
         }

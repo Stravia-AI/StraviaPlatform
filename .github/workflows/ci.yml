@@ -53,7 +53,7 @@ jobs:
         with:
           toolchain: ${{ env.RUST_VERSION }}
           cache: false
-          components: rustfmt
+          components: rustfmt, clippy
 
       - name: Normalize installed Rust toolchains
         run: python .github/scripts/normalize_rust_toolchains.py

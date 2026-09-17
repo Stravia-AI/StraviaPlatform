@@ -126,7 +126,9 @@ pub fn run() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                let _ = window.hide();
+                if let Err(error) = window.hide() {
+                    tracing::debug!(%error, "failed to hide main window");
+                }
             }
         })
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -400,8 +402,12 @@ fn build_main_window(app: &tauri::AppHandle) -> Result<(), anyhow::Error> {
 /// one (silent start leaves only the tray).
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.set_focus();
+        if let Err(error) = window.show() {
+            tracing::debug!(%error, "failed to show main window");
+        }
+        if let Err(error) = window.set_focus() {
+            tracing::debug!(%error, "failed to focus main window");
+        }
         return;
     }
     if let Err(error) = build_main_window(app) {

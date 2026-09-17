@@ -291,7 +291,7 @@ async fn automatic_parent_materializes_rewritten_history_before_the_current_hook
     let (base_url, _connections, requests) =
         serve_responses_websocket_sequence(vec!["first answer", "second answer", "third answer"])
             .await;
-    let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let data_dir = tempfile::tempdir().expect("temporary data directory");
     let gateway = Gateway::builder(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
@@ -391,18 +391,14 @@ async fn automatic_parent_materializes_rewritten_history_before_the_current_hook
     .await;
     assert_eq!(third_response.status(), StatusCode::OK);
 
-    let observed = observed
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let observed = observed.lock();
     assert_eq!(observed.len(), 3);
     assert!(
         observed[2].iter().any(|item| item == "second"),
         "explicit continuation lost the client item after automatic prefix reuse: {:?}",
         observed[2]
     );
-    let requests = requests
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let requests = requests.lock();
     assert!(requests[1].get("previous_response_id").is_none());
     assert_eq!(requests[1]["input"].as_array().map(Vec::len), Some(5));
 }

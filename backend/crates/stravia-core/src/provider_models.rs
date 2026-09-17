@@ -779,9 +779,11 @@ mod tests {
         assert!(!specified.lacks_registered_specification());
 
         // 历史空快照:规格全空时仍视为未登记,且允许整体升级。
-        let mut legacy = ProviderModelMetadata::default();
-        legacy.id = Some("glm-5.1".to_string());
-        legacy.name = Some("glm-5.1".to_string());
+        let mut legacy = ProviderModelMetadata {
+            id: Some("glm-5.1".to_string()),
+            name: Some("glm-5.1".to_string()),
+            ..Default::default()
+        };
         assert!(legacy.lacks_registered_specification());
         assert!(legacy.is_identity_only());
         legacy.name = Some("Renamed".to_string());

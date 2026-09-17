@@ -9,14 +9,14 @@ Object.defineProperty(globalThis, 'window', {
   configurable: true,
   value: {
     __TAURI_INTERNALS__: {
-      async invoke(command: string, args?: { url: string }) {
-        if (command === 'get_server_port') return 18473
+      invoke(command: string, args?: { url: string }): Promise<unknown> {
+        if (command === 'get_server_port') return Promise.resolve(18473)
         if (command === 'plugin:opener|open_url') {
-          if (openerError) throw openerError
+          if (openerError) return Promise.reject(openerError)
           openedUrls.push(args!.url)
-          return
+          return Promise.resolve()
         }
-        throw new Error(`Unexpected native command: ${command}`)
+        return Promise.reject(new Error(`Unexpected native command: ${command}`))
       },
     },
   },
@@ -53,6 +53,6 @@ test('desktop exports a bundle through the system browser without navigating the
 
 test('desktop reports a failed browser launch to the caller', async () => {
   openerError = new Error('System browser could not be opened')
-  await expect(navigateToBundle(ticket)).rejects.toThrow('System browser could not be opened')
+  await Promise.resolve(expect(navigateToBundle(ticket)).rejects.toThrow('System browser could not be opened'))
   expect(openedUrls).toEqual([])
 })

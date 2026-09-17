@@ -74,7 +74,7 @@ const buttonProps = $derived({
 {:else}
   <Tooltip.Root disabled={sidebar.state !== 'collapsed' || sidebar.isMobile}>
     <Tooltip.Trigger>
-      {#snippet child({ props })}
+      {#snippet child({ props }: { props: Record<string, unknown> })}
         {@render Button({ props })}
       {/snippet}
     </Tooltip.Trigger>

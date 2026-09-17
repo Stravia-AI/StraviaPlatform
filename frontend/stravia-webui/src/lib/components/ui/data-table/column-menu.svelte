@@ -5,10 +5,7 @@ import Columns3Icon from '@lucide/svelte/icons/columns-3'
 
 import { Button } from '$lib/components/ui/button'
 import * as DropdownMenu from '$lib/components/ui/dropdown-menu'
-import {
-  dataTableFeatures,
-  type DataTable,
-} from './data-table.js'
+import { dataTableFeatures, type DataTable } from './data-table.js'
 
 interface Props {
   table: DataTable<TData>

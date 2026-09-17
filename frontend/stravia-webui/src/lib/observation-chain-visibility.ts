@@ -11,9 +11,5 @@ export function interactionDisplayStatus(interaction: Pick<InteractionSummary, '
 }
 
 export function hiddenFailureNode(interaction: InteractionSummary): boolean {
-  return (
-    interaction.failed_request &&
-    !interaction.client_output_delivered &&
-    !LIVE_STATUSES[interaction.status]
-  )
+  return interaction.failed_request && !interaction.client_output_delivered && !LIVE_STATUSES[interaction.status]
 }

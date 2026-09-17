@@ -3,7 +3,7 @@ import * as Sheet from '$lib/components/ui/sheet/index.js'
 import { cn, type WithElementRef } from '$lib/utils.js'
 import { SIDEBAR_WIDTH_MOBILE } from './constants.js'
 import { useSidebar } from './context.svelte.js'
-import type { ComponentProps } from 'svelte'
+import type { Dialog as SheetPrimitive } from 'bits-ui'
 import type { HTMLAttributes } from 'svelte/elements'
 
 let {
@@ -23,8 +23,8 @@ let {
   title: string
   description?: string
   closeLabel?: string
-  onOpenAutoFocus?: ComponentProps<typeof Sheet.Content>['onOpenAutoFocus']
-  onCloseAutoFocus?: ComponentProps<typeof Sheet.Content>['onCloseAutoFocus']
+  onOpenAutoFocus?: SheetPrimitive.ContentProps['onOpenAutoFocus']
+  onCloseAutoFocus?: SheetPrimitive.ContentProps['onCloseAutoFocus']
   side?: 'left' | 'right'
   variant?: 'sidebar' | 'floating' | 'inset'
   collapsible?: 'offcanvas' | 'icon' | 'none'
@@ -41,7 +41,7 @@ const sidebar = useSidebar()
     {@render children?.()}
   </div>
 {:else if sidebar.isMobile}
-  <Sheet.Root bind:open={() => sidebar.openMobile, (v) => sidebar.setOpenMobile(v)} {...restProps}>
+  <Sheet.Root bind:open={() => sidebar.openMobile, (v: boolean) => sidebar.setOpenMobile(v)} {...restProps}>
     <Sheet.Content
       bind:ref
       data-sidebar="sidebar"

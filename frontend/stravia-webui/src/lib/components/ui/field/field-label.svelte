@@ -1,6 +1,6 @@
 <script lang="ts">
 import CircleHelpIcon from '@lucide/svelte/icons/circle-help'
-import type { ComponentProps } from 'svelte'
+import type { Label as LabelPrimitive } from 'bits-ui'
 
 import * as m from '$lib/paraglide/messages.js'
 import { Label } from '$lib/components/ui/label/index.js'
@@ -13,15 +13,12 @@ let {
   children,
   hint,
   ...restProps
-}: ComponentProps<typeof Label> & { hint?: string } = $props()
+}: LabelPrimitive.RootProps & { hint?: string } = $props()
 
 const hintId = $props.id()
 </script>
 
-<div
-  data-slot="field-label"
-  data-has-hint={hint ? 'true' : undefined}
-  class="group/field-label min-w-0">
+<div data-slot="field-label" data-has-hint={hint ? 'true' : undefined} class="group/field-label min-w-0">
   <div class="flex w-fit min-w-0 items-center gap-2">
     <Label
       bind:ref

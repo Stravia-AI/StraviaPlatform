@@ -334,11 +334,11 @@ impl stravia_runtime_contract::hook::HookSession for RewriteModelSession {
 }
 
 struct PrependContextHook {
-    observed: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+    observed: Arc<parking_lot::Mutex<Vec<Vec<String>>>>,
 }
 
 struct PrependContextSession {
-    observed: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+    observed: Arc<parking_lot::Mutex<Vec<Vec<String>>>>,
 }
 
 impl stravia_runtime_contract::hook::Hook for PrependContextHook {
@@ -368,16 +368,13 @@ impl stravia_runtime_contract::hook::HookSession for PrependContextSession {
         let stravia_runtime_contract::hook::HookEvent::Request { current, .. } = event else {
             return Ok(stravia_runtime_contract::hook::ActionBatch::default());
         };
-        self.observed
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push(
-                current
-                    .items
-                    .iter()
-                    .map(|item| item.content.to_text())
-                    .collect(),
-            );
+        self.observed.lock().push(
+            current
+                .items
+                .iter()
+                .map(|item| item.content.to_text())
+                .collect(),
+        );
         let mut rewritten = current.clone();
         let mut marker =
             stravia_runtime_contract::protocol::ir::AiItem::output_text("hook context");
@@ -410,7 +407,7 @@ async fn hidden_round_request_hook_response_is_delivered_impl() {
     });
     let (base_url, provider_calls) = serve_openai_sequence(vec![platform_round]).await;
     let data_dir = tempfile::tempdir().expect("temporary data directory");
-    let tool_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let tool_calls = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let gateway = crate::Gateway::builder(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
@@ -436,12 +433,7 @@ async fn hidden_round_request_hook_response_is_delivered_impl() {
     assert!(body.contains("hook completed hidden round"), "{body}");
     assert!(!body.contains("stream_mid_error"), "{body}");
     assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        *tool_calls
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()),
-        vec![1]
-    );
+    assert_eq!(*tool_calls.lock(), vec![1]);
     let chunks = body
         .lines()
         .filter_map(|line| line.strip_prefix("data: "))
@@ -515,7 +507,7 @@ async fn platform_only_stream_continues_with_marker_impl() {
     ])
     .await;
     let data_dir = tempfile::tempdir().expect("temporary data directory");
-    let tool_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let tool_calls = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let (expose_tool_hook, _request_hook_rounds) = ExposeOrderedToolHook::counting();
     let gateway = crate::Gateway::builder(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
@@ -616,12 +608,7 @@ async fn platform_only_stream_continues_with_marker_impl() {
         "the streamed assistant output must discover the first response as its exact parent"
     );
     assert_eq!(provider_calls.load(Ordering::SeqCst), 3);
-    assert_eq!(
-        *tool_calls
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()),
-        vec![1]
-    );
+    assert_eq!(*tool_calls.lock(), vec![1]);
 }
 
 async fn gateway_rewriting_model(test_name: &str, final_model: &str) -> Gateway {
@@ -732,46 +719,28 @@ async fn set_concurrency_limit(gateway: &Gateway, limit: i32) {
 
 #[derive(Clone, Default)]
 struct AccessMutationFixture {
-    gateway: Arc<std::sync::Mutex<Option<Gateway>>>,
-    key_id: Arc<std::sync::Mutex<Option<String>>>,
-    replacement_model_id: Arc<std::sync::Mutex<Option<String>>>,
+    gateway: Arc<parking_lot::Mutex<Option<Gateway>>>,
+    key_id: Arc<parking_lot::Mutex<Option<String>>>,
+    replacement_model_id: Arc<parking_lot::Mutex<Option<String>>>,
 }
 
 impl AccessMutationFixture {
     fn set(&self, gateway: Gateway, key_id: String, replacement_model_id: String) {
-        *self
-            .gateway
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(gateway);
-        *self
-            .key_id
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(key_id);
-        *self
-            .replacement_model_id
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(replacement_model_id);
+        *self.gateway.lock() = Some(gateway);
+        *self.key_id.lock() = Some(key_id);
+        *self.replacement_model_id.lock() = Some(replacement_model_id);
     }
 
     fn gateway(&self) -> Option<Gateway> {
-        self.gateway
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
+        self.gateway.lock().clone()
     }
 
     fn key_id(&self) -> Option<String> {
-        self.key_id
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
+        self.key_id.lock().clone()
     }
 
     fn replacement_model_id(&self) -> Option<String> {
-        self.replacement_model_id
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
+        self.replacement_model_id.lock().clone()
     }
 }
 
@@ -909,14 +878,18 @@ async fn create_test_provider_with_model(
 
 async fn serve_openai_sequence_with_requests(
     bodies: Vec<serde_json::Value>,
-) -> (String, Arc<AtomicUsize>, Arc<std::sync::Mutex<Vec<String>>>) {
+) -> (
+    String,
+    Arc<AtomicUsize>,
+    Arc<parking_lot::Mutex<Vec<String>>>,
+) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind provider sequence");
     let address = listener.local_addr().expect("provider sequence address");
     let calls = Arc::new(AtomicUsize::new(0));
     let observed = calls.clone();
-    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let observed_requests = requests.clone();
     tokio::spawn(async move {
         for body in bodies {
@@ -930,10 +903,7 @@ async fn serve_openai_sequence_with_requests(
                 .await
                 .expect("read provider sequence request");
             let request = String::from_utf8_lossy(&request[..read]).into_owned();
-            observed_requests
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push(request.clone());
+            observed_requests.lock().push(request.clone());
             observed.fetch_add(1, Ordering::SeqCst);
             let is_stream = request
                 .split_once("\r\n\r\n")
@@ -1074,7 +1044,7 @@ fn media_turn_id(request: &str) -> Option<String> {
 }
 
 async fn serve_media_parent(
-    source_id: Arc<std::sync::Mutex<Option<String>>>,
+    source_id: Arc<parking_lot::Mutex<Option<String>>>,
 ) -> (String, Arc<AtomicUsize>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -1090,9 +1060,7 @@ async fn serve_media_parent(
             let body = match ordinal {
                 0 => {
                     let id = marker_artifact_id(&request).expect("bridge Artifact marker");
-                    *source_id
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(id.clone());
+                    *source_id.lock() = Some(id.clone());
                     serde_json::json!({
                         "id": "chatcmpl-media-tool",
                         "object": "chat.completion",
@@ -1133,7 +1101,7 @@ async fn serve_media_parent(
                         request.contains(r#""name":"StraviaRead""#),
                         "continued request must expose StraviaRead: {request}"
                     );
-                    let id = source_id.lock().unwrap().clone().expect("source Artifact");
+                    let id = source_id.lock().clone().expect("source Artifact");
                     serde_json::json!({
                         "id": "chatcmpl-media-continuation",
                         "object": "chat.completion",
@@ -1176,7 +1144,7 @@ async fn serve_media_parent(
 }
 
 async fn serve_media_model(
-    source_id: Arc<std::sync::Mutex<Option<String>>>,
+    source_id: Arc<parking_lot::Mutex<Option<String>>>,
 ) -> (String, Arc<AtomicUsize>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -1191,7 +1159,6 @@ async fn serve_media_model(
             observed.fetch_add(1, Ordering::SeqCst);
             let id = source_id
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .clone()
                 .expect("source Artifact from parent request");
             assert!(
@@ -1391,11 +1358,11 @@ async fn execute_non_stream(gateway: Gateway, model: &str) -> Response {
 }
 
 struct ExposeOrderedToolHook {
-    request_rounds: Arc<std::sync::Mutex<Vec<u32>>>,
+    request_rounds: Arc<parking_lot::Mutex<Vec<u32>>>,
 }
 
 struct ExposeOrderedToolSession {
-    request_rounds: Arc<std::sync::Mutex<Vec<u32>>>,
+    request_rounds: Arc<parking_lot::Mutex<Vec<u32>>>,
 }
 
 struct HiddenRoundRespondHook;
@@ -1407,8 +1374,8 @@ struct HiddenRoundRejectHook;
 struct HiddenRoundRejectSession;
 
 impl ExposeOrderedToolHook {
-    fn counting() -> (Self, Arc<std::sync::Mutex<Vec<u32>>>) {
-        let request_rounds = Arc::new(std::sync::Mutex::new(Vec::new()));
+    fn counting() -> (Self, Arc<parking_lot::Mutex<Vec<u32>>>) {
+        let request_rounds = Arc::new(parking_lot::Mutex::new(Vec::new()));
         (
             Self {
                 request_rounds: request_rounds.clone(),
@@ -1525,10 +1492,7 @@ impl stravia_runtime_contract::hook::HookSession for ExposeOrderedToolSession {
         event: stravia_runtime_contract::hook::HookEvent<'_>,
     ) -> Result<stravia_runtime_contract::hook::ActionBatch, String> {
         if let stravia_runtime_contract::hook::HookEvent::Request { round, .. } = event {
-            self.request_rounds
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push(round);
+            self.request_rounds.lock().push(round);
             Ok(stravia_runtime_contract::hook::ActionBatch::one(
                 stravia_runtime_contract::hook::HookAction::ExposeTool(
                     stravia_runtime_contract::hook::ToolId::new("ordered-tool"),
@@ -1541,11 +1505,11 @@ impl stravia_runtime_contract::hook::HookSession for ExposeOrderedToolSession {
 }
 
 struct OrderedTool {
-    calls: Arc<std::sync::Mutex<Vec<u64>>>,
+    calls: Arc<parking_lot::Mutex<Vec<u64>>>,
 }
 
 struct RetryingOrderedTool {
-    calls: Arc<std::sync::Mutex<Vec<u64>>>,
+    calls: Arc<parking_lot::Mutex<Vec<u64>>>,
 }
 
 #[async_trait]
@@ -1574,10 +1538,7 @@ impl stravia_runtime_contract::hook::PlatformTool for OrderedTool {
         let index = arguments["index"].as_u64().ok_or_else(|| {
             stravia_runtime_contract::hook::PlatformToolError::new("missing index")
         })?;
-        self.calls
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push(index);
+        self.calls.lock().push(index);
         Ok(serde_json::json!({ "index": index }))
     }
 }
@@ -1608,10 +1569,7 @@ impl stravia_runtime_contract::hook::PlatformTool for RetryingOrderedTool {
         let index = arguments["index"].as_u64().ok_or_else(|| {
             stravia_runtime_contract::hook::PlatformToolError::new("missing index")
         })?;
-        self.calls
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push(index);
+        self.calls.lock().push(index);
         if index == 1 {
             return Err(stravia_runtime_contract::hook::PlatformToolError::new(
                 "first attempt failed",
@@ -1975,7 +1933,7 @@ async fn buffered_platform_only_executes_hidden_round_impl() {
     let (base_url, provider_calls) =
         serve_openai_sequence(vec![platform_round, openai_response("final answer")]).await;
     let data_dir = tempfile::tempdir().expect("temporary data directory");
-    let tool_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let tool_calls = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let (expose_tool_hook, _request_hook_rounds) = ExposeOrderedToolHook::counting();
     let gateway = crate::Gateway::builder(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
@@ -2002,12 +1960,7 @@ async fn buffered_platform_only_executes_hidden_round_impl() {
     );
     assert!(body.contains("final answer"), "{body}");
     assert_eq!(provider_calls.load(Ordering::SeqCst), 2);
-    assert_eq!(
-        *tool_calls
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()),
-        vec![1]
-    );
+    assert_eq!(*tool_calls.lock(), vec![1]);
     let completed_marker_count = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM history_markers \
          WHERE published_at IS NOT NULL AND execution_state = 'completed'",
@@ -2048,7 +2001,7 @@ async fn hidden_round_request_hook_rejection_is_delivered_impl() {
     });
     let (base_url, provider_calls) = serve_openai_sequence(vec![platform_round]).await;
     let data_dir = tempfile::tempdir().expect("temporary data directory");
-    let tool_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let tool_calls = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let gateway = crate::Gateway::builder(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
@@ -2075,12 +2028,7 @@ async fn hidden_round_request_hook_rejection_is_delivered_impl() {
     assert!(body.contains("hidden round rejected"), "{body}");
     assert!(!body.contains("stream aborted"), "{body}");
     assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        *tool_calls
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()),
-        vec![1]
-    );
+    assert_eq!(*tool_calls.lock(), vec![1]);
 }
 
 async fn mixed_tool_continuation_replays_impl() {
@@ -2140,7 +2088,7 @@ async fn mixed_tool_continuation_replays_impl() {
         )),
         ..Default::default()
     };
-    let tool_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let tool_calls = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let (expose_tool_hook, _request_hook_rounds) = ExposeOrderedToolHook::counting();
     let gateway = crate::Gateway::builder(config)
         .hook(Arc::new(expose_tool_hook))
@@ -2179,10 +2127,7 @@ async fn mixed_tool_continuation_replays_impl() {
             .await;
     assert_eq!(first.status(), StatusCode::OK);
     assert!(
-        tool_calls
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .is_empty(),
+        tool_calls.lock().is_empty(),
         "Platform Tool execution must wait for response-body delivery"
     );
     let first_body = to_bytes(first.into_body(), usize::MAX)
@@ -2243,12 +2188,7 @@ async fn mixed_tool_continuation_replays_impl() {
         String::from_utf8_lossy(&resumed_body)
     );
     assert_eq!(provider_calls.load(Ordering::SeqCst), 2);
-    assert_eq!(
-        *tool_calls
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()),
-        vec![1]
-    );
+    assert_eq!(*tool_calls.lock(), vec![1]);
 
     let branch = execute_non_stream_request_with_headers(gateway, headers, resumed).await;
     assert_eq!(branch.status(), StatusCode::OK);
@@ -2270,7 +2210,7 @@ async fn platform_only_stream_preserves_client_tool_arguments_impl() {
     ])
     .await;
     let data_dir = tempfile::tempdir().expect("temporary data directory");
-    let tool_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let tool_calls = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let (expose_tool_hook, _request_hook_rounds) = ExposeOrderedToolHook::counting();
     let gateway = crate::Gateway::builder(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
@@ -2318,12 +2258,7 @@ async fn platform_only_stream_preserves_client_tool_arguments_impl() {
     assert!(!body.contains("platform-call"), "{body}");
     assert!(!body.contains("stravia__ordered_tool"), "{body}");
     assert_eq!(provider_calls.load(Ordering::SeqCst), 2);
-    assert_eq!(
-        *tool_calls
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()),
-        vec![1]
-    );
+    assert_eq!(*tool_calls.lock(), vec![1]);
 }
 
 async fn platform_markers_are_ingress_neutral_impl() {
@@ -2377,7 +2312,7 @@ async fn platform_markers_are_ingress_neutral_impl() {
     }
     let (base_url, provider_calls) = serve_openai_sequence(provider_responses).await;
     let data_dir = tempfile::tempdir().expect("temporary data directory");
-    let tool_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let tool_calls = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let (expose_tool_hook, _request_hook_rounds) = ExposeOrderedToolHook::counting();
     let gateway = crate::Gateway::builder(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
@@ -2494,13 +2429,7 @@ async fn platform_markers_are_ingress_neutral_impl() {
         assert!(marker_is_reasoning, "{ingress}: {body}");
     }
     assert_eq!(provider_calls.load(Ordering::SeqCst), 16);
-    assert_eq!(
-        tool_calls
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .len(),
-        8
-    );
+    assert_eq!(tool_calls.lock().len(), 8);
 }
 
 fn openai_sse_platform_tool_call() -> String {
@@ -3306,8 +3235,8 @@ fn openai_responses_protected_parallel_tools_sse(
 
 #[derive(Clone)]
 struct ResponsesWebSocketFixture {
-    response_streams: Arc<std::sync::Mutex<VecDeque<String>>>,
-    requests: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    response_streams: Arc<parking_lot::Mutex<VecDeque<String>>>,
+    requests: Arc<parking_lot::Mutex<Vec<serde_json::Value>>>,
     connections: Arc<AtomicUsize>,
 }
 
@@ -3324,12 +3253,10 @@ async fn serve_responses_websocket(mut socket: WebSocket, fixture: ResponsesWebS
         fixture
             .requests
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(serde_json::from_str(&text).expect("Responses WebSocket request JSON"));
         let response_stream = fixture
             .response_streams
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .pop_front()
             .expect("configured Responses WebSocket response");
         for event in response_stream.split("\n\n").filter_map(|event| {
@@ -3353,7 +3280,7 @@ async fn serve_responses_websocket_sequence(
 ) -> (
     String,
     Arc<AtomicUsize>,
-    Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    Arc<parking_lot::Mutex<Vec<serde_json::Value>>>,
 ) {
     serve_responses_websocket_streams(responses.into_iter().map(openai_responses_sse).collect())
         .await
@@ -3364,7 +3291,7 @@ async fn serve_responses_websocket_streams(
 ) -> (
     String,
     Arc<AtomicUsize>,
-    Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    Arc<parking_lot::Mutex<Vec<serde_json::Value>>>,
 ) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -3373,9 +3300,9 @@ async fn serve_responses_websocket_streams(
         .local_addr()
         .expect("Responses WebSocket provider address");
     let connections = Arc::new(AtomicUsize::new(0));
-    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let fixture = ResponsesWebSocketFixture {
-        response_streams: Arc::new(std::sync::Mutex::new(response_streams.into())),
+        response_streams: Arc::new(parking_lot::Mutex::new(response_streams.into())),
         requests: requests.clone(),
         connections: connections.clone(),
     };
@@ -3392,7 +3319,7 @@ async fn serve_responses_websocket_streams(
 
 #[derive(Clone)]
 struct MissingPreviousFixture {
-    requests: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    requests: Arc<parking_lot::Mutex<Vec<serde_json::Value>>>,
     connections: Arc<AtomicUsize>,
     calls: Arc<AtomicUsize>,
     visible_event_before_error: bool,
@@ -3406,11 +3333,7 @@ async fn missing_previous_handler(
         fixture.connections.fetch_add(1, Ordering::SeqCst);
         while let Some(Ok(AxumWebSocketMessage::Text(text))) = socket.recv().await {
             let request = serde_json::from_str(&text).expect("Responses WebSocket request JSON");
-            fixture
-                .requests
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push(request);
+            fixture.requests.lock().push(request);
             let call = fixture.calls.fetch_add(1, Ordering::SeqCst);
             if call == 1 {
                 if fixture.visible_event_before_error {
@@ -3476,14 +3399,14 @@ async fn serve_missing_previous_websocket(
 ) -> (
     String,
     Arc<AtomicUsize>,
-    Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    Arc<parking_lot::Mutex<Vec<serde_json::Value>>>,
 ) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind missing-previous provider");
     let address = listener.local_addr().expect("provider address");
     let connections = Arc::new(AtomicUsize::new(0));
-    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let fixture = MissingPreviousFixture {
         requests: requests.clone(),
         connections: connections.clone(),
@@ -3972,11 +3895,11 @@ impl stravia_runtime_contract::hook::HookSession for RewriteUpstreamSession {
 }
 
 struct ObserveUpstreamHook {
-    responses: Arc<std::sync::Mutex<Vec<AiResponse>>>,
+    responses: Arc<parking_lot::Mutex<Vec<AiResponse>>>,
 }
 
 struct ObserveUpstreamSession {
-    responses: Arc<std::sync::Mutex<Vec<AiResponse>>>,
+    responses: Arc<parking_lot::Mutex<Vec<AiResponse>>>,
 }
 
 impl stravia_runtime_contract::hook::Hook for ObserveUpstreamHook {
@@ -4005,10 +3928,7 @@ impl stravia_runtime_contract::hook::HookSession for ObserveUpstreamSession {
     ) -> Result<stravia_runtime_contract::hook::ActionBatch, String> {
         if let stravia_runtime_contract::hook::HookEvent::UpstreamResponse { response, .. } = event
         {
-            self.responses
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push(response.clone());
+            self.responses.lock().push(response.clone());
         }
         Ok(stravia_runtime_contract::hook::ActionBatch::default())
     }

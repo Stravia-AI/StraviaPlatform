@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: superseded by ADR-0014
 ---
 
 # Discover Target Continuation from exact effective prefixes

@@ -430,7 +430,7 @@ async function saveProvider(): Promise<void> {
                 <Select.Root
                   type="single"
                   value={form.protocol}
-                  onValueChange={(value) => {
+                  onValueChange={(value: string) => {
                     const protocol = resolveProtocol(value)
                     if (protocol) updateProtocol(protocol)
                   }}>
@@ -456,7 +456,7 @@ async function saveProvider(): Promise<void> {
                 <Switch
                   id="provider-use-proxy"
                   checked={form.useProxy}
-                  onCheckedChange={(checked) => {
+                  onCheckedChange={(checked: boolean) => {
                     form.useProxy = checked
                     void oauthAuthorization?.updateProxy(checked)
                   }} />
@@ -566,7 +566,7 @@ async function saveProvider(): Promise<void> {
                 useProxy={form.useProxy}
                 mode="connect"
                 providerName={defaultProviderName(selectedOption, localeState.current)}
-                onStateChange={(sessionId, ready) => {
+                onStateChange={(sessionId: string | undefined, ready: boolean) => {
                   oauthSessionId = sessionId
                   oauthReady = ready
                 }} />

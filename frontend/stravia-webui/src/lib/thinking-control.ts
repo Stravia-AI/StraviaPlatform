@@ -14,22 +14,14 @@ export interface ThinkingControlContext {
 const CONTROL_KINDS: ThinkingControlKind[] = ['effort', 'budget', 'enabled', 'disabled', 'hidden']
 
 export function thinkingControlContext(provider: Provider | undefined, model: string): ThinkingControlContext {
-  return {
-    protocol: provider?.protocol,
-    presetKey: provider?.preset_key,
-    vendor: provider?.vendor,
-    model,
-  }
+  return { protocol: provider?.protocol, presetKey: provider?.preset_key, vendor: provider?.vendor, model }
 }
 
 export function writableThinkingControlKinds(context: ThinkingControlContext): ThinkingControlKind[] {
   return CONTROL_KINDS.filter((kind) => thinkingControlKindWritable(kind, context))
 }
 
-export function thinkingControlWritable(
-  control: TargetThinkingControl,
-  context: ThinkingControlContext,
-): boolean {
+export function thinkingControlWritable(control: TargetThinkingControl, context: ThinkingControlContext): boolean {
   return thinkingControlKindWritable(control.type, context)
 }
 
@@ -37,15 +29,10 @@ export function unrepresentableThinkingLevels(
   mappings: ThinkingLevelMapping[],
   context: ThinkingControlContext,
 ): ThinkingLevel[] {
-  return mappings
-    .filter((row) => !thinkingControlWritable(row.control, context))
-    .map((row) => row.level)
+  return mappings.filter((row) => !thinkingControlWritable(row.control, context)).map((row) => row.level)
 }
 
-export function thinkingControlKindWritable(
-  kind: ThinkingControlKind,
-  context: ThinkingControlContext,
-): boolean {
+export function thinkingControlKindWritable(kind: ThinkingControlKind, context: ThinkingControlContext): boolean {
   if (kind === 'hidden') return true
   const protocol = resolveProtocol(context.protocol)
   switch (protocol) {
@@ -95,7 +82,10 @@ export function openaiCompatibleSupportsToggle(context: ThinkingControlContext):
 
 function vendorIs(vendor: string | undefined, candidates: string[]): boolean {
   return Boolean(
-    vendor && candidates.some((candidate) => vendor.length === candidate.length && vendor.toLowerCase() === candidate.toLowerCase()),
+    vendor &&
+    candidates.some(
+      (candidate) => vendor.length === candidate.length && vendor.toLowerCase() === candidate.toLowerCase(),
+    ),
   )
 }
 

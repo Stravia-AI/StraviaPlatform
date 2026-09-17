@@ -24,6 +24,7 @@ import * as InputGroup from '$lib/components/ui/input-group'
 import * as Select from '$lib/components/ui/select'
 import { Spinner } from '$lib/components/ui/spinner'
 import { Switch } from '$lib/components/ui/switch'
+import { inputValue } from '$lib/utils.js'
 
 const queryClient = useQueryClient()
 const portQuery = createQuery(() => ({
@@ -34,10 +35,7 @@ const portQuery = createQuery(() => ({
       ? 500
       : false,
 }))
-const clientQuery = createQuery(() => ({
-  queryKey: ['desktop-client-settings'],
-  queryFn: getDesktopClientSettings,
-}))
+const clientQuery = createQuery(() => ({ queryKey: ['desktop-client-settings'], queryFn: getDesktopClientSettings }))
 
 let portDraft = $state<string>()
 let validationError = $state<string>()
@@ -239,7 +237,7 @@ async function applyStartupToggle(
                 max="65535"
                 value={portValue}
                 aria-invalid={validationError != null || displayedOperationError != null}
-                oninput={(event) => setPortDraft(event.currentTarget.value)} />
+                oninput={(event: Event) => setPortDraft(inputValue(event))} />
             </InputGroup.Root>
             <Button class="shrink-0" disabled={!canSave || saving || rechecking} onclick={requestSavePort}>
               {#if saving}<Spinner data-icon="inline-start" />{:else}<SaveIcon data-icon="inline-start" />{/if}
@@ -329,7 +327,7 @@ async function applyStartupToggle(
             <InputGroup.Root class="w-fit max-w-full">
               <InputGroup.Addon class="font-technical pr-0 tabular-nums">http://</InputGroup.Addon>
               {#if lanAddresses.length > 1}
-                <Select.Root type="single" value={lanAddress} onValueChange={(value) => (lanSelection = value)}>
+                <Select.Root type="single" value={lanAddress} onValueChange={(value: string) => (lanSelection = value)}>
                   <Select.Trigger
                     id="desktop-external-address"
                     class="rounded-md border-transparent px-1.5 py-0 font-technical text-sm tabular-nums hover:bg-accent focus-visible:border-transparent focus-visible:ring-2 data-[size=default]:h-8 dark:bg-transparent dark:hover:bg-accent">
@@ -378,7 +376,7 @@ async function applyStartupToggle(
             id="desktop-launch-at-login"
             checked={clientState.launchAtLogin}
             disabled={startupToggling}
-            onCheckedChange={(enabled) => void applyStartupToggle(setDesktopLaunchAtLogin, enabled)} />
+            onCheckedChange={(enabled: boolean) => void applyStartupToggle(setDesktopLaunchAtLogin, enabled)} />
         </Field.Field>
         {#if clientState.launchAtLogin}
           <Field.Field orientation="horizontal">
@@ -390,7 +388,7 @@ async function applyStartupToggle(
               id="desktop-silent-start"
               checked={clientState.silentStart}
               disabled={startupToggling}
-              onCheckedChange={(enabled) => void applyStartupToggle(setDesktopSilentStart, enabled)} />
+              onCheckedChange={(enabled: boolean) => void applyStartupToggle(setDesktopSilentStart, enabled)} />
           </Field.Field>
         {/if}
         {#if startupError}

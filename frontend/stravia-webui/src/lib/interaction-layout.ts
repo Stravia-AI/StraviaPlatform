@@ -42,22 +42,37 @@ export function layoutForest(request: LayoutRequest, layouts: Map<string, Cached
   const nodeRoots = new Map(
     request.roots.flatMap((root) => root.interactions.map((interaction) => [interaction.id, root.id] as const)),
   )
-  const rootGraph = new dagre.graphlib.Graph({ directed: false })
+  // 根节点只按观察关联做无向连通分组，用并查集替代 graphlib（其 Graph 默认泛型是 any）。
+  const rootParent = new Map(request.roots.map((root) => [root.id, root.id]))
+  const findRoot = (id: string): string => {
+    let root = id
+    let next = rootParent.get(root)
+    while (next !== undefined && next !== root) {
+      root = next
+      next = rootParent.get(root)
+    }
+    return root
+  }
   const rootEdges = new Map<string, LayoutRequest['edges']>()
-  for (const root of request.roots) rootGraph.setNode(root.id)
   for (const edge of request.edges) {
     const source = nodeRoots.get(edge.source)
     const target = nodeRoots.get(edge.target)
     if (!source || !target) continue
-    rootGraph.setEdge(source, target)
+    rootParent.set(findRoot(source), findRoot(target))
     const edges = rootEdges.get(source)
     if (edges) edges.push(edge)
     else rootEdges.set(source, [edge])
   }
+  const componentMap = new Map<string, string[]>()
+  for (const root of request.roots) {
+    const key = findRoot(root.id)
+    const component = componentMap.get(key)
+    if (component) component.push(root.id)
+    else componentMap.set(key, [root.id])
+  }
   // 观察关联只合并画布布局分组，不改写后端的执行父链或根节点身份。
   // 列顺序按根请求 started_at 新→左；不用 last_active_at，避免运行中的链左右跳动。
-  const groups = dagre.graphlib.alg
-    .components(rootGraph)
+  const groups = [...componentMap.values()]
     .map((ids) => ({
       id: [...ids].sort()[0],
       startedAt: Math.max(0, ...ids.map((id) => roots.get(id)?.startedAt ?? 0)),
@@ -81,7 +96,7 @@ export function layoutForest(request: LayoutRequest, layouts: Map<string, Cached
       for (const edge of edges) graph.setEdge(edge.source, edge.target)
       dagre.layout(graph)
       const laidOut = root.interactions.map((interaction) => {
-        const point = graph.node(interaction.id)
+        const point = graph.node(interaction.id) as { x: number; y: number }
         return { id: interaction.id, rootId: root.id, x: point.x - nodeWidth / 2, y: point.y - nodeHeight / 2 }
       })
       const minX = Math.min(...laidOut.map((position) => position.x))

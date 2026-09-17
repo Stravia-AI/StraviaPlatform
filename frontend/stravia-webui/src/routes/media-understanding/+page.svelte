@@ -156,7 +156,7 @@ function selectThinkingLevel(value?: string): void {
         <div class="flex shrink-0 items-center gap-3">
           {#if toggleSaving}<Spinner />{/if}
           <Switch
-            bind:checked={() => configQuery.data?.enabled ?? false, (value) => void toggleEnabled(value)}
+            bind:checked={() => configQuery.data?.enabled ?? false, (value: boolean) => void toggleEnabled(value)}
             disabled={saving || toggleSaving || (!configQuery.data.enabled && !savedBindingReady)}
             aria-busy={toggleSaving}
             aria-labelledby="media-service-title"

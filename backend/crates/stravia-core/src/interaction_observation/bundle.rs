@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -76,10 +78,7 @@ impl BundleService {
             .exported_at
             .saturating_add(TICKET_TTL.as_millis() as i64);
         let through_sequence = snapshot.through_sequence;
-        let mut tickets = self
-            .tickets
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut tickets = self.tickets.lock();
         let ticket = loop {
             let mut token_bytes = [0u8; 32];
             rand::fill(&mut token_bytes);
@@ -110,7 +109,6 @@ impl BundleService {
         let entry = self
             .tickets
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(ticket)
             .filter(|entry| Instant::now() < entry.expires)
             .ok_or(TicketUnavailable)?;
@@ -121,10 +119,7 @@ impl BundleService {
 
     fn remove_expired(&self) {
         let now = Instant::now();
-        self.tickets
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .retain(|_, entry| entry.expires > now);
+        self.tickets.lock().retain(|_, entry| entry.expires > now);
     }
 }
 

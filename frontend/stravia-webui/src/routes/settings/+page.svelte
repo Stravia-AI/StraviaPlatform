@@ -23,6 +23,7 @@ import * as Select from '$lib/components/ui/select'
 import { Spinner } from '$lib/components/ui/spinner'
 import { Skeleton } from '$lib/components/ui/skeleton'
 import { Switch } from '$lib/components/ui/switch'
+import { inputValue } from '$lib/utils.js'
 
 const queryClient = useQueryClient()
 const artifactQuery = createQuery(() => ({ queryKey: ['artifact-settings'], queryFn: admin.settings.artifacts }))
@@ -323,7 +324,7 @@ function retrySettings(): void {
               id="artifact-client-base-url"
               value={artifact.client_base_url}
               disabled={artifactSaving}
-              oninput={(event) => editArtifact({ client_base_url: event.currentTarget.value })} /></Field.Field>
+              oninput={(event: Event) => editArtifact({ client_base_url: inputValue(event) })} /></Field.Field>
           <Field.Field
             ><Field.FieldLabel for="artifact-storage">{m.artifact_storage()}</Field.FieldLabel><Select.Root
               type="single"
@@ -346,39 +347,39 @@ function retrySettings(): void {
                 id="artifact-s3-endpoint"
                 value={artifact.s3.endpoint ?? ''}
                 disabled={artifactSaving}
-                oninput={(event) => editS3({ endpoint: event.currentTarget.value })} /></Field.Field>
+                oninput={(event: Event) => editS3({ endpoint: inputValue(event) })} /></Field.Field>
             <Field.Field size="fill"
               ><Field.FieldLabel for="artifact-s3-region">{m.artifact_s3_region()}</Field.FieldLabel><Input
                 id="artifact-s3-region"
                 value={artifact.s3.region ?? ''}
                 disabled={artifactSaving}
-                oninput={(event) => editS3({ region: event.currentTarget.value })} /></Field.Field>
+                oninput={(event: Event) => editS3({ region: inputValue(event) })} /></Field.Field>
             <Field.Field size="fill"
               ><Field.FieldLabel for="artifact-s3-bucket">{m.artifact_s3_bucket()}</Field.FieldLabel><Input
                 id="artifact-s3-bucket"
                 value={artifact.s3.bucket ?? ''}
                 disabled={artifactSaving}
-                oninput={(event) => editS3({ bucket: event.currentTarget.value })} /></Field.Field>
+                oninput={(event: Event) => editS3({ bucket: inputValue(event) })} /></Field.Field>
             <Field.Field size="fill"
               ><Field.FieldLabel for="artifact-s3-access_key_id">{m.artifact_s3_access_key()}</Field.FieldLabel><Input
                 id="artifact-s3-access_key_id"
                 value={artifact.s3.access_key_id ?? ''}
                 disabled={artifactSaving}
-                oninput={(event) => editS3({ access_key_id: event.currentTarget.value })} /></Field.Field>
+                oninput={(event: Event) => editS3({ access_key_id: inputValue(event) })} /></Field.Field>
             <Field.Field size="fill"
               ><Field.FieldLabel for="artifact-s3-secret_access_key">{m.artifact_s3_secret_key()}</Field.FieldLabel
               ><SecretInput
                 id="artifact-s3-secret_access_key"
                 value={artifact.s3.secret_access_key ?? ''}
                 disabled={artifactSaving}
-                oninput={(event) => editS3({ secret_access_key: event.currentTarget.value })} /></Field.Field>
+                oninput={(event: Event) => editS3({ secret_access_key: inputValue(event) })} /></Field.Field>
             <Field.Field size="fill"
               ><Field.FieldLabel for="artifact-s3-session_token">{m.artifact_s3_session_token()}</Field.FieldLabel
               ><SecretInput
                 id="artifact-s3-session_token"
                 value={artifact.s3.session_token ?? ''}
                 disabled={artifactSaving}
-                oninput={(event) => editS3({ session_token: event.currentTarget.value || null })} /></Field.Field>
+                oninput={(event: Event) => editS3({ session_token: inputValue(event) || null })} /></Field.Field>
             <Field.Field size="datetime"
               ><Field.FieldLabel for="artifact-s3-expiry" hint={m.artifact_s3_expiry_help()}
                 >{m.artifact_s3_expiry()}</Field.FieldLabel
@@ -387,10 +388,10 @@ function retrySettings(): void {
                 type="number"
                 value={artifact.s3.credentials_expires_at ?? ''}
                 disabled={artifactSaving}
-                oninput={(event) =>
-                  editS3({
-                    credentials_expires_at: event.currentTarget.value === '' ? null : Number(event.currentTarget.value),
-                  })} /></Field.Field>
+                oninput={(event: Event) => {
+                  const raw = inputValue(event)
+                  editS3({ credentials_expires_at: raw === '' ? null : Number(raw) })
+                }} /></Field.Field>
           {/if}
           <Field.Field orientation="horizontal"
             ><div class="flex-1">
@@ -400,7 +401,7 @@ function retrySettings(): void {
               id="artifact-external-downloads"
               checked={artifact.external_signed_downloads}
               disabled={artifactSaving || !artifactQuery.data?.client_base_url}
-              onCheckedChange={(value) => {
+              onCheckedChange={(value: boolean) => {
                 void toggleArtifact('external_signed_downloads', value)
               }} /></Field.Field>
           {#if artifact.external_signed_downloads}
@@ -409,7 +410,7 @@ function retrySettings(): void {
                 id="artifact-public-base-url"
                 value={artifact.file_public_base_url ?? ''}
                 disabled={artifactSaving}
-                oninput={(event) => editArtifact({ file_public_base_url: event.currentTarget.value })} /></Field.Field>
+                oninput={(event: Event) => editArtifact({ file_public_base_url: inputValue(event) })} /></Field.Field>
             <p class="text-sm text-muted-foreground">
               {artifact.s3 ? m.artifact_s3_warning() : m.artifact_public_warning()}
             </p>
@@ -423,7 +424,7 @@ function retrySettings(): void {
               id="artifact-upload-injection"
               checked={artifactQuery.data?.upload_prompt_injection ?? false}
               disabled={artifactSaving || !artifactQuery.data?.client_base_url}
-              onCheckedChange={(value) => {
+              onCheckedChange={(value: boolean) => {
                 void toggleArtifact('upload_prompt_injection', value)
               }} /></Field.Field>
           <p class="text-sm text-muted-foreground">{m.artifact_upload_help()}</p>
@@ -467,20 +468,20 @@ function retrySettings(): void {
             <Switch
               id="proxy-enabled"
               checked={proxy.enabled}
-              onCheckedChange={(enabled) => (proxyDraft = { ...proxy, enabled })}
+              onCheckedChange={(enabled: boolean) => (proxyDraft = { ...proxy, enabled })}
               disabled={savingProxy} /></Field.Field>
           <Field.Field size="fill"
             ><Field.FieldLabel for="proxy-url">{m.settings_proxy_url()}</Field.FieldLabel><Input
               id="proxy-url"
               class="font-technical"
               value={proxy.url}
-              oninput={(event) => (proxyDraft = { ...proxy, url: event.currentTarget.value })}
+              oninput={(event: Event) => (proxyDraft = { ...proxy, url: inputValue(event) })}
               placeholder="http://127.0.0.1:7890" /></Field.Field>
           <Field.Field
             ><Field.FieldLabel for="proxy-bypass">{m.settings_bypass_hosts_optional()}</Field.FieldLabel><Input
               id="proxy-bypass"
               value={proxy.bypass}
-              oninput={(event) => (proxyDraft = { ...proxy, bypass: event.currentTarget.value })}
+              oninput={(event: Event) => (proxyDraft = { ...proxy, bypass: inputValue(event) })}
               placeholder="localhost,127.0.0.1,.internal" /></Field.Field>
           <div class="field-actions">
             <Button disabled={!proxyDirty || savingProxy} onclick={() => void saveProxy()}
@@ -515,7 +516,7 @@ function retrySettings(): void {
               min="1"
               max="365"
               value={retention}
-              oninput={(event) => (editedRetention = event.currentTarget.value)} /></Field.Field>
+              oninput={(event: Event) => (editedRetention = inputValue(event))} /></Field.Field>
           <div class="field-actions">
             <Button disabled={!retentionDirty || savingRetention} onclick={() => void saveRetention()}
               >{#if savingRetention}<Spinner data-icon="inline-start" />{:else}<SaveIcon

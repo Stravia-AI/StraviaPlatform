@@ -117,10 +117,7 @@ function durableActivities(detail: InteractionDetail): Map<string, ObservationAc
       // 独立空白增量也属于原文。
       activity.text += text
       activity.live =
-        running &&
-        !finishedTurns.has(currentTurn) &&
-        !finishedAttempts.has(scope) &&
-        !finishedThoughts.has(scope)
+        running && !finishedTurns.has(currentTurn) && !finishedAttempts.has(scope) && !finishedThoughts.has(scope)
     }
 
     for (const event of events) {
@@ -225,8 +222,14 @@ function durableActivities(detail: InteractionDetail): Map<string, ObservationAc
   return output
 }
 
-export function observationConversationActivities(detail: InteractionDetail, blocks: LiveContentBlock[] = [], durable = durableActivities(detail)): Map<string, ObservationActivity[]> {
-  const thoughts = blocks.filter((block) => block.interaction_id === detail.interaction.id && block.kind === 'model_thinking_delta')
+export function observationConversationActivities(
+  detail: InteractionDetail,
+  blocks: LiveContentBlock[] = [],
+  durable = durableActivities(detail),
+): Map<string, ObservationActivity[]> {
+  const thoughts = blocks.filter(
+    (block) => block.interaction_id === detail.interaction.id && block.kind === 'model_thinking_delta',
+  )
   if (!thoughts.length) return durable
   const output = new Map(durable)
   const updated = new Set<string>()
@@ -237,7 +240,12 @@ export function observationConversationActivities(detail: InteractionDetail, blo
       updated.add(key)
     }
     const activities = output.get(key)!
-    const id = identity(detail.interaction.id, block.run_id, 'thinking', identity(block.model_turn_id ?? '', block.attempt_id ?? ''))
+    const id = identity(
+      detail.interaction.id,
+      block.run_id,
+      'thinking',
+      identity(block.model_turn_id ?? '', block.attempt_id ?? ''),
+    )
     const index = activities.findIndex((activity) => activity.id === id)
     const prior = activities[index]
     if (prior?.kind === 'thinking') activities[index] = { ...prior, text: prior.text + block.text, live: true }

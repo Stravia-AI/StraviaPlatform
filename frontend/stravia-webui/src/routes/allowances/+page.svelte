@@ -280,7 +280,7 @@ async function refreshAll(): Promise<void> {
     )
     const failure = results.find((result) => result.status === 'rejected')
     if (failure) {
-      toast.error(localizeBackendErrorMessage((failure as PromiseRejectedResult).reason))
+      toast.error(localizeBackendErrorMessage(failure.reason))
     } else {
       toast.success(m.allowances_refreshed_all())
     }

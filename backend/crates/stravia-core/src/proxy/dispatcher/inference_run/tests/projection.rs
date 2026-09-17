@@ -5,8 +5,8 @@ async fn responses_thinking_paragraphs_replay_original_parts_through_chat() {
     use axum::Json;
     use axum::response::IntoResponse;
     use axum::routing::post;
+    use parking_lot::Mutex;
     use serde_json::{Value, json};
-    use std::sync::Mutex;
 
     fn snapshot(status: &str, output: Vec<Value>) -> Value {
         crate::protocol::codec::open_responses::formatter::response_resource_snapshot(
@@ -81,10 +81,7 @@ async fn responses_thinking_paragraphs_replay_original_parts_through_chat() {
 
     async fn handle(State(fixture): State<Fixture>, Json(body): Json<Value>) -> Response {
         let first = {
-            let mut requests = fixture
-                .requests
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut requests = fixture.requests.lock();
             requests.push(body.clone());
             requests.len() == 1
         };
@@ -247,9 +244,7 @@ async fn responses_thinking_paragraphs_replay_original_parts_through_chat() {
         let status = response.status();
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
-        let captured = requests
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let captured = requests.lock();
         assert_eq!(
             captured.len(),
             2,
@@ -359,7 +354,7 @@ async fn non_stream_projection_matches_ordered_content_and_replays_canonical_his
     ])
     .await;
     let data_dir = tempfile::tempdir().expect("temporary data directory");
-    let tool_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let tool_calls = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let (expose_tool_hook, _request_hook_rounds) = ExposeOrderedToolHook::counting();
     let gateway = crate::Gateway::builder(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
@@ -435,9 +430,7 @@ async fn non_stream_projection_matches_ordered_content_and_replays_canonical_his
 
     assert_eq!(provider_calls.load(Ordering::SeqCst), 2);
     let second_body: serde_json::Value = {
-        let captured = requests
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let captured = requests.lock();
         serde_json::from_str(
             captured[1]
                 .split_once("\r\n\r\n")
@@ -514,9 +507,7 @@ async fn non_stream_projection_matches_ordered_content_and_replays_canonical_his
     }
     assert_eq!(provider_calls.load(Ordering::SeqCst), 3);
 
-    let captured = requests
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let captured = requests.lock();
     let replay_body = captured[2]
         .split_once("\r\n\r\n")
         .expect("replay provider request body")
@@ -635,7 +626,7 @@ async fn failed_platform_call_and_successful_retry_preserve_marker_and_result_or
     ])
     .await;
     let data_dir = tempfile::tempdir().expect("temporary data directory");
-    let tool_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let tool_calls = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let (expose_tool_hook, _request_hook_rounds) = ExposeOrderedToolHook::counting();
     let gateway = crate::Gateway::builder(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
@@ -683,16 +674,9 @@ async fn failed_platform_call_and_successful_retry_preserve_marker_and_result_or
         "{content}"
     );
     assert_eq!(provider_calls.load(Ordering::SeqCst), 3);
-    assert_eq!(
-        *tool_calls
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()),
-        vec![1, 2]
-    );
+    assert_eq!(*tool_calls.lock(), vec![1, 2]);
 
-    let captured = requests
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let captured = requests.lock();
     let third_body = captured[2]
         .split_once("\r\n\r\n")
         .expect("third provider request body")
@@ -732,7 +716,7 @@ async fn platform_stream_projects_post_text_thinking_into_ordered_content() {
     ])
     .await;
     let data_dir = tempfile::tempdir().expect("temporary data directory");
-    let tool_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let tool_calls = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let (expose_tool_hook, _request_hook_rounds) = ExposeOrderedToolHook::counting();
     let gateway = crate::Gateway::builder(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
@@ -836,7 +820,7 @@ async fn post_text_thinking_without_tool_call_gets_its_own_ordered_marker() {
     })
     .hook(Arc::new(expose_tool_hook))
     .platform_tool(Arc::new(OrderedTool {
-        calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+        calls: Arc::new(parking_lot::Mutex::new(Vec::new())),
     }))
     .build()
     .await
@@ -903,7 +887,7 @@ async fn platform_stream_projection_matrix_for_registered_generation_ingresses()
         .collect::<Vec<_>>();
     let (base_url, provider_calls) = serve_sse_sequence(responses).await;
     let data_dir = tempfile::tempdir().expect("temporary data directory");
-    let tool_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let tool_calls = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let (expose_tool_hook, _request_hook_rounds) = ExposeOrderedToolHook::counting();
     let gateway = crate::Gateway::builder(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
@@ -1030,13 +1014,7 @@ async fn platform_stream_projection_matrix_for_registered_generation_ingresses()
         }
     }
     assert_eq!(provider_calls.load(Ordering::SeqCst), 8);
-    assert_eq!(
-        tool_calls
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .len(),
-        4
-    );
+    assert_eq!(tool_calls.lock().len(), 4);
 }
 
 #[tokio::test]
@@ -1044,7 +1022,7 @@ async fn exposed_platform_tools_preserve_visible_text_and_thinking_order() {
     let (base_url, provider_calls) =
         serve_sse_sequence(vec![openai_sse_reasoning_and_text("R1", "C1", 11, 2)]).await;
     let data_dir = tempfile::tempdir().expect("temporary data directory");
-    let tool_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let tool_calls = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let (expose_tool_hook, _request_hook_rounds) = ExposeOrderedToolHook::counting();
     let gateway = crate::Gateway::builder(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
@@ -1104,10 +1082,5 @@ async fn exposed_platform_tools_preserve_visible_text_and_thinking_order() {
         "{body}"
     );
     assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
-    assert!(
-        tool_calls
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .is_empty()
-    );
+    assert!(tool_calls.lock().is_empty());
 }

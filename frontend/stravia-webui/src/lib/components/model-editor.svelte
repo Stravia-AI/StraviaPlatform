@@ -16,6 +16,7 @@ import { admin } from '$lib/admin-client'
 import { modelIdFromCatalogId } from '$lib/catalog-model-id'
 import { localizeBackendErrorMessage, unrepresentableThinkingTarget } from '$lib/backend-error'
 import { formatList } from '$lib/format'
+import { inputValue } from '$lib/utils.js'
 import {
   thinkingControlContext,
   thinkingControlWritable,
@@ -564,9 +565,7 @@ async function saveModel(): Promise<void> {
 
   const blocked = targets.find((target) => target.enabled && unwritableThinkingLevels(target).length > 0)
   if (blocked) {
-    toast.error(
-      m.model_editor_thinking_enable_blocked({ levels: formatList(unwritableThinkingLevels(blocked)) }),
-    )
+    toast.error(m.model_editor_thinking_enable_blocked({ levels: formatList(unwritableThinkingLevels(blocked)) }))
     editTarget(blocked)
     return
   }
@@ -625,9 +624,7 @@ async function saveModel(): Promise<void> {
     toast.error(localizeBackendErrorMessage(error))
     const failed = unrepresentableThinkingTarget(error)
     const target = failed
-      ? targets.find(
-          (candidate) => candidate.providerId === failed.providerId && candidate.model === failed.modelId,
-        )
+      ? targets.find((candidate) => candidate.providerId === failed.providerId && candidate.model === failed.modelId)
       : undefined
     if (target) {
       target.validationError = localizeBackendErrorMessage(error)
@@ -696,7 +693,7 @@ async function saveModel(): Promise<void> {
           <Switch
             id="route-enabled"
             aria-label={m.common_enable_action()}
-            bind:checked={() => form.enabled, (checked) => (form.enabled = checked)} />
+            bind:checked={() => form.enabled, (checked: boolean) => (form.enabled = checked)} />
         </div>
       </div>
       <Field.Group class="grid gap-4 md:grid-cols-4">
@@ -710,10 +707,10 @@ async function saveModel(): Promise<void> {
             emptyText={m.model_editor_no_models_found()}
             ariaLabel={m.model_editor_model_id()}
             clearAriaLabel={m.model_editor_clear_selected_model()}
-            onInput={(value) => {
+            onInput={(value: string) => {
               form.modelId = value
             }}
-            onSelect={(model) => {
+            onSelect={(model: { id: string; name: string }) => {
               form.modelId = modelIdFromCatalogId(model.id)
               form.displayName = model.name
             }}
@@ -1029,7 +1026,7 @@ async function saveModel(): Promise<void> {
                   <Select.Root
                     type="single"
                     value={target.providerId}
-                    onValueChange={(value) => value && void changeProvider(target, value)}>
+                    onValueChange={(value: string) => value && void changeProvider(target, value)}>
                     <Select.Trigger
                       id={`target-provider-${target.key}`}
                       class="w-full"
@@ -1072,7 +1069,7 @@ async function saveModel(): Promise<void> {
                       ariaLabel={m.model_editor_destination_value_model({ index: index + 1 })}
                       searchAriaLabel={m.model_editor_search_models_destination_value({ index: index + 1 })}
                       disabled={!target.providerId || target.loading}
-                      onSelect={(value) => void selectModel(target, value)} />
+                      onSelect={(value: string) => void selectModel(target, value)} />
                   {/if}
                 </Field.Field>
               </Field.Group>
@@ -1160,7 +1157,7 @@ async function saveModel(): Promise<void> {
                           <Select.Root
                             type="single"
                             value={row.control.type}
-                            onValueChange={(value) =>
+                            onValueChange={(value: string) =>
                               value && changeThinkingControlKind(row, value as TargetThinkingControl['type'])}>
                             <Select.Trigger
                               class={['w-28 shrink-0 sm:w-32', !rowWritable && 'border-destructive']}
@@ -1181,7 +1178,7 @@ async function saveModel(): Promise<void> {
                               class="min-w-0 flex-1"
                               value={row.control.value}
                               aria-label={`${row.level} ${m.model_editor_thinking_effort()}`}
-                              oninput={(event) => changeThinkingControlValue(row, event.currentTarget.value)} />
+                              oninput={(event: Event) => changeThinkingControlValue(row, inputValue(event))} />
                           {:else if row.control.type === 'budget'}
                             <Input
                               class="min-w-0 flex-1"
@@ -1190,7 +1187,7 @@ async function saveModel(): Promise<void> {
                               step="1"
                               value={row.control.value}
                               aria-label={`${row.level} ${m.model_editor_thinking_budget()}`}
-                              oninput={(event) => changeThinkingControlValue(row, event.currentTarget.value)} />
+                              oninput={(event: Event) => changeThinkingControlValue(row, inputValue(event))} />
                           {/if}
                         </div>
                         {#if target.id}

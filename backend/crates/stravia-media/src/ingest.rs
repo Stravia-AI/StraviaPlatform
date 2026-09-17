@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 use std::time::{Duration, Instant};
 
 use base64::Engine;
@@ -39,10 +41,7 @@ impl MediaRunSnapshotStore {
         deadline: Instant,
     ) {
         let principal = principal.continuation_key();
-        let mut snapshots = self
-            .snapshots
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut snapshots = self.snapshots.lock();
         let snapshot = snapshots.entry(run_id).or_insert_with(|| MediaRunSnapshot {
             principal: principal.clone(),
             artifacts: HashSet::new(),
@@ -56,16 +55,12 @@ impl MediaRunSnapshotStore {
     }
 
     pub fn permits(&self, run_id: &str, principal: &Principal, artifacts: &[ArtifactId]) -> bool {
-        self.snapshots
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(run_id)
-            .is_some_and(|snapshot| {
-                snapshot.principal == principal.continuation_key()
-                    && artifacts
-                        .iter()
-                        .all(|artifact| snapshot.artifacts.contains(artifact))
-            })
+        self.snapshots.lock().get(run_id).is_some_and(|snapshot| {
+            snapshot.principal == principal.continuation_key()
+                && artifacts
+                    .iter()
+                    .all(|artifact| snapshot.artifacts.contains(artifact))
+        })
     }
 
     pub fn allow_turn(
@@ -76,10 +71,7 @@ impl MediaRunSnapshotStore {
         deadline: Instant,
     ) {
         let principal = principal.continuation_key();
-        let mut snapshots = self
-            .snapshots
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut snapshots = self.snapshots.lock();
         let snapshot = snapshots
             .entry(run_id.to_owned())
             .or_insert_with(|| MediaRunSnapshot {
@@ -95,30 +87,21 @@ impl MediaRunSnapshotStore {
     }
 
     pub fn permits_turn(&self, run_id: &str, principal: &Principal, turn_id: &AgentTurnId) -> bool {
-        self.snapshots
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(run_id)
-            .is_some_and(|snapshot| {
-                snapshot.principal == principal.continuation_key()
-                    && snapshot.turns.contains(turn_id)
-            })
+        self.snapshots.lock().get(run_id).is_some_and(|snapshot| {
+            snapshot.principal == principal.continuation_key() && snapshot.turns.contains(turn_id)
+        })
     }
 
     pub fn deadline(&self, run_id: &str, principal: &Principal) -> Option<Instant> {
         self.snapshots
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(run_id)
             .filter(|snapshot| snapshot.principal == principal.continuation_key())
             .map(|snapshot| snapshot.deadline)
     }
 
     pub fn remove(&self, run_id: &str) {
-        self.snapshots
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(run_id);
+        self.snapshots.lock().remove(run_id);
     }
 }
 

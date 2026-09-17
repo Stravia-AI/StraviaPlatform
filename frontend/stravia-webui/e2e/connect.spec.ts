@@ -110,13 +110,7 @@ test('Connect exposes recovery without eligible keys and retains code choices on
 test('Copy failure never reports success and leaves the configuration available', async ({ page }) => {
   await setup(page, [key('Personal')])
   await page.addInitScript(() => {
-    Object.defineProperty(navigator, 'clipboard', {
-      value: {
-        writeText: async () => {
-          throw new Error('denied')
-        },
-      },
-    })
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText: () => Promise.reject(new Error('denied')) } })
   })
   await page.goto('/connect')
   await page.getByRole('button', { name: 'Copy', exact: true }).click()

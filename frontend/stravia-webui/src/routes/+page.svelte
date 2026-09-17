@@ -194,14 +194,8 @@ const errorRate = $derived(hasTraffic && overview ? (overview.error_count / over
 const dash = '–'
 const metrics = $derived([
   { label: m.common_total_requests(), value: hasTraffic ? formatCompactCount(overview?.total_requests ?? 0) : dash },
-  {
-    label: m.stats_input_tokens(),
-    value: hasTraffic ? formatCompactCount(overview?.total_input_tokens) : dash,
-  },
-  {
-    label: m.stats_output_tokens(),
-    value: hasTraffic ? formatCompactCount(overview?.total_output_tokens) : dash,
-  },
+  { label: m.stats_input_tokens(), value: hasTraffic ? formatCompactCount(overview?.total_input_tokens) : dash },
+  { label: m.stats_output_tokens(), value: hasTraffic ? formatCompactCount(overview?.total_output_tokens) : dash },
   { label: m.common_avg_latency(), value: hasTraffic ? formatDuration(overview?.avg_duration_ms) : dash },
   {
     label: m.common_error_rate(),
@@ -334,7 +328,7 @@ function retryConfiguration(): void {
             <div class="h-72 min-w-0" aria-label={m.overview_request_volume_chart()}>
               <BarChart
                 data={requestChart}
-                x={(item) => item.hour}
+                x={(item: (typeof requestChart)[number]) => item.hour}
                 series={[
                   { key: 'requests', label: m.common_requests_label(), color: 'var(--chart-1)' },
                   { key: 'errors', label: m.common_errors_label(), color: 'var(--chart-5)' },
@@ -377,7 +371,7 @@ function retryConfiguration(): void {
             <div class="h-72 min-w-0" aria-label={m.overview_latency_chart()}>
               <LineChart
                 data={latencyChart}
-                x={(item) => item.bucket}
+                x={(item: (typeof latencyChart)[number]) => item.bucket}
                 series={[
                   { key: 'firstToken', label: m.stats_first_token_seconds(), color: 'var(--chart-2)' },
                   { key: 'duration', label: m.stats_duration_seconds(), color: 'var(--chart-1)' },
@@ -435,8 +429,9 @@ function retryConfiguration(): void {
                   <div class="min-w-0">
                     <p class="font-technical truncate font-medium">{model.model}</p>
                     <p class="mt-1 text-xs text-muted-foreground">
-                      IN {formatCompactCount(model.total_input_tokens)} ·
-                      OUT {formatCompactCount(model.total_output_tokens)} ·
+                      IN {formatCompactCount(model.total_input_tokens)} · OUT {formatCompactCount(
+                        model.total_output_tokens,
+                      )} ·
                       {formatDuration(model.avg_duration_ms)}
                     </p>
                   </div>

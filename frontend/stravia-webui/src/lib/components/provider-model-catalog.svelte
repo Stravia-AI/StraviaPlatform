@@ -570,7 +570,7 @@ async function deleteManualModel(): Promise<void> {
 {#snippet providerModelSpecificationFilter(value: unknown, onChange: (value: unknown) => void)}
   <ModelSpecificationFilter
     value={(value as SpecificationFilter | undefined) ?? emptySpecificationFilter}
-    onChange={(next) => onChange(specificationFilterCount(next) ? next : undefined)} />
+    onChange={(next: SpecificationFilter) => onChange(specificationFilterCount(next) ? next : undefined)} />
 {/snippet}
 
 {#snippet providerModelSpecificationCell(context: DataTableCellContext<ProviderModelSummary>)}
@@ -715,9 +715,9 @@ async function deleteManualModel(): Promise<void> {
           bind:this={editor}
           detail={selectedDetail}
           {draft}
-          onSave={(metadataJson) => void saveModel(metadataJson)}
-          onSelectionChange={(policy) => void updateSelection(policy)}
-          onDirtyChange={(value) => {
+          onSave={(metadataJson: string) => void saveModel(metadataJson)}
+          onSelectionChange={(policy: ProviderModelSelectionPolicy) => void updateSelection(policy)}
+          onDirtyChange={(value: boolean) => {
             if (!discarding) dirty = value
           }} />
       </div>
@@ -895,9 +895,9 @@ async function deleteManualModel(): Promise<void> {
   {saving}
   onOpenChange={handleDrawerOpen}
   onClose={requestClose}
-  onSave={(metadataJson) => void saveModel(metadataJson)}
-  onSelectionChange={(policy) => void updateSelection(policy)}
-  onDirtyChange={(value) => {
+  onSave={(metadataJson: string) => void saveModel(metadataJson)}
+  onSelectionChange={(policy: ProviderModelSelectionPolicy) => void updateSelection(policy)}
+  onDirtyChange={(value: boolean) => {
     if (!discarding) dirty = value
   }} />
 

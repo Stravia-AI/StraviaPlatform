@@ -32,7 +32,7 @@ Google 自有原生 `models.list` 端点及从保存 base URL 自动选择的原
 
 ## 明确保留的职责
 
-[ADR-0026](0026-own-provider-write-and-route-bind-as-two-modules.md) 的 Provider 与 Route 分工不变：
+[ADR-0057](0057-own-provider-write-and-route-bind-as-two-modules.md) 的 Provider 与 Route 分工不变：
 
 - 查询 Provider 模型列表仍可在现有条件下回退静态列表。
 - Route 的 Provider Model 同步仍对发现失败明确报错，不把失败解释为空列表或同步成功。

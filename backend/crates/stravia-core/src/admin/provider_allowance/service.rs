@@ -183,8 +183,12 @@ impl AdminService {
         &self,
         provider_id: &str,
     ) -> anyhow::Result<Option<ProviderAllowanceSnapshot>> {
-        get_provider_allowance_with_transport(self, provider_id, Arc::new(ReqwestAllowanceTransport))
-            .await
+        get_provider_allowance_with_transport(
+            self,
+            provider_id,
+            Arc::new(ReqwestAllowanceTransport),
+        )
+        .await
     }
 
     pub async fn refresh_provider_allowance(

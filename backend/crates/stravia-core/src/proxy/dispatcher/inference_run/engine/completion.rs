@@ -250,7 +250,6 @@ impl PlatformOnlyContinuation {
         {
             let states = publications
                 .lock()
-                .expect("compaction publication lock")
                 .iter()
                 .filter(|publication| {
                     publication.model_turn_id == context.model_turn_id
@@ -693,9 +692,7 @@ pub(super) async fn complete_canonical_response(
             .extensions
             .get::<crate::model_turn::CompactionPublications>()
         {
-            chain.write.record_inline_publications(
-                &publications.lock().expect("compaction publication lock"),
-            );
+            chain.write.record_inline_publications(&publications.lock());
         }
     }
     let reusable_upstream_id = generation_chain

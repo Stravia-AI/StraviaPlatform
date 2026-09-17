@@ -4,7 +4,7 @@ import { afterNavigate } from '$app/navigation'
 import { resolve } from '$app/paths'
 import { page } from '$app/state'
 import { QueryClient, QueryClientProvider } from '@tanstack/svelte-query'
-import { onMount } from 'svelte'
+import { onMount, type Snippet } from 'svelte'
 import { ModeWatcher } from 'mode-watcher'
 
 import '../app.css'
@@ -24,7 +24,7 @@ import {
   setProductUpdateCoordinator,
 } from '$lib/product-update.svelte'
 
-let { children } = $props()
+let { children }: { children: Snippet } = $props()
 const connectSetup = $state<ConnectSetup>({ draft: undefined, createKey: false })
 setConnectSetup(connectSetup)
 const isSetupResource = $derived(/^\/(providers|models|api-keys)(\/|$)/.test(page.url.pathname))

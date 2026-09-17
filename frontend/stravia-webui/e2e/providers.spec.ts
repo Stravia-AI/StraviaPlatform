@@ -1621,7 +1621,7 @@ test('dependency previews block referenced Provider deletion and explain Route d
   await expect(page.getByRole('alertdialog', { name: `Cannot delete ${provider.name}` })).toBeVisible()
   await expect(page.getByRole('link', { name: /used-route.*upstream/ })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Delete service' })).toBeDisabled()
-  await expect(providerDeletes).toBe(0)
+  expect(providerDeletes).toBe(0)
   await page.getByRole('button', { name: 'Cancel' }).click()
   await page.getByRole('button', { name: `More actions for ${safeProvider.name}` }).click()
   await page.getByRole('menuitem', { name: 'Delete service…' }).click()
@@ -1890,9 +1890,9 @@ test('visible provider model actions bind exact IDs and keep inventory open', as
   await expect(existingAction).toHaveText('Add to existing model')
 
   await existingAction.click()
-  const existingToast = page.locator('[data-sonner-toast]').filter({
-    hasText: 'Added this service to model gpt-existing.',
-  })
+  const existingToast = page
+    .locator('[data-sonner-toast]')
+    .filter({ hasText: 'Added this service to model gpt-existing.' })
   await expect(existingToast).toBeVisible()
   await expect(page.locator('.route-page').getByText('Added this service to model gpt-existing.')).toHaveCount(0)
   expect(bindBodies[0]).toEqual({ provider_id: provider.id, provider_model_id: 'gpt-existing' })
