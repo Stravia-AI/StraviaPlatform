@@ -50,8 +50,9 @@ describe('activity grid', () => {
       { endMs: end, spanMs: 3 * DAY_MS, bucketMs: DAY_MS, tzOffsetMs: 0 },
     )
 
-    // 窗口 [end-3d, end] 覆盖 4 个日格。
-    expect(grid.cells).toHaveLength(4)
+    // 窗口 [end-3d, end] 覆盖 4 个日格；窗口外边缘位置补 0 值方格，
+    // 矩阵始终是完整矩形。
+    expect(grid.cells).toHaveLength(grid.colCount * grid.rowCount)
     const byStart = new Map(grid.cells.map((cell) => [cell.start, cell]))
     expect(byStart.get(end - 3 * DAY_MS)?.tokens).toBe(0)
     expect(byStart.get(end - 2 * DAY_MS)?.tokens).toBeNull()
@@ -69,9 +70,11 @@ describe('activity grid', () => {
   test('sub-day buckets group into parent-period columns', () => {
     const end = Date.UTC(2026, 8, 17, 12)
     const grid = buildActivityGrid([], { endMs: end, spanMs: 6 * HOUR_MS, bucketMs: 900_000, tzOffsetMs: 0 })
-    expect(grid.cells).toHaveLength(25)
+    expect(grid.cells).toHaveLength(grid.colCount * grid.rowCount)
     expect(grid.rowCount).toBe(4)
     expect(grid.colCount).toBeGreaterThanOrEqual(6)
     expect(grid.colCount).toBeLessThanOrEqual(7)
+    const positions = new Set(grid.cells.map((cell) => `${cell.col}:${cell.row}`))
+    expect(positions.size).toBe(grid.cells.length)
   })
 })

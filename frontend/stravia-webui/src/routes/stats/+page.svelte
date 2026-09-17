@@ -2,7 +2,7 @@
 import * as m from '$lib/paraglide/messages.js'
 import RequestFailure from '$lib/components/request-failure.svelte'
 import { createQuery } from '@tanstack/svelte-query'
-import { BarChart, LineChart } from 'layerchart'
+import { BarChart, LineChart, PieChart } from 'layerchart'
 
 import { admin } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
@@ -15,6 +15,7 @@ import {
   formatLogTime,
   formatPercent,
   formatTime,
+  formatTps,
 } from '$lib/format'
 import { buildActivityGrid, buildLatencyChart, localTzOffsetMs } from '$lib/stats-chart'
 import type { ApiKeyStats, ProviderStats } from '$lib/types'
@@ -26,7 +27,6 @@ import { Button } from '$lib/components/ui/button'
 import { DataTable, createDataTableColumnHelper } from '$lib/components/ui/data-table'
 import * as Select from '$lib/components/ui/select'
 import { Skeleton } from '$lib/components/ui/skeleton'
-import { Progress } from '$lib/components/ui/progress'
 import * as Empty from '$lib/components/ui/empty'
 
 let hours = $state('24')
@@ -100,10 +100,10 @@ const providerStatsColumns = providerStatsColumnHelper.columns([
       meta: { label: () => m.common_error_rate(), align: 'end', cellClass: 'font-technical tabular-nums' },
     },
   ),
-  providerStatsColumnHelper.accessor('avg_duration_ms', {
-    header: () => m.common_avg_latency(),
-    cell: (context) => formatDuration(context.getValue()),
-    meta: { label: () => m.common_avg_latency(), align: 'end', cellClass: 'font-technical tabular-nums' },
+  providerStatsColumnHelper.accessor('avg_output_tps', {
+    header: () => m.stats_output_speed(),
+    cell: (context) => formatTps(context.getValue()),
+    meta: { label: () => m.stats_output_speed(), align: 'end', cellClass: 'font-technical tabular-nums' },
   }),
 ])
 const apiKeyStatsColumnHelper = createDataTableColumnHelper<ApiKeyStats>()
@@ -158,7 +158,42 @@ const latencyChart = $derived(buildLatencyChart(seriesStats, formatBucket, HOUR_
 const errorChart = $derived(
   seriesStats.map((item) => ({ bucket: formatBucket(item.bucket_start), errors: item.error_count })),
 )
-const modelTotal = $derived(modelStats.slice(0, 6).reduce((total, item) => total + item.request_count, 0))
+interface PieSlice {
+  key: string
+  label: string
+  value: number
+  color: string
+}
+const modelTotal = $derived(modelStats.reduce((total, item) => total + item.request_count, 0))
+const MODEL_PIE_COLORS = ['var(--chart-1)', 'var(--chart-2)', 'var(--chart-3)', 'var(--chart-4)']
+const modelPie = $derived.by((): PieSlice[] => {
+  const slices = modelStats
+    .slice(0, 4)
+    .map((item, index) => ({
+      key: item.model,
+      label: item.model,
+      value: item.request_count,
+      color: MODEL_PIE_COLORS[index],
+    }))
+  const rest = modelStats.slice(4).reduce((total, item) => total + item.request_count, 0)
+  if (rest > 0) slices.push({ key: '__other__', label: m.stats_other(), value: rest, color: 'var(--muted)' })
+  return slices
+})
+const cacheHit = $derived.by((): { hit: number; miss: number; rate: number } | null => {
+  if (overview?.total_cache_read_tokens == null || overview.total_input_tokens == null) return null
+  const hit = overview.total_cache_read_tokens
+  const miss = overview.total_input_tokens
+  if (hit + miss <= 0) return null
+  return { hit, miss, rate: hit / (hit + miss) }
+})
+const cachePie = $derived.by((): PieSlice[] =>
+  cacheHit == null
+    ? []
+    : [
+        { key: 'hit', label: m.stats_cache_hit(), value: cacheHit.hit, color: 'var(--chart-1)' },
+        { key: 'miss', label: m.stats_cache_miss(), value: cacheHit.miss, color: 'var(--muted)' },
+      ],
+)
 const metrics = $derived([
   { label: m.common_total_requests(), value: formatCompactCount(overview?.total_requests ?? 0) },
   { label: m.stats_input_tokens(), value: formatCompactCount(overview?.total_input_tokens) },
@@ -198,8 +233,7 @@ const failedAnalyticsLabels = $derived.by(() => {
   const labels: string[] = []
   if (overviewQuery.error) labels.push(m.stats_summary())
   if (seriesQuery.error) labels.push(m.stats_time_series())
-  if (activityQuery.error && activityQuery.error !== seriesQuery.error)
-    labels.push(m.stats_token_activity())
+  if (activityQuery.error && activityQuery.error !== seriesQuery.error) labels.push(m.stats_token_activity())
   if (modelsQuery.error) labels.push(m.common_models())
   if (providersQuery.error) labels.push(m.common_model_services())
   if (apiKeysQuery.error) labels.push(m.app_shell_nav_api_keys())
@@ -326,80 +360,121 @@ function retryAll(): void {
         {:else if hasTraffic}<div class="min-w-0 flex-1 content-center overflow-x-auto py-2">
             <TokenActivityGrid model={activityGrid} />
           </div>{:else}<Empty.Root class="min-h-40 flex-1 border-y"
+            ><Empty.Header><Empty.Description>{m.stats_send_first_request()}</Empty.Description></Empty.Header
+            ></Empty.Root
+          >{/if}
+      </section>
+
+      <section class="route-section min-[1280px]:col-span-5" aria-labelledby="latency-trend-title">
+        <div class="route-section-header">
+          <div>
+            <h2 id="latency-trend-title" class="route-section-title">{m.common_latency()}</h2>
+            <p class="route-section-description">{m.stats_average_end_end_duration()}</p>
+          </div>
+          <div class="font-technical grid grid-cols-[auto_auto] gap-x-2 text-xs tabular-nums">
+            <span class="text-muted-foreground">{m.logs_first_token_short()}</span>
+            <span>{formatDurationSeconds(overview?.avg_first_token_ms)}</span>
+            <span class="text-muted-foreground">{m.logs_duration_short()}</span>
+            <span>{formatDurationSeconds(overview?.avg_duration_ms)}</span>
+          </div>
+        </div>
+        {#if seriesQuery.error && seriesQuery.data === undefined}
+          {@render queryFailure(seriesQuery.error, seriesQuery.refetch, seriesQuery.isFetching)}
+        {:else if hasTraffic && latencyChart.length > 0}<div
+            class="h-40 min-w-0"
+            aria-label={m.overview_latency_chart()}>
+            <LineChart
+              data={latencyChart}
+              x={(item) => item.bucket}
+              series={[
+                { key: 'firstToken', label: m.stats_first_token_seconds(), color: 'var(--chart-2)' },
+                { key: 'duration', label: m.stats_duration_seconds(), color: 'var(--chart-1)' },
+              ]}
+              props={{ xAxis: { ticks: 4 } }} />
+          </div>{:else}<Empty.Root class="h-40 border-y"
             ><Empty.Header
               ><Empty.Description
-                >{m.stats_send_first_request()}</Empty.Description
+                >{hasTraffic ? m.stats_no_latency_data() : m.stats_send_first_request()}</Empty.Description
+              ></Empty.Header
+            ></Empty.Root
+          >{/if}
+      </section>
+    </div>
+
+    <div class="grid gap-6 min-[1280px]:grid-cols-12">
+      <section class="route-section min-[1280px]:col-span-4" aria-labelledby="error-trend-title">
+        <div class="route-section-header">
+          <div>
+            <h2 id="error-trend-title" class="route-section-title">{m.common_errors_label()}</h2>
+            <p class="route-section-description">
+              {m.stats_failed_requests_time_bucket()}
+            </p>
+          </div>
+          <span class="font-technical text-xs text-destructive tabular-nums">{overview?.error_count ?? '–'}</span>
+        </div>
+        {#if seriesQuery.error && seriesQuery.data === undefined}
+          {@render queryFailure(seriesQuery.error, seriesQuery.refetch, seriesQuery.isFetching)}
+        {:else if hasTraffic && errorChart.length > 0}<div class="h-40 min-w-0">
+            <BarChart
+              data={errorChart}
+              x={(item) => item.bucket}
+              series={[{ key: 'errors', label: m.common_errors_label(), color: 'var(--chart-5)' }]}
+              props={{ xAxis: { ticks: 4 } }} />
+          </div>{:else}<Empty.Root class="h-40 border-y"
+            ><Empty.Header
+              ><Empty.Description
+                >{hasTraffic ? m.stats_no_error_data() : m.stats_send_first_request()}</Empty.Description
               ></Empty.Header
             ></Empty.Root
           >{/if}
       </section>
 
-      <div class="grid gap-6 min-[1280px]:col-span-5">
-        <section class="route-section" aria-labelledby="latency-trend-title">
-          <div class="route-section-header">
-            <div>
-              <h2 id="latency-trend-title" class="route-section-title">{m.common_latency()}</h2>
-              <p class="route-section-description">{m.stats_average_end_end_duration()}</p>
-            </div>
-            <div class="font-technical grid grid-cols-[auto_auto] gap-x-2 text-xs tabular-nums">
-              <span class="text-muted-foreground">{m.logs_first_token_short()}</span>
-              <span>{formatDurationSeconds(overview?.avg_first_token_ms)}</span>
-              <span class="text-muted-foreground">{m.logs_duration_short()}</span>
-              <span>{formatDurationSeconds(overview?.avg_duration_ms)}</span>
-            </div>
+      <section class="route-section min-[1280px]:col-span-4" aria-labelledby="cache-hit-rate-title">
+        <div class="route-section-header">
+          <div>
+            <h2 id="cache-hit-rate-title" class="route-section-title">{m.stats_cache_hit_rate()}</h2>
+            <p class="route-section-description">{m.stats_cache_hit_share_input_tokens()}</p>
           </div>
-          {#if seriesQuery.error && seriesQuery.data === undefined}
-            {@render queryFailure(seriesQuery.error, seriesQuery.refetch, seriesQuery.isFetching)}
-          {:else if hasTraffic && latencyChart.length > 0}<div
-              class="h-36 min-w-0"
-              aria-label={m.overview_latency_chart()}>
-              <LineChart
-                data={latencyChart}
-                x={(item) => item.bucket}
-                series={[
-                  { key: 'firstToken', label: m.stats_first_token_seconds(), color: 'var(--chart-2)' },
-                  { key: 'duration', label: m.stats_duration_seconds(), color: 'var(--chart-1)' },
-                ]}
-                props={{ xAxis: { ticks: 4 } }} />
-            </div>{:else}<Empty.Root class="h-36 border-y"
-              ><Empty.Header
-                ><Empty.Description
-                  >{hasTraffic ? m.stats_no_latency_data() : m.stats_send_first_request()}</Empty.Description
-                ></Empty.Header
-              ></Empty.Root
-            >{/if}
-        </section>
-        <section class="route-section" aria-labelledby="error-trend-title">
-          <div class="route-section-header">
-            <div>
-              <h2 id="error-trend-title" class="route-section-title">{m.common_errors_label()}</h2>
-              <p class="route-section-description">
-                {m.stats_failed_requests_time_bucket()}
-              </p>
+        </div>
+        {#if overviewQuery.error && overview === undefined}
+          {@render queryFailure(overviewQuery.error, overviewQuery.refetch, overviewQuery.isFetching)}
+        {:else if cacheHit}<div class="flex flex-col items-center gap-4">
+            <div class="relative size-40 min-w-0" aria-label={m.stats_cache_hit_rate()}>
+              <PieChart
+                data={cachePie}
+                key="key"
+                label="label"
+                value="value"
+                c="key"
+                cDomain={cachePie.map((slice) => slice.key)}
+                cRange={cachePie.map((slice) => slice.color)}
+                innerRadius={0.68}
+                cornerRadius={2}
+                padAngle={0.01} />
+              <div class="pointer-events-none absolute inset-0 grid place-items-center">
+                <span class="font-technical text-2xl font-medium tabular-nums">{formatPercent(cacheHit.rate)}</span>
+              </div>
             </div>
-            <span class="font-technical text-xs text-destructive tabular-nums">{overview?.error_count ?? '–'}</span>
-          </div>
-          {#if seriesQuery.error && seriesQuery.data === undefined}
-            {@render queryFailure(seriesQuery.error, seriesQuery.refetch, seriesQuery.isFetching)}
-          {:else if hasTraffic && errorChart.length > 0}<div class="h-36 min-w-0">
-              <BarChart
-                data={errorChart}
-                x={(item) => item.bucket}
-                series={[{ key: 'errors', label: m.common_errors_label(), color: 'var(--chart-5)' }]}
-                props={{ xAxis: { ticks: 4 } }} />
-            </div>{:else}<Empty.Root class="h-36 border-y"
-              ><Empty.Header
-                ><Empty.Description
-                  >{hasTraffic ? m.stats_no_error_data() : m.stats_send_first_request()}</Empty.Description
-                ></Empty.Header
-              ></Empty.Root
-            >{/if}
-        </section>
-      </div>
-    </div>
+            <ul class="w-full space-y-2 text-sm">
+              {#each cachePie as slice (slice.key)}
+                <li class="flex items-center gap-2">
+                  <span class="size-2.5 shrink-0 rounded-[2px]" style:background={slice.color}></span>
+                  <span class="truncate">{slice.label}</span>
+                  <span class="font-technical ml-auto text-muted-foreground tabular-nums"
+                    >{formatCompactCount(slice.value)}</span>
+                </li>
+              {/each}
+            </ul>
+          </div>{:else}<Empty.Root class="border-y py-6"
+            ><Empty.Header
+              ><Empty.Description
+                >{hasTraffic ? m.stats_cache_usage_unavailable() : m.stats_send_first_request()}</Empty.Description
+              ></Empty.Header
+            ></Empty.Root
+          >{/if}
+      </section>
 
-    <div class="grid gap-6 min-[1280px]:grid-cols-12">
-      <section class="route-section min-[1280px]:col-span-5" aria-labelledby="analytics-model-title">
+      <section class="route-section min-[1280px]:col-span-4" aria-labelledby="analytics-model-title">
         <div class="route-section-header">
           <div>
             <h2 id="analytics-model-title" class="route-section-title">{m.common_models()}</h2>
@@ -408,32 +483,46 @@ function retryAll(): void {
         </div>
         {#if modelsQuery.error && modelsQuery.data === undefined}
           {@render queryFailure(modelsQuery.error, modelsQuery.refetch, modelsQuery.isFetching)}
-        {:else if modelStats.length > 0}<div class="flex flex-col gap-4">
-            {#each modelStats.slice(0, 6) as model (model.model)}<div>
-                <div class="mb-1 flex justify-between gap-3 text-sm">
-                  <span class="font-technical truncate">{model.model}</span><span
-                    class="font-technical text-muted-foreground tabular-nums"
-                    >{formatPercent(modelTotal > 0 ? model.request_count / modelTotal : 0)}</span>
-                </div>
-                <Progress
-                  value={modelTotal > 0 ? (model.request_count / modelTotal) * 100 : 0}
-                  aria-label={model.model}
-                  class="h-1.5" />
-              </div>{/each}
+        {:else if modelPie.length > 0}<div class="flex flex-col items-center gap-4">
+            <div class="size-40 min-w-0" aria-label={m.stats_share_all_requests()}>
+              <PieChart
+                data={modelPie}
+                key="key"
+                label="label"
+                value="value"
+                c="key"
+                cDomain={modelPie.map((slice) => slice.key)}
+                cRange={modelPie.map((slice) => slice.color)}
+                innerRadius={0.68}
+                cornerRadius={2}
+                padAngle={0.01} />
+            </div>
+            <ul class="w-full space-y-2 text-sm">
+              {#each modelPie as slice (slice.key)}
+                <li class="flex items-center gap-2">
+                  <span class="size-2.5 shrink-0 rounded-[2px]" style:background={slice.color}></span>
+                  <span class="font-technical truncate">{slice.label}</span>
+                  <span class="font-technical ml-auto text-muted-foreground tabular-nums"
+                    >{formatPercent(modelTotal > 0 ? slice.value / modelTotal : 0)}</span>
+                </li>
+              {/each}
+            </ul>
           </div>{:else}<Empty.Root class="border-y py-6"
             ><Empty.Header><Empty.Description>{m.stats_no_model_traffic()}</Empty.Description></Empty.Header
             ></Empty.Root
           >{/if}
       </section>
+    </div>
 
-      <section class="route-section min-[1280px]:col-span-7" aria-labelledby="analytics-provider-title">
+    <div class="grid gap-6 min-[1280px]:grid-cols-12">
+      <section class="route-section min-[1280px]:col-span-12" aria-labelledby="analytics-provider-title">
         <div class="route-section-header">
           <div>
             <h2 id="analytics-provider-title" class="route-section-title">
               {m.common_model_services()}
             </h2>
             <p class="route-section-description">
-              {m.stats_requests_errors_average_response_time_each_service()}
+              {m.stats_requests_errors_output_speed_each_service()}
             </p>
           </div>
         </div>
@@ -458,7 +547,7 @@ function retryAll(): void {
                   <div class="min-w-0">
                     <p class="truncate font-medium">{provider.provider}</p>
                     <p class="font-technical mt-1 text-xs text-muted-foreground">
-                      {formatDuration(provider.avg_duration_ms)} ·
+                      {formatTps(provider.avg_output_tps)} ·
                       <span class="text-destructive">{provider.error_count} {m.common_errors()}</span>
                     </p>
                   </div>

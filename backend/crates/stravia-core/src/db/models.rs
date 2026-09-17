@@ -701,6 +701,9 @@ pub struct ProviderStats {
     pub request_count: i64,
     pub error_count: i64,
     pub avg_duration_ms: Option<f64>,
+    /// 已完成 attempt 的输出 Token 总速（tok/s）：Σoutput / Σ净生成耗时。
+    /// 组内任一已完成 attempt 未报告输出或耗时，或总生成耗时为零时为 null。
+    pub avg_output_tps: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]

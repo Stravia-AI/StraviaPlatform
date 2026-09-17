@@ -139,6 +139,16 @@ export function buildActivityGrid(
     rawCells.push({ start, tokens, col, row })
   }
 
+  // 窗口边缘列未覆盖的位置也补 0 值方格，保证矩阵是完整矩形；
+  // 列内 bucket 连续，起点 = 列起点 + 行号 × 粒度。
+  const occupied = new Set(rawCells.map((cell) => cell.col * rowCount + cell.row))
+  for (let col = 0; col < colStarts.length; col++) {
+    for (let row = 0; row < rowCount; row++) {
+      if (occupied.has(col * rowCount + row)) continue
+      rawCells.push({ start: colStarts[col] + row * bucketMs, tokens: 0, col, row })
+    }
+  }
+
   const cells = rawCells.map((cell): ActivityCell => ({
     ...cell,
     level:
