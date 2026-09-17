@@ -13,10 +13,25 @@ pub(crate) use samples::AllowanceSampleStore;
 #[cfg(test)]
 use service::{
     AllowanceHttpRequest, AllowanceHttpResponse, AllowanceTransport, TransportFailure,
-    fetch_monitor, list_provider_allowances_with_transport, monitor_requests,
-    refresh_provider_allowance_with_transport,
+    fetch_monitor, get_provider_allowance_with_transport,
+    list_provider_allowance_targets_with_transport, list_provider_allowances_with_transport,
+    monitor_requests, refresh_provider_allowance_with_transport,
 };
 pub(crate) use service::{ProviderAllowanceState, SAMPLE_INTERVAL};
+
+/// One eligible provider's entry in the non-blocking allowance list: identity
+/// is always present, `snapshot` carries the cached state when one exists, and
+/// `refreshing` marks that an upstream fetch is in flight for this provider.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProviderAllowanceTarget {
+    pub provider_id: String,
+    pub provider_name: String,
+    pub catalog_provider_id: String,
+    pub channel: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<ProviderAllowanceSnapshot>,
+    pub refreshing: bool,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProviderAllowanceSnapshot {

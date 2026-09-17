@@ -25,7 +25,7 @@ mod connect_clients;
 mod provider_allowances;
 use connect_clients::preview_connect_client_handler;
 use provider_allowances::{
-    list_provider_allowances, refresh_provider_allowance, refresh_provider_allowances,
+    get_provider_allowance, list_provider_allowances, refresh_provider_allowance,
 };
 
 #[cfg(test)]
@@ -259,8 +259,8 @@ fn create_router_inner(gateway: Gateway, auth: Option<AdminHttpState>) -> Router
         .route("/stats/api-keys", get(stats_by_api_key))
         .route("/provider-allowances", get(list_provider_allowances))
         .route(
-            "/provider-allowances/refresh",
-            post(refresh_provider_allowances),
+            "/provider-allowances/{provider_id}",
+            get(get_provider_allowance),
         )
         .route(
             "/provider-allowances/{provider_id}/refresh",

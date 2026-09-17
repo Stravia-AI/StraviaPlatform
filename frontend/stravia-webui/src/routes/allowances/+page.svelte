@@ -1,7 +1,7 @@
 <script lang="ts">
 import * as m from '$lib/paraglide/messages.js'
 import RequestFailure from '$lib/components/request-failure.svelte'
-import { createQuery, useQueryClient } from '@tanstack/svelte-query'
+import { createQueries, createQuery, useQueryClient } from '@tanstack/svelte-query'
 import { renderSnippet } from '@tanstack/svelte-table'
 import ChevronDownIcon from '@lucide/svelte/icons/chevron-down'
 import Clock3Icon from '@lucide/svelte/icons/clock-3'
@@ -41,6 +41,7 @@ import type {
   ProviderAllowanceErrorCategory,
   ProviderAllowanceSnapshot,
   ProviderAllowanceStatus,
+  ProviderAllowanceTarget,
 } from '$lib/types'
 import PageHeader from '$lib/components/page-header.svelte'
 import { Badge, type BadgeVariant } from '$lib/components/ui/badge'
@@ -57,8 +58,13 @@ import * as Select from '$lib/components/ui/select'
 import { Skeleton } from '$lib/components/ui/skeleton'
 
 interface VisibleProvider {
-  snapshot: ProviderAllowanceSnapshot
+  target: ProviderAllowanceTarget
+  snapshot?: ProviderAllowanceSnapshot
   allowances: Allowance[]
+  pending: boolean
+  failed: boolean
+  refreshing: boolean
+  refetch?: () => void
 }
 
 interface VisibleAllowance {
@@ -67,15 +73,23 @@ interface VisibleAllowance {
 }
 
 interface AllowanceMatrixRow {
-  snapshot: ProviderAllowanceSnapshot
+  provider: VisibleProvider
   allowance?: Allowance
 }
 
 const queryClient = useQueryClient()
-const allowanceQuery = createQuery(() => ({
+const targetsQuery = createQuery(() => ({
   queryKey: ['provider-allowances'],
   queryFn: admin.allowances.list,
   refetchInterval: 180_000,
+}))
+const snapshotQueries = createQueries(() => ({
+  queries: (targetsQuery.data ?? []).map((target) => ({
+    queryKey: ['provider-allowance', target.provider_id],
+    queryFn: () => admin.allowances.get(target.provider_id),
+    initialData: target.snapshot,
+    refetchInterval: 180_000,
+  })),
 }))
 
 let refreshingAll = $state(false)
@@ -85,17 +99,33 @@ let conditionFilter = $state<'all' | AllowanceCondition>('all')
 let freshnessFilter = $state<'all' | ProviderAllowanceStatus>('all')
 const refreshingProviderIds = new SvelteSet<string>()
 const collator = $derived(new Intl.Collator(localeState.current, { sensitivity: 'base', numeric: true }))
-const snapshots = $derived.by(() =>
-  [...(allowanceQuery.data ?? [])].sort(
-    (left, right) =>
-      collator.compare(left.provider_name, right.provider_name) || left.provider_id.localeCompare(right.provider_id),
-  ),
+const targets = $derived(targetsQuery.data ?? [])
+const entries = $derived.by(() =>
+  targets
+    .map((target, index) => {
+      const result = snapshotQueries[index]
+      const snapshot = result?.data ?? target.snapshot
+      const failed = snapshot == null && Boolean(result?.isError)
+      return {
+        target,
+        snapshot,
+        pending: snapshot == null && !failed,
+        failed,
+        refreshing: Boolean(result?.isFetching),
+        refetch: result ? () => void result.refetch() : undefined,
+      }
+    })
+    .sort(
+      (left, right) =>
+        collator.compare(left.target.provider_name, right.target.provider_name) ||
+        left.target.provider_id.localeCompare(right.target.provider_id),
+    ),
 )
 const catalogOptions = $derived.by(() => {
   const options = new SvelteMap<string, string>()
-  for (const snapshot of snapshots) {
-    const value = catalogValue(snapshot)
-    options.set(value, `${snapshot.catalog_provider_id} / ${snapshot.channel}`)
+  for (const entry of entries) {
+    const value = catalogValue(entry.target)
+    options.set(value, `${entry.target.catalog_provider_id} / ${entry.target.channel}`)
   }
   return [...options]
     .map(([value, label]) => ({ value, label }))
@@ -114,30 +144,37 @@ const freshnessFilterLabel = $derived(
 )
 const visibleProviders = $derived.by((): VisibleProvider[] => {
   const query = searchQuery.trim().toLocaleLowerCase(localeState.current)
-  return snapshots.flatMap((snapshot) => {
-    if (query && !snapshot.provider_name.toLocaleLowerCase(localeState.current).includes(query)) return []
-    if (catalogFilter !== 'all' && catalogValue(snapshot) !== catalogFilter) return []
-    if (freshnessFilter !== 'all' && snapshot.status !== freshnessFilter) return []
+  return entries.flatMap((entry) => {
+    if (query && !entry.target.provider_name.toLocaleLowerCase(localeState.current).includes(query)) return []
+    if (catalogFilter !== 'all' && catalogValue(entry.target) !== catalogFilter) return []
+    // Pending providers have no status yet; keep them visible under any filter
+    // since their freshness/condition cannot be evaluated yet.
+    if (freshnessFilter !== 'all' && entry.snapshot != null && entry.snapshot.status !== freshnessFilter) return []
     const allowances =
-      conditionFilter === 'all'
-        ? snapshot.allowances
-        : snapshot.allowances.filter((allowance) => effectiveAllowanceCondition(allowance) === conditionFilter)
-    if (conditionFilter !== 'all' && allowances.length === 0) return []
-    return [{ snapshot, allowances }]
+      entry.snapshot == null
+        ? []
+        : conditionFilter === 'all'
+          ? entry.snapshot.allowances
+          : entry.snapshot.allowances.filter((allowance) => effectiveAllowanceCondition(allowance) === conditionFilter)
+    if (conditionFilter !== 'all' && entry.snapshot != null && allowances.length === 0) return []
+    return [{ ...entry, allowances }]
   })
 })
+const allResolved = $derived(visibleProviders.every((entry) => entry.snapshot != null || entry.failed))
 const visibleAllowances = $derived(
-  visibleProviders.flatMap(({ snapshot, allowances }) => allowances.map((allowance) => ({ snapshot, allowance }))),
+  visibleProviders.flatMap(({ snapshot, allowances }) =>
+    snapshot == null ? [] : allowances.map((allowance) => ({ snapshot, allowance })),
+  ),
 )
 const allowanceMatrixRows = $derived(
-  visibleProviders.flatMap(({ snapshot, allowances }) =>
-    allowances.length > 0 ? allowances.map((allowance) => ({ snapshot, allowance })) : [{ snapshot }],
+  visibleProviders.flatMap((provider) =>
+    provider.allowances.length > 0 ? provider.allowances.map((allowance) => ({ provider, allowance })) : [{ provider }],
   ),
 )
 const tableLabels = $derived(getDataTableLabels())
 const allowanceColumnHelper = createDataTableColumnHelper<AllowanceMatrixRow>()
 const allowanceColumns = allowanceColumnHelper.columns([
-  allowanceColumnHelper.accessor(({ snapshot }) => snapshot.provider_id, {
+  allowanceColumnHelper.accessor(({ provider }) => provider.target.provider_id, {
     id: 'provider',
     header: '',
     enableSorting: false,
@@ -147,7 +184,7 @@ const allowanceColumns = allowanceColumnHelper.columns([
     header: () => m.allowances_item(),
     cell: (context) => renderSnippet(allowanceItemCell, context),
     enableSorting: false,
-    meta: { label: () => m.allowances_item(), headerClass: 'w-[14rem]' },
+    meta: { label: () => m.allowances_item(), headerClass: 'w-[14rem]', cellClass: 'ps-7' },
   }),
   allowanceColumnHelper.display({
     id: 'used',
@@ -201,7 +238,8 @@ const emptyWindows = $derived.by(() =>
     .filter(({ allowance }) => effectiveAllowanceCondition(allowance) === 'exhausted')
     .sort(
       (left, right) =>
-        (left.allowance.reset_at ?? Number.POSITIVE_INFINITY) - (right.allowance.reset_at ?? Number.POSITIVE_INFINITY) ||
+        (left.allowance.reset_at ?? Number.POSITIVE_INFINITY) -
+          (right.allowance.reset_at ?? Number.POSITIVE_INFINITY) ||
         collator.compare(left.snapshot.provider_name, right.snapshot.provider_name) ||
         collator.compare(allowanceLabel(left.allowance), allowanceLabel(right.allowance)),
     ),
@@ -213,40 +251,55 @@ const forecastSummary = $derived.by(() => {
   return { ...counts, exhaustedItems, willExhaustItems }
 })
 const latestFetchedAt = $derived.by(() => {
-  const timestamps = snapshots
-    .map((snapshot) => snapshot.fetched_at)
+  const timestamps = entries
+    .map((entry) => entry.snapshot?.fetched_at)
     .filter((value): value is string => Boolean(value))
     .sort()
   return timestamps.at(-1)
 })
 
-function catalogValue(snapshot: ProviderAllowanceSnapshot): string {
-  return `${snapshot.catalog_provider_id}::${snapshot.channel}`
+function catalogValue(target: Pick<ProviderAllowanceTarget, 'catalog_provider_id' | 'channel'>): string {
+  return `${target.catalog_provider_id}::${target.channel}`
 }
 
 async function refreshAll(): Promise<void> {
+  const pending = targets.filter((target) => !refreshingProviderIds.has(target.provider_id))
+  if (pending.length === 0) return
   refreshingAll = true
   try {
-    await admin.allowances.refreshAll()
-    await queryClient.invalidateQueries({ queryKey: ['provider-allowances'] })
-    toast.success(m.allowances_refreshed_all())
-  } catch (error) {
-    toast.error(localizeBackendErrorMessage(error))
+    const results = await Promise.allSettled(
+      pending.map(async (target) => {
+        refreshingProviderIds.add(target.provider_id)
+        try {
+          const snapshot = await admin.allowances.refresh(target.provider_id)
+          queryClient.setQueryData(['provider-allowance', target.provider_id], snapshot)
+        } finally {
+          refreshingProviderIds.delete(target.provider_id)
+        }
+      }),
+    )
+    const failure = results.find((result) => result.status === 'rejected')
+    if (failure) {
+      toast.error(localizeBackendErrorMessage((failure as PromiseRejectedResult).reason))
+    } else {
+      toast.success(m.allowances_refreshed_all())
+    }
   } finally {
     refreshingAll = false
   }
 }
 
-async function refreshProvider(snapshot: ProviderAllowanceSnapshot): Promise<void> {
-  refreshingProviderIds.add(snapshot.provider_id)
+async function refreshProvider(provider: VisibleProvider): Promise<void> {
+  const providerId = provider.target.provider_id
+  refreshingProviderIds.add(providerId)
   try {
-    await admin.allowances.refresh(snapshot.provider_id)
-    await queryClient.invalidateQueries({ queryKey: ['provider-allowances'] })
-    toast.success(m.allowances_refreshed_provider({ provider: snapshot.provider_name }))
+    const snapshot = await admin.allowances.refresh(providerId)
+    queryClient.setQueryData(['provider-allowance', providerId], snapshot)
+    toast.success(m.allowances_refreshed_provider({ provider: provider.target.provider_name }))
   } catch (error) {
     toast.error(localizeBackendErrorMessage(error))
   } finally {
-    refreshingProviderIds.delete(snapshot.provider_id)
+    refreshingProviderIds.delete(providerId)
   }
 }
 
@@ -392,7 +445,9 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
 }
 
 function allowanceRowId(item: AllowanceMatrixRow): string {
-  return item.allowance ? `${item.snapshot.provider_id}:${item.allowance.key}` : `${item.snapshot.provider_id}:empty`
+  return item.allowance
+    ? `${item.provider.target.provider_id}:${item.allowance.key}`
+    : `${item.provider.target.provider_id}:pending`
 }
 
 function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
@@ -403,23 +458,26 @@ function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
 
 <svelte:head><title>{m.allowances_title()} · Stravia</title></svelte:head>
 
-{#snippet allowanceProviderSummary(snapshot: ProviderAllowanceSnapshot, allowances: Allowance[])}
-  {@const presentation = statusPresentation(snapshot.status)}
+{#snippet allowanceProviderSummary(provider: VisibleProvider, allowances: Allowance[])}
+  {@const snapshot = provider.snapshot}
+  {@const presentation = snapshot ? statusPresentation(snapshot.status) : undefined}
   {@const providerCondition = worstAllowanceCondition(allowances.map(effectiveAllowanceCondition))}
   {@const emptyHint = providerEmptyHint(allowances)}
-  {@const refreshingProvider = refreshingProviderIds.has(snapshot.provider_id)}
+  {@const refreshingProvider = refreshingProviderIds.has(provider.target.provider_id) || provider.refreshing}
   <div class="min-w-0">
     <div class="flex flex-wrap items-center gap-2">
-      <h3 class="font-semibold">{snapshot.provider_name}</h3>
-      <Badge variant={presentation.variant}>{presentation.label}</Badge>
+      <h3 class="font-semibold">{provider.target.provider_name}</h3>
+      {#if presentation}<Badge variant={presentation.variant}>{presentation.label}</Badge>{/if}
       {#if providerCondition}<Badge variant={conditionVariant(providerCondition)}
           >{conditionLabel(providerCondition)}</Badge
         >{/if}
-      {#if snapshot.plan_label}<span class="text-xs text-muted-foreground">{snapshot.plan_label}</span>{/if}
+      {#if snapshot?.plan_label}<span class="text-xs text-muted-foreground">{snapshot.plan_label}</span>{/if}
       {#if emptyHint}<span class="text-xs text-muted-foreground">{emptyHint}</span>{/if}
     </div>
-    <p class="font-technical mt-1 text-xs text-muted-foreground">{snapshot.catalog_provider_id} / {snapshot.channel}</p>
-    {#if snapshot.error}
+    <p class="font-technical mt-1 text-xs text-muted-foreground">
+      {provider.target.catalog_provider_id} / {provider.target.channel}
+    </p>
+    {#if snapshot?.error}
       <Alert.Root class="mt-1.5" variant={snapshot.status === 'stale' ? 'warning' : 'destructive'} role="status"
         ><Alert.Description
           >{snapshot.status === 'stale' ? `${m.allowances_stale_message()} ` : ''}{allowanceErrorMessage(
@@ -427,11 +485,11 @@ function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
           )}</Alert.Description
         ></Alert.Root>
     {/if}
-    {#if snapshot.models.length > 0}
+    {#if snapshot && snapshot.models.length > 0}
       <Collapsible.Root class="mt-1.5">
         <Collapsible.Trigger
           class="inline-flex min-h-10 items-center gap-1"
-          aria-label={m.allowances_show_model_allowances({ provider: snapshot.provider_name })}>
+          aria-label={m.allowances_show_model_allowances({ provider: provider.target.provider_name })}>
           {m.allowances_model_allowances()}<ChevronDownIcon class="size-3.5" />
         </Collapsible.Trigger>
         <Collapsible.Content class="mt-3 max-w-2xl">{@render modelRows(snapshot.models)}</Collapsible.Content>
@@ -442,25 +500,49 @@ function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
     size="icon"
     class="size-10"
     variant="ghost"
-    onclick={() => refreshProvider(snapshot)}
+    onclick={() => refreshProvider(provider)}
     disabled={refreshingProvider || refreshingAll}
-    aria-label={m.allowances_refresh_provider({ provider: snapshot.provider_name })}>
+    aria-label={m.allowances_refresh_provider({ provider: provider.target.provider_name })}>
     {#if refreshingProvider}<Spinner
         data-icon="inline-start"
         aria-label={m.allowances_loading()} />{:else}<RefreshCwIcon />{/if}
   </Button>
 {/snippet}
 
+{#snippet providerPendingBlock(testId: string)}
+  <div class="flex items-center justify-center border-t px-3 py-6" data-testid={testId}>
+    <Spinner aria-label={m.allowances_loading()} />
+  </div>
+{/snippet}
+
+{#snippet providerFailedBlock(provider: VisibleProvider, testId: string)}
+  <div class="border-t px-3 py-3" data-testid={testId}>
+    <Alert.Root variant="destructive" role="status"
+      ><Alert.Description class="flex flex-wrap items-center justify-between gap-3"
+        >{m.allowances_load_failed()}{#if provider.refetch}<Button
+            variant="outline"
+            size="sm"
+            onclick={provider.refetch}>{m.common_retry()}</Button
+          >{/if}</Alert.Description
+      ></Alert.Root>
+  </div>
+{/snippet}
+
 {#snippet allowanceGroupRow(row: DataTableRow<AllowanceMatrixRow>)}
   {@const leaves = row.getLeafRows()}
-  {@const snapshot = leaves[0]?.original.snapshot}
-  {#if snapshot}
+  {@const provider = leaves[0]?.original.provider}
+  {#if provider}
     {@const allowances = leaves.flatMap(({ original }) => (original.allowance ? [original.allowance] : []))}
     <div
       class="flex min-h-14 items-center justify-between gap-3 px-3 py-2"
-      data-testid={`allowance-provider-${snapshot.provider_id}`}>
-      {@render allowanceProviderSummary(snapshot, allowances)}
+      data-testid={`allowance-provider-${provider.target.provider_id}`}>
+      {@render allowanceProviderSummary(provider, allowances)}
     </div>
+    {#if provider.pending}
+      {@render providerPendingBlock(`allowance-loading-${provider.target.provider_id}`)}
+    {:else if provider.failed}
+      {@render providerFailedBlock(provider, `allowance-failed-${provider.target.provider_id}`)}
+    {/if}
   {/if}
 {/snippet}
 
@@ -514,7 +596,7 @@ function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
 {#snippet mobileAllowanceRow(allowance: Allowance)}
   {@const condition = effectiveAllowanceCondition(allowance)}
   {@const percent = allowance.used_percent == null ? undefined : Math.min(100, Math.max(0, allowance.used_percent))}
-  <div class="border-t px-3 py-2.5">
+  <div class="border-t ps-6 pe-3 py-2.5">
     <div class="flex min-w-0 items-start justify-between gap-3">
       <div class="flex min-w-0 items-center gap-2">
         <span class="size-1.5 shrink-0 rounded-full bg-muted-foreground/50"></span>
@@ -581,7 +663,7 @@ function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
             ? m.allowances_last_updated({ time: formatLogTime(latestFetchedAt, localeState.current) })
             : m.allowances_never_updated()}
         </span>
-        <Button onclick={refreshAll} disabled={refreshingAll || allowanceQuery.isPending}>
+        <Button onclick={refreshAll} disabled={refreshingAll || targetsQuery.isPending}>
           {#if refreshingAll}<Spinner
               data-icon="inline-start"
               aria-label={m.allowances_loading()} />{:else}<RefreshCwIcon />{/if}
@@ -591,18 +673,18 @@ function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
     {/snippet}
   </PageHeader>
 
-  {#if allowanceQuery.isPending}
+  {#if targetsQuery.isPending}
     <div class="grid gap-5 xl:grid-cols-[minmax(0,2fr)_minmax(17rem,1fr)]" aria-label={m.allowances_loading()}>
       <Skeleton class="h-96 w-full" />
       <div class="grid gap-5"><Skeleton class="h-48 w-full" /><Skeleton class="h-56 w-full" /></div>
     </div>
-  {:else if allowanceQuery.error && allowanceQuery.data === undefined}
+  {:else if targetsQuery.error && targetsQuery.data === undefined}
     <RequestFailure
       title={m.allowances_load_failed()}
-      message={localizeBackendErrorMessage(allowanceQuery.error)}
-      retry={() => allowanceQuery.refetch()}
-      retrying={allowanceQuery.isFetching} />
-  {:else if snapshots.length === 0}
+      message={localizeBackendErrorMessage(targetsQuery.error)}
+      retry={() => targetsQuery.refetch()}
+      retrying={targetsQuery.isFetching} />
+  {:else if targets.length === 0}
     <Empty.Root
       ><Empty.Header
         ><Empty.Media variant="icon"><GaugeIcon /></Empty.Media><Empty.Title role="heading" aria-level={2}
@@ -612,11 +694,11 @@ function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
         ><Button variant="outline" href="/providers">{m.allowances_manage_providers()}</Button></Empty.Content
       ></Empty.Root>
   {:else}
-    {#if allowanceQuery.error}<RequestFailure
+    {#if targetsQuery.error}<RequestFailure
         title={m.allowances_stale_message()}
-        message={localizeBackendErrorMessage(allowanceQuery.error)}
-        retry={() => allowanceQuery.refetch()}
-        retrying={allowanceQuery.isFetching} />{/if}
+        message={localizeBackendErrorMessage(targetsQuery.error)}
+        retry={() => targetsQuery.refetch()}
+        retrying={targetsQuery.isFetching} />{/if}
     <section
       class="route-section grid gap-2 p-2 sm:grid-cols-2 xl:grid-cols-[minmax(14rem,1fr)_repeat(3,minmax(10rem,auto))]">
       <InputGroup.Root class="min-w-0">
@@ -665,40 +747,49 @@ function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
     </section>
 
     <section
-      class={['relative overflow-hidden rounded-xl border px-4 py-3', conditionTone(overallCondition)]}
+      class={[
+        'relative overflow-hidden rounded-xl border px-4 py-3',
+        conditionTone(allResolved ? overallCondition : undefined),
+      ]}
       aria-label={m.allowances_condition_title()}>
       <div class="absolute inset-y-0 left-0 w-1 bg-current opacity-60"></div>
-      <div class="grid items-center gap-3 sm:grid-cols-[minmax(9rem,1fr)_repeat(2,minmax(0,1fr))]">
-        <div>
-          <p class="text-xs font-medium uppercase tracking-[0.12em] text-muted-foreground">
-            {m.allowances_condition_title()}
-          </p>
-          <p class="mt-0.5 text-base font-semibold">{conditionLabel(overallCondition)}</p>
+      {#if !allResolved}
+        <div class="flex items-center justify-center py-6">
+          <Spinner aria-label={m.allowances_loading()} />
         </div>
-        <p class="font-technical text-sm tabular-nums">
-          {lowestRemaining == null
-            ? m.allowances_lowest_remaining({ value: '–' })
-            : m.allowances_lowest_remaining({ value: formatAllowancePercent(lowestRemaining, localeState.current) })}
-        </p>
-        <p class="font-technical text-sm tabular-nums">
-          {nextResetAt == null
-            ? m.allowances_no_upcoming_reset()
-            : m.allowances_next_reset({ time: formatLogTime(nextResetAt, localeState.current) })}
-        </p>
-      </div>
-      {#if emptyWindows.length > 0}
-        <ul class="mt-3 grid gap-1 border-t pt-3 text-sm" data-testid="allowance-empty-windows">
-          {#each emptyWindows as item (`${item.snapshot.provider_id}:${item.allowance.key}`)}
-            <li>
-              {item.snapshot.provider_name} · {allowanceLabel(item.allowance)}
-              {#if item.allowance.reset_at != null}
-                <span class="font-technical text-muted-foreground">
-                  · {m.allowances_reset_at({ time: formatLogTime(item.allowance.reset_at, localeState.current) })}
-                </span>
-              {/if}
-            </li>
-          {/each}
-        </ul>
+      {:else}
+        <div class="grid items-center gap-3 sm:grid-cols-[minmax(9rem,1fr)_repeat(2,minmax(0,1fr))]">
+          <div>
+            <p class="text-xs font-medium uppercase tracking-[0.12em] text-muted-foreground">
+              {m.allowances_condition_title()}
+            </p>
+            <p class="mt-0.5 text-base font-semibold">{conditionLabel(overallCondition)}</p>
+          </div>
+          <p class="font-technical text-sm tabular-nums">
+            {lowestRemaining == null
+              ? m.allowances_lowest_remaining({ value: '–' })
+              : m.allowances_lowest_remaining({ value: formatAllowancePercent(lowestRemaining, localeState.current) })}
+          </p>
+          <p class="font-technical text-sm tabular-nums">
+            {nextResetAt == null
+              ? m.allowances_no_upcoming_reset()
+              : m.allowances_next_reset({ time: formatLogTime(nextResetAt, localeState.current) })}
+          </p>
+        </div>
+        {#if emptyWindows.length > 0}
+          <ul class="mt-3 grid gap-1 border-t pt-3 text-sm" data-testid="allowance-empty-windows">
+            {#each emptyWindows as item (`${item.snapshot.provider_id}:${item.allowance.key}`)}
+              <li>
+                {item.snapshot.provider_name} · {allowanceLabel(item.allowance)}
+                {#if item.allowance.reset_at != null}
+                  <span class="font-technical text-muted-foreground">
+                    · {m.allowances_reset_at({ time: formatLogTime(item.allowance.reset_at, localeState.current) })}
+                  </span>
+                {/if}
+              </li>
+            {/each}
+          </ul>
+        {/if}
       {/if}
     </section>
 
@@ -729,16 +820,22 @@ function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
                 tableClass="min-w-[46rem] [&_[data-slot=table-header]]:bg-muted/20" />
             </div>
             <div class="route-mobile-list">
-              {#each visibleProviders as provider (provider.snapshot.provider_id)}
+              {#each visibleProviders as provider (provider.target.provider_id)}
                 <section class="border-b last:border-b-0">
                   <div
                     class="flex min-h-14 items-center justify-between gap-3 bg-muted/35 px-3 py-2.5"
-                    data-testid={`allowance-mobile-provider-${provider.snapshot.provider_id}`}>
-                    {@render allowanceProviderSummary(provider.snapshot, provider.allowances)}
+                    data-testid={`allowance-mobile-provider-${provider.target.provider_id}`}>
+                    {@render allowanceProviderSummary(provider, provider.allowances)}
                   </div>
-                  {#each provider.allowances as allowance (allowance.key)}
-                    {@render mobileAllowanceRow(allowance)}
-                  {/each}
+                  {#if provider.pending}
+                    {@render providerPendingBlock(`allowance-loading-mobile-${provider.target.provider_id}`)}
+                  {:else if provider.failed}
+                    {@render providerFailedBlock(provider, `allowance-failed-mobile-${provider.target.provider_id}`)}
+                  {:else}
+                    {#each provider.allowances as allowance (allowance.key)}
+                      {@render mobileAllowanceRow(allowance)}
+                    {/each}
+                  {/if}
                 </section>
               {/each}
             </div>
@@ -755,7 +852,11 @@ function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
             </div>
           </Card.Header>
           <Card.Content class="pt-3">
-            {#if timeline.length === 0}
+            {#if !allResolved}
+              <div class="flex items-center justify-center py-6">
+                <Spinner aria-label={m.allowances_loading()} />
+              </div>
+            {:else if timeline.length === 0}
               <p class="text-sm text-muted-foreground">{m.allowances_timeline_empty()}</p>
             {:else}
               <ol class="relative ml-2 border-l">
@@ -785,49 +886,55 @@ function allowanceRowClass(row: DataTableRow<AllowanceMatrixRow>): string {
             <Card.Description>{m.allowances_forecast_basis()}</Card.Description>
           </Card.Header>
           <Card.Content class="pt-3">
-            <div class="grid grid-cols-3 gap-2 text-center">
-              <div
-                class="rounded-lg bg-destructive/8 px-2 py-3"
-                data-testid="allowance-forecast-exhausted"
-                aria-label={m.allowances_forecast_exhausted_count({ count: forecastSummary.exhausted })}>
-                <p class="font-technical text-lg font-semibold tabular-nums">{forecastSummary.exhausted}</p>
-                <p class="text-xs text-muted-foreground">{m.allowances_forecast_exhausted()}</p>
+            {#if !allResolved}
+              <div class="flex items-center justify-center py-6">
+                <Spinner aria-label={m.allowances_loading()} />
               </div>
-              <div
-                class="rounded-lg bg-warning/8 px-2 py-3"
-                data-testid="allowance-forecast-will-exhaust"
-                aria-label={m.allowances_forecast_will_exhaust_count({ count: forecastSummary.willExhaust })}>
-                <p class="font-technical text-lg font-semibold tabular-nums">{forecastSummary.willExhaust}</p>
-                <p class="text-xs text-muted-foreground">{m.allowances_forecast_will_exhaust()}</p>
+            {:else}
+              <div class="grid grid-cols-3 gap-2 text-center">
+                <div
+                  class="rounded-lg bg-destructive/8 px-2 py-3"
+                  data-testid="allowance-forecast-exhausted"
+                  aria-label={m.allowances_forecast_exhausted_count({ count: forecastSummary.exhausted })}>
+                  <p class="font-technical text-lg font-semibold tabular-nums">{forecastSummary.exhausted}</p>
+                  <p class="text-xs text-muted-foreground">{m.allowances_forecast_exhausted()}</p>
+                </div>
+                <div
+                  class="rounded-lg bg-warning/8 px-2 py-3"
+                  data-testid="allowance-forecast-will-exhaust"
+                  aria-label={m.allowances_forecast_will_exhaust_count({ count: forecastSummary.willExhaust })}>
+                  <p class="font-technical text-lg font-semibold tabular-nums">{forecastSummary.willExhaust}</p>
+                  <p class="text-xs text-muted-foreground">{m.allowances_forecast_will_exhaust()}</p>
+                </div>
+                <div
+                  class="rounded-lg bg-success/8 px-2 py-3"
+                  data-testid="allowance-forecast-no-risk"
+                  aria-label={m.allowances_forecast_no_risk_count({ count: forecastSummary.noRisk })}>
+                  <p class="font-technical text-lg font-semibold tabular-nums">{forecastSummary.noRisk}</p>
+                  <p class="text-xs text-muted-foreground">{m.allowances_forecast_no_risk()}</p>
+                </div>
               </div>
-              <div
-                class="rounded-lg bg-success/8 px-2 py-3"
-                data-testid="allowance-forecast-no-risk"
-                aria-label={m.allowances_forecast_no_risk_count({ count: forecastSummary.noRisk })}>
-                <p class="font-technical text-lg font-semibold tabular-nums">{forecastSummary.noRisk}</p>
-                <p class="text-xs text-muted-foreground">{m.allowances_forecast_no_risk()}</p>
-              </div>
-            </div>
-            {#if forecastSummary.unknown > 0}
-              <p class="mt-3 text-xs text-muted-foreground" data-testid="allowance-forecast-unknown">
-                {m.allowances_forecast_unknown_count({ count: forecastSummary.unknown })}
+              {#if forecastSummary.unknown > 0}
+                <p class="mt-3 text-xs text-muted-foreground" data-testid="allowance-forecast-unknown">
+                  {m.allowances_forecast_unknown_count({ count: forecastSummary.unknown })}
+                </p>
+              {/if}
+              <p class="mt-4 border-t pt-4 text-sm text-muted-foreground">
+                {forecastSummary.lowestProjected != null
+                  ? m.allowances_forecast_lowest({
+                      value: formatAllowancePercent(forecastSummary.lowestProjected, localeState.current),
+                    })
+                  : forecastSummary.exhausted > 0
+                    ? m.allowances_forecast_windows_exhausted()
+                    : m.allowances_forecast_no_projection()}
               </p>
-            {/if}
-            <p class="mt-4 border-t pt-4 text-sm text-muted-foreground">
-              {forecastSummary.lowestProjected != null
-                ? m.allowances_forecast_lowest({
-                    value: formatAllowancePercent(forecastSummary.lowestProjected, localeState.current),
-                  })
-                : forecastSummary.exhausted > 0
-                  ? m.allowances_forecast_windows_exhausted()
-                  : m.allowances_forecast_no_projection()}
-            </p>
-            {#if forecastSummary.exhaustedItems.length > 0 || forecastSummary.willExhaustItems.length > 0}
-              <ul class="mt-4 grid gap-2 border-t pt-4">
-                {#each [...forecastSummary.exhaustedItems, ...forecastSummary.willExhaustItems] as item (`${item.snapshot.provider_id}:${item.allowance.key}`)}
-                  <li class="text-sm">{forecastItemCopy(item)}</li>
-                {/each}
-              </ul>
+              {#if forecastSummary.exhaustedItems.length > 0 || forecastSummary.willExhaustItems.length > 0}
+                <ul class="mt-4 grid gap-2 border-t pt-4">
+                  {#each [...forecastSummary.exhaustedItems, ...forecastSummary.willExhaustItems] as item (`${item.snapshot.provider_id}:${item.allowance.key}`)}
+                    <li class="text-sm">{forecastItemCopy(item)}</li>
+                  {/each}
+                </ul>
+              {/if}
             {/if}
           </Card.Content>
         </Card.Root>

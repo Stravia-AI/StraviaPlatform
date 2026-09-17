@@ -5,8 +5,8 @@ use axum::response::IntoResponse;
 use stravia_core::Gateway;
 
 pub(super) async fn list_provider_allowances(State(gateway): State<Gateway>) -> impl IntoResponse {
-    match gateway.admin().list_provider_allowances().await {
-        Ok(snapshots) => Json(serde_json::json!({ "data": snapshots })).into_response(),
+    match gateway.admin().list_provider_allowance_targets().await {
+        Ok(targets) => Json(serde_json::json!({ "data": targets })).into_response(),
         Err(error) => {
             tracing::error!(error = %error, "Failed to list provider allowances");
             internal_error(
@@ -17,16 +17,29 @@ pub(super) async fn list_provider_allowances(State(gateway): State<Gateway>) -> 
     }
 }
 
-pub(super) async fn refresh_provider_allowances(
+pub(super) async fn get_provider_allowance(
     State(gateway): State<Gateway>,
+    Path(provider_id): Path<String>,
 ) -> impl IntoResponse {
-    match gateway.admin().refresh_provider_allowances().await {
-        Ok(snapshots) => Json(serde_json::json!({ "data": snapshots })).into_response(),
+    match gateway.admin().get_provider_allowance(&provider_id).await {
+        Ok(Some(snapshot)) => Json(serde_json::json!({ "data": snapshot })).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "provider allowance is unavailable",
+                "code": "PROVIDER_ALLOWANCE_UNAVAILABLE",
+            })),
+        )
+            .into_response(),
         Err(error) => {
-            tracing::error!(error = %error, "Failed to refresh provider allowances");
+            tracing::error!(
+                provider_id,
+                error = %error,
+                "Failed to load provider allowance"
+            );
             internal_error(
-                "PROVIDER_ALLOWANCE_REFRESH_FAILED",
-                "failed to refresh provider allowances",
+                "PROVIDER_ALLOWANCE_LOAD_FAILED",
+                "failed to load provider allowance",
             )
         }
     }

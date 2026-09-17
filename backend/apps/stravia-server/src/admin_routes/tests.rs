@@ -124,25 +124,26 @@ async fn provider_allowance_routes_share_the_core_contract() -> anyhow::Result<(
     .await?;
     let app = create_unprotected_router(gateway);
 
-    for request in [
-        Request::get("/api/v1/provider-allowances").body(Body::empty())?,
-        Request::post("/api/v1/provider-allowances/refresh").body(Body::empty())?,
-    ] {
-        let response = app.clone().oneshot(request).await?;
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX).await?;
-        let json: serde_json::Value = serde_json::from_slice(&body)?;
-        assert_eq!(json, serde_json::json!({ "data": [] }));
-    }
-
-    let missing = app
-        .oneshot(Request::post("/api/v1/provider-allowances/missing/refresh").body(Body::empty())?)
+    let response = app
+        .clone()
+        .oneshot(Request::get("/api/v1/provider-allowances").body(Body::empty())?)
         .await?;
-    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
-    let body = to_bytes(missing.into_body(), usize::MAX).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await?;
     let json: serde_json::Value = serde_json::from_slice(&body)?;
-    assert_eq!(json["error"], "provider allowance is unavailable");
-    assert_eq!(json["code"], "PROVIDER_ALLOWANCE_UNAVAILABLE");
+    assert_eq!(json, serde_json::json!({ "data": [] }));
+
+    for request in [
+        Request::get("/api/v1/provider-allowances/missing").body(Body::empty())?,
+        Request::post("/api/v1/provider-allowances/missing/refresh").body(Body::empty())?,
+    ] {
+        let missing = app.clone().oneshot(request).await?;
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        let body = to_bytes(missing.into_body(), usize::MAX).await?;
+        let json: serde_json::Value = serde_json::from_slice(&body)?;
+        assert_eq!(json["error"], "provider allowance is unavailable");
+        assert_eq!(json["code"], "PROVIDER_ALLOWANCE_UNAVAILABLE");
+    }
     Ok(())
 }
 

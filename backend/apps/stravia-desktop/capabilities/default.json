@@ -21,9 +21,6 @@
     "allow-recheck-desktop-fixed-port",
     "allow-plan-connect-client",
     "allow-apply-connect-client",
-    "allow-list-provider-allowances",
-    "allow-refresh-provider-allowances",
-    "allow-refresh-provider-allowance",
     "allow-get-desktop-update-state",
     "allow-download-product-update",
     "allow-install-product-update"
