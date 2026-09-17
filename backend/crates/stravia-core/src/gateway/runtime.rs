@@ -148,14 +148,6 @@ impl Gateway {
         turn_chains.rebuild_generation_prefixes().await?;
         let turn_chains: Arc<dyn stravia_runtime_contract::turn_chain::TurnChainStore> =
             Arc::new(turn_chains);
-        let observation = interaction_observation::InteractionObservation::new(
-            history_sqlite_pool.clone(),
-            postgres_pool.clone(),
-            paths.diagnostics(),
-            retention_days,
-            !matches!(storage_kind, RuntimeStorageKind::Memory),
-        )
-        .await;
         let history_markers: Arc<dyn history_marker::HistoryMarkerStore> =
             if let Some(pool) = history_sqlite_pool.as_ref() {
                 Arc::new(history_marker::SqlHistoryMarkerStore::sqlite(pool.clone()))
@@ -265,6 +257,15 @@ impl Gateway {
         .with_history_markers(Arc::clone(&history_markers))
         .with_redaction_mappings(Arc::clone(&redaction.mappings))
         .with_compaction(compaction.clone());
+        let observation = interaction_observation::InteractionObservation::new(
+            history_sqlite_pool.clone(),
+            postgres_pool.clone(),
+            paths.diagnostics(),
+            retention_days,
+            !matches!(storage_kind, RuntimeStorageKind::Memory),
+            generation_chains.clone(),
+        )
+        .await;
         let allowance_samples = match storage_kind {
             RuntimeStorageKind::Memory => admin::provider_allowance::AllowanceSampleStore::memory(),
             RuntimeStorageKind::Sqlite => admin::provider_allowance::AllowanceSampleStore::sqlite(

@@ -263,38 +263,6 @@ impl TailIndex {
         runs
     }
 
-    #[cfg(test)]
-    pub(super) fn current_tool_source(
-        &self,
-        input: &Window,
-        principal: &str,
-    ) -> Option<(String, String)> {
-        let tail_ids = input.current_tail_tool_ids()?;
-        let mut source = None;
-        for id in &tail_ids {
-            let runs = self.pending_tools.get(id)?;
-            let matches: Vec<_> = runs
-                .iter()
-                .filter(|run| self.principals.get(*run).map(String::as_str) == Some(principal))
-                .collect();
-            if matches.len() != 1 {
-                return None;
-            }
-            let run = matches[0];
-            match &source {
-                None => source = Some(run.clone()),
-                Some(existing) if existing != run => return None,
-                Some(_) => {}
-            }
-        }
-        let run = source?;
-        let pending = self.windows.get(&run)?.pending_tool_ids()?;
-        if !tail_ids.iter().all(|id| pending.iter().any(|p| p == id)) {
-            return None;
-        }
-        Some((run.clone(), self.interactions.get(&run)?.clone()))
-    }
-
     pub(super) fn interaction(&self, run: &str) -> Option<&str> {
         self.interactions.get(run).map(String::as_str)
     }
@@ -423,37 +391,6 @@ impl TailIndex {
             }
         }
     }
-
-    #[cfg(test)]
-    pub(super) fn associate(
-        &self,
-        input: Option<&Window>,
-        candidates: &[(String, String)],
-    ) -> RunEvent {
-        if candidates
-            .iter()
-            .any(|(run, _)| !self.windows.contains_key(run))
-        {
-            return RunEvent::RetainedTailAssociated {
-                source_run_id: None,
-                source_interaction_id: None,
-                status: "index_unavailable".into(),
-                candidate_count: 0,
-                matched_units: 0,
-                matched_bytes: 0,
-                input_start: None,
-            };
-        }
-        let loaded: Vec<(String, String, &Window)> = candidates
-            .iter()
-            .filter_map(|(run, interaction)| {
-                self.windows
-                    .get(run)
-                    .map(|window| (run.clone(), interaction.clone(), window))
-            })
-            .collect();
-        Self::associate_loaded(input, &loaded)
-    }
 }
 
 fn public_thinking_projection(value: &Value) -> bool {
@@ -567,6 +504,24 @@ mod tests {
         }
     }
 
+    /// Loads candidate windows through the index exactly as Run Attribution's
+    /// discover step does, then runs the production matcher.
+    fn associate(
+        index: &TailIndex,
+        input: Option<&Window>,
+        candidates: &[(String, String)],
+    ) -> RunEvent {
+        let loaded: Vec<(String, String, &Window)> = candidates
+            .iter()
+            .filter_map(|(run, interaction)| {
+                index
+                    .window(run)
+                    .map(|window| (run.clone(), interaction.clone(), window))
+            })
+            .collect();
+        TailIndex::associate_loaded(input, &loaded)
+    }
+
     fn association(thinking: AiItem, replayed_thinking: AiItem) -> RunEvent {
         let question = user("你好，你是什么模型");
         let answer = AiItem::output_text(
@@ -589,7 +544,8 @@ mod tests {
             "principal",
             "previous-interaction",
         );
-        index.associate(
+        associate(
+            &index,
             Some(&input),
             &[("previous-run".into(), "previous-interaction".into())],
         )
@@ -687,7 +643,7 @@ mod tests {
     fn unique_longest_nested_source_is_the_later_turn() {
         let (index, with_gpt, _) = nested_sources();
         assert!(matches!(
-            index.associate(Some(&with_gpt), &candidates()),
+            associate(&index, Some(&with_gpt), &candidates()),
             RunEvent::RetainedTailAssociated {
                 status,
                 source_interaction_id: Some(source),
@@ -700,7 +656,7 @@ mod tests {
     fn omitting_the_switched_turn_keeps_the_earlier_source() {
         let (index, _, without_gpt) = nested_sources();
         assert!(matches!(
-            index.associate(Some(&without_gpt), &candidates()),
+            associate(&index, Some(&without_gpt), &candidates()),
             RunEvent::RetainedTailAssociated {
                 status,
                 source_interaction_id: Some(source),
@@ -734,7 +690,8 @@ mod tests {
             "interaction-b",
         );
         assert!(matches!(
-            index.associate(
+            associate(
+                &index,
                 Some(&input),
                 &[
                     ("run-a".into(), "interaction-a".into()),
@@ -763,38 +720,6 @@ mod tests {
                 RunEvent::RetainedTailAssociated { status, .. } if status == "no_match"
             ));
         }
-    }
-
-    #[test]
-    fn current_tool_source_requires_unique_pending_ids() {
-        let question = long_user("tool");
-        let call = AiItem::function_call(stravia_runtime_contract::protocol::ir::ToolCall {
-            id: "call-1".into(),
-            name: "probe".into(),
-            arguments: "{}".into(),
-        });
-        let result: AiItem = serde_json::from_value(serde_json::json!({
-            "role": "tool",
-            "tool_call_id": "call-1",
-            "content": long_answer("result").content.to_text(),
-        }))
-        .unwrap();
-        let mut pending = Window::capture(std::slice::from_ref(&question)).unwrap();
-        assert!(pending.append(Window::capture(std::slice::from_ref(&call)).unwrap()));
-        let input = Window::capture(&[question, call, result, long_user("after")]).unwrap();
-        let mut index = TailIndex::default();
-        index.insert(
-            "pending-run".into(),
-            pending,
-            i64::MAX,
-            "principal",
-            "pending-interaction",
-        );
-        assert_eq!(
-            index.current_tool_source(&input, "principal"),
-            Some(("pending-run".into(), "pending-interaction".into()))
-        );
-        assert_eq!(index.current_tool_source(&input, "other"), None);
     }
 
     fn bulky(tag: &str, bytes: usize) -> AiItem {
@@ -879,7 +804,8 @@ mod tests {
             "source-interaction",
         );
         assert!(matches!(
-            index.associate(
+            associate(
+                &index,
                 Some(&input),
                 &[("source-run".into(), "source-interaction".into())]
             ),

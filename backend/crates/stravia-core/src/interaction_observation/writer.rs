@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     sync::{
         Arc, Mutex,
         atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering},
@@ -10,9 +10,8 @@ use std::{
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use super::{
-    grouping::{DiagnosticKind, DiagnosticSource, GroupingIndex},
+    attribution::{ObservationEvidence, RunAttribution},
     store::{Admission, ObservationStore},
-    tail::{MAX_CANDIDATES, TailIndex, Window},
     types::*,
 };
 
@@ -37,16 +36,15 @@ pub(super) enum WriterCommand {
         run_id: String,
         principal: String,
         window: Option<super::tail::Window>,
-        completed: bool,
     },
     Admit {
         start: RunStart,
+        facts: super::AdmissionFacts,
+        received_at: i64,
         metadata: super::RequestMetadata,
         debug_enabled: bool,
         trace: Option<super::trace::TraceHandle>,
         discarded_trace: Option<super::trace::TraceHandle>,
-        input: Option<Window>,
-        input_overflow: bool,
     },
     Event {
         run_id: String,
@@ -90,6 +88,7 @@ pub(super) struct WriterDeps {
     pub partial_trace_count: Arc<AtomicU64>,
     pub unpersisted_gaps: Arc<Mutex<super::UnpersistedGaps>>,
     pub live: Arc<super::live::LiveState>,
+    pub generation_chains: crate::generation_chain::GenerationChain,
 }
 
 struct WriterContext<'a> {
@@ -112,12 +111,12 @@ pub(super) fn spawn(
         partial_trace_count,
         unpersisted_gaps,
         live,
+        generation_chains,
     } = deps;
     let (tx, mut rx) = mpsc::channel(2048);
     let handle = tokio::spawn(async move {
-        let mut grouping = GroupingIndex::default();
-        let mut tail = TailIndex::default();
-        let mut attributed = HashSet::new();
+        let mut attribution =
+            RunAttribution::new(ObservationEvidence::new(store.clone(), generation_chains));
         // 只合并同一 Run 中相邻且同作用域的正文或思考增量，不跨事件边界重排。
         let mut pending_text = TextBuffer {
             blocks: HashMap::new(),
@@ -152,15 +151,15 @@ pub(super) fn spawn(
                     _ = interval.tick() => {
                         unpersisted_gaps.lock().expect("observation gaps")
                             .expire(now(), retention_days.load(Ordering::Acquire));
-                        tail.sweep(now());
+                        attribution.sweep(now());
                         pending_text.publish_live(&updates);
                         let due: Vec<_> = pending_text.blocks.iter().filter(|(_, block)| block.due()).map(|(run, _)| run.clone()).collect();
-                        for run in due { flush_one(&context, &grouping, &mut pending_text, &run).await; }
+                        for run in due { flush_one(&context, &attribution, &mut pending_text, &run).await; }
                         if maintenance.elapsed() < Duration::from_secs(2) { continue; }
                         maintenance = tokio::time::Instant::now();
                         flush_active_manifests(
                             &context,
-                            &grouping,
+                            &attribution,
                             &active_traces,
                             &mut persisted_manifests,
                             None,
@@ -171,10 +170,10 @@ pub(super) fn spawn(
                     command = rx.recv() => command,
                 }
             };
-            tail.sweep(now());
+            attribution.sweep(now());
             match &command {
                 Some(WriterCommand::ClearTail | WriterCommand::Purge { .. }) => {
-                    flush_text(&context, &grouping, &mut pending_text).await;
+                    flush_text(&context, &attribution, &mut pending_text).await;
                 }
                 Some(
                     WriterCommand::InputPreview { run_id, .. }
@@ -184,12 +183,12 @@ pub(super) fn spawn(
                         ..
                     },
                 ) => {
-                    flush_one(&context, &grouping, &mut pending_text, run_id).await;
+                    flush_one(&context, &attribution, &mut pending_text, run_id).await;
                 }
                 _ => {}
             }
             match command {
-                Some(WriterCommand::ClearTail) => tail = super::tail::TailIndex::default(),
+                Some(WriterCommand::ClearTail) => attribution.clear_tail(),
                 Some(WriterCommand::ClientDisconnected { runs }) => {
                     for run_id in runs {
                         match store.disconnect_waiting_client(&run_id, now()).await {
@@ -200,7 +199,8 @@ pub(super) fn spawn(
                                     .lock()
                                     .expect("observation gaps")
                                     .record(&run_id, now());
-                                if let Some(interaction) = grouping.interaction_for_run(&run_id) {
+                                if let Some(interaction) = attribution.interaction_for_run(&run_id)
+                                {
                                     pending_gaps.insert(interaction.to_owned(), now());
                                 }
                                 tracing::warn!(%run_id, "client disconnect persistence failed");
@@ -209,8 +209,8 @@ pub(super) fn spawn(
                     }
                 }
                 Some(WriterCommand::ClientToolResults { run_id, events }) => {
-                    flush_one(&context, &grouping, &mut pending_text, &run_id).await;
-                    let Some(interaction) = grouping.interaction_for_run(&run_id) else {
+                    flush_one(&context, &attribution, &mut pending_text, &run_id).await;
+                    let Some(interaction) = attribution.interaction_for_run(&run_id) else {
                         continue;
                     };
                     let at = now();
@@ -243,7 +243,7 @@ pub(super) fn spawn(
                     }
                 }
                 Some(WriterCommand::InputPreview { run_id, preview }) => {
-                    let Some(interaction) = grouping.interaction_for_run(&run_id) else {
+                    let Some(interaction) = attribution.interaction_for_run(&run_id) else {
                         continue;
                     };
                     let at = now();
@@ -273,13 +273,13 @@ pub(super) fn spawn(
                         None => store.purge_clear_rows().await,
                     }
                     .map(|removed| {
-                        grouping.forget_interactions(&removed);
+                        attribution.forget_interactions(&removed);
                         pending_gaps.retain(|interaction, _| !removed.contains(interaction));
-                        pending_text.retain(|run| grouping.interaction_for_run(run).is_some());
+                        pending_text.retain(|run| attribution.interaction_for_run(run).is_some());
                         persisted_manifests
-                            .retain(|run, _| grouping.interaction_for_run(run).is_some());
+                            .retain(|run, _| attribution.interaction_for_run(run).is_some());
                         if expired_before.is_none() {
-                            tail = super::tail::TailIndex::default();
+                            attribution.clear_tail();
                         }
                     });
                     let _ = done.send(result);
@@ -288,211 +288,96 @@ pub(super) fn spawn(
                     run_id,
                     principal,
                     window,
-                    completed,
                 }) => {
                     let at = now();
                     let expiry = expires(at, retention_days.load(Ordering::Relaxed));
-                    if completed {
-                        if let Some(window) = window
-                            && let Some(interaction) = grouping.interaction_for_run(&run_id)
+                    if let Some(window) = window
+                        && let Some(interaction) = attribution.interaction_for_run(&run_id)
+                    {
+                        let pending = window.pending_tool_ids().unwrap_or_default();
+                        if let Some(hash) = window.last_hash_hex()
+                            && let Err(error) = store
+                                .persist_tail_source(
+                                    &run_id,
+                                    interaction,
+                                    &principal,
+                                    &hash,
+                                    &pending,
+                                    expiry,
+                                )
+                                .await
                         {
-                            let pending = window.pending_tool_ids().unwrap_or_default();
-                            if let Some(hash) = window.last_hash_hex()
-                                && let Err(error) = store
-                                    .persist_tail_source(
-                                        &run_id,
-                                        interaction,
-                                        &principal,
-                                        &hash,
-                                        &pending,
-                                        expiry,
-                                    )
-                                    .await
-                            {
-                                tracing::warn!(%run_id, %error, "tail source persistence failed");
-                            }
-                            tail.insert(run_id, window, expiry, principal, interaction.to_owned());
+                            tracing::warn!(%run_id, %error, "tail source persistence failed");
                         }
-                        continue;
-                    }
-                    if attributed.contains(&run_id) {
-                        continue;
-                    }
-                    let Some(interaction) = grouping.interaction_for_run(&run_id) else {
-                        continue;
-                    };
-                    let event = match store
-                        .tail_sources_by_hashes(
-                            &principal,
-                            &run_id,
-                            &window
-                                .as_ref()
-                                .map(Window::unit_hash_hexes)
-                                .unwrap_or_default(),
-                            at,
-                        )
-                        .await
-                    {
-                        Ok(rows) if rows.len() > MAX_CANDIDATES => {
-                            RunEvent::RetainedTailAssociated {
-                                source_run_id: None,
-                                source_interaction_id: None,
-                                status: "resource_limit".into(),
-                                candidate_count: rows.len(),
-                                matched_units: 0,
-                                matched_bytes: 0,
-                                input_start: None,
-                            }
-                        }
-                        Ok(rows) => {
-                            let mut loaded = Vec::new();
-                            let mut unavailable = false;
-                            for (source_run, source_interaction, node) in &rows {
-                                if let Some(existing) = tail.window(source_run) {
-                                    loaded.push((
-                                        source_run.clone(),
-                                        source_interaction.clone(),
-                                        existing.clone(),
-                                    ));
-                                } else if let Some(node) = node {
-                                    match store
-                                        .rematerialize_client_items(&principal, node, at)
-                                        .await
-                                    {
-                                        Ok(Some(items)) => {
-                                            if let Some(existing) = Window::capture(&items) {
-                                                loaded.push((
-                                                    source_run.clone(),
-                                                    source_interaction.clone(),
-                                                    existing,
-                                                ));
-                                            } else {
-                                                unavailable = true;
-                                                break;
-                                            }
-                                        }
-                                        _ => {
-                                            unavailable = true;
-                                            break;
-                                        }
-                                    }
-                                } else {
-                                    unavailable = true;
-                                    break;
-                                }
-                            }
-                            if unavailable {
-                                RunEvent::RetainedTailAssociated {
-                                    source_run_id: None,
-                                    source_interaction_id: None,
-                                    status: "index_unavailable".into(),
-                                    candidate_count: 0,
-                                    matched_units: 0,
-                                    matched_bytes: 0,
-                                    input_start: None,
-                                }
-                            } else {
-                                let refs: Vec<_> = loaded
-                                    .iter()
-                                    .map(|(run, interaction, window)| {
-                                        (run.clone(), interaction.clone(), window)
-                                    })
-                                    .collect();
-                                TailIndex::associate_loaded(window.as_ref(), &refs)
-                            }
-                        }
-                        Err(_) => RunEvent::ObservationGap {
-                            reason: "tail_index_unavailable".into(),
-                        },
-                    };
-                    match store
-                        .persist_run_event(interaction, &run_id, &event, at, expiry)
-                        .await
-                    {
-                        Ok(Some(event)) => {
-                            publish(&updates, &trace_sequence, event);
-                        }
-                        Ok(None) => {}
-                        Err(error) => {
-                            tracing::warn!(%run_id, %error, "tail observation persistence failed")
-                        }
+                        attribution.insert_tail_source(
+                            run_id,
+                            window,
+                            expiry,
+                            principal,
+                            interaction.to_owned(),
+                        );
                     }
                 }
                 Some(WriterCommand::Admit {
                     start,
+                    facts,
+                    received_at,
                     metadata,
                     debug_enabled,
                     trace,
                     discarded_trace,
-                    input,
-                    input_overflow,
                 }) => {
                     let now = now();
-                    let persisted_parent = match start.generation_parent_id.as_deref() {
-                        Some(parent) => match store
-                            .observed_generation_parent(parent, &start.principal)
-                            .await
-                        {
-                            Ok(parent) => parent,
-                            Err(error) => {
-                                unpersisted_gaps
-                                    .lock()
-                                    .expect("observation gaps")
-                                    .record(&start.id, now);
-                                tracing::warn!(run_id=%start.id, %error, "observation parent lookup failed");
-                                None
-                            }
-                        },
-                        None => None,
-                    };
-                    if input.is_some() || input_overflow {
-                        attributed.insert(start.id.clone());
+                    // Run Attribution owns the placement decision end to end; the
+                    // writer only persists the outcome and publishes it.
+                    let decision = attribution.admit(&start, &facts, received_at, now).await;
+                    if decision.fingerprint_gap
+                        && let Some(trace) = &trace
+                    {
+                        trace.mark_partial("observation_gap", false);
                     }
-                    let (diagnostic, diagnostic_event) = discover_diagnostic(
-                        &tail,
-                        &store,
-                        &start,
-                        input.as_ref(),
-                        input_overflow,
-                        now,
-                    )
-                    .await;
-                    let assignment = grouping.assign(
-                        &start,
-                        now,
-                        persisted_parent.as_ref(),
-                        diagnostic.as_ref(),
-                    );
+                    if let Some(error) = &decision.parent_evidence_error {
+                        unpersisted_gaps
+                            .lock()
+                            .expect("observation gaps")
+                            .record(&start.id, now);
+                        tracing::warn!(run_id=%start.id, %error, "observation parent lookup failed");
+                    }
                     // 无关请求不应切碎活跃流；只刷新可能被本次准入中断的父链。
                     let affected: Vec<_> = pending_text
                         .blocks
                         .keys()
                         .filter(|run| {
-                            assignment.parent_run_id.as_deref() == Some(run.as_str())
-                                || assignment.parent_interaction_id.as_deref().is_some_and(
-                                    |parent| grouping.interaction_for_run(run) == Some(parent),
-                                )
+                            decision.parent_run_id.as_deref() == Some(run.as_str())
+                                || decision
+                                    .parent_interaction_id
+                                    .as_deref()
+                                    .is_some_and(|parent| {
+                                        attribution.interaction_for_run(run) == Some(parent)
+                                    })
                         })
                         .cloned()
                         .collect();
                     for run in affected {
-                        flush_one(&context, &grouping, &mut pending_text, &run).await;
+                        flush_one(&context, &attribution, &mut pending_text, &run).await;
                     }
                     let expires = expires(now, retention_days.load(Ordering::Relaxed));
                     match store
                         .admit(Admission {
                             start: &start,
                             metadata: Some(&metadata),
-                            interaction_id: &assignment.interaction_id,
-                            parent_run_id: assignment.parent_run_id.as_deref(),
-                            parent_interaction_id: assignment.parent_interaction_id.as_deref(),
+                            interaction_id: &decision.interaction_id,
+                            generation_root_id: facts.generation_root_id.as_deref(),
+                            generation_parent_id: facts.generation_parent_id.as_deref(),
+                            has_new_user: facts.has_new_user,
+                            ingress_received_at: decision.ingress_received_at,
+                            parent_run_id: decision.parent_run_id.as_deref(),
+                            parent_interaction_id: decision.parent_interaction_id.as_deref(),
                             debug_enabled,
-                            inferred_retry: assignment.inferred_retry,
-                            grouping_reason: assignment.grouping_reason,
-                            diagnostic_source_run_id: assignment
-                                .diagnostic_source_run_id
-                                .as_deref(),
-                            interrupt_parent: assignment.interrupt_parent,
+                            inferred_retry: decision.inferred_retry,
+                            grouping_reason: decision.grouping_reason,
+                            diagnostic_source_run_id: decision.diagnostic_source_run_id.as_deref(),
+                            interrupt_parent: decision.interrupt_parent,
                             now,
                             expires_at: expires,
                         })
@@ -522,10 +407,10 @@ pub(super) fn spawn(
                                 }
                             }
                             publish(&updates, &trace_sequence, event);
-                            if let Some(diagnostic_event) = diagnostic_event {
+                            if let Some(diagnostic_event) = decision.diagnostic_event {
                                 match store
                                     .persist_run_event(
-                                        &assignment.interaction_id,
+                                        &decision.interaction_id,
                                         &start.id,
                                         &diagnostic_event,
                                         now,
@@ -570,7 +455,7 @@ pub(super) fn spawn(
                     ..
                 }) => {
                     let Some(interaction) =
-                        grouping.interaction_for_run(&run_id).map(str::to_owned)
+                        attribution.interaction_for_run(&run_id).map(str::to_owned)
                     else {
                         continue;
                     };
@@ -581,7 +466,7 @@ pub(super) fn spawn(
                         .get(&run_id)
                         .is_some_and(|block| !same_scope(&block.event, &event))
                     {
-                        flush_one(&context, &grouping, &mut pending_text, &run_id).await;
+                        flush_one(&context, &attribution, &mut pending_text, &run_id).await;
                     }
                     let text = text_mut(&mut event).expect("text event");
                     let incoming = std::mem::take(text);
@@ -624,7 +509,7 @@ pub(super) fn spawn(
                     }
                 }
                 Some(WriterCommand::Event { run_id, event }) => {
-                    flush_one(&context, &grouping, &mut pending_text, &run_id).await;
+                    flush_one(&context, &attribution, &mut pending_text, &run_id).await;
                     let mut batch = vec![(event, None, now())];
                     while batch.len() < 64 {
                         match rx.try_recv() {
@@ -650,10 +535,10 @@ pub(super) fn spawn(
                     }
                     for (event, _, _) in &batch {
                         if matches!(event, RunEvent::ClientOutputCommitted) {
-                            grouping.output_committed(&run_id);
+                            attribution.output_committed(&run_id);
                         }
                     }
-                    if let Some(interaction) = grouping.interaction_for_run(&run_id) {
+                    if let Some(interaction) = attribution.interaction_for_run(&run_id) {
                         let at = now();
                         match store
                             .persist_run_events(
@@ -692,7 +577,7 @@ pub(super) fn spawn(
                 }) => {
                     persist_finish(
                         &context,
-                        &mut grouping,
+                        &mut attribution,
                         &mut pending_text,
                         &run_id,
                         &outcome,
@@ -743,7 +628,7 @@ pub(super) fn spawn(
                             if let Some(trace) = &trace {
                                 trace.mark_partial("writer_overflow", false);
                             }
-                            if let Some(interaction) = grouping.interaction_for_run(run_id) {
+                            if let Some(interaction) = attribution.interaction_for_run(run_id) {
                                 let at = now();
                                 let event = RunEvent::ObservationGap {
                                     reason: "writer_overflow".into(),
@@ -776,7 +661,7 @@ pub(super) fn spawn(
                         if let Some((outcome, finished_at)) = pending_finish {
                             persist_finish(
                                 &context,
-                                &mut grouping,
+                                &mut attribution,
                                 &mut pending_text,
                                 run_id,
                                 &outcome,
@@ -793,7 +678,7 @@ pub(super) fn spawn(
                         let at = now();
                         let expiry = expires(at, retention_days.load(Ordering::Relaxed));
                         let persisted = if let Some(run_id) = run_id.as_deref() {
-                            if let Some(interaction_id) = grouping.interaction_for_run(run_id) {
+                            if let Some(interaction_id) = attribution.interaction_for_run(run_id) {
                                 match store
                                     .persist_manifest_event(
                                         interaction_id,
@@ -855,16 +740,16 @@ pub(super) fn spawn(
                         .blocks
                         .keys()
                         .filter(|run| {
-                            grouping.interaction_for_run(run) == Some(interaction_id.as_str())
+                            attribution.interaction_for_run(run) == Some(interaction_id.as_str())
                         })
                         .cloned()
                         .collect();
                     for run in runs {
-                        flush_one(&context, &grouping, &mut pending_text, &run).await;
+                        flush_one(&context, &attribution, &mut pending_text, &run).await;
                     }
                     flush_active_manifests(
                         &context,
-                        &grouping,
+                        &attribution,
                         &active_traces,
                         &mut persisted_manifests,
                         Some(&interaction_id),
@@ -873,10 +758,10 @@ pub(super) fn spawn(
                     let _ = done.send(());
                 }
                 Some(WriterCommand::Barrier(done)) => {
-                    flush_text(&context, &grouping, &mut pending_text).await;
+                    flush_text(&context, &attribution, &mut pending_text).await;
                     flush_active_manifests(
                         &context,
-                        &grouping,
+                        &attribution,
                         &active_traces,
                         &mut persisted_manifests,
                         None,
@@ -885,12 +770,12 @@ pub(super) fn spawn(
                     let _ = done.send(());
                 }
                 Some(WriterCommand::Shutdown(done)) => {
-                    flush_text(&context, &grouping, &mut pending_text).await;
+                    flush_text(&context, &attribution, &mut pending_text).await;
                     let _ = done.send(());
                     break;
                 }
                 None => {
-                    flush_text(&context, &grouping, &mut pending_text).await;
+                    flush_text(&context, &attribution, &mut pending_text).await;
                     break;
                 }
             }
@@ -901,7 +786,7 @@ pub(super) fn spawn(
 
 async fn flush_active_manifests(
     context: &WriterContext<'_>,
-    grouping: &GroupingIndex,
+    attribution: &RunAttribution<ObservationEvidence>,
     active_traces: &Mutex<HashMap<String, super::trace::TraceHandle>>,
     persisted: &mut HashMap<String, TraceManifest>,
     only_interaction: Option<&str>,
@@ -913,7 +798,7 @@ async fn flush_active_manifests(
         .map(|(run_id, trace)| (run_id.clone(), trace.clone()))
         .collect();
     for (run_id, trace) in active {
-        let Some(interaction_id) = grouping.interaction_for_run(&run_id) else {
+        let Some(interaction_id) = attribution.interaction_for_run(&run_id) else {
             continue;
         };
         if only_interaction.is_some_and(|id| id != interaction_id) {
@@ -974,14 +859,14 @@ fn manifests_match(left: &TraceManifest, right: &TraceManifest) -> bool {
 
 async fn persist_finish(
     context: &WriterContext<'_>,
-    grouping: &mut GroupingIndex,
+    attribution: &mut RunAttribution<ObservationEvidence>,
     pending_text: &mut TextBuffer,
     run_id: &str,
     outcome: &RunOutcome,
     at: i64,
 ) {
-    flush_one(context, grouping, pending_text, run_id).await;
-    if let Some(interaction) = grouping.interaction_for_run(run_id) {
+    flush_one(context, attribution, pending_text, run_id).await;
+    if let Some(interaction) = attribution.interaction_for_run(run_id) {
         let expiry = expires(at, context.retention.load(Ordering::Relaxed));
         match context
             .store
@@ -1010,29 +895,29 @@ async fn persist_finish(
             }
         }
     }
-    grouping.finish(run_id, &outcome.status, at);
+    attribution.finish(run_id, &outcome.status, at);
 }
 
 async fn flush_text(
     context: &WriterContext<'_>,
-    grouping: &GroupingIndex,
+    attribution: &RunAttribution<ObservationEvidence>,
     pending: &mut TextBuffer,
 ) {
     let ids: Vec<_> = pending.blocks.keys().cloned().collect();
     for id in ids {
-        flush_one(context, grouping, pending, &id).await;
+        flush_one(context, attribution, pending, &id).await;
     }
 }
 async fn flush_one(
     context: &WriterContext<'_>,
-    grouping: &GroupingIndex,
+    attribution: &RunAttribution<ObservationEvidence>,
     pending: &mut TextBuffer,
     run_id: &str,
 ) {
     let Some(block) = pending.blocks.remove(run_id) else {
         return;
     };
-    let Some(interaction) = grouping.interaction_for_run(run_id) else {
+    let Some(interaction) = attribution.interaction_for_run(run_id) else {
         pending.live.remove(&block.id);
         return;
     };
@@ -1251,185 +1136,6 @@ fn same_scope(left: &RunEvent, right: &RunEvent) -> bool {
         ) => l == r && a == b,
         _ => false,
     }
-}
-
-fn tail_status_event(status: &str) -> RunEvent {
-    RunEvent::RetainedTailAssociated {
-        source_run_id: None,
-        source_interaction_id: None,
-        status: status.into(),
-        candidate_count: 0,
-        matched_units: 0,
-        matched_bytes: 0,
-        input_start: None,
-    }
-}
-
-async fn current_tool_source(
-    tail: &TailIndex,
-    store: &ObservationStore,
-    start: &RunStart,
-    input: &Window,
-    now: i64,
-) -> Option<DiagnosticSource> {
-    let ids = input.current_tail_tool_ids()?;
-    let rows = store
-        .pending_tool_sources(&start.principal, &ids, now)
-        .await
-        .ok()?;
-    let mut source = None;
-    for id in &ids {
-        let mut matches: Vec<(String, String)> = tail.pending_runs(id, &start.principal);
-        for (tool_id, run, interaction) in &rows {
-            if tool_id == id && !matches.iter().any(|(existing, _)| existing == run) {
-                matches.push((run.clone(), interaction.clone()));
-            }
-        }
-        if matches.len() != 1 {
-            return None;
-        }
-        match &source {
-            None => source = Some(matches[0].clone()),
-            Some(existing) if existing.0 != matches[0].0 => return None,
-            Some(_) => {}
-        }
-    }
-    let (run_id, interaction_id) = source?;
-    let pending = if let Some(window) = tail.window(&run_id) {
-        window.pending_tool_ids()?
-    } else {
-        let node = store.tail_generation_node(&run_id).await.ok()?;
-        let node = node?;
-        let items = store
-            .rematerialize_client_items(&start.principal, &node, now)
-            .await
-            .ok()??;
-        Window::capture(&items)?.pending_tool_ids()?
-    };
-    if !ids
-        .iter()
-        .all(|id| pending.iter().any(|pending_id| pending_id == id))
-    {
-        return None;
-    }
-    let delivery_completed_at = store.delivery_completed_at(&run_id).await.ok()??;
-    if delivery_completed_at > start.ingress_received_at {
-        return None;
-    }
-    Some(DiagnosticSource {
-        run_id,
-        interaction_id,
-        delivery_completed_at: Some(delivery_completed_at),
-        kind: DiagnosticKind::CurrentTool,
-        user_after_match: false,
-    })
-}
-
-async fn discover_diagnostic(
-    tail: &TailIndex,
-    store: &ObservationStore,
-    start: &RunStart,
-    input: Option<&Window>,
-    input_overflow: bool,
-    now: i64,
-) -> (Option<DiagnosticSource>, Option<RunEvent>) {
-    if input_overflow {
-        return (None, Some(tail_status_event("resource_limit")));
-    }
-    let Some(input) = input else {
-        return (None, None);
-    };
-    if start.generation_parent_id.is_none()
-        && let Some(source) = current_tool_source(tail, store, start, input, now).await
-    {
-        return (Some(source), None);
-    }
-    let mut loaded = Vec::new();
-    let mut seen = HashSet::new();
-    for run in tail.fingerprint_runs(input, &start.principal) {
-        if !seen.insert(run.clone()) {
-            continue;
-        }
-        let Some(window) = tail.window(&run) else {
-            continue;
-        };
-        let Some(interaction) = tail.interaction(&run) else {
-            continue;
-        };
-        loaded.push((run, interaction.to_owned(), window.clone()));
-    }
-    match store
-        .tail_sources_by_hashes(&start.principal, &start.id, &input.unit_hash_hexes(), now)
-        .await
-    {
-        Ok(rows) if rows.len() > MAX_CANDIDATES => {
-            return (None, Some(tail_status_event("resource_limit")));
-        }
-        Ok(rows) => {
-            for (run, interaction, node) in rows {
-                if !seen.insert(run.clone()) {
-                    continue;
-                }
-                if let Some(window) = tail.window(&run) {
-                    loaded.push((run, interaction, window.clone()));
-                    continue;
-                }
-                let Some(node) = node else {
-                    return (None, Some(tail_status_event("index_unavailable")));
-                };
-                match store
-                    .rematerialize_client_items(&start.principal, &node, now)
-                    .await
-                {
-                    Ok(Some(items)) => match Window::capture(&items) {
-                        Some(window) => loaded.push((run, interaction, window)),
-                        None => return (None, Some(tail_status_event("resource_limit"))),
-                    },
-                    _ => return (None, Some(tail_status_event("index_unavailable"))),
-                }
-            }
-        }
-        Err(_) => {
-            if start.generation_parent_id.is_some() {
-                return (None, None);
-            }
-            return (None, Some(tail_status_event("index_unavailable")));
-        }
-    }
-    if loaded.len() > MAX_CANDIDATES {
-        return (None, Some(tail_status_event("resource_limit")));
-    }
-    let refs: Vec<_> = loaded
-        .iter()
-        .map(|(run, interaction, window)| (run.clone(), interaction.clone(), window))
-        .collect();
-    let event = TailIndex::associate_loaded(Some(input), &refs);
-    let diagnostic = if start.generation_parent_id.is_none() {
-        match &event {
-            RunEvent::RetainedTailAssociated {
-                status,
-                source_run_id: Some(run_id),
-                source_interaction_id: Some(interaction_id),
-                input_start: Some(start_idx),
-                matched_units,
-                ..
-            } if status == "inferred" => {
-                let delivery_completed_at =
-                    store.delivery_completed_at(run_id).await.ok().flatten();
-                Some(DiagnosticSource {
-                    run_id: run_id.clone(),
-                    interaction_id: interaction_id.clone(),
-                    delivery_completed_at,
-                    kind: DiagnosticKind::RetainedTail,
-                    user_after_match: input.user_after_match(*start_idx, *matched_units),
-                })
-            }
-            _ => None,
-        }
-    } else {
-        None
-    };
-    (diagnostic, Some(event))
 }
 
 #[cfg(test)]

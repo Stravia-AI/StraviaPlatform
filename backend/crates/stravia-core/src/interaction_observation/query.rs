@@ -1260,12 +1260,6 @@ mod tests {
                 principal: "owner".into(),
                 api_key_id: None,
                 api_key_name: None,
-                generation_root_id: None,
-                generation_parent_id: None,
-                has_new_user: true,
-                has_matching_pending_tool_result: false,
-                ingress_received_at: at,
-                canonical_fingerprint: id.into(),
                 route_id: "route".into(),
                 model_display_name: None,
                 ingress_protocol: "openai".into(),
@@ -1275,6 +1269,10 @@ mod tests {
                     start: &start,
                     metadata: None,
                     interaction_id: id,
+                    generation_root_id: None,
+                    generation_parent_id: None,
+                    has_new_user: true,
+                    ingress_received_at: at,
                     parent_run_id: None,
                     parent_interaction_id: None,
                     debug_enabled: false,
@@ -1400,12 +1398,6 @@ mod tests {
                 principal: "owner".into(),
                 api_key_id: None,
                 api_key_name: None,
-                generation_root_id: None,
-                generation_parent_id: None,
-                has_new_user: true,
-                has_matching_pending_tool_result: false,
-                ingress_received_at: at,
-                canonical_fingerprint: id.into(),
                 route_id: "route".into(),
                 model_display_name: None,
                 ingress_protocol: "openai".into(),
@@ -1415,6 +1407,10 @@ mod tests {
                     start: &start,
                     metadata: None,
                     interaction_id: id,
+                    generation_root_id: None,
+                    generation_parent_id: None,
+                    has_new_user: true,
+                    ingress_received_at: at,
                     parent_run_id: None,
                     parent_interaction_id: None,
                     debug_enabled: false,
@@ -1427,10 +1423,12 @@ mod tests {
                 })
                 .await?;
             if committed {
-                sqlx::query("UPDATE inference_run_observations SET client_output_committed=1 WHERE id=?")
-                    .bind(id)
-                    .execute(&pool)
-                    .await?;
+                sqlx::query(
+                    "UPDATE inference_run_observations SET client_output_committed=1 WHERE id=?",
+                )
+                .bind(id)
+                .execute(&pool)
+                .await?;
             }
             store
                 .finish_run(
@@ -1460,7 +1458,8 @@ mod tests {
                 .unwrap_or_else(|| panic!("summary for {id}"));
             assert_eq!(snapshot.interaction.failed_request, failed_request, "{id}");
             assert_eq!(
-                snapshot.interaction.client_output_delivered, delivered, "{id}"
+                snapshot.interaction.client_output_delivered, delivered,
+                "{id}"
             );
         }
         Ok(())
@@ -1535,17 +1534,15 @@ mod tests {
                     principal: "owner".into(),
                     api_key_id: None,
                     api_key_name: None,
-                    generation_root_id: (root_id != id).then(|| root_id.to_owned()),
-                    generation_parent_id: None,
-                    has_new_user: true,
-                    has_matching_pending_tool_result: false,
-                    ingress_received_at: now,
-                    canonical_fingerprint: id.into(),
                     route_id: "route".into(),
                     model_display_name: None,
                     ingress_protocol: "responses".into(),
                 },
                 interaction_id: id,
+                generation_root_id: (root_id != id).then_some(root_id),
+                generation_parent_id: None,
+                has_new_user: true,
+                ingress_received_at: now,
                 parent_run_id: parent,
                 parent_interaction_id: parent,
                 debug_enabled: false,

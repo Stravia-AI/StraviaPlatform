@@ -150,7 +150,7 @@ Observation 写入、SSE、Debug 分段文件、容量统计或导出失败不�
 ```text
 observe_ingress(IngressStart) -> IngressObserver
 IngressObserver.reject(RejectedOutcome)
-IngressObserver.admit(RunStart) -> RunObserver
+IngressObserver.admit(RunStart, AdmissionFacts) -> RunObserver
 RunObserver.record(RunEvent)
 RunObserver.finish(RunOutcome)
 
@@ -171,7 +171,8 @@ clear_history() -> ClearHistoryResult
 - typed `RunEvent` 表达 Model Turn、Target attempt、Platform Tool、canonical checkpoint、Client Projection、Delivery 与 usage；
 - AdminService 只调用查询、开关、清理、票据和流式导出接口；
 - Axum/Tauri adapter 不解释 Interaction 分组、Trace 完整度、ZIP 内容或保留策略；
-- Generation Chain 只提供已确认的 node/root/parent 关联，不接收运行中或失败 Observation 状态。
+- Generation Chain 只提供已确认的 node/root/parent 关联，不接收运行中或失败 Observation 状态；
+- 归并判定集中在内部 Run Attribution 深模块：writer 在 Admit 处理中把 `RunStart` 与 `AdmissionFacts`（收到的 canonical client 请求与 Generation Chain 已确认证据）交给它，canonical fingerprint、入口接收时间与合并规则只在该模块内计算；writer 保留顺序、背压、持久化与发布职责。
 
 删除旧 `logging::LogEntry`、`run_collector`、`LogStore`、`proxy::observability::send_log` 和旧 `wire_capture` 的平行写入路径。Header/URL 脱敏工具迁入 Observation 模块的单一 redaction policy；Provider/Delivery adapter 只提交原始应用协议事件。
 

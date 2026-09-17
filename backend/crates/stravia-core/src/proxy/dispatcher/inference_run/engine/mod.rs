@@ -44,7 +44,7 @@ use crate::agent::TurnInput;
 #[cfg(test)]
 use crate::db::models::Provider;
 use crate::error::{AccessDenial, AuthFailure, GatewayError};
-use crate::interaction_observation::{IngressObserver, RunEvent, RunStart};
+use crate::interaction_observation::{AdmissionFacts, IngressObserver, RunEvent, RunStart};
 use crate::model_turn::StreamResponseAccumulator;
 #[cfg(test)]
 use crate::provider::VendorRegistry;
@@ -688,21 +688,6 @@ pub(super) async fn orchestrate(
             },
         )
     });
-    let canonical_fingerprint =
-        match serde_json::to_value(&client_request).and_then(|mut canonical| {
-            canonical.sort_all_objects();
-            serde_json::to_vec(&canonical)
-        }) {
-            Ok(canonical) => stravia_runtime_contract::protocol::ir::canonical::hash_hex(
-                &stravia_runtime_contract::protocol::ir::canonical::hash_bytes(&canonical),
-            ),
-            Err(error) => {
-                ingress_observer.record(RunEvent::ObservationGap {
-                    reason: format!("canonical_fingerprint_serialization: {error}"),
-                });
-                format!("unavailable:{}", ctx.request_id)
-            }
-        };
     let (route_id, model_display_name) = gw
         .model_cache
         .read()
@@ -717,26 +702,30 @@ pub(super) async fn orchestrate(
             )
         })
         .unwrap_or_else(|| (request.model.clone(), None));
-    ingress_observer.set_client_input(client_request.items.clone());
-    let observer = ingress_observer.admit(RunStart {
-        id: ctx.request_id.clone(),
-        principal: principal.api_key_id().to_owned(),
-        api_key_id: Some(principal.api_key_id().to_owned()),
-        api_key_name: Some(api_key_name),
-        generation_root_id: generation_root_id.clone(),
-        generation_parent_id: generation_parent_id.clone(),
-        has_new_user,
-        has_matching_pending_tool_result: has_new_user
-            && (compact_pending_tool_result
-                || generation_chain_write
-                    .as_ref()
-                    .is_some_and(|write| write.has_matching_pending_tool_result())),
-        ingress_received_at: 0, // Admission replaces this with the ingress observer's receipt.
-        canonical_fingerprint,
-        route_id,
-        model_display_name,
-        ingress_protocol: ingress.to_string(),
-    });
+    // Admission carries the received client items plus the facts Generation
+    // Chain already confirmed; Run Attribution derives every grouping signal.
+    let observer = ingress_observer.admit(
+        RunStart {
+            id: ctx.request_id.clone(),
+            principal: principal.api_key_id().to_owned(),
+            api_key_id: Some(principal.api_key_id().to_owned()),
+            api_key_name: Some(api_key_name),
+            route_id,
+            model_display_name,
+            ingress_protocol: ingress.to_string(),
+        },
+        AdmissionFacts {
+            client_request: client_request.clone(),
+            has_new_user,
+            has_matching_pending_tool_result: has_new_user
+                && (compact_pending_tool_result
+                    || generation_chain_write
+                        .as_ref()
+                        .is_some_and(|write| write.has_matching_pending_tool_result())),
+            generation_root_id: generation_root_id.clone(),
+            generation_parent_id: generation_parent_id.clone(),
+        },
+    );
     // Use the received request snapshot, never restored history or hook-added results.
     // Publication waits for the observer's credential-protected preview boundary.
     observer.capture_client_tool_results(&client_request.items);
@@ -798,15 +787,6 @@ pub(super) async fn orchestrate(
         principal: principal.clone(),
         compaction_records: compaction_records.clone(),
     });
-    // 有 Generation parent 也要做尾部诊断：用来区分切模型后续接（输入含中间轮）
-    // 和从原链真实分叉（不含中间轮）。压缩请求改走 native compaction 关联。
-    if !client_request
-        .items
-        .iter()
-        .any(stravia_runtime_contract::protocol::ir::AiItem::is_compaction)
-    {
-        observer.observe_client_input(&client_request.items);
-    }
     ctx.extensions.insert(compaction_records.clone());
     if compact {
         let mut turn_input = TurnInput::new(principal.clone(), request)
