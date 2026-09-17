@@ -238,10 +238,11 @@ impl Snapshot {
         let mut merged: Vec<[u64; 2]> = Vec::with_capacity(lines.len());
         for [start, end] in lines {
             if let Some(previous) = merged.last_mut()
-                && start <= previous[1].saturating_add(1) {
-                    previous[1] = previous[1].max(end);
-                    continue;
-                }
+                && start <= previous[1].saturating_add(1)
+            {
+                previous[1] = previous[1].max(end);
+                continue;
+            }
             merged.push([start, end]);
         }
         // 最多 32 个边界；不为每一行分配索引。

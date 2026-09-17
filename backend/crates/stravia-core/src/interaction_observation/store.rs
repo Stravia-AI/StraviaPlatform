@@ -329,9 +329,10 @@ impl ObservationStore {
                 let mut connection = pool.acquire().await?;
                 let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
                 if admission.interrupt_parent
-                    && let Some(parent) = admission.parent_interaction_id {
-                        interrupt_predecessors_sqlite(&mut tx, parent, admission.now).await?;
-                    }
+                    && let Some(parent) = admission.parent_interaction_id
+                {
+                    interrupt_predecessors_sqlite(&mut tx, parent, admission.now).await?;
+                }
                 let sequence = next_sqlite(&mut tx).await?;
                 sqlx::query("INSERT OR IGNORE INTO interaction_observations (id,principal,api_key_id,api_key_name,generation_root_id,parent_interaction_id,root_id,root_run_id,first_route_id,first_model_display_name,status,started_at,last_active_at,last_event_sequence,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,'running',?,?,?,?)")
                     .bind(admission.interaction_id).bind(&admission.start.principal).bind(&admission.start.api_key_id).bind(&admission.start.api_key_name)
@@ -373,9 +374,10 @@ impl ObservationStore {
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 if admission.interrupt_parent
-                    && let Some(parent) = admission.parent_interaction_id {
-                        interrupt_predecessors_postgres(&mut tx, parent, admission.now).await?;
-                    }
+                    && let Some(parent) = admission.parent_interaction_id
+                {
+                    interrupt_predecessors_postgres(&mut tx, parent, admission.now).await?;
+                }
                 let sequence: i64 =
                     sqlx::query_scalar("SELECT nextval('observation_event_sequence')")
                         .fetch_one(&mut *tx)

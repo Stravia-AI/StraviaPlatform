@@ -15,6 +15,7 @@ import LanguageSelector from '$lib/components/language-selector.svelte'
 import PageHeader from '$lib/components/page-header.svelte'
 import ProductUpdateSettings from '$lib/components/product-update-settings.svelte'
 import RequestFailure from '$lib/components/request-failure.svelte'
+import { Badge } from '$lib/components/ui/badge'
 import { Button } from '$lib/components/ui/button'
 import * as Field from '$lib/components/ui/field'
 import { Input } from '$lib/components/ui/input'
@@ -299,7 +300,10 @@ function retrySettings(): void {
     <section id="artifacts" class="route-section scroll-mt-20 pb-8" aria-labelledby="artifacts-title">
       <div class="route-section-header">
         <div>
-          <h2 id="artifacts-title" class="route-section-title">{m.artifact_settings_title()}</h2>
+          <div class="flex items-center gap-2">
+            <h2 id="artifacts-title" class="route-section-title">{m.artifact_settings_title()}</h2>
+            <Badge variant="secondary">{m.common_beta()}</Badge>
+          </div>
           <p class="route-section-description">{m.artifact_settings_help()}</p>
         </div>
       </div>

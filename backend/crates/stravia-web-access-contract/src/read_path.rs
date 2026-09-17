@@ -447,8 +447,7 @@ fn validate_http_url(url: &str) -> Result<(), ReadPathError> {
     if parsed.scheme() != "http" && parsed.scheme() != "https" {
         return Err(ReadPathError::InvalidScheme);
     }
-    if parsed.host_str().is_none_or(|host| host.is_empty())
-        || parsed.host_str() == Some("stravia")
+    if parsed.host_str().is_none_or(|host| host.is_empty()) || parsed.host_str() == Some("stravia")
     {
         return Err(ReadPathError::InvalidScheme);
     }

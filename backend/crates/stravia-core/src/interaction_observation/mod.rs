@@ -1211,12 +1211,13 @@ impl RunObserver {
             attempt_id,
             ..
         } = &event
-            && self.flush_thinking(model_turn_id, attempt_id) {
-                self.send_event(RunEvent::ModelThinkingFinished {
-                    model_turn_id: model_turn_id.clone(),
-                    attempt_id: attempt_id.clone(),
-                });
-            }
+            && self.flush_thinking(model_turn_id, attempt_id)
+        {
+            self.send_event(RunEvent::ModelThinkingFinished {
+                model_turn_id: model_turn_id.clone(),
+                attempt_id: attempt_id.clone(),
+            });
+        }
         if let RunEvent::ClientVisibleContentDelta { text } = event {
             let ready = self
                 .inner
@@ -1327,9 +1328,10 @@ impl RunObserver {
             *self.inner.failure.lock().expect("request failure") = Some(error.clone());
         }
         if matches!(event, RunEvent::ObservationGap { .. })
-            && let Some(trace) = &self.inner.trace {
-                trace.mark_partial("observation_gap", false);
-            }
+            && let Some(trace) = &self.inner.trace
+        {
+            trace.mark_partial("observation_gap", false);
+        }
         if matches!(event, RunEvent::Checkpoint { .. } | RunEvent::Wire { .. }) {
             if let Some(trace) = &self.inner.trace {
                 // Trace owns its queue. The next durable observation boundary includes this
@@ -1404,23 +1406,23 @@ impl RunObserver {
                         outcome,
                         finished_at,
                     })
-                && let WriterCommand::Finish {
-                    outcome,
-                    finished_at,
-                    ..
-                } = error.into_inner()
-                {
-                    *self.inner.pending_finish.lock().expect("terminal state") =
-                        Some((outcome, finished_at));
-                    self.inner.gap.store(true, Ordering::Release);
-                    self.inner
-                        .observation
-                        .inner
-                        .unpersisted_gaps
-                        .lock()
-                        .expect("observation gaps")
-                        .record(&self.inner.run_id, writer::now());
-                }
+            && let WriterCommand::Finish {
+                outcome,
+                finished_at,
+                ..
+            } = error.into_inner()
+        {
+            *self.inner.pending_finish.lock().expect("terminal state") =
+                Some((outcome, finished_at));
+            self.inner.gap.store(true, Ordering::Release);
+            self.inner
+                .observation
+                .inner
+                .unpersisted_gaps
+                .lock()
+                .expect("observation gaps")
+                .record(&self.inner.run_id, writer::now());
+        }
     }
 }
 impl Drop for RunObserverInner {
@@ -1473,9 +1475,9 @@ impl Drop for RunObserverInner {
                     event: RunEvent::ClientVisibleContentDelta { text },
                 })
                 .is_err()
-            {
-                *self.gap.get_mut() = true;
-            }
+        {
+            *self.gap.get_mut() = true;
+        }
         let mut pending_finish = self
             .pending_finish
             .get_mut()
@@ -1693,9 +1695,9 @@ fn collect_captured_artifacts(
                 && let Some(reference) = object
                     .get("artifact_reference")
                     .and_then(serde_json::Value::as_str)
-                {
-                    references.insert(reference.to_owned());
-                }
+            {
+                references.insert(reference.to_owned());
+            }
             for value in object.values() {
                 collect_captured_artifacts(value, references);
             }
@@ -1707,9 +1709,10 @@ fn collect_captured_artifacts(
         }
         serde_json::Value::String(text) => {
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(text)
-                && !value.is_string() {
-                    collect_captured_artifacts(&value, references);
-                }
+                && !value.is_string()
+            {
+                collect_captured_artifacts(&value, references);
+            }
         }
         _ => {}
     }

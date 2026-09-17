@@ -47,6 +47,7 @@ impl ProviderStore for PostgresProviderStore {
         .bind(input.static_models)
         .bind(input.api_key)
         .bind(input.adapter_credentials)
+        .bind(input.vendor_options)
         .bind(input.auth_mode)
         .bind(input.use_proxy)
         .execute(&self.pool)

@@ -93,7 +93,7 @@ pub(crate) fn take_rejection_observer(response: &mut Response) -> Option<Ingress
     let pending = response
         .extensions_mut()
         .remove::<Arc<Mutex<Option<IngressObserver>>>>()?;
-    
+
     pending.lock().expect("rejection observation").take()
 }
 

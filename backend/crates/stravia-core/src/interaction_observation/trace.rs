@@ -445,42 +445,41 @@ impl TraceHandle {
         if matches!(
             record.message_type.as_deref(),
             Some("body_chunk" | "sse_chunk")
-        )
-            && let Some(text) = record.payload.as_str() {
-                let key = format!(
-                    "{}:{}:{}",
-                    record.direction.as_deref().unwrap_or_default(),
-                    record.attempt_id.as_deref().unwrap_or_default(),
-                    record.message_type.as_deref().unwrap_or_default()
-                );
-                let mut pending = self
-                    .state
-                    .wire_pending
-                    .lock()
-                    .expect("wire capture fragments");
-                let (buffer, _) = pending.entry(key.clone()).or_insert_with(|| {
-                    let mut template = record.clone();
-                    template.payload = Value::Null;
-                    (String::new(), template)
-                });
-                buffer.push_str(text);
-                if buffer.len() as u64 > WIRE_MESSAGE_LIMIT_BYTES {
-                    pending.remove(&key);
-                    self.mark_partial("structured_wire_capture_limit", false);
-                    return TraceWriteOutcome::Partial("structured_wire_capture_limit");
-                }
-                let complete = serde_json::from_str::<Value>(buffer).is_ok()
-                    || ((buffer.starts_with("data:")
-                        || buffer.starts_with("event:")
-                        || buffer.starts_with(':'))
-                        && (buffer.ends_with("\n\n") || buffer.ends_with("\r\n\r\n")));
-                if !complete {
-                    return TraceWriteOutcome::Queued;
-                }
-                record.payload =
-                    Value::String(pending.remove(&key).expect("complete wire message").0);
-                record.representation = "reassembled_application_message".into();
+        ) && let Some(text) = record.payload.as_str()
+        {
+            let key = format!(
+                "{}:{}:{}",
+                record.direction.as_deref().unwrap_or_default(),
+                record.attempt_id.as_deref().unwrap_or_default(),
+                record.message_type.as_deref().unwrap_or_default()
+            );
+            let mut pending = self
+                .state
+                .wire_pending
+                .lock()
+                .expect("wire capture fragments");
+            let (buffer, _) = pending.entry(key.clone()).or_insert_with(|| {
+                let mut template = record.clone();
+                template.payload = Value::Null;
+                (String::new(), template)
+            });
+            buffer.push_str(text);
+            if buffer.len() as u64 > WIRE_MESSAGE_LIMIT_BYTES {
+                pending.remove(&key);
+                self.mark_partial("structured_wire_capture_limit", false);
+                return TraceWriteOutcome::Partial("structured_wire_capture_limit");
             }
+            let complete = serde_json::from_str::<Value>(buffer).is_ok()
+                || ((buffer.starts_with("data:")
+                    || buffer.starts_with("event:")
+                    || buffer.starts_with(':'))
+                    && (buffer.ends_with("\n\n") || buffer.ends_with("\r\n\r\n")));
+            if !complete {
+                return TraceWriteOutcome::Queued;
+            }
+            record.payload = Value::String(pending.remove(&key).expect("complete wire message").0);
+            record.representation = "reassembled_application_message".into();
+        }
         self.queue_record(record)
     }
 
@@ -724,9 +723,7 @@ async fn writer_loop(inner: Arc<ManagerInner>, mut rx: mpsc::Receiver<WriterComm
                 let root = inner.root.clone();
                 let result = tokio::task::spawn_blocking(move || clear_managed_directories(&root))
                     .await
-                    .map_err(|error| {
-                        io::Error::other(format!("trace clear task failed: {error}"))
-                    })
+                    .map_err(|error| io::Error::other(format!("trace clear task failed: {error}")))
                     .and_then(|result| result);
                 if result.is_ok() {
                     inner.actual_retained.store(0, Ordering::Release);
@@ -759,9 +756,10 @@ impl ActiveWriter {
     async fn write_record(&mut self, bytes: &[u8]) -> Result<u64, WriteFailure> {
         if self.segment_bytes > 0
             && self.segment_bytes.saturating_add(bytes.len() as u64) > SEGMENT_LIMIT_BYTES
-            && (self.flush().await.is_err() || self.rotate().await.is_err()) {
-                return Err(WriteFailure { written: 0 });
-            }
+            && (self.flush().await.is_err() || self.rotate().await.is_err())
+        {
+            return Err(WriteFailure { written: 0 });
+        }
         use tokio::io::AsyncWriteExt;
         let mut written = 0usize;
         while written < bytes.len() {

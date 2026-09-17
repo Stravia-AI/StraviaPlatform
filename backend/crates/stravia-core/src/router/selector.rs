@@ -1179,7 +1179,7 @@ mod tests {
                         now_ms: 0,
                         jitter_sample: 1.0,
                     },
-            ),
+                ),
                 AttemptFailureDisposition::RetrySame {
                     delay: Duration::from_millis(cap_ms),
                 }

@@ -71,12 +71,14 @@ pub fn parse_response(body: &str) -> anyhow::Result<EngineResponse> {
                             description.push_str(&t.text);
                         }
                         scraper::Node::Element(inner_el)
-                            if !inner_el
-                                .has_class("algoSlug_icon", scraper::CaseSensitivity::CaseSensitive)
-                            => {
-                                let element_ref = ElementRef::wrap(inner_node).unwrap();
-                                description.push_str(&element_ref.text().collect::<String>());
-                            }
+                            if !inner_el.has_class(
+                                "algoSlug_icon",
+                                scraper::CaseSensitivity::CaseSensitive,
+                            ) =>
+                        {
+                            let element_ref = ElementRef::wrap(inner_node).unwrap();
+                            description.push_str(&element_ref.text().collect::<String>());
+                        }
                         _ => {}
                     }
                 }

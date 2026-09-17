@@ -409,9 +409,9 @@ fn validate_field_types(obj: &serde_json::Map<String, Value>) -> Result<()> {
         && stream_options
             .get("include_obfuscation")
             .is_some_and(|value| !value.is_boolean())
-        {
-            anyhow::bail!("'stream_options.include_obfuscation' must be a boolean");
-        }
+    {
+        anyhow::bail!("'stream_options.include_obfuscation' must be a boolean");
+    }
     if let Some(text) = obj.get("text").and_then(Value::as_object) {
         if let Some(verbosity) = text.get("verbosity")
             && !verbosity.is_null()

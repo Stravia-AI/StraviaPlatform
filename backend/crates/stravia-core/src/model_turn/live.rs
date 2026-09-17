@@ -654,7 +654,7 @@ async fn execute_inner(
                             context: attempt_context.clone(),
                         },
                     );
-                    
+
                     if target.first_token_timeout_ms == 0 {
                         attempt.await
                     } else {
@@ -2279,5 +2279,4 @@ mod tests {
 
         assert!(!health.is_healthy("provider:model"));
     }
-
 }

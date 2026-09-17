@@ -289,17 +289,17 @@ def test_projected_reasoning_links_diagnostics_after_model_instruction_change(di
     replay = [changed_system, question, returned, follow_up]
     final_answer = _answer(_text("current environment answer"))
     # The provider must receive the restored reasoning, not the public projection
-    # or the previous system instructions.
+    # or the previous system instructions. The chat-completions wire folds a
+    # standalone reasoning item into the following assistant message's
+    # `reasoning_content` (strict upstreams reject content-less messages).
     restored = [
         changed_system,
         question,
         {
             "role": "assistant",
-            "provenance": "provider",
-            "audience": "internal",
+            "content": upstream_answer["content"],
             "reasoning_content": upstream_answer["reasoning_content"],
         },
-        _answer(upstream_answer["content"]),
         follow_up,
     ]
     conversation.accepted[_semantic(restored)] = final_answer
@@ -410,10 +410,13 @@ def test_equal_strength_sources_remain_ambiguous_not_latest_parent(diagnostic_pr
 def test_incomplete_index_and_oversized_search_leave_inference_unchanged(diagnostic_provider) -> None:
     conversation = diagnostic_provider("resource")
     retained, _ = _seed(conversation)
-    _, oversized = conversation.send([_user("x" * (600 * 1024)), *retained, _user("large supplied context")])
+    # A single unit over the byte budget still fails closed: no diagnostic
+    # window is captured, so the run reports resource_limit and cannot become
+    # a fingerprint source for later requests.
+    _, oversized = conversation.send([*retained, _user("x" * (600 * 1024))])
     _diagnostic(conversation, oversized, "resource_limit")
-    # Fingerprints ignore the oversized source whose last unit is not in this
-    # window. The original retained source remains uniquely verifiable.
+    # The windowless oversized run leaves no candidate behind. The original
+    # retained source remains uniquely verifiable.
     _, incomplete = conversation.send([_user("small summary"), *retained, _user("small supplied context")])
     event = _diagnostic(conversation, incomplete, "inferred")
     assert event["source_interaction_id"] is not None

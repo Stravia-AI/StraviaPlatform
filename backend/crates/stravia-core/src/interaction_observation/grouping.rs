@@ -277,9 +277,11 @@ pub(super) fn resolved_client_tool_runs<'a>(
             }
         } else if let Some((owner, sequence, returned)) =
             event.tool_id.and_then(|id| calls.get_mut(id))
-            && *owner != event.run_id && event.sequence > *sequence {
-                *returned = true;
-            }
+            && *owner != event.run_id
+            && event.sequence > *sequence
+        {
+            *returned = true;
+        }
     }
     for (run, _, returned) in calls.into_values() {
         if !returned {

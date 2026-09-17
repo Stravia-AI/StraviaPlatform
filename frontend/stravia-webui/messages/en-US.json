@@ -1328,6 +1328,7 @@
   ],
   "common_close": "Close",
   "common_base_url": "Base URL",
+  "common_beta": "Beta",
   "common_interleaved": "Interleaved",
   "model_editor_modality_input": "{modality} input",
   "connect_tool_claude_description": "Anthropic official coding CLI assistant",

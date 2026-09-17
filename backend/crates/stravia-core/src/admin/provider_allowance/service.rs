@@ -23,9 +23,11 @@ use crate::db::models::Provider;
 
 use super::samples::{AllowanceSample, AllowanceSampleStore, SAMPLE_RETENTION_MILLIS};
 use super::{
-    Allowance, AllowanceCondition, ExhaustionForecast, ExhaustionForecastStatus, MonitorKind,
-    ParsedAllowance, ProviderAllowanceError, ProviderAllowanceErrorCategory,
-    ProviderAllowanceSnapshot, ProviderAllowanceStatus, monitor_for, parse_minimax_fallback,
+    Allowance, AllowanceCondition, CommandCodeSubscription, ExhaustionForecast,
+    ExhaustionForecastStatus, MonitorKind, ParsedAllowance, ProviderAllowanceError,
+    ProviderAllowanceErrorCategory, ProviderAllowanceSnapshot, ProviderAllowanceStatus,
+    commandcode_billing_cycle, monitor_for, parse_commandcode_org_id,
+    parse_commandcode_subscription, parse_commandcode_summary_cost, parse_minimax_fallback,
     parse_monitor_response,
 };
 
@@ -76,7 +78,7 @@ struct CacheEntry {
 
 pub(super) struct AllowanceHttpRequest {
     pub method: Method,
-    pub url: &'static str,
+    pub url: String,
     pub headers: HeaderMap,
     pub body: Vec<u8>,
 }
@@ -741,23 +743,17 @@ pub(super) async fn fetch_monitor(
     client: reqwest::Client,
     transport: Arc<dyn AllowanceTransport>,
 ) -> Result<ParsedAllowance, ProviderAllowanceError> {
+    if monitor == MonitorKind::CommandCode {
+        return fetch_commandcode(use_proxy, &credential, client, transport).await;
+    }
+
     let requests = monitor_requests(monitor, &credential, &extra_headers)?;
     let request_count = requests.len();
     for (index, request) in requests.into_iter().enumerate() {
         let response = transport
             .execute(client.clone(), use_proxy, request)
             .await
-            .map_err(|failure| {
-                safe_error(match failure {
-                    TransportFailure::Timeout => ProviderAllowanceErrorCategory::Timeout,
-                    TransportFailure::Unavailable => {
-                        ProviderAllowanceErrorCategory::UpstreamUnavailable
-                    }
-                    TransportFailure::InvalidResponse => {
-                        ProviderAllowanceErrorCategory::InvalidResponse
-                    }
-                })
-            })?;
+            .map_err(transport_error)?;
         if !response.status.is_success() {
             if request_count > 1 && index == 0 && response.status == StatusCode::NOT_FOUND {
                 continue;
@@ -868,6 +864,17 @@ pub(super) fn monitor_requests(
             vec!["https://grok.com/grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig"],
             vec![0, 0, 0, 0, 0],
         ),
+        // 顺序即 fetch_commandcode 的调用顺序:whoami → credits → subscriptions → summary。
+        MonitorKind::CommandCode => (
+            Method::GET,
+            vec![
+                "https://api.commandcode.ai/alpha/whoami",
+                "https://api.commandcode.ai/alpha/billing/credits",
+                "https://api.commandcode.ai/alpha/billing/subscriptions",
+                "https://api.commandcode.ai/alpha/usage/summary",
+            ],
+            Vec::new(),
+        ),
     };
 
     let mut requests = Vec::with_capacity(urls.len());
@@ -940,12 +947,126 @@ pub(super) fn monitor_requests(
         }
         requests.push(AllowanceHttpRequest {
             method: method.clone(),
-            url,
+            url: url.to_string(),
             headers,
             body: body.clone(),
         });
     }
     Ok(requests)
+}
+
+fn transport_error(failure: TransportFailure) -> ProviderAllowanceError {
+    safe_error(match failure {
+        TransportFailure::Timeout => ProviderAllowanceErrorCategory::Timeout,
+        TransportFailure::Unavailable => ProviderAllowanceErrorCategory::UpstreamUnavailable,
+        TransportFailure::InvalidResponse => ProviderAllowanceErrorCategory::InvalidResponse,
+    })
+}
+
+async fn execute_allowance_request(
+    transport: &Arc<dyn AllowanceTransport>,
+    client: &reqwest::Client,
+    use_proxy: bool,
+    request: AllowanceHttpRequest,
+) -> Result<AllowanceHttpResponse, ProviderAllowanceError> {
+    let response = transport
+        .execute(client.clone(), use_proxy, request)
+        .await
+        .map_err(transport_error)?;
+    if !response.status.is_success() {
+        return Err(error_for_status(response.status));
+    }
+    Ok(response)
+}
+
+fn with_commandcode_params(
+    mut request: AllowanceHttpRequest,
+    org_id: Option<&str>,
+    since: Option<&str>,
+) -> AllowanceHttpRequest {
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    for (key, value) in [("orgId", org_id), ("since", since)]
+        .into_iter()
+        .filter_map(|(key, value)| value.map(|value| (key, value)))
+    {
+        serializer.append_pair(key, value);
+    }
+    let query = serializer.finish();
+    if !query.is_empty() {
+        request.url = format!("{}?{}", request.url, query);
+    }
+    request
+}
+
+/// Command Code 的额度链路:`whoami` 解析组织上下文(多组织账号需要 orgId
+/// 选择归属),`billing/credits` 提供 5h/weekly 窗口与点数余额,
+/// `billing/subscriptions` 与 `usage/summary` 提供套餐与本期用量。
+/// 后两者失败只损失增强信息,不影响核心额度。
+async fn fetch_commandcode(
+    use_proxy: bool,
+    credential: &str,
+    client: reqwest::Client,
+    transport: Arc<dyn AllowanceTransport>,
+) -> Result<ParsedAllowance, ProviderAllowanceError> {
+    let mut requests =
+        monitor_requests(MonitorKind::CommandCode, credential, &HashMap::new())?.into_iter();
+    let (Some(whoami), Some(credits), Some(subscriptions), Some(summary)) = (
+        requests.next(),
+        requests.next(),
+        requests.next(),
+        requests.next(),
+    ) else {
+        return Err(safe_error(ProviderAllowanceErrorCategory::InvalidResponse));
+    };
+
+    let whoami = execute_allowance_request(&transport, &client, use_proxy, whoami).await?;
+    let org_id = parse_commandcode_org_id(&whoami.body);
+
+    let credits = with_commandcode_params(credits, org_id.as_deref(), None);
+    let credits = execute_allowance_request(&transport, &client, use_proxy, credits).await?;
+    let mut parsed = parse_monitor_response(MonitorKind::CommandCode, &credits.body)
+        .map_err(|_| safe_error(ProviderAllowanceErrorCategory::InvalidResponse))?;
+
+    let subscriptions = with_commandcode_params(subscriptions, org_id.as_deref(), None);
+    let subscription: Option<CommandCodeSubscription> =
+        execute_allowance_request(&transport, &client, use_proxy, subscriptions)
+            .await
+            .ok()
+            .and_then(|response| parse_commandcode_subscription(&response.body));
+    if let Some(subscription) = &subscription {
+        parsed.plan_label = subscription.plan_label.clone();
+    }
+
+    // 不带 since 的 summary 无法区分账期,总花费会混进历史用量。
+    if let Some(subscription) = &subscription
+        && let Some(period_start) = subscription.period_start_raw.as_deref()
+    {
+        let summary = with_commandcode_params(summary, org_id.as_deref(), Some(period_start));
+        if let Ok(response) =
+            execute_allowance_request(&transport, &client, use_proxy, summary).await
+            && let Some(spent) = parse_commandcode_summary_cost(&response.body)
+            && let Some(remaining) = parsed
+                .allowances
+                .iter()
+                .find(|allowance| allowance.key == "credits_balance")
+                .and_then(|allowance| allowance.remaining.as_ref())
+                .map(|amount| amount.value)
+            && let Some(period_end) = subscription.period_end
+        {
+            let window_seconds = subscription
+                .period_start
+                .filter(|start| period_end > *start)
+                .and_then(|start| u64::try_from((period_end - start) / 1000).ok());
+            parsed.allowances.push(commandcode_billing_cycle(
+                spent,
+                remaining,
+                Some(period_end),
+                window_seconds,
+            ));
+        }
+    }
+
+    Ok(parsed)
 }
 
 fn grpc_status_error(headers: &HeaderMap) -> Option<ProviderAllowanceError> {

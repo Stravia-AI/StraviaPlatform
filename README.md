@@ -1,24 +1,35 @@
-<h1 align="center">Stravia</h1>
+<div align="center">
 
-<p align="center">
-  Local, self-hostable Agent infra — model access, tool execution, and built-in agent runtime with shared access controls, history, and observability.
-</p>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="frontend/stravia-webui/static/stravia-logo-reversed.svg">
+  <source media="(prefers-color-scheme: light)" srcset="frontend/stravia-webui/static/stravia-logo.svg">
+  <img alt="Stravia" src="frontend/stravia-webui/static/stravia-logo.svg" width="96">
+</picture>
 
-<p align="center">
-  <a href="README_CN.md">中文文档</a>
-</p>
+<h1>Stravia</h1>
 
-> **Project status:** Stravia is at `0.1.0` and under active development. Configuration and database compatibility may change before a stable release.
+**Local agent infrastructure — one endpoint for every AI client.**<br>
+Unified model access, tools that run for you, and shared access control,<br>
+history, and usage — desktop app or single binary.
 
-## Overview
+[![Release](https://img.shields.io/github/v/release/Stravia-AI/StraviaPlatform)](https://github.com/Stravia-AI/StraviaPlatform/releases)
+[![License: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-blue)](LICENSE)
+[![CI](https://github.com/Stravia-AI/StraviaPlatform/actions/workflows/ci.yml/badge.svg)](https://github.com/Stravia-AI/StraviaPlatform/actions/workflows/ci.yml)
+[![Rust](https://img.shields.io/badge/rust-1.98.1-orange)](rust-toolchain.toml)
 
-Stravia is **Agent infra (agent infrastructure)** for developers using AI coding clients or building agent-powered applications. It brings model access, platform-owned tool execution, and bounded built-in agent loops into one locally deployable system.
+[Releases](https://github.com/Stravia-AI/StraviaPlatform/releases) · [Changelog](CHANGELOG.md) · [中文文档](README_CN.md)
 
-The protocol gateway is its model-access layer, not the whole product. Clients keep speaking the protocol they already support; Stravia resolves a virtual model, selects an upstream backend, and translates requests and responses when necessary.
+</div>
 
-The execution layer runs platform-owned tools and feeds their results back into subsequent model turns. Its bounded Agent Runner powers local agentic Web Search and is also used by Media Understanding. These capabilities are available through compatible model requests and MCP. Shared identity, access controls, history, usage accounting, and diagnostics let developers manage model access and platform execution together.
+![Request Records — every client request, traced live](docs/assets/request-records.png)
 
-Agent behavior is defined and versioned by the platform implementation. Administrators configure supported capability settings and model bindings; Stravia is not a user-defined agent or visual workflow builder.
+> **Status:** Stravia is pre-1.0 and under active development. Configuration and database compatibility may change before a stable release.
+
+## What is Stravia
+
+Stravia is local, self-hostable **agent infrastructure** for developers who use AI coding clients or build agent-powered apps. Your clients keep the protocol they already speak — OpenAI, Anthropic, or Gemini — and simply point at Stravia. Stravia decides which upstream service should answer and translates between protocols when needed.
+
+On top of model access, the platform runs tools itself: built-in web search and media understanding execute inside Stravia and hand results back to the model — through ordinary model requests or MCP, no client plugins required. Access control, request history, usage, and diagnostics all live in the same place.
 
 ```text
 Claude Code · Codex CLI · Gemini CLI · OpenCode · SDKs
@@ -37,26 +48,49 @@ Claude Code · Codex CLI · Gemini CLI · OpenCode · SDKs
  OpenAI · Anthropic · Google · Vertex AI · DeepSeek · Ollama · …
 ```
 
-The same Rust core powers two deployment modes:
+Agent behavior is defined and versioned by the platform — Stravia is not a user-defined agent or visual workflow builder.
 
-- **Desktop:** a Tauri application that runs the platform locally with an integrated management interface.
-- **Server:** a standalone binary that runs the same platform capabilities and serves the proxy API, MCP, Admin API, health probes, and an embedded WebUI from one listener.
+## Why Stravia
 
-On Windows, the transparent Cadence taskbar and tray mark switches between black and white with the system color mode, including while hidden in the tray. Pinned shortcuts use the static application icon when Stravia is not running.
+- **Drop-in endpoint for AI coding clients** — point Claude Code, Codex CLI, Gemini CLI, or OpenCode at `127.0.0.1:23471` and keep working. Each client keeps its own protocol; Stravia handles translation, routing, and failover.
+- **Tools that run for you** — built-in web search (embedded [Moli](https://github.com/Stravia-AI/moli-stealth) engine with V8 rendering — no Chrome install, no sidecar) and image understanding execute inside Stravia and hand results back to the model. Expose them over MCP or add them automatically to compatible requests.
+- **Keys, spend, and request history in one place** — give each app its own key with model and concurrency limits, see the usage providers actually report, watch every request live, and download a full debug bundle when something goes wrong.
+- **Local-first, one Rust core** — a desktop app or a headless server binary; SQLite by default, PostgreSQL for teams; local or S3 file storage. No cloud dependency.
 
-## Current Capabilities
+## Quick Start
 
-### Platform tools and built-in agent execution
+**Desktop** — download the Windows (NSIS) or Linux (AppImage) installer from [GitHub Releases](https://github.com/Stravia-AI/StraviaPlatform/releases) and open it. The full platform runs locally with an integrated management UI. macOS builds are not currently provided.
 
-- **Platform-owned tool execution:** expose tools to compatible model requests, execute platform tool calls inside Stravia, and continue model turns with their results. Client-owned tool calls remain the client's responsibility.
-- **Bounded agent loops:** coordinate model and tool turns with time, turn, token, and tool budgets, controlled tool concurrency, cancellation, and validated outputs.
-- **Built-in capabilities:** `StraviaRead` accepts one `path` for files, webpages, `search://` research, and supported images. Text has immutable snapshot pagination; search and media requests support explicit continuation through `previous_turn_id` inside the path.
-- **MCP and transparent injection:** expose enabled capabilities to MCP clients, or inject selected capabilities into compatible model requests according to configuration.
-- **Execution management:** associate requests and nested executions with the calling Principal, enforce access and concurrency limits, and track history, confirmed upstream usage, and diagnostics.
+**Server** — one container:
 
-Local Web Search uses a model–tool loop; current Media Understanding reuses the Agent Runner without its own tool calls. The capability sections below describe their supported inputs, configuration, and limits.
+```bash
+docker run --rm \
+  --publish 127.0.0.1:23471:23471 \
+  --mount source=stravia-data,target=/data \
+  ghcr.io/stravia-ai/straviaplatform:latest
+```
 
-### Protocol gateway
+or `nix run github:Stravia-AI/StraviaPlatform`, or a platform archive from Releases (verify against `SHA256SUMS`).
+
+**First run (both):**
+
+1. Open <http://127.0.0.1:23471/setup> and paste the one-time setup token printed to the console. Pick SQLite or PostgreSQL and create the administrator.
+2. **Add a provider** — API key or OAuth channel (Codex, Claude Code, Grok device flow). Stravia syncs the available model inventory.
+3. **Add a model** — select upstream model IDs; the Model ID is the route clients call.
+4. **Create an API key**, then open **Connect clients** — Stravia generates a ready-to-apply provider patch for Claude Code, Codex CLI, Gemini CLI, or OpenCode; the desktop app can write the config for you.
+
+Then call it through any supported protocol:
+
+```bash
+curl http://127.0.0.1:23471/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_PROXY_KEY" \
+  -d '{"model": "my-model", "messages": [{"role": "user", "content": "Hello"}]}'
+```
+
+## Features
+
+### Unified model access
 
 | Client-facing protocol    | Endpoint                                               |
 | ------------------------- | ------------------------------------------------------ |
@@ -67,555 +101,70 @@ Local Web Search uses a model–tool loop; current Media Understanding reuses th
 | Gemini GenerateContent    | `POST /v1beta/models/{model}:generateContent`          |
 | Gemini streaming          | `POST /v1beta/models/{model}:streamGenerateContent`    |
 
-Stravia supports JSON, SSE, and Open Responses WebSocket delivery, cross-protocol tool calls, reasoning content, usage data, and same-protocol pass-through when an upstream requires no mutation.
-
-Open Responses reasoning content streams with the rolling `response.reasoning_text.delta` / `response.reasoning_text.done` event names used by current clients; the reasoning item and dated `2026-04-24` semantics remain unchanged.
-
-Generic Thinking output uses `reasoning.content` in both streaming and non-streaming Responses. Saved client history uses the same representation, so exact tool-result replays continue from the immediately preceding response instead of splitting Interactions or branching from an older response. Native reasoning summaries and full content remain distinct; existing history and observation links are not rewritten.
-
-Platform-owned random opaque IDs are exactly 28 lowercase ASCII letters, sampled uniformly with a cryptographically secure random generator (approximately 131.6 bits). Complete SHA-256-derived identities use 55 lowercase ASCII letters without truncating the 256-bit digest. Their protocol shells are distinct: Artifact references are `sa:<55-letter ID>` with optional query parameters and no fragment; History Markers are `<!--sh:<28-letter ID>-->`; Projection Delimiters are `<!--sp:<28-letter ID>:<t|p>:<ordinal>:<s|e>-->`; and reversible-redaction references are `<!--sr:<28-letter ID>-->`. A shell does not grant access. External provider/client IDs, Codex UUID request/connection metadata, and real credential tokens retain their protocol-defined formats. This is a clean-database cutover for new deployments, not an in-place migration: former platform IDs and shells are incompatible and immutable or external histories are not rewritten. Preserve old databases and user data separately rather than deleting them, and begin new conversations against the clean database.
-
-Protocol-repair locators remain deterministic and request-local; they are not persistent identities or content digests. Structured locators retain the fields needed for correlation: Open Responses items use `<type>_<exact response ID>_<ordinal>`, and search citations use `[sc:<turn ID>:<ordinal>]`. Media citations use `[sa:<Artifact ID>]`; bridge hints use `[sm:sa:<Artifact ID> <MIME> <ordinal>]` and `[st:<turn ID> <completion>]`, optionally including one `sa:<Artifact ID>` after completion inside the same brackets. These locators do not allocate a second identity or grant access.
-
-Hidden Platform Tool continuations are projected into client history with HTML-comment History Markers. OpenAI-compatible Chat Completions keep pre-answer Thinking in `reasoning_content`; public Open Responses summary deltas remain live when encrypted reasoning was not requested, while protected reasoning identified at item start also streams its public summary and keeps opaque bytes behind the Marker. After the first non-empty `content` delta, later Thinking is streamed in `content` as a Markdown blockquote Preview and all later Thinking and Platform Markers also use `content` so field aggregation preserves order. Plain-text clients may display those raw Marker comments. Open Responses, Anthropic Messages, and Gemini retain native ordered reasoning/thinking carriers; an ordering the selected protocol cannot represent fails explicitly rather than delaying ordinary Text.
-
-OpenAI-compatible Thinking previews separate independent blocks and summary/content parts with Markdown paragraph breaks; deltas within the same part remain contiguous. Each authoritative Thinking block has its own History Marker, including public unsigned Thinking; parts within one block share that Marker. Paragraph spacing belongs only to the Preview, not the original Thinking. Streaming and non-streaming delivery produce the same visible layout.
-
-Clients that resubmit full history must preserve History Markers and Projection Delimiters verbatim. Stravia removes display-only Preview bytes, including added paragraph spacing, and restores authoritative Thinking, ToolCall, and ToolResult segments at their original positions. Thinking text retains its original whitespace and part boundaries; compatible upstream replay uses the original signatures or encrypted content rather than the displayed Markdown. Removing a Marker or Delimiter is treated as an intentional history edit. With client streaming disabled, Stravia executes Platform-only hidden rounds before returning one semantically equivalent buffered projection. Live streams deliver and publish each Marker before starting its Platform Tool.
-
-Changing Targets prioritizes continuing the conversation. Historical reasoning with a compatible Target/account/configuration/model/protocol source is replayed natively; otherwise Stravia keeps its visible text and omits unusable ciphertext or signatures from that Target's request only. Original history remains intact: returning to the compatible source can reuse its ciphertext while the history and Markers remain available, including after a restart. Missing legacy source information is not invented; same-protocol replay may be attempted, while cross-protocol replay degrades conservatively. An explicit encrypted-content or thinking-signature rejection before any output permits one replay without protected reasoning, not a general error retry. This policy does not weaken tool, ordinary-message, or native-compaction requirements.
-
-OpenAI direct and Codex OAuth generation Targets use the upstream Responses WebSocket transport for Chat Completions, Open Responses, Anthropic Messages, and Gemini requests, regardless of client streaming mode. Embeddings remain HTTP-only. After Hooks and protocol representability checks, Stravia may continue from the longest exact reusable canonical item prefix; Principal, exact Target, Provider account/configuration, resolved model, instructions, tools, reasoning, response format, and request controls must all match. A mismatch sends the full Target-adapted history; reasoning degradation never reuses an incompatible continuation prefix.
-
-`POST /v1/responses` uses Open Responses 2026-04-24 as its canonical baseline while accepting structurally safe rolling additive fields and hosted-tool declarations. Same-protocol Targets preserve that compatibility envelope; cross-protocol Targets may omit advisory fields and optional hosted tools, but never ordinary content or hard constraints. Historical thinking follows the Target-specific replay policy above. Background execution remains unsupported.
-
-Client-initiated remote compaction is forwarded to the normally selected Target. `POST /v1/responses/compact` is a separate HTTP unary operation and returns the complete next window, including retained items and opaque state. Replay that window without pruning or rewriting it. Responses also carries native compaction items, in-band triggers, and client-supplied `context_management` controls. These are hard protocol requirements: an unrepresentable Target protocol returns unsupported rather than silently discarding them. A compact operation is not an empty Generation.
-
-Stravia does not provide platform-level compaction settings, inject default compaction controls, or generate local summaries. Unknown Target compaction capability does not block forwarding: the upstream decides whether to accept the request, including its client-supplied threshold. Success and errors are returned to the client without retrying or switching Targets to complete compaction. Explicit empty/null controls remain client-owned.
-
-For Codex OAuth, prefer V2 remote compaction through Responses with `compaction_trigger`. A native state delivered by `response.output_item.done` remains valid when the terminal response omits it; an explicitly repeated state must still match. Availability of the standalone compact endpoint is upstream-specific: an upstream 404 remains an error, not a synthetic success or an implicit switch to V2.
-
-Registered native states preserve their known ancestry across restarts within retention, without restoring removed history. Their Target, account/configuration generation, model, and protocol must remain compatible. Monitoring distinguishes confirmed generation ancestry, native bridges, and inferred retained-tail associations; inferred links never affect inference or enable Target Continuation. Clearing monitoring history does not delete valid native state mappings. Ordinary monitoring excludes opaque payloads and reports unreported compaction usage as unknown.
-
-Automatic history-parent discovery compares complete message semantics, not tracking metadata. A client may omit application metadata and internal tracking fields without breaking an otherwise exact history prefix; message roles, content, tool-call/result associations, protected reasoning, native compaction state, and unclassified protocol extensions remain significant. Existing history-prefix indexes are rebuilt under the current semantics at startup without rewriting original history or parent links; upstream continuation still requires compatible Targets and request controls.
-
-When a client switches models and updates its leading instructions, an unchanged complete interaction—including public thinking previews and their History Markers—can still support a diagnostic association with a unique source under the same API Key. This does not establish an execution parent. Edited previews or markers, private reasoning, ambiguous evidence, or an unavailable process-local index do not qualify; existing request records are not backfilled.
-
-When a WebSocket client disconnects while an Interaction is waiting for its tool results, Request Records changes the affected waiting leaf branches to **Disconnected**. Successfully delivered responses and their Generation Chain remain available for later continuation. Normal HTTP/SSE response completion does not prove that the client is offline; older records without a known connection association are not backfilled.
-
-Once every client tool call from a waiting branch has an unambiguous later result within the same Interaction, that branch no longer blocks completion, even when the results arrive on a sibling Run. On restart, Request Records reconciles these completed waits and marks unresolved waiting leaves from the previous process **Interrupted** (`process_restarted`), without deleting history or changing delivered responses. Valid later continuations remain supported.
+Cross-protocol tool calls, reasoning, and usage reporting are preserved; requests that need no changes pass through as-is.
 
 ### Providers and model routing
 
-Built-in provider metadata currently covers:
+OpenAI (incl. Codex OAuth) · Anthropic (incl. Claude Code OAuth) · Google Gemini + Vertex AI · DeepSeek · Moonshot AI · Zhipu AI · Z.AI · MiniMax · xAI (API key and Grok OAuth) · NVIDIA · OpenRouter · Ollama · custom OpenAI-compatible endpoints.
 
-- OpenAI and the Codex OAuth channel
-- Anthropic and the Claude Code OAuth channel
-- Google Gemini and Vertex AI
-- DeepSeek, Moonshot AI, Zhipu AI, Z.AI, MiniMax, xAI (API key and Grok OAuth), and NVIDIA
-- OpenRouter, Ollama, and custom OpenAI-compatible endpoints
+Clients call a **Model ID** you define — map it to one or more upstreams in priority layers: requests go to the top layer first, balanced by traffic or preferring the fastest target, and a conversation sticks to what worked before. A built-in catalog keeps provider model lists up to date.
 
-A client sends a **Model ID**. That value is the Route ID and is matched exactly, including letter case. A logical Model may also have an optional, non-unique display name; labels fall back to Model ID and never affect routing, authorization, or bindings. The matching Route can retain enabled and disabled Targets; disabled Targets keep their configuration without receiving traffic. Stravia first selects the highest eligible Target Priority group, then uses Traffic Equalization or Latency Preference within that group; conversation and cache affinity can preserve a previously successful enabled Target when applicable. Stravia refreshes its Provider Catalog from revisioned `models.stravia.cn` indexes: lightweight Provider and Canonical Model indexes update atomically, while Provider-scoped inventories load only when needed. Catalog-backed Providers use their scoped inventory; account-level discovery remains the source of callable IDs and only enriches exact matches without adding Catalog-only models.
+![Editing a model — upstream targets in priority layers](docs/assets/model-routing.png)
 
-When a Provider inventory is not cached for the active revision, Stravia refreshes the global indexes before downloading it, so an older local index does not require a separate manual refresh. If the catalog changes again during the download or refreshing fails, the operation fails explicitly without changing saved Provider Models.
+### Platform tools and built-in agent runtime
 
-Provider setup starts by choosing a complete provider/channel option. API-key and OAuth channels are separate options and cannot be converted into one another after creation. For Codex and Claude Code OAuth, desktop and loopback WebUI sessions receive the callback automatically; remote WebUI sessions ask for the full callback URL after browser sign-in. While authorization is pending, all three environments also allow pasting the full callback URL manually, even when the automatic listener is active. Grok OAuth uses xAI's device authorization flow: the WebUI opens the verification page, displays the user code when needed, and polls until authorization completes; no callback URL is required.
+- `StraviaRead` — one tool, one `path`: read files, webpages, `search://` questions, and images; long results page through automatically.
+- **Web Search** — an agent loop searches and reads pages for the model, using the embedded Moli engine, Exa, or Zhipu — or a Codex search binding.
+- **Media Understanding** — describe images and extract text (JPEG/PNG/WebP) with the vision model you choose.
+- Expose everything over `POST /mcp`, or add it to compatible requests automatically. Loops run under hard time, turn, token, and tool budgets.
 
-For services that do not require authentication, leave the API key empty when creating an API-key-only connection, including a custom OpenAI-compatible endpoint. Model discovery and inference then omit default authentication instead of sending an empty Bearer token; supplied keys are still sent normally. OAuth, Setup Token, Vertex, and structured adapter credentials retain their requirements. Clients must still authenticate to Stravia with a valid Stravia API Key.
+### Keys, usage, and request history
 
-Codex Provider Model synchronization uses the current upstream client contract, so newly version-gated models become available after synchronization. Generation requests include the model and optional service-tier routing hint required by the Codex backend.
-
-Model discovery follows the Provider's saved proxy choice and the existing global outbound-proxy settings; disabling the Provider's proxy choice keeps discovery direct. An invalid enabled proxy configuration is reported rather than silently bypassed. Model-list endpoints use the Vendor's Models authentication contract, which can differ from inference; custom endpoints inherit that contract without an additional setting or automatic authentication probing. Failed Provider Model synchronization leaves the saved inventory intact.
-
-The WebUI keeps each resource on one editing surface. When adding or editing a logical Model, the Model ID combobox searches Canonical Models by name or ID and also accepts custom IDs while the catalog is unavailable; choosing a template copies its display name, and both values remain editable. Canonical Models remain searchable templates for manual Provider Models as well; selecting one never creates a Backend or persists a hidden binding. Saving a new Provider opens its detail page and starts Provider Model synchronization; the detail views separate connection settings, persisted Provider Model inventory, and Route references. Provider Model metadata is saved from its drawer, while Selection Policy applies immediately and controls only Effective Availability for new Target candidates. Existing Route Targets are never rewritten merely because a Provider Model becomes unavailable. Administrators can explicitly re-import a discovered Provider Model from its exact Provider Catalog Entry; ordinary synchronization never overwrites local metadata.
-
-The available-model inventory has a separate **Model specification** column, shared with Target editing and model details. Specifications come from the saved, editable Provider Model snapshot—not tested capabilities, runtime defaults, or platform-added features. Limits retain exact decimal K/M values (1K = 1,000 tokens); full token counts are available by hover or keyboard focus. Input and output modalities remain separate, and feature declarations distinguish supported, unsupported, and not registered. The specification column filters by minimum context/output tokens, input/output modalities, and all five features. Every selected condition must match; unknown values cannot satisfy selected conditions. Filters combine with search, availability, source, and usage, and can be cleared together.
-
-Desktop specification filters use the table's standard column filter menu: **Apply** commits the draft, **Clear** removes that column's filter, and closing without applying discards edits. On mobile, specification conditions are included in the existing **Filter models** drawer.
-
-The WebUI uses shared controls for request recovery, sensitive-input visibility, loading and progress. Background refresh failures keep previously loaded data available. Model ID suggestions preserve free text and input-method composition; advanced settings retain drafts while collapsed. Navigation keeps its saved collapse preference, and the mobile observation inspector traps focus without changing the desktop overlay. Closing an update notification does not skip that version.
-
-Advanced Features save enable/disable switches immediately, without a separate save click. Media Understanding and Web Search require a complete saved configuration before enabling; model bindings, search methods, and related multi-field drafts still use **Save settings**. Toggling a capability changes only its saved enable state, without submitting or clearing configuration drafts. Failed immediate updates retain the confirmed state and show a local error. Web Search has one capability switch; selecting and ordering its internal search and page-reading sources applies immediately without another enable switch. Unloaded settings are not presented as editable defaults. Local tabs wrap on narrow screens, while model-service detail navigation retains real links and browser history.
-
-Overview recommends one next setup action based on loaded configuration, not request history. Connect a model service, search its inventory, and add the models you need using their upstream IDs; an exact existing Model ID adds the service to that model instead of creating another. Add actions stay visible; successful additions use a toast and keep the inventory open so you can add more models. Connect clients stays in navigation and Overview. Configured and enabled counts describe saved settings, not verified upstream connectivity.
-
-The Connect clients page builds incremental Stravia provider patches from the selected API Key's authorized Routes. It reuses enabled, unexpired keys with access to an enabled model: one eligible key is selected automatically, while multiple candidates require a choice. Missing resources link to their existing editors; Continue setup preserves still-valid selections for that page task without storing secrets or workflow progress. Stravia Desktop prioritizes writing the patch to the Connect Client Global Config and also offers Copy; the standalone server only offers Copy. Success confirms copying or writing, not a client connection, and setup sends no automatic validation request. Apply never selects a current/default model or writes a fused provider/model key. Claude Code is the exception: it requires and merges the default, Haiku, Sonnet, and Opus model mappings, without changing `effortLevel` or `autoCompactWindow`.
-
-Standalone server previews use portable client paths and do not depend on the server's `HOME`, `USERPROFILE`, or client-directory environment variables. Only Desktop resolves local directories for reading and writing client configuration.
-
-The Route Builder is a full page. Selecting a Provider automatically loads its available Provider Models, while an explicit advanced path supports unverified custom upstream model IDs. Enabled Targets appear in descending priority layers and disabled standby Targets remain in a dock; the detail dialog edits first-token timeout and cooldown in seconds, retry budget, and Thinking Level mapping without exposing priority integers. The Route chooses Traffic Equalization or Latency Preference for Targets in the same layer. Deleting a Provider removes its Targets atomically, deletes Routes left empty, and keeps Routes that still have another Target.
-
-### Web Search and MCP
-
-Optional Web Search uses `StraviaRead` with `{"path":"search://URL-encoded%20question"}` and returns a sourced Search Report with an answer, public HTTP(S) sources, limitations, completion state, and a stable `turn_id`. Continue or branch explicitly with `search://Follow-up?previous_turn_id=<id>`; no implicit latest Turn is selected. Repeat `allowed_domains` in the search query to constrain report sources, for example `search://Rust?allowed_domains=rust-lang.org&allowed_domains=docs.rs`. Omitted domains inherit the parent policy on continuation; a nonempty list replaces it. Start a new root for unrestricted research. Internal Agents use the same tool name and `path` schema but perform basic retrieval, never recursive research or research continuation.
-
-The only top-level argument is the required string `path`. The old `url` field, `query://` scheme, top-level continuation/domain options, and Stravia-managed `blocked_domains` are rejected. Native web-search declarations converted to StraviaRead also reject the removed blacklist field. Domain constraints govern research sources; they do not replace SSRF checks.
-
-Resource options use a separate fragment: `https://example.com/page?signature=...#stravia?raw=1&lines=10-30`. Source queries remain unchanged; resource options are not sent to the origin. HTML defaults to Markdown; `raw=1` returns strictly decoded original text without Markdown conversion or inserted line numbers. Unknown encodings or invalid bytes fail in raw mode. `lines` accepts `N` (to EOF), `N-M`, `N%2BK` (K lines), `-K`, and comma-separated ranges. `download=1` is exclusive and requests a download rather than content.
-
-Text results include `content`, `read_path`, `returned_ranges`, `has_more`, `source_truncated`, and an optional `next_path`. Copy `next_path` directly into the next call's `path`. Pages are at most 32 KiB of UTF-8 and 200 source lines; even a long single line can be read completely. Snapshots retain the first representation and never refetch or rerun a model on subsequent pages. Source truncation is separate from pagination: an upstream-limited snapshot may end with `has_more=false` and `source_truncated=true`. Long search/media answers keep their sources and other report fields in the first response and place continuation metadata in `pagination`; stored reports remain complete.
-
-Configure one Search Backend in the WebUI. Local Search runs a bounded Agent over ordered internal Web Access Search and Fetch sources: the seeded in-process Local Provider, Exa, or Zhipu. Each Web Provider can independently use the Gateway proxy. Codex Agentic Search uses one exact compatible Codex OAuth Responses Provider/model binding and ignores the Local budget. There is no fallback between Local and Codex.
-
-The in-process Local Provider embeds [Stravia's Moli engine](https://github.com/Stravia-AI/moli-stealth): `moli-stealth-net` handles HTTP Search/Fetch and `moli-core` renders dynamic pages with V8. Desktop and Server require no Chrome/Chromium installation, external Moli executable, or Node/Bun sidecar. Browser execution starts lazily on a dedicated owner thread.
-
-Local search saves its browser profile under `<data_dir>/state/web-access/browser-profile` and the separate HTTP search cookie jar in `<data_dir>/state/web-access/search-cookies.json`. Google searches use the browser throughout: without an unexpired cookie applicable to the search URL, Stravia first opens `https://www.google.com/` to receive anonymous cookies, then searches in the same page. Later searches reuse the saved identity, including after restart; other browser engines with homepage preflight use the same cookie-aware rule. Bing and other HTTP engines reuse their own saved cookies. Fetch uses separate temporary browser storage and cookie-disabled HTTP clients, never the search profile. These files are deployment-local, are not imported from your personal browser, and should not be shared or committed; stop Stravia before removing them to reset the search identity. A site may decline to issue cookies or still block automated traffic.
-
-Select Local under **Web search → Search and page sources** without configuring a browser path. The browser-path management endpoint and `STRAVIA_CHROME_PATH` setting have been removed. Existing `web-access-browser.json` and `desktop-browser.json` files are left untouched but are no longer read or written. Remote Exa and Zhipu services are unchanged.
-
-HTTP uses Moli's Chrome transport fingerprint; fingerprint mitigations do not guarantee access to bot-protected sites. HTTP and browser paths retain the selected Gateway proxy snapshot, separate cookie ownership, and Fetch safety limits. Browser HTTP and WebSocket traffic passes through the checked egress proxy without TLS interception; certificate verification remains enabled. Direct connections pin approved public addresses; an explicitly selected upstream proxy remains responsible for its own DNS resolution. Moli executes in the Stravia process, not a Chrome OS-sandboxed child process; deploy Stravia with least privilege and use host/container isolation appropriate for untrusted page execution.
-
-Google browser search stops with an explicit automated-traffic challenge error when it detects a CAPTCHA or unusual-traffic page, including during homepage preflight, rather than waiting for the search-result timeout. This does not solve CAPTCHAs or bypass Google's network restrictions.
-
-The platform Web Search switch controls both search and webpage reading for every valid API key. Each key separately controls MCP access and Transparent Injection; selected enabled networking and media capabilities merge into one `StraviaRead` declaration, and execution enforces that response's exposed scope. Injection preferences do not restrict explicit or MCP calls. MCP clients connect to `POST /mcp`, use `Authorization: Bearer <key>`, and discover `StraviaRead`; file downloads require ownership, while networking and media operations additionally require their platform switches. Provider-native web-search tool types are unchanged. The former platform `web_search`, `web_fetch`, and `understand_media` call aliases are not registered.
-
-Web Search and Web Access configuration are deployment-local and are not included in configuration export/import. Search Turns retain report metadata and cited URLs, not fetched page bodies or internal Agent transcripts.
-
-Local Fetch and browser outbound checks reject URLs whose host becomes a non-public IP after trailing dots are removed, such as `http://127.0.0.1../`, matching Web Access admission. This requires no configuration migration and does not change proxy selection or DNS responsibilities.
-
-### Media Understanding
-
-Media Understanding reads static JPEG, PNG, and WebP images with `{"path":"sa:<55-letter ID>"}`. Both owned image references and public image URLs default to description and readable-text extraction; public images are stored first. Add `?question=Describe%20the%20image` for a specific question, and `&previous_turn_id=<id>` in the same query to continue or branch. Explicit `?download=1` downloads without model execution. Artifact references reject fragments. HTML with a question remains Markdown and reports `question_applied=false`. If a parent route has an image-capable Target, Stravia delivers the stored image natively; otherwise a tool-capable parent Model can use the configured hidden visual Model. A failed native-vision route does not fall back to that Model.
-
-Enable the platform capability, select a logical Model, and choose its Thinking Level on the **Media Understanding** page. The selector only lists enabled Models where every Target explicitly advertises image input, and the Thinking Level selector only lists levels supported by every Target. All valid API keys can then request understanding through `StraviaRead`; MCP access and Transparent Injection remain independent per-key controls. Hidden calls consume the caller's quota without granting direct access to the selected Model. External files are restricted to public HTTP(S) destinations, with checked DNS, pinned connections, and checked redirects. Preprocessing always creates a bounded lossy JPEG derivative, ignores ICC profiles, and may reduce exact-color or fine-text OCR accuracy.
-
-### File storage and temporary transfers
-
-Internal storage works without S3. Optional S3 uses the same upload workflow: `POST /v1/artifacts/uploads`, `PUT /v1/artifacts/uploads/{upload_id}/parts/{part_number}` with `x-upload-token`, then `POST /v1/artifacts/uploads/{upload_id}/complete`. Creation returns `upload_id`, `upload_token`, and `expires_at`, not an `artifact_id`. Only completion returns the final file `id`, metadata, and `reference`, shaped as `sa:<55 lowercase ASCII letters>`. The 55-letter ID is a fixed-width base-26 encoding of the complete Principal/MIME/content SHA-256 digest, preserving all 256 bits. The reference accepts optional query parameters but rejects fragments. It is a stable Principal-scoped identity, not a network download URL or a credential. The same API key may reuse it across conversations; other Principals cannot resolve it.
-
-For the same Principal, exactly matching declared MIME and complete bytes produce the same Artifact ID across direct ingestion, multipart boundaries, concurrent uploads, and restarts. Upload sessions remain independent. Different Principals, MIME values, or bytes remain distinct; visual similarity is not enough. Re-uploading does not shorten existing retention. Former Artifact IDs are not parsed, merged, or rewritten into the new identity; preserve the old database and objects separately instead of deleting user data, and use a clean database for the new format. Media Understanding may share a normalized JPEG between source files while citing only sources declared in the current Turn or its ancestors.
-
-Structured inline media and remote attachment URLs are stored before a model call can begin. Ordinary text links and base64-looking text are not downloaded or rewritten. `StraviaRead` reads HTML and textual files, including JSON/XML without reformatting; unknown binaries return file/download information with an explicit unread-content limitation. It does not unpack or execute files. Empty text is valid. Successful content reads do not issue download grants automatically; downloading a text snapshot exports only its UTF-8 body. Snapshots retain the existing Principal ownership and retention rules, and expired snapshots fail rather than returning to the origin.
-
-Configure the complete **Client access address** in setup or Settings, including the protocol, port, and deployment path prefix. The saved value remains authoritative; request Host and forwarding headers do not change it. **External signed downloads** and **Upload prompt injection** are independently off by default:
-
-| External signed downloads | Provider input | Client download |
-|---|---|---|
-| Off, internal or S3 storage | Base64 generated from the Artifact | Signed Stravia URL under the saved client address |
-| On, internal storage | Signed Stravia URL under the file public address | Same public entry |
-| On, S3 storage | Native S3 presigned URL | Native S3 presigned URL |
-
-Enabling external signed downloads requires a file public address, initially filled from the client address or S3 endpoint. Saving does not verify reachability: actual clients and Providers must reach that entry. S3 buckets remain private. URLs normally last fifteen minutes and must retain at least five minutes before each actual Provider call, including retries and later model turns. A protocol that cannot express URL input uses supported inline input before sending; an upstream URL fetch failure never triggers an automatic base64 rerun.
-
-Upload prompt injection supplies the actual multipart curl workflow. Models see only `<stravia-upload-key>`; only delivered ordinary answers and client tool arguments receive a temporary upload credential. Thinking and platform tool arguments do not mint credentials. One response reuses a still-valid grant; each grant lasts a fixed fifteen minutes, supports multiple files, and authorizes uploads only. Disabling injection stops new issuance, not existing grants; revoking the owning API key still denies uploads. Returned credentials, including expired ones, are replaced with the placeholder before Provider use and platform persistence, independently of general credential protection.
-
-The single-file limit is 100 MiB. Each Principal may have at most sixteen unfinished, unexpired uploads reserving at most 400 MiB; completed uploads release staging slots. There is no aggregate saved-file quota. Authenticated file use refreshes retention using the request retention setting; signed downloads and text mentions do not. An expired reference alone cannot revive a file; a complete, validated re-upload can retain the same content identity again, including after cleanup. Active readers and unexpired download grants delay physical cleanup without extending logical retention. Signed URLs are transferable temporary credentials: anyone holding one may download that one file until expiry.
-
-New histories and diagnostics externalize structured media as references and metadata; media captures are not original wire bytes. Missing or expired content is marked unrecoverable. Existing historical records are not backfilled, rewritten, or refreshed by the upgrade. Changing or removing S3 endpoint/bucket credentials does not migrate existing objects; retain the matching storage configuration while those objects remain in use.
-
-### Credential Protection
-
-In **Advanced Features → Credential Protection**, toggle the switch to save instance-wide credential text protection immediately. It is **off by default** and applies to every valid Stravia API Key, with no per-key exemption, MCP tool, or Transparent Injection option. Server and Desktop use the same core setting and behavior; clients keep their existing protocols and plaintext view.
-
-The page opens on **Current rules**, a searchable, sortable, paginated table of the running version's complete read-only catalog. Each row shows the rule name, keywords, and any path, combination, or component-only conditions instead of repeating names and IDs. Rule IDs remain searchable without being displayed. The side panel separates keywords, matching expressions, exclusions, path restrictions, and required or optional component matches; extraction, priority, confidence, and rule role are available under **Rule parameters**. **Hit records** groups newly created protection mappings by client interaction and links to the corresponding request observation. Reusing a valid mapping or restoring a placeholder does not count as a new discovery; recreating an expired mapping does. API Keys remain isolated, concurrent creation counts only once, and a discovery can remain visible even when its request fails or is cancelled. Summaries show rules, source categories, counts, and request status without secret values, placeholders, or message excerpts. Observations can be incomplete and follow request-history retention; they are not a security audit guarantee.
-
-The **Matching test** tab places input and results side by side on wide screens and stacks them on mobile. It accepts a single key or contextual text, including multiline input; selecting a result highlights its original text. It sends submitted text only to your Stravia instance, uses the same local detector even when protection is off, and returns matching rules and input positions. It does not persist input, include it in diagnostics, contact a provider or validation service, search saved credentials, create mappings or observations, or change settings. **No existing rule matched** is not a guarantee that content is safe or a credential is invalid.
-
-Before each model request, Stravia locally replaces detected credentials in system instructions, user and historical messages, tool arguments, tool results, and platform-internal requests with opaque placeholders. Bundled Betterleaks and Kingfisher v1.109.0 offline rules update with Stravia releases; runtime rule downloads and online credential validation are never performed. The combined catalog includes 462 Betterleaks rules and 1,013 Kingfisher rules (861 reportable rules and 152 hidden helpers), including bare Zhipu-format and additional `sk-` credentials without a variable name. Format matches do not prove a credential's provider or validity, and broader detection can produce false positives. Valid known secrets for the same API Key are also replaced by exact text, including all occurrences elsewhere in a request that first identifies a secret. Surrounding non-secret text, protocol structure, and necessary upstream connection authentication remain unchanged.
-
-Returned valid placeholders restore to plaintext in answers, client tool arguments, and platform tool execution arguments, including streamed responses. While enabled, tool results are protected again before reaching the model. Mappings are isolated by API Key, persist across restarts, and reuse the same placeholder for the same secret while valid across conversations and branches. Sharing a key shares this access boundary. Retention follows History Marker rules: one hour before publication, at least seven days on publication, and extension with retained history without reviving expired mappings. Unknown, expired, or other-key placeholders remain unchanged. Detection, replacement, and mapping storage failures explicitly fail the request or terminate an active stream rather than bypass protection.
-
-References use `<!--sr:<28 lowercase ASCII letters>-->`, a fixed-length short HTML comment with restoration semantics separate from History Markers. New identifiers are sampled uniformly from `a`–`z` with a cryptographically secure random generator, providing approximately 131.6 bits of identifier space. Complete markers are excluded from credential detection and are preserved as atoms in diagnostic business text; actual credential headers and structured credential fields remain masked. Requests containing a live reference for the current API Key receive one short system instruction: “Preserve Stravia redaction markers verbatim when used; Stravia restores their values.”
-
-**Marker format cutover:** migration 0046 remains the historical migration from `~stravia-secret:…~` references to the former long HTML-comment format; it is not modified. The compact format is for new deployments and clean databases. Neither former format is parsed or restored, and immutable Stravia history and external client or upstream history are not rewritten. Do not directly reuse a database or conversation that depends on former references; retain the old database and user data separately rather than deleting them, then start with a clean database and a new conversation.
-
-**Turning the feature off stops new detection and replacement, not restoration.** It does not delete mappings: existing valid placeholders still restore in answers and both client and platform tool arguments until expiry. New outgoing text, including restored tool results, is no longer protected by this feature while off.
-
-A successful Model Turn completes restoration and publishes the required mappings before reporting completion, including internal Agent execution without saved history. Cancellation or a deadline can interrupt pending publication, but does not revoke mappings already published. A later client delivery failure still prevents that response from becoming a Generation Chain node.
-
-**Older tool history:** when an older conversation contains tool-output arrays whose interpretation cannot be verified, protection rejects the request before contacting the provider. This includes arrays previously saved as text. Start a new conversation to continue with protection. With protection off, ambiguous legacy payloads remain unchanged; Stravia does not guess their text or media boundaries.
-
-This is credential-text protection, **not general DLP or an all-secret guarantee**. Detection can miss secrets or flag non-secrets; images, audio, video, binary attachments, and opaque payloads are not scanned. Local mappings and client-visible history can contain plaintext; database, disk, and backup protection remain deployment responsibilities, with no additional application-layer encryption. A model can place a placeholder in a URL or other tool argument and cause the tool to exfiltrate the restored credential. Existing tool authorization and outbound controls remain essential; the toggle is not credential revocation or an exfiltration barrier.
-
-Restored secrets are permanently masked as `***` before response and tool-execution diagnostics are persisted, including Debug Bundles. Original client ingress still follows the existing diagnostic redaction policy; this does not make prompts, tool results, or diagnostic exports generally non-sensitive.
-
-### Local management
-
-The SvelteKit WebUI manages:
-
-- Providers, authentication, model discovery, and connectivity checks
-- Virtual models and their upstream backends
-- API keys with generated or custom editable secrets, model bindings, expiration, Principal Concurrency Limit, and execution permissions
-- Request Records as a fullscreen-capable live Interaction forest with causal branches, a Failed Requests list covering pre-admission rejections and finally failed Runs, a chronological inspector, and Confirmed Upstream Usage statistics; rolling live presets cover 5, 10, or 30 minutes and 1, 4, 12, or 24 hours, while precise local date/time ranges keep fixed boundaries and span at most 24 hours. Interaction Chains time filters select whole roots by their latest activity and retain the complete causal context; Failed Requests filters each request by its start time. Enter or exit fullscreen from the toolbar, or press Esc to exit
-- Provider-reported quotas, request allowances, and balances in an **Allowance overview** matrix with filters, a reset timeline, and current-window exhaustion forecasts backed by 30-minute samples; live reads retain three-minute caching, per-provider refresh, and the last successful result when a refresh fails
-- Runtime settings
-- Observation usage retains confirmed token subtotals when another attempt has not reported usage; aggregate API and debug-bundle values include per-field coverage, without treating unknown consumption as zero. Historical tool-result replays do not merge a later independent user input into a tool continuation.
-- Request details, Overview, and Usage show input tokens after subtracting cache reads and output tokens including reasoning. Reasoning is not counted again as a separate metric; cache reads and writes remain separate breakdowns. If input or cache-read usage is unreported, that attempt's net input remains unknown. Existing records use the same read-time calculation without rewriting raw upstream usage.
-- Ready-to-copy integration examples for SDKs and coding tools
-
-Interaction Observation is available in both Debug and release builds. Its process-local **Debug** switch starts off after every restart and requires confirmation before enabling. Each newly admitted Inference Run snapshots the current switch, so changing it affects only later admissions. Debug records canonical checkpoints and ordered HTTP, SSE, and WebSocket application messages—not TLS records, TCP packets, HTTP/2 frames, or packet/chunk fidelity below the application adapter. Credential headers, URL userinfo, credential-like query values, and structured credential fields are permanently redacted before persistence; prompts, business content, and tool inputs/results may still remain sensitive.
-
-Requests that exactly continue a parent response under the same API key stay in its Interaction when they contain no new user input, return a pending client-tool result (with no time limit), or arrive within two seconds after that parent response was fully delivered. The last two cases may include additional user input; a completed Interaction can become active again. The two-second rule also groups fast human follow-ups: it does not identify harness hooks, discard input, or change model execution.
-
-When that execution parent is absent—typically after a Connect Client trims or summarizes history—Request Records still group the next request from the current client input. A unique current-tool continuation stays in the source Interaction even with extra user input and without the five-minute tail window. A unique complete retained tail with no new user after the match stays in that Interaction when ingress minus delivery is at most five minutes. Other unique tails keep a diagnostic parent link on a new Interaction; incomplete or ambiguous evidence stays independent. This does not restore deleted history, write a Generation parent, or enable Target Continuation. Other new user inputs start a new Interaction.
-
-Desktop opens **Debug bundle** downloads in the system browser using a one-time download ticket; the desktop inspector stays open. In the WebUI, the current browser handles the download.
-
-Interaction cards show separate user-input and model-output previews below a compact model name. Hover or focus either preview to read more; on touch devices, tap the preview to open it. Both previews render sanitized Markdown without loading images or embedded resources. Input previews show the beginning of the user's message, while output previews keep the newest line visible as content updates. Cards keep a fixed height and do not show Debug capture or filter-match footer labels.
-
-Each run with new user input retains up to 4,096 characters of credential-redacted user-input text with the request records, without requiring Debug. Follow-up input grouped into the same Interaction appears on the user side before that run's reply; the card keeps the initial input preview. System instructions, historical messages, and tool results are not included in this preview; tool continuations do not replace the original input. Card previews indicate when older records, messages without text, or requests that stopped before input protection finished have no recorded text. Previously uncaptured follow-ups are not backfilled. The expanded output preview shows the retained output tail, not a guaranteed full response.
-
-The observation inspector opens as a read-only conversation: user messages on the right and model replies on the left, with safe Markdown including GFM tables. Consecutive replies from the same model share one avatar and name, with only the final message's timestamp at the end. Conversation footers do not repeat preview labels or execution status; missing text does not create an empty bubble. **Diagnostics** retains the readable event timeline, recorded outcomes, raw event data, and technical identifiers. Existing messages appear immediately, while newly received live text is revealed progressively without splitting emoji or combining characters. Scrolling up pauses automatic following; **Back to latest** resumes it. Reduced-motion preferences show new text immediately. Reply bubbles still use retained client-visible output events, not thinking or tool payloads; the existing observation update cadence is unchanged.
-
-New request records capture readable model thinking, client and platform tool inputs, and tool results even when Debug is off. These contents use the existing credential-redaction and request-record retention policies; they can still contain sensitive business data and increase storage use. Model thinking signatures and encrypted reasoning are excluded from ordinary thinking capture. Older records without captured contents are not backfilled.
-
-Recorded thinking separates identified parts and resumed thinking segments with Markdown paragraph breaks, consistently in live display and history. Deltas within the same part remain contiguous; display spacing does not change canonical reasoning. Older records that lost part boundaries are not rewritten.
-
-Debug Trace contents are available only through **Debug bundle** downloads, not an inline Debug records tab. Interaction and rejected-request detail responses contain ordinary observation events and capture metadata, but do not read Trace segments or return `debug_events`. Turning Debug off does not prevent downloading previously captured records.
-
-Live canvas updates use a summary-only query containing the affected interaction and its complete root tree; Run events and tool bodies are fetched only for the selected inspector. Context links are loaded in bounded batches rather than with one database query per interaction. Filtering and causal context remain unchanged.
-
-The canvas keeps the complete loaded topology but mounts cards only for the viewport and visible connection endpoints. New cards wait for their worker-computed positions instead of briefly rendering the entire graph at the origin for measurement. Panning, zooming, following activity, and opening details retain the same behavior.
-
-The inspector initially loads the latest 200 events, reads subsequent changes incrementally, and automatically loads earlier history when scrolling upward near the top, without moving the reading position. Live text appears before persistence with a **Not yet saved** indicator; committed blocks replace that preview without duplicating text or splitting Markdown messages. New text blocks are sealed at 16 KiB or approximately two seconds and compressed only when smaller. A process crash may lose pending observation text from that normal two-second window; storage failures are reported separately, and the window is not a durability guarantee during failures. Ordinary detail reads never force pending writes. Debug bundle downloads flush only the selected Interaction and include its complete fixed-cutoff history. Existing stored events are not rewritten or deleted.
-
-New client-tool observations skip replayed results only when the call ID, explicit same-principal Run ancestry, latest handoff, redacted result body, and error state establish the same result. New calls, changed results, and uncertain boundaries remain recorded. Debug Wire and canonical checkpoint data go directly to Trace instead of adding an ordinary database event per frame; ZIP capture and fixed snapshot cutoffs remain available. These changes do not rewrite or remove existing history.
-
-Conversation **Thinking** and **Tool call** markers reveal ordinary observation contents without enabling Debug. They do not fall back to Debug Trace data. Rows with details start collapsed; each row independently remembers its expanded state in the current browser and site, storing only the state and identifier, not its contents. Thinking without captured readable content is omitted, and tools without details remain plain named rows without missing-data notices. Full captured canonical and application-protocol records still require Debug and remain available in the downloaded bundle.
-
-Within each Run, diagnostic events are ordered by their recorded time, then by sequence for ties, rather than by a nested model/tool tree. Consecutive response-text updates or same-name client tool handoffs are folded into counted groups with their time range. Expand a group to inspect individual events; each event's arrow reveals its original data. Delivery, completion, failure, and intervening events stay separate, and live updates preserve an expanded group's state. Model-service attempts show token output speed using that attempt's latest confirmed output usage and the existing generation-time calculation; missing usage or valid timing is shown as unknown, not estimated.
-
-The output tooltip is named **Model output preview**. Confirmed execution-source links retain their connecting lines without repeated text labels. Inferred retained-tail links use the same top-to-bottom layout and connection geometry, differing only by a dashed line; neither the line nor the card preview adds an inference label. Association details remain available in diagnostics.
-
-Debug redaction covers protocol credential fields and complete recognizable patterns within one application message. Business text that forms a credential only after joining multiple messages may remain and must still be treated as sensitive.
-
-WebSocket Ping/Pong events retain their type, direction, and timing, but their arbitrary payloads are intentionally omitted with `control_frame_payload_omitted`. This policy omission does not mark a Trace as partial or classify the payload as media. Existing Trace records are not rewritten.
-
-Observation metadata and managed Debug Trace segments use `log_retention_days` (seven days by default). Debug Trace retention is reported as byte statistics without capacity caps; queue, writer, or storage loss is reported as an explicit gap or partial Trace and never changes inference. While Debug is on, a Clear debug data action deletes all retained traces without touching request history or the switch. Clear History preserves running and waiting-client Interactions and reports how many were skipped. An Interaction or Rejected Request can be exported as a point-in-time, streamed ZIP via a 60-second single-use download ticket; its manifest records the event-sequence boundary and `complete`, `partial`, or `none` capture status. Realtime updates, Debug state, Trace storage, and tickets are local to one Gateway process—there is no cluster-wide fanout, shared capture storage, or cross-instance ticket use.
-
-The interface supports English and Simplified Chinese, responsive navigation, and light, dark, or operating-system themes. On first use, a Simplified Chinese (`Hans`) client locale selects `zh-CN`; unsupported locales use English. Language can be switched without reloading from Login or **Settings → Appearance**, and each browser or desktop WebView remembers its own choice.
-
-The management UI checks public GitHub Releases for optional updates. Stravia Desktop checks when the app starts and can download a signed Windows x86_64/ARM64 NSIS or Linux x86_64/ARM64 AppImage update only after the user asks; the standalone server reports the exact Release and never replaces its own executable. Successful checks are cached for 24 hours, failed automatic attempts are limited for one hour, and **Settings → Updates** can always check again. Update traffic follows the instance outbound proxy when enabled and otherwise connects directly to GitHub.
-
-Cached updates are rechecked against the running version before being offered. After upgrading, an equal or older cached version is no longer offered, even while offline.
+- API keys with custom secrets, model bindings, expiry, and per-key limits for concurrency, MCP access, and automatic tool injection.
+- Request Records: watch every interaction live on a zoomable canvas — model calls, retries, and tool calls — with a separate failed-requests list and a per-conversation view.
+- See the token usage and provider quotas that services actually report.
+- Turn on Debug to capture HTTP/SSE/WebSocket traffic and download it as a debug bundle for the interaction you're inspecting; credentials are always redacted first.
+- Optional **credential protection** — local detection (bundled Betterleaks + Kingfisher rules, fully offline) swaps secrets for reversible placeholders before requests reach providers.
 
 ### Storage and deployment
 
-- Server selects **SQLite** or **PostgreSQL** during first-run setup; Desktop uses local SQLite.
-- The selected database connection is stored only in `server.toml`; database CLI options and environment-variable overrides are not supported.
-- SQLite always uses `<data-dir>/db/gateway.db`; selecting a database never changes the data root.
-- SQLx migrations preserve data from the currently supported schema and run before the normal Gateway becomes ready.
-- `GET /healthz` is the liveness probe; `GET /readyz` returns unavailable while setup is incomplete or the Gateway cannot start.
+- SQLite or PostgreSQL, chosen at first-run setup; files in local storage or S3.
+- Everything a deployment owns sits under one data directory, protected by an instance lock; a migration tool upgrades older layouts.
+- One port serves the model APIs, MCP, the admin API, health checks, and the built-in management UI; deploys cleanly behind a reverse proxy.
 
-PostgreSQL must already exist and be reachable by an account that can create and migrate Stravia's own tables; Stravia does not create the database or require `CREATEDB`. Incompatible older schemas fail explicitly rather than being deleted or rebuilt.
+## Deployment modes
 
-For schema review, `stravia-tools dump-schema --backend sqlite --output deploy/schema/sqlite.sql` exports an isolated in-memory database after all migrations. The PostgreSQL equivalent uses `--backend postgres --output deploy/schema/postgres.sql` and requires a development `DATABASE_URL`, `CREATEDB`, and compatible `pg_dump`; it creates and removes a temporary database without migrating the source database. These are development-tool requirements, not Gateway deployment requirements. Both exports are schema-only review artifacts, not deployment initialization scripts. See [Database Schema](docs/database/schema.md).
+|               | Desktop                                             | Server                                      |
+| ------------- | --------------------------------------------------- | ------------------------------------------- |
+| Form          | Tauri app with integrated management UI             | Single headless binary or container image   |
+| Best for      | Individual developers; writes client config locally | Self-hosted and shared team deployments     |
+| Storage       | Local SQLite                                        | SQLite or PostgreSQL                        |
+| Get it        | Windows NSIS / Linux AppImage on Releases           | Archive · `ghcr.io` image · Nix flake       |
 
-#### Managed data layout and migration
+The same Rust core powers both; the management surface is the same WebUI.
 
-Server and Desktop use `--data-dir`, then `STRAVIA_DATA_DIR`, then their deployment default. Relative roots resolve once at startup. An unavailable root fails explicitly; an instance lock prevents Server/Desktop from concurrently owning the same root. `--config` may select an external Server configuration file, but never redirects local data.
+## Documentation
 
-| Relative path | Contents |
-|---|---|
-| `server.toml` | Default Server configuration; protect PostgreSQL credentials |
-| `db/gateway.db` | SQLite business data; SQLite manages its adjacent WAL/SHM |
-| `artifacts/{objects,staging,locks}` | Local objects, incomplete uploads, and operational locks |
-| `diagnostics/observation-debug` | Debug Trace segments paired with database manifests |
-| `cache/catalog` | Rebuildable Provider Catalog and logos |
-| `state/web-access` | Search cookies and persistent browser profile, not disposable cache |
-| `state/desktop-port.json` | Desktop fixed-port preference |
-| `state/desktop-webview` | Desktop WebView data on Windows/Linux |
-
-PostgreSQL rows and S3 objects remain external: copying this directory alone is not a complete backup of those backends. Ordinary browser storage, Connect Client configuration, user-selected downloads, and OS/updater-managed files remain outside this layout. macOS WKWebView does not support filesystem `data_directory`, so its WebView state is not covered by the directory guarantee.
-
-Old layouts and SQLite configurations containing `path` are rejected rather than silently opening an empty database. Migrate explicitly to a nonexistent or empty target whose parent already exists:
-
-```bash
-cargo run -p stravia-devtools -- migrate-data --from ./old-data --to ./data
-# Stop every Server/Desktop using the source, then apply the same plan:
-cargo run -p stravia-devtools -- migrate-data --from ./old-data --to ./data --apply --source-stopped
-```
-
-The default command only prints a plan. Add `--config <old-server.toml>` for an external configuration. Add `--webview-from <old-platform-webview-directory>` to preserve old Desktop browser state: previous Windows/Linux builds used the platform local-data directory under `com.stravia.ai-gateway` (E2E used `com.stravia.ai-gateway.desktop-e2e`), independently of the gateway root. No user directory is guessed or read automatically. For a shared Linux root, explicitly passing the same directory as `--from` and `--webview-from` moves otherwise-unmapped entries as WebView state without duplicating the database or objects.
-
-Migration retains source data, replays copied WAL into a private SQLite snapshot, checks its integrity, and publishes the complete target only after copying succeeds. It does not upgrade database schemas or contact PostgreSQL/S3. Unknown entries, links/reparse points, overlapping roots, and conflicting targets fail explicitly. Apply may create source `.instance.lock` files and retains a sibling target reservation lock; these contain no business data. Do not run old binaries during migration: they predate the instance lock. After verification, start with the new `--data-dir` and default converted `server.toml`, not the old external configuration. Keep the old copy until verification is complete; switching back after new writes would lose those writes.
-
-## Releases
-
-Version tags publish Server archives and Desktop installers through [GitHub Releases](https://github.com/Stravia-AI/StraviaPlatform/releases), alongside a multi-architecture container image and Nix packages. Release outputs currently cover:
-
-- Server: Linux and Windows on x86_64 and ARM64; Linux provides both GNU and musl archives.
-- Desktop: signed Tauri updater artifacts and ordinary Linux AppImage or Windows NSIS downloads on x86_64 and ARM64. The NSIS installer includes English and Simplified Chinese; first install offers a language choice defaulting to the Windows UI language when it matches.
-- Container: `linux/amd64` and `linux/arm64` under `ghcr.io/stravia-ai/straviaplatform`.
-- Nix: native `x86_64-linux` and `aarch64-linux` packages from the repository flake, published to the [`stravia-platform` Cachix cache](https://app.cachix.org/cache/stravia-platform).
-
-macOS artifacts are not currently provided. Linux GNU Server archives and Desktop AppImages use Ubuntu 24.04 as their compatibility baseline; use a musl Server archive on older Linux distributions. Windows Desktop installers are updater-signed but not Authenticode-signed, so they may still trigger Microsoft Defender SmartScreen.
-
-Every downloadable build asset is listed in `SHA256SUMS`. Desktop updater artifacts also have `.sig` files and a versioned `stravia-updater.json` manifest; the embedded updater public key verifies the selected package before installation. Verify `SHA256SUMS` before manually running a binary or installer:
-
-```bash
-sha256sum path/to/downloaded-asset
-```
-
-Compare the result with the matching line in `SHA256SUMS`. On Windows, use `Get-FileHash C:\path\to\downloaded-asset -Algorithm SHA256`.
-
-Maintainers publish from `vMAJOR.MINOR.PATCH` or SemVer prerelease tags whose version matches `Cargo.toml`, `package.json`, and `tauri.conf.json`; the tagged commit must belong to `master`. Stable releases update the image tags for the full version, minor version, major version, and `latest`. Prereleases update only their full version tag. The first GHCR publication creates a private package; a maintainer must change its visibility to **Public** once in the package settings.
-
-## Quick Start from Source
-
-### Prerequisites
-
-- Rust `1.98.1`
-- Bun `1.4.0`
-- [Task](https://taskfile.dev/) `3.52.0`
-- uv `0.11.28` for Python E2E tests
-- CMake, Clang/libclang, Go 1.24 or newer, and Python for native Moli/V8 dependencies; Windows builds also need NASM and the MSVC C++ toolchain
-- The first build downloads the pinned V8 prebuilt archive; deployed binaries do not download a browser
-- Linux builds need pkg-config and Fontconfig development headers; runtime images need Fontconfig
-- Platform dependencies required by Tauri when building the desktop app
-
-### Run the standalone server
-
-```bash
-# Development mode with the Vite WebUI
-task dev:server
-
-# Build the embedded WebUI and release server binary
-task build:server
-
-# macOS / Linux
-./target/release/stravia-server
-
-# Windows
-.\target\release\stravia-server.exe
-```
-
-The server listens on `127.0.0.1:23471`. Debug builds use the repository-local `.stravia-dev/` data directory; release builds use `~/.stravia`. On first start there is no implicit database: the console prints a one-time setup token, and <http://127.0.0.1:23471/setup> uses it to select SQLite or PostgreSQL and create the single administrator. After setup, sign in with that username and password before configuring providers and model routes. The setup token is consumed by its first successful claim and is replaced if the unfinished process restarts.
-
-### Run the server with Nix
-
-```bash
-# Current checkout
-nix run .
-
-# Tagged release; replace vX.Y.Z with the required release
-nix run github:Stravia-AI/StraviaPlatform/vX.Y.Z
-```
-
-The flake supports `x86_64-linux` and `aarch64-linux`, builds the embedded WebUI, Moli engine, and Server as one package, and configures the public `stravia-platform` Cachix cache as a substituter. V8 archives are fetched with fixed hashes before the sandboxed build; no external browser is bundled.
-
-For NixOS, import the service module from the flake:
-
-```nix
-{
-  inputs.stravia.url = "github:Stravia-AI/StraviaPlatform";
-
-  outputs = { nixpkgs, stravia, ... }: {
-    nixosConfigurations.gateway = nixpkgs.lib.nixosSystem {
-      system = "x86_64-linux";
-      modules = [
-        stravia.nixosModules.default
-        {
-          services.stravia.enable = true;
-        }
-      ];
-    };
-  };
-}
-```
-
-The service listens on `127.0.0.1:23471` by default, runs with a dynamic system user, and persists its data and `/var/lib/stravia/server.toml` under `/var/lib/stravia`. Set `services.stravia.host`, `port`, and `openFirewall` when exposing it. HTTP works without entry configuration, including on non-loopback listeners. To restrict entries or trust a reverse proxy, set optional `STRAVIA_ADMIN_ORIGINS` and `STRAVIA_TRUSTED_PROXIES` in `services.stravia.environmentFile`; see the proxy contract below. No proxy network is trusted automatically. Database settings are never read from the environment. For an existing PostgreSQL deployment, write the `[database]` configuration shown below to `/var/lib/stravia/server.toml` before starting the upgraded service.
-
-### Run the server with Docker
-
-```bash
-# Pull the latest stable multi-architecture image
-docker pull ghcr.io/stravia-ai/straviaplatform:latest
-
-docker run --rm \
-  --publish 127.0.0.1:23471:23471 \
-  --mount source=stravia-data,target=/data \
-  ghcr.io/stravia-ai/straviaplatform:latest
-```
-
-Use `docker build --tag stravia-server:local .` and replace the final image name with `stravia-server:local` to build from the current checkout. The image embeds the production WebUI, listens on `0.0.0.0:23471` inside the container, runs as a non-root user, and persists `server.toml` and SQLite data under `/data`. The example supports direct HTTP at `http://127.0.0.1:23471` without entry configuration. For remote exposure, prefer an HTTPS reverse proxy and an explicit `STRAVIA_ADMIN_ORIGINS` list. Set `STRAVIA_TRUSTED_PROXIES` only to the actual proxy peer seen inside the container (Docker NAT may make this a bridge address, not `127.0.0.1`); inspect your network topology instead of trusting every container or all networks. Follow the forwarding contract below and isolate the backend port. The built-in health check calls `GET /healthz`; readiness remains unavailable until setup and Gateway startup complete.
-
-The image embeds Moli and does not install Chromium. Browser code runs in the Stravia process; keep the non-root container and normal host isolation in place.
-
-After creating a virtual model such as `my-model`, call it through any supported client protocol:
-
-```bash
-curl http://127.0.0.1:23471/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_PROXY_KEY" \
-  -d '{
-    "model": "my-model",
-    "messages": [{"role": "user", "content": "Hello"}]
-  }'
-```
-
-The authorization header is required only when the selected model route is protected by an API key.
-
-### Run the desktop app
-
-```bash
-# Development mode
-task dev:desktop
-
-# Production application bundle
-task build:desktop
-
-# Windows NSIS installer
-task build:desktop:installer
-```
-
-Development builds default to the repository-local, ignored `.stravia-dev/` root, including `db/gateway.db` and `state/desktop-port.json`. Release server builds default to `~/.stravia`; release desktop builds default to the operating system application-data directory. Explicit roots follow the same managed layout. Desktop preserves the selected absolute root for restart and autostart.
-
-Desktop builds with the `desktop-e2e` feature ignore ordinary root overrides. The `task test:e2e:desktop` workflow supplies an isolated `STRAVIA_DESKTOP_E2E_RUN_ROOT` beneath the system temporary directory and stores runtime data in its `data/` child; without that test-only variable, the default is the ignored `.stravia-desktop-e2e/` root. It seeds a fake `9.9.9` update to exercise download and installation without installing a real release; fixtures must not enter normal development or production data.
-
-The desktop process starts the same unified HTTP application locally on `127.0.0.1`. On first use it prefers the fixed default port `23471`; later launches prefer any fixed port saved under **Settings → Desktop**. If the preferred port cannot be bound, Stravia remains available on a temporary random port, reports the conflict on Overview, and lets you recheck or replace the fixed port without restarting. This desktop-local setting does not change the standalone server options below.
-
-## Server Configuration
-
-Common CLI options and environment variables:
-
-| CLI option               | Environment variable           | Default      |
-| ------------------------ | ------------------------------ | ------------ |
-| `--host`                 | `STRAVIA_HOST`                 | `127.0.0.1`  |
-| `--port`                 | `STRAVIA_PORT`                 | `23471`      |
-| `--admin-origin`         | `STRAVIA_ADMIN_ORIGINS`        | omitted: unrestricted management entries |
-| `--trusted-proxy`        | `STRAVIA_TRUSTED_PROXIES`      | omitted: no trusted proxies |
-| `--config`               | —                              | `<data-dir>/server.toml` |
-| `--data-dir`             | `STRAVIA_DATA_DIR`             | Debug: `.stravia-dev`; release: `~/.stravia` |
-| `--log-level`            | `STRAVIA_LOG_LEVEL`            | `info`       |
-| `--config-poll-interval` | `STRAVIA_CONFIG_POLL_INTERVAL` | `3` seconds  |
-
-`--config` selects the only database-backend and PostgreSQL-connection configuration source. `--data-dir` owns all managed local paths, including SQLite, and supplies the default config path. A missing config enters first-run setup. A malformed config, legacy layout, unreachable configured database, or incompatible schema is a startup error and never falls back to another database.
-
-The setup flow atomically writes one of these forms:
-
-```toml
-[database]
-backend = "sqlite"
-```
-
-SQLite has no independent `path` field. Setup testing, completion, restart, and administrator recovery all use `<data-dir>/db/gateway.db`; an external `server.toml` does not change that location. With the default Debug root, this is `<workspace>/.stravia-dev/db/gateway.db`. Use the explicit migration command above for old path-bearing configurations.
-
-For an already-created PostgreSQL database:
-
-```toml
-[database]
-backend = "postgres"
-url = "postgresql://stravia:replace-me@postgres.example.com:5432/stravia"
-max_connections = 10
-min_connections = 1
-idle_timeout_seconds = 300
-```
-
-The three pool settings are optional. Protect `server.toml` because a PostgreSQL URL can contain credentials. The connection account needs permission to run Stravia's migrations in that database, but not permission to create a database. Existing PostgreSQL deployments must create this file with their current connection URL **before the first upgraded start**. Removing the old database environment variables without doing so intentionally enters setup; Stravia will not infer the old PostgreSQL database or silently choose SQLite.
-
-On an unconfigured or configured-admin-free database, the console token is accepted only by `POST /api/v1/setup/claim`; the resulting `stravia_setup` HttpOnly, `SameSite=Strict` cookie (`Path=/api/v1`, and `Secure` for HTTPS) can call `/api/v1/setup/test` and `/api/v1/setup/complete`. Setup access cannot call management APIs and is closed when an administrator already exists. `GET /api/v1/auth/state` reports setup, availability, and current authentication without refreshing credentials. Normal Server authentication uses `/api/v1/auth/login`, `/api/v1/auth/refresh`, `/api/v1/auth/logout`, and `/api/v1/auth/credentials`. Access and refresh values remain in `HttpOnly`, `SameSite=Strict` cookies (`stravia_access` with `Path=/`, and `stravia_refresh` with `Path=/api/v1/auth`), not browser storage; HTTPS origins add `Secure`. HTTP and HTTPS entries both support the complete management flow. The browser client sends `X-Stravia-CSRF: 1`, and Stravia rejects unsafe requests whose `Origin` differs from the independently recovered external request origin.
-
-To recover forgotten credentials, stop the instance owning the data root, then run the local interactive command against the same data root and configuration:
-
-```bash
-./target/release/stravia-server --data-dir /var/lib/stravia --config /var/lib/stravia/server.toml recover-admin
-```
-
-The command prompts for the username and reads the new password plus confirmation without echoing it or accepting it as a command-line argument. It updates the existing single administrator in place and revokes every old management session; it does not delete business data or reopen database setup.
-
-### Management entries and reverse proxies
-
-No entry configuration is required: every reachable valid HTTP or HTTPS entry can use setup, login, and management, subject to authentication and same-origin/CSRF checks. The default listener remains `127.0.0.1:23471`; HTTP on a non-loopback listener is supported without an unsafe-mode switch. TLS is terminated by your reverse proxy, not by Stravia.
-
-To restrict the entire management surface (WebUI, setup, login, auth state, and all management API reads/writes, including setup and unavailable modes), repeat `--admin-origin`, for example `--admin-origin http://192.168.1.20:23471 --admin-origin https://gateway.example.com`, or set `STRAVIA_ADMIN_ORIGINS=http://192.168.1.20:23471,https://gateway.example.com`. Entries are exact normalized scheme/host/effective-port origins; IPv6 uses brackets, for example `http://[::1]:23471`. No wildcards, credentials, page paths, query, or fragment are allowed. Omit the setting for unrestricted entries; explicitly empty or invalid entries fail startup, not open access. The list does not change model API, MCP, health probes, or their existing authorization/CORS. Two allowed entries do not authorize cross-origin management calls: each write's `Origin` must independently match the request's recovered external origin, with the existing CSRF and JSON requirements. This is not a management CORS allowlist.
-
-By default no proxy is trusted: external origin comes from direct `Host` and HTTP, and forwarding headers from untrusted TCP peers are ignored. Repeat `--trusted-proxy` for actual immediate peer IPs or CIDRs, or use comma-separated `STRAVIA_TRUSTED_PROXIES`; invalid or explicitly empty entries fail startup. Only the actual TCP peer establishes trust, never `X-Forwarded-For` or another client claim. Trust only the proxy addresses you control; a broad CIDR (especially `0.0.0.0/0` or `::/0`) lets other clients impersonate external entries. A trusted proxy must overwrite inbound `X-Forwarded-Proto` with exactly one `http` or `https` and `X-Forwarded-Host` with exactly one browser-facing authority, including any non-default port. Both must be present together; duplicate headers, comma-separated chains, malformed/conflicting metadata, and any RFC `Forwarded` header are rejected. If a trusted peer sends neither supported header nor `Forwarded`, direct Host/HTTP applies. For multiple proxy hops, the final trusted peer must supply one authoritative sanitized pair; Stravia does not interpret forwarding chains. Proxy trust never bypasses the entry list or CSRF.
-
-For example, run Nginx on the same host as Stravia, install your certificate/key at the shown paths, and use the following configuration. `$http_host` preserves an external port; `$scheme` describes the browser connection to this TLS edge. An HTTP proxy can instead listen on HTTP and use the same header directives, with an HTTP allowed origin. An inner proxy behind another TLS terminator must use a separately secured, sanitized upstream contract rather than claiming its HTTP hop is the browser protocol.
-
-```bash
-./target/release/stravia-server \
-  --host 127.0.0.1 \
-  --port 23471 \
-  --admin-origin https://gateway.example.com \
-  --trusted-proxy 127.0.0.1
-```
-
-```nginx
-server {
-    listen 443 ssl;
-    server_name gateway.example.com;
-    ssl_certificate /etc/nginx/tls/gateway.crt;
-    ssl_certificate_key /etc/nginx/tls/gateway.key;
-
-    location / {
-        proxy_pass http://127.0.0.1:23471;
-        proxy_set_header Host $http_host;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Forwarded-Host $http_host;
-        proxy_set_header Forwarded "";
-    }
-}
-```
-
-Both lists are deployment-only settings, take effect on restart, and are not stored in the WebUI/database. Fix a restrictive misconfiguration locally and restart. Remove the old `--public-origin` / `STRAVIA_PUBLIC_ORIGIN` and server `--admin-cors-origin` settings when upgrading; there is no compatibility alias. A remaining `STRAVIA_PUBLIC_ORIGIN` makes Server startup fail with a migration error rather than silently discarding the old entry restriction. Client/file access addresses remain separate.
-
-Setup, access, and refresh cookies are set and cleared with `Secure` exactly when the recovered external request is HTTPS, even with HTTP upstream transport. HTTP remains usable without weakening HTTPS cookies; `HttpOnly`, `SameSite=Strict`, revocation, and CSRF remain enabled. Sessions are not promised to follow between hosts. Cookies are not isolated by port or scheme on the same host: mixing HTTP and HTTPS can prevent HTTP from replacing existing Secure cookies. Prefer distinct hostnames or HTTPS consistently rather than removing Secure or broadening Cookie Domain. HTTP also does not guarantee browser APIs that require a secure context.
-
-**Security warning:** HTTP exposes passwords, sessions, and management requests to interception and alteration. Startup warns when HTTP is allowed or entries are unrestricted; this describes policy, not evidence that an HTTPS proxy request was plaintext. Default unrestricted entries lose the partial DNS-rebinding protection of a fixed host allowlist. CSRF, SameSite, a private LAN, and trusted proxy configuration do not replace TLS or network isolation. Use HTTPS, explicit entries, and a firewall/backend-port isolation on untrusted networks; a client able to connect can construct Host, so an entry list is not a firewall.
+- [Architecture](docs/design/architecture.md) and [design documents](docs/design/) · [ADRs](docs/adr/)
+- [Database schema](docs/database/schema.md) · [Changelog](CHANGELOG.md)
 
 ## Development
 
-```text
-backend/crates/stravia-core/       Transport-independent gateway, protocols, providers, storage, and admin service
-backend/crates/stravia-runtime-contract/ Shared canonical IR, Hook, Agent, Artifact, and history contracts
-backend/crates/stravia-media/      Media Understanding implementation and configuration policy
-backend/crates/stravia-web-search/ Web Search backends, reports, tools, and configuration policy
-backend/crates/stravia-credential-protection/ Local credential detection, reversible protection, and mapping storage
-backend/crates/stravia-devtools/   Development and protocol-fixture tools
-backend/apps/stravia-server/       Standalone unified HTTP server
-backend/apps/stravia-desktop/      Tauri desktop shell
-frontend/stravia-webui/            SvelteKit management interface
-tests/e2e/                         Python backend E2E suites and recorded protocol fixtures
-```
-
-The three capability crates are assembled at compile time by `stravia-core`; they depend on shared contracts, not on core. Core supplies the model, authorization, storage, and observation adapters. There is no dynamic loading or hot unloading, and HTTP/MCP contracts and persisted data formats are unchanged. Rust callers import shared types from `stravia-runtime-contract` and capability types from their owning crate.
-
-Common commands:
+Rust `1.98.1` · Bun `1.4.0` · Task `3.52.0` · uv for Python E2E.
 
 | Command                  | Purpose                                                     |
 | ------------------------ | ----------------------------------------------------------- |
-| `task dev:web`           | Start the WebUI development server                          |
 | `task dev:server`        | Start the Vite WebUI and standalone debug server            |
 | `task dev:desktop`       | Start the Tauri desktop app in development mode             |
 | `task check`             | Run WebUI checks, ESLint, Rust formatting, and Cargo checks |
 | `task test`              | Run WebUI and supported Rust unit tests                     |
-| `task test:browser`      | Run embedded Moli regressions against local fixtures        |
-| `task test:e2e:web`      | Run Chromium WebUI E2E tests                                |
-| `task test:e2e:desktop`  | Run the Windows Tauri/WebView2 smoke test                   |
 | `DB_URL=… task test:e2e` | Run the full proxy, Admin, SQLite, and PostgreSQL E2E suite |
-
-### Rust build reuse
-
-At the repository root, bare `cargo build`, `cargo check`, and `cargo test` select only `stravia-server`. This keeps the default build's dependency features aligned with `task dev:server`, instead of first compiling the combined server/desktop workspace features. Use `cargo build --workspace` for all members, `task check` for workspace checks, and `task test` for the supported unit-test suite; their scope is unchanged.
-
-- **Server development:** run `task dev:server` directly, or prebuild with `cargo build --locked` / `task build:server:debug`. A separate workspace build is not required.
-- **Desktop development:** run `task dev:desktop` directly. Tauri selects its own dependency features and supplies build-script configuration; a bare workspace build is not an exact desktop-dev prebuild.
-- **Rust test prebuild:** use `cargo test --locked --workspace --exclude stravia-desktop --no-run`, matching `task test`. Test harnesses, `cfg(test)`, and features enabled by dev-dependencies require additional artifacts even after a normal build. For a focused test, keep the same `-p` selection between prebuild and execution.
-
-Cargo reuses artifacts with matching inputs, not every artifact under `target/debug`. Switching package selections, features, toolchains, target triples, compiler flags, or build-script environment can require recompilation. `cargo check` is not a code-generation prebuild, and release artifacts do not replace debug artifacts. Keep these inputs stable and do not run `cargo clean` as a routine development step. The repository already enables incremental compilation and uses LLD on Windows; third-party dependencies use `opt-level = 3` in development, trading a slower initial build for runtime speed.
-
-To avoid rebuilding Moli's native TLS when switching between server, desktop, and tests, `stravia-web-access` deliberately declares `libc`, `regex`, and `serde_core` as build dependencies to unify their build-time features. These are feature-resolution anchors even without a local `build.rs`, not unused runtime dependencies. The root dev profile also fixes debuginfo for `bitflags` 2.x and `glob`: Cargo's host/runtime artifact sharing would otherwise change their effective settings between entry points. This does not unify runtime proxy, JSON, or test-only features, so other configuration-specific artifacts remain necessary. Changes to these declarations can require a one-time rebuild; retain the resulting cache.
-
-Server integration tests also build the ordinary executable with the test dependency graph. Switching back to `cargo build -p stravia-server` can therefore recompile/link that binary (`UnitDependencyInfoChanged`) even when every library artifact is reused; this is distinct from rebuilding native TLS or losing the dependency cache.
-
-To check Google independently, run `cargo test --locked -p stravia-web-access live_google_returns_parsable_destination_urls -- --ignored --nocapture`. This contacts Google through the system proxy snapshot and verifies actual result titles and destination URLs; it is not part of the default test suite.
-
-Backend Python tests use the locked `test` dependency group in `pyproject.toml`; Task invokes them through `uv run --locked`.
-`task test:e2e:web` also builds the production Server for real management-entry browser tests. These tests require `openssl` on PATH, create an isolated local TLS proxy, and trust only the temporary certificate's public key in the test browser; they do not change system trust or disable certificate validation globally.
-Debug server builds do not embed or serve WebUI assets. `task dev:server` starts the Vite development server alongside the backend; release server builds embed the WebUI.
-
-`task dev:server` starts Vite first, passes its actual listening origin as `--admin-origin`, and trusts only the Vite proxy's `127.0.0.1` TCP peer. Vite overwrites the forwarding pair with `http` and the incoming authority (including the selected port), and removes `Forwarded`. If port `5173` is occupied, Vite automatically selects another port; open the exact **Local** URL printed in the terminal. Concurrent workspaces should use distinct `STRAVIA_PORT` values for their backend listeners; WebUI ports need not be fixed.
-
-If you run `task dev:web` and the backend separately, pass the WebUI's actual origin to the backend, for example `cargo run -p stravia-server -- --admin-origin http://localhost:5174 --trusted-proxy 127.0.0.1`. `localhost` and `127.0.0.1` are different browser origins. After restarting an unfinished setup, use the new setup token printed by the new Server process.
-
-## Documentation
-
-- [Architecture](docs/design/architecture.md)
-- [Database schema](docs/database/schema.md)
 
 ## License
 
 Stravia is licensed under the [GNU Affero General Public License v3.0 only](LICENSE) (`AGPL-3.0-only`).
-Separately licensed components and assets retain their own terms. The original `stravia-web-access` code is under `CC0-1.0`; its vendored OMP stealth scripts are under [MIT](backend/crates/stravia-web-access/src/browser/stealth/LICENSE), with that notice included in the compiled injection script. Bundled fonts retain their respective licenses.
+Separately licensed components retain their own terms: `stravia-web-access` is `CC0-1.0 AND MIT` ([Cargo.toml](backend/crates/stravia-web-access/Cargo.toml)), and the embedded [Moli engine](https://github.com/Stravia-AI/moli-stealth) is a separate repository under its own license. Bundled fonts retain their respective licenses.
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=Stravia-AI/StraviaPlatform&type=Date)](https://star-history.com/#Stravia-AI/StraviaPlatform&Date)

@@ -64,10 +64,11 @@ impl ThinkingSource {
                             | ContentBlock::Reasoning { .. }
                             | ContentBlock::RedactedThinking { .. }
                     )
-                }) && Self::from_item(item).is_none()
-                {
-                    self.stamp_item(item);
-                }
+                })
+                && Self::from_item(item).is_none()
+            {
+                self.stamp_item(item);
+            }
         }
     }
 

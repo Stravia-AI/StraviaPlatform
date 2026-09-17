@@ -4,7 +4,11 @@ mod parsers;
 mod samples;
 mod service;
 
-use parsers::{ParsedAllowance, parse_minimax_fallback, parse_monitor_response};
+use parsers::{
+    CommandCodeSubscription, ParsedAllowance, commandcode_billing_cycle, parse_commandcode_org_id,
+    parse_commandcode_subscription, parse_commandcode_summary_cost, parse_minimax_fallback,
+    parse_monitor_response,
+};
 pub(crate) use samples::AllowanceSampleStore;
 #[cfg(test)]
 use service::{
@@ -142,6 +146,7 @@ enum MonitorKind {
     DeepSeek,
     NeuralWatt,
     XaiGrok,
+    CommandCode,
 }
 
 fn monitor_for(preset_key: &str, channel: &str) -> Option<MonitorKind> {
@@ -161,6 +166,7 @@ fn monitor_for(preset_key: &str, channel: &str) -> Option<MonitorKind> {
         ("deepseek", "default") => Some(MonitorKind::DeepSeek),
         ("neuralwatt", "default") => Some(MonitorKind::NeuralWatt),
         ("xai", "grok") => Some(MonitorKind::XaiGrok),
+        ("commandcode", "default") => Some(MonitorKind::CommandCode),
         _ => None,
     }
 }

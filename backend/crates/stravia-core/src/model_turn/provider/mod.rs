@@ -309,14 +309,30 @@ impl AttemptObservation {
             });
         }
         let observed = binding.observer.is_some();
-        
+
         Self {
             observer: binding.observer.clone(),
             id,
-            model_turn_id: if observed { binding.model_turn_id.clone() } else { Default::default() },
-            transport: if observed { transport.to_owned() } else { Default::default() },
-            protocol: if observed { binding.protocol.to_string() } else { Default::default() },
-            url: if observed { url.to_owned() } else { Default::default() },
+            model_turn_id: if observed {
+                binding.model_turn_id.clone()
+            } else {
+                Default::default()
+            },
+            transport: if observed {
+                transport.to_owned()
+            } else {
+                Default::default()
+            },
+            protocol: if observed {
+                binding.protocol.to_string()
+            } else {
+                Default::default()
+            },
+            url: if observed {
+                url.to_owned()
+            } else {
+                Default::default()
+            },
             started_at: Instant::now(),
             finished: AtomicBool::new(false),
             usage_confirmed: AtomicBool::new(false),

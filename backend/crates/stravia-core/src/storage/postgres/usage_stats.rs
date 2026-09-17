@@ -82,17 +82,17 @@ impl UsageStatsStore for PostgresUsageStatsStore {
                  SELECT * FROM model_turn_observations WHERE ($1::BIGINT IS NULL OR started_at >= $1)
              ), attempts AS (
                  SELECT a.* FROM target_attempt_observations a JOIN turns t ON t.id = a.model_turn_id
+                 WHERE a.status = 'completed'
              )
              SELECT
                  (SELECT COUNT(*)::BIGINT FROM turns) AS total_requests,
-                 (SELECT CASE WHEN COUNT(*) > 0
-                              AND COUNT(input_tokens) = COUNT(*)
-                              AND COUNT(cache_read_tokens) = COUNT(*)
-                         THEN SUM(GREATEST(input_tokens - cache_read_tokens, 0))::BIGINT END FROM attempts) AS total_input_tokens,
-                 (SELECT CASE WHEN COUNT(*) > 0 AND COUNT(output_tokens) = COUNT(*) THEN SUM(output_tokens)::BIGINT END FROM attempts) AS total_output_tokens,
-                 (SELECT CASE WHEN COUNT(*) > 0 AND COUNT(cache_read_tokens) = COUNT(*) THEN SUM(cache_read_tokens)::BIGINT END FROM attempts) AS total_cache_read_tokens,
-                 (SELECT CASE WHEN COUNT(*) > 0 AND COUNT(cache_write_tokens) = COUNT(*) THEN SUM(cache_write_tokens)::BIGINT END FROM attempts) AS total_cache_write_tokens,
-                 (SELECT CASE WHEN COUNT(*) > 0 AND COUNT(reasoning_tokens) = COUNT(*) THEN SUM(reasoning_tokens)::BIGINT END FROM attempts) AS total_reasoning_tokens,
+                 (SELECT (SUM(GREATEST(input_tokens - cache_read_tokens, 0))
+                          FILTER (WHERE input_tokens IS NOT NULL AND cache_read_tokens IS NOT NULL))::BIGINT
+                  FROM attempts) AS total_input_tokens,
+                 (SELECT SUM(output_tokens)::BIGINT FROM attempts) AS total_output_tokens,
+                 (SELECT SUM(cache_read_tokens)::BIGINT FROM attempts) AS total_cache_read_tokens,
+                 (SELECT SUM(cache_write_tokens)::BIGINT FROM attempts) AS total_cache_write_tokens,
+                 (SELECT SUM(reasoning_tokens)::BIGINT FROM attempts) AS total_reasoning_tokens,
                  (SELECT AVG((finished_at - started_at)::FLOAT8) FROM turns WHERE finished_at IS NOT NULL) AS avg_duration_ms,
                  (SELECT AVG(first_token_ms::FLOAT8) FROM attempts) AS avg_first_token_ms,
                  (SELECT COALESCE(SUM(CASE WHEN status <> 'completed' THEN 1 ELSE 0 END), 0)::BIGINT FROM turns) AS error_count",
@@ -115,16 +115,14 @@ impl UsageStatsStore for PostgresUsageStatsStore {
                  FROM turns GROUP BY hour
              ), attempt_stats AS (
                  SELECT t.hour,
-                        CASE WHEN COUNT(*) > 0
-                                  AND COUNT(a.input_tokens) = COUNT(*)
-                                  AND COUNT(a.cache_read_tokens) = COUNT(*)
-                             THEN SUM(GREATEST(a.input_tokens - a.cache_read_tokens, 0))::BIGINT END AS total_input_tokens,
-                        CASE WHEN COUNT(*) > 0 AND COUNT(a.output_tokens) = COUNT(*) THEN SUM(a.output_tokens)::BIGINT END AS total_output_tokens,
-                        CASE WHEN COUNT(*) > 0 AND COUNT(a.cache_read_tokens) = COUNT(*) THEN SUM(a.cache_read_tokens)::BIGINT END AS total_cache_read_tokens,
-                        CASE WHEN COUNT(*) > 0 AND COUNT(a.cache_write_tokens) = COUNT(*) THEN SUM(a.cache_write_tokens)::BIGINT END AS total_cache_write_tokens,
-                        CASE WHEN COUNT(*) > 0 AND COUNT(a.reasoning_tokens) = COUNT(*) THEN SUM(a.reasoning_tokens)::BIGINT END AS total_reasoning_tokens,
+                        (SUM(GREATEST(a.input_tokens - a.cache_read_tokens, 0))
+                         FILTER (WHERE a.input_tokens IS NOT NULL AND a.cache_read_tokens IS NOT NULL))::BIGINT AS total_input_tokens,
+                        SUM(a.output_tokens)::BIGINT AS total_output_tokens,
+                        SUM(a.cache_read_tokens)::BIGINT AS total_cache_read_tokens,
+                        SUM(a.cache_write_tokens)::BIGINT AS total_cache_write_tokens,
+                        SUM(a.reasoning_tokens)::BIGINT AS total_reasoning_tokens,
                         AVG(a.first_token_ms::FLOAT8) AS avg_first_token_ms
-                 FROM turns t JOIN target_attempt_observations a ON a.model_turn_id = t.id GROUP BY t.hour
+                 FROM turns t JOIN target_attempt_observations a ON a.model_turn_id = t.id AND a.status = 'completed' GROUP BY t.hour
              )
              SELECT t.hour, t.request_count, t.error_count,
                     a.total_input_tokens, a.total_output_tokens, a.total_cache_read_tokens,
@@ -149,13 +147,11 @@ impl UsageStatsStore for PostgresUsageStatsStore {
                  FROM turns GROUP BY model
              ), attempt_stats AS (
                  SELECT t.model,
-                        CASE WHEN COUNT(*) > 0
-                                  AND COUNT(a.input_tokens) = COUNT(*)
-                                  AND COUNT(a.cache_read_tokens) = COUNT(*)
-                             THEN SUM(GREATEST(a.input_tokens - a.cache_read_tokens, 0))::BIGINT END AS total_input_tokens,
-                        CASE WHEN COUNT(*) > 0 AND COUNT(a.output_tokens) = COUNT(*) THEN SUM(a.output_tokens)::BIGINT END AS total_output_tokens,
-                        CASE WHEN COUNT(*) > 0 AND COUNT(a.reasoning_tokens) = COUNT(*) THEN SUM(a.reasoning_tokens)::BIGINT END AS total_reasoning_tokens
-                 FROM turns t JOIN target_attempt_observations a ON a.model_turn_id = t.id GROUP BY t.model
+                        (SUM(GREATEST(a.input_tokens - a.cache_read_tokens, 0))
+                         FILTER (WHERE a.input_tokens IS NOT NULL AND a.cache_read_tokens IS NOT NULL))::BIGINT AS total_input_tokens,
+                        SUM(a.output_tokens)::BIGINT AS total_output_tokens,
+                        SUM(a.reasoning_tokens)::BIGINT AS total_reasoning_tokens
+                 FROM turns t JOIN target_attempt_observations a ON a.model_turn_id = t.id AND a.status = 'completed' GROUP BY t.model
              )
              SELECT t.model, t.request_count, a.total_input_tokens, a.total_output_tokens,
                     a.total_reasoning_tokens, t.avg_duration_ms
@@ -190,17 +186,15 @@ impl UsageStatsStore for PostgresUsageStatsStore {
             "SELECT t.api_key_id,
                     COALESCE(MAX(NULLIF(t.api_key_name, '')), t.api_key_id) AS api_key_name,
                     COUNT(DISTINCT t.id)::BIGINT AS request_count,
-                    CASE WHEN COUNT(a.id) > 0
-                              AND COUNT(a.input_tokens) = COUNT(a.id)
-                              AND COUNT(a.cache_read_tokens) = COUNT(a.id)
-                         THEN SUM(GREATEST(a.input_tokens - a.cache_read_tokens, 0))::BIGINT END AS total_input_tokens,
-                    CASE WHEN COUNT(a.id) > 0 AND COUNT(a.output_tokens) = COUNT(a.id) THEN SUM(a.output_tokens)::BIGINT END AS total_output_tokens,
-                    CASE WHEN COUNT(a.id) > 0 AND COUNT(a.cache_read_tokens) = COUNT(a.id) THEN SUM(a.cache_read_tokens)::BIGINT END AS cache_read_tokens,
-                    CASE WHEN COUNT(a.id) > 0 AND COUNT(a.cache_write_tokens) = COUNT(a.id) THEN SUM(a.cache_write_tokens)::BIGINT END AS cache_write_tokens,
-                    CASE WHEN COUNT(a.id) > 0 AND COUNT(a.reasoning_tokens) = COUNT(a.id) THEN SUM(a.reasoning_tokens)::BIGINT END AS reasoning_tokens,
+                    (SUM(GREATEST(a.input_tokens - a.cache_read_tokens, 0))
+                     FILTER (WHERE a.input_tokens IS NOT NULL AND a.cache_read_tokens IS NOT NULL))::BIGINT AS total_input_tokens,
+                    SUM(a.output_tokens)::BIGINT AS total_output_tokens,
+                    SUM(a.cache_read_tokens)::BIGINT AS cache_read_tokens,
+                    SUM(a.cache_write_tokens)::BIGINT AS cache_write_tokens,
+                    SUM(a.reasoning_tokens)::BIGINT AS reasoning_tokens,
                     MAX(t.started_at)::BIGINT AS last_used_at
              FROM model_turn_observations t
-             LEFT JOIN target_attempt_observations a ON a.model_turn_id = t.id
+             LEFT JOIN target_attempt_observations a ON a.model_turn_id = t.id AND a.status = 'completed'
              WHERE t.api_key_id IS NOT NULL AND t.api_key_id <> ''
                AND ($1::BIGINT IS NULL OR t.started_at >= $1)
              GROUP BY t.api_key_id ORDER BY request_count DESC",
@@ -316,6 +310,36 @@ mod tests {
         Ok(())
     }
 
+    async fn insert_failed_attempt(
+        pool: &Pool<Postgres>,
+        id: &str,
+        turn_id: &str,
+        started_at: i64,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            "INSERT INTO target_attempt_observations
+             (id,model_turn_id,run_id,interaction_id,target_id,provider_id,provider_name,upstream_model,protocol,status,started_at,finished_at,duration_ms,last_event_sequence)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
+        )
+        .bind(id)
+        .bind(turn_id)
+        .bind(turn_id)
+        .bind(turn_id)
+        .bind("target")
+        .bind("provider")
+        .bind("Provider")
+        .bind("upstream")
+        .bind("responses")
+        .bind("failed")
+        .bind(started_at)
+        .bind(started_at + 10)
+        .bind(10_i64)
+        .bind(0_i64)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn postgres_management_stats_project_net_input_per_attempt() -> anyhow::Result<()> {
         let Ok(url) = std::env::var("DB_URL") else {
@@ -344,6 +368,8 @@ mod tests {
                 insert_turn(&pool, "recent", recent, "model", "key").await?;
                 insert_attempt(&pool, "recent-a", "recent", recent, 12, Some(5)).await?;
                 insert_attempt(&pool, "recent-b", "recent", recent, 3, Some(9)).await?;
+                // 失败 attempt 永远没有已确认用量，不计入统计覆盖。
+                insert_failed_attempt(&pool, "recent-failed", "recent", recent).await?;
                 insert_turn(&pool, "old", old, "unknown-cache", "old-key").await?;
                 insert_attempt(&pool, "old-a", "old", old, 8, None).await?;
 
@@ -355,7 +381,11 @@ mod tests {
                 assert_eq!(overview.total_input_tokens, Some(7));
                 assert_eq!(overview.total_output_tokens, Some(6));
                 assert_eq!(overview.total_reasoning_tokens, Some(2));
-                assert_eq!(store.stats_overview(None).await?.total_input_tokens, None);
+                // 未知字段只跳过该 attempt，不遮蔽其他已确认用量；全部未报告的字段保持 null。
+                let all_time = store.stats_overview(None).await?;
+                assert_eq!(all_time.total_input_tokens, Some(7));
+                assert_eq!(all_time.total_output_tokens, Some(9));
+                assert_eq!(all_time.total_cache_write_tokens, None);
 
                 let hourly = store.stats_hourly(1).await?;
                 assert_eq!(hourly.len(), 1);
