@@ -1,23 +1,77 @@
 import { describe, expect, test } from 'bun:test'
 
-import { buildLatencyChart } from '../src/lib/stats-chart'
+import { buildActivityGrid, buildLatencyChart } from '../src/lib/stats-chart'
+
+const HOUR_MS = 3_600_000
+const DAY_MS = 86_400_000
 
 describe('latency chart', () => {
-  test('breaks both series across hours without requests', () => {
+  test('breaks both series across buckets without requests', () => {
+    const start = Date.UTC(2026, 8, 2, 18)
     const points = buildLatencyChart(
       [
-        { hour: '2026-09-02 18:00:00', avg_first_token_ms: 1_000, avg_duration_ms: 5_000 },
-        { hour: '2026-09-02 20:00:00', avg_first_token_ms: 2_000, avg_duration_ms: 6_000 },
-        { hour: '2026-09-02 21:00:00', avg_first_token_ms: null, avg_duration_ms: 7_000 },
+        { bucket_start: start, avg_first_token_ms: 1_000, avg_duration_ms: 5_000 },
+        { bucket_start: start + 2 * HOUR_MS, avg_first_token_ms: 2_000, avg_duration_ms: 6_000 },
+        { bucket_start: start + 3 * HOUR_MS, avg_first_token_ms: null, avg_duration_ms: 7_000 },
       ],
-      (hour) => hour,
+      (ms) => new Date(ms).toISOString(),
+      HOUR_MS,
     )
 
     expect(points).toEqual([
-      { bucket: '2026-09-02 18:00:00', firstToken: 1, duration: 5 },
-      { bucket: '2026-09-02 19:00:00', firstToken: null, duration: null },
-      { bucket: '2026-09-02 20:00:00', firstToken: 2, duration: 6 },
-      { bucket: '2026-09-02 21:00:00', firstToken: null, duration: 7 },
+      { bucket: '2026-09-02T18:00:00.000Z', firstToken: 1, duration: 5 },
+      { bucket: '2026-09-02T19:00:00.000Z', firstToken: null, duration: null },
+      { bucket: '2026-09-02T20:00:00.000Z', firstToken: 2, duration: 6 },
+      { bucket: '2026-09-02T21:00:00.000Z', firstToken: null, duration: 7 },
     ])
+  })
+})
+
+describe('activity grid', () => {
+  test('fills every bucket in the window and distinguishes zero and unknown usage', () => {
+    const end = Date.UTC(2026, 8, 17)
+    const grid = buildActivityGrid(
+      [
+        {
+          bucket_start: end - DAY_MS,
+          total_input_tokens: 10,
+          total_output_tokens: null,
+          total_cache_read_tokens: null,
+          total_cache_write_tokens: null,
+        },
+        {
+          bucket_start: end - 2 * DAY_MS,
+          total_input_tokens: null,
+          total_output_tokens: null,
+          total_cache_read_tokens: null,
+          total_cache_write_tokens: null,
+        },
+      ],
+      { endMs: end, spanMs: 3 * DAY_MS, bucketMs: DAY_MS, tzOffsetMs: 0 },
+    )
+
+    // 窗口 [end-3d, end] 覆盖 4 个日格。
+    expect(grid.cells).toHaveLength(4)
+    const byStart = new Map(grid.cells.map((cell) => [cell.start, cell]))
+    expect(byStart.get(end - 3 * DAY_MS)?.tokens).toBe(0)
+    expect(byStart.get(end - 2 * DAY_MS)?.tokens).toBeNull()
+    expect(byStart.get(end - DAY_MS)?.tokens).toBe(10)
+    expect(byStart.get(end - DAY_MS)?.level).toBe(4)
+    expect(byStart.get(end)?.tokens).toBe(0)
+    expect(byStart.get(end)?.level).toBe(0)
+
+    const positions = new Set(grid.cells.map((cell) => `${cell.col}:${cell.row}`))
+    expect(positions.size).toBe(grid.cells.length)
+    expect(grid.rowCount).toBeLessThanOrEqual(7)
+    expect(grid.colCount).toBe(grid.colStarts.length)
+  })
+
+  test('sub-day buckets group into parent-period columns', () => {
+    const end = Date.UTC(2026, 8, 17, 12)
+    const grid = buildActivityGrid([], { endMs: end, spanMs: 6 * HOUR_MS, bucketMs: 900_000, tzOffsetMs: 0 })
+    expect(grid.cells).toHaveLength(25)
+    expect(grid.rowCount).toBe(4)
+    expect(grid.colCount).toBeGreaterThanOrEqual(6)
+    expect(grid.colCount).toBeLessThanOrEqual(7)
   })
 })

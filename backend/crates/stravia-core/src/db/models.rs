@@ -670,8 +670,10 @@ pub struct StatsOverview {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
-pub struct StatsHourly {
-    pub hour: String,
+pub struct StatsSeries {
+    /// Epoch milliseconds of the bucket start, aligned to the requested bucket
+    /// size and caller timezone offset.
+    pub bucket_start: i64,
     pub request_count: i64,
     pub error_count: i64,
     pub total_input_tokens: Option<i64>,

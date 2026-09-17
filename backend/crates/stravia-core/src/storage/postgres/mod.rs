@@ -9,7 +9,7 @@ use crate::db::models::{
     ApiKey, ApiKeyStats, ApiKeyWithBindings, CreateApiKey, CreateProviderRecord,
     DEFAULT_FIRST_TOKEN_TIMEOUT_MS, DEFAULT_TARGET_COOLDOWN_MS, DEFAULT_TARGET_PRIORITY,
     DEFAULT_TARGET_RETRY_BUDGET, ModelStats, OAuthCredential, Provider, ProviderStats, PutRoute,
-    Route, StatsHourly, StatsOverview, Target, UpdateApiKey, UpdateProvider, UpsertOAuthCredential,
+    Route, StatsOverview, StatsSeries, Target, UpdateApiKey, UpdateProvider, UpsertOAuthCredential,
     is_valid_provider_auth_mode,
 };
 use crate::storage::sql::config::SqlBackendConfig;

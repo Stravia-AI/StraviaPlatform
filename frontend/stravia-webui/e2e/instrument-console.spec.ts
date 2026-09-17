@@ -70,9 +70,9 @@ test('Overview with traffic shows request and second-based latency charts', asyn
   await expect(page.locator('.route-metric-strip__item').filter({ hasText: 'Output Tokens' })).toContainText('86')
   await expect(page.getByText('Total Tokens', { exact: true })).toHaveCount(0)
 
-  const modelSection = page.locator('section').filter({
-    has: page.getByRole('heading', { name: 'Most-used models', exact: true }),
-  })
+  const modelSection = page
+    .locator('section')
+    .filter({ has: page.getByRole('heading', { name: 'Most-used models', exact: true }) })
   const modelTable = modelSection.getByRole('table', { name: 'Most-used models' })
   await expect(modelTable.getByRole('columnheader')).toHaveText([
     'Model',
@@ -104,9 +104,9 @@ test('Usage analytics uses backend input and output without re-counting cache or
   }
   await expect(page.getByText('Reasoning', { exact: true })).toHaveCount(0)
 
-  const apiKeyUsage = page.locator('section').filter({
-    has: page.getByRole('heading', { name: 'API Key usage', exact: true }),
-  })
+  const apiKeyUsage = page
+    .locator('section')
+    .filter({ has: page.getByRole('heading', { name: 'API Key usage', exact: true }) })
   const apiKeyTable = apiKeyUsage.getByRole('table', { name: 'API Key usage' })
   await expect(apiKeyTable).toContainText('920')
   await expect(apiKeyTable).toContainText('86')
@@ -137,7 +137,7 @@ test('Usage analytics finishes its first load when breakdowns arrive before the 
     await overviewGate
     await route.fallback()
   })
-  const breakdowns = ['hourly', 'providers', 'api-keys', 'models'].map((name) =>
+  const breakdowns = ['series', 'providers', 'api-keys', 'models'].map((name) =>
     page.waitForResponse((response) => new URL(response.url()).pathname === `/api/v1/stats/${name}`),
   )
   await page.goto('/stats')
@@ -148,15 +148,15 @@ test('Usage analytics finishes its first load when breakdowns arrive before the 
     () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))),
   )
   releaseOverview()
-  await expect(page.getByLabel('Token usage chart')).toBeVisible()
+  await expect(page.getByRole('group', { name: 'Token activity' })).toBeVisible()
   await expect(page.locator('[data-slot="skeleton"]')).toHaveCount(0)
 })
 
 test('Usage analytics exposes an initial query failure and recovers on retry', async ({ page }) => {
   await stubTraffic(page, { requests: 12, errors: 0 })
-  let hourlyFails = true
-  await page.route('**/api/v1/stats/hourly**', async (route) => {
-    if (hourlyFails) {
+  let seriesFails = true
+  await page.route('**/api/v1/stats/series**', async (route) => {
+    if (seriesFails) {
       await route.fulfill({ status: 500, json: { error: 'Time series unavailable' } })
       return
     }
@@ -167,11 +167,11 @@ test('Usage analytics exposes an initial query failure and recovers on retry', a
   const retryAll = page.getByRole('button', { name: 'Retry all' })
   await expect(retryAll).toBeEnabled()
   await expect(page.locator('.route-metric-strip__item').filter({ hasText: 'Total requests' })).toContainText('12')
-  await expect(page.getByLabel('Token usage chart')).toHaveCount(0)
+  await expect(page.getByRole('group', { name: 'Token activity' })).toHaveCount(0)
 
-  hourlyFails = false
+  seriesFails = false
   await retryAll.click()
-  await expect(page.getByLabel('Token usage chart')).toBeVisible()
+  await expect(page.getByRole('group', { name: 'Token activity' })).toBeVisible()
   await expect(retryAll).toHaveCount(0)
 })
 
@@ -447,12 +447,12 @@ async function stubTraffic(page: Page, counts: { requests: number; errors: numbe
       },
     })
   })
-  await page.route('**/api/v1/stats/hourly**', async (route) => {
+  await page.route('**/api/v1/stats/series**', async (route) => {
     await route.fulfill({
       json: {
         data: [
           {
-            hour: '2026-08-26T00:00:00Z',
+            bucket_start: Date.UTC(2026, 7, 26),
             request_count: counts.requests,
             error_count: counts.errors,
             total_input_tokens: 920,

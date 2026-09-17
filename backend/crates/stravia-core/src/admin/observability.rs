@@ -113,11 +113,20 @@ impl AdminService {
             .await
     }
 
-    pub async fn get_stats_hourly(&self, hours: i32) -> anyhow::Result<Vec<StatsHourly>> {
+    pub async fn get_stats_series(
+        &self,
+        hours: i32,
+        bucket_seconds: i32,
+        tz_offset_seconds: i32,
+    ) -> anyhow::Result<Vec<StatsSeries>> {
         self.gw
             .storage
             .usage_stats()
-            .stats_hourly(i64::from(hours.max(1)))
+            .stats_series(
+                i64::from(hours.max(1)),
+                i64::from(bucket_seconds.clamp(60, 86_400)) * 1_000,
+                i64::from(tz_offset_seconds.clamp(-50_400, 50_400)) * 1_000,
+            )
             .await
     }
 

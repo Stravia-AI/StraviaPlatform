@@ -962,12 +962,12 @@ def test_stats_overview_incremented(admin_env: dict[str, str]) -> None:
 
     status, resp = http_request(
         "GET",
-        f"{admin_env['admin']}/api/v1/stats/hourly",
+        f"{admin_env['admin']}/api/v1/stats/series?hours=24&bucket=3600",
         headers=admin_env["auth"],
     )
     assert status == 200
-    hourly = resp.get("data", [])
-    assert hourly
-    assert hourly[-1]["total_cache_read_tokens"] is None
-    assert hourly[-1]["total_cache_write_tokens"] is None
-    assert hourly[-1]["avg_duration_ms"] >= 0
+    series = resp.get("data", [])
+    assert series
+    assert series[-1]["total_cache_read_tokens"] is None
+    assert series[-1]["total_cache_write_tokens"] is None
+    assert series[-1]["avg_duration_ms"] >= 0

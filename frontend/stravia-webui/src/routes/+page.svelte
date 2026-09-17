@@ -16,7 +16,7 @@ import {
   formatPercent,
   formatTime,
 } from '$lib/format'
-import { buildLatencyChart } from '$lib/stats-chart'
+import { buildLatencyChart, localTzOffsetMs } from '$lib/stats-chart'
 import type { ModelStats, ProviderStats } from '$lib/types'
 import DesktopPortNotice from '$lib/components/desktop-port-notice.svelte'
 import MetricStrip from '$lib/components/metric-strip.svelte'
@@ -34,9 +34,9 @@ const overviewQuery = createQuery(() => ({
   queryFn: () => admin.stats.overview(),
   refetchInterval: 10_000,
 }))
-const hourlyQuery = createQuery(() => ({
-  queryKey: ['stats-hourly'],
-  queryFn: () => admin.stats.hourly(24),
+const seriesQuery = createQuery(() => ({
+  queryKey: ['stats-series', 24, 3_600],
+  queryFn: () => admin.stats.series(24, 3_600, localTzOffsetMs() / 1000),
   refetchInterval: 30_000,
 }))
 const modelStatsQuery = createQuery(() => ({
@@ -183,13 +183,13 @@ const setupAction = $derived.by(() => {
 })
 const hasTraffic = $derived((overview?.total_requests ?? 0) > 0)
 const requestChart = $derived(
-  (hourlyQuery.data ?? []).map((item) => ({
-    hour: formatTime(item.hour),
+  (seriesQuery.data ?? []).map((item) => ({
+    hour: formatTime(item.bucket_start),
     requests: item.request_count,
     errors: item.error_count,
   })),
 )
-const latencyChart = $derived(buildLatencyChart(hourlyQuery.data ?? [], formatTime))
+const latencyChart = $derived(buildLatencyChart(seriesQuery.data ?? [], formatTime, 3_600_000))
 const errorRate = $derived(hasTraffic && overview ? (overview.error_count / overview.total_requests) * 100 : 0)
 const dash = '–'
 const metrics = $derived([

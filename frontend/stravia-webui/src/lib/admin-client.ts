@@ -50,8 +50,8 @@ import type {
   Provider,
   ProviderOAuthStatusData,
   ProviderStats,
-  StatsHourly,
   StatsOverview,
+  StatsSeries,
   TestResult,
   UpdateApiKey,
   UnbindRouteInput,
@@ -364,8 +364,13 @@ function mapRequest(command: string, args?: Record<string, unknown>): RequestMap
     }
     case 'getStatsOverview':
       return { method: 'GET', path: statsPath('/stats/overview', args?.hours) }
-    case 'getStatsHourly':
-      return { method: 'GET', path: statsPath('/stats/hourly', args?.hours ?? 24) }
+    case 'getStatsSeries': {
+      const params = new URLSearchParams()
+      params.set('hours', String(args?.hours ?? 24))
+      params.set('bucket', String(args?.bucket ?? 3600))
+      params.set('tz_offset', String(args?.tzOffset ?? 0))
+      return { method: 'GET', path: `/stats/series?${params}` }
+    }
     case 'getStatsByModel':
       return { method: 'GET', path: statsPath('/stats/models', args?.hours) }
     case 'getStatsByProvider':
@@ -574,7 +579,8 @@ export const admin = {
   },
   stats: {
     overview: (hours?: number) => request<StatsOverview>('getStatsOverview', { hours }),
-    hourly: (hours?: number) => request<StatsHourly[]>('getStatsHourly', { hours }),
+    series: (hours?: number, bucket?: number, tzOffset?: number) =>
+      request<StatsSeries[]>('getStatsSeries', { hours, bucket, tzOffset }),
     models: (hours?: number) => request<ModelStats[]>('getStatsByModel', { hours }),
     providers: (hours?: number) => request<ProviderStats[]>('getStatsByProvider', { hours }),
     apiKeys: (hours?: number) => request<ApiKeyStats[]>('getStatsByApiKey', { hours }),

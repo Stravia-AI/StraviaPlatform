@@ -6,8 +6,8 @@ use async_trait::async_trait;
 
 use crate::db::models::{
     ApiKeyStats, ApiKeyWithBindings, CreateApiKey, CreateProviderRecord, CreateWebProvider,
-    ModelStats, OAuthCredential, Provider, ProviderStats, PutRoute, Route, StatsHourly,
-    StatsOverview, UpdateApiKey, UpdateProvider, UpdateWebProvider, UpsertOAuthCredential,
+    ModelStats, OAuthCredential, Provider, ProviderStats, PutRoute, Route, StatsOverview,
+    StatsSeries, UpdateApiKey, UpdateProvider, UpdateWebProvider, UpsertOAuthCredential,
     WebAccessSettings, WebProvider,
 };
 use crate::provider_models::{
@@ -237,7 +237,16 @@ pub struct RouteSchedulingUsage {
 pub trait UsageStatsStore: Send + Sync {
     async fn route_scheduling_snapshot(&self) -> RouteSchedulingUsage;
     async fn stats_overview(&self, hours: Option<i64>) -> anyhow::Result<StatsOverview>;
-    async fn stats_hourly(&self, hours: i64) -> anyhow::Result<Vec<StatsHourly>>;
+    /// Buckets are aligned to the caller's wall clock: `tz_offset_ms` is added to
+    /// `started_at` before integer bucket division and subtracted back, so a day
+    /// bucket boundary lands on local midnight while `bucket_start` stays a real
+    /// instant.
+    async fn stats_series(
+        &self,
+        hours: i64,
+        bucket_ms: i64,
+        tz_offset_ms: i64,
+    ) -> anyhow::Result<Vec<StatsSeries>>;
     async fn stats_by_model(&self, hours: Option<i64>) -> anyhow::Result<Vec<ModelStats>>;
     async fn stats_by_provider(&self, hours: Option<i64>) -> anyhow::Result<Vec<ProviderStats>>;
     async fn stats_by_api_key(&self, hours: Option<i64>) -> anyhow::Result<Vec<ApiKeyStats>>;

@@ -253,7 +253,7 @@ fn create_router_inner(gateway: Gateway, auth: Option<AdminHttpState>) -> Router
             post(issue_rejection_bundle_ticket),
         )
         .route("/stats/overview", get(stats_overview))
-        .route("/stats/hourly", get(stats_hourly))
+        .route("/stats/series", get(stats_series))
         .route("/stats/models", get(stats_by_model))
         .route("/stats/providers", get(stats_by_provider))
         .route("/stats/api-keys", get(stats_by_api_key))
