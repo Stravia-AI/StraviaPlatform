@@ -16,7 +16,9 @@ mod completion;
 mod delivery;
 mod errors;
 mod followup;
+mod ledger;
 mod projection;
+mod settlement;
 mod stream;
 mod util;
 use self::canonical_stream::ai_response_to_deltas;
@@ -28,7 +30,9 @@ use self::delivery::{
 use self::errors::*;
 pub(super) use self::errors::{error_response, hook_failure_response};
 use self::followup::{FollowupLeg, FollowupModelTurn, acquire_followup_model_turn};
+pub(super) use self::ledger::RunLedger;
 use self::projection::*;
+use self::settlement::{Settlement, report_projected_delivery, settle};
 use self::util::{client_session_id, forwarded_client_headers};
 use super::{Phase, PhaseTracker, RunInput};
 use std::sync::Arc;
@@ -194,39 +198,6 @@ fn checkpoint_payload<R: ObservationRecorder, T: serde::Serialize + ?Sized>(
     })
 }
 
-fn generation_commit_flag(
-    request_context: &RequestContext,
-) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
-    request_context
-        .extensions
-        .get::<super::RunTerminalContext>()
-        .expect("Inference Run terminal context")
-        .generation_committed
-}
-
-fn stage_visible_response(
-    request_context: &RequestContext,
-    ingress: stravia_runtime_contract::protocol::ids::ProtocolId,
-    response: &AiResponse,
-) {
-    let Some(mut terminal) = request_context
-        .extensions
-        .get::<super::RunTerminalContext>()
-    else {
-        return;
-    };
-    terminal.stage_client_output(ingress, response);
-    terminal.visible_text.extend(
-        response
-            .items
-            .iter()
-            .filter_map(|item| item.output_text_ref().or_else(|| item.refusal_ref()))
-            .filter(|text| !text.is_empty())
-            .map(ToOwned::to_owned),
-    );
-    request_context.extensions.insert(terminal);
-}
-
 fn visible_delta_text(
     delta: &stravia_runtime_contract::protocol::ir::AiStreamDelta,
 ) -> Option<&str> {
@@ -283,6 +254,7 @@ struct DispatchContext<'a> {
     phase: &'a mut PhaseTracker,
     generation: &'a mut GenerationChainRun,
     projection: &'a mut Option<ClientProjectionSession>,
+    ledger: &'a RunLedger,
 }
 
 struct SharedModelTurnInput<'a> {
@@ -296,6 +268,7 @@ struct SharedModelTurnInput<'a> {
     generation: GenerationChainRun,
     headers: &'a HeaderMap,
     projection: &'a mut Option<ClientProjectionSession>,
+    ledger: &'a RunLedger,
 }
 
 fn stabilize_media_generation_chain(
@@ -785,19 +758,20 @@ pub(super) async fn orchestrate(
     }
     ctx.extensions.insert(observer.clone());
     let compaction_records = crate::model_turn::CompactionPublications::default();
-    ctx.extensions.insert(super::RunTerminalContext {
-        delivery_completed_at: None,
-        generation_node_id,
-        generation_root_id,
-        generation_committed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        waiting_client: false,
-        visible_text: Vec::new(),
-        client_input: Arc::new(client_request.items.clone()),
-        client_output: None,
-        compaction: gw.compaction.clone(),
-        principal: principal.clone(),
-        compaction_records: compaction_records.clone(),
-    });
+    // The ledger is constructed once at admission; a malformed run fails here
+    // instead of at later extension lookups.
+    let ledger = RunLedger::new(
+        super::RunTerminalContext::new(
+            generation_node_id,
+            generation_root_id,
+            client_request.items.clone(),
+            gw.compaction.clone(),
+            principal.clone(),
+            compaction_records.clone(),
+        ),
+        compaction_records.clone(),
+    );
+    ctx.extensions.insert(ledger.clone());
     // 有 Generation parent 也要做尾部诊断：用来区分切模型后续接（输入含中间轮）
     // 和从原链真实分叉（不含中间轮）。压缩请求改走 native compaction 关联。
     if !client_request
@@ -807,7 +781,6 @@ pub(super) async fn orchestrate(
     {
         observer.observe_client_input(&client_request.items);
     }
-    ctx.extensions.insert(compaction_records.clone());
     if compact {
         let mut turn_input = TurnInput::new(principal.clone(), request)
             .with_execution(ctx.cancellation.clone(), ctx.deadline.at())
@@ -891,6 +864,7 @@ pub(super) async fn orchestrate(
         phase: &mut *phase,
         generation: &mut generation,
         projection: &mut projection,
+        ledger: &ledger,
     })
     .await;
     phase.finish();
@@ -899,13 +873,9 @@ pub(super) async fn orchestrate(
         let response = wrap_delivery(response, delivery_admission);
         let store = Arc::clone(&gw.history_markers);
         let principal = generation.principal.clone();
-        let extensions = ctx.extensions.clone();
         let lifecycle = gw.lifecycle.clone();
         after_body_delivery(response, async move {
-            let references = extensions
-                .get::<PublishedPlatformExecutions>()
-                .unwrap_or_default()
-                .references;
+            let references = ledger.published_executions();
             if references.is_empty() {
                 drop(background_admission);
                 return;
@@ -934,6 +904,7 @@ async fn dispatch_pipeline_inner(context: DispatchContext<'_>) -> Response {
         phase,
         generation,
         projection,
+        ledger,
     } = context;
     let mut delivery = DeliveryState::Buffered;
     let response = Box::pin(dispatch_round(
@@ -948,6 +919,7 @@ async fn dispatch_pipeline_inner(context: DispatchContext<'_>) -> Response {
             phase: &mut *phase,
             generation: &mut *generation,
             projection: &mut *projection,
+            ledger,
         },
         &mut delivery,
     ))
@@ -975,6 +947,7 @@ async fn dispatch_round(
         phase,
         generation: generation_chain,
         projection,
+        ledger,
     } = context;
     let mut fixed_media_plan = request.meta.media_routing.clone();
     'round: loop {
@@ -1046,18 +1019,18 @@ async fn dispatch_round(
                         attempt_id: None,
                         payload: checkpoint_payload(&observer, &response),
                     });
-                    if let Err(error) = projection_session.project_staged(&mut response, &[]).await
-                    {
-                        return hook_failure_response(error);
-                    }
+                    let staged_delivery =
+                        match projection_session.project_staged(&mut response, &[]).await {
+                            Ok(batch) => batch,
+                            Err(error) => return hook_failure_response(error),
+                        };
                     observer.record_debug(|| RunEvent::Checkpoint {
                         stage: "client_projection_event".into(),
                         model_turn_id: None,
                         attempt_id: None,
                         payload: checkpoint_payload(&observer, &response),
                     });
-                    stage_visible_response(ctx, ingress, &response);
-                    let marker_delivery = projection_session.take_staged_delivery();
+                    ledger.stage_visible_response(ingress, &response);
                     let pending_generation_chain =
                         generation_chain.write.take().and_then(|mut write| {
                             write.observe_effective(request.clone());
@@ -1091,26 +1064,23 @@ async fn dispatch_round(
                     let mut projection = projection
                         .take()
                         .expect("delivered Hook Client Projection session");
-                    let generation_committed = generation_commit_flag(ctx);
+                    let gateway = gw.clone();
+                    let ledger = ledger.clone();
+                    let observer = observer.clone();
                     return after_body_delivery(response, async move {
-                        if let Err(error) = projection
-                            .report_delivery(marker_delivery, ProjectionDelivery::Sent)
-                            .await
-                        {
-                            tracing::error!(
-                                "failed to publish delivered Hook history markers: {error}"
-                            );
-                            return;
-                        }
-                        if let Some(mut pending) = pending_generation_chain {
-                            match pending.persist().await {
-                                Ok(()) => generation_committed
-                                    .store(true, std::sync::atomic::Ordering::Release),
-                                Err(error) => tracing::error!(
-                                    "failed to commit delivered Hook Generation Chain node: {error}"
-                                ),
-                            }
-                        }
+                        settle(
+                            &gateway,
+                            &mut projection,
+                            &ledger,
+                            &observer,
+                            ingress,
+                            Settlement {
+                                staged_delivery: Some(staged_delivery),
+                                pending_generation_chain,
+                                ..Default::default()
+                            },
+                        )
+                        .await;
                     });
                 }
                 Ok(control) => {
@@ -1155,6 +1125,7 @@ async fn dispatch_round(
             generation: generation_chain.clone(),
             headers: &headers,
             projection,
+            ledger,
         })
         .await;
         match outcome {
@@ -1183,6 +1154,7 @@ async fn acquire_turn(
     headers: &HeaderMap,
     request: &AiRequest,
     request_context: &RequestContext,
+    ledger: &RunLedger,
     inference_run: &mut crate::hook::InferenceRun,
     generation: &GenerationChainRun,
 ) -> Result<(ModelTurn, AiRequest), RoundOutcome> {
@@ -1209,10 +1181,7 @@ async fn acquire_turn(
                     .expect("admitted Inference Run observer"),
             )
             .with_extra_headers(forwarded_client_headers(headers));
-        input.compaction_records = request_context
-            .extensions
-            .get::<crate::model_turn::CompactionPublications>()
-            .unwrap_or_default();
+        input.compaction_records = ledger.compaction_records.clone();
         input.compaction_source_generation_id = generation.compaction_source_generation_id.clone();
         input
     };
@@ -1256,12 +1225,14 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
         generation,
         headers,
         projection,
+        ledger,
     } = input;
     let (turn, effective_request) = match acquire_turn(
         executor.as_ref(),
         headers,
         request,
         request_context,
+        ledger,
         inference_run.as_mut().expect("buffered Inference Run"),
         &generation,
     )
@@ -1292,6 +1263,7 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
             inference_run: inference_run.take().expect("live Inference Run"),
             phase: std::mem::replace(phase, PhaseTracker::at(Phase::Finished)),
             projection: projection.take().expect("live Client Projection session"),
+            ledger: ledger.clone(),
         })
         .await;
     }
@@ -1445,7 +1417,6 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
     let completed = match complete_canonical_response(
         &completion_context,
         CompletionInput {
-            request_context,
             request,
             run: inference_run
                 .as_mut()
@@ -1455,36 +1426,33 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
             upstream_response_id,
             early_platform_executions: Vec::new(),
             projection: projection_session,
+            ledger,
         },
     )
     .await
     {
-        CompletionOutcome::PlatformOnly(continuation) => {
-            let marker_delivery = projection_session.take_staged_delivery();
-            match projection_session
-                .report_delivery(marker_delivery, ProjectionDelivery::Sent)
-                .await
+        CompletionOutcome::PlatformOnly {
+            continuation,
+            staged_delivery,
+        } => {
+            if let Err(error) = report_projected_delivery(
+                projection_session,
+                ledger,
+                staged_delivery,
+                ProjectionDelivery::Sent,
+            )
+            .await
             {
-                Ok(references) => {
-                    let mut published = request_context
-                        .extensions
-                        .get::<PublishedPlatformExecutions>()
-                        .unwrap_or_default();
-                    published.references.extend(references);
-                    request_context.extensions.insert(published);
-                }
-                Err(error) => {
-                    return buffered_response(render_completion_failure(
-                        CompletionFailure::hook(error, ClientOutputCommit::Pending),
-                        ingress,
-                        request.stream.enabled,
-                    ));
-                }
+                return buffered_response(render_completion_failure(
+                    CompletionFailure::hook(error, ClientOutputCommit::Pending),
+                    ingress,
+                    request.stream.enabled,
+                ));
             }
             if let Err(failure) = continuation
                 .finish(
                     &completion_context,
-                    request_context,
+                    ledger,
                     request,
                     inference_run
                         .as_mut()
@@ -1525,11 +1493,11 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
 
     let PreparedDelivery {
         response: prepared_response,
+        staged_delivery,
         pending_generation_chain,
         background_executions,
         started_executions,
     } = completed;
-    let marker_delivery = projection_session.take_staged_delivery();
     let mut delivery = if request.stream.enabled {
         DeliveryAdapter::buffered_stream(ingress, route.egress)
     } else {
@@ -1551,75 +1519,45 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
     if delivered.progress != BufferedDeliveryProgress::Prepared {
         return buffered_response(delivered.response);
     }
-    if !marker_delivery.is_empty()
+    if !staged_delivery.is_empty()
         || !background_executions.is_empty()
         || !started_executions.is_empty()
         || pending_generation_chain.is_some()
     {
-        let mut marker_context = completion_context.clone();
         let gateway = gateway.clone();
-        let generation_committed = generation_commit_flag(request_context);
-        let request_context = request_context.clone();
+        let ledger = ledger.clone();
+        let observer = request_context
+            .extensions
+            .get::<crate::interaction_observation::RunObserver>()
+            .expect("admitted Inference Run observer");
         let mut projection_session = projection
             .take()
             .expect("delivered buffered Client Projection session");
-        let mut pending_generation_chain = pending_generation_chain;
         let run = if !background_executions.is_empty() || !started_executions.is_empty() {
             inference_run.take()
         } else {
             None
         };
         delivered.response = after_body_delivery(delivered.response, async move {
-            marker_context.mark_client_output_committed();
-            let published_references = match projection_session
-                .report_delivery(marker_delivery, ProjectionDelivery::Sent)
-                .await
-            {
-                Ok(references) => references,
-                Err(error) => {
-                    tracing::error!(
-                        "failed to publish delivered buffered history markers: {error}"
-                    );
-                    return;
-                }
-            };
-            if !published_references.is_empty() {
-                let mut published = request_context
-                    .extensions
-                    .get::<PublishedPlatformExecutions>()
-                    .unwrap_or_default();
-                published.references.extend(published_references);
-                request_context.extensions.insert(published);
-            }
-            let mut started_executions = started_executions;
-            if !background_executions.is_empty() {
-                started_executions.extend(gateway.start_history_marker_executions(
-                    marker_context.principal().clone(),
+            settle(
+                &gateway,
+                &mut projection_session,
+                &ledger,
+                &observer,
+                ingress,
+                Settlement {
+                    staged_delivery: Some(staged_delivery),
                     background_executions,
-                ));
-            }
-            if !started_executions.is_empty() {
-                if let Some(run) = run {
-                    gateway.spawn_started_history_marker_executions(started_executions, run);
-                } else {
-                    tracing::error!(
-                        "delivered history markers have Platform executions but no Inference Run"
-                    );
-                }
-            }
-            if let Some(write) = pending_generation_chain.as_mut() {
-                match write.persist().await {
-                    Ok(()) => {
-                        generation_committed.store(true, std::sync::atomic::Ordering::Release)
-                    }
-                    Err(error) => {
-                        tracing::error!("failed to commit delivered Generation Chain node: {error}")
-                    }
-                }
-            }
+                    started_executions,
+                    run,
+                    pending_generation_chain,
+                    ..Default::default()
+                },
+            )
+            .await;
         });
     }
-    stage_visible_response(request_context, ingress, &prepared_response);
+    ledger.stage_visible_response(ingress, &prepared_response);
     buffered_completion(delivered.response)
 }
 

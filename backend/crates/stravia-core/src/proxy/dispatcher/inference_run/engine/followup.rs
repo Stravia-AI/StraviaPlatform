@@ -4,6 +4,7 @@ pub(super) enum FollowupModelTurn {
     Turn(Box<crate::agent::ModelTurn>),
     HookResponse {
         response: Box<AiResponse>,
+        staged_delivery: ProjectedDeltaBatch,
         pending_generation_chain: Option<Box<crate::generation_chain::GenerationChainWrite>>,
     },
     StreamError(stravia_runtime_contract::protocol::ir::AiError),
@@ -15,6 +16,7 @@ pub(super) struct FollowupLeg<'a> {
     pub request: &'a mut AiRequest,
     pub ingress: ProtocolId,
     pub request_context: &'a RequestContext,
+    pub ledger: &'a RunLedger,
     pub inference_run: &'a mut crate::hook::InferenceRun,
     pub projection: &'a mut ClientProjectionSession,
     pub phase: &'a mut PhaseTracker,
@@ -60,6 +62,7 @@ pub(super) async fn acquire_followup_model_turn(
         request,
         ingress,
         request_context,
+        ledger,
         inference_run,
         projection,
         phase,
@@ -106,8 +109,8 @@ pub(super) async fn acquire_followup_model_turn(
                 inference_run.exposed_tool_names(),
                 None,
             );
-            match projection.project_staged(&mut response, &[]).await {
-                Ok(_) => {}
+            let staged_delivery = match projection.project_staged(&mut response, &[]).await {
+                Ok(batch) => batch,
                 Err(error) => {
                     return Ok(FollowupModelTurn::StreamError(
                         stravia_runtime_contract::protocol::ir::AiError::new(
@@ -116,11 +119,11 @@ pub(super) async fn acquire_followup_model_turn(
                         ),
                     ));
                 }
-            }
+            };
             let pending_generation_chain = generation.write.clone().and_then(|mut write| {
                 write.observe_effective(request.clone());
                 let mut staged_response = response.clone();
-                apply_hidden_rounds(request_context, &mut staged_response);
+                ledger.apply_hidden_rounds(&mut staged_response);
                 response.usage = staged_response.usage.clone();
                 let staged = write.stage(
                     &mut staged_response,
@@ -148,6 +151,7 @@ pub(super) async fn acquire_followup_model_turn(
             }
             return Ok(FollowupModelTurn::HookResponse {
                 response: Box::new(response),
+                staged_delivery,
                 pending_generation_chain: pending_generation_chain.map(Box::new),
             });
         }
@@ -178,6 +182,7 @@ pub(super) async fn acquire_followup_model_turn(
         headers,
         request,
         request_context,
+        ledger,
         inference_run,
         generation,
     )

@@ -296,7 +296,7 @@ impl WebSocketRunDelivery {
         self.observer.finish(RunOutcome {
             delivery_completed_at,
             status: if delivered {
-                if self.terminal.waiting_client {
+                if self.terminal.waiting_client() {
                     "waiting_client"
                 } else {
                     "completed"
@@ -324,7 +324,7 @@ impl WebSocketRunDelivery {
             .flatten(),
         });
         if delivered
-            && self.terminal.waiting_client
+            && self.terminal.waiting_client()
             && let Some(connection) = &self.connection
         {
             connection.waiting(&self.observer);
@@ -340,19 +340,32 @@ impl Drop for WebSocketRunDelivery {
     }
 }
 
+/// Terminal observation state for one Inference Run.
+///
+/// Cloning shares the mutable delivery state: the streaming task, the HTTP
+/// body wrapper, and WebSocket delivery each hold a clone, and a settlement
+/// staged after the Response was built must still land on the same values the
+/// finisher observes. Construction through `RunTerminalContext::new` keeps the
+/// run's identity fields (Generation ids, principal, compaction handles)
+/// separate from the delivery-side cells.
 #[derive(Clone)]
 pub(super) struct RunTerminalContext {
-    pub delivery_completed_at: Option<i64>,
+    shared: std::sync::Arc<std::sync::Mutex<TerminalDelivery>>,
     pub generation_node_id: Option<String>,
     pub generation_root_id: Option<String>,
     pub generation_committed: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    pub waiting_client: bool,
-    pub visible_text: Vec<String>,
-    pub client_input: std::sync::Arc<Vec<stravia_runtime_contract::protocol::ir::AiItem>>,
-    pub client_output: Option<Vec<stravia_runtime_contract::protocol::ir::AiItem>>,
     pub compaction: crate::compaction::Compaction,
     pub principal: stravia_runtime_contract::Principal,
     pub compaction_records: crate::model_turn::CompactionPublications,
+}
+
+#[derive(Default)]
+struct TerminalDelivery {
+    delivery_completed_at: Option<i64>,
+    waiting_client: bool,
+    visible_text: Vec<String>,
+    client_input: Vec<stravia_runtime_contract::protocol::ir::AiItem>,
+    client_output: Option<Vec<stravia_runtime_contract::protocol::ir::AiItem>>,
 }
 
 pub(super) struct StreamDeliveryCompletion(
@@ -439,7 +452,7 @@ impl ObservedDeliveryStream {
                     status_code,
                     "delivered",
                     None,
-                    terminal.delivery_completed_at,
+                    terminal.delivery_completed_at(),
                 );
             }
             Ok(None) if delivery_status != "delivered" => {
@@ -523,20 +536,73 @@ fn compaction_delivery_event(
 }
 
 impl RunTerminalContext {
-    fn stage_client_output(
-        &mut self,
+    pub(super) fn new(
+        generation_node_id: Option<String>,
+        generation_root_id: Option<String>,
+        client_input: Vec<stravia_runtime_contract::protocol::ir::AiItem>,
+        compaction: crate::compaction::Compaction,
+        principal: stravia_runtime_contract::Principal,
+        compaction_records: crate::model_turn::CompactionPublications,
+    ) -> Self {
+        Self {
+            shared: std::sync::Arc::new(std::sync::Mutex::new(TerminalDelivery {
+                client_input,
+                ..TerminalDelivery::default()
+            })),
+            generation_node_id,
+            generation_root_id,
+            generation_committed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            compaction,
+            principal,
+            compaction_records,
+        }
+    }
+
+    fn shared(&self) -> std::sync::MutexGuard<'_, TerminalDelivery> {
+        self.shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub(super) fn delivery_completed_at(&self) -> Option<i64> {
+        self.shared().delivery_completed_at
+    }
+
+    pub(super) fn set_delivery_completed_at(&self, delivered_at: i64) {
+        self.shared().delivery_completed_at = Some(delivered_at);
+    }
+
+    pub(super) fn mark_waiting_client(&self) {
+        self.shared().waiting_client = true;
+    }
+
+    fn waiting_client(&self) -> bool {
+        self.shared().waiting_client
+    }
+
+    pub(super) fn extend_visible_text(&self, texts: impl IntoIterator<Item = String>) {
+        self.shared().visible_text.extend(texts);
+    }
+
+    fn take_visible_text(&self) -> Vec<String> {
+        std::mem::take(&mut self.shared().visible_text)
+    }
+
+    pub(super) fn stage_client_output(
+        &self,
         ingress: stravia_runtime_contract::protocol::ids::ProtocolId,
         response: &stravia_runtime_contract::protocol::ir::AiResponse,
     ) {
         // 诊断比较客户端实际回放的 ingress 形态，不比较交付前的 canonical 分块。
+        let mut shared = self.shared();
         let prefix = if ingress
             == stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA
         {
-            std::sync::Arc::make_mut(&mut self.client_input).as_mut_slice()
+            shared.client_input.as_mut_slice()
         } else {
             &mut []
         };
-        self.client_output =
+        shared.client_output =
             match crate::generation_chain::project_client_history(ingress, response, prefix) {
                 Ok(output) => Some(output),
                 Err(error) => {
@@ -647,8 +713,9 @@ impl RunTerminalContext {
                 .generation_committed
                 .load(std::sync::atomic::Ordering::Acquire)
         {
-            if let Some(output) = &self.client_output {
-                observer.observe_client_completion(&self.client_input, output);
+            let shared = self.shared();
+            if let Some(output) = &shared.client_output {
+                observer.observe_client_completion(&shared.client_input, output);
             } else {
                 observer.record(RunEvent::ObservationGap {
                     reason: "client_history_projection_unavailable".into(),
@@ -694,7 +761,7 @@ impl RunTerminalContext {
             reason: reason.clone(),
         });
         let status = if delivery_status == "delivered" {
-            if self.waiting_client {
+            if self.waiting_client() {
                 "waiting_client"
             } else {
                 "completed"
@@ -739,7 +806,7 @@ impl Stream for ObservedDeliveryStream {
                 if !self.committed && self.status_code < 400 {
                     self.committed = true;
                     self.observer.record(RunEvent::ClientOutputCommitted);
-                    for text in std::mem::take(&mut self.terminal.visible_text) {
+                    for text in self.terminal.take_visible_text() {
                         self.observer
                             .record(RunEvent::ClientVisibleContentDelta { text });
                     }
@@ -899,27 +966,27 @@ async fn execute_observed(input: RunInput) -> Response {
     }
     match (
         extensions.get::<RunObserver>(),
-        extensions.get::<RunTerminalContext>(),
+        extensions.get::<engine::RunLedger>(),
     ) {
-        (Some(observer), Some(terminal)) if extensions.contains::<DeferredWebSocketDelivery>() => {
+        (Some(observer), Some(ledger)) if extensions.contains::<DeferredWebSocketDelivery>() => {
             extensions.insert(WebSocketRunDelivery {
                 observer,
                 connection: extensions
                     .get::<crate::interaction_observation::ClientConnectionObservation>(),
-                terminal,
-                stream_completion: extensions.take::<StreamDeliveryCompletion>(),
+                terminal: ledger.terminal.clone(),
+                stream_completion: ledger.take_stream_completion(),
                 delivery_completed_at: None,
                 committed: false,
                 finished: false,
             });
             response
         }
-        (Some(observer), Some(terminal)) => wrap_observed_delivery(
+        (Some(observer), Some(ledger)) => wrap_observed_delivery(
             response,
             observer,
             protocol,
-            terminal,
-            extensions.take::<StreamDeliveryCompletion>(),
+            ledger.terminal.clone(),
+            ledger.take_stream_completion(),
         ),
         _ => response,
     }
