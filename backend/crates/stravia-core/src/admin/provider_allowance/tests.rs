@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use reqwest::{StatusCode, header::HeaderMap};
@@ -35,6 +35,7 @@ fn registry_requires_the_exact_catalog_identity() {
         ("deepseek", "default"),
         ("neuralwatt", "default"),
         ("xai", "grok"),
+        ("commandcode", "default"),
     ] {
         assert!(
             monitor_for(preset_key, channel).is_some(),
@@ -136,7 +137,7 @@ fn zhipu_preserves_each_reported_token_window() {
 #[test]
 fn every_monitor_normalizes_its_response_fixture_and_rejects_schema_drift() {
     let xai = decode_hex(include_str!("fixtures/xai-grok-success.hex"));
-    let fixtures: [(MonitorKind, &[u8], &[u8], &str); 15] = [
+    let fixtures: [(MonitorKind, &[u8], &[u8], &str); 16] = [
         (
             MonitorKind::AnthropicClaudeCode,
             include_bytes!("fixtures/anthropic-claude-code-success.json"),
@@ -222,6 +223,12 @@ fn every_monitor_normalizes_its_response_fixture_and_rejects_schema_drift() {
             "developer",
         ),
         (MonitorKind::XaiGrok, &xai, &[0x0a], "billing_cycle"),
+        (
+            MonitorKind::CommandCode,
+            include_bytes!("fixtures/commandcode-success.json"),
+            br#"{"windowLimits":{},"credits":{}}"#,
+            "5h",
+        ),
     ];
 
     for (monitor, fixture, schema_drift_fixture, expected_key) in fixtures {
@@ -1324,6 +1331,10 @@ fn every_monitor_uses_fixed_official_endpoints_and_proxy_policy() {
         "https://api.deepseek.com/user/balance",
         "https://api.neuralwatt.com/v1/quota",
         "https://grok.com/grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig",
+        "https://api.commandcode.ai/alpha/whoami",
+        "https://api.commandcode.ai/alpha/billing/credits",
+        "https://api.commandcode.ai/alpha/billing/subscriptions",
+        "https://api.commandcode.ai/alpha/usage/summary",
     ];
     let urls = all_monitors()
         .into_iter()
@@ -1335,10 +1346,13 @@ fn every_monitor_uses_fixed_official_endpoints_and_proxy_policy() {
             request.url
         })
         .collect::<Vec<_>>();
-    assert_eq!(urls, expected_urls);
+    assert_eq!(
+        urls.iter().map(String::as_str).collect::<Vec<_>>(),
+        expected_urls
+    );
 }
 
-fn all_monitors() -> [MonitorKind; 15] {
+fn all_monitors() -> [MonitorKind; 16] {
     [
         MonitorKind::AnthropicClaudeCode,
         MonitorKind::OpenAiCodex,
@@ -1355,5 +1369,199 @@ fn all_monitors() -> [MonitorKind; 15] {
         MonitorKind::DeepSeek,
         MonitorKind::NeuralWatt,
         MonitorKind::XaiGrok,
+        MonitorKind::CommandCode,
     ]
+}
+
+struct CommandCodeFixtureTransport {
+    requests: Mutex<Vec<String>>,
+    org_id: Option<&'static str>,
+    extras_status: StatusCode,
+}
+
+impl CommandCodeFixtureTransport {
+    fn new() -> Self {
+        Self {
+            requests: Mutex::new(Vec::new()),
+            org_id: Some("org-9"),
+            extras_status: StatusCode::OK,
+        }
+    }
+
+    fn without_extras() -> Self {
+        Self {
+            extras_status: StatusCode::NOT_FOUND,
+            ..Self::new()
+        }
+    }
+}
+
+#[async_trait]
+impl AllowanceTransport for CommandCodeFixtureTransport {
+    async fn execute(
+        &self,
+        _client: reqwest::Client,
+        _use_proxy: bool,
+        request: AllowanceHttpRequest,
+    ) -> Result<AllowanceHttpResponse, TransportFailure> {
+        self.requests
+            .lock()
+            .expect("requests lock")
+            .push(request.url.clone());
+        let url = request.url.as_str();
+        let (status, body) = if url.contains("/alpha/whoami") {
+            let body = match self.org_id {
+                Some(org_id) => serde_json::json!({
+                    "org": { "id": org_id, "login": "team" },
+                    "user": { "userName": "dev" }
+                }),
+                None => serde_json::json!({ "user": { "userName": "dev" } }),
+            };
+            (StatusCode::OK, body)
+        } else if url.contains("/alpha/billing/credits") {
+            (
+                StatusCode::OK,
+                serde_json::json!({
+                    "credits": {
+                        "monthlyCredits": 69.44,
+                        "purchasedCredits": 0.0,
+                        "freeCredits": 0.0,
+                        "monthlyResetAt": "2026-10-01T00:00:00Z"
+                    },
+                    "windowLimits": {
+                        "fiveHour": { "used": 0.57, "cap": 14.0, "resetAt": 1_789_745_760 },
+                        "weekly": { "used": 0.57, "cap": 35.0, "resetAt": 1_790_246_400 }
+                    }
+                }),
+            )
+        } else if url.contains("/alpha/billing/subscriptions") {
+            (
+                self.extras_status,
+                serde_json::json!({
+                    "data": {
+                        "planId": "goat",
+                        "status": "active",
+                        "currentPeriodStart": "2026-09-01T00:00:00Z",
+                        "currentPeriodEnd": "2026-10-01T00:00:00Z"
+                    }
+                }),
+            )
+        } else if url.contains("/alpha/usage/summary") {
+            (
+                self.extras_status,
+                serde_json::json!({ "totalCost": 0.54, "totalCount": 45, "totalTokens": 3_100_000 }),
+            )
+        } else {
+            panic!("unexpected url: {url}");
+        };
+        Ok(AllowanceHttpResponse {
+            status,
+            headers: HeaderMap::new(),
+            body: serde_json::to_vec(&body).expect("commandcode fixture"),
+        })
+    }
+}
+
+#[tokio::test]
+async fn commandcode_monitor_chains_whoami_into_credits_plan_and_period_spend() -> anyhow::Result<()>
+{
+    let data_dir = tempfile::tempdir()?;
+    let gateway = Gateway::new(GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await?;
+    let provider =
+        create_test_provider(&gateway, "Command Code", "commandcode", "cc-token").await?;
+    let transport = Arc::new(CommandCodeFixtureTransport::new());
+
+    let snapshot = refresh_provider_allowance_with_transport(
+        &gateway.admin(),
+        &provider.id,
+        transport.clone(),
+    )
+    .await?
+    .expect("eligible provider");
+
+    assert_eq!(snapshot.status, ProviderAllowanceStatus::Fresh);
+    assert_eq!(snapshot.plan_label.as_deref(), Some("goat (active)"));
+    let keys = snapshot
+        .allowances
+        .iter()
+        .map(|allowance| allowance.key.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(keys, ["5h", "weekly", "credits_balance", "billing_cycle"]);
+
+    let five_hour = &snapshot.allowances[0];
+    assert_eq!(five_hour.kind, AllowanceKind::QuotaWindow);
+    assert_eq!(five_hour.window_seconds, Some(18_000));
+    assert_eq!(five_hour.reset_at, Some(1_789_745_760_000));
+    let used = five_hour.used.as_ref().expect("5h used");
+    assert_eq!(used.value, 0.57);
+    assert_eq!(used.unit, "credits");
+    assert!((five_hour.used_percent.expect("5h percent") - 0.57 / 14.0 * 100.0).abs() < 1e-9);
+
+    let balance = &snapshot.allowances[2];
+    assert_eq!(balance.kind, AllowanceKind::Balance);
+    let remaining = balance.remaining.as_ref().expect("balance remaining");
+    assert_eq!(remaining.value, 69.44);
+    assert_eq!(remaining.currency.as_deref(), Some("USD"));
+
+    let billing = &snapshot.allowances[3];
+    assert_eq!(billing.used.as_ref().map(|amount| amount.value), Some(0.54));
+    assert_eq!(
+        billing.remaining.as_ref().map(|amount| amount.value),
+        Some(69.44)
+    );
+    assert_eq!(billing.reset_at, Some(1_790_812_800_000));
+    assert_eq!(billing.window_seconds, Some(30 * 86_400));
+
+    let urls = transport.requests.lock().expect("requests lock").clone();
+    assert_eq!(urls.len(), 4);
+    assert!(urls[0].ends_with("/alpha/whoami"));
+    assert!(
+        urls[1].ends_with("/alpha/billing/credits?orgId=org-9"),
+        "urls: {urls:?}"
+    );
+    assert!(urls[2].ends_with("/alpha/billing/subscriptions?orgId=org-9"));
+    assert!(
+        urls[3].starts_with("https://api.commandcode.ai/alpha/usage/summary?")
+            && urls[3].contains("orgId=org-9")
+            && urls[3].contains("since=2026-09-01")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn commandcode_monitor_keeps_core_allowances_when_extras_fail() -> anyhow::Result<()> {
+    let data_dir = tempfile::tempdir()?;
+    let gateway = Gateway::new(GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await?;
+    let provider =
+        create_test_provider(&gateway, "Command Code", "commandcode", "cc-token").await?;
+    let transport = Arc::new(CommandCodeFixtureTransport::without_extras());
+
+    let snapshot = refresh_provider_allowance_with_transport(
+        &gateway.admin(),
+        &provider.id,
+        transport.clone(),
+    )
+    .await?
+    .expect("eligible provider");
+
+    assert_eq!(snapshot.status, ProviderAllowanceStatus::Fresh);
+    assert_eq!(snapshot.plan_label, None);
+    let keys = snapshot
+        .allowances
+        .iter()
+        .map(|allowance| allowance.key.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(keys, ["5h", "weekly", "credits_balance"]);
+
+    let urls = transport.requests.lock().expect("requests lock").clone();
+    assert_eq!(urls.len(), 3);
+    Ok(())
 }

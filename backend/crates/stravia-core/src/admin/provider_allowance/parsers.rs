@@ -39,6 +39,7 @@ pub(super) fn parse_monitor_response(
         MonitorKind::Crof => parse_crof(&payload),
         MonitorKind::DeepSeek => parse_deepseek(&payload),
         MonitorKind::NeuralWatt => parse_neuralwatt(&payload),
+        MonitorKind::CommandCode => parse_commandcode(&payload),
         MonitorKind::XaiGrok => unreachable!("handled above"),
     }?;
     require_allowance(parsed)
@@ -909,6 +910,126 @@ fn parse_neuralwatt(payload: &Value) -> Result<ParsedAllowance, InvalidResponse>
     }
 
     Ok(parsed(allowances))
+}
+
+fn parse_commandcode(payload: &Value) -> Result<ParsedAllowance, InvalidResponse> {
+    let object = payload.as_object().ok_or(InvalidResponse)?;
+    let mut allowances = Vec::new();
+
+    if let Some(limits) = object.get("windowLimits").and_then(Value::as_object) {
+        for (field, key, seconds) in [("fiveHour", "5h", 18_000), ("weekly", "weekly", 604_800)] {
+            let Some(window) = limits.get(field).and_then(Value::as_object) else {
+                continue;
+            };
+            let used = field_number(window, "used");
+            let cap = field_number(window, "cap");
+            if used.is_none() && cap.is_none() {
+                continue;
+            }
+            let remaining = used.zip(cap).map(|(used, cap)| cap - used);
+            let mut item = allowance(key, window_label(key), AllowanceKind::QuotaWindow);
+            amount_fields(&mut item, used, remaining, cap, "credits", None);
+            item.used_percent = percent_from(used, remaining, cap);
+            item.window_seconds = Some(seconds);
+            item.reset_at = field_timestamp(window, "resetAt");
+            allowances.push(item);
+        }
+    }
+
+    if let Some(credits) = object.get("credits").and_then(Value::as_object) {
+        let buckets = [
+            field_number(credits, "monthlyCredits"),
+            field_number(credits, "purchasedCredits"),
+            field_number(credits, "freeCredits"),
+        ];
+        if buckets.iter().any(Option::is_some) {
+            let remaining: f64 = buckets.iter().flatten().sum();
+            let mut item = allowance(
+                "credits_balance",
+                window_label("credits_balance"),
+                AllowanceKind::Balance,
+            );
+            item.remaining = Some(amount(remaining, "currency", Some("USD")));
+            item.reset_at = field_timestamp(credits, "monthlyResetAt");
+            allowances.push(item);
+        }
+    }
+
+    Ok(parsed(allowances))
+}
+
+pub(super) fn parse_commandcode_org_id(body: &[u8]) -> Option<String> {
+    let payload: Value = serde_json::from_slice(body).ok()?;
+    payload
+        .pointer("/org/id")
+        .and_then(non_empty)
+        .map(str::to_string)
+}
+
+pub(super) struct CommandCodeSubscription {
+    pub plan_label: Option<String>,
+    pub period_start_raw: Option<String>,
+    pub period_start: Option<i64>,
+    pub period_end: Option<i64>,
+}
+
+pub(super) fn parse_commandcode_subscription(body: &[u8]) -> Option<CommandCodeSubscription> {
+    let payload: Value = serde_json::from_slice(body).ok()?;
+    let data = payload.get("data").and_then(Value::as_object)?;
+    let plan = data.get("planId").and_then(non_empty);
+    let status = data.get("status").and_then(non_empty);
+    let plan_label = match (plan, status) {
+        (Some(plan), Some(status)) => Some(format!("{plan} ({status})")),
+        (Some(plan), None) => Some(plan.to_string()),
+        (None, Some(status)) => Some(status.to_string()),
+        (None, None) => None,
+    };
+    let period_start_raw = data.get("currentPeriodStart").and_then(|value| {
+        non_empty(value)
+            .map(str::to_string)
+            .or_else(|| number(value).map(|value| value.to_string()))
+    });
+    let subscription = CommandCodeSubscription {
+        plan_label,
+        period_start_raw,
+        period_start: field_timestamp(data, "currentPeriodStart"),
+        period_end: field_timestamp(data, "currentPeriodEnd"),
+    };
+    (subscription.plan_label.is_some()
+        || subscription.period_start.is_some()
+        || subscription.period_end.is_some())
+    .then_some(subscription)
+}
+
+pub(super) fn parse_commandcode_summary_cost(body: &[u8]) -> Option<f64> {
+    let payload: Value = serde_json::from_slice(body).ok()?;
+    payload.get("totalCost").and_then(number)
+}
+
+pub(super) fn commandcode_billing_cycle(
+    spent: f64,
+    remaining: f64,
+    reset_at: Option<i64>,
+    window_seconds: Option<u64>,
+) -> Allowance {
+    let mut item = allowance(
+        "billing_cycle",
+        window_label("billing_cycle"),
+        AllowanceKind::QuotaWindow,
+    );
+    let limit = spent + remaining;
+    amount_fields(
+        &mut item,
+        Some(spent),
+        Some(remaining),
+        Some(limit),
+        "currency",
+        Some("USD"),
+    );
+    item.used_percent = percent_from(Some(spent), Some(remaining), Some(limit));
+    item.window_seconds = window_seconds;
+    item.reset_at = reset_at;
+    item
 }
 
 fn slug_key(value: &str) -> String {
