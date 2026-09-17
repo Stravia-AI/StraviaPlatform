@@ -9,7 +9,7 @@ fn main() {
             "plan_connect_client",
             "apply_connect_client",
             "list_provider_allowances",
-            "refresh_provider_allowances",
+            "get_provider_allowance",
             "refresh_provider_allowance",
             "get_desktop_update_state",
             "download_product_update",

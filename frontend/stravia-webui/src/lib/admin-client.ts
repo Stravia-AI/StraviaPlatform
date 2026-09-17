@@ -69,6 +69,7 @@ import type {
   UpdateMediaUnderstandingConfig,
   ThinkingLevel,
   ProviderAllowanceSnapshot,
+  ProviderAllowanceTarget,
 } from '$lib/types'
 
 export { isTauri }
@@ -374,8 +375,8 @@ function mapRequest(command: string, args?: Record<string, unknown>): RequestMap
       return { method: 'GET', path: statsPath('/stats/api-keys', args?.hours) }
     case 'listProviderAllowances':
       return { method: 'GET', path: '/provider-allowances' }
-    case 'refreshProviderAllowances':
-      return { method: 'POST', path: '/provider-allowances/refresh' }
+    case 'getProviderAllowance':
+      return { method: 'GET', path: `/provider-allowances/${encodeURIComponent(String(args?.providerId))}` }
     case 'refreshProviderAllowance':
       return { method: 'POST', path: `/provider-allowances/${encodeURIComponent(String(args?.providerId))}/refresh` }
     case 'getCredentialRules':
@@ -580,8 +581,8 @@ export const admin = {
     apiKeys: (hours?: number) => request<ApiKeyStats[]>('getStatsByApiKey', { hours }),
   },
   allowances: {
-    list: () => request<ProviderAllowanceSnapshot[]>('listProviderAllowances'),
-    refreshAll: () => request<ProviderAllowanceSnapshot[]>('refreshProviderAllowances'),
+    list: () => request<ProviderAllowanceTarget[]>('listProviderAllowances'),
+    get: (providerId: string) => request<ProviderAllowanceSnapshot>('getProviderAllowance', { providerId }),
     refresh: (providerId: string) => request<ProviderAllowanceSnapshot>('refreshProviderAllowance', { providerId }),
   },
   settings: {

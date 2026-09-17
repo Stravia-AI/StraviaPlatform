@@ -225,7 +225,7 @@ pub fn run() {
             commands::plan_connect_client,
             commands::apply_connect_client,
             commands::list_provider_allowances,
-            commands::refresh_provider_allowances,
+            commands::get_provider_allowance,
             commands::refresh_provider_allowance,
             product_update::get_desktop_update_state,
             product_update::download_product_update,

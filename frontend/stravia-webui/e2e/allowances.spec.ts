@@ -108,9 +108,22 @@ async function mockAllowances(page: Page, snapshots: AllowanceFixture[]) {
     const request = route.request()
     const path = new URL(request.url()).pathname
     if (request.method() === 'POST') posts.push(path)
-    const providerId = path.match(/provider-allowances\/([^/]+)\/refresh$/)?.[1]
+    const providerId = path.match(/provider-allowances\/([^/]+?)(?:\/refresh)?$/)?.[1]
+    if (providerId) {
+      await route.fulfill({ json: { data: snapshots.find((snapshot) => snapshot.provider_id === providerId) ?? null } })
+      return
+    }
     await route.fulfill({
-      json: { data: providerId ? snapshots.find((snapshot) => snapshot.provider_id === providerId) : snapshots },
+      json: {
+        data: snapshots.map((snapshot) => ({
+          provider_id: snapshot.provider_id,
+          provider_name: snapshot.provider_name,
+          catalog_provider_id: snapshot.catalog_provider_id,
+          channel: snapshot.channel,
+          snapshot,
+          refreshing: false,
+        })),
+      },
     })
   })
   return posts
@@ -172,9 +185,55 @@ test('renders the matrix, shared summary, timeline, forecast, model details, and
   await expect(matrix.getByText(/Resets/)).toBeVisible()
 
   await page.getByRole('button', { name: 'Refresh all' }).click()
-  await expect.poll(() => posts).toContain('/api/v1/provider-allowances/refresh')
-  await matrix.getByRole('button', { name: 'Refresh Alpha account' }).click()
   await expect.poll(() => posts).toContain('/api/v1/provider-allowances/provider-alpha/refresh')
+  await expect.poll(() => posts).toContain('/api/v1/provider-allowances/provider-beta/refresh')
+  await expect.poll(() => posts).toContain('/api/v1/provider-allowances/provider-gamma/refresh')
+  await matrix.getByRole('button', { name: 'Refresh Alpha account' }).click()
+  await expect
+    .poll(() => posts.filter((path) => path === '/api/v1/provider-allowances/provider-alpha/refresh').length)
+    .toBe(2)
+})
+
+test('renders provider shells first and fills each group as its snapshot arrives', async ({ page }) => {
+  let releaseSnapshot!: () => void
+  const gate = new Promise<void>((resolve) => (releaseSnapshot = resolve))
+  await page.route('**/api/v1/provider-allowances**', async (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname
+    const providerId = path.match(/provider-allowances\/([^/]+)$/)?.[1]
+    if (providerId && providerId !== 'refresh' && request.method() === 'GET') {
+      await gate
+      await route.fulfill({ json: { data: freshSnapshot } })
+      return
+    }
+    await route.fulfill({
+      json: {
+        data: [
+          {
+            provider_id: freshSnapshot.provider_id,
+            provider_name: freshSnapshot.provider_name,
+            catalog_provider_id: freshSnapshot.catalog_provider_id,
+            channel: freshSnapshot.channel,
+            refreshing: true,
+          },
+        ],
+      },
+    })
+  })
+  await page.goto('/allowances')
+
+  const matrix = page.getByRole('table', { name: 'Allowance matrix' })
+  const conditionSummary = page.getByRole('region', { name: 'Allowance condition' })
+  // 组头先行渲染；快照到达前行区与聚合区各自转圈，不出全屏骨架
+  await expect(matrix.getByText('Alpha account')).toBeVisible()
+  await expect(matrix.getByTestId('allowance-loading-provider-alpha')).toBeVisible()
+  await expect(matrix.getByText('Weekly window', { exact: true })).toHaveCount(0)
+  await expect(conditionSummary.getByText('Normal', { exact: true })).toHaveCount(0)
+
+  releaseSnapshot()
+  await expect(matrix.getByText('Weekly window', { exact: true })).toBeVisible()
+  await expect(matrix.getByTestId('allowance-loading-provider-alpha')).toHaveCount(0)
+  await expect(conditionSummary.getByText('Normal', { exact: true })).toBeVisible()
 })
 
 test('keeps multiple model allowances open and distinguishes unknown utilization from zero', async ({ page }) => {
@@ -233,7 +292,7 @@ test('keeps allowance details visible when refresh replaces provider snapshots',
 
   snapshots[0].allowances[1].remaining!.value = 12
   await page.getByRole('button', { name: 'Refresh all' }).click()
-  await expect.poll(() => posts).toContain('/api/v1/provider-allowances/refresh')
+  await expect.poll(() => posts).toContain('/api/v1/provider-allowances/provider-alpha/refresh')
   await expect(matrix.getByText('12 USD')).toBeVisible()
   await expect(matrix.getByText('Weekly window', { exact: true })).toHaveCount(2)
 

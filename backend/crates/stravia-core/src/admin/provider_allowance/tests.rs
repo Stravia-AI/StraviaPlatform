@@ -13,8 +13,9 @@ use super::{
     AllowanceCondition, AllowanceHttpRequest, AllowanceHttpResponse, AllowanceKind,
     AllowanceTransport, ExhaustionForecastStatus, MonitorKind, ProviderAllowanceErrorCategory,
     ProviderAllowanceStatus, TransportFailure, fetch_monitor,
-    list_provider_allowances_with_transport, monitor_for, monitor_requests, parse_monitor_response,
-    refresh_provider_allowance_with_transport,
+    get_provider_allowance_with_transport, list_provider_allowance_targets_with_transport,
+    list_provider_allowances_with_transport, monitor_for, monitor_requests,
+    parse_monitor_response, refresh_provider_allowance_with_transport,
 };
 
 #[test]
@@ -1163,6 +1164,147 @@ async fn concurrent_manual_refreshes_for_one_provider_share_one_request() -> any
     assert!(first.await??.is_some());
     assert!(second.await??.is_some());
     assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn target_list_returns_shells_immediately_and_get_coalesces_the_spawned_fetch()
+-> anyhow::Result<()> {
+    let data_dir = tempfile::tempdir()?;
+    let gateway = Gateway::new(GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await?;
+    let provider =
+        create_test_provider(&gateway, "Copilot", "github-copilot", "token-alpha").await?;
+    let transport = Arc::new(BlockingTransport {
+        calls: AtomicUsize::new(0),
+        started: Notify::new(),
+        release: Semaphore::new(0),
+    });
+
+    // 上游抓取被阻塞时 targets 也必须立即返回身份壳
+    let targets = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        list_provider_allowance_targets_with_transport(&gateway.admin(), transport.clone()),
+    )
+    .await
+    .expect("target list must not await upstream fetches")?;
+    assert_eq!(targets.len(), 1);
+    let target = &targets[0];
+    assert_eq!(target.provider_id, provider.id);
+    assert_eq!(target.provider_name, "Copilot");
+    assert_eq!(target.catalog_provider_id, "github-copilot");
+    assert_eq!(target.channel, "default");
+    assert!(target.snapshot.is_none());
+    assert!(target.refreshing);
+
+    transport.started.notified().await;
+
+    // 单个 GET 合并到壳列表已触发的在途抓取上，不重复请求上游
+    let get_gateway = gateway.clone();
+    let get_transport = transport.clone();
+    let provider_id = provider.id.clone();
+    let get = tokio::spawn(async move {
+        get_provider_allowance_with_transport(&get_gateway.admin(), &provider_id, get_transport)
+            .await
+    });
+    gateway
+        .provider_allowance_state
+        .wait_for_coalesced_fetch()
+        .await;
+    transport.release.add_permits(10);
+
+    let snapshot = get.await??.expect("eligible provider snapshot");
+    assert_eq!(snapshot.status, ProviderAllowanceStatus::Fresh);
+    assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
+
+    // 缓存新鲜后 targets 直接携带快照，不再标记 refreshing
+    let cached_targets =
+        list_provider_allowance_targets_with_transport(&gateway.admin(), transport.clone())
+            .await?;
+    assert_eq!(cached_targets.len(), 1);
+    assert_eq!(cached_targets[0].snapshot.as_ref(), Some(&snapshot));
+    assert!(!cached_targets[0].refreshing);
+    assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
+
+    let cached = get_provider_allowance_with_transport(
+        &gateway.admin(),
+        &provider.id,
+        transport.clone(),
+    )
+    .await?;
+    assert_eq!(cached.as_ref(), Some(&snapshot));
+    assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn target_list_keeps_the_stale_snapshot_while_refetching() -> anyhow::Result<()> {
+    let data_dir = tempfile::tempdir()?;
+    let gateway = Gateway::new(GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await?;
+    let provider =
+        create_test_provider(&gateway, "Copilot", "github-copilot", "token-alpha").await?;
+    let transport = Arc::new(StaleFixtureTransport {
+        fail: AtomicBool::new(false),
+        calls: AtomicUsize::new(0),
+    });
+
+    refresh_provider_allowance_with_transport(&gateway.admin(), &provider.id, transport.clone())
+        .await?
+        .expect("fresh allowance");
+    transport.fail.store(true, Ordering::SeqCst);
+    let stale = refresh_provider_allowance_with_transport(
+        &gateway.admin(),
+        &provider.id,
+        transport.clone(),
+    )
+    .await?
+    .expect("stale allowance");
+    assert_eq!(stale.status, ProviderAllowanceStatus::Stale);
+
+    // 缓存里有失败快照：targets 透传它并重新发起抓取
+    let targets =
+        list_provider_allowance_targets_with_transport(&gateway.admin(), transport.clone())
+            .await?;
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].snapshot.as_ref(), Some(&stale));
+    assert!(targets[0].refreshing);
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_provider_allowance_returns_none_for_unknown_or_ineligible_providers()
+-> anyhow::Result<()> {
+    let data_dir = tempfile::tempdir()?;
+    let gateway = Gateway::new(GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await?;
+    let unsupported =
+        create_test_provider(&gateway, "Unsupported", "openrouter", "token-x").await?;
+    let transport = Arc::new(StaleFixtureTransport {
+        fail: AtomicBool::new(false),
+        calls: AtomicUsize::new(0),
+    });
+
+    assert!(
+        get_provider_allowance_with_transport(&gateway.admin(), "missing", transport.clone())
+            .await?
+            .is_none()
+    );
+    assert!(
+        get_provider_allowance_with_transport(&gateway.admin(), &unsupported.id, transport.clone())
+            .await?
+            .is_none()
+    );
+    assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
     Ok(())
 }
 

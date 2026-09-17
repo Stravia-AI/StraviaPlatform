@@ -9,7 +9,7 @@ use std::{
 use stravia_core::Gateway;
 use stravia_core::admin::{
     identity::{AdminAuth, AuthError, SessionTokens},
-    provider_allowance::ProviderAllowanceSnapshot,
+    provider_allowance::{ProviderAllowanceSnapshot, ProviderAllowanceTarget},
 };
 use stravia_core::connect_client_apply::{
     ConnectClientApplyError, ConnectClientApplyInput, ConnectClientApplyPlan,
@@ -374,15 +374,16 @@ fn io_error(
 #[tauri::command]
 pub async fn list_provider_allowances(
     gateway: State<'_, Gateway>,
-) -> Result<Vec<ProviderAllowanceSnapshot>, String> {
+) -> Result<Vec<ProviderAllowanceTarget>, String> {
     list_provider_allowances_for_gateway(&gateway).await
 }
 
 #[tauri::command]
-pub async fn refresh_provider_allowances(
+pub async fn get_provider_allowance(
+    provider_id: String,
     gateway: State<'_, Gateway>,
-) -> Result<Vec<ProviderAllowanceSnapshot>, String> {
-    refresh_provider_allowances_for_gateway(&gateway).await
+) -> Result<Option<ProviderAllowanceSnapshot>, String> {
+    get_provider_allowance_for_gateway(&gateway, &provider_id).await
 }
 
 #[tauri::command]
@@ -395,22 +396,23 @@ pub async fn refresh_provider_allowance(
 
 async fn list_provider_allowances_for_gateway(
     gateway: &Gateway,
-) -> Result<Vec<ProviderAllowanceSnapshot>, String> {
+) -> Result<Vec<ProviderAllowanceTarget>, String> {
     gateway
         .admin()
-        .list_provider_allowances()
+        .list_provider_allowance_targets()
         .await
         .map_err(|_| "failed to load provider allowances".to_string())
 }
 
-async fn refresh_provider_allowances_for_gateway(
+async fn get_provider_allowance_for_gateway(
     gateway: &Gateway,
-) -> Result<Vec<ProviderAllowanceSnapshot>, String> {
+    provider_id: &str,
+) -> Result<Option<ProviderAllowanceSnapshot>, String> {
     gateway
         .admin()
-        .refresh_provider_allowances()
+        .get_provider_allowance(provider_id)
         .await
-        .map_err(|_| "failed to refresh provider allowances".to_string())
+        .map_err(|_| "failed to load provider allowance".to_string())
 }
 
 async fn refresh_provider_allowance_for_gateway(
@@ -437,8 +439,8 @@ mod tests {
     use stravia_server::{AdminMode, HttpAppConfig, build_http_app, desktop_origins};
 
     use super::{
-        NativeAdminSession, list_provider_allowances_for_gateway,
-        refresh_provider_allowance_for_gateway, refresh_provider_allowances_for_gateway,
+        NativeAdminSession, get_provider_allowance_for_gateway,
+        list_provider_allowances_for_gateway, refresh_provider_allowance_for_gateway,
     };
     use crate::desktop_gateway_runtime::{
         DesktopGatewayRuntime, PortOwner, PortOwnerResolver, PortPreferenceLoad,
@@ -520,19 +522,15 @@ mod tests {
                 .expect("list allowances"),
             gateway
                 .admin()
-                .list_provider_allowances()
+                .list_provider_allowance_targets()
                 .await
                 .expect("core list allowances")
         );
         assert_eq!(
-            refresh_provider_allowances_for_gateway(&gateway)
+            get_provider_allowance_for_gateway(&gateway, "missing")
                 .await
-                .expect("refresh allowances"),
-            gateway
-                .admin()
-                .refresh_provider_allowances()
-                .await
-                .expect("core refresh allowances")
+                .expect("get missing provider"),
+            None
         );
         assert_eq!(
             refresh_provider_allowance_for_gateway(&gateway, "missing")

@@ -22,7 +22,7 @@
     "allow-plan-connect-client",
     "allow-apply-connect-client",
     "allow-list-provider-allowances",
-    "allow-refresh-provider-allowances",
+    "allow-get-provider-allowance",
     "allow-refresh-provider-allowance",
     "allow-get-desktop-update-state",
     "allow-download-product-update",

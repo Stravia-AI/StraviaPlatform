@@ -26,7 +26,7 @@ use super::{
     Allowance, AllowanceCondition, CommandCodeSubscription, ExhaustionForecast,
     ExhaustionForecastStatus, MonitorKind, ParsedAllowance, ProviderAllowanceError,
     ProviderAllowanceErrorCategory, ProviderAllowanceSnapshot, ProviderAllowanceStatus,
-    commandcode_billing_cycle, monitor_for, parse_commandcode_org_id,
+    ProviderAllowanceTarget, commandcode_billing_cycle, monitor_for, parse_commandcode_org_id,
     parse_commandcode_subscription, parse_commandcode_summary_cost, parse_minimax_fallback,
     parse_monitor_response,
 };
@@ -167,10 +167,23 @@ impl AdminService {
             .await
     }
 
-    pub async fn refresh_provider_allowances(
+    /// Non-blocking list: returns each eligible provider's identity plus its
+    /// cached snapshot when one exists, and kicks off upstream fetches for
+    /// entries whose cache is missing or stale instead of awaiting them.
+    pub async fn list_provider_allowance_targets(
         &self,
-    ) -> anyhow::Result<Vec<ProviderAllowanceSnapshot>> {
-        list_provider_allowances_with_transport(self, true, Arc::new(ReqwestAllowanceTransport))
+    ) -> anyhow::Result<Vec<ProviderAllowanceTarget>> {
+        list_provider_allowance_targets_with_transport(self, Arc::new(ReqwestAllowanceTransport))
+            .await
+    }
+
+    /// Returns one provider's snapshot, serving the fresh cache when possible
+    /// and otherwise awaiting (or coalescing onto) the upstream fetch.
+    pub async fn get_provider_allowance(
+        &self,
+        provider_id: &str,
+    ) -> anyhow::Result<Option<ProviderAllowanceSnapshot>> {
+        get_provider_allowance_with_transport(self, provider_id, Arc::new(ReqwestAllowanceTransport))
             .await
     }
 
@@ -187,9 +200,26 @@ impl AdminService {
     }
 }
 
+pub(super) async fn get_provider_allowance_with_transport(
+    admin: &AdminService,
+    provider_id: &str,
+    transport: Arc<dyn AllowanceTransport>,
+) -> anyhow::Result<Option<ProviderAllowanceSnapshot>> {
+    provider_allowance_with_transport(admin, provider_id, false, transport).await
+}
+
 pub(super) async fn refresh_provider_allowance_with_transport(
     admin: &AdminService,
     provider_id: &str,
+    transport: Arc<dyn AllowanceTransport>,
+) -> anyhow::Result<Option<ProviderAllowanceSnapshot>> {
+    provider_allowance_with_transport(admin, provider_id, true, transport).await
+}
+
+async fn provider_allowance_with_transport(
+    admin: &AdminService,
+    provider_id: &str,
+    force: bool,
     transport: Arc<dyn AllowanceTransport>,
 ) -> anyhow::Result<Option<ProviderAllowanceSnapshot>> {
     let Some(provider) = admin.gw.storage.providers().get(provider_id).await? else {
@@ -206,14 +236,10 @@ pub(super) async fn refresh_provider_allowance_with_transport(
             .remove(provider_id);
         return Ok(None);
     }
-    fetch_provider_allowance(admin, provider, true, transport).await
+    fetch_provider_allowance(admin, provider, force, transport).await
 }
 
-pub(super) async fn list_provider_allowances_with_transport(
-    admin: &AdminService,
-    force: bool,
-    transport: Arc<dyn AllowanceTransport>,
-) -> anyhow::Result<Vec<ProviderAllowanceSnapshot>> {
+async fn eligible_monitor_providers(admin: &AdminService) -> anyhow::Result<Vec<Provider>> {
     let mut providers = admin.gw.storage.providers().list().await?;
     providers.retain(eligible_monitor());
     providers.sort_by(|left, right| {
@@ -234,6 +260,81 @@ pub(super) async fn list_provider_allowances_with_transport(
         .write()
         .await
         .retain(|provider_id, _| eligible_ids.contains(provider_id));
+
+    Ok(providers)
+}
+
+pub(super) async fn list_provider_allowance_targets_with_transport(
+    admin: &AdminService,
+    transport: Arc<dyn AllowanceTransport>,
+) -> anyhow::Result<Vec<ProviderAllowanceTarget>> {
+    let providers = eligible_monitor_providers(admin).await?;
+    let mut targets = Vec::with_capacity(providers.len());
+    for provider in providers {
+        let identity = provider_identity(admin, &provider).await?;
+        let previous = {
+            let cache = admin.gw.provider_allowance_state.inner.cache.read().await;
+            cache
+                .get(&provider.id)
+                .filter(|entry| entry.identity == identity)
+                .cloned()
+        };
+        let fresh = previous.as_ref().is_some_and(|entry| {
+            entry
+                .successful_at
+                .is_some_and(|successful_at| successful_at.elapsed() < SUCCESS_TTL)
+        });
+        let snapshot = previous.map(|entry| entry.snapshot);
+        if fresh {
+            targets.push(allowance_target(&provider, snapshot, false));
+            continue;
+        }
+        // Kick the upstream fetch now so a later per-provider GET coalesces
+        // onto it instead of starting from scratch.
+        spawn_allowance_fetch(admin.clone(), provider.clone(), Arc::clone(&transport));
+        targets.push(allowance_target(&provider, snapshot, true));
+    }
+    Ok(targets)
+}
+
+fn spawn_allowance_fetch(
+    admin: AdminService,
+    provider: Provider,
+    transport: Arc<dyn AllowanceTransport>,
+) {
+    let provider_id = provider.id.clone();
+    tokio::spawn(async move {
+        if let Err(error) = fetch_provider_allowance(&admin, provider, false, transport).await {
+            tracing::warn!(
+                provider_id = %provider_id,
+                error = %error,
+                "background provider allowance fetch failed"
+            );
+        }
+    });
+}
+
+fn allowance_target(
+    provider: &Provider,
+    snapshot: Option<ProviderAllowanceSnapshot>,
+    refreshing: bool,
+) -> ProviderAllowanceTarget {
+    ProviderAllowanceTarget {
+        provider_id: provider.id.clone(),
+        provider_name: provider.name.clone(),
+        catalog_provider_id: provider.preset_key.clone().unwrap_or_default(),
+        channel: provider.channel.clone().unwrap_or_else(|| "default".into()),
+        snapshot,
+        refreshing,
+    }
+}
+
+pub(super) async fn list_provider_allowances_with_transport(
+    admin: &AdminService,
+    force: bool,
+    transport: Arc<dyn AllowanceTransport>,
+) -> anyhow::Result<Vec<ProviderAllowanceSnapshot>> {
+    let providers = eligible_monitor_providers(admin).await?;
 
     let results = stream::iter(providers.into_iter().map(|provider| {
         let admin = admin.clone();
