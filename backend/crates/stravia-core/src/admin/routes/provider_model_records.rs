@@ -319,8 +319,12 @@ impl AdminService {
                 {
                     summary.deprecated += 1;
                 }
+                // 未登记快照允许整体替换：命中真实规格时补全；只有 id/name 的
+                // 历史空快照也升级到 bare() 占位默认。人工改过的未登记记录不适用
+                // 后者，避免覆盖非规格字段的编辑。
                 let fill_specification = current.metadata.lacks_registered_specification()
-                    && !metadata.lacks_registered_specification();
+                    && (!metadata.lacks_registered_specification()
+                        || current.metadata.is_identity_only());
                 if current.presence != ProviderModelPresence::Present
                     || current.metadata.status != metadata.status
                     || fill_specification

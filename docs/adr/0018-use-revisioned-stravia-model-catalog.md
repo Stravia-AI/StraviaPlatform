@@ -10,7 +10,7 @@ Canonical Model 以 `{lab_id}/{model_id}` 标识，只作为创建逻辑 Model �
 
 - 两个模板搜索框都按 Canonical Model 的名称与完整 ID 搜索，并继续允许目录外手工输入。
 - Lab 只作为 Canonical Model ID 的命名空间；本次不缓存 Lab 数据、不代理 Lab logo，也不新增 Lab 浏览或展示 UI。
-- Provider Model 模板由 Core 按 canonical ID 从当前 revision 复制；不固定用户选择时看到的旧 revision。没有模板时生成只含 upstream model ID 的 bare metadata，不再 fuzzy 猜测 Canonical Model。
+- Provider Model 模板由 Core 按 canonical ID 从当前 revision 复制；不固定用户选择时看到的旧 revision。没有模板时生成 bare metadata：upstream model ID 加保守占位规格（text 输入/输出、256K 上下文、推理与工具调用），仍视为未登记、可由后续同步补模板；不再 fuzzy 猜测 Canonical Model。
 - 全局 Provider 与 Canonical Model 索引按同一 revision 校验后原子切换；Provider-scoped cache 按需刷新。当前 revision 的 scoped 下载失败会使同步或 re-import 失败并保持本地状态，不会把旧 LKG 冒充为成功。
 - 当前 revision 的 scoped cache 未命中时，先刷新全局索引，再下载 scoped 数据，避免本地旧索引与远端最新目录必然冲突。下载后仍校验远端与当前活动 revision；下载期间再次变版时明确失败，不盲目重试。
 - 首次启动离线时仍可浏览内嵌 Provider 与 Canonical Model 索引；尚无 scoped last-known-good 的 Provider 无法依赖目录导入模型。

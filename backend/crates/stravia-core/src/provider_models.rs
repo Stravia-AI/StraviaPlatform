@@ -160,23 +160,52 @@ impl ProviderModelMetadata {
         Self::from_value(model_id, value)
     }
 
+    /// 未匹配 Provider Catalog 与 Canonical 模板时的占位快照：按最常见的文本
+    /// 对话模型登记保守默认，避免规格完全空白。占位不等于已登记（见
+    /// lacks_registered_specification），后续同步命中真实元数据仍会整体替换。
     pub fn bare(model_id: &str) -> Self {
         Self {
             id: Some(model_id.to_string()),
             name: Some(model_id.to_string()),
+            reasoning: Some(true),
+            tool_call: Some(true),
+            modalities: Some(unmatched_default_modalities()),
+            limit: Some(unmatched_default_limit()),
             ..Self::default()
         }
     }
 
-    /// 规格芯片依赖这些字段。全空时视为「未登记」，后续同步可按模型 ID 补模板。
+    /// 规格芯片依赖这些字段。全空或仅含 bare() 占位默认值时视为「未登记」，
+    /// 后续同步可按模型 ID 补模板。
     pub fn lacks_registered_specification(&self) -> bool {
-        self.limit.is_none()
+        if self.structured_output.is_some()
+            || self.attachment.is_some()
+            || self.temperature.is_some()
+        {
+            return false;
+        }
+        if self.limit.is_none()
             && self.modalities.is_none()
             && self.reasoning.is_none()
             && self.tool_call.is_none()
-            && self.structured_output.is_none()
-            && self.attachment.is_none()
-            && self.temperature.is_none()
+        {
+            return true;
+        }
+        self.limit == Some(unmatched_default_limit())
+            && self.modalities == Some(unmatched_default_modalities())
+            && self.reasoning == Some(true)
+            && self.tool_call == Some(true)
+    }
+
+    /// 与历史 bare() 写法完全一致（id/name 均为模型 ID、其余全空）的快照；
+    /// 同步时可整体升级为占位默认或模板数据而不覆盖人工修改。
+    pub(crate) fn is_identity_only(&self) -> bool {
+        *self
+            == Self {
+                id: self.id.clone(),
+                name: self.id.clone(),
+                ..Self::default()
+            }
     }
 
     pub fn to_value(&self) -> anyhow::Result<Value> {
@@ -253,6 +282,23 @@ impl ProviderModelMetadata {
             cost.validate()?;
         }
         Ok(())
+    }
+}
+
+/// 未匹配占位规格：最常见的文本对话模型假设，发现后仍可人工改正或由同步用真实元数据替换。
+const UNMATCHED_DEFAULT_CONTEXT_TOKENS: u64 = 256 * 1024;
+
+fn unmatched_default_limit() -> ModelLimit {
+    ModelLimit {
+        context: Some(UNMATCHED_DEFAULT_CONTEXT_TOKENS),
+        ..ModelLimit::default()
+    }
+}
+
+fn unmatched_default_modalities() -> ModelModalities {
+    ModelModalities {
+        input: vec!["text".to_string()],
+        output: vec!["text".to_string()],
     }
 }
 
@@ -694,7 +740,32 @@ mod tests {
     #[test]
     fn lacks_registered_specification_matches_bare_metadata() {
         let bare = ProviderModelMetadata::bare("glm-5.1");
+        assert_eq!(bare.reasoning, Some(true));
+        assert_eq!(bare.tool_call, Some(true));
+        assert_eq!(
+            bare.limit.as_ref().and_then(|limit| limit.context),
+            Some(256 * 1024)
+        );
+        assert_eq!(
+            bare.modalities
+                .as_ref()
+                .map(|modalities| modalities.input.as_slice()),
+            Some(["text".to_string()].as_slice())
+        );
+        assert_eq!(
+            bare.modalities
+                .as_ref()
+                .map(|modalities| modalities.output.as_slice()),
+            Some(["text".to_string()].as_slice())
+        );
+        // 占位默认不算已登记,后续同步仍可补模板。
         assert!(bare.lacks_registered_specification());
+        assert!(!bare.is_identity_only());
+
+        // 占位之外的任何规格修改都视为已登记。
+        let mut touched = ProviderModelMetadata::bare("glm-5.1");
+        touched.temperature = Some(false);
+        assert!(!touched.lacks_registered_specification());
 
         let specified = ProviderModelMetadata::from_value(
             "glm-5.1",
@@ -706,6 +777,16 @@ mod tests {
         )
         .expect("specified metadata");
         assert!(!specified.lacks_registered_specification());
+
+        // 历史空快照:规格全空时仍视为未登记,且允许整体升级。
+        let mut legacy = ProviderModelMetadata::default();
+        legacy.id = Some("glm-5.1".to_string());
+        legacy.name = Some("glm-5.1".to_string());
+        assert!(legacy.lacks_registered_specification());
+        assert!(legacy.is_identity_only());
+        legacy.name = Some("Renamed".to_string());
+        assert!(legacy.lacks_registered_specification());
+        assert!(!legacy.is_identity_only());
     }
 
     #[test]
