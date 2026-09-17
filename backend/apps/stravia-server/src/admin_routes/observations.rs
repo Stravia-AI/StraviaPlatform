@@ -194,6 +194,13 @@ pub(super) async fn update_observation_debug(
     .into_response()
 }
 
+pub(super) async fn clear_observation_debug(State(gateway): State<Gateway>) -> Response {
+    match gateway.admin().clear_observation_debug().await {
+        Ok(data) => Json(serde_json::json!({ "data": data })).into_response(),
+        Err(_) => observation_unavailable(),
+    }
+}
+
 pub(super) async fn clear_observation_history(State(gateway): State<Gateway>) -> Response {
     match gateway.admin().clear_observation_history().await {
         Ok(data) => Json(serde_json::json!({ "data": data })).into_response(),

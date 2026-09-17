@@ -87,6 +87,33 @@ impl ObservationStore {
         Ok(())
     }
 
+    /// Tombstone every Debug manifest so retained trace files can be removed wholesale.
+    /// Active runs may re-persist their manifest afterwards with a partial status.
+    pub async fn mark_all_debug_tombstones(&self) -> anyhow::Result<Vec<String>> {
+        match self {
+            Self::Sqlite(p) => {
+                sqlx::query("UPDATE debug_trace_manifests SET tombstoned=1")
+                    .execute(p)
+                    .await?;
+                Ok(
+                    sqlx::query_scalar("SELECT trace_id FROM debug_trace_manifests")
+                        .fetch_all(p)
+                        .await?,
+                )
+            }
+            Self::Postgres(p) => {
+                sqlx::query("UPDATE debug_trace_manifests SET tombstoned=TRUE")
+                    .execute(p)
+                    .await?;
+                Ok(
+                    sqlx::query_scalar("SELECT trace_id FROM debug_trace_manifests")
+                        .fetch_all(p)
+                        .await?,
+                )
+            }
+        }
+    }
+
     pub async fn mark_expired_tombstones(&self, now: i64) -> anyhow::Result<Vec<String>> {
         match self {
             Self::Sqlite(p) => {

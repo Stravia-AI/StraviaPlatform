@@ -22,6 +22,13 @@ pub(crate) struct ResponsesWebSocketRequest<'a> {
     pub on_connect_start: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct ResponsesWebSocketAffinityHint<'a> {
+    pub previous_response_id: Option<&'a str>,
+    pub session_affinity: Option<&'a str>,
+    pub require_affinity: bool,
+}
+
 #[derive(Default)]
 struct ResponsesWebSocketRegistryState {
     connections: std::collections::HashMap<String, ResponsesWebSocketConnectionRecord>,
@@ -84,7 +91,7 @@ pub(crate) enum ResponsesWebSocketAcquireError {
     Unsupported {
         attempted: bool,
         status: Option<u16>,
-        headers: HeaderMap,
+        headers: Box<HeaderMap>,
         body: bytes::Bytes,
     },
     #[error("Responses WebSocket is cooling down for this Target")]
@@ -92,7 +99,7 @@ pub(crate) enum ResponsesWebSocketAcquireError {
     #[error("Responses WebSocket request was rejected: {status}")]
     Rejected {
         status: u16,
-        headers: HeaderMap,
+        headers: Box<HeaderMap>,
         body: bytes::Bytes,
     },
     #[error("Responses WebSocket handshake body could not be read")]
@@ -146,15 +153,18 @@ impl ResponsesWebSocketRegistry {
         namespace: &str,
         trace: ResponsesWebSocketTrace<'_>,
         request: ResponsesWebSocketRequest<'_>,
-        previous_response_id: Option<&str>,
-        session_affinity: Option<&str>,
-        require_affinity: bool,
+        affinity: ResponsesWebSocketAffinityHint<'_>,
     ) -> Result<ResponsesWebSocketLease, ResponsesWebSocketAcquireError> {
         let ResponsesWebSocketRequest {
             url,
             headers,
             on_connect_start,
         } = request;
+        let ResponsesWebSocketAffinityHint {
+            previous_response_id,
+            session_affinity,
+            require_affinity,
+        } = affinity;
         let response_affinity =
             previous_response_id.map(|id| ResponsesWebSocketAffinity::response(namespace, id));
         let session_affinity_key =
@@ -170,7 +180,7 @@ impl ResponsesWebSocketRegistry {
                     return Err(ResponsesWebSocketAcquireError::Unsupported {
                         attempted: false,
                         status: None,
-                        headers: HeaderMap::new(),
+                        headers: Box::new(HeaderMap::new()),
                         body: bytes::Bytes::new(),
                     });
                 }
@@ -316,14 +326,14 @@ impl ResponsesWebSocketRegistry {
                 return Err(ResponsesWebSocketAcquireError::Unsupported {
                     attempted: true,
                     status: Some(status),
-                    headers: handshake_headers,
+                    headers: Box::new(handshake_headers),
                     body,
                 });
             }
             if matches!(status, 401 | 403 | 429) {
                 return Err(ResponsesWebSocketAcquireError::Rejected {
                     status,
-                    headers: handshake_headers,
+                    headers: Box::new(handshake_headers),
                     body,
                 });
             }
@@ -851,9 +861,11 @@ mod tests {
                     headers: HeaderMap::new(),
                     on_connect_start: None,
                 },
-                None,
-                None,
-                true,
+                ResponsesWebSocketAffinityHint {
+                    previous_response_id: None,
+                    session_affinity: None,
+                    require_affinity: true,
+                },
             )
             .await
             .expect("connect first request");
@@ -892,9 +904,11 @@ mod tests {
                     headers: HeaderMap::new(),
                     on_connect_start: None,
                 },
-                Some("upstream-1"),
-                None,
-                true,
+                ResponsesWebSocketAffinityHint {
+                    previous_response_id: Some("upstream-1"),
+                    session_affinity: None,
+                    require_affinity: true,
+                },
             )
             .await
             .expect("reuse affinity");
@@ -941,9 +955,11 @@ mod tests {
                     headers: HeaderMap::new(),
                     on_connect_start: None,
                 },
-                None,
-                Some("session-1"),
-                true,
+                ResponsesWebSocketAffinityHint {
+                    previous_response_id: None,
+                    session_affinity: Some("session-1"),
+                    require_affinity: true,
+                },
             )
             .await
             .expect("connect first request");
@@ -980,9 +996,11 @@ mod tests {
                     headers: HeaderMap::new(),
                     on_connect_start: None,
                 },
-                None,
-                Some("session-1"),
-                true,
+                ResponsesWebSocketAffinityHint {
+                    previous_response_id: None,
+                    session_affinity: Some("session-1"),
+                    require_affinity: true,
+                },
             )
             .await
             .expect("reuse session affinity");
@@ -1026,9 +1044,11 @@ mod tests {
                     headers: HeaderMap::new(),
                     on_connect_start: None,
                 },
-                None,
-                None,
-                true,
+                ResponsesWebSocketAffinityHint {
+                    previous_response_id: None,
+                    session_affinity: None,
+                    require_affinity: true,
+                },
             )
             .await
             .expect("connect parent");
@@ -1058,9 +1078,11 @@ mod tests {
                     headers: HeaderMap::new(),
                     on_connect_start: None,
                 },
-                Some("upstream-1"),
-                None,
-                true,
+                ResponsesWebSocketAffinityHint {
+                    previous_response_id: Some("upstream-1"),
+                    session_affinity: None,
+                    require_affinity: true,
+                },
             )
             .await
             .expect("acquire first branch");
@@ -1078,9 +1100,11 @@ mod tests {
                         headers: HeaderMap::new(),
                         on_connect_start: None,
                     },
-                    Some("upstream-1"),
-                    None,
-                    true,
+                    ResponsesWebSocketAffinityHint {
+                        previous_response_id: Some("upstream-1"),
+                        session_affinity: None,
+                        require_affinity: true,
+                    },
                 )
                 .await
         });
@@ -1146,9 +1170,11 @@ mod tests {
                         headers: HeaderMap::new(),
                         on_connect_start: None,
                     },
-                    None,
-                    None,
-                    false,
+                    ResponsesWebSocketAffinityHint {
+                        previous_response_id: None,
+                        session_affinity: None,
+                        require_affinity: false,
+                    },
                 )
                 .await,
             Err(ResponsesWebSocketAcquireError::Unsupported { .. })
@@ -1164,9 +1190,11 @@ mod tests {
                         headers: HeaderMap::new(),
                         on_connect_start: None,
                     },
-                    None,
-                    None,
-                    false,
+                    ResponsesWebSocketAffinityHint {
+                        previous_response_id: None,
+                        session_affinity: None,
+                        require_affinity: false,
+                    },
                 )
                 .await,
             Err(ResponsesWebSocketAcquireError::Unsupported { .. })
@@ -1184,9 +1212,11 @@ mod tests {
                         headers: HeaderMap::new(),
                         on_connect_start: None,
                     },
-                    None,
-                    None,
-                    false,
+                    ResponsesWebSocketAffinityHint {
+                        previous_response_id: None,
+                        session_affinity: None,
+                        require_affinity: false,
+                    },
                 )
                 .await,
             Err(ResponsesWebSocketAcquireError::Unsupported { .. })
@@ -1216,9 +1246,11 @@ mod tests {
                         headers: HeaderMap::new(),
                         on_connect_start: None,
                     },
-                    None,
-                    None,
-                    false,
+                    ResponsesWebSocketAffinityHint {
+                        previous_response_id: None,
+                        session_affinity: None,
+                        require_affinity: false,
+                    },
                 )
                 .await,
             Err(ResponsesWebSocketAcquireError::Transport(_))
@@ -1234,9 +1266,11 @@ mod tests {
                         headers: HeaderMap::new(),
                         on_connect_start: None,
                     },
-                    None,
-                    None,
-                    false,
+                    ResponsesWebSocketAffinityHint {
+                        previous_response_id: None,
+                        session_affinity: None,
+                        require_affinity: false,
+                    },
                 )
                 .await,
             Err(ResponsesWebSocketAcquireError::Cooldown)
@@ -1260,9 +1294,11 @@ mod tests {
                         headers: HeaderMap::new(),
                         on_connect_start: None,
                     },
-                    None,
-                    None,
-                    false,
+                    ResponsesWebSocketAffinityHint {
+                        previous_response_id: None,
+                        session_affinity: None,
+                        require_affinity: false,
+                    },
                 )
                 .await;
             let Err(ResponsesWebSocketAcquireError::Rejected { status: code, .. }) = result else {
@@ -1311,9 +1347,11 @@ mod tests {
                         headers: HeaderMap::new(),
                         on_connect_start: None,
                     },
-                    None,
-                    None,
-                    false,
+                    ResponsesWebSocketAffinityHint {
+                        previous_response_id: None,
+                        session_affinity: None,
+                        require_affinity: false,
+                    },
                 )
                 .await,
             Err(ResponsesWebSocketAcquireError::Transport(_))
@@ -1346,9 +1384,11 @@ mod tests {
                     headers: HeaderMap::new(),
                     on_connect_start: None,
                 },
-                None,
-                None,
-                true,
+                ResponsesWebSocketAffinityHint {
+                    previous_response_id: None,
+                    session_affinity: None,
+                    require_affinity: true,
+                },
             )
             .await
             .expect("connect parent");
@@ -1394,9 +1434,11 @@ mod tests {
                     headers: HeaderMap::new(),
                     on_connect_start: None,
                 },
-                Some("upstream-1"),
-                None,
-                true,
+                ResponsesWebSocketAffinityHint {
+                    previous_response_id: Some("upstream-1"),
+                    session_affinity: None,
+                    require_affinity: true,
+                },
             )
             .await
             .expect("open replacement connection");
@@ -1419,9 +1461,11 @@ mod tests {
                     headers: HeaderMap::new(),
                     on_connect_start: None,
                 },
-                None,
-                None,
-                true,
+                ResponsesWebSocketAffinityHint {
+                    previous_response_id: None,
+                    session_affinity: None,
+                    require_affinity: true,
+                },
             )
             .await
             .expect("connect request");
@@ -1467,9 +1511,11 @@ mod tests {
                     headers: HeaderMap::new(),
                     on_connect_start: None,
                 },
-                None,
-                None,
-                false,
+                ResponsesWebSocketAffinityHint {
+                    previous_response_id: None,
+                    session_affinity: None,
+                    require_affinity: false,
+                },
             )
             .await
             .expect("connect request");

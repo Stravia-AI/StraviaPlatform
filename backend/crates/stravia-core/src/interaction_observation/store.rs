@@ -347,14 +347,16 @@ impl ObservationStore {
                 let payload = serde_json::json!({"route_id": admission.start.route_id, "model_display_name": admission.start.model_display_name, "debug_enabled": admission.debug_enabled, "inferred_retry": admission.inferred_retry, "grouping_reason": admission.grouping_reason, "ingress_received_at": admission.start.ingress_received_at, "parent_run_id": admission.parent_run_id, "generation_parent_id": admission.start.generation_parent_id, "diagnostic_source_run_id": admission.diagnostic_source_run_id, "has_new_user": admission.start.has_new_user, "parent_interaction_id": admission.parent_interaction_id, "root_id": admission.start.generation_root_id.as_deref().unwrap_or(admission.interaction_id)});
                 insert_event_sqlite(
                     &mut tx,
-                    sequence,
-                    admission.now,
-                    Some(admission.interaction_id),
-                    Some(&admission.start.id),
-                    None,
-                    "run_admitted",
-                    &payload,
-                    admission.expires_at,
+                    EventInsert {
+                        sequence,
+                        occurred_at: admission.now,
+                        interaction_id: Some(admission.interaction_id),
+                        run_id: Some(&admission.start.id),
+                        rejection_id: None,
+                        kind: "run_admitted",
+                        payload: &payload,
+                        expires_at: admission.expires_at,
+                    },
                 )
                 .await?;
                 tx.commit().await?;
@@ -392,14 +394,16 @@ impl ObservationStore {
                 let payload = serde_json::json!({"route_id": admission.start.route_id, "model_display_name": admission.start.model_display_name, "debug_enabled": admission.debug_enabled, "inferred_retry": admission.inferred_retry, "grouping_reason": admission.grouping_reason, "ingress_received_at": admission.start.ingress_received_at, "parent_run_id": admission.parent_run_id, "generation_parent_id": admission.start.generation_parent_id, "diagnostic_source_run_id": admission.diagnostic_source_run_id, "has_new_user": admission.start.has_new_user, "parent_interaction_id": admission.parent_interaction_id, "root_id": admission.start.generation_root_id.as_deref().unwrap_or(admission.interaction_id)});
                 insert_event_postgres(
                     &mut tx,
-                    sequence,
-                    admission.now,
-                    Some(admission.interaction_id),
-                    Some(&admission.start.id),
-                    None,
-                    "run_admitted",
-                    &payload,
-                    admission.expires_at,
+                    EventInsert {
+                        sequence,
+                        occurred_at: admission.now,
+                        interaction_id: Some(admission.interaction_id),
+                        run_id: Some(&admission.start.id),
+                        rejection_id: None,
+                        kind: "run_admitted",
+                        payload: &payload,
+                        expires_at: admission.expires_at,
+                    },
                 )
                 .await?;
                 tx.commit().await?;
@@ -457,14 +461,16 @@ impl ObservationStore {
                     .await?;
                 insert_event_sqlite(
                     &mut tx,
-                    sequence,
-                    now,
-                    Some(interaction_id),
-                    Some(run_id),
-                    None,
-                    "trace_manifest_updated",
-                    &payload,
-                    expires_at,
+                    EventInsert {
+                        sequence,
+                        occurred_at: now,
+                        interaction_id: Some(interaction_id),
+                        run_id: Some(run_id),
+                        rejection_id: None,
+                        kind: "trace_manifest_updated",
+                        payload: &payload,
+                        expires_at,
+                    },
                 )
                 .await?;
                 tx.commit().await?;
@@ -505,14 +511,16 @@ impl ObservationStore {
                 .await?;
                 insert_event_postgres(
                     &mut tx,
-                    sequence,
-                    now,
-                    Some(interaction_id),
-                    Some(run_id),
-                    None,
-                    "trace_manifest_updated",
-                    &payload,
-                    expires_at,
+                    EventInsert {
+                        sequence,
+                        occurred_at: now,
+                        interaction_id: Some(interaction_id),
+                        run_id: Some(run_id),
+                        rejection_id: None,
+                        kind: "trace_manifest_updated",
+                        payload: &payload,
+                        expires_at,
+                    },
                 )
                 .await?;
                 tx.commit().await?;
@@ -597,14 +605,16 @@ impl ObservationStore {
                     .await?;
                 insert_event_sqlite(
                     &mut tx,
-                    sequence,
-                    now,
-                    Some(interaction_id),
-                    Some(run_id),
-                    None,
-                    kind,
-                    &payload,
-                    expires_at,
+                    EventInsert {
+                        sequence,
+                        occurred_at: now,
+                        interaction_id: Some(interaction_id),
+                        run_id: Some(run_id),
+                        rejection_id: None,
+                        kind,
+                        payload: &payload,
+                        expires_at,
+                    },
                 )
                 .await?;
                 tx.commit().await?;
@@ -650,14 +660,16 @@ impl ObservationStore {
                 .await?;
                 insert_event_postgres(
                     &mut tx,
-                    sequence,
-                    now,
-                    Some(interaction_id),
-                    Some(run_id),
-                    None,
-                    kind,
-                    &payload,
-                    expires_at,
+                    EventInsert {
+                        sequence,
+                        occurred_at: now,
+                        interaction_id: Some(interaction_id),
+                        run_id: Some(run_id),
+                        rejection_id: None,
+                        kind,
+                        payload: &payload,
+                        expires_at,
+                    },
                 )
                 .await?;
                 tx.commit().await?;
@@ -876,14 +888,16 @@ impl ObservationStore {
                     status_changed |= status_event(run_event);
                     insert_event_sqlite(
                         &mut tx,
-                        sequence,
-                        at,
-                        Some(interaction_id),
-                        Some(run_id),
-                        None,
-                        &kind,
-                        encoded.as_ref().unwrap_or(&payload),
-                        expires_at,
+                        EventInsert {
+                            sequence,
+                            occurred_at: at,
+                            interaction_id: Some(interaction_id),
+                            run_id: Some(run_id),
+                            rejection_id: None,
+                            kind: &kind,
+                            payload: encoded.as_ref().unwrap_or(&payload),
+                            expires_at,
+                        },
                     )
                     .await?;
                     result.push(event(
@@ -931,14 +945,16 @@ impl ObservationStore {
                     status_changed |= status_event(run_event);
                     insert_event_postgres(
                         &mut tx,
-                        sequence,
-                        at,
-                        Some(interaction_id),
-                        Some(run_id),
-                        None,
-                        &kind,
-                        encoded.as_ref().unwrap_or(&payload),
-                        expires_at,
+                        EventInsert {
+                            sequence,
+                            occurred_at: at,
+                            interaction_id: Some(interaction_id),
+                            run_id: Some(run_id),
+                            rejection_id: None,
+                            kind: &kind,
+                            payload: encoded.as_ref().unwrap_or(&payload),
+                            expires_at,
+                        },
                     )
                     .await?;
                     result.push(event(
@@ -1007,14 +1023,16 @@ impl ObservationStore {
                 recompute_status_sqlite(&mut tx, &interaction, now, seq).await?;
                 insert_event_sqlite(
                     &mut tx,
-                    seq,
-                    now,
-                    Some(&interaction),
-                    Some(run_id),
-                    None,
-                    "run_state_changed",
-                    &payload,
-                    expiry,
+                    EventInsert {
+                        sequence: seq,
+                        occurred_at: now,
+                        interaction_id: Some(&interaction),
+                        run_id: Some(run_id),
+                        rejection_id: None,
+                        kind: "run_state_changed",
+                        payload: &payload,
+                        expires_at: expiry,
+                    },
                 )
                 .await?;
                 tx.commit().await?;
@@ -1058,14 +1076,16 @@ impl ObservationStore {
                 recompute_status_postgres(&mut tx, &interaction, now, seq).await?;
                 insert_event_postgres(
                     &mut tx,
-                    seq,
-                    now,
-                    Some(&interaction),
-                    Some(run_id),
-                    None,
-                    "run_state_changed",
-                    &payload,
-                    expiry,
+                    EventInsert {
+                        sequence: seq,
+                        occurred_at: now,
+                        interaction_id: Some(&interaction),
+                        run_id: Some(run_id),
+                        rejection_id: None,
+                        kind: "run_state_changed",
+                        payload: &payload,
+                        expires_at: expiry,
+                    },
                 )
                 .await?;
                 tx.commit().await?;
@@ -1100,14 +1120,16 @@ impl ObservationStore {
                 recompute_status_sqlite(&mut tx, interaction_id, recorded_at, seq).await?;
                 insert_event_sqlite(
                     &mut tx,
-                    seq,
-                    recorded_at,
-                    Some(interaction_id),
-                    Some(run_id),
-                    None,
-                    "run_finished",
-                    &payload,
-                    expires_at,
+                    EventInsert {
+                        sequence: seq,
+                        occurred_at: recorded_at,
+                        interaction_id: Some(interaction_id),
+                        run_id: Some(run_id),
+                        rejection_id: None,
+                        kind: "run_finished",
+                        payload: &payload,
+                        expires_at,
+                    },
                 )
                 .await?;
                 tx.commit().await?;
@@ -1131,14 +1153,16 @@ impl ObservationStore {
                 recompute_status_postgres(&mut tx, interaction_id, recorded_at, seq).await?;
                 insert_event_postgres(
                     &mut tx,
-                    seq,
-                    recorded_at,
-                    Some(interaction_id),
-                    Some(run_id),
-                    None,
-                    "run_finished",
-                    &payload,
-                    expires_at,
+                    EventInsert {
+                        sequence: seq,
+                        occurred_at: recorded_at,
+                        interaction_id: Some(interaction_id),
+                        run_id: Some(run_id),
+                        rejection_id: None,
+                        kind: "run_finished",
+                        payload: &payload,
+                        expires_at,
+                    },
                 )
                 .await?;
                 tx.commit().await?;
@@ -1181,14 +1205,16 @@ impl ObservationStore {
                     .bind(started_at).bind(duration_ms).bind(&failure).bind(&metadata.model).bind(&metadata.api_key_id).bind(&metadata.api_key_name).execute(&mut *tx).await?;
                 insert_event_sqlite(
                     &mut tx,
-                    seq,
-                    now,
-                    None,
-                    None,
-                    Some(&ingress.id),
-                    "request_rejected",
-                    &payload,
-                    expires_at,
+                    EventInsert {
+                        sequence: seq,
+                        occurred_at: now,
+                        interaction_id: None,
+                        run_id: None,
+                        rejection_id: Some(&ingress.id),
+                        kind: "request_rejected",
+                        payload: &payload,
+                        expires_at,
+                    },
                 )
                 .await?;
                 tx.commit().await?;
@@ -1212,14 +1238,16 @@ impl ObservationStore {
                     .bind(started_at).bind(duration_ms).bind(&failure).bind(&metadata.model).bind(&metadata.api_key_id).bind(&metadata.api_key_name).execute(&mut *tx).await?;
                 insert_event_postgres(
                     &mut tx,
-                    seq,
-                    now,
-                    None,
-                    None,
-                    Some(&ingress.id),
-                    "request_rejected",
-                    &payload,
-                    expires_at,
+                    EventInsert {
+                        sequence: seq,
+                        occurred_at: now,
+                        interaction_id: None,
+                        run_id: None,
+                        rejection_id: Some(&ingress.id),
+                        kind: "request_rejected",
+                        payload: &payload,
+                        expires_at,
+                    },
                 )
                 .await?;
                 tx.commit().await?;
@@ -1307,14 +1335,16 @@ impl ObservationStore {
                     let payload = serde_json::json!({"status":status,"reason":"process_restarted"});
                     insert_event_sqlite(
                         &mut tx,
-                        seq,
-                        now,
-                        Some(iid),
-                        Some(rid),
-                        None,
-                        "process_restarted",
-                        &payload,
-                        *expires_at,
+                        EventInsert {
+                            sequence: seq,
+                            occurred_at: now,
+                            interaction_id: Some(iid),
+                            run_id: Some(rid),
+                            rejection_id: None,
+                            kind: "process_restarted",
+                            payload: &payload,
+                            expires_at: *expires_at,
+                        },
                     )
                     .await?;
                 }
@@ -1371,14 +1401,16 @@ impl ObservationStore {
                     let payload = serde_json::json!({"status":status,"reason":"process_restarted"});
                     insert_event_postgres(
                         &mut tx,
-                        seq,
-                        now,
-                        Some(iid),
-                        Some(rid),
-                        None,
-                        "process_restarted",
-                        &payload,
-                        *expires_at,
+                        EventInsert {
+                            sequence: seq,
+                            occurred_at: now,
+                            interaction_id: Some(iid),
+                            run_id: Some(rid),
+                            rejection_id: None,
+                            kind: "process_restarted",
+                            payload: &payload,
+                            expires_at: *expires_at,
+                        },
                     )
                     .await?;
                 }
@@ -1445,14 +1477,16 @@ async fn interrupt_predecessors_sqlite(
         let payload = serde_json::json!({"status":status,"user_interrupted":true,"reason":"user_interrupted"});
         insert_event_sqlite(
             tx,
-            seq,
-            now,
-            Some(interaction_id),
-            Some(&rid),
-            None,
-            "run_state_changed",
-            &payload,
-            expires_at,
+            EventInsert {
+                sequence: seq,
+                occurred_at: now,
+                interaction_id: Some(interaction_id),
+                run_id: Some(&rid),
+                rejection_id: None,
+                kind: "run_state_changed",
+                payload: &payload,
+                expires_at,
+            },
         )
         .await?;
         last = Some(seq);
@@ -1482,14 +1516,16 @@ async fn interrupt_predecessors_postgres(
         let payload = serde_json::json!({"status":status,"user_interrupted":true,"reason":"user_interrupted"});
         insert_event_postgres(
             tx,
-            seq,
-            now,
-            Some(interaction_id),
-            Some(&rid),
-            None,
-            "run_state_changed",
-            &payload,
-            expires_at,
+            EventInsert {
+                sequence: seq,
+                occurred_at: now,
+                interaction_id: Some(interaction_id),
+                run_id: Some(&rid),
+                rejection_id: None,
+                kind: "run_state_changed",
+                payload: &payload,
+                expires_at,
+            },
         )
         .await?;
         last = Some(seq);
@@ -1513,32 +1549,29 @@ async fn next_sqlite(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> anyhow::Re
     )
 }
 
+struct EventInsert<'a> {
+    sequence: i64,
+    occurred_at: i64,
+    interaction_id: Option<&'a str>,
+    run_id: Option<&'a str>,
+    rejection_id: Option<&'a str>,
+    kind: &'a str,
+    payload: &'a Value,
+    expires_at: i64,
+}
+
 async fn insert_event_sqlite(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    seq: i64,
-    at: i64,
-    interaction_id: Option<&str>,
-    run_id: Option<&str>,
-    rejection_id: Option<&str>,
-    kind: &str,
-    payload: &Value,
-    expires: i64,
+    event: EventInsert<'_>,
 ) -> anyhow::Result<()> {
-    sqlx::query("INSERT INTO observation_events (sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload,expires_at) VALUES (?,?,?,?,?,?,?,?)").bind(seq).bind(at).bind(interaction_id).bind(run_id).bind(rejection_id).bind(kind).bind(serde_json::to_string(payload)?).bind(expires).execute(&mut **tx).await?;
+    sqlx::query("INSERT INTO observation_events (sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload,expires_at) VALUES (?,?,?,?,?,?,?,?)").bind(event.sequence).bind(event.occurred_at).bind(event.interaction_id).bind(event.run_id).bind(event.rejection_id).bind(event.kind).bind(serde_json::to_string(event.payload)?).bind(event.expires_at).execute(&mut **tx).await?;
     Ok(())
 }
 async fn insert_event_postgres(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    seq: i64,
-    at: i64,
-    interaction_id: Option<&str>,
-    run_id: Option<&str>,
-    rejection_id: Option<&str>,
-    kind: &str,
-    payload: &Value,
-    expires: i64,
+    event: EventInsert<'_>,
 ) -> anyhow::Result<()> {
-    sqlx::query("INSERT INTO observation_events (sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload,expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)").bind(seq).bind(at).bind(interaction_id).bind(run_id).bind(rejection_id).bind(kind).bind(payload).bind(expires).execute(&mut **tx).await?;
+    sqlx::query("INSERT INTO observation_events (sequence,occurred_at,interaction_id,run_id,rejection_id,kind,payload,expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)").bind(event.sequence).bind(event.occurred_at).bind(event.interaction_id).bind(event.run_id).bind(event.rejection_id).bind(event.kind).bind(event.payload).bind(event.expires_at).execute(&mut **tx).await?;
     Ok(())
 }
 

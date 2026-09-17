@@ -117,7 +117,7 @@ pub async fn compact(
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
     if let Err(response) = authenticate(&gw, &headers).await {
-        return response;
+        return *response;
     }
     let Json(body) = match body {
         Ok(body) => body,
@@ -329,9 +329,12 @@ pub(super) fn has_unambiguous_bearer(headers: &HeaderMap) -> bool {
     scheme.eq_ignore_ascii_case("bearer") && !token.is_empty()
 }
 
-pub(super) async fn authenticate(gateway: &Gateway, headers: &HeaderMap) -> Result<(), Response> {
+pub(super) async fn authenticate(
+    gateway: &Gateway,
+    headers: &HeaderMap,
+) -> Result<(), Box<Response>> {
     if !has_unambiguous_bearer(headers) {
-        return Err(authentication_error());
+        return Err(Box::new(authentication_error()));
     }
     let credential = ClientCredential::from_inference_headers(headers);
     match Security::new(gateway.storage.auth())
@@ -339,7 +342,7 @@ pub(super) async fn authenticate(gateway: &Gateway, headers: &HeaderMap) -> Resu
         .await
     {
         Ok(_) => Ok(()),
-        Err(error) => Err(normalize_error_response(error.render(None)).await),
+        Err(error) => Err(Box::new(normalize_error_response(error.render(None)).await)),
     }
 }
 

@@ -350,6 +350,8 @@ function mapRequest(command: string, args?: Record<string, unknown>): RequestMap
         path: '/observations/debug',
         body: { enabled: args?.enabled, confirmed: args?.enabled === true },
       }
+    case 'clearObservationDebug':
+      return { method: 'DELETE', path: '/observations/debug' }
     case 'clearObservationHistory':
       return { method: 'DELETE', path: '/observations/history' }
     case 'issueObservationBundleTicket': {
@@ -565,6 +567,7 @@ export const admin = {
       request<InteractionEventsPage>('getObservationInteractionEvents', { id, query }),
     debug: () => request<DebugState>('getObservationDebug'),
     setDebug: (enabled: boolean) => request<DebugState>('setObservationDebug', { enabled }),
+    clearDebug: () => request<DebugState>('clearObservationDebug'),
     clearHistory: () => request<ClearHistoryResult>('clearObservationHistory'),
     issueBundleTicket: (kind: BundleResourceKind, id: string, throughSequence?: number) =>
       request<DownloadTicket>('issueObservationBundleTicket', { kind, id, throughSequence }),

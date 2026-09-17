@@ -28,6 +28,15 @@ pub enum AttemptFailureDisposition {
     Stop,
 }
 
+#[derive(Debug, Clone)]
+pub struct AttemptFailureSignal {
+    pub kind: AiErrorKind,
+    pub client_output_committed: bool,
+    pub retry_after: Option<Duration>,
+    pub now_ms: u64,
+    pub jitter_sample: f64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ConversationIdentity {
     GenerationParent(String),
@@ -341,12 +350,15 @@ impl RouteAttemptPolicy {
         &mut self,
         health: &crate::router::health::HealthRegistry,
         target: &SelectedTarget,
-        kind: AiErrorKind,
-        client_output_committed: bool,
-        retry_after: Option<Duration>,
-        now_ms: u64,
-        jitter_sample: f64,
+        failure: AttemptFailureSignal,
     ) -> AttemptFailureDisposition {
+        let AttemptFailureSignal {
+            kind,
+            client_output_committed,
+            retry_after,
+            now_ms,
+            jitter_sample,
+        } = failure;
         let key = selected_target_key(target);
         health.record_failure(&key);
         if client_output_committed {
@@ -1083,7 +1095,17 @@ mod tests {
         let flaky = policy.next_healthy(&health).expect("first Target");
         assert_eq!(flaky.provider_id, "flaky");
         assert_eq!(
-            policy.record_failure(&health, &flaky, AiErrorKind::Timeout, false, None, 10, 1.0),
+            policy.record_failure(
+                &health,
+                &flaky,
+                AttemptFailureSignal {
+                    kind: AiErrorKind::Timeout,
+                    client_output_committed: false,
+                    retry_after: None,
+                    now_ms: 10,
+                    jitter_sample: 1.0,
+                },
+            ),
             AttemptFailureDisposition::RetrySame {
                 delay: Duration::from_millis(500)
             }
@@ -1092,11 +1114,13 @@ mod tests {
             policy.record_failure(
                 &health,
                 &flaky,
-                AiErrorKind::Timeout,
-                false,
-                None,
-                1_000,
-                1.0,
+                AttemptFailureSignal {
+                    kind: AiErrorKind::Timeout,
+                    client_output_committed: false,
+                    retry_after: None,
+                    now_ms: 1_000,
+                    jitter_sample: 1.0,
+                },
             ),
             AttemptFailureDisposition::TryNextTarget
         );
@@ -1148,12 +1172,14 @@ mod tests {
                 policy.record_failure(
                     &health,
                     &flaky,
-                    AiErrorKind::ServerError,
-                    false,
-                    None,
-                    0,
-                    1.0,
-                ),
+                    AttemptFailureSignal {
+                        kind: AiErrorKind::ServerError,
+                        client_output_committed: false,
+                        retry_after: None,
+                        now_ms: 0,
+                        jitter_sample: 1.0,
+                    },
+            ),
                 AttemptFailureDisposition::RetrySame {
                     delay: Duration::from_millis(cap_ms),
                 }
@@ -1163,11 +1189,13 @@ mod tests {
             policy.record_failure(
                 &health,
                 &flaky,
-                AiErrorKind::ServerError,
-                false,
-                None,
-                0,
-                1.0,
+                AttemptFailureSignal {
+                    kind: AiErrorKind::ServerError,
+                    client_output_committed: false,
+                    retry_after: None,
+                    now_ms: 0,
+                    jitter_sample: 1.0,
+                },
             ),
             AttemptFailureDisposition::TryNextTarget
         );
@@ -1190,11 +1218,13 @@ mod tests {
             policy.record_failure(
                 &health,
                 &first,
-                AiErrorKind::RateLimitError,
-                false,
-                Some(Duration::from_secs(9)),
-                0,
-                0.0,
+                AttemptFailureSignal {
+                    kind: AiErrorKind::RateLimitError,
+                    client_output_committed: false,
+                    retry_after: Some(Duration::from_secs(9)),
+                    now_ms: 0,
+                    jitter_sample: 0.0,
+                },
             ),
             AttemptFailureDisposition::RetrySame {
                 delay: Duration::from_secs(9)
@@ -1204,11 +1234,13 @@ mod tests {
             policy.record_failure(
                 &health,
                 &first,
-                AiErrorKind::QuotaExceeded,
-                false,
-                None,
-                0,
-                0.0
+                AttemptFailureSignal {
+                    kind: AiErrorKind::QuotaExceeded,
+                    client_output_committed: false,
+                    retry_after: None,
+                    now_ms: 0,
+                    jitter_sample: 0.0,
+                },
             ),
             AttemptFailureDisposition::TryNextTarget
         );
@@ -1231,11 +1263,13 @@ mod tests {
             policy.record_failure(
                 &health,
                 &first,
-                AiErrorKind::ServerError,
-                true,
-                None,
-                0,
-                0.0,
+                AttemptFailureSignal {
+                    kind: AiErrorKind::ServerError,
+                    client_output_committed: true,
+                    retry_after: None,
+                    now_ms: 0,
+                    jitter_sample: 0.0,
+                },
             ),
             AttemptFailureDisposition::Stop
         );
@@ -1243,11 +1277,13 @@ mod tests {
             policy.record_failure(
                 &health,
                 &first,
-                AiErrorKind::InvalidRequest,
-                false,
-                None,
-                0,
-                0.0
+                AttemptFailureSignal {
+                    kind: AiErrorKind::InvalidRequest,
+                    client_output_committed: false,
+                    retry_after: None,
+                    now_ms: 0,
+                    jitter_sample: 0.0,
+                },
             ),
             AttemptFailureDisposition::Stop
         );

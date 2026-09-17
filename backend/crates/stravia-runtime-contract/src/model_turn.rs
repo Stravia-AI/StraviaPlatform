@@ -15,7 +15,7 @@ pub struct ModelTurnError {
     pub code: String,
     pub message: String,
     pub upstream_status: Option<u16>,
-    pub upstream_body: Option<serde_json::Value>,
+    pub upstream_body: Option<Box<serde_json::Value>>,
 }
 
 impl ModelTurnError {

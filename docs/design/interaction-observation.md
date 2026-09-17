@@ -331,13 +331,11 @@ diagnostics/observation-debug/
 
 ### 6.3 容量与失败
 
-- 每个 Inference Run 最多 64 MiB；
-- 所有未过期 Trace 的总占用最多 2 GiB；
-- 容量按实际落盘字节计；
-- 达到上限后停止对应 Trace 写入，Inference Run 继续；
-- manifest 标记 `partial`，原因使用 `run_size_limit`、`global_size_limit`、`writer_overflow` 或 `storage_error`；
-- 不完整原因只出现在 Interaction 详情和诊断包中，请求记录页不显示常驻告警；
-- 不为释放额度提前删除尚在保留期内的旧 Trace。
+- Trace 落盘不设 Run 级或全局容量上限；`retained_bytes` 只统计实际落盘字节；
+- 请求体捕获缓冲和单条 wire 消息重组缓冲仍有内存上限，超限只截断对应捕获；
+- 队列溢出或存储错误停止对应 Trace 写入，Inference Run 继续；
+- manifest 标记 `partial`，原因使用 `run_size_limit`、`structured_wire_capture_limit`、`writer_overflow`、`storage_error` 或 `debug_data_cleared`；
+- 不完整原因只出现在 Interaction 详情和诊断包中，请求记录页不显示常驻告警。
 
 ### 6.4 保留与清理
 
@@ -352,12 +350,15 @@ Observation、Rejected Request、Debug manifest 与 Trace 文件跟随 `log_rete
 
 “清除历史记录”只删除非活动 Interaction 与 Rejected Request；`running` 和 `waiting_client` 保留，并在结果中报告跳过数量。清理不取消 Inference Run。
 
+“清除 Debug 数据”只删除 Debug 内容：全部 manifest 标记 tombstone、关闭活动 writer 句柄后删除受管目录、删除 manifest 行。活动 Run 的 Trace 停止并标记 `debug_data_cleared` partial；请求记录、Rejected Request 与 Debug 开关状态不变，后续准入的 Run 继续正常捕获。
+
 ## 7. Debug 开关与脱敏
 
 ### 7.1 开关
 
 - 开关是当前 Gateway 进程的原子运行态；默认关闭，重启后关闭；
-- 每次开启都显示确认：body 可能含提示词、工具参数和业务数据；64 MiB/Run；2 GiB 总上限；关闭后已有 Trace 仍按保留期存在；
+- 每次开启都显示确认：body 可能含提示词、工具参数和业务数据；关闭后已有 Trace 仍按保留期存在；
+- 开启状态下提供「清除 Debug 数据」操作，删除全部已保留 Trace，不影响开关与请求记录；
 - 每个 Inference Run 在准入时独立快照；同一 Interaction 可以完整、部分或完全没有 Trace；
 - Rejected Request 在 ingress 时快照，并可生成只含 client request/platform error response 的独立 Trace；没有上游方向不算缺失；
 - 关闭只影响之后准入的 Run，不删除已有数据。
@@ -434,6 +435,7 @@ GET    /api/v1/observations/failed-requests/{kind}/{id}
 GET    /api/v1/observations/events?after=<sequence>
 GET    /api/v1/observations/debug
 PUT    /api/v1/observations/debug
+DELETE /api/v1/observations/debug
 DELETE /api/v1/observations/history
 POST   /api/v1/observations/interactions/{id}/debug-bundle-tickets
 POST   /api/v1/observations/rejections/{id}/debug-bundle-tickets
@@ -472,7 +474,7 @@ SSE 通过普通 `fetch` 携带 Admin Bearer header，并由 `eventsource-parser
 - `交互链路`：默认页签，Interaction forest 无限画布；
 - `失败的请求`：Failed Requests 表格列表与详情，不伪造画布节点。
 
-页面 header 包含实时状态、时间预设、精确日期时间范围、全屏切换、筛选、Debug switch 和“清除历史记录”。全屏保留当前筛选、选中节点及检查器，支持工具栏退出和 Esc 退出。普通 CSV 导出删除。Debug Bundle 按选中的 Interaction/Rejected Request 提供。
+页面 header 包含实时状态、时间预设、精确日期时间范围、全屏切换、筛选、Debug switch 和“清除历史记录”；Debug 开启时额外提供“清除 Debug 数据”。全屏保留当前筛选、选中节点及检查器，支持工具栏退出和 Esc 退出。普通 CSV 导出删除。Debug Bundle 按选中的 Interaction/Rejected Request 提供。
 
 #### 失败请求列表
 
@@ -650,7 +652,7 @@ Rust workspace 新增：
 - HTTP、SSE 与 upstream Responses WebSocket 覆盖四方向适用消息、顺序、时间和 attempt ID。
 - Debug Run 包含全部约定 canonical checkpoint；普通 Run 不持久化或返回隐藏 payload。
 - credential header、URL 与结构化 body 凭据在落盘前脱敏；ZIP、API 和错误不出现原值。
-- 单 Run 64 MiB 或全局 2 GiB 超限时请求继续、Trace partial；不完整原因只出现在详情和诊断包中。
+- Trace 落盘不设容量上限，只统计保留字节；队列、writer 或存储丢失时请求继续、Trace partial；不完整原因只出现在详情和诊断包中。
 - 运行中票据固定 sequence；ZIP manifest 与 events 一致。
 - 下载 ticket 60 秒、单次、固定资源；过期/重放/跨资源使用失败。
 - 清除历史只删除非活动 Observation 及 Trace，活动请求不中断。

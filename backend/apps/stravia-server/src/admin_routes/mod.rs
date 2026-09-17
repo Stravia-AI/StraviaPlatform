@@ -236,7 +236,9 @@ fn create_router_inner(gateway: Gateway, auth: Option<AdminHttpState>) -> Router
         .route("/observations/events", get(observation_events))
         .route(
             "/observations/debug",
-            get(observation_debug).put(update_observation_debug),
+            get(observation_debug)
+                .put(update_observation_debug)
+                .delete(clear_observation_debug),
         )
         .route(
             "/observations/history",

@@ -191,7 +191,7 @@ pub async fn handler(
             ingress,
             "authentication",
             "authentication_error",
-            response,
+            *response,
         );
     }
 
@@ -506,10 +506,12 @@ async fn serve(
                                 headers,
                                 request_context,
                                 event,
-                                &outgoing,
-                                &progress,
-                                &active_observer,
-                                &delivery_slot,
+                                ResponseForwardSinks {
+                                    outgoing: &outgoing,
+                                    progress: &progress,
+                                    active_observer: &active_observer,
+                                    delivery_slot: &delivery_slot,
+                                },
                             ),
                         )
                         .await;
@@ -680,16 +682,26 @@ async fn serve(
     let _ = writer.await;
 }
 
+struct ResponseForwardSinks<'a> {
+    outgoing: &'a mpsc::Sender<OutgoingMessage>,
+    progress: &'a Arc<Mutex<StreamForwardProgress>>,
+    active_observer: &'a Arc<Mutex<Option<crate::interaction_observation::RunObserver>>>,
+    delivery_slot: &'a SharedRunDelivery,
+}
+
 async fn forward_response(
     gateway: Gateway,
     headers: HeaderMap,
     context: RequestContext,
     body: Value,
-    outgoing: &mpsc::Sender<OutgoingMessage>,
-    progress: &Arc<Mutex<StreamForwardProgress>>,
-    active_observer: &Arc<Mutex<Option<crate::interaction_observation::RunObserver>>>,
-    delivery_slot: &SharedRunDelivery,
+    sinks: ResponseForwardSinks<'_>,
 ) {
+    let ResponseForwardSinks {
+        outgoing,
+        progress,
+        active_observer,
+        delivery_slot,
+    } = sinks;
     let mut response = super::responses::handler(
         State(gateway),
         Extension(context.clone()),

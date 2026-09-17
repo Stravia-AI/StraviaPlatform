@@ -633,36 +633,42 @@ async fn cached_marker(
     Ok(marker)
 }
 
+struct ResolutionContext<'a> {
+    seen: &'a mut HashSet<String>,
+    cache: &'a mut HashMap<String, Option<ResolvedHistoryMarker>>,
+    resolved_items: &'a mut Vec<AiItem>,
+    summary: &'a mut MarkerResolution,
+}
+
 async fn materialize_parsed_item(
     store: &dyn HistoryMarkerStore,
     principal: &Principal,
     original: AiItem,
     atoms: Vec<CarrierAtom>,
     request_marker_references: &HashSet<String>,
-    seen: &mut HashSet<String>,
-    cache: &mut HashMap<String, Option<ResolvedHistoryMarker>>,
-    resolved_items: &mut Vec<AiItem>,
-    summary: &mut MarkerResolution,
+    context: &mut ResolutionContext<'_>,
 ) -> Result<(), HistoryMarkerError> {
     let mut meta = original.meta.clone();
     for atom in atoms {
         match atom {
             CarrierAtom::Visible(block) => {
-                resolved_items.push(client_fragment(&original, block, &mut meta));
+                context
+                    .resolved_items
+                    .push(client_fragment(&original, block, &mut meta));
             }
             CarrierAtom::Projection {
                 reference,
                 mode,
                 source,
             } => {
-                let marker = cached_marker(store, principal, cache, &reference)
+                let marker = cached_marker(store, principal, context.cache, &reference)
                     .await?
                     .filter(|marker| marker.published);
                 match (mode, marker) {
                     (ProjectionMode::Text, Some(_))
                         if request_marker_references.contains(&reference) =>
                     {
-                        resolved_items.push(client_fragment(
+                        context.resolved_items.push(client_fragment(
                             &original,
                             ContentBlock::Text {
                                 text: projection_source_text(&source).to_owned(),
@@ -675,15 +681,18 @@ async fn materialize_parsed_item(
                         if marker.marker.kind == HistoryMarkerKind::Thinking
                             && request_marker_references.contains(&reference) => {}
                     _ => {
-                        resolved_items.push(client_fragment(&original, source, &mut meta));
+                        context
+                            .resolved_items
+                            .push(client_fragment(&original, source, &mut meta));
                     }
                 }
             }
             CarrierAtom::Marker(reference) => {
-                if !seen.insert(reference.clone()) {
+                if !context.seen.insert(reference.clone()) {
                     continue;
                 }
-                let Some(mut marker) = cached_marker(store, principal, cache, &reference).await?
+                let Some(mut marker) =
+                    cached_marker(store, principal, context.cache, &reference).await?
                 else {
                     continue;
                 };
@@ -697,16 +706,20 @@ async fn materialize_parsed_item(
                     let Some(terminal) = store.wait_terminal(principal, &reference).await? else {
                         continue;
                     };
-                    cache.insert(reference.clone(), Some(terminal.clone()));
+                    context
+                        .cache
+                        .insert(reference.clone(), Some(terminal.clone()));
                     marker = terminal;
                 }
                 let Some(segment) = marker.segment else {
                     continue;
                 };
                 let (mut restored, restored_summary) = segment_items(segment, &reference);
-                summary.restored_platform_segments += restored_summary.restored_platform_segments;
-                summary.restored_thinking_segments += restored_summary.restored_thinking_segments;
-                resolved_items.append(&mut restored);
+                context.summary.restored_platform_segments +=
+                    restored_summary.restored_platform_segments;
+                context.summary.restored_thinking_segments +=
+                    restored_summary.restored_thinking_segments;
+                context.resolved_items.append(&mut restored);
             }
         }
     }
@@ -716,7 +729,7 @@ async fn materialize_parsed_item(
         .as_ref()
         .is_some_and(|calls| !calls.is_empty());
     if has_tool_calls || original.tool_call_id.is_some() {
-        resolved_items.push(AiItem {
+        context.resolved_items.push(AiItem {
             role: original.role,
             content: MessageContent::Text(String::new()),
             tool_calls: has_tool_calls.then_some(original.tool_calls.unwrap_or_default()),
@@ -787,10 +800,12 @@ pub async fn resolve_request_markers(
                     original,
                     atoms,
                     &request_marker_references,
-                    &mut seen,
-                    &mut cache,
-                    &mut resolved_items,
-                    &mut summary,
+                    &mut ResolutionContext {
+                        seen: &mut seen,
+                        cache: &mut cache,
+                        resolved_items: &mut resolved_items,
+                        summary: &mut summary,
+                    },
                 )
                 .await?;
             }

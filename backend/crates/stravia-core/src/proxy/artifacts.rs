@@ -34,7 +34,7 @@ pub async fn create_upload(
 ) -> Response {
     let principal = match required_principal(&gateway, &headers).await {
         Ok(principal) => principal,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let Some(store) = gateway.artifact_store() else {
         return unavailable();
@@ -69,7 +69,7 @@ pub async fn upload_part(
 ) -> Response {
     let principal = match required_principal(&gateway, &headers).await {
         Ok(principal) => principal,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let Some(token) = headers
         .get("x-upload-token")
@@ -107,7 +107,7 @@ pub async fn complete_upload(
 ) -> Response {
     let principal = match required_principal(&gateway, &headers).await {
         Ok(principal) => principal,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let Some(store) = gateway.artifact_store() else {
         return unavailable();
@@ -130,7 +130,7 @@ pub async fn complete_upload(
 async fn required_principal(
     gateway: &Gateway,
     headers: &HeaderMap,
-) -> Result<stravia_runtime_contract::Principal, Response> {
+) -> Result<stravia_runtime_contract::Principal, Box<Response>> {
     let credential = ClientCredential::from_inference_headers(headers);
     let security = Security::new(gateway.storage.auth());
     if let Some(key) = credential
@@ -152,7 +152,7 @@ async fn required_principal(
     security
         .required_principal(&credential)
         .await
-        .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid api key").into_response())
+        .map_err(|_| Box::new((StatusCode::UNAUTHORIZED, "invalid api key").into_response()))
 }
 
 pub async fn download(State(gateway): State<Gateway>, Path(token): Path<String>) -> Response {

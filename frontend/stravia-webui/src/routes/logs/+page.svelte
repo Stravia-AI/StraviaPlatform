@@ -106,6 +106,8 @@ let clearing = $state(false)
 let clearResult = $state<{ skipped_active: number }>()
 let debugConfirmOpen = $state(false)
 let changingDebug = $state(false)
+let debugClearOpen = $state(false)
+let clearingDebug = $state(false)
 let fitProgress = $state<number>()
 let followPaused = $state(false)
 let hasNewActivity = $state(false)
@@ -745,6 +747,30 @@ async function enableDebug(): Promise<void> {
   }
 }
 
+async function clearDebugData(): Promise<void> {
+  clearingDebug = true
+  try {
+    await admin.observations.clearDebug()
+    debugClearOpen = false
+    const selection = selectionVersion
+    const interactionId = selectedInteraction?.id
+    const failure = selectedFailure
+    await queryClient.invalidateQueries({ queryKey: ['observation-debug'] })
+    if (interactionId && selection === selectionVersion) {
+      applySelectedDetail(await admin.observations.interaction(interactionId, currentQuery), selection)
+      await refreshSelectedEvents(interactionId, selection)
+    }
+    if (failure && selection === selectionVersion) {
+      failureDetail = await admin.observations.failure(failure.kind, failure.id)
+    }
+    toast.success(m.observation_debug_cleared())
+  } catch (error) {
+    toast.error(localizeBackendErrorMessage(error))
+  } finally {
+    clearingDebug = false
+  }
+}
+
 async function clearHistory(): Promise<void> {
   clearing = true
   try {
@@ -821,6 +847,10 @@ function formatBytes(value: number | undefined): string {
         disabled={changingDebug || debugQuery.isPending || !debugQuery.data}
         aria-label={m.observation_debug()} />
     </div>
+    {#if debugQuery.data?.enabled}
+      <Button variant="outline" onclick={() => (debugClearOpen = true)}
+        ><Trash2Icon data-icon="inline-start" />{m.observation_clear_debug()}</Button>
+    {/if}
     <Button variant="outline" onclick={() => (filterOpen = true)}
       ><SlidersHorizontalIcon data-icon="inline-start" />{m.observation_filters()}{#if activeFilterCount}<span
           >· {activeFilterCount}</span
@@ -1182,8 +1212,6 @@ function formatBytes(value: number | undefined): string {
       <AlertDialog.Title>{m.observation_enable_debug()}</AlertDialog.Title>
       <AlertDialog.Description>
         {m.observation_debug_warning({
-          run_limit: formatBytes(debugQuery.data?.run_limit_bytes),
-          total_limit: formatBytes(debugQuery.data?.total_limit_bytes),
           retention_days: debugQuery.data?.retention_days ?? 0,
         })}
       </AlertDialog.Description>
@@ -1196,6 +1224,23 @@ function formatBytes(value: number | undefined): string {
       <AlertDialog.Cancel>{m.common_cancel()}</AlertDialog.Cancel>
       <AlertDialog.Action disabled={changingDebug} onclick={() => void enableDebug()}
         >{changingDebug ? m.observation_enabling() : m.observation_enable_debug()}</AlertDialog.Action>
+    </AlertDialog.Footer>
+  </AlertDialog.Content>
+</AlertDialog.Root>
+
+<AlertDialog.Root bind:open={debugClearOpen}>
+  <AlertDialog.Content>
+    <AlertDialog.Header>
+      <AlertDialog.Title>{m.observation_clear_debug()}</AlertDialog.Title>
+      <AlertDialog.Description
+        >{m.observation_clear_debug_warning({
+          retained: formatBytes(debugQuery.data?.retained_bytes),
+        })}</AlertDialog.Description>
+    </AlertDialog.Header>
+    <AlertDialog.Footer>
+      <AlertDialog.Cancel>{m.common_cancel()}</AlertDialog.Cancel>
+      <AlertDialog.Action variant="destructive" disabled={clearingDebug} onclick={() => void clearDebugData()}
+        >{clearingDebug ? m.observation_clearing() : m.observation_clear_debug()}</AlertDialog.Action>
     </AlertDialog.Footer>
   </AlertDialog.Content>
 </AlertDialog.Root>

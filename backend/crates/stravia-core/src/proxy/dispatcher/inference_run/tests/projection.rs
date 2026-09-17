@@ -434,15 +434,18 @@ async fn non_stream_projection_matches_ordered_content_and_replays_canonical_his
     );
 
     assert_eq!(provider_calls.load(Ordering::SeqCst), 2);
-    let captured = requests
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let second_body = captured[1]
-        .split_once("\r\n\r\n")
-        .expect("provider request body")
-        .1;
-    let second_body: serde_json::Value =
-        serde_json::from_str(second_body).expect("provider request JSON");
+    let second_body: serde_json::Value = {
+        let captured = requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        serde_json::from_str(
+            captured[1]
+                .split_once("\r\n\r\n")
+                .expect("provider request body")
+                .1,
+        )
+        .expect("provider request JSON")
+    };
     let messages = second_body["messages"]
         .as_array()
         .expect("provider messages");
@@ -483,7 +486,6 @@ async fn non_stream_projection_matches_ordered_content_and_replays_canonical_his
             .to_string()
             .contains(crate::history_marker::PROJECTION_DELIMITER_PREFIX)
     );
-    drop(captured);
 
     let replay_request = crate::protocol::registry::ProtocolRegistry::global()
         .adapter(&OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1)

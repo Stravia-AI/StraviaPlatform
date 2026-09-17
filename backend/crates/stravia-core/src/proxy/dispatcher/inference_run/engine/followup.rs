@@ -1,12 +1,26 @@
 use super::*;
 
 pub(super) enum FollowupModelTurn {
-    Turn(crate::agent::ModelTurn),
+    Turn(Box<crate::agent::ModelTurn>),
     HookResponse {
-        response: AiResponse,
-        pending_generation_chain: Option<crate::generation_chain::GenerationChainWrite>,
+        response: Box<AiResponse>,
+        pending_generation_chain: Option<Box<crate::generation_chain::GenerationChainWrite>>,
     },
     StreamError(stravia_runtime_contract::protocol::ir::AiError),
+}
+
+pub(super) struct FollowupLeg<'a> {
+    pub executor: &'a dyn ModelTurnExecutor,
+    pub headers: &'a HeaderMap,
+    pub request: &'a mut AiRequest,
+    pub ingress: ProtocolId,
+    pub request_context: &'a RequestContext,
+    pub inference_run: &'a mut crate::hook::InferenceRun,
+    pub projection: &'a mut ClientProjectionSession,
+    pub phase: &'a mut PhaseTracker,
+    pub generation: &'a GenerationChainRun,
+    pub fixed_media_plan:
+        Option<&'a stravia_runtime_contract::protocol::ir::request::MediaRoutingPlan>,
 }
 
 fn hook_stream_error(
@@ -38,17 +52,20 @@ fn hook_stream_error(
 }
 
 pub(super) async fn acquire_followup_model_turn(
-    executor: &dyn ModelTurnExecutor,
-    headers: &HeaderMap,
-    request: &mut AiRequest,
-    ingress: ProtocolId,
-    request_context: &RequestContext,
-    inference_run: &mut crate::hook::InferenceRun,
-    projection: &mut ClientProjectionSession,
-    phase: &mut PhaseTracker,
-    generation: &GenerationChainRun,
-    fixed_media_plan: Option<&stravia_runtime_contract::protocol::ir::request::MediaRoutingPlan>,
+    leg: FollowupLeg<'_>,
 ) -> Result<FollowupModelTurn, RoundOutcome> {
+    let FollowupLeg {
+        executor,
+        headers,
+        request,
+        ingress,
+        request_context,
+        inference_run,
+        projection,
+        phase,
+        generation,
+        fixed_media_plan,
+    } = leg;
     if request_context.cancellation.is_cancelled() {
         return Err(buffered_response(error_response(499, "request cancelled")));
     }
@@ -130,8 +147,8 @@ pub(super) async fn acquire_followup_model_turn(
                 ));
             }
             return Ok(FollowupModelTurn::HookResponse {
-                response,
-                pending_generation_chain,
+                response: Box::new(response),
+                pending_generation_chain: pending_generation_chain.map(Box::new),
             });
         }
         Ok(control) => return Ok(FollowupModelTurn::StreamError(hook_stream_error(control))),
@@ -168,5 +185,5 @@ pub(super) async fn acquire_followup_model_turn(
     *request = effective_request;
     inference_run.set_route(turn.route.clone());
     enter_phase(phase, Phase::Calling).map_err(|response| buffered_response(*response))?;
-    Ok(FollowupModelTurn::Turn(turn))
+    Ok(FollowupModelTurn::Turn(Box::new(turn)))
 }

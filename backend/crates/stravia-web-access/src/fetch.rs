@@ -99,7 +99,6 @@ pub struct ReadText {
 /// and reformatting entirely and strictly decodes the source bytes, failing on
 /// unknown or invalid character sets instead of substituting replacement
 /// characters.
-#[must_use]
 pub fn convert_read_bytes(
     body: &[u8],
     content_type: &str,

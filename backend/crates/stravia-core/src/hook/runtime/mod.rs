@@ -12,12 +12,12 @@ mod types;
 pub use types::*;
 
 mod apply;
-mod runtime;
+mod inference;
 
 use apply::*;
-pub(crate) use runtime::{DetachedPlatformExecution, InferenceRun};
+pub(crate) use inference::{DetachedPlatformExecution, InferenceRun};
 #[cfg(test)]
-use runtime::{preserve_stream_coordinates, semantic_variant};
+use inference::{preserve_stream_coordinates, semantic_variant};
 
 #[cfg(test)]
 mod tests;

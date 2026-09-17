@@ -77,6 +77,10 @@ impl AdminService {
         self.gw.observation.set_debug_enabled(enabled)
     }
 
+    pub async fn clear_observation_debug(&self) -> anyhow::Result<DebugState> {
+        self.gw.observation.clear_debug().await
+    }
+
     pub async fn clear_observation_history(&self) -> anyhow::Result<ClearHistoryResult> {
         self.gw.observation.clear_history().await
     }

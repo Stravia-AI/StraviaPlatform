@@ -25,8 +25,9 @@ use crate::provider::inbound::InboundResponse;
 use crate::provider::outbound::OutboundRequest;
 use crate::provider::vendor::{ProviderCtx, Vendor};
 use crate::proxy::client::{
-    ProxyClient, ResponsesWebSocketAcquireError, ResponsesWebSocketLease,
-    ResponsesWebSocketRegistry, ResponsesWebSocketRequest, ResponsesWebSocketTrace,
+    ProxyClient, ResponsesWebSocketAcquireError, ResponsesWebSocketAffinityHint,
+    ResponsesWebSocketLease, ResponsesWebSocketRegistry, ResponsesWebSocketRequest,
+    ResponsesWebSocketTrace,
 };
 use stravia_runtime_contract::protocol::ids::ProtocolId;
 use stravia_runtime_contract::protocol::ir::AiRequest;
@@ -164,7 +165,7 @@ pub(crate) enum ProviderStreamResponse {
         status: u16,
         headers: HeaderMap,
         body: anyhow::Result<Value>,
-        attempt: AttemptObservation,
+        attempt: Box<AttemptObservation>,
     },
     Stream(Box<ProviderStream>),
     Uncertain {

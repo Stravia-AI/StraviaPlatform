@@ -743,11 +743,10 @@ pub(crate) fn redact_run_event(event: &mut RunEvent) -> RedactionReport {
                 redact_string(error, &mut report);
             }
         }
-        RunEvent::DeliveryFinished { reason, .. } => {
-            if let Some(reason) = reason {
-                redact_string(reason, &mut report);
-            }
-        }
+        RunEvent::DeliveryFinished {
+            reason: Some(reason),
+            ..
+        } => redact_string(reason, &mut report),
         RunEvent::ClientVisibleContentDelta { text }
         | RunEvent::ModelThinkingDelta { text, .. } => redact_string(text, &mut report),
         RunEvent::ClientToolHandoff {
@@ -1721,10 +1720,10 @@ fn redact_credential_text(input: &str, report: &mut RedactionReport) -> String {
             }
         } else {
             let lower = token.to_ascii_lowercase();
-            if matches!(lower.as_str(), "bearer" | "basic") || credential_header_scheme(token) {
-                output.push_str(token);
-                redact_next_token = true;
-            } else if token.ends_with(':') && is_credential_key(token[..token.len() - 1].trim()) {
+            if matches!(lower.as_str(), "bearer" | "basic")
+                || credential_header_scheme(token)
+                || (token.ends_with(':') && is_credential_key(token[..token.len() - 1].trim()))
+            {
                 output.push_str(token);
                 redact_next_token = true;
             } else {

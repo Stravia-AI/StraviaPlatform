@@ -415,8 +415,15 @@ async fn first_token_timeout_records_one_precise_attempt_terminal_without_usage(
     let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
     let upstream = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
-        let mut request = vec![0_u8; 16 * 1024];
-        socket.read(&mut request).await.unwrap();
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        while !request.ends_with(b"\r\n\r\n") {
+            let read = socket.read(&mut chunk).await.unwrap();
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&chunk[..read]);
+        }
         socket
             .write_all(
                 b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n",

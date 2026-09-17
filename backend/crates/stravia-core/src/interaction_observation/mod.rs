@@ -28,10 +28,7 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use bundle::{BundleRunSnapshot, BundleService, BundleSnapshot};
 use store::ObservationStore;
-use trace::{
-    RUN_LIMIT_BYTES, TOTAL_LIMIT_BYTES, TRACE_SCHEMA_VERSION, TraceHandle, TraceManager,
-    TraceRecord,
-};
+use trace::{TRACE_SCHEMA_VERSION, TraceHandle, TraceManager, TraceRecord};
 use writer::WriterCommand;
 
 #[derive(Clone)]
@@ -190,17 +187,17 @@ impl InteractionObservation {
         let active_traces = Arc::new(Mutex::new(HashMap::new()));
         let partial_trace_count = Arc::new(AtomicU64::new(partial_count));
         let unpersisted_gaps = Arc::new(Mutex::new(UnpersistedGaps::default()));
-        let (writer, task) = writer::spawn(
-            store.clone(),
-            Arc::clone(&retention_days),
-            updates.clone(),
-            Arc::clone(&trace_sequence),
-            traces.clone(),
-            Arc::clone(&active_traces),
-            Arc::clone(&partial_trace_count),
-            Arc::clone(&unpersisted_gaps),
-            Arc::clone(&live_content),
-        );
+        let (writer, task) = writer::spawn(writer::WriterDeps {
+            store: store.clone(),
+            retention_days: Arc::clone(&retention_days),
+            updates: updates.clone(),
+            trace_sequence: Arc::clone(&trace_sequence),
+            traces: traces.clone(),
+            active_traces: Arc::clone(&active_traces),
+            partial_trace_count: Arc::clone(&partial_trace_count),
+            unpersisted_gaps: Arc::clone(&unpersisted_gaps),
+            live: Arc::clone(&live_content),
+        });
         Self {
             inner: Arc::new(Inner {
                 store,
@@ -286,8 +283,6 @@ impl InteractionObservation {
             .count() as u64;
         DebugState {
             enabled: self.inner.debug.load(Ordering::Acquire),
-            run_limit_bytes: RUN_LIMIT_BYTES,
-            total_limit_bytes: TOTAL_LIMIT_BYTES,
             retained_bytes: self.inner.traces.retained_bytes(),
             partial_trace_count: self
                 .inner
@@ -300,6 +295,35 @@ impl InteractionObservation {
     pub(crate) fn set_debug_enabled(&self, enabled: bool) -> DebugState {
         self.inner.debug.store(enabled, Ordering::Release);
         self.debug_state()
+    }
+    /// 删除全部已落盘 Debug Trace 与 manifest，不动请求记录；活动 Trace 标记 partial 后停止。
+    pub(crate) async fn clear_debug(&self) -> anyhow::Result<DebugState> {
+        {
+            let active: Vec<TraceHandle> = self
+                .inner
+                .active_traces
+                .lock()
+                .expect("trace registry")
+                .values()
+                .cloned()
+                .collect();
+            for trace in active {
+                trace.mark_partial("debug_data_cleared", true);
+            }
+        }
+        let ids = self.inner.store.mark_all_debug_tombstones().await?;
+        self.inner.traces.delete_all().await?;
+        self.inner.store.delete_manifests(&ids).await?;
+        let (_, partial) = self
+            .inner
+            .store
+            .debug_manifest_counts()
+            .await
+            .unwrap_or((0, 0));
+        self.inner
+            .partial_trace_count
+            .store(partial, Ordering::Release);
+        Ok(self.debug_state())
     }
     pub(crate) async fn set_retention_days(&self, days: u32) -> anyhow::Result<DebugState> {
         self.inner.store.update_retention(days).await?;
@@ -779,7 +803,8 @@ pub(crate) struct IngressCapture {
 }
 
 impl IngressCapture {
-    pub(crate) const MAX_BODY_BYTES: usize = RUN_LIMIT_BYTES as usize;
+    // 捕获请求体的内存缓冲上限；不是落盘容量配额。
+    pub(crate) const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 
     pub(crate) fn record(&self, event: RunEvent) {
         record_trace(&self.trace, None, None, event);

@@ -1487,8 +1487,9 @@ def test_debug_snapshot_redaction_bundle_ticket_and_clear_active_history(
     )
     assert status == 200, state
     assert state["data"]["enabled"] is False
-    assert state["data"]["run_limit_bytes"] == 64 * 1024 * 1024
-    assert state["data"]["total_limit_bytes"] == 2 * 1024 * 1024 * 1024
+    assert "retained_bytes" in state["data"]
+    assert "partial_trace_count" in state["data"]
+    assert "retention_days" in state["data"]
     status, refused = http_request(
         "PUT",
         f"{admin_env['admin']}/api/v1/observations/debug",
@@ -1629,6 +1630,31 @@ def test_debug_snapshot_redaction_bundle_ticket_and_clear_active_history(
                 assert sentinel.encode() not in path.read_bytes(), path
     assert sentinel not in "\n".join(admin_env["logs"])
     assert sentinel not in json.dumps(detail)
+
+    trace_dir = (
+        Path(admin_env["data_dir"])
+        / "diagnostics"
+        / "observation-debug"
+        / run["trace"]["trace_id"]
+    )
+    assert trace_dir.is_dir()
+    status, state = http_request(
+        "DELETE",
+        f"{admin_env['admin']}/api/v1/observations/debug",
+        headers=admin_env["auth"],
+    )
+    assert status == 200, state
+    assert state["data"]["enabled"] is True
+    assert state["data"]["retained_bytes"] == 0
+    assert not trace_dir.exists()
+    cleared_detail = _wait_for(
+        "Debug trace manifest cleared",
+        lambda: (lambda value: value if value["runs"][0].get("trace") is None else None)(
+            _detail(admin_env, interaction["id"])
+        ),
+    )
+    assert cleared_detail["interaction"]["debug_status"] == "partial"
+    assert _route_interactions(admin_env, route_id)
 
     waiting_route, waiting_key = _create_route(admin_env, "observation-branch-clear")
     status, waiting_response = http_request(

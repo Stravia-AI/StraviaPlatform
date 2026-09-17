@@ -270,21 +270,25 @@ pub(super) fn apply_tool_result_actions(
     *result = staged;
     Ok(HookControl::Continue)
 }
+pub(super) struct ToolExposure<'a> {
+    pub tools: &'a mut HashMap<String, ToolId>,
+    pub specs: &'a mut HashMap<String, ToolSpec>,
+    pub read_scope: &'a mut ReadExposureScope,
+}
+
 pub(super) fn apply_request_actions(
     hook_id: &HookId,
     request: &mut AiRequest,
     current: &mut ContextSnapshot,
-    exposed_tools: &mut HashMap<String, ToolId>,
-    exposed_tool_specs: &mut HashMap<String, ToolSpec>,
-    read_scope: &mut ReadExposureScope,
+    exposure: &mut ToolExposure<'_>,
     registry: &PlatformToolRegistry,
     batch: ActionBatch,
 ) -> Result<HookControl, HookError> {
     let mut staged_request = request.clone();
     let mut staged_context = current.clone();
-    let mut staged_tools = exposed_tools.clone();
-    let mut staged_tool_specs = exposed_tool_specs.clone();
-    let mut staged_read_scope = *read_scope;
+    let mut staged_tools = exposure.tools.clone();
+    let mut staged_tool_specs = exposure.specs.clone();
+    let mut staged_read_scope = *exposure.read_scope;
     let mut protected_specs: HashMap<String, ToolSpec> = staged_request
         .tools
         .iter()
@@ -389,9 +393,9 @@ pub(super) fn apply_request_actions(
 
     *request = staged_request;
     *current = staged_context;
-    *exposed_tools = staged_tools;
-    *exposed_tool_specs = staged_tool_specs;
-    *read_scope = staged_read_scope;
+    *exposure.tools = staged_tools;
+    *exposure.specs = staged_tool_specs;
+    *exposure.read_scope = staged_read_scope;
     Ok(control.unwrap_or(HookControl::Continue))
 }
 

@@ -163,7 +163,7 @@ pub(super) fn compaction_stream_error_outcome(
         error.message.clone(),
     );
     failure.upstream_status = error.status_code.filter(|status| *status >= 400);
-    failure.upstream_body = Some(serde_json::json!({ "error": upstream }));
+    failure.upstream_body = Some(Box::new(serde_json::json!({ "error": upstream })));
     Some(model_turn_error_outcome(failure))
 }
 

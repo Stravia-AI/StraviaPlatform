@@ -204,8 +204,6 @@ export async function prepareApp(page: Page): Promise<void> {
         json: {
           data: {
             enabled: false,
-            run_limit_bytes: 67_108_864,
-            total_limit_bytes: 2_147_483_648,
             retained_bytes: 0,
             partial_trace_count: 0,
             retention_days: 7,

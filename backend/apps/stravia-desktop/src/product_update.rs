@@ -53,7 +53,7 @@ struct DesktopUpdateProgress {
 
 enum DownloadedUpdate {
     #[cfg(not(feature = "desktop-e2e"))]
-    Verified { update: Update, bytes: Vec<u8> },
+    Verified { update: Box<Update>, bytes: Vec<u8> },
     #[cfg(any(test, feature = "desktop-e2e"))]
     TestBridge,
 }
@@ -191,7 +191,10 @@ pub async fn download_product_update(
             (
                 downloaded_bytes,
                 total_bytes,
-                DownloadedUpdate::Verified { update, bytes },
+                DownloadedUpdate::Verified {
+                    update: Box::new(update),
+                    bytes,
+                },
             )
         });
 

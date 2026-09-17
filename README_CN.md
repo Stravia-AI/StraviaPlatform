@@ -281,7 +281,7 @@ Debug 脱敏覆盖协议凭据字段与单条应用消息中的完整可识别�
 
 WebSocket Ping/Pong 事件保留类型、方向与时间，其任意字节载荷按策略省略，并标注 `control_frame_payload_omitted`。这种策略性省略不将 Trace 标为 partial，也不把载荷归类为媒体。已有 Trace 记录不会改写。
 
-Observation 元数据与托管 Debug Trace segment 共用 `log_retention_days`（默认七天）。每个 Run 的 Debug 上限为 64 MiB，总上限为 2 GiB；容量、队列、writer 或存储造成的丢失会显示为明确 gap 或 partial Trace，绝不改变推理结果。清除历史会保留 running 与 waiting-client Interaction，并报告跳过数量。Interaction 或 Rejected Request 可通过 60 秒、单次使用的下载 ticket 导出时间点固定的流式 ZIP；manifest 会记录 event sequence 边界和 `complete`、`partial` 或 `none` 状态。实时更新、Debug 状态、Trace 存储及 ticket 均限于单个 Gateway 进程；不提供集群级 fanout、共享 capture 存储或跨实例 ticket。
+Observation 元数据与托管 Debug Trace segment 共用 `log_retention_days`（默认七天）。Debug Trace 不设容量上限，仅统计已保留字节；队列、writer 或存储造成的丢失会显示为明确 gap 或 partial Trace，绝不改变推理结果。Debug 开启时提供「清除 Debug 数据」，删除全部已保留 Trace，不影响请求记录与开关状态。清除历史会保留 running 与 waiting-client Interaction，并报告跳过数量。Interaction 或 Rejected Request 可通过 60 秒、单次使用的下载 ticket 导出时间点固定的流式 ZIP；manifest 会记录 event sequence 边界和 `complete`、`partial` 或 `none` 状态。实时更新、Debug 状态、Trace 存储及 ticket 均限于单个 Gateway 进程；不提供集群级 fanout、共享 capture 存储或跨实例 ticket。
 
 界面支持英文与简体中文、响应式导航，以及浅色、深色和跟随操作系统三种主题。首次使用时，简体中文（`Hans`）客户端 locale 会选择 `zh-CN`，不支持的 locale 使用英文；可在 Login 页面或**设置 → 外观**中无刷新切换语言，每个浏览器或桌面 WebView 分别记住自己的选择。
 

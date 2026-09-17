@@ -21,7 +21,7 @@ use super::delivery::LiveStreamRequest;
 use super::{
     ClientOutputCommit, ClientProjectionSession, CompletionContext, CompletionFailure,
     CompletionInput, CompletionOutcome, DeliveryAdapter, DeliveryProgress, EarlyPlatformExecution,
-    FollowupModelTurn, PhaseTracker, ProjectedDeltaBatch, ProjectionDelivery,
+    FollowupLeg, FollowupModelTurn, PhaseTracker, ProjectedDeltaBatch, ProjectionDelivery,
     PublishedPlatformExecutions, RoundOutcome, StreamResponseAccumulator,
     acquire_followup_model_turn, ai_response_to_deltas, buffered_response,
     complete_canonical_response, error_response, hook_failure_response, live_response,
@@ -717,30 +717,31 @@ pub(super) async fn handle_model_turn_stream(input: ModelTurnStreamInput) -> Rou
                             aborted = true;
                         }
                         if !aborted {
-                            match acquire_followup_model_turn(
-                                executor.as_ref(),
-                                &headers,
-                                &mut request,
+                            match acquire_followup_model_turn(FollowupLeg {
+                                executor: executor.as_ref(),
+                                headers: &headers,
+                                request: &mut request,
                                 ingress,
-                                &request_context,
-                                hook_leg.run_mut(),
-                                &mut projection,
-                                &mut phase,
-                                &generation,
-                                fixed_media_plan.as_ref(),
-                            )
+                                request_context: &request_context,
+                                inference_run: hook_leg.run_mut(),
+                                projection: &mut projection,
+                                phase: &mut phase,
+                                generation: &generation,
+                                fixed_media_plan: fixed_media_plan.as_ref(),
+                            })
                             .await
                             {
                                 Ok(FollowupModelTurn::Turn(next_turn)) => {
-                                    turn = next_turn;
+                                    turn = *next_turn;
                                     continue 'model_legs;
                                 }
                                 Ok(FollowupModelTurn::HookResponse {
                                     response: hook_response,
                                     pending_generation_chain: hook_generation_chain,
                                 }) => {
-                                    response = hook_response;
-                                    pending_generation_chain = hook_generation_chain;
+                                    response = *hook_response;
+                                    pending_generation_chain =
+                                        hook_generation_chain.map(|chain| *chain);
                                     let hook_marker_delivery = projection.take_staged_delivery();
                                     if !buffer_terminal_hooks {
                                         let delivered_response = match projection

@@ -193,12 +193,19 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
                             event
                         }));
                     }
-                    turn.output = register_compaction_stream(
-                        turn.output, self.gateway.compaction.clone(), principal.clone(),
-                        crate::compaction::CompactionTarget { target_key: turn.target.target_id.clone(), namespace: turn.target.namespace.clone(), model: turn.target.actual_model.clone(), protocol: turn.route.egress.to_string() },
-                        source_generation_id, source.map(|source| source.record_ids).unwrap_or_default(),
-                        model_turn_id.clone(), registrations, observer.clone(), incoming_states, operation_started,
-                    );
+                    turn.output = register_compaction_stream(CompactionStreamSpec {
+                        output: turn.output,
+                        compaction: self.gateway.compaction.clone(),
+                        principal: principal.clone(),
+                        target: crate::compaction::CompactionTarget { target_key: turn.target.target_id.clone(), namespace: turn.target.namespace.clone(), model: turn.target.actual_model.clone(), protocol: turn.route.egress.to_string() },
+                        source_generation_id,
+                        source_record_ids: source.map(|source| source.record_ids).unwrap_or_default(),
+                        model_turn_id: model_turn_id.clone(),
+                        registrations,
+                        observer: observer.clone(),
+                        incoming_states,
+                        operation_started,
+                    });
                     turn.output = completion_stream(
                         turn.output,
                         self.gateway.redaction.clone(),
@@ -222,7 +229,7 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
     }
 }
 
-fn register_compaction_stream(
+struct CompactionStreamSpec {
     output: super::CanonicalEventStream,
     compaction: crate::compaction::Compaction,
     principal: stravia_runtime_contract::Principal,
@@ -234,21 +241,24 @@ fn register_compaction_stream(
     observer: Option<crate::interaction_observation::RunObserver>,
     incoming_states: Vec<serde_json::Value>,
     operation_started: Instant,
-) -> super::CanonicalEventStream {
+}
+
+fn register_compaction_stream(spec: CompactionStreamSpec) -> super::CanonicalEventStream {
     use crate::interaction_observation::{CompactionMode, CompactionPhase};
     use futures::StreamExt;
     use stravia_runtime_contract::protocol::ir::canonical::native_compaction_item;
+    let operation_started = spec.operation_started;
     let state = (
-        output,
-        compaction,
-        principal,
-        target,
-        source_generation_id,
-        source_record_ids,
-        model_turn_id,
-        registrations,
-        observer,
-        incoming_states,
+        spec.output,
+        spec.compaction,
+        spec.principal,
+        spec.target,
+        spec.source_generation_id,
+        spec.source_record_ids,
+        spec.model_turn_id,
+        spec.registrations,
+        spec.observer,
+        spec.incoming_states,
         false,
     );
     Box::pin(stream::unfold(state, move |mut state| async move {
@@ -639,8 +649,10 @@ async fn execute_inner(
                         &input,
                         prepared,
                         attempt_started,
-                        gateway.route_policy_state.clone(),
-                        attempt_context.clone(),
+                        AttemptRoutePolicy {
+                            state: gateway.route_policy_state.clone(),
+                            context: attempt_context.clone(),
+                        },
                     );
                     
                     if target.first_token_timeout_ms == 0 {
@@ -701,11 +713,13 @@ async fn execute_inner(
             match attempts.record_failure(
                 &gateway.health_registry,
                 &target,
-                kind,
-                false,
-                failure.retry_after,
-                gateway.route_policy_state.now_ms(),
-                rand::random(),
+                crate::router::selector::AttemptFailureSignal {
+                    kind,
+                    client_output_committed: false,
+                    retry_after: failure.retry_after,
+                    now_ms: gateway.route_policy_state.now_ms(),
+                    jitter_sample: rand::random(),
+                },
             ) {
                 AttemptFailureDisposition::RetrySame { delay } => {
                     tokio::time::sleep(delay).await;
@@ -800,8 +814,8 @@ struct PreparedAttempt {
 }
 
 struct AttemptFailure {
-    error: ModelTurnError,
-    diagnostic: crate::interaction_observation::FailureDiagnostic,
+    error: Box<ModelTurnError>,
+    diagnostic: Box<crate::interaction_observation::FailureDiagnostic>,
     kind: Option<stravia_runtime_contract::protocol::ir::AiErrorKind>,
     record_health: bool,
     retry_after: Option<Duration>,
@@ -815,11 +829,11 @@ impl AttemptFailure {
     }
     fn retryable(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
-            error: ModelTurnError::new(code, message),
-            diagnostic: crate::interaction_observation::FailureDiagnostic {
+            error: Box::new(ModelTurnError::new(code, message)),
+            diagnostic: Box::new(crate::interaction_observation::FailureDiagnostic {
                 source: Some("platform".into()),
                 ..Default::default()
-            },
+            }),
             kind: Some(stravia_runtime_contract::protocol::ir::AiErrorKind::ServiceUnavailable),
             record_health: true,
             retry_after: None,
@@ -839,12 +853,12 @@ impl AttemptFailure {
             |status| matches!(status, 408 | 429 | 500 | 502 | 503 | 529),
         );
         Self {
-            error: ModelTurnError::new(code, message),
-            diagnostic: crate::interaction_observation::FailureDiagnostic {
+            error: Box::new(ModelTurnError::new(code, message)),
+            diagnostic: Box::new(crate::interaction_observation::FailureDiagnostic {
                 source: Some("upstream".into()),
                 status_code: status,
                 ..Default::default()
-            },
+            }),
             kind: Some(kind),
             record_health,
             retry_after,
@@ -876,17 +890,17 @@ impl AttemptFailure {
                 self.error.message = message.to_owned();
             }
         }
-        self.error.upstream_body = body;
+        self.error.upstream_body = body.map(Box::new);
         self
     }
 
     fn terminal(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
-            error: ModelTurnError::new(code, message),
-            diagnostic: crate::interaction_observation::FailureDiagnostic {
+            error: Box::new(ModelTurnError::new(code, message)),
+            diagnostic: Box::new(crate::interaction_observation::FailureDiagnostic {
                 source: Some("platform".into()),
                 ..Default::default()
-            },
+            }),
             kind: None,
             record_health: false,
             retry_after: None,
@@ -896,11 +910,11 @@ impl AttemptFailure {
 
     fn ineligible(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
-            error: ModelTurnError::new(code, message),
-            diagnostic: crate::interaction_observation::FailureDiagnostic {
+            error: Box::new(ModelTurnError::new(code, message)),
+            diagnostic: Box::new(crate::interaction_observation::FailureDiagnostic {
                 source: Some("platform".into()),
                 ..Default::default()
-            },
+            }),
             kind: Some(stravia_runtime_contract::protocol::ir::AiErrorKind::ModelNotAvailable),
             record_health: false,
             retry_after: None,
@@ -918,10 +932,10 @@ impl AttemptFailure {
                 self.diagnostic.message = Some(self.error.message.clone());
             }
             if let Some(observer) = observer {
-                observer.record_failure(self.diagnostic);
+                observer.record_failure(*self.diagnostic);
             }
         }
-        self.error
+        *self.error
     }
 }
 
@@ -1435,6 +1449,12 @@ fn insert_default_prompt_cache_key(body: &mut serde_json::Value, prompt_cache_ke
     }
 }
 
+#[derive(Clone)]
+struct AttemptRoutePolicy {
+    state: RoutePolicyState,
+    context: RouteAttemptContext,
+}
+
 async fn begin_attempt(
     gateway: &Gateway,
     route: &crate::db::models::Route,
@@ -1442,8 +1462,7 @@ async fn begin_attempt(
     input: &TurnInput,
     mut prepared: PreparedAttempt,
     attempt_started: Instant,
-    route_policy_state: RoutePolicyState,
-    attempt_context: RouteAttemptContext,
+    policy: AttemptRoutePolicy,
 ) -> Result<ModelTurn, AttemptFailure> {
     let native_compaction_requested = input.purpose == super::ModelTurnPurpose::Compact
         || crate::compaction::NativeCompactionControls::classify(&input.request).requested();
@@ -1500,7 +1519,7 @@ async fn begin_attempt(
             None,
             Some(attempt_started.elapsed().as_millis() as i64),
         );
-        record_success(gateway, target, &route_policy_state, &attempt_context);
+        record_success(gateway, target, &policy.state, &policy.context);
         return Ok(ModelTurn {
             model_turn_id: prepared.model_turn_id,
             route: prepared.route,
@@ -1596,7 +1615,7 @@ async fn begin_attempt(
             &prepared.route.target_id,
             &response.usage,
         );
-        record_success(gateway, target, &route_policy_state, &attempt_context);
+        record_success(gateway, target, &policy.state, &policy.context);
         call.attempt.confirm_usage(&response.usage);
         call.attempt
             .checkpoint("canonical_terminal_response", &response);
@@ -1745,8 +1764,8 @@ async fn begin_attempt(
     let principal = input.principal.clone();
     let request = input.request.clone();
     let route_id = route.id.clone();
-    let route_policy_state = route_policy_state.clone();
-    let attempt_context = attempt_context.clone();
+    let route_policy_state = policy.state.clone();
+    let attempt_context = policy.context.clone();
     let target_key = prepared.route.target_id.clone();
     let health_target_key = selected_target_key(target);
     let reservation =
@@ -2260,4 +2279,5 @@ mod tests {
 
         assert!(!health.is_healthy("provider:model"));
     }
+
 }

@@ -821,11 +821,10 @@ fn thinking_control_representable(
     use stravia_runtime_contract::thinking::TargetThinkingControl;
     match protocol {
         Protocol::OpenAICompatible => matches!(control, TargetThinkingControl::Effort { .. }),
-        Protocol::OpenResponses => match control {
-            TargetThinkingControl::Effort { .. } => true,
-            TargetThinkingControl::Disabled => true,
-            _ => false,
-        },
+        Protocol::OpenResponses => matches!(
+            control,
+            TargetThinkingControl::Effort { .. } | TargetThinkingControl::Disabled
+        ),
         Protocol::AnthropicMessages | Protocol::GoogleGemini => {
             !matches!(control, TargetThinkingControl::Hidden)
         }

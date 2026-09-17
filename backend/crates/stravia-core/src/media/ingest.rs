@@ -383,32 +383,32 @@ pub(crate) async fn materialize_request(
         return Ok(Vec::new());
     }
     let settings = settings(gateway).await?;
-    let retention = retention(gateway).await?;
+    let access = ArtifactAccess {
+        store: store(gateway)?,
+        principal,
+        settings: &settings,
+        retention: retention(gateway).await?,
+    };
     let mut transfers = Vec::new();
     for item in &mut request.items {
         if let MessageContent::Blocks(blocks) = &mut item.content {
-            materialize_blocks(
-                store(gateway)?,
-                principal,
-                blocks,
-                protocol,
-                &settings,
-                retention,
-                &mut transfers,
-            )
-            .await?;
+            materialize_blocks(&access, blocks, protocol, &mut transfers).await?;
         }
     }
     Ok(transfers)
 }
 
-fn materialize_blocks<'a>(
+struct ArtifactAccess<'a> {
     store: &'a dyn ArtifactStore,
     principal: &'a Principal,
-    blocks: &'a mut [ContentBlock],
-    protocol: ProtocolId,
     settings: &'a ArtifactSettings,
     retention: Duration,
+}
+
+fn materialize_blocks<'a>(
+    access: &'a ArtifactAccess<'a>,
+    blocks: &'a mut [ContentBlock],
+    protocol: ProtocolId,
     transfers: &'a mut Vec<(String, ArtifactId)>,
 ) -> futures::future::BoxFuture<'a, Result<(), ArtifactError>> {
     Box::pin(async move {
@@ -425,19 +425,13 @@ fn materialize_blocks<'a>(
                 | ContentBlock::Audio { source }
                 | ContentBlock::File { source, .. }
                 | ContentBlock::Video { source, .. } => {
-                    materialize_source(
-                        store, principal, source, protocol, kind, settings, retention, transfers,
-                    )
-                    .await?;
+                    materialize_source(access, source, protocol, kind, transfers).await?;
                 }
                 ContentBlock::Document { source, .. } => match source {
                     DocumentSource::Url(url) => {
                         let mut media = MediaSource::Url(url.clone());
-                        materialize_source(
-                            store, principal, &mut media, protocol, "document", settings,
-                            retention, transfers,
-                        )
-                        .await?;
+                        materialize_source(access, &mut media, protocol, "document", transfers)
+                            .await?;
                         *source = match media {
                             MediaSource::Url(url) => DocumentSource::Url(url),
                             MediaSource::Base64 { data, media_type }
@@ -453,18 +447,12 @@ fn materialize_blocks<'a>(
                         };
                     }
                     DocumentSource::Blocks { content } => {
-                        materialize_blocks(
-                            store, principal, content, protocol, settings, retention, transfers,
-                        )
-                        .await?
+                        materialize_blocks(access, content, protocol, transfers).await?
                     }
                     _ => {}
                 },
                 ContentBlock::SearchResult { content, .. } => {
-                    materialize_blocks(
-                        store, principal, content, protocol, settings, retention, transfers,
-                    )
-                    .await?
+                    materialize_blocks(access, content, protocol, transfers).await?
                 }
                 ContentBlock::ToolResult {
                     content,
@@ -478,16 +466,7 @@ fn materialize_blocks<'a>(
                 } => {
                     let mut nested: Vec<ContentBlock> = serde_json::from_value(content.clone())
                         .map_err(|e| ArtifactError::Invalid(e.to_string()))?;
-                    materialize_blocks(
-                        store,
-                        principal,
-                        &mut nested,
-                        protocol,
-                        settings,
-                        retention,
-                        transfers,
-                    )
-                    .await?;
+                    materialize_blocks(access, &mut nested, protocol, transfers).await?;
                     *content = serde_json::to_value(nested)
                         .map_err(|e| ArtifactError::Invalid(e.to_string()))?;
                 }
@@ -499,13 +478,10 @@ fn materialize_blocks<'a>(
 }
 
 async fn materialize_source(
-    store: &dyn ArtifactStore,
-    principal: &Principal,
+    access: &ArtifactAccess<'_>,
     source: &mut MediaSource,
     protocol: ProtocolId,
     kind: &str,
-    settings: &ArtifactSettings,
-    retention: Duration,
     transfers: &mut Vec<(String, ArtifactId)>,
 ) -> Result<(), ArtifactError> {
     let MediaSource::Url(reference) = source else {
@@ -531,8 +507,11 @@ async fn materialize_source(
         Protocol::CohereChat => (kind == "image", kind == "image"),
         Protocol::CommandCode => (false, kind == "image"),
     };
-    if settings.external_signed_downloads && url {
-        let download = store.download(principal, &id, retention, settings).await?;
+    if access.settings.external_signed_downloads && url {
+        let download = access
+            .store
+            .download(access.principal, &id, access.retention, access.settings)
+            .await?;
         if download
             .expires_at
             .saturating_sub(chrono::Utc::now().timestamp_millis())
@@ -545,7 +524,10 @@ async fn materialize_source(
         transfers.push((download.url.clone(), id));
         *source = MediaSource::Url(download.url);
     } else if inline {
-        let (artifact, bytes) = store.read_bytes(principal, &id, retention).await?;
+        let (artifact, bytes) = access
+            .store
+            .read_bytes(access.principal, &id, access.retention)
+            .await?;
         if kind == "audio"
             && matches!(
                 protocol.protocol,

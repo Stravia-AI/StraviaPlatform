@@ -14,13 +14,11 @@ use super::redaction::{RedactionKind, redact_error, redact_headers, redact_url, 
 use super::types::TraceManifest;
 
 pub(crate) const TRACE_SCHEMA_VERSION: u32 = 1;
-pub(crate) const RUN_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
-pub(crate) const TOTAL_LIMIT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+// 重组单条 wire 消息的内存缓冲上限；不是落盘容量配额，超限只影响该条消息。
+const WIRE_MESSAGE_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
 const SEGMENT_LIMIT_BYTES: u64 = 8 * 1024 * 1024;
 const WRITER_QUEUE_CAPACITY: usize = 1024;
 const MANAGED_DIRECTORY: &str = "observation-debug";
-const RUN_SIZE_LIMIT: &str = "run_size_limit";
-const GLOBAL_SIZE_LIMIT: &str = "global_size_limit";
 const WRITER_OVERFLOW: &str = "writer_overflow";
 const STORAGE_ERROR: &str = "storage_error";
 const CREDENTIAL_REDACTION_UNSUPPORTED: &str = "credential_redaction_unsupported";
@@ -214,7 +212,6 @@ pub(crate) struct TraceManager {
 struct ManagerInner {
     root: PathBuf,
     tx: mpsc::Sender<WriterCommand>,
-    retained_and_reserved: AtomicU64,
     actual_retained: AtomicU64,
     available: bool,
 }
@@ -232,7 +229,6 @@ struct TraceState {
     wire_pending: std::sync::Mutex<std::collections::HashMap<String, (String, TraceRecord)>>,
     protected: super::redaction::ProtectedSecrets,
     bytes_written: AtomicU64,
-    retained_and_reserved: AtomicU64,
     event_count: AtomicU64,
     stopped: AtomicBool,
     finished: AtomicBool,
@@ -263,6 +259,9 @@ enum WriterCommand {
         state: Arc<TraceState>,
         response: oneshot::Sender<io::Result<()>>,
     },
+    ClearAll {
+        response: oneshot::Sender<io::Result<()>>,
+    },
     Shutdown {
         response: oneshot::Sender<()>,
     },
@@ -278,7 +277,6 @@ impl TraceManager {
         let inner = Arc::new(ManagerInner {
             root,
             tx,
-            retained_and_reserved: AtomicU64::new(retained),
             actual_retained: AtomicU64::new(retained),
             available: true,
         });
@@ -293,7 +291,6 @@ impl TraceManager {
             inner: Arc::new(ManagerInner {
                 root: PathBuf::new(),
                 tx,
-                retained_and_reserved: AtomicU64::new(0),
                 actual_retained: AtomicU64::new(0),
                 available: false,
             }),
@@ -307,7 +304,6 @@ impl TraceManager {
             wire_pending: std::sync::Mutex::new(std::collections::HashMap::new()),
             protected: super::redaction::ProtectedSecrets::default(),
             bytes_written: AtomicU64::new(0),
-            retained_and_reserved: AtomicU64::new(0),
             event_count: AtomicU64::new(0),
             stopped: AtomicBool::new(false),
             finished: AtomicBool::new(false),
@@ -369,9 +365,24 @@ impl TraceManager {
                 .map_err(|error| {
                     io::Error::other(format!("trace deletion task failed: {error}"))
                 })??;
-        subtract_saturating(&self.inner.retained_and_reserved, removed);
         subtract_saturating(&self.inner.actual_retained, removed);
         Ok(())
+    }
+
+    /// Close every active writer and delete all managed trace directories.
+    /// Runs inside the writer loop so queued records are ordered deterministically:
+    /// earlier records are written then removed, later records fail as unavailable.
+    pub(crate) async fn delete_all(&self) -> io::Result<()> {
+        if !self.inner.available {
+            return Err(writer_unavailable());
+        }
+        let (response, receive) = oneshot::channel();
+        self.inner
+            .tx
+            .send(WriterCommand::ClearAll { response })
+            .await
+            .map_err(|_| writer_unavailable())?;
+        receive.await.map_err(|_| writer_unavailable())?
     }
 
     pub(crate) async fn shutdown(&self) {
@@ -410,9 +421,6 @@ impl TraceManager {
             io::Error::other(format!("trace reconciliation task failed: {error}"))
         })??;
         let retained = managed_size(&self.inner.root)?;
-        self.inner
-            .retained_and_reserved
-            .store(retained, Ordering::Release);
         self.inner
             .actual_retained
             .store(retained, Ordering::Release);
@@ -456,7 +464,7 @@ impl TraceHandle {
                     (String::new(), template)
                 });
                 buffer.push_str(text);
-                if buffer.len() as u64 > RUN_LIMIT_BYTES {
+                if buffer.len() as u64 > WIRE_MESSAGE_LIMIT_BYTES {
                     pending.remove(&key);
                     self.mark_partial("structured_wire_capture_limit", false);
                     return TraceWriteOutcome::Partial("structured_wire_capture_limit");
@@ -507,25 +515,6 @@ impl TraceHandle {
             }
         };
         bytes.push(b'\n');
-        let byte_count = bytes.len() as u64;
-
-        if !reserve(
-            &self.state.retained_and_reserved,
-            byte_count,
-            RUN_LIMIT_BYTES,
-        ) {
-            self.mark_partial(RUN_SIZE_LIMIT, true);
-            return TraceWriteOutcome::Partial(RUN_SIZE_LIMIT);
-        }
-        if !reserve(
-            &self.manager.inner.retained_and_reserved,
-            byte_count,
-            TOTAL_LIMIT_BYTES,
-        ) {
-            subtract_saturating(&self.state.retained_and_reserved, byte_count);
-            self.mark_partial(GLOBAL_SIZE_LIMIT, true);
-            return TraceWriteOutcome::Partial(GLOBAL_SIZE_LIMIT);
-        }
 
         let command = WriterCommand::Record {
             trace_id: Arc::clone(&self.trace_id),
@@ -533,8 +522,6 @@ impl TraceHandle {
             bytes,
         };
         if self.manager.inner.tx.try_send(command).is_err() {
-            subtract_saturating(&self.state.retained_and_reserved, byte_count);
-            subtract_saturating(&self.manager.inner.retained_and_reserved, byte_count);
             self.mark_partial(WRITER_OVERFLOW, false);
             return TraceWriteOutcome::Partial(WRITER_OVERFLOW);
         }
@@ -661,7 +648,6 @@ async fn writer_loop(inner: Arc<ManagerInner>, mut rx: mpsc::Receiver<WriterComm
                 state,
                 bytes,
             } => {
-                let reserved = bytes.len() as u64;
                 let result = match writers.get_mut(trace_id.as_ref()) {
                     Some(writer) => writer.write_record(&bytes).await,
                     None => Err(WriteFailure { written: 0 }),
@@ -676,8 +662,6 @@ async fn writer_loop(inner: Arc<ManagerInner>, mut rx: mpsc::Receiver<WriterComm
                         let written = failure.written;
                         state.bytes_written.fetch_add(written, Ordering::AcqRel);
                         inner.actual_retained.fetch_add(written, Ordering::AcqRel);
-                        subtract_saturating(&state.retained_and_reserved, reserved - written);
-                        subtract_saturating(&inner.retained_and_reserved, reserved - written);
                         state.stopped.store(true, Ordering::Release);
                         state.reasons.insert(STORAGE_ERROR.to_owned());
                         writers.remove(trace_id.as_ref());
@@ -731,6 +715,23 @@ async fn writer_loop(inner: Arc<ManagerInner>, mut rx: mpsc::Receiver<WriterComm
                     state.reasons.insert(STORAGE_ERROR.to_owned());
                 }
                 let _ = response.send(result);
+            }
+            WriterCommand::ClearAll { response } => {
+                for (_, mut writer) in writers.drain() {
+                    // 先关闭句柄再删目录，Windows 上打开的文件无法删除。
+                    let _ = writer.shutdown().await;
+                }
+                let root = inner.root.clone();
+                let result = tokio::task::spawn_blocking(move || clear_managed_directories(&root))
+                    .await
+                    .map_err(|error| {
+                        io::Error::other(format!("trace clear task failed: {error}"))
+                    })
+                    .and_then(|result| result);
+                if result.is_ok() {
+                    inner.actual_retained.store(0, Ordering::Release);
+                }
+                let _ = response.send(result.map(|_| ()));
             }
             WriterCommand::Shutdown { response } => {
                 for writer in writers.values_mut() {
@@ -787,6 +788,11 @@ impl ActiveWriter {
     async fn flush(&mut self) -> io::Result<()> {
         use tokio::io::AsyncWriteExt;
         self.file.flush().await
+    }
+
+    async fn shutdown(&mut self) -> io::Result<()> {
+        use tokio::io::AsyncWriteExt;
+        self.file.shutdown().await
     }
 }
 
@@ -931,6 +937,16 @@ fn remove_managed_directory(root: &Path, directory: &Path) -> io::Result<u64> {
     Ok(bytes)
 }
 
+fn clear_managed_directories(root: &Path) -> io::Result<()> {
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        if validate_trace_id(&entry.file_name().to_string_lossy()).is_ok() {
+            remove_managed_directory(root, &entry.path())?;
+        }
+    }
+    Ok(())
+}
+
 fn managed_size(root: &Path) -> io::Result<u64> {
     let mut total = 0u64;
     for entry in fs::read_dir(root)? {
@@ -971,19 +987,6 @@ fn is_segment_name(name: &str) -> bool {
         && name.starts_with("segment-")
         && name.ends_with(".jsonl")
         && name[8..14].bytes().all(|byte| byte.is_ascii_digit())
-}
-
-fn reserve(counter: &AtomicU64, amount: u64, limit: u64) -> bool {
-    let mut current = counter.load(Ordering::Acquire);
-    loop {
-        let Some(next) = current.checked_add(amount).filter(|next| *next <= limit) else {
-            return false;
-        };
-        match counter.compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire) {
-            Ok(_) => return true,
-            Err(actual) => current = actual,
-        }
-    }
 }
 
 fn subtract_saturating(counter: &AtomicU64, amount: u64) {
@@ -1081,18 +1084,5 @@ mod tests {
         let text = String::from_utf8(decoded).expect("UTF-8 JSON");
         assert!(!text.contains(sentinel));
         assert!(text.contains("keep"));
-    }
-
-    #[test]
-    fn capacity_reservation_accepts_exact_limits_and_rejects_one_more_byte() {
-        let run = AtomicU64::new(RUN_LIMIT_BYTES - 1);
-        assert!(reserve(&run, 1, RUN_LIMIT_BYTES));
-        assert_eq!(run.load(Ordering::Relaxed), RUN_LIMIT_BYTES);
-        assert!(!reserve(&run, 1, RUN_LIMIT_BYTES));
-
-        let retained = AtomicU64::new(TOTAL_LIMIT_BYTES - 1);
-        assert!(reserve(&retained, 1, TOTAL_LIMIT_BYTES));
-        assert_eq!(retained.load(Ordering::Relaxed), TOTAL_LIMIT_BYTES);
-        assert!(!reserve(&retained, 1, TOTAL_LIMIT_BYTES));
     }
 }

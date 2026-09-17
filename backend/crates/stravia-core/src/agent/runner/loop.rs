@@ -707,15 +707,15 @@ impl AgentRunner {
                                 )
                                 .await?;
                         }
-                        self.commit_turn(
-                            &input,
-                            &record,
-                            &model_id,
+                        self.commit_turn(TurnCommitContext {
+                            input: &input,
+                            record: &record,
+                            model_id: &model_id,
                             thinking_level,
-                            &turn_id,
-                            &transcript,
-                            &result,
-                        )
+                            turn_id: &turn_id,
+                            transcript: &transcript,
+                            result: &result,
+                        })
                         .await?;
                     }
                     return Ok(result);
@@ -800,32 +800,23 @@ impl AgentRunner {
         ))
     }
 
-    async fn commit_turn(
-        &self,
-        input: &AgentInput,
-        record: &stravia_runtime_contract::agent::AgentDefinitionRecord,
-        model_id: &str,
-        thinking_level: Option<stravia_runtime_contract::thinking::ThinkingLevel>,
-        turn_id: &AgentTurnId,
-        transcript: &[AiItem],
-        result: &AgentResult,
-    ) -> Result<(), AgentRunError> {
+    async fn commit_turn(&self, commit: TurnCommitContext<'_>) -> Result<(), AgentRunError> {
         self.turns
             .commit(TurnCommit {
-                id: turn_id.clone(),
-                parent_id: input.parent_turn_id.clone(),
-                principal: input.principal.clone(),
+                id: commit.turn_id.clone(),
+                parent_id: commit.input.parent_turn_id.clone(),
+                principal: commit.input.principal.clone(),
                 kind: TurnNodeKind::Agent,
                 payload_version: 1,
                 payload: serde_json::json!({
-                    "definition_id": record.spec.id.as_str(),
-                    "definition_revision": record.spec.revision,
-                    "model_id": model_id,
-                    "thinking_level": thinking_level,
-                    "transcript": transcript,
-                    "completion": result.completion,
-                    "output": result.output,
-                    "usage": result.usage,
+                    "definition_id": commit.record.spec.id.as_str(),
+                    "definition_revision": commit.record.spec.revision,
+                    "model_id": commit.model_id,
+                    "thinking_level": commit.thinking_level,
+                    "transcript": commit.transcript,
+                    "completion": commit.result.completion,
+                    "output": commit.result.output,
+                    "usage": commit.result.usage,
                 }),
                 idle_ttl: Duration::from_secs(7 * 24 * 60 * 60),
                 reusable_prefix: None,
@@ -834,6 +825,16 @@ impl AgentRunner {
             .map_err(|error| AgentRunError::new("turn_commit_failed", error.to_string()))?;
         Ok(())
     }
+}
+
+struct TurnCommitContext<'a> {
+    input: &'a AgentInput,
+    record: &'a stravia_runtime_contract::agent::AgentDefinitionRecord,
+    model_id: &'a str,
+    thinking_level: Option<stravia_runtime_contract::thinking::ThinkingLevel>,
+    turn_id: &'a AgentTurnId,
+    transcript: &'a [AiItem],
+    result: &'a AgentResult,
 }
 
 pub(super) fn model_instructions(spec: &AgentDefinitionSpec) -> String {

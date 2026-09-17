@@ -223,7 +223,7 @@ impl ProviderCall {
                     status,
                     headers,
                     body,
-                    attempt,
+                    attempt: Box::new(attempt),
                 });
             }
             self.outbound = outbound;

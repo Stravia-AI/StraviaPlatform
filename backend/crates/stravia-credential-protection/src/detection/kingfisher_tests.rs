@@ -154,6 +154,7 @@ fn requirements_use_full_match_with_named_groups_and_secret_entropy() {
 #[test]
 fn all_checksum_transforms_match_external_vectors_and_reject_mutation() {
     // CRC-32 and SHA-256 vectors for "hello", independent of the detector's implementation.
+    let regex = Regex::new(r"(?P<body>hello):(?P<checksum>\w+)").unwrap();
     for (expected, actual) in [
         ("{{ body | crc32 | base62: 6 }}", "0zNvy2"),
         ("{{ body | crc32_le_b64: 6 }}", "hqYQNg"),
@@ -169,7 +170,6 @@ fn all_checksum_transforms_match_external_vectors_and_reject_mutation() {
             skip_if_missing: false,
         };
         let checksum = Checksum::compile(&source).unwrap();
-        let regex = Regex::new(r"(?P<body>hello):(?P<checksum>\w+)").unwrap();
         let text = format!("hello:{actual}");
         assert!(
             checksum

@@ -247,12 +247,14 @@ macro_rules! readable_surface {
             fn json_values(value: & $($qualifier)* Value, context: Option<&str>, location: &'static str, visit: &mut Visitor<'_>) -> Result<(), RedactionError> {
     super::$json(value, context, &mut |text, context| visit(text, context, location))
 }
+#[allow(clippy::ptr_arg)]
 fn arguments_text(value: & $($qualifier)* String, _source: &'static str, visit: &mut Visitor<'_>) -> Result<(), RedactionError> {
     super::$arguments(value, &mut |text, context| visit(text, context, "tool_arguments"))
 }
 fn tool_result(value: & $($qualifier)* Value, kind: Option<ToolResultContentKind>, reject: bool, _source: &'static str, visit: &mut Visitor<'_>) -> Result<(), RedactionError> {
     super::$result(value, kind, reject, &mut |text, context| visit(text, context, "tool_result"))
 }
+#[allow(clippy::ptr_arg)]
 fn encoded_tool_result(value: & $($qualifier)* String, kind: ToolResultContentKind, _source: &'static str, visit: &mut Visitor<'_>) -> Result<(), RedactionError> {
     super::$encoded(value, kind, &mut |text, context| visit(text, context, "tool_result"))
 }
@@ -508,7 +510,7 @@ fn read_json_values(
     Ok(())
 }
 
-fn read_arguments(arguments: &String, visit: &mut ReadVisitor<'_>) -> Result<(), RedactionError> {
+fn read_arguments(arguments: &str, visit: &mut ReadVisitor<'_>) -> Result<(), RedactionError> {
     if arguments.is_empty() {
         return Ok(());
     }
@@ -541,7 +543,7 @@ fn read_tool_result(
 }
 
 fn read_encoded_tool_result(
-    text: &String,
+    text: &str,
     kind: ToolResultContentKind,
     visit: &mut ReadVisitor<'_>,
 ) -> Result<(), RedactionError> {

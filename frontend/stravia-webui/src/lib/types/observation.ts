@@ -196,8 +196,6 @@ export interface InteractionDetail {
 
 export interface DebugState {
   enabled: boolean
-  run_limit_bytes: number
-  total_limit_bytes: number
   retained_bytes: number
   partial_trace_count: number
   retention_days: number

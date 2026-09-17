@@ -217,9 +217,11 @@ impl InferenceRun {
                 &runtime_session.descriptor.id,
                 request,
                 &mut self.current,
-                &mut self.exposed_tools,
-                &mut self.exposed_tool_specs,
-                &mut self.read_scope,
+                &mut ToolExposure {
+                    tools: &mut self.exposed_tools,
+                    specs: &mut self.exposed_tool_specs,
+                    read_scope: &mut self.read_scope,
+                },
                 &self.tools,
                 batch,
             )?;

@@ -58,7 +58,7 @@ _避免使用_：Request Log、Wire Debug Capture（当指包含 canonical 阶�
 
 ## Interaction Debug Bundle
 
-Interaction Debug Bundle 是管理员在某一时间点导出的版本化 ZIP 诊断包，汇总一个 Connect Client Interaction 中当时已落盘的全部 Inference Run Debug Trace。Bundle 必须说明 Interaction 状态、导出时间、schema 版本，以及每个 Inference Run 的捕获状态；部分存在时明确列出未捕获或因容量限制而不完整的 Run，不得表示为完整。
+Interaction Debug Bundle 是管理员在某一时间点导出的版本化 ZIP 诊断包，汇总一个 Connect Client Interaction 中当时已落盘的全部 Inference Run Debug Trace。Bundle 必须说明 Interaction 状态、导出时间、schema 版本，以及每个 Inference Run 的捕获状态；部分存在时明确列出未捕获或不完整的 Run，不得表示为完整。
 _避免使用_：完整抓包（当存在未捕获或不完整的 Inference Run）、实时备份
 
 ## Confirmed Upstream Usage

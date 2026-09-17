@@ -179,9 +179,11 @@ impl ProviderCall {
                         headers,
                         on_connect_start: Some(on_connect_start),
                     },
-                    previous_response_id,
-                    websocket.session_affinity.as_deref(),
-                    websocket.require_affinity,
+                    ResponsesWebSocketAffinityHint {
+                        previous_response_id,
+                        session_affinity: websocket.session_affinity.as_deref(),
+                        require_affinity: websocket.require_affinity,
+                    },
                 )
                 .await;
             match lease {
@@ -287,9 +289,9 @@ impl ProviderCall {
                             );
                             return Ok(ProviderStreamResponse::Error {
                                 status: status.unwrap_or(502),
-                                headers,
+                                headers: *headers,
                                 body: serde_json::from_slice(&body).map_err(anyhow::Error::from),
-                                attempt,
+                                attempt: Box::new(attempt),
                             });
                         }
                         anyhow::bail!("Responses WebSocket is unavailable");
@@ -361,7 +363,7 @@ impl ProviderCall {
                             body: Err(anyhow::anyhow!(
                                 "WebSocket handshake body could not be read"
                             )),
-                            attempt,
+                            attempt: Box::new(attempt),
                         });
                     }
                     let mut outbound = if websocket.require_affinity {
@@ -418,9 +420,9 @@ impl ProviderCall {
                     );
                     return Ok(ProviderStreamResponse::Error {
                         status,
-                        headers,
+                        headers: *headers,
                         body: serde_json::from_slice(&body).map_err(anyhow::Error::from),
-                        attempt,
+                        attempt: Box::new(attempt),
                     });
                 }
             }

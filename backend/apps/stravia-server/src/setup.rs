@@ -310,7 +310,7 @@ async fn claim_setup(
     Json(input): Json<ClaimInput>,
 ) -> Response {
     if let Err(response) = validate_web_request(Some(origin.as_str()), &headers, true) {
-        return response;
+        return *response;
     }
     let mut token = runtime.setup_token.lock().await;
     if token.as_deref() != Some(input.token.as_str()) {
@@ -337,7 +337,7 @@ async fn test_database(
     Json(input): Json<TestInput>,
 ) -> Response {
     if let Err(response) = authorize_setup(&runtime, &origin, &headers, true).await {
-        return response;
+        return *response;
     }
     let database = input.database;
     match preflight_database(&runtime.startup.gateway.data_dir, &database).await {
@@ -353,7 +353,7 @@ async fn complete_setup(
     Json(input): Json<CompleteInput>,
 ) -> Response {
     if let Err(response) = authorize_setup(&runtime, &origin, &headers, true).await {
-        return response;
+        return *response;
     }
     let _completion = runtime.completion.lock().await;
     let mut setup_session = runtime.setup_session.lock().await;
@@ -467,7 +467,7 @@ async fn authorize_setup(
     origin: &RequestOrigin,
     headers: &HeaderMap,
     json: bool,
-) -> Result<(), Response> {
+) -> Result<(), Box<Response>> {
     validate_web_request(Some(origin.as_str()), headers, json)?;
     let session = runtime.setup_session.lock().await;
     if cookie(headers, SETUP_COOKIE)
@@ -476,7 +476,10 @@ async fn authorize_setup(
     {
         Ok(())
     } else {
-        Err(auth_error(StatusCode::UNAUTHORIZED, "setup_unauthorized"))
+        Err(Box::new(auth_error(
+            StatusCode::UNAUTHORIZED,
+            "setup_unauthorized",
+        )))
     }
 }
 

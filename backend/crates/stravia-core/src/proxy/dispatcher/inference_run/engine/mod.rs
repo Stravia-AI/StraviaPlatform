@@ -27,7 +27,9 @@ use self::delivery::{
 };
 use self::errors::*;
 pub(super) use self::errors::{error_response, hook_failure_response};
-use self::followup::{FollowupModelTurn, acquire_followup_model_turn};
+use self::followup::{
+    FollowupLeg, FollowupModelTurn, acquire_followup_model_turn,
+};
 use self::projection::*;
 use self::util::{client_session_id, forwarded_client_headers};
 use super::{Phase, PhaseTracker, RunInput};
@@ -107,7 +109,7 @@ fn is_openai_generation_target(
 
 pub(super) enum RoundOutcome {
     Deliver {
-        response: Response,
+        response: Box<Response>,
         delivery: DeliveryState,
     },
     NextRound {
@@ -135,21 +137,21 @@ pub(super) enum DeliveryState {
 
 pub(super) fn buffered_response(response: Response) -> RoundOutcome {
     RoundOutcome::Deliver {
-        response,
+        response: Box::new(response),
         delivery: DeliveryState::Buffered,
     }
 }
 
 pub(super) fn buffered_completion(response: Response) -> RoundOutcome {
     RoundOutcome::Deliver {
-        response,
+        response: Box::new(response),
         delivery: DeliveryState::Buffered,
     }
 }
 
 pub(super) fn live_response(response: Response) -> RoundOutcome {
     RoundOutcome::Deliver {
-        response,
+        response: Box::new(response),
         delivery: DeliveryState::Live,
     }
 }
@@ -1172,7 +1174,7 @@ async fn dispatch_round(
             }
             RoundOutcome::Deliver { response, delivery } => {
                 *delivery_state = delivery;
-                return response;
+                return *response;
             }
         }
     }

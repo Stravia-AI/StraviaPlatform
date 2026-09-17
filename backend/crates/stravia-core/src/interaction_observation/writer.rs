@@ -80,17 +80,37 @@ pub(super) enum WriterCommand {
     Shutdown(oneshot::Sender<()>),
 }
 
-pub(super) fn spawn(
-    store: ObservationStore,
-    retention_days: Arc<AtomicU32>,
-    updates: broadcast::Sender<ObservationUpdate>,
-    trace_sequence: Arc<AtomicI64>,
-    traces: super::trace::TraceManager,
-    active_traces: Arc<Mutex<HashMap<String, super::trace::TraceHandle>>>,
-    partial_trace_count: Arc<AtomicU64>,
-    unpersisted_gaps: Arc<Mutex<super::UnpersistedGaps>>,
-    live: Arc<super::live::LiveState>,
-) -> (mpsc::Sender<WriterCommand>, tokio::task::JoinHandle<()>) {
+pub(super) struct WriterDeps {
+    pub store: ObservationStore,
+    pub retention_days: Arc<AtomicU32>,
+    pub updates: broadcast::Sender<ObservationUpdate>,
+    pub trace_sequence: Arc<AtomicI64>,
+    pub traces: super::trace::TraceManager,
+    pub active_traces: Arc<Mutex<HashMap<String, super::trace::TraceHandle>>>,
+    pub partial_trace_count: Arc<AtomicU64>,
+    pub unpersisted_gaps: Arc<Mutex<super::UnpersistedGaps>>,
+    pub live: Arc<super::live::LiveState>,
+}
+
+struct WriterContext<'a> {
+    store: &'a ObservationStore,
+    retention: &'a AtomicU32,
+    updates: &'a broadcast::Sender<ObservationUpdate>,
+    trace_sequence: &'a AtomicI64,
+}
+
+pub(super) fn spawn(deps: WriterDeps) -> (mpsc::Sender<WriterCommand>, tokio::task::JoinHandle<()>) {
+    let WriterDeps {
+        store,
+        retention_days,
+        updates,
+        trace_sequence,
+        traces,
+        active_traces,
+        partial_trace_count,
+        unpersisted_gaps,
+        live,
+    } = deps;
     let (tx, mut rx) = mpsc::channel(2048);
     let handle = tokio::spawn(async move {
         let mut grouping = GroupingIndex::default();
@@ -108,6 +128,12 @@ pub(super) fn spawn(
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut deferred = None;
         let mut maintenance = tokio::time::Instant::now();
+        let context = WriterContext {
+            store: &store,
+            retention: retention_days.as_ref(),
+            updates: &updates,
+            trace_sequence: trace_sequence.as_ref(),
+        };
         loop {
             // 仅重试缺失标记，不重放发现，避免把诊断故障转化为重复计数或执行失败。
             for (interaction_id, occurred_at) in std::mem::take(&mut pending_gaps) {
@@ -127,14 +153,11 @@ pub(super) fn spawn(
                         tail.sweep(now());
                         pending_text.publish_live(&updates);
                         let due: Vec<_> = pending_text.blocks.iter().filter(|(_, block)| block.due()).map(|(run, _)| run.clone()).collect();
-                        for run in due { flush_one(&store, &grouping, &retention_days, &updates, &trace_sequence, &mut pending_text, &run).await; }
+                        for run in due { flush_one(&context, &grouping, &mut pending_text, &run).await; }
                         if maintenance.elapsed() < Duration::from_secs(2) { continue; }
                         maintenance = tokio::time::Instant::now();
                         flush_active_manifests(
-                            &store,
-                            &retention_days,
-                            &updates,
-                            &trace_sequence,
+                            &context,
                             &grouping,
                             &active_traces,
                             &mut persisted_manifests,
@@ -149,15 +172,7 @@ pub(super) fn spawn(
             tail.sweep(now());
             match &command {
                 Some(WriterCommand::ClearTail | WriterCommand::Purge { .. }) => {
-                    flush_text(
-                        &store,
-                        &grouping,
-                        &retention_days,
-                        &updates,
-                        &trace_sequence,
-                        &mut pending_text,
-                    )
-                    .await;
+                    flush_text(&context, &grouping, &mut pending_text).await;
                 }
                 Some(
                     WriterCommand::InputPreview { run_id, .. }
@@ -167,16 +182,7 @@ pub(super) fn spawn(
                         ..
                     },
                 ) => {
-                    flush_one(
-                        &store,
-                        &grouping,
-                        &retention_days,
-                        &updates,
-                        &trace_sequence,
-                        &mut pending_text,
-                        run_id,
-                    )
-                    .await;
+                    flush_one(&context, &grouping, &mut pending_text, run_id).await;
                 }
                 _ => {}
             }
@@ -201,16 +207,7 @@ pub(super) fn spawn(
                     }
                 }
                 Some(WriterCommand::ClientToolResults { run_id, events }) => {
-                    flush_one(
-                        &store,
-                        &grouping,
-                        &retention_days,
-                        &updates,
-                        &trace_sequence,
-                        &mut pending_text,
-                        &run_id,
-                    )
-                    .await;
+                    flush_one(&context, &grouping, &mut pending_text, &run_id).await;
                     let Some(interaction) = grouping.interaction_for_run(&run_id) else {
                         continue;
                     };
@@ -482,16 +479,7 @@ pub(super) fn spawn(
                         .cloned()
                         .collect();
                     for run in affected {
-                        flush_one(
-                            &store,
-                            &grouping,
-                            &retention_days,
-                            &updates,
-                            &trace_sequence,
-                            &mut pending_text,
-                            &run,
-                        )
-                        .await;
+                        flush_one(&context, &grouping, &mut pending_text, &run).await;
                     }
                     let expires = expires(now, retention_days.load(Ordering::Relaxed));
                     match store
@@ -596,16 +584,7 @@ pub(super) fn spawn(
                         .get(&run_id)
                         .is_some_and(|block| !same_scope(&block.event, &event))
                     {
-                        flush_one(
-                            &store,
-                            &grouping,
-                            &retention_days,
-                            &updates,
-                            &trace_sequence,
-                            &mut pending_text,
-                            &run_id,
-                        )
-                        .await;
+                        flush_one(&context, &grouping, &mut pending_text, &run_id).await;
                     }
                     let text = text_mut(&mut event).expect("text event");
                     let incoming = std::mem::take(text);
@@ -632,10 +611,7 @@ pub(super) fn spawn(
                             sealed.push(pending_text.blocks.remove(&run_id).expect("sealed block"));
                             if sealed.len() == 32 {
                                 persist_blocks(
-                                    &store,
-                                    &retention_days,
-                                    &updates,
-                                    &trace_sequence,
+                                    &context,
                                     &pending_text,
                                     &interaction,
                                     &run_id,
@@ -647,10 +623,7 @@ pub(super) fn spawn(
                     }
                     if !sealed.is_empty() {
                         persist_blocks(
-                            &store,
-                            &retention_days,
-                            &updates,
-                            &trace_sequence,
+                            &context,
                             &pending_text,
                             &interaction,
                             &run_id,
@@ -660,16 +633,7 @@ pub(super) fn spawn(
                     }
                 }
                 Some(WriterCommand::Event { run_id, event }) => {
-                    flush_one(
-                        &store,
-                        &grouping,
-                        &retention_days,
-                        &updates,
-                        &trace_sequence,
-                        &mut pending_text,
-                        &run_id,
-                    )
-                    .await;
+                    flush_one(&context, &grouping, &mut pending_text, &run_id).await;
                     let mut batch = vec![(event, None, now())];
                     while batch.len() < 64 {
                         match rx.try_recv() {
@@ -736,11 +700,8 @@ pub(super) fn spawn(
                     finished_at,
                 }) => {
                     persist_finish(
-                        &store,
+                        &context,
                         &mut grouping,
-                        &retention_days,
-                        &updates,
-                        &trace_sequence,
                         &mut pending_text,
                         &run_id,
                         &outcome,
@@ -823,11 +784,8 @@ pub(super) fn spawn(
                         }
                         if let Some((outcome, finished_at)) = pending_finish {
                             persist_finish(
-                                &store,
+                                &context,
                                 &mut grouping,
-                                &retention_days,
-                                &updates,
-                                &trace_sequence,
                                 &mut pending_text,
                                 run_id,
                                 &outcome,
@@ -911,22 +869,10 @@ pub(super) fn spawn(
                         .cloned()
                         .collect();
                     for run in runs {
-                        flush_one(
-                            &store,
-                            &grouping,
-                            &retention_days,
-                            &updates,
-                            &trace_sequence,
-                            &mut pending_text,
-                            &run,
-                        )
-                        .await;
+                        flush_one(&context, &grouping, &mut pending_text, &run).await;
                     }
                     flush_active_manifests(
-                        &store,
-                        &retention_days,
-                        &updates,
-                        &trace_sequence,
+                        &context,
                         &grouping,
                         &active_traces,
                         &mut persisted_manifests,
@@ -936,20 +882,9 @@ pub(super) fn spawn(
                     let _ = done.send(());
                 }
                 Some(WriterCommand::Barrier(done)) => {
-                    flush_text(
-                        &store,
-                        &grouping,
-                        &retention_days,
-                        &updates,
-                        &trace_sequence,
-                        &mut pending_text,
-                    )
-                    .await;
+                    flush_text(&context, &grouping, &mut pending_text).await;
                     flush_active_manifests(
-                        &store,
-                        &retention_days,
-                        &updates,
-                        &trace_sequence,
+                        &context,
                         &grouping,
                         &active_traces,
                         &mut persisted_manifests,
@@ -959,28 +894,12 @@ pub(super) fn spawn(
                     let _ = done.send(());
                 }
                 Some(WriterCommand::Shutdown(done)) => {
-                    flush_text(
-                        &store,
-                        &grouping,
-                        &retention_days,
-                        &updates,
-                        &trace_sequence,
-                        &mut pending_text,
-                    )
-                    .await;
+                    flush_text(&context, &grouping, &mut pending_text).await;
                     let _ = done.send(());
                     break;
                 }
                 None => {
-                    flush_text(
-                        &store,
-                        &grouping,
-                        &retention_days,
-                        &updates,
-                        &trace_sequence,
-                        &mut pending_text,
-                    )
-                    .await;
+                    flush_text(&context, &grouping, &mut pending_text).await;
                     break;
                 }
             }
@@ -990,10 +909,7 @@ pub(super) fn spawn(
 }
 
 async fn flush_active_manifests(
-    store: &ObservationStore,
-    retention: &AtomicU32,
-    updates: &broadcast::Sender<ObservationUpdate>,
-    trace_sequence: &AtomicI64,
+    context: &WriterContext<'_>,
     grouping: &GroupingIndex,
     active_traces: &Mutex<HashMap<String, super::trace::TraceHandle>>,
     persisted: &mut HashMap<String, TraceManifest>,
@@ -1023,20 +939,21 @@ async fn flush_active_manifests(
             continue;
         }
         let at = now();
-        match store
+        match context
+            .store
             .persist_manifest_event(
                 interaction_id,
                 &run_id,
                 &manifest,
                 at,
-                expires(at, retention.load(Ordering::Relaxed)),
+                expires(at, context.retention.load(Ordering::Relaxed)),
                 false,
             )
             .await
         {
             Ok(event) => {
                 persisted.insert(run_id, manifest);
-                publish(updates, trace_sequence, event);
+                publish(context.updates, context.trace_sequence, event);
             }
             Err(error) => {
                 trace.mark_observation_gap();
@@ -1065,37 +982,26 @@ fn manifests_match(left: &TraceManifest, right: &TraceManifest) -> bool {
 }
 
 async fn persist_finish(
-    store: &ObservationStore,
+    context: &WriterContext<'_>,
     grouping: &mut GroupingIndex,
-    retention: &AtomicU32,
-    updates: &broadcast::Sender<ObservationUpdate>,
-    trace_sequence: &AtomicI64,
     pending_text: &mut TextBuffer,
     run_id: &str,
     outcome: &RunOutcome,
     at: i64,
 ) {
-    flush_one(
-        store,
-        grouping,
-        retention,
-        updates,
-        trace_sequence,
-        pending_text,
-        run_id,
-    )
-    .await;
+    flush_one(context, grouping, pending_text, run_id).await;
     if let Some(interaction) = grouping.interaction_for_run(run_id) {
-        let expiry = expires(at, retention.load(Ordering::Relaxed));
-        match store
+        let expiry = expires(at, context.retention.load(Ordering::Relaxed));
+        match context
+            .store
             .finish_run(interaction, run_id, outcome, at, expiry)
             .await
         {
             Ok(value) => {
                 if let Some(node) = outcome.generation_node_id.as_deref() {
-                    let _ = store.set_tail_generation_node(run_id, node).await;
+                    let _ = context.store.set_tail_generation_node(run_id, node).await;
                 }
-                publish(updates, trace_sequence, value);
+                publish(context.updates, context.trace_sequence, value);
             }
             Err(_) => {
                 pending_text
@@ -1103,8 +1009,8 @@ async fn persist_finish(
                     .lock()
                     .expect("observation gaps")
                     .record(run_id, at);
-                let _ = store.mark_observation_gap(interaction).await;
-                let _ = updates.send(ObservationUpdate::LiveGap {
+                let _ = context.store.mark_observation_gap(interaction).await;
+                let _ = context.updates.send(ObservationUpdate::LiveGap {
                     interaction_id: interaction.to_owned(),
                     run_id: run_id.to_owned(),
                     reason: "persistence_failed".into(),
@@ -1117,33 +1023,18 @@ async fn persist_finish(
 }
 
 async fn flush_text(
-    store: &ObservationStore,
+    context: &WriterContext<'_>,
     grouping: &GroupingIndex,
-    retention: &AtomicU32,
-    updates: &broadcast::Sender<ObservationUpdate>,
-    trace_sequence: &AtomicI64,
     pending: &mut TextBuffer,
 ) {
     let ids: Vec<_> = pending.blocks.keys().cloned().collect();
     for id in ids {
-        flush_one(
-            store,
-            grouping,
-            retention,
-            updates,
-            trace_sequence,
-            pending,
-            &id,
-        )
-        .await;
+        flush_one(context, grouping, pending, &id).await;
     }
 }
 async fn flush_one(
-    store: &ObservationStore,
+    context: &WriterContext<'_>,
     grouping: &GroupingIndex,
-    retention: &AtomicU32,
-    updates: &broadcast::Sender<ObservationUpdate>,
-    trace_sequence: &AtomicI64,
     pending: &mut TextBuffer,
     run_id: &str,
 ) {
@@ -1154,23 +1045,10 @@ async fn flush_one(
         pending.live.remove(&block.id);
         return;
     };
-    persist_blocks(
-        store,
-        retention,
-        updates,
-        trace_sequence,
-        pending,
-        interaction,
-        run_id,
-        vec![block],
-    )
-    .await;
+    persist_blocks(context, pending, interaction, run_id, vec![block]).await;
 }
 async fn persist_blocks(
-    store: &ObservationStore,
-    retention: &AtomicU32,
-    updates: &broadcast::Sender<ObservationUpdate>,
-    trace_sequence: &AtomicI64,
+    context: &WriterContext<'_>,
     pending: &TextBuffer,
     interaction: &str,
     run_id: &str,
@@ -1180,16 +1058,17 @@ async fn persist_blocks(
     let events: Vec<_> = blocks
         .into_iter()
         .map(|block| {
-            pending.publish_block(&block, updates);
+            pending.publish_block(&block, context.updates);
             (block.event, Some(block.id), block.at)
         })
         .collect();
-    let result = store
+    let result = context
+        .store
         .persist_run_events(
             interaction,
             run_id,
             &events,
-            expires(at, retention.load(Ordering::Relaxed)),
+            expires(at, context.retention.load(Ordering::Relaxed)),
         )
         .await;
     for (_, id, _) in &events {
@@ -1198,7 +1077,7 @@ async fn persist_blocks(
     match result {
         Ok(events) => {
             for event in events {
-                publish(updates, trace_sequence, event);
+                publish(context.updates, context.trace_sequence, event);
             }
         }
         Err(_) => {
@@ -1207,8 +1086,8 @@ async fn persist_blocks(
                 .lock()
                 .expect("observation gaps")
                 .record(run_id, at);
-            let _ = store.mark_observation_gap(interaction).await;
-            let _ = updates.send(ObservationUpdate::LiveGap {
+            let _ = context.store.mark_observation_gap(interaction).await;
+            let _ = context.updates.send(ObservationUpdate::LiveGap {
                 interaction_id: interaction.to_owned(),
                 run_id: run_id.to_owned(),
                 reason: "persistence_failed".into(),

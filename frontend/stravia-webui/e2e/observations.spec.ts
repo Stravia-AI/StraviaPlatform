@@ -164,6 +164,7 @@ interface ObservationFixture {
   failureRequests: URL[]
   failureDetailRequests: URL[]
   debugWrites: Array<{ enabled: boolean; confirmed: boolean }>
+  debugDeletes: number[]
 }
 
 async function installObservationFixture(
@@ -218,6 +219,7 @@ async function installObservationFixture(
   const heldDetails = new Map<string, Promise<void>>()
   let resetRequired = false
   const debugWrites: Array<{ enabled: boolean; confirmed: boolean }> = []
+  const debugDeletes: number[] = []
   const streamEvents: ObservationEvent[] = []
   let debugEnabled = false
   let snapshotSequence = 10
@@ -261,13 +263,13 @@ async function installObservationFixture(
         const body = request.postDataJSON() as { enabled: boolean; confirmed: boolean }
         debugWrites.push(body)
         debugEnabled = body.enabled
+      } else if (request.method() === 'DELETE') {
+        debugDeletes.push(Date.now())
       }
       await route.fulfill({
         json: {
           data: {
             enabled: debugEnabled,
-            run_limit_bytes: 67_108_864,
-            total_limit_bytes: 2_147_483_648,
             retained_bytes: 0,
             partial_trace_count: 0,
             retention_days: 7,
@@ -508,6 +510,7 @@ async function installObservationFixture(
     failureRequests,
     failureDetailRequests,
     debugWrites,
+    debugDeletes,
   }
 }
 
@@ -2801,8 +2804,6 @@ test.describe('Interaction Observation canvas', () => {
           json: {
             data: {
               enabled: false,
-              run_limit_bytes: 67_108_864,
-              total_limit_bytes: 2_147_483_648,
               retained_bytes: retainedBytes,
               partial_trace_count: 0,
               retention_days: 7,
@@ -2829,6 +2830,29 @@ test.describe('Interaction Observation canvas', () => {
       .click()
     await page.getByRole('switch', { name: 'Debug' }).click()
     await expect(page.getByRole('alertdialog', { name: 'Enable Debug' })).toContainText('Currently retained: 0 MiB.')
+  })
+
+  test('clears retained Debug data while Debug stays enabled', async ({ page }) => {
+    const fixture = await installObservationFixture(page)
+    await page.goto('/logs')
+    await expect(page.getByRole('button', { name: 'Clear debug data' })).toBeHidden()
+
+    await page.getByRole('switch', { name: 'Debug' }).click()
+    await page
+      .getByRole('alertdialog', { name: 'Enable Debug' })
+      .getByRole('button', { name: 'Enable Debug' })
+      .click()
+    const clearButton = page.getByRole('button', { name: 'Clear debug data' })
+    await expect(clearButton).toBeVisible()
+
+    await clearButton.click()
+    await page
+      .getByRole('alertdialog', { name: 'Clear debug data' })
+      .getByRole('button', { name: 'Clear debug data', exact: true })
+      .click()
+    await expect.poll(() => fixture.debugDeletes.length).toBe(1)
+    await expect(page.getByRole('switch', { name: 'Debug' })).toBeChecked()
+    await expect(clearButton).toBeVisible()
   })
 
   test.describe('touch input', () => {

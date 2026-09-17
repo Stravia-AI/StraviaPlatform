@@ -624,8 +624,6 @@ pub struct RejectionDetail {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DebugState {
     pub enabled: bool,
-    pub run_limit_bytes: u64,
-    pub total_limit_bytes: u64,
     pub retained_bytes: u64,
     pub partial_trace_count: u64,
     pub retention_days: u32,

@@ -72,7 +72,7 @@ pub(crate) async fn require_admin(
             request.headers(),
             false,
         ) {
-            return response;
+            return *response;
         }
 
     let token = match state.mode {
@@ -131,7 +131,7 @@ async fn login(
         &headers,
         true,
     ) {
-        return response;
+        return *response;
     }
     match state.auth.login(&input.username, &input.password).await {
         Ok(tokens) => {
@@ -162,7 +162,7 @@ async fn refresh(
         &headers,
         false,
     ) {
-        return response;
+        return *response;
     }
     let Some(token) = cookie(&headers, REFRESH_COOKIE) else {
         return auth_error(StatusCode::UNAUTHORIZED, "unauthorized");
@@ -193,7 +193,7 @@ async fn logout(
         &headers,
         false,
     ) {
-        return response;
+        return *response;
     }
     let session_id = if let Some(token) = cookie(&headers, ACCESS_COOKIE) {
         match state.auth.authenticate(token).await {
@@ -242,7 +242,7 @@ async fn change_credentials(
         &headers,
         true,
     ) {
-        return response;
+        return *response;
     }
     let Some(token) = cookie(&headers, ACCESS_COOKIE) else {
         return auth_error(StatusCode::UNAUTHORIZED, "unauthorized");
@@ -312,9 +312,9 @@ pub(crate) fn validate_web_request(
     expected_origin: Option<&str>,
     headers: &HeaderMap,
     json_body: bool,
-) -> Result<(), Response> {
+) -> Result<(), Box<Response>> {
     let Some(expected_origin) = expected_origin else {
-        return Err(auth_error(StatusCode::FORBIDDEN, "origin_required"));
+        return Err(Box::new(auth_error(StatusCode::FORBIDDEN, "origin_required")));
     };
     let mut origins = headers.get_all(header::ORIGIN).iter();
     let origin = origins
@@ -322,10 +322,10 @@ pub(crate) fn validate_web_request(
         .and_then(|v| v.to_str().ok())
         .and_then(|value| canonical_origin(value).ok());
     if origins.next().is_some() || origin.as_deref() != Some(expected_origin) {
-        return Err(auth_error(StatusCode::FORBIDDEN, "origin_mismatch"));
+        return Err(Box::new(auth_error(StatusCode::FORBIDDEN, "origin_mismatch")));
     }
     if headers.get(CSRF_HEADER).and_then(|v| v.to_str().ok()) != Some("1") {
-        return Err(auth_error(StatusCode::FORBIDDEN, "csrf_required"));
+        return Err(Box::new(auth_error(StatusCode::FORBIDDEN, "csrf_required")));
     }
     if json_body
         && !headers
@@ -336,10 +336,10 @@ pub(crate) fn validate_web_request(
                     || value.to_ascii_lowercase().starts_with("application/json;")
             })
     {
-        return Err(auth_error(
+        return Err(Box::new(auth_error(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             "json_required",
-        ));
+        )));
     }
     Ok(())
 }

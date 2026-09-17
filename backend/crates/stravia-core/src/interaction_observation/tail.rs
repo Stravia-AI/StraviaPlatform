@@ -272,9 +272,7 @@ impl TailIndex {
         let tail_ids = input.current_tail_tool_ids()?;
         let mut source = None;
         for id in &tail_ids {
-            let Some(runs) = self.pending_tools.get(id) else {
-                return None;
-            };
+            let runs = self.pending_tools.get(id)?;
             let matches: Vec<_> = runs
                 .iter()
                 .filter(|run| self.principals.get(*run).map(String::as_str) == Some(principal))
