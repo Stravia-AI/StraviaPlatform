@@ -70,7 +70,7 @@ async fn completed_inline_window_is_the_parent_after_cold_restore() {
     let cold_chain =
         GenerationChain::from_turn_chain(durable.clone(), DEFAULT_GENERATION_CHAIN_TTL, None);
     let mut continuation = responses_request(vec![user_message("after ordinary answer")]);
-    crate::model_turn::stamp_previous_response_id(&mut continuation, below_threshold.id());
+    crate::router::stamp_previous_response_id(&mut continuation, below_threshold.id());
     let continued = cold_chain.begin(owner.clone(), continuation).await.unwrap();
     let mut expected = full_history;
     expected.extend(ordinary_response.items);

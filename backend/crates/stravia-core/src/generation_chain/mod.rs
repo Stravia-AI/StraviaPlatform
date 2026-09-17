@@ -291,7 +291,7 @@ impl GenerationChain {
         let mut request = request.clone();
         request.items.retain(|item| !item.is_compaction_trigger());
         let native = self.resolve_compaction(principal, &request).await?;
-        let explicit = crate::model_turn::parent_id_from_request(&request);
+        let explicit = crate::router::parent_id_from_request(&request);
         let source_prefix = self.compaction_source_prefix(principal, &request).await?;
         let parent = explicit
             .or_else(|| source_prefix.map(|(_, id)| id))
@@ -410,9 +410,9 @@ impl GenerationChain {
                 .position(|window| items_equal(window, &native.window))
                 .ok_or(BeginError::CompactionConflict)?;
             let native_range = matched_start..matched_start + native.window.len();
-            let explicit = crate::model_turn::parent_id_from_request(&request);
+            let explicit = crate::router::parent_id_from_request(&request);
             let mut discovered_request = request.clone();
-            crate::model_turn::clear_previous_response_id(&mut discovered_request);
+            crate::router::clear_previous_response_id(&mut discovered_request);
             let discovered = self
                 .store
                 .discover_parent(&principal, &mut discovered_request)
@@ -456,7 +456,7 @@ impl GenerationChain {
                     Some(canonical_client_history_request(&request).items);
                 parent.compaction_input_range = Some(native_range.clone());
                 request_delta.items.drain(native_range);
-                crate::model_turn::clear_previous_response_id(&mut request);
+                crate::router::clear_previous_response_id(&mut request);
                 parent
             }
         } else if has_explicit_parent {
@@ -491,7 +491,7 @@ impl GenerationChain {
             .await
             .map_err(|_| BeginError::ItemReferenceNotFound)?;
         if let Some(parent_id) = parent.parent_id.as_deref() {
-            crate::model_turn::stamp_previous_response_id(&mut request, parent_id);
+            crate::router::stamp_previous_response_id(&mut request, parent_id);
         }
 
         Ok(GenerationChainWrite {
@@ -510,7 +510,7 @@ impl GenerationChain {
         principal: Principal,
         request: AiRequest,
     ) -> Result<GenerationChainWrite, BeginError> {
-        let explicit_parent = crate::model_turn::parent_id_from_request(&request).is_some();
+        let explicit_parent = crate::router::parent_id_from_request(&request).is_some();
         if explicit_parent {
             return self.begin(principal, request).await;
         }
@@ -606,12 +606,12 @@ impl GenerationChain {
         )
         .await
         .map_err(|_| BeginError::ItemReferenceNotFound)?;
-        crate::model_turn::stamp_previous_response_id(&mut write.request, &source_id);
+        crate::router::stamp_previous_response_id(&mut write.request, &source_id);
         write.parent = parent;
         Ok(write)
     }
 
-    pub(crate) fn continuation_lookup(&self) -> Arc<dyn crate::model_turn::ContinuationLookup> {
+    pub(crate) fn continuation_lookup(&self) -> Arc<dyn crate::router::ContinuationLookup> {
         Arc::new(GenerationChainContinuationLookup {
             chain: self.clone(),
         })
@@ -623,9 +623,9 @@ struct GenerationChainContinuationLookup {
 }
 
 #[async_trait]
-impl crate::model_turn::ContinuationLookup for GenerationChainContinuationLookup {
+impl crate::router::ContinuationLookup for GenerationChainContinuationLookup {
     async fn preferred_target(&self, principal: &Principal, request: &AiRequest) -> Option<String> {
-        let parent_id = crate::model_turn::parent_id_from_request(request)?;
+        let parent_id = crate::router::parent_id_from_request(request)?;
         let materialized = self
             .chain
             .store
@@ -639,10 +639,10 @@ impl crate::model_turn::ContinuationLookup for GenerationChainContinuationLookup
     async fn prepare(
         &self,
         principal: &Principal,
-        target: crate::model_turn::ContinuationTarget<'_>,
+        target: crate::router::ContinuationTarget<'_>,
         request: &mut AiRequest,
     ) -> Option<String> {
-        let parent_id = crate::model_turn::parent_id_from_request(request)?;
+        let parent_id = crate::router::parent_id_from_request(request)?;
         let mut candidate_state =
             GenerationChainState::from_request(request, target.namespace, target.protocol)
                 .with_provider_model(target.actual_model);
@@ -659,9 +659,9 @@ impl crate::model_turn::ContinuationLookup for GenerationChainContinuationLookup
             )
             .await
         {
-            crate::model_turn::parent_id_from_request(request)
+            crate::router::parent_id_from_request(request)
         } else {
-            crate::model_turn::clear_previous_response_id(request);
+            crate::router::clear_previous_response_id(request);
             None
         }
     }

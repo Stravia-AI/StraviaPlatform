@@ -866,7 +866,7 @@ async fn matching_prefix_prefers_ephemeral_upstream_continuation_when_transport_
         lookup
             .prepare(
                 &owner,
-                crate::model_turn::ContinuationTarget {
+                crate::router::ContinuationTarget {
                     namespace: "provider:model",
                     protocol: OPEN_RESPONSES_2026_04_24,
                     actual_model: "model",
@@ -884,7 +884,7 @@ async fn matching_prefix_prefers_ephemeral_upstream_continuation_when_transport_
         lookup
             .prepare(
                 &owner,
-                crate::model_turn::ContinuationTarget {
+                crate::router::ContinuationTarget {
                     namespace: "provider:model",
                     protocol: OPEN_RESPONSES_2026_04_24,
                     actual_model: "model",

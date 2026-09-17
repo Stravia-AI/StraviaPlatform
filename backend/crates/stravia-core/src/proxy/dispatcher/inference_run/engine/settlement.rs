@@ -214,6 +214,7 @@ mod tests {
             directory.path().to_path_buf(),
             7,
             true,
+            gateway.generation_chains.clone(),
         )
         .await;
         let observer = observation
@@ -223,21 +224,24 @@ mod tests {
                 path: "/v1/chat/completions".into(),
                 protocol: OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1.to_string(),
             })
-            .admit(crate::interaction_observation::RunStart {
-                id: "settle-run".into(),
-                principal: "owner".into(),
-                api_key_id: None,
-                api_key_name: None,
-                generation_root_id: None,
-                generation_parent_id: None,
-                has_new_user: true,
-                has_matching_pending_tool_result: false,
-                ingress_received_at: 0,
-                canonical_fingerprint: "settle-run".into(),
-                route_id: "local-route".into(),
-                model_display_name: None,
-                ingress_protocol: OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1.to_string(),
-            });
+            .admit(
+                crate::interaction_observation::RunStart {
+                    id: "settle-run".into(),
+                    principal: "owner".into(),
+                    api_key_id: None,
+                    api_key_name: None,
+                    route_id: "local-route".into(),
+                    model_display_name: None,
+                    ingress_protocol: OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1.to_string(),
+                },
+                crate::interaction_observation::AdmissionFacts {
+                    client_request: AiRequest::new("model", Vec::new()),
+                    has_new_user: true,
+                    has_matching_pending_tool_result: false,
+                    generation_root_id: None,
+                    generation_parent_id: None,
+                },
+            );
         let principal = stravia_runtime_contract::Principal::new("owner");
         let session = ClientProjectionSession::new(
             gateway.history_markers.clone(),

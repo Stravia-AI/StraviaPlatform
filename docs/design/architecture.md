@@ -52,8 +52,7 @@ stravia/
 │           │   └── extensions.rs · history_marker_executions.rs
 │           ├── model_turn/       # Model Turn Executor deep module（crate-private）
 │           │   ├── mod.rs            # execute(TurnInput) interface / Live + InMemory adapters
-│           │   ├── live.rs           # 授权、选路、Target Continuation、transport
-│           │   ├── continuation.rs   # ContinuationLookup
+│           │   ├── live.rs           # 授权、router::selection 驱动的 Target 尝试循环、transport
 │           │   ├── provider/         # Provider Turn transport deep module
 │           │   │   ├── mod.rs            # 选择 transport 与公共执行流程
 │           │   │   ├── reasoning.rs      # reasoning normalizer
@@ -186,7 +185,7 @@ stravia/
 │           ├── turn_chain/       # SqlTurnChainStore 与集成回归
 │           ├── admission.rs      # Principal Concurrency Limit（private）
 │           ├── error.rs          # GatewayError taxonomy
-│           ├── router/           # TargetSelector / HealthRegistry / CacheAffinity
+│           ├── router/           # 选路装配(selection) / RouteAttemptPolicy / HealthRegistry / CacheAffinity / ContinuationLookup
 │           ├── interaction_observation/ # Interaction Observation deep module（crate-private）
 │           │   ├── mod.rs            # 小 interface：准入、事件、查询、SSE、Debug、清理、bundle
 │           │   ├── grouping.rs · writer.rs · query.rs · store.rs

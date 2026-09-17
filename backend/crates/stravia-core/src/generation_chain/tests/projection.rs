@@ -190,7 +190,7 @@ async fn hook_completion_does_not_reuse_an_earlier_target_or_upstream_response()
         lookup
             .prepare(
                 &owner,
-                crate::model_turn::ContinuationTarget {
+                crate::router::ContinuationTarget {
                     namespace: "provider:model",
                     protocol: OPEN_RESPONSES_2026_04_24,
                     actual_model: "model",
@@ -269,7 +269,7 @@ async fn chat_reasoning_prefix_restores_encrypted_effective_history() {
         lookup
             .prepare(
                 &owner,
-                crate::model_turn::ContinuationTarget {
+                crate::router::ContinuationTarget {
                     namespace: "provider:model",
                     protocol: OPEN_RESPONSES_2026_04_24,
                     actual_model: "model",
@@ -290,7 +290,7 @@ async fn chat_reasoning_prefix_restores_encrypted_effective_history() {
         lookup
             .prepare(
                 &owner,
-                crate::model_turn::ContinuationTarget {
+                crate::router::ContinuationTarget {
                     namespace: "different-account",
                     protocol: OPEN_RESPONSES_2026_04_24,
                     actual_model: "model",
@@ -475,7 +475,7 @@ async fn native_responses_replay_uses_whitelisted_provider_context_for_continuat
             .continuation_lookup()
             .prepare(
                 &owner,
-                crate::model_turn::ContinuationTarget {
+                crate::router::ContinuationTarget {
                     namespace: "provider:model",
                     protocol: OPEN_RESPONSES_2026_04_24,
                     actual_model: "model",
@@ -553,7 +553,7 @@ async fn encrypted_reasoning_replay_omits_gateway_projected_item_id() {
             .continuation_lookup()
             .prepare(
                 &owner,
-                crate::model_turn::ContinuationTarget {
+                crate::router::ContinuationTarget {
                     namespace: "different-account",
                     protocol: OPEN_RESPONSES_2026_04_24,
                     actual_model: "model",

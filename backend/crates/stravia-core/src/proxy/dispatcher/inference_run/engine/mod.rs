@@ -665,9 +665,7 @@ pub(super) async fn orchestrate(
         .model_cache
         .read()
         .await
-        .models
-        .iter()
-        .find(|model| model.model_id == request.model)
+        .resolve(&request.model)
         .map(|model| {
             (
                 model.id.clone(),

@@ -47,35 +47,37 @@ pub enum ConversationIdentity {
 
 #[derive(Debug, Clone, Default, sqlx::FromRow)]
 pub struct TargetSchedulingSnapshot {
-    pub target_key: String,
-    pub input_tokens_24h: Option<i64>,
-    pub output_tokens_24h: Option<i64>,
-    pub cache_read_tokens_24h: Option<i64>,
-    pub cache_write_tokens_24h: Option<i64>,
-    pub attempts_1h: i64,
-    pub successes_1h: i64,
-    pub successful_output_tokens_1h: Option<i64>,
-    pub successful_upstream_ms_1h: Option<i64>,
-    pub cost_input: Option<f64>,
-    pub cost_output: Option<f64>,
-    pub cost_cache_read: Option<f64>,
-    pub cost_cache_write: Option<f64>,
+    pub(super) target_key: String,
+    pub(super) input_tokens_24h: Option<i64>,
+    pub(super) output_tokens_24h: Option<i64>,
+    pub(super) cache_read_tokens_24h: Option<i64>,
+    pub(super) cache_write_tokens_24h: Option<i64>,
+    pub(super) attempts_1h: i64,
+    pub(super) successes_1h: i64,
+    pub(super) successful_output_tokens_1h: Option<i64>,
+    pub(super) successful_upstream_ms_1h: Option<i64>,
+    pub(super) cost_input: Option<f64>,
+    pub(super) cost_output: Option<f64>,
+    pub(super) cost_cache_read: Option<f64>,
+    pub(super) cost_cache_write: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct RouteSchedulingSnapshot {
-    pub targets: Vec<TargetSchedulingSnapshot>,
+    pub(super) targets: Vec<TargetSchedulingSnapshot>,
 }
 
+/// Evidence `router::selection` assembles for one selection. Fields stay
+/// router-private so callers can only obtain it through `RouteSelector`.
 #[derive(Debug, Clone)]
 pub struct RouteAttemptContext {
-    pub principal: String,
-    pub route_id: String,
-    pub conversation: Option<ConversationIdentity>,
-    pub conversation_affinity_target: Option<String>,
-    pub cache_affinity_target: Option<String>,
-    pub estimated_uncached_input_tokens: u64,
-    pub now_ms: u64,
+    pub(super) principal: String,
+    pub(super) route_id: String,
+    pub(super) conversation: Option<ConversationIdentity>,
+    pub(super) conversation_affinity_target: Option<String>,
+    pub(super) cache_affinity_target: Option<String>,
+    pub(super) estimated_uncached_input_tokens: u64,
+    pub(super) now_ms: u64,
 }
 
 #[derive(Clone)]
@@ -119,7 +121,15 @@ impl RoutePolicyState {
         self.origin.elapsed().as_millis().min(u64::MAX as u128) as u64
     }
 
-    pub fn record_success(&self, context: &RouteAttemptContext, target_key: &str) {
+    /// The single success path: clears the target's health failures, releases
+    /// the in-flight input reservation, and stores conversation affinity.
+    pub fn record_success(
+        &self,
+        health: &crate::router::health::HealthRegistry,
+        context: &RouteAttemptContext,
+        target_key: &str,
+    ) {
+        health.record_success(target_key);
         let mut inner = self.inner.lock();
         release_reservation(
             &mut inner.in_flight_input,
@@ -184,7 +194,9 @@ pub struct RouteAttemptPolicy {
 }
 
 impl RouteAttemptPolicy {
-    pub fn new(
+    /// Construction is router-private: callers receive a ready policy from
+    /// `RouteSelector::select` and only drive it.
+    pub(super) fn new(
         strategy: &str,
         targets: &[Target],
         context: RouteAttemptContext,
@@ -270,6 +282,16 @@ impl RouteAttemptPolicy {
         }
     }
 
+    /// The evidence context this policy was assembled with.
+    pub fn context(&self) -> &RouteAttemptContext {
+        &self.context
+    }
+
+    /// The shared cooldown/reservation/affinity state behind this policy.
+    pub fn state(&self) -> &RoutePolicyState {
+        &self.state
+    }
+
     pub fn retain(&mut self, predicate: impl FnMut(&SelectedTarget) -> bool) {
         self.ordered = self
             .ordered
@@ -311,17 +333,6 @@ impl RouteAttemptPolicy {
             return Some(target);
         }
         None
-    }
-
-    pub fn record_success(
-        &mut self,
-        health: &crate::router::health::HealthRegistry,
-        target: &SelectedTarget,
-    ) {
-        let key = selected_target_key(target);
-        health.record_success(&key);
-        self.state.record_success(&self.context, &key);
-        self.current_target_key = None;
     }
 
     pub fn skip_current(&mut self) {
@@ -570,7 +581,7 @@ fn release_reservation(reservations: &mut HashMap<String, u64>, key: &str, amoun
 }
 
 pub fn conversation_identity(request: &AiRequest) -> Option<ConversationIdentity> {
-    crate::model_turn::parent_id_from_request(request)
+    super::continuation::parent_id_from_request(request)
         .map(ConversationIdentity::GenerationParent)
         .or_else(|| {
             let Some(ProtocolExt::OpenResponses(extension)) = request.ext.as_ref() else {
@@ -739,18 +750,7 @@ mod tests {
         let identity = ConversationIdentity::PromptCacheKey("chat-a".into());
         let mut first_context = context(0);
         first_context.conversation = Some(identity.clone());
-        let mut first = RouteAttemptPolicy::new(
-            "traffic_equalization",
-            &targets,
-            first_context,
-            &RouteSchedulingSnapshot::default(),
-            state.clone(),
-        );
-        let conversation = targets
-            .iter()
-            .find(|target| target.provider_id == "conversation")
-            .unwrap();
-        first.record_success(&health, &super::to_selected(conversation));
+        state.record_success(&health, &first_context, "conversation:model");
 
         let mut next_context = context(1);
         next_context.conversation = Some(identity);
@@ -797,14 +797,7 @@ mod tests {
         let mut recorded_context = context(0);
         recorded_context.conversation =
             Some(ConversationIdentity::GenerationParent("parent-a".into()));
-        let mut recorded = RouteAttemptPolicy::new(
-            "traffic_equalization",
-            &targets,
-            recorded_context,
-            &RouteSchedulingSnapshot::default(),
-            state.clone(),
-        );
-        recorded.record_success(&health, &to_selected(&targets[1]));
+        state.record_success(&health, &recorded_context, "affinity:model");
 
         for (principal, route_id, identity) in [
             (
