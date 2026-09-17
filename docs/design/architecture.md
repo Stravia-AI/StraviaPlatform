@@ -1072,7 +1072,7 @@ CREATE TABLE provider_oauth_credentials (
 );
 ```
 
-Migration 34 在 SQLite/PostgreSQL 都先删除旧 `request_logs` 及其行，不做 Generation Chain backfill，再创建等价 Observation schema 与 sequence/index。升级后没有 legacy logs API、别名或 dual-write。`UsageStatsStore` 的 overview/hourly/model/provider/API-key 统计从 `model_turn_observations` 与 `target_attempt_observations` 计算；每个真实 attempt 的 provider-reported usage 只计一次，任何适用 attempt 缺某维时该聚合维度保持 unknown，而不是估算或补零。
+Migration 34 在 SQLite/PostgreSQL 都先删除旧 `request_logs` 及其行，不做 Generation Chain backfill，再创建等价 Observation schema 与 sequence/index。升级后没有 legacy logs API、别名或 dual-write。`UsageStatsStore` 的 overview/series/model/provider/API-key 统计从 `model_turn_observations` 与 `target_attempt_observations` 计算；每个真实 attempt 的 provider-reported usage 只计一次，任何适用 attempt 缺某维时该聚合维度保持 unknown，而不是估算或补零。
 
 Observation metadata 与数据库 manifest 共用 `log_retention_days`（默认 7 天）；大 payload 位于 data directory 下的托管 segment，不进入数据库 WAL。expiry 与 Clear History 都跳过 active Interaction；Trace 先 tombstone、幂等删除目录，再删除 owner rows，启动 reconciliation 继续处理 tombstone 与 orphan directory。
 

@@ -7,7 +7,7 @@ use tokio::sync::RwLock;
 use crate::db::models::{
     ApiKeyStats, CreateProviderRecord, DEFAULT_FIRST_TOKEN_TIMEOUT_MS, DEFAULT_TARGET_COOLDOWN_MS,
     DEFAULT_TARGET_PRIORITY, DEFAULT_TARGET_RETRY_BUDGET, ModelStats, OAuthCredential, Provider,
-    ProviderStats, PutRoute, Route, StatsHourly, StatsOverview, Target, UpdateProvider,
+    ProviderStats, PutRoute, Route, StatsOverview, StatsSeries, Target, UpdateProvider,
     UpsertOAuthCredential,
 };
 use crate::provider_models::{
@@ -376,7 +376,12 @@ impl UsageStatsStore for MemoryStorage {
         Ok(StatsOverview::default())
     }
 
-    async fn stats_hourly(&self, _hours: i64) -> anyhow::Result<Vec<StatsHourly>> {
+    async fn stats_series(
+        &self,
+        _hours: i64,
+        _bucket_ms: i64,
+        _tz_offset_ms: i64,
+    ) -> anyhow::Result<Vec<StatsSeries>> {
         Ok(vec![])
     }
 

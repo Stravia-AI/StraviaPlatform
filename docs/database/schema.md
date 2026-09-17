@@ -492,7 +492,7 @@ Migration `0047_observation_tail_sources` adds fingerprint and pending-tool inde
 
 ### Usage statistics and retention
 
-`UsageStatsStore` computes overview, hourly, model, provider, API-key, and Route-scheduling projections directly from `model_turn_observations` and `target_attempt_observations`; there is no separate `usage_stats` table. Provider-reported values are counted once per attempt, and a dimension remains NULL when any applicable attempt is unknown. Route scheduling uses 24-hour token totals and one-hour attempt success/latency from Target attempts; a failed refresh returns the last successful in-process snapshot marked stale.
+`UsageStatsStore` computes overview, time-series, model, provider, API-key, and Route-scheduling projections directly from `model_turn_observations` and `target_attempt_observations`; there is no separate `usage_stats` table. Provider-reported values are counted once per attempt, and a dimension remains NULL when any applicable attempt is unknown. Route scheduling uses 24-hour token totals and one-hour attempt success/latency from Target attempts; a failed refresh returns the last successful in-process snapshot marked stale.
 
 Observation rows, Rejected Requests, events, manifests, and managed Trace segments use the `log_retention_days` setting, default seven days. Expiry and Clear History preserve `running` and `waiting_client` Interactions; Clear History reports them as skipped. Trace deletion is tombstoned and reconciled before owning rows are removed.
 

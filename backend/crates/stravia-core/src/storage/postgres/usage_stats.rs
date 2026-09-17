@@ -102,19 +102,25 @@ impl UsageStatsStore for PostgresUsageStatsStore {
         .await?)
     }
 
-    async fn stats_hourly(&self, hours: i64) -> anyhow::Result<Vec<StatsHourly>> {
+    async fn stats_series(
+        &self,
+        hours: i64,
+        bucket_ms: i64,
+        tz_offset_ms: i64,
+    ) -> anyhow::Result<Vec<StatsSeries>> {
         let cutoff = cutoff_ms(Some(hours));
-        Ok(sqlx::query_as::<_, StatsHourly>(
+        let bucket_ms = bucket_ms.max(1);
+        Ok(sqlx::query_as::<_, StatsSeries>(
             "WITH turns AS (
-                 SELECT *, to_char(date_trunc('hour', to_timestamp(started_at / 1000.0) AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:00:00') AS hour
+                 SELECT *, (started_at + $2) / $3 * $3 - $2 AS bucket_start
                  FROM model_turn_observations WHERE started_at >= $1
              ), turn_stats AS (
-                 SELECT hour, COUNT(*)::BIGINT AS request_count,
+                 SELECT bucket_start, COUNT(*)::BIGINT AS request_count,
                         SUM(CASE WHEN status <> 'completed' THEN 1 ELSE 0 END)::BIGINT AS error_count,
                         AVG((finished_at - started_at)::FLOAT8) FILTER (WHERE finished_at IS NOT NULL) AS avg_duration_ms
-                 FROM turns GROUP BY hour
+                 FROM turns GROUP BY bucket_start
              ), attempt_stats AS (
-                 SELECT t.hour,
+                 SELECT t.bucket_start,
                         CASE WHEN COUNT(*) > 0
                                   AND COUNT(a.input_tokens) = COUNT(*)
                                   AND COUNT(a.cache_read_tokens) = COUNT(*)
@@ -124,15 +130,18 @@ impl UsageStatsStore for PostgresUsageStatsStore {
                         CASE WHEN COUNT(*) > 0 AND COUNT(a.cache_write_tokens) = COUNT(*) THEN SUM(a.cache_write_tokens)::BIGINT END AS total_cache_write_tokens,
                         CASE WHEN COUNT(*) > 0 AND COUNT(a.reasoning_tokens) = COUNT(*) THEN SUM(a.reasoning_tokens)::BIGINT END AS total_reasoning_tokens,
                         AVG(a.first_token_ms::FLOAT8) AS avg_first_token_ms
-                 FROM turns t JOIN target_attempt_observations a ON a.model_turn_id = t.id GROUP BY t.hour
+                 FROM turns t JOIN target_attempt_observations a ON a.model_turn_id = t.id GROUP BY t.bucket_start
              )
-             SELECT t.hour, t.request_count, t.error_count,
+             SELECT t.bucket_start, t.request_count, t.error_count,
                     a.total_input_tokens, a.total_output_tokens, a.total_cache_read_tokens,
                     a.total_cache_write_tokens, a.total_reasoning_tokens,
                     t.avg_duration_ms, a.avg_first_token_ms
-             FROM turn_stats t LEFT JOIN attempt_stats a ON a.hour = t.hour ORDER BY t.hour ASC",
+             FROM turn_stats t LEFT JOIN attempt_stats a ON a.bucket_start = t.bucket_start
+             ORDER BY t.bucket_start ASC",
         )
         .bind(cutoff)
+        .bind(tz_offset_ms)
+        .bind(bucket_ms)
         .fetch_all(&self.pool)
         .await?)
     }
@@ -357,11 +366,12 @@ mod tests {
                 assert_eq!(overview.total_reasoning_tokens, Some(2));
                 assert_eq!(store.stats_overview(None).await?.total_input_tokens, None);
 
-                let hourly = store.stats_hourly(1).await?;
-                assert_eq!(hourly.len(), 1);
-                assert_eq!(hourly[0].total_input_tokens, Some(7));
-                assert_eq!(hourly[0].total_output_tokens, Some(6));
-                assert_eq!(hourly[0].total_reasoning_tokens, Some(2));
+                let series = store.stats_series(1, 3_600_000, 0).await?;
+                assert_eq!(series.len(), 1);
+                assert_eq!(series[0].total_input_tokens, Some(7));
+                assert_eq!(series[0].total_output_tokens, Some(6));
+                assert_eq!(series[0].total_reasoning_tokens, Some(2));
+                assert_eq!(series[0].bucket_start % 3_600_000, 0);
 
                 let models = store.stats_by_model(Some(1)).await?;
                 assert_eq!(models.len(), 1);

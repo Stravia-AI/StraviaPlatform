@@ -22,6 +22,16 @@ const timeFormatters: Record<Locale, Intl.DateTimeFormat> = {
   }),
 }
 
+const minuteTimeFormatters: Record<Locale, Intl.DateTimeFormat> = {
+  'en-US': new Intl.DateTimeFormat('en-US', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }),
+  'zh-CN': new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }),
+}
+
+const monthDayFormatters: Record<Locale, Intl.DateTimeFormat> = {
+  'en-US': new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' }),
+  'zh-CN': new Intl.DateTimeFormat('zh-CN', { month: 'short', day: 'numeric' }),
+}
+
 const numberFormatters: Record<Locale, Intl.NumberFormat> = {
   'en-US': new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }),
   'zh-CN': new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 2 }),
@@ -77,6 +87,18 @@ export function formatTime(value: DateInput, locale = getLocale()): string {
 export function formatLogTime(value: DateInput, locale = getLocale()): string {
   const date = asDate(value)
   return date ? `${dateFormatters[locale].format(date)} ${timeFormatters[locale].format(date)}` : '–'
+}
+
+/** “9月12日” / “Sep 12” 式短日期，用于热力格标签与提示。 */
+export function formatMonthDay(value: DateInput, locale = getLocale()): string {
+  const date = asDate(value)
+  return date ? monthDayFormatters[locale].format(date) : '–'
+}
+
+/** 不带秒的 HH:mm，用于亚日粒度的时间点。 */
+export function formatMinuteTime(value: DateInput, locale = getLocale()): string {
+  const date = asDate(value)
+  return date ? minuteTimeFormatters[locale].format(date) : '–'
 }
 
 export function formatDuration(ms: number | null | undefined, locale = getLocale()): string {

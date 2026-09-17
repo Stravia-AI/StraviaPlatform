@@ -16,9 +16,10 @@ import {
   formatPercent,
   formatTime,
 } from '$lib/format'
-import { buildLatencyChart } from '$lib/stats-chart'
+import { buildActivityGrid, buildLatencyChart, localTzOffsetMs } from '$lib/stats-chart'
 import type { ApiKeyStats, ProviderStats } from '$lib/types'
 import MetricStrip from '$lib/components/metric-strip.svelte'
+import TokenActivityGrid from '$lib/components/token-activity-grid.svelte'
 import PageHeader from '$lib/components/page-header.svelte'
 import StatusIndicator from '$lib/components/status-indicator.svelte'
 import { Button } from '$lib/components/ui/button'
@@ -35,9 +36,19 @@ const overviewQuery = createQuery(() => ({
   queryFn: () => admin.stats.overview(hoursNumber),
   refetchInterval: 10_000,
 }))
-const hourlyQuery = createQuery(() => ({
-  queryKey: ['stats-hourly', hoursNumber],
-  queryFn: () => admin.stats.hourly(hoursNumber),
+const HOUR_MS = 3_600_000
+// 方格粒度跟随时间范围：6h→15 分钟，24h→1 小时，3 天→6 小时，7 天→1 天。
+const activityBucketSeconds = $derived(
+  hoursNumber <= 6 ? 900 : hoursNumber <= 24 ? 3_600 : hoursNumber <= 72 ? 21_600 : 86_400,
+)
+const seriesQuery = createQuery(() => ({
+  queryKey: ['stats-series', hoursNumber, 3_600],
+  queryFn: () => admin.stats.series(hoursNumber, 3_600, localTzOffsetMs() / 1000),
+  refetchInterval: 30_000,
+}))
+const activityQuery = createQuery(() => ({
+  queryKey: ['stats-series', hoursNumber, activityBucketSeconds],
+  queryFn: () => admin.stats.series(hoursNumber, activityBucketSeconds, localTzOffsetMs() / 1000),
   refetchInterval: 30_000,
 }))
 const providersQuery = createQuery(() => ({
@@ -134,18 +145,19 @@ const apiKeyStatsColumns = apiKeyStatsColumnHelper.columns([
   }),
 ])
 const modelStats = $derived(modelsQuery.data ?? [])
-const hourlyStats = $derived(hourlyQuery.data ?? [])
-const tokenChart = $derived(
-  hourlyStats.map((item) => ({
-    bucket: formatBucket(item.hour),
-    input: item.total_input_tokens,
-    output: item.total_output_tokens,
-    cacheRead: item.total_cache_read_tokens,
-    cacheWrite: item.total_cache_write_tokens,
-  })),
+const seriesStats = $derived(seriesQuery.data ?? [])
+const activityGrid = $derived(
+  buildActivityGrid(activityQuery.data ?? [], {
+    endMs: Date.now(),
+    spanMs: hoursNumber * HOUR_MS,
+    bucketMs: activityBucketSeconds * 1_000,
+    tzOffsetMs: localTzOffsetMs(),
+  }),
 )
-const latencyChart = $derived(buildLatencyChart(hourlyStats, formatBucket))
-const errorChart = $derived(hourlyStats.map((item) => ({ bucket: formatBucket(item.hour), errors: item.error_count })))
+const latencyChart = $derived(buildLatencyChart(seriesStats, formatBucket, HOUR_MS))
+const errorChart = $derived(
+  seriesStats.map((item) => ({ bucket: formatBucket(item.bucket_start), errors: item.error_count })),
+)
 const modelTotal = $derived(modelStats.slice(0, 6).reduce((total, item) => total + item.request_count, 0))
 const metrics = $derived([
   { label: m.common_total_requests(), value: formatCompactCount(overview?.total_requests ?? 0) },
@@ -156,29 +168,38 @@ const metrics = $derived([
   { label: m.common_avg_latency(), value: formatDuration(overview?.avg_duration_ms) },
 ])
 const anyError = $derived(
-  overviewQuery.error ?? hourlyQuery.error ?? providersQuery.error ?? apiKeysQuery.error ?? modelsQuery.error,
+  overviewQuery.error ??
+    seriesQuery.error ??
+    activityQuery.error ??
+    providersQuery.error ??
+    apiKeysQuery.error ??
+    modelsQuery.error,
 )
 // 先读取每个查询状态，避免短路跳过 TanStack 属性订阅后错过先完成的查询。
 const analyticsPending = $derived.by(() => {
   const overview = overviewQuery.isPending
-  const hourly = hourlyQuery.isPending
+  const series = seriesQuery.isPending
+  const activity = activityQuery.isPending
   const providers = providersQuery.isPending
   const apiKeys = apiKeysQuery.isPending
   const models = modelsQuery.isPending
-  return overview || hourly || providers || apiKeys || models
+  return overview || series || activity || providers || apiKeys || models
 })
 const analyticsFetching = $derived.by(() => {
   const overview = overviewQuery.isFetching
-  const hourly = hourlyQuery.isFetching
+  const series = seriesQuery.isFetching
+  const activity = activityQuery.isFetching
   const providers = providersQuery.isFetching
   const apiKeys = apiKeysQuery.isFetching
   const models = modelsQuery.isFetching
-  return overview || hourly || providers || apiKeys || models
+  return overview || series || activity || providers || apiKeys || models
 })
 const failedAnalyticsLabels = $derived.by(() => {
   const labels: string[] = []
   if (overviewQuery.error) labels.push(m.stats_summary())
-  if (hourlyQuery.error) labels.push(m.stats_time_series())
+  if (seriesQuery.error) labels.push(m.stats_time_series())
+  if (activityQuery.error && activityQuery.error !== seriesQuery.error)
+    labels.push(m.stats_token_activity())
   if (modelsQuery.error) labels.push(m.common_models())
   if (providersQuery.error) labels.push(m.common_model_services())
   if (apiKeysQuery.error) labels.push(m.app_shell_nav_api_keys())
@@ -193,14 +214,15 @@ function getApiKeyStatsRowId(apiKey: ApiKeyStats): string {
   return apiKey.api_key_id
 }
 
-function formatBucket(value: string): string {
+function formatBucket(value: number): string {
   return hoursNumber <= 24 ? formatTime(value) : formatLogTime(value)
 }
 
 function retryAll(): void {
   void Promise.all([
     overviewQuery.refetch(),
-    hourlyQuery.refetch(),
+    seriesQuery.refetch(),
+    activityQuery.refetch(),
     providersQuery.refetch(),
     apiKeysQuery.refetch(),
     modelsQuery.refetch(),
@@ -288,37 +310,25 @@ function retryAll(): void {
     {/if}
 
     <div class="grid gap-6 min-[1280px]:grid-cols-12">
-      <section class="route-section flex flex-col min-[1280px]:col-span-7" aria-labelledby="token-trend-title">
+      <section class="route-section flex flex-col min-[1280px]:col-span-7" aria-labelledby="token-activity-title">
         <div class="route-section-header">
           <div>
-            <h2 id="token-trend-title" class="route-section-title">
-              {m.stats_token_usage_over_time()}
+            <h2 id="token-activity-title" class="route-section-title">
+              {m.stats_token_activity()}
             </h2>
             <p class="route-section-description">
               {m.stats_input_output_totals_each_time_period()}
             </p>
           </div>
         </div>
-        {#if hourlyQuery.error && hourlyQuery.data === undefined}
-          {@render queryFailure(hourlyQuery.error, hourlyQuery.refetch, hourlyQuery.isFetching)}
-        {:else if hasTraffic && tokenChart.length > 0}<div
-            class="min-h-80 min-w-0 flex-1"
-            aria-label={m.stats_token_usage_chart()}>
-            <BarChart
-              data={tokenChart}
-              x={(item) => item.bucket}
-              series={[
-                { key: 'input', label: m.stats_input(), color: 'var(--chart-1)' },
-                { key: 'output', label: m.stats_output(), color: 'var(--chart-3)' },
-                { key: 'cacheRead', label: m.stats_cache_read_tokens(), color: 'var(--chart-2)' },
-                { key: 'cacheWrite', label: m.stats_cache_write_tokens(), color: 'var(--chart-4)' },
-              ]}
-              seriesLayout="stack"
-              props={{ xAxis: { ticks: 4 } }} />
-          </div>{:else}<Empty.Root class="min-h-80 flex-1 border-y"
+        {#if activityQuery.error && activityQuery.data === undefined}
+          {@render queryFailure(activityQuery.error, activityQuery.refetch, activityQuery.isFetching)}
+        {:else if hasTraffic}<div class="min-w-0 flex-1 content-center overflow-x-auto py-2">
+            <TokenActivityGrid model={activityGrid} />
+          </div>{:else}<Empty.Root class="min-h-40 flex-1 border-y"
             ><Empty.Header
               ><Empty.Description
-                >{hasTraffic ? m.stats_no_token_usage_range() : m.stats_send_first_request()}</Empty.Description
+                >{m.stats_send_first_request()}</Empty.Description
               ></Empty.Header
             ></Empty.Root
           >{/if}
@@ -338,8 +348,8 @@ function retryAll(): void {
               <span>{formatDurationSeconds(overview?.avg_duration_ms)}</span>
             </div>
           </div>
-          {#if hourlyQuery.error && hourlyQuery.data === undefined}
-            {@render queryFailure(hourlyQuery.error, hourlyQuery.refetch, hourlyQuery.isFetching)}
+          {#if seriesQuery.error && seriesQuery.data === undefined}
+            {@render queryFailure(seriesQuery.error, seriesQuery.refetch, seriesQuery.isFetching)}
           {:else if hasTraffic && latencyChart.length > 0}<div
               class="h-36 min-w-0"
               aria-label={m.overview_latency_chart()}>
@@ -369,8 +379,8 @@ function retryAll(): void {
             </div>
             <span class="font-technical text-xs text-destructive tabular-nums">{overview?.error_count ?? '–'}</span>
           </div>
-          {#if hourlyQuery.error && hourlyQuery.data === undefined}
-            {@render queryFailure(hourlyQuery.error, hourlyQuery.refetch, hourlyQuery.isFetching)}
+          {#if seriesQuery.error && seriesQuery.data === undefined}
+            {@render queryFailure(seriesQuery.error, seriesQuery.refetch, seriesQuery.isFetching)}
           {:else if hasTraffic && errorChart.length > 0}<div class="h-36 min-w-0">
               <BarChart
                 data={errorChart}

@@ -18,20 +18,32 @@ pub(super) async fn stats_overview(
 }
 
 #[derive(Deserialize)]
-pub(super) struct HourlyParams {
+pub(super) struct SeriesParams {
     #[serde(default = "default_hours")]
     hours: i32,
+    #[serde(default = "default_bucket")]
+    bucket: i32,
+    #[serde(default)]
+    tz_offset: i32,
 }
 
 pub(super) fn default_hours() -> i32 {
     24
 }
 
-pub(super) async fn stats_hourly(
+pub(super) fn default_bucket() -> i32 {
+    3600
+}
+
+pub(super) async fn stats_series(
     State(gw): State<Gateway>,
-    Query(params): Query<HourlyParams>,
+    Query(params): Query<SeriesParams>,
 ) -> impl IntoResponse {
-    match gw.admin().get_stats_hourly(params.hours).await {
+    match gw
+        .admin()
+        .get_stats_series(params.hours, params.bucket, params.tz_offset)
+        .await
+    {
         Ok(v) => Json(serde_json::json!({ "data": v })).into_response(),
         Err(e) => err(e),
     }

@@ -15,8 +15,9 @@ export interface StatsOverview {
   error_count: number
 }
 
-export interface StatsHourly {
-  hour: string
+export interface StatsSeries {
+  /** Bucket 起点（epoch ms），已按 bucket 粒度与调用方时区对齐。 */
+  bucket_start: number
   request_count: number
   error_count: number
   total_input_tokens: number | null
