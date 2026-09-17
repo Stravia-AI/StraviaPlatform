@@ -43,6 +43,8 @@ export interface ProviderStats {
   request_count: number
   error_count: number
   avg_duration_ms: number | null
+  /** 已完成请求的输出 Token 总速（tok/s）；未完整报告输出或耗时为 null。 */
+  avg_output_tps: number | null
 }
 
 export interface ApiKeyStats {

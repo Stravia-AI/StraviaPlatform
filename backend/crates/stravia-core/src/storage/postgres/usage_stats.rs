@@ -182,7 +182,24 @@ impl UsageStatsStore for PostgresUsageStatsStore {
             "SELECT COALESCE(NULLIF(provider_name, ''), provider_id) AS provider,
                     COUNT(*)::BIGINT AS request_count,
                     SUM(CASE WHEN status <> 'completed' THEN 1 ELSE 0 END)::BIGINT AS error_count,
-                    AVG(duration_ms::FLOAT8) AS avg_duration_ms
+                    AVG(duration_ms::FLOAT8) AS avg_duration_ms,
+                    CASE WHEN SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) > 0
+                              AND SUM(CASE WHEN status = 'completed' AND (output_tokens IS NULL OR duration_ms IS NULL)
+                                           THEN 1 ELSE 0 END) = 0
+                              AND SUM(CASE WHEN status = 'completed'
+                                           THEN CASE WHEN first_token_ms IS NOT NULL
+                                                          AND duration_ms - first_token_ms >= 50
+                                                     THEN duration_ms - first_token_ms
+                                                     ELSE duration_ms END
+                                      END) > 0
+                         THEN SUM(CASE WHEN status = 'completed' THEN output_tokens END)::FLOAT8 * 1000.0
+                              / SUM(CASE WHEN status = 'completed'
+                                         THEN CASE WHEN first_token_ms IS NOT NULL
+                                                        AND duration_ms - first_token_ms >= 50
+                                                   THEN duration_ms - first_token_ms
+                                                   ELSE duration_ms END
+                                    END)::FLOAT8
+                    END AS avg_output_tps
              FROM target_attempt_observations
              WHERE ($1::BIGINT IS NULL OR started_at >= $1)
              GROUP BY COALESCE(NULLIF(provider_name, ''), provider_id)
@@ -384,6 +401,10 @@ mod tests {
                 assert_eq!(api_keys[0].total_input_tokens, Some(7));
                 assert_eq!(api_keys[0].total_output_tokens, Some(6));
                 assert_eq!(api_keys[0].reasoning_tokens, Some(2));
+
+                let providers = store.stats_by_provider(Some(1)).await?;
+                assert_eq!(providers.len(), 1);
+                assert_eq!(providers[0].avg_output_tps, Some(300.0));
 
                 let raw_input: Option<i64> = sqlx::query_scalar(
                     "SELECT SUM(input_tokens)::BIGINT FROM target_attempt_observations WHERE model_turn_id='recent'",
