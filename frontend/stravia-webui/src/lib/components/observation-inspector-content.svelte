@@ -101,10 +101,10 @@ function eventGroups(events: ObservationEvent[], compact: boolean): ObservationE
 
 function usageRows(run: RunDetail): ReadonlyArray<readonly [string, number | null]> {
   return [
-    [m.observation_usage_input(), run.usage.input_tokens],
-    [m.observation_usage_output(), run.usage.output_tokens],
-    [m.observation_usage_cache_read(), run.usage.cache_read_tokens],
-    [m.observation_usage_cache_write(), run.usage.cache_write_tokens],
+    ['IN', run.usage.input_tokens],
+    ['OUT', run.usage.output_tokens],
+    ['C·R', run.usage.cache_read_tokens],
+    ['C·W', run.usage.cache_write_tokens],
   ]
 }
 </script>

@@ -1,6 +1,7 @@
 <script lang="ts">
 import { Pagination as PaginationPrimitive } from 'bits-ui'
 import ChevronLeftIcon from '@lucide/svelte/icons/chevron-left'
+import * as m from '$lib/paraglide/messages.js'
 import { buttonVariants } from '$lib/components/ui/button/index.js'
 import { cn } from '$lib/utils.js'
 
@@ -16,6 +17,6 @@ let { ref = $bindable(null), class: className, children, ...restProps }: Paginat
     {@render children()}
   {:else}
     <ChevronLeftIcon data-icon="inline-start" />
-    <span class="cn-pagination-previous-text hidden sm:block">Previous</span>
+    <span class="cn-pagination-previous-text hidden sm:block">{m.common_previous()}</span>
   {/if}
 </PaginationPrimitive.PrevButton>

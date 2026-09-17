@@ -489,10 +489,10 @@ function retryAll(): void {
                 <div class="min-w-0">
                   <p class="truncate font-medium">{apiKey.api_key_name || apiKey.api_key_id}</p>
                   <p class="font-technical mt-1 text-xs text-muted-foreground">
-                    {m.observation_usage_input()} {formatCompactCount(apiKey.total_input_tokens)} ·
-                    {m.observation_usage_output()} {formatCompactCount(apiKey.total_output_tokens)} ·
-                    {m.observation_usage_cache_read()} {formatCompactCount(apiKey.cache_read_tokens)} ·
-                    {m.observation_usage_cache_write()} {formatCompactCount(apiKey.cache_write_tokens)}
+                    IN {formatCompactCount(apiKey.total_input_tokens)} ·
+                    OUT {formatCompactCount(apiKey.total_output_tokens)} ·
+                    C·R {formatCompactCount(apiKey.cache_read_tokens)} ·
+                    C·W {formatCompactCount(apiKey.cache_write_tokens)}
                   </p>
                   <p class="font-technical mt-1 text-xs text-muted-foreground">{formatLogTime(apiKey.last_used_at)}</p>
                 </div>

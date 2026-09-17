@@ -981,7 +981,7 @@ test.describe('Interaction Observation canvas', () => {
     await page.goto('/logs')
     await expect.poll(() => fixture.forestRequests.at(-1)?.searchParams.get('min_tokens')).toBe('10000')
     await page.getByRole('button', { name: 'Filters' }).click()
-    const slider = page.getByRole('slider', { name: 'Minimum chain tokens' })
+    const slider = page.getByRole('slider', { name: 'Minimum tokens per chain' })
     await expect(slider).toBeVisible()
     const track = page.locator('[data-slot="slider-track"]')
     await expect(track).toBeVisible()
@@ -1027,7 +1027,7 @@ test.describe('Interaction Observation canvas', () => {
     await node(page, 'Cinder', 'running').getByRole('heading', { name: 'Cinder', exact: true }).click()
     const inspector = page.getByRole('complementary', { name: 'Observation details' })
     await expect(
-      inspector.getByRole('button', { name: 'This chain moved to a newer time page · Open latest', exact: true }),
+      inspector.getByRole('button', { name: 'This chain moved to a newer time range · Open latest', exact: true }),
     ).toBeVisible()
     await expect(inspector.getByRole('log', { name: 'Conversation' })).toContainText('Historical chain advanced')
     expect(fixture.detailRequests).toHaveLength(1)
@@ -1284,7 +1284,7 @@ test.describe('Interaction Observation canvas', () => {
     await expect(inspector.getByText('HTTP 400', { exact: true })).toBeVisible()
     await expect(inspector.getByText('Not captured', { exact: true })).toBeVisible()
     await expect(inspector.getByText('Request rejected', { exact: true })).toBeVisible()
-    await expect(inspector.getByRole('button', { name: 'Open interaction node', exact: true })).toHaveCount(0)
+    await expect(inspector.getByRole('button', { name: 'Open interaction', exact: true })).toHaveCount(0)
     await expect(inspector.getByRole('button', { name: 'Debug bundle', exact: true })).toBeVisible()
     await inspector.getByRole('button', { name: 'Close', exact: true }).click()
     await expect(inspector).toHaveCount(0)
@@ -1361,7 +1361,7 @@ test.describe('Interaction Observation canvas', () => {
     await expect(inspector.getByText('Upstream request timed out after 4800 ms', { exact: true })).toBeVisible()
     await expect(inspector.getByText('Partial', { exact: true })).toBeVisible()
     await expect(inspector.getByText('Trace stopped when the process restarted.', { exact: true })).toBeVisible()
-    await inspector.getByRole('button', { name: 'Open interaction node', exact: true }).click()
+    await inspector.getByRole('button', { name: 'Open interaction', exact: true }).click()
     await expect(page.getByRole('tab', { name: 'Interaction Chains', exact: true })).toHaveAttribute(
       'aria-selected',
       'true',
@@ -1442,7 +1442,7 @@ test.describe('Interaction Observation canvas', () => {
     await expect(boundaryRows.filter({ hasText: 'Unauthenticated' })).toHaveCount(1)
     await expect(boundaryRows.filter({ hasText: 'codex' })).toHaveCount(1)
 
-    await page.getByRole('button', { name: 'Refresh and anchor a new current window' }).click()
+    await page.getByRole('button', { name: 'Refresh and pin the latest time range' }).click()
     await expect(table.getByRole('button')).toHaveCount(30)
     await expect(page.getByText('30 / 31', { exact: true })).toBeVisible()
     await expect(page.getByRole('button', { name: 'Load more', exact: true })).toBeInViewport()
@@ -1477,7 +1477,7 @@ test.describe('Interaction Observation canvas', () => {
       else await route.fallback()
     }
     await page.route('**/api/v1/observations/failed-requests?**', failList)
-    await page.getByRole('button', { name: 'Refresh and anchor a new current window' }).click()
+    await page.getByRole('button', { name: 'Refresh and pin the latest time range' }).click()
     const listError = page.getByRole('alert').filter({ hasText: 'Failed requests unavailable' })
     await expect(listError).toBeVisible()
     await expect(page.getByText('No failed requests', { exact: true })).toHaveCount(0)
@@ -1488,7 +1488,7 @@ test.describe('Interaction Observation canvas', () => {
     await page.unroute('**/api/v1/observations/failed-requests?**', failList)
 
     const release = fixture.holdNextFailureRead()
-    await page.getByRole('button', { name: 'Refresh and anchor a new current window' }).click()
+    await page.getByRole('button', { name: 'Refresh and pin the latest time range' }).click()
     await expect(page.getByText('Loading failed requests…', { exact: true })).toBeVisible()
     await expect(page.getByText('No failed requests', { exact: true })).toHaveCount(0)
     await expect(table.getByRole('button')).toHaveCount(0)
@@ -1733,7 +1733,7 @@ test.describe('Interaction Observation canvas', () => {
     await installObservationFixture(page, false, true)
     await page.goto('/logs')
     const atlas = node(page, 'Atlas', 'completed')
-    const cardUsage = atlas.getByLabel('Confirmed usage')
+    const cardUsage = atlas.getByLabel('Reported usage')
     await expect(cardUsage.getByTitle('IN')).toContainText('920')
     await expect(cardUsage.getByTitle('OUT')).toContainText('86')
     await expect(cardUsage.getByTitle('C·R')).toContainText('320')
@@ -1750,7 +1750,7 @@ test.describe('Interaction Observation canvas', () => {
     await expect(inspector.getByText('run-interaction-atlas', { exact: true })).toBeHidden()
     await expect(inspector.getByText('retained diagnostic record', { exact: false })).toBeHidden()
     await inspector.getByRole('tab', { name: 'Diagnostics', exact: true }).click()
-    const runUsage = inspector.getByLabel('Confirmed usage')
+    const runUsage = inspector.getByLabel('Reported usage')
     await expect(runUsage).toContainText('IN920')
     await expect(runUsage).toContainText('OUT86')
     await expect(runUsage).toContainText('C·R320')
@@ -2521,12 +2521,12 @@ test.describe('Interaction Observation canvas', () => {
     const fixture = await installObservationFixture(page, true)
     await page.goto('/logs')
 
-    await expect(page.getByText('1 / 3 roots', { exact: true })).toBeVisible()
+    await expect(page.getByText('1 / 3 chains', { exact: true })).toBeVisible()
     await expect.poll(() => fixture.forestRequests.some((url) => url.searchParams.has('cursor'))).toBe(true)
-    await page.getByRole('button', { name: 'Load and fit all roots' }).click()
-    await expect(page.getByRole('progressbar', { name: 'Loading all roots before fitting' })).toBeVisible()
+    await page.getByRole('button', { name: 'Load and show all chains' }).click()
+    await expect(page.getByRole('progressbar', { name: 'Loading all chains' })).toBeVisible()
     fixture.releaseRemainingRoots()
-    await expect(page.getByText('3 / 3 roots', { exact: true })).toBeVisible()
+    await expect(page.getByText('3 / 3 chains', { exact: true })).toBeVisible()
     await expect(node(page, 'Atlas', 'completed')).toHaveCount(1)
 
     await expect(async () => {
@@ -2553,7 +2553,7 @@ test.describe('Interaction Observation canvas', () => {
     const inspector = page.getByRole('complementary', { name: 'Observation details' })
     await expect(inspector.getByRole('heading', { name: 'Atlas', level: 2 })).toBeVisible()
     const widthBefore = (await inspector.boundingBox())!.width
-    const resize = page.getByRole('slider', { name: 'Resize details inspector' })
+    const resize = page.getByRole('slider', { name: 'Resize details panel' })
     await resize.press('ArrowRight')
     await resize.press('ArrowRight')
     await expect.poll(async () => (await inspector.boundingBox())!.width).toBeGreaterThan(widthBefore)
@@ -2572,9 +2572,9 @@ test.describe('Interaction Observation canvas', () => {
     await page.getByRole('button', { name: 'Close', exact: true }).click()
 
     await page.getByRole('button', { name: 'Show minimap' }).click()
-    await expect(page.getByLabel('Interaction forest minimap')).toBeVisible()
+    await expect(page.getByLabel('Interaction chains minimap')).toBeVisible()
     await page.getByRole('button', { name: 'Hide minimap' }).click()
-    await expect(page.getByLabel('Interaction forest minimap')).toHaveCount(0)
+    await expect(page.getByLabel('Interaction chains minimap')).toHaveCount(0)
 
     const pane = page.locator('.svelte-flow__pane')
     const paneBox = (await pane.boundingBox())!
@@ -2694,7 +2694,7 @@ test.describe('Interaction Observation canvas', () => {
         return Number(params?.get('end_at')) - Number(params?.get('start_at'))
       })
       .toBe(600_000)
-    await expect(page.getByRole('button', { name: 'Time window', exact: true })).toHaveText('10 minutes')
+    await expect(page.getByRole('button', { name: 'Time range', exact: true })).toHaveText('10 minutes')
     const presets = [
       ['5 minutes', 300_000],
       ['10 minutes', 600_000],
@@ -2705,7 +2705,7 @@ test.describe('Interaction Observation canvas', () => {
       ['24 hours', DAY],
     ] as const
     for (const [label, duration] of presets) {
-      await page.getByRole('button', { name: 'Time window', exact: true }).click()
+      await page.getByRole('button', { name: 'Time range', exact: true }).click()
       await page.getByRole('option', { name: label, exact: true }).click()
       await expect
         .poll(() => {
@@ -2739,7 +2739,7 @@ test.describe('Interaction Observation canvas', () => {
   test('live presets expire old roots while an applied custom range stays fixed', async ({ page }) => {
     const fixture = await installObservationFixture(page)
     await page.goto('/logs')
-    await page.getByRole('button', { name: 'Time window', exact: true }).click()
+    await page.getByRole('button', { name: 'Time range', exact: true }).click()
     await page.getByRole('option', { name: '5 minutes', exact: true }).click()
     await expect(node(page, 'Atlas', 'completed')).toBeVisible()
     await page.evaluate((now) => (Date.now = () => now), startedAt + 900_000)
@@ -2757,7 +2757,7 @@ test.describe('Interaction Observation canvas', () => {
     await expect(dialog).toBeHidden()
     const fixed = fixture.forestRequests.at(-1)!.searchParams
     await page.evaluate((now) => (Date.now = () => now), startedAt + DAY * 2)
-    await page.getByRole('button', { name: 'Refresh and anchor a new current window' }).click()
+    await page.getByRole('button', { name: 'Refresh and pin the latest time range' }).click()
     await expect
       .poll(() => {
         const params = fixture.forestRequests.at(-1)!.searchParams
@@ -2829,7 +2829,7 @@ test.describe('Interaction Observation canvas', () => {
       .getByRole('button', { name: 'Clear history', exact: true })
       .click()
     await page.getByRole('switch', { name: 'Debug' }).click()
-    await expect(page.getByRole('alertdialog', { name: 'Enable Debug' })).toContainText('Currently retained: 0 MiB.')
+    await expect(page.getByRole('alertdialog', { name: 'Enable Debug' })).toContainText('Currently saved: 0 MiB.')
   })
 
   test('clears retained Debug data while Debug stays enabled', async ({ page }) => {
@@ -2906,7 +2906,7 @@ test.describe('Interaction Observation canvas', () => {
       const inspectorBox = (await inspector.boundingBox())!
       expect(inspectorBox.x).toBeLessThanOrEqual(1)
       expect(inspectorBox.width).toBeGreaterThanOrEqual(389)
-      await expect(page.getByRole('slider', { name: 'Resize details inspector' })).toBeHidden()
+      await expect(page.getByRole('slider', { name: 'Resize details panel' })).toBeHidden()
       const close = inspector.getByRole('button', { name: 'Close', exact: true })
       await expect(close).toBeFocused()
       await close.press('Shift+Tab')
@@ -2925,7 +2925,7 @@ test.describe('Interaction Observation canvas', () => {
       const debugSwitch = page.getByRole('switch', { name: 'Debug' })
       await debugSwitch.click()
       const confirmation = page.getByRole('alertdialog', { name: 'Enable Debug' })
-      await expect(confirmation).toContainText('Confirm every enable action.')
+      await expect(confirmation).toContainText('Confirm each time you turn it on.')
       await confirmation.getByRole('button', { name: 'Cancel' }).click()
       expect(fixture.debugWrites).toHaveLength(0)
 

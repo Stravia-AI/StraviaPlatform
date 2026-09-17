@@ -1453,7 +1453,7 @@ test('Provider detail separates connection, inventory, references, and guarded m
   await page.getByRole('menuitem', { name: 'Restore details from service…' }).click()
   await expect(
     page.getByText(
-      'This Provider Catalog Entry is no longer available. Your saved model is unchanged. Refresh the catalog or update it manually.',
+      'This catalog entry is no longer available. Your saved model is unchanged. Refresh the catalog or update it manually.',
     ),
   ).toBeVisible()
   await expect(page.locator('#provider-model-id')).toHaveValue('openai/gpt-test')
@@ -1484,7 +1484,7 @@ test('Provider detail separates connection, inventory, references, and guarded m
   await expect(page.getByText('Sync this list to check for model updates.')).toBeVisible()
   await expect(
     page.getByText(
-      'Provider Catalog model details are temporarily unavailable. Your saved models are unchanged. Try syncing or re-importing again.',
+      'Service catalog model details are temporarily unavailable. Your saved models are unchanged. Try syncing or re-importing again.',
     ),
   ).toBeVisible()
 
