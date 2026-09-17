@@ -40,6 +40,7 @@ chrono = { version = "0.4", default-features = false }
 chrono-tz = { version = "0.10.4", features = ["case-insensitive"] }
 rust_decimal = { version = "1.42", features = ["serde-with-arbitrary-precision"] }
 anyhow = "1"
+arboard = "3"
 fend-core = "1.5.8"
 thiserror = "2"
 tokio-stream = "0.1"
@@ -87,6 +88,7 @@ toml = { version = "1.1.4", default-features = false, features = ["std", "parse"
 shellexpand = "3"
 rust-embed = { version = "8", features = ["compression"] }
 listeners = "0.6.1"
+local-ip-address = "0.6"
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-autostart = "2"
 

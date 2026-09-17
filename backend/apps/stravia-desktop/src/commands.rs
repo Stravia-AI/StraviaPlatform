@@ -15,9 +15,12 @@ use stravia_core::connect_client_apply::{
     ConnectClientApplyError, ConnectClientApplyInput, ConnectClientApplyPlan,
     PlannedConnectClientFile, plan_connect_client_apply,
 };
-use tauri::State;
+use tauri::{Manager, State};
 
-use crate::desktop_gateway_runtime::{DesktopGatewayRuntime, DesktopPortState, PortOperationError};
+use crate::desktop_gateway_runtime::{
+    DesktopGatewayRuntime, DesktopPortState, DesktopPreferenceStore, PortOperationError,
+    lan_ipv4_addresses,
+};
 
 struct StagedConnectClientFile {
     target: PathBuf,
@@ -140,6 +143,78 @@ pub async fn recheck_desktop_fixed_port(
     runtime: State<'_, Arc<DesktopGatewayRuntime>>,
 ) -> Result<DesktopPortState, PortOperationError> {
     runtime.recheck_fixed_port().await
+}
+
+#[tauri::command]
+pub async fn set_desktop_external_access(
+    enabled: bool,
+    runtime: State<'_, Arc<DesktopGatewayRuntime>>,
+) -> Result<DesktopPortState, PortOperationError> {
+    runtime.set_external_access(enabled).await
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopClientSettings {
+    pub launch_at_login: bool,
+    pub silent_start: bool,
+    pub lan_addresses: Vec<String>,
+}
+
+fn autostart_manager(
+    app: &tauri::AppHandle,
+) -> Result<State<'_, tauri_plugin_autostart::AutoLaunchManager>, String> {
+    app.try_state::<tauri_plugin_autostart::AutoLaunchManager>()
+        .ok_or_else(|| "autostart is unavailable".to_string())
+}
+
+fn client_settings(
+    app: &tauri::AppHandle,
+    store: &Arc<dyn DesktopPreferenceStore>,
+) -> Result<DesktopClientSettings, String> {
+    let launch_at_login = autostart_manager(app)?
+        .is_enabled()
+        .map_err(|error| error.to_string())?;
+    let silent_start = store.load()?.silent_start;
+    Ok(DesktopClientSettings {
+        launch_at_login,
+        silent_start,
+        lan_addresses: lan_ipv4_addresses(),
+    })
+}
+
+#[tauri::command]
+pub fn get_desktop_client_settings(
+    app: tauri::AppHandle,
+    store: State<'_, Arc<dyn DesktopPreferenceStore>>,
+) -> Result<DesktopClientSettings, String> {
+    client_settings(&app, &store)
+}
+
+#[tauri::command]
+pub fn set_desktop_launch_at_login(
+    enabled: bool,
+    app: tauri::AppHandle,
+    store: State<'_, Arc<dyn DesktopPreferenceStore>>,
+) -> Result<DesktopClientSettings, String> {
+    let autostart = autostart_manager(&app)?;
+    let result = if enabled {
+        autostart.enable()
+    } else {
+        autostart.disable()
+    };
+    result.map_err(|error| error.to_string())?;
+    client_settings(&app, &store)
+}
+
+#[tauri::command]
+pub fn set_desktop_silent_start(
+    enabled: bool,
+    app: tauri::AppHandle,
+    store: State<'_, Arc<dyn DesktopPreferenceStore>>,
+) -> Result<DesktopClientSettings, String> {
+    store.save_silent_start(enabled)?;
+    client_settings(&app, &store)
 }
 
 #[tauri::command]
@@ -441,18 +516,26 @@ mod tests {
         refresh_provider_allowance_for_gateway, refresh_provider_allowances_for_gateway,
     };
     use crate::desktop_gateway_runtime::{
-        DesktopGatewayRuntime, PortOwner, PortOwnerResolver, PortPreferenceLoad,
-        PortPreferenceStore,
+        BindScope, DesktopGatewayRuntime, DesktopPreferenceStore, DesktopPreferences, PortOwner,
+        PortOwnerResolver,
     };
 
     struct MissingStore;
 
-    impl PortPreferenceStore for MissingStore {
-        fn load(&self) -> Result<PortPreferenceLoad, String> {
-            Ok(PortPreferenceLoad::Missing)
+    impl DesktopPreferenceStore for MissingStore {
+        fn load(&self) -> Result<DesktopPreferences, String> {
+            Ok(DesktopPreferences::default())
         }
 
-        fn save(&self, _port: u16) -> Result<(), String> {
+        fn save_fixed_port(&self, _port: u16) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn save_external_access(&self, _enabled: bool) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn save_silent_start(&self, _enabled: bool) -> Result<(), String> {
             Ok(())
         }
     }
@@ -460,7 +543,7 @@ mod tests {
     struct NoOwners;
 
     impl PortOwnerResolver for NoOwners {
-        fn resolve(&self, _port: u16) -> Result<Vec<PortOwner>, String> {
+        fn resolve(&self, _scope: BindScope, _port: u16) -> Result<Vec<PortOwner>, String> {
             Ok(vec![])
         }
     }

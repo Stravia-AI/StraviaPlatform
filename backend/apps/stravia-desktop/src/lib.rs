@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use desktop_gateway_runtime::{
     DesktopGatewayRuntime, PortSwitchPublisher, SystemPortOwnerResolver, autostart_root_argument,
-    desktop_port_store, desktop_root_override, desktop_runtime_dir,
+    desktop_preference_store, desktop_root_override, desktop_runtime_dir, launched_in_background,
 };
 use stravia_core::{
     Gateway, admin::identity::AdminAuth, config::GatewayConfig, data_paths::DataPaths,
@@ -45,13 +45,13 @@ impl PortSwitchPublisher for TauriPortSwitchPublisher {
             .try_state::<DesktopTray>()
             .ok_or_else(|| "desktop tray state is unavailable".to_string())?;
         tray.sync_port(port).map_err(|error| error.to_string())?;
-        let window = self
-            .app
-            .get_webview_window("main")
-            .ok_or_else(|| "main WebView is unavailable".to_string())?;
-        window
-            .eval("window.location.reload()")
-            .map_err(|error| error.to_string())
+        // A silent-started app may have no window to reload.
+        if let Some(window) = self.app.get_webview_window("main") {
+            window
+                .eval("window.location.reload()")
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
 }
 
@@ -96,10 +96,7 @@ pub fn run() {
             }
         })
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
+            show_main_window(app);
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
@@ -122,12 +119,13 @@ pub fn run() {
                     return Err(error.into());
                 }
             };
-            let paths = DataPaths::new(&data_dir);
             app.manage(lock);
+            app.manage(data_dir.clone());
             let autostart_root = autostart_root_argument(&data_dir)?;
             app.handle().plugin(
                 tauri_plugin_autostart::Builder::new()
-                    .args(["--data-dir", autostart_root.as_str()])
+                    // --background 标记自启来源；是否隐藏窗口由 silent_start 偏好决定。
+                    .args(["--data-dir", autostart_root.as_str(), "--background"])
                     .build(),
             )?;
             #[cfg(not(feature = "desktop-e2e"))]
@@ -177,7 +175,13 @@ pub fn run() {
                     serve_embedded_webui: false,
                 },
             );
-            let port_store = desktop_port_store(app, &data_dir)?;
+            let port_store = desktop_preference_store(app, &data_dir)?;
+            let silent_start = launched_in_background()
+                && port_store
+                    .load()
+                    .map(|preferences| preferences.silent_start)
+                    .unwrap_or(false);
+            app.manage(port_store.clone());
             let runtime = tauri::async_runtime::block_on(DesktopGatewayRuntime::start(
                 app_router,
                 port_store,
@@ -201,14 +205,10 @@ pub fn run() {
             app.manage(native_admin_session);
             app.manage(runtime.clone());
             app.manage(product_update::DesktopUpdateState::default());
-            let window_config = app.config().app.windows.iter()
-                .find(|window| window.label == "main")
-                .ok_or_else(|| anyhow::anyhow!("main WebView configuration is missing"))?;
-            std::fs::create_dir_all(paths.desktop_webview())?;
             // dragDropEnabled:false 在窗口配置里：Windows 上 Tauri 默认 drop handler 会换掉 WebView2 的 HTML5 DnD。
-            tauri::WebviewWindowBuilder::from_config(app, window_config)?
-                .data_directory(paths.desktop_webview())
-                .build()?;
+            if !silent_start {
+                build_main_window(app.handle())?;
+            }
             app.manage(setup_tray(app, server_port)?);
             desktop_icons::setup(app.handle())?;
             runtime.set_switch_publisher(Arc::new(TauriPortSwitchPublisher {
@@ -222,6 +222,10 @@ pub fn run() {
             commands::get_desktop_port_state,
             commands::set_desktop_fixed_port,
             commands::recheck_desktop_fixed_port,
+            commands::set_desktop_external_access,
+            commands::get_desktop_client_settings,
+            commands::set_desktop_launch_at_login,
+            commands::set_desktop_silent_start,
             commands::plan_connect_client,
             commands::apply_connect_client,
             commands::list_provider_allowances,
@@ -241,10 +245,7 @@ pub fn run() {
             } = &event
             {
                 if !*has_visible_windows {
-                    if let Some(window) = app.get_webview_window("main") {
-                        let _ = window.show();
-                        let _ = window.set_focus();
-                    }
+                    show_main_window(app);
                 }
             }
 
@@ -296,29 +297,25 @@ fn setup_tray(
                 ..
             } = event
             {
-                let app = tray.app_handle();
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
+                show_main_window(tray.app_handle());
             }
         })
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => {
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
+                show_main_window(app);
             }
             "copy_url" => {
-                if let (Some(window), Some(runtime)) = (
-                    app.get_webview_window("main"),
-                    app.try_state::<Arc<DesktopGatewayRuntime>>(),
-                ) {
+                if let Some(runtime) = app.try_state::<Arc<DesktopGatewayRuntime>>() {
                     let port = runtime.current_port();
-                    let _ = window.eval(format!(
-                        "navigator.clipboard.writeText('http://127.0.0.1:{port}')"
-                    ));
+                    let url = format!("http://127.0.0.1:{port}");
+                    match arboard::Clipboard::new() {
+                        Ok(mut clipboard) => {
+                            let _ = clipboard.set_text(url);
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "clipboard is unavailable");
+                        }
+                    }
                 }
             }
             "quit" => {
@@ -329,4 +326,39 @@ fn setup_tray(
         .build(app)?;
 
     Ok(DesktopTray { tray, copy_url })
+}
+
+/// Build the main WebView from its declared config; the WebView data directory
+/// lives under the managed data root.
+fn build_main_window(app: &tauri::AppHandle) -> Result<(), anyhow::Error> {
+    let window_config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|window| window.label == "main")
+        .ok_or_else(|| anyhow::anyhow!("main WebView configuration is missing"))?
+        .clone();
+    let data_dir = app
+        .try_state::<std::path::PathBuf>()
+        .ok_or_else(|| anyhow::anyhow!("desktop data directory state is missing"))?;
+    let webview_dir = DataPaths::new(data_dir.inner()).desktop_webview();
+    std::fs::create_dir_all(&webview_dir)?;
+    tauri::WebviewWindowBuilder::from_config(app, &window_config)?
+        .data_directory(webview_dir)
+        .build()?;
+    Ok(())
+}
+
+/// Show the dashboard window, creating it first when the app launched without
+/// one (silent start leaves only the tray).
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.set_focus();
+        return;
+    }
+    if let Err(error) = build_main_window(app) {
+        tracing::error!(%error, "failed to open the main window");
+    }
 }

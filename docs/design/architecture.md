@@ -899,7 +899,7 @@ SQLite 与 PostgreSQL 通过 SQLx versioned migrations 演进。Server 未配置
 
 ### 10.2 核心表结构（最终态，post-migration）
 
-本地布局由 `stravia-core::data_paths::DataPaths` 统一推导：`db/gateway.db`、`artifacts/`、`diagnostics/observation-debug/`、`cache/catalog/` 和 `state/`。宿主只选择并解析根目录，Server/Desktop 持有根 `.instance.lock` 到退出；SQLite 位置不再反向决定根目录。Desktop 的端口与 Windows/Linux WebView 分别位于 `state/desktop-port.json`、`state/desktop-webview/`。Memory Gateway 的临时 Trace 使用所选根内的隔离子目录，并在 shutdown 清理。
+本地布局由 `stravia-core::data_paths::DataPaths` 统一推导：`db/gateway.db`、`artifacts/`、`diagnostics/observation-debug/`、`cache/catalog/` 和 `state/`。宿主只选择并解析根目录，Server/Desktop 持有根 `.instance.lock` 到退出；SQLite 位置不再反向决定根目录。Desktop 的客户端偏好（固定端口、外部访问、静默启动）与 Windows/Linux WebView 分别位于 `state/desktop-port.json`、`state/desktop-webview/`。Memory Gateway 的临时 Trace 使用所选根内的隔离子目录，并在 shutdown 清理。
 
 旧布局启动失败，使用 `stravia-tools migrate-data` 停机复制、转换配置并校验 SQLite 后发布完整目标；不改 schema、不连接外部后端，也不自动删除源数据。Artifact 相对键和 Trace 相对身份保持不变，数据库与其本地文件必须配套迁移。操作步骤、外部 WebView 输入和支持范围见双语 README；路径来源取舍见 ADR-0041。
 
@@ -1081,7 +1081,7 @@ Observation metadata 与数据库 manifest 共用 `log_retention_days`（默认 
 ### 10.3 安全
 
 - 每个数据库只有一个独立管理用户，唯一角色为 `admin`；它不拥有 API Key，管理 JWT 也不能替代推理/MCP 的 API Key。
-- Desktop 模式下共享 HTTP Server 监听 `127.0.0.1:0`，由操作系统分配端口；只有受限 Tauri 原生通道能取得内存中的 Bearer JWT，普通回环 HTTP 请求仍需有效管理认证。
+- Desktop 模式下共享 HTTP Server 默认监听 `127.0.0.1`，端口可固定或由操作系统分配；设置页开启"允许其他设备访问"后复用 drain+rebind 机制改绑 `0.0.0.0`，对外仍要求有效 API Key 或管理认证。只有受限 Tauri 原生通道能取得内存中的 Bearer JWT，普通回环 HTTP 请求仍需有效管理认证。
 - Server 模式下 Proxy、Admin API、健康探针和 WebUI 共用一个 listener。WebUI 使用可撤销会话的 HttpOnly Cookie；所有会修改状态的管理请求执行精确 origin 和 CSRF 校验。HTTP 与 HTTPS 管理入口均受支持，默认监听不变。Server 传输层集中恢复外部源并按实际 TCP 对端应用显式代理信任；可选 `--admin-origin`／`STRAVIA_ADMIN_ORIGINS` 限制整个管理面，`--trusted-proxy`／`STRAVIA_TRUSTED_PROXIES` 默认不信任任何代理。设置、正常与不可用状态共用准入，模型 API、MCP 与健康探针不受入口列表影响；代理转发及 Cookie 契约见 [管理认证设计](admin-auth-bootstrap.md#管理入口与代理信任)。
 - Server 数据库连接只来自 `server.toml`。配置缺失进入受控制台一次性令牌保护的设置模式；配置损坏、数据库不可达或 schema 不兼容均失败关闭，不回退到 SQLite。
 

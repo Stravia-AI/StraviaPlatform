@@ -192,16 +192,16 @@ describe('Stravia desktop smoke', () => {
     await expect(navigationTrigger).toBeDisplayed()
 
     if (portState.mode === 'fallback') {
-      await expect($('aria/Fixed desktop port unavailable')).toBeDisplayed()
-      await $('a=Resolve in Desktop Settings').click()
+      await expect($('aria/Fixed port unavailable')).toBeDisplayed()
+      await $('a=Resolve in Client Settings').click()
     } else if (portState.mode === 'configError') {
-      await expect($('aria/Desktop port setting unavailable')).toBeDisplayed()
-      await $('a=Open Desktop Settings').click()
+      await expect($('aria/Port settings unavailable')).toBeDisplayed()
+      await $('a=Open Client Settings').click()
     } else {
       await $('a[href="/settings"]').click()
     }
 
-    await expect($('//h2[normalize-space()="Local access"]')).toBeDisplayed()
+    await expect($('//h2[normalize-space()="Client"]')).toBeDisplayed()
     await expect($('#desktop-fixed-port')).toHaveValue(String(portState.fixedPort ?? portState.currentPort))
     await expect($('input[type="password"]')).not.toExist()
     await expect($('button=Sign out')).not.toExist()
@@ -210,7 +210,7 @@ describe('Stravia desktop smoke', () => {
     if (portState.mode !== 'fixed') {
       const nextPort = await unusedPort()
       await $('#desktop-fixed-port').setValue(String(nextPort))
-      await $('button=Save Fixed Port').click()
+      await $('button=Save Port').click()
       await browser.waitUntil(
         async () => {
           try {
@@ -232,9 +232,9 @@ describe('Stravia desktop smoke', () => {
     let replacementPort = await unusedPort()
     if (replacementPort === activePort) replacementPort = await unusedPort()
     await $('#desktop-fixed-port').setValue(String(replacementPort))
-    await $('button=Save Fixed Port').click()
+    await $('button=Save Port').click()
     const confirmation = await $('[data-slot="alert-dialog-title"]')
-    await expect(confirmation).toHaveText('Change fixed desktop port?')
+    await expect(confirmation).toHaveText('Change the port?')
     await expect($('[role="alertdialog"]')).toHaveText(expect.stringContaining(`127.0.0.1:${activePort}`))
     await $('button=Change Port').click()
     await browser.waitUntil(

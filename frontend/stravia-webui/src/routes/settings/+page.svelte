@@ -10,7 +10,7 @@ import { admin, isTauri, type ArtifactSettings, type ArtifactS3Settings } from '
 import SecretInput from '$lib/components/secret-input.svelte'
 import { changeCredentials, getAuthState } from '$lib/auth'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
-import DesktopPortSettings from '$lib/components/desktop-port-settings.svelte'
+import DesktopClientSettings from '$lib/components/desktop-client-settings.svelte'
 import LanguageSelector from '$lib/components/language-selector.svelte'
 import PageHeader from '$lib/components/page-header.svelte'
 import ProductUpdateSettings from '$lib/components/product-update-settings.svelte'
@@ -163,8 +163,8 @@ function handleThemeValueChange(value: string): void {
 }
 
 onMount(() => {
-  if (!isTauri || window.location.hash !== '#desktop') return
-  requestAnimationFrame(() => scrollToSection('desktop'))
+  if (!isTauri || window.location.hash !== '#client') return
+  requestAnimationFrame(() => scrollToSection('client'))
 })
 
 async function saveSetting(key: string, value: string): Promise<void> {
@@ -294,7 +294,7 @@ function retrySettings(): void {
     </section>
 
     {#if isTauri}
-      <DesktopPortSettings />
+      <DesktopClientSettings />
     {/if}
 
     <section id="artifacts" class="route-section scroll-mt-20 pb-8" aria-labelledby="artifacts-title">

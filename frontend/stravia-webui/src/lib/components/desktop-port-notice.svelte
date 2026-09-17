@@ -4,8 +4,8 @@ import { resolve } from '$app/paths'
 import { createQuery } from '@tanstack/svelte-query'
 import CircleAlertIcon from '@lucide/svelte/icons/circle-alert'
 
-import { getDesktopPortState } from '$lib/desktop-port'
-import type { PortOwner } from '$lib/desktop-port'
+import { getDesktopPortState } from '$lib/desktop-client'
+import type { PortOwner } from '$lib/desktop-client'
 import { buttonVariants } from '$lib/components/ui/button'
 import * as Alert from '$lib/components/ui/alert'
 
@@ -33,7 +33,7 @@ function ownersLabel(owners: PortOwner[]): string {
         {m.desktop_port_notice_fallback_reason()}
       </p>
       <p class="font-technical mt-1 text-xs text-muted-foreground">{state.configError}</p>
-      <a class={buttonVariants({ variant: 'outline', size: 'sm', class: 'mt-3' })} href={resolve('/settings#desktop')}>
+      <a class={buttonVariants({ variant: 'outline', size: 'sm', class: 'mt-3' })} href={resolve('/settings#client')}>
         {m.desktop_port_notice_open_desktop_settings()}
       </a>
     </Alert.Description>
@@ -63,7 +63,7 @@ function ownersLabel(owners: PortOwner[]): string {
           {m.common_occupying_application_not_identified()}
         </p>
       {/if}
-      <a class={buttonVariants({ variant: 'outline', size: 'sm', class: 'mt-3' })} href={resolve('/settings#desktop')}>
+      <a class={buttonVariants({ variant: 'outline', size: 'sm', class: 'mt-3' })} href={resolve('/settings#client')}>
         {m.desktop_port_notice_resolve_desktop_settings()}
       </a>
     </Alert.Description>

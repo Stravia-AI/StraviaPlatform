@@ -11,9 +11,10 @@ use axum::{Router, routing::get};
 use tokio::sync::{Notify, oneshot};
 
 use super::{
-    BindingFailureKind, DEFAULT_PORT, DesktopGatewayRuntime, DesktopPortMode, OwnerLookupStatus,
-    PortOperationErrorCode, PortOwner, PortOwnerResolver, PortPreferenceLoad, PortPreferenceStore,
-    PortSwitchPublisher, TestBind, e2e_data_dir, select_root_override, start_http_server,
+    BindScope, BindingFailureKind, DEFAULT_PORT, DesktopGatewayRuntime, DesktopPortMode,
+    DesktopPreferenceStore, DesktopPreferences, OwnerLookupStatus, PortOperationErrorCode,
+    PortOwner, PortOwnerResolver, PortPreferenceLoad, PortSwitchPublisher, TestBind,
+    args_include_background, e2e_data_dir, select_root_override, start_http_server,
 };
 
 #[test]
@@ -94,16 +95,25 @@ fn windows_autostart_quotes_unicode_roots_and_trailing_separators() {
 }
 
 struct TestStore {
-    load: Result<PortPreferenceLoad, String>,
+    load: Result<DesktopPreferences, String>,
     saved: AtomicU16,
+    saved_external: AtomicBool,
     fail_save: bool,
 }
 
 impl TestStore {
     fn new(load: PortPreferenceLoad) -> Self {
+        Self::with_preferences(DesktopPreferences {
+            fixed_port: load,
+            ..Default::default()
+        })
+    }
+
+    fn with_preferences(preferences: DesktopPreferences) -> Self {
         Self {
-            load: Ok(load),
+            load: Ok(preferences),
             saved: AtomicU16::new(0),
+            saved_external: AtomicBool::new(false),
             fail_save: false,
         }
     }
@@ -112,29 +122,49 @@ impl TestStore {
         Self {
             load: Err(message.to_string()),
             saved: AtomicU16::new(0),
+            saved_external: AtomicBool::new(false),
             fail_save: false,
         }
     }
 
     fn failing_save(load: PortPreferenceLoad) -> Self {
         Self {
-            load: Ok(load),
+            load: Ok(DesktopPreferences {
+                fixed_port: load,
+                ..Default::default()
+            }),
             saved: AtomicU16::new(0),
+            saved_external: AtomicBool::new(false),
             fail_save: true,
         }
     }
 }
 
-impl PortPreferenceStore for TestStore {
-    fn load(&self) -> Result<PortPreferenceLoad, String> {
+impl DesktopPreferenceStore for TestStore {
+    fn load(&self) -> Result<DesktopPreferences, String> {
         self.load.clone()
     }
 
-    fn save(&self, port: u16) -> Result<(), String> {
+    fn save_fixed_port(&self, port: u16) -> Result<(), String> {
         if self.fail_save {
             return Err("store is read-only".to_string());
         }
         self.saved.store(port, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn save_external_access(&self, enabled: bool) -> Result<(), String> {
+        if self.fail_save {
+            return Err("store is read-only".to_string());
+        }
+        self.saved_external.store(enabled, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn save_silent_start(&self, _enabled: bool) -> Result<(), String> {
+        if self.fail_save {
+            return Err("store is read-only".to_string());
+        }
         Ok(())
     }
 }
@@ -142,7 +172,7 @@ impl PortPreferenceStore for TestStore {
 struct StaticOwners(Vec<PortOwner>);
 
 impl PortOwnerResolver for StaticOwners {
-    fn resolve(&self, _port: u16) -> Result<Vec<PortOwner>, String> {
+    fn resolve(&self, _scope: BindScope, _port: u16) -> Result<Vec<PortOwner>, String> {
         Ok(self.0.clone())
     }
 }
@@ -150,7 +180,7 @@ impl PortOwnerResolver for StaticOwners {
 struct FailingOwners;
 
 impl PortOwnerResolver for FailingOwners {
-    fn resolve(&self, _port: u16) -> Result<Vec<PortOwner>, String> {
+    fn resolve(&self, _scope: BindScope, _port: u16) -> Result<Vec<PortOwner>, String> {
         Err("owner table unavailable".to_string())
     }
 }
@@ -185,7 +215,7 @@ impl BlockingOwners {
 }
 
 impl PortOwnerResolver for BlockingOwners {
-    fn resolve(&self, _port: u16) -> Result<Vec<PortOwner>, String> {
+    fn resolve(&self, _scope: BindScope, _port: u16) -> Result<Vec<PortOwner>, String> {
         self.started.store(true, Ordering::Release);
         let released = match self.released.lock() {
             Ok(released) => released,
@@ -230,10 +260,20 @@ fn unused_port() -> u16 {
 }
 
 async fn assert_reachable(port: u16) {
-    let response = reqwest::get(format!("http://127.0.0.1:{port}/health"))
-        .await
-        .expect("listener should accept requests");
-    assert_eq!(response.text().await.unwrap(), "ok");
+    // A rebound socket can briefly RST connections handed to the draining
+    // listener, so poll instead of asserting on a single attempt.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Ok(response) = reqwest::get(format!("http://127.0.0.1:{port}/health")).await
+                && response.text().await.unwrap_or_default() == "ok"
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("listener should accept requests");
 }
 
 async fn wait_until_closed(port: u16) {
@@ -254,9 +294,9 @@ async fn absent_or_invalid_preference_requests_the_default_fixed_loopback_port()
     for preference in [PortPreferenceLoad::Missing, PortPreferenceLoad::Invalid] {
         let requested_port = Arc::new(AtomicU16::new(0));
         let captured_port = requested_port.clone();
-        let bind_override: Arc<TestBind> = Arc::new(move |port, app| {
+        let bind_override: Arc<TestBind> = Arc::new(move |scope, port, app| {
             captured_port.store(port, Ordering::Relaxed);
-            Box::pin(async move { start_http_server(("127.0.0.1", 0), app).await })
+            Box::pin(async move { start_http_server((scope.host(), 0), app).await })
         });
         let runtime = DesktopGatewayRuntime::start_with_bind_override(
             test_app(),
@@ -279,12 +319,12 @@ async fn absent_or_invalid_preference_requests_the_default_fixed_loopback_port()
 
 #[tokio::test]
 async fn unavailable_default_port_uses_a_random_fallback() {
-    let bind_override: Arc<TestBind> = Arc::new(|port, app| {
+    let bind_override: Arc<TestBind> = Arc::new(|scope, port, app| {
         Box::pin(async move {
             if port == DEFAULT_PORT {
                 Err(io::Error::new(io::ErrorKind::AddrInUse, "default port is occupied").into())
             } else {
-                start_http_server(("127.0.0.1", port), app).await
+                start_http_server((scope.host(), port), app).await
             }
         })
     });
@@ -549,12 +589,12 @@ fn blank_process_names_are_not_reported_as_known_owners() {
 #[tokio::test]
 async fn non_address_in_use_errors_fall_back_and_remain_manually_recheckable() {
     let fixed_port = unused_port();
-    let bind_override: Arc<TestBind> = Arc::new(move |port, app| {
+    let bind_override: Arc<TestBind> = Arc::new(move |scope, port, app| {
         Box::pin(async move {
             if port == fixed_port {
                 Err(io::Error::new(io::ErrorKind::PermissionDenied, "blocked by policy").into())
             } else {
-                start_http_server(("127.0.0.1", port), app).await
+                start_http_server((scope.host(), port), app).await
             }
         })
     });
@@ -592,7 +632,7 @@ async fn non_address_in_use_errors_fall_back_and_remain_manually_recheckable() {
 #[tokio::test]
 async fn startup_fails_when_a_fixed_bind_and_its_random_fallback_both_fail() {
     let fixed_port = unused_port();
-    let bind_override: Arc<TestBind> = Arc::new(|_port, _app| {
+    let bind_override: Arc<TestBind> = Arc::new(|_scope, _port, _app| {
         Box::pin(async {
             Err(io::Error::new(io::ErrorKind::PermissionDenied, "no listener allowed").into())
         })
@@ -830,5 +870,145 @@ async fn recheck_without_a_fixed_target_is_rejected() {
     let error = runtime.recheck_fixed_port().await.unwrap_err();
 
     assert_eq!(error.code, PortOperationErrorCode::NoFixedPort);
+    runtime.shutdown().await.unwrap();
+}
+
+#[test]
+fn background_argument_marks_autostart_launches_only() {
+    assert!(args_include_background([
+        "--data-dir".into(),
+        "root".into(),
+        "--background".into()
+    ]));
+    assert!(!args_include_background([
+        "--data-dir".into(),
+        "root".into()
+    ]));
+    assert!(!args_include_background([]));
+    assert!(!args_include_background(["--backgrounded".into()]));
+}
+
+#[tokio::test]
+async fn external_access_preference_binds_all_interfaces_on_startup() {
+    let runtime = DesktopGatewayRuntime::start(
+        test_app(),
+        Arc::new(TestStore::with_preferences(DesktopPreferences {
+            fixed_port: PortPreferenceLoad::Fixed(unused_port()),
+            external_access: true,
+            silent_start: false,
+        })),
+        no_owners(),
+    )
+    .await
+    .unwrap();
+
+    let state = runtime.snapshot().await;
+    assert!(state.external_access);
+    assert!(runtime.current_local_addr().ip().is_unspecified());
+    assert_reachable(state.current_port).await;
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn enabling_external_access_rebinds_the_same_port_on_all_interfaces() {
+    let store = Arc::new(TestStore::new(PortPreferenceLoad::Fixed(unused_port())));
+    let runtime = DesktopGatewayRuntime::start(test_app(), store.clone(), no_owners())
+        .await
+        .unwrap();
+    let port = runtime.current_port();
+    assert!(runtime.current_local_addr().ip().is_loopback());
+
+    let state = runtime.set_external_access(true).await.unwrap();
+
+    assert!(state.external_access);
+    assert_eq!(state.current_port, port);
+    assert_eq!(store.saved_external.load(Ordering::Relaxed), true);
+    assert!(runtime.current_local_addr().ip().is_unspecified());
+    assert_reachable(port).await;
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn disabling_external_access_returns_to_loopback() {
+    let runtime = DesktopGatewayRuntime::start(
+        test_app(),
+        Arc::new(TestStore::with_preferences(DesktopPreferences {
+            fixed_port: PortPreferenceLoad::Fixed(unused_port()),
+            external_access: true,
+            silent_start: false,
+        })),
+        no_owners(),
+    )
+    .await
+    .unwrap();
+    let port = runtime.current_port();
+
+    let state = runtime.set_external_access(false).await.unwrap();
+
+    assert!(!state.external_access);
+    assert_eq!(state.current_port, port);
+    assert!(runtime.current_local_addr().ip().is_loopback());
+    assert_reachable(port).await;
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_failed_external_bind_restores_the_loopback_listener() {
+    let store = Arc::new(TestStore::new(PortPreferenceLoad::Fixed(unused_port())));
+    let bind_override: Arc<TestBind> = Arc::new(|scope, port, app| {
+        Box::pin(async move {
+            if scope == BindScope::External {
+                Err(io::Error::new(io::ErrorKind::PermissionDenied, "wildcard blocked").into())
+            } else {
+                start_http_server((scope.host(), port), app).await
+            }
+        })
+    });
+    let runtime = DesktopGatewayRuntime::start_with_bind_override(
+        test_app(),
+        store.clone(),
+        no_owners(),
+        bind_override,
+    )
+    .await
+    .unwrap();
+    let port = runtime.current_port();
+
+    let error = runtime.set_external_access(true).await.unwrap_err();
+
+    assert_eq!(error.code, PortOperationErrorCode::BindFailed);
+    let state = runtime.snapshot().await;
+    assert!(!state.external_access);
+    assert_eq!(state.current_port, port);
+    assert!(!store.saved_external.load(Ordering::Relaxed));
+    assert!(runtime.current_local_addr().ip().is_loopback());
+    assert_reachable(port).await;
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn external_access_survives_a_later_port_change() {
+    let runtime = DesktopGatewayRuntime::start(
+        test_app(),
+        Arc::new(TestStore::with_preferences(DesktopPreferences {
+            fixed_port: PortPreferenceLoad::Fixed(unused_port()),
+            external_access: true,
+            silent_start: false,
+        })),
+        no_owners(),
+    )
+    .await
+    .unwrap();
+    let new_port = unused_port();
+
+    let state = runtime
+        .configure_fixed_port(u32::from(new_port))
+        .await
+        .unwrap();
+
+    assert!(state.external_access);
+    assert_eq!(state.current_port, new_port);
+    assert!(runtime.current_local_addr().ip().is_unspecified());
+    assert_reachable(new_port).await;
     runtime.shutdown().await.unwrap();
 }
