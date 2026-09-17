@@ -4,6 +4,7 @@ import { Handle, Position, type NodeProps } from '@xyflow/svelte'
 import InteractionPreview from './interaction-preview.svelte'
 
 import { formatCompactCount, formatLogTime } from '$lib/format'
+import { interactionDisplayStatus } from '$lib/observation-chain-visibility'
 import { observationStatusLabel } from '$lib/observation-labels'
 import type { InteractionNodeData } from '$lib/types'
 
@@ -12,7 +13,8 @@ let { data, selected }: NodeProps<InteractionNode> = $props()
 
 const interaction = $derived(data.interaction)
 const title = $derived(interaction.first_model_display_name?.trim() || interaction.first_route_id)
-const statusLabel = $derived(observationStatusLabel(interaction.status))
+const displayStatus = $derived(interactionDisplayStatus(interaction))
+const statusLabel = $derived(observationStatusLabel(displayStatus))
 const contextLabel = $derived.by(() => {
   const events = interaction.context_events ?? []
   if (events.some((event) => event.kind === 'compaction_operation')) return m.observation_compaction_operation()
@@ -45,7 +47,7 @@ const usage = $derived([
       </time>
       <h3 class="font-structural mt-1 truncate text-sm font-semibold">{title}</h3>
     </div>
-    <span class="status-label" data-status={interaction.status}>
+    <span class="status-label" data-status={displayStatus}>
       <span class="status-dot" aria-hidden="true"></span>{statusLabel}
     </span>
   </header>
@@ -128,6 +130,11 @@ const usage = $derived([
 }
 [data-status='waiting_client'] .status-dot {
   background: var(--warning);
+}
+[data-status='failed'] .status-dot {
+  border-radius: 1px;
+  transform: rotate(45deg);
+  background: var(--destructive);
 }
 .usage-grid {
   display: grid;

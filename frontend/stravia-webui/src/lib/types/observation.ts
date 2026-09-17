@@ -102,6 +102,8 @@ export interface InteractionSummary {
   last_active_at: number
   input_preview: string | null
   visible_tail: string
+  failed_request: boolean
+  client_output_delivered: boolean
   usage: ConfirmedUsage
   debug_status: string
   observation_gap: boolean

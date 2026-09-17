@@ -8,6 +8,7 @@ import { formatDuration, formatLogTime, formatTime, formatTokenCount } from '$li
 import ObservationConversation from '$lib/components/observation-conversation.svelte'
 import RequestFailure from '$lib/components/request-failure.svelte'
 import { observationDebugStatusLabel, observationStatusLabel } from '$lib/observation-labels'
+import { interactionDisplayStatus } from '$lib/observation-chain-visibility'
 import { observationAttemptOutputTokens, observationEventSummary } from '$lib/observation-event-summary'
 import type { InteractionDetail, LiveContentBlock, ObservationEvent, RunDetail, FailedRequestDetail } from '$lib/types'
 import { Badge } from '$lib/components/ui/badge'
@@ -288,7 +289,7 @@ function usageRows(run: RunDetail): ReadonlyArray<readonly [string, number | nul
         <dl class="diagnostic-overview">
           <div>
             <dt class="text-xs text-muted-foreground">{m.common_status()}</dt>
-            <dd class="font-medium">{observationStatusLabel(interaction.interaction.status)}</dd>
+            <dd class="font-medium">{observationStatusLabel(interactionDisplayStatus(interaction.interaction))}</dd>
           </div>
           <div>
             <dt class="text-xs text-muted-foreground">{m.observation_started()}</dt>

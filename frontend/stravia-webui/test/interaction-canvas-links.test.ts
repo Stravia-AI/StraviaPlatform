@@ -32,6 +32,8 @@ function interaction(
     last_active_at: startedAt + 1,
     input_preview: id,
     visible_tail: id,
+    failed_request: false,
+    client_output_delivered: true,
     usage,
     debug_status: 'none',
     observation_gap: false,

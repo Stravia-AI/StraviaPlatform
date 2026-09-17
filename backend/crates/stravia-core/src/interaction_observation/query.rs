@@ -29,7 +29,10 @@ COUNT(a.id)-COUNT(a.output_tokens) missing_output_tokens,
 COUNT(a.id)-COUNT(a.cache_read_tokens) missing_cache_read_tokens,
 COUNT(a.id)-COUNT(a.cache_write_tokens) missing_cache_write_tokens,
 COUNT(a.id)-COUNT(a.reasoning_tokens) missing_reasoning_tokens,
-i.observation_gap,i.last_event_sequence,CASE WHEN SUM(CASE WHEN r.debug_enabled THEN 1 ELSE 0 END)=0 THEN 'none' WHEN SUM(CASE WHEN r.debug_enabled THEN 1 ELSE 0 END)=COUNT(*) AND COUNT(m.trace_id)=COUNT(*) AND SUM(CASE WHEN m.status='complete' THEN 1 ELSE 0 END)=COUNT(*) THEN 'complete' ELSE 'partial' END debug_status FROM interaction_observations i JOIN inference_run_observations r ON r.interaction_id=i.id LEFT JOIN debug_trace_manifests m ON m.run_id=r.id LEFT JOIN target_attempt_observations a ON a.run_id=r.id ";
+i.observation_gap,i.last_event_sequence,
+CAST(MAX(CASE WHEN r.status='failed' AND r.finished_at IS NOT NULL AND (r.failure_json IS NOT NULL OR COALESCE(r.terminal_reason,'') NOT IN ('cancelled','client_disconnected','websocket_delivery_dropped','request_aborted')) THEN 1 ELSE 0 END) AS BIGINT) failed_request,
+CAST(MAX(CASE WHEN r.client_output_committed THEN 1 ELSE 0 END) AS BIGINT) client_output_delivered,
+CASE WHEN SUM(CASE WHEN r.debug_enabled THEN 1 ELSE 0 END)=0 THEN 'none' WHEN SUM(CASE WHEN r.debug_enabled THEN 1 ELSE 0 END)=COUNT(*) AND COUNT(m.trace_id)=COUNT(*) AND SUM(CASE WHEN m.status='complete' THEN 1 ELSE 0 END)=COUNT(*) THEN 'complete' ELSE 'partial' END debug_status FROM interaction_observations i JOIN inference_run_observations r ON r.interaction_id=i.id LEFT JOIN debug_trace_manifests m ON m.run_id=r.id LEFT JOIN target_attempt_observations a ON a.run_id=r.id ";
 // PostgreSQL promotes SUM(BIGINT) to NUMERIC; keep the public usage contract i64.
 const RUN_SELECT: &str = "SELECT r.id,r.parent_run_id,r.generation_node_id,r.generation_parent_id,r.route_id,r.model_display_name,r.ingress_protocol,r.status,r.terminal_reason,r.user_interrupted,r.debug_enabled,r.client_output_committed,r.started_at,r.finished_at,
 CAST(SUM(CASE
@@ -109,6 +112,8 @@ struct InteractionRow {
     last_active_at: i64,
     input_preview: Option<String>,
     visible_tail: String,
+    failed_request: i64,
+    client_output_delivered: i64,
     input_tokens: Option<i64>,
     output_tokens: Option<i64>,
     cache_read_tokens: Option<i64>,
@@ -1166,6 +1171,8 @@ fn summary(r: InteractionRow, matched: bool) -> InteractionSummary {
         last_active_at: r.last_active_at,
         input_preview: r.input_preview,
         visible_tail: r.visible_tail,
+        failed_request: r.failed_request != 0,
+        client_output_delivered: r.client_output_delivered != 0,
         usage: ConfirmedUsage {
             input_tokens: r.input_tokens,
             output_tokens: r.output_tokens,
@@ -1358,6 +1365,104 @@ mod tests {
             ]
             .map(|(kind, id)| (kind.to_owned(), id.to_owned())),
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn interaction_summary_flags_failed_request_and_client_delivery() -> anyhow::Result<()> {
+        use crate::interaction_observation::store::Admission;
+
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        crate::migrations::migrate_sqlite(&pool).await?;
+        let store = ObservationStore::Sqlite(pool.clone());
+        let at = 1_000i64;
+        for (id, status, reason, committed) in [
+            (
+                "failed-empty",
+                "failed",
+                Some("protocol_lossy_rejected"),
+                false,
+            ),
+            (
+                "failed-delivered",
+                "failed",
+                Some("protocol_lossy_rejected"),
+                true,
+            ),
+            ("user-stopped", "user_interrupted", None, false),
+            ("failed-cancel-reason", "failed", Some("cancelled"), false),
+        ] {
+            let start = RunStart {
+                id: id.into(),
+                principal: "owner".into(),
+                api_key_id: None,
+                api_key_name: None,
+                generation_root_id: None,
+                generation_parent_id: None,
+                has_new_user: true,
+                has_matching_pending_tool_result: false,
+                ingress_received_at: at,
+                canonical_fingerprint: id.into(),
+                route_id: "route".into(),
+                model_display_name: None,
+                ingress_protocol: "openai".into(),
+            };
+            store
+                .admit(Admission {
+                    start: &start,
+                    metadata: None,
+                    interaction_id: id,
+                    parent_run_id: None,
+                    parent_interaction_id: None,
+                    debug_enabled: false,
+                    inferred_retry: false,
+                    grouping_reason: "new_root",
+                    diagnostic_source_run_id: None,
+                    interrupt_parent: false,
+                    now: at,
+                    expires_at: i64::MAX,
+                })
+                .await?;
+            if committed {
+                sqlx::query("UPDATE inference_run_observations SET client_output_committed=1 WHERE id=?")
+                    .bind(id)
+                    .execute(&pool)
+                    .await?;
+            }
+            store
+                .finish_run(
+                    id,
+                    id,
+                    &RunOutcome {
+                        status: status.into(),
+                        terminal_reason: reason.map(str::to_owned),
+                        delivery_completed_at: None,
+                        generation_node_id: None,
+                        generation_root_id: None,
+                    },
+                    at + 10,
+                    i64::MAX,
+                )
+                .await?;
+        }
+        for (id, failed_request, delivered) in [
+            ("failed-empty", true, false),
+            ("failed-delivered", true, true),
+            ("user-stopped", false, false),
+            ("failed-cancel-reason", false, false),
+        ] {
+            let snapshot = store
+                .get_interaction_summary(id, ForestQuery::default())
+                .await?
+                .unwrap_or_else(|| panic!("summary for {id}"));
+            assert_eq!(snapshot.interaction.failed_request, failed_request, "{id}");
+            assert_eq!(
+                snapshot.interaction.client_output_delivered, delivered, "{id}"
+            );
+        }
         Ok(())
     }
 

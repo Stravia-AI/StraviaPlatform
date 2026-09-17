@@ -23,6 +23,7 @@ const routeIds = {
 } as const
 const statusLabels: Record<string, string> = {
   completed: 'Completed',
+  failed: 'Failed',
   interrupted: 'Interrupted',
   running: 'Running',
   waiting_client: 'Waiting for client',
@@ -60,6 +61,8 @@ function interaction(
         ? null
         : `**${model} user question**\n\nPlease explain the result using \`Markdown\`.\n\n${Array.from({ length: 20 }, (_, index) => `Input context ${index}`).join('\n\n')}\n\nInput preview ending`,
     visible_tail: `${model} client-visible answer`,
+    failed_request: false,
+    client_output_delivered: true,
     usage,
     debug_status: 'none',
     observation_gap: false,
@@ -1384,6 +1387,138 @@ test.describe('Interaction Observation canvas', () => {
     await emberNode.click()
     await expect(inspector.getByRole('heading', { name: 'Ember', exact: true, level: 2 })).toBeVisible()
     await expect(inspector.getByRole('log', { name: 'Conversation' })).toContainText('Ember client-visible answer')
+  })
+
+  test('hides a zero-output terminal failure from chains and reveals it from the failed request', async ({
+    page,
+  }) => {
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    const fixture = await installObservationFixture(page)
+    const flint = interaction(
+      'interaction-flint',
+      'root-a',
+      'interaction-atlas',
+      'Flint',
+      routeIds.delta,
+      'interrupted',
+      280_000,
+    )
+    flint.failed_request = true
+    flint.client_output_delivered = false
+    flint.visible_tail = ''
+    fixture.addInteraction(flint)
+    fixture.addFailure(
+      failedRequest('run-flint', 'run', startedAt + 280_000, {
+        duration_ms: 1_334,
+        client: 'codex',
+        error: {
+          source: 'upstream',
+          code: 'protocol_lossy_rejected',
+          message: null,
+          status_code: 422,
+        },
+        interaction_id: 'interaction-flint',
+        root_id: 'root-a',
+        run_id: 'run-interaction-flint',
+      }),
+    )
+    await page.goto('/logs')
+    await expect(node(page, 'Flint', 'interrupted')).toHaveCount(0)
+    await expect(node(page, 'Cinder', 'running')).toBeVisible()
+    await page.getByRole('tab', { name: 'Failed Requests', exact: true }).click()
+    await page
+      .getByRole('table', { name: 'Failed Requests', exact: true })
+      .getByRole('button', { name: logTime(startedAt + 280_000), exact: true })
+      .click()
+    const inspector = page.getByRole('complementary', { name: 'Observation details' })
+    await expect(inspector.getByRole('button', { name: 'Open interaction node', exact: true })).toBeVisible()
+    await inspector.getByRole('button', { name: 'Open interaction node', exact: true }).click()
+    await expect(page.getByRole('tab', { name: 'Interaction Chains', exact: true })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    )
+    await expect(inspector).toHaveCount(0)
+    await expect(node(page, 'Flint', 'failed')).toBeVisible()
+    await expect(node(page, 'Flint', 'failed')).toBeInViewport()
+  })
+
+  test('keeps a failure that delivered client output visible and labels it failed', async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    const fixture = await installObservationFixture(page)
+    const granite = interaction(
+      'interaction-granite',
+      'root-a',
+      'interaction-atlas',
+      'Granite',
+      routeIds.delta,
+      'interrupted',
+      200_000,
+    )
+    granite.failed_request = true
+    granite.client_output_delivered = true
+    fixture.addInteraction(granite)
+    await page.goto('/logs')
+    const graniteNode = node(page, 'Granite', 'failed')
+    await expect(graniteNode).toBeVisible()
+    await graniteNode.click()
+    const inspector = page.getByRole('complementary', { name: 'Observation details' })
+    await expect(inspector.getByRole('heading', { name: 'Granite', exact: true, level: 2 })).toBeVisible()
+    await inspector.getByRole('tab', { name: 'Diagnostics', exact: true }).click()
+    await expect(inspector.getByRole('definition').filter({ hasText: 'Failed' })).toBeVisible()
+  })
+
+  test('a zero-output terminal failure stays hidden when live events update it', async ({ page }) => {
+    const fixture = await installObservationFixture(page)
+    const flint = interaction(
+      'interaction-flint',
+      'root-a',
+      'interaction-atlas',
+      'Flint',
+      routeIds.delta,
+      'interrupted',
+      280_000,
+    )
+    flint.failed_request = true
+    flint.client_output_delivered = false
+    flint.visible_tail = ''
+    fixture.addInteraction(flint)
+    await page.goto('/logs')
+    await expect(node(page, 'Cinder', 'running')).toBeVisible()
+    await expect(node(page, 'Flint', 'interrupted')).toHaveCount(0)
+    fixture.emit({
+      sequence: 30,
+      occurred_at: startedAt + 285_000,
+      interaction_id: 'interaction-flint',
+      run_id: 'run-interaction-flint',
+      rejection_id: null,
+      kind: 'request_failed',
+      payload: {},
+    })
+    await expect(node(page, 'Flint', 'interrupted')).toHaveCount(0)
+    await expect(node(page, 'Cinder', 'running')).toBeVisible()
+    await expect(page.getByLabel('Retry')).toHaveCount(0)
+  })
+
+  test('a deep link reveals a hidden zero-output failure and opens its inspector', async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    const fixture = await installObservationFixture(page)
+    const flint = interaction(
+      'interaction-flint',
+      'root-a',
+      'interaction-atlas',
+      'Flint',
+      routeIds.delta,
+      'interrupted',
+      280_000,
+    )
+    flint.failed_request = true
+    flint.client_output_delivered = false
+    flint.visible_tail = ''
+    fixture.addInteraction(flint)
+    await page.goto('/logs?interaction=interaction-flint')
+    const inspector = page.getByRole('complementary', { name: 'Observation details' })
+    await expect(inspector.getByRole('heading', { name: 'Flint', exact: true, level: 2 })).toBeVisible()
+    await expect(node(page, 'Flint', 'failed')).toBeVisible()
   })
 
   test('pages and refreshes failed requests without duplicating equal-timestamp rows', async ({ page }) => {

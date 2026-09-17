@@ -26,6 +26,7 @@ import '@xyflow/svelte/dist/style.css'
 import { canvasLinks } from '$lib/interaction-canvas-links'
 import { interactionNodeWidth, interactionNodeHeight } from '$lib/interaction-node-geometry'
 import type { LayoutPosition } from '$lib/interaction-layout.worker'
+import { interactionDisplayStatus } from '$lib/observation-chain-visibility'
 import { observationStatusLabel } from '$lib/observation-labels'
 import type { ForestRoot, InteractionNodeData, InteractionSummary } from '$lib/types'
 import InteractionNode from '$lib/components/interaction-node.svelte'
@@ -105,7 +106,7 @@ let nodes = $derived.by<FlowInteractionNode[]>(() => {
       const selected = interaction.id === selectedId
       const onSelectedPath = selectedPath.has(interaction.id)
       const subdued = (selectedId != null && !onSelectedPath) || (!interaction.matched && hasMatches)
-      const ariaLabel = `${interaction.first_model_display_name || interaction.first_route_id}, ${observationStatusLabel(interaction.status)}`
+      const ariaLabel = `${interaction.first_model_display_name || interaction.first_route_id}, ${observationStatusLabel(interactionDisplayStatus(interaction))}`
       if (
         current &&
         current.data.interaction === interaction &&

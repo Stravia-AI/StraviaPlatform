@@ -18,6 +18,7 @@ import { admin } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
 import { formatCompactCount, formatLogTime } from '$lib/format'
 import { visualParent } from '$lib/interaction-canvas-links'
+import { hiddenFailureNode } from '$lib/observation-chain-visibility'
 import { eventBlockId, mergeObservationRuns, retainLiveBlocks, withoutCommittedBlocks } from '$lib/observation-state'
 import { observationStatusLabel } from '$lib/observation-labels'
 import { navigateToBundle, subscribeToObservations, type ObservationSubscription } from '$lib/observation-stream'
@@ -126,6 +127,20 @@ const keysQuery = createQuery(() => ({ queryKey: ['api-keys'], queryFn: admin.ap
 const debugQuery = createQuery(() => ({ queryKey: ['observation-debug'], queryFn: admin.observations.debug }))
 
 const interactions = $derived(roots.flatMap((root) => root.interactions))
+// 交互链路成员规则：零客户端可见输出且最终失败的交互默认不进画布；「失败的请求」页
+// 跳转、深链与跟随聚焦把它显式 reveal 后才可见。
+let revealedFailures = $state.raw(new Set<string>())
+const canvasRoots = $derived(
+  roots
+    .map((root) => ({
+      ...root,
+      interactions: root.interactions.filter(
+        (item) => revealedFailures.has(item.id) || !hiddenFailureNode(item),
+      ),
+    }))
+    .filter((root) => root.interactions.length > 0),
+)
+const canvasInteractions = $derived(canvasRoots.flatMap((root) => root.interactions))
 const minTokensFilter = $derived(minTokenStops[minTokenStop] ?? 0)
 const activeFilterCount = $derived(
   [providerFilter, modelFilter, apiKeyFilter, ...(activeTab === 'interactions' ? [statusFilter] : [])].filter(
@@ -134,7 +149,7 @@ const activeFilterCount = $derived(
 )
 const latestInteraction = $derived.by(
   () =>
-    [...interactions].sort(
+    [...canvasInteractions].sort(
       (a, b) => Number(b.status === 'running') - Number(a.status === 'running') || b.last_active_at - a.last_active_at,
     )[0],
 )
@@ -143,8 +158,8 @@ const selectedPath = $derived.by(() => {
   let current = selectedInteraction
   while (current && !path.has(current.id)) {
     path.add(current.id)
-    const parentId = visualParent(current, interactions)?.id
-    current = parentId ? interactions.find((candidate) => candidate.id === parentId) : undefined
+    const parentId = visualParent(current, canvasInteractions)?.id
+    current = parentId ? canvasInteractions.find((candidate) => candidate.id === parentId) : undefined
   }
   return path
 })
@@ -294,6 +309,9 @@ $effect(() => {
   untrack(closeInspector)
   const selection = selectionVersion
   followPaused = true
+  // 读取已 reveal 集合必须 untrack：本 effect 同时写入它，否则读写循环无限重触发。
+  const currentRevealed = untrack(() => revealedFailures)
+  if (!currentRevealed.has(id)) revealedFailures = new Set([...currentRevealed, id])
   detailLoading = true
   void admin.observations
     .interaction(id)
@@ -654,6 +672,7 @@ async function changeWindow(delta: number): Promise<void> {
 }
 
 async function refreshAnchor(focusId?: string): Promise<void> {
+  if (focusId) revealedFailures = new Set([...revealedFailures, focusId])
   if (focusId || !customRange) {
     customRange = false
     anchorAt = Date.now()
@@ -662,7 +681,7 @@ async function refreshAnchor(focusId?: string): Promise<void> {
   }
   await reloadWindow()
   if (focusId) {
-    const interaction = interactions.find((item) => item.id === focusId)
+    const interaction = canvasInteractions.find((item) => item.id === focusId)
     if (interaction) await selectInteraction(interaction)
   }
 }
@@ -704,6 +723,7 @@ async function openFailureInteraction(): Promise<void> {
     closeInspector()
     activeTab = 'interactions'
     followPaused = true
+    revealedFailures = new Set([...revealedFailures, id])
     roots = [...roots.filter((root) => root.id !== snapshot.root.id), snapshot.root]
     await tick()
     await canvas?.focusNode(id)
@@ -944,7 +964,7 @@ function formatBytes(value: number | undefined): string {
           <div class="stage-state">
             <RequestFailure message={localizeBackendErrorMessage(loadError)} retry={() => loadForest(true)} />
           </div>
-        {:else if roots.length === 0}
+        {:else if canvasRoots.length === 0}
           <div class="stage-state">
             <Empty.Root
               ><Empty.Header
@@ -969,7 +989,7 @@ function formatBytes(value: number | undefined): string {
           <SvelteFlowProvider>
             <InteractionCanvas
               bind:this={canvas}
-              {roots}
+              roots={canvasRoots}
               selectedId={selectedInteraction?.id}
               {selectedPath}
               {loadingMore}

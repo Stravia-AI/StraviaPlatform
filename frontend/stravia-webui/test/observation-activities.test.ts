@@ -44,6 +44,8 @@ function detail(runs: RunDetail[]): InteractionDetail {
     last_active_at: 10,
     input_preview: 'Question',
     visible_tail: '',
+    failed_request: false,
+    client_output_delivered: false,
     usage,
     debug_status: 'complete',
     observation_gap: false,

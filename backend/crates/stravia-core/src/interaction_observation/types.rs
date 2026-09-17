@@ -493,6 +493,12 @@ pub struct InteractionSummary {
     /// Redacted opening text of the initiating user message; absent for uncaptured input.
     pub input_preview: Option<String>,
     pub visible_tail: String,
+    /// The interaction contains at least one run qualifying as a Failed Request
+    /// (same predicate as the failed-requests view).
+    pub failed_request: bool,
+    /// Any run in this interaction committed client-visible output, i.e. the client
+    /// received at least one visible byte (text, public tool call, or thinking preview).
+    pub client_output_delivered: bool,
     pub usage: ConfirmedUsage,
     pub debug_status: String,
     pub observation_gap: bool,

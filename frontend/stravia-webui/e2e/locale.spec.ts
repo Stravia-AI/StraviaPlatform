@@ -117,6 +117,8 @@ test('localized Request Records keep one local timestamp across canvas and detai
     last_active_at: startedAt + 42,
     input_preview: '用户输入问题',
     visible_tail: '客户端可见回答',
+    failed_request: false,
+    client_output_delivered: true,
     usage: {
       input_tokens: 1200,
       output_tokens: 34,
