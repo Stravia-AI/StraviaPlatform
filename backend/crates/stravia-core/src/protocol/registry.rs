@@ -12,6 +12,7 @@ use crate::protocol::transform::ProtocolAdapter;
 use stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01;
 use stravia_runtime_contract::protocol::ids::BEDROCK_CONVERSE_V1;
 use stravia_runtime_contract::protocol::ids::COHERE_CHAT_V2;
+use stravia_runtime_contract::protocol::ids::COMMAND_CODE_GENERATE_V1;
 use stravia_runtime_contract::protocol::ids::GATEWAY_LANGUAGE_MODEL_V4;
 use stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA;
 use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
@@ -177,6 +178,11 @@ impl ProtocolRegistry {
             Some(Protocol::OpenAICompatible) => {
                 matches!(control, TargetThinkingControl::Effort { .. })
             }
+            // Command Code 上游以 `params.reasoning_effort` 表达思考强度,
+            // 与 OpenAICompatible 同样只接受强度枚举,不支持 budget/开关。
+            Some(Protocol::CommandCode) => {
+                matches!(control, TargetThinkingControl::Effort { .. })
+            }
             _ => false,
         }
     }
@@ -287,6 +293,8 @@ fn default_endpoint_aliases() -> HashMap<&'static str, ProtocolEndpoint> {
     m.insert("cohere-chat", COHERE_CHAT_V2);
     m.insert("watsonx-text-chat", WATSONX_TEXT_CHAT_V1);
     m.insert("gateway-language-model", GATEWAY_LANGUAGE_MODEL_V4);
+    m.insert("command-code", COMMAND_CODE_GENERATE_V1);
+    m.insert("command-code-generate", COMMAND_CODE_GENERATE_V1);
 
     // ── Tier 3: Legacy brand / friendly aliases ────────────────────────────────
     m.insert("openai", OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1);
@@ -298,6 +306,7 @@ fn default_endpoint_aliases() -> HashMap<&'static str, ProtocolEndpoint> {
     m.insert("cohere", COHERE_CHAT_V2);
     m.insert("watsonx", WATSONX_TEXT_CHAT_V1);
     m.insert("gateway", GATEWAY_LANGUAGE_MODEL_V4);
+    m.insert("commandcode", COMMAND_CODE_GENERATE_V1);
 
     m
 }
@@ -315,6 +324,8 @@ fn default_protocol_aliases() -> HashMap<&'static str, Protocol> {
     m.insert("cohere-chat", Protocol::CohereChat);
     m.insert("watsonx-text-chat", Protocol::WatsonxTextChat);
     m.insert("gateway-language-model", Protocol::GatewayLanguageModel);
+    m.insert("command-code", Protocol::CommandCode);
+    m.insert("command-code-generate", Protocol::CommandCode);
 
     // Short names
     m.insert("openai", Protocol::OpenAICompatible);
@@ -326,6 +337,7 @@ fn default_protocol_aliases() -> HashMap<&'static str, Protocol> {
     m.insert("cohere", Protocol::CohereChat);
     m.insert("watsonx", Protocol::WatsonxTextChat);
     m.insert("gateway", Protocol::GatewayLanguageModel);
+    m.insert("commandcode", Protocol::CommandCode);
 
     // Deprecated aliases (old canonical slugs, backward compat only)
     m.insert("openai-compat", Protocol::OpenAICompatible);
@@ -341,7 +353,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registers_all_nine_adapters() {
+    fn registers_all_ten_adapters() {
         let reg = ProtocolRegistry::global();
         assert!(reg.contains(&OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1));
         assert!(reg.contains(&OPEN_RESPONSES_2026_04_24));
@@ -352,7 +364,35 @@ mod tests {
         assert!(reg.contains(&COHERE_CHAT_V2));
         assert!(reg.contains(&WATSONX_TEXT_CHAT_V1));
         assert!(reg.contains(&GATEWAY_LANGUAGE_MODEL_V4));
-        assert_eq!(reg.endpoints().len(), 9);
+        assert!(reg.contains(&COMMAND_CODE_GENERATE_V1));
+        assert_eq!(reg.endpoints().len(), 10);
+    }
+
+    #[test]
+    fn command_code_writes_effort_thinking_controls() {
+        // 上游以 `params.reasoning_effort` 表达思考强度(codec 已编码);
+        // 管理面校验必须与 transform 侧 thinking_control_representable 一致,
+        // 否则 Route 编辑会误报「按强度值无法发送」。
+        let reg = ProtocolRegistry::global();
+        use stravia_runtime_contract::thinking::TargetThinkingControl;
+        assert!(reg.protocol_represents_target_thinking_control(
+            "command-code",
+            &TargetThinkingControl::Effort {
+                value: "high".into()
+            }
+        ));
+        assert!(reg.protocol_represents_target_thinking_control(
+            "command-code",
+            &TargetThinkingControl::Hidden
+        ));
+        assert!(!reg.protocol_represents_target_thinking_control(
+            "command-code",
+            &TargetThinkingControl::Budget { value: 10000 }
+        ));
+        assert!(!reg.protocol_represents_target_thinking_control(
+            "command-code",
+            &TargetThinkingControl::Enabled
+        ));
     }
 
     #[test]
@@ -528,10 +568,10 @@ mod tests {
     }
 
     #[test]
-    fn list_protocols_returns_all_eight() {
+    fn list_protocols_returns_all_nine() {
         let reg = ProtocolRegistry::global();
         let protocols = reg.list_protocols();
-        assert_eq!(protocols.len(), 8);
+        assert_eq!(protocols.len(), 9);
         assert!(protocols.contains(&Protocol::OpenAICompatible));
         assert!(protocols.contains(&Protocol::OpenResponses));
         assert!(protocols.contains(&Protocol::AnthropicMessages));
@@ -540,6 +580,7 @@ mod tests {
         assert!(protocols.contains(&Protocol::CohereChat));
         assert!(protocols.contains(&Protocol::WatsonxTextChat));
         assert!(protocols.contains(&Protocol::GatewayLanguageModel));
+        assert!(protocols.contains(&Protocol::CommandCode));
     }
 
     #[test]

@@ -42,4 +42,12 @@ describe('thinking control representability', () => {
     expect(thinkingControlWritable({ type: 'enabled' }, context)).toBe(false)
     expect(thinkingControlWritable({ type: 'budget', value: 1024 }, context)).toBe(false)
   })
+
+  test('command-code only writes effort', () => {
+    const context = { protocol: 'command-code', vendor: 'commandcode', model: 'claude-sonnet-4-6' }
+
+    expect(writableThinkingControlKinds(context)).toEqual(['effort', 'hidden'])
+    expect(thinkingControlWritable({ type: 'effort', value: 'high' }, context)).toBe(true)
+    expect(thinkingControlWritable({ type: 'enabled' }, context)).toBe(false)
+  })
 })

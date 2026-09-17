@@ -614,15 +614,14 @@ pub(super) async fn complete_canonical_response(
             },
         );
     }
-    if has_client_calls {
-        if let Some(mut terminal) = request_context
+    if has_client_calls
+        && let Some(mut terminal) = request_context
             .extensions
             .get::<super::super::RunTerminalContext>()
         {
             terminal.waiting_client = true;
             request_context.extensions.insert(terminal);
         }
-    }
     let canonical_response = response.clone();
     let mut started_executions = Vec::new();
     let mut prepared_platform = Vec::new();

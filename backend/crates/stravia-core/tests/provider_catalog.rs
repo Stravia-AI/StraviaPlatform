@@ -354,11 +354,13 @@ async fn catalog_commits_global_indexes_for_one_revision() -> anyhow::Result<()>
     assert!(refreshed.changed);
     assert_eq!(refreshed.revision, "revision-1");
     assert_eq!(refreshed.generated_at, "2026-08-20T14:01:40Z");
-    assert_eq!(refreshed.provider_count, 1);
+    // 索引里的 demo 加上并入的内置服务 commandcode。
+    assert_eq!(refreshed.provider_count, 2);
     assert_eq!(refreshed.model_count, 1);
     assert_eq!(providers.revision, models.revision);
     assert_eq!(providers.generated_at, models.generated_at);
-    assert_eq!(providers.providers[0].id, "demo");
+    assert_eq!(providers.providers[0].id, "commandcode");
+    assert_eq!(providers.providers[1].id, "demo");
     assert_eq!(models.models[0].id, "demo/chat");
     assert_eq!(
         catalog
@@ -389,6 +391,47 @@ async fn catalog_commits_global_indexes_for_one_revision() -> anyhow::Result<()>
 }
 
 #[tokio::test]
+async fn canonical_upstream_id_match_ignores_namespace_and_case() -> anyhow::Result<()> {
+    let data_dir = tempfile::tempdir()?;
+    let source = source();
+    source
+        .set_canonical_models(
+            br#"{
+              "minimax/MiniMax-M2.7": { "id": "minimax/MiniMax-M2.7", "name": "MiniMax M2.7" },
+              "moonshotai/kimi-k2.5": { "id": "moonshotai/kimi-k2.5", "name": "Kimi K2.5" }
+            }"#
+            .to_vec(),
+        )
+        .await;
+    let catalog = ProviderCatalog::with_source(data_dir.path(), Arc::new(source))?;
+    catalog.refresh().await?;
+
+    // 上游清单的命名空间与 Canonical lab 不必一致,匹配只看最右段。
+    assert_eq!(
+        catalog
+            .canonical_model_matching_upstream_id("MiniMaxAI/MiniMax-M2.7")
+            .await
+            .expect("mismatched namespace prefix")["name"],
+        "MiniMax M2.7"
+    );
+    // 大小写差异同样归一。
+    assert_eq!(
+        catalog
+            .canonical_model_matching_upstream_id("moonshotai/Kimi-K2.5")
+            .await
+            .expect("case-insensitive segment")["name"],
+        "Kimi K2.5"
+    );
+    assert!(
+        catalog
+            .canonical_model_matching_upstream_id("minimax-m2.7")
+            .await
+            .is_some_and(|template| template["name"] == "MiniMax M2.7")
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn canonical_upstream_id_match_skips_ambiguous_model_segments() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
     let source = source();
@@ -396,13 +439,14 @@ async fn canonical_upstream_id_match_skips_ambiguous_model_segments() -> anyhow:
         .set_canonical_models(
             br#"{
               "demo/chat": { "id": "demo/chat", "name": "Demo Chat" },
-              "other/chat": { "id": "other/chat", "name": "Other Chat" }
+              "other/Chat": { "id": "other/Chat", "name": "Other Chat" }
             }"#
             .to_vec(),
         )
         .await;
     let catalog = ProviderCatalog::with_source(data_dir.path(), Arc::new(source))?;
     catalog.refresh().await?;
+    // 歧义判定同样走归一键:大小写不同的同名段仍视为多个候选。
     assert!(
         catalog
             .canonical_model_matching_upstream_id("chat")
@@ -627,6 +671,75 @@ async fn model_source_requires_an_exact_provider_catalog_entry() -> anyhow::Resu
                 model_id
             } if provider_id == "demo" && model_id == "chat-preview"
         )
+    }));
+    Ok(())
+}
+
+// 目录 revision 刷新可能移除已选服务或更换 channel 指纹;创建 Provider 时
+// 必须能区分这三类过期,管理面才能给出可恢复的提示而不是裸错误串。
+#[tokio::test]
+async fn resolve_channel_reports_typed_errors_for_stale_selections() -> anyhow::Result<()> {
+    let data_dir = tempfile::tempdir()?;
+    let catalog = ProviderCatalog::with_source(data_dir.path(), Arc::new(source()))?;
+    catalog.refresh().await?;
+
+    let missing_provider = catalog
+        .resolve_channel("gone-vendor", "default", "fingerprint")
+        .await
+        .unwrap_err();
+    assert!(missing_provider.downcast_ref::<CatalogError>().is_some_and(
+        |error| matches!(error, CatalogError::ProviderNotFound { provider_id } if provider_id == "gone-vendor")
+    ));
+
+    // 内置服务(commandcode)随索引规范化并入快照,必须能按 catalog 流程解析。
+    let builtin_fingerprint = {
+        let providers = catalog.providers().await;
+        providers
+            .providers
+            .iter()
+            .find(|provider| provider.id == "commandcode")
+            .expect("commandcode must be merged into the snapshot")
+            .channels
+            .iter()
+            .find(|channel| channel.id == "default")
+            .expect("commandcode default channel must exist")
+            .fingerprint
+            .clone()
+    };
+    let builtin = catalog
+        .resolve_channel("commandcode", "default", &builtin_fingerprint)
+        .await?;
+    assert_eq!(builtin.0.vendor_id, "commandcode");
+    assert_eq!(builtin.1.protocol, "command-code");
+
+    let providers = catalog.providers().await;
+    let demo = providers
+        .providers
+        .iter()
+        .find(|provider| provider.id == "demo")
+        .expect("demo provider must exist");
+    let demo_channel = demo
+        .channels
+        .iter()
+        .find(|channel| channel.id == "default")
+        .expect("demo default channel must exist");
+
+    let missing_channel = catalog
+        .resolve_channel("demo", "oauth", &demo_channel.fingerprint)
+        .await
+        .unwrap_err();
+    assert!(missing_channel.downcast_ref::<CatalogError>().is_some_and(
+        |error| matches!(error, CatalogError::ChannelNotFound { provider_id, channel_id }
+            if provider_id == "demo" && channel_id == "oauth")
+    ));
+
+    let changed = catalog
+        .resolve_channel("demo", "default", "stale-fingerprint")
+        .await
+        .unwrap_err();
+    assert!(changed.downcast_ref::<CatalogError>().is_some_and(|error| {
+        matches!(error, CatalogError::ChannelChanged { provider_id, channel_id }
+            if provider_id == "demo" && channel_id == "default")
     }));
     Ok(())
 }

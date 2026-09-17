@@ -282,18 +282,62 @@ fn recursive_iter_featured_snippet_children(description: &mut String, el: &Eleme
             scraper::Node::Text(t) => {
                 description.push_str(&t.text);
             }
-            scraper::Node::Element(inner_el) => {
-                if inner_el.attr("data-ved").is_none()
-                    || inner_el.attr("data-send-open-event").is_some()
-                {
+            scraper::Node::Element(inner_el)
+                if (inner_el.attr("data-ved").is_none()
+                    || inner_el.attr("data-send-open-event").is_some())
+                => {
                     recursive_iter_featured_snippet_children(
                         description,
                         &ElementRef::wrap(inner_node).unwrap(),
                     );
                 }
-            }
             _ => {}
         }
+    }
+}
+
+pub fn request_autocomplete(query: &str, _client: &HttpClient) -> anyhow::Result<Request> {
+    let url = Url::parse_with_params(
+        "https://suggestqueries.google.com/complete/search",
+        &[
+            ("output", "firefox"),
+            ("client", "firefox"),
+            ("hl", "US-en"),
+            ("q", query),
+        ],
+    )
+    .unwrap();
+    Ok(http::Request::get(url.as_str()).body(Vec::new())?)
+}
+
+pub fn parse_autocomplete_response(body: &str) -> anyhow::Result<Vec<String>> {
+    let res = serde_json::from_str::<Vec<serde_json::Value>>(body)?;
+    Ok(res
+        .into_iter()
+        .nth(1)
+        .unwrap_or_default()
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|v| v.as_str().unwrap_or_default().to_string())
+        .collect())
+}
+
+fn clean_url(url: &str) -> anyhow::Result<String> {
+    if url.starts_with("/goto?url=") {
+        Ok(format!("https://www.google.com{url}"))
+    } else if url.starts_with("/url?q=") {
+        // get the q param
+        let url = Url::parse(format!("https://www.google.com{url}").as_str())?;
+        let q = url
+            .query_pairs()
+            .find(|(key, _)| key == "q")
+            .unwrap_or_default()
+            .1;
+        Ok(q.to_string())
+    } else {
+        Ok(url.to_string())
     }
 }
 
@@ -476,50 +520,5 @@ mod tests {
 
         assert!(response.search_results.is_empty());
         assert!(response.featured_snippet.is_none());
-    }
-}
-
-pub fn request_autocomplete(query: &str, _client: &HttpClient) -> anyhow::Result<Request> {
-    let url = Url::parse_with_params(
-        "https://suggestqueries.google.com/complete/search",
-        &[
-            ("output", "firefox"),
-            ("client", "firefox"),
-            ("hl", "US-en"),
-            ("q", query),
-        ],
-    )
-    .unwrap();
-    Ok(http::Request::get(url.as_str()).body(Vec::new())?)
-}
-
-pub fn parse_autocomplete_response(body: &str) -> anyhow::Result<Vec<String>> {
-    let res = serde_json::from_str::<Vec<serde_json::Value>>(body)?;
-    Ok(res
-        .into_iter()
-        .nth(1)
-        .unwrap_or_default()
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|v| v.as_str().unwrap_or_default().to_string())
-        .collect())
-}
-
-fn clean_url(url: &str) -> anyhow::Result<String> {
-    if url.starts_with("/goto?url=") {
-        Ok(format!("https://www.google.com{url}"))
-    } else if url.starts_with("/url?q=") {
-        // get the q param
-        let url = Url::parse(format!("https://www.google.com{url}").as_str())?;
-        let q = url
-            .query_pairs()
-            .find(|(key, _)| key == "q")
-            .unwrap_or_default()
-            .1;
-        Ok(q.to_string())
-    } else {
-        Ok(url.to_string())
     }
 }

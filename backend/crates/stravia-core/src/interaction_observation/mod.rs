@@ -1186,14 +1186,12 @@ impl RunObserver {
             attempt_id,
             ..
         } = &event
-        {
-            if self.flush_thinking(model_turn_id, attempt_id) {
+            && self.flush_thinking(model_turn_id, attempt_id) {
                 self.send_event(RunEvent::ModelThinkingFinished {
                     model_turn_id: model_turn_id.clone(),
                     attempt_id: attempt_id.clone(),
                 });
             }
-        }
         if let RunEvent::ClientVisibleContentDelta { text } = event {
             let ready = self
                 .inner
@@ -1303,11 +1301,10 @@ impl RunObserver {
         if let RunEvent::RequestFailed { error } = &event {
             *self.inner.failure.lock().expect("request failure") = Some(error.clone());
         }
-        if matches!(event, RunEvent::ObservationGap { .. }) {
-            if let Some(trace) = &self.inner.trace {
+        if matches!(event, RunEvent::ObservationGap { .. })
+            && let Some(trace) = &self.inner.trace {
                 trace.mark_partial("observation_gap", false);
             }
-        }
         if matches!(event, RunEvent::Checkpoint { .. } | RunEvent::Wire { .. }) {
             if let Some(trace) = &self.inner.trace {
                 // Trace owns its queue. The next durable observation boundary includes this
@@ -1371,8 +1368,8 @@ impl RunObserver {
             self.inner.protected.text(reason);
         }
         redaction::redact_run_outcome(&mut outcome);
-        if !self.inner.terminal.swap(true, Ordering::AcqRel) {
-            if let Err(error) =
+        if !self.inner.terminal.swap(true, Ordering::AcqRel)
+            && let Err(error) =
                 self.inner
                     .observation
                     .inner
@@ -1382,8 +1379,7 @@ impl RunObserver {
                         outcome,
                         finished_at,
                     })
-            {
-                if let WriterCommand::Finish {
+                && let WriterCommand::Finish {
                     outcome,
                     finished_at,
                     ..
@@ -1400,8 +1396,6 @@ impl RunObserver {
                         .expect("observation gaps")
                         .record(&self.inner.run_id, writer::now());
                 }
-            }
-        }
     }
 }
 impl Drop for RunObserverInner {
@@ -1445,8 +1439,7 @@ impl Drop for RunObserverInner {
             .get_mut()
             .expect("visible redaction state")
             .finish()
-        {
-            if self
+            && self
                 .observation
                 .inner
                 .writer
@@ -1458,7 +1451,6 @@ impl Drop for RunObserverInner {
             {
                 *self.gap.get_mut() = true;
             }
-        }
         let mut pending_finish = self
             .pending_finish
             .get_mut()
@@ -1673,14 +1665,12 @@ fn collect_captured_artifacts(
                 .get("media_externalized")
                 .and_then(serde_json::Value::as_bool)
                 == Some(true)
-            {
-                if let Some(reference) = object
+                && let Some(reference) = object
                     .get("artifact_reference")
                     .and_then(serde_json::Value::as_str)
                 {
                     references.insert(reference.to_owned());
                 }
-            }
             for value in object.values() {
                 collect_captured_artifacts(value, references);
             }
@@ -1691,11 +1681,10 @@ fn collect_captured_artifacts(
             }
         }
         serde_json::Value::String(text) => {
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
-                if !value.is_string() {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(text)
+                && !value.is_string() {
                     collect_captured_artifacts(&value, references);
                 }
-            }
         }
         _ => {}
     }

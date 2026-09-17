@@ -156,6 +156,7 @@ mod tests {
                 static_models: None,
                 api_key: "sk-test".into(),
                 adapter_credentials: r#"{"apiKey":"sk-test"}"#.into(),
+                vendor_options: "{}".into(),
                 auth_mode: "apikey".into(),
                 use_proxy: false,
             })

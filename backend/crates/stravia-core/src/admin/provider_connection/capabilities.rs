@@ -189,7 +189,11 @@ impl AdminService {
             anyhow::bail!("capability source returned status {}", resp.status());
         }
         let json: Value = resp.json().await.unwrap_or_default();
-        if let Some(cap) = parse_http_capability(&json, model) {
+        let provider_label = provider
+            .preset_key
+            .as_deref()
+            .unwrap_or(provider.vendor.as_deref().unwrap_or_default());
+        if let Some(cap) = parse_http_capability(provider_label, &json, model) {
             return Ok(cap);
         }
         anyhow::bail!("no matched model capabilities found from capability source")
@@ -214,6 +218,28 @@ impl AdminService {
         }
         let json: Value = resp.json().await.unwrap_or_default();
         Ok(parse_ollama_capability(&json, model))
+    }
+}
+
+fn catalog_model_capabilities(
+    provider: String,
+    model: crate::provider_catalog::CatalogModel,
+) -> ModelCapabilities {
+    let capabilities = model.capabilities.unwrap_or_default();
+    let limits = model.limits.unwrap_or_default();
+    let cost = model.cost.unwrap_or_default();
+    ModelCapabilities {
+        provider,
+        model_id: model.id,
+        context_window: limits.context.unwrap_or(0),
+        embedding_length: None,
+        output_max_tokens: limits.output,
+        tool_call: capabilities.tool_call,
+        reasoning: capabilities.reasoning,
+        input_modalities: capabilities.input_modalities,
+        output_modalities: capabilities.output_modalities,
+        input_cost: cost.input,
+        output_cost: cost.output,
     }
 }
 
@@ -438,27 +464,5 @@ mod tests {
         ));
         server.abort();
         Ok(())
-    }
-}
-
-fn catalog_model_capabilities(
-    provider: String,
-    model: crate::provider_catalog::CatalogModel,
-) -> ModelCapabilities {
-    let capabilities = model.capabilities.unwrap_or_default();
-    let limits = model.limits.unwrap_or_default();
-    let cost = model.cost.unwrap_or_default();
-    ModelCapabilities {
-        provider,
-        model_id: model.id,
-        context_window: limits.context.unwrap_or(0),
-        embedding_length: None,
-        output_max_tokens: limits.output,
-        tool_call: capabilities.tool_call,
-        reasoning: capabilities.reasoning,
-        input_modalities: capabilities.input_modalities,
-        output_modalities: capabilities.output_modalities,
-        input_cost: cost.input,
-        output_cost: cost.output,
     }
 }

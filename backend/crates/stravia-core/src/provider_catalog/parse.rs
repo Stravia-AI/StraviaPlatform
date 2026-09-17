@@ -117,6 +117,7 @@ pub(super) fn parse_providers(raw: &Value) -> anyhow::Result<Vec<CatalogProvider
     if providers.is_empty() {
         bail!("provider index contains no supported providers");
     }
+    merge_builtin_providers(&mut providers);
     providers.sort_by(|left, right| {
         left.name
             .to_lowercase()
@@ -129,6 +130,72 @@ pub(super) fn parse_providers(raw: &Value) -> anyhow::Result<Vec<CatalogProvider
         "normalized provider index"
     );
     Ok(providers)
+}
+
+/// 仅以编译期 vendor 形式存在、远端目录(models.stravia.cn,源自 models.dev)
+/// 不会收录的服务。它们随每次索引规范化并入快照,保证 bootstrap 与刷新后
+/// “选择服务”列表始终提供这些内置服务。`custom` 由前端合成为自定义入口、
+/// `ollama` 面向本地守护进程,都不是目录服务,不在此列。
+const BUILTIN_CATALOG_PROVIDERS: &[&str] = &["commandcode"];
+
+/// 该 catalog 服务是否为编译期并入(远端目录不提供它的索引与 scope)。
+pub(crate) fn is_builtin_catalog_provider(provider_id: &str) -> bool {
+    BUILTIN_CATALOG_PROVIDERS.contains(&provider_id)
+}
+
+fn merge_builtin_providers(providers: &mut Vec<CatalogProvider>) {
+    for vendor_id in BUILTIN_CATALOG_PROVIDERS {
+        if providers.iter().any(|provider| provider.id == *vendor_id) {
+            continue;
+        }
+        match builtin_catalog_provider(vendor_id) {
+            Some(provider) => providers.push(provider),
+            None => tracing::warn!(
+                vendor_id,
+                "built-in catalog provider has no registered vendor"
+            ),
+        }
+    }
+}
+
+fn builtin_catalog_provider(vendor_id: &str) -> Option<CatalogProvider> {
+    let metadata = crate::provider::VendorRegistry::global().metadata(vendor_id)?;
+    let channels = metadata
+        .channels
+        .iter()
+        .map(|definition| {
+            let endpoint = definition.base_urls.first();
+            channel(
+                metadata.id,
+                definition.id,
+                definition.label.en,
+                endpoint
+                    .map(|endpoint| endpoint.protocol)
+                    .unwrap_or(metadata.default_protocol),
+                endpoint.map(|endpoint| endpoint.base_url).unwrap_or(""),
+                match definition.auth_mode {
+                    crate::provider::metadata::AuthMode::ApiKey => CatalogAuthMode::OptionalApiKey,
+                    crate::provider::metadata::AuthMode::OAuth => CatalogAuthMode::OAuth,
+                    crate::provider::metadata::AuthMode::SetupToken => CatalogAuthMode::SetupToken,
+                },
+            )
+        })
+        .collect();
+    Some(CatalogProvider {
+        id: metadata.id.to_string(),
+        name: metadata.label.en.to_string(),
+        documentation_url: None,
+        npm: String::new(),
+        vendor_id: metadata.id.to_string(),
+        protocol: metadata.default_protocol.to_string(),
+        base_url: metadata
+            .channels
+            .first()
+            .and_then(|definition| definition.base_urls.first())
+            .map(|endpoint| endpoint.base_url.to_string())
+            .unwrap_or_default(),
+        channels,
+    })
 }
 
 pub(super) fn parse_canonical_models(body: &[u8]) -> anyhow::Result<BTreeMap<String, Value>> {
@@ -278,7 +345,10 @@ pub(super) fn ensure_catalog_provider(
     {
         Ok(())
     } else {
-        bail!("catalog provider not found: {provider_id}")
+        Err(CatalogError::ProviderNotFound {
+            provider_id: provider_id.to_string(),
+        }
+        .into())
     }
 }
 

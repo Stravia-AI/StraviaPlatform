@@ -173,7 +173,8 @@ fn needs_replay(block: &ContentBlock, role: Role, target: Protocol, preserve: bo
                 Protocol::OpenAICompatible
                 | Protocol::WatsonxTextChat
                 | Protocol::CohereChat
-                | Protocol::GatewayLanguageModel => !preserve || signature.is_some(),
+                | Protocol::GatewayLanguageModel
+                | Protocol::CommandCode => !preserve || signature.is_some(),
             }
         }
         ContentBlock::Reasoning { .. } => {

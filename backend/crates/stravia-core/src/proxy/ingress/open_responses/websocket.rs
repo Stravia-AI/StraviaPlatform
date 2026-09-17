@@ -605,7 +605,7 @@ async fn serve(
                                 "close",
                                 frame.map_or(Value::Null, |frame| {
                                     serde_json::json!({
-                                        "code": u16::from(frame.code),
+                                        "code": frame.code,
                                         "reason": frame.reason.as_str(),
                                     })
                                 }),

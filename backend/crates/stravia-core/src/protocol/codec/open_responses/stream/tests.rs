@@ -458,9 +458,9 @@ fn multi_function_calls_emit_done_as_each_item_completes() {
             && body["item"]["name"] == "grep"
     }));
     assert!(
-        !second_bodies.iter().any(|body| {
-            body["type"] == "response.function_call_arguments.done"
-        }),
+        !second_bodies
+            .iter()
+            .any(|body| { body["type"] == "response.function_call_arguments.done" }),
         "the first client tool must already have completed before later tools start: {second_bodies:?}"
     );
 
@@ -483,9 +483,13 @@ fn multi_function_calls_emit_done_as_each_item_completes() {
         1,
         "only the still-open client tool should complete in the tail: {tail_bodies:?}"
     );
-    assert_eq!(tail_bodies.iter().find(|body| {
-        body["type"] == "response.function_call_arguments.done"
-    }).map(|body| body["arguments"].as_str()), Some(Some(r#"{"pattern":"x"}"#)));
+    assert_eq!(
+        tail_bodies
+            .iter()
+            .find(|body| { body["type"] == "response.function_call_arguments.done" })
+            .map(|body| body["arguments"].as_str()),
+        Some(Some(r#"{"pattern":"x"}"#))
+    );
 }
 
 #[test]

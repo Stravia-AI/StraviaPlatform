@@ -642,7 +642,8 @@ async fn execute_inner(
                         gateway.route_policy_state.clone(),
                         attempt_context.clone(),
                     );
-                    let result = if target.first_token_timeout_ms == 0 {
+                    
+                    if target.first_token_timeout_ms == 0 {
                         attempt.await
                     } else {
                         // timeout 只借用 future；先标记原因，再让其中的观察器随取消释放。
@@ -667,8 +668,7 @@ async fn execute_inner(
                                 ))
                             }
                         }
-                    };
-                    result
+                    }
                 }
                 Err(failure) => Err(failure),
             };
@@ -1435,61 +1435,6 @@ fn insert_default_prompt_cache_key(body: &mut serde_json::Value, prompt_cache_ke
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{handle_terminal_stream_error, insert_default_prompt_cache_key};
-    use stravia_runtime_contract::protocol::ir::AiError;
-    use stravia_runtime_contract::protocol::ir::AiErrorKind;
-    use stravia_runtime_contract::protocol::ir::AiStreamDelta;
-
-    #[test]
-    fn session_cache_key_fills_only_missing_provider_value() {
-        let mut missing = serde_json::json!({"model": "gpt-test"});
-        insert_default_prompt_cache_key(&mut missing, "session-cache");
-        assert_eq!(missing["prompt_cache_key"], "session-cache");
-
-        let mut explicit = serde_json::json!({"prompt_cache_key": "client-cache"});
-        insert_default_prompt_cache_key(&mut explicit, "session-cache");
-        assert_eq!(explicit["prompt_cache_key"], "client-cache");
-    }
-
-    #[test]
-    fn request_scoped_stream_errors_do_not_degrade_target_health() {
-        let health = crate::router::health::HealthRegistry::new();
-        let deltas = vec![AiStreamDelta::StreamError {
-            error: AiError::new(AiErrorKind::StreamMidError, "invalid request").with_status(400),
-        }];
-
-        for _ in 0..3 {
-            assert!(handle_terminal_stream_error(
-                &health,
-                "provider:model",
-                &deltas
-            ));
-        }
-
-        assert!(health.is_healthy("provider:model"));
-    }
-
-    #[test]
-    fn retryable_stream_errors_degrade_target_health() {
-        let health = crate::router::health::HealthRegistry::new();
-        let deltas = vec![AiStreamDelta::StreamError {
-            error: AiError::new(AiErrorKind::StreamMidError, "unavailable").with_status(503),
-        }];
-
-        for _ in 0..3 {
-            assert!(handle_terminal_stream_error(
-                &health,
-                "provider:model",
-                &deltas
-            ));
-        }
-
-        assert!(!health.is_healthy("provider:model"));
-    }
-}
-
 async fn begin_attempt(
     gateway: &Gateway,
     route: &crate::db::models::Route,
@@ -1803,7 +1748,7 @@ async fn begin_attempt(
     let route_policy_state = route_policy_state.clone();
     let attempt_context = attempt_context.clone();
     let target_key = prepared.route.target_id.clone();
-    let health_target_key = selected_target_key(&target);
+    let health_target_key = selected_target_key(target);
     let reservation =
         route_policy_state.reservation(attempt_context.clone(), health_target_key.clone());
     let gateway = gateway.clone();
@@ -2260,4 +2205,59 @@ fn record_success(
     let target_key = selected_target_key(target);
     gateway.health_registry.record_success(&target_key);
     route_policy_state.record_success(attempt_context, &target_key);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{handle_terminal_stream_error, insert_default_prompt_cache_key};
+    use stravia_runtime_contract::protocol::ir::AiError;
+    use stravia_runtime_contract::protocol::ir::AiErrorKind;
+    use stravia_runtime_contract::protocol::ir::AiStreamDelta;
+
+    #[test]
+    fn session_cache_key_fills_only_missing_provider_value() {
+        let mut missing = serde_json::json!({"model": "gpt-test"});
+        insert_default_prompt_cache_key(&mut missing, "session-cache");
+        assert_eq!(missing["prompt_cache_key"], "session-cache");
+
+        let mut explicit = serde_json::json!({"prompt_cache_key": "client-cache"});
+        insert_default_prompt_cache_key(&mut explicit, "session-cache");
+        assert_eq!(explicit["prompt_cache_key"], "client-cache");
+    }
+
+    #[test]
+    fn request_scoped_stream_errors_do_not_degrade_target_health() {
+        let health = crate::router::health::HealthRegistry::new();
+        let deltas = vec![AiStreamDelta::StreamError {
+            error: AiError::new(AiErrorKind::StreamMidError, "invalid request").with_status(400),
+        }];
+
+        for _ in 0..3 {
+            assert!(handle_terminal_stream_error(
+                &health,
+                "provider:model",
+                &deltas
+            ));
+        }
+
+        assert!(health.is_healthy("provider:model"));
+    }
+
+    #[test]
+    fn retryable_stream_errors_degrade_target_health() {
+        let health = crate::router::health::HealthRegistry::new();
+        let deltas = vec![AiStreamDelta::StreamError {
+            error: AiError::new(AiErrorKind::StreamMidError, "unavailable").with_status(503),
+        }];
+
+        for _ in 0..3 {
+            assert!(handle_terminal_stream_error(
+                &health,
+                "provider:model",
+                &deltas
+            ));
+        }
+
+        assert!(!health.is_healthy("provider:model"));
+    }
 }

@@ -36,6 +36,8 @@ pub enum Protocol {
     WatsonxTextChat,
     /// Vercel AI Gateway AI SDK v4 language-model wire.
     GatewayLanguageModel,
+    /// Command Code `/alpha/generate` envelope and NDJSON stream.
+    CommandCode,
 }
 
 impl Protocol {
@@ -49,6 +51,7 @@ impl Protocol {
             Self::CohereChat => "cohere-chat",
             Self::WatsonxTextChat => "watsonx-text-chat",
             Self::GatewayLanguageModel => "gateway-language-model",
+            Self::CommandCode => "command-code",
         }
     }
 
@@ -62,6 +65,7 @@ impl Protocol {
             Self::CohereChat => "Cohere Chat",
             Self::WatsonxTextChat => "watsonx.ai Text Chat",
             Self::GatewayLanguageModel => "Vercel AI Gateway Language Model",
+            Self::CommandCode => "Command Code Generate",
         }
     }
 }
@@ -89,6 +93,7 @@ impl FromStr for Protocol {
             "cohere-chat" | "cohere" => Ok(Self::CohereChat),
             "watsonx-text-chat" | "watsonx" => Ok(Self::WatsonxTextChat),
             "gateway-language-model" | "gateway" => Ok(Self::GatewayLanguageModel),
+            "command-code" | "commandcode" | "command-code-generate" => Ok(Self::CommandCode),
             other => anyhow::bail!("unknown protocol: {other}"),
         }
     }
@@ -150,6 +155,9 @@ pub const WATSONX_TEXT_CHAT_V1: ProtocolEndpoint =
 
 pub const GATEWAY_LANGUAGE_MODEL_V4: ProtocolEndpoint =
     ProtocolEndpoint::new(Protocol::GatewayLanguageModel, "language-model", "v4");
+
+pub const COMMAND_CODE_GENERATE_V1: ProtocolEndpoint =
+    ProtocolEndpoint::new(Protocol::CommandCode, "generate", "v1");
 
 // ── Backward-compat type alias ────────────────────────────────────────────────
 
@@ -312,6 +320,7 @@ mod tests {
             Protocol::CohereChat,
             Protocol::WatsonxTextChat,
             Protocol::GatewayLanguageModel,
+            Protocol::CommandCode,
         ] {
             assert_eq!(p.as_str().parse::<Protocol>().unwrap(), p);
         }

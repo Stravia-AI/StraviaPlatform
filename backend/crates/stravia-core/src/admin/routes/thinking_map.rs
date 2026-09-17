@@ -57,7 +57,7 @@ impl RouteModule<'_> {
                                     .iter()
                                     .find(|old| old.level == level)
                                     .cloned()
-                                    .unwrap_or_else(|| crate::thinking::ThinkingLevelMapping {
+                                    .unwrap_or(crate::thinking::ThinkingLevelMapping {
                                         level,
                                         control: stravia_runtime_contract::thinking::TargetThinkingControl::Hidden,
                                         source: ThinkingMappingSource::Generated,

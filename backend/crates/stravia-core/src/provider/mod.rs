@@ -32,6 +32,7 @@ pub mod azure;
 pub mod cerebras;
 pub mod cloudflare_ai_gateway;
 pub mod cohere;
+pub mod commandcode;
 pub mod custom;
 pub mod deepinfra;
 pub mod gateway;

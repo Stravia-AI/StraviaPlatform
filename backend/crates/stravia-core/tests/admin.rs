@@ -571,6 +571,7 @@ async fn discovered_models_are_persisted_and_enriched_without_expanding_ids() ->
             static_models: None,
             api_key: "sk-test".to_string(),
             adapter_credentials: r#"{"apiKey":"sk-test"}"#.to_string(),
+            vendor_options: "{}".into(),
             auth_mode: "apikey".to_string(),
             use_proxy: false,
         })
@@ -634,6 +635,7 @@ async fn custom_provider_sync_applies_unique_canonical_templates() -> anyhow::Re
             static_models: None,
             api_key: "sk-test".to_string(),
             adapter_credentials: r#"{"apiKey":"sk-test"}"#.to_string(),
+            vendor_options: "{}".into(),
             auth_mode: "apikey".to_string(),
             use_proxy: false,
         })
@@ -699,6 +701,7 @@ async fn custom_provider_resync_fills_bare_discovered_canonical_templates() -> a
             static_models: None,
             api_key: "sk-test".to_string(),
             adapter_credentials: r#"{"apiKey":"sk-test"}"#.to_string(),
+            vendor_options: "{}".into(),
             auth_mode: "apikey".to_string(),
             use_proxy: false,
         })
@@ -1049,6 +1052,7 @@ async fn catalog_provider_uses_runtime_discovery_without_expanding_scope() -> an
             static_models: None,
             api_key: "sk-test".to_string(),
             adapter_credentials: r#"{"apiKey":"sk-test"}"#.to_string(),
+            vendor_options: "{}".into(),
             auth_mode: "apikey".to_string(),
             use_proxy: false,
         })
@@ -1088,6 +1092,7 @@ async fn catalog_capabilities_use_the_catalog_scope_not_vendor_channel() -> anyh
             static_models: None,
             api_key: "{}".to_string(),
             adapter_credentials: r#"{"credentials":"{}"}"#.to_string(),
+            vendor_options: "{}".into(),
             auth_mode: "apikey".to_string(),
             use_proxy: false,
         })
@@ -1309,6 +1314,7 @@ fn oauth_provider_record() -> CreateProviderRecord {
         static_models: None,
         api_key: String::new(),
         adapter_credentials: "{}".to_string(),
+        vendor_options: "{}".into(),
         auth_mode: "oauth".to_string(),
         use_proxy: false,
     }

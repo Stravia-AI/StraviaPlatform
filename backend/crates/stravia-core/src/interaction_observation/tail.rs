@@ -574,7 +574,7 @@ mod tests {
         let answer = AiItem::output_text(
             "我是编程助手，可以帮助你阅读代码、运行命令、定位错误、处理文档，以及执行浏览器自动化和桌面操作。",
         );
-        let mut old = Window::capture(&[question.clone()]).unwrap();
+        let mut old = Window::capture(std::slice::from_ref(&question)).unwrap();
         assert!(old.append(Window::capture(&[thinking, answer.clone()]).unwrap()));
         let input = Window::capture(&[
             question,
@@ -642,15 +642,15 @@ mod tests {
         let switch_user = long_user("switch");
         let switch_answer = long_answer("gpt");
         let resume_user = long_user("resume");
-        let mut first = Window::capture(&[first_user.clone()]).unwrap();
-        assert!(first.append(Window::capture(&[first_answer.clone()]).unwrap()));
+        let mut first = Window::capture(std::slice::from_ref(&first_user)).unwrap();
+        assert!(first.append(Window::capture(std::slice::from_ref(&first_answer)).unwrap()));
         let mut switched = Window::capture(&[
             first_user.clone(),
             first_answer.clone(),
             switch_user.clone(),
         ])
         .unwrap();
-        assert!(switched.append(Window::capture(&[switch_answer.clone()]).unwrap()));
+        assert!(switched.append(Window::capture(std::slice::from_ref(&switch_answer)).unwrap()));
         let with_gpt = Window::capture(&[
             first_user.clone(),
             first_answer.clone(),
@@ -716,8 +716,8 @@ mod tests {
         let first_user = long_user("first");
         let first_answer = long_answer("glm");
         let resume_user = long_user("resume");
-        let mut first = Window::capture(&[first_user.clone()]).unwrap();
-        assert!(first.append(Window::capture(&[first_answer.clone()]).unwrap()));
+        let mut first = Window::capture(std::slice::from_ref(&first_user)).unwrap();
+        assert!(first.append(Window::capture(std::slice::from_ref(&first_answer)).unwrap()));
         let duplicate = Window::capture(&[first_user.clone(), first_answer.clone()]).unwrap();
         let input = Window::capture(&[first_user, first_answer, resume_user]).unwrap();
         let mut index = TailIndex::default();
@@ -781,8 +781,8 @@ mod tests {
             "content": long_answer("result").content.to_text(),
         }))
         .unwrap();
-        let mut pending = Window::capture(&[question.clone()]).unwrap();
-        assert!(pending.append(Window::capture(&[call.clone()]).unwrap()));
+        let mut pending = Window::capture(std::slice::from_ref(&question)).unwrap();
+        assert!(pending.append(Window::capture(std::slice::from_ref(&call)).unwrap()));
         let input = Window::capture(&[question, call, result, long_user("after")]).unwrap();
         let mut index = TailIndex::default();
         index.insert(

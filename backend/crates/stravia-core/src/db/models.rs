@@ -74,6 +74,12 @@ pub struct Provider {
     pub api_key: String,
     #[serde(default = "empty_adapter_credentials", skip_serializing)]
     pub adapter_credentials: String,
+    /// Non-secret vendor behavior options (JSON object). Unlike
+    /// `adapter_credentials` this round-trips to clients so the UI can show
+    /// the current state (e.g. the commandcode zdr switch). Storage keeps a
+    /// JSON string; the API surface is a real object.
+    #[serde(default = "empty_vendor_options", with = "vendor_options_json")]
+    pub vendor_options: String,
     #[serde(default = "default_provider_auth_mode")]
     pub auth_mode: String,
     #[serde(default)]
@@ -337,6 +343,7 @@ pub struct CreateProviderRecord {
     pub static_models: Option<String>,
     pub api_key: String,
     pub adapter_credentials: String,
+    pub vendor_options: String,
     pub auth_mode: String,
     pub use_proxy: bool,
 }
@@ -354,6 +361,10 @@ pub struct UpdateProvider {
     pub static_models: Option<String>,
     pub api_key: Option<String>,
     pub adapter_credentials: Option<BTreeMap<String, String>>,
+    /// Validated against the vendor's declared `option_fields`; `None` keeps
+    /// the stored value, an empty object resets every option to its default.
+    #[serde(default)]
+    pub vendor_options: Option<serde_json::Map<String, serde_json::Value>>,
     pub auth_mode: Option<String>,
     pub use_proxy: Option<bool>,
     pub is_enabled: Option<bool>,
@@ -734,6 +745,15 @@ impl Provider {
             .filter(|value| !value.trim().is_empty())
     }
 
+    /// Parsed `vendor_options` object; malformed JSON yields an empty map
+    /// rather than failing the request — options only tweak behavior.
+    pub fn vendor_options(&self) -> serde_json::Map<String, serde_json::Value> {
+        serde_json::from_str::<serde_json::Value>(&self.vendor_options)
+            .ok()
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_default()
+    }
+
     pub fn effective_api_key(&self) -> String {
         self.adapter_credential("apiKey")
             .unwrap_or_else(|| self.api_key.trim().to_string())
@@ -764,6 +784,59 @@ impl Provider {
 
 fn empty_adapter_credentials() -> String {
     "{}".to_string()
+}
+
+fn empty_vendor_options() -> String {
+    "{}".to_string()
+}
+
+/// Serializes the stored JSON string as a real object and accepts either an
+/// object (canonical) or a JSON-encoded string (lenient) on the way in.
+mod vendor_options_json {
+    use serde::de::Error as _;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use serde_json::Value;
+
+    pub fn serialize<S: Serializer>(value: &str, serializer: S) -> Result<S::Ok, S::Error> {
+        serde_json::from_str::<Value>(value)
+            .unwrap_or_else(|_| Value::Object(Default::default()))
+            .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+        let value = Value::deserialize(deserializer)?;
+        match value {
+            Value::Object(map) => serde_json::to_string(&Value::Object(map))
+                .map_err(|error| D::Error::custom(format!("invalid vendor options: {error}"))),
+            Value::String(text) => {
+                // Lenient: a pre-existing string payload must still parse.
+                serde_json::from_str::<Value>(&text).map_err(|error| {
+                    D::Error::custom(format!("invalid vendor options: {error}"))
+                })?;
+                Ok(text)
+            }
+            Value::Null => Ok("{}".to_string()),
+            other => Err(D::Error::custom(format!(
+                "vendor options must be an object, got {}",
+                ValueTypeLabel(&other)
+            ))),
+        }
+    }
+
+    struct ValueTypeLabel<'a>(&'a Value);
+
+    impl std::fmt::Display for ValueTypeLabel<'_> {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            let label = match self.0 {
+                Value::Bool(_) => "a boolean",
+                Value::Number(_) => "a number",
+                Value::String(_) => "a string",
+                Value::Array(_) => "an array",
+                _ => "an unrecognized value",
+            };
+            formatter.write_str(label)
+        }
+    }
 }
 
 impl CreateProviderRecord {

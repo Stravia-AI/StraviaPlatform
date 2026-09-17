@@ -222,6 +222,7 @@ macro_rules! standard_openai_vendor {
                 icon: $icon,
                 default_protocol: "openai-compatible",
                 credential_fields: $crate::provider::metadata::API_KEY_CREDENTIAL_FIELDS,
+                option_fields: $crate::provider::metadata::NO_OPTION_FIELDS,
                 channels: &[$crate::provider::metadata::ChannelDef {
                     id: "default",
                     label: $crate::provider::metadata::Label {

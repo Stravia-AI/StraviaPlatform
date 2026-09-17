@@ -213,7 +213,8 @@ pub(super) fn model_turn_error_response(
         "STRAVIA_AUTH_ERROR" => StatusCode::UNAUTHORIZED,
         _ => StatusCode::BAD_GATEWAY,
     };
-    let response = if error.code.starts_with("STRAVIA_") {
+    
+    if error.code.starts_with("STRAVIA_") {
         let message = match error.code.as_str() {
             "STRAVIA_FORBIDDEN" if error.message == "access to this model is not permitted" => {
                 "api key not allowed for this model".to_owned()
@@ -233,8 +234,7 @@ pub(super) fn model_turn_error_response(
             .into_response()
     } else {
         coded_error_response(status, &error.code, &error.message)
-    };
-    response
+    }
 }
 
 pub(super) fn model_turn_execute_failure(

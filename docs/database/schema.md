@@ -53,6 +53,7 @@ AI 模型供应商配置（API endpoint、密钥、认证方式等）。
 | `static_models` | TEXT | NULL | 静态模型列表（`\n` 分隔） |
 | `api_key` | TEXT NOT NULL | — | API 密钥 |
 | `adapter_credentials` | JSONB / TEXT | `'{}'` | Vendor 声明的上游凭据字段；secret 值不通过 Admin API 回显 |
+| `vendor_options` | JSONB / TEXT | `'{}'` | Vendor 声明的非密钥行为开关（JSON 对象，按 `option_fields` 声明校验，如 commandcode 的 `zdr`）；随 Admin API 正常回显 |
 | `auth_mode` | TEXT | `'apikey'` | 认证方式：`apikey` 或 `oauth` |
 | `access_token` | TEXT | NULL | Provider 级 OAuth access token |
 | `refresh_token` | TEXT | NULL | Provider 级 OAuth refresh token |

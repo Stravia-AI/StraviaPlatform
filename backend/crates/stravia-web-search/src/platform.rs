@@ -518,6 +518,20 @@ fn reject(status: u16, code: &str, message: &str) -> ActionBatch {
     }))
 }
 
+pub fn output_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "turn_id": { "type": "string" },
+            "completion": { "type": "string", "enum": ["complete", "partial"] },
+            "report": crate::local::search_report_schema(),
+            "pagination": stravia_web_access_contract::read_path::pagination_schema()
+        },
+        "required": ["turn_id", "completion", "report"],
+        "additionalProperties": false
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -686,18 +700,4 @@ mod tests {
 
         assert!(batch.actions.is_empty());
     }
-}
-
-pub fn output_schema() -> Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "turn_id": { "type": "string" },
-            "completion": { "type": "string", "enum": ["complete", "partial"] },
-            "report": crate::local::search_report_schema(),
-            "pagination": stravia_web_access_contract::read_path::pagination_schema()
-        },
-        "required": ["turn_id", "completion", "report"],
-        "additionalProperties": false
-    })
 }

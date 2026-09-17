@@ -96,6 +96,18 @@ fn all_generation_request_codecs_restore_thinking_marker_carriers() {
                 }]
             }),
         ),
+        (
+            COMMAND_CODE_GENERATE_V1,
+            json!({
+                "params": {
+                    "model": "test-model",
+                    "messages": [{
+                        "role": "assistant",
+                        "content": [{"type": "reasoning", "text": marker}]
+                    }]
+                }
+            }),
+        ),
     ];
 
     for (protocol, body) in cases {

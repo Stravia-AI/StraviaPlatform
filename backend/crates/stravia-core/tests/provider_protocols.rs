@@ -28,6 +28,7 @@ fn provider_with_protocol(protocol: &str, base_url: &str) -> Provider {
         static_models: None,
         api_key: String::new(),
         adapter_credentials: "{}".to_string(),
+        vendor_options: "{}".to_string(),
         auth_mode: "apikey".to_string(),
         use_proxy: false,
         last_test_success: None,

@@ -28,6 +28,7 @@ const METADATA: VendorMetadata = VendorMetadata {
     icon: "xai",
     default_protocol: "openai-compatible",
     credential_fields: crate::provider::metadata::API_KEY_CREDENTIAL_FIELDS,
+    option_fields: crate::provider::metadata::NO_OPTION_FIELDS,
     channels: &[
         ChannelDef {
             id: "default",
@@ -183,6 +184,7 @@ mod tests {
             static_models: None,
             api_key: String::new(),
             adapter_credentials: "{}".to_string(),
+            vendor_options: "{}".into(),
             auth_mode: "oauth".to_string(),
             use_proxy: false,
             last_test_success: None,

@@ -599,6 +599,18 @@ fn target_key(target: &Target) -> String {
     format!("{}:{}", target.provider_id, target.model)
 }
 
+fn to_selected(target: &Target) -> SelectedTarget {
+    SelectedTarget {
+        provider_id: target.provider_id.clone(),
+        model: target.model.clone(),
+        priority: target.priority,
+        first_token_timeout_ms: target.first_token_timeout_ms,
+        target_retry_budget: target.target_retry_budget,
+        target_cooldown_ms: target.target_cooldown_ms,
+        thinking_level_map: target.thinking_level_map.0.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1239,17 +1251,5 @@ mod tests {
             ),
             AttemptFailureDisposition::Stop
         );
-    }
-}
-
-fn to_selected(target: &Target) -> SelectedTarget {
-    SelectedTarget {
-        provider_id: target.provider_id.clone(),
-        model: target.model.clone(),
-        priority: target.priority,
-        first_token_timeout_ms: target.first_token_timeout_ms,
-        target_retry_budget: target.target_retry_budget,
-        target_cooldown_ms: target.target_cooldown_ms,
-        thinking_level_map: target.thinking_level_map.0.clone(),
     }
 }

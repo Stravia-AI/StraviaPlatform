@@ -384,6 +384,7 @@ mod tests {
             static_models: None,
             api_key: String::new(),
             adapter_credentials: "{}".into(),
+            vendor_options: "{}".into(),
             auth_mode: "oauth".into(),
             use_proxy: false,
             last_test_success: None,

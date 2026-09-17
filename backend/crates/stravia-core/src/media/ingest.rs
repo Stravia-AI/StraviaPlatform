@@ -529,6 +529,7 @@ async fn materialize_source(
             (kind != "document", kind != "document")
         }
         Protocol::CohereChat => (kind == "image", kind == "image"),
+        Protocol::CommandCode => (false, kind == "image"),
     };
     if settings.external_signed_downloads && url {
         let download = store.download(principal, &id, retention, settings).await?;

@@ -1,5 +1,105 @@
 use super::*;
 
+/// Regression: Open Responses replays history as separate items — a standalone
+/// reasoning item, one item per function_call, then the outputs. The reasoning
+/// item must not be encoded as an assistant message with neither `content` nor
+/// `tool_calls`: DeepSeek (and strict chat-completions upstreams) reject it with
+/// 400 "Invalid assistant message: content or tool_calls must be set". Its
+/// reasoning text must merge onto the following assistant turn instead.
+#[test]
+fn standalone_reasoning_item_does_not_become_contentless_assistant_message() {
+    let assistant_call = |id: &str, name: &str| AiItem {
+        role: Role::Assistant,
+        content: MessageContent::Text(String::new()),
+        tool_calls: Some(vec![ToolCall {
+            id: id.into(),
+            name: name.into(),
+            arguments: "{}".into(),
+        }]),
+        tool_call_id: None,
+        meta: None,
+    };
+    let tool_output = |id: &str, text: &str| AiItem {
+        role: Role::Tool,
+        content: MessageContent::Text(text.into()),
+        tool_calls: None,
+        tool_call_id: Some(id.into()),
+        meta: None,
+    };
+    let request = AiRequest::new(
+        "deepseek-flash",
+        vec![
+            AiItem {
+                role: Role::User,
+                content: MessageContent::Text("修复这个问题".into()),
+                tool_calls: None,
+                tool_call_id: None,
+                meta: None,
+            },
+            AiItem::reasoning(Vec::new(), vec!["inspect the repo first".into()], None),
+            assistant_call("call_00", "bash"),
+            assistant_call("call_01", "glob"),
+            tool_output("call_01", "scratch listing"),
+            tool_output("call_00", "git status output"),
+        ],
+    );
+
+    let (body, _) = OpenAIEncoder.encode_request(&request).expect("encode");
+    assert_replayed_reasoning_is_valid(body);
+
+    // Release shape: replay keeps preserved native reasoning as Thinking
+    // blocks (see `transform/replay.rs`), which `encode_message` strips from
+    // content — the exact message DeepSeek rejected in production.
+    let request = AiRequest::new(
+        "deepseek-flash",
+        vec![
+            AiItem {
+                role: Role::User,
+                content: MessageContent::Text("修复这个问题".into()),
+                tool_calls: None,
+                tool_call_id: None,
+                meta: None,
+            },
+            AiItem::thinking("inspect the repo first", None),
+            assistant_call("call_00", "bash"),
+            assistant_call("call_01", "glob"),
+            tool_output("call_01", "scratch listing"),
+            tool_output("call_00", "git status output"),
+        ],
+    );
+
+    let (body, _) = OpenAIEncoder.encode_request(&request).expect("encode");
+    assert_replayed_reasoning_is_valid(body);
+}
+
+fn assert_replayed_reasoning_is_valid(body: serde_json::Value) {
+    let messages = body["messages"].as_array().expect("messages array");
+
+    let mut reasoning_merged = false;
+    for message in messages {
+        if message["role"] != "assistant" {
+            continue;
+        }
+        let has_content = message.get("content").is_some_and(|c| !c.is_null());
+        let has_calls = message
+            .get("tool_calls")
+            .is_some_and(|c| c.as_array().is_some_and(|a| !a.is_empty()));
+        assert!(
+            has_content || has_calls,
+            "assistant message without content or tool_calls: {message}"
+        );
+        if message.get("reasoning_content").and_then(|c| c.as_str())
+            == Some("inspect the repo first")
+        {
+            reasoning_merged = true;
+        }
+    }
+    assert!(
+        reasoning_merged,
+        "standalone reasoning text must survive on a following assistant message: {messages:?}"
+    );
+}
+
 #[test]
 fn canonical_system_is_encoded_as_a_system_message() {
     let mut request = AiRequest::new(

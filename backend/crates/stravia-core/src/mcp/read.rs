@@ -92,8 +92,8 @@ impl ReadTool {
                 StraviaReadDomain::Query | StraviaReadDomain::WebPage => scope.networking(),
                 StraviaReadDomain::Media => scope.media(),
             };
-            if visible {
-                if let Some(description) = self
+            if visible
+                && let Some(description) = self
                     .handlers
                     .get(&domain)
                     .and_then(|tool| tool.description())
@@ -101,7 +101,6 @@ impl ReadTool {
                     text.push('\n');
                     text.push_str(description);
                 }
-            }
         }
         text
     }
@@ -179,11 +178,10 @@ impl ReadTool {
             raw["pagination"] = value;
             paginated = true;
         }
-        if paginated && result.metadata.contains_key("stravia_media") {
-            if let Some(ContentBlock::Unknown { raw }) = result.content.first() {
+        if paginated && result.metadata.contains_key("stravia_media")
+            && let Some(ContentBlock::Unknown { raw }) = result.content.first() {
                 result.metadata.insert("stravia_media".into(), raw.clone());
             }
-        }
         Ok(result)
     }
 
@@ -589,11 +587,10 @@ impl ReadTool {
                 media.insert("artifact_reference".into(), reference.clone());
             }
             for block in &mut output.content {
-                if let ContentBlock::Unknown { raw } = block {
-                    if let Some(result) = raw.as_object_mut() {
+                if let ContentBlock::Unknown { raw } = block
+                    && let Some(result) = raw.as_object_mut() {
                         result.insert("artifact_reference".into(), reference.clone());
                     }
-                }
             }
         }
         Ok(output)

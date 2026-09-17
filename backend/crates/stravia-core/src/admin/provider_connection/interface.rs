@@ -224,6 +224,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
+    use serde_json::Map;
     use serde_json::json;
 
     use super::*;
@@ -434,6 +435,99 @@ mod tests {
             })
             .await?;
         assert_eq!(updated.base_url, "https://snapshot.example/v1");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn vendor_options_validate_against_declared_fields_and_persist() -> anyhow::Result<()> {
+        let (_data_dir, gateway) = memory_gateway().await?;
+        let admin = gateway.admin();
+        let providers = ProviderConnection::new(&admin);
+        let provider = providers
+            .save(ProviderSave::Custom(CreateProvider {
+                name: Some("CC Options".into()),
+                source: ProviderSourceInput::Custom {
+                    vendor: Some("commandcode".into()),
+                    protocol: "command-code".into(),
+                    base_url: "https://api.commandcode.ai".into(),
+                    models_source: None,
+                    static_models: None,
+                },
+                credential: ProviderCredentialInput::ApiKey {
+                    value: "sk-cc".into(),
+                },
+                use_proxy: false,
+            }))
+            .await?;
+        assert_eq!(provider.vendor_options, "{}");
+
+        // 未声明的 key 与类型不符的值都要被拒。
+        for invalid in [
+            Map::from_iter([("zdr".into(), json!("yes"))]),
+            Map::from_iter([("fingerprintSalt".into(), json!("x"))]),
+        ] {
+            let error = providers
+                .save(ProviderSave::Update {
+                    provider_id: provider.id.clone(),
+                    input: UpdateProvider {
+                        vendor_options: Some(invalid),
+                        ..UpdateProvider::default()
+                    },
+                })
+                .await
+                .expect_err("invalid vendor option must be rejected");
+            assert!(!error.to_string().is_empty());
+        }
+
+        // 合法值持久化并回读;未提供时保持原值。
+        let updated = providers
+            .save(ProviderSave::Update {
+                provider_id: provider.id.clone(),
+                input: UpdateProvider {
+                    vendor_options: Some(Map::from_iter([("zdr".into(), json!(false))])),
+                    ..UpdateProvider::default()
+                },
+            })
+            .await?;
+        assert_eq!(updated.vendor_options, r#"{"zdr":false}"#);
+        let touched_name = providers
+            .save(ProviderSave::Update {
+                provider_id: provider.id,
+                input: UpdateProvider {
+                    name: Some("CC Options 2".into()),
+                    ..UpdateProvider::default()
+                },
+            })
+            .await?;
+        assert_eq!(touched_name.vendor_options, r#"{"zdr":false}"#);
+
+        // 其它 vendor 不声明 option_fields,任何选项都必须被拒。
+        let openai = providers
+            .save(ProviderSave::Custom(CreateProvider {
+                name: Some("OpenAI".into()),
+                source: ProviderSourceInput::Custom {
+                    vendor: Some("openai".into()),
+                    protocol: "openai".into(),
+                    base_url: "https://api.openai.com/v1".into(),
+                    models_source: None,
+                    static_models: None,
+                },
+                credential: ProviderCredentialInput::ApiKey {
+                    value: "sk-oai".into(),
+                },
+                use_proxy: false,
+            }))
+            .await?;
+        providers
+            .save(ProviderSave::Update {
+                provider_id: openai.id,
+                input: UpdateProvider {
+                    vendor_options: Some(Map::from_iter([("zdr".into(), json!(true))])),
+                    ..UpdateProvider::default()
+                },
+            })
+            .await
+            .expect_err("undeclared vendor option must be rejected");
         Ok(())
     }
 

@@ -117,6 +117,17 @@ export function unrepresentableThinkingTarget(
   return { providerId, modelId }
 }
 
+// 目录选择过期:服务/渠道被新 revision 移除,或渠道指纹变更。
+// 这类失败重试不可能成功,调用方应刷新服务列表并让用户重新选择。
+export function catalogSelectionStale(error: unknown): boolean {
+  const code = resolveErrorPayload(error).payload?.code
+  return (
+    code === 'CATALOG_PROVIDER_NOT_FOUND' ||
+    code === 'CATALOG_CHANNEL_NOT_FOUND' ||
+    code === 'CATALOG_FINGERPRINT_STALE'
+  )
+}
+
 export function localizeBackendErrorMessage(error: unknown, locale: Locale = getLocale()): string {
   const { raw, payload } = resolveErrorPayload(error)
   const options = { locale }
@@ -220,6 +231,12 @@ export function localizeBackendErrorMessage(error: unknown, locale: Locale = get
       return m.backend_error_catalog_model_not_found({}, options)
     case 'CATALOG_ENTRY_NOT_FOUND':
       return m.backend_error_catalog_entry_not_found({}, options)
+    case 'CATALOG_PROVIDER_NOT_FOUND':
+      return m.backend_error_catalog_provider_not_found({}, options)
+    case 'CATALOG_CHANNEL_NOT_FOUND':
+      return m.backend_error_catalog_channel_not_found({}, options)
+    case 'CATALOG_FINGERPRINT_STALE':
+      return m.backend_error_catalog_fingerprint_stale({}, options)
     case 'AUTH_ACCESS_DENIED':
       return m.backend_error_auth_access_denied({}, options)
     case 'AUTH_CALLBACK_URL_INVALID':

@@ -58,6 +58,8 @@ export function thinkingControlKindWritable(
       if (kind === 'effort') return true
       if (kind === 'enabled' || kind === 'disabled') return openaiCompatibleSupportsToggle(context)
       return false
+    case 'command-code':
+      return kind === 'effort'
     default:
       return false
   }

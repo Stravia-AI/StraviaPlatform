@@ -185,7 +185,7 @@ async fn assert_resolving_a_branch_renews_its_predecessors_but_not_its_sibling(
         .unwrap();
 
     store
-        .resolve(&owner, &[tip_state.clone()])
+        .resolve(&owner, std::slice::from_ref(&tip_state))
         .await
         .unwrap()
         .unwrap();
@@ -325,7 +325,7 @@ async fn assert_expired_branch_cannot_resolve_or_supply_a_new_registration_sourc
     // Expiry must be respected even before the cleanup worker runs.
     assert!(
         store
-            .resolve(&owner, &[old_state.clone()])
+            .resolve(&owner, std::slice::from_ref(&old_state))
             .await
             .unwrap()
             .is_none()
@@ -376,7 +376,7 @@ async fn assert_same_native_id_with_different_content_is_conflicting_not_a_sourc
         .await
         .unwrap();
     assert!(matches!(
-        store.resolve(&owner, &[changed.clone()]).await,
+        store.resolve(&owner, std::slice::from_ref(&changed)).await,
         Err(CompactionError::Conflict)
     ));
 

@@ -10,6 +10,7 @@ const METADATA: crate::provider::metadata::VendorMetadata =
         icon: "vercel",
         default_protocol: "gateway-language-model",
         credential_fields: crate::provider::metadata::API_KEY_CREDENTIAL_FIELDS,
+        option_fields: crate::provider::metadata::NO_OPTION_FIELDS,
         channels: &[crate::provider::metadata::ChannelDef {
             id: "default",
             label: crate::provider::metadata::Label {

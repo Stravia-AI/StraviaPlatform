@@ -26,6 +26,7 @@ const METADATA: VendorMetadata = VendorMetadata {
     icon: "google",
     default_protocol: "google-gemini",
     credential_fields: crate::provider::metadata::API_KEY_CREDENTIAL_FIELDS,
+    option_fields: crate::provider::metadata::NO_OPTION_FIELDS,
     channels: &[ChannelDef {
         id: "default",
         label: Label {

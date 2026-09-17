@@ -63,8 +63,8 @@ pub(crate) async fn require_admin(
     mut request: Request,
     next: Next,
 ) -> Response {
-    if state.mode == AdminMode::Server && request.method() != Method::GET {
-        if let Err(response) = validate_web_request(
+    if state.mode == AdminMode::Server && request.method() != Method::GET
+        && let Err(response) = validate_web_request(
             request
                 .extensions()
                 .get::<RequestOrigin>()
@@ -74,7 +74,6 @@ pub(crate) async fn require_admin(
         ) {
             return response;
         }
-    }
 
     let token = match state.mode {
         AdminMode::Desktop => bearer_token(request.headers()),

@@ -70,14 +70,13 @@ pub fn parse_response(body: &str) -> anyhow::Result<EngineResponse> {
                         scraper::Node::Text(t) => {
                             description.push_str(&t.text);
                         }
-                        scraper::Node::Element(inner_el) => {
+                        scraper::Node::Element(inner_el)
                             if !inner_el
                                 .has_class("algoSlug_icon", scraper::CaseSensitivity::CaseSensitive)
-                            {
+                            => {
                                 let element_ref = ElementRef::wrap(inner_node).unwrap();
                                 description.push_str(&element_ref.text().collect::<String>());
                             }
-                        }
                         _ => {}
                     }
                 }

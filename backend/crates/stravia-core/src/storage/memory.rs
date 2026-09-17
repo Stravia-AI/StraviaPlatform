@@ -114,6 +114,7 @@ impl ProviderStore for MemoryStorage {
             static_models: input.static_models,
             api_key: input.api_key,
             adapter_credentials: input.adapter_credentials,
+            vendor_options: input.vendor_options,
             auth_mode: input.auth_mode,
             use_proxy: input.use_proxy,
             last_test_success: None,
@@ -161,6 +162,9 @@ impl ProviderStore for MemoryStorage {
         }
         if let Some(value) = input.adapter_credentials {
             provider.adapter_credentials = serde_json::to_string(&value)?;
+        }
+        if let Some(value) = input.vendor_options {
+            provider.vendor_options = serde_json::to_string(&value)?;
         }
         if let Some(value) = input.auth_mode {
             provider.auth_mode = value;
@@ -251,7 +255,7 @@ impl RouteStore for MemoryStorage {
         let storage_id = input
             .id
             .clone()
-            .unwrap_or_else(|| stravia_runtime_contract::identifier::new_id());
+            .unwrap_or_else(stravia_runtime_contract::identifier::new_id);
         anyhow::ensure!(
             !routes
                 .iter()
@@ -279,7 +283,7 @@ impl RouteStore for MemoryStorage {
                         current.provider_id == target.provider_id && current.model == target.model
                     })
                     .map(|current| current.id.clone())
-                    .unwrap_or_else(|| stravia_runtime_contract::identifier::new_id()),
+                    .unwrap_or_else(stravia_runtime_contract::identifier::new_id),
                 model_id: storage_id.clone(),
                 provider_id: target.provider_id,
                 model: target.model,
@@ -745,6 +749,7 @@ mod tests {
             static_models: None,
             api_key: String::new(),
             adapter_credentials: "{}".into(),
+            vendor_options: "{}".into(),
             auth_mode: "apikey".into(),
             use_proxy: false,
             last_test_success: None,

@@ -13,7 +13,7 @@ use serde_json::{Map, Value};
 use sha2::Digest;
 use tokio::sync::{Mutex, RwLock};
 
-use crate::provider_models::ProviderModelMetadata;
+use crate::provider_models::{ProviderModelMetadata, model_id_match_key};
 
 mod types;
 pub use types::*;
@@ -23,8 +23,8 @@ mod persist;
 mod source;
 
 use parse::*;
+pub(crate) use parse::{is_builtin_catalog_provider, opencode_zen_free_tier_model};
 use persist::*;
-pub(crate) use parse::opencode_zen_free_tier_model;
 pub use source::{CatalogSource, HttpCatalogSource};
 
 pub const CATALOG_BASE_URL: &str = "https://models.stravia.cn";
@@ -277,7 +277,9 @@ impl ProviderCatalog {
             .iter()
             .find(|provider| provider.id == provider_id)
             .cloned()
-            .ok_or_else(|| anyhow!("catalog provider not found: {provider_id}"))?;
+            .ok_or_else(|| CatalogError::ProviderNotFound {
+                provider_id: provider_id.to_string(),
+            })?;
         parse_catalog_model(provider_id, &provider.protocol, &source.metadata)
     }
 
@@ -293,15 +295,24 @@ impl ProviderCatalog {
             .iter()
             .find(|provider| provider.id == provider_id)
             .cloned()
-            .ok_or_else(|| anyhow!("catalog provider not found: {provider_id}"))?;
+            .ok_or_else(|| CatalogError::ProviderNotFound {
+                provider_id: provider_id.to_string(),
+            })?;
         let channel = provider
             .channels
             .iter()
             .find(|channel| channel.id == channel_id)
             .cloned()
-            .ok_or_else(|| anyhow!("catalog channel not found: {provider_id}/{channel_id}"))?;
+            .ok_or_else(|| CatalogError::ChannelNotFound {
+                provider_id: provider_id.to_string(),
+                channel_id: channel_id.to_string(),
+            })?;
         if channel.fingerprint != fingerprint {
-            bail!("catalog channel changed; refresh and select it again");
+            return Err(CatalogError::ChannelChanged {
+                provider_id: provider_id.to_string(),
+                channel_id: channel_id.to_string(),
+            }
+            .into());
         }
         Ok((provider, channel))
     }
@@ -384,13 +395,19 @@ impl ProviderCatalog {
             .iter()
             .find(|provider| provider.id == provider_id)
             .cloned()
-            .ok_or_else(|| anyhow!("catalog provider not found: {provider_id}"))?;
+            .ok_or_else(|| CatalogError::ProviderNotFound {
+                provider_id: provider_id.to_string(),
+            })?;
         if !provider
             .channels
             .iter()
             .any(|channel| channel.id == channel_id)
         {
-            bail!("catalog channel not found: {provider_id}/{channel_id}");
+            return Err(CatalogError::ChannelNotFound {
+                provider_id: provider_id.to_string(),
+                channel_id: channel_id.to_string(),
+            }
+            .into());
         }
         Ok((provider, scope))
     }
@@ -407,7 +424,12 @@ impl ProviderCatalog {
     }
 }
 
-/// 上游模型 ID 优先精确匹配 Canonical ID；否则仅在 lab/model 的 model 段唯一时采用该模板。
+/// 上游模型 ID 优先精确匹配 Canonical ID；否则按「`/` 最右段 + 忽略大小写」
+/// 归一后匹配，且仅在归一键唯一时采用该模板（与 ProviderModelStore::find 同语义）。
+///
+/// 上游清单 ID 的命名空间与大小写不必与 Canonical ID 一致
+/// （`MiniMaxAI/MiniMax-M2.7` vs `minimax/MiniMax-M2.7`），
+/// 因此宽松回退与 b95e5a4 的读取侧匹配共用 model_id_match_key。
 fn canonical_template_for_upstream_id(
     canonical_models: &BTreeMap<String, Value>,
     model_id: &str,
@@ -419,12 +441,10 @@ fn canonical_template_for_upstream_id(
     if let Some(value) = canonical_models.get(model_id) {
         return Some(value.clone());
     }
+    let needle = model_id_match_key(model_id);
     let mut matched = None;
     for (id, value) in canonical_models {
-        let Some((_, segment)) = id.split_once('/') else {
-            continue;
-        };
-        if segment != model_id {
+        if model_id_match_key(id) != needle {
             continue;
         }
         if matched.is_some() {

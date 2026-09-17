@@ -165,14 +165,8 @@ pub(super) async fn create_provider_handler(
     match gw.admin().create_provider(input).await {
         Ok(v) => Json(serde_json::json!({ "data": provider_value(v) })).into_response(),
         Err(e) if e.to_string().contains("AUTH_SESSION_REQUIRED") => oauth_err(e),
-        Err(e) if e.to_string().contains("refresh and select") => (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({
-                "code": "CATALOG_FINGERPRINT_STALE",
-                "error": "The selected Catalog channel changed. Refresh and select it again."
-            })),
-        )
-            .into_response(),
+        // Catalog 选择过期(服务或渠道被目录新 revision 移除/变更)由 err() 里的
+        // 类型化 CatalogError 映射为 404/409 + code,前端据此提示重新选择。
         Err(e) => err(e),
     }
 }

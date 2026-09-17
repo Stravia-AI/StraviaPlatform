@@ -24,6 +24,7 @@ export type Protocol =
   | 'cohere-chat'
   | 'watsonx-text-chat'
   | 'gateway-language-model'
+  | 'command-code'
 
 export interface ProtocolMeta {
   id: Protocol
@@ -42,6 +43,7 @@ export const PROTOCOL_TABLE: ProtocolMeta[] = [
   { id: 'cohere-chat', displayName: 'Cohere Chat', defaultBaseUrl: 'https://api.cohere.com/v2' },
   { id: 'watsonx-text-chat', displayName: 'watsonx.ai Text Chat', defaultBaseUrl: 'https://us-south.ml.cloud.ibm.com' },
   { id: 'gateway-language-model', displayName: 'Vercel AI Gateway Language Model', defaultBaseUrl: 'https://ai-gateway.vercel.sh/v4/ai' },
+  { id: 'command-code', displayName: 'Command Code Generate', defaultBaseUrl: 'https://api.commandcode.ai' },
 ]
 
 // ── Alias resolution ───────────────────────────────────────────────────────
@@ -57,6 +59,8 @@ const PROTOCOL_ALIASES: Record<string, Protocol> = {
   'cohere-chat': 'cohere-chat',
   'watsonx-text-chat': 'watsonx-text-chat',
   'gateway-language-model': 'gateway-language-model',
+  'command-code': 'command-code',
+  'command-code-generate': 'command-code',
 
   // Short names
   openai: 'openai-compatible',
@@ -68,6 +72,7 @@ const PROTOCOL_ALIASES: Record<string, Protocol> = {
   cohere: 'cohere-chat',
   watsonx: 'watsonx-text-chat',
   gateway: 'gateway-language-model',
+  commandcode: 'command-code',
 
   // Deprecated aliases (old canonical slugs)
   'openai-compat': 'openai-compatible',
@@ -97,6 +102,7 @@ const PROTOCOL_ALIASES: Record<string, Protocol> = {
   'cohere-chat/chat/v2': 'cohere-chat',
   'watsonx-text-chat/chat/v1': 'watsonx-text-chat',
   'gateway-language-model/language-model/v4': 'gateway-language-model',
+  'command-code/generate/v1': 'command-code',
 }
 
 /**

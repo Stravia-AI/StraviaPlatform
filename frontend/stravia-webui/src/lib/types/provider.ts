@@ -18,6 +18,8 @@ export interface Provider {
   channel?: string | null
   models_source?: string | null
   static_models?: string | null
+  /** Non-secret vendor behavior options (e.g. commandcode zdr). */
+  vendor_options?: Record<string, unknown>
   is_enabled: boolean
   created_at: string
   updated_at: string
@@ -60,6 +62,7 @@ export type ProviderProtocol =
   | 'cohere-chat'
   | 'watsonx-text-chat'
   | 'gateway-language-model'
+  | 'command-code'
 
 export type CatalogAuthMode = 'optional_api_key' | 'oauth' | 'setup_token'
 
@@ -246,12 +249,21 @@ export interface VendorCredentialField {
   input: 'text' | 'password' | 'textarea'
 }
 
+export interface VendorOptionField {
+  key: string
+  label: string
+  input: 'toggle'
+  /** Value used when the stored vendor_options JSON omits the key. */
+  defaultOn: boolean
+}
+
 export interface VendorMetadata {
   id: string
   label: { zh: string; en: string }
   icon: string
   defaultProtocol: ProviderProtocol
   credentialFields: VendorCredentialField[]
+  optionFields?: VendorOptionField[]
 }
 
 export interface UpdateProvider {
@@ -266,5 +278,7 @@ export interface UpdateProvider {
   models_source?: string
   static_models?: string
   api_key?: string
+  /** Replaces all vendor options when present; omitted keys use vendor defaults. */
+  vendor_options?: Record<string, unknown>
   is_enabled?: boolean
 }

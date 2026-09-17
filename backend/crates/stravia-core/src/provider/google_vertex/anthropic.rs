@@ -62,6 +62,7 @@ const METADATA: VendorMetadata = VendorMetadata {
     icon: "googlecloud",
     default_protocol: "anthropic-messages",
     credential_fields: CREDENTIAL_FIELDS,
+    option_fields: crate::provider::metadata::NO_OPTION_FIELDS,
     channels: &[ChannelDef {
         id: "default",
         label: Label {

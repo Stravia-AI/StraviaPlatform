@@ -8,6 +8,41 @@ pub(super) fn validate_adapter_credentials(
     vendor.validate_credentials(values)
 }
 
+/// Validate `vendor_options` against the vendor's declared `option_fields`:
+/// unknown keys and values that do not match the declared input kind are
+/// rejected so typos fail loudly instead of silently no-op'ing at runtime.
+pub(super) fn validate_vendor_options(
+    vendor_id: &str,
+    values: serde_json::Map<String, serde_json::Value>,
+) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
+    let vendor = crate::provider::VendorRegistry::global()
+        .get_vendor(vendor_id)
+        .ok_or_else(|| anyhow::anyhow!("Vendor `{vendor_id}` is not installed"))?;
+    let declared = vendor
+        .metadata()
+        .map(|metadata| metadata.option_fields)
+        .unwrap_or(&[]);
+    for field in declared {
+        if let Some(value) = values.get(field.key) {
+            let type_ok = match field.input {
+                crate::provider::metadata::OptionInputKind::Toggle => value.is_boolean(),
+            };
+            if !type_ok {
+                anyhow::bail!(
+                    "Vendor option `{}` must be a boolean for vendor `{vendor_id}`",
+                    field.key
+                );
+            }
+        }
+    }
+    for key in values.keys() {
+        if !declared.iter().any(|field| field.key == key) {
+            anyhow::bail!("Vendor `{vendor_id}` does not declare option `{key}`");
+        }
+    }
+    Ok(values)
+}
+
 pub(super) fn assemble_vendor_base_url(
     vendor_id: &str,
     credentials: &std::collections::BTreeMap<String, String>,

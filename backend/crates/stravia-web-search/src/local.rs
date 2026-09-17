@@ -247,14 +247,13 @@ impl AgentOutputValidator for LocalSearchOutputValidator {
                 } = block
                 {
                     evidence.extend(tool_evidence(content));
-                    if public_reads.contains(tool_use_id.as_str()) {
-                        if let Some(url) = content.get("source_url").and_then(Value::as_str) {
+                    if public_reads.contains(tool_use_id.as_str())
+                        && let Some(url) = content.get("source_url").and_then(Value::as_str) {
                             evidence.extend([SearchEvidence {
                                 url: url.to_owned(),
                                 title: None,
                             }]);
                         }
-                    }
                 }
             }
         }

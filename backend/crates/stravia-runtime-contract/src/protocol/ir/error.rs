@@ -150,7 +150,8 @@ impl AiError {
             }
             return AiErrorKind::RateLimitError;
         }
-        let kind = match status {
+        
+        match status {
             400 => AiErrorKind::InvalidRequest,
             401 => AiErrorKind::AuthenticationError,
             403 => AiErrorKind::AuthorizationError,
@@ -160,8 +161,7 @@ impl AiError {
             501..=528 => AiErrorKind::ServiceUnavailable,
             529 => AiErrorKind::QuotaExceeded,
             _ => AiErrorKind::Unknown,
-        };
-        kind
+        }
     }
 }
 

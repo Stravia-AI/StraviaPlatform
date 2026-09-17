@@ -405,14 +405,13 @@ fn validate_field_types(obj: &serde_json::Map<String, Value>) -> Result<()> {
             anyhow::bail!("'reasoning.summary' must be a string or null");
         }
     }
-    if let Some(stream_options) = obj.get("stream_options").and_then(Value::as_object) {
-        if stream_options
+    if let Some(stream_options) = obj.get("stream_options").and_then(Value::as_object)
+        && stream_options
             .get("include_obfuscation")
             .is_some_and(|value| !value.is_boolean())
         {
             anyhow::bail!("'stream_options.include_obfuscation' must be a boolean");
         }
-    }
     if let Some(text) = obj.get("text").and_then(Value::as_object) {
         if let Some(verbosity) = text.get("verbosity")
             && !verbosity.is_null()

@@ -342,7 +342,7 @@ fn decode_hex(value: &str) -> Vec<u8> {
     assert_eq!(value.len() % 2, 0);
     value
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>().0.iter()
         .map(|pair| {
             u8::from_str_radix(std::str::from_utf8(pair).expect("hex fixture"), 16)
                 .expect("valid hex fixture")
@@ -929,6 +929,7 @@ async fn create_test_provider(
             static_models: None,
             api_key: token.into(),
             adapter_credentials: serde_json::json!({ "apiKey": token }).to_string(),
+            vendor_options: "{}".into(),
             auth_mode: "apikey".into(),
             use_proxy: false,
         })

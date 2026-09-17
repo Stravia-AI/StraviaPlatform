@@ -1899,7 +1899,7 @@ async fn assert_hidden_round_rechecks_access(
     let replacement_model_id = configure_route_with_id(
         &gateway,
         &format!("hidden-round-replacement-{}", mutation.tool_id()),
-        &[base_url.clone()],
+        std::slice::from_ref(&base_url),
     )
     .await;
     let model_id = configure_route_with_id(&gateway, &model, &[base_url]).await;

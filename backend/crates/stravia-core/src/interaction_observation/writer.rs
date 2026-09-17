@@ -294,11 +294,11 @@ pub(super) fn spawn(
                     let at = now();
                     let expiry = expires(at, retention_days.load(Ordering::Relaxed));
                     if completed {
-                        if let Some(window) = window {
-                            if let Some(interaction) = grouping.interaction_for_run(&run_id) {
+                        if let Some(window) = window
+                            && let Some(interaction) = grouping.interaction_for_run(&run_id) {
                                 let pending = window.pending_tool_ids().unwrap_or_default();
-                                if let Some(hash) = window.last_hash_hex() {
-                                    if let Err(error) = store
+                                if let Some(hash) = window.last_hash_hex()
+                                    && let Err(error) = store
                                         .persist_tail_source(
                                             &run_id,
                                             interaction,
@@ -311,7 +311,6 @@ pub(super) fn spawn(
                                     {
                                         tracing::warn!(%run_id, %error, "tail source persistence failed");
                                     }
-                                }
                                 tail.insert(
                                     run_id,
                                     window,
@@ -320,7 +319,6 @@ pub(super) fn spawn(
                                     interaction.to_owned(),
                                 );
                             }
-                        }
                         continue;
                     }
                     if attributed.contains(&run_id) {
@@ -1038,7 +1036,7 @@ async fn flush_active_manifests(
         {
             Ok(event) => {
                 persisted.insert(run_id, manifest);
-                publish(&updates, &trace_sequence, event);
+                publish(updates, trace_sequence, event);
             }
             Err(error) => {
                 trace.mark_observation_gap();
@@ -1097,7 +1095,7 @@ async fn persist_finish(
                 if let Some(node) = outcome.generation_node_id.as_deref() {
                     let _ = store.set_tail_generation_node(run_id, node).await;
                 }
-                publish(&updates, &trace_sequence, value);
+                publish(updates, trace_sequence, value);
             }
             Err(_) => {
                 pending_text
@@ -1471,11 +1469,10 @@ async fn discover_diagnostic(
     let Some(input) = input else {
         return (None, None);
     };
-    if start.generation_parent_id.is_none() {
-        if let Some(source) = current_tool_source(tail, store, start, input, now).await {
+    if start.generation_parent_id.is_none()
+        && let Some(source) = current_tool_source(tail, store, start, input, now).await {
             return (Some(source), None);
         }
-    }
     let mut loaded = Vec::new();
     let mut seen = HashSet::new();
     for run in tail.fingerprint_runs(input, &start.principal) {

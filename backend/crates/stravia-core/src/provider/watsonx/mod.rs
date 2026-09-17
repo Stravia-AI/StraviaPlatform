@@ -67,6 +67,7 @@ const METADATA: VendorMetadata = VendorMetadata {
     icon: "ibm",
     default_protocol: "watsonx-text-chat",
     credential_fields: CREDENTIAL_FIELDS,
+    option_fields: crate::provider::metadata::NO_OPTION_FIELDS,
     channels: &[ChannelDef {
         id: "default",
         label: Label {

@@ -28,6 +28,9 @@ pub(super) fn resolve_models_endpoint(provider: &Provider) -> Option<String> {
             }
         }
         Protocol::GoogleGemini => Some(format!("{base}/v1beta/models")),
+        // Command Code 的清单端点不在 CLI 信封协议里,是独立的 OpenAI 兼容
+        // `/provider/v1/models`;跟随 base_url 以便自定义网关与测试注入。
+        Protocol::CommandCode => Some(format!("{base}/provider/v1/models")),
         _ => None,
     }
 }
@@ -289,7 +292,11 @@ pub(super) fn extract_ollama_embedding_length(
         .filter(|value| *value > 0)
 }
 
-pub(super) fn parse_http_capability(json: &Value, model: &str) -> Option<ModelCapabilities> {
+pub(super) fn parse_http_capability(
+    provider_label: &str,
+    json: &Value,
+    model: &str,
+) -> Option<ModelCapabilities> {
     // OpenRouter 等能力源即 `/v1/models` 响应；清单 ID 可能带命名空间前缀或
     // 大小写差异，与清单查找一致地用“最右段 + 忽略大小写”匹配。
     let query_key = crate::provider_models::model_id_match_key(model);
@@ -359,7 +366,7 @@ pub(super) fn parse_http_capability(json: &Value, model: &str) -> Option<ModelCa
     let lower_model_id = model_id.to_lowercase();
 
     Some(ModelCapabilities {
-        provider: "openrouter".to_string(),
+        provider: provider_label.to_string(),
         model_id: model_id.to_string(),
         context_window,
         embedding_length: None,
@@ -399,13 +406,52 @@ mod tests {
             ]
         });
 
-        let caps =
-            parse_http_capability(&response, "gpt-4o").expect("segment + case-insensitive hit");
+        let caps = parse_http_capability("openrouter", &response, "gpt-4o")
+            .expect("segment + case-insensitive hit");
+        assert_eq!(caps.provider, "openrouter");
         assert_eq!(caps.model_id, "openai/GPT-4o");
         assert_eq!(caps.context_window, 128000);
         assert!(
-            parse_http_capability(&response, "gpt-4.1").is_none(),
+            parse_http_capability("openrouter", &response, "gpt-4.1").is_none(),
             "no inventory entry shares the match key"
+        );
+    }
+
+    #[test]
+    fn command_code_models_endpoint_follows_base_url() {
+        let provider = Provider {
+            id: "provider".into(),
+            name: "Command Code".into(),
+            vendor: Some("commandcode".into()),
+            protocol: "command-code".into(),
+            base_url: "https://api.commandcode.ai/".into(),
+            preset_key: Some("commandcode".into()),
+            channel: Some("default".into()),
+            models_source: Some("catalog".into()),
+            static_models: None,
+            api_key: String::new(),
+            adapter_credentials: "{}".into(),
+            vendor_options: "{}".into(),
+            auth_mode: "apikey".into(),
+            use_proxy: false,
+            last_test_success: None,
+            last_test_at: None,
+            is_enabled: true,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+
+        assert_eq!(
+            resolve_models_endpoint(&provider).as_deref(),
+            Some("https://api.commandcode.ai/provider/v1/models")
+        );
+
+        // base_url 覆盖(自定义网关/测试注入)时清单端点跟随。
+        let mut routed = provider;
+        routed.base_url = "http://127.0.0.1:9".into();
+        assert_eq!(
+            resolve_models_endpoint(&routed).as_deref(),
+            Some("http://127.0.0.1:9/provider/v1/models")
         );
     }
 
@@ -440,6 +486,7 @@ mod tests {
             static_models: None,
             api_key: String::new(),
             adapter_credentials: "{}".into(),
+            vendor_options: "{}".into(),
             auth_mode: "apikey".into(),
             use_proxy: false,
             last_test_success: None,
@@ -448,14 +495,8 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
         };
-        assert!(!retain_discovered_model_id(
-            &provider,
-            "mimo-v2.5-free"
-        ));
-        assert!(retain_discovered_model_id(
-            &provider,
-            "claude-sonnet-4-6"
-        ));
+        assert!(!retain_discovered_model_id(&provider, "mimo-v2.5-free"));
+        assert!(retain_discovered_model_id(&provider, "claude-sonnet-4-6"));
         assert_eq!(
             retain_discovered_model_ids(
                 &provider,
@@ -469,9 +510,6 @@ mod tests {
         );
 
         provider.preset_key = Some("opencode-go".into());
-        assert!(retain_discovered_model_id(
-            &provider,
-            "mimo-v2.5-free"
-        ));
+        assert!(retain_discovered_model_id(&provider, "mimo-v2.5-free"));
     }
 }

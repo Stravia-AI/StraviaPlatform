@@ -77,6 +77,7 @@ const METADATA: VendorMetadata = VendorMetadata {
     icon: "googlecloud",
     default_protocol: "google-gemini",
     credential_fields: VERTEX_CREDENTIAL_FIELDS,
+    option_fields: crate::provider::metadata::NO_OPTION_FIELDS,
     channels: &[
         ChannelDef {
             id: "native",
@@ -391,6 +392,7 @@ mod tests {
             static_models: None,
             api_key: "unused".into(),
             adapter_credentials: "{}".into(),
+            vendor_options: "{}".into(),
             auth_mode: "apikey".into(),
             use_proxy: false,
             last_test_success: None,

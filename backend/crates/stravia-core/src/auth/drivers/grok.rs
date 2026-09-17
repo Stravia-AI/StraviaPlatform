@@ -516,7 +516,7 @@ impl AuthDriver for GrokOAuthDriver {
                 .resource_url
                 .clone()
                 .filter(|value| !value.trim().is_empty())
-                .or_else(|| Some(config.runtime_base_url)),
+                .or(Some(config.runtime_base_url)),
             extra_headers,
             model_aliases: HashMap::new(),
             models_source_override: None,
@@ -752,6 +752,7 @@ mod tests {
                     static_models: None,
                     api_key: String::new(),
                     adapter_credentials: "{}".to_string(),
+                    vendor_options: "{}".into(),
                     auth_mode: "oauth".to_string(),
                     use_proxy: false,
                     last_test_success: None,

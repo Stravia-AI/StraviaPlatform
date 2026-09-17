@@ -100,7 +100,7 @@ impl GoogleResponseParser {
             .get("responseId")
             .and_then(|v| v.as_str())
             .map(str::to_string)
-            .unwrap_or_else(|| stravia_runtime_contract::identifier::new_id());
+            .unwrap_or_else(stravia_runtime_contract::identifier::new_id);
 
         let mut ai_resp = AiResponse::new(response_id, model);
         ai_resp.items = items;
@@ -290,7 +290,7 @@ fn parse_gemini_chunk(
                     let id = function_call
                         .id
                         .clone()
-                        .unwrap_or_else(|| stravia_runtime_contract::identifier::new_id());
+                        .unwrap_or_else(stravia_runtime_contract::identifier::new_id);
                     deltas.push(AiStreamDelta::ToolCallStart {
                         index: 0,
                         id,

@@ -74,6 +74,7 @@ const METADATA: VendorMetadata = VendorMetadata {
     icon: "aws",
     default_protocol: "bedrock-converse",
     credential_fields: CREDENTIAL_FIELDS,
+    option_fields: crate::provider::metadata::NO_OPTION_FIELDS,
     channels: &[ChannelDef {
         id: "default",
         label: Label {

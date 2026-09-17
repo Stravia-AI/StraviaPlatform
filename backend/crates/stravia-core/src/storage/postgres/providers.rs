@@ -34,7 +34,7 @@ impl ProviderStore for PostgresProviderStore {
             anyhow::bail!("unsupported provider auth_mode: {}", input.auth_mode);
         }
         sqlx::query(
-            "INSERT INTO providers (id, name, vendor, protocol, base_url, preset_key, channel, models_source, static_models, api_key, adapter_credentials, auth_mode, use_proxy) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+            "INSERT INTO providers (id, name, vendor, protocol, base_url, preset_key, channel, models_source, static_models, api_key, adapter_credentials, vendor_options, auth_mode, use_proxy) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
         )
         .bind(&id)
         .bind(input.name.trim())
@@ -80,6 +80,11 @@ impl ProviderStore for PostgresProviderStore {
             .map(|values| serde_json::to_string(&values))
             .transpose()?
             .unwrap_or(current.adapter_credentials);
+        let vendor_options = input
+            .vendor_options
+            .map(|values| serde_json::to_string(&values))
+            .transpose()?
+            .unwrap_or(current.vendor_options);
         let api_key = input.api_key.unwrap_or_else(|| {
             serde_json::from_str::<std::collections::BTreeMap<String, String>>(&adapter_credentials)
                 .ok()
@@ -95,7 +100,7 @@ impl ProviderStore for PostgresProviderStore {
         let is_enabled = input.is_enabled.unwrap_or(current.is_enabled);
 
         sqlx::query(
-            "UPDATE providers SET name=$1, vendor=$2, protocol=$3, base_url=$4, preset_key=$5, channel=$6, models_source=$7, static_models=$8, api_key=$9, adapter_credentials=$10, auth_mode=$11, use_proxy=$12, is_enabled=$13, updated_at=CURRENT_TIMESTAMP WHERE id=$14",
+            "UPDATE providers SET name=$1, vendor=$2, protocol=$3, base_url=$4, preset_key=$5, channel=$6, models_source=$7, static_models=$8, api_key=$9, adapter_credentials=$10, vendor_options=$11, auth_mode=$12, use_proxy=$13, is_enabled=$14, updated_at=CURRENT_TIMESTAMP WHERE id=$15",
         )
         .bind(name.trim())
         .bind(vendor)
@@ -107,6 +112,7 @@ impl ProviderStore for PostgresProviderStore {
         .bind(static_models)
         .bind(api_key)
         .bind(adapter_credentials)
+        .bind(vendor_options)
         .bind(auth_mode)
         .bind(use_proxy)
         .bind(is_enabled)

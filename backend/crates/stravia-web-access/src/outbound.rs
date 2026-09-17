@@ -79,7 +79,7 @@ impl NoProxyList {
     fn parse(value: &str) -> Self {
         Self {
             entries: value
-                .split(|character| matches!(character, ',' | ' ' | ';'))
+                .split([',', ' ', ';'])
                 .map(str::trim)
                 .filter(|entry| !entry.is_empty())
                 .map(|entry| entry.to_ascii_lowercase())

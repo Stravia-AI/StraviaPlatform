@@ -76,7 +76,7 @@ macro_rules! engine_requests {
 macro_rules! engine_autocomplete_requests {
     ($($engine:ident => $module:ident::$engine_id:ident::$request:ident, $parse_response:ident),* $(,)?) => {
         impl Engine {
-            #[must_use]
+            
             pub fn request_autocomplete(&self, query: &str, client: &HttpClient) -> anyhow::Result<Option<RequestAutocompleteResponse>> {
                 match self {
                     $(
@@ -103,7 +103,7 @@ macro_rules! engine_autocomplete_requests {
 macro_rules! engine_postsearch_requests {
     ($($engine:ident => $module:ident::$engine_id:ident::$request:ident, $parse_response:ident),* $(,)?) => {
         impl Engine {
-            #[must_use]
+            
             pub async fn postsearch_request(&self, response: &Response) -> anyhow::Result<Option<$crate::http_client::Request>> {
                 match self {
                     $(

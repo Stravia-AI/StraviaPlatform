@@ -437,8 +437,8 @@ impl TraceHandle {
         if matches!(
             record.message_type.as_deref(),
             Some("body_chunk" | "sse_chunk")
-        ) {
-            if let Some(text) = record.payload.as_str() {
+        )
+            && let Some(text) = record.payload.as_str() {
                 let key = format!(
                     "{}:{}:{}",
                     record.direction.as_deref().unwrap_or_default(),
@@ -473,7 +473,6 @@ impl TraceHandle {
                     Value::String(pending.remove(&key).expect("complete wire message").0);
                 record.representation = "reassembled_application_message".into();
             }
-        }
         self.queue_record(record)
     }
 
@@ -759,11 +758,9 @@ impl ActiveWriter {
     async fn write_record(&mut self, bytes: &[u8]) -> Result<u64, WriteFailure> {
         if self.segment_bytes > 0
             && self.segment_bytes.saturating_add(bytes.len() as u64) > SEGMENT_LIMIT_BYTES
-        {
-            if self.flush().await.is_err() || self.rotate().await.is_err() {
+            && (self.flush().await.is_err() || self.rotate().await.is_err()) {
                 return Err(WriteFailure { written: 0 });
             }
-        }
         use tokio::io::AsyncWriteExt;
         let mut written = 0usize;
         while written < bytes.len() {

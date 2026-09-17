@@ -479,7 +479,9 @@ fn terminal_payload_delivered(egress: ProtocolId, payload: &str) -> bool {
         Protocol::BedrockConverse => false,
         Protocol::CohereChat => payload.contains(r#""type":"message-end""#),
         Protocol::WatsonxTextChat => payload.contains(r#""finish_reason":"#),
-        Protocol::GatewayLanguageModel => payload.contains(r#""type":"finish""#),
+        Protocol::GatewayLanguageModel | Protocol::CommandCode => {
+            payload.contains(r#""type":"finish""#)
+        }
     }
 }
 

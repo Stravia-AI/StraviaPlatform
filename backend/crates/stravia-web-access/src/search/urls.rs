@@ -97,10 +97,9 @@ impl HostAndPath {
     ) -> Option<(String, String)> {
         let new_host = if replace_from.host.starts_with(".") {
             if replace_with.host.starts_with(".") {
-                if let Some(host_without_suffix) = real_url.host.strip_suffix(&replace_from.host) {
+                {
+                    let host_without_suffix = real_url.host.strip_suffix(&replace_from.host)?;
                     format!("{host_without_suffix}{}", replace_with.host)
-                } else {
-                    return None;
                 }
             } else if real_url.host.ends_with(&replace_from.host) {
                 replace_with.host.to_owned()
@@ -117,10 +116,9 @@ impl HostAndPath {
 
         let new_path = if replace_from.path.ends_with('/') || replace_from.path.is_empty() {
             if replace_with.path.ends_with('/') || replace_with.path.is_empty() {
-                if let Some(path_without_prefix) = real_url.path.strip_prefix(&replace_from.path) {
+                {
+                    let path_without_prefix = real_url.path.strip_prefix(&replace_from.path)?;
                     format!("{}{path_without_prefix}", replace_with.path)
-                } else {
-                    return None;
                 }
             } else if real_url.path.starts_with(&replace_from.path) {
                 replace_with.path.clone()

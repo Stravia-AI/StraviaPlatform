@@ -1,15 +1,17 @@
 //! Protocol registry acceptance.
 //!
-//! Nine adapters are registered:
+//! Ten adapters are registered:
 //! - OpenAI Chat / Open Responses
 //! - Anthropic Messages / Google Generate
 //! - OpenAI Embeddings (registered for ingress route and capability discovery).
+//! - Command Code generate.
 
 use crate::protocol::registry::ProtocolRegistry;
 use serde_json::json;
 use stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01;
 use stravia_runtime_contract::protocol::ids::BEDROCK_CONVERSE_V1;
 use stravia_runtime_contract::protocol::ids::COHERE_CHAT_V2;
+use stravia_runtime_contract::protocol::ids::COMMAND_CODE_GENERATE_V1;
 use stravia_runtime_contract::protocol::ids::GATEWAY_LANGUAGE_MODEL_V4;
 use stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA;
 use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
@@ -23,7 +25,7 @@ use stravia_runtime_contract::protocol::ir::Role;
 #[test]
 fn registers_all_adapters_with_correct_ids() {
     let reg = ProtocolRegistry::global();
-    assert_eq!(reg.endpoints().len(), 9);
+    assert_eq!(reg.endpoints().len(), 10);
 
     for id in [
         OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
@@ -35,6 +37,7 @@ fn registers_all_adapters_with_correct_ids() {
         COHERE_CHAT_V2,
         WATSONX_TEXT_CHAT_V1,
         GATEWAY_LANGUAGE_MODEL_V4,
+        COMMAND_CODE_GENERATE_V1,
     ] {
         let h = reg.adapter(&id).unwrap_or_else(|| panic!("missing {id}"));
         assert_eq!(h.id(), id);

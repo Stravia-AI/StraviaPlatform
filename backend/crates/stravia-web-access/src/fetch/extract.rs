@@ -155,10 +155,10 @@ fn content_type_charset(content_type: &str) -> Option<String> {
 
 fn utf16_text(payload: &[u8], decode: fn([u8; 2]) -> u16) -> DecodedText {
     let units = payload
-        .chunks_exact(2)
+        .as_chunks::<2>().0.iter()
         .map(|chunk| decode([chunk[0], chunk[1]]))
         .collect::<Vec<_>>();
-    if payload.len() % 2 == 0 {
+    if payload.len().is_multiple_of(2) {
         if let Ok(text) = String::from_utf16(&units) {
             return DecodedText { text, lossy: false };
         }
@@ -170,11 +170,11 @@ fn utf16_text(payload: &[u8], decode: fn([u8; 2]) -> u16) -> DecodedText {
 }
 
 fn strict_utf16(payload: &[u8], decode: fn([u8; 2]) -> u16) -> Result<String, FetchError> {
-    if payload.len() % 2 != 0 {
+    if !payload.len().is_multiple_of(2) {
         return Err(invalid_charset_bytes("utf-16"));
     }
     let units = payload
-        .chunks_exact(2)
+        .as_chunks::<2>().0.iter()
         .map(|chunk| decode([chunk[0], chunk[1]]))
         .collect::<Vec<_>>();
     String::from_utf16(&units).map_err(|_| invalid_charset_bytes("utf-16"))

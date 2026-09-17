@@ -24,6 +24,7 @@ fn make_provider(vendor: Option<&str>, channel: Option<&str>) -> Provider {
         static_models: None,
         api_key: "sk-test".into(),
         adapter_credentials: r#"{"apiKey":"sk-test"}"#.into(),
+        vendor_options: "{}".to_string(),
         auth_mode: "apikey".into(),
         use_proxy: false,
         last_test_success: None,
@@ -125,16 +126,16 @@ fn vertex_inference_endpoint_rewrites_google_generate_content_to_vertex_resource
     let url = ext
         .construct_request(
             &stravia_core::provider::vendor_ext::RequestContext {
-                provider: (&ctx).provider,
-                api_key: (&ctx).api_key,
-                credential: (&ctx).credential,
+                provider: ctx.provider,
+                api_key: ctx.api_key,
+                credential: ctx.credential,
                 disable_default_auth: false,
             },
             stravia_core::provider::vendor_ext::RequestPurpose::Inference {
-                protocol: (&ctx).protocol_id,
+                protocol: ctx.protocol_id,
                 base_url: &p.base_url,
                 path: "/v1beta/models/gemini-2.5-flash:generateContent",
-                actual_model: (&ctx).actual_model,
+                actual_model: ctx.actual_model,
             },
         )
         .unwrap()
@@ -168,16 +169,16 @@ fn vertex_inference_endpoint_rewrites_openai_compat_path_without_double_version(
     let url = ext
         .construct_request(
             &stravia_core::provider::vendor_ext::RequestContext {
-                provider: (&ctx).provider,
-                api_key: (&ctx).api_key,
-                credential: (&ctx).credential,
+                provider: ctx.provider,
+                api_key: ctx.api_key,
+                credential: ctx.credential,
                 disable_default_auth: false,
             },
             stravia_core::provider::vendor_ext::RequestPurpose::Inference {
-                protocol: (&ctx).protocol_id,
+                protocol: ctx.protocol_id,
                 base_url: &p.base_url,
                 path: "/v1/chat/completions",
-                actual_model: (&ctx).actual_model,
+                actual_model: ctx.actual_model,
             },
         )
         .unwrap()
@@ -321,16 +322,16 @@ fn google_family_default_appends_key_query_param() {
     let url1 = ext
         .construct_request(
             &stravia_core::provider::vendor_ext::RequestContext {
-                provider: (&c).provider,
-                api_key: (&c).api_key,
-                credential: (&c).credential,
+                provider: c.provider,
+                api_key: c.api_key,
+                credential: c.credential,
                 disable_default_auth: false,
             },
             stravia_core::provider::vendor_ext::RequestPurpose::Inference {
-                protocol: (&c).protocol_id,
+                protocol: c.protocol_id,
                 base_url: "https://generativelanguage.googleapis.com",
                 path: "/v1beta/models",
-                actual_model: (&c).actual_model,
+                actual_model: c.actual_model,
             },
         )
         .unwrap()
@@ -343,16 +344,16 @@ fn google_family_default_appends_key_query_param() {
     let url2 = ext
         .construct_request(
             &stravia_core::provider::vendor_ext::RequestContext {
-                provider: (&c).provider,
-                api_key: (&c).api_key,
-                credential: (&c).credential,
+                provider: c.provider,
+                api_key: c.api_key,
+                credential: c.credential,
                 disable_default_auth: false,
             },
             stravia_core::provider::vendor_ext::RequestPurpose::Inference {
-                protocol: (&c).protocol_id,
+                protocol: c.protocol_id,
                 base_url: "https://generativelanguage.googleapis.com/v1beta",
                 path: "/models?alt=sse",
-                actual_model: (&c).actual_model,
+                actual_model: c.actual_model,
             },
         )
         .unwrap()
@@ -375,16 +376,16 @@ fn openai_compat_strips_v1_when_base_already_has_path() {
     let stripped = ext
         .construct_request(
             &stravia_core::provider::vendor_ext::RequestContext {
-                provider: (&c).provider,
-                api_key: (&c).api_key,
-                credential: (&c).credential,
+                provider: c.provider,
+                api_key: c.api_key,
+                credential: c.credential,
                 disable_default_auth: false,
             },
             stravia_core::provider::vendor_ext::RequestPurpose::Inference {
-                protocol: (&c).protocol_id,
+                protocol: c.protocol_id,
                 base_url: "https://api.deepseek.com/v1",
                 path: "/v1/chat/completions",
-                actual_model: (&c).actual_model,
+                actual_model: c.actual_model,
             },
         )
         .unwrap()
@@ -394,16 +395,16 @@ fn openai_compat_strips_v1_when_base_already_has_path() {
     let preserved = ext
         .construct_request(
             &stravia_core::provider::vendor_ext::RequestContext {
-                provider: (&c).provider,
-                api_key: (&c).api_key,
-                credential: (&c).credential,
+                provider: c.provider,
+                api_key: c.api_key,
+                credential: c.credential,
                 disable_default_auth: false,
             },
             stravia_core::provider::vendor_ext::RequestPurpose::Inference {
-                protocol: (&c).protocol_id,
+                protocol: c.protocol_id,
                 base_url: "https://api.openai.com",
                 path: "/v1/chat/completions",
-                actual_model: (&c).actual_model,
+                actual_model: c.actual_model,
             },
         )
         .unwrap()

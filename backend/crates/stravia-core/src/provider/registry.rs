@@ -50,6 +50,7 @@ pub fn protocol_default_vendor(protocol: Protocol) -> &'static str {
         Protocol::CohereChat => "cohere",
         Protocol::WatsonxTextChat => "watsonx",
         Protocol::GatewayLanguageModel => "gateway",
+        Protocol::CommandCode => "commandcode",
     }
 }
 

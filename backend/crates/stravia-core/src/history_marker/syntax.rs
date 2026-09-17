@@ -597,7 +597,7 @@ fn legacy_cleaned_item(original: &AiItem, atoms: &[CarrierAtom]) -> Option<AiIte
         MessageContent::Blocks(visible)
     };
     Some(AiItem {
-        role: original.role.clone(),
+        role: original.role,
         content,
         tool_calls: original.tool_calls.clone(),
         tool_call_id: original.tool_call_id.clone(),
@@ -611,7 +611,7 @@ fn client_fragment(
     meta: &mut Option<serde_json::Value>,
 ) -> AiItem {
     AiItem {
-        role: original.role.clone(),
+        role: original.role,
         content: MessageContent::Blocks(vec![block]),
         tool_calls: None,
         tool_call_id: None,

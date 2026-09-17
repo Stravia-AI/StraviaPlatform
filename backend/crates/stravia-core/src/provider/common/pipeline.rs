@@ -476,6 +476,7 @@ mod tests {
             static_models: None,
             api_key: api_key.into(),
             adapter_credentials: format!(r#"{{"apiKey":"{api_key}"}}"#),
+            vendor_options: "{}".into(),
             auth_mode: "apikey".into(),
             use_proxy: false,
             last_test_success: None,
@@ -508,8 +509,8 @@ mod tests {
                 .join(format!("stravia-pipeline-test-{}", Uuid::new_v4())),
             ..Default::default()
         };
-        let gw = Gateway::new(config).await.expect("gateway init");
-        gw
+        
+        Gateway::new(config).await.expect("gateway init")
     }
 
     #[tokio::test]

@@ -466,8 +466,11 @@ async fn non_stream_projection_matches_ordered_content_and_replays_canonical_his
         .iter()
         .position(|message| message["tool_call_id"] == "platform-call")
         .expect("canonical platform result message");
+    // `reasoning_content` may ride the same assistant message as its turn's
+    // text (DeepSeek rejects a standalone reasoning-only assistant message),
+    // but it must never land after that turn's text, call, or result.
     assert!(
-        reasoning_index < text_index && text_index < call_index && call_index < result_index,
+        reasoning_index <= text_index && text_index < call_index && call_index < result_index,
         "{messages:?}"
     );
     assert!(
@@ -559,8 +562,10 @@ async fn non_stream_projection_matches_ordered_content_and_replays_canonical_his
         .iter()
         .position(|message| message_text(message) == "C2")
         .expect("replayed C2");
+    // Same-turn `reasoning_content` may share the assistant message with its
+    // text; it must never appear after that turn's text, call, or result.
     assert!(
-        r1 < c1 && c1 < call && call < result && result < r2 && r2 <= c2,
+        r1 <= c1 && c1 < call && call < result && result < r2 && r2 <= c2,
         "{replay_messages:?}"
     );
     let replay_wire = replay_body.to_string();

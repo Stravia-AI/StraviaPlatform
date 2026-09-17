@@ -455,13 +455,12 @@ impl VisibleTextRedactor {
                         b'&' | b',' | b';' | b'}' | b']' | b'"' | b'\''
                     )
                 {
-                    if bytes[cursor] == b'<' {
-                        if let Some(reference) = marker::reference_prefix(&text[cursor..]) {
+                    if bytes[cursor] == b'<'
+                        && let Some(reference) = marker::reference_prefix(&text[cursor..]) {
                             self.continuation = None;
                             output.push_str(reference);
                             return &text[cursor + reference.len()..];
                         }
-                    }
                     cursor += 1;
                 }
             }
@@ -486,13 +485,12 @@ impl VisibleTextRedactor {
                     && !bytes[cursor].is_ascii_whitespace()
                     && !matches!(bytes[cursor], b'/' | b'?' | b'#')
                 {
-                    if bytes[cursor] == b'<' {
-                        if let Some(reference) = marker::reference_prefix(&text[cursor..]) {
+                    if bytes[cursor] == b'<'
+                        && let Some(reference) = marker::reference_prefix(&text[cursor..]) {
                             self.continuation = None;
                             output.push_str(reference);
                             return &text[cursor + reference.len()..];
                         }
-                    }
                     cursor += 1;
                 }
             }
@@ -510,8 +508,8 @@ impl VisibleTextRedactor {
         }
         if !finish {
             const PREFIX: &str = "stravia_upload_";
-            if let Some(start) = self.pending.rfind(PREFIX) {
-                if self.pending[start + PREFIX.len()..]
+            if let Some(start) = self.pending.rfind(PREFIX)
+                && self.pending[start + PREFIX.len()..]
                     .bytes()
                     .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
                 {
@@ -521,7 +519,6 @@ impl VisibleTextRedactor {
                     self.continuation = Some(CredentialContinuation::UploadGrant);
                     return;
                 }
-            }
             for length in (1..PREFIX.len()).rev() {
                 if self.pending.ends_with(&PREFIX[..length]) {
                     let start = self.pending.len() - length;
@@ -549,8 +546,8 @@ impl VisibleTextRedactor {
                 _ => {}
             }
         }
-        if !finish {
-            if let Some(url_start) = trailing_url_authority(&self.pending) {
+        if !finish
+            && let Some(url_start) = trailing_url_authority(&self.pending) {
                 if self.pending.len() - url_start <= VISIBLE_URL_AUTHORITY_BYTES {
                     if url_start > 0 {
                         output.push_str(&redact_text(&self.pending[..url_start]));
@@ -568,7 +565,6 @@ impl VisibleTextRedactor {
                 self.continuation = Some(CredentialContinuation::UrlAuthority);
                 return;
             }
-        }
         if finish || text_may_need_redaction(&self.pending) {
             let (redacted, report) = redact_text_with_report(&self.pending);
             if finish || !report.kinds.is_empty() {
@@ -661,12 +657,11 @@ pub(crate) fn redact_url(value: &str) -> (String, RedactionReport) {
         }
     }
     let scrubbed = crate::agent::upload_grant::scrub_upload_grants(url.as_str());
-    if scrubbed != url.as_str() {
-        if let Ok(scrubbed_url) = reqwest::Url::parse(&scrubbed) {
+    if scrubbed != url.as_str()
+        && let Ok(scrubbed_url) = reqwest::Url::parse(&scrubbed) {
             url = scrubbed_url;
             report.record(RedactionKind::CredentialText);
         }
-    }
     if !url.username().is_empty() || url.password().is_some() {
         let _ = url.set_username(REDACTED);
         if url.password().is_some() {
@@ -1254,8 +1249,8 @@ fn redact_header_node(value: &mut Value, report: &mut RedactionReport) {
 /// arguments are credential-scrubbed separately and never interpreted as media.
 pub(crate) fn externalize_capture(value: &mut Value, wire: bool) -> RedactionReport {
     let mut report = RedactionReport::default();
-    if wire {
-        if let Value::String(text) = value {
+    if wire
+        && let Value::String(text) = value {
             if let Ok(mut envelope) = serde_json::from_str::<Value>(text) {
                 externalize_envelope(&mut envelope, &mut report);
                 if !report.kinds.is_empty() {
@@ -1267,8 +1262,8 @@ pub(crate) fn externalize_capture(value: &mut Value, wire: bool) -> RedactionRep
             {
                 let mut output = String::with_capacity(text.len());
                 for line in text.split_inclusive('\n') {
-                    if let Some(data) = line.strip_prefix("data:") {
-                        if let Ok(mut envelope) = serde_json::from_str::<Value>(data.trim()) {
+                    if let Some(data) = line.strip_prefix("data:")
+                        && let Ok(mut envelope) = serde_json::from_str::<Value>(data.trim()) {
                             let mut line_report = RedactionReport::default();
                             externalize_envelope(&mut envelope, &mut line_report);
                             if !line_report.kinds.is_empty() {
@@ -1281,7 +1276,6 @@ pub(crate) fn externalize_capture(value: &mut Value, wire: bool) -> RedactionRep
                                 continue;
                             }
                         }
-                    }
                     output.push_str(line);
                 }
                 if !report.kinds.is_empty() {
@@ -1310,7 +1304,6 @@ pub(crate) fn externalize_capture(value: &mut Value, wire: bool) -> RedactionRep
             }
             return report;
         }
-    }
     externalize_envelope(value, &mut report);
     report
 }
@@ -1355,16 +1348,14 @@ fn externalize_envelope(value: &mut Value, report: &mut RedactionReport) {
         return;
     }
     let anthropic_media = matches!(kind, "content_block_start" | "content_block_stop");
-    if object.get("kind").and_then(Value::as_str) == Some("item_done") {
-        if let Some(item) = object.get_mut("data").and_then(|data| data.get_mut("item")) {
+    if object.get("kind").and_then(Value::as_str) == Some("item_done")
+        && let Some(item) = object.get_mut("data").and_then(|data| data.get_mut("item")) {
             externalize_envelope(item, report);
         }
-    }
-    if anthropic_media {
-        if let Some(block) = object.get_mut("content_block") {
+    if anthropic_media
+        && let Some(block) = object.get_mut("content_block") {
             externalize_media(block, report);
         }
-    }
     for key in ["content", "parts"] {
         if let Some(Value::Array(blocks)) = object.get_mut(key) {
             for block in blocks {
@@ -1416,19 +1407,18 @@ fn externalize_envelope(value: &mut Value, report: &mut RedactionReport) {
 fn externalize_media(value: &mut Value, report: &mut RedactionReport) {
     let Value::Object(object) = value else { return };
     if object.get("type").and_then(Value::as_str) == Some("tool_result") {
-        if object.get("content_kind").and_then(Value::as_str) != Some("json") {
-            if let Some(Value::Array(blocks)) = object.get_mut("content") {
+        if object.get("content_kind").and_then(Value::as_str) != Some("json")
+            && let Some(Value::Array(blocks)) = object.get_mut("content") {
                 for block in blocks {
                     externalize_media(block, report);
                 }
             }
-        }
         return;
     }
     // Bedrock Converse's currently supported image block has no type discriminator.
     // This function is called only for a protocol content block, not tool input JSON.
-    if let Some(image) = object.get_mut("image").and_then(Value::as_object_mut) {
-        if image
+    if let Some(image) = object.get_mut("image").and_then(Value::as_object_mut)
+        && image
             .get("source")
             .and_then(|source| source.get("bytes"))
             .is_some()
@@ -1439,7 +1429,6 @@ fn externalize_media(value: &mut Value, report: &mut RedactionReport) {
             }));
             report.record(RedactionKind::MediaUnrecoverable);
         }
-    }
     let kind = object
         .get("type")
         .and_then(Value::as_str)

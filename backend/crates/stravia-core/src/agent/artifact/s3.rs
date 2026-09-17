@@ -143,7 +143,8 @@ impl LocalArtifactStore {
                 .await
                 .map_err(storage_error)?;
         }
-        let result = async {
+        
+        async {
             // The caller already owns this existing temporary file. Open it
             // synchronously so a cancelled spawn-blocking create cannot recreate it.
             let file = std::fs::OpenOptions::new()
@@ -170,8 +171,7 @@ impl LocalArtifactStore {
             }
             file.flush().await.map_err(storage_error)
         }
-        .await;
-        result
+        .await
     }
 
     pub(super) async fn object_location(
@@ -212,8 +212,8 @@ impl LocalArtifactStore {
             Some((_, _, _, key)) => ArtifactId::new(object_id_for_key(key)?),
             None => ArtifactId::new(artifact_id),
         };
-        if let Some((backend, endpoint, bucket, _)) = backend {
-            if backend == "s3" {
+        if let Some((backend, endpoint, bucket, _)) = backend
+            && backend == "s3" {
                 let s3 = settings.s3.as_ref().ok_or_else(|| {
                     ArtifactError::Storage("S3 credentials are not configured".into())
                 })?;
@@ -246,7 +246,6 @@ impl LocalArtifactStore {
                     )));
                 }
             }
-        }
         match tokio::fs::remove_file(self.object_path(id.as_str())).await {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),

@@ -421,24 +421,32 @@ impl AdminService {
             }
             let model_id = normalize_model_id(&id)?;
             let catalog_source = match provider.preset_key.as_deref() {
-                Some(catalog_provider_id) => match self
-                    .gw
-                    .provider_catalog
-                    .model_source(catalog_provider_id, &model_id)
-                    .await
+                // 编译期并入的内置服务没有远端 Provider Catalog scope;
+                // 元数据由 canonical 模板或裸记录提供,不做 scope 富化。
+                Some(catalog_provider_id)
+                    if !crate::provider_catalog::is_builtin_catalog_provider(
+                        catalog_provider_id,
+                    ) =>
                 {
-                    Ok(source) => Some(source),
-                    Err(error)
-                        if matches!(
-                            error.downcast_ref::<CatalogError>(),
-                            Some(CatalogError::EntryNotFound { .. })
-                        ) =>
+                    match self
+                        .gw
+                        .provider_catalog
+                        .model_source(catalog_provider_id, &model_id)
+                        .await
                     {
-                        None
+                        Ok(source) => Some(source),
+                        Err(error)
+                            if matches!(
+                                error.downcast_ref::<CatalogError>(),
+                                Some(CatalogError::EntryNotFound { .. })
+                            ) =>
+                        {
+                            None
+                        }
+                        Err(error) => return Err(error),
                     }
-                    Err(error) => return Err(error),
-                },
-                None => None,
+                }
+                _ => None,
             };
             let discovered = if let Some(source) = catalog_source {
                 DiscoveredModelSource {

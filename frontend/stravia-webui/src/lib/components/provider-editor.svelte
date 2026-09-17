@@ -6,7 +6,7 @@ import SearchIcon from '@lucide/svelte/icons/search'
 import { toast } from 'svelte-sonner'
 
 import { admin } from '$lib/admin-client'
-import { localizeBackendErrorMessage } from '$lib/backend-error'
+import { catalogSelectionStale, localizeBackendErrorMessage } from '$lib/backend-error'
 import { localeState } from '$lib/localization.svelte'
 import { providerCredentialFieldLabel } from '$lib/provider-credential-labels'
 import {
@@ -284,6 +284,14 @@ async function saveProvider(): Promise<void> {
     open = false
   } catch (error) {
     toast.error(localizeBackendErrorMessage(error))
+    // 目录 revision 已变化,所选服务或登录方式不再存在;重试不会成功。
+    // 丢弃当前选择,拉取最新服务列表,让用户从“选择服务”重新开始。
+    if (catalogSelectionStale(error)) {
+      await oauthAuthorization?.cancel()
+      selectedOptionKey = ''
+      step = 'select'
+      await queryClient.invalidateQueries({ queryKey: ['catalog-providers'] })
+    }
   } finally {
     saving = false
   }

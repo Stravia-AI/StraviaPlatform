@@ -277,11 +277,9 @@ pub(super) fn resolved_client_tool_runs<'a>(
             }
         } else if let Some((owner, sequence, returned)) =
             event.tool_id.and_then(|id| calls.get_mut(id))
-        {
-            if *owner != event.run_id && event.sequence > *sequence {
+            && *owner != event.run_id && event.sequence > *sequence {
                 *returned = true;
             }
-        }
     }
     for (run, _, returned) in calls.into_values() {
         if !returned {
@@ -534,17 +532,17 @@ mod tests {
     #[test]
     fn status_rollup_is_activity_first() {
         assert_eq!(
-            rollup_status([("completed".into(), true), ("running".into(), true)]),
+            rollup_status([("completed", true), ("running", true)]),
             "running"
         );
         assert_eq!(
-            rollup_status([("completed".into(), false), ("waiting_client".into(), true)]),
+            rollup_status([("completed", false), ("waiting_client", true)]),
             "waiting_client"
         );
         assert_eq!(
-            rollup_status([("completed".into(), true), ("failed".into(), true)]),
+            rollup_status([("completed", true), ("failed", true)]),
             "completed"
         );
-        assert_eq!(rollup_status([("failed".into(), true)]), "interrupted");
+        assert_eq!(rollup_status([("failed", true)]), "interrupted");
     }
 }

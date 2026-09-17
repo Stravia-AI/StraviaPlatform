@@ -83,11 +83,10 @@ impl PortPreferenceStore for TauriPortPreferenceStore {
 }
 
 pub(crate) fn desktop_root_override() -> anyhow::Result<Option<PathBuf>> {
-    if cfg!(feature = "desktop-e2e") {
-        if let Some(root) = std::env::var_os("STRAVIA_DESKTOP_E2E_RUN_ROOT") {
+    if cfg!(feature = "desktop-e2e")
+        && let Some(root) = std::env::var_os("STRAVIA_DESKTOP_E2E_RUN_ROOT") {
             return e2e_data_dir(Path::new(&root)).map(Some);
         }
-    }
     select_root_override(
         cfg!(feature = "desktop-e2e"),
         std::env::args_os().skip(1),

@@ -631,19 +631,17 @@ impl Detector {
 }
 impl Component {
     fn near(&self, primary: &Finding<'_>, candidate: &Finding<'_>) -> bool {
-        if let Some(lines) = self.lines {
-            if candidate.start_line < primary.start_line.saturating_sub(lines)
-                || candidate.start_line > primary.end_line.saturating_add(lines)
+        if let Some(lines) = self.lines
+            && (candidate.start_line < primary.start_line.saturating_sub(lines)
+                || candidate.start_line > primary.end_line.saturating_add(lines))
             {
                 return false;
             }
-        }
-        if primary.start_line == primary.end_line {
-            if let Some(columns) = self.columns {
+        if primary.start_line == primary.end_line
+            && let Some(columns) = self.columns {
                 return candidate.column >= primary.column.saturating_sub(columns)
                     && candidate.column < primary.end_column.saturating_add(columns);
             }
-        }
         true
     }
 }

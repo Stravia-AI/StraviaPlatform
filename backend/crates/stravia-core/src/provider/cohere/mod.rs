@@ -22,6 +22,7 @@ const METADATA: VendorMetadata = VendorMetadata {
     icon: "cohere",
     default_protocol: "cohere-chat",
     credential_fields: CREDENTIAL_FIELDS,
+    option_fields: crate::provider::metadata::NO_OPTION_FIELDS,
     channels: &[ChannelDef {
         id: "default",
         label: Label {

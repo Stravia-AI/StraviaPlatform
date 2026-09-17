@@ -1,14 +1,16 @@
 <script lang="ts">
 import * as m from '$lib/paraglide/messages.js'
-import { useQueryClient } from '@tanstack/svelte-query'
+import { createQuery, useQueryClient } from '@tanstack/svelte-query'
 import { untrack } from 'svelte'
 import { toast } from 'svelte-sonner'
 
 import { admin } from '$lib/admin-client'
 import { localizeBackendErrorMessage } from '$lib/backend-error'
 import { formatDuration } from '$lib/format'
+import { localeState } from '$lib/localization.svelte'
+import { providerOptionLabel } from '$lib/provider-option-labels'
 import { PROTOCOL_TABLE, resolveProtocol } from '$lib/protocol'
-import type { Provider, UpdateProvider } from '$lib/types'
+import type { Provider, UpdateProvider, VendorOptionField } from '$lib/types'
 import ProviderOAuthAuthorization from '$lib/components/provider-oauth-authorization.svelte'
 import * as Field from '$lib/components/ui/field'
 import { Button } from '$lib/components/ui/button'
@@ -34,6 +36,7 @@ let form = $state({
   apiKey: '',
   useProxy: initialProvider.use_proxy,
   modelsSource: initialProvider.models_source ?? '',
+  vendorOptions: {} as Record<string, boolean>,
 })
 let saving = $state(false)
 let testing = $state(false)
@@ -43,6 +46,35 @@ let oauthReady = $state(false)
 let oauthAuthorization = $state<{ consume: () => void; updateProxy: (useProxy: boolean) => Promise<void> }>()
 const custom = $derived(!provider.preset_key)
 const oauthProvider = $derived(provider.auth_mode === 'oauth')
+
+const vendorMetadataQuery = createQuery(() => ({
+  queryKey: ['vendor-metadata'],
+  queryFn: admin.providers.vendors,
+}))
+const vendorId = $derived(provider.vendor ?? provider.preset_key ?? '')
+const optionFields = $derived<VendorOptionField[]>(
+  vendorMetadataQuery.data?.find((vendor) => vendor.id === vendorId)?.optionFields ?? [],
+)
+// 初始值只取一次:未存储的 key 落到 vendor 声明的默认值,保存时全量提交。
+const initialVendorOptions = $derived.by(() => {
+  const stored = initialProvider.vendor_options
+  const storedOptions =
+    stored && typeof stored === 'object' && !Array.isArray(stored)
+      ? (stored as Record<string, unknown>)
+      : {}
+  return Object.fromEntries(
+    optionFields.map((field) => [
+      field.key,
+      typeof storedOptions[field.key] === 'boolean' ? (storedOptions[field.key] as boolean) : field.defaultOn,
+    ]),
+  ) as Record<string, boolean>
+})
+function optionValue(field: VendorOptionField): boolean {
+  return field.key in form.vendorOptions ? form.vendorOptions[field.key] : initialVendorOptions[field.key]
+}
+function optionLabel(field: VendorOptionField) {
+  return providerOptionLabel(vendorId, field, localeState.current)
+}
 
 async function testConnection(): Promise<void> {
   testing = true
@@ -68,6 +100,13 @@ async function save(): Promise<void> {
     name: form.name.trim(),
     use_proxy: form.useProxy,
     api_key: oauthProvider ? undefined : form.apiKey.trim() || undefined,
+    ...(optionFields.length > 0
+      ? {
+          vendor_options: Object.fromEntries(
+            optionFields.map((field) => [field.key, optionValue(field)]),
+          ),
+        }
+      : {}),
     ...(custom
       ? {
           vendor: form.vendor.trim() || undefined,
@@ -212,6 +251,22 @@ async function save(): Promise<void> {
           void oauthAuthorization?.updateProxy(checked)
         }} />
     </Field.Field>
+    {#each optionFields as field (field.key)}
+      {@const labels = optionLabel(field)}
+      <Field.Field orientation="horizontal" class="min-h-10 justify-between rounded-lg border px-3 py-2">
+        <div>
+          <Field.Label for={`provider-option-${field.key}`} hint={labels.hint}>
+            {labels.label}
+          </Field.Label>
+        </div>
+        <Switch
+          id={`provider-option-${field.key}`}
+          checked={optionValue(field)}
+          onCheckedChange={(checked) => {
+            form.vendorOptions[field.key] = checked
+          }} />
+      </Field.Field>
+    {/each}
     <div class="flex justify-end border-t pt-4">
       <Button
         type="submit"

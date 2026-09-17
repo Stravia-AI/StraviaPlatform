@@ -1211,6 +1211,24 @@ fn map_sqlite_events(rows: Vec<sqlx::sqlite::SqliteRow>) -> anyhow::Result<Vec<O
         })
         .collect()
 }
+
+fn map_postgres_events(rows: Vec<sqlx::postgres::PgRow>) -> anyhow::Result<Vec<ObservationEvent>> {
+    rows.into_iter()
+        .map(|r| {
+            Ok(project_event_for_management(ObservationEvent {
+                sequence: r.try_get(0)?,
+                occurred_at: r.try_get(1)?,
+                interaction_id: r.try_get(2)?,
+                run_id: r.try_get(3)?,
+                rejection_id: r.try_get(4)?,
+                kind: r.try_get(5)?,
+                payload: super::codec::decode_payload(serde_json::from_str(
+                    &r.try_get::<String, _>(6)?,
+                )?)?,
+            }))
+        })
+        .collect()
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1568,22 +1586,4 @@ mod tests {
         assert!(snapshot.root.interactions.iter().all(|item| !item.matched));
         Ok(())
     }
-}
-
-fn map_postgres_events(rows: Vec<sqlx::postgres::PgRow>) -> anyhow::Result<Vec<ObservationEvent>> {
-    rows.into_iter()
-        .map(|r| {
-            Ok(project_event_for_management(ObservationEvent {
-                sequence: r.try_get(0)?,
-                occurred_at: r.try_get(1)?,
-                interaction_id: r.try_get(2)?,
-                run_id: r.try_get(3)?,
-                rejection_id: r.try_get(4)?,
-                kind: r.try_get(5)?,
-                payload: super::codec::decode_payload(serde_json::from_str(
-                    &r.try_get::<String, _>(6)?,
-                )?)?,
-            }))
-        })
-        .collect()
 }

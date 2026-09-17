@@ -57,6 +57,32 @@ pub const API_KEY_CREDENTIAL_FIELDS: &[CredentialFieldDef] = &[CredentialFieldDe
     input: CredentialInputKind::Password,
 }];
 
+/// Control used to collect one vendor option value.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OptionInputKind {
+    Toggle,
+}
+
+/// A non-secret, behavior-level option declared by a vendor. Options live in
+/// `providers.vendor_options`, are validated against this declaration, and —
+/// unlike credentials — are serialized back to clients so the UI can show the
+/// current state without echoing credentials.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OptionFieldDef {
+    pub key: &'static str,
+    /// Canonical English fallback for clients that do not localize this field.
+    pub label: &'static str,
+    pub input: OptionInputKind,
+    /// Value used when the stored `vendor_options` JSON omits the key
+    /// (only meaningful for boolean-style inputs today).
+    pub default_on: bool,
+}
+
+/// Empty option declaration shared by vendors without behavior options.
+pub const NO_OPTION_FIELDS: &[OptionFieldDef] = &[];
+
 /// Authentication mode advertised to the WebUI.
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -131,6 +157,8 @@ pub struct VendorMetadata {
     pub default_protocol: &'static str,
     #[serde(skip_serializing_if = "<[CredentialFieldDef]>::is_empty")]
     pub credential_fields: &'static [CredentialFieldDef],
+    #[serde(skip_serializing_if = "<[OptionFieldDef]>::is_empty")]
+    pub option_fields: &'static [OptionFieldDef],
     pub channels: &'static [ChannelDef],
 }
 

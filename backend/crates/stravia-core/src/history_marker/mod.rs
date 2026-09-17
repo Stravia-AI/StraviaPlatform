@@ -57,8 +57,7 @@ impl ThinkingSource {
         for item in &mut response.items {
             if let stravia_runtime_contract::protocol::ir::MessageContent::Blocks(blocks) =
                 &item.content
-            {
-                if blocks.iter().any(|block| {
+                && blocks.iter().any(|block| {
                     matches!(
                         block,
                         ContentBlock::Thinking { .. }
@@ -69,7 +68,6 @@ impl ThinkingSource {
                 {
                     self.stamp_item(item);
                 }
-            }
         }
     }
 

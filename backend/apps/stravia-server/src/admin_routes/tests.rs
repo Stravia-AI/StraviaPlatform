@@ -913,3 +913,198 @@ async fn web_access_admin_routes_persist_masked_providers_and_atomic_priority() 
     );
     Ok(())
 }
+
+// 内置-only vendor(commandcode)必须能通过标准 catalog 流程创建;
+// 目录解析失败要返回结构化错误码,而不是 200 + 裸错误串。
+#[tokio::test]
+async fn provider_create_accepts_builtin_vendors_and_codes_catalog_mismatches() -> anyhow::Result<()>
+{
+    let data_dir = tempfile::tempdir()?;
+    let gateway = Gateway::new(GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await?;
+    let app = create_unprotected_router(gateway);
+
+    let catalog_response = app
+        .clone()
+        .oneshot(Request::get("/api/v1/catalog/providers").body(Body::empty())?)
+        .await?;
+    assert_eq!(catalog_response.status(), StatusCode::OK);
+    let catalog_body = to_bytes(catalog_response.into_body(), usize::MAX).await?;
+    let catalog: serde_json::Value = serde_json::from_slice(&catalog_body)?;
+    let channel = catalog["providers"]
+        .as_array()
+        .expect("provider list")
+        .iter()
+        .find(|provider| provider["id"] == "commandcode")
+        .and_then(|provider| provider["channels"].as_array())
+        .and_then(|channels| {
+            channels
+                .iter()
+                .find(|channel| channel["id"] == "default")
+                .cloned()
+        })
+        .expect("commandcode must be exposed as a catalog provider");
+    assert_eq!(channel["protocol"], "command-code");
+    assert_eq!(channel["base_url"], "https://api.commandcode.ai");
+    let fingerprint = channel["fingerprint"].as_str().expect("fingerprint");
+
+    // 模型清单来自 `/provider/v1/models`(HTTP 发现),用本地 mock 提供
+    // 真实 API 的 OpenAI 兼容格式,避免 E2E 触达生产服务。
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let mock_models = axum::routing::get(|| async {
+        axum::Json(serde_json::json!({
+            "object": "list",
+            "data": [
+                {
+                    "id": "deepseek/deepseek-v4-pro",
+                    "object": "model",
+                    "owned_by": "command-code",
+                    "name": "DeepSeek V4 Pro (latest)",
+                    "context_length": 1000000
+                },
+                {
+                    "id": "claude-fable-5",
+                    "object": "model",
+                    "owned_by": "command-code",
+                    "name": "Claude Fable 5",
+                    "context_length": 1000000
+                },
+                {
+                    "id": "commandcode/ccc-private-1",
+                    "object": "model",
+                    "owned_by": "command-code",
+                    "name": "CCC Private 1",
+                    "context_length": 64000
+                }
+            ]
+        }))
+    });
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            axum::Router::new().route("/provider/v1/models", mock_models),
+        )
+        .await
+    });
+
+    let create = |source: serde_json::Value| {
+        app.clone().oneshot(
+            Request::post("/api/v1/providers")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({
+                        "name": "Command Code",
+                        "source": source,
+                        "credential": { "type": "api_key", "value": "sk-commandcode" }
+                    }))
+                    .expect("serialize create provider request"),
+                ))
+                .expect("build create provider request"),
+        )
+    };
+
+    let created = create(serde_json::json!({
+        "type": "catalog",
+        "provider_id": "commandcode",
+        "channel_id": "default",
+        "fingerprint": fingerprint,
+        "base_url_override": format!("http://{address}"),
+    }))
+    .await?;
+    assert_eq!(created.status(), StatusCode::OK);
+    let created_body = to_bytes(created.into_body(), usize::MAX).await?;
+    let created_json: serde_json::Value = serde_json::from_slice(&created_body)?;
+    assert_eq!(created_json["data"]["vendor"], "commandcode");
+    assert_eq!(created_json["data"]["protocol"], "command-code");
+    assert_eq!(created_json["data"]["preset_key"], "commandcode");
+    assert_eq!(
+        created_json["data"]["base_url"],
+        format!("http://{address}")
+    );
+    let provider_id = created_json["data"]["id"].as_str().expect("provider id");
+
+    // 模型清单经 HTTP 发现自 mock 端点;同步后持久化,id 在 canonical 目录
+    // 命中时富化元数据,未命中时保留裸记录,不依赖远端目录 scope。
+    let synced = app
+        .clone()
+        .oneshot(
+            Request::post(format!("/api/v1/providers/{provider_id}/models/sync"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(synced.status(), StatusCode::OK);
+    let synced_body = to_bytes(synced.into_body(), usize::MAX).await?;
+    let synced_json: serde_json::Value = serde_json::from_slice(&synced_body)?;
+    assert_eq!(synced_json["data"]["added"], 3);
+
+    let models = app
+        .clone()
+        .oneshot(
+            Request::get(format!("/api/v1/providers/{provider_id}/models")).body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(models.status(), StatusCode::OK);
+    let models_body = to_bytes(models.into_body(), usize::MAX).await?;
+    let models_json: serde_json::Value = serde_json::from_slice(&models_body)?;
+    let entries: Vec<serde_json::Value> = models_json["data"]["models"]
+        .as_array()
+        .expect("persisted models")
+        .clone();
+    let model_ids: Vec<&str> = entries
+        .iter()
+        .map(|model| model["id"].as_str().expect("model id"))
+        .collect();
+    assert_eq!(
+        model_ids,
+        vec![
+            "claude-fable-5",
+            "commandcode/ccc-private-1",
+            "deepseek/deepseek-v4-pro",
+        ]
+    );
+
+    // deepseek 精确命中、claude-fable-5 经 model 段唯一命中内置 canonical 目录,
+    // 元数据来自模板而非上游显示名;ccc-private-1 无模板,退回裸记录。
+    let deepseek = &entries[2];
+    assert_eq!(deepseek["name"], "DeepSeek V4 Pro");
+    assert_eq!(deepseek["specification"]["limit"]["context"], 1000000);
+    assert_eq!(deepseek["specification"]["tool_call"], true);
+    let fable = &entries[0];
+    assert_eq!(fable["name"], "Claude Fable 5");
+    let private = &entries[1];
+    assert_eq!(private["name"], "commandcode/ccc-private-1");
+
+    server.abort();
+
+    let stale = create(serde_json::json!({
+        "type": "catalog",
+        "provider_id": "commandcode",
+        "channel_id": "default",
+        "fingerprint": "stale-fingerprint",
+    }))
+    .await?;
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    let stale_body = to_bytes(stale.into_body(), usize::MAX).await?;
+    let stale_json: serde_json::Value = serde_json::from_slice(&stale_body)?;
+    assert_eq!(stale_json["code"], "CATALOG_FINGERPRINT_STALE");
+    assert_eq!(stale_json["params"]["provider_id"], "commandcode");
+
+    let missing = create(serde_json::json!({
+        "type": "catalog",
+        "provider_id": "gone-vendor",
+        "channel_id": "default",
+        "fingerprint": "fingerprint",
+    }))
+    .await?;
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    let missing_body = to_bytes(missing.into_body(), usize::MAX).await?;
+    let missing_json: serde_json::Value = serde_json::from_slice(&missing_body)?;
+    assert_eq!(missing_json["code"], "CATALOG_PROVIDER_NOT_FOUND");
+    assert_eq!(missing_json["params"]["provider_id"], "gone-vendor");
+
+    Ok(())
+}

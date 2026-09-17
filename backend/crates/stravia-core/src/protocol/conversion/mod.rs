@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 use stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01;
 use stravia_runtime_contract::protocol::ids::BEDROCK_CONVERSE_V1;
 use stravia_runtime_contract::protocol::ids::COHERE_CHAT_V2;
+use stravia_runtime_contract::protocol::ids::COMMAND_CODE_GENERATE_V1;
 use stravia_runtime_contract::protocol::ids::GATEWAY_LANGUAGE_MODEL_V4;
 use stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA;
 use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;

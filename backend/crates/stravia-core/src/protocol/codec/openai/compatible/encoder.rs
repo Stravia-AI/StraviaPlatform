@@ -299,7 +299,117 @@ fn normalize_messages_for_openai(
         has_reasoning || !msg.content.to_text().trim().is_empty()
     });
 
+    fold_standalone_reasoning_items(&mut out);
+
     out
+}
+
+/// DeepSeek and other strict chat-completions upstreams reject assistant
+/// messages that have neither `content` nor `tool_calls`:
+/// 400 "Invalid assistant message: content or tool_calls must be set".
+/// Open Responses history gives native reasoning its own item ahead of the
+/// sibling function-call items, so after the tool-call split such an item
+/// sits right before the first assistant turn it belongs to. Fold its text
+/// into that turn's `reasoning_content` (chronologically first) and drop the
+/// carrier; without a following assistant turn there is no chat-completions
+/// shape that can carry it, so drop it there as well.
+fn fold_standalone_reasoning_items(out: &mut Vec<AiItem>) {
+    for idx in (0..out.len()).rev() {
+        if !is_standalone_reasoning_item(&out[idx]) {
+            continue;
+        }
+        let text = standalone_reasoning_text(&out[idx]);
+        if out
+            .get(idx + 1)
+            .is_some_and(|next| next.role == Role::Assistant)
+        {
+            let next_meta = out[idx + 1]
+                .meta
+                .get_or_insert_with(|| Value::Object(serde_json::Map::new()));
+            if let Value::Object(map) = next_meta {
+                let existing = map
+                    .get("reasoning_content")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let merged = match (text.is_empty(), existing.is_empty()) {
+                    (true, _) => existing,
+                    (false, true) => text,
+                    (false, false) => format!("{text}\n{existing}"),
+                };
+                map.insert("reasoning_content".into(), Value::String(merged));
+            }
+        }
+        out.remove(idx);
+    }
+}
+
+/// An assistant item whose only payload is native reasoning: no tool calls,
+/// no tool-call id, and no textual or non-reasoning content blocks.
+fn is_standalone_reasoning_item(item: &AiItem) -> bool {
+    item.role == Role::Assistant
+        && item
+            .tool_calls
+            .as_ref()
+            .is_none_or(|calls| calls.is_empty())
+        && item
+            .tool_call_id
+            .as_ref()
+            .is_none_or(|id| id.trim().is_empty())
+        && match &item.content {
+            MessageContent::Text(text) => text.trim().is_empty(),
+            MessageContent::Blocks(blocks) => blocks.iter().all(|block| {
+                matches!(
+                    block,
+                    ContentBlock::Thinking { .. }
+                        | ContentBlock::Reasoning { .. }
+                        | ContentBlock::RedactedThinking { .. }
+                )
+            }),
+        }
+}
+
+/// Reasoning text of a standalone carrier, in encode order. Thinking blocks
+/// win: `promote_reasoning_meta` mirrors them into `meta.reasoning_content`
+/// during the split loop, so the blocks are the single authoritative source.
+/// Reasoning blocks are not promoted, so read their summary/content directly.
+/// `meta.reasoning_content` is the fallback for meta-only carriers.
+fn standalone_reasoning_text(item: &AiItem) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let MessageContent::Blocks(blocks) = &item.content {
+        for block in blocks {
+            match block {
+                ContentBlock::Thinking { thinking, .. } => {
+                    if !thinking.trim().is_empty() {
+                        parts.push(thinking.clone());
+                    }
+                }
+                ContentBlock::Reasoning {
+                    summary, content, ..
+                } => {
+                    parts.extend(
+                        summary
+                            .iter()
+                            .chain(content)
+                            .filter(|text| !text.trim().is_empty())
+                            .cloned(),
+                    );
+                }
+                ContentBlock::RedactedThinking { .. } => {}
+                _ => {}
+            }
+        }
+    }
+    if parts.is_empty()
+        && let Some(reasoning) = item
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("reasoning_content"))
+            .and_then(Value::as_str)
+    {
+        return reasoning.to_string();
+    }
+    parts.join("\n")
 }
 
 fn prune_orphan_assistant_tool_calls(messages: Vec<AiItem>) -> Vec<AiItem> {
@@ -660,6 +770,17 @@ fn encode_message(msg: &AiItem) -> Result<Value> {
         {
             map.entry(key.clone()).or_insert_with(|| value.clone());
         }
+    }
+
+    // Strict chat-completions upstreams (e.g. DeepSeek) reject assistant
+    // messages that have neither `content` nor `tool_calls`. Every normal
+    // path yields one of the two; this net guarantees the invariant even for
+    // unexpected block combinations.
+    if msg.role == Role::Assistant
+        && !map.contains_key("tool_calls")
+        && map.get("content").is_none_or(Value::is_null)
+    {
+        map.insert("content".into(), Value::String(String::new()));
     }
 
     Ok(obj)

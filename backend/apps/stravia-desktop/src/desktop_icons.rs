@@ -30,7 +30,7 @@ mod tests {
         for image in [tray_image(), window_image()] {
             let mut transparent = 0;
             let mut solid = 0;
-            for pixel in image.rgba().chunks_exact(4) {
+            for pixel in image.rgba().as_chunks::<4>().0 {
                 if pixel[3] == 0 {
                     transparent += 1;
                 } else {

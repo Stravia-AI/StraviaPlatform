@@ -1129,7 +1129,7 @@ async fn dispatch_round(
             .media_routing
             .as_ref()
             .is_some_and(|plan| plan.mode == MediaRoutingMode::Bridge)
-            && !stabilize_media_generation_chain(&generation_chain, request)
+            && !stabilize_media_generation_chain(generation_chain, request)
         {
             return coded_error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1642,6 +1642,7 @@ mod openai_generation_target_tests {
             static_models: None,
             api_key: "secret".into(),
             adapter_credentials: r#"{"apiKey":"secret"}"#.into(),
+            vendor_options: "{}".into(),
             auth_mode: "apikey".into(),
             use_proxy: false,
             last_test_success: None,

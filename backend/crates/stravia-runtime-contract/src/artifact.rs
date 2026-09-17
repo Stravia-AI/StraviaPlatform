@@ -114,11 +114,10 @@ impl ArtifactSettings {
                 "client base URL is required for upload assistance".into(),
             ));
         }
-        if let Some(public) = &self.file_public_base_url {
-            if !public.is_empty() {
+        if let Some(public) = &self.file_public_base_url
+            && !public.is_empty() {
                 base(public)?;
             }
-        }
         if self.external_signed_downloads {
             base(
                 self.file_public_base_url

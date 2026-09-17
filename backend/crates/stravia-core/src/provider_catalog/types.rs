@@ -14,6 +14,18 @@ pub enum CatalogError {
         provider_id: String,
         model_id: String,
     },
+    #[error("catalog provider not found: {provider_id}")]
+    ProviderNotFound { provider_id: String },
+    #[error("catalog channel not found: {provider_id}/{channel_id}")]
+    ChannelNotFound {
+        provider_id: String,
+        channel_id: String,
+    },
+    #[error("catalog channel changed; refresh and select it again")]
+    ChannelChanged {
+        provider_id: String,
+        channel_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -151,6 +151,7 @@ impl AdminService {
                     static_models: None,
                     api_key,
                     adapter_credentials,
+                    vendor_options: "{}".to_string(),
                     auth_mode,
                     use_proxy: input.use_proxy,
                 })
@@ -190,6 +191,7 @@ impl AdminService {
                     static_models,
                     api_key,
                     adapter_credentials,
+                    vendor_options: "{}".to_string(),
                     auth_mode: "apikey".to_string(),
                     use_proxy: input.use_proxy,
                 })
@@ -406,6 +408,10 @@ impl AdminService {
         } else {
             adapter_credentials
         };
+        let vendor_options = match input.vendor_options {
+            Some(values) => Some(validate_vendor_options(credential_vendor, values)?),
+            None => None,
+        };
         let current_credentials =
             serde_json::from_str::<std::collections::BTreeMap<String, String>>(
                 &current.adapter_credentials,
@@ -451,6 +457,7 @@ impl AdminService {
                     static_models,
                     api_key,
                     adapter_credentials,
+                    vendor_options,
                     auth_mode: Some(auth_mode),
                     use_proxy: Some(use_proxy),
                     is_enabled: Some(is_enabled),

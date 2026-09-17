@@ -667,11 +667,10 @@ fn private_dir(path: &Path) -> Result<()> {
     if path.is_dir() {
         return Ok(());
     }
-    if let Some(parent) = path.parent() {
-        if !parent.exists() {
+    if let Some(parent) = path.parent()
+        && !parent.exists() {
             private_dir(parent)?;
         }
-    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;
@@ -710,6 +709,32 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut file = options.open(path)?;
     file.write_all(bytes)?;
     file.sync_all()?;
+    Ok(())
+}
+
+fn copy_tree(source: &Path, target: &Path) -> Result<()> {
+    reject_links(source)?;
+    if source.is_dir() {
+        private_dir(target)?;
+        for entry in fs::read_dir(source)? {
+            let entry = entry?;
+            copy_tree(&entry.path(), &target.join(entry.file_name()))?;
+        }
+    } else {
+        ensure!(source.is_file(), "unsupported source file");
+        private_dir(target.parent().context("copy parent missing")?)?;
+        let mut input = File::open(source)?;
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut output = options.open(target)?;
+        std::io::copy(&mut input, &mut output)?;
+        output.sync_all()?;
+    }
     Ok(())
 }
 
@@ -1029,30 +1054,4 @@ mod tests {
         }));
         Ok(())
     }
-}
-
-fn copy_tree(source: &Path, target: &Path) -> Result<()> {
-    reject_links(source)?;
-    if source.is_dir() {
-        private_dir(target)?;
-        for entry in fs::read_dir(source)? {
-            let entry = entry?;
-            copy_tree(&entry.path(), &target.join(entry.file_name()))?;
-        }
-    } else {
-        ensure!(source.is_file(), "unsupported source file");
-        private_dir(target.parent().context("copy parent missing")?)?;
-        let mut input = File::open(source)?;
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut output = options.open(target)?;
-        std::io::copy(&mut input, &mut output)?;
-        output.sync_all()?;
-    }
-    Ok(())
 }

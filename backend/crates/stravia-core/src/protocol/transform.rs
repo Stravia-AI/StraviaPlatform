@@ -410,6 +410,7 @@ pub(crate) enum WireStreamDecoder {
     Bedrock(crate::protocol::codec::bedrock::BedrockStreamParser),
     Cohere(crate::protocol::codec::cohere::CohereStreamParser),
     Gateway(crate::protocol::codec::gateway::GatewayStreamParser),
+    CommandCode(crate::protocol::codec::command_code::CommandCodeStreamParser),
 }
 
 impl WireStreamDecoder {
@@ -469,6 +470,7 @@ impl WireStreamDecoder {
             Self::Bedrock(_) => unreachable!("Bedrock stream decoding is byte-oriented"),
             Self::Cohere(parser) => parser.parse_chunk(raw),
             Self::Gateway(parser) => parser.parse_chunk(raw),
+            Self::CommandCode(parser) => parser.parse_chunk(raw),
         }
     }
 
@@ -481,6 +483,7 @@ impl WireStreamDecoder {
             Self::Bedrock(parser) => parser.finish(),
             Self::Cohere(parser) => parser.finish(),
             Self::Gateway(parser) => parser.finish(),
+            Self::CommandCode(parser) => parser.finish(),
         }
     }
 }
@@ -631,7 +634,8 @@ fn request_loss_paths(pair: ProtocolPair, request: &AiRequest) -> Vec<String> {
             | Protocol::OpenResponses
             | Protocol::CohereChat
             | Protocol::WatsonxTextChat
-            | Protocol::GatewayLanguageModel => false,
+            | Protocol::GatewayLanguageModel
+            | Protocol::CommandCode => false,
         };
         push_if(&mut lost, unsupported, "tool_choice");
     }
@@ -825,6 +829,7 @@ fn thinking_control_representable(
         Protocol::AnthropicMessages | Protocol::GoogleGemini => {
             !matches!(control, TargetThinkingControl::Hidden)
         }
+        Protocol::CommandCode => matches!(control, TargetThinkingControl::Effort { .. }),
         _ => false,
     }
 }
@@ -937,6 +942,17 @@ fn request_block_representable(
                 | ContentBlock::Image { .. }
                 | ContentBlock::File { .. }
                 | ContentBlock::Video { .. }
+                | ContentBlock::ToolUse { .. }
+                | ContentBlock::ToolResult { .. }
+                | ContentBlock::Thinking {
+                    signature: None,
+                    ..
+                }
+        ),
+        Protocol::CommandCode => matches!(
+            block,
+            ContentBlock::Text { .. }
+                | ContentBlock::Image { .. }
                 | ContentBlock::ToolUse { .. }
                 | ContentBlock::ToolResult { .. }
                 | ContentBlock::Thinking {

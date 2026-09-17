@@ -209,6 +209,73 @@ test('provider editor selects a Provider option before showing its configuration
   await expect(apiKey).toHaveAttribute('type', 'password')
 })
 
+test('stale catalog selection recovers with a localized error and a refreshed service list', async ({ page }) => {
+  const goneVendor = {
+    id: 'gone-vendor',
+    name: 'Gone Vendor',
+    documentation_url: null,
+    protocol: 'openai-compatible',
+    base_url: 'https://gone.example/v1',
+    vendor_id: 'openai-compatible',
+    npm: '@ai-sdk/openai-compatible',
+    channels: [
+      {
+        id: 'default',
+        label: 'Default',
+        protocol: 'openai-compatible',
+        base_url: 'https://gone.example/v1',
+        auth_mode: 'optional_api_key',
+        fingerprint: 'gone-default',
+      },
+    ],
+  }
+  let catalogFetches = 0
+  await page.route('**/api/v1/catalog/providers', async (route) => {
+    catalogFetches += 1
+    // 第一次列出已过期的服务;目录失效后重新拉取,新 revision 不再包含它。
+    const providers = catalogFetches === 1 ? [goneVendor] : []
+    await route.fulfill({
+      json: {
+        revision: catalogFetches === 1 ? 'stale-catalog' : 'refreshed-catalog',
+        generated_at: '2026-09-16T00:00:00Z',
+        providers,
+      },
+    })
+  })
+  await page.route('**/api/v1/providers', async (route) => {
+    if (route.request().method() === 'POST') {
+      await route.fulfill({
+        status: 404,
+        json: {
+          code: 'CATALOG_PROVIDER_NOT_FOUND',
+          error: 'Catalog provider was not found in the active catalog revision.',
+          params: { provider_id: 'gone-vendor' },
+        },
+      })
+      return
+    }
+    await route.fulfill({ json: { data: [] } })
+  })
+
+  await page.goto('/providers')
+  await page.getByRole('button', { name: /Connect (first )?service/ }).click()
+  await page.getByRole('button', { name: /Gone Vendor.*API key/ }).click()
+  await expect(page.getByRole('heading', { name: 'Connection details' })).toBeVisible()
+  await page.getByLabel('API Key', { exact: true }).fill('fixture-only-provider-secret')
+  await page.getByRole('button', { name: 'Connect', exact: true }).click()
+
+  await expect(
+    page.getByText(
+      'The selected service is no longer available in the catalog. Refresh the service list and choose again.',
+    ),
+  ).toBeVisible()
+  // 回到“选择服务”并且过期服务从刷新后的列表里消失。
+  await expect(page.getByRole('tab', { name: 'Choose service' })).toHaveAttribute('data-state', 'active')
+  await expect(page.getByRole('heading', { name: 'Connect a model service' })).toBeVisible()
+  await expect(page.getByRole('button', { name: /Gone Vendor/ })).toHaveCount(0)
+  expect(catalogFetches).toBeGreaterThanOrEqual(2)
+})
+
 test('configured Providers use Catalog logos and Custom uses its endpoint favicon', async ({ page }) => {
   const configuredProviders = [
     {

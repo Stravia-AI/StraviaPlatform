@@ -29,6 +29,7 @@ const METADATA: VendorMetadata = VendorMetadata {
     icon: "anthropic",
     default_protocol: "anthropic-messages",
     credential_fields: crate::provider::metadata::API_KEY_CREDENTIAL_FIELDS,
+    option_fields: crate::provider::metadata::NO_OPTION_FIELDS,
     channels: &[
         ChannelDef {
             id: "default",

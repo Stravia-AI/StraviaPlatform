@@ -33,6 +33,7 @@ const METADATA: VendorMetadata = VendorMetadata {
     icon: "openai",
     default_protocol: "openai-compatible",
     credential_fields: crate::provider::metadata::API_KEY_CREDENTIAL_FIELDS,
+    option_fields: crate::provider::metadata::NO_OPTION_FIELDS,
     channels: &[
         ChannelDef {
             id: "default",

@@ -308,25 +308,21 @@ impl AttemptObservation {
             });
         }
         let observed = binding.observer.is_some();
-        let attempt = Self {
+        
+        Self {
             observer: binding.observer.clone(),
             id,
-            model_turn_id: observed
-                .then(|| binding.model_turn_id.clone())
-                .unwrap_or_default(),
-            transport: observed.then(|| transport.to_owned()).unwrap_or_default(),
-            protocol: observed
-                .then(|| binding.protocol.to_string())
-                .unwrap_or_default(),
-            url: observed.then(|| url.to_owned()).unwrap_or_default(),
+            model_turn_id: if observed { binding.model_turn_id.clone() } else { Default::default() },
+            transport: if observed { transport.to_owned() } else { Default::default() },
+            protocol: if observed { binding.protocol.to_string() } else { Default::default() },
+            url: if observed { url.to_owned() } else { Default::default() },
             started_at: Instant::now(),
             finished: AtomicBool::new(false),
             usage_confirmed: AtomicBool::new(false),
             thinking_active: AtomicBool::new(false),
             thinking_layout: Mutex::new(ObservedThinkingLayout::default()),
             first_token_timed_out: adapter.first_token_timed_out.clone(),
-        };
-        attempt
+        }
     }
 
     pub(crate) fn debug_enabled(&self) -> bool {
@@ -1290,6 +1286,7 @@ mod tests {
                 "aiGatewayUrl": base_url,
             })
             .to_string(),
+            vendor_options: "{}".to_string(),
             auth_mode: "apikey".into(),
             use_proxy: false,
             last_test_success: None,
