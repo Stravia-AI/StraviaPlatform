@@ -58,6 +58,7 @@ pub struct ResponsesStreamFormatter {
     next_sequence_number: u64,
     reasoning_item_id: Option<String>,
     reasoning_output_index: Option<usize>,
+    sealed_reasoning_items: BTreeMap<usize, serde_json::Value>,
     tool_index_map: HashMap<usize, usize>,
     tool_calls: Vec<PendingFunctionCall>,
     standalone_items: Vec<PendingOutputItem>,
@@ -101,6 +102,7 @@ impl ResponsesStreamFormatter {
             next_sequence_number: 0,
             reasoning_item_id: None,
             reasoning_output_index: None,
+            sealed_reasoning_items: BTreeMap::new(),
             tool_index_map: HashMap::new(),
             tool_calls: Vec::new(),
             standalone_items: Vec::new(),
@@ -241,6 +243,7 @@ impl ResponsesStreamFormatter {
 
     fn ensure_message_started(&mut self, events: &mut Vec<SseEvent>) {
         self.ensure_started(events);
+        self.seal_reasoning_item(events);
         if self.message_output_index.is_some() {
             return;
         }
@@ -365,6 +368,79 @@ impl ResponsesStreamFormatter {
         }
         item
     }
+
+    /// Close the open unindexed reasoning item. The IR has no explicit
+    /// thinking-finished delta, so a reasoning run ends when the stream moves on
+    /// to another item. Sealing early keeps `output_item.done` arrival order
+    /// aligned with `output_index` order; thinking that resumes afterwards opens
+    /// a fresh reasoning item, matching how the IR itemizes non-adjacent
+    /// thinking blocks.
+    fn seal_reasoning_item(&mut self, events: &mut Vec<SseEvent>) {
+        let (Some(item_id), Some(output_index)) = (
+            self.reasoning_item_id.clone(),
+            self.reasoning_output_index,
+        ) else {
+            return;
+        };
+        if !self.accumulated_reasoning.is_empty() {
+            events.push(SseEvent::new(
+                Some("response.reasoning_summary_text.done"),
+                serde_json::json!({
+                    "type": "response.reasoning_summary_text.done",
+                    "item_id": item_id,
+                    "output_index": output_index,
+                    "summary_index": 0,
+                    "text": self.accumulated_reasoning
+                })
+                .to_string(),
+            ));
+            events.push(SseEvent::new(
+                Some("response.reasoning_summary_part.done"),
+                serde_json::json!({
+                    "type": "response.reasoning_summary_part.done",
+                    "item_id": item_id,
+                    "output_index": output_index,
+                    "summary_index": 0,
+                    "part": {
+                        "type": "summary_text",
+                        "text": self.accumulated_reasoning
+                    }
+                })
+                .to_string(),
+            ));
+        }
+        if !self.accumulated_reasoning_content.is_empty() {
+            events.push(SseEvent::new(
+                Some("response.reasoning_text.done"),
+                serde_json::json!({
+                    "type": "response.reasoning_text.done",
+                    "item_id": item_id,
+                    "output_index": output_index,
+                    "content_index": 0,
+                    "text": self.accumulated_reasoning_content
+                })
+                .to_string(),
+            ));
+        }
+        let item = self.reasoning_item();
+        events.push(SseEvent::new(
+            Some("response.output_item.done"),
+            serde_json::json!({
+                "type": "response.output_item.done",
+                "output_index": output_index,
+                "item": item
+            })
+            .to_string(),
+        ));
+        self.sealed_reasoning_items.insert(output_index, item);
+        self.reasoning_item_id = None;
+        self.reasoning_output_index = None;
+        self.accumulated_reasoning.clear();
+        self.accumulated_reasoning_content.clear();
+        self.reasoning_encrypted_content = None;
+        self.reasoning_summary_started = false;
+    }
+
     fn emit_reasoning_delta(
         &mut self,
         events: &mut Vec<SseEvent>,
@@ -923,59 +999,7 @@ impl ResponsesStreamFormatter {
     ) -> Vec<SseEvent> {
         let mut events = Vec::new();
 
-        if let (Some(item_id), Some(output_index)) =
-            (&self.reasoning_item_id, self.reasoning_output_index)
-        {
-            if !self.accumulated_reasoning.is_empty() {
-                events.push(SseEvent::new(
-                    Some("response.reasoning_summary_text.done"),
-                    serde_json::json!({
-                        "type": "response.reasoning_summary_text.done",
-                        "item_id": item_id,
-                        "output_index": output_index,
-                        "summary_index": 0,
-                        "text": self.accumulated_reasoning
-                    })
-                    .to_string(),
-                ));
-                events.push(SseEvent::new(
-                    Some("response.reasoning_summary_part.done"),
-                    serde_json::json!({
-                        "type": "response.reasoning_summary_part.done",
-                        "item_id": item_id,
-                        "output_index": output_index,
-                        "summary_index": 0,
-                        "part": {
-                            "type": "summary_text",
-                            "text": self.accumulated_reasoning
-                        }
-                    })
-                    .to_string(),
-                ));
-            }
-            if !self.accumulated_reasoning_content.is_empty() {
-                events.push(SseEvent::new(
-                    Some("response.reasoning_text.done"),
-                    serde_json::json!({
-                        "type": "response.reasoning_text.done",
-                        "item_id": item_id,
-                        "output_index": output_index,
-                        "content_index": 0,
-                        "text": self.accumulated_reasoning_content
-                    })
-                    .to_string(),
-                ));
-            }
-            let reasoning_done = serde_json::json!({
-                "type": "response.output_item.done",
-                "output_index": output_index,
-                "item": self.reasoning_item()
-            });
-            events.push(SseEvent::new(
-                Some("response.output_item.done"),
-                reasoning_done.to_string(),
-            ));
-        }
+        self.seal_reasoning_item(&mut events);
 
         let mut indexed_reasoning_output = Vec::new();
         for (output_index, reasoning) in &mut self.indexed_reasoning {
@@ -1284,10 +1308,8 @@ impl ResponsesStreamFormatter {
                 }),
             ));
         }
-        if self.reasoning_item_id.is_some()
-            && let Some(output_index) = self.reasoning_output_index
-        {
-            indexed_output.push((output_index, self.reasoning_item()));
+        for (output_index, item) in &self.sealed_reasoning_items {
+            indexed_output.push((*output_index, item.clone()));
         }
         for call in &self.tool_calls {
             indexed_output.push((
@@ -1415,7 +1437,18 @@ impl ResponsesStreamFormatter {
                     self.emit_reasoning_summary_delta(&mut events, text, obfuscation.as_deref());
                 }
                 AiStreamDelta::ThinkingSignature(signature) => {
-                    self.reasoning_encrypted_content = Some(signature.clone());
+                    if self.reasoning_item_id.is_none()
+                        && let Some(item) =
+                            self.sealed_reasoning_items.values_mut().next_back()
+                    {
+                        // The signature completes the thinking block it trails;
+                        // that block's item already sealed, so keep it on the
+                        // sealed item for the terminal snapshot.
+                        item["encrypted_content"] =
+                            serde_json::Value::String(signature.clone());
+                    } else {
+                        self.reasoning_encrypted_content = Some(signature.clone());
+                    }
                 }
                 AiStreamDelta::TextDelta(text) => {
                     self.emit_text_delta(&mut events, text, None);
@@ -1473,6 +1506,7 @@ impl ResponsesStreamFormatter {
                 ),
                 AiStreamDelta::ToolCallStart { index, id, name } => {
                     self.ensure_started(&mut events);
+                    self.seal_reasoning_item(&mut events);
                     if let Some(pos) = self.tool_index_map.get(index).copied()
                         && let Some(call) = self.tool_calls.get_mut(pos)
                     {
@@ -1611,6 +1645,7 @@ impl ResponsesStreamFormatter {
                         item.get("type").and_then(|value| value.as_str())
                     {
                         self.ensure_started(&mut events);
+                        self.seal_reasoning_item(&mut events);
                         let output_index = self.next_output_index;
                         self.next_output_index += 1;
                         if let Some(object) = item.as_object_mut() {
@@ -1652,6 +1687,7 @@ impl ResponsesStreamFormatter {
                     }
                     if let Some(native) = super::native_compaction_item(item) {
                         self.ensure_started(&mut events);
+                        self.seal_reasoning_item(&mut events);
                         self.next_output_index = self.next_output_index.max(*index + 1);
                         for event in ["response.output_item.added", "response.output_item.done"] {
                             events.push(SseEvent::new(
@@ -1691,6 +1727,7 @@ impl ResponsesStreamFormatter {
                     }
                     if let Some((call_id, content)) = item.function_call_output_ref() {
                         self.ensure_started(&mut events);
+                        self.seal_reasoning_item(&mut events);
                         self.next_output_index = self.next_output_index.max(*index + 1);
                         let item_id = gateway_item_id("fco", &self.resp_id, *index);
                         let output = super::formatter::function_output_value(content);

@@ -1259,3 +1259,140 @@ fn function_output_item_done_emits_lifecycle_and_terminal_item() {
     assert_eq!(terminal_item["call_id"], added["item"]["call_id"]);
     assert_eq!(terminal_item["call_id"], "call_1");
 }
+
+#[test]
+fn reasoning_item_seals_before_a_later_function_call_completes() {
+    // Regression: a reasoning item used to stay open until the terminal flush,
+    // so in-stream function_call dones reached clients first. Clients that
+    // persist output items in done-arrival order (e.g. omp) then replayed a
+    // reordered history that broke generation-chain prefix discovery.
+    let mut formatter = ResponsesStreamFormatter::new();
+    let events = formatter.format_deltas(&[
+        AiStreamDelta::MessageStart {
+            id: "resp-reasoning-tool".into(),
+            model: "model".into(),
+        },
+        AiStreamDelta::ThinkingDelta("chain".into()),
+        AiStreamDelta::ToolCallStart {
+            index: 0,
+            id: "call_1".into(),
+            name: "read".into(),
+        },
+        AiStreamDelta::ToolCallDelta {
+            index: 0,
+            arguments: r#"{"path":"a"}"#.into(),
+        },
+        AiStreamDelta::ToolCallComplete {
+            index: 0,
+            tool_call: stravia_runtime_contract::protocol::ir::ToolCall {
+                id: "call_1".into(),
+                name: "read".into(),
+                arguments: r#"{"path":"a"}"#.into(),
+            },
+        },
+        AiStreamDelta::Done {
+            stop_reason: "tool_calls".into(),
+        },
+    ]);
+    let bodies = event_bodies(&events);
+
+    let added_order = bodies
+        .iter()
+        .filter(|body| body["type"] == "response.output_item.added")
+        .map(|body| body["output_index"].as_u64())
+        .collect::<Vec<_>>();
+    assert_eq!(added_order, [Some(0), Some(1)]);
+
+    let done_order = bodies
+        .iter()
+        .filter(|body| body["type"] == "response.output_item.done")
+        .map(|body| body["output_index"].as_u64())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        done_order,
+        [Some(0), Some(1)],
+        "reasoning must seal before the function call completes: {bodies:?}"
+    );
+
+    let reasoning_done = bodies
+        .iter()
+        .find(|body| {
+            body["type"] == "response.output_item.done" && body["item"]["type"] == "reasoning"
+        })
+        .expect("reasoning done");
+    assert_eq!(reasoning_done["item"]["content"][0]["text"], "chain");
+
+    let terminal = bodies
+        .iter()
+        .find(|body| body["type"] == "response.completed")
+        .expect("response completed");
+    let output_types = terminal["response"]["output"]
+        .as_array()
+        .expect("terminal output")
+        .iter()
+        .map(|item| item["type"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(output_types, [Some("reasoning"), Some("function_call")]);
+}
+
+#[test]
+fn thinking_resuming_after_a_function_call_opens_a_new_reasoning_item() {
+    let mut formatter = ResponsesStreamFormatter::new();
+    let events = formatter.format_deltas(&[
+        AiStreamDelta::MessageStart {
+            id: "resp-reasoning-resume".into(),
+            model: "model".into(),
+        },
+        AiStreamDelta::ThinkingDelta("first".into()),
+        AiStreamDelta::ToolCallStart {
+            index: 0,
+            id: "call_1".into(),
+            name: "read".into(),
+        },
+        AiStreamDelta::ToolCallComplete {
+            index: 0,
+            tool_call: stravia_runtime_contract::protocol::ir::ToolCall {
+                id: "call_1".into(),
+                name: "read".into(),
+                arguments: "{}".into(),
+            },
+        },
+        AiStreamDelta::ThinkingDelta("second".into()),
+        AiStreamDelta::Done {
+            stop_reason: "tool_calls".into(),
+        },
+    ]);
+    let bodies = event_bodies(&events);
+
+    let reasoning_items = bodies
+        .iter()
+        .filter(|body| {
+            body["type"] == "response.output_item.added" && body["item"]["type"] == "reasoning"
+        })
+        .map(|body| body["output_index"].as_u64())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        reasoning_items,
+        [Some(0), Some(2)],
+        "resumed thinking must open a fresh reasoning item, not append to the sealed one: {bodies:?}"
+    );
+
+    let done_order = bodies
+        .iter()
+        .filter(|body| body["type"] == "response.output_item.done")
+        .map(|body| body["output_index"].as_u64())
+        .collect::<Vec<_>>();
+    assert_eq!(done_order, [Some(0), Some(1), Some(2)]);
+
+    let terminal = bodies
+        .iter()
+        .find(|body| body["type"] == "response.completed")
+        .expect("response completed");
+    let output = terminal["response"]["output"].as_array().expect("output");
+    let reasoning_texts = output
+        .iter()
+        .filter(|item| item["type"] == "reasoning")
+        .map(|item| item["content"][0]["text"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(reasoning_texts, [Some("first"), Some("second")]);
+}
