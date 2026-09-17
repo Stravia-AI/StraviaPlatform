@@ -41,10 +41,10 @@ export function getPayloadConfigFromPayload(
   ) {
     configLabelKey = payloadConfig[key as keyof typeof payloadConfig] as string
   } else if (data != null && key in data && typeof data[key] === 'string') {
-    configLabelKey = data[key] as string
+    configLabelKey = data[key]
   }
 
-  return configLabelKey in config ? config[configLabelKey] : config[key as keyof typeof config]
+  return configLabelKey in config ? config[configLabelKey] : config[key]
 }
 
 type ChartContextValue = { config: ChartConfig }

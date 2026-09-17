@@ -77,7 +77,10 @@ describe('observation conversation', () => {
     const latest = run('latest', 2, [event('latest', 5, 'client_visible_content_delta', { text: 'B' })])
     const current = detail([first, latest])
     const before = observationConversationMessages(current)
-    const older = { ...latest, events: [event('latest', 4, 'client_visible_content_delta', { text: 'A' }), latest.events[0]] }
+    const older = {
+      ...latest,
+      events: [event('latest', 4, 'client_visible_content_delta', { text: 'A' }), latest.events[0]],
+    }
     const merged = mergeObservationRuns(current.runs, [older], true)
     const replay = mergeObservationRuns(merged, [older], true)
     const after = observationConversationMessages({ ...current, runs: replay }, [], before)
@@ -88,12 +91,29 @@ describe('observation conversation', () => {
   })
 
   test('live blocks extend one Markdown message and commit removes only the matching overlay', () => {
-    const current = detail([run('first', 1, [event('first', 1, 'client_visible_content_delta', { text: '| A | B |\\n' })])])
-    const block: LiveContentBlock = { block_id: 'block-a', interaction_id: 'interaction', run_id: 'first', kind: 'client_visible_content_delta', model_turn_id: 'turn', attempt_id: 'attempt', occurred_at: 2, revision: 1, text: '|---|---|\\n| one | two |' }
+    const current = detail([
+      run('first', 1, [event('first', 1, 'client_visible_content_delta', { text: '| A | B |\\n' })]),
+    ])
+    const block: LiveContentBlock = {
+      block_id: 'block-a',
+      interaction_id: 'interaction',
+      run_id: 'first',
+      kind: 'client_visible_content_delta',
+      model_turn_id: 'turn',
+      attempt_id: 'attempt',
+      occurred_at: 2,
+      revision: 1,
+      text: '|---|---|\\n| one | two |',
+    }
     const live = observationConversationMessages(current, [block])
     expect(live[1].text).toBe('| A | B |\\n|---|---|\\n| one | two |')
     expect(live[1].unsaved).toBe(true)
-    const committed = { ...current, runs: mergeObservationRuns(current.runs, [{ ...current.runs[0], events: [event('first', 2, block.kind, { text: block.text, block_id: block.block_id })] }]) }
+    const committed = {
+      ...current,
+      runs: mergeObservationRuns(current.runs, [
+        { ...current.runs[0], events: [event('first', 2, block.kind, { text: block.text, block_id: block.block_id })] },
+      ]),
+    }
     const after = observationConversationMessages(committed, withoutCommittedBlocks([block], committed), live)
     expect(after[1].text).toBe(live[1].text)
     expect(after[1].unsaved).toBe(false)
@@ -106,10 +126,24 @@ describe('observation conversation', () => {
   })
 
   test('background live memory is bounded independently from the selected interaction', () => {
-    const blocks: LiveContentBlock[] = Array.from({ length: 100 }, (_, index) => ({ block_id: String(index), interaction_id: index === 0 ? 'selected' : 'background', run_id: String(index), kind: 'client_visible_content_delta', model_turn_id: null, attempt_id: null, occurred_at: index, revision: 1, text: 'x'.repeat(16_384) }))
+    const blocks: LiveContentBlock[] = Array.from({ length: 100 }, (_, index) => ({
+      block_id: String(index),
+      interaction_id: index === 0 ? 'selected' : 'background',
+      run_id: String(index),
+      kind: 'client_visible_content_delta',
+      model_turn_id: null,
+      attempt_id: null,
+      occurred_at: index,
+      revision: 1,
+      text: 'x'.repeat(16_384),
+    }))
     const retained = retainLiveBlocks(blocks, 'selected')
     expect(retained.find((block) => block.interaction_id === 'selected')).toBe(blocks[0])
-    expect(retained.filter((block) => block.interaction_id !== 'selected').reduce((bytes, block) => bytes + block.text.length * 2, 0)).toBeLessThanOrEqual(256 * 1024)
+    expect(
+      retained
+        .filter((block) => block.interaction_id !== 'selected')
+        .reduce((bytes, block) => bytes + block.text.length * 2, 0),
+    ).toBeLessThanOrEqual(256 * 1024)
   })
   test('shows the user once and orders delivered text without exposing tool or checkpoint payloads', () => {
     const messages = observationConversationMessages(
@@ -139,7 +173,10 @@ describe('observation conversation', () => {
     const current = detail([
       run('root-run', 1, [
         event('root-run', 1, 'run_admitted', { has_new_user: true }),
-        event('root-run', 2, 'input_preview_recorded', { kind: 'input_preview_recorded', text: 'Actual user question' }),
+        event('root-run', 2, 'input_preview_recorded', {
+          kind: 'input_preview_recorded',
+          text: 'Actual user question',
+        }),
         event('root-run', 3, 'client_visible_content_delta', { text: 'First response' }),
       ]),
       run('tool-continuation', 2, [
@@ -148,8 +185,14 @@ describe('observation conversation', () => {
         event('tool-continuation', 6, 'client_visible_content_delta', { text: 'Tool continuation' }),
       ]),
       run('pending-tool-result-with-user', 3, [
-        event('pending-tool-result-with-user', 7, 'run_admitted', { has_new_user: true, grouping_reason: 'pending_tool_result' }),
-        event('pending-tool-result-with-user', 8, 'input_preview_recorded', { kind: 'input_preview_recorded', text: 'Actual user question' }),
+        event('pending-tool-result-with-user', 7, 'run_admitted', {
+          has_new_user: true,
+          grouping_reason: 'pending_tool_result',
+        }),
+        event('pending-tool-result-with-user', 8, 'input_preview_recorded', {
+          kind: 'input_preview_recorded',
+          text: 'Actual user question',
+        }),
         event('pending-tool-result-with-user', 9, 'client_visible_content_delta', { text: 'Follow-up response' }),
       ]),
     ])
@@ -170,7 +213,10 @@ describe('observation conversation', () => {
       ...detail([
         run('root-run', 1, [event('root-run', 3, 'client_visible_content_delta', { text: 'First response' })]),
         run('follow-up', 2, [
-          event('follow-up', 4, 'input_preview_recorded', { kind: 'input_preview_recorded', text: 'Visible follow-up' }),
+          event('follow-up', 4, 'input_preview_recorded', {
+            kind: 'input_preview_recorded',
+            text: 'Visible follow-up',
+          }),
           event('follow-up', 5, 'client_visible_content_delta', { text: 'Follow-up response' }),
         ]),
       ]),

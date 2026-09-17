@@ -1,13 +1,14 @@
 use std::{
     io,
     sync::{
-        Arc, Condvar, Mutex as StdMutex,
+        Arc,
         atomic::{AtomicBool, AtomicU16, Ordering},
     },
     time::Duration,
 };
 
 use axum::{Router, routing::get};
+use parking_lot::{Condvar, Mutex as SyncMutex};
 use tokio::sync::{Notify, oneshot};
 
 use super::{
@@ -157,7 +158,7 @@ impl PortOwnerResolver for FailingOwners {
 
 struct BlockingOwners {
     started: AtomicBool,
-    released: StdMutex<bool>,
+    released: SyncMutex<bool>,
     release: Condvar,
 }
 
@@ -165,36 +166,23 @@ impl BlockingOwners {
     fn new() -> Self {
         Self {
             started: AtomicBool::new(false),
-            released: StdMutex::new(false),
+            released: SyncMutex::new(false),
             release: Condvar::new(),
         }
     }
 
     fn release(&self) {
-        match self.released.lock() {
-            Ok(mut released) => {
-                *released = true;
-                self.release.notify_all();
-            }
-            Err(poisoned) => {
-                *poisoned.into_inner() = true;
-                self.release.notify_all();
-            }
-        }
+        *self.released.lock() = true;
+        self.release.notify_all();
     }
 }
 
 impl PortOwnerResolver for BlockingOwners {
     fn resolve(&self, _port: u16) -> Result<Vec<PortOwner>, String> {
         self.started.store(true, Ordering::Release);
-        let released = match self.released.lock() {
-            Ok(released) => released,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        let _released = self
-            .release
-            .wait_while(released, |released| !*released)
-            .map_err(|error| error.to_string())?;
+        let mut released = self.released.lock();
+        self.release
+            .wait_while(&mut released, |released| !*released);
         Ok(vec![PortOwner {
             name: "stale-owner".to_string(),
             pid: 91,
@@ -674,7 +662,7 @@ async fn switch_publication_happens_before_the_old_listener_starts_draining() {
 #[tokio::test]
 async fn an_in_flight_request_finishes_while_the_old_listener_drains() {
     let (started_tx, started_rx) = oneshot::channel();
-    let started_tx = Arc::new(StdMutex::new(Some(started_tx)));
+    let started_tx = Arc::new(SyncMutex::new(Some(started_tx)));
     let release = Arc::new(Notify::new());
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
@@ -687,10 +675,7 @@ async fn an_in_flight_request_finishes_while_the_old_listener_drains() {
                     let started_tx = started_tx.clone();
                     let release = release.clone();
                     async move {
-                        let sender = match started_tx.lock() {
-                            Ok(mut sender) => sender.take(),
-                            Err(poisoned) => poisoned.into_inner().take(),
-                        };
+                        let sender = started_tx.lock().take();
                         if let Some(sender) = sender {
                             let _ = sender.send(());
                         }

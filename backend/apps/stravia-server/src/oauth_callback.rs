@@ -210,7 +210,7 @@ impl OAuthCallbackManager {
     async fn replace_active_session(&self) {
         let active = self.inner.active.lock().await.take();
         if let Some(active) = active {
-            let _ = self
+            if let Err(error) = self
                 .inner
                 .gateway
                 .admin()
@@ -219,7 +219,10 @@ impl OAuthCallbackManager {
                     "AUTH_SESSION_REPLACED",
                     "OAuth session was replaced by a newer local login",
                 )
-                .await;
+                .await
+            {
+                tracing::debug!(%error, "failed to mark replaced OAuth session");
+            }
             if let Some(shutdown) = active.shutdown {
                 let _ = shutdown.send(true);
             }

@@ -29,6 +29,7 @@ import { Input } from '$lib/components/ui/input'
 import * as Select from '$lib/components/ui/select'
 import { Switch } from '$lib/components/ui/switch'
 import { Textarea } from '$lib/components/ui/textarea'
+import { inputValue } from '$lib/utils.js'
 
 interface Props {
   detail: ProviderModelDetail
@@ -291,7 +292,7 @@ export function submit(): void {
         <Select.Root
           type="single"
           value={detail.selection_policy}
-          onValueChange={(value) => value && onSelectionChange(value as ProviderModelSelectionPolicy)}>
+          onValueChange={(value: string) => value && onSelectionChange(value as ProviderModelSelectionPolicy)}>
           <Select.Trigger
             id="provider-model-selection"
             class="min-h-10 w-full shrink-0 @sm/model-editor:w-44"
@@ -330,12 +331,12 @@ export function submit(): void {
                   id={`provider-model-${field.key}`}
                   class="min-h-24 resize-y"
                   value={String(metadata[field.key] ?? '')}
-                  oninput={(event) => setStringField(field.key, event.currentTarget.value)} />
+                  oninput={(event: Event) => setStringField(field.key, inputValue(event))} />
               {:else}
                 <Input
                   id={`provider-model-${field.key}`}
                   value={String(metadata[field.key] ?? '')}
-                  oninput={(event) => setStringField(field.key, event.currentTarget.value)} />
+                  oninput={(event: Event) => setStringField(field.key, inputValue(event))} />
               {/if}
             </Field.Field>
           {/if}
@@ -362,7 +363,7 @@ export function submit(): void {
                   id={`provider-model-${field.key}`}
                   size="sm"
                   checked={metadata[field.key] === true}
-                  onCheckedChange={(checked) => setBooleanField(field.key, checked)} />
+                  onCheckedChange={(checked: boolean) => setBooleanField(field.key, checked)} />
               </Field.Field>
             {/if}
           {/each}
@@ -401,7 +402,7 @@ export function submit(): void {
               <Select.Root
                 type="multiple"
                 value={metadata.modalities[target]}
-                onValueChange={(values) => setModalityValues(target, values)}>
+                onValueChange={(values: string[]) => setModalityValues(target, values)}>
                 <Select.Trigger
                   id={`provider-model-${target}-modalities`}
                   class="w-full min-w-0"
@@ -438,7 +439,7 @@ export function submit(): void {
                 min="0"
                 step="1"
                 value={metadata.limit[key as keyof typeof metadata.limit] ?? ''}
-                oninput={(event) => setLimit(key as 'context' | 'input' | 'output', event.currentTarget.value)} />
+                oninput={(event: Event) => setLimit(key as 'context' | 'input' | 'output', inputValue(event))} />
             </Field.Field>
           {/each}
         </Field.Group>
@@ -477,7 +478,8 @@ export function submit(): void {
             <Select.Root
               type="single"
               value={interleavedMode()}
-              onValueChange={(value) => value && setInterleavedMode(value as ReturnType<typeof interleavedMode>)}>
+              onValueChange={(value: string) =>
+                value && setInterleavedMode(value as ReturnType<typeof interleavedMode>)}>
               <Select.Trigger class="w-32" aria-label={m.common_interleaved()}>{interleavedMode()}</Select.Trigger>
               <Select.Content>
                 <Select.Group>
@@ -507,7 +509,7 @@ export function submit(): void {
                 <Select.Root
                   type="single"
                   value={option.type}
-                  onValueChange={(value) =>
+                  onValueChange={(value: string) =>
                     value && changeReasoningType(index, value as ProviderModelReasoningOption['type'])}>
                   <Select.Trigger aria-label={m.provider_model_editor_reasoning_behavior()}
                     >{option.type}</Select.Trigger>
@@ -525,7 +527,7 @@ export function submit(): void {
                   <Select.Root
                     type="multiple"
                     value={option.values.map(effortValueKey)}
-                    onValueChange={(values) => setEffortValues(option, values)}>
+                    onValueChange={(values: string[]) => setEffortValues(option, values)}>
                     <Select.Trigger
                       class="w-full min-w-0"
                       aria-label={m.provider_model_editor_reasoning_options()}
@@ -547,14 +549,14 @@ export function submit(): void {
                       step="1"
                       value={option.min ?? ''}
                       aria-label={m.provider_model_editor_minimum_reasoning_tokens()}
-                      oninput={(event) => setBudgetValue(option, 'min', event.currentTarget.value)} />
+                      oninput={(event: Event) => setBudgetValue(option, 'min', inputValue(event))} />
                     <Input
                       type="number"
                       min="0"
                       step="1"
                       value={option.max ?? ''}
                       aria-label={m.provider_model_editor_maximum_reasoning_tokens()}
-                      oninput={(event) => setBudgetValue(option, 'max', event.currentTarget.value)} />
+                      oninput={(event: Event) => setBudgetValue(option, 'max', inputValue(event))} />
                   </div>
                 {:else}
                   <p class="self-center text-xs text-muted-foreground">

@@ -48,9 +48,7 @@ const oauthInProgress = $derived(
   Boolean(oauthSession) && oauthStatus?.status !== 'ready' && oauthStatus?.status !== 'error',
 )
 const userCode = $derived(
-  oauthStatus?.status === 'pending'
-    ? (oauthStatus.user_code ?? oauthSession?.user_code)
-    : oauthSession?.user_code,
+  oauthStatus?.status === 'pending' ? (oauthStatus.user_code ?? oauthSession?.user_code) : oauthSession?.user_code,
 )
 const supportsManualCallback = $derived(oauthSession?.scheme === 'oauth_auth_code_pkce')
 const callbackInputId = $derived(mode === 'connect' ? 'oauth-callback-url' : 'provider-oauth-callback-url')

@@ -118,9 +118,7 @@ const savedSourceIssue = $derived.by(() => {
   if (settingsStatus === 'error' || providersStatus === 'error') return 'unavailable'
   if (settingsStatus === 'pending' || providersStatus === 'pending') return 'loading'
   const hasSource = (capability: 'search' | 'fetch', ids: string[]) =>
-    providers.some(
-      (provider) => ids.includes(provider.id) && provider.capabilities[capability],
-    )
+    providers.some((provider) => ids.includes(provider.id) && provider.capabilities[capability])
   if (
     settings &&
     hasSource('search', settings.search_provider_ids) &&
@@ -246,7 +244,7 @@ async function save(): Promise<void> {
         <div class="flex shrink-0 items-center gap-3">
           {#if toggleSaving}<Spinner />{/if}
           <Switch
-            bind:checked={() => configQuery.data?.enabled ?? false, (value) => void toggleEnabled(value)}
+            bind:checked={() => configQuery.data?.enabled ?? false, (value: boolean) => void toggleEnabled(value)}
             disabled={saving || toggleSaving || (!configQuery.data.enabled && !canEnable)}
             aria-busy={toggleSaving}
             aria-labelledby="search-gate-title"

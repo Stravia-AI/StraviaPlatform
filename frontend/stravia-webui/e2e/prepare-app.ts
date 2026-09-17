@@ -201,14 +201,7 @@ export async function prepareApp(page: Page): Promise<void> {
     }
     if (path === '/observations/debug') {
       await route.fulfill({
-        json: {
-          data: {
-            enabled: false,
-            retained_bytes: 0,
-            partial_trace_count: 0,
-            retention_days: 7,
-          },
-        },
+        json: { data: { enabled: false, retained_bytes: 0, partial_trace_count: 0, retention_days: 7 } },
       })
       return
     }

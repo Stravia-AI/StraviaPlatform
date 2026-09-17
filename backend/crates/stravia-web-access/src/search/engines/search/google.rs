@@ -284,13 +284,13 @@ fn recursive_iter_featured_snippet_children(description: &mut String, el: &Eleme
             }
             scraper::Node::Element(inner_el)
                 if (inner_el.attr("data-ved").is_none()
-                    || inner_el.attr("data-send-open-event").is_some())
-                => {
-                    recursive_iter_featured_snippet_children(
-                        description,
-                        &ElementRef::wrap(inner_node).unwrap(),
-                    );
-                }
+                    || inner_el.attr("data-send-open-event").is_some()) =>
+            {
+                recursive_iter_featured_snippet_children(
+                    description,
+                    &ElementRef::wrap(inner_node).unwrap(),
+                );
+            }
             _ => {}
         }
     }

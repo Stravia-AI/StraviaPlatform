@@ -1,5 +1,7 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 use crate::error::GatewayError;
 use stravia_runtime_contract::Principal;
@@ -31,20 +33,14 @@ impl PrincipalAdmission {
     }
 
     pub(crate) fn set_limit(&self, principal_id: &str, concurrency_limit: Option<i32>) {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut state = self.state.lock();
         state
             .limit_by_principal
             .insert(principal_id.to_owned(), concurrency_limit);
     }
 
     pub(crate) fn remove_principal(&self, principal_id: &str) {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut state = self.state.lock();
         state.limit_by_principal.remove(principal_id);
     }
 
@@ -54,10 +50,7 @@ impl PrincipalAdmission {
         concurrency_limit: Option<i32>,
     ) -> Result<PrincipalAdmissionLease, GatewayError> {
         let principal_id = principal.api_key_id().to_owned();
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut state = self.state.lock();
         let limit = *state
             .limit_by_principal
             .entry(principal_id.clone())
@@ -94,10 +87,7 @@ impl PrincipalAdmission {
     }
 
     fn release(&self, principal_id: &str) {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut state = self.state.lock();
         let Some(active) = state.active_by_principal.get_mut(principal_id) else {
             return;
         };

@@ -1,7 +1,9 @@
 use crate::model_turn::ModelTurnError;
 use crate::protocol::ir::{AiRequest, AiResponse};
 use std::collections::BTreeSet;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 #[derive(Debug, Clone, Copy, thiserror::Error)]
 pub enum RedactionError {
@@ -41,10 +43,7 @@ pub struct ProviderProof {
 
 impl RedactionTrace {
     pub fn set_tracking(&self, tracking: bool) -> Result<(), RedactionError> {
-        self.0
-            .lock()
-            .map_err(|_| RedactionError::InvalidText)?
-            .tracking = tracking;
+        self.0.lock().tracking = tracking;
         Ok(())
     }
 
@@ -52,36 +51,20 @@ impl RedactionTrace {
         &self,
         references: impl IntoIterator<Item = String>,
     ) -> Result<(), RedactionError> {
-        self.0
-            .lock()
-            .map_err(|_| RedactionError::InvalidText)?
-            .references
-            .extend(references);
+        self.0.lock().references.extend(references);
         Ok(())
     }
 
     pub fn references(&self) -> Result<Vec<String>, RedactionError> {
-        Ok(self
-            .0
-            .lock()
-            .map_err(|_| RedactionError::InvalidText)?
-            .references
-            .iter()
-            .cloned()
-            .collect())
+        Ok(self.0.lock().references.iter().cloned().collect())
     }
 
     pub fn provider_proof(&self) -> Result<Option<ProviderProof>, RedactionError> {
-        Ok(self
-            .0
-            .lock()
-            .map_err(|_| RedactionError::InvalidText)?
-            .provider
-            .clone())
+        Ok(self.0.lock().provider.clone())
     }
 
     pub fn observe_provider_request(&self, request: &AiRequest) -> Result<(), RedactionError> {
-        let mut state = self.0.lock().map_err(|_| RedactionError::InvalidText)?;
+        let mut state = self.0.lock();
         if !state.tracking {
             state.provider = None;
             return Ok(());
@@ -97,7 +80,7 @@ impl RedactionTrace {
     }
 
     pub fn observe_provider_response(&self, response: &AiResponse) -> Result<(), RedactionError> {
-        let mut state = self.0.lock().map_err(|_| RedactionError::InvalidText)?;
+        let mut state = self.0.lock();
         if let Some(proof) = state.provider.as_mut() {
             for item in &response.items {
                 proof.context_hash = crate::protocol::ir::canonical::append_history_context_hash(

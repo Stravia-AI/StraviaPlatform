@@ -1,0 +1,8 @@
+# parking_lot guards are not std::sync guards; await_holding_lock would not
+# catch them without this list. Holding them across .await risks deadlock.
+await-holding-invalid-types = [
+    "parking_lot::MutexGuard",
+    "parking_lot::RwLockReadGuard",
+    "parking_lot::RwLockWriteGuard",
+    "parking_lot::ReentrantMutexGuard",
+]

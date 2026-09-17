@@ -97,6 +97,17 @@ tauri-plugin-store = "2"
 tauri-plugin-updater = "2"
 tauri-build = { version = "2", features = [] }
 
+[workspace.lints.rust]
+# rustc 默认警告由 task check 的 -D warnings 统一升级为错误；
+# 此处只列需要偏离默认级别的条目。
+
+[workspace.lints.clippy]
+# 默认 warn 的 clippy::all 由 -D warnings 升级为错误；
+# 此处只允许当前代码有意违反、且修复收益低于噪音的 lint。
+# `let _ =` 丢弃锁 guard 或未驱动的 future 属于真实 bug 类别，直接 deny。
+let_underscore_lock = "deny"
+let_underscore_future = "deny"
+
 [profile.dev]
 opt-level = 0
 debug = true

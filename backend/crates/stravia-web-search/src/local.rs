@@ -1,5 +1,7 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 use std::time::Duration;
 
 use super::{
@@ -120,17 +122,11 @@ pub struct LocalSearchEvidenceStore {
 
 impl LocalSearchEvidenceStore {
     fn insert(&self, turn_id: SearchTurnId, evidence: SearchEvidenceSet) {
-        self.evidence
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(turn_id, evidence);
+        self.evidence.lock().insert(turn_id, evidence);
     }
 
     fn take(&self, turn_id: &SearchTurnId) -> Option<SearchEvidenceSet> {
-        self.evidence
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(turn_id)
+        self.evidence.lock().remove(turn_id)
     }
 }
 
@@ -248,12 +244,13 @@ impl AgentOutputValidator for LocalSearchOutputValidator {
                 {
                     evidence.extend(tool_evidence(content));
                     if public_reads.contains(tool_use_id.as_str())
-                        && let Some(url) = content.get("source_url").and_then(Value::as_str) {
-                            evidence.extend([SearchEvidence {
-                                url: url.to_owned(),
-                                title: None,
-                            }]);
-                        }
+                        && let Some(url) = content.get("source_url").and_then(Value::as_str)
+                    {
+                        evidence.extend([SearchEvidence {
+                            url: url.to_owned(),
+                            title: None,
+                        }]);
+                    }
                 }
             }
         }

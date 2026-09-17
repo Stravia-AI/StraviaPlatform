@@ -1,13 +1,6 @@
 export type UpdateCheckStatus = 'idle' | 'up-to-date' | 'available' | 'error'
 export type ProductUpdatePhase =
-  | 'idle'
-  | 'checking'
-  | 'up-to-date'
-  | 'available'
-  | 'downloading'
-  | 'downloaded'
-  | 'installing'
-  | 'error'
+  'idle' | 'checking' | 'up-to-date' | 'available' | 'downloading' | 'downloaded' | 'installing' | 'error'
 
 export interface AvailableUpdate {
   version: string
@@ -178,11 +171,7 @@ export class ProductUpdateController {
     this.applyDesktopSnapshot(await this.#desktop.snapshot())
     return this.#desktop.onProgress((progress) => {
       if (this.state.phase !== 'downloading' || this.state.targetVersion !== progress.target_version) return
-      this.state = {
-        ...this.state,
-        downloadedBytes: progress.downloaded_bytes,
-        totalBytes: progress.total_bytes,
-      }
+      this.state = { ...this.state, downloadedBytes: progress.downloaded_bytes, totalBytes: progress.total_bytes }
       this.publish()
     })
   }
@@ -283,11 +272,7 @@ export class ProductUpdateController {
   }
 
   private publish(): void {
-    this.#listener({
-      status: this.status,
-      state: this.state,
-      notification: this.notification,
-    })
+    this.#listener({ status: this.status, state: this.state, notification: this.notification })
   }
 }
 

@@ -21,7 +21,9 @@ describe('markdown HTML', () => {
 
   test('escapes script and img HTML so they cannot execute', () => {
     expect(html('<script>alert(1)</script>')).toContain('&lt;script&gt;alert(1)&lt;/script&gt;')
-    expect(html('<img src="x" onerror="alert(1)">')).toContain('&lt;img src=&quot;x&quot; onerror=&quot;alert(1)&quot;&gt;')
+    expect(html('<img src="x" onerror="alert(1)">')).toContain(
+      '&lt;img src=&quot;x&quot; onerror=&quot;alert(1)&quot;&gt;',
+    )
     expect(html('<script>alert(1)</script>')).not.toContain('<script>')
     expect(html('<img src="x" onerror="alert(1)">')).not.toContain('<img')
   })

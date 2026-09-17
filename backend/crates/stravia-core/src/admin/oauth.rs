@@ -515,12 +515,15 @@ impl AdminService {
         {
             Ok(provider) => provider,
             Err(error) => {
-                let _ = self
+                if let Err(cleanup_error) = self
                     .gw
                     .storage
                     .oauth_credentials()
                     .delete(&provider.id)
-                    .await;
+                    .await
+                {
+                    tracing::warn!(%cleanup_error, provider_id = %provider.id, "failed to delete OAuth credential after sync failure");
+                }
                 self.restore_auth_session_record(session).await?;
                 return Err(error);
             }

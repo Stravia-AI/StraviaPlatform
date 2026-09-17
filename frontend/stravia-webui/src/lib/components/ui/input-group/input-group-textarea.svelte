@@ -1,14 +1,9 @@
 <script lang="ts">
 import { Textarea } from '$lib/components/ui/textarea/index.js'
 import { cn } from '$lib/utils.js'
-import type { ComponentProps } from 'svelte'
+import type { TextareaProps } from '$lib/components/ui/textarea/props.js'
 
-let {
-  ref = $bindable(null),
-  value = $bindable(),
-  class: className,
-  ...props
-}: ComponentProps<typeof Textarea> = $props()
+let { ref = $bindable(null), value = $bindable(), class: className, ...props }: TextareaProps = $props()
 </script>
 
 <Textarea

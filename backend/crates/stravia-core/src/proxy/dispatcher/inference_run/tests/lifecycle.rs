@@ -275,7 +275,7 @@ async fn encrypted_reasoning_survives_target_switch_and_restart_for_original_tar
         messages.push(json!({"role": "user", "content": "continue"}));
     }
     for captured in [&foreign_requests, &chat_requests] {
-        let requests = captured.lock().expect("captured requests");
+        let requests = captured.lock();
         let body = captured_body(&requests[0]);
         let wire = body.to_string();
         assert!(wire.contains("retained public summary"), "{wire}");
@@ -300,7 +300,7 @@ async fn encrypted_reasoning_survives_target_switch_and_restart_for_original_tar
         .expect("returned response body");
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
     assert!(String::from_utf8_lossy(&body).contains("resumed original target"));
-    let requests = origin_requests.lock().expect("origin requests");
+    let requests = origin_requests.lock();
     let replay = captured_body(&requests[1]);
     let encrypted = replay["input"]
         .as_array()
@@ -328,7 +328,7 @@ async fn rejected_encrypted_reasoning_is_replayed_once_without_ciphertext_before
 
     #[derive(Clone)]
     struct Fixture {
-        requests: Arc<std::sync::Mutex<Vec<Value>>>,
+        requests: Arc<parking_lot::Mutex<Vec<Value>>>,
         error_code: &'static str,
         stream_rejection: bool,
         output_before_rejection: bool,
@@ -336,7 +336,7 @@ async fn rejected_encrypted_reasoning_is_replayed_once_without_ciphertext_before
 
     async fn handle(State(fixture): State<Fixture>, Json(body): Json<Value>) -> Response {
         let first = {
-            let mut requests = fixture.requests.lock().expect("captured requests");
+            let mut requests = fixture.requests.lock();
             requests.push(body.clone());
             requests.len() == 1
         };
@@ -397,7 +397,7 @@ async fn rejected_encrypted_reasoning_is_replayed_once_without_ciphertext_before
         (true, "invalid_encrypted_content", true, true, 1),
         (false, "invalid_request_error", false, false, 1),
     ] {
-        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
         let app = Router::new()
             .route("/v1/responses", post(handle))
             .with_state(Fixture {
@@ -450,7 +450,7 @@ async fn rejected_encrypted_reasoning_is_replayed_once_without_ciphertext_before
         .await;
         let status = response.status();
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let requests = requests.lock().unwrap();
+        let requests = requests.lock();
         assert_eq!(
             requests.len(),
             expected_calls,
@@ -708,7 +708,7 @@ async fn protected_reasoning_replay_preserves_parallel_public_tool_calls() {
     let gateway = crate::Gateway::builder(config)
         .hook(Arc::new(expose_tool_hook))
         .platform_tool(Arc::new(OrderedTool {
-            calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+            calls: Arc::new(parking_lot::Mutex::new(Vec::new())),
         }))
         .build()
         .await
@@ -864,9 +864,7 @@ async fn protected_reasoning_replay_preserves_parallel_public_tool_calls() {
         .await
         .expect("third response body");
 
-    let requests = provider_requests
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let requests = provider_requests.lock();
     assert_eq!(requests.len(), 3);
     assert!(
         requests[1].get("previous_response_id").is_none(),
@@ -1098,7 +1096,7 @@ async fn hidden_rounds_are_iterative_and_platform_tools_keep_response_order() {
         )),
         ..Default::default()
     };
-    let tool_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let tool_calls = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let (expose_tool_hook, request_hook_rounds) = ExposeOrderedToolHook::counting();
     let gateway = crate::Gateway::builder(config)
         .hook(Arc::new(expose_tool_hook))
@@ -1126,21 +1124,12 @@ async fn hidden_rounds_are_iterative_and_platform_tools_keep_response_order() {
     );
     assert_eq!(provider_calls.load(Ordering::SeqCst), 2);
     assert_eq!(
-        *request_hook_rounds
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        *request_hook_rounds.lock(),
         vec![0, 1],
         "each provider round must run Request Hook exactly once"
     );
-    assert_eq!(
-        *tool_calls
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()),
-        vec![1, 2]
-    );
-    let provider_requests = provider_requests
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert_eq!(*tool_calls.lock(), vec![1, 2]);
+    let provider_requests = provider_requests.lock();
     assert_eq!(provider_requests.len(), 2);
     assert!(
         provider_requests[1].contains("\"tool_call_id\":\"call-1\""),
@@ -1204,9 +1193,7 @@ async fn thinking_level_is_clamped_and_mapped_without_replaying_omitted_control(
     }
 
     assert_eq!(calls.load(Ordering::SeqCst), 3);
-    let requests = requests
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let requests = requests.lock();
     assert!(requests[0].contains("\"reasoning_effort\":\"high\""));
     assert!(!requests[1].contains("reasoning_effort"));
     assert!(requests[2].contains("\"reasoning_effort\":\"none\""));
@@ -1456,8 +1443,6 @@ async fn failover_remaps_the_same_clamped_level_for_the_next_target() {
         .expect("fallback response");
     assert_eq!(failed_calls.load(Ordering::SeqCst), 1);
     assert_eq!(fallback_calls.load(Ordering::SeqCst), 1);
-    let fallback_requests = fallback_requests
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let fallback_requests = fallback_requests.lock();
     assert!(fallback_requests[0].contains("\"reasoning_effort\":\"high\""));
 }

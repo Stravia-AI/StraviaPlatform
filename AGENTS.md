@@ -78,6 +78,7 @@ Run the narrowest relevant check first, then expand according to risk:
 - Make the smallest coherent change that fixes the root cause. Do not mix unrelated cleanup into feature or bug-fix work.
 - Follow the existing naming, error handling, module layout, and test patterns in the affected subsystem.
 - Keep errors explicit. Do not swallow failures or hide them with sleeps, reduced timeouts, blind retries, or input-specific exceptions.
+- `let _ =` is reserved for intentionally discarded results: closed-channel sends during shutdown or drop, deliberately detached task handles, and infallible-style setters (`url.set_*`, `write!` into `String`). Filesystem, network, storage, and task-outcome results on product paths must be propagated or logged at `tracing::warn!`/`tracing::debug!`; use `#[cfg(test)]` or a `let _ =` only where failure is genuinely expected and unactionable.
 - Treat all external input as untrusted. Never log, commit, or expose API keys, tokens, cookies, private keys, or production connection strings.
 - Reuse current dependencies. If a dependency change is required, update its lockfile through the owning package manager.
 - Do not edit generated outputs directly, including `frontend/stravia-webui/dist/` and `frontend/stravia-webui/src/lib/paraglide/`.

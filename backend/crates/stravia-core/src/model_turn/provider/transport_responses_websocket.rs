@@ -147,7 +147,7 @@ impl ProviderCall {
             self.adapter
                 .prepare_responses_websocket_headers(&mut headers, connection)?;
             let observation_headers = headers.clone();
-            let handshake_attempt = Arc::new(std::sync::Mutex::new(None));
+            let handshake_attempt = Arc::new(parking_lot::Mutex::new(None));
             let handshake_attempt_slot = Arc::clone(&handshake_attempt);
             let handshake_adapter = self.adapter.clone();
             let handshake_url = websocket_url.clone();
@@ -160,9 +160,7 @@ impl ProviderCall {
                     &handshake_headers,
                     || Value::Null,
                 );
-                *handshake_attempt_slot
-                    .lock()
-                    .expect("handshake attempt slot") = Some(attempt);
+                *handshake_attempt_slot.lock() = Some(attempt);
             });
             let lease = websocket
                 .registry
@@ -215,7 +213,6 @@ impl ProviderCall {
                     } else {
                         let attempt = handshake_attempt
                             .lock()
-                            .expect("handshake attempt slot")
                             .take()
                             .expect("new WebSocket connection starts an observed handshake");
                         attempt.wire(
@@ -275,11 +272,7 @@ impl ProviderCall {
                     body,
                 }) => {
                     if !self.allow_retries {
-                        if let Some(attempt) = handshake_attempt
-                            .lock()
-                            .expect("handshake attempt slot")
-                            .take()
-                        {
+                        if let Some(attempt) = handshake_attempt.lock().take() {
                             attempt.wire_lazy(
                                 "upstream_response",
                                 "handshake_response",
@@ -299,7 +292,6 @@ impl ProviderCall {
                     if attempted {
                         let attempt = handshake_attempt
                             .lock()
-                            .expect("handshake attempt slot")
                             .take()
                             .expect("network handshake starts an observed attempt");
                         attempt.wire_lazy(
@@ -339,7 +331,6 @@ impl ProviderCall {
                 Err(ResponsesWebSocketAcquireError::HandshakeBodyRead { status, headers }) => {
                     let attempt = handshake_attempt
                         .lock()
-                        .expect("handshake attempt slot")
                         .take()
                         .expect("network handshake starts an observed attempt");
                     attempt.wire(
@@ -377,7 +368,6 @@ impl ProviderCall {
                 Err(ResponsesWebSocketAcquireError::Transport(error)) => {
                     let attempt = handshake_attempt
                         .lock()
-                        .expect("handshake attempt slot")
                         .take()
                         .expect("network connect starts an observed attempt");
                     attempt.finish("failed", None, Some("websocket_connect_error".into()), None);
@@ -399,7 +389,6 @@ impl ProviderCall {
                 }) => {
                     let attempt = handshake_attempt
                         .lock()
-                        .expect("handshake attempt slot")
                         .take()
                         .expect("network handshake starts an observed attempt");
                     attempt.wire_lazy(

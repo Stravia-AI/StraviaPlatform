@@ -53,7 +53,6 @@ describe('stable engineering values', () => {
     expect(formatBytes(1_572_864, EN)).toBe('1.5 MiB')
     expect(formatPixels(1024, ZH)).toBe('1,024 px')
   })
-
 })
 
 describe('localized count sentences', () => {

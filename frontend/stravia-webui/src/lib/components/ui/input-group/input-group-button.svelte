@@ -18,9 +18,8 @@ export type InputGroupButtonSize = VariantProps<typeof inputGroupButtonVariants>
 </script>
 
 <script lang="ts">
-import { Button } from '$lib/components/ui/button/index.js'
+import { Button, type ButtonProps } from '$lib/components/ui/button/index.js'
 import { cn } from '$lib/utils.js'
-import type { ComponentProps } from 'svelte'
 
 let {
   ref = $bindable(null),
@@ -30,7 +29,7 @@ let {
   variant = 'ghost',
   size = 'xs',
   ...restProps
-}: Omit<ComponentProps<typeof Button>, 'href' | 'size'> & { size?: InputGroupButtonSize } = $props()
+}: Omit<ButtonProps, 'href' | 'size'> & { size?: InputGroupButtonSize } = $props()
 </script>
 
 <Button

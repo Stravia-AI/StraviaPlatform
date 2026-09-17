@@ -1,5 +1,6 @@
 use super::types::LiveContentBlock;
-use std::{collections::HashMap, sync::Mutex};
+use parking_lot::Mutex;
+use std::collections::HashMap;
 
 const MAX_LIVE_BYTES: usize = 8 * 1024 * 1024;
 #[derive(Default)]
@@ -12,13 +13,13 @@ struct Mirror {
 pub(super) struct LiveState(Mutex<Mirror>);
 impl LiveState {
     pub(super) fn snapshot(&self) -> Vec<LiveContentBlock> {
-        let mirror = self.0.lock().expect("live observation mirror");
+        let mirror = self.0.lock();
         let mut blocks: Vec<_> = mirror.blocks.values().collect();
         blocks.sort_unstable_by_key(|(order, _)| *order);
         blocks.into_iter().map(|(_, block)| block.clone()).collect()
     }
     pub(super) fn replace(&self, block: LiveContentBlock) -> bool {
-        let mut mirror = self.0.lock().expect("live observation mirror");
+        let mut mirror = self.0.lock();
         let previous = mirror
             .blocks
             .get(&block.block_id)
@@ -39,7 +40,7 @@ impl LiveState {
         true
     }
     pub(super) fn remove(&self, id: &str) {
-        let mut mirror = self.0.lock().expect("live observation mirror");
+        let mut mirror = self.0.lock();
         if let Some((_, block)) = mirror.blocks.remove(id) {
             mirror.bytes -= block.text.len();
         }

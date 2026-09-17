@@ -58,9 +58,10 @@ impl GenerationChainWrite {
                 if let MessageContent::Blocks(blocks) = &item.content {
                     for block in blocks {
                         if let ContentBlock::ToolUse { id, .. } = block
-                            && !id.is_empty() {
-                                pending.insert(id.as_str());
-                            }
+                            && !id.is_empty()
+                        {
+                            pending.insert(id.as_str());
+                        }
                     }
                 }
             }

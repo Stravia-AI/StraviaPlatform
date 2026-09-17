@@ -6,10 +6,7 @@ let { text }: { text: string } = $props()
 
 // 用原文起点区分重复段落，追加正文时不替换已经完成的块。
 const blocks = $derived.by(() =>
-  markdownBlocks(text).map((block) => ({
-    ...block,
-    html: DOMPurify.sanitize(block.html, MARKDOWN_SANITIZE),
-  })),
+  markdownBlocks(text).map((block) => ({ ...block, html: DOMPurify.sanitize(block.html, MARKDOWN_SANITIZE) })),
 )
 </script>
 

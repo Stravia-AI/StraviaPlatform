@@ -1,12 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
 import { ProductUpdateController, supportsInAppInstallProgress } from '../src/lib/product-update'
-import type {
-  DesktopUpdateBridge,
-  DesktopUpdateSnapshot,
-  UpdateApi,
-  UpdateStatus,
-} from '../src/lib/product-update'
+import type { DesktopUpdateBridge, DesktopUpdateSnapshot, UpdateApi, UpdateStatus } from '../src/lib/product-update'
 
 const available: UpdateStatus = {
   current_version: '1.0.0',
@@ -29,50 +24,45 @@ class FakeApi implements UpdateApi {
   checks = 0
   status = structuredClone(available)
 
-  async get(): Promise<UpdateStatus> {
-    return structuredClone(this.status)
+  get(): Promise<UpdateStatus> {
+    return Promise.resolve(structuredClone(this.status))
   }
 
-  async check(): Promise<UpdateStatus> {
+  check(): Promise<UpdateStatus> {
     this.checks += 1
-    return structuredClone(this.status)
+    return Promise.resolve(structuredClone(this.status))
   }
 
-  async skip(version: string | null): Promise<UpdateStatus> {
+  skip(version: string | null): Promise<UpdateStatus> {
     this.status.skipped = version === this.status.available_update?.version
-    return structuredClone(this.status)
+    return Promise.resolve(structuredClone(this.status))
   }
 }
 
 class FakeDesktop implements DesktopUpdateBridge {
   installs = 0
 
-  async snapshot(): Promise<DesktopUpdateSnapshot> {
-    return {
-      phase: 'idle',
-      target_version: null,
-      downloaded_bytes: 0,
-      total_bytes: null,
-      error: null,
-    }
+  snapshot(): Promise<DesktopUpdateSnapshot> {
+    return Promise.resolve({ phase: 'idle', target_version: null, downloaded_bytes: 0, total_bytes: null, error: null })
   }
 
-  async download(version: string): Promise<DesktopUpdateSnapshot> {
-    return {
+  download(version: string): Promise<DesktopUpdateSnapshot> {
+    return Promise.resolve({
       phase: 'downloaded',
       target_version: version,
       downloaded_bytes: 42,
       total_bytes: 42,
       error: null,
-    }
+    })
   }
 
-  async install(): Promise<void> {
+  install(): Promise<void> {
     this.installs += 1
+    return Promise.resolve()
   }
 
-  async onProgress(): Promise<() => void> {
-    return () => undefined
+  onProgress(): Promise<() => void> {
+    return Promise.resolve(() => undefined)
   }
 }
 
@@ -109,11 +99,7 @@ describe('ProductUpdateCoordinator', () => {
     api.status = {
       ...api.status,
       check_status: 'error',
-      last_failure: {
-        code: 'UPDATE_REQUEST_FAILED',
-        message: 'offline',
-        attempted_at: '2026-09-05T00:00:00Z',
-      },
+      last_failure: { code: 'UPDATE_REQUEST_FAILED', message: 'offline', attempted_at: '2026-09-05T00:00:00Z' },
     }
     expect(await coordinator.manualCheck()).toBe('error')
     coordinator.dismissNotification()

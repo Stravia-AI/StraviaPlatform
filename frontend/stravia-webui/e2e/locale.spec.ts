@@ -149,8 +149,11 @@ test('localized Request Records keep one local timestamp across canvas and detai
   await page.route('**/api/v1/observations/interactions/localized-interaction**', async (route) => {
     const summary = { interaction, root, snapshot_sequence: 4 }
     const path = new URL(route.request().url()).pathname
-    const data = path.endsWith('/events') ? { runs: [], snapshot_sequence: 4, next_cursor: null }
-      : path.endsWith('/summary') ? summary : { ...summary, runs: [], older_events_cursor: null }
+    const data = path.endsWith('/events')
+      ? { runs: [], snapshot_sequence: 4, next_cursor: null }
+      : path.endsWith('/summary')
+        ? summary
+        : { ...summary, runs: [], older_events_cursor: null }
     await route.fulfill({ json: { data } })
   })
   await page.goto('/logs')

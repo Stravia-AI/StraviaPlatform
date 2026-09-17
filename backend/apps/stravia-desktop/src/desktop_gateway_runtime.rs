@@ -2,13 +2,14 @@ use std::{
     collections::BTreeSet,
     io,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock},
+    sync::Arc,
     time::Duration,
 };
 
 use anyhow::Context;
 use axum::Router;
 use listeners::{Protocol, SocketState};
+use parking_lot::{Mutex as SyncMutex, RwLock as SyncRwLock};
 use serde::Serialize;
 #[cfg(test)]
 use std::{future::Future, pin::Pin};
@@ -84,9 +85,10 @@ impl PortPreferenceStore for TauriPortPreferenceStore {
 
 pub(crate) fn desktop_root_override() -> anyhow::Result<Option<PathBuf>> {
     if cfg!(feature = "desktop-e2e")
-        && let Some(root) = std::env::var_os("STRAVIA_DESKTOP_E2E_RUN_ROOT") {
-            return e2e_data_dir(Path::new(&root)).map(Some);
-        }
+        && let Some(root) = std::env::var_os("STRAVIA_DESKTOP_E2E_RUN_ROOT")
+    {
+        return e2e_data_dir(Path::new(&root)).map(Some);
+    }
     select_root_override(
         cfg!(feature = "desktop-e2e"),
         std::env::args_os().skip(1),
@@ -447,10 +449,10 @@ pub(crate) struct DesktopGatewayRuntime {
     owners: Arc<dyn PortOwnerResolver>,
     operation: Mutex<()>,
     inner: RwLock<RuntimeInner>,
-    current_handle: StdRwLock<ServerHandle>,
-    draining_handles: StdMutex<Vec<ServerHandle>>,
+    current_handle: SyncRwLock<ServerHandle>,
+    draining_handles: SyncMutex<Vec<ServerHandle>>,
     binder: HttpServerBinder,
-    switch_publisher: StdRwLock<Option<Arc<dyn PortSwitchPublisher>>>,
+    switch_publisher: SyncRwLock<Option<Arc<dyn PortSwitchPublisher>>>,
 }
 impl DesktopGatewayRuntime {
     pub(crate) async fn start(
@@ -548,10 +550,10 @@ impl DesktopGatewayRuntime {
                 state,
                 generation,
             }),
-            current_handle: StdRwLock::new(current_handle),
-            draining_handles: StdMutex::new(vec![]),
+            current_handle: SyncRwLock::new(current_handle),
+            draining_handles: SyncMutex::new(vec![]),
             binder,
-            switch_publisher: StdRwLock::new(None),
+            switch_publisher: SyncRwLock::new(None),
         });
         if let Some(port) = lookup_port {
             runtime.spawn_owner_lookup(port, generation, OwnerLookupTarget::Fallback);
@@ -564,17 +566,11 @@ impl DesktopGatewayRuntime {
     }
 
     pub(crate) fn current_port(&self) -> u16 {
-        match self.current_handle.read() {
-            Ok(handle) => handle.local_addr().port(),
-            Err(poisoned) => poisoned.into_inner().local_addr().port(),
-        }
+        self.current_handle.read().local_addr().port()
     }
 
     pub(crate) fn set_switch_publisher(&self, publisher: Arc<dyn PortSwitchPublisher>) {
-        match self.switch_publisher.write() {
-            Ok(mut current) => *current = Some(publisher),
-            Err(poisoned) => *poisoned.into_inner() = Some(publisher),
-        }
+        *self.switch_publisher.write() = Some(publisher);
     }
 
     pub(crate) async fn configure_fixed_port(
@@ -654,14 +650,8 @@ impl DesktopGatewayRuntime {
     }
 
     pub(crate) fn request_shutdown(&self) {
-        match self.current_handle.read() {
-            Ok(handle) => handle.shutdown(),
-            Err(poisoned) => poisoned.into_inner().shutdown(),
-        }
-        let handles = match self.draining_handles.lock() {
-            Ok(handles) => handles,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        self.current_handle.read().shutdown();
+        let handles = self.draining_handles.lock();
         for handle in handles.iter() {
             handle.shutdown();
         }
@@ -762,10 +752,7 @@ impl DesktopGatewayRuntime {
     ) -> DesktopPortState {
         let current_port = candidate.local_addr().port();
         let candidate_handle = candidate.handle();
-        match self.current_handle.write() {
-            Ok(mut handle) => *handle = candidate_handle,
-            Err(poisoned) => *poisoned.into_inner() = candidate_handle,
-        }
+        *self.current_handle.write() = candidate_handle;
         let (old_server, state) = {
             let mut inner = self.inner.write().await;
             let old_server = inner.server.replace(candidate);
@@ -776,10 +763,7 @@ impl DesktopGatewayRuntime {
         if let Some(old_server) = old_server {
             self.drain_server(old_server);
         }
-        let publisher = match self.switch_publisher.read() {
-            Ok(publisher) => publisher.clone(),
-            Err(poisoned) => poisoned.into_inner().clone(),
-        };
+        let publisher = self.switch_publisher.read().clone();
         if let Some(publisher) = publisher
             && let Err(error) = publisher.publish(current_port)
         {
@@ -791,10 +775,7 @@ impl DesktopGatewayRuntime {
     fn drain_server(&self, server: RunningHttpServer) {
         let handle = server.handle();
         handle.shutdown();
-        match self.draining_handles.lock() {
-            Ok(mut handles) => handles.push(handle),
-            Err(poisoned) => poisoned.into_inner().push(handle),
-        }
+        self.draining_handles.lock().push(handle);
         tauri::async_runtime::spawn(async move {
             if let Err(error) = server.shutdown_with_timeout(DRAIN_TIMEOUT).await {
                 tracing::warn!(%error, "desktop listener failed while draining");

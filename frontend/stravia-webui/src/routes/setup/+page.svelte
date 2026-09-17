@@ -40,9 +40,7 @@ const poolSettingsValid = $derived(
     (value) => !value.trim() || (/^\d+$/.test(value) && Number(value) > 0),
   ),
 )
-const databaseReady = $derived(
-  backend === 'sqlite' || (postgresUrl.trim().length > 0 && poolSettingsValid),
-)
+const databaseReady = $derived(backend === 'sqlite' || (postgresUrl.trim().length > 0 && poolSettingsValid))
 
 onMount(() => {
   clientBaseUrl = `${window.location.origin}${window.location.pathname.replace(/\/setup\/?$/, '').replace(/\/$/, '')}`
@@ -196,7 +194,7 @@ async function complete(): Promise<void> {
               <Select.Root
                 type="single"
                 value={backend}
-                onValueChange={(value) => {
+                onValueChange={(value: string) => {
                   if (value === 'sqlite' || value === 'postgres') {
                     backend = value
                     databaseTested = false

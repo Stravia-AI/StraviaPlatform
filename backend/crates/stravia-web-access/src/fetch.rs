@@ -444,11 +444,10 @@ mod tests {
     use std::{
         collections::VecDeque,
         net::{IpAddr, Ipv4Addr},
-        sync::{
-            atomic::{AtomicUsize, Ordering},
-            Mutex,
-        },
+        sync::atomic::{AtomicUsize, Ordering},
     };
+
+    use parking_lot::Mutex;
 
     use super::*;
 
@@ -477,7 +476,7 @@ mod tests {
         }
 
         pub(crate) fn with_rendered(self, html: impl Into<String>) -> Self {
-            *self.rendered.lock().expect("stub renderer lock") = Some(Ok(RenderedResponse {
+            *self.rendered.lock() = Some(Ok(RenderedResponse {
                 final_url: "https://example.com/article".into(),
                 html: html.into(),
             }));
@@ -505,14 +504,10 @@ mod tests {
             _addresses: &'a [IpAddr],
         ) -> BackendFuture<'a, Result<HttpResponse, FetchError>> {
             self.requests.fetch_add(1, Ordering::Relaxed);
-            self.requested_urls
-                .lock()
-                .expect("stub requested URL lock")
-                .push(url.as_str().to_string());
+            self.requested_urls.lock().push(url.as_str().to_string());
             Box::pin(async move {
                 self.responses
                     .lock()
-                    .expect("stub response lock")
                     .pop_front()
                     .ok_or_else(|| FetchError::unavailable("stub response exhausted"))
             })
@@ -526,13 +521,9 @@ mod tests {
         ) -> BackendFuture<'a, Result<RenderedResponse, FetchError>> {
             self.renders.fetch_add(1, Ordering::Relaxed);
             Box::pin(async move {
-                self.rendered
-                    .lock()
-                    .expect("stub renderer lock")
-                    .take()
-                    .unwrap_or_else(|| {
-                        Err(FetchError::unavailable("browser renderer is unavailable"))
-                    })
+                self.rendered.lock().take().unwrap_or_else(|| {
+                    Err(FetchError::unavailable("browser renderer is unavailable"))
+                })
             })
         }
     }
@@ -568,7 +559,7 @@ mod tests {
                 &'a self,
                 _url: &'a Url,
             ) -> BackendFuture<'a, Result<Vec<IpAddr>, FetchError>> {
-                Box::pin(async move { self.0.lock().expect("stub DNS lock").take().unwrap() })
+                Box::pin(async move { self.0.lock().take().unwrap() })
             }
 
             fn get<'a>(
@@ -608,13 +599,12 @@ mod tests {
     async fn rejects_trailing_dot_redirect_before_second_request() {
         for location in ["http://127.0.0.1../", "http://192.168.1.1../"] {
             let backend = StubBackend::default();
-            *backend.responses.lock().expect("stub response lock") =
-                VecDeque::from([HttpResponse {
-                    status: 302,
-                    content_type: None,
-                    location: Some(location.into()),
-                    body: Vec::new(),
-                }]);
+            *backend.responses.lock() = VecDeque::from([HttpResponse {
+                status: 302,
+                content_type: None,
+                location: Some(location.into()),
+                body: Vec::new(),
+            }]);
 
             let error = fetch_with("https://example.com/article", &backend, &backend)
                 .await
@@ -632,7 +622,7 @@ mod tests {
             "text/html",
             "<html><body><main>Please enable JavaScript to continue to the requested article.</main></body></html>",
         );
-        *backend.rendered.lock().expect("stub renderer lock") = Some(Ok(RenderedResponse {
+        *backend.rendered.lock() = Some(Ok(RenderedResponse {
             final_url: "http://127.0.0.1/".into(),
             html: "<html><body><main>Private content must not be returned.</main></body></html>"
                 .into(),

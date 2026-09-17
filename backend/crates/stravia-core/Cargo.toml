@@ -6,6 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 description = "Core library for Stravia Agent infra — model access, tool execution, built-in agents, and administration"
 
+[lints]
+workspace = true
+
 [dependencies]
 stravia-runtime-contract = { workspace = true }
 stravia-media = { workspace = true }
@@ -52,6 +55,7 @@ aws-credential-types = { workspace = true }
 aws-sigv4 = { workspace = true }
 zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 tempfile = { workspace = true }
+parking_lot = { workspace = true }
 
 [dev-dependencies]
 image = { workspace = true }

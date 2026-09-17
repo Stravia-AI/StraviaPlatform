@@ -55,6 +55,17 @@ impl PortSwitchPublisher for TauriPortSwitchPublisher {
     }
 }
 
+fn focus_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        if let Err(error) = window.show() {
+            tracing::debug!(%error, "failed to show main window");
+        }
+        if let Err(error) = window.set_focus() {
+            tracing::debug!(%error, "failed to focus main window");
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tracing_subscriber::fmt()
@@ -92,14 +103,13 @@ pub fn run() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                let _ = window.hide();
+                if let Err(error) = window.hide() {
+                    tracing::debug!(%error, "failed to hide main window");
+                }
             }
         })
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
+            focus_main_window(app);
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
@@ -241,10 +251,7 @@ pub fn run() {
             } = &event
             {
                 if !*has_visible_windows {
-                    if let Some(window) = app.get_webview_window("main") {
-                        let _ = window.show();
-                        let _ = window.set_focus();
-                    }
+                    focus_main_window(app);
                 }
             }
 
@@ -297,18 +304,12 @@ fn setup_tray(
             } = event
             {
                 let app = tray.app_handle();
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
+                focus_main_window(app);
             }
         })
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => {
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
+                focus_main_window(app);
             }
             "copy_url" => {
                 if let (Some(window), Some(runtime)) = (
@@ -316,9 +317,11 @@ fn setup_tray(
                     app.try_state::<Arc<DesktopGatewayRuntime>>(),
                 ) {
                     let port = runtime.current_port();
-                    let _ = window.eval(format!(
+                    if let Err(error) = window.eval(format!(
                         "navigator.clipboard.writeText('http://127.0.0.1:{port}')"
-                    ));
+                    )) {
+                        tracing::debug!(%error, "failed to copy proxy URL to clipboard");
+                    }
                 }
             }
             "quit" => {

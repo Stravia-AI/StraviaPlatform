@@ -8,9 +8,7 @@ export function effectiveAllowanceCondition(
   return allowance.condition === 'exhausted' && allowance.reset_at == null ? undefined : allowance.condition
 }
 
-export function forecastBucket(
-  allowance: Pick<Allowance, 'condition' | 'reset_at' | 'forecast'>,
-): ForecastBucket {
+export function forecastBucket(allowance: Pick<Allowance, 'condition' | 'reset_at' | 'forecast'>): ForecastBucket {
   if (effectiveAllowanceCondition(allowance) === 'exhausted') return 'exhausted'
   switch (allowance.forecast.status) {
     case 'will_exhaust':
@@ -66,9 +64,7 @@ export function exhaustedAllowances(allowances: readonly Allowance[]): Allowance
 }
 
 function soonestResetAt(allowances: readonly Allowance[]): number | undefined {
-  const resets = allowances
-    .map((allowance) => allowance.reset_at)
-    .filter((value): value is number => value != null)
+  const resets = allowances.map((allowance) => allowance.reset_at).filter((value): value is number => value != null)
   return resets.length ? Math.min(...resets) : undefined
 }
 

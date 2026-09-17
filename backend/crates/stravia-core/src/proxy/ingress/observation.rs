@@ -2,8 +2,9 @@ use axum::body::Body;
 use axum::http::HeaderMap;
 use axum::response::Response;
 use futures::StreamExt;
+use parking_lot::Mutex;
 use serde_json::Value;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::Gateway;
 use crate::interaction_observation::{IngressObserver, IngressStart, RejectedOutcome, RunEvent};
@@ -93,8 +94,8 @@ pub(crate) fn take_rejection_observer(response: &mut Response) -> Option<Ingress
     let pending = response
         .extensions_mut()
         .remove::<Arc<Mutex<Option<IngressObserver>>>>()?;
-    
-    pending.lock().expect("rejection observation").take()
+
+    pending.lock().take()
 }
 
 fn header_value(headers: &HeaderMap) -> Value {

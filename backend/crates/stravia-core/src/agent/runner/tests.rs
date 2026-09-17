@@ -1,7 +1,7 @@
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
+use parking_lot::Mutex;
 
 use super::*;
 use stravia_runtime_contract::agent::AgentBudgets;
@@ -319,7 +319,7 @@ impl AgentOutputValidator for RejectBeforeCommit {
         _transcript: &[AiItem],
         _output: &Value,
     ) -> Result<(), AgentRunError> {
-        *self.turn_id.lock().expect("turn ID") = Some(context.turn_id.clone());
+        *self.turn_id.lock() = Some(context.turn_id.clone());
         Err(AgentRunError::new(
             "media_store_failed",
             "Media Artifact retention could not be extended",
@@ -703,7 +703,6 @@ async fn before_commit_failure_does_not_leave_a_durable_agent_turn() {
     let turn_id = validator
         .turn_id
         .lock()
-        .expect("turn ID")
         .clone()
         .expect("validator should observe Turn ID");
     assert!(

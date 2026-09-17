@@ -277,8 +277,7 @@ fn thinking_control_writable(
         || registry
             .parse_protocol(&provider.protocol)
             .is_some_and(|protocol| {
-                protocol
-                    == stravia_runtime_contract::protocol::ids::Protocol::OpenAICompatible
+                protocol == stravia_runtime_contract::protocol::ids::Protocol::OpenAICompatible
                     && matches!(
                         control,
                         TargetThinkingControl::Enabled | TargetThinkingControl::Disabled

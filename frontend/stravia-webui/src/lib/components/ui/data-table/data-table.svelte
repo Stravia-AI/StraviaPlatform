@@ -81,6 +81,8 @@ import {
   type DataTableVirtualScrollOptions,
 } from './data-table.js'
 
+type PaginationPageItem = { key: string } & ({ type: 'page'; value: number } | { type: 'ellipsis' })
+
 interface Props {
   data: TData[]
   columns: DataTableColumn<TData>[]
@@ -459,7 +461,7 @@ const table = createTable({
     notifyStateChange()
   },
   onGlobalFilterChange: (updater: Updater<unknown>) => {
-    globalFilter = String(functionalUpdate(updater, globalFilter) ?? '')
+    globalFilter = (functionalUpdate(updater, globalFilter) as string | null) ?? ''
     resetPaginationForDataChange()
     onFilterChange?.({ columnFilters, globalFilter })
     notifyStateChange()
@@ -746,7 +748,7 @@ function createFilterGroup(filter: DataTableColumnFilter, value: unknown): DataT
       operator: group.operator,
       constraints: group.constraints.map((constraint) => ({
         matchMode: constraint.matchMode,
-        value: Array.isArray(constraint.value) ? [...constraint.value] : constraint.value,
+        value: Array.isArray(constraint.value) ? [...(constraint.value as unknown[])] : constraint.value,
       })),
     }
   }
@@ -755,7 +757,12 @@ function createFilterGroup(filter: DataTableColumnFilter, value: unknown): DataT
     constraints: [
       {
         matchMode: defaultFilterMatchMode(filter),
-        value: filter.variant === 'number-range' ? (Array.isArray(value) ? [...value] : [undefined, undefined]) : value,
+        value:
+          filter.variant === 'number-range'
+            ? Array.isArray(value)
+              ? [...(value as unknown[])]
+              : [undefined, undefined]
+            : value,
       },
     ],
   }
@@ -1102,11 +1109,11 @@ $effect(() => {
     data-data-table-row-index={rowIndex}
     aria-selected={selectionMode === 'none' ? undefined : item.row.getIsSelected()}
     tabindex={selectionMode === 'none' ? undefined : 0}
-    onclick={(event) => handleRowClick(event, item.row)}
-    ondblclick={(event) => onRowDoubleClick?.({ event, row: item.row, original: item.row.original })}
-    oncontextmenu={(event) => handleRowContextMenu(event, item.row)}
-    onkeydown={(event) => handleRowKeydown(event, item.row, rowIndex)}
-    ondragover={reorderableRows ? (event) => event.preventDefault() : undefined}
+    onclick={(event: MouseEvent) => handleRowClick(event, item.row)}
+    ondblclick={(event: MouseEvent) => onRowDoubleClick?.({ event, row: item.row, original: item.row.original })}
+    oncontextmenu={(event: MouseEvent) => handleRowContextMenu(event, item.row)}
+    onkeydown={(event: KeyboardEvent) => handleRowKeydown(event, item.row, rowIndex)}
+    ondragover={reorderableRows ? (event: DragEvent) => event.preventDefault() : undefined}
     ondrop={reorderableRows ? () => handleRowDrop(item.row) : undefined}>
     {#if reorderableRows}
       <Table.Cell class={cn('w-10', sizeClass('cell'), showGridlines && 'border-e')}>
@@ -1117,7 +1124,7 @@ $effect(() => {
             draggable="true"
             aria-label={resolvedLabels.reorderRow(rowIndex + 1)}
             ondragstart={() => (draggedRowId = item.row.id)}
-            onclick={(event) => event.stopPropagation()}>
+            onclick={(event: MouseEvent) => event.stopPropagation()}>
             <GripVerticalIcon />
           </Button>
         {/if}
@@ -1129,7 +1136,7 @@ $effect(() => {
           disabled={!item.row.getCanSelect()}
           aria-label={resolvedLabels.selectRow(rowIndex + 1)}
           bind:checked={() => item.row.getIsSelected(), (value) => item.row.toggleSelected(Boolean(value))}
-          onclick={(event) => event.stopPropagation()} />
+          onclick={(event: MouseEvent) => event.stopPropagation()} />
       </Table.Cell>
     {/if}
     {#if hasExpansionControl}
@@ -1141,7 +1148,7 @@ $effect(() => {
             aria-label={item.row.getIsExpanded()
               ? resolvedLabels.collapseRow(rowIndex + 1)
               : resolvedLabels.expandRow(rowIndex + 1)}
-            onclick={(event) => {
+            onclick={(event: MouseEvent) => {
               event.stopPropagation()
               item.row.toggleExpanded()
             }}>
@@ -1159,7 +1166,7 @@ $effect(() => {
               size="icon"
               class="size-10"
               aria-label={resolvedLabels.saveRow(rowIndex + 1)}
-              onclick={(event) => {
+              onclick={(event: MouseEvent) => {
                 event.stopPropagation()
                 saveRowEdit(item.row)
               }}>
@@ -1170,7 +1177,7 @@ $effect(() => {
               size="icon"
               class="size-10"
               aria-label={resolvedLabels.cancelRowEdit(rowIndex + 1)}
-              onclick={(event) => {
+              onclick={(event: MouseEvent) => {
                 event.stopPropagation()
                 cancelRowEdit(item.row)
               }}>
@@ -1182,7 +1189,7 @@ $effect(() => {
               size="icon"
               class="size-10"
               aria-label={resolvedLabels.editRow(rowIndex + 1)}
-              onclick={(event) => {
+              onclick={(event: MouseEvent) => {
                 event.stopPropagation()
                 startRowEdit(item.row)
               }}>
@@ -1210,13 +1217,13 @@ $effect(() => {
             ? resolvedLabels.editCell(columnLabel(cell.column), rowIndex + 1)
             : undefined}
           ondblclick={editMode === 'cell' && cellEditor
-            ? (event) => {
+            ? (event: MouseEvent) => {
                 event.stopPropagation()
                 startCellEdit(cell)
               }
             : undefined}
           onkeydown={editMode === 'cell' && cellEditor
-            ? (event) => {
+            ? (event: KeyboardEvent) => {
                 if (event.target === event.currentTarget && event.key === 'Enter') {
                   event.preventDefault()
                   startCellEdit(cell)
@@ -1237,7 +1244,7 @@ $effect(() => {
                 aria-label={item.row.getIsExpanded()
                   ? resolvedLabels.collapseRow(rowIndex + 1)
                   : resolvedLabels.expandRow(rowIndex + 1)}
-                onclick={(event) => {
+                onclick={(event: MouseEvent) => {
                   event.stopPropagation()
                   item.row.toggleExpanded()
                 }}>
@@ -1277,10 +1284,10 @@ $effect(() => {
       data-data-table-row-index={rowIndex}
       aria-selected={selectionMode === 'none' ? undefined : item.row.getIsSelected()}
       tabindex={selectionMode === 'none' ? undefined : 0}
-      onclick={(event) => handleRowClick(event, item.row)}
-      ondblclick={(event) => onRowDoubleClick?.({ event, row: item.row, original: item.row.original })}
-      oncontextmenu={(event) => handleRowContextMenu(event, item.row)}
-      onkeydown={(event) => handleRowKeydown(event, item.row, rowIndex)}>
+      onclick={(event: MouseEvent) => handleRowClick(event, item.row)}
+      ondblclick={(event: MouseEvent) => onRowDoubleClick?.({ event, row: item.row, original: item.row.original })}
+      oncontextmenu={(event: MouseEvent) => handleRowContextMenu(event, item.row)}
+      onkeydown={(event: KeyboardEvent) => handleRowKeydown(event, item.row, rowIndex)}>
       <Table.Cell colspan={renderedColumnCount} class="whitespace-normal p-0">
         {@render groupRow(item.row)}
       </Table.Cell>
@@ -1316,7 +1323,7 @@ $effect(() => {
       perPage={pagination.pageSize}
       bind:page={() => pagination.pageIndex + 1, (page) => table.setPageIndex(page - 1)}
       aria-label={resolvedLabels.pageStatus(pagination.pageIndex + 1, pageCount)}>
-      {#snippet children({ pages, currentPage })}
+      {#snippet children({ pages, currentPage }: { pages: PaginationPageItem[]; currentPage: number })}
         <Pagination.Content class="flex-wrap">
           <Pagination.Item>
             <Button
@@ -1343,7 +1350,7 @@ $effect(() => {
                 <Pagination.Link
                   {page}
                   isActive={currentPage === page.value}
-                  aria-label={resolvedLabels.pageStatus(page.value, pageCount)}>
+                  aria-label={resolvedLabels.pageStatus((page as { value: number }).value, pageCount)}>
                   {page.value}
                 </Pagination.Link>
               {/if}
@@ -1397,7 +1404,7 @@ $effect(() => {
               value={globalFilter}
               aria-label={globalFilterPlaceholder ?? resolvedLabels.search}
               placeholder={globalFilterPlaceholder ?? resolvedLabels.search}
-              oninput={(event) => table.setGlobalFilter(event.currentTarget.value)} />
+              oninput={(event: Event) => table.setGlobalFilter((event.currentTarget as HTMLInputElement).value)} />
             <InputGroup.Addon><SearchIcon /></InputGroup.Addon>
           </InputGroup.Root>
         {/if}
@@ -1504,7 +1511,7 @@ $effect(() => {
                     reorderableColumns && header.column.columns.length === 0 && 'cursor-grab active:cursor-grabbing',
                   )}
                   ondragstart={reorderableColumns ? () => (draggedColumnId = header.column.id) : undefined}
-                  ondragover={reorderableColumns ? (event) => event.preventDefault() : undefined}
+                  ondragover={reorderableColumns ? (event: DragEvent) => event.preventDefault() : undefined}
                   ondrop={reorderableColumns ? () => handleColumnDrop(header.column.id) : undefined}>
                   {#if !header.isPlaceholder}
                     {@const filter = header.column.columnDef.meta?.filter}
@@ -1553,7 +1560,7 @@ $effect(() => {
                           {allFilterValue}
                           selectOptions={selectFilterOptions(header.column)}
                           textMatchModes={textFilterMatchModes(filter)}
-                          onOpenChange={(open) => setFilterMenuOpen(header.column, filter, open)}
+                          onOpenChange={(open: boolean) => setFilterMenuOpen(header.column, filter, open)}
                           onUpdateOperator={updateFilterOperator}
                           onUpdateConstraint={updateFilterConstraint}
                           onAddConstraint={() => addFilterConstraint(filter)}
@@ -1594,22 +1601,23 @@ $effect(() => {
                   {#if filter?.variant === 'text'}
                     <Input
                       class="h-8 min-w-28"
-                      value={String(column.getFilterValue() ?? '')}
+                      value={(column.getFilterValue() as string | undefined) ?? ''}
                       placeholder={filter.placeholder ?? columnLabel(column)}
                       aria-label={filter.placeholder ?? columnLabel(column)}
-                      oninput={(event) => column.setFilterValue(event.currentTarget.value || undefined)} />
+                      oninput={(event: Event) =>
+                        column.setFilterValue((event.currentTarget as HTMLInputElement).value || undefined)} />
                   {:else if filter?.variant === 'select'}
                     <Select.Root
                       type="single"
                       bind:value={
-                        () => String(column.getFilterValue() ?? allFilterValue),
+                        () => (column.getFilterValue() as string | undefined) ?? allFilterValue,
                         (value) => column.setFilterValue(value === allFilterValue ? undefined : value)
                       }>
                       <Select.Trigger class="h-8 min-w-28">
                         {filter.options?.find((option) => option.value === column.getFilterValue())?.label ??
                           (column.getFilterValue() == null
                             ? (filter.allLabel ?? resolvedLabels.allValues)
-                            : String(column.getFilterValue()))}
+                            : (column.getFilterValue() as string))}
                       </Select.Trigger>
                       <Select.Content>
                         <Select.Group>
@@ -1632,14 +1640,16 @@ $effect(() => {
                         value={range[0] ?? ''}
                         placeholder={filter.minPlaceholder ?? resolvedLabels.minimum}
                         aria-label={filter.minPlaceholder ?? resolvedLabels.minimum}
-                        oninput={(event) => updateNumberFilter(column, 0, event.currentTarget.value)} />
+                        oninput={(event: Event) =>
+                          updateNumberFilter(column, 0, (event.currentTarget as HTMLInputElement).value)} />
                       <Input
                         class="h-8 min-w-20"
                         type="number"
                         value={range[1] ?? ''}
                         placeholder={filter.maxPlaceholder ?? resolvedLabels.maximum}
                         aria-label={filter.maxPlaceholder ?? resolvedLabels.maximum}
-                        oninput={(event) => updateNumberFilter(column, 1, event.currentTarget.value)} />
+                        oninput={(event: Event) =>
+                          updateNumberFilter(column, 1, (event.currentTarget as HTMLInputElement).value)} />
                     </div>
                   {:else if filter?.variant === 'custom'}
                     {@render filter.content(column.getFilterValue(), (value) => column.setFilterValue(value))}

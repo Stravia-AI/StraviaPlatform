@@ -111,9 +111,7 @@ async fn media_only_injection_rejects_guessed_search_before_research_execution()
         0,
         "guessed networking must not start research despite global availability"
     );
-    let requests = requests
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let requests = requests.lock();
     let followup: serde_json::Value =
         serde_json::from_str(requests[1].split_once("\r\n\r\n").expect("HTTP body").1)
             .expect("provider request JSON");
@@ -124,7 +122,7 @@ async fn media_only_injection_rejects_guessed_search_before_research_execution()
 
 #[tokio::test]
 async fn non_vision_parent_uses_capability_owned_media_model() {
-    let source_id = Arc::new(std::sync::Mutex::new(None));
+    let source_id = Arc::new(parking_lot::Mutex::new(None));
     let (parent_url, parent_calls) = serve_media_parent(source_id.clone()).await;
     let (media_url, media_calls) = serve_media_model(source_id).await;
     let data_dir = tempfile::tempdir().expect("temporary data directory");
@@ -530,7 +528,6 @@ async fn mixed_media_route_prefers_native_targets_and_rejects_targets_without_to
     assert_eq!(bridge_calls.load(Ordering::SeqCst), 0);
     let native_request = native_requests
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .first()
         .cloned()
         .expect("native Provider request");

@@ -17,6 +17,7 @@ import { Button } from '$lib/components/ui/button'
 import * as Field from '$lib/components/ui/field'
 import * as InputGroup from '$lib/components/ui/input-group'
 import { Spinner } from '$lib/components/ui/spinner'
+import { inputValue } from '$lib/utils.js'
 
 const queryClient = useQueryClient()
 const portQuery = createQuery(() => ({
@@ -160,7 +161,7 @@ async function recheckPort(): Promise<void> {
                 max="65535"
                 value={portValue}
                 aria-invalid={validationError != null || displayedOperationError != null}
-                oninput={(event) => setPortDraft(event.currentTarget.value)} />
+                oninput={(event: Event) => setPortDraft(inputValue(event))} />
             </InputGroup.Root>
             <Button class="shrink-0" disabled={!canSave || saving || rechecking} onclick={requestSavePort}>
               {#if saving}<Spinner data-icon="inline-start" />{:else}<SaveIcon data-icon="inline-start" />{/if}

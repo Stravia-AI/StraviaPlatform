@@ -530,10 +530,7 @@ impl GenerationChainStore {
         principal: &str,
         id: &TurnNodeId,
     ) -> Option<MaterializedGeneration> {
-        let mut cache = self
-            .materializations
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut cache = self.materializations.lock();
         let version = *cache
             .head_versions
             .get(&(principal.to_owned(), id.clone()))?;
@@ -577,10 +574,7 @@ impl GenerationChainStore {
             node_id: id.clone(),
             payload_version: materialized.payload_version,
         };
-        let mut cache = self
-            .materializations
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut cache = self.materializations.lock();
         if let Some(previous_version) = cache
             .head_versions
             .insert((principal, id), materialized.payload_version)

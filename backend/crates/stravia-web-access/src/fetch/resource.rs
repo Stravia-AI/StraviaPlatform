@@ -242,15 +242,11 @@ mod tests {
     }
 
     fn set_responses(backend: &StubBackend, responses: impl IntoIterator<Item = HttpResponse>) {
-        *backend.responses.lock().expect("stub response lock") = responses.into_iter().collect();
+        *backend.responses.lock() = responses.into_iter().collect();
     }
 
     fn requested(backend: &StubBackend) -> Vec<String> {
-        backend
-            .requested_urls
-            .lock()
-            .expect("stub requested url lock")
-            .clone()
+        backend.requested_urls.lock().clone()
     }
 
     fn request_count(backend: &StubBackend) -> usize {

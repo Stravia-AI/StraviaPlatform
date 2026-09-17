@@ -200,7 +200,9 @@ impl WebProviderAdapter for ZhipuAdapter {
         let result = service
             .call_tool(CallToolRequestParams::new(ZHIPU_SEARCH_TOOL).with_arguments(arguments))
             .await;
-        let _ = service.cancel().await;
+        if let Err(error) = service.cancel().await {
+            tracing::debug!(%error, "Zhipu Search MCP service cancel failed");
+        }
         let result = result.map_err(|error| {
             zhipu_transport_failure("Zhipu Search MCP tool call failed", &error.to_string())
         })?;
@@ -229,7 +231,9 @@ impl WebProviderAdapter for ZhipuAdapter {
             .buffer_unordered(4)
             .collect::<Vec<_>>()
             .await;
-        let _ = service.cancel().await;
+        if let Err(error) = service.cancel().await {
+            tracing::debug!(%error, "Zhipu Reader MCP service cancel failed");
+        }
         results.sort_unstable_by_key(|(index, _)| *index);
         Ok(AdapterSuccess::new(
             results.into_iter().map(|(_, result)| result).collect(),

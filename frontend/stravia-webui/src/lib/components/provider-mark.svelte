@@ -17,9 +17,7 @@ const svg = $derived(icon && !isCustom ? icons[icon.toLowerCase()] : undefined)
 const svgSource = $derived(svg ? `data:image/svg+xml,${encodeURIComponent(svg)}` : undefined)
 const catalogSource = $derived(catalog && icon && !isCustom ? catalogLogoUrl(icon) : undefined)
 const endpointSource = $derived(isCustom ? endpointFaviconUrl(endpoint) : undefined)
-const usingFallback = $derived(
-  Boolean(failedSource) || (!svgSource && !catalogSource && !endpointSource),
-)
+const usingFallback = $derived(Boolean(failedSource) || (!svgSource && !catalogSource && !endpointSource))
 
 function endpointFaviconUrl(endpoint: string | null | undefined): string | undefined {
   if (!endpoint) return undefined

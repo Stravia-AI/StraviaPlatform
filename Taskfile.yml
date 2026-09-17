@@ -95,13 +95,14 @@ tasks:
     cmds:
       - bun run check:web
       - bun run lint:web
+      - bun run format:check:web
 
   check:
     desc: Run fast static checks without building embedded WebUI assets.
     deps: [check:web]
     cmds:
       - cargo fmt --all -- --check
-      - cargo check --locked --workspace
+      - cargo clippy --locked --workspace --all-targets -- -D warnings
 
   test:
     desc: Run WebUI and supported Rust unit tests without building embedded WebUI assets.

@@ -34,7 +34,7 @@ class LocaleState {
   }
 
   set(next: Locale, persist = true): void {
-    setLocale(next, { reload: false })
+    void setLocale(next, { reload: false })
     this.current = next
     document.documentElement.lang = next
     if (persist) localStorage.setItem(LOCALE_STORAGE_KEY, next)

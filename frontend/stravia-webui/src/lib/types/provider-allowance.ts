@@ -22,11 +22,7 @@ export interface Allowance {
   window_seconds?: number
   reset_at?: number
   condition?: AllowanceCondition
-  forecast: {
-    status: ExhaustionForecastStatus
-    projected_remaining_percent?: number
-    exhausts_at?: number
-  }
+  forecast: { status: ExhaustionForecastStatus; projected_remaining_percent?: number; exhausts_at?: number }
 }
 
 export interface ModelAllowance {

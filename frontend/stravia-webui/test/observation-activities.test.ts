@@ -189,10 +189,7 @@ describe('observation activities', () => {
     root.events[0].payload = { model_turn_id: 'turn', tool_id: 'call', name: 'Bash' }
     root.events[1].payload = { model_turn_id: 'turn', tool_id: 'call', status: 'completed' }
     expect(tools(value, 'root')[0]).not.toHaveProperty('input')
-    expect(tools(value, 'root')[0]).toMatchObject({
-      live: false,
-      results: [],
-    })
+    expect(tools(value, 'root')[0]).toMatchObject({ live: false, results: [] })
   })
 
   test('deduplicates ordinary client returns only within explicit ancestor branches', () => {

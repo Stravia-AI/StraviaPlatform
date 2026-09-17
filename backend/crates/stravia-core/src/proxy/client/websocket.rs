@@ -6,7 +6,7 @@ const RESPONSES_WEBSOCKET_TRANSIENT_COOLDOWN: std::time::Duration =
 
 #[derive(Clone, Default)]
 pub(crate) struct ResponsesWebSocketRegistry {
-    state: std::sync::Arc<std::sync::Mutex<ResponsesWebSocketRegistryState>>,
+    state: std::sync::Arc<parking_lot::Mutex<ResponsesWebSocketRegistryState>>,
 }
 
 #[derive(Clone, Copy)]
@@ -134,10 +134,7 @@ impl ResponsesWebSocketRegistry {
         if cross_socket {
             return true;
         }
-        let mut state = self
-            .state
-            .lock()
-            .expect("Responses WebSocket registry poisoned");
+        let mut state = self.state.lock();
         prune_expired_connections(&mut state);
         state
             .affinity
@@ -170,10 +167,7 @@ impl ResponsesWebSocketRegistry {
         let session_affinity_key =
             session_affinity.map(|id| ResponsesWebSocketAffinity::session(namespace, id));
         let affinity = {
-            let mut state = self
-                .state
-                .lock()
-                .expect("Responses WebSocket registry poisoned");
+            let mut state = self.state.lock();
             prune_expired_connections(&mut state);
             match state.capabilities.get(namespace) {
                 Some(ResponsesWebSocketCapability::Unsupported) => {
@@ -222,10 +216,7 @@ impl ResponsesWebSocketRegistry {
         if let Some((connection_id, connection, matched_response)) = affinity {
             let connection = connection.lock_owned().await;
             let still_current = {
-                let state = self
-                    .state
-                    .lock()
-                    .expect("Responses WebSocket registry poisoned");
+                let state = self.state.lock();
                 state.connections.contains_key(&connection_id)
                     && if matched_response {
                         response_affinity
@@ -315,14 +306,10 @@ impl ResponsesWebSocketRegistry {
                 }
             })?;
             if (200..300).contains(&status) || matches!(status, 400 | 404 | 405 | 426 | 501) {
-                self.state
-                    .lock()
-                    .expect("Responses WebSocket registry poisoned")
-                    .capabilities
-                    .insert(
-                        namespace.to_owned(),
-                        ResponsesWebSocketCapability::Unsupported,
-                    );
+                self.state.lock().capabilities.insert(
+                    namespace.to_owned(),
+                    ResponsesWebSocketCapability::Unsupported,
+                );
                 return Err(ResponsesWebSocketAcquireError::Unsupported {
                     attempted: true,
                     status: Some(status),
@@ -356,10 +343,7 @@ impl ResponsesWebSocketRegistry {
                 window_id,
             }));
         {
-            let mut state = self
-                .state
-                .lock()
-                .expect("Responses WebSocket registry poisoned");
+            let mut state = self.state.lock();
             state.connections.insert(
                 connection_id.clone(),
                 ResponsesWebSocketConnectionRecord {
@@ -380,10 +364,7 @@ impl ResponsesWebSocketRegistry {
         tokio::spawn(async move {
             tokio::time::sleep(RESPONSES_WEBSOCKET_MAX_AGE).await;
             let removed = {
-                let mut state = expiry_registry
-                    .state
-                    .lock()
-                    .expect("Responses WebSocket registry poisoned");
+                let mut state = expiry_registry.state.lock();
                 let removed = state.connections.remove(&expiry_connection_id);
                 state
                     .affinity
@@ -433,16 +414,12 @@ impl ResponsesWebSocketRegistry {
     }
 
     fn mark_transient_failure(&self, namespace: &str, trace: ResponsesWebSocketTrace<'_>) {
-        self.state
-            .lock()
-            .expect("Responses WebSocket registry poisoned")
-            .capabilities
-            .insert(
-                namespace.to_owned(),
-                ResponsesWebSocketCapability::CooldownUntil(
-                    tokio::time::Instant::now() + RESPONSES_WEBSOCKET_TRANSIENT_COOLDOWN,
-                ),
-            );
+        self.state.lock().capabilities.insert(
+            namespace.to_owned(),
+            ResponsesWebSocketCapability::CooldownUntil(
+                tokio::time::Instant::now() + RESPONSES_WEBSOCKET_TRANSIENT_COOLDOWN,
+            ),
+        );
         tracing::debug!(
             transport = "responses_websocket",
             target_namespace = namespace,
@@ -457,7 +434,6 @@ impl ResponsesWebSocketRegistry {
     fn invalidate(&self, namespace: &str, response_id: &str, trace: ResponsesWebSocketTrace<'_>) {
         self.state
             .lock()
-            .expect("Responses WebSocket registry poisoned")
             .affinity
             .remove(&ResponsesWebSocketAffinity::response(
                 namespace,
@@ -511,11 +487,7 @@ impl ResponsesWebSocketLease {
     }
 
     pub(crate) fn completed(&mut self, response_id: String) {
-        let mut state = self
-            .registry
-            .state
-            .lock()
-            .expect("Responses WebSocket registry poisoned");
+        let mut state = self.registry.state.lock();
         state.affinity.retain(|key, connection_id| {
             connection_id != &self.connection_id
                 || matches!(key, ResponsesWebSocketAffinity::Session { .. })
@@ -544,11 +516,7 @@ impl ResponsesWebSocketLease {
     }
 
     pub(crate) fn terminal(&mut self) {
-        let mut state = self
-            .registry
-            .state
-            .lock()
-            .expect("Responses WebSocket registry poisoned");
+        let mut state = self.registry.state.lock();
         let age_ms = state
             .connections
             .remove(&self.connection_id)
@@ -615,11 +583,7 @@ impl Drop for ResponsesWebSocketLease {
         if self.terminal {
             return;
         }
-        let mut state = self
-            .registry
-            .state
-            .lock()
-            .expect("Responses WebSocket registry poisoned");
+        let mut state = self.registry.state.lock();
         let age_ms = state
             .connections
             .remove(&self.connection_id)
@@ -1404,10 +1368,7 @@ mod tests {
         drop(parent);
 
         {
-            let mut state = registry
-                .state
-                .lock()
-                .expect("Responses WebSocket registry poisoned");
+            let mut state = registry.state.lock();
             let connection_id = state
                 .affinity
                 .get(&ResponsesWebSocketAffinity::response(
@@ -1488,10 +1449,7 @@ mod tests {
         tokio::time::advance(RESPONSES_WEBSOCKET_MAX_AGE).await;
         tokio::task::yield_now().await;
 
-        let state = registry
-            .state
-            .lock()
-            .expect("Responses WebSocket registry poisoned");
+        let state = registry.state.lock();
         assert!(state.connections.is_empty());
         assert!(state.affinity.is_empty());
     }
@@ -1519,15 +1477,7 @@ mod tests {
             )
             .await
             .expect("connect request");
-        assert_eq!(
-            registry
-                .state
-                .lock()
-                .expect("Responses WebSocket registry poisoned")
-                .connections
-                .len(),
-            1
-        );
+        assert_eq!(registry.state.lock().connections.len(), 1);
         assert_eq!(connections.active.load(Ordering::SeqCst), 1);
 
         drop(lease);
@@ -1539,10 +1489,7 @@ mod tests {
         .await
         .expect("dropping an in-flight lease must close the upstream socket");
 
-        let state = registry
-            .state
-            .lock()
-            .expect("Responses WebSocket registry poisoned");
+        let state = registry.state.lock();
         assert!(state.connections.is_empty());
         assert!(state.affinity.is_empty());
     }

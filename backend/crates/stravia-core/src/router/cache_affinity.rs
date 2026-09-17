@@ -1,5 +1,7 @@
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 use stravia_runtime_contract::Principal;
 use stravia_runtime_contract::protocol::ir;
@@ -63,10 +65,7 @@ impl CacheAffinity {
         if item_hashes.is_empty() {
             return None;
         }
-        let index = self
-            .index
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let index = self.index.lock();
         let mut best = None;
         for record in index.records.iter().rev() {
             if record.namespace != namespace {
@@ -111,10 +110,7 @@ impl CacheAffinity {
             item_hashes,
             target_key: target_key.to_owned(),
         };
-        let mut index = self
-            .index
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut index = self.index.lock();
         index.records.retain(|existing| {
             existing.namespace != record.namespace
                 || existing.item_hashes != record.item_hashes

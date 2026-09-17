@@ -26,7 +26,9 @@ pub async fn discover_remote_mcp_tools(
         .list_all_tools()
         .await
         .map_err(|error| AgentToolError::new("mcp_discovery_failed", error.to_string()))?;
-    let _ = client.close().await;
+    if let Err(error) = client.close().await {
+        tracing::debug!(%error, "remote MCP client close failed after tool discovery");
+    }
     Ok(remote_tools
         .into_iter()
         .map(|tool| {
@@ -88,7 +90,9 @@ impl AgentTool for RemoteMcpAgentTool {
                 )
                 .await
                 .map_err(|error| AgentToolError::new("mcp_call_failed", error.to_string()))?;
-            let _ = client.close().await;
+            if let Err(error) = client.close().await {
+                tracing::debug!(%error, "remote MCP client close failed after tool call");
+            }
             let (output, content_kind) = match result.structured_content {
                 Some(content) => (content, ToolResultContentKind::Json),
                 None => (

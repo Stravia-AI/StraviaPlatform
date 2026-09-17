@@ -70,7 +70,7 @@ function formatContent(content: unknown): string {
     <Collapsible.Root {open} onOpenChange={changeOpen} class="min-w-0 w-full">
       <div role={activity.live ? 'status' : undefined}>
         <Marker.Root>
-          {#snippet child({ props })}
+          {#snippet child({ props }: { props: Record<string, unknown> })}
             <Collapsible.Trigger
               {...props}
               aria-controls={contentId}

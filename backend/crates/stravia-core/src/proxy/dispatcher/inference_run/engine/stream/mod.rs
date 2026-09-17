@@ -57,7 +57,9 @@ impl<'a> HookLegGuard<'a> {
 impl Drop for HookLegGuard<'_> {
     fn drop(&mut self) {
         if !self.closed {
-            let _ = self.run.flush_stream();
+            if let Err(error) = self.run.flush_stream() {
+                tracing::debug!(%error, "failed to flush stream on hook leg drop");
+            }
             self.closed = true;
         }
     }

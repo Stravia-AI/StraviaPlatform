@@ -92,7 +92,11 @@ const selectedLiveBlocks = $derived(liveBlocks.filter((block) => block.interacti
 let failureDetail = $state<FailedRequestDetail>()
 let detailLoading = $state(false)
 let inspectorWidth = $state(46)
-let canvas = $state<InteractionCanvas>()
+let canvas = $state<{
+  focusLatest(): Promise<void>
+  fitAfterAllLoaded(): Promise<void>
+  focusNode(id: string): Promise<void>
+}>()
 let stream: ObservationSubscription | undefined
 let streamConnected = $state(false)
 let filterOpen = $state(false)
@@ -566,7 +570,7 @@ async function handleObservationUpdate(update: ObservationStreamUpdate): Promise
             : Promise.resolve(),
       ])
       if (version !== rangeVersion) return
-      if (loadError) throw loadError
+      if (loadError) throw loadError instanceof Error ? loadError : new Error(localizeBackendErrorMessage(loadError))
       stream?.setCursor(snapshotSequence)
     } catch (error) {
       if (version !== rangeVersion) return
@@ -823,7 +827,7 @@ function formatBytes(value: number | undefined): string {
     if (!fullscreen) fullscreenButton?.focus()
   }} />
 <svelte:window
-  onkeydown={(event) => {
+  onkeydown={(event: KeyboardEvent) => {
     if (event.key === 'Escape' && fullscreen && !rangeOpen && !event.defaultPrevented) {
       void toggleFullscreen()
     }
@@ -880,7 +884,7 @@ function formatBytes(value: number | undefined): string {
     aria-labelledby="observation-workspace-title">
     <h2 id="observation-workspace-title" class="sr-only">{m.observation_interaction_chains()}</h2>
     <div class="workspace-toolbar">
-      <Tabs.Root value={activeTab} onValueChange={(value) => void tabChanged(value)}>
+      <Tabs.Root value={activeTab} onValueChange={(value: string) => void tabChanged(value)}>
         <Tabs.List
           ><Tabs.Trigger value="interactions">{m.observation_interaction_chains()}</Tabs.Trigger><Tabs.Trigger
             value="failures">{m.observation_failed_requests()}</Tabs.Trigger
@@ -890,7 +894,7 @@ function formatBytes(value: number | undefined): string {
         <Select.Root
           type="single"
           value={customRange ? '' : String(durationMs / 60_000)}
-          onValueChange={(value) => void choosePreset(value)}>
+          onValueChange={(value: string) => void choosePreset(value)}>
           <Select.Trigger aria-label={m.observation_time_window()} class="w-28">
             {customRange ? m.observation_custom_range() : durationLabel(durationMs / 60_000)}
           </Select.Trigger>
@@ -979,7 +983,7 @@ function formatBytes(value: number | undefined): string {
               {followPaused}
               newActivityAvailable={hasNewActivity}
               {fitProgress}
-              onselect={(item) => void selectInteraction(item)}
+              onselect={(item: InteractionSummary) => void selectInteraction(item)}
               onloadmore={() => void loadNextRootBatch()}
               onfitall={() => void fitAll()}
               onmanualmove={() => (followPaused = true)}
@@ -1000,7 +1004,7 @@ function formatBytes(value: number | undefined): string {
             onolder={loadOlderEvents}
             loading={detailLoading}
             width={inspectorWidth}
-            onwidthchange={(value) => (inspectorWidth = value)}
+            onwidthchange={(value: number) => (inspectorWidth = value)}
             onclose={closeInspector}
             onbundle={() => void downloadBundle()}
             onlatest={selectedMigrated && migratedRoots.has(selectedMigrated)
@@ -1032,7 +1036,7 @@ function formatBytes(value: number | undefined): string {
           <FailedRequestTable
             items={failures}
             loading={failureLoading}
-            onselect={(failure) => void selectFailure(failure)} />
+            onselect={(failure: FailedRequestSummary) => void selectFailure(failure)} />
         {/if}
         {#if failureCursor}<div class="border-t p-3 text-center">
             <Button variant="outline" disabled={failureLoading} onclick={() => void loadFailures(false)}
@@ -1046,7 +1050,7 @@ function formatBytes(value: number | undefined): string {
             oninteraction={failureDetail?.request.interaction_id ? () => void openFailureInteraction() : undefined}
             loading={detailLoading}
             width={inspectorWidth}
-            onwidthchange={(value) => (inspectorWidth = value)}
+            onwidthchange={(value: number) => (inspectorWidth = value)}
             onclose={closeInspector}
             onbundle={() => void downloadBundle()} />{/if}
       </div>
@@ -1172,8 +1176,7 @@ function formatBytes(value: number | undefined): string {
                     >{/each}</Select.Group
                 ></Select.Content
               ></Select.Root
-            ></Field.Field
-          >
+            ></Field.Field>
           <Field.Field>
             <Field.FieldLabel for="observation-min-tokens" hint={m.observation_min_tokens_hint()}
               >{m.observation_min_tokens()}</Field.FieldLabel>
@@ -1190,14 +1193,11 @@ function formatBytes(value: number | undefined): string {
                 >{minTokensFilter > 0 ? formatCompactCount(minTokensFilter) : m.observation_all()}</span>
             </div>
           </Field.Field>
-          {/if}
+        {/if}
       </Field.FieldGroup>
     </div>
     <Sheet.Footer
-      ><Button
-        variant="ghost"
-        onclick={clearFilters}>{m.observation_clear_filters()}</Button
-      ><Button
+      ><Button variant="ghost" onclick={clearFilters}>{m.observation_clear_filters()}</Button><Button
         onclick={() => {
           filterOpen = false
           void reloadForFilters()
@@ -1211,9 +1211,7 @@ function formatBytes(value: number | undefined): string {
     <AlertDialog.Header>
       <AlertDialog.Title>{m.observation_enable_debug()}</AlertDialog.Title>
       <AlertDialog.Description>
-        {m.observation_debug_warning({
-          retention_days: debugQuery.data?.retention_days ?? 0,
-        })}
+        {m.observation_debug_warning({ retention_days: debugQuery.data?.retention_days ?? 0 })}
       </AlertDialog.Description>
     </AlertDialog.Header>
     <div class="rounded-md border p-3 text-sm">

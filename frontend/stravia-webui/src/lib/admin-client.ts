@@ -106,16 +106,18 @@ interface ResponsePayload {
   params?: Record<string, unknown>
 }
 
+// Path and query segments arrive as unknown through the command dispatch table;
+// the typed methods on `admin` always supply string or number values.
+function param(value: unknown): string {
+  return typeof value === 'string' || typeof value === 'number' ? String(value) : ''
+}
+
 function mapRequest(command: string, args?: Record<string, unknown>): RequestMapping {
   switch (command) {
     case 'listProviders':
       return { method: 'GET', path: '/providers' }
     case 'previewConnectClient':
-      return {
-        method: 'POST',
-        path: '/connect-clients/preview',
-        body: args?.input as unknown as Record<string, unknown>,
-      }
+      return { method: 'POST', path: '/connect-clients/preview', body: args?.input as Record<string, unknown> }
     case 'listCatalogProviders':
       return { method: 'GET', path: '/catalog/providers' }
     case 'listVendorMetadata':
@@ -135,25 +137,25 @@ function mapRequest(command: string, args?: Record<string, unknown>): RequestMap
     case 'copyProvider':
       return {
         method: 'POST',
-        path: `/providers/${args?.id}/copy`,
+        path: `/providers/${param(args?.id)}/copy`,
         body: (args?.options ?? {}) as Record<string, unknown>,
       }
     case 'updateProvider':
-      return { method: 'PUT', path: `/providers/${args?.id}`, body: args?.input as Record<string, unknown> }
+      return { method: 'PUT', path: `/providers/${param(args?.id)}`, body: args?.input as Record<string, unknown> }
     case 'deleteProvider':
-      return { method: 'DELETE', path: `/providers/${args?.id}` }
+      return { method: 'DELETE', path: `/providers/${param(args?.id)}` }
     case 'testProvider':
-      return { method: 'GET', path: `/providers/${args?.id}/test` }
+      return { method: 'GET', path: `/providers/${param(args?.id)}/test` }
     case 'listWebProviders':
       return { method: 'GET', path: '/web-providers' }
     case 'createWebProvider':
       return { method: 'POST', path: '/web-providers', body: args?.input as Record<string, unknown> }
     case 'updateWebProvider':
-      return { method: 'PUT', path: `/web-providers/${args?.id}`, body: args?.input as Record<string, unknown> }
+      return { method: 'PUT', path: `/web-providers/${param(args?.id)}`, body: args?.input as Record<string, unknown> }
     case 'deleteWebProvider':
-      return { method: 'DELETE', path: `/web-providers/${args?.id}` }
+      return { method: 'DELETE', path: `/web-providers/${param(args?.id)}` }
     case 'testWebProvider':
-      return { method: 'POST', path: `/web-providers/${args?.id}/test` }
+      return { method: 'POST', path: `/web-providers/${param(args?.id)}/test` }
     case 'getWebAccessSettings':
       return { method: 'GET', path: '/web-access/settings' }
     case 'updateWebAccessSettings':
@@ -171,68 +173,68 @@ function mapRequest(command: string, args?: Record<string, unknown>): RequestMap
     case 'updateMediaUnderstandingConfig':
       return { method: 'PUT', path: '/media-understanding', body: args?.input as Record<string, unknown> }
     case 'testProviderModels':
-      return { method: 'GET', path: `/providers/${args?.id}/test-models` }
+      return { method: 'GET', path: `/providers/${param(args?.id)}/test-models` }
     case 'listImageCapabilityDrifts':
       return { method: 'GET', path: '/providers/image-capability-drifts' }
     case 'listProviderModels':
-      return { method: 'GET', path: `/providers/${args?.id}/models` }
+      return { method: 'GET', path: `/providers/${param(args?.id)}/models` }
     case 'syncProviderModels':
-      return { method: 'POST', path: `/providers/${args?.id}/models/sync` }
+      return { method: 'POST', path: `/providers/${param(args?.id)}/models/sync` }
     case 'prepareProviderModel':
       return {
         method: 'POST',
-        path: `/providers/${args?.id}/model/prepare`,
+        path: `/providers/${param(args?.id)}/model/prepare`,
         body: { model_id: args?.modelId, template_id: args?.templateId },
       }
     case 'getProviderModel':
       return {
         method: 'GET',
-        path: `/providers/${args?.id}/model?model=${encodeURIComponent(String(args?.modelId ?? ''))}`,
+        path: `/providers/${param(args?.id)}/model?model=${encodeURIComponent(param(args?.modelId))}`,
       }
     case 'createManualProviderModel':
       return {
         method: 'POST',
-        path: `/providers/${args?.id}/models`,
-        body: `{"model_id":${JSON.stringify(String(args?.modelId ?? ''))},"metadata":${String(args?.metadataJson)}}`,
+        path: `/providers/${param(args?.id)}/models`,
+        body: `{"model_id":${JSON.stringify(param(args?.modelId))},"metadata":${param(args?.metadataJson)}}`,
       }
     case 'updateProviderModel':
       return {
         method: 'PUT',
-        path: `/providers/${args?.id}/model`,
-        body: `{"model_id":${JSON.stringify(String(args?.modelId ?? ''))},"metadata":${String(args?.metadataJson)},"revision":${Number(args?.revision)}}`,
+        path: `/providers/${param(args?.id)}/model`,
+        body: `{"model_id":${JSON.stringify(param(args?.modelId))},"metadata":${param(args?.metadataJson)},"revision":${Number(args?.revision)}}`,
       }
     case 'updateProviderModelSelection':
       return {
         method: 'PUT',
-        path: `/providers/${args?.id}/model/selection`,
+        path: `/providers/${param(args?.id)}/model/selection`,
         body: { model_id: args?.modelId, policy: args?.policy, revision: args?.revision },
       }
     case 'reimportProviderModel':
       return {
         method: 'POST',
-        path: `/providers/${args?.id}/model/reimport`,
+        path: `/providers/${param(args?.id)}/model/reimport`,
         body: { model_id: args?.modelId, revision: args?.revision },
       }
     case 'deleteManualProviderModel':
       return {
         method: 'DELETE',
-        path: `/providers/${args?.id}/model?model=${encodeURIComponent(String(args?.modelId ?? ''))}`,
+        path: `/providers/${param(args?.id)}/model?model=${encodeURIComponent(param(args?.modelId))}`,
       }
     case 'getModelCapabilities':
       return {
         method: 'GET',
-        path: `/providers/${args?.providerId}/model-capabilities?model=${encodeURIComponent(String(args?.model ?? ''))}`,
+        path: `/providers/${param(args?.providerId)}/model-capabilities?model=${encodeURIComponent(param(args?.model))}`,
       }
     case 'getProviderOAuthStatus':
-      return { method: 'GET', path: `/providers/${args?.id}/oauth/status` }
+      return { method: 'GET', path: `/providers/${param(args?.id)}/oauth/status` }
     case 'reconnectProviderOAuth':
-      return { method: 'POST', path: `/providers/${args?.id}/oauth/reconnect` }
+      return { method: 'POST', path: `/providers/${param(args?.id)}/oauth/reconnect` }
     case 'logoutProviderOAuth':
-      return { method: 'POST', path: `/providers/${args?.id}/oauth/logout` }
+      return { method: 'POST', path: `/providers/${param(args?.id)}/oauth/logout` }
     case 'bindProviderOAuth':
       return {
         method: 'POST',
-        path: `/providers/${args?.providerId ?? args?.id}/oauth/bind`,
+        path: `/providers/${param(args?.providerId ?? args?.id)}/oauth/bind`,
         body: { session_id: args?.sessionId },
       }
     case 'initOAuthSession':
@@ -247,15 +249,19 @@ function mapRequest(command: string, args?: Record<string, unknown>): RequestMap
         },
       }
     case 'getOAuthSessionStatus':
-      return { method: 'GET', path: `/oauth/sessions/${args?.sessionId}/status` }
+      return { method: 'GET', path: `/oauth/sessions/${param(args?.sessionId)}/status` }
     case 'cancelOAuthSession':
-      return { method: 'POST', path: `/oauth/sessions/${args?.sessionId}/cancel` }
+      return { method: 'POST', path: `/oauth/sessions/${param(args?.sessionId)}/cancel` }
     case 'updateOAuthSessionProxy':
-      return { method: 'PUT', path: `/oauth/sessions/${args?.sessionId}/proxy`, body: { use_proxy: args?.useProxy } }
+      return {
+        method: 'PUT',
+        path: `/oauth/sessions/${param(args?.sessionId)}/proxy`,
+        body: { use_proxy: args?.useProxy },
+      }
     case 'completeOAuthSession':
       return {
         method: 'POST',
-        path: `/oauth/sessions/${args?.sessionId}/complete`,
+        path: `/oauth/sessions/${param(args?.sessionId)}/complete`,
         body: { callback_url: args?.callbackUrl, metadata: args?.metadata ?? {} },
       }
     case 'createOAuthProvider':
@@ -263,7 +269,7 @@ function mapRequest(command: string, args?: Record<string, unknown>): RequestMap
     case 'listModels':
       return { method: 'GET', path: '/models' }
     case 'getModel':
-      return { method: 'GET', path: `/models/${encodeURIComponent(String(args?.routeId ?? ''))}` }
+      return { method: 'GET', path: `/models/${encodeURIComponent(param(args?.routeId))}` }
     case 'createModel':
       return { method: 'POST', path: '/models', body: args?.input as Record<string, unknown> }
     case 'bindRoute':
@@ -273,30 +279,30 @@ function mapRequest(command: string, args?: Record<string, unknown>): RequestMap
     case 'updateModel':
       return {
         method: 'PUT',
-        path: `/models/${encodeURIComponent(String(args?.routeId ?? ''))}`,
+        path: `/models/${encodeURIComponent(param(args?.routeId))}`,
         body: args?.input as Record<string, unknown>,
       }
     case 'deleteModel':
-      return { method: 'DELETE', path: `/models/${encodeURIComponent(String(args?.routeId ?? ''))}` }
+      return { method: 'DELETE', path: `/models/${encodeURIComponent(param(args?.routeId))}` }
     case 'resetTargetThinkingMapping':
       return {
         method: 'POST',
-        path: `/models/${encodeURIComponent(String(args?.routeId ?? ''))}/targets/${args?.targetId}/thinking-map/reset`,
+        path: `/models/${encodeURIComponent(param(args?.routeId))}/targets/${param(args?.targetId)}/thinking-map/reset`,
         body: { level: args?.level },
       }
     case 'regenerateTargetThinkingMap':
       return {
         method: 'POST',
-        path: `/models/${encodeURIComponent(String(args?.routeId ?? ''))}/targets/${args?.targetId}/thinking-map/regenerate`,
+        path: `/models/${encodeURIComponent(param(args?.routeId))}/targets/${param(args?.targetId)}/thinking-map/regenerate`,
       }
     case 'listApiKeys':
       return { method: 'GET', path: '/api-keys' }
     case 'createApiKey':
       return { method: 'POST', path: '/api-keys', body: args?.input as Record<string, unknown> }
     case 'updateApiKey':
-      return { method: 'PUT', path: `/api-keys/${args?.id}`, body: args?.input as Record<string, unknown> }
+      return { method: 'PUT', path: `/api-keys/${param(args?.id)}`, body: args?.input as Record<string, unknown> }
     case 'deleteApiKey':
-      return { method: 'DELETE', path: `/api-keys/${args?.id}` }
+      return { method: 'DELETE', path: `/api-keys/${param(args?.id)}` }
     case 'queryObservationForest':
     case 'queryFailedRequests': {
       const params = new URLSearchParams()
@@ -315,7 +321,7 @@ function mapRequest(command: string, args?: Record<string, unknown>): RequestMap
       const suffix = params.size > 0 ? `?${params}` : ''
       return {
         method: 'GET',
-        path: `/observations/interactions/${encodeURIComponent(String(args?.id))}/summary${suffix}`,
+        path: `/observations/interactions/${encodeURIComponent(param(args?.id))}/summary${suffix}`,
       }
     }
     case 'getObservationInteraction': {
@@ -325,7 +331,7 @@ function mapRequest(command: string, args?: Record<string, unknown>): RequestMap
         if (query[key]) params.set(key, String(query[key]))
       }
       const suffix = params.size > 0 ? `?${params}` : ''
-      return { method: 'GET', path: `/observations/interactions/${encodeURIComponent(String(args?.id))}${suffix}` }
+      return { method: 'GET', path: `/observations/interactions/${encodeURIComponent(param(args?.id))}${suffix}` }
     }
     case 'getObservationInteractionEvents': {
       const params = new URLSearchParams()
@@ -334,13 +340,13 @@ function mapRequest(command: string, args?: Record<string, unknown>): RequestMap
       }
       return {
         method: 'GET',
-        path: `/observations/interactions/${encodeURIComponent(String(args?.id))}/events?${params}`,
+        path: `/observations/interactions/${encodeURIComponent(param(args?.id))}/events?${params}`,
       }
     }
     case 'getFailedRequest':
       return {
         method: 'GET',
-        path: `/observations/failed-requests/${encodeURIComponent(String(args?.kind))}/${encodeURIComponent(String(args?.id))}`,
+        path: `/observations/failed-requests/${encodeURIComponent(param(args?.kind))}/${encodeURIComponent(param(args?.id))}`,
       }
     case 'getObservationDebug':
       return { method: 'GET', path: '/observations/debug' }
@@ -358,7 +364,7 @@ function mapRequest(command: string, args?: Record<string, unknown>): RequestMap
       const resource = args?.kind === 'rejected_request' ? 'rejections' : 'interactions'
       return {
         method: 'POST',
-        path: `/observations/${resource}/${encodeURIComponent(String(args?.id))}/debug-bundle-tickets`,
+        path: `/observations/${resource}/${encodeURIComponent(param(args?.id))}/debug-bundle-tickets`,
         body: args?.throughSequence == null ? {} : { through_sequence: args.throughSequence },
       }
     }
@@ -377,7 +383,7 @@ function mapRequest(command: string, args?: Record<string, unknown>): RequestMap
     case 'refreshProviderAllowances':
       return { method: 'POST', path: '/provider-allowances/refresh' }
     case 'refreshProviderAllowance':
-      return { method: 'POST', path: `/provider-allowances/${encodeURIComponent(String(args?.providerId))}/refresh` }
+      return { method: 'POST', path: `/provider-allowances/${encodeURIComponent(param(args?.providerId))}/refresh` }
     case 'getCredentialRules':
       return { method: 'GET', path: '/reversible-redaction/rules' }
     case 'testCredentialText':
@@ -390,9 +396,9 @@ function mapRequest(command: string, args?: Record<string, unknown>): RequestMap
       return { method: 'GET', path: `/reversible-redaction/discoveries${params.size ? `?${params}` : ''}` }
     }
     case 'getSetting':
-      return { method: 'GET', path: `/settings/${args?.key}` }
+      return { method: 'GET', path: `/settings/${param(args?.key)}` }
     case 'setSetting':
-      return { method: 'PUT', path: `/settings/${args?.key}`, body: { value: args?.value } }
+      return { method: 'PUT', path: `/settings/${param(args?.key)}`, body: { value: args?.value } }
     case 'getGatewayStatus':
       return { method: 'GET', path: '/status' }
     case 'getUpdateStatus':
@@ -407,7 +413,7 @@ function mapRequest(command: string, args?: Record<string, unknown>): RequestMap
 }
 
 function statsPath(path: string, hours: unknown): string {
-  return hours == null ? path : `${path}?hours=${hours}`
+  return hours == null ? path : `${path}?hours=${param(hours)}`
 }
 
 async function request<T>(command: string, args?: Record<string, unknown>): Promise<T> {
@@ -595,7 +601,7 @@ export const admin = {
             upload_prompt_injection: false,
             s3: null,
           }
-        : JSON.parse(value)
+        : (JSON.parse(value) as ArtifactSettings)
     },
     saveArtifacts: (settings: ArtifactSettings) =>
       request<void>('setSetting', { key: 'artifact_settings', value: JSON.stringify(settings) }),

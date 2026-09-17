@@ -4,11 +4,7 @@ import { tv, type VariantProps } from 'tailwind-variants'
 export const fieldVariants = tv({
   base: 'data-[invalid=true]:text-destructive group/field @container/field w-full min-w-0 [--field-control-width:36rem]',
   variants: {
-    orientation: {
-      vertical: '',
-      horizontal: '',
-      responsive: '',
-    },
+    orientation: { vertical: '', horizontal: '', responsive: '' },
     size: {
       number: '[--field-control-width:7rem]',
       datetime: '[--field-control-width:18rem]',

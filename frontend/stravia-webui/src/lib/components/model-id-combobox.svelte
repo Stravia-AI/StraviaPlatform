@@ -6,6 +6,7 @@ import * as Command from '$lib/components/ui/command'
 import * as InputGroup from '$lib/components/ui/input-group'
 import * as Popover from '$lib/components/ui/popover'
 import { localeState } from '$lib/localization.svelte'
+import { inputValue } from '$lib/utils.js'
 
 interface CatalogModel {
   id: string
@@ -96,7 +97,7 @@ function handleKeydown(event: KeyboardEvent): void {
           : undefined}
         onfocus={() => (open = true)}
         onblur={() => (open = false)}
-        oninput={(event) => changeValue(event.currentTarget.value)}
+        oninput={(event: Event) => changeValue(inputValue(event))}
         oncompositionstart={() => (composing = true)}
         oncompositionend={() => (composing = false)}
         onkeydown={handleKeydown} />
@@ -121,12 +122,12 @@ function handleKeydown(event: KeyboardEvent): void {
       align="start"
       class="w-(--bits-popover-anchor-width) p-0"
       trapFocus={false}
-      onOpenAutoFocus={(event) => event.preventDefault()}
-      onCloseAutoFocus={(event) => event.preventDefault()}
-      onInteractOutside={(event) => {
+      onOpenAutoFocus={(event: Event) => event.preventDefault()}
+      onCloseAutoFocus={(event: Event) => event.preventDefault()}
+      onInteractOutside={(event: Event) => {
         if (event.target === input) event.preventDefault()
       }}
-      onpointerdown={(event) => event.preventDefault()}>
+      onpointerdown={(event: PointerEvent) => event.preventDefault()}>
       <Command.List id={`${id}-options`} aria-label={ariaLabel}>
         {#if filteredModels.length === 0}
           <Command.Empty>{emptyText}</Command.Empty>

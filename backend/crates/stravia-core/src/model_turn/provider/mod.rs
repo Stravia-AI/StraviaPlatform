@@ -8,12 +8,13 @@ use transport_responses_websocket::{ResponsesWebSocketCall, ResponsesWebSocketSt
 
 use std::borrow::Cow;
 use std::sync::{
-    Arc, Mutex,
+    Arc,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::Instant;
 
 use futures::{StreamExt, stream::BoxStream};
+use parking_lot::Mutex;
 use reqwest::header::HeaderMap;
 use serde_json::Value;
 
@@ -309,14 +310,30 @@ impl AttemptObservation {
             });
         }
         let observed = binding.observer.is_some();
-        
+
         Self {
             observer: binding.observer.clone(),
             id,
-            model_turn_id: if observed { binding.model_turn_id.clone() } else { Default::default() },
-            transport: if observed { transport.to_owned() } else { Default::default() },
-            protocol: if observed { binding.protocol.to_string() } else { Default::default() },
-            url: if observed { url.to_owned() } else { Default::default() },
+            model_turn_id: if observed {
+                binding.model_turn_id.clone()
+            } else {
+                Default::default()
+            },
+            transport: if observed {
+                transport.to_owned()
+            } else {
+                Default::default()
+            },
+            protocol: if observed {
+                binding.protocol.to_string()
+            } else {
+                Default::default()
+            },
+            url: if observed {
+                url.to_owned()
+            } else {
+                Default::default()
+            },
             started_at: Instant::now(),
             finished: AtomicBool::new(false),
             usage_confirmed: AtomicBool::new(false),
@@ -428,7 +445,7 @@ impl AttemptObservation {
                     },
                     _ => unreachable!(),
                 };
-                let mut layout = self.thinking_layout.lock().expect("thinking layout lock");
+                let mut layout = self.thinking_layout.lock();
                 self.thinking_active.store(true, Ordering::Release);
                 observer.record(RunEvent::ModelThinkingDelta {
                     model_turn_id: self.model_turn_id.clone(),
@@ -456,7 +473,7 @@ impl AttemptObservation {
     }
 
     fn finish_thinking(&self) {
-        let mut layout = self.thinking_layout.lock().expect("thinking layout lock");
+        let mut layout = self.thinking_layout.lock();
         if !self.thinking_active.swap(false, Ordering::AcqRel) {
             return;
         }

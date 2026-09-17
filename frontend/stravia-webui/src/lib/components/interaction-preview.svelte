@@ -61,7 +61,7 @@ async function handleKeydown(event: KeyboardEvent) {
 <Tooltip.Root
   bind:open={
     () => open,
-    (value) => {
+    (value: boolean) => {
       if (!pinned) open = value
     }
   }
@@ -73,10 +73,10 @@ async function handleKeydown(event: KeyboardEvent) {
     type="button"
     aria-label={label}
     class="preview-trigger nodrag nopan nowheel"
-    onpointerdown={(event) => event.stopPropagation()}
+    onpointerdown={(event: PointerEvent) => event.stopPropagation()}
     onkeydown={handleKeydown}
-    onkeyup={(event) => event.stopPropagation()}
-    onclick={(event) => {
+    onkeyup={(event: KeyboardEvent) => event.stopPropagation()}
+    onclick={(event: MouseEvent) => {
       event.preventDefault()
       event.stopPropagation()
       pinned = true
@@ -100,14 +100,14 @@ async function handleKeydown(event: KeyboardEvent) {
     strategy="fixed"
     updatePositionStrategy="always"
     class="max-w-[min(32rem,calc(100vw-2rem))]"
-    onInteractOutside={(event) => {
+    onInteractOutside={(event: Event) => {
       if (trigger?.contains(event.target as Node)) event.preventDefault()
       else close()
     }}
-    onFocusOutside={(event) => {
+    onFocusOutside={(event: Event) => {
       if (!trigger?.contains(event.target as Node)) close()
     }}
-    onEscapeKeydown={(event) => {
+    onEscapeKeydown={(event: KeyboardEvent) => {
       event.preventDefault()
       event.stopPropagation()
       close()

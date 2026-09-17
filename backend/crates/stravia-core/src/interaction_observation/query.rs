@@ -173,17 +173,12 @@ impl super::InteractionObservation {
     ) -> anyhow::Result<CredentialDiscoveryPage> {
         self.flush().await?;
         let mut page = self.inner.store.credential_discoveries(query).await?;
-        page.observation_gap |= self
-            .inner
-            .unpersisted_gaps
-            .lock()
-            .expect("observation gaps")
-            .visible(
-                chrono::Utc::now().timestamp_millis(),
-                self.inner
-                    .retention_days
-                    .load(std::sync::atomic::Ordering::Acquire),
-            );
+        page.observation_gap |= self.inner.unpersisted_gaps.lock().visible(
+            chrono::Utc::now().timestamp_millis(),
+            self.inner
+                .retention_days
+                .load(std::sync::atomic::Ordering::Acquire),
+        );
         Ok(page)
     }
 }

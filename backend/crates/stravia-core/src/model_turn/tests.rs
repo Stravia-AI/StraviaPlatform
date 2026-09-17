@@ -1,5 +1,7 @@
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+
+use parking_lot::Mutex;
 use std::time::{Duration, Instant};
 
 use reqwest::header::{HeaderMap, HeaderValue};
@@ -128,7 +130,7 @@ async fn serve_zdr_then_responses_stream() -> (String, Arc<Mutex<Vec<serde_json:
             let bytes_read = socket.read(&mut request).await.expect("read ZDR request");
             request.truncate(bytes_read);
             let (_, body) = captured_http(&request);
-            observed.lock().expect("captured ZDR requests").push(body);
+            observed.lock().push(body);
 
             let (status, content_type, body) = if attempt == 0 {
                 (
@@ -208,7 +210,7 @@ async fn serve_openai_capture_text(text: &'static str) -> (String, Arc<Mutex<Vec
         let mut request = vec![0_u8; 16 * 1024];
         let bytes_read = socket.read(&mut request).await.expect("read request");
         request.truncate(bytes_read);
-        *observed.lock().expect("captured request") = request;
+        *observed.lock() = request;
         let body = serde_json::json!({
             "id": "chatcmpl-capture",
             "object": "chat.completion",
@@ -729,7 +731,7 @@ async fn http_continuation_not_retained_by_zdr_replays_full_request_once() {
             if response.id == "resp-replayed"
     ));
 
-    let captured = captured.lock().expect("captured ZDR requests");
+    let captured = captured.lock();
     assert_eq!(captured.len(), 2);
     assert_eq!(captured[0]["previous_response_id"], "resp-zdr");
     assert!(captured[1].get("previous_response_id").is_none());
@@ -1030,7 +1032,7 @@ async fn execute_omits_previous_response_id_when_lookup_misses() {
         .await
         .expect("missed continuation still executes");
     let _ = turn.output.collect::<Vec<_>>().await;
-    let (_, body) = captured_http(&captured.lock().expect("captured miss"));
+    let (_, body) = captured_http(&captured.lock());
 
     assert!(body.get("previous_response_id").is_none());
 }
@@ -1051,7 +1053,7 @@ async fn execute_sends_previous_response_id_when_lookup_hits() {
         .await
         .expect("hit continuation executes");
     let _ = turn.output.collect::<Vec<_>>().await;
-    let (_, body) = captured_http(&captured.lock().expect("captured hit"));
+    let (_, body) = captured_http(&captured.lock());
 
     assert_eq!(
         body.get("previous_response_id")
@@ -1083,7 +1085,7 @@ async fn execute_forwards_extra_headers_without_overriding_authorization() {
         .await
         .expect("extra-header Model Turn");
     let _ = turn.output.collect::<Vec<_>>().await;
-    let (head, _) = captured_http(&captured.lock().expect("captured headers"));
+    let (head, _) = captured_http(&captured.lock());
     let head = head.to_ascii_lowercase();
 
     assert!(head.contains("openai-beta: responses=v1"));
@@ -1120,7 +1122,7 @@ async fn execute_capability_grant_does_not_require_route_binding() {
         .expect("CapabilityGrant Model Turn");
     let _ = turn.output.collect::<Vec<_>>().await;
 
-    assert!(!captured.lock().expect("captured grant").is_empty());
+    assert!(!captured.lock().is_empty());
 }
 
 // The real MappingStore seam can hold intern or publication acknowledgements
@@ -1189,7 +1191,7 @@ impl stravia_credential_protection::store::MappingStore for HeldPublicationStore
         }
         self.entered.notify_one();
         self.release.notified().await;
-        if let Some(cancellation) = self.cancel_on_release.lock().unwrap().take() {
+        if let Some(cancellation) = self.cancel_on_release.lock().take() {
             cancellation.cancel();
         }
         if self.fail {
@@ -1807,7 +1809,7 @@ async fn cancellation_in_publications_final_poll_preempts_completed() {
     let (_directory, gateway, mut turn, store, principal, cancellation, pending_expiry) =
         held_publication_turn(false, false).await;
     consume_until_publication(&mut turn, &store).await;
-    *store.cancel_on_release.lock().unwrap() = Some(cancellation);
+    *store.cancel_on_release.lock() = Some(cancellation);
     store.release.notify_one();
     assert_eq!(
         turn.output.next().await.unwrap().unwrap_err().code,

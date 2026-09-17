@@ -1,10 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import {
-  buildProviderOptions,
-  defaultProviderName,
-  providerNameAfterOptionChange,
-} from '../src/lib/provider-options'
+import { buildProviderOptions, defaultProviderName, providerNameAfterOptionChange } from '../src/lib/provider-options'
 import type { CatalogProvider } from '../src/lib/types'
 
 const xai: CatalogProvider = {

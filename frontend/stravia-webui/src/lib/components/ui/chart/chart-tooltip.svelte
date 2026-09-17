@@ -52,17 +52,17 @@ const formattedLabel = $derived.by(() => {
   if (hideLabel || !visibleSeries?.length) return null
 
   const [item] = visibleSeries
-  const tooltipData = chartCtx.tooltip.data
+  const tooltipData = chartCtx.tooltip.data as Record<string, unknown> | null
 
   // Get the x-axis label value from the raw tooltip data (e.g. a Date or month string)
-  const dataLabel = tooltipData != null ? chartCtx.x(tooltipData) : undefined
+  const dataLabel = tooltipData != null ? (chartCtx.x(tooltipData) as unknown) : undefined
 
   const key = labelKey ?? item?.label ?? item?.key ?? 'value'
-  const itemConfig = getPayloadConfigFromPayload(chart.config, item, key, tooltipData as Record<string, unknown> | null)
+  const itemConfig = getPayloadConfigFromPayload(chart.config, item, key, tooltipData)
 
   let value: unknown
   if (!labelKey && typeof label === 'string') {
-    value = chart.config[label as keyof typeof chart.config]?.label ?? label
+    value = chart.config[label]?.label ?? label
   } else if (labelKey) {
     value = itemConfig?.label ?? dataLabel
   } else {
@@ -81,7 +81,7 @@ const nestLabel = $derived(visibleSeries.length === 1 && indicator !== 'dot')
   {#if formattedLabel}
     <div class={cn('font-medium', labelClassName)}>
       {#if typeof formattedLabel === 'function'}
-        {@render formattedLabel()}
+        {@render (formattedLabel as Snippet)()}
       {:else}
         {formattedLabel}
       {/if}
@@ -103,7 +103,12 @@ const nestLabel = $derived(visibleSeries.length === 1 && indicator !== 'dot')
     <div class="grid gap-1.5">
       {#each visibleSeries as item, i (item.key + i)}
         {@const key = `${nameKey || item.key || item.label || 'value'}`}
-        {@const itemConfig = getPayloadConfigFromPayload(chart.config, item, key, chartCtx.tooltip.data)}
+        {@const itemConfig = getPayloadConfigFromPayload(
+          chart.config,
+          item,
+          key,
+          chartCtx.tooltip.data as Record<string, unknown> | null,
+        )}
         {@const indicatorColor = color || item.config?.color || item.color}
         <div
           class={cn(

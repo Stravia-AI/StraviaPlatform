@@ -341,8 +341,7 @@ async fn open_responses_public_summaries_stream_before_late_encrypted_content() 
     .await
     .expect("public summary should stream before encrypted item.done");
     assert!(
-        prefix.contains(r#""delta":"live protected "#)
-            || prefix.contains("live protected"),
+        prefix.contains(r#""delta":"live protected "#) || prefix.contains("live protected"),
         "{prefix}"
     );
     assert!(
@@ -610,7 +609,7 @@ async fn non_stream_post_text_marker_persistence_failure_is_typed_error() {
     })
     .hook(Arc::new(expose_tool_hook))
     .platform_tool(Arc::new(OrderedTool {
-        calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+        calls: Arc::new(parking_lot::Mutex::new(Vec::new())),
     }))
     .build()
     .await
@@ -774,7 +773,7 @@ async fn canonical_completion_contract_matrix_covers_four_delivery_paths() {
     )
     .await;
 
-    let observed_live_responses = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed_live_responses = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let live_gateway = Gateway::builder(crate::config::GatewayConfig {
         data_dir: data_dir.path().join("live"),
         ..Default::default()
@@ -793,7 +792,7 @@ async fn canonical_completion_contract_matrix_covers_four_delivery_paths() {
     )
     .await;
 
-    let tool_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let tool_calls = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let (expose_tool_hook, _) = ExposeOrderedToolHook::counting();
     let buffered_gateway = Gateway::builder(crate::config::GatewayConfig {
         data_dir: data_dir.path().join("buffered"),
@@ -846,10 +845,7 @@ async fn canonical_completion_contract_matrix_covers_four_delivery_paths() {
     .expect("normal live output before upstream completion");
     assert!(!live_prefix.contains("[DONE]"), "{live_prefix}");
     assert!(
-        observed_live_responses
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .is_empty(),
+        observed_live_responses.lock().is_empty(),
         "UpstreamResponse Hook ran before the upstream completed"
     );
     release_live_stream
@@ -914,9 +910,7 @@ async fn canonical_completion_contract_matrix_covers_four_delivery_paths() {
             "{path}: {body}"
         );
     }
-    let observed_live_responses = observed_live_responses
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let observed_live_responses = observed_live_responses.lock();
     assert_eq!(observed_live_responses.len(), 1);
     assert_eq!(
         observed_live_responses[0].output_text(),
@@ -931,12 +925,7 @@ async fn canonical_completion_contract_matrix_covers_four_delivery_paths() {
     assert_eq!(forced_stream_calls.load(Ordering::SeqCst), 1);
     assert_eq!(live_stream_calls.load(Ordering::SeqCst), 1);
     assert_eq!(buffered_stream_calls.load(Ordering::SeqCst), 2);
-    assert_eq!(
-        *tool_calls
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()),
-        vec![1]
-    );
+    assert_eq!(*tool_calls.lock(), vec![1]);
 }
 
 #[tokio::test]
@@ -1077,7 +1066,7 @@ async fn hidden_stream_rounds_close_each_provider_leg_once() {
     };
     let begins = Arc::new(AtomicUsize::new(0));
     let closes = Arc::new(AtomicUsize::new(0));
-    let tool_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let tool_calls = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let gateway = Gateway::builder(config)
         .hook(Arc::new(CountingStreamToolHook {
             begins: begins.clone(),
@@ -1104,12 +1093,7 @@ async fn hidden_stream_rounds_close_each_provider_leg_once() {
     assert_eq!(provider_calls.load(Ordering::SeqCst), 2);
     assert_eq!(begins.load(Ordering::SeqCst), 2);
     assert_eq!(closes.load(Ordering::SeqCst), 2);
-    assert_eq!(
-        *tool_calls
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()),
-        vec![1]
-    );
+    assert_eq!(*tool_calls.lock(), vec![1]);
 }
 
 #[tokio::test]

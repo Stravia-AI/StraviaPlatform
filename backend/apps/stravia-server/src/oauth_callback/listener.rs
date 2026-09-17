@@ -99,11 +99,13 @@ pub(super) fn serve_callback_listener(
             tokio::select! {
                 _ = receiver.changed() => {}
                 _ = tokio::time::sleep(CALLBACK_TTL) => {
-                    let _ = timeout_gateway.admin().mark_oauth_session_error(
+                    if let Err(error) = timeout_gateway.admin().mark_oauth_session_error(
                         &timeout_session_id,
                         "AUTH_TIMEOUT",
                         "auth session expired",
-                    ).await;
+                    ).await {
+                        tracing::debug!(%error, "failed to mark timed-out OAuth session");
+                    }
                 }
             }
         };
@@ -115,15 +117,17 @@ pub(super) fn serve_callback_listener(
             Ok(stravia_core::auth::AuthSessionStatusData::Pending { .. }
                 | stravia_core::auth::AuthSessionStatusData::Exchanging { .. })
         );
-        if serve_result.is_err() || stopped_while_active {
-            let _ = gateway
+        if (serve_result.is_err() || stopped_while_active)
+            && let Err(error) = gateway
                 .admin()
                 .mark_oauth_session_error(
                     &session_id,
                     "AUTH_LISTENER_FATAL",
                     "OAuth callback listener stopped unexpectedly",
                 )
-                .await;
+                .await
+        {
+            tracing::debug!(%error, "failed to mark failed OAuth session");
         }
         if let Err(error) = serve_result {
             tracing::warn!(%error, "OAuth callback listener failed");
@@ -181,11 +185,14 @@ pub(super) async fn oauth_callback_handler(
 }
 
 async fn oauth_cancel_handler(State(state): State<CallbackState>) -> Response {
-    let _ = state
+    if let Err(error) = state
         .gateway
         .admin()
         .cancel_oauth_session(&state.session_id)
-        .await;
+        .await
+    {
+        tracing::debug!(%error, "failed to mark cancelled OAuth session");
+    }
     let _ = state.shutdown.send(true);
     (StatusCode::OK, "Login cancelled").into_response()
 }

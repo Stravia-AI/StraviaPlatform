@@ -2,8 +2,10 @@
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use parking_lot::Mutex;
 
 use crate::db::models::{RouteSelectionStrategy, Target};
 use stravia_runtime_contract::protocol::ir::AiErrorKind;
@@ -118,10 +120,7 @@ impl RoutePolicyState {
     }
 
     pub fn record_success(&self, context: &RouteAttemptContext, target_key: &str) {
-        let mut inner = self
-            .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut inner = self.inner.lock();
         release_reservation(
             &mut inner.in_flight_input,
             target_key,
@@ -153,10 +152,7 @@ impl RoutePolicyState {
     }
 
     fn release(&self, context: &RouteAttemptContext, target_key: &str) {
-        let mut inner = self
-            .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut inner = self.inner.lock();
         release_reservation(
             &mut inner.in_flight_input,
             target_key,
@@ -196,10 +192,7 @@ impl RouteAttemptPolicy {
         state: RoutePolicyState,
     ) -> Self {
         let (cooldowns, in_flight, preferred) = {
-            let mut inner = state
-                .inner
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut inner = state.inner.lock();
             inner
                 .cooldown_until
                 .retain(|_, expires_at| *expires_at > context.now_ms);
@@ -300,18 +293,13 @@ impl RouteAttemptPolicy {
                 .state
                 .inner
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .cooldown_until
                 .get(&key)
                 .is_some_and(|expires_at| *expires_at > self.context.now_ms);
             if cooling_down || !health.is_healthy(&key) {
                 continue;
             }
-            let mut inner = self
-                .state
-                .inner
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut inner = self.state.inner.lock();
             *inner.in_flight_input.entry(key.clone()).or_default() = inner
                 .in_flight_input
                 .get(&key)
@@ -392,11 +380,7 @@ impl RouteAttemptPolicy {
     }
 
     fn abandon_target(&mut self, key: &str, cooldown_ms: i64, now_ms: u64) {
-        let mut inner = self
-            .state
-            .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut inner = self.state.inner.lock();
         release_reservation(
             &mut inner.in_flight_input,
             key,
@@ -411,11 +395,7 @@ impl RouteAttemptPolicy {
     }
 
     fn release_reservation(&self, key: &str) {
-        let mut inner = self
-            .state
-            .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut inner = self.state.inner.lock();
         release_reservation(
             &mut inner.in_flight_input,
             key,
@@ -1179,7 +1159,7 @@ mod tests {
                         now_ms: 0,
                         jitter_sample: 1.0,
                     },
-            ),
+                ),
                 AttemptFailureDisposition::RetrySame {
                     delay: Duration::from_millis(cap_ms),
                 }

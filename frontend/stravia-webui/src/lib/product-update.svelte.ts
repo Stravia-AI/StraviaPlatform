@@ -99,5 +99,4 @@ export class ProductUpdateCoordinator {
   }
 }
 
-export const [getProductUpdateCoordinator, setProductUpdateCoordinator] =
-  createContext<ProductUpdateCoordinator>()
+export const [getProductUpdateCoordinator, setProductUpdateCoordinator] = createContext<ProductUpdateCoordinator>()

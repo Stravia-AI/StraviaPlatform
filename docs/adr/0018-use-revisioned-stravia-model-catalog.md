@@ -4,7 +4,7 @@ Status: accepted
 
 Stravia 将模型目录事实源从 models.dev 干净切换到 `models.stravia.cn`，以 `/version.json` 的 immutable revision 协调 `/providers.json`、`/models.json` 与按需 `/providers/{provider}/models.json`；运行时不再下载完整 `/api.json`，内嵌 bootstrap 也只保留 Provider 与 Canonical Model 两个轻量索引。这样保留现有 Provider 创建后自动同步与账号级 discovery seam，同时避免重复下载完整 Provider Model 目录。
 
-Canonical Model 以 `{lab_id}/{model_id}` 标识，只作为创建逻辑 Model 与手动 Provider Model 的一次性模板，不形成持久绑定或自动 overlay。逻辑 Model 选择模板时使用完整 canonical ID 作为客户端模型名；手动 Provider Model 复制除 `id` 外的完整 canonical 记录，把末段 `model_id` 预填为仍可编辑的 upstream model ID。Provider-scoped 条目已由上游应用 Canonical Model 基础数据与 Provider 覆盖，Stravia 不再次合并；导入后继续由 ADR-0001 定义的可编辑 Provider Model 快照承接。
+Canonical Model 以 `{lab_id}/{model_id}` 标识，只作为创建逻辑 Model 与手动 Provider Model 的一次性模板，不形成持久绑定或自动 overlay。逻辑 Model 选择模板时使用完整 canonical ID 作为客户端模型名；手动 Provider Model 复制除 `id` 外的完整 canonical 记录，把末段 `model_id` 预填为仍可编辑的 upstream model ID。Provider-scoped 条目已由上游应用 Canonical Model 基础数据与 Provider 覆盖，Stravia 不再次合并；导入后继续由 ADR-0054 定义的可编辑 Provider Model 快照承接。
 
 ## Consequences
 

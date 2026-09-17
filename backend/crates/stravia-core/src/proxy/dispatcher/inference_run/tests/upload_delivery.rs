@@ -46,14 +46,14 @@ async fn upload_delivery_http_stream_matches_split_placeholders_without_retyping
 }
 
 async fn upload_delivery_roundtrip(stream: bool) {
-    let captured = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let captured = Arc::new(parking_lot::Mutex::new(Vec::<Value>::new()));
     let requests = Arc::clone(&captured);
     let provider = Router::new().route(
         "/v1/chat/completions",
         axum::routing::post(move |axum::Json(request): axum::Json<Value>| {
             let requests = Arc::clone(&requests);
             async move {
-                requests.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(request.clone());
+                requests.lock().push(request.clone());
                 let messages = request["messages"].as_array().unwrap();
                 let replay = messages.iter().any(|message| {
                     message["role"] == "user"
@@ -283,10 +283,7 @@ async fn upload_delivery_roundtrip(stream: bool) {
         "replay accepted"
     );
     let replay_interaction = finished_upload_interaction(&mut observations).await;
-    let captured = captured
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
+    let captured = captured.lock().clone();
     for request in &captured {
         assert!(!request.to_string().contains("stravia_upload_"));
     }
@@ -314,9 +311,10 @@ async fn finished_upload_interaction(
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         while let Some(update) = events.next().await {
             if let crate::interaction_observation::ObservationUpdate::Event(event) = update
-                && event.kind == "run_finished" {
-                    return event.interaction_id.unwrap();
-                }
+                && event.kind == "run_finished"
+            {
+                return event.interaction_id.unwrap();
+            }
         }
         panic!("observation stream ended before delivery completed");
     })

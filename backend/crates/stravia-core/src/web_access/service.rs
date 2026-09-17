@@ -15,30 +15,20 @@ pub(super) struct WebAccessRunSnapshot {
 
 #[derive(Clone, Default)]
 pub(crate) struct WebAccessRunSnapshotStore {
-    snapshots: Arc<std::sync::Mutex<HashMap<String, WebAccessRunSnapshot>>>,
+    snapshots: Arc<parking_lot::Mutex<HashMap<String, WebAccessRunSnapshot>>>,
 }
 
 impl WebAccessRunSnapshotStore {
     fn insert(&self, run_id: String, snapshot: WebAccessRunSnapshot) {
-        self.snapshots
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(run_id, snapshot);
+        self.snapshots.lock().insert(run_id, snapshot);
     }
 
     fn get(&self, run_id: &str) -> Option<WebAccessRunSnapshot> {
-        self.snapshots
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(run_id)
-            .cloned()
+        self.snapshots.lock().get(run_id).cloned()
     }
 
     fn remove(&self, run_id: &str) {
-        self.snapshots
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(run_id);
+        self.snapshots.lock().remove(run_id);
     }
 }
 

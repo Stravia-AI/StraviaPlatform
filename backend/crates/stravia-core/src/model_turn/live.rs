@@ -356,18 +356,15 @@ fn register_compaction_stream(spec: CompactionStreamSpec) -> super::CanonicalEve
                 .await;
             match result {
                 Ok(record) => {
-                    registrations
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .push(super::CompactionPublication {
-                            record_id: record.id.clone(),
-                            operation_id: operation_id.clone(),
-                            model_turn_id: model_turn_id.clone(),
-                            mode: mode.clone(),
-                            source_generation_id: source_generation_id.clone(),
-                            state: publication_state,
-                            receipt: super::CompactionReceipt::Pending,
-                        });
+                    registrations.lock().push(super::CompactionPublication {
+                        record_id: record.id.clone(),
+                        operation_id: operation_id.clone(),
+                        model_turn_id: model_turn_id.clone(),
+                        mode: mode.clone(),
+                        source_generation_id: source_generation_id.clone(),
+                        state: publication_state,
+                        receipt: super::CompactionReceipt::Pending,
+                    });
                     seen.extend(native_states);
                     if let Some(observer) = observer {
                         observer.record(operation_event(
@@ -654,7 +651,7 @@ async fn execute_inner(
                             context: attempt_context.clone(),
                         },
                     );
-                    
+
                     if target.first_token_timeout_ms == 0 {
                         attempt.await
                     } else {
@@ -2279,5 +2276,4 @@ mod tests {
 
         assert!(!health.is_healthy("provider:model"));
     }
-
 }

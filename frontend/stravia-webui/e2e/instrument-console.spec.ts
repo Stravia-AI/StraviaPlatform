@@ -70,9 +70,9 @@ test('Overview with traffic shows request and second-based latency charts', asyn
   await expect(page.locator('.route-metric-strip__item').filter({ hasText: 'Output Tokens' })).toContainText('86')
   await expect(page.getByText('Total Tokens', { exact: true })).toHaveCount(0)
 
-  const modelSection = page.locator('section').filter({
-    has: page.getByRole('heading', { name: 'Most-used models', exact: true }),
-  })
+  const modelSection = page
+    .locator('section')
+    .filter({ has: page.getByRole('heading', { name: 'Most-used models', exact: true }) })
   const modelTable = modelSection.getByRole('table', { name: 'Most-used models' })
   await expect(modelTable.getByRole('columnheader')).toHaveText([
     'Model',
@@ -104,9 +104,9 @@ test('Usage analytics uses backend input and output without re-counting cache or
   }
   await expect(page.getByText('Reasoning', { exact: true })).toHaveCount(0)
 
-  const apiKeyUsage = page.locator('section').filter({
-    has: page.getByRole('heading', { name: 'API Key usage', exact: true }),
-  })
+  const apiKeyUsage = page
+    .locator('section')
+    .filter({ has: page.getByRole('heading', { name: 'API Key usage', exact: true }) })
   const apiKeyTable = apiKeyUsage.getByRole('table', { name: 'API Key usage' })
   await expect(apiKeyTable).toContainText('920')
   await expect(apiKeyTable).toContainText('86')

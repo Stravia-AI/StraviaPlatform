@@ -6,10 +6,14 @@ rust-version.workspace = true
 license.workspace = true
 description = "Shared canonical and execution contracts for Stravia capability modules"
 
+[lints]
+workspace = true
+
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
+parking_lot = { workspace = true }
 futures = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true }

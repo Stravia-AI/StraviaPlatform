@@ -17,11 +17,12 @@
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::task::{Context as TaskContext, Poll};
 use std::time::{Duration, Instant};
 
 use futures::Stream;
+use parking_lot::Mutex;
 use stravia_runtime_contract::protocol::ids::ProtocolId;
 
 // ── Deadline ──────────────────────────────────────────────────────────────────
@@ -141,18 +142,16 @@ impl TraceSink {
     /// Append a trace event.
     pub fn push(&self, started_at: Instant, tag: &'static str, detail: impl Into<String>) {
         let elapsed_ms = started_at.elapsed().as_millis() as u64;
-        if let Ok(mut guard) = self.0.lock() {
-            guard.push(TraceEvent {
-                elapsed_ms,
-                tag,
-                detail: detail.into(),
-            });
-        }
+        self.0.lock().push(TraceEvent {
+            elapsed_ms,
+            tag,
+            detail: detail.into(),
+        });
     }
 
     /// Snapshot all events (for logging / debugging).
     pub fn snapshot(&self) -> Vec<TraceEvent> {
-        self.0.lock().map(|g| g.clone()).unwrap_or_default()
+        self.0.lock().clone()
     }
 }
 
@@ -181,42 +180,37 @@ impl ContextBag {
 
     /// Insert (or replace) the value stored for type `T`.
     pub fn insert<T: Any + Send + Sync>(&self, value: T) {
-        if let Ok(mut guard) = self.0.lock() {
-            guard.insert(TypeId::of::<T>(), Box::new(value));
-        }
+        self.0.lock().insert(TypeId::of::<T>(), Box::new(value));
     }
 
     /// Fetch a clone of the value stored for type `T`, if present.
     pub fn get<T: Any + Send + Sync + Clone>(&self) -> Option<T> {
         self.0
             .lock()
-            .ok()
-            .and_then(|guard| guard.get(&TypeId::of::<T>())?.downcast_ref::<T>().cloned())
+            .get(&TypeId::of::<T>())?
+            .downcast_ref::<T>()
+            .cloned()
     }
 
     /// Remove and return the value stored for type `T`, if present.
     pub fn take<T: Any + Send + Sync>(&self) -> Option<T> {
-        self.0.lock().ok().and_then(|mut guard| {
-            guard
-                .remove(&TypeId::of::<T>())?
-                .downcast::<T>()
-                .ok()
-                .map(|value| *value)
-        })
+        self.0
+            .lock()
+            .remove(&TypeId::of::<T>())?
+            .downcast::<T>()
+            .ok()
+            .map(|value| *value)
     }
 
     /// Returns `true` if a value of type `T` is present.
     pub fn contains<T: Any + Send + Sync>(&self) -> bool {
-        self.0
-            .lock()
-            .map(|guard| guard.contains_key(&TypeId::of::<T>()))
-            .unwrap_or(false)
+        self.0.lock().contains_key(&TypeId::of::<T>())
     }
 }
 
 impl std::fmt::Debug for ContextBag {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let len = self.0.lock().map(|g| g.len()).unwrap_or(0);
+        let len = self.0.lock().len();
         f.debug_struct("ContextBag").field("len", &len).finish()
     }
 }

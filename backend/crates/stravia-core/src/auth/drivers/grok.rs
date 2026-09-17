@@ -528,7 +528,8 @@ impl AuthDriver for GrokOAuthDriver {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use parking_lot::Mutex;
+    use std::sync::Arc;
 
     use axum::Router;
     use axum::body::Bytes;
@@ -574,7 +575,6 @@ mod tests {
                         state
                             .requests
                             .lock()
-                            .expect("requests")
                             .push(String::from_utf8_lossy(&body).into_owned());
                         axum::Json(serde_json::json!({
                             "device_code": "device-code",
@@ -592,7 +592,7 @@ mod tests {
                 post(
                     |State(state): State<FixtureState>, body: Bytes| async move {
                         let body = String::from_utf8_lossy(&body).into_owned();
-                        state.requests.lock().expect("requests").push(body.clone());
+                        state.requests.lock().push(body.clone());
                         if body.contains("device_code=device-code") {
                             (
                                 AxumStatusCode::OK,
@@ -723,7 +723,7 @@ mod tests {
         );
         assert_eq!(refreshed.refresh_token.as_deref(), Some("refresh-token"));
 
-        let requests = fixture.requests.lock().expect("requests");
+        let requests = fixture.requests.lock();
         assert!(requests[0].contains("client_id=test-client"));
         assert!(requests[0].contains("scope=openid+offline_access"));
         assert!(

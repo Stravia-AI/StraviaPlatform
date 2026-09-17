@@ -179,7 +179,9 @@ pub async fn download_product_update(
             total_bytes: Some(128),
             finished: false,
         };
-        let _ = app.emit(UPDATE_PROGRESS_EVENT, progress);
+        if let Err(error) = app.emit(UPDATE_PROGRESS_EVENT, progress) {
+            tracing::debug!(%error, "failed to emit update progress");
+        }
         tokio::time::sleep(Duration::from_millis(750)).await;
         Ok((128, Some(128), DownloadedUpdate::TestBridge))
     };
@@ -285,7 +287,7 @@ async fn download_verified_update(
                     .fetch_add(chunk_length as u64, Ordering::Relaxed)
                     + chunk_length as u64;
                 let total_bytes = atomic_optional(&total_for_progress);
-                let _ = app_for_progress.emit(
+                if let Err(error) = app_for_progress.emit(
                     UPDATE_PROGRESS_EVENT,
                     DesktopUpdateProgress {
                         target_version: progress_version.clone(),
@@ -293,10 +295,12 @@ async fn download_verified_update(
                         total_bytes,
                         finished: false,
                     },
-                );
+                ) {
+                    tracing::debug!(%error, "failed to emit update progress");
+                }
             },
             move || {
-                let _ = app_for_finish.emit(
+                if let Err(error) = app_for_finish.emit(
                     UPDATE_PROGRESS_EVENT,
                     DesktopUpdateProgress {
                         target_version: finish_version,
@@ -304,7 +308,9 @@ async fn download_verified_update(
                         total_bytes: atomic_optional(&total_for_finish),
                         finished: true,
                     },
-                );
+                ) {
+                    tracing::debug!(%error, "failed to emit update finished progress");
+                }
             },
         )
         .await

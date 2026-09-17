@@ -1,5 +1,7 @@
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+
+use parking_lot::Mutex;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -287,7 +289,7 @@ impl SearchBackend for CountingBackend {
         input: SearchBackendInput,
     ) -> Result<BackendOutput, stravia_web_search::WebSearchError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        self.inputs.lock().expect("inputs").push(input.clone());
+        self.inputs.lock().push(input.clone());
         tokio::time::sleep(self.delay).await;
         let id = format!("{}:1", input.turn_id);
         // The fixture backend searches within the resolved policy, so its
@@ -543,7 +545,7 @@ async fn continuation_uses_the_exact_parent_snapshot_and_supports_sibling_branch
     assert_eq!(local.calls.load(Ordering::SeqCst), 3);
     assert_eq!(codex.calls.load(Ordering::SeqCst), 0);
     {
-        let inputs = local.inputs.lock().expect("inputs");
+        let inputs = local.inputs.lock();
         assert_eq!(inputs[1].ancestors.len(), 1);
         assert_eq!(
             inputs[1].local_limits.map(|limits| limits.max_turns),
@@ -631,7 +633,7 @@ async fn continuation_is_principal_scoped_and_never_uses_an_implicit_latest_turn
     .await;
 
     assert_eq!(backend.calls.load(Ordering::SeqCst), 2);
-    let inputs = backend.inputs.lock().expect("inputs");
+    let inputs = backend.inputs.lock();
     assert!(inputs[1].ancestors.is_empty());
 }
 
@@ -654,7 +656,7 @@ impl SearchBackend for RelaxingBackend {
         input: SearchBackendInput,
     ) -> Result<BackendOutput, stravia_web_search::WebSearchError> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
-        self.inputs.lock().expect("inputs").push(input.clone());
+        self.inputs.lock().push(input.clone());
         let source_url = if call == 0 {
             match input.policy.allowed_domains.first() {
                 Some(domain) => format!("https://{domain}/search"),
@@ -745,7 +747,7 @@ async fn continuation_report_cannot_relax_the_inherited_allowed_domains() {
     assert_eq!(error.code, "source_outside_allowed_domains");
     assert_eq!(backend.calls.load(Ordering::SeqCst), 2);
     {
-        let inputs = backend.inputs.lock().expect("inputs");
+        let inputs = backend.inputs.lock();
         assert_eq!(inputs[1].policy.allowed_domains, ["8.8.4.4"]);
     }
     assert!(

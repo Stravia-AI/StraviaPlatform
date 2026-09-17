@@ -1,12 +1,13 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering},
     },
     time::Duration,
 };
 
+use parking_lot::Mutex;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use super::{
@@ -99,7 +100,9 @@ struct WriterContext<'a> {
     trace_sequence: &'a AtomicI64,
 }
 
-pub(super) fn spawn(deps: WriterDeps) -> (mpsc::Sender<WriterCommand>, tokio::task::JoinHandle<()>) {
+pub(super) fn spawn(
+    deps: WriterDeps,
+) -> (mpsc::Sender<WriterCommand>, tokio::task::JoinHandle<()>) {
     let WriterDeps {
         store,
         retention_days,
@@ -148,7 +151,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (mpsc::Sender<WriterCommand>, tokio::ta
             } else {
                 tokio::select! {
                     _ = interval.tick() => {
-                        unpersisted_gaps.lock().expect("observation gaps")
+                        unpersisted_gaps.lock()
                             .expire(now(), retention_days.load(Ordering::Acquire));
                         tail.sweep(now());
                         pending_text.publish_live(&updates);
@@ -194,10 +197,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (mpsc::Sender<WriterCommand>, tokio::ta
                             Ok(Some(event)) => publish(&updates, &trace_sequence, event),
                             Ok(None) => {}
                             Err(_) => {
-                                unpersisted_gaps
-                                    .lock()
-                                    .expect("observation gaps")
-                                    .record(&run_id, now());
+                                unpersisted_gaps.lock().record(&run_id, now());
                                 if let Some(interaction) = grouping.interaction_for_run(&run_id) {
                                     pending_gaps.insert(interaction.to_owned(), now());
                                 }
@@ -231,10 +231,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (mpsc::Sender<WriterCommand>, tokio::ta
                     }
                     .await;
                     if result.is_err() {
-                        unpersisted_gaps
-                            .lock()
-                            .expect("observation gaps")
-                            .record(&run_id, at);
+                        unpersisted_gaps.lock().record(&run_id, at);
                         pending_gaps.insert(interaction.to_owned(), at);
                         // SQL errors may include result bind values; never log payloads.
                         tracing::warn!(%run_id, "client tool result persistence failed");
@@ -292,30 +289,25 @@ pub(super) fn spawn(deps: WriterDeps) -> (mpsc::Sender<WriterCommand>, tokio::ta
                     let expiry = expires(at, retention_days.load(Ordering::Relaxed));
                     if completed {
                         if let Some(window) = window
-                            && let Some(interaction) = grouping.interaction_for_run(&run_id) {
-                                let pending = window.pending_tool_ids().unwrap_or_default();
-                                if let Some(hash) = window.last_hash_hex()
-                                    && let Err(error) = store
-                                        .persist_tail_source(
-                                            &run_id,
-                                            interaction,
-                                            &principal,
-                                            &hash,
-                                            &pending,
-                                            expiry,
-                                        )
-                                        .await
-                                    {
-                                        tracing::warn!(%run_id, %error, "tail source persistence failed");
-                                    }
-                                tail.insert(
-                                    run_id,
-                                    window,
-                                    expiry,
-                                    principal,
-                                    interaction.to_owned(),
-                                );
+                            && let Some(interaction) = grouping.interaction_for_run(&run_id)
+                        {
+                            let pending = window.pending_tool_ids().unwrap_or_default();
+                            if let Some(hash) = window.last_hash_hex()
+                                && let Err(error) = store
+                                    .persist_tail_source(
+                                        &run_id,
+                                        interaction,
+                                        &principal,
+                                        &hash,
+                                        &pending,
+                                        expiry,
+                                    )
+                                    .await
+                            {
+                                tracing::warn!(%run_id, %error, "tail source persistence failed");
                             }
+                            tail.insert(run_id, window, expiry, principal, interaction.to_owned());
+                        }
                         continue;
                     }
                     if attributed.contains(&run_id) {
@@ -438,10 +430,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (mpsc::Sender<WriterCommand>, tokio::ta
                         {
                             Ok(parent) => parent,
                             Err(error) => {
-                                unpersisted_gaps
-                                    .lock()
-                                    .expect("observation gaps")
-                                    .record(&start.id, now);
+                                unpersisted_gaps.lock().record(&start.id, now);
                                 tracing::warn!(run_id=%start.id, %error, "observation parent lookup failed");
                                 None
                             }
@@ -551,10 +540,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (mpsc::Sender<WriterCommand>, tokio::ta
                             }
                         }
                         Err(error) => {
-                            unpersisted_gaps
-                                .lock()
-                                .expect("observation gaps")
-                                .record(&start.id, now);
+                            unpersisted_gaps.lock().record(&start.id, now);
                             tracing::warn!(run_id=%start.id, %error, "observation admission persistence failed")
                         }
                     }
@@ -622,14 +608,8 @@ pub(super) fn spawn(deps: WriterDeps) -> (mpsc::Sender<WriterCommand>, tokio::ta
                         }
                     }
                     if !sealed.is_empty() {
-                        persist_blocks(
-                            &context,
-                            &pending_text,
-                            &interaction,
-                            &run_id,
-                            sealed,
-                        )
-                        .await;
+                        persist_blocks(&context, &pending_text, &interaction, &run_id, sealed)
+                            .await;
                     }
                 }
                 Some(WriterCommand::Event { run_id, event }) => {
@@ -679,10 +659,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (mpsc::Sender<WriterCommand>, tokio::ta
                                 }
                             }
                             Err(_) => {
-                                unpersisted_gaps
-                                    .lock()
-                                    .expect("observation gaps")
-                                    .record(&run_id, at);
+                                unpersisted_gaps.lock().record(&run_id, at);
                                 pending_gaps.insert(interaction.to_owned(), at);
                                 let _ = updates.send(ObservationUpdate::LiveGap {
                                     interaction_id: interaction.to_owned(),
@@ -772,10 +749,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (mpsc::Sender<WriterCommand>, tokio::ta
                                     }
                                     Ok(None) => {}
                                     Err(error) => {
-                                        unpersisted_gaps
-                                            .lock()
-                                            .expect("observation gaps")
-                                            .record(run_id, at);
+                                        unpersisted_gaps.lock().record(run_id, at);
                                         pending_gaps.insert(interaction.to_owned(), at);
                                         tracing::warn!(%run_id,%error,"observation gap persistence failed")
                                     }
@@ -845,7 +819,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (mpsc::Sender<WriterCommand>, tokio::ta
                         }
                     }
                     if let Some(run_id) = run_id {
-                        let mut active = active_traces.lock().expect("trace registry");
+                        let mut active = active_traces.lock();
                         active.remove(&run_id);
                         if persisted_partial {
                             partial_trace_count.fetch_add(1, Ordering::AcqRel);
@@ -917,7 +891,6 @@ async fn flush_active_manifests(
 ) {
     let active: Vec<_> = active_traces
         .lock()
-        .expect("trace registry")
         .iter()
         .map(|(run_id, trace)| (run_id.clone(), trace.clone()))
         .collect();
@@ -998,18 +971,18 @@ async fn persist_finish(
             .await
         {
             Ok(value) => {
-                if let Some(node) = outcome.generation_node_id.as_deref() {
-                    let _ = context.store.set_tail_generation_node(run_id, node).await;
+                if let Some(node) = outcome.generation_node_id.as_deref()
+                    && let Err(error) = context.store.set_tail_generation_node(run_id, node).await
+                {
+                    tracing::debug!(%run_id, %error, "failed to persist tail Generation node");
                 }
                 publish(context.updates, context.trace_sequence, value);
             }
             Err(_) => {
-                pending_text
-                    .gaps
-                    .lock()
-                    .expect("observation gaps")
-                    .record(run_id, at);
-                let _ = context.store.mark_observation_gap(interaction).await;
+                pending_text.gaps.lock().record(run_id, at);
+                if let Err(error) = context.store.mark_observation_gap(interaction).await {
+                    tracing::debug!(%run_id, %error, "failed to mark Interaction observation gap");
+                }
                 let _ = context.updates.send(ObservationUpdate::LiveGap {
                     interaction_id: interaction.to_owned(),
                     run_id: run_id.to_owned(),
@@ -1081,12 +1054,10 @@ async fn persist_blocks(
             }
         }
         Err(_) => {
-            pending
-                .gaps
-                .lock()
-                .expect("observation gaps")
-                .record(run_id, at);
-            let _ = context.store.mark_observation_gap(interaction).await;
+            pending.gaps.lock().record(run_id, at);
+            if let Err(error) = context.store.mark_observation_gap(interaction).await {
+                tracing::debug!(%run_id, %error, "failed to mark Interaction observation gap");
+            }
             let _ = context.updates.send(ObservationUpdate::LiveGap {
                 interaction_id: interaction.to_owned(),
                 run_id: run_id.to_owned(),
@@ -1349,9 +1320,10 @@ async fn discover_diagnostic(
         return (None, None);
     };
     if start.generation_parent_id.is_none()
-        && let Some(source) = current_tool_source(tail, store, start, input, now).await {
-            return (Some(source), None);
-        }
+        && let Some(source) = current_tool_source(tail, store, start, input, now).await
+    {
+        return (Some(source), None);
+    }
     let mut loaded = Vec::new();
     let mut seen = HashSet::new();
     for run in tail.fingerprint_runs(input, &start.principal) {

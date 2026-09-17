@@ -439,7 +439,7 @@ async function deleteProvider(): Promise<void> {
               id="web-provider-use-proxy"
               disabled={savingEditor}
               checked={editorUseProxy}
-              onCheckedChange={(checked) => (editorUseProxy = checked)} />
+              onCheckedChange={(checked: boolean) => (editorUseProxy = checked)} />
           </Field.Field>
           {#if editorKind === 'local'}
             <Field.Set>
@@ -452,7 +452,7 @@ async function deleteProvider(): Promise<void> {
                       disabled={savingEditor}
                       checked={editorLocalEngines[engine.id].enabled}
                       aria-label={engine.label}
-                      onCheckedChange={(checked) => (editorLocalEngines[engine.id].enabled = checked)} />
+                      onCheckedChange={(checked: boolean) => (editorLocalEngines[engine.id].enabled = checked)} />
                   </div>
                 {/each}
               </div>
@@ -476,10 +476,7 @@ async function deleteProvider(): Promise<void> {
       </div>
       <Sheet.Footer class="route-overlay-footer">
         <Sheet.Close type="button" class={buttonVariants({ variant: 'outline' })}>{m.common_cancel()}</Sheet.Close>
-        <Button
-          type="submit"
-          aria-busy={savingEditor}
-          disabled={savingEditor}>
+        <Button type="submit" aria-busy={savingEditor} disabled={savingEditor}>
           {#if savingEditor}<Spinner data-icon="inline-start" />{/if}{m.web_access_configuration_save_service()}
         </Button>
       </Sheet.Footer>

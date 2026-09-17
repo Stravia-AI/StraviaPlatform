@@ -27,6 +27,7 @@ interface Props {
 
 let { provider, onSaved }: Props = $props()
 const initialProvider = untrack(() => provider)
+const emptyVendorOptions: Record<string, boolean> = {}
 const queryClient = useQueryClient()
 let form = $state({
   name: initialProvider.name,
@@ -36,7 +37,7 @@ let form = $state({
   apiKey: '',
   useProxy: initialProvider.use_proxy,
   modelsSource: initialProvider.models_source ?? '',
-  vendorOptions: {} as Record<string, boolean>,
+  vendorOptions: { ...emptyVendorOptions },
 })
 let saving = $state(false)
 let testing = $state(false)
@@ -47,10 +48,7 @@ let oauthAuthorization = $state<{ consume: () => void; updateProxy: (useProxy: b
 const custom = $derived(!provider.preset_key)
 const oauthProvider = $derived(provider.auth_mode === 'oauth')
 
-const vendorMetadataQuery = createQuery(() => ({
-  queryKey: ['vendor-metadata'],
-  queryFn: admin.providers.vendors,
-}))
+const vendorMetadataQuery = createQuery(() => ({ queryKey: ['vendor-metadata'], queryFn: admin.providers.vendors }))
 const vendorId = $derived(provider.vendor ?? provider.preset_key ?? '')
 const optionFields = $derived<VendorOptionField[]>(
   vendorMetadataQuery.data?.find((vendor) => vendor.id === vendorId)?.optionFields ?? [],
@@ -58,14 +56,11 @@ const optionFields = $derived<VendorOptionField[]>(
 // 初始值只取一次:未存储的 key 落到 vendor 声明的默认值,保存时全量提交。
 const initialVendorOptions = $derived.by(() => {
   const stored = initialProvider.vendor_options
-  const storedOptions =
-    stored && typeof stored === 'object' && !Array.isArray(stored)
-      ? (stored as Record<string, unknown>)
-      : {}
+  const storedOptions = stored && typeof stored === 'object' && !Array.isArray(stored) ? stored : {}
   return Object.fromEntries(
     optionFields.map((field) => [
       field.key,
-      typeof storedOptions[field.key] === 'boolean' ? (storedOptions[field.key] as boolean) : field.defaultOn,
+      typeof storedOptions[field.key] === 'boolean' ? storedOptions[field.key] : field.defaultOn,
     ]),
   ) as Record<string, boolean>
 })
@@ -101,11 +96,7 @@ async function save(): Promise<void> {
     use_proxy: form.useProxy,
     api_key: oauthProvider ? undefined : form.apiKey.trim() || undefined,
     ...(optionFields.length > 0
-      ? {
-          vendor_options: Object.fromEntries(
-            optionFields.map((field) => [field.key, optionValue(field)]),
-          ),
-        }
+      ? { vendor_options: Object.fromEntries(optionFields.map((field) => [field.key, optionValue(field)])) }
       : {}),
     ...(custom
       ? {
@@ -203,7 +194,7 @@ async function save(): Promise<void> {
           driver={provider.channel ?? provider.preset_key ?? provider.vendor ?? ''}
           useProxy={form.useProxy}
           mode="reconnect"
-          onStateChange={(sessionId, ready) => {
+          onStateChange={(sessionId: string | undefined, ready: boolean) => {
             oauthSessionId = sessionId
             oauthReady = ready
           }} />
@@ -246,7 +237,7 @@ async function save(): Promise<void> {
       <Switch
         id="provider-use-proxy"
         checked={form.useProxy}
-        onCheckedChange={(checked) => {
+        onCheckedChange={(checked: boolean) => {
           form.useProxy = checked
           void oauthAuthorization?.updateProxy(checked)
         }} />
@@ -262,7 +253,7 @@ async function save(): Promise<void> {
         <Switch
           id={`provider-option-${field.key}`}
           checked={optionValue(field)}
-          onCheckedChange={(checked) => {
+          onCheckedChange={(checked: boolean) => {
             form.vendorOptions[field.key] = checked
           }} />
       </Field.Field>

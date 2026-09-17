@@ -4,7 +4,7 @@ import { renderSnippet } from '@tanstack/svelte-table'
 import { formatDuration, formatLogTime } from '$lib/format'
 import { getDataTableLabels } from '$lib/data-table-labels'
 import type { FailedRequestSummary } from '$lib/types'
-import { DataTable, createDataTableColumnHelper } from '$lib/components/ui/data-table'
+import { DataTable, createDataTableColumnHelper, type DataTableRowPointerEvent } from '$lib/components/ui/data-table'
 
 let {
   items,
@@ -60,7 +60,7 @@ const columns = helper.columns([
     header: () => m.failed_request_duration(),
     size: 100,
     enableSorting: false,
-    cell: (context) => (context.getValue() == null ? '—' : formatDuration(context.getValue()!)),
+    cell: (context) => (context.getValue() == null ? '—' : formatDuration(Number(context.getValue()))),
     meta: { align: 'end', cellClass: 'font-technical text-xs tabular-nums' },
   }),
 ])
@@ -94,8 +94,8 @@ const columns = helper.columns([
   {labels}
   {loading}
   ariaLabel={m.observation_failed_requests()}
-  getRowId={(row) => `${row.kind}:${row.id}`}
+  getRowId={(row: FailedRequestSummary) => `${row.kind}:${row.id}`}
   class="isolate min-h-0 flex-1"
   scrollHeight="100%"
   stickyHeader
-  onRowClick={({ row }) => onselect(row.original)} />
+  onRowClick={({ row }: DataTableRowPointerEvent<FailedRequestSummary>) => onselect(row.original)} />

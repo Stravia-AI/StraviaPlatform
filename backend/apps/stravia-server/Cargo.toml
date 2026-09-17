@@ -6,6 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 description = "Stravia Agent infra — Standalone Server Binary"
 
+[lints]
+workspace = true
+
 [features]
 default = ["embed-webui"]
 embed-webui = ["dep:rust-embed"]

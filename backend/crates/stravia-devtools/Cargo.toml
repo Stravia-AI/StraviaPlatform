@@ -6,6 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 description = "CLI suite for Stravia development and E2E testing — real LLM recording, offline byte-stream replay, and schema export"
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "stravia-tools"
 path = "src/main.rs"

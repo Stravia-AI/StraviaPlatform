@@ -7,6 +7,9 @@ license = "CC0-1.0 AND MIT"
 description = "Web Access adapter implementations for Local, Exa, and Zhipu providers"
 publish = false
 
+[lints]
+workspace = true
+
 [dependencies]
 stravia-web-access-contract = { workspace = true }
 ammonia = { workspace = true }

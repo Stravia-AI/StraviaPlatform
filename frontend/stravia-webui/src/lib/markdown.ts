@@ -2,13 +2,7 @@ import { marked, Renderer } from 'marked'
 
 const MARKED_OPTIONS = { async: false, gfm: true, breaks: true } as const
 
-const HTML_ESCAPE: Record<string, string> = {
-  '&': '&amp;',
-  '<': '&lt;',
-  '>': '&gt;',
-  '"': '&quot;',
-  "'": '&#39;',
-}
+const HTML_ESCAPE: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }
 
 export const MARKDOWN_SANITIZE = {
   ALLOWED_TAGS: [

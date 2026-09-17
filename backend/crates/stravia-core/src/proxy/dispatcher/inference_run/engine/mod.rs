@@ -27,9 +27,7 @@ use self::delivery::{
 };
 use self::errors::*;
 pub(super) use self::errors::{error_response, hook_failure_response};
-use self::followup::{
-    FollowupLeg, FollowupModelTurn, acquire_followup_model_turn,
-};
+use self::followup::{FollowupLeg, FollowupModelTurn, acquire_followup_model_turn};
 use self::projection::*;
 use self::util::{client_session_id, forwarded_client_headers};
 use super::{Phase, PhaseTracker, RunInput};
@@ -914,7 +912,9 @@ pub(super) async fn orchestrate(
             }
             lifecycle.spawn(async move {
                 for reference in references {
-                    let _ = store.wait_terminal(&principal, &reference).await;
+                    if let Err(error) = store.wait_terminal(&principal, &reference).await {
+                        tracing::debug!(%reference, %error, "background execution wait failed");
+                    }
                 }
                 drop(background_admission);
             });

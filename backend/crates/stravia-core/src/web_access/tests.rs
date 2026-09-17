@@ -220,7 +220,7 @@ struct FakeSearchProvider {
 
 struct FakeAdapterFactory {
     adapters: std::collections::HashMap<String, Arc<dyn WebProviderAdapter>>,
-    outbounds: std::sync::Mutex<Vec<(String, stravia_web_access::OutboundProxyMode)>>,
+    outbounds: parking_lot::Mutex<Vec<(String, stravia_web_access::OutboundProxyMode)>>,
 }
 
 impl AdapterFactory for FakeAdapterFactory {
@@ -229,10 +229,7 @@ impl AdapterFactory for FakeAdapterFactory {
         provider: &WebProvider,
         outbound: stravia_web_access::OutboundProxyMode,
     ) -> Result<Arc<dyn WebProviderAdapter>, WebAccessError> {
-        self.outbounds
-            .lock()
-            .expect("outbounds lock")
-            .push((provider.id.clone(), outbound));
+        self.outbounds.lock().push((provider.id.clone(), outbound));
         self.adapters.get(&provider.id).cloned().ok_or_else(|| {
             WebAccessError::from_code(
                 WebAccessErrorCode::Unavailable,
@@ -364,7 +361,7 @@ async fn configured_local_adapter_observes_proxy_snapshot_empty_success_and_fail
         ]
         .into_iter()
         .collect(),
-        outbounds: std::sync::Mutex::new(vec![]),
+        outbounds: parking_lot::Mutex::new(vec![]),
     });
     let old_service = WebAccessService::with_adapter_factory(gateway.clone(), old_factory.clone());
     assert_eq!(
@@ -396,11 +393,7 @@ async fn configured_local_adapter_observes_proxy_snapshot_empty_success_and_fail
         .expect("Exa rescues Local hard failure");
     assert_eq!(rescued.results[0].url, "https://docs.rs/");
     assert_eq!(
-        old_factory
-            .outbounds
-            .lock()
-            .expect("outbounds lock")
-            .as_slice(),
+        old_factory.outbounds.lock().as_slice(),
         [
             (
                 local.id.clone(),
@@ -442,7 +435,7 @@ async fn configured_local_adapter_observes_proxy_snapshot_empty_success_and_fail
         ]
         .into_iter()
         .collect(),
-        outbounds: std::sync::Mutex::new(vec![]),
+        outbounds: parking_lot::Mutex::new(vec![]),
     });
     let new_service = WebAccessService::with_adapter_factory(gateway, new_factory.clone());
     new_service
@@ -471,7 +464,7 @@ async fn configured_local_adapter_observes_proxy_snapshot_empty_success_and_fail
         0
     );
     assert_eq!(
-        new_factory.outbounds.lock().expect("outbounds lock")[0],
+        new_factory.outbounds.lock()[0],
         (
             local.id,
             stravia_web_access::OutboundProxyMode::Explicit("http://new-proxy.example:8080".into()),
@@ -764,7 +757,7 @@ async fn legacy_switch_does_not_block_snapshots_and_source_changes_preserve_acti
 struct FakeFetchProvider {
     fail_url: Option<String>,
     content_characters: usize,
-    calls: std::sync::Mutex<Vec<Vec<String>>>,
+    calls: parking_lot::Mutex<Vec<Vec<String>>>,
 }
 
 #[async_trait::async_trait]
@@ -788,10 +781,7 @@ impl WebProviderAdapter for FakeFetchProvider {
         &self,
         request: &FetchRequest,
     ) -> Result<AdapterSuccess<Vec<FetchResult>>, ProviderFailure> {
-        self.calls
-            .lock()
-            .expect("calls lock")
-            .push(request.urls.clone());
+        self.calls.lock().push(request.urls.clone());
         Ok(AdapterSuccess::new(
             request
                 .urls
@@ -835,12 +825,12 @@ async fn fetch_retries_only_failed_urls_and_preserves_input_order() {
     let first = Arc::new(FakeFetchProvider {
         fail_url: Some("https://8.8.8.8/b".into()),
         content_characters: 7,
-        calls: std::sync::Mutex::new(vec![]),
+        calls: parking_lot::Mutex::new(vec![]),
     });
     let second = Arc::new(FakeFetchProvider {
         fail_url: None,
         content_characters: 7,
-        calls: std::sync::Mutex::new(vec![]),
+        calls: parking_lot::Mutex::new(vec![]),
     });
     let engine = WebAccessEngine::new(vec![], vec![first.clone(), second.clone()]);
 
@@ -861,7 +851,7 @@ async fn fetch_retries_only_failed_urls_and_preserves_input_order() {
         ["https://8.8.8.8/a", "https://8.8.8.8/b"]
     );
     assert_eq!(
-        second.calls.lock().expect("calls lock").as_slice(),
+        second.calls.lock().as_slice(),
         &[vec!["https://8.8.8.8/b".to_string()]]
     );
 }
@@ -918,12 +908,12 @@ async fn configured_local_fetch_retries_only_failed_urls_on_zhipu() {
     let local_fetch = Arc::new(FakeFetchProvider {
         fail_url: Some("https://8.8.8.8/b".into()),
         content_characters: 7,
-        calls: std::sync::Mutex::new(vec![]),
+        calls: parking_lot::Mutex::new(vec![]),
     });
     let zhipu_fetch = Arc::new(FakeFetchProvider {
         fail_url: None,
         content_characters: 7,
-        calls: std::sync::Mutex::new(vec![]),
+        calls: parking_lot::Mutex::new(vec![]),
     });
     let factory = Arc::new(FakeAdapterFactory {
         adapters: [
@@ -932,7 +922,7 @@ async fn configured_local_fetch_retries_only_failed_urls_on_zhipu() {
         ]
         .into_iter()
         .collect(),
-        outbounds: std::sync::Mutex::new(vec![]),
+        outbounds: parking_lot::Mutex::new(vec![]),
     });
     let service = WebAccessService::with_adapter_factory(gateway, factory);
     assert_eq!(
@@ -966,7 +956,7 @@ async fn configured_local_fetch_retries_only_failed_urls_on_zhipu() {
         ["https://8.8.8.8/a", "https://8.8.8.8/b"]
     );
     assert_eq!(
-        zhipu_fetch.calls.lock().expect("calls lock").as_slice(),
+        zhipu_fetch.calls.lock().as_slice(),
         &[vec!["https://8.8.8.8/b".to_string()]]
     );
 }
@@ -976,7 +966,7 @@ async fn fetch_read_budget_preserves_content_above_the_default_batch_ceiling() {
     let provider = Arc::new(FakeFetchProvider {
         fail_url: None,
         content_characters: 120_000,
-        calls: std::sync::Mutex::new(vec![]),
+        calls: parking_lot::Mutex::new(vec![]),
     });
     let response = WebAccessEngine::new(vec![], vec![provider])
         .fetch(FetchRequest {
@@ -997,7 +987,7 @@ async fn fetch_applies_a_fair_total_limit_and_marks_all_failures() {
     let large = Arc::new(FakeFetchProvider {
         fail_url: None,
         content_characters: 30_000,
-        calls: std::sync::Mutex::new(vec![]),
+        calls: parking_lot::Mutex::new(vec![]),
     });
     let engine = WebAccessEngine::new(vec![], vec![large]);
     let response = engine
@@ -1020,12 +1010,12 @@ async fn fetch_applies_a_fair_total_limit_and_marks_all_failures() {
     let first = Arc::new(FakeFetchProvider {
         fail_url: Some("https://8.8.8.8/failed".into()),
         content_characters: 7,
-        calls: std::sync::Mutex::new(vec![]),
+        calls: parking_lot::Mutex::new(vec![]),
     });
     let second = Arc::new(FakeFetchProvider {
         fail_url: Some("https://8.8.8.8/failed".into()),
         content_characters: 7,
-        calls: std::sync::Mutex::new(vec![]),
+        calls: parking_lot::Mutex::new(vec![]),
     });
     let response = WebAccessEngine::new(vec![], vec![first, second])
         .fetch(FetchRequest {

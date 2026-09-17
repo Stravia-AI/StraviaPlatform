@@ -59,7 +59,7 @@ export const config: WebdriverIO.Config = {
         return
       } catch (error) {
         if (attempt >= 20) {
-          console.warn(`stravia-desktop-e2e: 无法清理临时目录 ${runRoot}: ${error}`)
+          console.warn(`stravia-desktop-e2e: 无法清理临时目录 ${runRoot}: ${String(error)}`)
           return
         }
         const { promise: sleep, resolve: finishSleep } = Promise.withResolvers<void>()

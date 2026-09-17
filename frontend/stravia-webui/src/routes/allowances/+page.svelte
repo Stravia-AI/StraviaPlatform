@@ -201,7 +201,8 @@ const emptyWindows = $derived.by(() =>
     .filter(({ allowance }) => effectiveAllowanceCondition(allowance) === 'exhausted')
     .sort(
       (left, right) =>
-        (left.allowance.reset_at ?? Number.POSITIVE_INFINITY) - (right.allowance.reset_at ?? Number.POSITIVE_INFINITY) ||
+        (left.allowance.reset_at ?? Number.POSITIVE_INFINITY) -
+          (right.allowance.reset_at ?? Number.POSITIVE_INFINITY) ||
         collator.compare(left.snapshot.provider_name, right.snapshot.provider_name) ||
         collator.compare(allowanceLabel(left.allowance), allowanceLabel(right.allowance)),
     ),

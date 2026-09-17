@@ -1,5 +1,5 @@
+use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
 const DEFAULT_FAILURE_THRESHOLD: u32 = 3;
@@ -32,7 +32,7 @@ impl HealthRegistry {
     }
 
     pub fn is_healthy(&self, target_key: &str) -> bool {
-        let states = self.states.read().unwrap();
+        let states = self.states.read();
         match states.get(target_key) {
             None => true,
             Some(state) => {
@@ -48,14 +48,14 @@ impl HealthRegistry {
     }
 
     pub fn record_success(&self, target_key: &str) {
-        let mut states = self.states.write().unwrap();
+        let mut states = self.states.write();
         if let Some(state) = states.get_mut(target_key) {
             state.consecutive_failures = 0;
         }
     }
 
     pub fn record_failure(&self, target_key: &str) {
-        let mut states = self.states.write().unwrap();
+        let mut states = self.states.write();
         let entry = states
             .entry(target_key.to_string())
             .or_insert(TargetHealth {

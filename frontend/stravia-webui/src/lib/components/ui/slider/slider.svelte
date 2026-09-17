@@ -47,7 +47,9 @@ let {
       data-slot="slider-track"
       data-orientation={orientation}
       class="relative grow overflow-hidden rounded-full bg-input data-[orientation=horizontal]:h-1 data-[orientation=horizontal]:w-full data-[orientation=vertical]:h-full data-[orientation=vertical]:w-1">
-      <SliderPrimitive.Range data-slot="slider-range" class="absolute bg-primary select-none data-[orientation=horizontal]:h-full data-[orientation=vertical]:w-full" />
+      <SliderPrimitive.Range
+        data-slot="slider-range"
+        class="absolute bg-primary select-none data-[orientation=horizontal]:h-full data-[orientation=vertical]:w-full" />
     </span>
     {#each thumbItems as thumb (thumb.index)}
       <SliderPrimitive.Thumb

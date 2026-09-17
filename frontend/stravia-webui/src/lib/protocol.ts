@@ -42,7 +42,11 @@ export const PROTOCOL_TABLE: ProtocolMeta[] = [
   { id: 'bedrock-converse', displayName: 'Amazon Bedrock Converse', defaultBaseUrl: '' },
   { id: 'cohere-chat', displayName: 'Cohere Chat', defaultBaseUrl: 'https://api.cohere.com/v2' },
   { id: 'watsonx-text-chat', displayName: 'watsonx.ai Text Chat', defaultBaseUrl: 'https://us-south.ml.cloud.ibm.com' },
-  { id: 'gateway-language-model', displayName: 'Vercel AI Gateway Language Model', defaultBaseUrl: 'https://ai-gateway.vercel.sh/v4/ai' },
+  {
+    id: 'gateway-language-model',
+    displayName: 'Vercel AI Gateway Language Model',
+    defaultBaseUrl: 'https://ai-gateway.vercel.sh/v4/ai',
+  },
   { id: 'command-code', displayName: 'Command Code Generate', defaultBaseUrl: 'https://api.commandcode.ai' },
 ]
 

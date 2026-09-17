@@ -60,7 +60,7 @@ export function asDesktopPortOperationError(error: unknown): DesktopPortOperatio
   const candidate = error as Partial<DesktopPortOperationError>
   if (typeof candidate.code !== 'string' || typeof candidate.message !== 'string') return undefined
   return {
-    code: candidate.code as PortOperationErrorCode,
+    code: candidate.code,
     message: candidate.message,
     bindingFailure: candidate.bindingFailure ?? null,
     ownerLookup: candidate.ownerLookup ?? 'notApplicable',

@@ -64,14 +64,14 @@ async fn platform_tool_json_array_type_fields_remain_business_data() {
 async fn platform_tool_roundtrip(websocket: bool, array_output: bool, debug: bool) {
     use futures::StreamExt;
 
-    let requests = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+    let requests = Arc::new(parking_lot::Mutex::new(Vec::<serde_json::Value>::new()));
     let captured = Arc::clone(&requests);
     let provider = Router::new().route(
         "/v1/chat/completions",
         axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
             let captured = Arc::clone(&captured);
             async move {
-                let mut requests = captured.lock().unwrap();
+                let mut requests = captured.lock();
                 requests.push(body.clone());
                 let mut response = if !body["messages"].as_array().unwrap().iter()
                     .any(|message| message["role"] == "tool") {
@@ -292,7 +292,7 @@ async fn platform_tool_roundtrip(websocket: bool, array_output: bool, debug: boo
         assert_eq!(configured["api_key"], TOOL_SECRET);
         assert_eq!(configured["configured"], true);
     }
-    let request_snapshot = requests.lock().unwrap().clone();
+    let request_snapshot = requests.lock().clone();
     assert_eq!(request_snapshot.len(), 2);
     for request in &request_snapshot {
         let wire = request.to_string();
@@ -312,9 +312,10 @@ async fn platform_tool_roundtrip(websocket: bool, array_output: bool, debug: boo
     let interaction_id = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         while let Some(update) = observations.next().await {
             if let crate::interaction_observation::ObservationUpdate::Event(event) = update
-                && event.kind == "run_finished" {
-                    return event.interaction_id.expect("finished interaction");
-                }
+                && event.kind == "run_finished"
+            {
+                return event.interaction_id.expect("finished interaction");
+            }
         }
         panic!("observation stream ended before the run finished");
     })
@@ -427,7 +428,7 @@ async fn platform_tool_roundtrip(websocket: bool, array_output: bool, debug: boo
         let status = resumed.status();
         let resumed: serde_json::Value = resumed.json().await.unwrap();
         assert_eq!(status, StatusCode::OK, "{resumed}");
-        let wire = requests.lock().unwrap().last().unwrap().to_string();
+        let wire = requests.lock().last().unwrap().to_string();
         assert!(!wire.contains(SECRET) && !wire.contains(TOOL_SECRET));
 
         fn remove_payload_kinds(value: &mut serde_json::Value) {
@@ -474,7 +475,7 @@ async fn platform_tool_roundtrip(websocket: bool, array_output: bool, debug: boo
                     .unwrap();
             }
         }
-        let requests_before = requests.lock().unwrap().len();
+        let requests_before = requests.lock().len();
         let rejected = client
             .post(format!("{gateway_url}/v1/responses"))
             .headers(headers.clone())
@@ -483,7 +484,7 @@ async fn platform_tool_roundtrip(websocket: bool, array_output: bool, debug: boo
             .await
             .unwrap();
         assert_eq!(rejected.status(), StatusCode::BAD_GATEWAY);
-        assert_eq!(requests.lock().unwrap().len(), requests_before);
+        assert_eq!(requests.lock().len(), requests_before);
         gateway
             .admin()
             .set_setting(stravia_credential_protection::SETTING_KEY, "false")
@@ -499,7 +500,7 @@ async fn platform_tool_roundtrip(websocket: bool, array_output: bool, debug: boo
         let status = unprotected.status();
         let unprotected: serde_json::Value = unprotected.json().await.unwrap();
         assert_eq!(status, StatusCode::OK, "{unprotected}");
-        assert_eq!(requests.lock().unwrap().len(), requests_before + 1);
+        assert_eq!(requests.lock().len(), requests_before + 1);
     }
     if !websocket && !array_output {
         let first_wire = request_snapshot[0].to_string();
@@ -537,7 +538,6 @@ async fn platform_tool_roundtrip(websocket: bool, array_output: bool, debug: boo
             assert!(
                 requests
                     .lock()
-                    .unwrap()
                     .last()
                     .unwrap()
                     .to_string()
@@ -631,7 +631,7 @@ async fn redaction_continuation_reuses_only_equal_provider_visible_history() {
         let body: serde_json::Value = response.json().await.unwrap();
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["content"][0]["text"], "second answer");
-        let requests = captured.lock().unwrap().clone();
+        let requests = captured.lock().clone();
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0].to_string().contains(SECRET), !first_enabled);
         if reusable {

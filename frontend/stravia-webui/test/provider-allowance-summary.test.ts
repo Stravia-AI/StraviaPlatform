@@ -12,13 +12,7 @@ import {
 import type { Allowance } from '../src/lib/types'
 
 function allowance(overrides: Partial<Allowance>): Allowance {
-  return {
-    key: 'weekly',
-    label: 'Weekly',
-    kind: 'quota_window',
-    forecast: { status: 'unknown' },
-    ...overrides,
-  }
+  return { key: 'weekly', label: 'Weekly', kind: 'quota_window', forecast: { status: 'unknown' }, ...overrides }
 }
 
 describe('allowance forecast presentation', () => {
