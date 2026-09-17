@@ -188,6 +188,7 @@ mod tests {
     use stravia_runtime_contract::protocol::ir::AiRequest;
 
     async fn fixture() -> (
+        tempfile::TempDir,
         ClientProjectionSession,
         RunLedger,
         RunObserver,
@@ -259,7 +260,7 @@ mod tests {
             ),
             crate::model_turn::CompactionPublications::default(),
         );
-        (session, ledger, observer, gateway)
+        (directory, session, ledger, observer, gateway)
     }
 
     fn staged_platform_batch(
@@ -284,7 +285,7 @@ mod tests {
 
     #[tokio::test]
     async fn settle_publishes_staged_markers_then_commits_and_stages() {
-        let (mut session, ledger, observer, gateway) = fixture().await;
+        let (_directory, mut session, ledger, observer, gateway) = fixture().await;
         let principal = ledger.terminal.principal.clone();
         let marker = gateway
             .history_markers
@@ -345,7 +346,7 @@ mod tests {
 
     #[tokio::test]
     async fn settle_enumerates_failures_and_still_runs_later_steps() {
-        let (mut session, ledger, observer, gateway) = fixture().await;
+        let (_directory, mut session, ledger, observer, gateway) = fixture().await;
         // A Marker that was never persisted makes publication fail.
         let batch = staged_platform_batch(&mut session, "abcdefghijklmnopqrstuvwxyzab");
         // A write that was never staged makes the commit persist fail.

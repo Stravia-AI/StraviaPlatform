@@ -47,16 +47,17 @@ async function stubStats(page: Page): Promise<void> {
 }
 
 // 粒度跟随范围选择器：6h→15 分钟，24h→1 小时，3 天→6 小时，7 天→1 天。
+// 期望格数为补齐后的完整矩形（父周期列 × 子序号行）：7×4、5×6、4×4、2×7。
 test('token activity grid granularity follows the range selector', async ({ page }) => {
   await prepareApp(page)
   await stubStats(page)
   await page.setViewportSize({ width: 1280, height: 900 })
 
   const ranges = [
-    { value: '6', label: 'Last 6h', expectedCells: 25 },
-    { value: '24', label: 'Last 24h', expectedCells: 25 },
-    { value: '72', label: 'Last 3d', expectedCells: 13 },
-    { value: '168', label: 'Last 7d', expectedCells: 8 },
+    { value: '6', label: 'Last 6h', expectedCells: 28 },
+    { value: '24', label: 'Last 24h', expectedCells: 30 },
+    { value: '72', label: 'Last 3d', expectedCells: 16 },
+    { value: '168', label: 'Last 7d', expectedCells: 14 },
   ]
   for (const range of ranges) {
     await page.goto('/stats')

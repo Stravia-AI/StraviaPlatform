@@ -472,13 +472,14 @@ test('Model Route editor derives thinking levels and identifies blocking destina
   await expect(enabledSwitch).not.toBeChecked()
 
   await page.setViewportSize({ width: 1568, height: 900 })
+  const clientModel = page.getByRole('region', { name: 'Client model', exact: true })
   const [nameLabelBox, nameInputBox, displayLabelBox, displayInputBox, balanceLabelBox, balanceTriggerBox] =
     await Promise.all([
-      page.getByText('Model ID', { exact: true }).boundingBox(),
+      clientModel.getByText('Model ID', { exact: true }).boundingBox(),
       page.locator('#route-model-id').boundingBox(),
-      page.getByText('Display name', { exact: true }).boundingBox(),
+      clientModel.getByText('Display name', { exact: true }).boundingBox(),
       page.locator('#route-display-name').boundingBox(),
-      page.getByText('How requests are sent', { exact: true }).boundingBox(),
+      clientModel.getByText('How requests are sent', { exact: true }).boundingBox(),
       page.locator('#route-balance').boundingBox(),
     ])
   expect(nameLabelBox).not.toBeNull()

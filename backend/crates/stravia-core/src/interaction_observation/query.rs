@@ -536,6 +536,9 @@ impl ObservationStore {
         id: &str,
         filters: ForestQuery,
     ) -> anyhow::Result<Option<InteractionDetail>> {
+        // 与 interaction 行相同：run 行必须在快照序列之前读取，否则 finish_run
+        // 在快照与行读取之间提交时，行状态已见的 run_finished 会被事件分页截掉。
+        let runs = self.runs(id).await?;
         let Some(snapshot) = self.get_interaction_summary(id, filters).await? else {
             return Ok(None);
         };
@@ -543,7 +546,7 @@ impl ObservationStore {
         let (events, older_events_cursor) = self
             .event_page(id, &InteractionEventsQuery::default(), snapshot_sequence)
             .await?;
-        let runs = self.run_details(id, events).await?;
+        let runs = self.run_details(runs, events).await?;
         Ok(Some(InteractionDetail {
             interaction: snapshot.interaction,
             root: snapshot.root,
@@ -555,7 +558,7 @@ impl ObservationStore {
 
     async fn run_details(
         &self,
-        id: &str,
+        runs: Vec<RunRow>,
         events: Vec<ObservationEvent>,
     ) -> anyhow::Result<Vec<RunDetail>> {
         let mut by_run = std::collections::HashMap::<String, Vec<ObservationEvent>>::new();
@@ -564,7 +567,6 @@ impl ObservationStore {
                 by_run.entry(run_id.clone()).or_default().push(event);
             }
         }
-        let runs = self.runs(id).await?;
         let mut details = Vec::with_capacity(runs.len());
         for run in runs {
             let trace = self.manifest_for_run(&run.id).await?;
@@ -604,6 +606,8 @@ impl ObservationStore {
         id: &str,
         query: InteractionEventsQuery,
     ) -> anyhow::Result<Option<InteractionEventsPage>> {
+        // 快照前读取 run 行：through_sequence 缺省时快照上界必须不早于行状态已见的终态事件。
+        let runs = self.runs(id).await?;
         let current_sequence = self.max_sequence().await?;
         let snapshot_sequence = query.through_sequence.unwrap_or(current_sequence);
         anyhow::ensure!(
@@ -628,7 +632,7 @@ impl ObservationStore {
         }
         let (events, next_cursor) = self.event_page(id, &query, snapshot_sequence).await?;
         Ok(Some(InteractionEventsPage {
-            runs: self.run_details(id, events).await?,
+            runs: self.run_details(runs, events).await?,
             snapshot_sequence,
             next_cursor,
         }))
@@ -700,6 +704,8 @@ impl ObservationStore {
         id: &str,
         through: i64,
     ) -> anyhow::Result<Option<InteractionDetail>> {
+        // 与 get_interaction 相同：run 行先于快照读取，避免终态事件被分页截掉。
+        let runs = self.runs(id).await?;
         let Some(snapshot) = self
             .get_interaction_summary(id, ForestQuery::default())
             .await?
@@ -725,7 +731,7 @@ impl ObservationStore {
         Ok(Some(InteractionDetail {
             interaction: snapshot.interaction,
             root: snapshot.root,
-            runs: self.run_details(id, events).await?,
+            runs: self.run_details(runs, events).await?,
             snapshot_sequence,
             older_events_cursor: None,
         }))

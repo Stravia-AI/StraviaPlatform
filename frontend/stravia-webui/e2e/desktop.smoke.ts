@@ -260,7 +260,7 @@ describe('Stravia desktop smoke', () => {
     await expect($('button=Cancel')).not.toExist()
     await expect($('[data-slot="dialog-title"]')).toHaveText('Install Stravia 9.9.9?')
     await expect($('[data-slot="dialog-description"]')).toHaveText(
-      'Stravia will exit now. Any Gateway requests in progress will be interrupted.',
+      'Stravia will exit now. Any requests in progress will be interrupted.',
     )
     await (await $('[data-slot="dialog-content"]')).$('button=Close').click()
     await expect($('[data-slot="dialog-title"]')).not.toExist()
