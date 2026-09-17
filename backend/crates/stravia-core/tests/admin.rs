@@ -665,7 +665,33 @@ async fn custom_provider_sync_applies_unique_canonical_templates() -> anyhow::Re
         unknown.metadata.name.as_deref(),
         Some("unknown-local-model")
     );
-    assert!(unknown.metadata.limit.is_none());
+    // 未匹配模型登记占位默认:text→text、256K 上下文、推理与工具调用。
+    assert_eq!(
+        unknown
+            .metadata
+            .limit
+            .as_ref()
+            .and_then(|limit| limit.context),
+        Some(256 * 1024)
+    );
+    assert_eq!(unknown.metadata.tool_call, Some(true));
+    assert_eq!(unknown.metadata.reasoning, Some(true));
+    assert_eq!(
+        unknown
+            .metadata
+            .modalities
+            .as_ref()
+            .map(|modalities| modalities.input.as_slice()),
+        Some(["text".to_string()].as_slice())
+    );
+    assert_eq!(
+        unknown
+            .metadata
+            .modalities
+            .as_ref()
+            .map(|modalities| modalities.output.as_slice()),
+        Some(["text".to_string()].as_slice())
+    );
     Ok(())
 }
 
@@ -677,7 +703,7 @@ async fn custom_provider_resync_fills_bare_discovered_canonical_templates() -> a
         let (mut socket, _) = listener.accept().await?;
         let mut request = [0_u8; 4096];
         let _ = socket.read(&mut request).await?;
-        let body = r#"{"data":[{"id":"glm-5.1"}]}"#;
+        let body = r#"{"data":[{"id":"glm-5.1"},{"id":"legacy-unmatched"}]}"#;
         let response = format!(
             "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
             body.len()
@@ -718,6 +744,22 @@ async fn custom_provider_resync_fills_bare_discovered_canonical_templates() -> a
             metadata: ProviderModelMetadata::bare("glm-5.1"),
         })
         .await?;
+    gw.storage
+        .provider_models()
+        .create(NewProviderModelRecord {
+            provider_id: provider.id.clone(),
+            model_id: "legacy-unmatched".to_string(),
+            source_kind: ProviderModelSourceKind::Discovered,
+            metadata_source_provider_id: None,
+            presence: ProviderModelPresence::Present,
+            selection_policy: ProviderModelSelectionPolicy::Auto,
+            metadata: ProviderModelMetadata {
+                id: Some("legacy-unmatched".to_string()),
+                name: Some("legacy-unmatched".to_string()),
+                ..ProviderModelMetadata::default()
+            },
+        })
+        .await?;
 
     let listed = gw
         .admin()
@@ -743,6 +785,22 @@ async fn custom_provider_resync_fills_bare_discovered_canonical_templates() -> a
         Some(200_000)
     );
     assert!(!filled.metadata.lacks_registered_specification());
+
+    // 历史空快照(仅 id/name)在同步时升级到 bare() 占位默认。
+    let upgraded = gw
+        .admin()
+        .get_provider_model(&provider.id, "legacy-unmatched")
+        .await?;
+    assert_eq!(
+        upgraded
+            .metadata
+            .limit
+            .as_ref()
+            .and_then(|limit| limit.context),
+        Some(256 * 1024)
+    );
+    assert_eq!(upgraded.metadata.tool_call, Some(true));
+    assert_eq!(upgraded.metadata.reasoning, Some(true));
     Ok(())
 }
 
