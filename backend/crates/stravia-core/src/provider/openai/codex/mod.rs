@@ -127,9 +127,10 @@ impl VendorExtension for OpenAiCodexChannel {
         // Codex HTTP 400s `service_tier: auto` (response echo / inherited).
         // Drop it before the routing hint so HTTP fallback matches WebSocket.
         if body.get("service_tier").and_then(serde_json::Value::as_str) == Some("auto")
-            && let Some(object) = body.as_object_mut() {
-                object.remove("service_tier");
-            }
+            && let Some(object) = body.as_object_mut()
+        {
+            object.remove("service_tier");
+        }
         // Newer Codex models are routed from this header even when the
         // WebSocket frame omits service_tier.
         headers.insert(

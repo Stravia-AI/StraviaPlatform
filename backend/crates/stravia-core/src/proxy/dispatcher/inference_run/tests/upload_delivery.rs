@@ -314,9 +314,10 @@ async fn finished_upload_interaction(
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         while let Some(update) = events.next().await {
             if let crate::interaction_observation::ObservationUpdate::Event(event) = update
-                && event.kind == "run_finished" {
-                    return event.interaction_id.unwrap();
-                }
+                && event.kind == "run_finished"
+            {
+                return event.interaction_id.unwrap();
+            }
         }
         panic!("observation stream ended before delivery completed");
     })

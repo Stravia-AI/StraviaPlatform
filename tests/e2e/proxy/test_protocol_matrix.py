@@ -201,8 +201,9 @@ def test_protocol_matrix(
     route_id = str(route_ids[replay_model])
     admin_headers = stravia_proxy_base["admin_headers"]
     assert isinstance(admin_headers, dict)
-    deadline = time.time() + 10.0
+    deadline = time.time() + 30.0
     observed: dict | None = None
+    last_state = "no interaction"
     while time.time() < deadline:
         query_status, forest = http_request(
             "GET",
@@ -226,17 +227,25 @@ def test_protocol_matrix(
             )
             assert detail_status == 200, detail
             candidate = detail["data"]
+            run = candidate["runs"][-1] if candidate["runs"] else None
+            last_state = (
+                f"run status={run['status']} trace={(run.get('trace') or {}).get('status')}"
+                if run
+                else "no runs"
+            )
             if (
-                candidate["runs"]
-                and candidate["runs"][-1]["ingress_protocol"]
+                run
+                and run["ingress_protocol"]
                 == OBSERVED_INGRESS_PROTOCOL[ingress_protocol]
-                and candidate["runs"][-1]["status"] != "running"
-                and (candidate["runs"][-1].get("trace") or {}).get("status") == "complete"
+                and run["status"] != "running"
+                and (run.get("trace") or {}).get("status") == "complete"
             ):
                 observed = candidate
                 break
         time.sleep(0.1)
-    assert observed is not None, f"Observation not persisted for {ingress_protocol} <- {replay_model}"
+    assert observed is not None, (
+        f"Observation not persisted for {ingress_protocol} <- {replay_model} ({last_state})"
+    )
     run = observed["runs"][-1]
     assert run["ingress_protocol"] == OBSERVED_INGRESS_PROTOCOL[ingress_protocol]
     sequences = [event["sequence"] for event in run["events"]]

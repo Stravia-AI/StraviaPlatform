@@ -99,7 +99,9 @@ struct WriterContext<'a> {
     trace_sequence: &'a AtomicI64,
 }
 
-pub(super) fn spawn(deps: WriterDeps) -> (mpsc::Sender<WriterCommand>, tokio::task::JoinHandle<()>) {
+pub(super) fn spawn(
+    deps: WriterDeps,
+) -> (mpsc::Sender<WriterCommand>, tokio::task::JoinHandle<()>) {
     let WriterDeps {
         store,
         retention_days,
@@ -292,30 +294,25 @@ pub(super) fn spawn(deps: WriterDeps) -> (mpsc::Sender<WriterCommand>, tokio::ta
                     let expiry = expires(at, retention_days.load(Ordering::Relaxed));
                     if completed {
                         if let Some(window) = window
-                            && let Some(interaction) = grouping.interaction_for_run(&run_id) {
-                                let pending = window.pending_tool_ids().unwrap_or_default();
-                                if let Some(hash) = window.last_hash_hex()
-                                    && let Err(error) = store
-                                        .persist_tail_source(
-                                            &run_id,
-                                            interaction,
-                                            &principal,
-                                            &hash,
-                                            &pending,
-                                            expiry,
-                                        )
-                                        .await
-                                    {
-                                        tracing::warn!(%run_id, %error, "tail source persistence failed");
-                                    }
-                                tail.insert(
-                                    run_id,
-                                    window,
-                                    expiry,
-                                    principal,
-                                    interaction.to_owned(),
-                                );
+                            && let Some(interaction) = grouping.interaction_for_run(&run_id)
+                        {
+                            let pending = window.pending_tool_ids().unwrap_or_default();
+                            if let Some(hash) = window.last_hash_hex()
+                                && let Err(error) = store
+                                    .persist_tail_source(
+                                        &run_id,
+                                        interaction,
+                                        &principal,
+                                        &hash,
+                                        &pending,
+                                        expiry,
+                                    )
+                                    .await
+                            {
+                                tracing::warn!(%run_id, %error, "tail source persistence failed");
                             }
+                            tail.insert(run_id, window, expiry, principal, interaction.to_owned());
+                        }
                         continue;
                     }
                     if attributed.contains(&run_id) {
@@ -622,14 +619,8 @@ pub(super) fn spawn(deps: WriterDeps) -> (mpsc::Sender<WriterCommand>, tokio::ta
                         }
                     }
                     if !sealed.is_empty() {
-                        persist_blocks(
-                            &context,
-                            &pending_text,
-                            &interaction,
-                            &run_id,
-                            sealed,
-                        )
-                        .await;
+                        persist_blocks(&context, &pending_text, &interaction, &run_id, sealed)
+                            .await;
                     }
                 }
                 Some(WriterCommand::Event { run_id, event }) => {
@@ -1349,9 +1340,10 @@ async fn discover_diagnostic(
         return (None, None);
     };
     if start.generation_parent_id.is_none()
-        && let Some(source) = current_tool_source(tail, store, start, input, now).await {
-            return (Some(source), None);
-        }
+        && let Some(source) = current_tool_source(tail, store, start, input, now).await
+    {
+        return (Some(source), None);
+    }
     let mut loaded = Vec::new();
     let mut seen = HashSet::new();
     for run in tail.fingerprint_runs(input, &start.principal) {

@@ -150,7 +150,7 @@ impl AiError {
             }
             return AiErrorKind::RateLimitError;
         }
-        
+
         match status {
             400 => AiErrorKind::InvalidRequest,
             401 => AiErrorKind::AuthenticationError,

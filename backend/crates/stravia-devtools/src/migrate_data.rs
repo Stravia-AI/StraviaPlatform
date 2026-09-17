@@ -668,9 +668,10 @@ fn private_dir(path: &Path) -> Result<()> {
         return Ok(());
     }
     if let Some(parent) = path.parent()
-        && !parent.exists() {
-            private_dir(parent)?;
-        }
+        && !parent.exists()
+    {
+        private_dir(parent)?;
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;

@@ -341,8 +341,7 @@ async fn open_responses_public_summaries_stream_before_late_encrypted_content() 
     .await
     .expect("public summary should stream before encrypted item.done");
     assert!(
-        prefix.contains(r#""delta":"live protected "#)
-            || prefix.contains("live protected"),
+        prefix.contains(r#""delta":"live protected "#) || prefix.contains("live protected"),
         "{prefix}"
     );
     assert!(

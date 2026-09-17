@@ -376,10 +376,9 @@ impl ResponsesStreamFormatter {
     /// a fresh reasoning item, matching how the IR itemizes non-adjacent
     /// thinking blocks.
     fn seal_reasoning_item(&mut self, events: &mut Vec<SseEvent>) {
-        let (Some(item_id), Some(output_index)) = (
-            self.reasoning_item_id.clone(),
-            self.reasoning_output_index,
-        ) else {
+        let (Some(item_id), Some(output_index)) =
+            (self.reasoning_item_id.clone(), self.reasoning_output_index)
+        else {
             return;
         };
         if !self.accumulated_reasoning.is_empty() {
@@ -1438,14 +1437,12 @@ impl ResponsesStreamFormatter {
                 }
                 AiStreamDelta::ThinkingSignature(signature) => {
                     if self.reasoning_item_id.is_none()
-                        && let Some(item) =
-                            self.sealed_reasoning_items.values_mut().next_back()
+                        && let Some(item) = self.sealed_reasoning_items.values_mut().next_back()
                     {
                         // The signature completes the thinking block it trails;
                         // that block's item already sealed, so keep it on the
                         // sealed item for the terminal snapshot.
-                        item["encrypted_content"] =
-                            serde_json::Value::String(signature.clone());
+                        item["encrypted_content"] = serde_json::Value::String(signature.clone());
                     } else {
                         self.reasoning_encrypted_content = Some(signature.clone());
                     }

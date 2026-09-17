@@ -97,10 +97,10 @@ impl ReadTool {
                     .handlers
                     .get(&domain)
                     .and_then(|tool| tool.description())
-                {
-                    text.push('\n');
-                    text.push_str(description);
-                }
+            {
+                text.push('\n');
+                text.push_str(description);
+            }
         }
         text
     }
@@ -178,10 +178,12 @@ impl ReadTool {
             raw["pagination"] = value;
             paginated = true;
         }
-        if paginated && result.metadata.contains_key("stravia_media")
-            && let Some(ContentBlock::Unknown { raw }) = result.content.first() {
-                result.metadata.insert("stravia_media".into(), raw.clone());
-            }
+        if paginated
+            && result.metadata.contains_key("stravia_media")
+            && let Some(ContentBlock::Unknown { raw }) = result.content.first()
+        {
+            result.metadata.insert("stravia_media".into(), raw.clone());
+        }
         Ok(result)
     }
 
@@ -588,9 +590,10 @@ impl ReadTool {
             }
             for block in &mut output.content {
                 if let ContentBlock::Unknown { raw } = block
-                    && let Some(result) = raw.as_object_mut() {
-                        result.insert("artifact_reference".into(), reference.clone());
-                    }
+                    && let Some(result) = raw.as_object_mut()
+                {
+                    result.insert("artifact_reference".into(), reference.clone());
+                }
             }
         }
         Ok(output)

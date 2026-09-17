@@ -63,7 +63,8 @@ pub(crate) async fn require_admin(
     mut request: Request,
     next: Next,
 ) -> Response {
-    if state.mode == AdminMode::Server && request.method() != Method::GET
+    if state.mode == AdminMode::Server
+        && request.method() != Method::GET
         && let Err(response) = validate_web_request(
             request
                 .extensions()
@@ -71,9 +72,10 @@ pub(crate) async fn require_admin(
                 .map(RequestOrigin::as_str),
             request.headers(),
             false,
-        ) {
-            return *response;
-        }
+        )
+    {
+        return *response;
+    }
 
     let token = match state.mode {
         AdminMode::Desktop => bearer_token(request.headers()),
@@ -314,7 +316,10 @@ pub(crate) fn validate_web_request(
     json_body: bool,
 ) -> Result<(), Box<Response>> {
     let Some(expected_origin) = expected_origin else {
-        return Err(Box::new(auth_error(StatusCode::FORBIDDEN, "origin_required")));
+        return Err(Box::new(auth_error(
+            StatusCode::FORBIDDEN,
+            "origin_required",
+        )));
     };
     let mut origins = headers.get_all(header::ORIGIN).iter();
     let origin = origins
@@ -322,7 +327,10 @@ pub(crate) fn validate_web_request(
         .and_then(|v| v.to_str().ok())
         .and_then(|value| canonical_origin(value).ok());
     if origins.next().is_some() || origin.as_deref() != Some(expected_origin) {
-        return Err(Box::new(auth_error(StatusCode::FORBIDDEN, "origin_mismatch")));
+        return Err(Box::new(auth_error(
+            StatusCode::FORBIDDEN,
+            "origin_mismatch",
+        )));
     }
     if headers.get(CSRF_HEADER).and_then(|v| v.to_str().ok()) != Some("1") {
         return Err(Box::new(auth_error(StatusCode::FORBIDDEN, "csrf_required")));

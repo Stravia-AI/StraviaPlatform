@@ -509,7 +509,7 @@ mod tests {
                 .join(format!("stravia-pipeline-test-{}", Uuid::new_v4())),
             ..Default::default()
         };
-        
+
         Gateway::new(config).await.expect("gateway init")
     }
 

@@ -143,7 +143,7 @@ impl LocalArtifactStore {
                 .await
                 .map_err(storage_error)?;
         }
-        
+
         async {
             // The caller already owns this existing temporary file. Open it
             // synchronously so a cancelled spawn-blocking create cannot recreate it.
@@ -213,39 +213,40 @@ impl LocalArtifactStore {
             None => ArtifactId::new(artifact_id),
         };
         if let Some((backend, endpoint, bucket, _)) = backend
-            && backend == "s3" {
-                let s3 = settings.s3.as_ref().ok_or_else(|| {
-                    ArtifactError::Storage("S3 credentials are not configured".into())
-                })?;
-                if endpoint.as_deref() != Some(s3.endpoint.as_str())
-                    || bucket.as_deref() != Some(s3.bucket.as_str())
-                {
-                    return Err(ArtifactError::Storage(
-                        "Artifact belongs to a different S3 endpoint or bucket".into(),
-                    ));
-                }
-                let url = self.s3_url(
-                    s3,
-                    &s3.endpoint,
-                    &id,
-                    "DELETE",
-                    Duration::from_secs(900),
-                    SystemTime::now(),
-                )?;
-                let response = Self::s3_client()?
-                    .delete(url)
-                    .send()
-                    .await
-                    .map_err(|_| ArtifactError::Storage("S3 delete transport failed".into()))?;
-                if !response.status().is_success()
-                    && response.status() != reqwest::StatusCode::NOT_FOUND
-                {
-                    return Err(ArtifactError::Storage(format!(
-                        "S3 delete failed ({})",
-                        response.status()
-                    )));
-                }
+            && backend == "s3"
+        {
+            let s3 = settings.s3.as_ref().ok_or_else(|| {
+                ArtifactError::Storage("S3 credentials are not configured".into())
+            })?;
+            if endpoint.as_deref() != Some(s3.endpoint.as_str())
+                || bucket.as_deref() != Some(s3.bucket.as_str())
+            {
+                return Err(ArtifactError::Storage(
+                    "Artifact belongs to a different S3 endpoint or bucket".into(),
+                ));
             }
+            let url = self.s3_url(
+                s3,
+                &s3.endpoint,
+                &id,
+                "DELETE",
+                Duration::from_secs(900),
+                SystemTime::now(),
+            )?;
+            let response = Self::s3_client()?
+                .delete(url)
+                .send()
+                .await
+                .map_err(|_| ArtifactError::Storage("S3 delete transport failed".into()))?;
+            if !response.status().is_success()
+                && response.status() != reqwest::StatusCode::NOT_FOUND
+            {
+                return Err(ArtifactError::Storage(format!(
+                    "S3 delete failed ({})",
+                    response.status()
+                )));
+            }
+        }
         match tokio::fs::remove_file(self.object_path(id.as_str())).await {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
