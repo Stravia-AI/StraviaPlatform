@@ -74,7 +74,7 @@ function statusLabel(status: string): string {
   }
 }
 
-function statusTone(status: unknown): EventSummary['tone'] {
+export function observationStatusTone(status: unknown): EventSummary['tone'] {
   switch (status) {
     case 'completed':
       return 'success'
@@ -140,7 +140,7 @@ export function observationEventSummary(
   const result = () => {
     const status = text(payload.status)
     if (status) add(m.observation_event_result(), statusLabel(status))
-    summary.tone = statusTone(payload.status)
+    summary.tone = observationStatusTone(payload.status)
   }
   switch (event.kind) {
     case 'run_admitted':

@@ -4,13 +4,24 @@ import DownloadIcon from '@lucide/svelte/icons/download'
 import XIcon from '@lucide/svelte/icons/x'
 import ChevronRightIcon from '@lucide/svelte/icons/chevron-right'
 
-import { formatDuration, formatLogTime, formatTime, formatTokenCount } from '$lib/format'
+import { formatDuration, formatList, formatLogTime, formatNumber, formatTime, formatTokenCount } from '$lib/format'
 import ObservationConversation from '$lib/components/observation-conversation.svelte'
 import RequestFailure from '$lib/components/request-failure.svelte'
+import TechnicalValue from '$lib/components/technical-value.svelte'
 import { observationDebugStatusLabel, observationStatusLabel } from '$lib/observation-labels'
 import { interactionDisplayStatus } from '$lib/observation-chain-visibility'
-import { observationAttemptOutputTokens, observationEventSummary } from '$lib/observation-event-summary'
-import type { InteractionDetail, LiveContentBlock, ObservationEvent, RunDetail, FailedRequestDetail } from '$lib/types'
+import {
+  observationAttemptOutputTokens,
+  observationEventSummary,
+  observationStatusTone,
+} from '$lib/observation-event-summary'
+import type {
+  InteractionDetail,
+  LiveContentBlock,
+  ObservationEvent,
+  RunDetail,
+  FailedRequestDetail,
+} from '$lib/types'
 import { Badge } from '$lib/components/ui/badge'
 import { Button } from '$lib/components/ui/button'
 import * as Empty from '$lib/components/ui/empty'
@@ -81,102 +92,263 @@ function toolName(event: ObservationEvent): string | null {
   return typeof payload.name === 'string' && payload.name.trim() ? payload.name : null
 }
 
-function eventGroups(events: ObservationEvent[], compact: boolean): ObservationEvent[][] {
-  const groups: ObservationEvent[][] = []
+// 过程层事件：诊断关联、捕获与增量记录不承载主流程叙事；带成败或警告语义时仍留在主干。
+const PROCESS_KINDS = new Set([
+  'generation_associated',
+  'retained_tail_associated',
+  'native_compaction_associated',
+  'input_preview_recorded',
+  'credential_mappings_created',
+  'checkpoint',
+  'wire',
+  'trace_manifest_updated',
+  'usage_confirmed',
+  'client_visible_content_delta',
+  'model_thinking_delta',
+])
+
+type StreamItem =
+  | { type: 'event'; event: ObservationEvent }
+  | { type: 'tools'; name: string | null; events: ObservationEvent[] }
+  | { type: 'process'; events: ObservationEvent[] }
+
+function streamItems(
+  events: readonly ObservationEvent[],
+  outputs?: ReadonlyMap<string, number | null>,
+): StreamItem[] {
+  const items: StreamItem[] = []
   for (const event of events) {
-    const previous = groups.at(-1)
-    // 只合并时间线上相邻的输出增量或同名工具交接，不跨越其他事件。
+    const process =
+      PROCESS_KINDS.has(event.kind) && observationEventSummary(event, outputs).tone === 'neutral'
     const name = toolName(event)
-    if (
-      compact &&
-      previous?.[0].kind === event.kind &&
-      (event.kind === 'client_visible_content_delta' || (name !== null && name === toolName(previous[0])))
-    ) {
-      previous.push(event)
+    const previous = items.at(-1)
+    if (process) {
+      if (previous?.type === 'process') previous.events.push(event)
+      else items.push({ type: 'process', events: [event] })
+    } else if (name !== null) {
+      if (previous?.type === 'tools' && previous.name === name) previous.events.push(event)
+      else items.push({ type: 'tools', name, events: [event] })
     } else {
-      groups.push([event])
+      items.push({ type: 'event', event })
     }
   }
-  return groups
+  return items
+}
+
+const streams = $derived(
+  new Map(
+    orderedRuns.map((run) => [run.id, streamItems(timelines.get(run.id) ?? [], attemptOutputs.get(run.id))]),
+  ),
+)
+const failureItems = $derived(failure ? streamItems(orderedEvents(failure.events)) : [])
+
+const baseTime = $derived(interaction?.interaction.started_at ?? failure?.request.started_at ?? null)
+
+function offsetLabel(at: number): string {
+  if (baseTime == null) return formatTime(at)
+  const delta = at - baseTime
+  return delta >= 0 ? `+${formatDuration(delta)}` : `−${formatDuration(-delta)}`
+}
+
+function childRuns(parentId: string | null): RunDetail[] {
+  return orderedRuns.filter((run) =>
+    parentId === null ? !run.parent_run_id || !runIds.has(run.parent_run_id) : run.parent_run_id === parentId,
+  )
+}
+
+function itemKey(item: StreamItem): number {
+  return item.type === 'event' ? item.event.sequence : item.events[0].sequence
+}
+
+// 同种过程事件合并为「标题 × N」，混合过程事件显示计数并附种类名帮助扫描。
+function processGroup(events: readonly ObservationEvent[]): { label: string; titles: string | null } {
+  const titles = [...new Set(events.map((event) => observationEventSummary(event).title))]
+  if (titles.length === 1) {
+    return { label: m.observation_event_group({ title: titles[0], count: events.length }), titles: null }
+  }
+  return {
+    label: m.observation_process_events({ count: events.length }),
+    titles: titles.length <= 3 ? formatList(titles) : `${formatList(titles.slice(0, 3))}…`,
+  }
+}
+
+function usageText(value: number | null): string {
+  return value == null ? m.observation_usage_unknown() : formatNumber(value)
 }
 
 function usageRows(run: RunDetail): ReadonlyArray<readonly [string, number | null]> {
   return [
-    ['IN', run.usage.input_tokens],
-    ['OUT', run.usage.output_tokens],
-    ['C·R', run.usage.cache_read_tokens],
-    ['C·W', run.usage.cache_write_tokens],
+    [m.observation_event_tokens_input(), run.usage.input_tokens],
+    [m.observation_event_tokens_output(), run.usage.output_tokens],
+    [m.observation_event_tokens_cache_read(), run.usage.cache_read_tokens],
+    [m.observation_event_tokens_cache_write(), run.usage.cache_write_tokens],
   ]
 }
 </script>
 
-{#snippet timeline(events: ObservationEvent[], compact = true, outputs?: ReadonlyMap<string, number | null>)}
-  <ol class="event-list">
-    {#each eventGroups(events, compact) as group (group[0].sequence)}
-      {#if group.length > 1}
-        <li>
-          <span class="event-mark" aria-hidden="true"></span>
-          <Collapsible.Root class="min-w-0 flex-1">
-            <div class="event-heading">
-              <Collapsible.Trigger class="diagnostic-trigger event-group-trigger">
-                <ChevronRightIcon size={14} aria-hidden="true" />
-                {group[0].kind === 'client_visible_content_delta'
-                  ? m.observation_response_updates({ count: group.length })
-                  : m.observation_tool_handoffs({
-                      tool: toolName(group[0]) ?? m.observation_event_tool(),
-                      count: group.length,
-                    })}
-              </Collapsible.Trigger>
-              <time class="font-technical text-xs text-muted-foreground">
-                {formatTime(group[0].occurred_at)}–{formatTime(group[group.length - 1].occurred_at)}
-              </time>
+{#snippet eventRow(event: ObservationEvent, outputs?: ReadonlyMap<string, number | null>)}
+  {@const summary = observationEventSummary(event, outputs)}
+  <li class="stream-item">
+    <Collapsible.Root>
+      <Collapsible.Trigger class="stream-row" data-tone={summary.tone} data-sequence={event.sequence}>
+        <span class="stream-text">
+          <strong>{summary.title}</strong>
+          {#each summary.facts as fact (fact.label)}
+            <span class="fact"><span class="fact-label">{fact.label}</span><span class="fact-value">{fact.value}</span></span>
+          {/each}
+        </span>
+        <time class="stream-time" title={formatLogTime(event.occurred_at)}>{offsetLabel(event.occurred_at)}</time>
+        <ChevronRightIcon size={14} class="stream-chev" aria-hidden="true" />
+      </Collapsible.Trigger>
+      {#if summary.note}<p class="event-note">{summary.note}</p>{/if}
+      <Collapsible.Content>
+        <div class="row-detail">
+          <dl class="detail-grid">
+            <div>
+              <dt>{m.observation_event_type()}</dt>
+              <dd class="event-kind"><code>{event.kind}</code></dd>
             </div>
-            <Collapsible.Content>
-              {@render timeline(group, false, outputs)}
-            </Collapsible.Content>
-          </Collapsible.Root>
-        </li>
-      {:else}
-        {@const event = group[0]}
-        {@const summary = observationEventSummary(event, outputs)}
-        <li>
-          <span class="event-mark" data-tone={summary.tone} aria-hidden="true"></span>
-          <div class="min-w-0 flex-1">
-            <Collapsible.Root>
-              <div class="event-heading">
-                <strong>{summary.title}</strong>
-                <div class="event-actions">
-                  <time class="font-technical text-xs text-muted-foreground" title={formatLogTime(event.occurred_at)}
-                    >{formatTime(event.occurred_at)}</time>
-                  <Collapsible.Trigger
-                    class="diagnostic-trigger event-raw-trigger"
-                    aria-label={m.observation_raw_event()}
-                    title={m.observation_raw_event()}>
-                    <ChevronRightIcon size={14} aria-hidden="true" />
-                  </Collapsible.Trigger>
-                </div>
-              </div>
-              {#if summary.facts.length}
-                <dl class="event-facts">
-                  {#each summary.facts as fact (fact.label)}
-                    <div>
-                      <dt>{fact.label}</dt>
-                      <dd>{fact.value}</dd>
-                    </div>
-                  {/each}
-                </dl>
-              {/if}
-              {#if summary.note}<p class="event-note">{summary.note}</p>{/if}
-              <Collapsible.Content>
-                <p class="event-kind">{m.observation_event_type()}: <code>{event.kind}</code></p>
-                <pre>{JSON.stringify(event.payload, null, 2)}</pre>
-              </Collapsible.Content>
-            </Collapsible.Root>
+            <div>
+              <dt>{m.observation_event_sequence()}</dt>
+              <dd class="font-technical">{event.sequence}</dd>
+            </div>
+            <div>
+              <dt>{m.failed_request_time()}</dt>
+              <dd>{formatLogTime(event.occurred_at)}</dd>
+            </div>
+          </dl>
+          <pre>{JSON.stringify(event.payload, null, 2)}</pre>
+        </div>
+      </Collapsible.Content>
+    </Collapsible.Root>
+  </li>
+{/snippet}
+
+{#snippet streamItem(item: StreamItem, outputs?: ReadonlyMap<string, number | null>)}
+  {#if item.type === 'event'}
+    {@render eventRow(item.event, outputs)}
+  {:else if item.events.length === 1}
+    {@render eventRow(item.events[0], outputs)}
+  {:else}
+    {@const group = item.type === 'process' ? processGroup(item.events) : null}
+    <li class="stream-item stream-group" data-group={item.type}>
+      <Collapsible.Root>
+        <Collapsible.Trigger class="stream-row" data-tone="neutral" data-group={item.type}>
+          <span class="stream-text">
+            <strong
+              >{item.type === 'tools'
+                ? m.observation_tool_handoffs({
+                    tool: item.name ?? m.observation_event_tool(),
+                    count: item.events.length,
+                  })
+                : group?.label}</strong>
+            {#if group?.titles}<span class="group-titles">{group.titles}</span>{/if}
+          </span>
+          <time
+            class="stream-time"
+            title="{formatLogTime(item.events[0].occurred_at)} – {formatLogTime(
+              item.events[item.events.length - 1].occurred_at,
+            )}">{offsetLabel(item.events[0].occurred_at)}</time>
+          <ChevronRightIcon size={14} class="stream-chev" aria-hidden="true" />
+        </Collapsible.Trigger>
+        <Collapsible.Content>
+          <ol class="branch">
+            {#each item.events as event (event.sequence)}
+              {@render eventRow(event, outputs)}
+            {/each}
+          </ol>
+        </Collapsible.Content>
+      </Collapsible.Root>
+    </li>
+  {/if}
+{/snippet}
+
+{#snippet runBlock(run: RunDetail)}
+  {@const items = streams.get(run.id) ?? []}
+  {@const children = childRuns(run.id)}
+  {@const duration = run.finished_at == null ? null : run.finished_at - run.started_at}
+  <li class="stream-run">
+    <Collapsible.Root>
+      <Collapsible.Trigger
+        class="stream-row run-head"
+        data-tone={observationStatusTone(run.status)}
+        data-run={run.id}>
+        <span class="stream-text">
+          <strong class="font-structural">{run.model_display_name?.trim() || run.route_id}</strong>
+          <Badge variant="outline">{observationStatusLabel(run.status)}</Badge>
+          {#if run.user_interrupted}<Badge variant="destructive">{m.observation_user_interrupted()}</Badge>{/if}
+          {#if run.debug_enabled}
+            <Badge variant={run.trace?.status === 'partial' ? 'destructive' : 'secondary'}
+              >{observationDebugStatusLabel(run.trace?.status ?? 'missing')}</Badge>
+          {/if}
+          <span class="run-stats"
+            >{#if duration != null}{formatDuration(duration)} · {/if}IN
+            {formatTokenCount(run.usage.input_tokens)} · OUT
+            {formatTokenCount(run.usage.output_tokens)}</span>
+        </span>
+        <time class="stream-time" title={formatLogTime(run.started_at)}>{offsetLabel(run.started_at)}</time>
+        <ChevronRightIcon size={14} class="stream-chev" aria-hidden="true" />
+      </Collapsible.Trigger>
+      <Collapsible.Content>
+        <dl class="row-detail detail-grid">
+          <div>
+            <dt>{m.observation_run_id()}</dt>
+            <dd><TechnicalValue value={run.id} copyable /></dd>
           </div>
-        </li>
-      {/if}
-    {/each}
-  </ol>
+          <div>
+            <dt>{m.observation_route()}</dt>
+            <dd><TechnicalValue value={run.route_id} copyable /></dd>
+          </div>
+          <div>
+            <dt>{m.failed_request_time()}</dt>
+            <dd>{formatLogTime(run.started_at)}</dd>
+          </div>
+          <div>
+            <dt>{m.observation_duration()}</dt>
+            <dd>{formatDuration(duration)}</dd>
+          </div>
+          <div>
+            <dt>{m.observation_protocol()}</dt>
+            <dd class="font-technical">{run.ingress_protocol}</dd>
+          </div>
+          <div>
+            <dt>{m.observation_delivery()}</dt>
+            <dd>{run.client_output_committed ? m.observation_committed() : m.observation_not_committed()}</dd>
+          </div>
+          {#each usageRows(run) as row (row[0])}
+            <div>
+              <dt>{row[0]}</dt>
+              <dd class="font-technical">{usageText(row[1])}</dd>
+            </div>
+          {/each}
+          {#if run.parent_run_id}
+            <div>
+              <dt>{m.observation_parent_run()}</dt>
+              <dd><TechnicalValue value={run.parent_run_id} copyable /></dd>
+            </div>
+          {/if}
+        </dl>
+      </Collapsible.Content>
+    </Collapsible.Root>
+    {#if run.trace?.status === 'partial' || (run.debug_enabled && !run.trace)}
+      <Alert.Root variant="warning" role="status" class="stream-alert"
+        ><Alert.Description>
+          {m.observation_partial_trace({
+            reasons: run.trace?.reasons.join(', ') || m.observation_trace_missing(),
+          })}
+        </Alert.Description></Alert.Root>
+    {/if}
+    {#if items.length || children.length}
+      <ol class="branch">
+        {#each items as item (itemKey(item))}
+          {@render streamItem(item, attemptOutputs.get(run.id))}
+        {/each}
+        {#each children as child (child.id)}
+          {@render runBlock(child)}
+        {/each}
+      </ol>
+    {/if}
+  </li>
 {/snippet}
 
 <header class="flex items-start justify-between gap-3 border-b p-4">
@@ -221,7 +393,7 @@ function usageRows(run: RunDetail): ReadonlyArray<readonly [string, number | nul
         {#if failure.request.error.status_code !== null}<p>HTTP {failure.request.error.status_code}</p>{/if}
       </Alert.Description>
     </Alert.Root>
-    <dl class="run-facts">
+    <dl class="detail-grid failure-facts">
       <div>
         <dt>{m.failed_request_request_id()}</dt>
         <dd>{failure.request.request_id}</dd>
@@ -241,7 +413,7 @@ function usageRows(run: RunDetail): ReadonlyArray<readonly [string, number | nul
         <dd>{formatLogTime(failure.request.started_at)}</dd>
       </div>
       <div>
-        <dt>{m.failed_request_duration()}</dt>
+        <dt>{m.observation_duration()}</dt>
         <dd>{failure.request.duration_ms === null ? '—' : formatDuration(failure.request.duration_ms)}</dd>
       </div>
       <div>
@@ -262,7 +434,11 @@ function usageRows(run: RunDetail): ReadonlyArray<readonly [string, number | nul
         ><DownloadIcon data-icon="inline-start" />{m.observation_bundle()}</Button>
     </div>
     <h3 class="font-structural font-semibold">{m.observation_diagnostics()}</h3>
-    {@render timeline(orderedEvents(failure.events))}
+    <ol class="stream">
+      {#each failureItems as item (itemKey(item))}
+        {@render streamItem(item)}
+      {/each}
+    </ol>
   </div>
 {:else if !interaction}
   <Empty.Root class="flex-1"
@@ -303,97 +479,16 @@ function usageRows(run: RunDetail): ReadonlyArray<readonly [string, number | nul
             <dt class="text-xs text-muted-foreground">{m.observation_debug()}</dt>
             <dd class="font-medium">{observationDebugStatusLabel(interaction.interaction.debug_status)}</dd>
           </div>
+          <div>
+            <dt class="text-xs text-muted-foreground">{m.observation_interaction_id()}</dt>
+            <dd><TechnicalValue value={interaction.interaction.id} copyable /></dd>
+          </div>
         </dl>
-        <Collapsible.Root class="mb-4">
-          <Collapsible.Trigger class="diagnostic-trigger">
-            <ChevronRightIcon size={14} aria-hidden="true" />
-            {m.observation_identifiers()}
-          </Collapsible.Trigger>
-          <Collapsible.Content>
-            <dl class="identifier-facts">
-              <div>
-                <dt>{m.observation_interaction_id()}</dt>
-                <dd>{interaction.interaction.id}</dd>
-              </div>
-            </dl>
-          </Collapsible.Content>
-        </Collapsible.Root>
-        <div class="timeline">
-          {#snippet runBranch(parentId: string | null)}
-            {#each orderedRuns.filter( (run) => (parentId === null ? !run.parent_run_id || !runIds.has(run.parent_run_id) : run.parent_run_id === parentId) ) as run (run.id)}
-              <section class="run-record">
-                <header class="run-heading">
-                  <div class="min-w-0">
-                    <div class="flex flex-wrap items-center gap-2">
-                      <h3 class="font-structural font-semibold">{run.model_display_name || run.route_id}</h3>
-                      <Badge variant="outline">{observationStatusLabel(run.status)}</Badge>
-                      {#if run.user_interrupted}<Badge variant="destructive">{m.observation_user_interrupted()}</Badge
-                        >{/if}
-                      {#if run.debug_enabled}
-                        <Badge variant={run.trace?.status === 'partial' ? 'destructive' : 'secondary'}
-                          >{observationDebugStatusLabel(run.trace?.status ?? 'missing')}</Badge>
-                      {/if}
-                    </div>
-                  </div>
-                  <time class="font-technical text-xs text-muted-foreground">{formatLogTime(run.started_at)}</time>
-                </header>
-                <dl class="run-facts">
-                  <div>
-                    <dt>{m.observation_protocol()}</dt>
-                    <dd>{run.ingress_protocol}</dd>
-                  </div>
-                  <div>
-                    <dt>{m.observation_delivery()}</dt>
-                    <dd>{run.client_output_committed ? m.observation_committed() : m.observation_not_committed()}</dd>
-                  </div>
-                  <div>
-                    <dt>{m.observation_duration()}</dt>
-                    <dd>{formatDuration(run.finished_at == null ? null : run.finished_at - run.started_at)}</dd>
-                  </div>
-                </dl>
-                <Collapsible.Root class="px-3">
-                  <Collapsible.Trigger class="diagnostic-trigger">
-                    <ChevronRightIcon size={14} aria-hidden="true" />
-                    {m.observation_identifiers()}
-                  </Collapsible.Trigger>
-                  <Collapsible.Content>
-                    <dl class="identifier-facts">
-                      <div>
-                        <dt>{m.observation_run_id()}</dt>
-                        <dd>{run.id}</dd>
-                      </div>
-                      <div>
-                        <dt>{m.observation_route()}</dt>
-                        <dd>{run.route_id}</dd>
-                      </div>
-                    </dl>
-                    {#if run.parent_run_id}
-                      <p class="event-kind">{m.observation_child_of({ id: run.parent_run_id })}</p>
-                    {/if}
-                  </Collapsible.Content>
-                </Collapsible.Root>
-                <div class="usage-line" aria-label={m.observation_confirmed_usage()}>
-                  {#each usageRows(run) as item (item[0])}<span
-                      ><small>{item[0]}</small>{item[1] == null
-                        ? m.observation_usage_unknown()
-                        : formatTokenCount(item[1])}</span
-                    >{/each}
-                </div>
-                {#if run.trace?.status === 'partial' || (run.debug_enabled && !run.trace)}
-                  <Alert.Root variant="warning" role="status" class="mx-3 mt-3 w-auto"
-                    ><Alert.Description>
-                      {m.observation_partial_trace({
-                        reasons: run.trace?.reasons.join(', ') || m.observation_trace_missing(),
-                      })}
-                    </Alert.Description></Alert.Root>
-                {/if}
-                {@render timeline(timelines.get(run.id) ?? [], true, attemptOutputs.get(run.id))}
-                <div class="run-children">{@render runBranch(run.id)}</div>
-              </section>
-            {/each}
-          {/snippet}
-          {@render runBranch(null)}
-        </div>
+        <ol class="stream">
+          {#each childRuns(null) as run (run.id)}
+            {@render runBlock(run)}
+          {/each}
+        </ol>
       {/if}
     </Tabs.Content>
   </Tabs.Root>
@@ -406,199 +501,183 @@ function usageRows(run: RunDetail): ReadonlyArray<readonly [string, number | nul
   gap: 0.75rem;
   border-bottom: 1px solid var(--border);
   padding-bottom: 1rem;
+  margin-bottom: 1rem;
   font-size: 0.875rem;
 }
-:global(.diagnostic-trigger) {
-  display: inline-flex;
+.diagnostic-overview dd {
+  min-width: 0;
+}
+/* 诊断流是一条带主干的列表：每个嵌套 ol 的左边线是该层级的引导线，
+   行内标记通过 ::before 落在各自层级的引导线上。 */
+.stream,
+.branch {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  margin-inline-start: 0.4rem;
+  border-inline-start: 1px solid var(--border);
+  padding: 0;
+  padding-inline-start: 1rem;
+  list-style: none;
+}
+.stream {
+  gap: 0.9rem;
+}
+.branch {
+  gap: 0.15rem;
+  margin-block-start: 0.15rem;
+}
+.stream-item,
+.stream-run {
+  min-width: 0;
+}
+.branch > .stream-run {
+  margin-block-start: 0.5rem;
+}
+:global(.stream-row) {
+  position: relative;
+  display: flex;
+  width: 100%;
   min-height: 40px;
   align-items: center;
-  gap: 0.375rem;
-  border-radius: var(--radius-sm);
-  padding: 0.25rem 0.375rem;
-  color: var(--muted-foreground);
-  font-size: 0.75rem;
+  gap: 0.5rem;
+  border-radius: var(--radius-md);
+  padding: 0.3rem 0.5rem;
+  color: var(--foreground);
+  font-size: 0.8125rem;
+  line-height: 1.45;
   text-align: start;
   cursor: pointer;
 }
-:global(.diagnostic-trigger:hover) {
+:global(.stream-row:hover) {
   background: var(--accent);
-  color: var(--accent-foreground);
 }
-:global(.diagnostic-trigger svg) {
-  flex: none;
-  transition: transform 140ms cubic-bezier(0.2, 0, 0, 1);
-}
-:global(.diagnostic-trigger[data-state='open'] svg) {
-  transform: rotate(90deg);
-}
-.event-heading {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.25rem 0.75rem;
-}
-.event-actions {
-  display: flex;
-  align-items: center;
-  gap: 0.25rem;
-}
-:global(.event-raw-trigger) {
-  width: 40px;
-  justify-content: center;
-}
-:global(.event-group-trigger) {
-  min-width: 0;
-  color: var(--foreground);
-  font-size: 0.875rem;
-  font-weight: 600;
-}
-.event-heading strong {
-  font-size: 0.875rem;
-  overflow-wrap: anywhere;
-}
-.event-heading time {
-  flex: none;
-  font-variant-numeric: tabular-nums;
-}
-.event-facts {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.25rem 1rem;
-  margin-top: 0.375rem;
-}
-.event-facts > div {
-  display: flex;
-  align-items: baseline;
-  gap: 0.5rem;
-  min-width: 0;
-}
-.event-facts dt,
-.identifier-facts dt {
-  flex: none;
-  color: var(--muted-foreground);
-}
-.event-facts dd,
-.identifier-facts dd {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-.event-note {
-  margin-top: 0.375rem;
-  color: var(--muted-foreground);
-  line-height: 1.6;
-  text-wrap: pretty;
-  overflow-wrap: anywhere;
-}
-.event-kind,
-.identifier-facts {
-  margin-bottom: 0.5rem;
-  font-size: 0.75rem;
-  overflow-wrap: anywhere;
-}
-.identifier-facts {
-  display: grid;
-  gap: 0.5rem;
-}
-.identifier-facts dd,
-.event-kind code {
-  font-family: var(--font-technical);
-}
-.timeline {
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
-}
-.run-record {
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--card);
-}
-.run-children {
-  display: grid;
-  gap: 0.75rem;
-  margin-inline-start: 0.75rem;
-}
-.run-heading {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 1rem;
-  border-bottom: 1px solid var(--border);
-  padding: 0.8rem;
-}
-.run-facts {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 8rem), 1fr));
-  gap: 0.65rem 1rem;
-  padding: 0.8rem;
-  font-size: 0.75rem;
-}
-.run-facts dt {
-  color: var(--muted-foreground);
-}
-.run-facts dd {
-  overflow-wrap: anywhere;
-  font-weight: 500;
-}
-.usage-line {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  border-block: 1px solid var(--border);
-  padding: 0.55rem 0.8rem;
-  font-family: var(--font-technical);
-  font-size: 0.7rem;
-}
-.usage-line span {
-  border-inline-start: 1px solid var(--border);
-  padding-inline: 0.45rem;
-}
-.usage-line span:first-child {
-  border-inline-start: 0;
-  padding-inline-start: 0;
-}
-.usage-line small {
-  display: block;
-  color: var(--muted-foreground);
-}
-.event-list {
-  padding: 0.8rem;
-}
-.event-list li {
-  display: flex;
-  gap: 0.65rem;
-  border-inline-start: 1px solid var(--border);
-  padding: 0 0 0.5rem 0.75rem;
-  font-size: 0.75rem;
-}
-.event-list .event-list {
-  padding: 0.75rem 0 0;
-}
-.event-mark {
-  width: 0.45rem;
-  height: 0.45rem;
-  flex: none;
-  transform: translate(-1rem, 1rem);
+:global(.stream-row)::before {
+  content: '';
+  position: absolute;
+  inset-inline-start: calc(-1rem - 1px - 0.25rem);
+  top: 50%;
+  width: 0.5rem;
+  height: 0.5rem;
+  translate: 0 -50%;
   border: 1px solid var(--primary);
   border-radius: 999px;
   background: var(--background);
 }
-.event-mark[data-tone='success'] {
+:global(.stream-row[data-tone='success'])::before {
   border-color: var(--success);
   background: var(--success);
 }
-.event-mark[data-tone='warning'] {
+:global(.stream-row[data-tone='warning'])::before {
   height: 0.2rem;
   border-color: var(--warning);
   border-radius: 0;
   background: var(--warning);
 }
-.event-mark[data-tone='error'] {
-  transform: translate(-1rem, 1rem) rotate(45deg);
+:global(.stream-row[data-tone='error'])::before {
+  rotate: 45deg;
   border-color: var(--destructive);
   border-radius: 0;
   background: var(--destructive);
+}
+:global(.run-head)::before {
+  inset-inline-start: calc(-1rem - 1px - 0.3rem);
+  width: 0.6rem;
+  height: 0.6rem;
+}
+.stream-item[data-group='process'] > :global(.stream-row)::before {
+  border-color: var(--muted-foreground);
+}
+.stream-text {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.15rem 0.6rem;
+  overflow-wrap: anywhere;
+}
+.stream-text strong {
+  font-weight: 600;
+}
+.fact {
+  display: inline-flex;
+  gap: 0.3rem;
+  font-size: 0.75rem;
+}
+.fact-label {
+  color: var(--muted-foreground);
+}
+.group-titles {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.run-stats {
+  color: var(--muted-foreground);
+  font-family: var(--font-technical);
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+}
+.stream-time {
+  flex: none;
+  margin-inline-start: auto;
+  color: var(--muted-foreground);
+  font-family: var(--font-technical);
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+}
+:global(.stream-chev) {
+  flex: none;
+  color: var(--muted-foreground);
+  transition: transform 140ms cubic-bezier(0.2, 0, 0, 1);
+}
+:global(.stream-row[data-state='open'] .stream-chev) {
+  transform: rotate(90deg);
+}
+.event-note {
+  margin: 0.1rem 0.5rem 0.4rem;
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+  line-height: 1.6;
+  text-wrap: pretty;
+  overflow-wrap: anywhere;
+}
+.row-detail {
+  padding: 0.15rem 0.5rem 0.6rem;
+}
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));
+  gap: 0.4rem 1rem;
+  font-size: 0.75rem;
+}
+.detail-grid > div {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+.detail-grid dt {
+  flex: none;
+  color: var(--muted-foreground);
+}
+.detail-grid dd {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.detail-grid code {
+  font-family: var(--font-technical);
+}
+.failure-facts {
+  font-size: 0.8rem;
+}
+:global(.stream-alert) {
+  width: auto;
+  margin: 0.25rem 0.5rem 0.5rem;
 }
 pre {
   max-height: 18rem;
@@ -612,11 +691,5 @@ pre {
   line-height: 1.4;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-}
-@media (max-width: 767px) {
-  .usage-line {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    row-gap: 0.55rem;
-  }
 }
 </style>
