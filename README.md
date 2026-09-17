@@ -124,7 +124,17 @@ Clients call a **Model ID** you define — map it to one or more upstreams in pr
 - Request Records: watch every interaction live on a zoomable canvas — model calls, retries, and tool calls — with a separate failed-requests list and a per-conversation view.
 - See the token usage and provider quotas that services actually report.
 - Turn on Debug to capture HTTP/SSE/WebSocket traffic and download it as a debug bundle for the interaction you're inspecting; credentials are always redacted first.
-- Optional **credential protection** — local detection (bundled Betterleaks + Kingfisher rules, fully offline) swaps secrets for reversible placeholders before requests reach providers.
+
+### Credential protection
+
+Off by default — turn it on once and it covers every Stravia API key, with nothing to change in your clients.
+
+- **Secrets stay on your machine** — Stravia recognizes API keys, tokens, and other credentials in messages, history, and tool inputs and outputs bound for a model, and swaps them for placeholders before the request goes out. All 1,475 detection rules are bundled and run locally — nothing is sent anywhere to be checked.
+- **Replies still work end to end** — when a provider echoes a placeholder back, Stravia restores the real value in the answer and in tool calls, so tools can keep using the credential. The same secret keeps the same placeholder across conversations and restarts.
+- **Fails safe, never silently** — if detection or storage breaks, the request fails instead of shipping your plaintext. Turning it off stops new replacements; placeholders already issued still restore until they expire.
+- **Visible and testable** — browse the full rule list, see which credentials each request caught, and try your own text against the detector — test input stays on this instance and is never saved.
+
+Good to know: it catches what its rules know — not every secret, and not personal or business data. It can over- or under-match and doesn't scan images or attachments. Tools receive the real credential when they run, so keep tool permissions and outbound limits in place — this lowers exposure, it isn't a lock.
 
 ### Storage and deployment
 
