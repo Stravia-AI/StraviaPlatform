@@ -1,9 +1,20 @@
 use std::collections::{HashMap, HashSet};
 
-use super::types::RunStart;
-
 const RETRY_WINDOW_MS: i64 = 120_000;
 pub(super) const TAIL_MERGE_WINDOW_MS: i64 = 300_000;
+
+/// Kernel input: caller-confirmed facts plus evidence Run Attribution computed.
+/// The decision table never reads request or store types directly.
+#[derive(Debug, Clone)]
+pub(super) struct AssignInput<'a> {
+    pub run_id: &'a str,
+    pub principal: &'a str,
+    pub canonical_fingerprint: &'a str,
+    pub has_new_user: bool,
+    pub has_matching_pending_tool_result: bool,
+    pub generation_parent_id: Option<&'a str>,
+    pub ingress_received_at: i64,
+}
 
 #[derive(Debug, Clone)]
 pub(super) struct GroupAssignment {
@@ -74,7 +85,7 @@ impl GroupingIndex {
 
     pub fn assign(
         &mut self,
-        start: &RunStart,
+        input: AssignInput<'_>,
         now: i64,
         parent: Option<&ObservedParent>,
         diagnostic: Option<&DiagnosticSource>,
@@ -84,12 +95,12 @@ impl GroupingIndex {
         let mut diagnostic_source_run_id = None;
         let mut interrupt_parent = false;
         let (interaction_id, parent_run_id, inferred_retry) = if let Some(parent) = parent {
-            let continuation = if !start.has_new_user {
+            let continuation = if !input.has_new_user {
                 Some("exact_continuation")
-            } else if start.has_matching_pending_tool_result {
+            } else if input.has_matching_pending_tool_result {
                 Some("pending_tool_result")
             } else if parent.delivery_completed_at.is_some_and(|delivered_at| {
-                start
+                input
                     .ingress_received_at
                     .checked_sub(delivered_at)
                     .is_some_and(|elapsed| (0..=2000).contains(&elapsed))
@@ -115,14 +126,14 @@ impl GroupingIndex {
                     false,
                 )
             }
-        } else if start.generation_parent_id.is_some() {
+        } else if input.generation_parent_id.is_some() {
             grouping_reason = "unmatched_parent";
             (stravia_runtime_contract::identifier::new_id(), None, false)
         } else if let Some(source) = diagnostic {
             diagnostic_source_run_id = Some(source.run_id.clone());
             if source.kind == DiagnosticKind::CurrentTool
                 || (!source.user_after_match
-                    && source.tail_merge_eligible(start.ingress_received_at))
+                    && source.tail_merge_eligible(input.ingress_received_at))
             {
                 grouping_reason = if source.kind == DiagnosticKind::CurrentTool {
                     "current_tool_continuation"
@@ -149,8 +160,8 @@ impl GroupingIndex {
                 .runs
                 .values()
                 .filter(|candidate| {
-                    candidate.principal == start.principal
-                        && candidate.fingerprint == start.canonical_fingerprint
+                    candidate.principal == input.principal
+                        && candidate.fingerprint == input.canonical_fingerprint
                         && !candidate.active
                         && !candidate.client_output_committed
                         && candidate.failed_at.is_some_and(|failed_at| {
@@ -159,8 +170,8 @@ impl GroupingIndex {
                 })
                 .max_by_key(|candidate| candidate.failed_at);
             let identical_active = self.runs.values().any(|candidate| {
-                candidate.principal == start.principal
-                    && candidate.fingerprint == start.canonical_fingerprint
+                candidate.principal == input.principal
+                    && candidate.fingerprint == input.canonical_fingerprint
                     && candidate.active
             });
             if !identical_active {
@@ -179,12 +190,12 @@ impl GroupingIndex {
             }
         };
         self.runs.insert(
-            start.id.clone(),
+            input.run_id.to_owned(),
             RetryCandidate {
                 interaction_id: interaction_id.clone(),
-                run_id: start.id.clone(),
-                principal: start.principal.clone(),
-                fingerprint: start.canonical_fingerprint.clone(),
+                run_id: input.run_id.to_owned(),
+                principal: input.principal.to_owned(),
+                fingerprint: input.canonical_fingerprint.to_owned(),
                 failed_at: None,
                 client_output_committed: false,
                 active: true,
@@ -346,59 +357,53 @@ mod tests {
         }
     }
 
-    fn start(id: &str, principal: &str, fingerprint: &str) -> RunStart {
-        RunStart {
-            id: id.into(),
-            principal: principal.into(),
-            api_key_id: None,
-            api_key_name: None,
-            generation_root_id: None,
-            generation_parent_id: None,
+    fn input<'a>(id: &'a str, principal: &'a str, fingerprint: &'a str) -> AssignInput<'a> {
+        AssignInput {
+            run_id: id,
+            principal,
+            canonical_fingerprint: fingerprint,
             has_new_user: true,
             has_matching_pending_tool_result: false,
+            generation_parent_id: None,
             ingress_received_at: 0,
-            canonical_fingerprint: fingerprint.into(),
-            route_id: "route".into(),
-            model_display_name: None,
-            ingress_protocol: "openai".into(),
         }
     }
     #[test]
     fn failed_root_retry_requires_every_exact_guard() {
         let mut index = GroupingIndex::default();
-        let first = index.assign(&start("one", "principal", "exact"), 1_000, None, None);
+        let first = index.assign(input("one", "principal", "exact"), 1_000, None, None);
         index.finish("one", "failed", 2_000);
-        let retry = index.assign(&start("two", "principal", "exact"), 121_999, None, None);
+        let retry = index.assign(input("two", "principal", "exact"), 121_999, None, None);
         assert_eq!(retry.interaction_id, first.interaction_id);
         assert!(retry.inferred_retry);
         index.finish("two", "failed", 123_000);
-        let late = index.assign(&start("three", "principal", "exact"), 243_000, None, None);
+        let late = index.assign(input("three", "principal", "exact"), 243_000, None, None);
         assert_ne!(late.interaction_id, first.interaction_id);
-        let other = index.assign(&start("four", "other", "exact"), 243_002, None, None);
+        let other = index.assign(input("four", "other", "exact"), 243_002, None, None);
         assert_ne!(other.interaction_id, first.interaction_id);
     }
     #[test]
     fn output_commit_and_concurrency_prevent_inferred_retry() {
         let mut committed = GroupingIndex::default();
-        let first = committed.assign(&start("one", "p", "f"), 0, None, None);
+        let first = committed.assign(input("one", "p", "f"), 0, None, None);
         committed.output_committed("one");
         committed.finish("one", "failed", 1);
-        let retry = committed.assign(&start("two", "p", "f"), 2, None, None);
+        let retry = committed.assign(input("two", "p", "f"), 2, None, None);
         assert_ne!(retry.interaction_id, first.interaction_id);
         let mut concurrent = GroupingIndex::default();
-        let active = concurrent.assign(&start("active", "p", "f"), 0, None, None);
-        let duplicate = concurrent.assign(&start("duplicate", "p", "f"), 1, None, None);
+        let active = concurrent.assign(input("active", "p", "f"), 0, None, None);
+        let duplicate = concurrent.assign(input("duplicate", "p", "f"), 1, None, None);
         assert_ne!(duplicate.interaction_id, active.interaction_id);
     }
     #[test]
     fn explicit_parent_never_uses_failed_root_inference() {
         let mut index = GroupingIndex::default();
-        let failed = index.assign(&start("failed", "p", "f"), 0, None, None);
+        let failed = index.assign(input("failed", "p", "f"), 0, None, None);
         index.finish("failed", "failed", 1);
-        let mut continuation = start("continuation", "p", "f");
-        continuation.generation_parent_id = Some("unobserved-parent".into());
+        let mut continuation = input("continuation", "p", "f");
+        continuation.generation_parent_id = Some("unobserved-parent");
         continuation.has_new_user = false;
-        let assigned = index.assign(&continuation, 2, None, None);
+        let assigned = index.assign(continuation, 2, None, None);
         assert_ne!(assigned.interaction_id, failed.interaction_id);
         assert!(!assigned.inferred_retry);
         assert_eq!(assigned.parent_run_id, None);
@@ -421,11 +426,11 @@ mod tests {
     #[test]
     fn current_tool_continuation_merges_without_window_or_user_split() {
         let mut index = GroupingIndex::default();
-        let mut start = start("child", "p", "f");
-        start.has_new_user = true;
-        start.ingress_received_at = 400_000;
+        let mut input = input("child", "p", "f");
+        input.has_new_user = true;
+        input.ingress_received_at = 400_000;
         let assigned = index.assign(
-            &start,
+            input,
             400_000,
             None,
             Some(&source(DiagnosticKind::CurrentTool, true, Some(1))),
@@ -445,12 +450,14 @@ mod tests {
     fn retained_tail_merges_on_inclusive_five_minute_window() {
         let mut index = GroupingIndex::default();
         for elapsed in [0_i64, TAIL_MERGE_WINDOW_MS] {
-            let mut start = start(&format!("child-{elapsed}"), "p", "f");
-            start.has_new_user = false;
-            start.ingress_received_at = 10_000 + elapsed;
+            let run_id = format!("child-{elapsed}");
+            let mut input = input(&run_id, "p", "f");
+            input.has_new_user = false;
+            input.ingress_received_at = 10_000 + elapsed;
+            let received_at = input.ingress_received_at;
             let assigned = index.assign(
-                &start,
-                start.ingress_received_at,
+                input,
+                received_at,
                 None,
                 Some(&source(DiagnosticKind::RetainedTail, false, Some(10_000))),
             );
@@ -470,11 +477,13 @@ mod tests {
             (-1, Some(10_000)),
         ];
         for (elapsed, delivered_at) in cases {
-            let mut start = start(&format!("child-{elapsed}-{delivered_at:?}"), "p", "f");
-            start.ingress_received_at = delivered_at.unwrap_or(10_000) + elapsed;
+            let run_id = format!("child-{elapsed}-{delivered_at:?}");
+            let mut input = input(&run_id, "p", "f");
+            input.ingress_received_at = delivered_at.unwrap_or(10_000) + elapsed;
+            let received_at = input.ingress_received_at;
             let assigned = index.assign(
-                &start,
-                start.ingress_received_at,
+                input,
+                received_at,
                 None,
                 Some(&source(DiagnosticKind::RetainedTail, false, delivered_at)),
             );
@@ -491,11 +500,11 @@ mod tests {
     #[test]
     fn new_user_after_retained_tail_creates_child_and_interrupts() {
         let mut index = GroupingIndex::default();
-        let mut start = start("child", "p", "f");
-        start.has_new_user = true;
-        start.ingress_received_at = 10_001;
+        let mut input = input("child", "p", "f");
+        input.has_new_user = true;
+        input.ingress_received_at = 10_001;
         let assigned = index.assign(
-            &start,
+            input,
             10_001,
             None,
             Some(&source(DiagnosticKind::RetainedTail, true, Some(10_000))),
@@ -512,16 +521,16 @@ mod tests {
     #[test]
     fn confirmed_generation_parent_ignores_diagnostic_source() {
         let mut index = GroupingIndex::default();
-        let mut start = start("child", "p", "f");
-        start.has_new_user = false;
-        start.generation_parent_id = Some("node".into());
+        let mut input = input("child", "p", "f");
+        input.has_new_user = false;
+        input.generation_parent_id = Some("node");
         let parent = ObservedParent {
             interaction_id: "exec-interaction".into(),
             run_id: "exec-run".into(),
             delivery_completed_at: Some(1),
         };
         let assigned = index.assign(
-            &start,
+            input,
             2,
             Some(&parent),
             Some(&source(DiagnosticKind::CurrentTool, false, Some(1))),

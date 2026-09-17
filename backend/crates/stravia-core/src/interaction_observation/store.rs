@@ -16,6 +16,12 @@ pub(super) struct Admission<'a> {
     pub start: &'a RunStart,
     pub metadata: Option<&'a super::RequestMetadata>,
     pub interaction_id: &'a str,
+    pub generation_root_id: Option<&'a str>,
+    pub generation_parent_id: Option<&'a str>,
+    pub has_new_user: bool,
+    /// Ingress receipt stamped by Run Attribution; the run's started_at and the
+    /// merge windows derive from it.
+    pub ingress_received_at: i64,
     pub parent_run_id: Option<&'a str>,
     pub parent_interaction_id: Option<&'a str>,
     pub debug_enabled: bool,
@@ -260,68 +266,6 @@ impl ObservationStore {
         })
     }
 
-    pub(super) async fn rematerialize_client_items(
-        &self,
-        principal: &str,
-        generation_node_id: &str,
-        now: i64,
-    ) -> anyhow::Result<Option<Vec<stravia_runtime_contract::protocol::ir::AiItem>>> {
-        let chain_principal = format!("api-key:{principal}");
-        let payloads: Vec<Value> = match self {
-            Self::Sqlite(pool) => {
-                let rows: Vec<(String,)> = sqlx::query_as(
-                    "WITH RECURSIVE chain AS (
-                        SELECT id, parent_id, payload, 0 AS depth
-                        FROM turn_chain_nodes
-                        WHERE id=? AND principal=? AND expires_at>?
-                        UNION ALL
-                        SELECT n.id, n.parent_id, n.payload, c.depth+1
-                        FROM turn_chain_nodes n JOIN chain c ON n.id=c.parent_id
-                        WHERE n.expires_at>? AND c.depth<256
-                    )
-                    SELECT payload FROM chain ORDER BY depth DESC",
-                )
-                .bind(generation_node_id)
-                .bind(&chain_principal)
-                .bind(now)
-                .bind(now)
-                .fetch_all(pool)
-                .await?;
-                rows.into_iter()
-                    .map(|(payload,)| serde_json::from_str(&payload))
-                    .collect::<Result<Vec<_>, _>>()?
-            }
-            Self::Postgres(pool) => {
-                let rows: Vec<String> = sqlx::query_scalar(
-                    "WITH RECURSIVE chain AS (
-                        SELECT id, parent_id, payload, 0 AS depth
-                        FROM turn_chain_nodes
-                        WHERE id=$1 AND principal=$2 AND expires_at>$3
-                        UNION ALL
-                        SELECT n.id, n.parent_id, n.payload, c.depth+1
-                        FROM turn_chain_nodes n JOIN chain c ON n.id=c.parent_id
-                        WHERE n.expires_at>$3 AND c.depth<256
-                    )
-                    SELECT payload FROM chain ORDER BY depth DESC",
-                )
-                .bind(generation_node_id)
-                .bind(&chain_principal)
-                .bind(now)
-                .fetch_all(pool)
-                .await?;
-                rows.into_iter()
-                    .map(|payload| serde_json::from_str(&payload))
-                    .collect::<Result<Vec<_>, _>>()?
-            }
-        };
-        if payloads.is_empty() {
-            return Ok(None);
-        }
-        crate::generation_chain::client_items_from_payloads(payloads)
-            .map(Some)
-            .map_err(|error| anyhow::anyhow!(error))
-    }
-
     pub async fn admit(&self, admission: Admission<'_>) -> anyhow::Result<ObservationEvent> {
         match self {
             Self::Sqlite(pool) => {
@@ -336,16 +280,16 @@ impl ObservationStore {
                 let sequence = next_sqlite(&mut tx).await?;
                 sqlx::query("INSERT OR IGNORE INTO interaction_observations (id,principal,api_key_id,api_key_name,generation_root_id,parent_interaction_id,root_id,root_run_id,first_route_id,first_model_display_name,status,started_at,last_active_at,last_event_sequence,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,'running',?,?,?,?)")
                     .bind(admission.interaction_id).bind(&admission.start.principal).bind(&admission.start.api_key_id).bind(&admission.start.api_key_name)
-                    .bind(&admission.start.generation_root_id).bind(admission.parent_interaction_id)
-                    .bind(admission.start.generation_root_id.as_deref().unwrap_or(admission.interaction_id)).bind(&admission.start.id)
+                    .bind(admission.generation_root_id).bind(admission.parent_interaction_id)
+                    .bind(admission.generation_root_id.unwrap_or(admission.interaction_id)).bind(&admission.start.id)
                     .bind(&admission.start.route_id).bind(&admission.start.model_display_name).bind(admission.now).bind(admission.now).bind(sequence).bind(admission.expires_at).execute(&mut *tx).await?;
                 sqlx::query("UPDATE interaction_observations SET status='running',last_active_at=?,last_event_sequence=?,expires_at=? WHERE id=?").bind(admission.now).bind(sequence).bind(admission.expires_at).bind(admission.interaction_id).execute(&mut *tx).await?;
                 sqlx::query("INSERT INTO inference_run_observations (id,interaction_id,parent_run_id,generation_parent_id,ingress_protocol,route_id,model_display_name,status,debug_enabled,started_at,last_active_at,last_event_sequence,expires_at,request_model) VALUES (?,?,?,?,?,?,?,'running',?,?,?,?,?,?)")
-                    .bind(&admission.start.id).bind(admission.interaction_id).bind(admission.parent_run_id).bind(&admission.start.generation_parent_id)
+                    .bind(&admission.start.id).bind(admission.interaction_id).bind(admission.parent_run_id).bind(admission.generation_parent_id)
                     .bind(&admission.start.ingress_protocol).bind(&admission.start.route_id).bind(&admission.start.model_display_name)
-                    .bind(admission.debug_enabled).bind(admission.start.ingress_received_at).bind(admission.now).bind(sequence).bind(admission.expires_at)
+                    .bind(admission.debug_enabled).bind(admission.ingress_received_at).bind(admission.now).bind(sequence).bind(admission.expires_at)
                     .bind(admission.metadata.and_then(|metadata| metadata.model.as_deref())).execute(&mut *tx).await?;
-                let payload = serde_json::json!({"route_id": admission.start.route_id, "model_display_name": admission.start.model_display_name, "debug_enabled": admission.debug_enabled, "inferred_retry": admission.inferred_retry, "grouping_reason": admission.grouping_reason, "ingress_received_at": admission.start.ingress_received_at, "parent_run_id": admission.parent_run_id, "generation_parent_id": admission.start.generation_parent_id, "diagnostic_source_run_id": admission.diagnostic_source_run_id, "has_new_user": admission.start.has_new_user, "parent_interaction_id": admission.parent_interaction_id, "root_id": admission.start.generation_root_id.as_deref().unwrap_or(admission.interaction_id)});
+                let payload = serde_json::json!({"route_id": admission.start.route_id, "model_display_name": admission.start.model_display_name, "debug_enabled": admission.debug_enabled, "inferred_retry": admission.inferred_retry, "grouping_reason": admission.grouping_reason, "ingress_received_at": admission.ingress_received_at, "parent_run_id": admission.parent_run_id, "generation_parent_id": admission.generation_parent_id, "diagnostic_source_run_id": admission.diagnostic_source_run_id, "has_new_user": admission.has_new_user, "parent_interaction_id": admission.parent_interaction_id, "root_id": admission.generation_root_id.unwrap_or(admission.interaction_id)});
                 insert_event_sqlite(
                     &mut tx,
                     EventInsert {
@@ -384,16 +328,16 @@ impl ObservationStore {
                         .await?;
                 sqlx::query("INSERT INTO interaction_observations (id,principal,api_key_id,api_key_name,generation_root_id,parent_interaction_id,root_id,root_run_id,first_route_id,first_model_display_name,status,started_at,last_active_at,last_event_sequence,expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'running',$11,$12,$13,$14) ON CONFLICT (id) DO NOTHING")
                     .bind(admission.interaction_id).bind(&admission.start.principal).bind(&admission.start.api_key_id).bind(&admission.start.api_key_name)
-                    .bind(&admission.start.generation_root_id).bind(admission.parent_interaction_id)
-                    .bind(admission.start.generation_root_id.as_deref().unwrap_or(admission.interaction_id)).bind(&admission.start.id)
+                    .bind(admission.generation_root_id).bind(admission.parent_interaction_id)
+                    .bind(admission.generation_root_id.unwrap_or(admission.interaction_id)).bind(&admission.start.id)
                     .bind(&admission.start.route_id).bind(&admission.start.model_display_name).bind(admission.now).bind(admission.now).bind(sequence).bind(admission.expires_at).execute(&mut *tx).await?;
                 sqlx::query("UPDATE interaction_observations SET status='running',last_active_at=$1,last_event_sequence=$2,expires_at=$3 WHERE id=$4").bind(admission.now).bind(sequence).bind(admission.expires_at).bind(admission.interaction_id).execute(&mut *tx).await?;
                 sqlx::query("INSERT INTO inference_run_observations (id,interaction_id,parent_run_id,generation_parent_id,ingress_protocol,route_id,model_display_name,status,debug_enabled,started_at,last_active_at,last_event_sequence,expires_at,request_model) VALUES ($1,$2,$3,$4,$5,$6,$7,'running',$8,$9,$10,$11,$12,$13)")
-                    .bind(&admission.start.id).bind(admission.interaction_id).bind(admission.parent_run_id).bind(&admission.start.generation_parent_id)
+                    .bind(&admission.start.id).bind(admission.interaction_id).bind(admission.parent_run_id).bind(admission.generation_parent_id)
                     .bind(&admission.start.ingress_protocol).bind(&admission.start.route_id).bind(&admission.start.model_display_name)
-                    .bind(admission.debug_enabled).bind(admission.start.ingress_received_at).bind(admission.now).bind(sequence).bind(admission.expires_at)
+                    .bind(admission.debug_enabled).bind(admission.ingress_received_at).bind(admission.now).bind(sequence).bind(admission.expires_at)
                     .bind(admission.metadata.and_then(|metadata| metadata.model.as_deref())).execute(&mut *tx).await?;
-                let payload = serde_json::json!({"route_id": admission.start.route_id, "model_display_name": admission.start.model_display_name, "debug_enabled": admission.debug_enabled, "inferred_retry": admission.inferred_retry, "grouping_reason": admission.grouping_reason, "ingress_received_at": admission.start.ingress_received_at, "parent_run_id": admission.parent_run_id, "generation_parent_id": admission.start.generation_parent_id, "diagnostic_source_run_id": admission.diagnostic_source_run_id, "has_new_user": admission.start.has_new_user, "parent_interaction_id": admission.parent_interaction_id, "root_id": admission.start.generation_root_id.as_deref().unwrap_or(admission.interaction_id)});
+                let payload = serde_json::json!({"route_id": admission.start.route_id, "model_display_name": admission.start.model_display_name, "debug_enabled": admission.debug_enabled, "inferred_retry": admission.inferred_retry, "grouping_reason": admission.grouping_reason, "ingress_received_at": admission.ingress_received_at, "parent_run_id": admission.parent_run_id, "generation_parent_id": admission.generation_parent_id, "diagnostic_source_run_id": admission.diagnostic_source_run_id, "has_new_user": admission.has_new_user, "parent_interaction_id": admission.parent_interaction_id, "root_id": admission.generation_root_id.unwrap_or(admission.interaction_id)});
                 insert_event_postgres(
                     &mut tx,
                     EventInsert {
@@ -2214,17 +2158,15 @@ mod tests {
                     principal: principal.into(),
                     api_key_id: None,
                     api_key_name: None,
-                    generation_root_id: None,
-                    generation_parent_id: None,
-                    has_new_user: true,
-                    has_matching_pending_tool_result: false,
-                    ingress_received_at: 0,
-                    canonical_fingerprint: id.into(),
                     route_id: "route".into(),
                     model_display_name: None,
                     ingress_protocol: "responses".into(),
                 },
                 interaction_id: id,
+                generation_root_id: None,
+                generation_parent_id: None,
+                has_new_user: true,
+                ingress_received_at: 0,
                 parent_run_id: parent,
                 parent_interaction_id: None,
                 debug_enabled: false,
@@ -2363,17 +2305,15 @@ mod tests {
                     principal: "alice".into(),
                     api_key_id: None,
                     api_key_name: None,
-                    generation_root_id: Some(interaction.into()),
-                    generation_parent_id: parent.map(str::to_owned),
-                    has_new_user: false,
-                    has_matching_pending_tool_result: parent.is_some(),
-                    ingress_received_at: 1,
-                    canonical_fingerprint: id.into(),
                     route_id: "route".into(),
                     model_display_name: None,
                     ingress_protocol: "responses".into(),
                 },
                 interaction_id: interaction,
+                generation_root_id: Some(interaction),
+                generation_parent_id: parent,
+                has_new_user: false,
+                ingress_received_at: 1,
                 parent_run_id: parent,
                 parent_interaction_id: None,
                 debug_enabled: false,
@@ -3225,12 +3165,6 @@ mod tests {
             principal: "test-principal".into(),
             api_key_id: None,
             api_key_name: None,
-            generation_root_id: Some("root".into()),
-            generation_parent_id: None,
-            has_new_user: true,
-            has_matching_pending_tool_result: false,
-            ingress_received_at: 0,
-            canonical_fingerprint: id.into(),
             route_id: "test-route".into(),
             model_display_name: None,
             ingress_protocol: "responses".into(),
@@ -3240,6 +3174,10 @@ mod tests {
                 metadata: None,
                 start: &start("parent-run"),
                 interaction_id: "parent",
+                generation_root_id: Some("root"),
+                generation_parent_id: None,
+                has_new_user: true,
+                ingress_received_at: 0,
                 parent_run_id: None,
                 parent_interaction_id: None,
                 debug_enabled: false,
@@ -3264,6 +3202,10 @@ mod tests {
                     metadata: None,
                     start: &child_start,
                     interaction_id: "child",
+                    generation_root_id: Some("root"),
+                    generation_parent_id: None,
+                    has_new_user: true,
+                    ingress_received_at: 0,
                     parent_run_id: Some("parent-run"),
                     parent_interaction_id: Some("parent"),
                     debug_enabled: false,

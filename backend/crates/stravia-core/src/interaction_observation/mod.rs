@@ -1,3 +1,4 @@
+mod attribution;
 mod bundle;
 mod codec;
 mod grouping;
@@ -12,6 +13,7 @@ mod trace;
 mod types;
 mod writer;
 
+pub(crate) use attribution::AdmissionFacts;
 pub use types::*;
 
 use parking_lot::Mutex;
@@ -141,6 +143,7 @@ impl InteractionObservation {
         data_dir: PathBuf,
         retention_days: u32,
         persistent: bool,
+        generation_chains: crate::generation_chain::GenerationChain,
     ) -> Self {
         let store = ObservationStore::new(sqlite, postgres)
             .expect("Gateway provides exactly one observation SQL backend");
@@ -198,6 +201,7 @@ impl InteractionObservation {
             partial_trace_count: Arc::clone(&partial_trace_count),
             unpersisted_gaps: Arc::clone(&unpersisted_gaps),
             live: Arc::clone(&live_content),
+            generation_chains,
         });
         Self {
             inner: Arc::new(Inner {
@@ -237,7 +241,6 @@ impl InteractionObservation {
             finalization,
             rejection_id: None,
             websocket,
-            client_items: None,
         }
     }
     pub(crate) async fn query_forest(&self, q: ForestQuery) -> anyhow::Result<ForestPage> {
@@ -782,7 +785,6 @@ pub(crate) struct IngressObserver {
     finalization: Option<mpsc::OwnedPermit<WriterCommand>>,
     rejection_id: Option<String>,
     websocket: bool,
-    client_items: Option<Vec<stravia_runtime_contract::protocol::ir::AiItem>>,
 }
 
 #[derive(Clone)]
@@ -806,13 +808,6 @@ impl IngressCapture {
 impl IngressObserver {
     pub(crate) fn set_model(&mut self, model: &str) {
         self.metadata.model = Some(redaction::redact_text(model));
-    }
-
-    pub(crate) fn set_client_input(
-        &mut self,
-        items: Vec<stravia_runtime_contract::protocol::ir::AiItem>,
-    ) {
-        self.client_items = Some(items);
     }
 
     pub(crate) fn set_authenticated_source(&mut self, key_id: &str, key_name: &str) {
@@ -846,8 +841,9 @@ impl IngressObserver {
             record_trace(trace, None, None, event)
         }
     }
-    pub(crate) fn admit(mut self, mut start: RunStart) -> RunObserver {
-        start.ingress_received_at = self.received_at;
+    /// One admission carries everything Run Attribution needs; there is no
+    /// separate input-registration call to get out of order.
+    pub(crate) fn admit(mut self, start: RunStart, facts: AdmissionFacts) -> RunObserver {
         let ingress = self.start.take();
         let debug_enabled = self.observation.inner.debug.load(Ordering::Acquire);
         let discarded_trace = if !debug_enabled {
@@ -890,25 +886,18 @@ impl IngressObserver {
             )),
             protected,
         });
-        let (input, input_overflow) = match self.client_items.take() {
-            Some(items) => match tail::Window::capture(&items) {
-                Some(window) => (Some(window), false),
-                None => (None, !items.is_empty()),
-            },
-            None => (None, false),
-        };
         if self
             .observation
             .inner
             .writer
             .try_send(WriterCommand::Admit {
                 start,
+                facts,
+                received_at: self.received_at,
                 metadata: std::mem::take(&mut self.metadata),
                 debug_enabled,
                 trace: inner.trace.clone(),
                 discarded_trace,
-                input,
-                input_overflow,
             })
             .is_err()
         {
@@ -1069,13 +1058,6 @@ impl RunObserver {
         }
     }
 
-    /// Diagnostic-only: pass the received normalized window, never materialized history.
-    pub(crate) fn observe_client_input(
-        &self,
-        input: &[stravia_runtime_contract::protocol::ir::AiItem],
-    ) {
-        self.send_tail(tail::Window::capture(input), false);
-    }
     /// Call only after successful delivery and Generation commit, with client-visible output.
     pub(crate) fn observe_client_completion(
         &self,
@@ -1087,9 +1069,6 @@ impl RunObserver {
                 .append(tail::Window::capture(output)?)
                 .then_some(window)
         });
-        self.send_tail(window, true);
-    }
-    fn send_tail(&self, window: Option<tail::Window>, completed: bool) {
         if self
             .inner
             .observation
@@ -1099,7 +1078,6 @@ impl RunObserver {
                 run_id: self.inner.run_id.clone(),
                 principal: self.inner.principal.clone(),
                 window,
-                completed,
             })
             .is_err()
         {
@@ -1771,6 +1749,33 @@ mod snapshot_tests {
 
     use super::*;
 
+    /// Every test admission crosses the same one-call boundary as production.
+    fn facts(items: Vec<stravia_runtime_contract::protocol::ir::AiItem>) -> AdmissionFacts {
+        AdmissionFacts {
+            client_request: stravia_runtime_contract::protocol::ir::AiRequest::new("model", items),
+            has_new_user: true,
+            has_matching_pending_tool_result: false,
+            generation_root_id: None,
+            generation_parent_id: None,
+        }
+    }
+
+    async fn test_observation(
+        pool: &sqlx::SqlitePool,
+        directory: &std::path::Path,
+        persistent: bool,
+    ) -> InteractionObservation {
+        InteractionObservation::new(
+            Some(pool.clone()),
+            None,
+            directory.to_path_buf(),
+            1,
+            persistent,
+            crate::generation_chain::test_chain().await,
+        )
+        .await
+    }
+
     #[tokio::test]
     async fn connection_close_and_tool_handoff_commute() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
@@ -1779,14 +1784,7 @@ mod snapshot_tests {
             .connect("sqlite::memory:")
             .await?;
         crate::migrations::migrate_sqlite(&pool).await?;
-        let observation = InteractionObservation::new(
-            Some(pool.clone()),
-            None,
-            directory.path().to_owned(),
-            1,
-            true,
-        )
-        .await;
+        let observation = test_observation(&pool, directory.path(), true).await;
         for close_first in [false, true] {
             let connection = ClientConnectionObservation::new(observation.clone());
             let mut observers = Vec::new();
@@ -1799,21 +1797,18 @@ mod snapshot_tests {
                         path: "/v1/responses".into(),
                         protocol: "responses".into(),
                     })
-                    .admit(RunStart {
-                        id: id.clone(),
-                        principal: "owner".into(),
-                        api_key_id: None,
-                        api_key_name: None,
-                        generation_root_id: None,
-                        generation_parent_id: None,
-                        has_new_user: true,
-                        has_matching_pending_tool_result: false,
-                        ingress_received_at: 0,
-                        canonical_fingerprint: id.clone(),
-                        route_id: "route".into(),
-                        model_display_name: None,
-                        ingress_protocol: "responses".into(),
-                    });
+                    .admit(
+                        RunStart {
+                            id: id.clone(),
+                            principal: "owner".into(),
+                            api_key_id: None,
+                            api_key_name: None,
+                            route_id: "route".into(),
+                            model_display_name: None,
+                            ingress_protocol: "responses".into(),
+                        },
+                        facts(Vec::new()),
+                    );
                 if close_first {
                     connection.close();
                 }
@@ -1867,14 +1862,7 @@ mod snapshot_tests {
             .connect("sqlite::memory:")
             .await?;
         crate::migrations::migrate_sqlite(&pool).await?;
-        let observation = InteractionObservation::new(
-            Some(pool.clone()),
-            None,
-            directory.path().to_owned(),
-            1,
-            true,
-        )
-        .await;
+        let observation = test_observation(&pool, directory.path(), true).await;
         let observer = observation
             .observe_ingress(IngressStart {
                 id: "read-only-ingress".into(),
@@ -1882,21 +1870,18 @@ mod snapshot_tests {
                 path: "/responses".into(),
                 protocol: "responses".into(),
             })
-            .admit(RunStart {
-                id: "read-only-run".into(),
-                principal: "test".into(),
-                api_key_id: None,
-                api_key_name: None,
-                generation_root_id: None,
-                generation_parent_id: None,
-                has_new_user: true,
-                has_matching_pending_tool_result: false,
-                ingress_received_at: 0,
-                canonical_fingerprint: "read-only".into(),
-                route_id: "route".into(),
-                model_display_name: None,
-                ingress_protocol: "responses".into(),
-            });
+            .admit(
+                RunStart {
+                    id: "read-only-run".into(),
+                    principal: "test".into(),
+                    api_key_id: None,
+                    api_key_name: None,
+                    route_id: "route".into(),
+                    model_display_name: None,
+                    ingress_protocol: "responses".into(),
+                },
+                facts(Vec::new()),
+            );
         observer.record(RunEvent::ClientVisibleContentDelta {
             text: "saved answer".into(),
         });
@@ -1943,14 +1928,7 @@ mod snapshot_tests {
         let directory = tempfile::tempdir()?;
         let pool = crate::db::init_pool(directory.path()).await?;
         crate::migrations::migrate_sqlite(&pool).await?;
-        let observation = InteractionObservation::new(
-            Some(pool.clone()),
-            None,
-            directory.path().to_owned(),
-            1,
-            true,
-        )
-        .await;
+        let observation = test_observation(&pool, directory.path(), true).await;
         for enabled in [true, false] {
             observation.set_debug_enabled(enabled);
             let run_id = format!("trace-{enabled}");
@@ -1961,21 +1939,18 @@ mod snapshot_tests {
                     path: "/responses".into(),
                     protocol: "responses".into(),
                 })
-                .admit(RunStart {
-                    id: run_id.clone(),
-                    principal: "test".into(),
-                    api_key_id: None,
-                    api_key_name: None,
-                    generation_root_id: None,
-                    generation_parent_id: None,
-                    has_new_user: true,
-                    has_matching_pending_tool_result: false,
-                    ingress_received_at: 0,
-                    canonical_fingerprint: run_id.clone(),
-                    route_id: "route".into(),
-                    model_display_name: None,
-                    ingress_protocol: "responses".into(),
-                });
+                .admit(
+                    RunStart {
+                        id: run_id.clone(),
+                        principal: "test".into(),
+                        api_key_id: None,
+                        api_key_name: None,
+                        route_id: "route".into(),
+                        model_display_name: None,
+                        ingress_protocol: "responses".into(),
+                    },
+                    facts(Vec::new()),
+                );
             observation.flush().await?;
             let admitted = observation.inner.store.max_sequence().await?;
             let checkpoint = |stage: &str| RunEvent::Checkpoint {
@@ -2318,14 +2293,7 @@ mod snapshot_tests {
         ))
         .execute(&pool)
         .await?;
-        let mut observation = InteractionObservation::new(
-            Some(pool.clone()),
-            None,
-            directory.path().to_path_buf(),
-            1,
-            false,
-        )
-        .await;
+        let mut observation = test_observation(&pool, directory.path(), false).await;
         let delivered_at = writer::now() - 100_000;
         for restarted in [false, true] {
             for (case, delay, tools, parent, principal, new_user, merged, reason) in [
@@ -2407,21 +2375,23 @@ mod snapshot_tests {
                         protocol: "responses".into(),
                     });
                     ingress.received_at = received_at;
-                    ingress.admit(RunStart {
-                        id: id.clone(),
-                        principal: principal.into(),
-                        api_key_id: None,
-                        api_key_name: None,
-                        generation_root_id: None,
-                        generation_parent_id: parent,
-                        has_new_user: new_user,
-                        has_matching_pending_tool_result: tools,
-                        ingress_received_at: 0,
-                        canonical_fingerprint: id,
-                        route_id: "route".into(),
-                        model_display_name: None,
-                        ingress_protocol: "responses".into(),
-                    })
+                    ingress.admit(
+                        RunStart {
+                            id: id.clone(),
+                            principal: principal.into(),
+                            api_key_id: None,
+                            api_key_name: None,
+                            route_id: "route".into(),
+                            model_display_name: None,
+                            ingress_protocol: "responses".into(),
+                        },
+                        AdmissionFacts {
+                            has_new_user: new_user,
+                            has_matching_pending_tool_result: tools,
+                            generation_parent_id: parent,
+                            ..facts(Vec::new())
+                        },
+                    )
                 };
                 let parent_id = format!("parent-{id}");
                 let node_id = format!("node-{id}");
@@ -2450,14 +2420,7 @@ mod snapshot_tests {
                 if restarted {
                     drop(first);
                     observation.shutdown().await;
-                    observation = InteractionObservation::new(
-                        Some(pool.clone()),
-                        None,
-                        directory.path().to_path_buf(),
-                        1,
-                        false,
-                    )
-                    .await;
+                    observation = test_observation(&pool, directory.path(), false).await;
                 }
                 let child = make_run(
                     &observation,
@@ -2551,14 +2514,7 @@ mod snapshot_tests {
         ))
         .execute(&pool)
         .await?;
-        let observation = InteractionObservation::new(
-            Some(pool.clone()),
-            None,
-            directory.path().to_path_buf(),
-            1,
-            true,
-        )
-        .await;
+        let observation = test_observation(&pool, directory.path(), true).await;
         let make_run = |id: &str| {
             observation
                 .observe_ingress(IngressStart {
@@ -2567,21 +2523,18 @@ mod snapshot_tests {
                     path: "/responses".into(),
                     protocol: "responses".into(),
                 })
-                .admit(RunStart {
-                    id: id.into(),
-                    principal: "api-key:test".into(),
-                    api_key_id: None,
-                    api_key_name: Some("test".into()),
-                    generation_root_id: None,
-                    generation_parent_id: None,
-                    has_new_user: true,
-                    has_matching_pending_tool_result: false,
-                    ingress_received_at: 0,
-                    canonical_fingerprint: id.into(),
-                    route_id: "test-route".into(),
-                    model_display_name: None,
-                    ingress_protocol: "responses".into(),
-                })
+                .admit(
+                    RunStart {
+                        id: id.into(),
+                        principal: "api-key:test".into(),
+                        api_key_id: None,
+                        api_key_name: Some("test".into()),
+                        route_id: "test-route".into(),
+                        model_display_name: None,
+                        ingress_protocol: "responses".into(),
+                    },
+                    facts(Vec::new()),
+                )
         };
         let active = make_run("active");
         let completed = make_run("completed");
@@ -2699,14 +2652,7 @@ mod snapshot_tests {
         ))
         .execute(&pool)
         .await?;
-        let observation = InteractionObservation::new(
-            Some(pool.clone()),
-            None,
-            directory.path().to_path_buf(),
-            1,
-            true,
-        )
-        .await;
+        let observation = test_observation(&pool, directory.path(), true).await;
         let observer = observation
             .observe_ingress(IngressStart {
                 id: "ingress".into(),
@@ -2714,21 +2660,21 @@ mod snapshot_tests {
                 path: "/responses".into(),
                 protocol: "responses".into(),
             })
-            .admit(RunStart {
-                id: "run".into(),
-                principal: "api-key:test".into(),
-                api_key_id: None,
-                api_key_name: None,
-                generation_root_id: None,
-                generation_parent_id: None,
-                has_new_user: false,
-                has_matching_pending_tool_result: false,
-                ingress_received_at: 0,
-                canonical_fingerprint: "tool-payload-test".into(),
-                route_id: "route".into(),
-                model_display_name: None,
-                ingress_protocol: "responses".into(),
-            });
+            .admit(
+                RunStart {
+                    id: "run".into(),
+                    principal: "api-key:test".into(),
+                    api_key_id: None,
+                    api_key_name: None,
+                    route_id: "route".into(),
+                    model_display_name: None,
+                    ingress_protocol: "responses".into(),
+                },
+                AdmissionFacts {
+                    has_new_user: false,
+                    ..facts(Vec::new())
+                },
+            );
         assert!(!observer.debug_enabled());
         observer.capture_client_tool_results(&[
             AiItem::output_text("not a received tool result"),

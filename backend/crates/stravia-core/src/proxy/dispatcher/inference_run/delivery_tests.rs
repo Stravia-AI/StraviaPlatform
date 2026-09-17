@@ -1,6 +1,8 @@
 use super::*;
 use crate::compaction::{Compaction, CompactionRegistration, CompactionTarget};
-use crate::interaction_observation::{CompactionMode, InteractionObservation, RunStart};
+use crate::interaction_observation::{
+    AdmissionFacts, CompactionMode, InteractionObservation, RunStart,
+};
 use crate::model_turn::{CompactionPublication, CompactionReceipt};
 
 #[tokio::test]
@@ -18,6 +20,7 @@ async fn delivered_native_state_survives_later_failure_but_unexposed_states_expi
         directory.path().to_path_buf(),
         7,
         true,
+        crate::generation_chain::test_chain().await,
     )
     .await;
     let observer = observation
@@ -27,21 +30,27 @@ async fn delivered_native_state_survives_later_failure_but_unexposed_states_expi
             path: "/v1/responses".into(),
             protocol: "open-responses/responses/2026-04-24".into(),
         })
-        .admit(RunStart {
-            id: "native-delivery".into(),
-            principal: "owner".into(),
-            api_key_id: None,
-            api_key_name: None,
-            generation_root_id: None,
-            generation_parent_id: None,
-            has_new_user: true,
-            has_matching_pending_tool_result: false,
-            ingress_received_at: 0,
-            canonical_fingerprint: "native-delivery".into(),
-            route_id: "local-route".into(),
-            model_display_name: None,
-            ingress_protocol: "open-responses/responses/2026-04-24".into(),
-        });
+        .admit(
+            RunStart {
+                id: "native-delivery".into(),
+                principal: "owner".into(),
+                api_key_id: None,
+                api_key_name: None,
+                route_id: "local-route".into(),
+                model_display_name: None,
+                ingress_protocol: "open-responses/responses/2026-04-24".into(),
+            },
+            AdmissionFacts {
+                client_request: stravia_runtime_contract::protocol::ir::AiRequest::new(
+                    "model",
+                    Vec::new(),
+                ),
+                has_new_user: true,
+                has_matching_pending_tool_result: false,
+                generation_root_id: None,
+                generation_parent_id: None,
+            },
+        );
     let compaction = Compaction::sqlite(pool.clone());
     let principal = stravia_runtime_contract::Principal::new("owner");
     let publications = crate::model_turn::CompactionPublications::default();

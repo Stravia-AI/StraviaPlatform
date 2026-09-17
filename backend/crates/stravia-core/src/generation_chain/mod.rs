@@ -55,6 +55,18 @@ const GENERATION_SESSION_ID_META: &str = "__stravia_generation_session_id";
 #[cfg(test)]
 const DEFAULT_GENERATION_CHAIN_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
+/// Test-only chain on a fresh migrated SQLite store; used by tests outside this
+/// module that need to construct a `GenerationChain` (e.g. Interaction
+/// Observation).
+#[cfg(test)]
+pub(crate) async fn test_chain() -> GenerationChain {
+    GenerationChain::from_turn_chain(
+        std::sync::Arc::new(crate::turn_chain::test_store().await),
+        DEFAULT_GENERATION_CHAIN_TTL,
+        None,
+    )
+}
+
 #[derive(Clone)]
 pub(crate) struct GenerationChain {
     store: GenerationChainStore,
@@ -340,6 +352,32 @@ impl GenerationChain {
             Ok(())
         } else {
             Err(BeginError::CompactionConflict)
+        }
+    }
+
+    /// Ancestor client items of a completed response node, for observation evidence.
+    /// Generation Chain owns its schema; callers get items, never node payloads.
+    /// An incomplete or expired chain declines rather than returning partial history.
+    pub(crate) async fn ancestor_client_items(
+        &self,
+        principal: &Principal,
+        node: &str,
+    ) -> anyhow::Result<Option<Vec<AiItem>>> {
+        match self
+            .store
+            .turn_chain
+            .materialize(principal, TurnNodeKind::Response, &TurnNodeId::new(node))
+            .await
+        {
+            Ok(nodes) => {
+                client_items_from_payloads(nodes.into_iter().map(|node| node.payload).collect())
+                    .map(Some)
+                    .map_err(anyhow::Error::msg)
+            }
+            Err(stravia_runtime_contract::turn_chain::TurnUnavailable::Unavailable) => Ok(None),
+            Err(error @ stravia_runtime_contract::turn_chain::TurnUnavailable::Storage(_)) => {
+                Err(anyhow::Error::new(error))
+            }
         }
     }
 

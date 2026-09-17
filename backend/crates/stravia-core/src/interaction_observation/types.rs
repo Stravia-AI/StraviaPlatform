@@ -104,20 +104,15 @@ pub(crate) struct IngressStart {
     pub protocol: String,
 }
 
+/// Run identity only. Attribution evidence (client items, chain facts, ingress
+/// receipt) travels through `AdmissionFacts`; Run Attribution computes
+/// fingerprinting, window capture, and receipt stamping inside its boundary.
 #[derive(Debug, Clone)]
 pub(crate) struct RunStart {
     pub id: String,
     pub principal: String,
     pub api_key_id: Option<String>,
     pub api_key_name: Option<String>,
-    pub generation_root_id: Option<String>,
-    pub generation_parent_id: Option<String>,
-    pub has_new_user: bool,
-    pub has_matching_pending_tool_result: bool,
-    /// Captured at ingress receipt, before admission or writer queuing.
-    pub ingress_received_at: i64,
-    // 仅用于进程内精确重试索引，不允许持久化或对外序列化。
-    pub canonical_fingerprint: String,
     pub route_id: String,
     pub model_display_name: Option<String>,
     pub ingress_protocol: String,

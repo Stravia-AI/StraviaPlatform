@@ -869,6 +869,7 @@ mod tests {
             directory.path().to_path_buf(),
             1,
             true,
+            crate::generation_chain::test_chain().await,
         )
         .await;
         let observer = observation
@@ -878,21 +879,27 @@ mod tests {
                 path: "/responses".into(),
                 protocol: "responses".into(),
             })
-            .admit(RunStart {
-                id: "run".into(),
-                principal: "api-key:test".into(),
-                api_key_id: None,
-                api_key_name: None,
-                generation_root_id: None,
-                generation_parent_id: None,
-                has_new_user: true,
-                has_matching_pending_tool_result: false,
-                ingress_received_at: 0,
-                canonical_fingerprint: "thinking-boundaries".into(),
-                route_id: "route".into(),
-                model_display_name: None,
-                ingress_protocol: "responses".into(),
-            });
+            .admit(
+                RunStart {
+                    id: "run".into(),
+                    principal: "api-key:test".into(),
+                    api_key_id: None,
+                    api_key_name: None,
+                    route_id: "route".into(),
+                    model_display_name: None,
+                    ingress_protocol: "responses".into(),
+                },
+                crate::interaction_observation::AdmissionFacts {
+                    client_request: stravia_runtime_contract::protocol::ir::AiRequest::new(
+                        "model",
+                        Vec::new(),
+                    ),
+                    has_new_user: true,
+                    has_matching_pending_tool_result: false,
+                    generation_root_id: None,
+                    generation_parent_id: None,
+                },
+            );
         let make_attempt = |id: &str| AttemptObservation {
             observer: Some(observer.clone()),
             id: id.into(),
@@ -1003,6 +1010,7 @@ mod tests {
             directory.path().to_path_buf(),
             1,
             true,
+            crate::generation_chain::test_chain().await,
         )
         .await;
         let observer = observation
@@ -1012,21 +1020,27 @@ mod tests {
                 path: "/responses".into(),
                 protocol: "responses".into(),
             })
-            .admit(RunStart {
-                id: "run".into(),
-                principal: "api-key:test".into(),
-                api_key_id: None,
-                api_key_name: None,
-                generation_root_id: None,
-                generation_parent_id: None,
-                has_new_user: true,
-                has_matching_pending_tool_result: false,
-                ingress_received_at: 0,
-                canonical_fingerprint: "thinking-test".into(),
-                route_id: "route".into(),
-                model_display_name: None,
-                ingress_protocol: "responses".into(),
-            });
+            .admit(
+                RunStart {
+                    id: "run".into(),
+                    principal: "api-key:test".into(),
+                    api_key_id: None,
+                    api_key_name: None,
+                    route_id: "route".into(),
+                    model_display_name: None,
+                    ingress_protocol: "responses".into(),
+                },
+                crate::interaction_observation::AdmissionFacts {
+                    client_request: stravia_runtime_contract::protocol::ir::AiRequest::new(
+                        "model",
+                        Vec::new(),
+                    ),
+                    has_new_user: true,
+                    has_matching_pending_tool_result: false,
+                    generation_root_id: None,
+                    generation_parent_id: None,
+                },
+            );
         assert!(!observer.debug_enabled());
         observer.protect_secrets(["PLAIN_THINKING_SECRET_9"]);
         let make_attempt = |id: &str| AttemptObservation {

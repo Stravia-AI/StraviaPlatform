@@ -1232,21 +1232,27 @@ fn credential_observer(
             path: "/v1/chat/completions".into(),
             protocol: "openai-compatible".into(),
         })
-        .admit(crate::interaction_observation::RunStart {
-            id,
-            principal: principal.continuation_key(),
-            api_key_id: None,
-            api_key_name: Some("Discovery test".into()),
-            generation_root_id: None,
-            generation_parent_id: None,
-            has_new_user: true,
-            has_matching_pending_tool_result: false,
-            ingress_received_at: 0,
-            canonical_fingerprint: stravia_runtime_contract::identifier::new_id(),
-            route_id: "discovery-model".into(),
-            model_display_name: None,
-            ingress_protocol: "openai-compatible".into(),
-        })
+        .admit(
+            crate::interaction_observation::RunStart {
+                id,
+                principal: principal.continuation_key(),
+                api_key_id: None,
+                api_key_name: Some("Discovery test".into()),
+                route_id: "discovery-model".into(),
+                model_display_name: None,
+                ingress_protocol: "openai-compatible".into(),
+            },
+            crate::interaction_observation::AdmissionFacts {
+                client_request: stravia_runtime_contract::protocol::ir::AiRequest::new(
+                    "model",
+                    Vec::new(),
+                ),
+                has_new_user: true,
+                has_matching_pending_tool_result: false,
+                generation_root_id: None,
+                generation_parent_id: None,
+            },
+        )
 }
 
 #[tokio::test]
@@ -1572,21 +1578,27 @@ async fn held_publication_turn(
             path: "/v1/chat/completions".into(),
             protocol: "openai-compatible".into(),
         })
-        .admit(crate::interaction_observation::RunStart {
-            id: run_id,
-            principal: principal.continuation_key(),
-            api_key_id: None,
-            api_key_name: None,
-            generation_root_id: None,
-            generation_parent_id: None,
-            has_new_user: true,
-            has_matching_pending_tool_result: false,
-            ingress_received_at: 0,
-            canonical_fingerprint: "publication-fixture".into(),
-            route_id: "publication-model".into(),
-            model_display_name: None,
-            ingress_protocol: "openai-compatible".into(),
-        });
+        .admit(
+            crate::interaction_observation::RunStart {
+                id: run_id,
+                principal: principal.continuation_key(),
+                api_key_id: None,
+                api_key_name: None,
+                route_id: "publication-model".into(),
+                model_display_name: None,
+                ingress_protocol: "openai-compatible".into(),
+            },
+            crate::interaction_observation::AdmissionFacts {
+                client_request: stravia_runtime_contract::protocol::ir::AiRequest::new(
+                    "model",
+                    Vec::new(),
+                ),
+                has_new_user: true,
+                has_matching_pending_tool_result: false,
+                generation_root_id: None,
+                generation_parent_id: None,
+            },
+        );
     let turn = executor
         .execute(
             TurnInput::new(principal.clone(), request)
