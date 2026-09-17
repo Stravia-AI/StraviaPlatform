@@ -890,7 +890,7 @@ impl IngressObserver {
             .observation
             .inner
             .writer
-            .try_send(WriterCommand::Admit {
+            .try_send(WriterCommand::Admit(Box::new(writer::AdmitPayload {
                 start,
                 facts,
                 received_at: self.received_at,
@@ -898,7 +898,7 @@ impl IngressObserver {
                 debug_enabled,
                 trace: inner.trace.clone(),
                 discarded_trace,
-            })
+            })))
             .is_err()
         {
             inner.gap.store(true, Ordering::Release);

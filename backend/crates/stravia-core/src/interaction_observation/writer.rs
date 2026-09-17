@@ -16,6 +16,18 @@ use super::{
     types::*,
 };
 
+/// Admission payload carried through the writer channel; boxed because the
+/// full request facts dwarf the other `WriterCommand` variants.
+pub(super) struct AdmitPayload {
+    pub start: RunStart,
+    pub facts: super::AdmissionFacts,
+    pub received_at: i64,
+    pub metadata: super::RequestMetadata,
+    pub debug_enabled: bool,
+    pub trace: Option<super::trace::TraceHandle>,
+    pub discarded_trace: Option<super::trace::TraceHandle>,
+}
+
 pub(super) enum WriterCommand {
     ClearTail,
     ClientDisconnected {
@@ -38,15 +50,7 @@ pub(super) enum WriterCommand {
         principal: String,
         window: Option<super::tail::Window>,
     },
-    Admit {
-        start: RunStart,
-        facts: super::AdmissionFacts,
-        received_at: i64,
-        metadata: super::RequestMetadata,
-        debug_enabled: bool,
-        trace: Option<super::trace::TraceHandle>,
-        discarded_trace: Option<super::trace::TraceHandle>,
-    },
+    Admit(Box<AdmitPayload>),
     Event {
         run_id: String,
         event: RunEvent,
@@ -313,15 +317,16 @@ pub(super) fn spawn(
                         );
                     }
                 }
-                Some(WriterCommand::Admit {
-                    start,
-                    facts,
-                    received_at,
-                    metadata,
-                    debug_enabled,
-                    trace,
-                    discarded_trace,
-                }) => {
+                Some(WriterCommand::Admit(payload)) => {
+                    let AdmitPayload {
+                        start,
+                        facts,
+                        received_at,
+                        metadata,
+                        debug_enabled,
+                        trace,
+                        discarded_trace,
+                    } = *payload;
                     let now = now();
                     // Run Attribution owns the placement decision end to end; the
                     // writer only persists the outcome and publishes it.

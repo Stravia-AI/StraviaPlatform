@@ -19,6 +19,18 @@ use super::{
     types::{RunEvent, RunStart},
 };
 
+/// Inputs for the tail-diagnostic pass: the admitted run identity plus the
+/// captured request window (or its overflow marker) and timing facts.
+struct DiscoverInput<'a> {
+    run_id: &'a str,
+    principal: &'a str,
+    generation_parent_id: Option<&'a str>,
+    input: Option<&'a Window>,
+    input_overflow: bool,
+    ingress_received_at: i64,
+    now: i64,
+}
+
 /// Caller-confirmed admission inputs: the received client items plus the facts
 /// Generation Chain already confirmed (ADR-0040/0020 keep those caller-side).
 /// Grouping evidence — tail window, canonical fingerprint, ingress receipt — is
@@ -231,15 +243,15 @@ impl<E: AttributionEvidence> RunAttribution<E> {
         // persisted event separates a model-switched continuation (input carries
         // the intermediate turn) from a real fork of the original chain.
         let (diagnostic, diagnostic_event) = self
-            .discover(
-                &start.id,
-                &start.principal,
-                facts.generation_parent_id.as_deref(),
-                input.as_ref(),
+            .discover(DiscoverInput {
+                run_id: &start.id,
+                principal: &start.principal,
+                generation_parent_id: facts.generation_parent_id.as_deref(),
+                input: input.as_ref(),
                 input_overflow,
                 ingress_received_at,
                 now,
-            )
+            })
             .await;
         let assignment = self.grouping.assign(
             AssignInput {
@@ -373,14 +385,17 @@ impl<E: AttributionEvidence> RunAttribution<E> {
 
     async fn discover(
         &self,
-        run_id: &str,
-        principal: &str,
-        generation_parent_id: Option<&str>,
-        input: Option<&Window>,
-        input_overflow: bool,
-        ingress_received_at: i64,
-        now: i64,
+        discovery: DiscoverInput<'_>,
     ) -> (Option<DiagnosticSource>, Option<RunEvent>) {
+        let DiscoverInput {
+            run_id,
+            principal,
+            generation_parent_id,
+            input,
+            input_overflow,
+            ingress_received_at,
+            now,
+        } = discovery;
         if input_overflow {
             return (None, Some(tail_status_event("resource_limit")));
         }
@@ -520,15 +535,18 @@ mod tests {
 
     use super::*;
 
+    /// `(principal, interaction_id, last_unit_hash, ancestor items)`; `None`
+    /// items model a row whose history cannot be rematerialized.
+    type TailSource = (String, String, String, Option<Vec<AiItem>>);
+
     /// In-memory evidence adapter: tests declare the persisted evidence and the
     /// production merge path reads it through the same seam the store uses.
     #[derive(Default)]
     struct MemoryEvidence {
         /// `(tool_id, run_id, interaction_id, principal)` pending-tool rows.
         pending_tools: Vec<(String, String, String, String)>,
-        /// `run_id -> (principal, interaction_id, last_unit_hash, ancestor items)`.
-        /// `None` items model a row whose history cannot be rematerialized.
-        tail_sources: HashMap<String, (String, String, String, Option<Vec<AiItem>>)>,
+        /// `run_id -> tail source`.
+        tail_sources: HashMap<String, TailSource>,
         delivered: HashMap<String, i64>,
         /// `generation_node_id -> (principal, observed parent)`.
         parents: HashMap<String, (String, ObservedParent)>,
@@ -848,8 +866,10 @@ mod tests {
 
     #[tokio::test]
     async fn failed_parent_lookup_still_admits_unparented() {
-        let mut evidence = MemoryEvidence::default();
-        evidence.fail_parent_lookup = true;
+        let evidence = MemoryEvidence {
+            fail_parent_lookup: true,
+            ..Default::default()
+        };
         let mut attribution = RunAttribution::new(evidence);
         let mut facts = facts(vec![user("hi")]);
         facts.generation_parent_id = Some("node".into());
@@ -1104,8 +1124,10 @@ mod tests {
     #[tokio::test]
     async fn failed_tail_query_marks_index_unavailable_unless_parented() {
         for parented in [false, true] {
-            let mut evidence = MemoryEvidence::default();
-            evidence.fail_tail_sources = true;
+            let mut evidence = MemoryEvidence {
+                fail_tail_sources: true,
+                ..Default::default()
+            };
             if parented {
                 evidence.parents.insert(
                     "node".into(),
