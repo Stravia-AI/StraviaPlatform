@@ -695,7 +695,7 @@ async fn http_continuation_not_retained_by_zdr_replays_full_request_once() {
         .expect("API key");
     let executor = LiveModelTurnExecutor::new(
         gateway,
-        super::continuation::ScriptedContinuation::hit("resp-zdr"),
+        crate::router::continuation::ScriptedContinuation::hit("resp-zdr"),
     );
     let mut request = AiRequest::new(
         "zdr-model",
@@ -1021,9 +1021,12 @@ async fn execute_omits_previous_response_id_when_lookup_misses() {
     let (_data_dir, gateway, captured, key) =
         gateway_with_captured_model("lookup-miss-model", true).await;
     let executor =
-        LiveModelTurnExecutor::new(gateway.clone(), continuation::ScriptedContinuation::miss());
+        LiveModelTurnExecutor::new(
+            gateway.clone(),
+            crate::router::continuation::ScriptedContinuation::miss(),
+        );
     let mut request = AiRequest::new("lookup-miss-model", Vec::new());
-    crate::model_turn::stamp_previous_response_id(&mut request, "stravia-parent");
+    crate::router::stamp_previous_response_id(&mut request, "stravia-parent");
 
     let turn = executor
         .execute(TurnInput::new(Principal::new(key.id), request))
@@ -1041,10 +1044,10 @@ async fn execute_sends_previous_response_id_when_lookup_hits() {
         gateway_with_captured_model("lookup-hit-model", true).await;
     let executor = LiveModelTurnExecutor::new(
         gateway.clone(),
-        continuation::ScriptedContinuation::hit("upstream-resp-1"),
+        crate::router::continuation::ScriptedContinuation::hit("upstream-resp-1"),
     );
     let mut request = AiRequest::new("lookup-hit-model", Vec::new());
-    crate::model_turn::stamp_previous_response_id(&mut request, "stravia-parent");
+    crate::router::stamp_previous_response_id(&mut request, "stravia-parent");
 
     let turn = executor
         .execute(TurnInput::new(Principal::new(key.id), request))
@@ -1560,7 +1563,10 @@ async fn held_publication_turn(
     let mut related = request.clone();
     let cancellation = CancellationToken::new();
     let executor =
-        LiveModelTurnExecutor::new(gateway.clone(), continuation::ScriptedContinuation::miss());
+        LiveModelTurnExecutor::new(
+            gateway.clone(),
+            crate::router::continuation::ScriptedContinuation::miss(),
+        );
     let run_id = stravia_runtime_contract::identifier::new_id();
     let observer = gateway
         .observation

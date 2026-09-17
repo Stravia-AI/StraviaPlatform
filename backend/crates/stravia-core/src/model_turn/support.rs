@@ -2,16 +2,11 @@ use std::sync::Arc;
 
 use reqwest::header::{HeaderMap as ReqwestHeaderMap, HeaderValue as ReqwestHeaderValue};
 
-use crate::Gateway;
-use crate::db::models::{Provider, Route, Target};
+use crate::db::models::Provider;
 use crate::provider::VendorRegistry;
 use crate::provider::vendor::Vendor;
 use stravia_runtime_contract::protocol::ids::Protocol;
 use stravia_runtime_contract::protocol::ir::AiResponse;
-
-pub(super) async fn load_route_targets(_gw: &Gateway, model: &Route) -> Vec<Target> {
-    model.targets.clone()
-}
 
 pub(super) fn runtime_binding_headers(
     binding: &crate::auth::RuntimeBinding,

@@ -2,19 +2,15 @@
 //!
 //! Callers submit a Principal, Effective Model Request, authorization,
 //! optional forwarded upstream hints, and cancel / deadline. The live adapter
-//! owns Route / Target selection, first-output failover, and Provider Transport.
+//! drives the `router::selection` attempt policy, first-output failover, and
+//! Provider Transport.
 
 mod accumulator;
-mod continuation;
 mod live;
 mod provider;
 mod support;
 
 pub(crate) use accumulator::StreamResponseAccumulator;
-pub(crate) use continuation::{
-    ContinuationLookup, ContinuationTarget, clear_previous_response_id, parent_id_from_request,
-    stamp_previous_response_id,
-};
 pub(crate) use live::LiveModelTurnExecutor;
 
 use std::sync::{Arc, atomic::AtomicBool};

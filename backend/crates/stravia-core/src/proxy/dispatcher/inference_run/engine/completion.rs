@@ -266,7 +266,7 @@ impl PlatformOnlyContinuation {
                 &states,
             ) {
                 request.items.drain(..start);
-                crate::model_turn::clear_previous_response_id(request);
+                crate::router::clear_previous_response_id(request);
             }
         }
         run.next_round();

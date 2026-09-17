@@ -3,15 +3,14 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use futures::stream;
-use rust_decimal::prelude::ToPrimitive;
 
-use super::continuation::{ContinuationLookup, ContinuationTarget};
+use crate::router::{ContinuationLookup, ContinuationTarget};
 use super::provider::{
     AttemptObservation, ProviderAdapter, ProviderBinding, ProviderCall, ProviderStreamError,
     ProviderStreamResponse, ResponsesWebSocketBinding,
 };
 use super::support::{
-    ai_response_to_deltas, is_openai_generation_target, load_route_targets, merge_provider_headers,
+    ai_response_to_deltas, is_openai_generation_target, merge_provider_headers,
     resolve_vendor_adapter, runtime_binding_headers,
 };
 use super::{
@@ -28,8 +27,8 @@ use crate::proxy::context::RequestContext;
 use crate::proxy::planner::{ProtocolMode, ProtocolPlan, negotiate};
 use crate::proxy::security::Security;
 use crate::router::{
-    AttemptFailureDisposition, RouteAttemptContext, RouteAttemptPolicy, RoutePolicyState,
-    RouteSchedulingSnapshot, SelectedTarget, conversation_identity, selected_target_key,
+    AttemptFailureDisposition, RouteAttemptContext, RoutePolicyState, SelectedTarget,
+    selected_target_key,
 };
 use stravia_runtime_contract::hook::RouteContext;
 use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
@@ -42,13 +41,21 @@ use stravia_runtime_contract::protocol::ir::request::MediaRoutingMode;
 pub struct LiveModelTurnExecutor {
     gateway: Gateway,
     continuation: Arc<dyn ContinuationLookup>,
+    selector: crate::router::RouteSelector,
 }
 
 impl LiveModelTurnExecutor {
     pub fn new(gateway: Gateway, continuation: Arc<dyn ContinuationLookup>) -> Self {
+        let selector = crate::router::RouteSelector::new(
+            gateway.storage.clone(),
+            gateway.cache_affinity.clone(),
+            continuation.clone(),
+            gateway.route_policy_state.clone(),
+        );
         Self {
             gateway,
             continuation,
+            selector,
         }
     }
 }
@@ -86,9 +93,7 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
                 .model_cache
                 .read()
                 .await
-                .models
-                .iter()
-                .find(|route| route.model_id == input.request.model)
+                .resolve(&input.request.model)
                 .map(|route| {
                     (
                         route.id.clone(),
@@ -511,19 +516,13 @@ async fn execute_inner(
     model_turn_id: String,
 ) -> Result<ModelTurn, ModelTurnError> {
     let gateway = &executor.gateway;
-    let route = {
-        let cache = gateway.model_cache.read().await;
-        cache
-            .match_model(&input.request.model)
-            .or_else(|| {
-                cache
-                    .models
-                    .iter()
-                    .find(|model| model.id == input.request.model)
-            })
-            .cloned()
-    }
-    .ok_or_else(|| ModelTurnError::new("model_not_found", "Model is unavailable"))?;
+    let route = gateway
+        .model_cache
+        .read()
+        .await
+        .resolve(&input.request.model)
+        .cloned()
+        .ok_or_else(|| ModelTurnError::new("model_not_found", "Model is unavailable"))?;
 
     if let Some(requested) = input.request.reasoning.level {
         input.request.reasoning.level = requested
@@ -562,62 +561,29 @@ async fn execute_inner(
     }
     .map_err(model_turn_gateway_error)?;
 
-    let targets = load_route_targets(gateway, &route).await;
-    let preferred_target =
-        gateway
-            .cache_affinity
-            .preferred_target(&input.principal, &route.id, &input.request);
-    let conversation = conversation_identity(&input.request);
-    let conversation_affinity_target = if matches!(
-        conversation,
-        Some(crate::router::ConversationIdentity::GenerationParent(_))
-    ) {
-        executor
-            .continuation
-            .preferred_target(&input.principal, &input.request)
-            .await
-    } else {
-        None
-    };
-    let scheduling_snapshot = load_scheduling_snapshot(gateway, &targets, input.observer.as_ref())
+    let mut attempts = executor
+        .selector
+        .select(
+            &input.principal,
+            &route,
+            &input.request,
+            input.request.meta.media_routing.as_ref(),
+            input.observer.as_ref(),
+        )
         .await
-        .map_err(|error| {
-            ModelTurnError::new(
+        .map_err(|error| match error {
+            crate::router::SelectionError::SchedulingEvidence(source) => ModelTurnError::new(
                 "route_scheduling_unavailable",
-                format!("Route scheduling snapshot is unavailable: {error}"),
-            )
-        })?;
-    let attempt_context = RouteAttemptContext {
-        principal: input.principal.continuation_key(),
-        route_id: route.id.clone(),
-        conversation,
-        conversation_affinity_target,
-        cache_affinity_target: preferred_target,
-        estimated_uncached_input_tokens: estimate_uncached_input_tokens(&input.request),
-        now_ms: gateway.route_policy_state.now_ms(),
-    };
-    let mut attempts = RouteAttemptPolicy::new(
-        &route.balance,
-        &targets,
-        attempt_context.clone(),
-        &scheduling_snapshot,
-        gateway.route_policy_state.clone(),
-    );
-    if let Some(plan) = input.request.meta.media_routing.as_ref() {
-        attempts.retain(|target| plan.target_keys.contains(&selected_target_key(target)));
-        if attempts.is_empty() {
-            return Err(ModelTurnError::new(
+                format!("Route scheduling snapshot is unavailable: {source}"),
+            ),
+            crate::router::SelectionError::MediaPlanExhausted => ModelTurnError::new(
                 "input_modality_unsupported",
                 "No eligible Target remains for the fixed Media routing plan",
-            ));
-        }
-    }
-    if attempts.is_empty() {
-        return Err(ModelTurnError::new(
-            "model_unavailable",
-            "Model has no configured Target",
-        ));
-    }
+            ),
+            crate::router::SelectionError::NoEligibleTarget => {
+                ModelTurnError::new("model_unavailable", "Model has no configured Target")
+            }
+        })?;
 
     let native_compaction_requested = input.purpose == super::ModelTurnPurpose::Compact
         || crate::compaction::NativeCompactionControls::classify(&input.request).requested();
@@ -650,8 +616,8 @@ async fn execute_inner(
                         prepared,
                         attempt_started,
                         AttemptRoutePolicy {
-                            state: gateway.route_policy_state.clone(),
-                            context: attempt_context.clone(),
+                            state: attempts.state().clone(),
+                            context: attempts.context().clone(),
                         },
                     );
 
@@ -740,67 +706,6 @@ async fn execute_inner(
             AttemptFailure::terminal("provider_unavailable", "all Model Targets failed")
         })
         .finish(input.observer.as_ref()))
-}
-
-async fn load_scheduling_snapshot(
-    gateway: &Gateway,
-    targets: &[crate::db::models::Target],
-    observer: Option<&crate::interaction_observation::RunObserver>,
-) -> anyhow::Result<RouteSchedulingSnapshot> {
-    let usage = gateway
-        .storage
-        .usage_stats()
-        .route_scheduling_snapshot()
-        .await;
-    if usage.stale
-        && let Some(observer) = observer
-    {
-        observer.record(RunEvent::ObservationGap {
-            reason: "usage_stats_snapshot_stale".into(),
-        });
-    }
-    let mut snapshot = RouteSchedulingSnapshot {
-        targets: usage.targets,
-    };
-    for target in targets {
-        let key = format!("{}:{}", target.provider_id, target.model);
-        let index = snapshot
-            .targets
-            .iter()
-            .position(|item| item.target_key == key)
-            .unwrap_or_else(|| {
-                snapshot
-                    .targets
-                    .push(crate::router::TargetSchedulingSnapshot {
-                        target_key: key.clone(),
-                        ..Default::default()
-                    });
-                snapshot.targets.len() - 1
-            });
-        let Some(provider_model) = gateway
-            .storage
-            .provider_models()
-            .find(&target.provider_id, &target.model)
-            .await?
-        else {
-            continue;
-        };
-        let Some(cost) = provider_model.metadata.cost else {
-            continue;
-        };
-        let target_snapshot = &mut snapshot.targets[index];
-        target_snapshot.cost_input = cost.prices.input.and_then(|value| value.to_f64());
-        target_snapshot.cost_output = cost.prices.output.and_then(|value| value.to_f64());
-        target_snapshot.cost_cache_read = cost.prices.cache_read.and_then(|value| value.to_f64());
-        target_snapshot.cost_cache_write = cost.prices.cache_write.and_then(|value| value.to_f64());
-    }
-    Ok(snapshot)
-}
-
-fn estimate_uncached_input_tokens(request: &AiRequest) -> u64 {
-    serde_json::to_vec(&request.items)
-        .map(|bytes| bytes.len().div_ceil(4) as u64)
-        .unwrap_or_default()
 }
 
 struct PreparedAttempt {
@@ -1285,7 +1190,7 @@ async fn prepare_attempt(
     .await
     .map_err(|error| AttemptFailure::terminal("attachment_delivery_failed", error.to_string()))?;
     let mut full_provider_request = provider_request.clone();
-    crate::model_turn::clear_previous_response_id(&mut full_provider_request);
+    crate::router::clear_previous_response_id(&mut full_provider_request);
     let mut full_outbound = if compact {
         adapter
             .build_compact_request(&mut full_provider_request)
@@ -1318,7 +1223,7 @@ async fn prepare_attempt(
             == Some(false);
     let continued_id = if compact || thinking_replayed {
         // 原生续接的前缀不能替代已经按当前 Target 改写过的完整历史。
-        crate::model_turn::clear_previous_response_id(&mut provider_request);
+        crate::router::clear_previous_response_id(&mut provider_request);
         None
     } else {
         executor
@@ -1455,6 +1360,17 @@ struct AttemptRoutePolicy {
     context: RouteAttemptContext,
 }
 
+impl AttemptRoutePolicy {
+    fn record_success(
+        &self,
+        health: &crate::router::health::HealthRegistry,
+        target: &SelectedTarget,
+    ) {
+        self.state
+            .record_success(health, &self.context, &selected_target_key(target));
+    }
+}
+
 async fn begin_attempt(
     gateway: &Gateway,
     route: &crate::db::models::Route,
@@ -1519,7 +1435,7 @@ async fn begin_attempt(
             None,
             Some(attempt_started.elapsed().as_millis() as i64),
         );
-        record_success(gateway, target, &policy.state, &policy.context);
+        policy.record_success(&gateway.health_registry, target);
         return Ok(ModelTurn {
             model_turn_id: prepared.model_turn_id,
             route: prepared.route,
@@ -1615,7 +1531,7 @@ async fn begin_attempt(
             &prepared.route.target_id,
             &response.usage,
         );
-        record_success(gateway, target, &policy.state, &policy.context);
+        policy.record_success(&gateway.health_registry, target);
         call.attempt.confirm_usage(&response.usage);
         call.attempt
             .checkpoint("canonical_terminal_response", &response);
@@ -1951,7 +1867,11 @@ async fn begin_attempt(
             &target_key,
             &response.usage,
         );
-        record_success(&gateway, &target, &route_policy_state, &attempt_context);
+        route_policy_state.record_success(
+            &gateway.health_registry,
+            &attempt_context,
+            &health_target_key,
+        );
         reservation.complete();
         provider_stream.attempt().confirm_usage(&response.usage);
         provider_stream
@@ -2213,17 +2133,6 @@ fn normalize_provider_effective_request(
     request.response_format = effective.response_format;
     request.safety_settings = effective.safety_settings;
     request.ext = effective.ext;
-}
-
-fn record_success(
-    gateway: &Gateway,
-    target: &SelectedTarget,
-    route_policy_state: &RoutePolicyState,
-    attempt_context: &RouteAttemptContext,
-) {
-    let target_key = selected_target_key(target);
-    gateway.health_registry.record_success(&target_key);
-    route_policy_state.record_success(attempt_context, &target_key);
 }
 
 #[cfg(test)]
