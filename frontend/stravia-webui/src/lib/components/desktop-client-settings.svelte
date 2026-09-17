@@ -101,7 +101,6 @@ function requestSavePort(): void {
 }
 
 function confirmPortChange(): void {
-  confirmationOpen = false
   const port = pendingPort
   pendingPort = undefined
   if (port != null) void savePort(port)
@@ -439,11 +438,7 @@ async function applyStartupToggle(
     </AlertDialog.Header>
     <AlertDialog.Footer>
       <AlertDialog.Cancel>{m.common_cancel()}</AlertDialog.Cancel>
-      <AlertDialog.Action
-        onclick={() => {
-          externalConfirmOpen = false
-          void applyExternalAccess(true)
-        }}>
+      <AlertDialog.Action onclick={() => void applyExternalAccess(true)}>
         {m.desktop_client_external_confirm_action()}
       </AlertDialog.Action>
     </AlertDialog.Footer>
