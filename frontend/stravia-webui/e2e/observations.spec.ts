@@ -1750,19 +1750,20 @@ test.describe('Interaction Observation canvas', () => {
     await expect(inspector.getByText('run-interaction-atlas', { exact: true })).toBeHidden()
     await expect(inspector.getByText('retained diagnostic record', { exact: false })).toBeHidden()
     await inspector.getByRole('tab', { name: 'Diagnostics', exact: true }).click()
-    const runUsage = inspector.getByLabel('Confirmed usage')
-    await expect(runUsage).toContainText('IN920')
-    await expect(runUsage).toContainText('OUT86')
-    await expect(runUsage).toContainText('C·R320')
-    await expect(runUsage).toContainText('C·WNot reported')
-    await expect(runUsage).not.toContainText('RSN')
+    const diagnostics = inspector.getByRole('tabpanel', { name: 'Diagnostics', exact: true })
+    // 交互 ID 在概览中常驻可复制；行内展示用量摘要。
+    await expect(diagnostics.getByText('interaction-atlas', { exact: true })).toBeVisible()
+    const runRow = diagnostics.locator('button[data-run="run-interaction-atlas"]')
+    await expect(runRow).toContainText('IN 920')
+    await expect(runRow).toContainText('OUT 86')
     await expect(inspector.getByText('run-interaction-atlas', { exact: true })).toBeHidden()
-    for (const disclosure of await inspector
-      .getByRole('button', { name: 'Technical identifiers', exact: true })
-      .all()) {
-      await disclosure.click()
-    }
+    await runRow.click()
+    await expect(runRow).toHaveAttribute('aria-expanded', 'true')
     await expect(inspector.getByText('run-interaction-atlas', { exact: true })).toBeVisible()
+    await expect(diagnostics.getByText('Cache read tokens', { exact: true })).toBeVisible()
+    await expect(diagnostics.getByText('Cache write tokens', { exact: true })).toBeVisible()
+    await expect(diagnostics.getByText('Not reported', { exact: true })).toBeVisible()
+    await expect(diagnostics.getByText(/Reasoning/)).toHaveCount(0)
     await inspector.getByRole('tab', { name: 'Conversation', exact: true }).click()
     await expect(conversation.getByRole('article', { name: 'Atlas', exact: true })).toContainText(
       'Atlas client-visible answer',
@@ -1837,14 +1838,16 @@ test.describe('Interaction Observation canvas', () => {
     const diagnosticsTab = inspector.getByRole('tab', { name: 'Diagnostics', exact: true })
     await diagnosticsTab.click()
     const diagnostics = inspector.getByRole('tabpanel', { name: 'Diagnostics', exact: true })
-    const rawButtons = diagnostics.getByRole('button', { name: 'Raw event data', exact: true })
-    await expect(rawButtons).toHaveCount(6)
-    await expect(rawButtons.nth(2).locator('xpath=ancestor::li[1]')).toContainText('Cinder')
-    await expect(rawButtons.nth(4).locator('xpath=ancestor::li[1]')).toContainText(/inferred/i)
+    const rows = diagnostics.locator('.stream-row[data-sequence]:visible')
+    const rowFor = (sequence: number) => diagnostics.locator(`.stream-row[data-sequence="${sequence}"]`)
+    // 两条 fixture 原始事件加 run_admitted 与未识别事件构成主干；两条关联诊断收进过程事件组。
+    await expect(rows).toHaveCount(4)
+    const processGroup = diagnostics.locator('button[data-group="process"]')
+    await expect(processGroup).toHaveAccessibleName(/^2 process events/)
     await expect(diagnostics.locator('pre:visible')).toHaveCount(0)
+    await expect(diagnostics.getByText('interaction-cinder', { exact: true })).toBeVisible()
     for (const value of [
       'run-interaction-cinder',
-      'interaction-cinder',
       'generation-root-cinder',
       'generation-parent-atlas',
       'run-interaction-atlas',
@@ -1856,34 +1859,43 @@ test.describe('Interaction Observation canvas', () => {
     }
     for (const event of events) await expect(diagnostics.getByText(event.kind, { exact: true })).toBeHidden()
 
-    // The two original run events precede these four records. Inspect each record
-    // independently so an accidental shared disclosure cannot expose other payloads.
-    for (const [index, event] of events.entries()) {
-      const button = rawButtons.nth(index + 2)
-      await button.focus()
+    await processGroup.focus()
+    await page.keyboard.press('Enter')
+    await expect(processGroup).toHaveAttribute('aria-expanded', 'true')
+    await expect(rows).toHaveCount(6)
+    await expect(rowFor(13)).toContainText(/inferred/i)
+
+    // Inspect each record independently so an accidental shared disclosure
+    // cannot expose other payloads.
+    for (const event of events) {
+      const row = rowFor(event.sequence)
+      await row.focus()
       await page.keyboard.press('Enter')
-      await expect(button).toHaveAttribute('aria-expanded', 'true')
+      await expect(row).toHaveAttribute('aria-expanded', 'true')
       await expect(diagnostics.getByText(event.kind, { exact: true })).toBeVisible()
       const payload = diagnostics.locator('pre:visible')
       await expect(payload).toHaveCount(1)
       expect(JSON.parse(await payload.innerText())).toEqual(event.payload)
-      await button.focus()
+      await row.focus()
       await page.keyboard.press('Space')
-      await expect(button).toHaveAttribute('aria-expanded', 'false')
+      await expect(row).toHaveAttribute('aria-expanded', 'false')
       await expect(payload).toHaveCount(0)
     }
 
-    for (const button of await diagnostics.getByRole('button', { name: 'Technical identifiers', exact: true }).all()) {
-      await button.focus()
-      await page.keyboard.press('Enter')
-    }
-    await expect(diagnostics.getByText('interaction-cinder', { exact: true })).toBeVisible()
+    await diagnostics.locator('button[data-run="run-interaction-cinder"]').click()
     await expect(diagnostics.getByText('run-interaction-cinder', { exact: true })).toBeVisible()
+    await expect(diagnostics.getByText(routeIds.cinder, { exact: true })).toBeVisible()
     await inspector.getByRole('tab', { name: 'Conversation', exact: true }).click()
     await expect(inspector.getByRole('log', { name: 'Conversation' })).toContainText('Cinder client-visible answer')
     await expect(inspector.getByRole('tab')).toHaveText(['Conversation', 'Diagnostics'])
     await diagnosticsTab.click()
-    await expect(rawButtons).toHaveCount(6)
+    // 折叠状态跨页签切换保留；组可双向切换。
+    await expect(processGroup).toHaveAttribute('aria-expanded', 'true')
+    await expect(rows).toHaveCount(6)
+    await processGroup.click()
+    await expect(rows).toHaveCount(4)
+    await processGroup.click()
+    await expect(rows).toHaveCount(6)
 
     const liveEvent: ObservationEvent = {
       ...events[3],
@@ -1892,10 +1904,10 @@ test.describe('Interaction Observation canvas', () => {
       payload: { new_record: 'live raw payload', prior_sequence: 14 },
     }
     fixture.emit(liveEvent, 'Cinder client-visible answer')
-    await expect(rawButtons).toHaveCount(7)
+    await expect(rows).toHaveCount(7)
     await expect(diagnosticsTab).toHaveAttribute('aria-selected', 'true')
     await expect(diagnostics.locator('pre:visible')).toHaveCount(0)
-    await rawButtons.last().focus()
+    await rowFor(15).focus()
     await page.keyboard.press('Enter')
     expect(JSON.parse(await diagnostics.locator('pre:visible').innerText())).toEqual(liveEvent.payload)
   })
@@ -1919,19 +1931,22 @@ test.describe('Interaction Observation canvas', () => {
     const inspector = page.getByRole('complementary', { name: 'Observation details' })
     await inspector.getByRole('tab', { name: 'Diagnostics', exact: true }).click()
     const diagnostics = inspector.getByRole('tabpanel', { name: 'Diagnostics', exact: true })
-    const groups = diagnostics.getByRole('button', { name: /^Response updates \(/ })
+    const groups = diagnostics.locator('button[data-group="process"]')
     const group = groups.first()
     await expect(groups).toHaveCount(1)
-    await expect(group).toHaveAccessibleName('Response updates (3)')
+    await expect(group).toHaveAccessibleName(/^Response text updated × 3/)
     await expect(group).toHaveAttribute('aria-expanded', 'false')
-    const records = group.locator('xpath=ancestor::li[1]').getByRole('button', { name: 'Raw event data', exact: true })
+    const records = diagnostics
+      .locator('li[data-group="process"]')
+      .first()
+      .locator('.stream-row[data-sequence]:visible')
     await expect(records).toHaveCount(0)
     await group.focus()
     await page.keyboard.press('Enter')
     await expect(records).toHaveCount(3)
 
     emit(14, 'client_visible_content_delta', { text: 'chunk-14' })
-    await expect(group).toHaveAccessibleName('Response updates (4)')
+    await expect(group).toHaveAccessibleName(/^Response text updated × 4/)
     await expect(group).toHaveAttribute('aria-expanded', 'true')
     await expect(records).toHaveCount(4)
     for (let index = 0; index < 4; index++) {
@@ -1944,8 +1959,8 @@ test.describe('Interaction Observation canvas', () => {
     emit(16, 'client_visible_content_delta', { text: 'after-failure-16' })
     emit(17, 'client_visible_content_delta', { text: 'after-failure-17' })
     await expect(groups).toHaveCount(2)
-    await expect(group).toHaveAccessibleName('Response updates (4)')
-    await expect(groups.last()).toHaveAccessibleName('Response updates (2)')
+    await expect(group).toHaveAccessibleName(/^Response text updated × 4/)
+    await expect(groups.last()).toHaveAccessibleName(/^Response text updated × 2/)
     await expect(diagnostics.getByText('client_disconnected', { exact: true })).toBeVisible()
     await group.focus()
     await page.keyboard.press('Space')
@@ -1990,22 +2005,23 @@ test.describe('Interaction Observation canvas', () => {
     const inspector = page.getByRole('complementary', { name: 'Observation details' })
     await inspector.getByRole('tab', { name: 'Diagnostics', exact: true }).click()
     const diagnostics = inspector.getByRole('tabpanel', { name: 'Diagnostics', exact: true })
-    const groups = diagnostics.getByRole('button', { name: /^Response updates \(/ })
-    for (const group of await groups.all()) await group.click()
+    // 相邻的 delta / usage_confirmed / delta 合并为一条过程组，原位展开后仍按序出现。
+    const processGroup = diagnostics.locator('button[data-group="process"]')
+    await expect(processGroup).toHaveAccessibleName(/^3 process events/)
+    await processGroup.click()
     const observed: Array<{ kind: string; payload: unknown }> = []
-    for (const button of await diagnostics.getByRole('button', { name: 'Raw event data', exact: true }).all()) {
-      await button.click()
+    for (const row of await diagnostics.locator('.stream-row[data-sequence]:visible').all()) {
+      await row.click()
       observed.push({
         kind: await diagnostics.locator('.event-kind:visible code').innerText(),
         payload: JSON.parse(await diagnostics.locator('pre:visible').innerText()),
       })
-      await button.click()
+      await row.click()
     }
     const expected = events
       .toSorted((a, b) => a.occurred_at - b.occurred_at || a.sequence - b.sequence)
       .map(({ kind, payload }) => ({ kind, payload }))
     expect(observed.slice(2)).toEqual(expected)
-    await expect(groups).toHaveCount(0)
   })
 
   test('groups only consecutive same-name client tools and shows attempt-local output speed', async ({ page }) => {
@@ -2041,15 +2057,15 @@ test.describe('Interaction Observation canvas', () => {
     await inspector.getByRole('tab', { name: 'Diagnostics', exact: true }).click()
     const diagnostics = inspector.getByRole('tabpanel', { name: 'Diagnostics', exact: true })
     await expect(diagnostics.getByText('100 tok/s', { exact: true })).toBeVisible()
-    const groups = diagnostics.getByRole('button', { name: /^Bash ×/ })
+    const groups = diagnostics.locator('button[data-group="tools"]')
     await expect(groups).toHaveCount(2)
-    await expect(groups.first()).toHaveAccessibleName('Bash × 4 · Sent to client')
-    await expect(groups.last()).toHaveAccessibleName('Bash × 2 · Sent to client')
+    await expect(groups.first()).toHaveAccessibleName(/^Bash × 4 · Sent to client/)
+    await expect(groups.last()).toHaveAccessibleName(/^Bash × 2 · Sent to client/)
     await expect(diagnostics.getByText('Read', { exact: true })).toBeVisible()
-    const records = groups
+    const records = diagnostics
+      .locator('li[data-group="tools"]')
       .first()
-      .locator('xpath=ancestor::li[1]')
-      .getByRole('button', { name: 'Raw event data', exact: true })
+      .locator('.stream-row[data-sequence]:visible')
     await expect(records).toHaveCount(0)
     await groups.first().focus()
     await page.keyboard.press('Enter')
