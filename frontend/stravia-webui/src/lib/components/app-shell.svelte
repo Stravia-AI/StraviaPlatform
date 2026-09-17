@@ -29,6 +29,7 @@ import BrandMark from '$lib/components/brand-mark.svelte'
 import BrandWordmark from '$lib/components/brand-wordmark.svelte'
 import StatusIndicator from '$lib/components/status-indicator.svelte'
 import WindowControls from '$lib/components/window-controls.svelte'
+import { Badge } from '$lib/components/ui/badge'
 import { Button } from '$lib/components/ui/button'
 import * as Sidebar from '$lib/components/ui/sidebar'
 import * as Breadcrumb from '$lib/components/ui/breadcrumb'
@@ -96,8 +97,8 @@ const navigationGroups = [
   {
     label: m.app_shell_nav_advanced_features,
     items: [
-      { href: '/media-understanding', label: m.app_shell_nav_media_understanding, icon: ImagesIcon },
-      { href: '/web-search', label: m.app_shell_nav_web_search, icon: SearchCheckIcon },
+      { href: '/media-understanding', label: m.app_shell_nav_media_understanding, icon: ImagesIcon, beta: true },
+      { href: '/web-search', label: m.app_shell_nav_web_search, icon: SearchCheckIcon, beta: true },
       { href: '/reversible-redaction', label: m.reversible_redaction_title, icon: KeyRoundIcon },
     ],
   },
@@ -273,7 +274,7 @@ onMount(() => {
                       <a
                         {...props}
                         href={resolve(item.href)}
-                        aria-label={label}
+                        aria-label={'beta' in item ? `${label} ${m.common_beta()}` : label}
                         data-sveltekit-keepfocus={!isDesktopNavigation ? true : undefined}
                         aria-current={current ? 'page' : undefined}
                         onclick={() => {
@@ -284,6 +285,9 @@ onMount(() => {
                       </a>
                     {/snippet}
                   </Sidebar.MenuButton>
+                  {#if 'beta' in item}
+                    <Sidebar.MenuBadge><Badge variant="secondary">{m.common_beta()}</Badge></Sidebar.MenuBadge>
+                  {/if}
                 </Sidebar.MenuItem>
               {/each}
             </Sidebar.Menu>

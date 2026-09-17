@@ -1325,6 +1325,7 @@
   ],
   "common_close": "关闭",
   "common_base_url": "Base URL",
+  "common_beta": "Beta",
   "common_interleaved": "Interleaved",
   "model_editor_modality_input": "{modality} 输入",
   "connect_tool_claude_description": "Anthropic 官方命令行编程助手",
