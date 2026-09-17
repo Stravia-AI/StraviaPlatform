@@ -290,6 +290,11 @@ _避免使用_：Automatic Parent Discovery、Generation Chain parent、Retained
 Retained Tail Association 是 Interaction Observation 对幸存完整连续交互与唯一历史候选的精确匹配所作的诊断推断，用于在当前工具续接不成立时确定跨 Generation Chain 根的交互续接或新交互的诊断来源。匹配之后没有新增 User 且准入相对交付完成不超过五分钟时归入来源 Interaction；其他唯一尾部只建立诊断父连接。它不证明发生过压缩，不建立执行父边或恢复历史；缺少、歧义或不完整的证据不能证明任务续接，时间接近也不能替代匹配证据。
 _避免使用_：Automatic Parent Discovery、Generation Chain parent、确认压缩
 
+## Run Attribution
+
+Run Attribution 是 Interaction Observation 内部拥有"一次 Inference Run 归入哪个 Connect Client Interaction"全部判定的深模块。它消费调用方提交的 client items 与 Generation Chain 已确认证据（新增 User、命中 pending tool result），自己捕获 tail window、计算 canonical fingerprint 与准入时间，统一执行 Current Tool Continuation 与 Retained Tail Association 的判定表并产出诊断事件；内存证据与持久化证据的合并规则只在此模块内成立。它不改变 ADR-0053 的判定语义，不写入 Generation parent，也不替代 writer 的顺序与背压职责。
+_避免使用_：Grouping、归属逻辑（当散在多模块时）、把 engine 预计算证据当作判定
+
 ## Upstream Store Hint
 
 Upstream Store Hint 是 Open Responses `store` 传达给 Target 的上游状态保留偏好。它只约束 Provider 是否可保存或续接其自身状态，不约束 Stravia 对 Generation Chain 的持久化。
