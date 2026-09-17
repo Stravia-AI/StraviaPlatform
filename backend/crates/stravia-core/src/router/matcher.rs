@@ -52,10 +52,19 @@ mod tests {
             models: vec![route("route-a", "logical-a"), route("route-b", "route-a")],
         };
 
-        assert_eq!(cache.resolve("logical-a").map(|route| route.id.as_str()), Some("route-a"));
-        assert_eq!(cache.resolve("route-b").map(|route| route.id.as_str()), Some("route-b"));
+        assert_eq!(
+            cache.resolve("logical-a").map(|route| route.id.as_str()),
+            Some("route-a")
+        );
+        assert_eq!(
+            cache.resolve("route-b").map(|route| route.id.as_str()),
+            Some("route-b")
+        );
         // A model_id hit wins over another Route's id.
-        assert_eq!(cache.resolve("route-a").map(|route| route.id.as_str()), Some("route-b"));
+        assert_eq!(
+            cache.resolve("route-a").map(|route| route.id.as_str()),
+            Some("route-b")
+        );
         assert!(cache.resolve("missing").is_none());
     }
 }

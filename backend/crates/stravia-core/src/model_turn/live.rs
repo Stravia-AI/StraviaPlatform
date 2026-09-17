@@ -4,7 +4,6 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use futures::stream;
 
-use crate::router::{ContinuationLookup, ContinuationTarget};
 use super::provider::{
     AttemptObservation, ProviderAdapter, ProviderBinding, ProviderCall, ProviderStreamError,
     ProviderStreamResponse, ResponsesWebSocketBinding,
@@ -30,6 +29,7 @@ use crate::router::{
     AttemptFailureDisposition, RouteAttemptContext, RoutePolicyState, SelectedTarget,
     selected_target_key,
 };
+use crate::router::{ContinuationLookup, ContinuationTarget};
 use stravia_runtime_contract::hook::RouteContext;
 use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
 use stravia_runtime_contract::protocol::ir::AiError;

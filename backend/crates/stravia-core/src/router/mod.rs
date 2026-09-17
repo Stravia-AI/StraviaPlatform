@@ -2,20 +2,20 @@ pub(crate) mod cache_affinity;
 pub(crate) mod continuation;
 pub mod health;
 mod matcher;
-pub mod selector;
 pub(crate) mod selection;
+pub mod selector;
 
 pub(crate) use continuation::{
-    ContinuationLookup, ContinuationTarget, clear_previous_response_id,
-    parent_id_from_request, stamp_previous_response_id,
+    ContinuationLookup, ContinuationTarget, clear_previous_response_id, parent_id_from_request,
+    stamp_previous_response_id,
 };
 pub use matcher::RouteCache;
+pub(crate) use selection::{RouteSelector, SelectionError};
 pub use selector::{
     AttemptFailureDisposition, ConversationIdentity, RouteAttemptContext, RouteAttemptPolicy,
     RouteAttemptReservation, RoutePolicyState, RouteSchedulingSnapshot, SelectedTarget,
     TargetSchedulingSnapshot, conversation_identity, selected_target_key,
 };
-pub(crate) use selection::{RouteSelector, SelectionError};
 
 use crate::db::models::Route;
 

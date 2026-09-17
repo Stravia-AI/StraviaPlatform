@@ -1022,11 +1022,10 @@ async fn execute_does_not_fail_over_after_the_first_canonical_delta() {
 async fn execute_omits_previous_response_id_when_lookup_misses() {
     let (_data_dir, gateway, captured, key) =
         gateway_with_captured_model("lookup-miss-model", true).await;
-    let executor =
-        LiveModelTurnExecutor::new(
-            gateway.clone(),
-            crate::router::continuation::ScriptedContinuation::miss(),
-        );
+    let executor = LiveModelTurnExecutor::new(
+        gateway.clone(),
+        crate::router::continuation::ScriptedContinuation::miss(),
+    );
     let mut request = AiRequest::new("lookup-miss-model", Vec::new());
     crate::router::stamp_previous_response_id(&mut request, "stravia-parent");
 
@@ -1570,11 +1569,10 @@ async fn held_publication_turn(
     }
     let mut related = request.clone();
     let cancellation = CancellationToken::new();
-    let executor =
-        LiveModelTurnExecutor::new(
-            gateway.clone(),
-            crate::router::continuation::ScriptedContinuation::miss(),
-        );
+    let executor = LiveModelTurnExecutor::new(
+        gateway.clone(),
+        crate::router::continuation::ScriptedContinuation::miss(),
+    );
     let run_id = stravia_runtime_contract::identifier::new_id();
     let observer = gateway
         .observation

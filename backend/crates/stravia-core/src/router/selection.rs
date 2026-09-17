@@ -78,9 +78,7 @@ impl RouteSelector {
             conversation,
             Some(ConversationIdentity::GenerationParent(_))
         ) {
-            self.continuation
-                .preferred_target(principal, request)
-                .await
+            self.continuation.preferred_target(principal, request).await
         } else {
             None
         };
@@ -125,11 +123,7 @@ impl RouteSelector {
         targets: &[Target],
         observer: Option<&RunObserver>,
     ) -> anyhow::Result<RouteSchedulingSnapshot> {
-        let usage = self
-            .storage
-            .usage_stats()
-            .route_scheduling_snapshot()
-            .await;
+        let usage = self.storage.usage_stats().route_scheduling_snapshot().await;
         if usage.stale
             && let Some(observer) = observer
         {
@@ -205,12 +199,12 @@ mod tests {
         AttemptFailureDisposition, AttemptFailureSignal, ConversationIdentity, RouteAttemptContext,
         TargetSchedulingSnapshot,
     };
+    use crate::storage::MemoryStorage;
     use crate::storage::traits::{
         AdminIdentityStore, ApiKeyStore, AuthAccessStore, OAuthCredentialStore, ProviderModelStore,
         ProviderStore, RouteSchedulingUsage, RouteStore, SettingsStore, Storage, StorageBootstrap,
         UsageStatsStore,
     };
-    use crate::storage::MemoryStorage;
     use stravia_runtime_contract::protocol::ir::request::MediaRoutingMode;
     use stravia_runtime_contract::protocol::ir::{
         AiErrorKind, AiItem, MessageContent, OpenResponsesExt, ProtocolExt, Role, Usage,
@@ -861,24 +855,22 @@ mod tests {
 
     #[tokio::test]
     async fn provider_model_costs_feed_traffic_weights() {
-        let storage = Arc::new(
-            FixtureStorage::new().with_usage(RouteSchedulingUsage {
-                stale: false,
-                targets: vec![
-                    TargetSchedulingSnapshot {
-                        target_key: "cache_read_heavy:model".into(),
-                        input_tokens_24h: Some(1_000_000),
-                        cache_read_tokens_24h: Some(1_000_000),
-                        ..Default::default()
-                    },
-                    TargetSchedulingSnapshot {
-                        target_key: "output_heavy:model".into(),
-                        output_tokens_24h: Some(100_000),
-                        ..Default::default()
-                    },
-                ],
-            }),
-        );
+        let storage = Arc::new(FixtureStorage::new().with_usage(RouteSchedulingUsage {
+            stale: false,
+            targets: vec![
+                TargetSchedulingSnapshot {
+                    target_key: "cache_read_heavy:model".into(),
+                    input_tokens_24h: Some(1_000_000),
+                    cache_read_tokens_24h: Some(1_000_000),
+                    ..Default::default()
+                },
+                TargetSchedulingSnapshot {
+                    target_key: "output_heavy:model".into(),
+                    output_tokens_24h: Some(100_000),
+                    ..Default::default()
+                },
+            ],
+        }));
         // Cache-read-heavy usage only outweighs output usage once the joined
         // cost ratio (cache_read/input = 50) replaces the default 0.1 weight.
         let cost = ModelCost {
