@@ -1,8 +1,10 @@
 <script lang="ts">
 import * as m from '$lib/paraglide/messages.js'
 import { createQuery, useQueryClient } from '@tanstack/svelte-query'
+import ClipboardCopyIcon from '@lucide/svelte/icons/clipboard-copy'
 import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw'
 import SaveIcon from '@lucide/svelte/icons/save'
+import { toast } from 'svelte-sonner'
 
 import {
   asDesktopPortOperationError,
@@ -15,8 +17,6 @@ import {
   setDesktopSilentStart,
 } from '$lib/desktop-client'
 import type { DesktopClientSettings, DesktopPortOperationError, PortOwner } from '$lib/desktop-client'
-import StatusIndicator from '$lib/components/status-indicator.svelte'
-import TechnicalValue from '$lib/components/technical-value.svelte'
 import * as AlertDialog from '$lib/components/ui/alert-dialog'
 import { Button } from '$lib/components/ui/button'
 import * as Field from '$lib/components/ui/field'
@@ -103,6 +103,7 @@ function requestSavePort(): void {
 }
 
 function confirmPortChange(): void {
+  confirmationOpen = false
   const port = pendingPort
   pendingPort = undefined
   if (port != null) void savePort(port)
@@ -170,6 +171,15 @@ async function applyExternalAccess(enabled: boolean): Promise<void> {
     }
   } finally {
     externalToggling = false
+  }
+}
+
+async function copyLanUrl(): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(lanUrl)
+    toast.success(m.common_copied_clipboard())
+  } catch {
+    toast.error(m.common_not_copy_clipboard())
   }
 }
 
@@ -248,25 +258,11 @@ async function applyStartupToggle(
             {/if}
           </div>
 
-          <div class="flex min-h-6 flex-wrap items-center justify-between gap-x-4 gap-y-1">
-            <StatusIndicator
-              compact
-              label={portState.mode === 'fixed'
-                ? m.desktop_client_port_active()
-                : portState.mode === 'fallback'
-                  ? m.desktop_client_using_temporary_port()
-                  : m.desktop_client_port_settings_unreadable()}
-              tone={portState.mode === 'fixed' ? 'healthy' : portState.mode === 'fallback' ? 'warning' : 'error'} />
-            <p class="text-xs text-muted-foreground">
-              {m.desktop_client_current_address()}
-              <span class="font-technical ms-1 tabular-nums text-foreground">{bindHost}:{portState.currentPort}</span>
-            </p>
-          </div>
-
           {#if portState.mode === 'fallback' && (portState.bindingFailure || portState.ownerLookup !== 'notApplicable')}
             <div class="border-s-2 border-warning ps-4 text-sm">
+              <p>{m.desktop_client_using_temporary_port()}</p>
               {#if portState.bindingFailure}
-                <p class="text-muted-foreground">{portState.bindingFailure.message}</p>
+                <p class="mt-1 text-muted-foreground">{portState.bindingFailure.message}</p>
               {/if}
               {#if portState.ownerLookup === 'identifying'}
                 <p class="mt-1 text-muted-foreground">
@@ -281,9 +277,10 @@ async function applyStartupToggle(
               {/if}
             </div>
           {:else if portState.mode === 'configError'}
-            <p class="border-s-2 border-destructive ps-4 text-sm text-muted-foreground">
-              {portState.configError}
-            </p>
+            <div class="border-s-2 border-destructive ps-4 text-sm">
+              <p>{m.desktop_client_port_settings_unreadable()}</p>
+              <p class="mt-1 text-muted-foreground">{portState.configError}</p>
+            </div>
           {/if}
         </div>
         {#if validationError}<Field.FieldError>{validationError}</Field.FieldError>{/if}
@@ -328,22 +325,36 @@ async function applyStartupToggle(
           <div class="flex-1">
             <Field.FieldLabel for="desktop-external-address">{m.desktop_client_external_address()}</Field.FieldLabel>
           </div>
-          {#if lanAddresses.length > 1}
-            <div class="flex items-center gap-2">
-              <Select.Root type="single" value={lanAddress} onValueChange={(value) => (lanSelection = value)}>
-                <Select.Trigger id="desktop-external-address" class="font-technical w-36 tabular-nums">
-                  {lanAddress}
-                </Select.Trigger>
-                <Select.Content>
-                  {#each lanAddresses as address (address)}
-                    <Select.Item value={address} label={address} />
-                  {/each}
-                </Select.Content>
-              </Select.Root>
-              <TechnicalValue value={lanUrl} copyable />
-            </div>
-          {:else if lanAddress}
-            <TechnicalValue value={lanUrl} copyable />
+          {#if lanAddress}
+            <InputGroup.Root class="w-fit max-w-full">
+              <InputGroup.Addon class="font-technical pr-0 tabular-nums">http://</InputGroup.Addon>
+              {#if lanAddresses.length > 1}
+                <Select.Root type="single" value={lanAddress} onValueChange={(value) => (lanSelection = value)}>
+                  <Select.Trigger
+                    id="desktop-external-address"
+                    class="rounded-md border-transparent px-1.5 py-0 font-technical text-sm tabular-nums hover:bg-accent focus-visible:border-transparent focus-visible:ring-2 data-[size=default]:h-8 dark:bg-transparent dark:hover:bg-accent">
+                    {lanAddress}
+                  </Select.Trigger>
+                  <Select.Content>
+                    {#each lanAddresses as address (address)}
+                      <Select.Item value={address} label={address} />
+                    {/each}
+                  </Select.Content>
+                </Select.Root>
+              {:else}
+                <InputGroup.Text class="font-technical px-1.5 text-foreground tabular-nums"
+                  >{lanAddress}</InputGroup.Text>
+              {/if}
+              <InputGroup.Addon align="inline-end">
+                <span class="font-technical tabular-nums">:{portState.currentPort}</span>
+                <InputGroup.Button
+                  size="icon-sm"
+                  aria-label={m.technical_value_copy_full_value()}
+                  onclick={() => void copyLanUrl()}>
+                  <ClipboardCopyIcon />
+                </InputGroup.Button>
+              </InputGroup.Addon>
+            </InputGroup.Root>
           {:else}
             <p class="text-sm text-muted-foreground">{m.desktop_client_external_no_address()}</p>
           {/if}
@@ -430,7 +441,11 @@ async function applyStartupToggle(
     </AlertDialog.Header>
     <AlertDialog.Footer>
       <AlertDialog.Cancel>{m.common_cancel()}</AlertDialog.Cancel>
-      <AlertDialog.Action onclick={() => void applyExternalAccess(true)}>
+      <AlertDialog.Action
+        onclick={() => {
+          externalConfirmOpen = false
+          void applyExternalAccess(true)
+        }}>
         {m.desktop_client_external_confirm_action()}
       </AlertDialog.Action>
     </AlertDialog.Footer>
