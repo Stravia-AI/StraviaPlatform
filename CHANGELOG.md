@@ -24,6 +24,7 @@
 
 ### Fixed
 
+- Usage analytics token totals (overview, hourly, model, and API Key aggregates) now accumulate reported values across successful Target attempts. Failed or still-running attempts never carry confirmed usage, and one attempt's unreported field no longer forces a whole group total to `null`; a total stays `null` only when no completed attempt reported that metric.
 - Responses now preserves generic Thinking as full reasoning content in both streaming and non-streaming output and saved client history. Exact tool-result replays no longer split Interactions or incorrectly branch from older responses because of a summary/content mismatch. Native reasoning summaries remain distinct from full content; existing history and observation links are not rewritten.
 - Usage analytics, API Key lists, and Model lists now complete their first load when dependency queries finish before the main query. Loading, refresh, and list error states read every participating query before combining results, preventing stale snapshots from leaving pages on skeletons or losing retry feedback.
 - Codex V2 remote compaction now preserves native states completed by `response.output_item.done` when the terminal response omits them, instead of failing with `protocol_lossy_rejected`. Explicitly conflicting terminal states remain rejected, and legacy standalone compact errors are still forwarded without a local summary or implicit V2 conversion.
