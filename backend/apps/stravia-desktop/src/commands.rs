@@ -6,6 +6,7 @@ use std::{
     sync::Arc,
 };
 
+use stravia_core::Gateway;
 use stravia_core::admin::identity::{AdminAuth, AuthError, SessionTokens};
 use stravia_core::connect_client_apply::{
     ConnectClientApplyError, ConnectClientApplyInput, ConnectClientApplyPlan,
@@ -365,6 +366,24 @@ fn io_error(
         message: message.into(),
         path: Some(path.display().to_string()),
     }
+}
+
+#[tauri::command]
+pub async fn set_desktop_locale(
+    locale: String,
+    tray: State<'_, crate::DesktopTray>,
+    gateway: State<'_, Gateway>,
+) -> Result<(), String> {
+    if !matches!(locale.as_str(), "en-US" | "zh-CN") {
+        return Err(format!("unsupported interface language: {locale}"));
+    }
+    tray.set_locale(&locale).map_err(|error| error.to_string())?;
+    gateway
+        .storage
+        .settings()
+        .set("ui_locale", &locale)
+        .await
+        .map_err(|_| "failed to persist the interface language".to_string())
 }
 
 #[cfg(test)]

@@ -21,6 +21,7 @@
     "allow-recheck-desktop-fixed-port",
     "allow-plan-connect-client",
     "allow-apply-connect-client",
+    "allow-set-desktop-locale",
     "allow-get-desktop-update-state",
     "allow-download-product-update",
     "allow-install-product-update"

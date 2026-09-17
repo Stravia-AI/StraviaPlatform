@@ -8,6 +8,7 @@ fn main() {
             "recheck_desktop_fixed_port",
             "plan_connect_client",
             "apply_connect_client",
+            "set_desktop_locale",
             "get_desktop_update_state",
             "download_product_update",
             "install_product_update",
