@@ -462,7 +462,7 @@ describe('Stravia desktop smoke', () => {
     await expect(inspector.$('button=Debug records')).not.toExist()
     await expect(inspector.$('button=Debug bundle')).toBeEnabled()
     await expect(inspector).toHaveText(expect.stringContaining('HTTP 401'))
-    await expect(inspector.$('button=Open interaction node')).not.toExist()
+    await expect(inspector.$('button=Open interaction')).not.toExist()
     await debugSwitch.click()
     await expect(debugSwitch).toHaveAttribute('aria-checked', 'false')
 

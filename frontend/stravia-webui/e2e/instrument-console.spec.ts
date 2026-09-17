@@ -57,7 +57,7 @@ test('Overview with traffic shows request and second-based latency charts', asyn
 
   await expect(page.getByLabel('Request volume chart')).toBeVisible()
   const latency = page.locator('section').filter({ has: page.getByRole('heading', { name: 'Latency', exact: true }) })
-  await expect(latency.getByText('First', { exact: true })).toBeVisible()
+  await expect(latency.getByText('First token', { exact: true })).toBeVisible()
   await expect(latency.getByText('0.04 s', { exact: true })).toBeVisible()
   await expect(latency.getByText('Duration', { exact: true })).toBeVisible()
   await expect(latency.getByText('0.12 s', { exact: true })).toBeVisible()
@@ -120,7 +120,7 @@ test('Usage analytics uses backend input and output without re-counting cache or
   await expect(mobileApiKeyUsage).not.toContainText('RSN')
 
   const latency = page.locator('section').filter({ has: page.getByRole('heading', { name: 'Latency', exact: true }) })
-  await expect(latency.getByText('First', { exact: true })).toBeVisible()
+  await expect(latency.getByText('First token', { exact: true })).toBeVisible()
   await expect(latency.getByText('0.04 s', { exact: true })).toBeVisible()
   await expect(latency.getByText('Duration', { exact: true })).toBeVisible()
   await expect(latency.getByText('0.12 s', { exact: true })).toBeVisible()
@@ -242,7 +242,7 @@ for (const scenario of [
 
 test('empty Model services, Models, API Keys, and logs speak the missing dependency', async ({ page }) => {
   await page.goto('/providers')
-  await expect(page.getByText('A Model has nowhere to go until you connect a Provider.')).toBeVisible()
+  await expect(page.getByText('A model has nowhere to go until you connect a model service.')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Connect first service' })).toHaveCount(1)
   await expect(page.getByRole('button', { name: 'Connect service' })).toHaveCount(0)
 
