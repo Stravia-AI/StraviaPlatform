@@ -21,6 +21,9 @@ pub(super) fn parse_monitor_response(
     if monitor == MonitorKind::XaiGrok {
         return parse_xai(body);
     }
+    if monitor == MonitorKind::Devin {
+        return parse_devin(body);
+    }
 
     let payload: Value = serde_json::from_slice(body).map_err(|_| InvalidResponse)?;
     let parsed = match monitor {
@@ -40,7 +43,7 @@ pub(super) fn parse_monitor_response(
         MonitorKind::DeepSeek => parse_deepseek(&payload),
         MonitorKind::NeuralWatt => parse_neuralwatt(&payload),
         MonitorKind::CommandCode => parse_commandcode(&payload),
-        MonitorKind::XaiGrok => unreachable!("handled above"),
+        MonitorKind::XaiGrok | MonitorKind::Devin => unreachable!("handled above"),
     }?;
     require_allowance(parsed)
 }
@@ -1276,4 +1279,178 @@ fn read_varint(body: &[u8], index: &mut usize) -> Result<u64, InvalidResponse> {
         }
     }
     Err(InvalidResponse)
+}
+
+/// Devin `GetUserStatus` (unary Connect-RPC, raw protobuf body). Field numbers
+/// calibrated against a live paid account by the reference project:
+///
+///   GetUserStatusResponse
+///     #1  UserStatus { #13 PlanStatus, #28 used_prompt_credits,
+///                      #29 used_flow_credits }
+///     #2  fallback plan block { #2 plan_name }
+///   PlanStatus  { #1 PlanInfo, #16 balance_micro_usd,
+///                 #17 period_start_unix, #18 period_end_unix }
+///   PlanInfo    { #1 teams_tier, #2 plan_name, #12 monthly_prompt_credits,
+///                 #13 monthly_flow_credits }
+fn parse_devin(body: &[u8]) -> Result<ParsedAllowance, InvalidResponse> {
+    use crate::protocol::codec::devin_connect::proto::{ProtoField, parse_fields};
+
+    fn message<'a>(fields: &'a [ProtoField<'a>], number: u32) -> Option<Vec<ProtoField<'a>>> {
+        let field = fields
+            .iter()
+            .find(|field| field.number == number && field.wire_type == 2)?;
+        parse_fields(field.bytes).ok()
+    }
+    fn varint(fields: &[ProtoField<'_>], number: u32) -> Option<u64> {
+        fields
+            .iter()
+            .find(|field| field.number == number && field.wire_type == 0)
+            .map(|field| field.scalar)
+    }
+    fn string(fields: &[ProtoField<'_>], number: u32) -> Option<String> {
+        let field = fields
+            .iter()
+            .find(|field| field.number == number && field.wire_type == 2)?;
+        let value = std::str::from_utf8(field.bytes).ok()?.trim();
+        (!value.is_empty()).then(|| value.to_string())
+    }
+
+    let top = parse_fields(body).map_err(|_| InvalidResponse)?;
+    // #2 is a nested plan block: #2.#2 carries the plan name.
+    let mut plan_label = message(&top, 2).and_then(|inner| string(&inner, 2));
+
+    let mut allowances = Vec::new();
+    // The Connect response wraps UserStatus at #1; the language-server path
+    // exposes UserStatus fields at top level instead. `pro` (#1) is a varint,
+    // so a bare UserStatus can never collide with the wrapped shape.
+    let user_status = message(&top, 1).unwrap_or_else(|| top.clone());
+    {
+        let used_prompt = varint(&user_status, 28);
+        let used_flow = varint(&user_status, 29);
+
+        if let Some(plan_status) = message(&user_status, 13) {
+            // PlanStatus #14/#15 are remaining-percent gauges (0-100) for the
+            // daily and weekly quota windows, paired with unix-second reset
+            // timestamps at #17/#18. Calibrated against CodexBar's
+            // GetPlanStatus field map (same PlanStatus message) and confirmed
+            // on a live Pro account.
+            for (key, percent_field, reset_field, seconds) in [
+                ("daily", 14u32, 17u32, 86_400u64),
+                ("weekly", 15u32, 18u32, 604_800u64),
+            ] {
+                if let Some(remaining_percent) = varint(&plan_status, percent_field) {
+                    let mut item = allowance(key, window_label(key), AllowanceKind::QuotaWindow);
+                    item.used_percent = Some((100.0 - remaining_percent as f64).max(0.0));
+                    item.window_seconds = Some(seconds);
+                    item.reset_at = varint(&plan_status, reset_field)
+                        .and_then(|secs| i64::try_from(secs * 1000).ok());
+                    allowances.push(item);
+                }
+            }
+
+            if let Some(plan_info) = message(&plan_status, 1) {
+                if let Some(name) = string(&plan_info, 2) {
+                    plan_label = Some(name);
+                } else if let Some(tier) = varint(&plan_info, 1) {
+                    plan_label = Some(devin_tier_label(tier).to_string());
+                }
+                // PlanInfo monthly credit limits encode "unlimited" as int64
+                // -1 (u64::MAX on the wire); surface it as no limit rather
+                // than a garbage 1.8e19 quota.
+                let finite = |value: Option<u64>| value.filter(|v| *v != u64::MAX);
+                if let Some(allowance) = devin_credit_window(
+                    "prompt_credits",
+                    "Prompt credits",
+                    used_prompt,
+                    finite(varint(&plan_info, 12)),
+                ) {
+                    allowances.push(allowance);
+                }
+                if let Some(allowance) = devin_credit_window(
+                    "flow_credits",
+                    "Flow credits",
+                    used_flow,
+                    finite(varint(&plan_info, 13)),
+                ) {
+                    allowances.push(allowance);
+                }
+            }
+
+            // PlanStatus #16 is micro-dollars (80000000 = $80 on a paid
+            // account); report the converted USD figure, never the raw wire
+            // value.
+            if let Some(balance_micro) = varint(&plan_status, 16) {
+                let mut item = allowance("balance_usd", "Balance", AllowanceKind::Balance);
+                item.remaining = Some(amount(balance_micro as f64 / 1e6, "currency", Some("USD")));
+                allowances.push(item);
+            }
+        } else {
+            // No billing block (free-tier shape): still surface usage counters
+            // when the account carries them.
+            for (key, label, used) in [
+                ("prompt_credits", "Prompt credits", used_prompt),
+                ("flow_credits", "Flow credits", used_flow),
+            ] {
+                if let Some(used) = used {
+                    let mut item = allowance(key, label, AllowanceKind::QuotaWindow);
+                    item.used = Some(amount(used as f64, "credits", None));
+                    allowances.push(item);
+                }
+            }
+        }
+    }
+
+    if plan_label.is_none() && allowances.is_empty() {
+        return Err(InvalidResponse);
+    }
+    Ok(ParsedAllowance {
+        allowances,
+        models: Vec::new(),
+        plan_label,
+    })
+}
+
+fn devin_credit_window(
+    key: &str,
+    label: &str,
+    used: Option<u64>,
+    limit: Option<u64>,
+) -> Option<Allowance> {
+    if used.is_none() && limit.is_none() {
+        return None;
+    }
+    let mut item = allowance(key, label, AllowanceKind::QuotaWindow);
+    item.used = used.map(|value| amount(value as f64, "credits", None));
+    item.limit = limit.map(|value| amount(value as f64, "credits", None));
+    if let (Some(used), Some(limit)) = (used, limit) {
+        item.remaining = Some(amount(limit.saturating_sub(used) as f64, "credits", None));
+        if limit > 0 {
+            item.used_percent = Some(used as f64 / limit as f64 * 100.0);
+        }
+    }
+    Some(item)
+}
+
+fn devin_tier_label(tier: u64) -> &'static str {
+    match tier {
+        1 => "Teams",
+        2 => "Pro",
+        3 => "Enterprise (SaaS)",
+        4 => "Hybrid",
+        5 => "Enterprise (Self-Hosted)",
+        7 => "Teams Ultimate",
+        8 => "Pro Ultimate",
+        9 => "Trial",
+        10 => "Enterprise (Self-Serve)",
+        11 => "Enterprise (SaaS Pooled)",
+        12 => "Devin Enterprise",
+        14 => "Devin Teams",
+        15 => "Devin Teams V2",
+        16 => "Devin Pro",
+        17 => "Devin Max",
+        18 => "Max",
+        19 => "Devin Free",
+        20 => "Devin Trial",
+        _ => "Unknown",
+    }
 }

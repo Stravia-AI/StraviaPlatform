@@ -54,6 +54,8 @@ gcp_auth = { workspace = true }
 aws-credential-types = { workspace = true }
 aws-sigv4 = { workspace = true }
 zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+# Pure-Rust zlib backend for Connect-RPC gzip frames; no C toolchain needed.
+flate2 = { version = "=1.1.10", default-features = false, features = ["rust_backend"] }
 tempfile = { workspace = true }
 parking_lot = { workspace = true }
 

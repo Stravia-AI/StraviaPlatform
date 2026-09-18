@@ -1,9 +1,11 @@
 mod claude;
+mod devin;
 mod grok;
 mod openai;
 mod shared;
 
 pub use claude::ClaudeOAuthDriver;
+pub use devin::DevinOAuthDriver;
 pub use grok::GrokOAuthDriver;
 pub use openai::OpenAIOAuthDriver;
 pub use shared::{

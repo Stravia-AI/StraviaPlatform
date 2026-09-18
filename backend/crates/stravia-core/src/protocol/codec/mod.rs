@@ -5,6 +5,7 @@ pub mod anthropic;
 pub mod bedrock;
 pub mod cohere;
 pub mod command_code;
+pub mod devin_connect;
 pub mod gateway;
 pub mod google;
 pub mod open_responses;

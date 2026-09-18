@@ -969,6 +969,18 @@ pub(super) fn monitor_requests(
             vec!["https://grok.com/grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig"],
             vec![0, 0, 0, 0, 0],
         ),
+        // GetUserStatus is a zero-billable unary Connect-RPC on the same host as
+        // chat: raw protobuf body (no envelope), `application/proto`, doubled
+        // Basic auth — the wire shape the CLI itself sends.
+        MonitorKind::Devin => (
+            Method::POST,
+            vec![
+                "https://server.codeium.com/exa.seat_management_pb.SeatManagementService/GetUserStatus",
+            ],
+            crate::protocol::codec::devin_connect::encode_client_metadata_request(
+                credential.trim(),
+            ),
+        ),
         // 顺序即 fetch_commandcode 的调用顺序:whoami → credits → subscriptions → summary。
         MonitorKind::CommandCode => (
             Method::GET,
@@ -987,6 +999,9 @@ pub(super) fn monitor_requests(
         let mut headers = HeaderMap::new();
         let authorization = if monitor == MonitorKind::GitHubCopilot {
             format!("token {credential}")
+        } else if monitor == MonitorKind::Devin {
+            let token = credential.trim();
+            format!("Basic {token}-{token}")
         } else {
             format!("Bearer {credential}")
         };
@@ -1026,6 +1041,14 @@ pub(super) fn monitor_requests(
             }
             MonitorKind::OpenCodeGo => {
                 headers.insert(USER_AGENT, HeaderValue::from_static("Stravia"));
+            }
+            MonitorKind::Devin => {
+                headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
+                headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/proto"));
+                headers.insert(
+                    HeaderName::from_static("connect-protocol-version"),
+                    HeaderValue::from_static("1"),
+                );
             }
             MonitorKind::XaiGrok => {
                 headers.insert(ACCEPT, HeaderValue::from_static("*/*"));

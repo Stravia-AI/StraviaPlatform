@@ -160,7 +160,12 @@ where
     let mut headers = constructed.headers;
     headers.extend(extra_headers);
 
-    Ok(crate::provider::outbound::OutboundRequest { url, headers, body })
+    Ok(crate::provider::outbound::OutboundRequest {
+        url,
+        headers,
+        body,
+        body_bytes: None,
+    })
 }
 
 fn transform_gateway_error(error: crate::protocol::transform::TransformError) -> GatewayError {

@@ -476,7 +476,7 @@ fn terminal_payload_delivered(egress: ProtocolId, payload: &str) -> bool {
                 || payload.contains(r#""type":"message_stop""#)
         }
         Protocol::GoogleGemini => payload.contains(r#""finishReason":"#),
-        Protocol::BedrockConverse => false,
+        Protocol::BedrockConverse | Protocol::DevinConnect => false,
         Protocol::CohereChat => payload.contains(r#""type":"message-end""#),
         Protocol::WatsonxTextChat => payload.contains(r#""finish_reason":"#),
         Protocol::GatewayLanguageModel | Protocol::CommandCode => {

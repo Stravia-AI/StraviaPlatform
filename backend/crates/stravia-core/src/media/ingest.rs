@@ -506,6 +506,8 @@ async fn materialize_source(
         }
         Protocol::CohereChat => (kind == "image", kind == "image"),
         Protocol::CommandCode => (false, kind == "image"),
+        // Inline base64 only — the wire ImageData field carries bytes, no URL.
+        Protocol::DevinConnect => (false, kind == "image"),
     };
     if access.settings.external_signed_downloads && url {
         let download = access

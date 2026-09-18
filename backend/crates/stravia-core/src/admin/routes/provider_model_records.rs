@@ -79,7 +79,7 @@ impl AdminService {
         model_id: &str,
         template_id: Option<&str>,
     ) -> anyhow::Result<PreparedProviderModel> {
-        self.get_provider(provider_id).await?;
+        let provider = self.get_provider(provider_id).await?;
         let model_id = normalize_model_id(model_id)?;
         if self
             .gw
@@ -99,6 +99,22 @@ impl AdminService {
                     .canonical_model(template_id)
                     .await?;
                 metadata_from_canonical_template(&model_id, template)?
+            }
+            // Devin 手动添加同样需要 selector 派生的 reasoning_options;
+            // family 等级集从既有记录 + 新 id 推导。
+            None if provider.vendor.as_deref() == Some("devin") => {
+                let known: Vec<String> = self
+                    .gw
+                    .storage
+                    .provider_models()
+                    .list_for_provider(provider_id)
+                    .await?
+                    .iter()
+                    .map(|model| model.model_id.clone())
+                    .chain(std::iter::once(model_id.clone()))
+                    .collect();
+                let levels = crate::provider::devin::selector::family_level_map(&known);
+                crate::provider::devin::model_metadata(&model_id, &levels, None)
             }
             None => match self
                 .gw
@@ -325,15 +341,22 @@ impl AdminService {
                 let fill_specification = current.metadata.lacks_registered_specification()
                     && (!metadata.lacks_registered_specification()
                         || current.metadata.is_identity_only());
+                // Devin 发现记录的 metadata 全部由 selector+catalog 系统生成
+                // (bare 占位不在 lacks_registered_specification 覆盖内),任何
+                // 字段差异——reasoning_options、label、context、provider——都
+                // 回填,让已同步过的存量记录在下次 sync 拿到完整规格。
+                let fill_devin =
+                    provider.vendor.as_deref() == Some("devin") && current.metadata != metadata;
                 if current.presence != ProviderModelPresence::Present
                     || current.metadata.status != metadata.status
                     || fill_specification
+                    || fill_devin
                 {
                     reconciliation.updates.push(ProviderModelPresenceUpdate {
                         model_id,
                         presence: ProviderModelPresence::Present,
                         lifecycle_status: metadata.status.clone(),
-                        metadata: fill_specification.then_some(metadata),
+                        metadata: (fill_specification || fill_devin).then_some(metadata),
                     });
                 }
                 continue;
@@ -417,6 +440,12 @@ impl AdminService {
             return Ok(discovered);
         }
 
+        // Devin records are built straight from the `GetCliModelConfigs`
+        // catalog: selectors become model ids and each entry carries display
+        // metadata (label, image support, context window, upstream provider).
+        if provider.vendor.as_deref() == Some("devin") {
+            return self.discover_devin_model_sources(provider).await;
+        }
         let ids = self.test_provider_models(&provider.id).await?;
         let mut sources = BTreeMap::new();
         for id in ids {
@@ -474,6 +503,49 @@ impl AdminService {
                 }
             };
             sources.insert(model_id, discovered);
+        }
+        Ok(sources)
+    }
+
+    /// Devin discovery goes through `GetCliModelConfigs` directly (not the
+    /// HTTP-JSON `test_provider_models` path) so each record keeps the
+    /// catalog's display metadata. A failed or empty probe falls back to the
+    /// preset selector list — sync must not break over a metadata probe.
+    async fn discover_devin_model_sources(
+        &self,
+        provider: &Provider,
+    ) -> anyhow::Result<BTreeMap<String, DiscoveredModelSource>> {
+        let runtime = self.resolve_provider_runtime(provider).await?;
+        let entries = super::model_discovery::discover_devin_catalog(self, provider, &runtime)
+            .await
+            .unwrap_or_default();
+        let by_selector: BTreeMap<&str, _> = entries
+            .iter()
+            .map(|entry| (entry.selector.as_str(), entry))
+            .collect();
+        let selectors = super::model_discovery::static_model_union(
+            &runtime,
+            provider,
+            entries.iter().map(|entry| entry.selector.clone()).collect(),
+        );
+        let levels = crate::provider::devin::selector::family_level_map(&selectors);
+        let mut sources = BTreeMap::new();
+        for selector in selectors {
+            if !retain_discovered_model_id(provider, &selector) {
+                continue;
+            }
+            let model_id = normalize_model_id(&selector)?;
+            sources.insert(
+                model_id.clone(),
+                DiscoveredModelSource {
+                    metadata: crate::provider::devin::model_metadata(
+                        &model_id,
+                        &levels,
+                        by_selector.get(selector.as_str()).copied(),
+                    ),
+                    metadata_source_provider_id: None,
+                },
+            );
         }
         Ok(sources)
     }

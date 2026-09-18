@@ -35,6 +35,7 @@ pub mod cohere;
 pub mod commandcode;
 pub mod custom;
 pub mod deepinfra;
+pub mod devin;
 pub mod gateway;
 pub mod gitlab;
 pub mod google;

@@ -162,6 +162,7 @@ enum MonitorKind {
     NeuralWatt,
     XaiGrok,
     CommandCode,
+    Devin,
 }
 
 fn monitor_for(preset_key: &str, channel: &str) -> Option<MonitorKind> {
@@ -182,6 +183,7 @@ fn monitor_for(preset_key: &str, channel: &str) -> Option<MonitorKind> {
         ("neuralwatt", "default") => Some(MonitorKind::NeuralWatt),
         ("xai", "grok") => Some(MonitorKind::XaiGrok),
         ("commandcode", "default") => Some(MonitorKind::CommandCode),
+        ("devin", "default") => Some(MonitorKind::Devin),
         _ => None,
     }
 }

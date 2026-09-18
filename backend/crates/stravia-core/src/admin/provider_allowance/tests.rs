@@ -37,6 +37,7 @@ fn registry_requires_the_exact_catalog_identity() {
         ("neuralwatt", "default"),
         ("xai", "grok"),
         ("commandcode", "default"),
+        ("devin", "default"),
     ] {
         assert!(
             monitor_for(preset_key, channel).is_some(),
@@ -133,6 +134,107 @@ fn zhipu_preserves_each_reported_token_window() {
     assert_eq!(parsed.allowances[1].used_percent, Some(12.0));
     assert_eq!(parsed.allowances[1].reset_at, Some(1_790_500_000_000));
     assert_eq!(parsed.allowances[2].key, "mcp_tools");
+}
+
+#[test]
+fn devin_parses_user_status_protobuf() {
+    use crate::protocol::codec::devin_connect::proto::{
+        write_message_field, write_string_field, write_varint_field,
+    };
+
+    // PlanInfo { #1 teams_tier=14, #2 plan_name, #12 monthly_prompt_credits,
+    //            #13 monthly_flow_credits (-1 = unlimited) }
+    let mut plan_info = Vec::new();
+    write_varint_field(&mut plan_info, 1, 14);
+    write_string_field(&mut plan_info, 2, "Devin Teams");
+    write_varint_field(&mut plan_info, 12, 2000);
+    write_varint_field(&mut plan_info, 13, u64::MAX);
+    // PlanStatus { #1 PlanInfo, #14 daily remaining %, #15 weekly remaining %,
+    //              #16 balance micro-usd, #17 daily reset, #18 weekly reset }
+    let mut plan_status = Vec::new();
+    write_message_field(&mut plan_status, 1, &plan_info);
+    write_varint_field(&mut plan_status, 14, 100);
+    write_varint_field(&mut plan_status, 15, 75);
+    write_varint_field(&mut plan_status, 16, 80_000_000);
+    write_varint_field(&mut plan_status, 17, 1_800_086_400);
+    write_varint_field(&mut plan_status, 18, 1_800_604_800);
+    // UserStatus { #13 PlanStatus, #28 used_prompt, #29 used_flow }
+    let mut user_status = Vec::new();
+    write_message_field(&mut user_status, 13, &plan_status);
+    write_varint_field(&mut user_status, 28, 400);
+    write_varint_field(&mut user_status, 29, 50);
+    let mut body = Vec::new();
+    write_message_field(&mut body, 1, &user_status);
+
+    let parsed =
+        parse_monitor_response(MonitorKind::Devin, &body).expect("Devin user status should parse");
+    assert_eq!(parsed.plan_label.as_deref(), Some("Devin Teams"));
+
+    let daily = parsed
+        .allowances
+        .iter()
+        .find(|allowance| allowance.key == "daily")
+        .expect("daily quota allowance");
+    assert_eq!(daily.used_percent, Some(0.0));
+    assert_eq!(daily.window_seconds, Some(86_400));
+    assert_eq!(daily.reset_at, Some(1_800_086_400_000));
+
+    let weekly = parsed
+        .allowances
+        .iter()
+        .find(|allowance| allowance.key == "weekly")
+        .expect("weekly quota allowance");
+    assert_eq!(weekly.used_percent, Some(25.0));
+    assert_eq!(weekly.window_seconds, Some(604_800));
+    assert_eq!(weekly.reset_at, Some(1_800_604_800_000));
+
+    let prompt = parsed
+        .allowances
+        .iter()
+        .find(|allowance| allowance.key == "prompt_credits")
+        .expect("prompt credits allowance");
+    assert_eq!(prompt.used.as_ref().map(|amount| amount.value), Some(400.0));
+    assert_eq!(
+        prompt.limit.as_ref().map(|amount| amount.value),
+        Some(2000.0)
+    );
+    assert_eq!(
+        prompt.remaining.as_ref().map(|amount| amount.value),
+        Some(1600.0)
+    );
+    assert_eq!(prompt.used_percent, Some(20.0));
+
+    let flow = parsed
+        .allowances
+        .iter()
+        .find(|allowance| allowance.key == "flow_credits")
+        .expect("flow credits allowance");
+    assert_eq!(flow.used.as_ref().map(|amount| amount.value), Some(50.0));
+    // u64::MAX on the wire is the int64 -1 "unlimited" sentinel, not a limit.
+    assert_eq!(flow.limit, None);
+
+    let balance = parsed
+        .allowances
+        .iter()
+        .find(|allowance| allowance.key == "balance_usd")
+        .expect("balance allowance");
+    assert_eq!(
+        balance.remaining.as_ref().map(|amount| amount.value),
+        Some(80.0)
+    );
+    assert_eq!(
+        balance
+            .remaining
+            .as_ref()
+            .and_then(|amount| amount.currency.clone())
+            .as_deref(),
+        Some("USD")
+    );
+
+    // A protobuf blob with no recognizable fields is rejected.
+    let mut empty = Vec::new();
+    write_varint_field(&mut empty, 99, 1);
+    assert!(parse_monitor_response(MonitorKind::Devin, &empty).is_err());
 }
 
 #[test]
@@ -1701,4 +1803,100 @@ async fn commandcode_monitor_keeps_core_allowances_when_extras_fail() -> anyhow:
     let urls = transport.requests.lock().expect("requests lock").clone();
     assert_eq!(urls.len(), 3);
     Ok(())
+}
+
+/// Live check against the real Devin seat-management endpoint. Reads the
+/// session token from STRAVIA_DEVIN_LIVE_TOKEN or the gitignored
+/// .scratch/devin-token.txt; ignored by default because it calls production.
+#[tokio::test]
+#[ignore = "calls the production Devin Connect endpoint"]
+async fn live_devin_get_user_status() {
+    let token = std::env::var("STRAVIA_DEVIN_LIVE_TOKEN")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../.scratch/devin-token.txt");
+            std::fs::read_to_string(path)
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
+        .expect("devin session token");
+
+    let requests = monitor_requests(
+        MonitorKind::Devin,
+        &token,
+        &std::collections::HashMap::new(),
+    )
+    .expect("monitor request");
+    assert_eq!(requests.len(), 1);
+    let request = requests.into_iter().next().unwrap();
+
+    let client = reqwest::Client::new();
+    let response = client
+        .request(request.method, request.url)
+        .headers(request.headers)
+        .body(request.body)
+        .send()
+        .await
+        .expect("upstream request");
+    assert!(
+        response.status().is_success(),
+        "status {}",
+        response.status()
+    );
+    let body = response.bytes().await.expect("body");
+
+    // Diagnostic dump: field inventory of the UserStatus/PlanStatus/PlanInfo
+    // blocks so un-calibrated quota fields (daily/weekly percent, resets) can
+    // be pinned against a real account. Prints numbers only, never strings.
+    {
+        use crate::protocol::codec::devin_connect::proto::{ProtoField, parse_fields};
+        let dump = |label: &str, fields: &[ProtoField]| {
+            let items: Vec<String> = fields
+                .iter()
+                .map(|f| match f.wire_type {
+                    0 => format!("{}=v{}", f.number, f.scalar),
+                    _ => format!("{}=len{}", f.number, f.bytes.len()),
+                })
+                .collect();
+            println!("  {label}: {}", items.join(" "));
+        };
+        if let Ok(top) = parse_fields(&body) {
+            dump("top", &top);
+            if let Some(us) = top.iter().find(|f| f.number == 1 && f.wire_type == 2) {
+                if let Ok(us) = parse_fields(us.bytes) {
+                    dump("user_status(#1)", &us);
+                    if let Some(ps) = us.iter().find(|f| f.number == 13 && f.wire_type == 2) {
+                        if let Ok(ps) = parse_fields(ps.bytes) {
+                            dump("plan_status(#1.13)", &ps);
+                            if let Some(pi) = ps.iter().find(|f| f.number == 1 && f.wire_type == 2)
+                            {
+                                if let Ok(pi) = parse_fields(pi.bytes) {
+                                    dump("plan_info(#1.13.1)", &pi);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let parsed = parse_monitor_response(MonitorKind::Devin, &body).expect("parse user status");
+    println!(
+        "devin user status: plan={:?} allowances={:?}",
+        parsed.plan_label,
+        parsed
+            .allowances
+            .iter()
+            .map(|a| (
+                a.key.clone(),
+                a.used_percent,
+                a.remaining.as_ref().map(|r| r.value)
+            ))
+            .collect::<Vec<_>>()
+    );
 }
