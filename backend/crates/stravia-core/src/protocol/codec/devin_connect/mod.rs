@@ -10,6 +10,7 @@
 pub(crate) mod connect;
 pub(crate) mod proto;
 pub(crate) mod request;
+pub(crate) mod sanitize;
 pub(crate) mod stream;
 
 pub(crate) use connect::wrap_request;

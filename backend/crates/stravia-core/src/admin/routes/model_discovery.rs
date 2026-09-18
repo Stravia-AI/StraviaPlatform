@@ -78,20 +78,28 @@ impl ProviderModelDiscovery for HttpProviderModelDiscovery {
             .resolve_provider_runtime(&provider)
             .await
             .map_err(|error| RouteModelDiscoveryError::setup(provider_id, error))?;
-        if provider.vendor.as_deref() == Some("devin")
-            && let Ok(entries) = discover_devin_catalog(admin, &provider, &runtime).await
-            && !entries.is_empty()
-        {
+        if provider.vendor.as_deref() == Some("devin") {
             // Union with the preset selector list: the catalog omits
             // `swe-1-6-slow` on some accounts even though free tier can still
             // run it (upstream #258), so the curated list doubles as the
-            // safety net for selectors the catalog does not advertise.
+            // safety net for selectors the catalog does not advertise. The
+            // merged selectors fold to one id per family — the same shape
+            // record sync produces — instead of every upstream variant.
+            let entries = discover_devin_catalog(admin, &provider, &runtime)
+                .await
+                .unwrap_or_default();
             let merged = static_model_union(
                 &runtime,
                 &provider,
                 entries.iter().map(|entry| entry.selector.clone()).collect(),
             );
-            return Ok(retain_discovered_model_ids(&provider, merged));
+            if !merged.is_empty() {
+                let families = crate::provider::devin::family::group_families(&merged, &entries);
+                return Ok(retain_discovered_model_ids(
+                    &provider,
+                    families.iter().map(|family| family.id.clone()).collect(),
+                ));
+            }
         }
         if let Some(static_list) = runtime.binding.static_models_override.as_deref() {
             let models = static_list

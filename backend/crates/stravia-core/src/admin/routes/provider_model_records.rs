@@ -100,21 +100,16 @@ impl AdminService {
                     .await?;
                 metadata_from_canonical_template(&model_id, template)?
             }
-            // Devin 手动添加同样需要 selector 派生的 reasoning_options;
-            // family 等级集从既有记录 + 新 id 推导。
+            // Devin 手动添加没有 catalog 成员可查:按单个 id 生成占位
+            // metadata,canonical 模板可命中时补齐名称与描述。请求侧对无
+            // selector 表的记录回落到规则改写。
             None if provider.vendor.as_deref() == Some("devin") => {
-                let known: Vec<String> = self
+                let canonical = self
                     .gw
-                    .storage
-                    .provider_models()
-                    .list_for_provider(provider_id)
-                    .await?
-                    .iter()
-                    .map(|model| model.model_id.clone())
-                    .chain(std::iter::once(model_id.clone()))
-                    .collect();
-                let levels = crate::provider::devin::selector::family_level_map(&known);
-                crate::provider::devin::model_metadata(&model_id, &levels, None)
+                    .provider_catalog
+                    .canonical_model_matching_upstream_id(&model_id)
+                    .await;
+                crate::provider::devin::family::manual_model_metadata(&model_id, canonical.as_ref())
             }
             None => match self
                 .gw
@@ -508,9 +503,12 @@ impl AdminService {
     }
 
     /// Devin discovery goes through `GetCliModelConfigs` directly (not the
-    /// HTTP-JSON `test_provider_models` path) so each record keeps the
-    /// catalog's display metadata. A failed or empty probe falls back to the
-    /// preset selector list — sync must not break over a metadata probe.
+    /// HTTP-JSON `test_provider_models` path). The catalog collapses to one
+    /// record per upstream family — the record id is the family alias and its
+    /// `extensions["devin"]` carries the whole callable selector set, which is
+    /// what `build_request` resolves thinking controls against. A failed or
+    /// empty probe falls back to the preset selector list, folded by the same
+    /// rules — sync must not break over a metadata probe.
     async fn discover_devin_model_sources(
         &self,
         provider: &Provider,
@@ -519,29 +517,29 @@ impl AdminService {
         let entries = super::model_discovery::discover_devin_catalog(self, provider, &runtime)
             .await
             .unwrap_or_default();
-        let by_selector: BTreeMap<&str, _> = entries
-            .iter()
-            .map(|entry| (entry.selector.as_str(), entry))
-            .collect();
         let selectors = super::model_discovery::static_model_union(
             &runtime,
             provider,
             entries.iter().map(|entry| entry.selector.clone()).collect(),
         );
-        let levels = crate::provider::devin::selector::family_level_map(&selectors);
+        let families = crate::provider::devin::family::group_families(&selectors, &entries);
         let mut sources = BTreeMap::new();
-        for selector in selectors {
-            if !retain_discovered_model_id(provider, &selector) {
+        for family in &families {
+            if !retain_discovered_model_id(provider, &family.id) {
                 continue;
             }
-            let model_id = normalize_model_id(&selector)?;
+            let model_id = normalize_model_id(&family.id)?;
+            let canonical = self
+                .gw
+                .provider_catalog
+                .canonical_model_matching_upstream_id(&family.id)
+                .await;
             sources.insert(
                 model_id.clone(),
                 DiscoveredModelSource {
-                    metadata: crate::provider::devin::model_metadata(
-                        &model_id,
-                        &levels,
-                        by_selector.get(selector.as_str()).copied(),
+                    metadata: crate::provider::devin::family::family_metadata(
+                        family,
+                        canonical.as_ref(),
                     ),
                     metadata_source_provider_id: None,
                 },

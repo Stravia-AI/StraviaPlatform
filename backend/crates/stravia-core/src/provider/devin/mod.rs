@@ -7,12 +7,12 @@
 //! the upstream contract — single inside `ClientMetadata` (codec) and
 //! doubled `Basic <token>-<token>` in the HTTP `Authorization` header.
 
+pub(crate) mod family;
 pub(crate) mod selector;
 
 use crate::error::GatewayError;
 use crate::protocol::codec::devin_connect::{
-    DevinModelConfig, GET_CHAT_MESSAGE_PATH, encode_get_chat_message_request, session_shape,
-    wrap_request,
+    GET_CHAT_MESSAGE_PATH, encode_get_chat_message_request, session_shape, wrap_request,
 };
 use crate::provider::inbound::InboundResponse;
 use crate::provider::metadata::{
@@ -24,11 +24,9 @@ use crate::provider::vendor::{ProviderCtx, Vendor};
 use crate::provider::vendor_ext::{
     ConstructedRequest, RequestContext, RequestPurpose, ResolvedTargetCapabilities,
 };
-use crate::provider_models::{ProviderModelMetadata, ReasoningOption};
 use async_trait::async_trait;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet};
 use stravia_runtime_contract::protocol::ids::DEVIN_CONNECT_GET_CHAT_MESSAGE_V1;
 use stravia_runtime_contract::protocol::ids::ProtocolId;
 use stravia_runtime_contract::protocol::ir::AiRequest;
@@ -153,68 +151,6 @@ fn session_token(api_key: &str) -> Result<&str, GatewayError> {
     Ok(token)
 }
 
-/// Metadata for one discovered selector. Devin carries reasoning effort in
-/// the selector suffix, so the family's observed levels become
-/// `reasoning_options` — route binding generates a thinking map from them,
-/// and `build_request` rewrites the selector to the picked level. Families
-/// with no level suffixes get an empty Effort set, which hides the picker
-/// instead of advertising selectors upstream does not have. The catalog
-/// entry additionally supplies the display label, the multimodal flag, the
-/// context window, and the upstream provider enum.
-pub(crate) fn model_metadata(
-    model_id: &str,
-    levels: &BTreeMap<String, BTreeSet<String>>,
-    entry: Option<&DevinModelConfig>,
-) -> ProviderModelMetadata {
-    let parts = selector::decompose(model_id);
-    let mut metadata = ProviderModelMetadata::bare(model_id);
-    metadata.family = Some(
-        entry
-            .and_then(|entry| entry.alias.as_deref())
-            .map(str::trim)
-            .filter(|alias| !alias.is_empty())
-            .unwrap_or(parts.family)
-            .to_string(),
-    );
-    metadata.reasoning_options = Some(vec![ReasoningOption::Effort {
-        values: selector::family_levels_ordered(levels, parts.family)
-            .into_iter()
-            .map(Some)
-            .collect(),
-    }]);
-    if let Some(entry) = entry {
-        if let Some(label) = entry
-            .label
-            .as_deref()
-            .map(str::trim)
-            .filter(|label| !label.is_empty())
-        {
-            metadata.name = Some(label.to_string());
-        }
-        if entry.supports_images == Some(true)
-            && let Some(modalities) = metadata.modalities.as_mut()
-            && !modalities.input.iter().any(|kind| kind == "image")
-        {
-            modalities.input.push("image".to_string());
-        }
-        if let Some(context) = entry.context_window
-            && let Some(limit) = metadata.limit.as_mut()
-        {
-            limit.context = Some(context);
-        }
-        if let Some(upstream) = entry
-            .provider
-            .and_then(crate::protocol::codec::devin_connect::devin_upstream_provider_name)
-        {
-            metadata.extensions.insert(
-                "devin_provider".to_string(),
-                Value::String(upstream.to_string()),
-            );
-        }
-    }
-    metadata
-}
-
 #[async_trait]
 impl Vendor for DevinVendor {
     fn scope(&self) -> VendorScope {
@@ -270,13 +206,37 @@ impl Vendor for DevinVendor {
         req: &mut AiRequest,
         ctx: &ProviderCtx<'_>,
     ) -> Result<OutboundRequest, GatewayError> {
-        req.model = ctx.actual_model.to_string();
-        // Reasoning effort lives in the selector suffix, not a request field —
-        // the resolved `Effort` control rewrites the selector inside its
-        // family (`claude-sonnet-5-medium` + high → `claude-sonnet-5-high`).
-        // The generated thinking map only exposes levels the family actually
-        // advertises, so the rewritten selector is always a real upstream id.
-        if let Some(TargetThinkingControl::Effort { value }) = &req.reasoning.target_control {
+        req.model = selector::selector_from_alias(ctx.actual_model);
+        // Reasoning effort lives in the selector suffix, not a request field.
+        // Family records carry their full upstream selector set in
+        // `metadata.extensions["devin"]` — resolve the thinking control
+        // against it inside the vendor (1M preferred, ordinary lanes before
+        // speed lanes, missing levels fall back to the family default).
+        // Records without a table (manual adds) keep the legacy suffix
+        // rewrite on the normalized id.
+        let table = match ctx
+            .gw
+            .storage
+            .provider_models()
+            .get(&ctx.provider.id, ctx.actual_model)
+            .await
+        {
+            Ok(record) => record
+                .and_then(|record| selector::table_from_extensions(&record.metadata.extensions)),
+            Err(error) => {
+                tracing::debug!(
+                    provider = %ctx.provider.id,
+                    model = %ctx.actual_model,
+                    %error,
+                    "devin selector table lookup failed; using normalized id"
+                );
+                None
+            }
+        };
+        if let Some(table) = table {
+            req.model = selector::resolve_selector(&table, req.reasoning.target_control.as_ref());
+        } else if let Some(TargetThinkingControl::Effort { value }) = &req.reasoning.target_control
+        {
             req.model = selector::selector_with_level(&req.model, value);
         }
         crate::protocol::codec::tool_correlation::normalize_request_tool_results(req);
@@ -527,27 +487,144 @@ mod tests {
         assert!(!proto.contains("claude-sonnet-5-medium"));
     }
 
-    #[test]
-    fn model_metadata_exports_family_levels_as_effort_options() {
-        let selectors = vec![
-            "claude-sonnet-5-low".to_string(),
-            "claude-sonnet-5-medium".to_string(),
-            "claude-sonnet-5-high".to_string(),
-            "claude-sonnet-5-high-fast".to_string(),
-            "swe-1-7".to_string(),
-        ];
-        let levels = selector::family_level_map(&selectors);
+    /// A stored family record's `extensions["devin"]` selector table drives
+    /// resolution: the logical alias id never reaches the wire, a requested
+    /// level maps to its concrete selector, and an absent level falls back
+    /// to the family default.
+    #[tokio::test]
+    async fn build_request_resolves_family_selector_table() {
+        let gw = crate::Gateway::new(crate::GatewayConfig {
+            data_dir: std::env::temp_dir().join(format!("stravia-devin-{}", Uuid::new_v4())),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let provider = gw
+            .storage
+            .providers()
+            .create(crate::db::models::CreateProviderRecord {
+                name: "devin".into(),
+                vendor: Some("devin".into()),
+                protocol: "devin-connect".into(),
+                base_url: DEFAULT_BASE_URL.into(),
+                preset_key: Some("devin".into()),
+                channel: Some("devin".into()),
+                models_source: None,
+                static_models: None,
+                api_key: "session-token".into(),
+                adapter_credentials: r#"{"apiKey":"session-token"}"#.into(),
+                vendor_options: "{}".into(),
+                auth_mode: "oauth".into(),
+                use_proxy: false,
+            })
+            .await
+            .unwrap();
+        let mut metadata = crate::provider_models::ProviderModelMetadata::bare("gpt-5.6-sol");
+        metadata.extensions.insert(
+            selector::SELECTOR_EXTENSION_KEY.to_string(),
+            selector::table_extension_value(&selector::SelectorTable {
+                default: "gpt-5-6-sol-medium".into(),
+                selectors: [
+                    "gpt-5-6-sol-medium",
+                    "gpt-5-6-sol-high",
+                    "gpt-5-6-sol-high-priority",
+                ]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            }),
+        );
+        gw.storage
+            .provider_models()
+            .create(crate::provider_models::NewProviderModelRecord {
+                provider_id: provider.id.clone(),
+                model_id: "gpt-5.6-sol".into(),
+                source_kind: crate::provider_models::ProviderModelSourceKind::Discovered,
+                metadata_source_provider_id: None,
+                presence: crate::provider_models::ProviderModelPresence::Present,
+                selection_policy: crate::provider_models::ProviderModelSelectionPolicy::Auto,
+                metadata,
+            })
+            .await
+            .unwrap();
 
-        let entry = DevinModelConfig {
-            selector: "claude-sonnet-5-medium".into(),
+        let ctx = ProviderCtx {
+            provider: &provider,
+            protocol: DEVIN_CONNECT_GET_CHAT_MESSAGE_V1,
+            egress_base_url: DEFAULT_BASE_URL,
+            api_key: &provider.api_key,
+            actual_model: "gpt-5.6-sol",
+            credential: None,
+            gw: &gw,
+            disable_default_auth: true,
+        };
+        let make_req = || {
+            AiRequest::new(
+                "ignored",
+                vec![AiItem {
+                    role: Role::User,
+                    content: MessageContent::Text("hi".into()),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    meta: None,
+                }],
+            )
+        };
+        // Explicit level → ordinary `-high` selector, never the priority lane
+        // and never the logical alias id.
+        let mut req = make_req();
+        req.reasoning.target_control = Some(TargetThinkingControl::Effort {
+            value: "high".into(),
+        });
+        let outbound = DevinVendor.build_request(&mut req, &ctx).await.unwrap();
+        let body = outbound.body_bytes.expect("binary body");
+        let proto = String::from_utf8_lossy(&body[5..]);
+        assert!(proto.contains("gpt-5-6-sol-high"));
+        assert!(!proto.contains("gpt-5-6-sol-high-priority"));
+        assert!(!proto.contains("gpt-5.6-sol"));
+
+        // Missing level (`xhigh` is not in the table) → family default.
+        let mut req = make_req();
+        req.reasoning.target_control = Some(TargetThinkingControl::Effort {
+            value: "xhigh".into(),
+        });
+        let outbound = DevinVendor.build_request(&mut req, &ctx).await.unwrap();
+        let body = outbound.body_bytes.expect("binary body");
+        let proto = String::from_utf8_lossy(&body[5..]);
+        assert!(proto.contains("gpt-5-6-sol-medium"));
+
+        // No control → family default as well.
+        let mut req = make_req();
+        let outbound = DevinVendor.build_request(&mut req, &ctx).await.unwrap();
+        let body = outbound.body_bytes.expect("binary body");
+        let proto = String::from_utf8_lossy(&body[5..]);
+        assert!(proto.contains("gpt-5-6-sol-medium"));
+    }
+
+    #[test]
+    fn family_metadata_exports_levels_as_effort_options() {
+        let entry = |selector: &str| crate::protocol::codec::devin_connect::DevinModelConfig {
+            selector: selector.into(),
             label: Some("Claude Sonnet 5 Medium".into()),
             supports_images: Some(true),
             provider: Some(3),
             context_window: Some(400_000),
             alias: Some("claude-sonnet-5".into()),
+            short_alias: None,
+            cost: None,
         };
-        let metadata = model_metadata("claude-sonnet-5-medium", &levels, Some(&entry));
-        assert_eq!(metadata.name.as_deref(), Some("Claude Sonnet 5 Medium"));
+        let entries = vec![
+            entry("claude-sonnet-5-low"),
+            entry("claude-sonnet-5-medium"),
+            entry("claude-sonnet-5-high"),
+            entry("claude-sonnet-5-high-fast"),
+        ];
+        let selectors: Vec<String> = entries.iter().map(|e| e.selector.clone()).collect();
+        let families = family::group_families(&selectors, &entries);
+        assert_eq!(families.len(), 1);
+        let metadata = family::family_metadata(&families[0], None);
+
+        assert_eq!(metadata.id.as_deref(), Some("claude-sonnet-5"));
         assert_eq!(
             metadata.modalities.as_ref().map(|m| m.input.as_slice()),
             Some(&["text".to_string(), "image".to_string()][..])
@@ -560,8 +637,8 @@ mod tests {
             metadata.extensions.get("devin_provider"),
             Some(&Value::String("anthropic".into()))
         );
-        assert_eq!(metadata.family.as_deref(), Some("claude-sonnet-5"));
-        let Some([ReasoningOption::Effort { values }]) = metadata.reasoning_options.as_deref()
+        let Some([crate::provider_models::ReasoningOption::Effort { values }]) =
+            metadata.reasoning_options.as_deref()
         else {
             panic!("expected effort reasoning options");
         };
@@ -582,10 +659,24 @@ mod tests {
                 stravia_runtime_contract::thinking::ThinkingLevel::High,
             ]
         );
+        // The family's selector table resolves level requests inside the
+        // vendor — medium is the canonical default.
+        let table = selector::table_from_extensions(&metadata.extensions).expect("selector table");
+        assert_eq!(table.default, "claude-sonnet-5-medium");
+        assert_eq!(
+            selector::resolve_selector(
+                &table,
+                Some(&TargetThinkingControl::Effort {
+                    value: "high".into()
+                })
+            ),
+            "claude-sonnet-5-high"
+        );
 
         // A family with no level suffixes hides the picker instead of
         // advertising selectors upstream does not have.
-        let metadata = model_metadata("swe-1-7", &levels, None);
+        let families = family::group_families(&["swe-1-7".to_string()], &[]);
+        let metadata = family::family_metadata(&families[0], None);
         assert!(
             crate::thinking::visible_levels(&crate::thinking::generate_thinking_level_map(
                 &metadata
