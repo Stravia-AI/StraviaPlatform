@@ -75,7 +75,7 @@ or `nix run github:Stravia-AI/StraviaPlatform`, or a platform archive from Relea
 **First run (both):**
 
 1. Open <http://127.0.0.1:23471/setup> and paste the one-time setup token printed to the console. Pick SQLite or PostgreSQL and create the administrator.
-2. **Add a provider** — API key or OAuth channel (Codex, Claude Code, Grok device flow). Stravia syncs the available model inventory.
+2. **Add a provider** — API key or OAuth channel (Codex, Claude Code, Grok device flow, Devin). Stravia syncs the available model inventory.
 3. **Add a model** — select upstream model IDs; the Model ID is the route clients call.
 4. **Create an API key**, then open **Connect clients** — Stravia generates a ready-to-apply provider patch for Claude Code, Codex CLI, Gemini CLI, or OpenCode; the desktop app can write the config for you.
 
@@ -105,7 +105,7 @@ Cross-protocol tool calls, reasoning, and usage reporting are preserved; request
 
 ### Providers and model routing
 
-OpenAI (incl. Codex OAuth) · Anthropic (incl. Claude Code OAuth) · Google Gemini + Vertex AI · DeepSeek · Moonshot AI · Zhipu AI · Z.AI · MiniMax · xAI (API key and Grok OAuth) · NVIDIA · OpenRouter · Ollama · custom OpenAI-compatible endpoints.
+OpenAI (incl. Codex OAuth) · Anthropic (incl. Claude Code OAuth) · Google Gemini + Vertex AI · Devin (OAuth) · DeepSeek · Moonshot AI · Zhipu AI · Z.AI · MiniMax · xAI (API key and Grok OAuth) · NVIDIA · OpenRouter · Ollama · custom OpenAI-compatible endpoints.
 
 Clients call a **Model ID** you define — map it to one or more upstreams in priority layers: requests go to the top layer first, balanced by traffic or preferring the fastest target, and a conversation sticks to what worked before. A built-in catalog keeps provider model lists up to date.
 

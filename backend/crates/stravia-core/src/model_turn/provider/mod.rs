@@ -147,6 +147,17 @@ impl ProviderCall {
             None => Ok(std::borrow::Cow::Borrowed(body)),
         }
     }
+
+    /// Resolves the wire body: raw bytes take precedence over the JSON body.
+    /// Artifact transfer only applies to JSON bodies — raw-byte formats
+    /// (Connect-RPC protobuf) carry no JSON artifact placeholders.
+    async fn request_body_bytes(&self, outbound: &OutboundRequest) -> anyhow::Result<bytes::Bytes> {
+        if let Some(raw) = &outbound.body_bytes {
+            return Ok(bytes::Bytes::copy_from_slice(raw));
+        }
+        let body = self.transfer_body(&outbound.body).await?;
+        Ok(bytes::Bytes::from(serde_json::to_vec(body.as_ref())?))
+    }
     pub(crate) fn disable_retries(&mut self) {
         self.allow_retries = false;
         self.continuation_fallback = None;

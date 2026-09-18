@@ -75,7 +75,7 @@ docker run --rm \
 **首次启动（两种形态相同）：**
 
 1. 打开 <http://127.0.0.1:23471/setup>，输入控制台打印的一次性设置令牌。选择 SQLite 或 PostgreSQL，创建管理员。
-2. **添加提供商** —— API Key 或 OAuth 通道（Codex、Claude Code、Grok device flow）。Stravia 会同步可用模型清单。
+2. **添加提供商** —— API Key 或 OAuth 通道（Codex、Claude Code、Grok device flow、Devin）。Stravia 会同步可用模型清单。
 3. **添加模型** —— 选择上游模型 ID；Model ID 即客户端调用的路由。
 4. **创建 API Key**，然后打开**接入客户端** —— Stravia 为 Claude Code、Codex CLI、Gemini CLI 或 OpenCode 生成可直接应用的 provider 补丁；桌面端可直接写入客户端配置。
 
@@ -105,7 +105,7 @@ curl http://127.0.0.1:23471/v1/chat/completions \
 
 ### 提供商与模型路由
 
-OpenAI（含 Codex OAuth）· Anthropic（含 Claude Code OAuth）· Google Gemini + Vertex AI · DeepSeek · Moonshot AI · Zhipu AI · Z.AI · MiniMax · xAI（API Key 与 Grok OAuth）· NVIDIA · OpenRouter · Ollama · 自定义 OpenAI 兼容端点。
+OpenAI（含 Codex OAuth）· Anthropic（含 Claude Code OAuth）· Google Gemini + Vertex AI · Devin（OAuth）· DeepSeek · Moonshot AI · Zhipu AI · Z.AI · MiniMax · xAI（API Key 与 Grok OAuth）· NVIDIA · OpenRouter · Ollama · 自定义 OpenAI 兼容端点。
 
 客户端调用你定义的 **Model ID** —— 可以绑定一个或多个上游并按优先级分层：请求先走最高层，同层按流量均衡或延迟偏好选择，同一会话尽量留在已成功的目标上。内置目录让各服务商的模型清单保持最新。
 

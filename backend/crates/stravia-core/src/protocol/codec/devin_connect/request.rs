@@ -1,0 +1,1173 @@
+//! `GetChatMessageRequest` protobuf encoder.
+//!
+//! Field layout recovered from `dwgx/WindsurfAPI` `src/devin-connect.js`,
+//! whose tags were calibrated against live `devin.exe` captures:
+//!
+//! ```text
+//! GetChatMessageRequest
+//!   #1  ClientMetadata { #1 client_name, #2 client_version, #3 session_token,
+//!                        #4 language, #5 platform, #7 client_version,
+//!                        #12 client_name, #31 fingerprint (732 hex chars) }
+//!   #2  system prompt
+//!   #3  repeated ChatMessage { #1 uuid, #2 source, #3 text,
+//!                              #6 ChatToolCall{#1 id,#2 name,#3 args_json},
+//!                              #7 tool_call_id, #10 ImageData{#1 b64,#2 mime} }
+//!   #7  request source enum (5)
+//!   #8  CompletionConfig { #1 enabled, #2 max_tokens, #3 max_newlines,
+//!                          #5 f64 temperature, #7 top_k, #8 f64 top_p }
+//!   #10 repeated ToolDef { #1 name, #2 description, #3 parameters JSON }
+//!   #15 ModelConfig { #1 config uuid, #2 turn, #3 =4 }
+//!   #16 session id
+//!   #20 = 1
+//!   #21 model selector
+//!   #22 user-exchange id — absent on stateless turn-1 requests
+//! ```
+//!
+//! ChatMessage.source: 1 = user, 2 = assistant, 4 = tool result.
+//!
+//! Two wire behaviors from the reference are load-bearing and copied on
+//! purpose:
+//! * Claude-family upstreams reject a request that declares tools with an
+//!   absent or empty system prompt, so a minimal fallback system is injected
+//!   whenever tools are present without one.
+//! * The upstream MCP gate pattern-matches ToolDef descriptions and parameter
+//!   schema `description` keys against known tool signatures and rejects the
+//!   whole request (`permission_denied`). The verified workaround emits the
+//!   tool NAME as the description and strips schema `description` keys; the
+//!   model still sees the name plus full parameter structure.
+
+use anyhow::bail;
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
+
+use super::proto::{
+    ProtoField, parse_fields, write_fixed64_field, write_message_field, write_string_field,
+    write_varint_field,
+};
+use stravia_runtime_contract::protocol::ir::AiItem;
+use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::ContentBlock;
+use stravia_runtime_contract::protocol::ir::MediaSource;
+use stravia_runtime_contract::protocol::ir::MessageContent;
+use stravia_runtime_contract::protocol::ir::Role;
+
+/// Connect-RPC method path on the Devin api-server host.
+pub(crate) const GET_CHAT_MESSAGE_PATH: &str = "/exa.api_server_pb.ApiServerService/GetChatMessage";
+
+/// ClientMetadata constants observed on live CLI requests. `chisel` is the
+/// CLI's internal client name; the version tracks the Devin CLI build.
+const CLIENT_NAME: &str = "chisel";
+const CLIENT_VERSION: &str = "2026.8.18";
+const CLIENT_LANGUAGE: &str = "en";
+const CLIENT_PLATFORM: &str = "windows";
+
+const DEFAULT_CONTEXT_WINDOW: u64 = 128_000;
+const WIRE_DEFAULT_MAX_TOKENS: u64 = 8192;
+const DEFAULT_TEMPERATURE: f64 = 1.0;
+/// Exactly 0 → upstream "internal error" (live-verified); clamp to epsilon.
+const MIN_TEMPERATURE: f64 = 0.001;
+const DEFAULT_TOP_K: u64 = 40;
+const DEFAULT_TOP_P: f64 = 0.95;
+
+const SOURCE_USER: u64 = 1;
+const SOURCE_ASSISTANT: u64 = 2;
+const SOURCE_TOOL_RESULT: u64 = 4;
+
+/// Injected when tools are declared without a system prompt — Claude-family
+/// upstreams reject that combination, verified live by the reference project.
+const TOOLS_FALLBACK_SYSTEM: &str =
+    "You are a helpful assistant. Use the available tools when appropriate.";
+
+/// Per-session wire shape, calibrated on a 9-request live CLI capture
+/// (WindsurfAPI capture 9501aa2c): `#15.1` config uuid and `#16` session id
+/// stay stable across a conversation while `#15.2` increments once per HTTP
+/// request, tool-loop rounds included. All three are derivable from the
+/// request itself because `#3` always carries the full history — upstream
+/// holds no chain state that replaces it.
+#[derive(Debug, PartialEq)]
+pub(crate) struct SessionShape {
+    pub session_id: String,
+    pub config_id: String,
+    pub turn: u64,
+}
+
+/// Derives the session shape statelessly. A request with no completed
+/// assistant turn is a turn-1 request: fresh uuids, turn 1 — byte-identical
+/// to the verified capture. Once history contains at least one assistant
+/// output, the shape pins to a root anchored on the token and the first user
+/// message, so a continuing conversation reuses one session instead of
+/// minting a fresh one per turn (which the upstream velocity limiter reads
+/// as N brand-new sessions). `#22` is deliberately never emitted: the
+/// capture shows it echoing a server-issued exchange handle we cannot
+/// fabricate.
+pub(crate) fn session_shape(req: &AiRequest, session_token: &str) -> SessionShape {
+    let completed = req
+        .items
+        .iter()
+        .filter(|item| matches!(item.role, Role::Assistant))
+        .count() as u64;
+    if completed == 0 {
+        return SessionShape {
+            session_id: Uuid::new_v4().to_string(),
+            config_id: Uuid::new_v4().to_string(),
+            turn: 1,
+        };
+    }
+    let anchor = req
+        .items
+        .iter()
+        .find(|item| matches!(item.role, Role::User))
+        .map(|item| item.content.to_text())
+        .unwrap_or_default();
+    let mut hasher = Sha256::new();
+    hasher.update(session_token.as_bytes());
+    hasher.update(b"devin-session-root");
+    hasher.update(anchor.as_bytes());
+    let root: [u8; 32] = hasher.finalize().into();
+    SessionShape {
+        session_id: uuid_from_seed(&root, 0),
+        config_id: uuid_from_seed(&root, 1),
+        turn: completed + 1,
+    }
+}
+
+fn uuid_from_seed(root: &[u8; 32], salt: u32) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(root);
+    hasher.update(salt.to_be_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    uuid::Builder::from_random_bytes(bytes)
+        .into_uuid()
+        .to_string()
+}
+
+/// Serialize the protobuf request body (un-enveloped). `session_token` is
+/// embedded SINGLE inside `ClientMetadata` — the doubling is only for the
+/// HTTP `Authorization` header, which the vendor owns.
+pub(crate) fn encode_get_chat_message_request(
+    req: &AiRequest,
+    session_token: &str,
+    shape: &SessionShape,
+) -> anyhow::Result<Vec<u8>> {
+    if session_token.trim().is_empty() {
+        bail!("Devin Connect request is missing the session token");
+    }
+    if req.embedding.is_some() {
+        bail!("Devin Connect does not expose an embeddings endpoint");
+    }
+    if req.generation.seed.is_some()
+        || req.generation.presence_penalty.is_some()
+        || req.generation.frequency_penalty.is_some()
+        || req.generation.stop.is_some()
+    {
+        bail!(
+            "Devin Connect cannot represent seed, presence_penalty, frequency_penalty, or stop sequences"
+        );
+    }
+    if req.response_format.is_some() {
+        bail!("Devin Connect does not expose a model-neutral response format");
+    }
+    if req.safety_settings.is_some() {
+        bail!("Devin Connect does not expose safety settings");
+    }
+    // #11 disable_parallel_tool_calls / #12 tool_choice exist in third-party
+    // .proto reconstructions but their tags were never wire-confirmed; the
+    // reference client deliberately omits them (a wrong tag can silently
+    // overwrite adjacent request fields). tool_choice /
+    // disable_parallel_tool_calls are therefore not forwarded.
+
+    let mut system_prompt = collect_system_prompt(req);
+    let chat_messages = collect_chat_messages(req)?;
+    let tool_defs = encode_tool_defs(req)?;
+    if system_prompt.is_empty() && !tool_defs.is_empty() {
+        system_prompt = TOOLS_FALLBACK_SYSTEM.to_string();
+    }
+
+    let mut out = Vec::new();
+    write_message_field(&mut out, 1, &client_metadata(session_token));
+    write_string_field(&mut out, 2, &system_prompt);
+    for message in &chat_messages {
+        write_message_field(&mut out, 3, &message.encode());
+    }
+    write_varint_field(&mut out, 7, 5);
+    write_message_field(&mut out, 8, &completion_config(req));
+    for tool_def in &tool_defs {
+        write_message_field(&mut out, 10, tool_def);
+    }
+    write_message_field(&mut out, 15, &model_config(shape));
+    write_string_field(&mut out, 16, &shape.session_id);
+    write_varint_field(&mut out, 20, 1);
+    write_string_field(&mut out, 21, &req.model);
+    Ok(out)
+}
+
+/// Unary seat-management requests (GetUserStatus, GetCliModelConfigs) carry
+/// only `ClientMetadata` at field #1 and travel as `application/proto` —
+/// raw protobuf, no Connect envelope.
+pub(crate) fn encode_client_metadata_request(session_token: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    write_message_field(&mut out, 1, &client_metadata(session_token));
+    out
+}
+
+/// One entry from `GetCliModelConfigsResponse`. `ClientModelConfig` repeats
+/// at top-level #1; entries flagged #4 disabled are not callable and dropped
+/// at decode time. Tag numbers are calibrated from a live 200 response
+/// (`dwgx/WindsurfAPI` `devin-connect-catalog.js` decodeCatalog).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DevinModelConfig {
+    /// #22 — the value `GetChatMessageRequest.model` expects.
+    pub selector: String,
+    /// #1 — friendly label, e.g. "Claude Opus 4.8 Medium".
+    pub label: Option<String>,
+    /// #5 — explicit upstream multimodal capability flag.
+    pub supports_images: Option<bool>,
+    /// #10 — upstream provider enum (1=cognition 2=openai 3=anthropic
+    /// 4=google 7=moonshot 9=zhipu; other values surface as the raw number).
+    pub provider: Option<u64>,
+    /// #18 — context window tokens (observed 200000 on swe-1-6-slow).
+    pub context_window: Option<u64>,
+    /// #23.#23 — short alias inside ModelInfo, e.g. "claude-opus-4.8".
+    pub alias: Option<String>,
+}
+
+/// The upstream provider enum carried at ClientModelConfig #10.
+pub(crate) fn devin_upstream_provider_name(id: u64) -> Option<&'static str> {
+    Some(match id {
+        1 => "cognition",
+        2 => "openai",
+        3 => "anthropic",
+        4 => "google",
+        7 => "moonshot",
+        9 => "zhipu",
+        _ => return None,
+    })
+}
+
+pub(crate) fn decode_cli_model_configs(body: &[u8]) -> Vec<DevinModelConfig> {
+    let Ok(top) = parse_fields(body) else {
+        return Vec::new();
+    };
+    let varint = |config: &[ProtoField<'_>], number: u32| -> Option<u64> {
+        config
+            .iter()
+            .find(|f| f.number == number && f.wire_type == 0)
+            .map(|f| f.scalar)
+    };
+    let string = |config: &[ProtoField<'_>], number: u32| -> Option<String> {
+        config
+            .iter()
+            .find(|f| f.number == number && f.wire_type == 2)
+            .and_then(|f| std::str::from_utf8(f.bytes).ok())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let mut configs = Vec::new();
+    for entry in top.iter().filter(|f| f.number == 1 && f.wire_type == 2) {
+        let Ok(config) = parse_fields(entry.bytes) else {
+            continue;
+        };
+        if varint(&config, 4) == Some(1) {
+            continue;
+        }
+        let Some(selector) = string(&config, 22) else {
+            continue;
+        };
+        let alias = config
+            .iter()
+            .find(|f| f.number == 23 && f.wire_type == 2)
+            .and_then(|f| parse_fields(f.bytes).ok())
+            .and_then(|info| string(&info, 23));
+        configs.push(DevinModelConfig {
+            selector,
+            label: string(&config, 1),
+            supports_images: varint(&config, 5).map(|v| v == 1),
+            provider: varint(&config, 10),
+            context_window: varint(&config, 18),
+            alias,
+        });
+    }
+    configs
+}
+
+fn client_metadata(session_token: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    write_string_field(&mut out, 1, CLIENT_NAME);
+    write_string_field(&mut out, 2, CLIENT_VERSION);
+    write_string_field(&mut out, 3, session_token);
+    write_string_field(&mut out, 4, CLIENT_LANGUAGE);
+    write_string_field(&mut out, 5, CLIENT_PLATFORM);
+    write_string_field(&mut out, 7, CLIENT_VERSION);
+    write_string_field(&mut out, 12, CLIENT_NAME);
+    write_string_field(&mut out, 31, &device_fingerprint(session_token));
+    out
+}
+
+/// ClientMetadata #31: 366 bytes rendered as 732 lowercase hex chars. The
+/// real CLI derives a stable machine fingerprint from MAC addresses
+/// (`windsurf-api-client/fingerprint.rs`) and the server tracks it per
+/// account (`has_fingerprint_set`); the wire itself only checks shape. We
+/// derive a deterministic per-credential id instead of a fresh random one —
+/// the same token always presents the same device, matching the CLI's
+/// stable-device semantics and the reference's opt-in stable-device mode.
+fn device_fingerprint(session_token: &str) -> String {
+    // Counter-mode expand: block_i = SHA256(token || "devin-clientmeta" || i).
+    // 12 blocks × 32 bytes covers 366.
+    let mut bytes = Vec::with_capacity(384);
+    for index in 0u32..12 {
+        let mut hasher = Sha256::new();
+        hasher.update(session_token.as_bytes());
+        hasher.update(b"devin-clientmeta");
+        hasher.update(index.to_be_bytes());
+        bytes.extend_from_slice(&hasher.finalize());
+    }
+    let mut hex = String::with_capacity(732);
+    for byte in &bytes[..366] {
+        hex.push_str(&format!("{byte:02x}"));
+    }
+    hex
+}
+
+fn completion_config(req: &AiRequest) -> Vec<u8> {
+    let mut temperature = req.generation.temperature.unwrap_or(DEFAULT_TEMPERATURE);
+    if temperature < MIN_TEMPERATURE {
+        temperature = MIN_TEMPERATURE;
+    }
+    let mut out = Vec::new();
+    write_varint_field(&mut out, 1, 1);
+    write_varint_field(
+        &mut out,
+        2,
+        u64::from(
+            req.generation
+                .max_tokens
+                .unwrap_or(WIRE_DEFAULT_MAX_TOKENS as u32),
+        ),
+    );
+    write_varint_field(&mut out, 3, DEFAULT_CONTEXT_WINDOW);
+    write_fixed64_field(&mut out, 5, temperature);
+    write_varint_field(&mut out, 7, DEFAULT_TOP_K);
+    write_fixed64_field(&mut out, 8, req.generation.top_p.unwrap_or(DEFAULT_TOP_P));
+    out
+}
+
+/// ModelConfig #15: #1 stable per-session config uuid, #2 monotonic turn
+/// counter, #3 constant 4 — the shape the real CLI sends (live capture
+/// 9501aa2c). Stateless turn-1 requests get a fresh uuid and turn 1.
+fn model_config(shape: &SessionShape) -> Vec<u8> {
+    let mut out = Vec::new();
+    write_string_field(&mut out, 1, &shape.config_id);
+    write_varint_field(&mut out, 2, shape.turn);
+    write_varint_field(&mut out, 3, 4);
+    out
+}
+
+fn collect_system_prompt(req: &AiRequest) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(instructions) = req.instructions.as_deref() {
+        let trimmed = instructions.trim();
+        if !trimmed.is_empty() {
+            parts.push(trimmed.to_string());
+        }
+    }
+    for item in &req.items {
+        if matches!(item.role, Role::System | Role::Developer) {
+            let text = item.content.to_text();
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                parts.push(trimmed.to_string());
+            }
+        }
+    }
+    // The reference joins consecutive system turns with a single newline.
+    parts.join("\n")
+}
+
+// ── ChatMessage model ─────────────────────────────────────────────────────────
+
+/// One logical ChatMessage before serialization. Keeping a struct (instead of
+/// merging encoded bytes) makes the same-source text merge trivially correct.
+#[derive(Default)]
+struct ChatMsg {
+    source: u64,
+    text: String,
+    images: Vec<Vec<u8>>,
+    tool_call: Option<Vec<u8>>,
+    tool_call_id: Option<String>,
+}
+
+impl ChatMsg {
+    fn is_text_only(&self) -> bool {
+        self.tool_call.is_none() && self.tool_call_id.is_none() && self.images.is_empty()
+    }
+
+    fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        write_string_field(&mut out, 1, &Uuid::new_v4().to_string());
+        write_varint_field(&mut out, 2, self.source);
+        write_string_field(&mut out, 3, &self.text);
+        if let Some(call) = &self.tool_call {
+            write_message_field(&mut out, 6, call);
+        }
+        if let Some(id) = &self.tool_call_id {
+            write_string_field(&mut out, 7, id);
+        }
+        for image in &self.images {
+            write_message_field(&mut out, 10, image);
+        }
+        out
+    }
+}
+
+fn push_message(out: &mut Vec<ChatMsg>, message: ChatMsg) {
+    // The upstream rejects long runs of consecutive same-source turns; fold
+    // text-only user/assistant messages into the previous one.
+    if message.is_text_only()
+        && matches!(message.source, SOURCE_USER | SOURCE_ASSISTANT)
+        && let Some(last) = out.last_mut()
+        && last.source == message.source
+        && last.is_text_only()
+    {
+        if !last.text.is_empty() {
+            last.text.push_str("\n\n");
+        }
+        last.text.push_str(&message.text);
+        return;
+    }
+    out.push(message);
+}
+
+fn collect_chat_messages(req: &AiRequest) -> anyhow::Result<Vec<ChatMsg>> {
+    let mut out: Vec<ChatMsg> = Vec::new();
+    for item in &req.items {
+        match item.role {
+            Role::System | Role::Developer => {}
+            Role::User => encode_user_item(item, &mut out)?,
+            Role::Assistant => encode_assistant_item(item, &mut out)?,
+            Role::Tool => encode_tool_result_item(item, &mut out)?,
+        }
+    }
+    Ok(out)
+}
+
+fn encode_user_item(item: &AiItem, out: &mut Vec<ChatMsg>) -> anyhow::Result<()> {
+    let mut current = ChatMsg {
+        source: SOURCE_USER,
+        ..ChatMsg::default()
+    };
+    let mut has_content = false;
+    let blocks: &[ContentBlock] = match &item.content {
+        MessageContent::Text(text) => {
+            current.text = text.clone();
+            has_content = !text.is_empty();
+            &[]
+        }
+        MessageContent::Blocks(blocks) => blocks,
+    };
+    for block in blocks {
+        has_content = true;
+        match block {
+            ContentBlock::Text { text, .. } => {
+                if !current.text.is_empty() {
+                    current.text.push('\n');
+                }
+                current.text.push_str(text);
+            }
+            ContentBlock::Image { source, .. } => match source {
+                MediaSource::Base64 { media_type, data } => {
+                    current.images.push(encode_image(data, media_type));
+                }
+                MediaSource::Url(_) | MediaSource::FileId { .. } => {
+                    bail!("Devin Connect accepts only inline image bytes")
+                }
+            },
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } => {
+                // Anthropic-style tool results arrive inside user items; emit
+                // each as the native source=4 turn it belongs to.
+                if has_content {
+                    push_message(out, std::mem::take(&mut current));
+                    current.source = SOURCE_USER;
+                }
+                push_message(
+                    out,
+                    ChatMsg {
+                        source: SOURCE_TOOL_RESULT,
+                        text: tool_result_text(content),
+                        tool_call_id: Some(tool_use_id.clone()),
+                        ..ChatMsg::default()
+                    },
+                );
+                has_content = false;
+            }
+            other => bail!(
+                "Devin Connect cannot represent user content block `{}`",
+                content_block_name(other)
+            ),
+        }
+    }
+    if has_content && (!current.text.is_empty() || !current.images.is_empty()) {
+        push_message(out, current);
+    }
+    Ok(())
+}
+
+fn encode_assistant_item(item: &AiItem, out: &mut Vec<ChatMsg>) -> anyhow::Result<()> {
+    if let MessageContent::Blocks(blocks) = &item.content {
+        let mut pending_text = String::new();
+        for block in blocks {
+            match block {
+                ContentBlock::Text { text, .. } => {
+                    if !pending_text.is_empty() {
+                        pending_text.push('\n');
+                    }
+                    pending_text.push_str(text);
+                }
+                // Thinking replay needs a paid-capture-calibrated tag the
+                // reference deliberately leaves off; silent on the wire.
+                ContentBlock::Thinking { .. }
+                | ContentBlock::RedactedThinking { .. }
+                | ContentBlock::Reasoning { .. } => {}
+                ContentBlock::ToolUse {
+                    id, name, input, ..
+                } => {
+                    if !pending_text.is_empty() {
+                        push_message(
+                            out,
+                            ChatMsg {
+                                source: SOURCE_ASSISTANT,
+                                text: std::mem::take(&mut pending_text),
+                                ..ChatMsg::default()
+                            },
+                        );
+                    }
+                    push_message(
+                        out,
+                        ChatMsg {
+                            source: SOURCE_ASSISTANT,
+                            tool_call: Some(encode_tool_call(
+                                id,
+                                name,
+                                &serde_json::to_string(input).unwrap_or_else(|_| input.to_string()),
+                            )),
+                            ..ChatMsg::default()
+                        },
+                    );
+                }
+                other => bail!(
+                    "Devin Connect cannot represent assistant content block `{}`",
+                    content_block_name(other)
+                ),
+            }
+        }
+        if !pending_text.is_empty() {
+            push_message(
+                out,
+                ChatMsg {
+                    source: SOURCE_ASSISTANT,
+                    text: pending_text,
+                    ..ChatMsg::default()
+                },
+            );
+        }
+    } else {
+        let text = item.content.to_text();
+        if !text.is_empty() {
+            push_message(
+                out,
+                ChatMsg {
+                    source: SOURCE_ASSISTANT,
+                    text,
+                    ..ChatMsg::default()
+                },
+            );
+        }
+    }
+    for call in item.tool_calls.as_deref().unwrap_or_default() {
+        push_message(
+            out,
+            ChatMsg {
+                source: SOURCE_ASSISTANT,
+                tool_call: Some(encode_tool_call(&call.id, &call.name, &call.arguments)),
+                ..ChatMsg::default()
+            },
+        );
+    }
+    Ok(())
+}
+
+fn encode_tool_result_item(item: &AiItem, out: &mut Vec<ChatMsg>) -> anyhow::Result<()> {
+    let text = match &item.content {
+        MessageContent::Text(value) => value.clone(),
+        MessageContent::Blocks(blocks) => blocks
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text { text, .. } => Some(text.clone()),
+                ContentBlock::ToolResult { content, .. } => Some(tool_result_text(content)),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    };
+    let text = if text.is_empty() {
+        "[tool result]".to_string()
+    } else {
+        text
+    };
+    match item.tool_call_id.as_deref() {
+        Some(tool_call_id) => push_message(
+            out,
+            ChatMsg {
+                source: SOURCE_TOOL_RESULT,
+                text,
+                tool_call_id: Some(tool_call_id.to_string()),
+                ..ChatMsg::default()
+            },
+        ),
+        // No id to echo: fold into a user turn like the reference's
+        // emulation path instead of dropping the result.
+        None => push_message(
+            out,
+            ChatMsg {
+                source: SOURCE_USER,
+                text: format!("[tool result]: {text}"),
+                ..ChatMsg::default()
+            },
+        ),
+    }
+    Ok(())
+}
+
+fn tool_result_text(content: &Value) -> String {
+    let text = match content {
+        Value::String(text) => text.clone(),
+        other => serde_json::to_string(other).unwrap_or_else(|_| other.to_string()),
+    };
+    // An empty tool result still needs a body — the reference emits a
+    // placeholder rather than a zero-length #3.
+    if text.is_empty() {
+        "[tool result]".to_string()
+    } else {
+        text
+    }
+}
+
+fn encode_image(base64_data: &str, media_type: &str) -> Vec<u8> {
+    // ImageData{#1 base64 text, #2 mime} — verified from wire: #1 carries the
+    // base64 STRING, not raw image bytes.
+    let mut out = Vec::new();
+    write_string_field(&mut out, 1, base64_data);
+    write_string_field(&mut out, 2, media_type);
+    out
+}
+
+fn encode_tool_call(id: &str, name: &str, args_json: &str) -> Vec<u8> {
+    // ChatToolCall{#1 id, #2 name, #3 arguments JSON} — only #3 is a JSON
+    // string; the envelope around it is protobuf.
+    let mut call = Vec::new();
+    write_string_field(&mut call, 1, id);
+    write_string_field(&mut call, 2, name);
+    write_string_field(&mut call, 3, args_json);
+    call
+}
+
+fn encode_tool_defs(req: &AiRequest) -> anyhow::Result<Vec<Vec<u8>>> {
+    let mut defs = Vec::new();
+    for tool in req.tools.as_deref().unwrap_or_default() {
+        if tool.name.trim().is_empty() {
+            continue;
+        }
+        let mut def = Vec::new();
+        write_string_field(&mut def, 1, &tool.name);
+        // #2 emits the NAME, never prose — the upstream MCP gate scans
+        // descriptions for known tool signatures and rejects the request.
+        write_string_field(&mut def, 2, &tool.name);
+        write_string_field(
+            &mut def,
+            3,
+            &normalize_tool_schema(&tool.parameters).to_string(),
+        );
+        defs.push(def);
+    }
+    Ok(defs)
+}
+
+/// Normalize a JSON Schema for the wire: force an object envelope, drop
+/// `$schema` / top-level combinators, keep `required` ⊆ `properties`, and
+/// strip schema-annotation `description` keys (a property literally named
+/// `description` is preserved).
+fn normalize_tool_schema(schema: &Value) -> Value {
+    let mut out = match schema {
+        Value::Object(map) => map.clone(),
+        _ => serde_json::Map::new(),
+    };
+    out.remove("$schema");
+    strip_top_level_combinators(&mut out);
+    match out.get("type") {
+        Some(Value::String(kind)) if kind == "object" => {}
+        _ => {
+            out.insert("type".into(), Value::String("object".into()));
+        }
+    }
+    if !out.get("properties").is_some_and(Value::is_object) {
+        out.insert("properties".into(), Value::Object(serde_json::Map::new()));
+    }
+    if out.contains_key("required") {
+        let keys: Vec<String> = out
+            .get("properties")
+            .and_then(Value::as_object)
+            .map(|props| props.keys().cloned().collect())
+            .unwrap_or_default();
+        let filtered: Vec<Value> = out
+            .get("required")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter(|item| {
+                        item.as_str()
+                            .is_some_and(|name| keys.iter().any(|k| k == name))
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        if filtered.is_empty() {
+            out.remove("required");
+        } else {
+            out.insert("required".into(), Value::Array(filtered));
+        }
+    }
+    strip_schema_descriptions(&Value::Object(out), false)
+}
+
+/// Remove a top-level oneOf/anyOf/allOf envelope; when the root had no
+/// `properties` of its own, recover them from the first object variant
+/// without overwriting existing keys.
+fn strip_top_level_combinators(out: &mut serde_json::Map<String, Value>) {
+    let had_properties = out.contains_key("properties");
+    let mut recovered = false;
+    for key in ["oneOf", "anyOf", "allOf"] {
+        let Some(variants) = out.remove(key) else {
+            continue;
+        };
+        if had_properties || recovered {
+            continue;
+        }
+        let Some(variants) = variants.as_array() else {
+            continue;
+        };
+        let Some(object_variant) = variants.iter().find_map(|variant| {
+            variant
+                .as_object()
+                .filter(|obj| obj.get("type").and_then(Value::as_str) == Some("object"))
+        }) else {
+            continue;
+        };
+        for field in [
+            "properties",
+            "required",
+            "additionalProperties",
+            "description",
+        ] {
+            if !out.contains_key(field)
+                && let Some(value) = object_variant.get(field)
+            {
+                out.insert(field.into(), value.clone());
+            }
+        }
+        recovered = true;
+    }
+}
+
+fn strip_schema_descriptions(value: &Value, in_properties: bool) -> Value {
+    match value {
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| strip_schema_descriptions(item, false))
+                .collect(),
+        ),
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .filter(|(key, _)| in_properties || key.as_str() != "description")
+                .map(|(key, child)| {
+                    (
+                        key.clone(),
+                        strip_schema_descriptions(child, key == "properties"),
+                    )
+                })
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+fn content_block_name(block: &ContentBlock) -> &'static str {
+    match block {
+        ContentBlock::Text { .. } => "text",
+        ContentBlock::Image { .. } => "image",
+        ContentBlock::Audio { .. } => "audio",
+        ContentBlock::File { .. } => "file",
+        ContentBlock::Video { .. } => "video",
+        ContentBlock::Thinking { .. } => "thinking",
+        ContentBlock::Reasoning { .. } => "reasoning",
+        ContentBlock::Compaction { .. } => "compaction",
+        ContentBlock::CompactionTrigger {} => "compaction_trigger",
+        ContentBlock::RedactedThinking { .. } => "redacted_thinking",
+        ContentBlock::ToolUse { .. } => "tool_use",
+        ContentBlock::ToolResult { .. } => "tool_result",
+        ContentBlock::ServerToolUse { .. } => "server_tool_use",
+        ContentBlock::ServerToolResult { .. } => "server_tool_result",
+        ContentBlock::Document { .. } => "document",
+        ContentBlock::SearchResult { .. } => "search_result",
+        ContentBlock::Citation { .. } => "citation",
+        ContentBlock::ExecutableCode { .. } => "executable_code",
+        ContentBlock::CodeExecutionResult { .. } => "code_execution_result",
+        ContentBlock::ContainerUpload { .. } => "container_upload",
+        ContentBlock::Refusal { .. } => "refusal",
+        ContentBlock::Unknown { .. } => "unknown",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::codec::devin_connect::proto::parse_fields;
+    use stravia_runtime_contract::protocol::ir::ToolCall;
+    use stravia_runtime_contract::protocol::ir::ToolSpec;
+
+    fn text_item(role: Role, text: &str) -> AiItem {
+        AiItem {
+            role,
+            content: MessageContent::Text(text.to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+            meta: None,
+        }
+    }
+
+    /// Encode and leak the wire bytes so parsed fields borrow 'static — tests
+    /// only, keeps field access free of lifetime plumbing.
+    fn wire(req: &AiRequest) -> &'static [u8] {
+        let bytes = encode_get_chat_message_request(req, "tok", &shape(req)).unwrap();
+        Box::leak(bytes.into_boxed_slice())
+    }
+
+    fn shape(req: &AiRequest) -> SessionShape {
+        session_shape(req, "tok")
+    }
+
+    fn top_level(
+        req: &AiRequest,
+    ) -> Vec<crate::protocol::codec::devin_connect::proto::ProtoField<'static>> {
+        parse_fields(wire(req)).unwrap()
+    }
+
+    fn sub_message<'a>(
+        fields: &'a [crate::protocol::codec::devin_connect::proto::ProtoField<'a>],
+        field: u32,
+        index: usize,
+    ) -> Vec<crate::protocol::codec::devin_connect::proto::ProtoField<'a>> {
+        let bytes = fields
+            .iter()
+            .filter(|f| f.number == field && f.wire_type == 2)
+            .nth(index)
+            .unwrap_or_else(|| panic!("missing sub-message field #{field} at index {index}"))
+            .bytes;
+        parse_fields(bytes).unwrap()
+    }
+
+    #[test]
+    fn request_carries_metadata_system_and_model() {
+        let req = AiRequest::new(
+            "swe-1-7",
+            vec![
+                text_item(Role::System, "be brief"),
+                text_item(Role::User, "hi"),
+            ],
+        );
+        let fields = top_level(&req);
+        let meta = sub_message(&fields, 1, 0);
+        // #3 carries the SINGLE session token (header doubling is separate).
+        assert!(meta.iter().any(|f| f.number == 3 && f.bytes == b"tok"));
+        assert!(meta.iter().any(|f| f.number == 1 && f.bytes == b"chisel"));
+        assert!(meta.iter().any(|f| f.number == 31 && f.bytes.len() == 732));
+        // The fingerprint is deterministic per session token — the same
+        // credential always presents the same device id.
+        assert_eq!(device_fingerprint("tok"), device_fingerprint("tok"));
+        assert_ne!(device_fingerprint("tok"), device_fingerprint("tok2"));
+        assert!(
+            fields
+                .iter()
+                .any(|f| f.number == 2 && f.bytes == b"be brief")
+        );
+        assert!(fields.iter().any(|f| f.number == 7 && f.scalar == 5));
+        assert!(fields.iter().any(|f| f.number == 20 && f.scalar == 1));
+        assert!(
+            fields
+                .iter()
+                .any(|f| f.number == 21 && f.bytes == b"swe-1-7")
+        );
+        // Turn-1 shape: #16 is a fresh uuid, #15 carries turn 1.
+        let session = fields
+            .iter()
+            .find(|f| f.number == 16)
+            .expect("missing session id");
+        assert!(Uuid::parse_str(std::str::from_utf8(session.bytes).unwrap()).is_ok());
+        let model_cfg = sub_message(&fields, 15, 0);
+        assert!(model_cfg.iter().any(|f| f.number == 2 && f.scalar == 1));
+        assert!(model_cfg.iter().any(|f| f.number == 3 && f.scalar == 4));
+    }
+
+    #[test]
+    fn consecutive_same_role_text_merges() {
+        let req = AiRequest::new(
+            "m",
+            vec![
+                text_item(Role::User, "a"),
+                text_item(Role::User, "b"),
+                text_item(Role::Assistant, "c"),
+                text_item(Role::User, "d"),
+            ],
+        );
+        let fields = top_level(&req);
+        let texts: Vec<Vec<u8>> = fields
+            .iter()
+            .filter(|f| f.number == 3 && f.wire_type == 2)
+            .map(|f| {
+                parse_fields(f.bytes)
+                    .unwrap()
+                    .into_iter()
+                    .find(|inner| inner.number == 3)
+                    .map(|inner| inner.bytes.to_vec())
+                    .unwrap_or_default()
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            vec![b"a\n\nb".to_vec(), b"c".to_vec(), b"d".to_vec()]
+        );
+    }
+
+    #[test]
+    fn assistant_tool_calls_encode_as_submessages() {
+        let mut item = text_item(Role::Assistant, "");
+        item.tool_calls = Some(vec![ToolCall {
+            id: "c1".into(),
+            name: "grep".into(),
+            arguments: "{\"p\":\"x\"}".into(),
+        }]);
+        let req = AiRequest::new("m", vec![item]);
+        let fields = top_level(&req);
+        let msg = sub_message(&fields, 3, 0);
+        assert!(
+            msg.iter()
+                .any(|f| f.number == 2 && f.scalar == SOURCE_ASSISTANT)
+        );
+        let call = msg.iter().find(|f| f.number == 6).unwrap().bytes;
+        let call_fields = parse_fields(call).unwrap();
+        assert!(
+            call_fields
+                .iter()
+                .any(|f| f.number == 1 && f.bytes == b"c1")
+        );
+        assert!(
+            call_fields
+                .iter()
+                .any(|f| f.number == 2 && f.bytes == b"grep")
+        );
+        assert!(
+            call_fields
+                .iter()
+                .any(|f| f.number == 3 && f.bytes == b"{\"p\":\"x\"}")
+        );
+    }
+
+    #[test]
+    fn tool_result_encodes_source_four_with_call_id() {
+        let mut item = text_item(Role::Tool, "42 results");
+        item.tool_call_id = Some("c1".into());
+        let req = AiRequest::new("m", vec![item]);
+        let fields = top_level(&req);
+        let msg = sub_message(&fields, 3, 0);
+        assert!(
+            msg.iter()
+                .any(|f| f.number == 2 && f.scalar == SOURCE_TOOL_RESULT)
+        );
+        assert!(msg.iter().any(|f| f.number == 7 && f.bytes == b"c1"));
+    }
+
+    #[test]
+    fn tools_inject_fallback_system_when_absent() {
+        let mut req = AiRequest::new("m", vec![text_item(Role::User, "hi")]);
+        req.tools = Some(vec![ToolSpec {
+            name: "grep".into(),
+            description: Some("find text".into()),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {"pattern": {"type": "string", "description": "regex"}},
+                "required": ["pattern", "missing"],
+                "$schema": "http://json-schema.org/draft-07/schema#",
+            }),
+            strict: None,
+            cache_control: None,
+            meta: None,
+        }]);
+        let fields = top_level(&req);
+        // Fallback system prompt injected because tools exist without one.
+        assert!(fields.iter().any(|f| f.number == 2 && !f.bytes.is_empty()));
+        let def_fields = sub_message(&fields, 10, 0);
+        // #2 emits the NAME, never the prose description (MCP gate workaround).
+        assert!(
+            def_fields
+                .iter()
+                .any(|f| f.number == 2 && f.bytes == b"grep")
+        );
+        let schema = def_fields.iter().find(|f| f.number == 3).unwrap().bytes;
+        let schema: Value = serde_json::from_slice(schema).unwrap();
+        // $schema dropped, unknown required key pruned, description stripped.
+        assert!(schema.get("$schema").is_none());
+        assert_eq!(schema["required"], serde_json::json!(["pattern"]));
+        assert!(schema["properties"]["pattern"].get("description").is_none());
+    }
+
+    #[test]
+    fn empty_tool_result_folds_to_user_without_id() {
+        let item = text_item(Role::Tool, "");
+        let req = AiRequest::new("m", vec![item]);
+        let fields = top_level(&req);
+        let msg = sub_message(&fields, 3, 0);
+        assert!(msg.iter().any(|f| f.number == 2 && f.scalar == SOURCE_USER));
+        assert!(
+            msg.iter()
+                .any(|f| f.number == 3 && f.bytes == b"[tool result]: [tool result]")
+        );
+    }
+
+    #[test]
+    fn unrepresentable_generation_fields_fail() {
+        let mut req = AiRequest::new("m", vec![text_item(Role::User, "hi")]);
+        req.generation.seed = Some(1);
+        assert!(encode_get_chat_message_request(&req, "t", &shape(&req)).is_err());
+    }
+
+    #[test]
+    fn session_shape_pins_after_first_completed_turn() {
+        let turn1 = AiRequest::new("m", vec![text_item(Role::User, "open")]);
+        let first = session_shape(&turn1, "tok");
+        assert_eq!(first.turn, 1);
+        // Turn-1 stays on the verified fresh-uuid shape: no pinning.
+        assert_ne!(first.session_id, session_shape(&turn1, "tok").session_id);
+
+        let turn2 = AiRequest::new(
+            "m",
+            vec![
+                text_item(Role::User, "open"),
+                text_item(Role::Assistant, "reply"),
+                text_item(Role::User, "again"),
+            ],
+        );
+        let pinned = session_shape(&turn2, "tok");
+        assert_eq!(pinned.turn, 2);
+        assert_eq!(pinned, session_shape(&turn2, "tok"));
+        assert!(Uuid::parse_str(&pinned.session_id).is_ok());
+        assert!(Uuid::parse_str(&pinned.config_id).is_ok());
+        assert_ne!(pinned.session_id, pinned.config_id);
+
+        // The turn counter tracks completed exchanges, session root tracks
+        // the opening user message — editing later history keeps the session.
+        let turn3 = AiRequest::new(
+            "m",
+            vec![
+                text_item(Role::User, "open"),
+                text_item(Role::Assistant, "reply"),
+                text_item(Role::User, "again"),
+                text_item(Role::Assistant, "second"),
+                text_item(Role::User, "more"),
+            ],
+        );
+        let deeper = session_shape(&turn3, "tok");
+        assert_eq!(deeper.turn, 3);
+        assert_eq!(deeper.session_id, pinned.session_id);
+        // A different opener or credential is a different session.
+        let other = AiRequest::new(
+            "m",
+            vec![
+                text_item(Role::User, "different opener"),
+                text_item(Role::Assistant, "reply"),
+                text_item(Role::User, "again"),
+            ],
+        );
+        assert_ne!(session_shape(&other, "tok").session_id, pinned.session_id);
+        assert_ne!(session_shape(&turn2, "tok2").session_id, pinned.session_id);
+    }
+
+    #[test]
+    fn decodes_cli_model_config_entries() {
+        let entry = |selector: Option<&str>, disabled: bool| {
+            let mut config = Vec::new();
+            write_string_field(&mut config, 1, "Label");
+            if disabled {
+                write_varint_field(&mut config, 4, 1);
+            }
+            if let Some(selector) = selector {
+                write_string_field(&mut config, 22, selector);
+            }
+            let mut field = Vec::new();
+            write_message_field(&mut field, 1, &config);
+            field
+        };
+        let body = [
+            entry(Some("swe-1-7"), false),
+            entry(Some("claude-sonnet-5-medium"), false),
+            entry(Some("retired-model"), true),
+            entry(None, false),
+        ]
+        .concat();
+
+        let selectors = |body: &[u8]| {
+            decode_cli_model_configs(body)
+                .into_iter()
+                .map(|config| config.selector)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(selectors(&body), ["swe-1-7", "claude-sonnet-5-medium"]);
+        assert!(selectors(b"\xff\xff").is_empty());
+        assert!(selectors(&[]).is_empty());
+    }
+
+    #[test]
+    fn decodes_cli_model_config_display_metadata() {
+        let mut info = Vec::new();
+        write_string_field(&mut info, 23, "claude-sonnet-5");
+        let mut config = Vec::new();
+        write_string_field(&mut config, 1, " Claude Sonnet 5 Medium ");
+        write_varint_field(&mut config, 5, 1);
+        write_varint_field(&mut config, 10, 3);
+        write_varint_field(&mut config, 18, 400_000);
+        write_string_field(&mut config, 22, "claude-sonnet-5-medium");
+        write_message_field(&mut config, 23, &info);
+        let mut body = Vec::new();
+        write_message_field(&mut body, 1, &config);
+
+        let entries = decode_cli_model_configs(&body);
+        let entry = entries.first().expect("expected one entry");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entry.selector, "claude-sonnet-5-medium");
+        assert_eq!(entry.label.as_deref(), Some("Claude Sonnet 5 Medium"));
+        assert_eq!(entry.supports_images, Some(true));
+        assert_eq!(entry.provider, Some(3));
+        assert_eq!(entry.context_window, Some(400_000));
+        assert_eq!(entry.alias.as_deref(), Some("claude-sonnet-5"));
+        assert_eq!(devin_upstream_provider_name(3), Some("anthropic"));
+        assert_eq!(devin_upstream_provider_name(6), None);
+    }
+}

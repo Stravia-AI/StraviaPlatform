@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use crate::auth::drivers::{ClaudeOAuthDriver, GrokOAuthDriver, OpenAIOAuthDriver};
+use crate::auth::drivers::{
+    ClaudeOAuthDriver, DevinOAuthDriver, GrokOAuthDriver, OpenAIOAuthDriver,
+};
 use crate::auth::types::{AuthDriver, AuthDriverMetadata};
 
 pub fn normalize_driver_key(value: &str) -> String {
@@ -9,6 +11,7 @@ pub fn normalize_driver_key(value: &str) -> String {
         "xai" | "x-ai" | "x.ai" | "grok-build" | "grok_build" | "grok" => "grok".to_string(),
         "claude-code" | "claude_code" | "claude-oauth" | "claude_oauth" | "claude"
         | "anthropic" => "claude-code".to_string(),
+        "devin" | "devin-cli" | "devin_cli" | "chisel" => "devin".to_string(),
         other => other.to_string(),
     }
 }
@@ -18,6 +21,7 @@ pub fn build_driver(key: &str) -> Option<Arc<dyn AuthDriver>> {
         "codex" => Some(Arc::new(OpenAIOAuthDriver)),
         "grok" => Some(Arc::new(GrokOAuthDriver::default())),
         "claude-code" => Some(Arc::new(ClaudeOAuthDriver)),
+        "devin" => Some(Arc::new(DevinOAuthDriver)),
         _ => None,
     }
 }
@@ -27,6 +31,7 @@ pub fn list_driver_metadata() -> Vec<AuthDriverMetadata> {
         build_driver("codex"),
         build_driver("grok"),
         build_driver("claude-code"),
+        build_driver("devin"),
     ]
     .into_iter()
     .flatten()

@@ -13,6 +13,7 @@ use stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01;
 use stravia_runtime_contract::protocol::ids::BEDROCK_CONVERSE_V1;
 use stravia_runtime_contract::protocol::ids::COHERE_CHAT_V2;
 use stravia_runtime_contract::protocol::ids::COMMAND_CODE_GENERATE_V1;
+use stravia_runtime_contract::protocol::ids::DEVIN_CONNECT_GET_CHAT_MESSAGE_V1;
 use stravia_runtime_contract::protocol::ids::GATEWAY_LANGUAGE_MODEL_V4;
 use stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA;
 use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
@@ -183,6 +184,11 @@ impl ProtocolRegistry {
             Some(Protocol::CommandCode) => {
                 matches!(control, TargetThinkingControl::Effort { .. })
             }
+            // Devin Connect 把思考档位编进 selector 后缀(`family-high`),
+            // vendor 编码前用 Effort 值改写模型名;wire 上没有独立 effort 字段。
+            Some(Protocol::DevinConnect) => {
+                matches!(control, TargetThinkingControl::Effort { .. })
+            }
             _ => false,
         }
     }
@@ -295,6 +301,7 @@ fn default_endpoint_aliases() -> HashMap<&'static str, ProtocolEndpoint> {
     m.insert("gateway-language-model", GATEWAY_LANGUAGE_MODEL_V4);
     m.insert("command-code", COMMAND_CODE_GENERATE_V1);
     m.insert("command-code-generate", COMMAND_CODE_GENERATE_V1);
+    m.insert("devin-connect", DEVIN_CONNECT_GET_CHAT_MESSAGE_V1);
 
     // ── Tier 3: Legacy brand / friendly aliases ────────────────────────────────
     m.insert("openai", OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1);
@@ -307,6 +314,8 @@ fn default_endpoint_aliases() -> HashMap<&'static str, ProtocolEndpoint> {
     m.insert("watsonx", WATSONX_TEXT_CHAT_V1);
     m.insert("gateway", GATEWAY_LANGUAGE_MODEL_V4);
     m.insert("commandcode", COMMAND_CODE_GENERATE_V1);
+    m.insert("devin", DEVIN_CONNECT_GET_CHAT_MESSAGE_V1);
+    m.insert("windsurf-connect", DEVIN_CONNECT_GET_CHAT_MESSAGE_V1);
 
     m
 }
@@ -326,6 +335,7 @@ fn default_protocol_aliases() -> HashMap<&'static str, Protocol> {
     m.insert("gateway-language-model", Protocol::GatewayLanguageModel);
     m.insert("command-code", Protocol::CommandCode);
     m.insert("command-code-generate", Protocol::CommandCode);
+    m.insert("devin-connect", Protocol::DevinConnect);
 
     // Short names
     m.insert("openai", Protocol::OpenAICompatible);
@@ -338,6 +348,8 @@ fn default_protocol_aliases() -> HashMap<&'static str, Protocol> {
     m.insert("watsonx", Protocol::WatsonxTextChat);
     m.insert("gateway", Protocol::GatewayLanguageModel);
     m.insert("commandcode", Protocol::CommandCode);
+    m.insert("devin", Protocol::DevinConnect);
+    m.insert("windsurf-connect", Protocol::DevinConnect);
 
     // Deprecated aliases (old canonical slugs, backward compat only)
     m.insert("openai-compat", Protocol::OpenAICompatible);
@@ -353,7 +365,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registers_all_ten_adapters() {
+    fn registers_all_eleven_adapters() {
         let reg = ProtocolRegistry::global();
         assert!(reg.contains(&OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1));
         assert!(reg.contains(&OPEN_RESPONSES_2026_04_24));
@@ -365,7 +377,8 @@ mod tests {
         assert!(reg.contains(&WATSONX_TEXT_CHAT_V1));
         assert!(reg.contains(&GATEWAY_LANGUAGE_MODEL_V4));
         assert!(reg.contains(&COMMAND_CODE_GENERATE_V1));
-        assert_eq!(reg.endpoints().len(), 10);
+        assert!(reg.contains(&DEVIN_CONNECT_GET_CHAT_MESSAGE_V1));
+        assert_eq!(reg.endpoints().len(), 11);
     }
 
     #[test]
@@ -391,6 +404,32 @@ mod tests {
         ));
         assert!(!reg.protocol_represents_target_thinking_control(
             "command-code",
+            &TargetThinkingControl::Enabled
+        ));
+    }
+
+    #[test]
+    fn devin_connect_writes_effort_thinking_controls() {
+        // Devin 的思考档位经 selector 改写表达;校验面必须与 transform 侧
+        // thinking_control_representable 一致,否则 Route 编辑误报不可发送。
+        let reg = ProtocolRegistry::global();
+        use stravia_runtime_contract::thinking::TargetThinkingControl;
+        assert!(reg.protocol_represents_target_thinking_control(
+            "devin-connect",
+            &TargetThinkingControl::Effort {
+                value: "high".into()
+            }
+        ));
+        assert!(reg.protocol_represents_target_thinking_control(
+            "devin-connect",
+            &TargetThinkingControl::Hidden
+        ));
+        assert!(!reg.protocol_represents_target_thinking_control(
+            "devin-connect",
+            &TargetThinkingControl::Budget { value: 10000 }
+        ));
+        assert!(!reg.protocol_represents_target_thinking_control(
+            "devin-connect",
             &TargetThinkingControl::Enabled
         ));
     }
@@ -568,10 +607,10 @@ mod tests {
     }
 
     #[test]
-    fn list_protocols_returns_all_nine() {
+    fn list_protocols_returns_all_ten() {
         let reg = ProtocolRegistry::global();
         let protocols = reg.list_protocols();
-        assert_eq!(protocols.len(), 9);
+        assert_eq!(protocols.len(), 10);
         assert!(protocols.contains(&Protocol::OpenAICompatible));
         assert!(protocols.contains(&Protocol::OpenResponses));
         assert!(protocols.contains(&Protocol::AnthropicMessages));
@@ -581,6 +620,7 @@ mod tests {
         assert!(protocols.contains(&Protocol::WatsonxTextChat));
         assert!(protocols.contains(&Protocol::GatewayLanguageModel));
         assert!(protocols.contains(&Protocol::CommandCode));
+        assert!(protocols.contains(&Protocol::DevinConnect));
     }
 
     #[test]

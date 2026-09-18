@@ -411,6 +411,7 @@ pub(crate) enum WireStreamDecoder {
     Cohere(crate::protocol::codec::cohere::CohereStreamParser),
     Gateway(crate::protocol::codec::gateway::GatewayStreamParser),
     CommandCode(crate::protocol::codec::command_code::CommandCodeStreamParser),
+    DevinConnect(crate::protocol::codec::devin_connect::DevinConnectStreamParser),
 }
 
 impl WireStreamDecoder {
@@ -420,6 +421,12 @@ impl WireStreamDecoder {
         pending_utf8: &mut Vec<u8>,
     ) -> anyhow::Result<Vec<AiStreamDelta>> {
         if let Self::Bedrock(parser) = self {
+            debug_assert!(pending_utf8.is_empty());
+            return parser.parse_chunk(raw);
+        }
+        if let Self::DevinConnect(parser) = self {
+            // Binary protobuf frames; UTF-8 splitting happens per-field
+            // inside the parser, never across frame bytes.
             debug_assert!(pending_utf8.is_empty());
             return parser.parse_chunk(raw);
         }
@@ -468,6 +475,9 @@ impl WireStreamDecoder {
             Self::Anthropic(parser) => parser.parse_chunk(raw),
             Self::Google(parser) => parser.parse_chunk(raw),
             Self::Bedrock(_) => unreachable!("Bedrock stream decoding is byte-oriented"),
+            Self::DevinConnect(_) => {
+                unreachable!("Devin Connect stream decoding is byte-oriented")
+            }
             Self::Cohere(parser) => parser.parse_chunk(raw),
             Self::Gateway(parser) => parser.parse_chunk(raw),
             Self::CommandCode(parser) => parser.parse_chunk(raw),
@@ -481,6 +491,7 @@ impl WireStreamDecoder {
             Self::Anthropic(parser) => parser.finish(),
             Self::Google(parser) => parser.finish(),
             Self::Bedrock(parser) => parser.finish(),
+            Self::DevinConnect(parser) => parser.finish(),
             Self::Cohere(parser) => parser.finish(),
             Self::Gateway(parser) => parser.finish(),
             Self::CommandCode(parser) => parser.finish(),
@@ -636,6 +647,9 @@ fn request_loss_paths(pair: ProtocolPair, request: &AiRequest) -> Vec<String> {
             | Protocol::WatsonxTextChat
             | Protocol::GatewayLanguageModel
             | Protocol::CommandCode => false,
+            // #11/#12 are unconfirmed tags the reference omits — tool_choice
+            // can never ride this wire.
+            Protocol::DevinConnect => true,
         };
         push_if(&mut lost, unsupported, "tool_choice");
     }
@@ -829,6 +843,9 @@ fn thinking_control_representable(
             !matches!(control, TargetThinkingControl::Hidden)
         }
         Protocol::CommandCode => matches!(control, TargetThinkingControl::Effort { .. }),
+        // Devin 把思考档位编码进 selector 后缀(`family-high`),vendor 在编码前
+        // 用 Effort 值改写模型名;wire 上没有独立的 effort 字段。
+        Protocol::DevinConnect => matches!(control, TargetThinkingControl::Effort { .. }),
         _ => false,
     }
 }
@@ -958,6 +975,18 @@ fn request_block_representable(
                     signature: None,
                     ..
                 }
+        ),
+        // Thinking has no verified request-side field; images must be inline
+        // base64 (the encoder rejects Url/FileId).
+        Protocol::DevinConnect => matches!(
+            block,
+            ContentBlock::Text { .. }
+                | ContentBlock::Image {
+                    source: stravia_runtime_contract::protocol::ir::MediaSource::Base64 { .. },
+                    ..
+                }
+                | ContentBlock::ToolUse { .. }
+                | ContentBlock::ToolResult { .. }
         ),
     }
 }

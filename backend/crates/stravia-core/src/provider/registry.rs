@@ -51,6 +51,7 @@ pub fn protocol_default_vendor(protocol: Protocol) -> &'static str {
         Protocol::WatsonxTextChat => "watsonx",
         Protocol::GatewayLanguageModel => "gateway",
         Protocol::CommandCode => "commandcode",
+        Protocol::DevinConnect => "devin",
     }
 }
 

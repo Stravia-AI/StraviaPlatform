@@ -38,6 +38,8 @@ pub enum Protocol {
     GatewayLanguageModel,
     /// Command Code `/alpha/generate` envelope and NDJSON stream.
     CommandCode,
+    /// Devin Connect-RPC `ApiServerService` protobuf wire.
+    DevinConnect,
 }
 
 impl Protocol {
@@ -52,6 +54,7 @@ impl Protocol {
             Self::WatsonxTextChat => "watsonx-text-chat",
             Self::GatewayLanguageModel => "gateway-language-model",
             Self::CommandCode => "command-code",
+            Self::DevinConnect => "devin-connect",
         }
     }
 
@@ -66,6 +69,7 @@ impl Protocol {
             Self::WatsonxTextChat => "watsonx.ai Text Chat",
             Self::GatewayLanguageModel => "Vercel AI Gateway Language Model",
             Self::CommandCode => "Command Code Generate",
+            Self::DevinConnect => "Devin Connect ApiServer",
         }
     }
 }
@@ -94,6 +98,7 @@ impl FromStr for Protocol {
             "watsonx-text-chat" | "watsonx" => Ok(Self::WatsonxTextChat),
             "gateway-language-model" | "gateway" => Ok(Self::GatewayLanguageModel),
             "command-code" | "commandcode" | "command-code-generate" => Ok(Self::CommandCode),
+            "devin-connect" | "devin" | "windsurf-connect" => Ok(Self::DevinConnect),
             other => anyhow::bail!("unknown protocol: {other}"),
         }
     }
@@ -158,6 +163,9 @@ pub const GATEWAY_LANGUAGE_MODEL_V4: ProtocolEndpoint =
 
 pub const COMMAND_CODE_GENERATE_V1: ProtocolEndpoint =
     ProtocolEndpoint::new(Protocol::CommandCode, "generate", "v1");
+
+pub const DEVIN_CONNECT_GET_CHAT_MESSAGE_V1: ProtocolEndpoint =
+    ProtocolEndpoint::new(Protocol::DevinConnect, "get-chat-message", "v1");
 
 // ── Backward-compat type alias ────────────────────────────────────────────────
 
@@ -321,6 +329,7 @@ mod tests {
             Protocol::WatsonxTextChat,
             Protocol::GatewayLanguageModel,
             Protocol::CommandCode,
+            Protocol::DevinConnect,
         ] {
             assert_eq!(p.as_str().parse::<Protocol>().unwrap(), p);
         }
