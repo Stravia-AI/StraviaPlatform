@@ -14,7 +14,7 @@ pub struct MediaDerivative {
     pub derivative: ArtifactRef,
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum MediaStoreError {
     #[error("Media Artifact is unavailable")]
     Unavailable,
@@ -133,6 +133,7 @@ impl MediaDerivativeStore {
         source_id: &ArtifactId,
         bytes: Bytes,
         retention: Duration,
+        derivative_mime: &str,
     ) -> Result<MediaDerivative, MediaStoreError> {
         if let Some(existing) = self.find_derivative(principal, source_id).await? {
             return Ok(existing);
@@ -148,7 +149,7 @@ impl MediaDerivativeStore {
 
         let candidate = self
             .artifacts
-            .create_ready_bytes(principal, "image/jpeg", bytes, retention)
+            .create_ready_bytes(principal, derivative_mime, bytes, retention)
             .await
             .map_err(MediaStoreError::from)?;
         // Artifact identity is content-addressed and shared, so the candidate
@@ -213,7 +214,7 @@ impl MediaDerivativeStore {
             .map_err(MediaStoreError::from)
     }
 
-    async fn remaining_source_retention(
+    pub(crate) async fn remaining_source_retention(
         &self,
         principal: &Principal,
         source_id: &ArtifactId,
@@ -286,10 +287,23 @@ impl MediaDerivativeStore {
             .read_artifact_bounded(principal, id, super::MAX_DERIVATIVE_BYTES as u64)
             .await
             .map_err(|_| MediaStoreError::Corrupt)?;
-        if artifact.mime_type != "image/jpeg"
-            || image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg).is_err()
-        {
-            return Err(MediaStoreError::Corrupt);
+        match artifact.mime_type.as_str() {
+            "image/jpeg" => {
+                if image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg).is_err() {
+                    return Err(MediaStoreError::Corrupt);
+                }
+            }
+            mime if mime == crate::documents::DOCUMENT_MANIFEST_MIME => {
+                let manifest = crate::documents::DocumentManifest::parse(&bytes)?;
+                // A manifest is only trustworthy when every Artifact it
+                // references is readable by this principal.
+                for referenced in manifest.referenced_artifact_ids() {
+                    self.inspect_artifact(principal, &referenced)
+                        .await
+                        .map_err(|_| MediaStoreError::Corrupt)?;
+                }
+            }
+            _ => return Err(MediaStoreError::Corrupt),
         }
         Ok(artifact)
     }

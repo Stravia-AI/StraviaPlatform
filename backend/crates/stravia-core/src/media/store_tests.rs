@@ -58,12 +58,14 @@ mod tests {
             &source.id,
             first_bytes.clone(),
             Duration::from_secs(60),
+            "image/jpeg",
         );
         let second = store.get_or_create_derivative(
             &owner,
             &source.id,
             second_bytes.clone(),
             Duration::from_secs(60),
+            "image/jpeg",
         );
         let (first, second) = tokio::join!(first, second);
         let first = first.expect("first derivative");
@@ -91,7 +93,13 @@ mod tests {
             ))),
         );
         let reused = reconstructed
-            .get_or_create_derivative(&owner, &source.id, jpeg(3), Duration::from_secs(60))
+            .get_or_create_derivative(
+                &owner,
+                &source.id,
+                jpeg(3),
+                Duration::from_secs(60),
+                "image/jpeg",
+            )
             .await
             .expect("reused derivative");
         assert_eq!(reused.derivative.id, first.derivative.id);
@@ -151,7 +159,8 @@ mod tests {
                     &owner,
                     &source.id,
                     bytes.clone(),
-                    Duration::from_secs(60)
+                    Duration::from_secs(60),
+                    "image/jpeg",
                 )
                 .await,
             Err(MediaStoreError::Storage(_))
@@ -203,12 +212,14 @@ mod tests {
             &source.id,
             bytes.clone(),
             Duration::from_secs(60),
+            "image/jpeg",
         );
         let second = store.get_or_create_derivative(
             &owner,
             &source.id,
             bytes.clone(),
             Duration::from_secs(60),
+            "image/jpeg",
         );
         let (first, second) = tokio::join!(first, second);
         let first = first.expect("first derivative");
@@ -267,11 +278,23 @@ mod tests {
             .expect("second source");
         let shared = jpeg(4);
         let first_media = store
-            .get_or_create_derivative(&owner, &first.id, shared.clone(), Duration::from_secs(60))
+            .get_or_create_derivative(
+                &owner,
+                &first.id,
+                shared.clone(),
+                Duration::from_secs(60),
+                "image/jpeg",
+            )
             .await
             .expect("first mapping");
         let second_media = store
-            .get_or_create_derivative(&owner, &second.id, shared.clone(), Duration::from_secs(60))
+            .get_or_create_derivative(
+                &owner,
+                &second.id,
+                shared.clone(),
+                Duration::from_secs(60),
+                "image/jpeg",
+            )
             .await
             .expect("second mapping");
         assert_eq!(first_media.derivative.id, second_media.derivative.id);
@@ -299,7 +322,13 @@ mod tests {
             .await
             .expect("self source");
         let self_media = store
-            .get_or_create_derivative(&owner, &self_source.id, shared, Duration::from_secs(60))
+            .get_or_create_derivative(
+                &owner,
+                &self_source.id,
+                shared,
+                Duration::from_secs(60),
+                "image/jpeg",
+            )
             .await
             .expect("self mapping");
         assert_eq!(self_media.derivative.id, self_source.id);
@@ -349,6 +378,7 @@ mod tests {
                 &source.id,
                 Bytes::from_static(b"derivative"),
                 Duration::from_secs(60),
+                "image/jpeg",
             )
             .await
             .expect("derivative");
@@ -360,6 +390,7 @@ mod tests {
                     &source.id,
                     Bytes::from_static(b"foreign"),
                     Duration::from_secs(60),
+                    "image/jpeg",
                 )
                 .await,
             Err(MediaStoreError::Unavailable)
@@ -418,8 +449,125 @@ mod tests {
                     &source.id,
                     Bytes::from_static(b"replacement"),
                     Duration::from_secs(60),
+                    "image/jpeg",
                 )
                 .await,
+            Err(MediaStoreError::Corrupt)
+        ));
+    }
+
+    #[tokio::test]
+    async fn manifest_derivative_verifies_referenced_artifacts() {
+        let data_dir = tempfile::tempdir().expect("temporary data directory");
+        let pool = crate::db::init_pool(data_dir.path())
+            .await
+            .expect("SQLite pool");
+        crate::migrations::migrate_sqlite(&pool)
+            .await
+            .expect("SQLite migrations");
+        let artifacts = Arc::new(LocalArtifactStore::sqlite(
+            pool.clone(),
+            data_dir.path().join("artifacts"),
+        ));
+        let store = MediaDerivativeStore::sqlite(
+            pool.clone(),
+            Arc::new(super::super::ArtifactHost(Arc::clone(&artifacts))),
+        );
+        let owner = Principal::new("owner");
+        let document = store
+            .create_source(
+                &owner,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                Bytes::from_static(b"document"),
+                Duration::from_secs(60),
+            )
+            .await
+            .expect("document source");
+        let markdown = artifacts
+            .ingest(
+                &owner,
+                "text/markdown",
+                Some(3),
+                stravia_runtime_contract::artifact::bytes_stream(Bytes::from_static(b"md!")),
+                Duration::from_secs(60),
+            )
+            .await
+            .expect("markdown artifact");
+        let embedded = artifacts
+            .ingest(
+                &owner,
+                "image/jpeg",
+                None,
+                stravia_runtime_contract::artifact::bytes_stream(jpeg(7)),
+                Duration::from_secs(60),
+            )
+            .await
+            .expect("embedded image artifact");
+
+        let manifest = serde_json::json!({
+            "version": 1,
+            "format": "docx",
+            "markdown_artifact": format!("sa:{}", markdown.id.as_str()),
+            "images": [{
+                "artifact_id": embedded.id.as_str(),
+                "ordinal": 1,
+                "normalizable": true,
+                "size": 3,
+            }],
+        });
+        let manifest_bytes = Bytes::from(serde_json::to_vec(&manifest).unwrap());
+        let media = store
+            .get_or_create_derivative(
+                &owner,
+                &document.id,
+                manifest_bytes,
+                Duration::from_secs(60),
+                stravia_media::documents::DOCUMENT_MANIFEST_MIME,
+            )
+            .await
+            .expect("manifest derivative");
+        assert_eq!(
+            media.derivative.mime_type,
+            stravia_media::documents::DOCUMENT_MANIFEST_MIME
+        );
+        // Verification happens on read-back: a manifest whose referenced
+        // Artifacts are all readable by the principal verifies cleanly.
+        assert_eq!(
+            store
+                .find_derivative(&owner, &document.id)
+                .await
+                .expect("manifest lookup")
+                .expect("manifest mapping")
+                .derivative
+                .id,
+            media.derivative.id
+        );
+
+        // A manifest pointing at an Artifact the principal cannot open is
+        // corrupt — the mapping must not resolve.
+        let foreign = store
+            .create_source(
+                &owner,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                Bytes::from_static(b"other-document"),
+                Duration::from_secs(60),
+            )
+            .await
+            .expect("second document source");
+        let mut bad = manifest.clone();
+        bad["images"][0]["artifact_id"] = serde_json::json!("z".repeat(55));
+        store
+            .get_or_create_derivative(
+                &owner,
+                &foreign.id,
+                Bytes::from(serde_json::to_vec(&bad).unwrap()),
+                Duration::from_secs(60),
+                stravia_media::documents::DOCUMENT_MANIFEST_MIME,
+            )
+            .await
+            .expect("bad manifest derivative");
+        assert!(matches!(
+            store.find_derivative(&owner, &foreign.id).await,
             Err(MediaStoreError::Corrupt)
         ));
     }

@@ -13,7 +13,7 @@ use stravia_runtime_contract::protocol::ir::ContentBlock;
 use super::{MediaUnderstandingInput, MediaUnderstandingService};
 
 pub const MEDIA_TOOL_ID: &str = "media-understanding";
-pub const MEDIA_TOOL_DESCRIPTION: &str = "Understand static JPEG, PNG, or WebP Artifacts using OCR, description, comparison, or visual reasoning.";
+pub const MEDIA_TOOL_DESCRIPTION: &str = "Understand static JPEG, PNG, or WebP Artifacts and Office documents (DOCX, XLSX, PPTX, DOC, XLS, PPT) using OCR, description, comparison, or visual reasoning.";
 pub const MEDIA_TOOL_NAME: &str = "StraviaRead";
 
 pub fn model_is_image_capable(model: &crate::host::MediaRoute) -> bool {
@@ -50,7 +50,7 @@ pub fn input_schema() -> Value {
                 "type": "array",
                 "maxItems": 8,
                 "default": [],
-                "description": "Static JPEG, PNG, or WebP source Artifacts in stable order. Retained ancestor sources are reused when continuing previous_turn_id; duplicate IDs within one call are rejected.",
+                "description": "Static JPEG, PNG, or WebP images and Office document (DOCX, XLSX, PPTX, DOC, XLS, PPT) source Artifacts in stable order. Retained ancestor sources are reused when continuing previous_turn_id; duplicate IDs within one call are rejected.",
                 "items": {
                     "type": "object",
                     "properties": {

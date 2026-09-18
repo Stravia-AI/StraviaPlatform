@@ -33,7 +33,7 @@ pub(crate) const TOOL_ID: &str = "stravia-read";
 pub(crate) const TOOL_NAME: &str = "StraviaRead";
 const DOWNLOAD_DESCRIPTION: &str = "Read content from an owned sa:<artifact-id> path. Add ?download=1 to obtain download information without model execution.";
 const NETWORK_DESCRIPTION: &str = "Use search://<percent-encoded query> for a complete sourced research report; allowed_domains and previous_turn_id are search query parameters. Public HTTP(S) resource options use #stravia?.";
-const MEDIA_DESCRIPTION: &str = "Read static JPEG, PNG or WebP images for description and readable text. Add ?question=<encoded question> to an Artifact Reference for a specific question and previous_turn_id for explicit continuation.";
+const MEDIA_DESCRIPTION: &str = "Read static JPEG, PNG or WebP images for description and readable text; Office documents (DOCX, XLSX, PPTX, DOC, XLS, PPT) read as extracted Markdown. Add ?question=<encoded question> to an Artifact Reference for a specific question and previous_turn_id for explicit continuation.";
 
 #[derive(Clone)]
 pub(crate) struct ReadTool {
@@ -295,8 +295,11 @@ impl ReadTool {
                 bytes,
             } => {
                 let image = image_mime(&content_type);
+                let office = stravia_media::documents::is_office_document(&content_type);
                 require(
-                    if image && !resource_path.options.download {
+                    if !resource_path.options.download
+                        && (image || (office && resource_path.options.question.is_some()))
+                    {
                         context.read_scope.media() && enabled.media()
                     } else {
                         context.read_scope.networking() && enabled.networking()
@@ -377,6 +380,13 @@ impl ReadTool {
             drop(reader);
             return self
                 .read_image(id, &artifact.mime_type, options, context)
+                .await;
+        }
+        if stravia_media::documents::is_office_document(&artifact.mime_type) {
+            // Document bytes are read inside extraction only on a cache miss.
+            drop(reader);
+            return self
+                .read_document(artifact, None, None, options, context)
                 .await;
         }
         let ArtifactSource::LocalPath(path) = &reader.source else {
@@ -461,6 +471,22 @@ impl ReadTool {
                 .read_image(artifact.id, &content_type, options, context)
                 .await;
         }
+        if !options.download && stravia_media::documents::is_office_document(&content_type) {
+            require(
+                !options.raw,
+                "Office documents do not support raw; use ?download=1",
+            )?;
+            let artifact = match artifact {
+                Some(artifact) => artifact,
+                None => {
+                    self.store_bytes(&content_type, bytes.clone(), &context)
+                        .await?
+                }
+            };
+            return self
+                .read_document(artifact, Some(bytes), source_url, options, context)
+                .await;
+        }
         if !options.download {
             require(
                 options.previous_turn_id.is_none(),
@@ -530,6 +556,84 @@ impl ReadTool {
             }),
             options.previous_turn_id,
             context,
+        )
+        .await
+    }
+
+    /// Office document reads: `?question` routes into Media Understanding;
+    /// otherwise the extracted Markdown becomes an ordinary paginated text
+    /// snapshot. `?download` is handled by callers before this point; `?raw`
+    /// is meaningless for processed Markdown and is rejected.
+    async fn read_document(
+        &self,
+        artifact: ArtifactRef,
+        bytes: Option<Bytes>,
+        source_url: Option<String>,
+        options: ReadOptions,
+        context: ToolExecutionContext,
+    ) -> Result<PlatformToolOutput, PlatformToolError> {
+        require(
+            !options.raw,
+            "Office documents do not support raw; use ?download=1",
+        )?;
+        require(options.cursor.is_none(), "Cursor requires a text snapshot")?;
+        if let Some(question) = options.question {
+            return self
+                .understand(artifact.id, question, options.previous_turn_id, context)
+                .await;
+        }
+        require(
+            options.previous_turn_id.is_none(),
+            "Media continuation requires a question",
+        )?;
+        let derivatives = crate::media::runtime(&self.gateway)
+            .media_derivatives
+            .ok_or_else(|| PlatformToolError::new("Media document storage is unavailable"))?;
+        let deadline = Instant::now() + stravia_media::MEDIA_TOTAL_WALL_TIME;
+        let derivative = match stravia_media::documents::document_derivative(
+            &derivatives,
+            &context.principal,
+            &artifact,
+            bytes,
+            stravia_media::DERIVATIVE_STAGING_RETENTION,
+            &context.cancellation,
+            deadline,
+        )
+        .await
+        {
+            Ok(derivative) => derivative,
+            Err(error) => return Ok(document_error(error)),
+        };
+        let markdown = match stravia_media::documents::document_markdown(
+            &derivatives,
+            &context.principal,
+            &derivative.manifest,
+        )
+        .await
+        {
+            Ok(markdown) => markdown,
+            Err(error) => {
+                let error = match error {
+                    stravia_media::store::MediaStoreError::TooLarge => {
+                        stravia_media::MediaPreprocessError::DerivativeTooLarge
+                    }
+                    other => stravia_media::MediaPreprocessError::from(other),
+                };
+                return Ok(document_error(error));
+            }
+        };
+        text_output(
+            &self.gateway,
+            ReadText {
+                text: markdown,
+                representation: "markdown".into(),
+                title: derivative.manifest.title.clone(),
+                limitations: derivative.manifest.limitations.clone(),
+                source_truncated: derivative.manifest.truncated,
+            },
+            source_url,
+            &options,
+            &context,
         )
         .await
     }
@@ -713,6 +817,19 @@ fn output(value: Value) -> PlatformToolOutput {
     PlatformToolOutput {
         content: vec![ContentBlock::Unknown { raw: value }],
         is_error: false,
+        metadata: Default::default(),
+    }
+}
+
+/// Document extraction failures are explicit tool errors carrying the media
+/// error code; they never degrade into a generic download or text result.
+fn document_error(error: stravia_media::MediaPreprocessError) -> PlatformToolOutput {
+    let mapped = stravia_media::safe_preprocess_error(error);
+    PlatformToolOutput {
+        content: vec![ContentBlock::Unknown {
+            raw: json!({"error":{"code":mapped.code,"message":mapped.message}}),
+        }],
+        is_error: true,
         metadata: Default::default(),
     }
 }

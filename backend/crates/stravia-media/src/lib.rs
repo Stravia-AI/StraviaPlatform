@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod definition;
+pub mod documents;
 pub mod host;
 pub mod ingest;
 pub mod planner;
@@ -19,7 +20,7 @@ pub use platform::{model_is_image_capable, supports_image, tools as platform_too
 pub use preprocessor::{
     MAX_DERIVATIVE_BYTES, MAX_MEDIA_ARTIFACTS, MediaInputPreprocessor, MediaPreprocessError,
 };
-pub use service::MediaUnderstandingService;
+pub use service::{DERIVATIVE_STAGING_RETENTION, MediaUnderstandingService, safe_preprocess_error};
 pub use store::MediaDerivativeStore;
 pub use types::{MediaReport, MediaUnderstandingInput, MediaUnderstandingResult};
 pub use validator::MediaReportValidator;

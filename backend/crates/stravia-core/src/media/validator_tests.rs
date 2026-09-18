@@ -26,6 +26,7 @@ mod tests {
     use stravia_runtime_contract::Principal;
     use stravia_runtime_contract::agent::AgentDefinitionId;
     use stravia_runtime_contract::agent::AgentTurnId;
+    use stravia_runtime_contract::artifact::ArtifactStore;
     use stravia_runtime_contract::protocol::ir::Role;
 
     fn id(value: &str) -> ArtifactId {
@@ -220,7 +221,13 @@ mod tests {
             .await
             .expect("source");
         let media = store
-            .get_or_create_derivative(&principal, &source.id, jpeg(), Duration::from_secs(60))
+            .get_or_create_derivative(
+                &principal,
+                &source.id,
+                jpeg(),
+                Duration::from_secs(60),
+                "image/jpeg",
+            )
             .await
             .expect("derivative");
         let transcript = vec![turn(vec![
@@ -301,11 +308,18 @@ mod tests {
                 &declared.id,
                 shared.clone(),
                 Duration::from_secs(60),
+                "image/jpeg",
             )
             .await
             .expect("declared mapping");
         let undeclared_media = store
-            .get_or_create_derivative(&principal, &undeclared.id, shared, Duration::from_secs(60))
+            .get_or_create_derivative(
+                &principal,
+                &undeclared.id,
+                shared,
+                Duration::from_secs(60),
+                "image/jpeg",
+            )
             .await
             .expect("undeclared mapping");
         assert_eq!(declared_media.derivative.id, undeclared_media.derivative.id);
@@ -358,5 +372,180 @@ mod tests {
             )
             .await
             .expect("continuation declaration is evidence");
+    }
+
+    fn document_prompt(document: &ArtifactId, embedded: &[&ArtifactId], with_text: bool) -> String {
+        let mut media = vec![serde_json::json!({
+            "artifact_id": document.as_str(),
+            "ordinal": 1,
+            "kind": "document",
+            "format": "docx",
+        })];
+        if with_text {
+            media[0]["text"] = serde_json::json!("extracted markdown");
+        }
+        for (index, id) in embedded.iter().enumerate() {
+            media.push(serde_json::json!({
+                "artifact_id": id.as_str(),
+                "ordinal": index + 2,
+                "kind": "image",
+            }));
+        }
+        serde_json::json!({
+            "task": "describe",
+            "media": media,
+            "report_contract": {
+                "marker_format": "[sa:<full ArtifactId>]",
+                "source_artifact_ids_only": true,
+            }
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn document_evidence_requires_manifest_derivative_and_declared_text() {
+        let data_dir = tempfile::tempdir().expect("temporary data directory");
+        let pool = crate::db::init_pool(data_dir.path())
+            .await
+            .expect("SQLite pool");
+        crate::migrations::migrate_sqlite(&pool)
+            .await
+            .expect("SQLite migrations");
+        let artifacts = Arc::new(LocalArtifactStore::sqlite(
+            pool.clone(),
+            data_dir.path().join("artifacts"),
+        ));
+        let store = Arc::new(MediaDerivativeStore::sqlite(
+            pool,
+            Arc::new(super::super::ArtifactHost(Arc::clone(&artifacts))),
+        ));
+        let principal = Principal::new("owner");
+        let document = store
+            .create_source(
+                &principal,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                Bytes::from_static(b"document"),
+                Duration::from_secs(60),
+            )
+            .await
+            .expect("document source");
+        let markdown = artifacts
+            .ingest(
+                &principal,
+                "text/markdown",
+                Some(3),
+                stravia_runtime_contract::artifact::bytes_stream(Bytes::from_static(b"md!")),
+                Duration::from_secs(60),
+            )
+            .await
+            .expect("markdown artifact");
+        let embedded = artifacts
+            .ingest(
+                &principal,
+                "image/jpeg",
+                None,
+                stravia_runtime_contract::artifact::bytes_stream(jpeg()),
+                Duration::from_secs(60),
+            )
+            .await
+            .expect("embedded image");
+        let manifest = serde_json::json!({
+            "version": 1,
+            "format": "docx",
+            "markdown_artifact": format!("sa:{}", markdown.id.as_str()),
+            "images": [{
+                "artifact_id": embedded.id.as_str(),
+                "ordinal": 1,
+                "normalizable": true,
+                "size": 3,
+            }],
+        });
+        let media = store
+            .get_or_create_derivative(
+                &principal,
+                &document.id,
+                Bytes::from(serde_json::to_vec(&manifest).unwrap()),
+                Duration::from_secs(60),
+                stravia_media::documents::DOCUMENT_MANIFEST_MIME,
+            )
+            .await
+            .expect("manifest derivative");
+        let context = validation_context(principal);
+        let validator = MediaReportValidator::new(store);
+
+        // A document declared with text + a verified manifest is evidence;
+        // embedded images attach under their own Artifact ids.
+        let transcript = vec![turn(vec![
+            ContentBlock::Text {
+                text: document_prompt(&document.id, &[&embedded.id], true),
+                cache_control: None,
+            },
+            derivative_block(&embedded.id),
+        ])];
+        let citing_document = report(
+            format!("Read [sa:{}].", document.id.as_str()),
+            &[document.id.as_str()],
+            &[],
+        );
+        validator
+            .validate(
+                &context,
+                &transcript,
+                serde_json::to_value(citing_document).unwrap(),
+            )
+            .await
+            .expect("document source is evidence");
+        let citing_embedded = report(
+            format!("Figure [sa:{}].", embedded.id.as_str()),
+            &[embedded.id.as_str()],
+            &[],
+        );
+        validator
+            .validate(
+                &context,
+                &transcript,
+                serde_json::to_value(citing_embedded).unwrap(),
+            )
+            .await
+            .expect("embedded image is evidence");
+        // The manifest derivative itself is never citable.
+        let citing_manifest = report(
+            format!("Forged [sa:{}].", media.derivative.id.as_str()),
+            &[media.derivative.id.as_str()],
+            &[],
+        );
+        assert!(
+            validator
+                .validate(
+                    &context,
+                    &transcript,
+                    serde_json::to_value(citing_manifest).unwrap(),
+                )
+                .await
+                .is_err(),
+            "derivative ids are not citable"
+        );
+
+        // A document entry without extracted text is not evidence.
+        let no_text = vec![turn(vec![ContentBlock::Text {
+            text: document_prompt(&document.id, &[], false),
+            cache_control: None,
+        }])];
+        assert!(
+            validator
+                .validate(
+                    &context,
+                    &no_text,
+                    serde_json::to_value(report(
+                        format!("Read [sa:{}].", document.id.as_str()),
+                        &[document.id.as_str()],
+                        &[],
+                    ))
+                    .unwrap(),
+                )
+                .await
+                .is_err(),
+            "documents without declared text carry no evidence"
+        );
     }
 }

@@ -113,9 +113,9 @@ Clients call a **Model ID** you define — map it to one or more upstreams in pr
 
 ### Platform tools and built-in agent runtime
 
-- `StraviaRead` — one tool, one `path`: read files, webpages, `search://` questions, and images; long results page through automatically.
+- `StraviaRead` — one tool, one `path`: read files, webpages, `search://` questions, and images; Office documents (DOCX/XLSX/PPTX/DOC/XLS/PPT) read as extracted Markdown; long results page through automatically.
 - **Web Search** — an agent loop searches and reads pages for the model, using the embedded Moli engine, Exa, or Zhipu — or a Codex search binding.
-- **Media Understanding** — describe images and extract text (JPEG/PNG/WebP) with the vision model you choose.
+- **Media Understanding** — describe images and extract text (JPEG/PNG/WebP) or answer questions about Office documents with the vision model you choose.
 - Expose everything over `POST /mcp`, or add it to compatible requests automatically. Loops run under hard time, turn, token, and tool budgets.
 
 ### Keys, usage, and request history
