@@ -25,6 +25,7 @@ export type Protocol =
   | 'watsonx-text-chat'
   | 'gateway-language-model'
   | 'command-code'
+  | 'devin-connect'
 
 export interface ProtocolMeta {
   id: Protocol
@@ -48,6 +49,7 @@ export const PROTOCOL_TABLE: ProtocolMeta[] = [
     defaultBaseUrl: 'https://ai-gateway.vercel.sh/v4/ai',
   },
   { id: 'command-code', displayName: 'Command Code Generate', defaultBaseUrl: 'https://api.commandcode.ai' },
+  { id: 'devin-connect', displayName: 'Devin Connect', defaultBaseUrl: 'https://server.codeium.com' },
 ]
 
 // ── Alias resolution ───────────────────────────────────────────────────────
@@ -65,6 +67,8 @@ const PROTOCOL_ALIASES: Record<string, Protocol> = {
   'gateway-language-model': 'gateway-language-model',
   'command-code': 'command-code',
   'command-code-generate': 'command-code',
+  'devin-connect': 'devin-connect',
+  'windsurf-connect': 'devin-connect',
 
   // Short names
   openai: 'openai-compatible',
@@ -77,6 +81,7 @@ const PROTOCOL_ALIASES: Record<string, Protocol> = {
   watsonx: 'watsonx-text-chat',
   gateway: 'gateway-language-model',
   commandcode: 'command-code',
+  devin: 'devin-connect',
 
   // Deprecated aliases (old canonical slugs)
   'openai-compat': 'openai-compatible',
@@ -107,6 +112,7 @@ const PROTOCOL_ALIASES: Record<string, Protocol> = {
   'watsonx-text-chat/chat/v1': 'watsonx-text-chat',
   'gateway-language-model/language-model/v4': 'gateway-language-model',
   'command-code/generate/v1': 'command-code',
+  'devin-connect/get-chat-message/v1': 'devin-connect',
 }
 
 /**

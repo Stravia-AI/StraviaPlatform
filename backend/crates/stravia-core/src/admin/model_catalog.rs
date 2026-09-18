@@ -422,10 +422,10 @@ mod tests {
         let provider = Provider {
             id: "provider".into(),
             name: "Command Code".into(),
-            vendor: Some("commandcode".into()),
+            vendor: Some("command-code".into()),
             protocol: "command-code".into(),
             base_url: "https://api.commandcode.ai/".into(),
-            preset_key: Some("commandcode".into()),
+            preset_key: Some("command-code".into()),
             channel: Some("default".into()),
             models_source: Some("catalog".into()),
             static_models: None,

@@ -76,7 +76,7 @@ pub struct Provider {
     pub adapter_credentials: String,
     /// Non-secret vendor behavior options (JSON object). Unlike
     /// `adapter_credentials` this round-trips to clients so the UI can show
-    /// the current state (e.g. the commandcode zdr switch). Storage keeps a
+    /// the current state (e.g. the command-code zdr switch). Storage keeps a
     /// JSON string; the API surface is a real object.
     #[serde(default = "empty_vendor_options", with = "vendor_options_json")]
     pub vendor_options: String,

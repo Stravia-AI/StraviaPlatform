@@ -541,7 +541,7 @@ async fn provider_identity(admin: &AdminService, provider: &Provider) -> anyhow:
         provider.channel.as_deref().unwrap_or("default"),
         provider.api_key.as_str(),
         provider.adapter_credentials.as_str(),
-        // vendor options change request behavior (e.g. commandcode zdr) and
+        // vendor options change request behavior (e.g. command-code zdr) and
         // must invalidate cached allowances just like credentials do.
         provider.vendor_options.as_str(),
         provider.auth_mode.as_str(),

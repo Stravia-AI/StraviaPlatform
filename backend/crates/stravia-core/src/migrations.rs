@@ -1331,4 +1331,53 @@ ADD COLUMN allow_media_understanding BOOLEAN NOT NULL DEFAULT FALSE;\n";
                 .expect("drop isolated PostgreSQL schema");
         }
     }
+
+    #[tokio::test]
+    async fn command_code_vendor_rename_rewrites_only_legacy_identities() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("SQLite");
+        migrate_sqlite_range(&pool, 1, 49).await;
+        sqlx::query(
+            "INSERT INTO providers (
+                id, name, vendor, preset_key, protocol, base_url, api_key, auth_mode
+             ) VALUES
+                ('cc-provider', 'Command Code', 'commandcode', 'commandcode',
+                 'command-code', 'https://api.commandcode.ai', 'cc-key', 'apikey'),
+                ('other-provider', 'Other', 'openai', 'openai',
+                 'openai-compatible', 'https://example.com', 'other-key', 'apikey')",
+        )
+        .execute(&pool)
+        .await
+        .expect("legacy providers");
+
+        migrate_sqlite_range(&pool, 50, 50).await;
+
+        let renamed = sqlx::query_as::<_, (Option<String>, Option<String>, String)>(
+            "SELECT vendor, preset_key, protocol FROM providers WHERE id = 'cc-provider'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("renamed provider");
+        assert_eq!(
+            renamed,
+            (
+                Some("command-code".to_string()),
+                Some("command-code".to_string()),
+                "command-code".to_string()
+            )
+        );
+        let untouched = sqlx::query_as::<_, (Option<String>, Option<String>)>(
+            "SELECT vendor, preset_key FROM providers WHERE id = 'other-provider'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("untouched provider");
+        assert_eq!(
+            untouched,
+            (Some("openai".to_string()), Some("openai".to_string()))
+        );
+    }
 }

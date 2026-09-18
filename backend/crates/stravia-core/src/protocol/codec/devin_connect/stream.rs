@@ -13,7 +13,17 @@
 //!   #7  metadata { #2 prompt_tokens, #3 completion_tokens,
 //!                  #9 actual_model_uid }
 //!   #9  string  delta_thinking
+//!   #28 UsageStats { #1 label, #2 repeated UsageEntry {
+//!          #4 dimension { #1 label, #2 fixed32 value, #3 unit },
+//!          #5 metric_id } }   — billed token breakdown, final frame only
 //! ```
+//!
+//! The UsageStats block is the upstream's billed usage accounting: entries
+//! are selected by `metric_id` (`input_tokens`, `output_tokens`,
+//! `cached_input_tokens`, `cache_read_input_tokens`,
+//! `cache_creation_input_tokens`, `reasoning_tokens`). A well-formed block
+//! that omits a cache metric means nothing was cached, so absent cache
+//! metrics are read as zero rather than unknown.
 //!
 //! A single logical tool call streams across MULTIPLE frames: the first
 //! carries `{id, name}`, later frames carry only an `arguments_json`
@@ -32,6 +42,10 @@ use stravia_runtime_contract::protocol::ir::AiErrorKind;
 use stravia_runtime_contract::protocol::ir::AiStreamDelta;
 use stravia_runtime_contract::protocol::ir::ToolCall;
 use stravia_runtime_contract::protocol::ir::Usage;
+
+fn clamp_tokens(value: u64) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
 
 /// One in-flight native tool call being accumulated across frames.
 struct OpenToolCall {
@@ -83,6 +97,18 @@ impl Utf8Pending {
     }
 }
 
+/// Billed token breakdown from the final-frame `UsageStats` block (#28).
+/// Cache/reasoning counts accumulate across metric entries; `None` marks a
+/// metric the upstream never reported.
+#[derive(Default, Clone, Copy)]
+struct UsageStats {
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    cache_read_tokens: u64,
+    cache_creation_tokens: u64,
+    reasoning_tokens: u64,
+}
+
 pub struct DevinConnectStreamParser {
     reader: ConnectFrameReader,
     started: bool,
@@ -90,6 +116,9 @@ pub struct DevinConnectStreamParser {
     saw_end_stream: bool,
     last_finish: Option<u64>,
     usage_emitted: bool,
+    usage_prompt: Option<u64>,
+    usage_completion: Option<u64>,
+    usage_stats: Option<UsageStats>,
     content: Utf8Pending,
     reasoning: Utf8Pending,
     tools: BTreeMap<usize, OpenToolCall>,
@@ -106,6 +135,9 @@ impl DevinConnectStreamParser {
             saw_end_stream: false,
             last_finish: None,
             usage_emitted: false,
+            usage_prompt: None,
+            usage_completion: None,
+            usage_stats: None,
             content: Utf8Pending::default(),
             reasoning: Utf8Pending::default(),
             tools: BTreeMap::new(),
@@ -194,6 +226,7 @@ impl DevinConnectStreamParser {
                 }
                 (6, 2) => self.parse_tool_call(field, deltas),
                 (7, 2) => self.parse_metadata(field.bytes, deltas),
+                (28, 2) => self.parse_usage_stats(field.bytes, deltas),
                 (9, 2) => {
                     self.ensure_started(deltas);
                     match self.reasoning.push(field.bytes) {
@@ -251,21 +284,141 @@ impl DevinConnectStreamParser {
                 });
             }
         }
+        if let Some(prompt) = varint(2) {
+            self.usage_prompt = Some(prompt);
+        }
         // completion_tokens only rides the final metadata frame; treat the
         // pair as usage only when the completion count is present.
         if let Some(completion) = varint(3) {
-            let prompt = varint(2).unwrap_or(0);
+            self.usage_completion = Some(completion);
             if !self.usage_emitted {
                 self.usage_emitted = true;
-                let usage = Usage {
-                    prompt_tokens: u32::try_from(prompt).unwrap_or(u32::MAX),
-                    completion_tokens: u32::try_from(completion).unwrap_or(u32::MAX),
-                    total_tokens: u32::try_from(prompt + completion).unwrap_or(u32::MAX),
-                    required_components_known: true,
-                    ..Usage::default()
-                };
-                deltas.push(AiStreamDelta::Usage(usage));
+                self.emit_usage(deltas);
             }
+        }
+    }
+
+    /// `UsageStats` block (#28) — the upstream's billed usage accounting,
+    /// sent on the final frame. Entries are keyed by `metric_id` inside a
+    /// displayed-dimension submessage:
+    ///
+    /// ```text
+    /// UsageStats  { #1 label, #2 repeated UsageEntry }
+    /// UsageEntry  { #4 dimension, #5 metric_id }
+    /// dimension   { #1 label, #2 fixed32 float value, #3 unit, #4 plural }
+    /// ```
+    fn parse_usage_stats(&mut self, payload: &[u8], deltas: &mut Vec<AiStreamDelta>) {
+        let fields = match parse_fields(payload) {
+            Ok(fields) => fields,
+            Err(error) => {
+                tracing::debug!(
+                    target: "stravia_core::protocol::devin_connect",
+                    "skipping malformed UsageStats block: {error}"
+                );
+                return;
+            }
+        };
+        let mut stats = UsageStats::default();
+        let mut recognized = false;
+        for field in &fields {
+            if field.number != 2 || field.wire_type != 2 {
+                continue;
+            }
+            let Ok(entry) = parse_fields(field.bytes) else {
+                continue;
+            };
+            let mut metric = None;
+            let mut value = None;
+            for entry_field in &entry {
+                match (entry_field.number, entry_field.wire_type) {
+                    (5, 2) => metric = std::str::from_utf8(entry_field.bytes).ok(),
+                    (4, 2) => {
+                        value = parse_fields(entry_field.bytes)
+                            .ok()
+                            .and_then(|dimension| {
+                                dimension
+                                    .iter()
+                                    .find(|d| d.number == 2 && d.wire_type == 5)
+                                    .map(|d| f32::from_bits(d.scalar as u32))
+                            })
+                            .filter(|v| v.is_finite() && *v >= 0.0)
+                            .map(|v| v.round() as u64);
+                    }
+                    _ => {}
+                }
+            }
+            let (Some(metric), Some(value)) = (metric, value) else {
+                continue;
+            };
+            match metric {
+                "input_tokens" => stats.input_tokens = Some(value),
+                "output_tokens" => stats.output_tokens = Some(value),
+                "cached_input_tokens"
+                | "cache_read_input_tokens"
+                | "cache_read_tokens"
+                | "cached_tokens" => stats.cache_read_tokens += value,
+                "cache_creation_input_tokens"
+                | "cache_creation_tokens"
+                | "cache_write_input_tokens"
+                | "cache_write_tokens" => stats.cache_creation_tokens += value,
+                "reasoning_tokens" | "output_reasoning_tokens" | "thought_tokens" => {
+                    stats.reasoning_tokens += value
+                }
+                _ => continue,
+            }
+            recognized = true;
+        }
+        if !recognized {
+            return;
+        }
+        self.usage_stats = Some(stats);
+        self.emit_usage(deltas);
+    }
+
+    /// Merge the #7 metadata counts with the #28 billed breakdown. Both the
+    /// metadata `prompt_tokens` and the billed `input_tokens` count only the
+    /// fresh (uncached) input — live captures show them far below the
+    /// reported `cache_read_tokens` — so the processed prompt total is
+    /// rebuilt Anthropic-style: fresh + cache-read + cache-write. Emitted
+    /// deltas are last-wins downstream, so each emission carries the most
+    /// complete view so far.
+    fn merged_usage(&self) -> Option<Usage> {
+        let stats = self.usage_stats.unwrap_or_default();
+        let base_input = self
+            .usage_prompt
+            .into_iter()
+            .chain(stats.input_tokens)
+            .max();
+        let prompt = base_input.map(|base| {
+            base.saturating_add(stats.cache_read_tokens)
+                .saturating_add(stats.cache_creation_tokens)
+        });
+        let completion = stats.output_tokens.or(self.usage_completion);
+        if prompt.is_none() && completion.is_none() {
+            return None;
+        }
+        // A well-formed UsageStats block reports the complete billed
+        // accounting: a cache metric absent from it means nothing was
+        // cached, so the count reads as zero rather than unknown.
+        let billed = self
+            .usage_stats
+            .is_some_and(|s| s.input_tokens.is_some() || s.output_tokens.is_some());
+        Some(Usage {
+            prompt_tokens: clamp_tokens(prompt.unwrap_or(0)),
+            completion_tokens: clamp_tokens(completion.unwrap_or(0)),
+            total_tokens: clamp_tokens(prompt.unwrap_or(0).saturating_add(completion.unwrap_or(0))),
+            required_components_known: prompt.is_some() && completion.is_some(),
+            cache_read_tokens: billed.then(|| clamp_tokens(stats.cache_read_tokens)),
+            cache_creation_tokens: billed.then(|| clamp_tokens(stats.cache_creation_tokens)),
+            reasoning_tokens: (stats.reasoning_tokens > 0)
+                .then(|| clamp_tokens(stats.reasoning_tokens)),
+            ..Usage::default()
+        })
+    }
+
+    fn emit_usage(&mut self, deltas: &mut Vec<AiStreamDelta>) {
+        if let Some(usage) = self.merged_usage() {
+            deltas.push(AiStreamDelta::Usage(usage));
         }
     }
 
@@ -484,6 +637,114 @@ mod tests {
             d,
             AiStreamDelta::MessageStart { model, .. } if model == "swe-1-7"
         )));
+    }
+
+    /// UsageStats block (#28): UsageEntry { #4 dimension { #2 fixed32 float },
+    /// #5 metric_id }.
+    fn usage_stats_frame(entries: &[(&str, f32)]) -> Vec<u8> {
+        let mut block = Vec::new();
+        write_string_field(&mut block, 1, "Token Usage");
+        for (metric, value) in entries {
+            let mut dimension = Vec::new();
+            write_string_field(&mut dimension, 1, metric);
+            dimension.push((2 << 3) | 5);
+            dimension.extend_from_slice(&value.to_le_bytes());
+            write_string_field(&mut dimension, 3, " tokens");
+            let mut entry = Vec::new();
+            write_message_field(&mut entry, 4, &dimension);
+            write_string_field(&mut entry, 5, metric);
+            write_message_field(&mut block, 2, &entry);
+        }
+        let mut payload = Vec::new();
+        write_message_field(&mut payload, 28, &block);
+        data_frame(&payload)
+    }
+
+    fn last_usage(deltas: &[AiStreamDelta]) -> &Usage {
+        deltas
+            .iter()
+            .rev()
+            .find_map(|d| match d {
+                AiStreamDelta::Usage(u) => Some(u),
+                _ => None,
+            })
+            .expect("usage delta")
+    }
+
+    #[test]
+    fn usage_stats_carries_cache_and_reasoning_metrics() {
+        let mut parser = DevinConnectStreamParser::new();
+        let mut meta = Vec::new();
+        write_varint_field(&mut meta, 2, 150);
+        write_varint_field(&mut meta, 3, 42);
+        let mut payload = Vec::new();
+        write_message_field(&mut payload, 7, &meta);
+        let mut wire = data_frame(&payload);
+        wire.extend_from_slice(&usage_stats_frame(&[
+            ("input_tokens", 150.0),
+            ("output_tokens", 42.0),
+            ("cached_input_tokens", 90.0),
+            ("cache_creation_input_tokens", 12.0),
+            ("reasoning_tokens", 7.0),
+        ]));
+        let deltas = parser.parse_chunk(&wire).unwrap();
+        let usage = last_usage(&deltas);
+        // Fresh input (150) + cache read (90) + cache write (12) — the billed
+        // buckets add up to the processed prompt total.
+        assert_eq!(usage.prompt_tokens, 252);
+        assert_eq!(usage.completion_tokens, 42);
+        assert_eq!(usage.cache_read_tokens, Some(90));
+        assert_eq!(usage.cache_creation_tokens, Some(12));
+        assert_eq!(usage.reasoning_tokens, Some(7));
+    }
+
+    #[test]
+    fn usage_stats_without_cache_metrics_reads_as_zero() {
+        let mut parser = DevinConnectStreamParser::new();
+        let deltas = parser
+            .parse_chunk(&usage_stats_frame(&[
+                ("input_tokens", 200.0),
+                ("output_tokens", 30.0),
+            ]))
+            .unwrap();
+        let usage = last_usage(&deltas);
+        assert_eq!(usage.prompt_tokens, 200);
+        assert_eq!(usage.completion_tokens, 30);
+        assert_eq!(usage.cache_read_tokens, Some(0));
+        assert_eq!(usage.cache_creation_tokens, Some(0));
+        assert!(usage.required_components_known);
+    }
+
+    #[test]
+    fn usage_stats_alone_rebuilds_prompt_total() {
+        // No #7 metadata: the billed fresh-input bucket plus the cache
+        // buckets reconstruct the processed prompt total.
+        let mut parser = DevinConnectStreamParser::new();
+        let deltas = parser
+            .parse_chunk(&usage_stats_frame(&[
+                ("input_tokens", 603.0),
+                ("output_tokens", 132.0),
+                ("cache_read_input_tokens", 10240.0),
+            ]))
+            .unwrap();
+        let usage = last_usage(&deltas);
+        assert_eq!(usage.prompt_tokens, 10843);
+        assert_eq!(usage.cache_read_tokens, Some(10240));
+        assert_eq!(usage.cache_creation_tokens, Some(0));
+    }
+
+    #[test]
+    fn metadata_only_usage_leaves_cache_unknown() {
+        let mut parser = DevinConnectStreamParser::new();
+        let mut meta = Vec::new();
+        write_varint_field(&mut meta, 2, 150);
+        write_varint_field(&mut meta, 3, 42);
+        let mut payload = Vec::new();
+        write_message_field(&mut payload, 7, &meta);
+        let deltas = parser.parse_chunk(&data_frame(&payload)).unwrap();
+        let usage = last_usage(&deltas);
+        assert_eq!(usage.cache_read_tokens, None);
+        assert_eq!(usage.cache_creation_tokens, None);
     }
 
     #[test]

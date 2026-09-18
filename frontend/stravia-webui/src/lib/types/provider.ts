@@ -18,7 +18,7 @@ export interface Provider {
   channel?: string | null
   models_source?: string | null
   static_models?: string | null
-  /** Non-secret vendor behavior options (e.g. commandcode zdr). */
+  /** Non-secret vendor behavior options (e.g. command-code zdr). */
   vendor_options?: Record<string, unknown>
   is_enabled: boolean
   created_at: string
@@ -63,6 +63,7 @@ export type ProviderProtocol =
   | 'watsonx-text-chat'
   | 'gateway-language-model'
   | 'command-code'
+  | 'devin-connect'
 
 export type CatalogAuthMode = 'optional_api_key' | 'oauth' | 'setup_token'
 

@@ -136,7 +136,7 @@ pub(super) fn parse_providers(raw: &Value) -> anyhow::Result<Vec<CatalogProvider
 /// 不会收录的服务。它们随每次索引规范化并入快照,保证 bootstrap 与刷新后
 /// “选择服务”列表始终提供这些内置服务。`custom` 由前端合成为自定义入口、
 /// `ollama` 面向本地守护进程,都不是目录服务,不在此列。
-const BUILTIN_CATALOG_PROVIDERS: &[&str] = &["commandcode"];
+const BUILTIN_CATALOG_PROVIDERS: &[&str] = &["command-code", "devin"];
 
 /// 该 catalog 服务是否为编译期并入(远端目录不提供它的索引与 scope)。
 pub(crate) fn is_builtin_catalog_provider(provider_id: &str) -> bool {

@@ -1,10 +1,12 @@
 //! Devin OAuth driver — PKCE against `app.devin.ai` CLI endpoints.
 //!
-//! Endpoint contract recovered from `devin.exe` strings: the CLI drives
-//! `GET {webapp}/auth/cli/continue` with PKCE parameters and exchanges the
-//! code at `POST {webapp}/auth/cli/token`. The manual fallback mirrors the
-//! CLI's `chisel-show-auth-token` flow where the webapp renders the session
-//! token for the user to paste back.
+//! Endpoint contract recovered from `devin.exe` strings and live probing:
+//! the CLI drives `GET {webapp}/auth/cli/continue` with PKCE parameters,
+//! then exchanges the code via Connect-RPC
+//! `SeatManagementService/ExchangeDevinCLIPKCECode` on the api server
+//! ({code, codeVerifier} -> {sessionToken}). The manual fallback mirrors
+//! the CLI's `chisel-show-auth-token` flow where the webapp renders the
+//! session token for the user to paste back.
 //!
 //! Two credential shapes exist upstream (`session_token` for the Connect
 //! api-server, `api_key`/`windsurf_api_key` for legacy Windsurf accounts);
@@ -33,7 +35,7 @@ use crate::provider::OAuthConfig;
 use crate::provider::VendorRegistry;
 
 const DEVIN_PRESET_ID: &str = "devin";
-const DEVIN_CHANNEL_ID: &str = "default";
+const DEVIN_CHANNEL_ID: &str = "devin";
 const DEVIN_PROTOCOL_ID: &str = "devin-connect";
 
 /// The CLI's manual-flow redirect URI: the webapp shows the session token
@@ -55,14 +57,22 @@ struct DevinConfig {
 pub struct DevinOAuthDriver;
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct DevinTokenResponse {
+    #[serde(alias = "session_token")]
     session_token: Option<String>,
+    #[serde(alias = "api_key")]
     api_key: Option<String>,
+    #[serde(alias = "windsurf_api_key")]
     windsurf_api_key: Option<String>,
+    #[serde(alias = "access_token")]
     access_token: Option<String>,
+    #[serde(alias = "refresh_token")]
     refresh_token: Option<String>,
+    #[serde(alias = "expires_in")]
     expires_in: Option<i64>,
     scope: Option<String>,
+    #[serde(alias = "api_server_url")]
     api_server_url: Option<String>,
 }
 
@@ -187,7 +197,10 @@ impl AuthDriver for DevinOAuthDriver {
             supports_existing_provider: true,
             callback: Some(OAuthCallbackPolicy {
                 bind_host: "127.0.0.1",
-                redirect_host: "localhost",
+                // The CLI registers loopback callbacks as literal
+                // `http://127.0.0.1:{port}/callback`; the authorization
+                // server rejects a `localhost` redirect URI outright.
+                redirect_host: "127.0.0.1",
                 path: "/callback",
                 port: OAuthCallbackPort::Dynamic,
                 manual_redirect_uri: DEVIN_MANUAL_REDIRECT_URI,
@@ -303,18 +316,19 @@ impl AuthDriver for DevinOAuthDriver {
             .ok_or_else(|| anyhow!("missing authorization code"))?;
 
         let client = required_http_client(ctx.http_client)?;
+        // Unary Connect-RPC: JSON envelope, camelCase fields. The api server
+        // binds the code to the PKCE session it issued; no client_id or
+        // redirect_uri travels in the exchange.
         let token_body = serde_json::json!({
-            "grant_type": "authorization_code",
-            "client_id": config.oauth.client_id,
             "code": code,
-            "redirect_uri": state.redirect_uri,
-            "code_verifier": state.code_verifier,
+            "codeVerifier": state.code_verifier,
         });
 
         let response = client
             .post(config.oauth.token_url)
             .header(CONTENT_TYPE, "application/json")
             .header(ACCEPT, "application/json")
+            .header("connect-protocol-version", "1")
             .json(&token_body)
             .send()
             .await
@@ -430,7 +444,7 @@ mod tests {
             protocol: "devin-connect".into(),
             base_url: String::new(),
             preset_key: Some("devin".into()),
-            channel: Some("default".into()),
+            channel: Some("devin".into()),
             models_source: None,
             static_models: None,
             api_key: String::new(),
@@ -456,7 +470,7 @@ mod tests {
         );
         assert_eq!(
             config.oauth.token_url,
-            "https://app.devin.ai/auth/cli/token"
+            "https://server.codeium.com/exa.seat_management_pb.SeatManagementService/ExchangeDevinCLIPKCECode"
         );
         assert_eq!(config.api_base_url, "https://server.codeium.com");
     }

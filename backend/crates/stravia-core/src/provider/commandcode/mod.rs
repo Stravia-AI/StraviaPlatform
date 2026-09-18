@@ -75,12 +75,12 @@ const FP_OS_USERS: &[&str] = &["dev", "user", "admin", "coder", "engineer", "wor
 const FP_MAIL_DOMAINS: &[&str] = &["gmail.com", "outlook.com", "qq.com", "163.com"];
 
 const METADATA: VendorMetadata = VendorMetadata {
-    id: "commandcode",
+    id: "command-code",
     label: Label {
         zh: "Command Code",
         en: "Command Code",
     },
-    icon: "commandcode",
+    icon: "command-code",
     default_protocol: "command-code",
     credential_fields: crate::provider::metadata::API_KEY_CREDENTIAL_FIELDS,
     option_fields: &[crate::provider::metadata::OptionFieldDef {
@@ -146,7 +146,7 @@ fn http_client() -> &'static reqwest::Client {
 impl Vendor for CommandCodeVendor {
     fn scope(&self) -> VendorScope {
         VendorScope::Vendor {
-            vendor_id: "commandcode",
+            vendor_id: "command-code",
         }
     }
 
@@ -240,7 +240,7 @@ impl Vendor for CommandCodeVendor {
     }
 
     fn vendor_id(&self) -> &'static str {
-        "commandcode"
+        "command-code"
     }
 
     fn supported_protocols(&self) -> &'static [ProtocolId] {
@@ -278,7 +278,7 @@ impl Vendor for CommandCodeVendor {
             .and_then(Value::as_str)
             .map(str::to_string)
             .unwrap_or_else(|| format!("CC API error ({status})"));
-        GatewayError::upstream_status("commandcode", mapped, Some(message))
+        GatewayError::upstream_status("command-code", mapped, Some(message))
     }
 }
 
@@ -588,7 +588,7 @@ mod tests {
         Provider {
             id: "test".into(),
             name: "test".into(),
-            vendor: Some("commandcode".into()),
+            vendor: Some("command-code".into()),
             protocol: "command-code".into(),
             base_url: DEFAULT_BASE_URL.into(),
             preset_key: None,

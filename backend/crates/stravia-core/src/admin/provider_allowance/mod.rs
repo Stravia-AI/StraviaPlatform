@@ -182,8 +182,8 @@ fn monitor_for(preset_key: &str, channel: &str) -> Option<MonitorKind> {
         ("deepseek", "default") => Some(MonitorKind::DeepSeek),
         ("neuralwatt", "default") => Some(MonitorKind::NeuralWatt),
         ("xai", "grok") => Some(MonitorKind::XaiGrok),
-        ("commandcode", "default") => Some(MonitorKind::CommandCode),
-        ("devin", "default") => Some(MonitorKind::Devin),
+        ("command-code", "default") => Some(MonitorKind::CommandCode),
+        ("devin", "devin") => Some(MonitorKind::Devin),
         _ => None,
     }
 }

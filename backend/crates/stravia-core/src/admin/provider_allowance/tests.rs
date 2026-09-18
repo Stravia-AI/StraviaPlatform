@@ -36,8 +36,8 @@ fn registry_requires_the_exact_catalog_identity() {
         ("deepseek", "default"),
         ("neuralwatt", "default"),
         ("xai", "grok"),
-        ("commandcode", "default"),
-        ("devin", "default"),
+        ("command-code", "default"),
+        ("devin", "devin"),
     ] {
         assert!(
             monitor_for(preset_key, channel).is_some(),
@@ -49,6 +49,8 @@ fn registry_requires_the_exact_catalog_identity() {
         ("openai", "default"),
         ("anthropic", "default"),
         ("xai", "default"),
+        ("devin", "default"),
+        ("commandcode", "default"),
         ("openai", "Codex"),
         ("OpenAI", "codex"),
     ] {
@@ -1711,7 +1713,7 @@ async fn commandcode_monitor_chains_whoami_into_credits_plan_and_period_spend() 
     })
     .await?;
     let provider =
-        create_test_provider(&gateway, "Command Code", "commandcode", "cc-token").await?;
+        create_test_provider(&gateway, "Command Code", "command-code", "cc-token").await?;
     let transport = Arc::new(CommandCodeFixtureTransport::new());
 
     let snapshot = refresh_provider_allowance_with_transport(
@@ -1780,7 +1782,7 @@ async fn commandcode_monitor_keeps_core_allowances_when_extras_fail() -> anyhow:
     })
     .await?;
     let provider =
-        create_test_provider(&gateway, "Command Code", "commandcode", "cc-token").await?;
+        create_test_provider(&gateway, "Command Code", "command-code", "cc-token").await?;
     let transport = Arc::new(CommandCodeFixtureTransport::without_extras());
 
     let snapshot = refresh_provider_allowance_with_transport(

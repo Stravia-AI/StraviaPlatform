@@ -915,7 +915,7 @@ async fn web_access_admin_routes_persist_masked_providers_and_atomic_priority() 
     Ok(())
 }
 
-// 内置-only vendor(commandcode)必须能通过标准 catalog 流程创建;
+// 内置-only vendor(command-code)必须能通过标准 catalog 流程创建;
 // 目录解析失败要返回结构化错误码,而不是 200 + 裸错误串。
 #[tokio::test]
 async fn provider_create_accepts_builtin_vendors_and_codes_catalog_mismatches() -> anyhow::Result<()>
@@ -939,7 +939,7 @@ async fn provider_create_accepts_builtin_vendors_and_codes_catalog_mismatches() 
         .as_array()
         .expect("provider list")
         .iter()
-        .find(|provider| provider["id"] == "commandcode")
+        .find(|provider| provider["id"] == "command-code")
         .and_then(|provider| provider["channels"].as_array())
         .and_then(|channels| {
             channels
@@ -947,7 +947,7 @@ async fn provider_create_accepts_builtin_vendors_and_codes_catalog_mismatches() 
                 .find(|channel| channel["id"] == "default")
                 .cloned()
         })
-        .expect("commandcode must be exposed as a catalog provider");
+        .expect("command-code must be exposed as a catalog provider");
     assert_eq!(channel["protocol"], "command-code");
     assert_eq!(channel["base_url"], "https://api.commandcode.ai");
     let fingerprint = channel["fingerprint"].as_str().expect("fingerprint");
@@ -1010,7 +1010,7 @@ async fn provider_create_accepts_builtin_vendors_and_codes_catalog_mismatches() 
 
     let created = create(serde_json::json!({
         "type": "catalog",
-        "provider_id": "commandcode",
+        "provider_id": "command-code",
         "channel_id": "default",
         "fingerprint": fingerprint,
         "base_url_override": format!("http://{address}"),
@@ -1019,9 +1019,9 @@ async fn provider_create_accepts_builtin_vendors_and_codes_catalog_mismatches() 
     assert_eq!(created.status(), StatusCode::OK);
     let created_body = to_bytes(created.into_body(), usize::MAX).await?;
     let created_json: serde_json::Value = serde_json::from_slice(&created_body)?;
-    assert_eq!(created_json["data"]["vendor"], "commandcode");
+    assert_eq!(created_json["data"]["vendor"], "command-code");
     assert_eq!(created_json["data"]["protocol"], "command-code");
-    assert_eq!(created_json["data"]["preset_key"], "commandcode");
+    assert_eq!(created_json["data"]["preset_key"], "command-code");
     assert_eq!(
         created_json["data"]["base_url"],
         format!("http://{address}")
@@ -1083,7 +1083,7 @@ async fn provider_create_accepts_builtin_vendors_and_codes_catalog_mismatches() 
 
     let stale = create(serde_json::json!({
         "type": "catalog",
-        "provider_id": "commandcode",
+        "provider_id": "command-code",
         "channel_id": "default",
         "fingerprint": "stale-fingerprint",
     }))
@@ -1092,7 +1092,7 @@ async fn provider_create_accepts_builtin_vendors_and_codes_catalog_mismatches() 
     let stale_body = to_bytes(stale.into_body(), usize::MAX).await?;
     let stale_json: serde_json::Value = serde_json::from_slice(&stale_body)?;
     assert_eq!(stale_json["code"], "CATALOG_FINGERPRINT_STALE");
-    assert_eq!(stale_json["params"]["provider_id"], "commandcode");
+    assert_eq!(stale_json["params"]["provider_id"], "command-code");
 
     let missing = create(serde_json::json!({
         "type": "catalog",

@@ -10,7 +10,7 @@ export interface ProviderOptionLabel {
 type OptionLabelEntry = { label: (locale: Locale) => string; hint?: (locale: Locale) => string }
 
 const VENDOR_OPTION_LABELS: Record<string, Record<string, OptionLabelEntry>> = {
-  commandcode: {
+  'command-code': {
     zdr: {
       label: (locale) => m.provider_option_zero_data_retention({}, { locale }),
       hint: (locale) => m.provider_option_zero_data_retention_hint({}, { locale }),

@@ -447,7 +447,7 @@ mod tests {
             .save(ProviderSave::Custom(CreateProvider {
                 name: Some("CC Options".into()),
                 source: ProviderSourceInput::Custom {
-                    vendor: Some("commandcode".into()),
+                    vendor: Some("command-code".into()),
                     protocol: "command-code".into(),
                     base_url: "https://api.commandcode.ai".into(),
                     models_source: None,

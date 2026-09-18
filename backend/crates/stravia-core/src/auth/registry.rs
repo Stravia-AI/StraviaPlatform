@@ -75,5 +75,15 @@ mod tests {
             claude_callback.manual_redirect_uri,
             "https://platform.claude.com/oauth/code/callback"
         );
+
+        // Devin 的授权服务器只接受字面量 127.0.0.1 loopback 回调(CLI
+        // 的注册形态),localhost 会被拒;手动回退沿用 webapp 渲染 token。
+        let devin = build_driver("devin").unwrap().metadata();
+        let devin_callback = devin.callback.expect("Devin callback policy");
+        assert_eq!(devin_callback.bind_host, "127.0.0.1");
+        assert_eq!(devin_callback.redirect_host, "127.0.0.1");
+        assert_eq!(devin_callback.path, "/callback");
+        assert_eq!(devin_callback.port, OAuthCallbackPort::Dynamic);
+        assert_eq!(devin_callback.manual_redirect_uri, "chisel-show-auth-token");
     }
 }

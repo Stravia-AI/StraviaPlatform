@@ -78,10 +78,12 @@ const METADATA: VendorMetadata = VendorMetadata {
     credential_fields: crate::provider::metadata::API_KEY_CREDENTIAL_FIELDS,
     option_fields: crate::provider::metadata::NO_OPTION_FIELDS,
     channels: &[ChannelDef {
-        id: "default",
+        // OAuth 渠道沿用「登录产品名」命名约定(openai/codex、xai/grok):
+        // WebUI 用 channel id 推导 auth driver key,"devin" 正好命中 driver。
+        id: "devin",
         label: Label {
-            zh: "默认",
-            en: "Default",
+            zh: "Devin",
+            en: "Devin",
         },
         base_urls: &[ProtocolBaseUrl {
             protocol: "devin-connect",
@@ -97,7 +99,10 @@ const METADATA: VendorMetadata = VendorMetadata {
         oauth: Some(OAuthConfig {
             auth_base_url: DEVIN_WEBAPP_URL,
             authorize_url: "https://app.devin.ai/auth/cli/continue",
-            token_url: "https://app.devin.ai/auth/cli/token",
+            // Token exchange is a unary Connect-RPC on the api server, not an
+            // HTTP endpoint on the webapp (`/auth/cli/token` is unreachable
+            // behind CloudFront): {code, codeVerifier} -> {sessionToken}.
+            token_url: "https://server.codeium.com/exa.seat_management_pb.SeatManagementService/ExchangeDevinCLIPKCECode",
             client_id: DEVIN_OAUTH_CLIENT_ID,
             redirect_uri: DEVIN_MANUAL_REDIRECT_URI,
             scope: "",
@@ -359,7 +364,7 @@ mod tests {
             protocol: "devin-connect".into(),
             base_url: DEFAULT_BASE_URL.into(),
             preset_key: Some("devin".into()),
-            channel: Some("default".into()),
+            channel: Some("devin".into()),
             models_source: None,
             static_models: None,
             api_key: "session-token".into(),

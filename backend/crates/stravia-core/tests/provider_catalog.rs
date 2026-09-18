@@ -354,13 +354,24 @@ async fn catalog_commits_global_indexes_for_one_revision() -> anyhow::Result<()>
     assert!(refreshed.changed);
     assert_eq!(refreshed.revision, "revision-1");
     assert_eq!(refreshed.generated_at, "2026-08-20T14:01:40Z");
-    // 索引里的 demo 加上并入的内置服务 commandcode。
-    assert_eq!(refreshed.provider_count, 2);
+    // 索引里的 demo 加上并入的内置服务 command-code 与 devin。
+    assert_eq!(refreshed.provider_count, 3);
     assert_eq!(refreshed.model_count, 1);
     assert_eq!(providers.revision, models.revision);
     assert_eq!(providers.generated_at, models.generated_at);
-    assert_eq!(providers.providers[0].id, "commandcode");
+    assert_eq!(providers.providers[0].id, "command-code");
     assert_eq!(providers.providers[1].id, "demo");
+    let devin = &providers.providers[2];
+    assert_eq!(devin.id, "devin");
+    assert_eq!(devin.vendor_id, "devin");
+    assert_eq!(devin.protocol, "devin-connect");
+    assert_eq!(devin.channels.len(), 1);
+    assert_eq!(devin.channels[0].id, "devin");
+    assert_eq!(devin.channels[0].base_url, "https://server.codeium.com");
+    assert_eq!(
+        devin.channels[0].auth_mode,
+        stravia_core::provider_catalog::CatalogAuthMode::OAuth
+    );
     assert_eq!(models.models[0].id, "demo/chat");
     assert_eq!(
         catalog
@@ -691,26 +702,52 @@ async fn resolve_channel_reports_typed_errors_for_stale_selections() -> anyhow::
         |error| matches!(error, CatalogError::ProviderNotFound { provider_id } if provider_id == "gone-vendor")
     ));
 
-    // 内置服务(commandcode)随索引规范化并入快照,必须能按 catalog 流程解析。
+    // 内置服务(command-code)随索引规范化并入快照,必须能按 catalog 流程解析。
     let builtin_fingerprint = {
         let providers = catalog.providers().await;
         providers
             .providers
             .iter()
-            .find(|provider| provider.id == "commandcode")
-            .expect("commandcode must be merged into the snapshot")
+            .find(|provider| provider.id == "command-code")
+            .expect("command-code must be merged into the snapshot")
             .channels
             .iter()
             .find(|channel| channel.id == "default")
-            .expect("commandcode default channel must exist")
+            .expect("command-code default channel must exist")
             .fingerprint
             .clone()
     };
     let builtin = catalog
-        .resolve_channel("commandcode", "default", &builtin_fingerprint)
+        .resolve_channel("command-code", "default", &builtin_fingerprint)
         .await?;
-    assert_eq!(builtin.0.vendor_id, "commandcode");
+    assert_eq!(builtin.0.vendor_id, "command-code");
     assert_eq!(builtin.1.protocol, "command-code");
+
+    // devin 同为编译期并入服务,其唯一 OAuth 渠道必须能解析出 devin-connect
+    // 端点,供「连接模型服务」完成 catalog 契约校验。
+    let devin_fingerprint = {
+        let providers = catalog.providers().await;
+        providers
+            .providers
+            .iter()
+            .find(|provider| provider.id == "devin")
+            .expect("devin must be merged into the snapshot")
+            .channels
+            .iter()
+            .find(|channel| channel.id == "devin")
+            .expect("devin channel must exist")
+            .fingerprint
+            .clone()
+    };
+    let devin = catalog
+        .resolve_channel("devin", "devin", &devin_fingerprint)
+        .await?;
+    assert_eq!(devin.0.vendor_id, "devin");
+    assert_eq!(devin.1.protocol, "devin-connect");
+    assert_eq!(
+        devin.1.auth_mode,
+        stravia_core::provider_catalog::CatalogAuthMode::OAuth
+    );
 
     let providers = catalog.providers().await;
     let demo = providers

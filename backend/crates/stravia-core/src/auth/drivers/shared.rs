@@ -151,12 +151,14 @@ pub fn classify_oauth_token_exchange_error(
                 .and_then(serde_json::Value::as_str)
         })
         .or_else(|| value.get("error_code").and_then(serde_json::Value::as_str))
+        // Connect-RPC error envelopes carry the code at the top level.
+        .or_else(|| value.get("code").and_then(serde_json::Value::as_str))
         .unwrap_or_default();
     let message = format!("{provider} OAuth token exchange failed: HTTP {status} {detail}");
 
     match code {
         "access_denied" => OAuthExchangeError::AccessDenied(message).into(),
-        "invalid_grant" => OAuthExchangeError::InvalidGrant(message).into(),
+        "invalid_grant" | "unauthenticated" => OAuthExchangeError::InvalidGrant(message).into(),
         "invalid_client" | "unauthorized_client" | "invalid_request" | "redirect_uri_mismatch" => {
             OAuthExchangeError::Configuration(message).into()
         }
