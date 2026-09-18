@@ -50,6 +50,14 @@ pub(crate) fn write_fixed64_field(out: &mut Vec<u8>, field: u32, value: f64) {
     out.extend_from_slice(&value.to_le_bytes());
 }
 
+/// IEEE-754 single, little-endian (wire type 5) — upstream pricing rows and
+/// usage dimension floats travel this way.
+#[cfg(test)]
+pub(crate) fn write_fixed32_field(out: &mut Vec<u8>, field: u32, value: f32) {
+    write_tag(out, field, 5);
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
 pub(crate) fn write_len_field(out: &mut Vec<u8>, field: u32, payload: &[u8]) {
     write_tag(out, field, 2);
     write_varint(out, payload.len() as u64);

@@ -369,7 +369,13 @@ fn decode_model_cost(config: &[ProtoField<'_>]) -> Option<DevinModelCost> {
             .find(|f| f.number == 2)
             .and_then(|f| match f.wire_type {
                 1 => Some(f64::from_le_bytes(f.scalar.to_le_bytes())),
-                5 => Some(f64::from(f32::from_bits(f.scalar as u32))),
+                // Widening a fixed32 verbatim keeps its binary noise (0.22f32
+                // → 0.2199999988079071); the shortest f32 text form recovers
+                // the intended decimal before it reaches model metadata.
+                5 => f32::from_bits(f.scalar as u32)
+                    .to_string()
+                    .parse::<f64>()
+                    .ok(),
                 _ => None,
             });
         if let Some(price) = price.filter(|p| (0.0..10_000.0).contains(p)) {
@@ -1174,7 +1180,7 @@ fn content_block_name(block: &ContentBlock) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::codec::devin_connect::proto::parse_fields;
+    use crate::protocol::codec::devin_connect::proto::{parse_fields, write_fixed32_field};
     use stravia_runtime_contract::protocol::ir::ToolCall;
     use stravia_runtime_contract::protocol::ir::ToolSpec;
 
@@ -1680,5 +1686,31 @@ mod tests {
         assert_eq!(cost.output, Some(25.0));
         assert_eq!(devin_upstream_provider_name(3), Some("anthropic"));
         assert_eq!(devin_upstream_provider_name(6), None);
+    }
+
+    #[test]
+    fn decodes_fixed32_pricing_without_float_noise() {
+        // Upstream emits prices as fixed32; verbatim widening turns 0.22f32
+        // into 0.2199999988079071 in Provider Model metadata.
+        let mut config = Vec::new();
+        write_string_field(&mut config, 22, "swe-1-7");
+        for (name, price) in [
+            ("Input", 0.22_f32),
+            ("Cached input", 0.007),
+            ("Output", 0.66),
+        ] {
+            let mut row = Vec::new();
+            write_string_field(&mut row, 1, name);
+            write_fixed32_field(&mut row, 2, price);
+            write_message_field(&mut config, 32, &row);
+        }
+        let mut body = Vec::new();
+        write_message_field(&mut body, 1, &config);
+
+        let entries = decode_cli_model_configs(&body);
+        let cost = entries[0].cost.expect("pricing rows");
+        assert_eq!(cost.input, Some(0.22));
+        assert_eq!(cost.cache_read, Some(0.007));
+        assert_eq!(cost.output, Some(0.66));
     }
 }

@@ -557,7 +557,7 @@ fn map_finish_reason(_finish: Option<u64>) -> &'static str {
 mod tests {
     use super::*;
     use crate::protocol::codec::devin_connect::proto::{
-        write_message_field, write_string_field, write_varint_field,
+        write_fixed32_field, write_message_field, write_string_field, write_varint_field,
     };
 
     fn data_frame(payload: &[u8]) -> Vec<u8> {
@@ -647,8 +647,7 @@ mod tests {
         for (metric, value) in entries {
             let mut dimension = Vec::new();
             write_string_field(&mut dimension, 1, metric);
-            dimension.push((2 << 3) | 5);
-            dimension.extend_from_slice(&value.to_le_bytes());
+            write_fixed32_field(&mut dimension, 2, *value);
             write_string_field(&mut dimension, 3, " tokens");
             let mut entry = Vec::new();
             write_message_field(&mut entry, 4, &dimension);
