@@ -182,6 +182,10 @@ impl CompletionContext {
         &self.principal
     }
 
+    pub(super) fn gateway(&self) -> &Gateway {
+        &self.gateway
+    }
+
     pub(super) fn empty_response(&self) -> AiResponse {
         let model = if self.generation_chain.is_some() {
             &self.logical_model

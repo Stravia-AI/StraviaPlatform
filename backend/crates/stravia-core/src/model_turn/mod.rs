@@ -8,7 +8,7 @@
 mod accumulator;
 mod live;
 mod provider;
-mod support;
+pub(crate) mod support;
 
 pub(crate) use accumulator::StreamResponseAccumulator;
 pub(crate) use live::LiveModelTurnExecutor;

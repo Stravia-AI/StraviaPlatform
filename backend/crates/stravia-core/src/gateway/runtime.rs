@@ -145,7 +145,6 @@ impl Gateway {
                     .clone(),
             )
         };
-        turn_chains.rebuild_generation_prefixes().await?;
         let turn_chains: Arc<dyn stravia_runtime_contract::turn_chain::TurnChainStore> =
             Arc::new(turn_chains);
         let history_markers: Arc<dyn history_marker::HistoryMarkerStore> =
@@ -257,6 +256,7 @@ impl Gateway {
         .with_history_markers(Arc::clone(&history_markers))
         .with_redaction_mappings(Arc::clone(&redaction.mappings))
         .with_compaction(compaction.clone());
+        generation_chains.rebuild_prefixes().await?;
         let observation = interaction_observation::InteractionObservation::new(
             history_sqlite_pool.clone(),
             postgres_pool.clone(),

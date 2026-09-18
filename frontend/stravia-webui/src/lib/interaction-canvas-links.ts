@@ -1,3 +1,4 @@
+import { payloadRecord } from '$lib/observation-payload'
 import type { InteractionSummary } from '$lib/types'
 
 export type CanvasLinkKind = 'confirmed' | 'inferred' | 'native'
@@ -20,12 +21,9 @@ function contextSources(
     const nativeEvent = event.kind === 'native_compaction_associated'
     const inferredEvent =
       event.kind === 'retained_tail_associated' &&
-      event.payload &&
-      typeof event.payload === 'object' &&
-      (event.payload as Record<string, unknown>).status === 'inferred'
+      payloadRecord(event.payload).status === 'inferred'
     if (!nativeEvent && !inferredEvent) continue
-    if (!event.payload || typeof event.payload !== 'object') continue
-    const source = (event.payload as Record<string, unknown>).source_interaction_id
+    const source = payloadRecord(event.payload).source_interaction_id
     if (typeof source !== 'string' || source === interaction.id || !visible.has(source) || seen.has(source)) continue
     seen.add(source)
     if (nativeEvent) native.push(source)

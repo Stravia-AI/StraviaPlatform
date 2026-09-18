@@ -4,7 +4,7 @@ mod codec;
 mod grouping;
 mod live;
 mod query;
-pub(crate) mod redaction;
+mod redaction;
 mod retention;
 pub(crate) mod scope;
 mod store;
@@ -14,6 +14,7 @@ mod types;
 mod writer;
 
 pub(crate) use attribution::AdmissionFacts;
+pub(crate) use redaction::{redact_text, redact_url, redact_value};
 pub use types::*;
 
 use parking_lot::Mutex;

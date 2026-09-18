@@ -202,7 +202,105 @@ pub(super) fn is_openai_generation_target(
 
 #[cfg(test)]
 mod tests {
-    use super::is_openai_generation_target;
+    use super::{
+        ai_response_to_deltas, is_openai_generation_target, merge_provider_headers,
+        resolve_vendor_adapter,
+    };
+    use crate::db::models::Provider;
+    use reqwest::header::{HeaderMap as ReqwestHeaderMap, HeaderValue as ReqwestHeaderValue};
+    use stravia_runtime_contract::protocol::ids::Protocol;
+    use stravia_runtime_contract::protocol::ir::AiResponse;
+
+    fn unlabelled_provider() -> Provider {
+        Provider {
+            id: "provider".into(),
+            name: "Custom Provider".into(),
+            vendor: None,
+            protocol: "openai-compatible".into(),
+            base_url: "https://example.com/v1".into(),
+            preset_key: None,
+            channel: None,
+            models_source: None,
+            static_models: None,
+            api_key: "secret".into(),
+            adapter_credentials: r#"{"apiKey":"secret"}"#.into(),
+            vendor_options: "{}".into(),
+            auth_mode: "apikey".into(),
+            use_proxy: false,
+            last_test_success: None,
+            last_test_at: None,
+            is_enabled: true,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn unlabelled_open_responses_target_uses_openai_vendor_adapter() {
+        let adapter = resolve_vendor_adapter(&unlabelled_provider(), Protocol::OpenResponses)
+            .expect("Open Responses vendor adapter");
+
+        assert_eq!(adapter.vendor_id(), "openai");
+    }
+
+    #[test]
+    fn unlabelled_chat_target_keeps_custom_vendor_adapter() {
+        let adapter = resolve_vendor_adapter(&unlabelled_provider(), Protocol::OpenAICompatible)
+            .expect("custom vendor adapter");
+
+        assert_eq!(adapter.vendor_id(), "custom");
+    }
+
+    #[test]
+    fn runtime_binding_headers_override_client_identity_hints() {
+        let mut client = ReqwestHeaderMap::new();
+        client.insert(
+            reqwest::header::USER_AGENT,
+            ReqwestHeaderValue::from_static("curl/8.21.0"),
+        );
+        let mut binding = ReqwestHeaderMap::new();
+        binding.insert(
+            reqwest::header::USER_AGENT,
+            ReqwestHeaderValue::from_static("codex_cli_rs/0.145.0"),
+        );
+
+        let merged = merge_provider_headers(client, ReqwestHeaderMap::new(), binding);
+
+        assert_eq!(
+            merged
+                .get(reqwest::header::USER_AGENT)
+                .and_then(|value| value.to_str().ok()),
+            Some("codex_cli_rs/0.145.0")
+        );
+    }
+
+    #[test]
+    fn canonical_reencoding_preserves_dated_incomplete_terminal() {
+        let mut response = AiResponse::new("resp_1", "logical-model");
+        response.vendor.egress.insert(
+            "__open_responses_terminal".into(),
+            serde_json::json!({
+                "status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"},
+            }),
+        );
+
+        let deltas = ai_response_to_deltas(&response);
+
+        assert!(matches!(
+            deltas.as_slice(),
+            [
+                stravia_runtime_contract::protocol::ir::AiStreamDelta::MessageStart { .. },
+                stravia_runtime_contract::protocol::ir::AiStreamDelta::Usage(_),
+                stravia_runtime_contract::protocol::ir::AiStreamDelta::ResponseTerminal {
+                    status,
+                    incomplete_details: Some(details),
+                },
+                stravia_runtime_contract::protocol::ir::AiStreamDelta::Done { .. },
+            ] if status == "incomplete"
+                && details["reason"] == "max_output_tokens"
+        ));
+    }
 
     #[test]
     fn unlabelled_open_responses_target_does_not_enable_generation_transport() {

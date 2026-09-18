@@ -133,6 +133,68 @@ impl SqlHistoryMarkerStore {
         result.map_err(storage)
     }
 
+    async fn rows(
+        &self,
+        principal: &Principal,
+        references: &[String],
+    ) -> Result<Vec<MarkerRow>, HistoryMarkerError> {
+        if references.is_empty() {
+            return Ok(Vec::new());
+        }
+        let principal = principal.continuation_key();
+        let now = Self::now();
+        const SELECT: &str = "SELECT reference, kind, activity, call_payload, segment_payload, \
+             execution_state, execution_owner, lease_expires_at, execution_deadline, published_at, \
+             expires_at FROM history_markers WHERE principal = ";
+        let result = match self {
+            Self::Sqlite(pool) => {
+                let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(SELECT);
+                query.push_bind(&principal).push(" AND reference IN (");
+                let mut separated = query.separated(", ");
+                for reference in references {
+                    separated.push_bind(reference);
+                }
+                separated.push_unseparated(") AND expires_at > ");
+                query.push_bind(now);
+                query.build_query_as::<MarkerRow>().fetch_all(pool).await
+            }
+            Self::Postgres(pool) => {
+                let mut query = sqlx::QueryBuilder::<sqlx::Postgres>::new(SELECT);
+                query.push_bind(&principal).push(" AND reference IN (");
+                let mut separated = query.separated(", ");
+                for reference in references {
+                    separated.push_bind(reference);
+                }
+                separated.push_unseparated(") AND expires_at > ");
+                query.push_bind(now);
+                query.build_query_as::<MarkerRow>().fetch_all(pool).await
+            }
+        };
+        result.map_err(storage)
+    }
+
+    fn decode_resolved(row: &MarkerRow) -> Result<ResolvedHistoryMarker, HistoryMarkerError> {
+        let kind = kind_from_db(&row.kind)?;
+        let _ = (&row.execution_owner, row.expires_at);
+        let segment = row
+            .segment_payload
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|error| HistoryMarkerError::Storage(error.to_string()))?;
+        Ok(ResolvedHistoryMarker {
+            marker: HistoryMarker {
+                reference: row.reference.clone(),
+                kind,
+                activity: row.activity.clone(),
+            },
+            execution_state: state_from_db(row.execution_state.as_deref())?,
+            execution_deadline_unix_ms: row.execution_deadline,
+            segment,
+            published: row.published_at.is_some(),
+        })
+    }
+
     async fn interrupt_if_stale(
         &self,
         principal: &Principal,
@@ -418,25 +480,34 @@ impl HistoryMarkerStore for SqlHistoryMarkerStore {
         let Some(row) = self.row(principal, reference).await? else {
             return Ok(None);
         };
-        let kind = kind_from_db(&row.kind)?;
-        let segment = row
-            .segment_payload
-            .as_deref()
-            .map(serde_json::from_str)
-            .transpose()
-            .map_err(|error| HistoryMarkerError::Storage(error.to_string()))?;
-        let _ = (&row.execution_owner, row.expires_at);
-        Ok(Some(ResolvedHistoryMarker {
-            marker: HistoryMarker {
-                reference: row.reference,
-                kind,
-                activity: row.activity,
-            },
-            execution_state: state_from_db(row.execution_state.as_deref())?,
-            execution_deadline_unix_ms: row.execution_deadline,
-            segment,
-            published: row.published_at.is_some(),
-        }))
+        Self::decode_resolved(&row).map(Some)
+    }
+
+    async fn resolve_many(
+        &self,
+        principal: &Principal,
+        references: &[String],
+    ) -> Result<Vec<Option<ResolvedHistoryMarker>>, HistoryMarkerError> {
+        let rows = self.rows(principal, references).await?;
+        let rows_by_reference: std::collections::HashMap<&str, &MarkerRow> = rows
+            .iter()
+            .map(|row| (row.reference.as_str(), row))
+            .collect();
+        let mut resolved = Vec::with_capacity(references.len());
+        for reference in references {
+            let Some(row) = rows_by_reference.get(reference.as_str()).copied() else {
+                resolved.push(None);
+                continue;
+            };
+            if matches!(row.execution_state.as_deref(), Some("pending" | "running")) {
+                // The serial path owns stale-interrupt writes; keep them out of
+                // the batch read so decode stays pure.
+                resolved.push(self.resolve(principal, reference).await?);
+                continue;
+            }
+            resolved.push(Some(Self::decode_resolved(row)?));
+        }
+        Ok(resolved)
     }
 
     async fn claim_execution(

@@ -3,6 +3,7 @@ import * as m from '$lib/paraglide/messages.js'
 import { renderSnippet } from '@tanstack/svelte-table'
 import { formatDuration, formatLogTime } from '$lib/format'
 import { getDataTableLabels } from '$lib/data-table-labels'
+import { failureOriginLabel } from '$lib/observation-labels'
 import type { FailedRequestSummary } from '$lib/types'
 import { DataTable, createDataTableColumnHelper, type DataTableRowPointerEvent } from '$lib/components/ui/data-table'
 
@@ -40,15 +41,12 @@ const columns = helper.columns([
     size: 180,
     enableSorting: false,
   }),
-  helper.accessor(
-    (row) =>
-      row.error.source === 'platform'
-        ? m.failed_request_platform()
-        : row.error.source === 'upstream'
-          ? m.failed_request_upstream()
-          : '—',
-    { id: 'origin', header: () => m.failed_request_origin(), size: 120, enableSorting: false },
-  ),
+  helper.accessor((row) => failureOriginLabel(row.error.source) ?? '—', {
+    id: 'origin',
+    header: () => m.failed_request_origin(),
+    size: 120,
+    enableSorting: false,
+  }),
   helper.accessor((row) => row.error.message ?? row.error.code ?? '—', {
     id: 'error',
     header: () => m.failed_request_error(),

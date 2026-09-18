@@ -50,19 +50,6 @@ pub(super) fn client_session_id(
         .map(ToOwned::to_owned)
 }
 
-/// Merge caller hints with provider-generated headers. Runtime bindings are
-/// authoritative because they carry OAuth credentials and provider identity.
-#[cfg(test)]
-pub(super) fn merge_provider_headers(
-    mut client_headers: ReqwestHeaderMap,
-    adapter_headers: ReqwestHeaderMap,
-    binding_headers: ReqwestHeaderMap,
-) -> ReqwestHeaderMap {
-    client_headers.extend(adapter_headers);
-    client_headers.extend(binding_headers);
-    client_headers
-}
-
 /// Convert client-supplied request headers into the safe subset that may be
 /// forwarded upstream.
 ///
@@ -248,28 +235,6 @@ mod tests {
         assert!(
             forwarded.get("accept-encoding").is_none(),
             "reqwest must own upstream response decompression; client encoding hints are only for the Stravia response"
-        );
-    }
-    #[test]
-    fn runtime_binding_headers_override_client_identity_hints() {
-        let mut client = ReqwestHeaderMap::new();
-        client.insert(
-            reqwest::header::USER_AGENT,
-            ReqwestHeaderValue::from_static("curl/8.21.0"),
-        );
-        let mut binding = ReqwestHeaderMap::new();
-        binding.insert(
-            reqwest::header::USER_AGENT,
-            ReqwestHeaderValue::from_static("codex_cli_rs/0.145.0"),
-        );
-
-        let merged = merge_provider_headers(client, ReqwestHeaderMap::new(), binding);
-
-        assert_eq!(
-            merged
-                .get(reqwest::header::USER_AGENT)
-                .and_then(|value| value.to_str().ok()),
-            Some("codex_cli_rs/0.145.0")
         );
     }
 }

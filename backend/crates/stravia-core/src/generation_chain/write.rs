@@ -261,12 +261,12 @@ impl GenerationChainWrite {
                 crate::history_marker::history_marker_references(&self.parent.parent_client_items);
             parent_references.sort();
             parent_references.dedup();
+            let parent_resolved = store
+                .resolve_many(&self.principal, &parent_references)
+                .await
+                .map_err(PersistError::HistoryMarker)?;
             let mut references = Vec::with_capacity(parent_references.len());
-            for reference in parent_references {
-                let resolved = store
-                    .resolve(&self.principal, &reference)
-                    .await
-                    .map_err(PersistError::HistoryMarker)?;
+            for (reference, resolved) in parent_references.into_iter().zip(parent_resolved) {
                 if resolved.as_ref().is_some_and(|marker| marker.published) {
                     references.push(reference);
                 }
@@ -276,11 +276,11 @@ impl GenerationChainWrite {
             untrusted.extend(crate::history_marker::history_marker_references(
                 &staged.response.items,
             ));
-            for reference in untrusted {
-                let resolved = store
-                    .resolve(&self.principal, &reference)
-                    .await
-                    .map_err(PersistError::HistoryMarker)?;
+            let untrusted_resolved = store
+                .resolve_many(&self.principal, &untrusted)
+                .await
+                .map_err(PersistError::HistoryMarker)?;
+            for (reference, resolved) in untrusted.into_iter().zip(untrusted_resolved) {
                 if resolved.as_ref().is_some_and(|marker| marker.published) {
                     references.push(reference);
                 }

@@ -1,3 +1,4 @@
+import { payloadRecord, payloadString } from './observation-payload'
 import type { InteractionDetail, LiveContentBlock, ObservationEvent, RunDetail } from './types/observation'
 
 export function isLiveContentBlock(value: unknown): value is LiveContentBlock {
@@ -26,10 +27,7 @@ export function isLiveContentBlock(value: unknown): value is LiveContentBlock {
 }
 
 export function eventBlockId(event: ObservationEvent): string | undefined {
-  const payload = event.payload
-  return payload && typeof payload === 'object' && 'block_id' in payload && typeof payload.block_id === 'string'
-    ? payload.block_id
-    : undefined
+  return payloadString(payloadRecord(event.payload).block_id)
 }
 
 /** Only the selected history is retained; background live previews have a separate small budget. */
