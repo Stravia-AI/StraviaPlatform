@@ -1,4 +1,5 @@
 use sqlx::Connection;
+use stravia_runtime_contract::thinking::ThinkingLevel;
 
 use super::*;
 
@@ -15,7 +16,7 @@ impl SqliteRouteStore {
             ""
         };
         let sql = format!(
-            "SELECT id, model_id, display_name, COALESCE(balance, 'traffic_equalization') AS balance, \
+            "SELECT id, model_id, display_name, default_thinking_level, COALESCE(balance, 'traffic_equalization') AS balance, \
              COALESCE((SELECT provider_id FROM model_backends WHERE model_id = models.id AND enabled = 1 ORDER BY priority DESC, created_at ASC LIMIT 1), '') AS target_provider, \
              COALESCE((SELECT model FROM model_backends WHERE model_id = models.id AND enabled = 1 ORDER BY priority DESC, created_at ASC LIMIT 1), '') AS target_model, \
              COALESCE(is_enabled, 1) AS is_enabled, created_at \
@@ -42,7 +43,7 @@ impl SqliteRouteStore {
 
     async fn load_route(&self, route_id: &str) -> anyhow::Result<Option<Route>> {
         let route = sqlx::query_as::<_, Route>(
-            "SELECT id, model_id, display_name, COALESCE(balance, 'traffic_equalization') AS balance, \
+            "SELECT id, model_id, display_name, default_thinking_level, COALESCE(balance, 'traffic_equalization') AS balance, \
              COALESCE((SELECT provider_id FROM model_backends WHERE model_id = models.id AND enabled = 1 ORDER BY priority DESC, created_at ASC LIMIT 1), '') AS target_provider, \
              COALESCE((SELECT model FROM model_backends WHERE model_id = models.id AND enabled = 1 ORDER BY priority DESC, created_at ASC LIMIT 1), '') AS target_model, \
              COALESCE(is_enabled, 1) AS is_enabled, created_at \
@@ -97,12 +98,13 @@ impl RouteStore for SqliteRouteStore {
 
         if route.id.is_some() {
             let updated = sqlx::query(
-                "UPDATE models SET model_id = ?, display_name = ?, balance = ?, is_enabled = ? WHERE id = ?",
+                "UPDATE models SET model_id = ?, display_name = ?, balance = ?, is_enabled = ?, default_thinking_level = ? WHERE id = ?",
             )
             .bind(route.model_id.trim())
             .bind(route.display_name.as_deref())
             .bind(route.selection_strategy.trim())
             .bind(route.is_enabled)
+            .bind(route.default_thinking_level.map(ThinkingLevel::as_str))
             .bind(&route_storage_id)
             .execute(&mut *tx)
             .await?;
@@ -111,13 +113,14 @@ impl RouteStore for SqliteRouteStore {
             }
         } else {
             sqlx::query(
-                "INSERT INTO models (id, model_id, display_name, balance, is_enabled) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO models (id, model_id, display_name, balance, is_enabled, default_thinking_level) VALUES (?, ?, ?, ?, ?, ?)",
             )
                 .bind(&route_storage_id)
                 .bind(route.model_id.trim())
                 .bind(route.display_name.as_deref())
                 .bind(route.selection_strategy.trim())
                 .bind(route.is_enabled)
+                .bind(route.default_thinking_level.map(ThinkingLevel::as_str))
                 .execute(&mut *tx)
                 .await?;
         }
@@ -238,6 +241,7 @@ mod tests {
                 selection_strategy: "traffic_equalization".into(),
                 is_enabled: true,
                 targets: vec![target("provider-1", "working-model")],
+                default_thinking_level: None,
             })
             .await
             .expect("initial Route");
@@ -250,6 +254,7 @@ mod tests {
                 selection_strategy: "latency_preference".into(),
                 is_enabled: true,
                 targets: vec![target("missing-provider", "broken-model")],
+                default_thinking_level: None,
             })
             .await;
         assert!(failed.is_err());
@@ -300,6 +305,7 @@ mod tests {
                     selection_strategy: "traffic_equalization".into(),
                     is_enabled: true,
                     targets: vec![target("provider-1", "provider-model")],
+                    default_thinking_level: None,
                 })
                 .await
         });

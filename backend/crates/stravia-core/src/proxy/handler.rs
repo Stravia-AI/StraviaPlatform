@@ -159,6 +159,7 @@ mod tests {
                 target_cooldown_ms: None,
                 thinking_level_map: Vec::new(),
             }],
+            default_thinking_level: None,
         };
         let unbound = gateway
             .admin()
@@ -371,6 +372,7 @@ mod tests {
                 output_max_tokens: None,
                 supports_image_input: false,
                 targets: Vec::new(),
+                default_thinking_level: None,
             }],
             Vec::new(),
         ));

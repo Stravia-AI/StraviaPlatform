@@ -7,6 +7,7 @@ export interface Route {
   target_model: string
   is_enabled: boolean
   created_at: string
+  default_thinking_level?: ThinkingLevel | null
   supported_thinking_levels: ThinkingLevel[]
   context_window?: number | null
   output_max_tokens?: number | null
@@ -52,6 +53,7 @@ export interface CreateRoute {
   target_provider: string
   target_model: string
   targets?: CreateTarget[]
+  default_thinking_level?: ThinkingLevel | null
 }
 
 export interface BindRouteInput {
@@ -78,6 +80,7 @@ export interface UpdateRoute {
   target_model?: string
   targets?: UpsertTarget[]
   is_enabled?: boolean
+  default_thinking_level?: ThinkingLevel | null
 }
 
 export interface CreateTarget {

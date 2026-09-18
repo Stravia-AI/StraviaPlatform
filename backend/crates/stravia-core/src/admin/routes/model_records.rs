@@ -68,6 +68,7 @@ impl RouteModule<'_> {
                 selection_strategy,
                 is_enabled: true,
                 targets,
+                default_thinking_level: input.default_thinking_level,
             })
             .await?;
         self.after_write().await?;
@@ -91,6 +92,13 @@ impl RouteModule<'_> {
         };
         let selection_strategy =
             normalize_model_balance(input.balance.as_deref().or(Some(&current.balance)))?;
+        let default_thinking_level = match input.default_thinking_level {
+            Some(level) => level,
+            None => current
+                .default_thinking_level
+                .as_deref()
+                .and_then(|value| ThinkingLevel::from_wire(value).ok()),
+        };
         let targets = normalize_update_route_targets(&current, &input)?;
         ensure_route_targets_valid(&targets)?;
         let route = self
@@ -105,6 +113,7 @@ impl RouteModule<'_> {
                 selection_strategy,
                 is_enabled: input.is_enabled.unwrap_or(current.is_enabled),
                 targets,
+                default_thinking_level,
             })
             .await?;
         self.after_write().await?;

@@ -1273,6 +1273,7 @@ async fn configure_route_with_protocol(
             target_provider: String::new(),
             target_model: String::new(),
             targets,
+            default_thinking_level: None,
         })
         .await
         .expect("create route")

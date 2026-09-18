@@ -513,6 +513,11 @@ _避免使用_：Omitted Mapping、Null Level、Unsupported Level（当指对照
 Supported Thinking Levels 是一条 Route 的所有 Target 均能执行的 Thinking Level 子集，供管理面、模型发现面和请求钳制使用。它始终由各 Target 非 Hidden Mapping 的交集派生，不由管理员单独配置；任一 Target 缺少某档 Target Thinking Control，该档就不受 Route 支持。它不是 catalog 的 reasoning_options，也不是对照表里的上游值。
 _避免使用_：Advertised Thinking Levels、Visible Thinking Levels、Supported Reasoning
 
+## Default Thinking Level
+
+Default Thinking Level 是 Route 上的一个可选管理员配置，表示客户端请求完全没有给出推理指令（level、effort、budget、display、enabled 全缺省）时应用的 Canonical Thinking Level。它只在保存时校验枚举合法性，可配置当前不受支持的档位；运行时对 Supported Thinking Levels 做就近钳制，支持集为空时按未指定处理，由上游模型自行决定。客户端显式给出的任何推理指令优先于它。
+_避免使用_：Route Reasoning Default、Fallback Effort、Implicit Thinking
+
 ## Target Thinking Control
 
 Target Thinking Control 是 Thinking Level Map 为某个 Thinking Level 产出的、该 Target 原生的思考控制（effort 值、toggle 或 budget）。它不是客户端请求字段，也不是 Protocol Conversion 写出的 egress wire。

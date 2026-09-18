@@ -241,6 +241,7 @@ mod tests {
             output_max_tokens: None,
             supports_image_input: false,
             targets,
+            default_thinking_level: None,
         }
     }
 

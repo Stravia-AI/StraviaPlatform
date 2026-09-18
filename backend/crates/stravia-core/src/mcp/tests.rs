@@ -483,6 +483,7 @@ async fn media_test_app_with_answer(
             target_provider: provider.id,
             target_model: "vision".into(),
             targets: vec![],
+            default_thinking_level: None,
         })
         .await
         .expect("Media Model");

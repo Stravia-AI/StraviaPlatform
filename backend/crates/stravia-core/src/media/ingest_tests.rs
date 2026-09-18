@@ -56,6 +56,7 @@ async fn public_model_input_snapshots_media_without_scanning_text() {
             target_provider: provider.id,
             target_model: "vision".into(),
             targets: vec![],
+            default_thinking_level: None,
         })
         .await
         .unwrap();
@@ -306,6 +307,7 @@ async fn public_gemini_generated_media_is_reusable_without_inline_history() {
             target_provider: provider.id,
             target_model: "painter".into(),
             targets: vec![],
+            default_thinking_level: None,
         })
         .await
         .unwrap();

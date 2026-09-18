@@ -1037,6 +1037,7 @@ async fn catalog_provider_without_dedicated_vendor_adapter_reaches_upstream() {
             target_provider: provider.id,
             target_model: "glm-5".into(),
             targets: Vec::new(),
+            default_thinking_level: None,
         })
         .await
         .expect("create model route");
@@ -1251,6 +1252,7 @@ async fn unrepresentable_thinking_control_is_a_typed_422_before_upstream() {
                 target_cooldown_ms: Some(route.targets[0].target_cooldown_ms),
                 thinking_level_map: map,
             }],
+            default_thinking_level: None,
         })
         .await
         .expect("inject legacy unrepresentable map");

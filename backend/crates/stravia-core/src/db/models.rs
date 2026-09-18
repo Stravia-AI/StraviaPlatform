@@ -130,6 +130,10 @@ pub struct Route {
     pub id: String,
     pub model_id: String,
     pub display_name: Option<String>,
+    /// 客户端未表达任何推理意图时应用的 Canonical Thinking Level；
+    /// `None` 表示不加控制，由上游模型自行决定。
+    #[serde(default)]
+    pub default_thinking_level: Option<String>,
     pub balance: String,
     pub target_provider: String,
     pub target_model: String,
@@ -382,6 +386,8 @@ pub struct UpdateRoute {
     #[serde(default)]
     pub targets: Option<Vec<UpsertTarget>>,
     pub is_enabled: Option<bool>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub default_thinking_level: Option<Option<ThinkingLevel>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -396,6 +402,8 @@ pub struct CreateRoute {
     pub target_model: String,
     #[serde(default)]
     pub targets: Vec<CreateTarget>,
+    #[serde(default)]
+    pub default_thinking_level: Option<ThinkingLevel>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -437,6 +445,7 @@ pub struct PutRoute {
     pub selection_strategy: String,
     pub is_enabled: bool,
     pub targets: Vec<CreateTarget>,
+    pub default_thinking_level: Option<ThinkingLevel>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

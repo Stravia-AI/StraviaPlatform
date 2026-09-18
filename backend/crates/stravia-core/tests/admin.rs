@@ -516,6 +516,7 @@ async fn manual_provider_models_are_partial_and_do_not_mutate_routes() -> anyhow
             target_provider: provider.id.clone(),
             target_model: "private/model".to_string(),
             targets: vec![],
+            default_thinking_level: None,
         })
         .await?;
     gw.admin()
@@ -937,6 +938,7 @@ async fn copy_provider_can_copy_matching_route_targets_to_copied_provider() -> a
                     thinking_level_map: Vec::new(),
                 },
             ],
+            default_thinking_level: None,
         })
         .await?;
 
@@ -1013,6 +1015,7 @@ async fn copy_provider_does_not_append_targets_by_default() -> anyhow::Result<()
             target_provider: original.id.clone(),
             target_model: "source-upstream-model".to_string(),
             targets: vec![],
+            default_thinking_level: None,
         })
         .await?;
 
@@ -1226,6 +1229,7 @@ async fn config_epoch_starts_at_zero_and_increments_on_model_create() -> anyhow:
             target_provider: provider.id.clone(),
             target_model: "gpt-4".to_string(),
             targets: vec![],
+            default_thinking_level: None,
         })
         .await?;
 
@@ -1262,6 +1266,7 @@ async fn config_epoch_increments_on_model_update_and_delete() -> anyhow::Result<
             target_provider: provider.id.clone(),
             target_model: "gpt-4".to_string(),
             targets: vec![],
+            default_thinking_level: None,
         })
         .await?;
 

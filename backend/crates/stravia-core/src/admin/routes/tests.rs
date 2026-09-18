@@ -199,6 +199,79 @@ fn route_target_wire_input_defaults_enabled_and_accepts_disabled() {
     assert!(!disabled.enabled);
 }
 
+#[test]
+fn route_update_default_thinking_level_distinguishes_omitted_null_and_invalid() {
+    let omitted = serde_json::from_value::<UpdateRoute>(json!({})).expect("empty update");
+    assert!(omitted.default_thinking_level.is_none());
+
+    let cleared = serde_json::from_value::<UpdateRoute>(json!({"default_thinking_level": null}))
+        .expect("explicit null clears the default");
+    assert_eq!(cleared.default_thinking_level, Some(None));
+
+    let set = serde_json::from_value::<UpdateRoute>(json!({"default_thinking_level": "high"}))
+        .expect("valid Thinking Level");
+    assert_eq!(set.default_thinking_level, Some(Some(ThinkingLevel::High)));
+
+    let invalid =
+        serde_json::from_value::<UpdateRoute>(json!({"default_thinking_level": "ludicrous"}));
+    assert!(invalid.is_err(), "unknown Thinking Level must be rejected");
+}
+
+#[tokio::test]
+async fn route_default_thinking_level_round_trips_and_updates() -> anyhow::Result<()> {
+    let (_data_dir, gateway, provider) = route_fixture().await?;
+    let admin = gateway.admin();
+    let route = admin
+        .create_model(CreateRoute {
+            model_id: "default-thinking-route".into(),
+            display_name: None,
+            balance: None,
+            target_provider: provider.id,
+            target_model: "upstream-model".into(),
+            targets: Vec::new(),
+            default_thinking_level: Some(ThinkingLevel::High),
+        })
+        .await?;
+    assert_eq!(route.default_thinking_level.as_deref(), Some("high"));
+
+    // 未提交字段时保留已存值
+    let route = admin
+        .update_model(
+            "default-thinking-route",
+            UpdateRoute {
+                display_name: Some("Renamed".into()),
+                ..Default::default()
+            },
+        )
+        .await?;
+    assert_eq!(route.default_thinking_level.as_deref(), Some("high"));
+
+    // 显式 null 清除
+    let route = admin
+        .update_model(
+            "default-thinking-route",
+            UpdateRoute {
+                default_thinking_level: Some(None),
+                ..Default::default()
+            },
+        )
+        .await?;
+    assert!(route.default_thinking_level.is_none());
+
+    // 当前不被 Target 支持的档位仍可保存（保存时仅校验枚举）
+    let route = admin
+        .update_model(
+            "default-thinking-route",
+            UpdateRoute {
+                default_thinking_level: Some(Some(ThinkingLevel::Xhigh)),
+                ..Default::default()
+            },
+        )
+        .await?;
+    assert_eq!(route.default_thinking_level.as_deref(), Some("xhigh"));
+    Ok(())
+}
+
 #[tokio::test]
 async fn route_configuration_supports_three_targets_priorities_and_failure_defaults()
 -> anyhow::Result<()> {
@@ -237,6 +310,7 @@ async fn route_configuration_supports_three_targets_priorities_and_failure_defau
                 create_target("second-model", 0),
                 create_target("third-model", 0),
             ],
+            default_thinking_level: None,
         })
         .await?;
     assert_eq!(route.balance, "traffic_equalization");
@@ -258,6 +332,7 @@ async fn route_configuration_supports_three_targets_priorities_and_failure_defau
                 target_provider: String::new(),
                 target_model: String::new(),
                 targets: vec![create_target("upstream-model", valid)],
+                default_thinking_level: None,
             })
             .await?;
         assert_eq!(route.targets[0].priority, valid);
@@ -270,6 +345,7 @@ async fn route_configuration_supports_three_targets_priorities_and_failure_defau
             target_provider: String::new(),
             target_model: String::new(),
             targets: vec![create_target("upstream-model", 0)],
+            default_thinking_level: None,
         })
         .await
         .expect_err("unknown Scheduling Strategy must be rejected");
@@ -317,6 +393,7 @@ async fn route_configuration_round_trips_disabled_targets_and_requires_one_enabl
                 target("upstream-model", true),
                 target("standby-model", false),
             ],
+            default_thinking_level: None,
         })
         .await?;
     assert_eq!(route.targets.len(), 2);
@@ -344,6 +421,7 @@ async fn route_configuration_round_trips_disabled_targets_and_requires_one_enabl
             target_provider: String::new(),
             target_model: String::new(),
             targets: vec![target("upstream-model", false)],
+            default_thinking_level: None,
         })
         .await
         .expect_err("Route without an enabled Target must be rejected");
@@ -460,6 +538,7 @@ async fn target_models_match_inventory_by_segment_and_case() -> anyhow::Result<(
             target_provider: String::new(),
             target_model: String::new(),
             targets: vec![create_target("GLM-4.6")],
+            default_thinking_level: None,
         })
         .await?;
     assert_eq!(route.targets.len(), 1);
@@ -503,6 +582,7 @@ async fn ambiguous_inventory_segments_keep_target_errors_visible() -> anyhow::Re
         target_provider: String::new(),
         target_model: String::new(),
         targets: vec![target],
+        default_thinking_level: None,
     };
 
     // 两个清单 ID 的最右段相同，宽松匹配无法区分时保持报错而不是任意选择
@@ -586,6 +666,7 @@ async fn route_display_name_is_optional_normalized_and_not_an_identity() -> anyh
         target_provider: provider.id.clone(),
         target_model: "upstream-model".into(),
         targets: Vec::new(),
+        default_thinking_level: None,
     };
 
     let first = admin
@@ -668,6 +749,7 @@ async fn unavailable_provider_model_cannot_be_bound_as_a_new_target() -> anyhow:
                 target_cooldown_ms: None,
                 thinking_level_map: Vec::new(),
             }],
+            default_thinking_level: None,
         })
         .await
         .expect_err("Route change must enforce Effective Availability");
@@ -689,6 +771,7 @@ async fn missing_provider_model_cannot_be_added_as_a_new_target() -> anyhow::Res
             target_provider: provider.id,
             target_model: "missing-model".into(),
             targets: vec![],
+            default_thinking_level: None,
         })
         .await
         .expect_err("a Target requires a Provider Model snapshot");
@@ -750,6 +833,7 @@ async fn route_generates_seven_rows_seeds_levels_and_resets_one_override() -> an
             target_provider: provider.id.clone(),
             target_model: "effort-model".into(),
             targets: Vec::new(),
+            default_thinking_level: None,
         })
         .await?;
 
@@ -850,6 +934,7 @@ async fn open_responses_accepts_max_effort_map() -> anyhow::Result<()> {
             target_provider: provider.id,
             target_model: "max-effort-model".into(),
             targets: Vec::new(),
+            default_thinking_level: None,
         })
         .await?;
 
@@ -907,6 +992,7 @@ async fn create_openai_compatible_toggle_route(vendor: &str, model: &str) -> any
             target_provider: provider.id,
             target_model: model.into(),
             targets: Vec::new(),
+            default_thinking_level: None,
         })
         .await
 }
@@ -992,6 +1078,7 @@ async fn gemini_accepts_generated_effort_maps() -> anyhow::Result<()> {
             target_provider: provider.id,
             target_model: "gemini-effort-model".into(),
             targets: Vec::new(),
+            default_thinking_level: None,
         })
         .await?;
 
@@ -1076,6 +1163,7 @@ async fn supported_levels_are_the_intersection_of_all_targets() -> anyhow::Resul
                     thinking_level_map: Vec::new(),
                 },
             ],
+            default_thinking_level: None,
         })
         .await?;
 
@@ -1127,6 +1215,7 @@ async fn regenerate_updates_derived_supported_levels() -> anyhow::Result<()> {
             target_provider: provider.id,
             target_model: "toggle-model".into(),
             targets: Vec::new(),
+            default_thinking_level: None,
         })
         .await?;
     let mut targets = route_targets_for_update(&route);
@@ -1178,6 +1267,7 @@ async fn refresh_regenerates_only_generated_rows() -> anyhow::Result<()> {
             target_provider: provider.id.clone(),
             target_model: "upstream-model".into(),
             targets: Vec::new(),
+            default_thinking_level: None,
         })
         .await?;
     let mut targets = route_targets_for_update(&route);

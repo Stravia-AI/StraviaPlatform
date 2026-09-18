@@ -44,6 +44,7 @@ import {
   priorityLanes,
   removeRouteTarget,
   reorderRouteTargetBefore,
+  routeSupportedThinkingLevels,
   type RouteTargetForm,
   type RouteTargetInsertion,
 } from './route-targets-form.js'
@@ -72,6 +73,7 @@ interface Props {
 }
 
 const thinkingLevels: ThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+const UNSPECIFIED_THINKING_LEVEL = 'unspecified'
 
 let { model, providers, initialProviderId = '', initialModelId = '', onSaved }: Props = $props()
 const initialModel = untrack(() => model)
@@ -81,6 +83,7 @@ let form = $state({
   displayName: initialModel?.display_name ?? '',
   balance: initialModel?.balance ?? 'traffic_equalization',
   enabled: initialModel?.is_enabled ?? true,
+  defaultThinkingLevel: initialModel?.default_thinking_level ?? UNSPECIFIED_THINKING_LEVEL,
 })
 let targets = $state<RouteTargetForm[]>(
   untrack(() => createRouteTargetForms(initialModel, initialProviderId, initialModelId)),
@@ -429,6 +432,18 @@ function targetSupportsThinkingLevel(target: RouteTargetForm, level: ThinkingLev
   return target.thinkingLevelMap.some((row) => row.level === level && row.control.type !== 'hidden')
 }
 
+const supportedThinkingLevels = $derived(routeSupportedThinkingLevels(targets))
+const defaultThinkingLevelUnsupported = $derived(
+  form.defaultThinkingLevel !== UNSPECIFIED_THINKING_LEVEL &&
+    !supportedThinkingLevels.includes(form.defaultThinkingLevel as ThinkingLevel),
+)
+
+function defaultThinkingLevelLabel(): string {
+  return form.defaultThinkingLevel === UNSPECIFIED_THINKING_LEVEL
+    ? m.model_editor_thinking_level_provider_default()
+    : form.defaultThinkingLevel
+}
+
 function targetLabel(target: RouteTargetForm, index: number): string {
   const destination = m.model_editor_destination_value({ index: index + 1 })
   const provider = providers.find((candidate) => candidate.id === target.providerId)
@@ -592,6 +607,8 @@ async function saveModel(): Promise<void> {
       target_provider: firstTarget.provider_id,
       target_model: firstTarget.model,
       targets: cleanTargets,
+      default_thinking_level:
+        form.defaultThinkingLevel === UNSPECIFIED_THINKING_LEVEL ? null : (form.defaultThinkingLevel as ThinkingLevel),
     }
     if (initialModel) {
       await admin.models.update(initialModel.model_id, { ...input, is_enabled: form.enabled })
@@ -1270,6 +1287,36 @@ async function saveModel(): Promise<void> {
           {/if}
         {/each}
       </div>
+      <Field.Field orientation="vertical" class="mt-4 sm:max-w-md">
+        <Field.Label for="route-default-thinking-level">{m.model_editor_default_thinking_level()}</Field.Label>
+        <Select.Root type="single" bind:value={form.defaultThinkingLevel}>
+          <Select.Trigger
+            id="route-default-thinking-level"
+            class="w-full"
+            aria-label={m.model_editor_default_thinking_level()}>
+            {defaultThinkingLevelLabel()}
+          </Select.Trigger>
+          <Select.Content>
+            <Select.Group>
+              <Select.Item value={UNSPECIFIED_THINKING_LEVEL}>
+                {m.model_editor_thinking_level_provider_default()}
+              </Select.Item>
+              {#each supportedThinkingLevels as level (level)}
+                <Select.Item value={level}>{level}</Select.Item>
+              {/each}
+              {#if defaultThinkingLevelUnsupported}
+                <Select.Item value={form.defaultThinkingLevel}>{form.defaultThinkingLevel}</Select.Item>
+              {/if}
+            </Select.Group>
+          </Select.Content>
+        </Select.Root>
+        <Field.Description>{m.model_editor_default_thinking_level_help()}</Field.Description>
+        {#if defaultThinkingLevelUnsupported}
+          <p data-slot="default-thinking-level-warning" class="text-sm text-destructive">
+            {m.model_editor_default_thinking_level_unavailable({ level: form.defaultThinkingLevel })}
+          </p>
+        {/if}
+      </Field.Field>
     </section>
 
     <div

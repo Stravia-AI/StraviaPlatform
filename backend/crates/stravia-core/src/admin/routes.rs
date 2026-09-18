@@ -425,6 +425,7 @@ impl<'a> RouteModule<'a> {
                     balance: Some("traffic_equalization".into()),
                     target_provider: provider_id.clone(),
                     target_model: provider_model_id.clone(),
+                    default_thinking_level: None,
                     targets: vec![CreateTarget {
                         provider_id,
                         model: provider_model_id,

@@ -152,6 +152,7 @@ async fn registry_failure_gates_http_native_publication_and_standalone_compactio
         let route = admin.create_model(CreateRoute {
             model_id: "native-publication".into(), display_name: None, balance: None,
             target_provider: provider.id, target_model: "upstream-model".into(), targets: vec![],
+            default_thinking_level: None,
         }).await.unwrap();
         let key = admin.create_api_key(CreateApiKey {
             key: None, name: "local publication client".into(), concurrency_limit: None,
@@ -326,6 +327,7 @@ async fn inbound_responses_websocket_preserves_native_compaction_and_replays_cur
             target_provider: provider.id,
             target_model: "upstream-model".into(),
             targets: vec![],
+            default_thinking_level: None,
         }).await.unwrap();
         let key = admin.create_api_key(CreateApiKey {
             key: None,

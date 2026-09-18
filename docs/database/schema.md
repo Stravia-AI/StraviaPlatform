@@ -81,6 +81,7 @@ Route 记录。`model_id` 保存客户端请求使用的 Route ID，`display_nam
 | `is_enabled` | INTEGER | `1` | 是否启用 |
 | `priority` | INTEGER | `0` | 优先级（预留） |
 | `created_at` | TEXT | `datetime('now')` | 创建时间 |
+| `default_thinking_level` | TEXT | `NULL` | 客户端未指定推理配置时应用的 Canonical Thinking Level（`off`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`）；`NULL` 表示不注入控制，由上游模型自行决定；运行时对当前 Supported Thinking Levels 做就近 clamp，支持集为空则按未指定处理 |
 
 **唯一索引**：`idx_models_route_id` on `model_id`
 

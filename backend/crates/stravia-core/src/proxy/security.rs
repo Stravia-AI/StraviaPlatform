@@ -482,6 +482,7 @@ mod tests {
             context_window: None,
             output_max_tokens: None,
             supports_image_input: false,
+            default_thinking_level: None,
         }
     }
 

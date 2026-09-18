@@ -36,6 +36,7 @@ async fn media_only_injection_rejects_guessed_search_before_research_execution()
             target_provider: parent_provider.id,
             target_model: "vision".into(),
             targets: vec![],
+            default_thinking_level: None,
         })
         .await
         .expect("parent Model");
@@ -174,6 +175,7 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
             target_provider: parent_provider.id,
             target_model: "parent".into(),
             targets: vec![],
+            default_thinking_level: None,
         })
         .await
         .expect("parent Model");
@@ -215,6 +217,7 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
             target_provider: media_provider.id,
             target_model: "vision".into(),
             targets: vec![],
+            default_thinking_level: None,
         })
         .await
         .expect("Media Model");
@@ -457,6 +460,7 @@ async fn mixed_media_route_prefers_native_targets_and_rejects_targets_without_to
                     thinking_level_map: Vec::new(),
                 },
             ],
+            default_thinking_level: None,
         })
         .await
         .expect("mixed Media Model");
@@ -469,6 +473,7 @@ async fn mixed_media_route_prefers_native_targets_and_rejects_targets_without_to
             target_provider: no_tools.id,
             target_model: "unsupported".into(),
             targets: vec![],
+            default_thinking_level: None,
         })
         .await
         .expect("unsupported Media Model");

@@ -1,4 +1,11 @@
-import type { CreateTarget, ProviderModelSummary, Route, ThinkingLevelMapping, UpsertTarget } from '$lib/types'
+import type {
+  CreateTarget,
+  ProviderModelSummary,
+  Route,
+  ThinkingLevel,
+  ThinkingLevelMapping,
+  UpsertTarget,
+} from '$lib/types'
 
 export interface RouteTargetForm {
   key: string
@@ -33,6 +40,18 @@ export interface RouteTargetLane {
 
 export type RouteTargetInsertion =
   { position: 'top' } | { position: 'bottom' } | { position: 'between'; upperPriority: number; lowerPriority: number }
+
+export const THINKING_LEVELS: ThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+
+export function routeSupportedThinkingLevels(targets: RouteTargetForm[]): ThinkingLevel[] {
+  const enabled = targets.filter((target) => target.enabled)
+  if (enabled.length === 0) return []
+  return THINKING_LEVELS.filter((level) =>
+    enabled.every((target) =>
+      target.thinkingLevelMap.some((row) => row.level === level && row.control.type !== 'hidden'),
+    ),
+  )
+}
 
 export interface RouteTargetInsertionPlan {
   priority: number

@@ -88,6 +88,7 @@ async fn protected_responses_router_with_hook(
             target_provider: provider.id,
             target_model: "auth-model".into(),
             targets: vec![],
+            default_thinking_level: None,
         })
         .await
         .expect("Model Route");
@@ -592,6 +593,7 @@ async fn responses_rejects_removed_platform_web_search_extension() {
             target_provider: provider.id.clone(),
             target_model: "no-tools".into(),
             targets: vec![],
+            default_thinking_level: None,
         })
         .await
         .expect("Model Route");

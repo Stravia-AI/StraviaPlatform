@@ -36,6 +36,7 @@ use stravia_runtime_contract::protocol::ir::AiError;
 use stravia_runtime_contract::protocol::ir::AiRequest;
 use stravia_runtime_contract::protocol::ir::AiStreamDelta;
 use stravia_runtime_contract::protocol::ir::request::MediaRoutingMode;
+use stravia_runtime_contract::thinking::ThinkingLevel;
 
 #[derive(Clone)]
 pub struct LiveModelTurnExecutor {
@@ -521,16 +522,44 @@ async fn execute_inner(
         .cloned()
         .ok_or_else(|| ModelTurnError::new("model_not_found", "Model is unavailable"))?;
 
+    // 与 generation_chain 的推理继承判定同口径：客户端给出任何推理指令
+    // （level/effort/budget/display/enabled）都算「已指定」，Route 默认档不介入。
+    let mut default_level_applied = false;
+    if !input.request.reasoning.enabled
+        && input.request.reasoning.level.is_none()
+        && input.request.reasoning.effort.is_none()
+        && input.request.reasoning.budget_tokens.is_none()
+        && input.request.reasoning.display.is_none()
+        && let Some(value) = route.default_thinking_level.as_deref()
+    {
+        match ThinkingLevel::from_wire(value) {
+            Ok(level) => {
+                input.request.reasoning.level = Some(level);
+                default_level_applied = true;
+            }
+            Err(_) => {
+                tracing::warn!(
+                    route = %route.model_id,
+                    value,
+                    "ignoring invalid Route default Thinking Level"
+                );
+            }
+        }
+    }
+
     if let Some(requested) = input.request.reasoning.level {
-        input.request.reasoning.level = requested
-            .clamp(&route.supported_thinking_levels)
-            .ok_or_else(|| {
-                ModelTurnError::new(
+        input.request.reasoning.level = match requested.clamp(&route.supported_thinking_levels) {
+            Some(level) => Some(level),
+            // 默认档是管理员偏好而非客户端要求：配置漂移导致支持集为空时
+            // 退回未指定，不打断整条 Route 的流量。
+            None if default_level_applied => None,
+            None => {
+                return Err(ModelTurnError::new(
                     "thinking_level_unsupported",
                     "Route has no Supported Thinking Level for this request",
-                )
-            })
-            .map(Some)?;
+                ));
+            }
+        };
     }
 
     if input.authorization == ModelTurnAuthorization::CapabilityGrant

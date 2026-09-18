@@ -223,7 +223,7 @@ CREATE TABLE models (
     priority     INTEGER DEFAULT 0,
     created_at   TEXT DEFAULT (datetime('now')),
     display_name TEXT
-);
+, default_thinking_level TEXT);
 
 CREATE TABLE native_compaction_sources (
     record_id TEXT NOT NULL REFERENCES native_compactions(id) ON DELETE CASCADE,
@@ -395,7 +395,7 @@ CREATE TABLE providers (
     priority          INTEGER DEFAULT 0,
     created_at        TEXT DEFAULT (datetime('now')),
     updated_at        TEXT DEFAULT (datetime('now'))
-, adapter_credentials TEXT NOT NULL DEFAULT '{}');
+, adapter_credentials TEXT NOT NULL DEFAULT '{}', vendor_options TEXT NOT NULL DEFAULT '{}');
 
 CREATE TABLE rejected_request_observations (
     id TEXT PRIMARY KEY, occurred_at INTEGER NOT NULL, method TEXT NOT NULL, path TEXT NOT NULL,

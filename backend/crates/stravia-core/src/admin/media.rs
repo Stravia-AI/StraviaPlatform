@@ -196,6 +196,7 @@ mod tests {
                 target_provider: provider.id.clone(),
                 target_model: "vision".into(),
                 targets: vec![],
+                default_thinking_level: None,
             })
             .await
             .expect("Model");
@@ -228,6 +229,7 @@ mod tests {
                         thinking_level_map: Vec::new(),
                     },
                 ],
+                default_thinking_level: None,
             })
             .await
             .expect("mixed Model");

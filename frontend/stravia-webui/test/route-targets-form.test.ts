@@ -11,9 +11,11 @@ import {
   planRouteTargetInsertion,
   priorityLanes,
   reorderRouteTargetBefore,
+  routeSupportedThinkingLevels,
   secondsToMilliseconds,
+  THINKING_LEVELS,
 } from '../src/lib/components/route-targets-form'
-import type { Route } from '../src/lib/types'
+import type { Route, ThinkingLevel, ThinkingLevelMapping } from '../src/lib/types'
 
 function routeWithTargets(): Route {
   return {
@@ -230,6 +232,34 @@ describe('route targets form', () => {
     const targets = createRouteTargetForms(undefined, 'provider-a', 'model-a')
     targets[0].enabled = false
     expect(buildRouteTargets(targets).error).toBe('no-enabled-target')
+  })
+
+  test('supported thinking levels require every enabled target to expose the level', () => {
+    const map = (hidden: ThinkingLevel[]): ThinkingLevelMapping[] =>
+      THINKING_LEVELS.map((level) => ({
+        level,
+        control: hidden.includes(level) ? { type: 'hidden' } : { type: 'effort', value: level },
+        source: 'generated',
+      }))
+    const targets = [
+      createRouteTarget([], { providerId: 'provider-a', model: 'model-a', enabled: true, thinkingLevelMap: map([]) }),
+    ]
+    targets.push(
+      createRouteTarget(targets, {
+        providerId: 'provider-b',
+        model: 'model-b',
+        enabled: true,
+        thinkingLevelMap: map(['xhigh', 'max']),
+      }),
+    )
+
+    expect(routeSupportedThinkingLevels(targets)).toEqual(['off', 'minimal', 'low', 'medium', 'high'])
+
+    targets[1].enabled = false
+    expect(routeSupportedThinkingLevels(targets)).toEqual(THINKING_LEVELS)
+
+    targets[0].enabled = false
+    expect(routeSupportedThinkingLevels(targets)).toEqual([])
   })
 })
 

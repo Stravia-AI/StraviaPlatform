@@ -20,6 +20,7 @@ use stravia_runtime_contract::CancellationToken;
 use stravia_runtime_contract::Principal;
 use stravia_runtime_contract::protocol::ir::AiResponse;
 use stravia_runtime_contract::protocol::ir::AiStreamDelta;
+use stravia_runtime_contract::thinking::ThinkingLevel;
 
 async fn add_test_provider_model(gateway: &Gateway, provider_id: &str) {
     gateway
@@ -257,13 +258,14 @@ async fn gateway_with_captured_model(
     Arc<Mutex<Vec<u8>>>,
     crate::db::models::ApiKeyWithBindings,
 ) {
-    gateway_with_captured_text(model_name, bind_key, "ok").await
+    gateway_with_captured_thinking(model_name, bind_key, "ok", None).await
 }
 
-async fn gateway_with_captured_text(
+async fn gateway_with_captured_thinking(
     model_name: &str,
     bind_key: bool,
     text: &'static str,
+    default_thinking_level: Option<ThinkingLevel>,
 ) -> (
     tempfile::TempDir,
     crate::Gateway,
@@ -305,6 +307,7 @@ async fn gateway_with_captured_text(
             target_provider: provider.id.clone(),
             target_model: "upstream-model".into(),
             targets: Vec::new(),
+            default_thinking_level,
         })
         .await
         .expect("Model");
@@ -319,6 +322,7 @@ async fn gateway_with_captured_text(
                 target_provider: provider.id,
                 target_model: "upstream-model".into(),
                 targets: Vec::new(),
+                default_thinking_level: None,
             })
             .await
             .expect("other Model");
@@ -477,6 +481,7 @@ async fn first_token_timeout_records_one_precise_attempt_terminal_without_usage(
                 target_cooldown_ms: None,
                 thinking_level_map: Vec::new(),
             }],
+            default_thinking_level: None,
         })
         .await
         .unwrap();
@@ -597,6 +602,7 @@ async fn execute_fails_over_before_canonical_output_and_returns_the_locked_targe
                     thinking_level_map: Vec::new(),
                 })
                 .collect(),
+            default_thinking_level: None,
         })
         .await
         .expect("Model");
@@ -678,6 +684,7 @@ async fn http_continuation_not_retained_by_zdr_replays_full_request_once() {
             target_provider: provider.id,
             target_model: "upstream-model".into(),
             targets: Vec::new(),
+            default_thinking_level: None,
         })
         .await
         .expect("Model");
@@ -779,6 +786,7 @@ async fn request_scoped_http_errors_do_not_quarantine_the_target() {
             target_provider: provider.id,
             target_model: "upstream-model".into(),
             targets: Vec::new(),
+            default_thinking_level: None,
         })
         .await
         .expect("Model");
@@ -861,6 +869,7 @@ async fn execute_rejects_tools_when_no_target_declares_function_tool_support() {
             target_provider: provider.id,
             target_model: "upstream-model".into(),
             targets: Vec::new(),
+            default_thinking_level: None,
         })
         .await
         .expect("Model");
@@ -970,6 +979,7 @@ async fn execute_does_not_fail_over_after_the_first_canonical_delta() {
                     thinking_level_map: Vec::new(),
                 })
                 .collect(),
+            default_thinking_level: None,
         })
         .await
         .expect("Model");
@@ -1093,6 +1103,192 @@ async fn execute_forwards_extra_headers_without_overriding_authorization() {
     assert!(head.contains("openai-beta: responses=v1"));
     assert!(head.contains("authorization: bearer test-provider-key"));
     assert!(!head.contains("attacker-key"));
+}
+
+async fn captured_reasoning_effort(
+    gateway: &crate::Gateway,
+    captured: &Arc<Mutex<Vec<u8>>>,
+    key_id: &str,
+    model: &str,
+    request: AiRequest,
+) -> serde_json::Value {
+    let turn = gateway
+        .model_turn
+        .execute(TurnInput::new(Principal::new(key_id.to_owned()), request))
+        .await
+        .unwrap_or_else(|error| panic!("Model Turn for {model}: {error}"));
+    let _ = turn.output.collect::<Vec<_>>().await;
+    let (_, body) = captured_http(&captured.lock());
+    body
+}
+
+#[tokio::test]
+async fn route_default_thinking_level_applies_when_reasoning_is_unspecified() {
+    let (_data_dir, gateway, captured, key) = gateway_with_captured_thinking(
+        "default-thinking-model",
+        true,
+        "ok",
+        Some(ThinkingLevel::High),
+    )
+    .await;
+
+    let body = captured_reasoning_effort(
+        &gateway,
+        &captured,
+        &key.id,
+        "default-thinking-model",
+        AiRequest::new("default-thinking-model", Vec::new()),
+    )
+    .await;
+
+    assert_eq!(
+        body.get("reasoning_effort")
+            .and_then(|value| value.as_str()),
+        Some("high")
+    );
+}
+
+#[tokio::test]
+async fn route_default_thinking_level_yields_to_explicit_client_level() {
+    let (_data_dir, gateway, captured, key) = gateway_with_captured_thinking(
+        "explicit-thinking-model",
+        true,
+        "ok",
+        Some(ThinkingLevel::High),
+    )
+    .await;
+    let mut request = AiRequest::new("explicit-thinking-model", Vec::new());
+    request.reasoning.level = Some(ThinkingLevel::Low);
+
+    let body = captured_reasoning_effort(
+        &gateway,
+        &captured,
+        &key.id,
+        "explicit-thinking-model",
+        request,
+    )
+    .await;
+
+    assert_eq!(
+        body.get("reasoning_effort")
+            .and_then(|value| value.as_str()),
+        Some("low")
+    );
+}
+
+#[tokio::test]
+async fn route_default_thinking_level_yields_to_other_reasoning_directives() {
+    let (_data_dir, gateway, captured, key) = gateway_with_captured_thinking(
+        "directive-thinking-model",
+        true,
+        "ok",
+        Some(ThinkingLevel::High),
+    )
+    .await;
+    let mut request = AiRequest::new("directive-thinking-model", Vec::new());
+    request.reasoning.enabled = true;
+    request.reasoning.effort =
+        Some(stravia_runtime_contract::protocol::ir::request::ReasoningEffort::High);
+
+    let body = captured_reasoning_effort(
+        &gateway,
+        &captured,
+        &key.id,
+        "directive-thinking-model",
+        request,
+    )
+    .await;
+
+    assert!(
+        body.get("reasoning_effort").is_none(),
+        "a client-side reasoning directive without level must not trigger the Route default"
+    );
+}
+
+#[tokio::test]
+async fn route_default_thinking_level_clamps_to_the_nearest_supported_level() {
+    let (_data_dir, gateway, captured, key) = gateway_with_captured_thinking(
+        "clamped-thinking-model",
+        true,
+        "ok",
+        Some(ThinkingLevel::Xhigh),
+    )
+    .await;
+
+    let body = captured_reasoning_effort(
+        &gateway,
+        &captured,
+        &key.id,
+        "clamped-thinking-model",
+        AiRequest::new("clamped-thinking-model", Vec::new()),
+    )
+    .await;
+
+    assert_eq!(
+        body.get("reasoning_effort")
+            .and_then(|value| value.as_str()),
+        Some("high")
+    );
+}
+
+#[tokio::test]
+async fn route_default_thinking_level_is_dropped_when_no_level_is_supported() {
+    let (_data_dir, gateway, captured, key) = gateway_with_captured_thinking(
+        "empty-support-model",
+        true,
+        "ok",
+        Some(ThinkingLevel::High),
+    )
+    .await;
+    let route = gateway
+        .admin()
+        .get_model("empty-support-model")
+        .await
+        .expect("Route");
+    let target = route.targets.first().expect("Route Target").clone();
+    let hidden_map = ThinkingLevel::ALL
+        .into_iter()
+        .map(|level| crate::thinking::ThinkingLevelMapping {
+            level,
+            control: stravia_runtime_contract::thinking::TargetThinkingControl::Hidden,
+            source: crate::thinking::ThinkingMappingSource::Overridden,
+        })
+        .collect();
+    gateway
+        .admin()
+        .update_model(
+            "empty-support-model",
+            crate::db::models::UpdateRoute {
+                targets: Some(vec![crate::db::models::UpsertTarget {
+                    id: Some(target.id),
+                    provider_id: target.provider_id,
+                    model: target.model,
+                    enabled: true,
+                    priority: None,
+                    first_token_timeout_ms: None,
+                    target_retry_budget: None,
+                    target_cooldown_ms: None,
+                    thinking_level_map: hidden_map,
+                }]),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("hide every Thinking Level");
+
+    let body = captured_reasoning_effort(
+        &gateway,
+        &captured,
+        &key.id,
+        "empty-support-model",
+        AiRequest::new("empty-support-model", Vec::new()),
+    )
+    .await;
+
+    assert!(
+        body.get("reasoning_effort").is_none(),
+        "an empty Supported Thinking Level set must degrade the Route default to unspecified"
+    );
 }
 
 #[tokio::test]
@@ -1529,7 +1725,7 @@ async fn held_publication_turn(
     i64,
 ) {
     let (directory, mut gateway, _, key) =
-        gateway_with_captured_text("publication-model", true, "answer <!--sr:").await;
+        gateway_with_captured_thinking("publication-model", true, "answer <!--sr:", None).await;
     let principal = Principal::new(key.id);
     let store = Arc::new(HeldPublicationStore {
         inner: gateway.redaction.mappings.clone(),
@@ -1942,6 +2138,7 @@ async fn codex_native_compaction_uses_unary_and_replayable_responses_websocket()
             target_provider: provider.id.clone(),
             target_model: "upstream-model".into(),
             targets: Vec::new(),
+            default_thinking_level: None,
         })
         .await
         .unwrap();

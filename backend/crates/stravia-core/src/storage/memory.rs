@@ -321,6 +321,9 @@ impl RouteStore for MemoryStorage {
                 .clone(),
             is_enabled: input.is_enabled,
             created_at,
+            default_thinking_level: input
+                .default_thinking_level
+                .map(|level| level.as_str().to_string()),
             supported_thinking_levels: sqlx::types::Json(Vec::new()),
             context_window: None,
             output_max_tokens: None,
@@ -789,6 +792,7 @@ mod tests {
                 selection_strategy: "traffic_equalization".into(),
                 is_enabled: true,
                 targets: vec![target("p1", "m1"), target("p2", "m2")],
+                default_thinking_level: None,
             })
             .await
             .expect("put Route");
@@ -823,6 +827,7 @@ mod tests {
                 selection_strategy: "traffic_equalization".into(),
                 is_enabled: true,
                 targets: vec![target("p2", "m2")],
+                default_thinking_level: None,
             })
             .await
             .expect("replace Route aggregate");
@@ -842,6 +847,7 @@ mod tests {
                 selection_strategy: "traffic_equalization".into(),
                 is_enabled: true,
                 targets: vec![target("p1", "m1")],
+                default_thinking_level: None,
             })
             .await
             .expect("put disposable Route");
@@ -853,6 +859,7 @@ mod tests {
                 selection_strategy: "traffic_equalization".into(),
                 is_enabled: true,
                 targets: vec![target("p1", "m1"), target("p2", "m2")],
+                default_thinking_level: None,
             })
             .await
             .expect("put durable Route");
