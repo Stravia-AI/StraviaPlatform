@@ -22,10 +22,10 @@ const contextLabel = $derived.by(() => {
   return ''
 })
 const usage = $derived([
-  ['IN', interaction.usage.input_tokens],
-  ['OUT', interaction.usage.output_tokens],
-  ['C·R', interaction.usage.cache_read_tokens],
-  ['C·W', interaction.usage.cache_write_tokens],
+  [m.observation_usage_input(), interaction.usage.input_tokens],
+  [m.observation_usage_output(), interaction.usage.output_tokens],
+  [m.observation_usage_cache_read(), interaction.usage.cache_read_tokens],
+  [m.observation_usage_cache_write(), interaction.usage.cache_write_tokens],
 ] as const)
 </script>
 

@@ -180,8 +180,8 @@ function jumpToRun(runId: string | null) {
             {/if}
             <span class="run-stats"
               >{#if duration != null}{formatDuration(duration)} ·
-              {/if}IN
-              {formatTokenCount(run.usage.input_tokens)} · OUT
+              {/if}{m.observation_usage_input()}
+              {formatTokenCount(run.usage.input_tokens)} · {m.observation_usage_output()}
               {formatTokenCount(run.usage.output_tokens)}</span>
           </span>
           <time class="stream-time" title={formatLogTime(run.started_at)}>{timeline.offsetLabel(run.started_at)}</time>
