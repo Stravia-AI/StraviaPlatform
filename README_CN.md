@@ -113,9 +113,9 @@ OpenAI（含 Codex OAuth）· Anthropic（含 Claude Code OAuth）· Google Gemi
 
 ### 平台工具与内置 Agent 运行时
 
-- `StraviaRead` —— 一个工具、一个 `path`：读文件、网页、`search://` 问题和图片，长结果自动分页续读。
+- `StraviaRead` —— 一个工具、一个 `path`：读文件、网页、`search://` 问题和图片，Office 文档（DOCX/XLSX/PPTX/DOC/XLS/PPT）读取为提取的 Markdown，长结果自动分页续读。
 - **联网搜索** —— Agent 循环替模型搜索、读网页，可用内嵌 Moli 引擎、Exa 或智谱，也可绑定 Codex 搜索。
-- **多模态理解** —— 用你选的视觉模型描述 JPEG/PNG/WebP 图片并提取文字。
+- **多模态理解** —— 用你选的视觉模型描述 JPEG/PNG/WebP 图片、提取文字，或回答 Office 文档相关问题。
 - 能力可通过 `POST /mcp` 提供，也可自动加入兼容请求；循环在时间、轮次、token、工具预算内运行。
 
 ### 密钥、用量与请求记录

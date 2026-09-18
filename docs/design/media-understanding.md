@@ -10,7 +10,7 @@
 
 Media Understanding 是由独立平台开关控制的 Advanced Capability，通过 `StraviaRead` 的图片 path 调用；默认描述与 OCR，Artifact Reference 的指定问题放在 `?question=` 中。普通模型请求和 MCP 共用同一个 Media Report contract。统一入口的授权、收存、下载和路由归 core，媒体理解仍由本能力执行。参见 [ADR-0048](../adr/0048-separate-artifact-references-from-transfer-grants.md) 至 [ADR-0051](../adr/0051-disambiguate-artifact-download-and-understanding.md)。
 
-用户可见名称采用“多模态理解”，为未来 PDF、视频和音频扩展保留产品语义。本 Revision 的运行时仍只支持静态 JPEG、PNG 与 WebP 图片；页面不展示或承诺未来格式。
+用户可见名称采用“多模态理解”，为未来 PDF、视频和音频扩展保留产品语义。本 Revision 的运行时支持静态 JPEG、PNG 与 WebP 图片，以及 Office 文档（DOCX、XLSX、PPTX、DOC、XLS、PPT）的 Markdown 提取与内嵌图片归一化；页面不展示或承诺未来格式。
 
 平台 Gate 开启后，每个有效 API Key 都能通过统一入口显式请求理解。关闭后，该分流不可调用，但所属 Artifact 的 `?download=1` 不受媒体开关影响。API Key 的 Transparent Injection 只选择本次自动暴露的能力，不承担显式授权；执行层仍检查本次暴露范围。
 
@@ -30,7 +30,7 @@ StraviaRead
 }
 ```
 
-唯一顶层输入是 `path`。所属 Artifact 与公网图片默认都描述内容并提取文字，公网图片先收存；Artifact Reference 的 `question` 和 `previous_turn_id` 位于 `?` 查询中，公网 URL 的工具选项仍位于 `#stravia?` fragment，源 query 完整保留。`previous_turn_id` 保留同 Principal 的续接与分支，必须重新指定图片及问题；已在祖先中保留的 source 复用，不重复附加。图片不支持 raw、lines 或文本 cursor。显式 download 不调用模型；能力关闭或格式不支持不能以下载冒充理解。旧平台调用别名、顶层 url、旧 Artifact wrapper 和 Artifact fragment 不再执行。
+唯一顶层输入是 `path`。所属 Artifact 与公网图片默认都描述内容并提取文字，公网图片先收存；Artifact Reference 的 `question` 和 `previous_turn_id` 位于 `?` 查询中，公网 URL 的工具选项仍位于 `#stravia?` fragment，源 query 完整保留。`previous_turn_id` 保留同 Principal 的续接与分支，必须重新指定图片及问题；已在祖先中保留的 source 复用，不重复附加。图片不支持 raw、lines 或文本 cursor。Office 文档不带 `question` 时直接读取为提取的 Markdown 文本快照，支持既有的分页与 lines 选项；带 `question` 时进入 Media Understanding，`?download=1` 在任何解析或模型执行之前返回下载信息，不支持 `raw`。显式 download 不调用模型；能力关闭或格式不支持不能以下载冒充理解。旧平台调用别名、顶层 url、旧 Artifact wrapper 和 Artifact fragment 不再执行。
 
 长答案的工具交付在完整报告校验与落盘之后分页：首包保留 artifacts、limitations、turn_id、completion，顶层 pagination 给出 next_path；续页只读取不可变文本快照，不增加模型 Turn。完整契约见 [Web Search 设计的统一资源读取与文本分页](web-search.md#统一资源读取与文本分页)。
 
@@ -89,35 +89,39 @@ bridge 会：
 
 ## 5. 内部执行
 
-Media Understanding 使用 `id = "media-understanding"`、Revision 2 的 internal Agent Definition。它不出现在 Agent Admin list，也不生成通用 `agent_*` surface。
+Media Understanding 使用 `id = "media-understanding"`、Revision 3 的 internal Agent Definition。它不出现在 Agent Admin list，也不生成通用 `agent_*` surface。
 
 执行复用：
 
 - `AgentRunner` 的 model execution、repair、cancellation、usage 和 Turn persistence；
 - `ArtifactStore` 的 principal ownership、TTL 和 immutable bytes；
-- `MediaInputPreprocessor` 的格式验证与 JPEG derivative；
+- `MediaInputPreprocessor` 的格式验证、JPEG derivative 与 Office 文档提取；
 - `MediaOutputValidator` 的 Artifact provenance；
 - `TurnChainStore` 的 continuation 和 branch。
 
 管理员配置的逻辑 Model 必须启用，且每个 Target 都必须支持图片输入。管理员还必须从该逻辑 Model 的 `supported_thinking_levels` 中选择思考等级；每次内部 Model Turn 都携带该等级。隐藏 Media Model 不需要出现在 API Key 的普通 `model_ids` 中；平台 Gate 开启后，有效 Key 通过 capability-owned authorization 间接执行它，但不能把该隐藏 Model 当普通客户端 Model 直接调用。
 
-## 6. 当前图片处理边界
+## 6. 当前图片与文档处理边界
 
 本 Revision 接受：
 
 - `image/jpeg`；
 - `image/png`；
-- static `image/webp`。
+- static `image/webp`；
+- Office 文档：DOCX、XLSX、PPTX、DOC、XLS、PPT（各自的标准 MIME）。
 
-运行时依据实际 container 解码，不只信 MIME。GIF、animated WebP、HEIC/HEIF、SVG、PDF、视频和音频会返回明确的不支持错误。
+运行时依据实际 container 解码，不只信 MIME。GIF、animated WebP、HEIC/HEIF、SVG、PDF、视频和音频会返回明确的不支持错误。Office 文档校验声明 MIME 与 container magic（ZIP 或 Compound File Binary），ZIP 族先做条目数与声明解压总量 preflight，再由 `office_oxide` 解析；加密、损坏、ODF、XLSB 及 MIME 与 container 不一致的输入返回明确错误。
 
-每个 source Artifact 首次使用时生成 write-once JPEG derivative：应用 orientation、白底合成 alpha、限制尺寸、移除 metadata，并把 mapping 持久化。公开 contract 和 Media Report 始终引用 source Artifact，不暴露 derivative ID。
+每个图片 source Artifact 首次使用时生成 write-once JPEG derivative：应用 orientation、白底合成 alpha、限制尺寸、移除 metadata，并把 mapping 持久化。公开 contract 和 Media Report 始终引用 source Artifact，不暴露 derivative ID。
+
+文档 source 首次使用时生成 write-once 提取 manifest derivative：提取的 Markdown 与每个内嵌图片都存为独立 Artifact，manifest 记录其引用、顺序与归一化结果；Markdown 中的图片位置替换为 `![alt](sa:<artifact_id>)`。manifest derivative 在读取回校验时解析并逐个确认引用 Artifact 对该 Principal 可读。Media prompt 中文档以 `kind: "document"` entry 声明提取文本（受每个文档与每 Turn 的文本预算截断），内嵌图片以随后的 `kind: "image"` entry 声明，只有归一化 JPEG 才实际附加，且与祖先 Turn 去重；文档 source 与内嵌图片 Artifact 都可被报告引用，manifest derivative ID 不可引用。
 
 这些限制属于运行时错误 contract，不属于管理员配置项。未来增加新媒体类型时必须使用新的 Definition Revision，并保持旧 Turn 的 Revision 语义。
 
 ## 7. 安全边界
 
-- 图片和其中的文字都是不可信数据，不能改变 system instructions、authorization、Artifact allowlist 或 tool policy；
+- 图片、文档及其中的文字都是不可信数据，不能改变 system instructions、authorization、Artifact allowlist 或 tool policy；
+- 文档解析在 blocking pool 中执行，先验证 source 大小、container magic 与 ZIP 声明解压总量，再进入解析；
 - HTTP(S) ingest 在初始 URL 和每次 redirect 上执行公网地址、DNS、实际连接、字节数和 deadline 检查；
 - ArtifactStore 再次验证 principal owner；
 - 统一读取先验证当前 Principal 的 Artifact 归属，同 Principal 可跨对话复用，不能用公开下载入口绕过归属；
@@ -173,4 +177,6 @@ Media Definition、Agent Turn、Artifact 与 `media_derivatives` 继续使用既
 - 配置的思考等级必须由逻辑 Model 的每个 Target 支持，并应用到每次内部 Model Turn；
 - 无 native Target 时 bridge 仍可执行完整 Media Report；
 - JPEG/PNG/WebP 成功，不支持的未来格式返回明确错误；
+- Office 文档直接读取为分页 Markdown，`?question=` 进入媒体理解，`?download=1` 不解析，`raw` 被拒绝；
+- 损坏、加密、MIME 与 container 不一致或超限的文档返回明确错误；
 - WebUI 只显示核心配置和 effective state。

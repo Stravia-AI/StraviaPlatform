@@ -600,7 +600,7 @@ Media Report 是 Media Understanding 返回的强校验工具结果，由 Markdo
 
 ## Media Derivative
 
-Media Derivative 是 Media Understanding 为源 Artifact 生成并复用的内部、write-once 规范化表示，不同源可以共享同一表示，源与表示也可以是同一 Artifact。Media Report 始终引用当前或祖先 Turn 已声明的源 Artifact；仍在保留期内的源映射不会被重算或替换。
+Media Derivative 是 Media Understanding 为源 Artifact 生成并复用的内部、write-once 派生物：图片源对应规范化 JPEG，Office 文档源对应记录提取 Markdown 与内嵌图片引用的 manifest。不同源可以共享同一派生物，源与派生物也可以是同一 Artifact。Media Report 始终引用当前或祖先 Turn 已声明的源 Artifact 与文档内嵌图片 Artifact；仍在保留期内的源映射不会被重算或替换。
 
 ## Web Search
 

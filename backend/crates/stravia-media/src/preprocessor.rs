@@ -35,12 +35,74 @@ pub struct NormalizedImage {
 }
 
 #[derive(Debug, Clone)]
-pub struct PreparedMedia {
+pub struct PreparedImage {
     pub source: ArtifactRef,
     pub derivative: ArtifactRef,
     #[cfg(any(test, feature = "test-support"))]
     pub derivative_bytes: Bytes,
 }
+
+/// An embedded image declared by a document manifest.
+#[derive(Debug, Clone)]
+pub struct PreparedDocumentImage {
+    pub artifact_id: ArtifactId,
+    pub alt: Option<String>,
+    /// 1-based position in document order.
+    pub ordinal: u32,
+    /// Whether the stored bytes are a normalized JPEG the model can consume.
+    pub normalizable: bool,
+    pub size: u64,
+}
+
+/// A document source prepared for Media Understanding: the source Artifact is
+/// cited, the extracted Markdown is declared as prompt text, and normalized
+/// embedded images are attachable.
+#[derive(Debug, Clone)]
+pub struct PreparedDocument {
+    pub source: ArtifactRef,
+    pub manifest_artifact: ArtifactRef,
+    pub format: office_oxide::DocumentFormat,
+    pub title: Option<String>,
+    pub markdown: String,
+    pub images: Vec<PreparedDocumentImage>,
+    pub truncated: bool,
+    pub limitations: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum PreparedMedia {
+    Image(PreparedImage),
+    Document(PreparedDocument),
+}
+
+impl PreparedMedia {
+    /// The declared source Artifact.
+    pub fn source(&self) -> &ArtifactRef {
+        match self {
+            Self::Image(image) => &image.source,
+            Self::Document(document) => &document.source,
+        }
+    }
+
+    /// The derivative Artifact backing this media: the normalized JPEG for
+    /// images, the extraction manifest for documents.
+    pub fn derivative(&self) -> &ArtifactRef {
+        match self {
+            Self::Image(image) => &image.derivative,
+            Self::Document(document) => &document.manifest_artifact,
+        }
+    }
+
+    /// Image-source normalized JPEG bytes for test introspection.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn derivative_bytes(&self) -> Option<&Bytes> {
+        match self {
+            Self::Image(image) => Some(&image.derivative_bytes),
+            Self::Document(_) => None,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct MediaInputPreprocessor {
     store: Arc<MediaDerivativeStore>,
@@ -83,6 +145,7 @@ impl MediaInputPreprocessor {
         }
         let mut seen = HashSet::with_capacity(source_ids.len());
         let mut declared_total = 0_u64;
+        let mut sources = Vec::with_capacity(source_ids.len());
         for source_id in source_ids {
             check_normalization_budget(cancellation, deadline)?;
             if !seen.insert(source_id.clone()) {
@@ -94,45 +157,83 @@ impl MediaInputPreprocessor {
                 .await
                 .map_err(MediaPreprocessError::from)?;
             check_normalization_budget(cancellation, deadline)?;
-            if source.size == 0 || source.size > MAX_SOURCE_BYTES as u64 {
+            let kind = if crate::documents::is_office_document(&source.mime_type) {
+                SourceKind::Document
+            } else {
+                SourceKind::Image
+            };
+            // Office documents carry their own (much larger) Artifact ceiling
+            // and are excluded from the image Turn aggregates; document bytes
+            // are read lazily inside extraction only on a cache miss.
+            let limit = match kind {
+                SourceKind::Document => crate::documents::MAX_DOCUMENT_BYTES,
+                SourceKind::Image => MAX_SOURCE_BYTES as u64,
+            };
+            if source.size == 0 || source.size > limit {
                 return Err(MediaPreprocessError::SourceTooLarge);
             }
-            declared_total = declared_total
-                .checked_add(source.size)
-                .ok_or(MediaPreprocessError::SourceAggregateTooLarge)?;
-            if declared_total > MAX_TURN_SOURCE_BYTES as u64 {
-                return Err(MediaPreprocessError::SourceAggregateTooLarge);
+            if kind == SourceKind::Image {
+                declared_total = declared_total
+                    .checked_add(source.size)
+                    .ok_or(MediaPreprocessError::SourceAggregateTooLarge)?;
+                if declared_total > MAX_TURN_SOURCE_BYTES as u64 {
+                    return Err(MediaPreprocessError::SourceAggregateTooLarge);
+                }
             }
+            sources.push((source, kind));
         }
         let mut source_total = 0_usize;
-        let mut sources = Vec::with_capacity(source_ids.len());
-        for source_id in source_ids {
+        let mut readable = sources;
+        let mut sources: Vec<(ArtifactRef, SourceKind, Option<Bytes>)> =
+            Vec::with_capacity(readable.len());
+        for (source, kind) in readable.drain(..) {
             check_normalization_budget(cancellation, deadline)?;
-            let (source, bytes) = self
-                .store
-                .read_artifact_bounded(principal, source_id, MAX_SOURCE_BYTES as u64)
-                .await
-                .map_err(|error| match error {
-                    MediaStoreError::TooLarge => MediaPreprocessError::SourceTooLarge,
-                    other => MediaPreprocessError::from(other),
-                })?;
-            check_normalization_budget(cancellation, deadline)?;
-            if bytes.is_empty() || bytes.len() > MAX_SOURCE_BYTES {
-                return Err(MediaPreprocessError::SourceTooLarge);
-            }
-            source_total = source_total
-                .checked_add(bytes.len())
-                .ok_or(MediaPreprocessError::SourceAggregateTooLarge)?;
-            if source_total > MAX_TURN_SOURCE_BYTES {
-                return Err(MediaPreprocessError::SourceAggregateTooLarge);
-            }
-            sources.push((source, bytes));
+            let bytes = match kind {
+                SourceKind::Document => None,
+                SourceKind::Image => {
+                    let (_, bytes) = self
+                        .store
+                        .read_artifact_bounded(principal, &source.id, MAX_SOURCE_BYTES as u64)
+                        .await
+                        .map_err(|error| match error {
+                            MediaStoreError::TooLarge => MediaPreprocessError::SourceTooLarge,
+                            other => MediaPreprocessError::from(other),
+                        })?;
+                    check_normalization_budget(cancellation, deadline)?;
+                    if bytes.is_empty() || bytes.len() > MAX_SOURCE_BYTES {
+                        return Err(MediaPreprocessError::SourceTooLarge);
+                    }
+                    source_total = source_total
+                        .checked_add(bytes.len())
+                        .ok_or(MediaPreprocessError::SourceAggregateTooLarge)?;
+                    if source_total > MAX_TURN_SOURCE_BYTES {
+                        return Err(MediaPreprocessError::SourceAggregateTooLarge);
+                    }
+                    Some(bytes)
+                }
+            };
+            sources.push((source, kind, bytes));
         }
 
         let mut derivative_total = 0_usize;
         let mut prepared = Vec::with_capacity(sources.len());
-        for (source, source_bytes) in sources {
+        for (source, kind, source_bytes) in sources {
             check_normalization_budget(cancellation, deadline)?;
+            if kind == SourceKind::Document {
+                let document = crate::documents::prepare_document(
+                    &self.store,
+                    principal,
+                    &source,
+                    None,
+                    self.derivative_retention,
+                    cancellation,
+                    deadline,
+                )
+                .await?;
+                prepared.push(PreparedMedia::Document(document));
+                continue;
+            }
+            let source_bytes = source_bytes.ok_or(MediaPreprocessError::Storage)?;
             let existing = self
                 .store
                 .find_derivative(principal, &source.id)
@@ -144,29 +245,11 @@ impl MediaInputPreprocessor {
                 None => {
                     let bytes = source_bytes.clone();
                     let mime_type = source.mime_type.clone();
-                    let worker_cancellation = cancellation.clone();
-                    let mut normalization = tokio::task::spawn_blocking(move || {
-                        normalize_image_until(&bytes, &mime_type, &worker_cancellation, deadline)
-                    });
-                    let normalized = tokio::select! {
-                        biased;
-                        result = &mut normalization => {
-                            result.map_err(|_| MediaPreprocessError::Decode)??
-                        }
-                        _ = cancellation.cancelled() => {
-                            if let Err(error) = normalization.await {
-                                tracing::debug!(%error, "image normalization task failed after cancellation");
-                            }
-                            return Err(MediaPreprocessError::Cancelled);
-                        }
-                        _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
-                            cancellation.cancel();
-                            if let Err(error) = normalization.await {
-                                tracing::debug!(%error, "image normalization task failed after deadline");
-                            }
-                            return Err(MediaPreprocessError::DeadlineExceeded);
-                        }
-                    };
+                    let normalized =
+                        blocking_media_task(cancellation, deadline, move |token, limit| {
+                            normalize_image_until(&bytes, &mime_type, token, limit)
+                        })
+                        .await?;
                     check_normalization_budget(cancellation, deadline)?;
                     self.store
                         .get_or_create_derivative(
@@ -174,6 +257,7 @@ impl MediaInputPreprocessor {
                             &source.id,
                             normalized.bytes,
                             self.derivative_retention,
+                            "image/jpeg",
                         )
                         .await
                         .map_err(MediaPreprocessError::from)?
@@ -201,16 +285,22 @@ impl MediaInputPreprocessor {
             if derivative_total > MAX_TURN_DERIVATIVE_BYTES {
                 return Err(MediaPreprocessError::DerivativeAggregateTooLarge);
             }
-            prepared.push(PreparedMedia {
+            prepared.push(PreparedMedia::Image(PreparedImage {
                 source,
                 derivative,
                 #[cfg(any(test, feature = "test-support"))]
                 derivative_bytes,
-            });
+            }));
         }
         check_normalization_budget(cancellation, deadline)?;
         Ok(prepared)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceKind {
+    Image,
+    Document,
 }
 
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
@@ -235,6 +325,8 @@ pub enum MediaPreprocessError {
     TooManyPixels,
     #[error("Media decoding failed")]
     Decode,
+    #[error("Office document is invalid, encrypted, or corrupt")]
+    DocumentInvalid,
     #[error("Media Derivative exceeds the byte limit")]
     DerivativeTooLarge,
     #[error("Media Derivatives exceed the per-Turn byte limit")]
@@ -273,7 +365,46 @@ pub fn normalize_image(
     )
 }
 
-fn normalize_image_until(
+/// Runs media CPU work on the blocking pool with cooperative cancellation and
+/// deadline; a worker panic surfaces as a decode error rather than aborting.
+pub(crate) async fn blocking_media_task<T, F>(
+    cancellation: &stravia_runtime_contract::CancellationToken,
+    deadline: Instant,
+    work: F,
+) -> Result<T, MediaPreprocessError>
+where
+    T: Send + 'static,
+    F: FnOnce(
+            &stravia_runtime_contract::CancellationToken,
+            Instant,
+        ) -> Result<T, MediaPreprocessError>
+        + Send
+        + 'static,
+{
+    let worker_cancellation = cancellation.clone();
+    let mut task = tokio::task::spawn_blocking(move || work(&worker_cancellation, deadline));
+    tokio::select! {
+        biased;
+        result = &mut task => {
+            result.map_err(|_| MediaPreprocessError::Decode)?
+        }
+        _ = cancellation.cancelled() => {
+            if let Err(error) = task.await {
+                tracing::debug!(%error, "media task failed after cancellation");
+            }
+            Err(MediaPreprocessError::Cancelled)
+        }
+        _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+            cancellation.cancel();
+            if let Err(error) = task.await {
+                tracing::debug!(%error, "media task failed after deadline");
+            }
+            Err(MediaPreprocessError::DeadlineExceeded)
+        }
+    }
+}
+
+pub(crate) fn normalize_image_until(
     source: &[u8],
     declared_mime: &str,
     cancellation: &stravia_runtime_contract::CancellationToken,
@@ -373,7 +504,7 @@ fn normalize_image_until(
     })
 }
 
-fn check_normalization_budget(
+pub(crate) fn check_normalization_budget(
     cancellation: &stravia_runtime_contract::CancellationToken,
     deadline: Instant,
 ) -> Result<(), MediaPreprocessError> {

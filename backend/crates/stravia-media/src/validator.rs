@@ -64,21 +64,47 @@ pub fn validate_media_report(
     Ok(report)
 }
 
+/// How a declared `media[]` entry provides its evidence to the transcript.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeclaredKind {
+    /// Image bytes arrive as transcript image blocks. For a declared *source*
+    /// the block carries the normalized derivative id; for a document's
+    /// embedded image the block carries the embedded Artifact id itself.
+    Image,
+    /// Extracted Markdown arrives as entry `text`; the manifest derivative
+    /// proves it came from the declared document Artifact.
+    Document,
+}
+
+struct DeclaredSource {
+    id: ArtifactId,
+    kind: DeclaredKind,
+    /// Whether the entry carried extracted document text.
+    has_text: bool,
+}
+
 /// Only Media service-authored User prompts declare citable sources.
-fn declared_sources(text: &str, declared: &mut HashSet<ArtifactId>) {
+fn declared_sources(text: &str, declared: &mut Vec<DeclaredSource>) {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
         return;
     };
     let Some(media) = value.get("media").and_then(|media| media.as_array()) else {
         return;
     };
-    declared.extend(
-        media
-            .iter()
-            .filter_map(|entry| entry.get("artifact_id"))
-            .filter_map(|id| id.as_str())
-            .map(ArtifactId::new),
-    );
+    for entry in media {
+        let Some(id) = entry.get("artifact_id").and_then(|id| id.as_str()) else {
+            continue;
+        };
+        let kind = match entry.get("kind").and_then(|kind| kind.as_str()) {
+            Some("document") => DeclaredKind::Document,
+            _ => DeclaredKind::Image,
+        };
+        declared.push(DeclaredSource {
+            id: ArtifactId::new(id),
+            kind,
+            has_text: entry.get("text").is_some_and(|text| text.is_string()),
+        });
+    }
 }
 
 fn answer_markers(answer: &str) -> Result<Vec<&str>, String> {
@@ -119,7 +145,7 @@ impl MediaReportValidator {
         transcript: &[AiItem],
     ) -> Result<(HashSet<ArtifactId>, Vec<ArtifactId>), AgentRunError> {
         let mut shown = HashSet::new();
-        let mut declared = HashSet::new();
+        let mut declared = Vec::new();
         for message in transcript {
             // Declarations are request-authored: only the Turn prompts built by
             // the Media service carry the declared source list.
@@ -157,29 +183,87 @@ impl MediaReportValidator {
             }
         }
         // Forward verification: a source is evidence only when it was actually
-        // declared in a Turn prompt and its mapped derivative is really present
-        // in the transcript. A shared JPEG never widens the citable set to
-        // sources the requests did not declare.
+        // declared in a Turn prompt and its derivative — the normalized JPEG
+        // for images, the extraction manifest for documents — is really
+        // present in the transcript. A shared JPEG never widens the citable
+        // set to sources the requests did not declare.
         let mut evidence = HashSet::new();
         let mut retained = HashSet::new();
-        for source_id in declared {
-            let Some(media) = self
-                .store
-                .find_derivative(principal, &source_id)
-                .await
-                .map_err(|_| {
-                    AgentRunError::new(
-                        "media_report_invalid",
-                        "Media transcript evidence is unavailable",
-                    )
-                })?
-            else {
-                continue;
-            };
-            if shown.contains(&media.derivative.id) {
-                retained.insert(media.derivative.id);
-                retained.insert(source_id.clone());
-                evidence.insert(source_id);
+        for source in declared {
+            match source.kind {
+                DeclaredKind::Image => {
+                    // Embedded document images are attached under their own
+                    // Artifact id; declared sources appear via their mapped
+                    // JPEG derivative instead.
+                    if shown.contains(&source.id) {
+                        retained.insert(source.id.clone());
+                        evidence.insert(source.id);
+                        continue;
+                    }
+                    let Some(media) = self
+                        .store
+                        .find_derivative(principal, &source.id)
+                        .await
+                        .map_err(|_| {
+                            AgentRunError::new(
+                                "media_report_invalid",
+                                "Media transcript evidence is unavailable",
+                            )
+                        })?
+                    else {
+                        continue;
+                    };
+                    if media.derivative.mime_type == "image/jpeg"
+                        && shown.contains(&media.derivative.id)
+                    {
+                        retained.insert(media.derivative.id);
+                        retained.insert(source.id.clone());
+                        evidence.insert(source.id);
+                    }
+                }
+                DeclaredKind::Document => {
+                    // A document is evidence when its extracted text was
+                    // declared and the manifest derivative verifies; the
+                    // manifest pins the Markdown + embedded image Artifacts.
+                    if !source.has_text {
+                        continue;
+                    }
+                    let Some(media) = self
+                        .store
+                        .find_derivative(principal, &source.id)
+                        .await
+                        .map_err(|_| {
+                            AgentRunError::new(
+                                "media_report_invalid",
+                                "Media transcript evidence is unavailable",
+                            )
+                        })?
+                    else {
+                        continue;
+                    };
+                    if media.derivative.mime_type != crate::documents::DOCUMENT_MANIFEST_MIME {
+                        continue;
+                    }
+                    retained.insert(media.derivative.id.clone());
+                    retained.insert(source.id.clone());
+                    // Manifests passing find_derivative were already parsed and
+                    // reference-checked; a second parse collects the ids for
+                    // retention. If it somehow fails now, retain only the
+                    // source + manifest rather than widening retention.
+                    if let Ok((_, bytes)) = self
+                        .store
+                        .read_artifact_bounded(
+                            principal,
+                            &media.derivative.id,
+                            crate::documents::MAX_DOCUMENT_MANIFEST_BYTES as u64,
+                        )
+                        .await
+                        && let Ok(manifest) = crate::documents::DocumentManifest::parse(&bytes)
+                    {
+                        retained.extend(manifest.referenced_artifact_ids());
+                    }
+                    evidence.insert(source.id);
+                }
             }
         }
         Ok((evidence, retained.into_iter().collect()))

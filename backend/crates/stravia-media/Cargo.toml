@@ -20,6 +20,7 @@ bytes = { workspace = true }
 chrono = { workspace = true, features = ["clock"] }
 futures = { workspace = true }
 image = { workspace = true }
+office_oxide = { workspace = true }
 parking_lot = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -27,6 +28,8 @@ sqlx = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["fs", "io-util", "net", "rt", "sync", "time"] }
 tracing = { workspace = true }
+zip = { workspace = true }
 
 [dev-dependencies]
+cfb = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

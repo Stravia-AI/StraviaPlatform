@@ -56,6 +56,9 @@ argon2 = { version = "0.6", features = ["getrandom"] }
 jsonwebtoken = { version = "11", default-features = false, features = ["aws_lc_rs"] }
 rpassword = "7.5"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+office_oxide = "0.1.11"
+cfb = "0.7"
+zip = { version = "8.6", default-features = false }
 dashmap = "6"
 inventory = "0.3"
 gcp_auth = "0.12.7"

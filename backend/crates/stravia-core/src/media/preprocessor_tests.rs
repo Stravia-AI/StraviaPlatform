@@ -239,14 +239,14 @@ mod tests {
         assert_eq!(
             prepared
                 .iter()
-                .map(|media| media.source.id.clone())
+                .map(|media| media.source().id.clone())
                 .collect::<Vec<_>>(),
             [second.id.clone(), first.id.clone()]
         );
         assert!(prepared.iter().all(|media| {
-            media.derivative.mime_type == "image/jpeg"
+            media.derivative().mime_type == "image/jpeg"
                 && matches!(
-                    image::guess_format(&media.derivative_bytes),
+                    image::guess_format(media.derivative_bytes().expect("image derivative")),
                     Ok(image::ImageFormat::Jpeg)
                 )
         }));
@@ -258,21 +258,24 @@ mod tests {
         assert_eq!(
             reused
                 .iter()
-                .map(|media| media.derivative.id.clone())
+                .map(|media| media.derivative().id.clone())
                 .collect::<Vec<_>>(),
             prepared
                 .iter()
-                .map(|media| media.derivative.id.clone())
+                .map(|media| media.derivative().id.clone())
                 .collect::<Vec<_>>()
         );
         // An Artifact that once served as a derivative is still a legitimate
         // original: its ID no longer disqualifies it as a source.
         let reprocessed = preprocessor
-            .preprocess(&principal, std::slice::from_ref(&prepared[0].derivative.id))
+            .preprocess(
+                &principal,
+                std::slice::from_ref(&prepared[0].derivative().id),
+            )
             .await
             .expect("derivative id reprocessed as source");
-        assert_eq!(reprocessed[0].source.id, prepared[0].derivative.id);
-        assert_eq!(reprocessed[0].derivative.mime_type, "image/jpeg");
+        assert_eq!(reprocessed[0].source().id, prepared[0].derivative().id);
+        assert_eq!(reprocessed[0].derivative().mime_type, "image/jpeg");
         assert_eq!(
             preprocessor
                 .preprocess(&principal, &[first.id.clone(), first.id])
@@ -325,12 +328,12 @@ mod tests {
             .preprocess(&principal, &[rgba_source.id, luma_source.id])
             .await
             .expect("prepared media");
-        assert_ne!(prepared[0].source.id, prepared[1].source.id);
-        assert_eq!(prepared[0].derivative.id, prepared[1].derivative.id);
+        assert_ne!(prepared[0].source().id, prepared[1].source().id);
+        assert_eq!(prepared[0].derivative().id, prepared[1].derivative().id);
         assert!(
             prepared
                 .iter()
-                .all(|media| media.derivative.mime_type == "image/jpeg")
+                .all(|media| media.derivative().mime_type == "image/jpeg")
         );
     }
 
@@ -398,6 +401,7 @@ mod tests {
                     &source.id,
                     Bytes::from(derivative),
                     Duration::from_secs(60),
+                    "image/jpeg",
                 )
                 .await
                 .expect("bounded derivative");
@@ -409,6 +413,112 @@ mod tests {
                 .await
                 .unwrap_err(),
             MediaPreprocessError::DerivativeAggregateTooLarge
+        );
+    }
+
+    fn office_docx(text: &str, image: Option<Vec<u8>>) -> Bytes {
+        use office_oxide::ir::{
+            DocumentIR, Element, Image as IrImage, ImageFormat, InlineContent, Paragraph, Section,
+            TextSpan,
+        };
+        let mut elements = vec![Element::Paragraph(Paragraph {
+            content: vec![InlineContent::Text(TextSpan {
+                text: text.to_owned(),
+                ..Default::default()
+            })],
+            ..Default::default()
+        })];
+        if let Some(data) = image {
+            elements.push(Element::Image(IrImage {
+                data: Some(data),
+                format: Some(ImageFormat::Png),
+                ..Default::default()
+            }));
+        }
+        let ir = DocumentIR {
+            metadata: office_oxide::ir::Metadata {
+                format: office_oxide::DocumentFormat::Docx,
+                ..Default::default()
+            },
+            sections: vec![Section {
+                elements,
+                ..Default::default()
+            }],
+        };
+        let mut out = Cursor::new(Vec::new());
+        office_oxide::create::create_from_ir_to_writer(
+            &ir,
+            office_oxide::DocumentFormat::Docx,
+            &mut out,
+        )
+        .expect("synthesize docx");
+        Bytes::from(out.into_inner())
+    }
+
+    #[tokio::test]
+    async fn office_documents_extract_to_prepared_documents() {
+        let data_dir = tempfile::tempdir().expect("temporary data directory");
+        let pool = crate::db::init_pool(data_dir.path())
+            .await
+            .expect("SQLite pool");
+        crate::migrations::migrate_sqlite(&pool)
+            .await
+            .expect("SQLite migrations");
+        let artifacts = Arc::new(LocalArtifactStore::sqlite(
+            pool.clone(),
+            data_dir.path().join("artifacts"),
+        ));
+        let store = Arc::new(MediaDerivativeStore::sqlite(
+            pool,
+            Arc::new(super::super::ArtifactHost(artifacts)),
+        ));
+        let principal = Principal::new("owner");
+        let preprocessor = MediaInputPreprocessor::new(Arc::clone(&store), Duration::from_secs(60));
+
+        let document = store
+            .create_source(
+                &principal,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                office_docx("Body paragraph", Some(encode_png(1, 1, &[9, 9, 9, 255]))),
+                Duration::from_secs(60),
+            )
+            .await
+            .expect("document source");
+        let prepared = preprocessor
+            .preprocess(&principal, std::slice::from_ref(&document.id))
+            .await
+            .expect("prepared document");
+        let PreparedMedia::Document(document_media) = &prepared[0] else {
+            panic!("document sources prepare as documents");
+        };
+        assert_eq!(document_media.source.id, document.id);
+        assert_eq!(document_media.format, office_oxide::DocumentFormat::Docx);
+        assert_eq!(
+            document_media.manifest_artifact.mime_type,
+            stravia_media::documents::DOCUMENT_MANIFEST_MIME
+        );
+        assert!(document_media.markdown.contains("Body paragraph"));
+        // The embedded PNG normalized to JPEG and is declared as an image.
+        assert_eq!(document_media.images.len(), 1);
+        assert!(document_media.images[0].normalizable);
+        assert_eq!(document_media.images[0].ordinal, 1);
+
+        // Extraction results are cached: a second pass resolves the same
+        // manifest and image Artifacts.
+        let reused = preprocessor
+            .preprocess(&principal, std::slice::from_ref(&document.id))
+            .await
+            .expect("reused document");
+        let PreparedMedia::Document(reused_document) = &reused[0] else {
+            panic!("document sources prepare as documents");
+        };
+        assert_eq!(
+            reused_document.manifest_artifact.id,
+            document_media.manifest_artifact.id
+        );
+        assert_eq!(
+            reused_document.images[0].artifact_id,
+            document_media.images[0].artifact_id
         );
     }
 }
