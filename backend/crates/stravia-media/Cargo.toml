@@ -31,4 +31,5 @@ tracing = { workspace = true }
 zip = { workspace = true }
 
 [dev-dependencies]
+cfb = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

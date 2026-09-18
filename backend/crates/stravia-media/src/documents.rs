@@ -768,10 +768,10 @@ mod tests {
         Section, Table, TableCell, TableRow, TextSpan,
     };
 
-    fn docx_bytes(elements: Vec<Element>) -> Vec<u8> {
+    fn ooxml_bytes(elements: Vec<Element>, format: DocumentFormat) -> Vec<u8> {
         let ir = DocumentIR {
             metadata: office_oxide::ir::Metadata {
-                format: DocumentFormat::Docx,
+                format,
                 ..Default::default()
             },
             sections: vec![Section {
@@ -780,9 +780,96 @@ mod tests {
             }],
         };
         let mut out = Cursor::new(Vec::new());
-        office_oxide::create::create_from_ir_to_writer(&ir, DocumentFormat::Docx, &mut out)
-            .expect("synthesize docx");
+        office_oxide::create::create_from_ir_to_writer(&ir, format, &mut out)
+            .expect("synthesize document");
         out.into_inner()
+    }
+
+    fn docx_bytes(elements: Vec<Element>) -> Vec<u8> {
+        ooxml_bytes(elements, DocumentFormat::Docx)
+    }
+
+    /// Writes real CFB containers carrying the given streams.
+    fn cfb_bytes(streams: &[(&str, &[u8])]) -> Vec<u8> {
+        use std::io::Write;
+        let mut file = cfb::CompoundFile::create(Cursor::new(Vec::new())).expect("cfb create");
+        for (name, data) in streams {
+            file.create_stream(name)
+                .and_then(|mut stream| stream.write_all(data))
+                .expect("cfb stream");
+        }
+        file.flush().expect("cfb flush");
+        file.into_inner().into_inner()
+    }
+
+    fn biff_record(record_type: u16, data: &[u8]) -> Vec<u8> {
+        let mut record = record_type.to_le_bytes().to_vec();
+        record.extend_from_slice(&(data.len() as u16).to_le_bytes());
+        record.extend_from_slice(data);
+        record
+    }
+
+    /// Minimal BIFF8 workbook: a globals BOF and one worksheet holding a
+    /// single NUMBER cell — a real CFB file the legacy XLS parser accepts.
+    fn xls_bytes() -> Vec<u8> {
+        const RT_BOF: u16 = 0x0809;
+        const RT_EOF: u16 = 0x000A;
+        const RT_NUMBER: u16 = 0x0203;
+        let mut workbook = biff_record(RT_BOF, &[0x00, 0x06, 0x05, 0x00]);
+        workbook.extend(biff_record(RT_EOF, &[]));
+        workbook.extend(biff_record(RT_BOF, &[0x00, 0x06, 0x10, 0x00]));
+        let mut cell = Vec::new();
+        cell.extend_from_slice(&0u16.to_le_bytes()); // row
+        cell.extend_from_slice(&0u16.to_le_bytes()); // col
+        cell.extend_from_slice(&0u16.to_le_bytes()); // xf index
+        cell.extend_from_slice(&42.5f64.to_le_bytes());
+        workbook.extend(biff_record(RT_NUMBER, &cell));
+        workbook.extend(biff_record(RT_EOF, &[]));
+        cfb_bytes(&[("Workbook", &workbook)])
+    }
+
+    /// Minimal Word 97 .doc: a FIB pointing at a one-piece CLX in `0Table`,
+    /// with UTF-16LE text at a fixed offset in the WordDocument stream.
+    fn doc_bytes(text: &str) -> Vec<u8> {
+        let utf16: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let text_offset = 0x200usize;
+        let mut word = vec![0u8; text_offset + utf16.len()];
+        word[0..2].copy_from_slice(&0xA5ECu16.to_le_bytes()); // wIdent: Word 97+
+        word[2..4].copy_from_slice(&0x00C1u16.to_le_bytes()); // nFib
+        // Flags at 0x0A stay zero: the 0Table stream is selected.
+        let chars = text.encode_utf16().count() as u32;
+        word[0x4C..0x50].copy_from_slice(&chars.to_le_bytes()); // ccpText
+        word[0x01A2..0x01A6].copy_from_slice(&0u32.to_le_bytes()); // fcClx
+        word[0x01A6..0x01AA].copy_from_slice(&21u32.to_le_bytes()); // lcbClx
+        word[text_offset..].copy_from_slice(&utf16);
+        let mut clx = vec![0x02u8]; // Pcdt marker
+        clx.extend_from_slice(&16u32.to_le_bytes()); // PlcPcd: 2 CPs + 1 PCD
+        clx.extend_from_slice(&0u32.to_le_bytes()); // cp start
+        clx.extend_from_slice(&chars.to_le_bytes()); // cp end
+        clx.extend_from_slice(&0u16.to_le_bytes()); // PCD unused
+        clx.extend_from_slice(&(text_offset as u32).to_le_bytes()); // fc, unicode
+        clx.extend_from_slice(&0u16.to_le_bytes()); // prm
+        cfb_bytes(&[("WordDocument", &word), ("0Table", &clx)])
+    }
+
+    fn ppt_record(version_instance: u16, record_type: u16, data: &[u8]) -> Vec<u8> {
+        let mut record = version_instance.to_le_bytes().to_vec();
+        record.extend_from_slice(&record_type.to_le_bytes());
+        record.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        record.extend_from_slice(data);
+        record
+    }
+
+    /// Minimal .ppt: one Slide container holding a body TextCharsAtom.
+    fn ppt_bytes(text: &str) -> Vec<u8> {
+        const RT_TEXT_HEADER: u16 = 0x0F9F;
+        const RT_TEXT_CHARS: u16 = 0x0FA0;
+        const RT_SLIDE: u16 = 0x03EE;
+        let utf16: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let mut slide = ppt_record(0x0000, RT_TEXT_HEADER, &1u32.to_le_bytes());
+        slide.extend(ppt_record(0x0000, RT_TEXT_CHARS, &utf16));
+        let stream = ppt_record(0x000F, RT_SLIDE, &slide);
+        cfb_bytes(&[("PowerPoint Document", &stream)])
     }
 
     fn paragraph(text: &str) -> Element {
@@ -1212,6 +1299,51 @@ mod tests {
         assert_eq!(images[0].mime, "image/png");
         assert_eq!(images[1].data.as_ref(), &[4, 5, 6]);
         assert_eq!(images[1].mime, "application/octet-stream");
+    }
+
+    /// All six supported formats extract from real container bytes: OOXML
+    /// files synthesized by office_oxide's writer, CFB files assembled by the
+    /// `cfb` crate with minimal legacy payloads.
+    #[test]
+    fn extract_document_handles_all_six_real_formats() {
+        let token = CancellationToken::new();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        for (bytes, format, needle) in [
+            (
+                docx_bytes(vec![paragraph("docx body")]),
+                DocumentFormat::Docx,
+                "docx body",
+            ),
+            (
+                ooxml_bytes(vec![paragraph("xlsx body")], DocumentFormat::Xlsx),
+                DocumentFormat::Xlsx,
+                "xlsx body",
+            ),
+            (
+                ooxml_bytes(vec![paragraph("pptx body")], DocumentFormat::Pptx),
+                DocumentFormat::Pptx,
+                "pptx body",
+            ),
+            (
+                doc_bytes("legacy doc body"),
+                DocumentFormat::Doc,
+                "legacy doc body",
+            ),
+            (xls_bytes(), DocumentFormat::Xls, "42"),
+            (
+                ppt_bytes("legacy ppt body"),
+                DocumentFormat::Ppt,
+                "legacy ppt body",
+            ),
+        ] {
+            let extracted = extract_document(&bytes, format, &token, deadline)
+                .unwrap_or_else(|error| panic!("{format:?} extraction failed: {error}"));
+            assert!(
+                extracted.markdown_template.contains(needle),
+                "{format:?} markdown lacks {needle:?}: {:?}",
+                extracted.markdown_template
+            );
+        }
     }
 
     #[test]
